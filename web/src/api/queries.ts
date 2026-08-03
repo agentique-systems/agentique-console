@@ -3,7 +3,10 @@ import { useQuery } from "@tanstack/react-query";
 import type {
   FsDirsResponse,
   FsRootsResponse,
+  GetAgentSessionResponse,
   GetUserSessionResponse,
+  ListAgentSessionsResponse,
+  ListTasksResponse,
   ListUserSessionsResponse,
   StatsResponse,
   TranscriptResponse,
@@ -77,6 +80,58 @@ export function useUserTranscript(
       apiFetch<TranscriptResponse>(`/api/user-sessions/${id}/transcript`),
     enabled: options.enabled,
     staleTime: Infinity,
+  });
+}
+
+// Agent sessions and tasks ride the spine too: the router invalidates the
+// ["agent-sessions"] / ["tasks"] prefixes on their lifecycle events.
+
+/** The strip's corpus — every agent session under the active user session. */
+export function useAgentSessions(userSessionId: string | null) {
+  return useQuery({
+    queryKey: keys.agentSessions.list(userSessionId ?? ""),
+    queryFn: () =>
+      apiFetch<ListAgentSessionsResponse>(
+        `/api/user-sessions/${userSessionId}/agent-sessions`,
+      ),
+    enabled: userSessionId !== null,
+  });
+}
+
+/** The inspector header's session row (messages come from the transcript). */
+export function useAgentSession(id: string | null) {
+  return useQuery({
+    queryKey: keys.agentSessions.detail(id ?? ""),
+    queryFn: () =>
+      apiFetch<GetAgentSessionResponse>(`/api/agent-sessions/${id}`),
+    enabled: id !== null,
+  });
+}
+
+/**
+ * Raw transcript envelopes for agent-stream hydration. Same handshake as the
+ * user lane: the caller gates `enabled` on spine-open + stream-buffering.
+ */
+export function useAgentTranscript(
+  id: string,
+  options: { enabled: boolean },
+) {
+  return useQuery({
+    queryKey: keys.agentTranscript(id),
+    queryFn: () =>
+      apiFetch<TranscriptResponse>(`/api/agent-sessions/${id}/transcript`),
+    enabled: options.enabled,
+    staleTime: Infinity,
+  });
+}
+
+/** The strip's task ledger for the active user session (all lists merged). */
+export function useTasks(userSessionId: string | null) {
+  return useQuery({
+    queryKey: keys.tasks.list(userSessionId ?? ""),
+    queryFn: () =>
+      apiFetch<ListTasksResponse>(`/api/user-sessions/${userSessionId}/tasks`),
+    enabled: userSessionId !== null,
   });
 }
 

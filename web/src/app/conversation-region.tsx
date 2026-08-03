@@ -8,6 +8,7 @@
  */
 import { useRef } from "react";
 
+import { FlowEdgeTick } from "@/agents/flow-stem";
 import { useUserSessions } from "@/api/queries";
 import type { UserSession } from "@agentique-console/shared";
 import { Button } from "@/components/ui/button";
@@ -73,7 +74,9 @@ function ActiveSession({ session }: { session: UserSession }) {
   );
 
   return (
-    <div className="flex min-h-0 flex-col border-r border-border">
+    <div className="relative flex min-h-0 flex-col border-r border-border">
+      {/* Flow pulses glow this edge tick — the eye's cue toward the strip. */}
+      <FlowEdgeTick />
       <SessionHeader session={session} busy={busy} />
       <UserTranscript
         session={session}

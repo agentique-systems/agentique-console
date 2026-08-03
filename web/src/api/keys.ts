@@ -24,11 +24,16 @@ export const keys = {
    * exactly the re-hydration path.
    */
   userTranscript: (id: string) => ["user-transcript", id] as const,
+  agentTranscript: (id: string) => ["agent-transcript", id] as const,
   agentSessions: {
     all: ["agent-sessions"] as const,
+    list: (userSessionId: string) =>
+      ["agent-sessions", "list", userSessionId] as const,
+    detail: (id: string) => ["agent-sessions", "detail", id] as const,
   },
   tasks: {
     all: ["tasks"] as const,
+    list: (userSessionId: string) => ["tasks", "list", userSessionId] as const,
   },
   /**
    * Filesystem browsing for the workspace wizard. Its own topic on purpose:

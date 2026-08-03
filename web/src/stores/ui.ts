@@ -13,7 +13,10 @@ interface UiState {
    * composer, and NOTHING persists until the first send.
    */
   readonly draftOpen: boolean;
-  /** Which agent session each user session's inspector reads — stub for M6/M7. */
+  /**
+   * Which agent session each user session's inspector reads. Per-user-session
+   * memory on purpose: switching user sessions restores that session's pick.
+   */
   readonly selectedAgentSessionByUserSession: Readonly<Record<string, string>>;
   /**
    * Sessions with a pending question/plan card. Client-side on purpose: the

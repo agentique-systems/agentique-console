@@ -179,10 +179,116 @@
   animation: text-shimmer 2s linear infinite;
 }
 
+/*
+ * Flow indicator (strip stem + card glow + edge tick) — CSS only, one-shot,
+ * keyed by pulse nonce so repeats restart. Idle = static border, zero JS per
+ * frame.
+ */
+@keyframes flow-out {
+  0% {
+    transform: translate(-12px, -50%);
+    opacity: 0;
+  }
+  15% {
+    opacity: 1;
+  }
+  100% {
+    transform: translate(16px, -50%);
+    opacity: 0;
+  }
+}
+@keyframes flow-in {
+  0% {
+    transform: translate(16px, -50%);
+    opacity: 0;
+  }
+  15% {
+    opacity: 1;
+  }
+  100% {
+    transform: translate(-12px, -50%);
+    opacity: 0;
+  }
+}
+.console-flow-dot-out {
+  animation: flow-out 600ms ease-out 1 forwards;
+}
+.console-flow-dot-in {
+  animation: flow-in 600ms ease-out 1 forwards;
+}
+
+/* attention-pulse clones recolored per direction — one border glow, once. */
+@keyframes flow-pulse-out {
+  0% {
+    box-shadow: 0 0 0 0
+      color-mix(in oklab, var(--status-running) 55%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 12px transparent;
+  }
+}
+@keyframes flow-pulse-in {
+  0% {
+    box-shadow: 0 0 0 0
+      color-mix(in oklab, var(--status-completed) 55%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 12px transparent;
+  }
+}
+.console-flow-pulse-out {
+  animation: flow-pulse-out 900ms ease-out 1;
+}
+.console-flow-pulse-in {
+  animation: flow-pulse-in 900ms ease-out 1;
+}
+
+/*
+ * The card's stem: tinted instantly while data-flow is set (no transition),
+ * then decays back to the border color over ~4s once the attribute clears.
+ */
+.console-flow-stem {
+  background-color: var(--border);
+  transition: background-color 4s ease-out;
+}
+.console-flow-stem[data-flow="delegation"] {
+  background-color: color-mix(in oklab, var(--status-running) 40%, var(--border));
+  transition: none;
+}
+.console-flow-stem[data-flow="result"] {
+  background-color: color-mix(
+    in oklab,
+    var(--status-completed) 40%,
+    var(--border)
+  );
+  transition: none;
+}
+
+@keyframes flow-tick {
+  0% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+.console-flow-tick {
+  animation: flow-tick 900ms ease-out 1 forwards;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .console-running-ring,
   .console-attention-pulse,
-  .console-text-shimmer {
+  .console-text-shimmer,
+  .console-flow-pulse-out,
+  .console-flow-pulse-in {
     animation: none;
+  }
+  /* No travel/flash — the stem's opacity tint (a transition) is the only cue. */
+  .console-flow-dot-out,
+  .console-flow-dot-in,
+  .console-flow-tick {
+    animation: none;
+    opacity: 0;
   }
 }

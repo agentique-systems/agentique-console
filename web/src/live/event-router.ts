@@ -3,15 +3,16 @@ import type { QueryClient } from "@tanstack/react-query";
 import type { AgentStatePayload, ConsoleEvent } from "@agentique-console/shared";
 
 import { keys } from "@/api/keys";
-import { userStreamKey } from "@/live/watched";
+import { agentStreamKey, userStreamKey } from "@/live/watched";
+import type { FlowDirection } from "@/stores/flow";
 
 export interface RouterDeps {
   /** Prefix invalidation (coalesced) — see createInvalidationCoalescer. */
   invalidate(prefix: readonly unknown[]): void;
   /** User-session transcript sink; the stream store folds these. */
   appendUserStreamEvent(sessionId: string, event: ConsoleEvent): void;
-  /** Agent-session transcript sink — stub until the strip lands (M6/M7). */
-  appendAgentStreamEvent?(sessionId: string, event: ConsoleEvent): void;
+  /** Agent-session transcript sink; the agent stream store folds these. */
+  appendAgentStreamEvent(sessionId: string, event: ConsoleEvent): void;
   /** agent.state ALWAYS lands here, watched or not — it drives shimmer rows. */
   ingestAgentState(payload: AgentStatePayload): void;
   /**
@@ -19,6 +20,15 @@ export interface RouterDeps {
    * so the router keeps a client-side map fed by question/plan events.
    */
   setAwaitingInput(sessionId: string, awaiting: boolean): void;
+  /**
+   * Flow pulses (strip stem + edge tick). `eventTs` is the wire ts — the flow
+   * store's freshness guard drops stale reconnect replays there.
+   */
+  pulseFlow(
+    agentSessionId: string,
+    direction: FlowDirection,
+    eventTs: string,
+  ): void;
   /** Transient gate: deltas for unwatched sessions are dropped here. */
   isWatched(key: string): boolean;
 }
@@ -32,13 +42,21 @@ export interface RouterDeps {
 export function routeEvent(event: ConsoleEvent, deps: RouterDeps): void {
   const type = event.type;
 
-  // 1. Cache invalidation, by topic prefix.
+  // 1. Cache invalidation, by topic prefix. Agent-session invalidation is the
+  // LIFECYCLE subset on purpose: message/tool/routed events arrive in storms
+  // and already reach the strip via the stream store — refetching the list
+  // for each would be waste.
   if (type.startsWith("user_session.")) {
     deps.invalidate(keys.userSessions.all);
   } else if (type.startsWith("workspace.")) {
     deps.invalidate(keys.workspaces);
-  } else if (type.startsWith("agent_session.")) {
-    // Safe no-op until M6 mounts queries under this prefix.
+  } else if (
+    type === "agent_session.created" ||
+    type === "agent_session.status" ||
+    type === "agent_session.phase" ||
+    type === "agent_session.turn.started" ||
+    type === "agent_session.turn.settled"
+  ) {
     deps.invalidate(keys.agentSessions.all);
   } else if (type.startsWith("task.")) {
     deps.invalidate(keys.tasks.all);
@@ -60,8 +78,8 @@ export function routeEvent(event: ConsoleEvent, deps: RouterDeps): void {
         if (deps.isWatched(userStreamKey(scope.sessionId))) {
           deps.appendUserStreamEvent(scope.sessionId, event);
         }
-      } else {
-        deps.appendAgentStreamEvent?.(scope.sessionId, event);
+      } else if (deps.isWatched(agentStreamKey(scope.sessionId))) {
+        deps.appendAgentStreamEvent(scope.sessionId, event);
       }
       return;
     }
@@ -81,6 +99,32 @@ export function routeEvent(event: ConsoleEvent, deps: RouterDeps): void {
     case "user_session.turn.started":
     case "user_session.turn.settled":
       deps.appendUserStreamEvent(event.payload.sessionId, event);
+      return;
+
+    // 2c. Persisted transcript-shaped agent_session events — same ungated
+    // deviation as the user lane: the store drops unknown ids, and LINGERING
+    // streams must keep receiving persisted rows to stay gapless.
+    case "agent_session.message":
+    case "agent_session.routed":
+    case "agent_session.turn.started":
+    case "agent_session.turn.settled":
+    case "agent_session.phase":
+      deps.appendAgentStreamEvent(event.payload.agentSessionId, event);
+      return;
+    // Tool payloads inherit the user-lane shape: `sessionId` IS the agent
+    // session id there (the envelope's agentSessionId agrees).
+    case "agent_session.tool.call":
+    case "agent_session.tool.result":
+      deps.appendAgentStreamEvent(event.payload.sessionId, event);
+      return;
+
+    // 3c. Flow pulses — the store's freshness guard (via eventTs) keeps a
+    // reconnect replay from animating stale hops.
+    case "flow.delegation":
+      deps.pulseFlow(event.payload.agentSessionId, "delegation", event.ts);
+      return;
+    case "flow.result":
+      deps.pulseFlow(event.payload.agentSessionId, "result", event.ts);
       return;
 
     // 3b. Question/plan events both append AND flip the attention map.

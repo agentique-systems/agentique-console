@@ -1,0 +1,175 @@
+/**
+ * The read-along transcript of one agent session: hydrated once from raw
+ * events via the pure fold, continued live by the spine (buffer-then-hydrate,
+ * gated on the spine being OPEN). One streaming overlay per speaker
+ * (accent-labelled), silent-worker shimmers from the runtime store, and NO
+ * composer — the orchestrator runs this session, the operator reads along.
+ */
+import { useEffect, useMemo, useState } from "react";
+
+import { useAgentTranscript } from "@/api/queries";
+import type { AgentSession, ConsoleEvent } from "@agentique-console/shared";
+import {
+  Conversation as ChatRoot,
+  ConversationContent as ChatContent,
+  ConversationEmptyState as ChatEmptyState,
+  ConversationScrollButton as ChatScrollButton,
+} from "@/components/ai-elements/conversation";
+import {
+  Message,
+  MessageContent,
+  MessageResponse,
+} from "@/components/ai-elements/message";
+import {
+  Reasoning,
+  ReasoningContent,
+  ReasoningTrigger,
+} from "@/components/ai-elements/reasoning";
+import { Shimmer } from "@/components/ai-elements/shimmer";
+import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
+import { agentStreamKey } from "@/live/watched";
+import { useAgentSessionStreamsStore } from "@/stores/agent-session-streams";
+import { useConnectionStore } from "@/stores/connection";
+import { useRuntimeStore } from "@/stores/runtime";
+
+import { accentOfName, buildAccents } from "./accents";
+import { agentItemKey, foldAgentItems } from "./agent-fold";
+import { AgentPart } from "./agent-parts";
+
+const TAIL_LIMIT = 500;
+const EMPTY_EVENTS: readonly ConsoleEvent[] = [];
+
+export function AgentTranscript({ session }: { session: AgentSession }) {
+  const id = session.id;
+  const key = agentStreamKey(id);
+  const spineOpen = useConnectionStore((s) => s.status === "open");
+  const stream = useAgentSessionStreamsStore((s) => s.streams[key]);
+  const watch = useAgentSessionStreamsStore((s) => s.watch);
+  const unwatch = useAgentSessionStreamsStore((s) => s.unwatch);
+  const hydrateStream = useAgentSessionStreamsStore((s) => s.hydrateStream);
+  const [showAll, setShowAll] = useState(false);
+
+  useEffect(() => {
+    watch(key);
+    return () => unwatch(key);
+  }, [key, watch, unwatch]);
+
+  // Hydration is gated on the spine being open (buffer-then-hydrate).
+  const buffering = stream?.phase !== "hydrated";
+  const transcript = useAgentTranscript(id, {
+    enabled: spineOpen && buffering,
+  });
+  useEffect(() => {
+    if (transcript.data !== undefined && buffering) {
+      hydrateStream(key, transcript.data);
+    }
+  }, [transcript.data, buffering, hydrateStream, key]);
+
+  const events = stream?.items ?? EMPTY_EVENTS;
+  const items = useMemo(() => foldAgentItems(events), [events]);
+  const visible = showAll ? items : items.slice(-TAIL_LIMIT);
+
+  const accents = useMemo(
+    () => buildAccents(session.participants),
+    [session.participants],
+  );
+
+  // Streaming overlays, one per speaker key with any text.
+  const deltas = stream?.deltas;
+  const overlays = useMemo(() => {
+    const list: { key: string; message: string; reasoning: string }[] = [];
+    if (deltas === undefined) return list;
+    for (const [speaker, delta] of deltas) {
+      if (delta.message === "" && delta.reasoning === "") continue;
+      list.push({
+        key: speaker,
+        message: delta.message,
+        reasoning: delta.reasoning,
+      });
+    }
+    return list;
+  }, [deltas]);
+
+  // Silent workers: seats the runtime store says are busy without any overlay
+  // text yet — a shimmer row per seat keeps the silence honest.
+  const seats = useRuntimeStore((s) => s.bySession[id]);
+  const silentWorkers = session.participants.flatMap((name) => {
+    const runtime = seats?.[name];
+    if (runtime === undefined) return [];
+    if (runtime.state !== "thinking" && runtime.state !== "tool") return [];
+    if (overlays.some((overlay) => overlay.key === name)) return [];
+    return [
+      {
+        name,
+        label:
+          runtime.state === "tool"
+            ? `running ${runtime.toolName ?? "a tool"}…`
+            : `${name} is thinking…`,
+      },
+    ];
+  });
+
+  return (
+    <ChatRoot className="h-full">
+      <ChatContent className="mx-auto w-full max-w-3xl gap-2 px-4 py-3">
+        {items.length > TAIL_LIMIT && !showAll && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="mx-auto mb-2 block text-xs text-muted-foreground"
+            onClick={() => setShowAll(true)}
+          >
+            show {items.length - TAIL_LIMIT} earlier items
+          </Button>
+        )}
+        {visible.length === 0 &&
+          overlays.length === 0 &&
+          silentWorkers.length === 0 && (
+            <ChatEmptyState
+              title="Nothing yet"
+              description={
+                buffering
+                  ? "hydrating…"
+                  : "the table is seated — waiting for the first word"
+              }
+            />
+          )}
+        {visible.map((item) => (
+          <AgentPart key={agentItemKey(item)} item={item} accents={accents} />
+        ))}
+        {overlays.map((overlay) => (
+          <div key={overlay.key}>
+            {overlay.reasoning !== "" && (
+              <Reasoning isStreaming defaultOpen>
+                <ReasoningTrigger />
+                <ReasoningContent>{overlay.reasoning}</ReasoningContent>
+              </Reasoning>
+            )}
+            {overlay.message !== "" && (
+              <Message from="assistant">
+                <MessageContent>
+                  <div
+                    className={cn(
+                      "mb-1 text-[10px] uppercase tracking-wide opacity-80",
+                      accentOfName(accents, overlay.key),
+                    )}
+                  >
+                    {overlay.key}
+                  </div>
+                  <MessageResponse>{overlay.message}</MessageResponse>
+                </MessageContent>
+              </Message>
+            )}
+          </div>
+        ))}
+        {silentWorkers.map((worker) => (
+          <div key={worker.name} className="py-1">
+            <Shimmer className="text-xs">{worker.label}</Shimmer>
+          </div>
+        ))}
+      </ChatContent>
+      <ChatScrollButton />
+    </ChatRoot>
+  );
+}

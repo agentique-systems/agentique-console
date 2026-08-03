@@ -1,8 +1,6 @@
-/** Right column: the transcript/task inspector lands here in M6. */
+import { AgentPane } from "@/agents/agent-pane";
+
+/** Right column: the selected agent session's read-along inspector. */
 export function InspectorRegion() {
-  return (
-    <div className="flex min-h-0 items-center justify-center">
-      <span className="text-xs text-muted-foreground">inspector</span>
-    </div>
-  );
+  return <AgentPane />;
 }
