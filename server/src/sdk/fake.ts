@@ -285,3 +285,74 @@ export function turnIdleMessage(): SdkMessage {
   return { type: "system", subtype: "session_state_changed", state: "idle" };
 }
 
+// --- The agent world (B6) ---------------------------------------------------
+// The fake never executes tools, so a scripted "agent" is just frames the
+// program yields: an Agent spawn + launch receipt binds a seat; frames tagged
+// with the spawn's callId are that agent's own traffic; a peer-origin user
+// message is its SendMessage to "main" arriving in the lane.
+
+/** An Agent tool call spawning a named background subagent. */
+export function agentSpawnMessage(
+  callId: string,
+  input: { name: string; subagent_type: string; prompt: string },
+): SdkMessage {
+  return toolUseMessage(callId, "Agent", { ...input, run_in_background: true });
+}
+
+/** The Agent tool's structured launch receipt (carries the agentId). */
+export function agentLaunchReceipt(callId: string, agentId: string): SdkMessage {
+  return toolResultMessage(callId, `agentId: ${agentId}`, false, {
+    agentId,
+    status: "async_launched",
+  });
+}
+
+/** Stamps any built frame as a subagent's own traffic. */
+export function tagged(message: SdkMessage, parentCallId: string): SdkMessage {
+  return { ...message, parent_tool_use_id: parentCallId };
+}
+
+/** A SendMessage tool call ({to, message} is the speech the console derives). */
+export function sendMessageUse(
+  callId: string,
+  to: string,
+  message: string,
+): SdkMessage {
+  return toolUseMessage(callId, "SendMessage", { to, message });
+}
+
+/** An agent's SendMessage to "main", as the peer-origin user frame it becomes. */
+export function peerMessage(
+  from: string,
+  text: string,
+  senderTaskId?: string,
+): SdkMessage {
+  return {
+    type: "user",
+    message: { content: [{ type: "text", text }] },
+    origin: {
+      kind: "peer",
+      from,
+      name: from,
+      body: text,
+      ...(senderTaskId === undefined ? {} : { senderTaskId }),
+    },
+  };
+}
+
+/** Invokes a wired hook callback from inside a program (e.g. SubagentStop). */
+export async function fireHook(
+  options: SdkOptions,
+  event: string,
+  input: Record<string, unknown>,
+): Promise<void> {
+  const matchers = (
+    options.hooks as
+      | Record<string, { hooks: ((i: unknown) => Promise<unknown>)[] }[]>
+      | undefined
+  )?.[event];
+  for (const matcher of matchers ?? []) {
+    for (const hook of matcher.hooks) await hook(input);
+  }
+}
+

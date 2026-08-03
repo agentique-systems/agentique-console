@@ -140,6 +140,21 @@ function wire(
     sdk: async () => base.fake.sdk,
     interactions: base.interactions,
     getWorkspaceRoot: () => "/tmp/test-workspace",
+    // Mirror main.ts: SubagentStop releases the seat binding, so programs can
+    // fire it (fireHook) and exercise the production release path.
+    buildHooks: () => ({
+      SubagentStop: [
+        {
+          hooks: [
+            async (input: unknown) => {
+              const agentId = (input as { agent_id?: unknown }).agent_id;
+              if (typeof agentId === "string") host.releaseAgent(agentId);
+              return {};
+            },
+          ],
+        },
+      ],
+    }),
     buildMcpServer: (userSessionId, sdk) =>
       buildConsoleMcpServer({
         sdk,
