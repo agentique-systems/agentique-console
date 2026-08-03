@@ -1,17 +1,35 @@
 /**
  * Query-key factory. The convention is load-bearing: every key starts with its
- * topic prefix, and live invalidation (the event spine, once it lands) works
- * BY PREFIX — a key outside the convention silently stops updating live.
+ * topic prefix, and live invalidation (the event spine) works BY PREFIX — a
+ * key outside the convention silently stops updating live.
  *
- * Topics so far: stats · workspaces · fs. Later milestones add user-sessions,
- * agent-sessions, tasks, transcripts — each as its own prefix, never as a
- * suffix on an existing one.
+ * Topics: stats · workspaces · fs · user-sessions · agent-sessions · tasks ·
+ * user-transcript — each its own prefix, never a suffix on an existing one.
  */
 export const keys = {
   stats: {
     all: ["stats"] as const,
   },
   workspaces: ["workspaces"] as const,
+  userSessions: {
+    all: ["user-sessions"] as const,
+    list: (workspaceId: string) =>
+      ["user-sessions", "list", workspaceId] as const,
+    detail: (id: string) => ["user-sessions", "detail", id] as const,
+  },
+  /**
+   * Transcripts deliberately live OUTSIDE the user-sessions prefix: they are
+   * hydrate-once + SSE-continued, and must not refetch on every list-level
+   * invalidation. Reconnect's invalidate-all still reaches them, which is
+   * exactly the re-hydration path.
+   */
+  userTranscript: (id: string) => ["user-transcript", id] as const,
+  agentSessions: {
+    all: ["agent-sessions"] as const,
+  },
+  tasks: {
+    all: ["tasks"] as const,
+  },
   /**
    * Filesystem browsing for the workspace wizard. Its own topic on purpose:
    * NOTHING on the event spine announces a filesystem change, so these must

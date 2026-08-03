@@ -166,9 +166,23 @@
 .console-running-ring {
   animation: running-ring 2.4s ease-in-out infinite;
 }
+/* Sliding-highlight shimmer text (ai-elements/shimmer.tsx) — CSS only. */
+@keyframes text-shimmer {
+  0% {
+    background-position: 100% center;
+  }
+  100% {
+    background-position: 0% center;
+  }
+}
+.console-text-shimmer {
+  animation: text-shimmer 2s linear infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .console-running-ring,
-  .console-attention-pulse {
+  .console-attention-pulse,
+  .console-text-shimmer {
     animation: none;
   }
 }
