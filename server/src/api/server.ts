@@ -2,6 +2,8 @@ import Fastify, { type FastifyInstance } from "fastify";
 import type { AppContext } from "../context.ts";
 import { ApiError } from "./errors.ts";
 import { registerEventRoutes } from "./routes/events.ts";
+import { registerFsRoutes } from "./routes/fs.ts";
+import { registerWorkspaceRoutes } from "./routes/workspaces.ts";
 
 export function buildServer(ctx: AppContext): FastifyInstance {
   const app = Fastify({ logger: false });
@@ -38,7 +40,8 @@ export function buildServer(ctx: AppContext): FastifyInstance {
   app.get("/api/health", async () => ({ ok: true }));
 
   registerEventRoutes(app, ctx);
-  for (const register of ctx.extraRoutes) register(app, ctx);
+  registerFsRoutes(app, ctx);
+  registerWorkspaceRoutes(app, ctx);
 
   return app;
 }

@@ -2,18 +2,24 @@ import { loadConfig } from "./config.ts";
 import type { AppContext } from "./context.ts";
 import { openDb } from "./db/client.ts";
 import { EventBus } from "./events/bus.ts";
+import { WorkspaceService } from "./workspaces/service.ts";
 import { buildServer } from "./api/server.ts";
 
 const config = loadConfig();
 const { db, sqlite } = openDb(config.dbFile);
 const bus = new EventBus(db);
+const workspaces = new WorkspaceService(
+  db,
+  bus,
+  config.fsRoots.map((r) => r.path),
+);
 
 const ctx: AppContext = {
   config,
   db,
   bus,
   log: console,
-  extraRoutes: [],
+  workspaces,
 };
 
 const app = buildServer(ctx);
