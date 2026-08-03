@@ -82,8 +82,10 @@ export function DraftView() {
             placeholder="say it like you'd brief a colleague — the orchestrator takes it from here"
             onChange={(event) => setMessage(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key === "Enter" && (event.metaKey || event.ctrlKey))
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
                 send();
+              }
             }}
           />
         </div>

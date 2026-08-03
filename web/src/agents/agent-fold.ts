@@ -32,6 +32,8 @@ export interface AgentMessageItem {
 }
 export interface AgentToolItem {
   readonly type: "tool";
+  /** Render identity: callId, suffixed on repeated callIds (retried turns). */
+  readonly uid: string;
   readonly callId: string;
   readonly name: string;
   readonly participant: string;
@@ -76,7 +78,7 @@ export function agentItemKey(item: AgentItem): string {
     case "message":
       return `message:${item.seq}`;
     case "tool":
-      return `tool:${item.callId}`;
+      return `tool:${item.uid}`;
     case "routed":
       return `routed:${item.messageSeq}`;
     case "turn":
@@ -92,6 +94,7 @@ export function foldAgentItems(events: readonly ConsoleEvent[]): AgentItem[] {
   const items: AgentItem[] = [];
   const seen = new Set<string>();
   const toolIndex = new Map<string, number>();
+  const toolCounts = new Map<string, number>();
 
   for (const event of events) {
     const id = eventId(event);
@@ -116,9 +119,13 @@ export function foldAgentItems(events: readonly ConsoleEvent[]): AgentItem[] {
       }
 
       case "agent_session.tool.call": {
-        toolIndex.set(event.payload.callId, items.length);
+        const { callId } = event.payload;
+        const occurrence = (toolCounts.get(callId) ?? 0) + 1;
+        toolCounts.set(callId, occurrence);
+        toolIndex.set(callId, items.length);
         items.push({
           type: "tool",
+          uid: occurrence === 1 ? callId : `${callId}#${occurrence}`,
           callId: event.payload.callId,
           name: event.payload.name,
           participant: event.payload.participant,

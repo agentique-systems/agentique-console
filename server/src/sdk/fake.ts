@@ -257,9 +257,10 @@ export function devProgram(getPrompt: () => string): FakeProgram {
         tool_input: { taskId: `${seat}-t1`, status: "in_progress", owner: seat },
         tool_response: { success: true, updatedFields: ["status", "owner"] },
       });
-      yield toolUseMessage(`tu_${seat}_1`, "Grep", { pattern: "TODO", path: "." });
+      const toolUse = `tu_${seat}_${++fakeSession}`;
+      yield toolUseMessage(toolUse, "Grep", { pattern: "TODO", path: "." });
       await sleep(250);
-      yield toolResultMessage(`tu_${seat}_1`, "src/main.ts:12: TODO demo");
+      yield toolResultMessage(toolUse, "src/main.ts:12: TODO demo");
       yield* streamText(
         seat === "scout"
           ? "Found it: the demo marker sits in src/main.ts. Handing the detail to coder."

@@ -54,7 +54,7 @@ export function FlowStem({
       />
       {active !== null && (
         <span
-          key={active.nonce}
+          key={`dot-${active.nonce}`}
           aria-hidden
           data-testid="flow-dot"
           className={cn(
@@ -66,7 +66,7 @@ export function FlowStem({
         />
       )}
       <div
-        key={active?.nonce ?? "idle"}
+        key={active === null ? "idle" : `card-${active.nonce}`}
         className={cn(
           "rounded-md",
           active !== null &&

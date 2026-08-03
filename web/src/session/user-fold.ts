@@ -30,6 +30,8 @@ export interface MessageItem {
 }
 export interface ToolItem {
   readonly type: "tool";
+  /** Render identity: callId, suffixed on repeated callIds (retried turns). */
+  readonly uid: string;
   readonly callId: string;
   readonly name: string;
   readonly input: unknown;
@@ -79,7 +81,7 @@ export function itemKey(item: UserItem): string {
     case "message":
       return `message:${item.seq}`;
     case "tool":
-      return `tool:${item.callId}`;
+      return `tool:${item.uid}`;
     case "question":
       return `question:${item.interactionId}`;
     case "plan":
@@ -95,6 +97,7 @@ export function foldUserItems(events: readonly ConsoleEvent[]): UserItem[] {
   const items: UserItem[] = [];
   const seen = new Set<string>();
   const toolIndex = new Map<string, number>();
+  const toolCounts = new Map<string, number>();
   const questionIndex = new Map<string, number>();
   const planIndex = new Map<string, number>();
 
@@ -120,9 +123,13 @@ export function foldUserItems(events: readonly ConsoleEvent[]): UserItem[] {
       }
 
       case "user_session.tool.call": {
-        toolIndex.set(event.payload.callId, items.length);
+        const { callId } = event.payload;
+        const occurrence = (toolCounts.get(callId) ?? 0) + 1;
+        toolCounts.set(callId, occurrence);
+        toolIndex.set(callId, items.length);
         items.push({
           type: "tool",
+          uid: occurrence === 1 ? callId : `${callId}#${occurrence}`,
           callId: event.payload.callId,
           name: event.payload.name,
           input: event.payload.input,
