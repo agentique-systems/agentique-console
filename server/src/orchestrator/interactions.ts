@@ -37,6 +37,31 @@ function toWire(row: InteractionRow): Interaction {
   };
 }
 
+/**
+ * The prompt for an answer-revival turn: the interaction's promise died with a
+ * previous process, so the answer arrives as a fresh resumed turn instead.
+ */
+export function revivalPrompt(
+  interaction: Interaction,
+  body: ResolveInteractionBody,
+): string {
+  const asked =
+    interaction.kind === "question"
+      ? `you asked the operator: ${JSON.stringify(
+          (interaction.payload as { questions: InteractionQuestion[] }).questions.map(
+            (q) => q.question,
+          ),
+        )}`
+      : "you proposed a plan for approval";
+  const answered =
+    "answers" in body
+      ? `They have now answered: ${JSON.stringify(body.answers)}.`
+      : body.decision === "approve"
+        ? `They have now approved it.${body.note === undefined ? "" : ` Note: ${body.note}`}`
+        : `They asked for changes: ${body.note ?? "(no note)"}.`;
+  return `[console] Earlier (before a server restart) ${asked}. ${answered} Continue from there.`;
+}
+
 export class InteractionService {
   readonly #db: Db;
   readonly #bus: EventBus;

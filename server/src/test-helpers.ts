@@ -4,6 +4,7 @@ import {
   AgentSessionHost,
   type AgentSessionHostDeps,
 } from "./agent-sessions/host.ts";
+import { buildSeatPlanCapture } from "./agent-sessions/plan-capture.ts";
 import { loadConfig, type Config } from "./config.ts";
 import { openDb } from "./db/client.ts";
 import { Repo, type UserSessionRow } from "./db/repo.ts";
@@ -120,6 +121,7 @@ export function makeDelegationHarness(
   }
 
   let runnerRef: OrchestratorRunner | null = null;
+  let hostRef: AgentSessionHost | null = null;
   const host = new AgentSessionHost({
     repo: base.repo,
     bus: base.bus,
@@ -129,8 +131,14 @@ export function makeDelegationHarness(
     getWorkspaceRoot: () => "/tmp/test-workspace",
     wake: (userSessionId, agentSessionId) =>
       runnerRef?.enqueueWake(userSessionId, agentSessionId),
+    buildSeatCanUseTool: buildSeatPlanCapture({
+      host: () => hostRef as AgentSessionHost,
+      repo: base.repo,
+      bus: base.bus,
+    }),
     ...options.hostOverrides,
   });
+  hostRef = host;
   const runner = new OrchestratorRunner({
     repo: base.repo,
     bus: base.bus,

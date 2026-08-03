@@ -4,6 +4,7 @@ import { ApiError } from "./errors.ts";
 import { registerAgentSessionRoutes } from "./routes/agent-sessions.ts";
 import { registerEventRoutes } from "./routes/events.ts";
 import { registerFsRoutes } from "./routes/fs.ts";
+import { registerTaskRoutes } from "./routes/tasks.ts";
 import { registerUserSessionRoutes } from "./routes/user-sessions.ts";
 import { registerWorkspaceRoutes } from "./routes/workspaces.ts";
 
@@ -46,6 +47,7 @@ export function buildServer(ctx: AppContext): FastifyInstance {
   registerWorkspaceRoutes(app, ctx);
   registerUserSessionRoutes(app, ctx);
   registerAgentSessionRoutes(app, ctx);
+  registerTaskRoutes(app, ctx);
 
   return app;
 }

@@ -6,6 +6,7 @@ import type { EventBus } from "./events/bus.ts";
 import type { InteractionService } from "./orchestrator/interactions.ts";
 import type { OrchestratorRunner } from "./orchestrator/runner.ts";
 import type { UserSessionService } from "./sessions/service.ts";
+import type { TaskService } from "./tasks/service.ts";
 import type { WorkspaceService } from "./workspaces/service.ts";
 
 export interface Logger {
@@ -26,4 +27,5 @@ export interface AppContext {
   runner: OrchestratorRunner;
   interactions: InteractionService;
   host: AgentSessionHost;
+  tasks: TaskService;
 }

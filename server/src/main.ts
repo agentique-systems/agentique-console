@@ -1,4 +1,5 @@
 import { AgentSessionHost } from "./agent-sessions/host.ts";
+import { buildSeatPlanCapture } from "./agent-sessions/plan-capture.ts";
 import { loadConfig } from "./config.ts";
 import type { AppContext } from "./context.ts";
 import { openDb } from "./db/client.ts";
@@ -10,6 +11,8 @@ import { buildConsoleMcpServer } from "./orchestrator/tools.ts";
 import { resolveSdk } from "./sdk/client.ts";
 import { SqliteSessionStore } from "./sdk/session-store.ts";
 import { UserSessionService } from "./sessions/service.ts";
+import { buildTaskHooks } from "./tasks/hooks.ts";
+import { TaskService } from "./tasks/service.ts";
 import { WorkspaceService } from "./workspaces/service.ts";
 import { buildServer } from "./api/server.ts";
 
@@ -24,12 +27,14 @@ const workspaces = new WorkspaceService(
 );
 const interactions = new InteractionService(db, bus);
 const sessionStore = new SqliteSessionStore(db);
+const tasks = new TaskService(db, bus);
 const getWorkspaceRoot = (workspaceId: string): string =>
   workspaces.get(workspaceId).rootPath;
 
 // Host and runner reference each other (host wakes the runner; the runner's
-// MCP tools drive the host) — a late-bound closure breaks the cycle.
+// MCP tools drive the host) — late-bound closures break the cycles.
 let runnerRef: OrchestratorRunner | null = null;
+let hostRef: AgentSessionHost | null = null;
 const host = new AgentSessionHost({
   repo,
   bus,
@@ -39,7 +44,15 @@ const host = new AgentSessionHost({
   getWorkspaceRoot,
   wake: (userSessionId, agentSessionId) =>
     runnerRef?.enqueueWake(userSessionId, agentSessionId),
+  buildHooks: (attribution) => buildTaskHooks(tasks, attribution),
+  taskLines: (agentSessionId) => tasks.linesForAgentSession(agentSessionId),
+  buildSeatCanUseTool: buildSeatPlanCapture({
+    host: () => hostRef as AgentSessionHost,
+    repo,
+    bus,
+  }),
 });
+hostRef = host;
 const runner = new OrchestratorRunner({
   repo,
   bus,
@@ -48,6 +61,13 @@ const runner = new OrchestratorRunner({
   sessionStore,
   interactions,
   getWorkspaceRoot,
+  buildHooks: ({ workspaceId, userSessionId }) =>
+    buildTaskHooks(tasks, {
+      workspaceId,
+      userSessionId,
+      agentSessionId: null,
+      participant: null,
+    }),
   buildMcpServer: (userSessionId, sdk) =>
     buildConsoleMcpServer({ sdk, host, repo, bus, userSessionId }),
   buildWakeDigests: (userSessionId, ids) =>
@@ -79,6 +99,7 @@ const ctx: AppContext = {
   runner,
   interactions,
   host,
+  tasks,
 };
 
 const app = buildServer(ctx);

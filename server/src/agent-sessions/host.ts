@@ -86,6 +86,8 @@ export interface AgentSessionHostDeps {
     participant: string;
     lastText: () => string;
   }) => SdkOptions["canUseTool"];
+  /** M7: compact task lines for wake digests. */
+  taskLines?: (agentSessionId: string) => string[];
 }
 
 export class AgentSessionHost {
@@ -340,7 +342,7 @@ export class AgentSessionHost {
         agentSessionId: id,
         title: session.title,
         lines: rows.map(formatMessageLine),
-        taskLines: [],
+        taskLines: this.#deps.taskLines?.(id) ?? [],
       });
     }
     return digests;

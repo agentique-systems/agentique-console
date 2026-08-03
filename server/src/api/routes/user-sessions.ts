@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { AppContext } from "../../context.ts";
+import { revivalPrompt } from "../../orchestrator/interactions.ts";
 import { badRequest } from "../errors.ts";
 
 const CreateBody = z.object({
@@ -79,11 +80,36 @@ export function registerUserSessionRoutes(
     async (request) => {
       const parsed = ResolveBody.safeParse(request.body);
       if (!parsed.success) throw badRequest(parsed.error.message);
-      return ctx.interactions.resolveFromApi(
+      const before = ctx.interactions.get(request.params.interactionId);
+      const resolved = ctx.interactions.resolveFromApi(
         request.params.id,
         request.params.interactionId,
         parsed.data,
       );
+      // A stale interaction's parked promise died with a previous process —
+      // its answer becomes a fresh resumed turn instead (M8 revival).
+      if (before.status === "stale") {
+        if (
+          before.kind === "plan_approval" &&
+          "decision" in parsed.data &&
+          parsed.data.decision === "approve"
+        ) {
+          ctx.repo.patchUserSession(request.params.id, { phase: "executing" });
+          ctx.bus.append({
+            type: "user_session.updated",
+            userSessionId: request.params.id,
+            payload: {
+              sessionId: request.params.id,
+              patch: { phase: "executing" },
+            },
+          });
+        }
+        ctx.runner.enqueueRevival(
+          request.params.id,
+          revivalPrompt(before, parsed.data),
+        );
+      }
+      return resolved;
     },
   );
 
