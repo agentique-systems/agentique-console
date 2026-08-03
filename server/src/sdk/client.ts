@@ -5,14 +5,25 @@
  * with a `fakeSdk(...)` instance directly and never touch this file.
  */
 import type { Config } from "../config.ts";
-import { devProgram, fakeSdk } from "./fake.ts";
+import { devProgram, fakeSdk, type FakeSdk } from "./fake.ts";
 import type { ConsoleSdk } from "./types.ts";
 
 let cached: Promise<ConsoleSdk> | null = null;
 
 export function resolveSdk(config: Config): Promise<ConsoleSdk> {
-  cached ??= config.fakeSdk ? Promise.resolve(fakeSdk(devProgram()).sdk) : loadReal();
+  cached ??= config.fakeSdk ? Promise.resolve(devFake().sdk) : loadReal();
   return cached;
+}
+
+function devFake(): FakeSdk {
+  // The program reads its own prompt back off the capture (recorded before
+  // the program starts) — a late-bound box breaks the construction cycle.
+  const box: { fake?: FakeSdk } = {};
+  const fake = fakeSdk(
+    devProgram(() => box.fake?.captured.prompts.at(-1) ?? ""),
+  );
+  box.fake = fake;
+  return fake;
 }
 
 async function loadReal(): Promise<ConsoleSdk> {

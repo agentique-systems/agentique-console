@@ -197,23 +197,182 @@ export function errorMessage(subtype: string, extra: Partial<SdkMessage> = {}): 
 
 // --- Dev-mode demo program --------------------------------------------------
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function* streamText(
+  text: string,
+): AsyncGenerator<SdkMessage, void, void> {
+  for (const word of text.split(" ")) {
+    yield deltaMessage(`${word} `);
+    await sleep(18);
+  }
+  yield textMessage(text);
+}
+
+type HookCallback = (input: unknown) => Promise<unknown>;
+
+function hookCallbacks(
+  hooks: SdkOptions["hooks"],
+  event: string,
+): HookCallback[] {
+  const matchers = (hooks as
+    | Record<string, { hooks: HookCallback[] }[]>
+    | undefined)?.[event];
+  return matchers?.flatMap((m) => m.hooks) ?? [];
+}
+
 /**
- * The CONSOLE_FAKE_SDK=1 program: a canned orchestrator that streams a short
- * reply and settles. Enough to exercise the whole UI without credentials.
+ * The CONSOLE_FAKE_SDK=1 program: a scripted orchestrator + specialists that
+ * exercise the whole surface without credentials — chat, AskUserQuestion when
+ * asked to, a two-seat delegation with tool traffic and task-mirror hook
+ * calls, and wake-digest relays. `getPrompt` returns the current query's
+ * prompt (the fake records it before the program starts).
  */
-export function devProgram(): FakeProgram {
-  return async function* (options): AsyncGenerator<SdkMessage, void, void> {
-    const sessionId = options.resume ?? `fake-session-${++fakeSession}`;
-    yield initMessage(sessionId);
-    const reply =
-      "I hear you. This server is running against the fake SDK (CONSOLE_FAKE_SDK=1), " +
-      "so I can't do real work — but everything you see is flowing through the real " +
-      "event spine: streaming deltas, persisted messages, and turn lifecycle events.";
-    for (const word of reply.split(" ")) {
-      yield deltaMessage(`${word} `);
-      await new Promise((resolve) => setTimeout(resolve, 15));
+export function devProgram(getPrompt: () => string): FakeProgram {
+  return async function* (options, tools): AsyncGenerator<SdkMessage, void, void> {
+    const prompt = getPrompt();
+
+    // --- Specialist turns (structured output configured) ---
+    if (options.outputFormat !== undefined) {
+      const seat = /You are \*\*(.+?)\*\*/.exec(prompt)?.[1] ?? "seat";
+      const sessionId = options.resume ?? `fake-${seat}-${++fakeSession}`;
+      yield initMessage(sessionId);
+      const fire = async (event: string, input: Record<string, unknown>) => {
+        for (const callback of hookCallbacks(options.hooks, event)) {
+          await callback({ session_id: sessionId, ...input }).catch(() => undefined);
+        }
+      };
+      yield reasoningDeltaMessage(`Reading the brief as ${seat}… `);
+      await sleep(150);
+      await fire("PostToolUse", {
+        tool_name: "TaskCreate",
+        tool_input: {
+          subject: `${seat}: demo unit of work`,
+          activeForm: `${seat} working`,
+        },
+        tool_response: { task: { id: `${seat}-t1`, subject: `${seat}: demo unit of work` } },
+      });
+      await fire("PostToolUse", {
+        tool_name: "TaskUpdate",
+        tool_input: { taskId: `${seat}-t1`, status: "in_progress", owner: seat },
+        tool_response: { success: true, updatedFields: ["status", "owner"] },
+      });
+      yield toolUseMessage(`tu_${seat}_1`, "Grep", { pattern: "TODO", path: "." });
+      await sleep(250);
+      yield toolResultMessage(`tu_${seat}_1`, "src/main.ts:12: TODO demo");
+      yield* streamText(
+        seat === "scout"
+          ? "Found it: the demo marker sits in src/main.ts. Handing the detail to coder."
+          : "Confirmed and wrapped up on my side. Everything checks out.",
+      );
+      await fire("PostToolUse", {
+        tool_name: "TaskUpdate",
+        tool_input: { taskId: `${seat}-t1`, status: "completed" },
+        tool_response: { success: true, updatedFields: ["status"] },
+      });
+      yield successMessage(
+        seat === "scout"
+          ? {
+              message:
+                "@coder the marker is in src/main.ts:12 — confirm nothing else references it",
+              to: null,
+            }
+          : { message: "Confirmed: only src/main.ts:12 carries the marker.", to: null },
+        { session_id: sessionId },
+      );
+      return;
     }
-    yield textMessage(reply);
+
+    // --- Orchestrator turns ---
+    const sessionId = options.resume ?? `fake-orchestrator-${++fakeSession}`;
+    yield initMessage(sessionId);
+
+    if (prompt.includes("has gone quiet")) {
+      yield* streamText(
+        "The team settled. scout traced the demo marker to src/main.ts:12 and coder " +
+          "confirmed it is the only reference. Their tasks are complete — anything else?",
+      );
+      yield successMessage(undefined, { session_id: sessionId });
+      return;
+    }
+
+    if (/\b(ask|question|choose|decide)\b/i.test(prompt)) {
+      const result = await options.canUseTool?.(
+        "AskUserQuestion",
+        {
+          questions: [
+            {
+              question: "Fake SDK demo: how should I proceed?",
+              options: [
+                { label: "Delegate to a team", description: "Spin up scout + coder" },
+                { label: "Just chat", description: "No delegation" },
+              ],
+            },
+          ],
+        },
+        {
+          signal: new AbortController().signal,
+          toolUseID: `tu_ask_${++fakeSession}`,
+        } as never,
+      );
+      const answer =
+        result?.behavior === "allow"
+          ? JSON.stringify(
+              (result.updatedInput as { answers?: unknown }).answers ?? "",
+            )
+          : "";
+      if (answer.includes("Delegate")) {
+        yield* delegateBranch(tools);
+      } else {
+        yield* streamText(
+          result?.behavior === "allow"
+            ? "Understood — staying in chat mode. Ask me anything."
+            : "No answer arrived, so I'll hold off. Ask again when ready.",
+        );
+      }
+      yield successMessage(undefined, { session_id: sessionId });
+      return;
+    }
+
+    if (/\b(delegate|investigate|explore|build|find|look)\b/i.test(prompt)) {
+      yield* delegateBranch(tools);
+      yield successMessage(undefined, { session_id: sessionId });
+      return;
+    }
+
+    yield* streamText(
+      "I hear you. This server runs against the fake SDK (CONSOLE_FAKE_SDK=1) — say " +
+        "something with 'investigate' or 'delegate' to watch a demo delegation, or " +
+        "'ask me' to see a question card. Everything flows through the real event spine.",
+    );
     yield successMessage(undefined, { session_id: sessionId });
   };
+}
+
+async function* delegateBranch(
+  tools: CompiledTool[],
+): AsyncGenerator<SdkMessage, void, void> {
+  const create = tools.find((t) => t.name === "create_agent_session");
+  if (create) {
+    yield toolUseMessage("tu_create", "mcp__console__create_agent_session", {
+      title: "Demo investigation",
+    });
+    const result = await create.handler(
+      {
+        title: "Demo investigation",
+        mode: "execute",
+        agents: [
+          { name: "scout", preset: "explorer" },
+          { name: "coder", preset: "implementer" },
+        ],
+        briefing: "@scout find the demo marker in this workspace; loop in @coder to confirm",
+      },
+      {},
+    );
+    yield toolResultMessage("tu_create", result.content[0]?.text ?? "");
+  }
+  yield* streamText(
+    "Delegated to scout and coder in a fresh agent session — watch the panel on the " +
+      "right. I'll report back when they settle.",
+  );
 }
