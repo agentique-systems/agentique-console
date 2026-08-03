@@ -69,6 +69,7 @@ export interface WakeDigest {
 }
 
 export function composeWakePrompt(digests: WakeDigest[]): string {
+  if (digests.length === 0) return "";
   const sections = digests.map((digest) => {
     const parts = [
       `[console] Agent session "${digest.title}" (${digest.agentSessionId}) has gone quiet. Unseen transcript:`,

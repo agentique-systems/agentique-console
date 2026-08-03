@@ -5,17 +5,38 @@
  */
 import { and, asc, desc, eq, sql } from "drizzle-orm";
 import type {
+  AgentSession,
   MessageKind,
   SessionMessage,
   Speaker,
   UserSession,
 } from "@agentique-console/shared";
 import type { Db } from "./client.ts";
-import { messages, userSessions } from "./schema.ts";
+import { agentSessions, messages, participants, userSessions } from "./schema.ts";
 import { newId, nowIso } from "../ids.ts";
 
 export type MessageRow = typeof messages.$inferSelect;
 export type UserSessionRow = typeof userSessions.$inferSelect;
+export type AgentSessionRow = typeof agentSessions.$inferSelect;
+export type ParticipantRow = typeof participants.$inferSelect;
+
+export function toWireAgentSession(
+  row: AgentSessionRow,
+  specialists: string[],
+  working: boolean,
+): AgentSession {
+  return {
+    id: row.id,
+    userSessionId: row.userSessionId,
+    title: row.title,
+    mode: row.mode,
+    phase: row.phase,
+    status: row.status === "archived" ? "archived" : working ? "working" : "idle",
+    participants: specialists,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
 
 export function toWireMessage(row: MessageRow): SessionMessage {
   return {
@@ -166,6 +187,106 @@ export class Repo {
       .update(userSessions)
       .set({ updatedAt: nowIso() })
       .where(eq(userSessions.id, id))
+      .run();
+  }
+
+  // --- Agent sessions -------------------------------------------------------
+
+  getAgentSession(id: string): AgentSessionRow | undefined {
+    return this.#db
+      .select()
+      .from(agentSessions)
+      .where(eq(agentSessions.id, id))
+      .get();
+  }
+
+  listAgentSessions(userSessionId: string): AgentSessionRow[] {
+    return this.#db
+      .select()
+      .from(agentSessions)
+      .where(eq(agentSessions.userSessionId, userSessionId))
+      .orderBy(desc(agentSessions.createdAt))
+      .all();
+  }
+
+  insertAgentSession(row: AgentSessionRow): void {
+    this.#db.insert(agentSessions).values(row).run();
+  }
+
+  listOpenAgentSessions(): AgentSessionRow[] {
+    return this.#db
+      .select()
+      .from(agentSessions)
+      .where(eq(agentSessions.status, "open"))
+      .all();
+  }
+
+  patchAgentSession(
+    id: string,
+    patch: Partial<
+      Pick<
+        AgentSessionRow,
+        | "phase"
+        | "status"
+        | "hopCount"
+        | "lastRoutedSeq"
+        | "owedToOrchestrator"
+      >
+    >,
+  ): void {
+    this.#db
+      .update(agentSessions)
+      .set({ ...patch, updatedAt: nowIso() })
+      .where(eq(agentSessions.id, id))
+      .run();
+  }
+
+  /** Participants in seating order (the orchestrator's virtual seat is ord 0). */
+  listParticipants(agentSessionId: string): ParticipantRow[] {
+    return this.#db
+      .select()
+      .from(participants)
+      .where(eq(participants.agentSessionId, agentSessionId))
+      .orderBy(asc(participants.ord))
+      .all();
+  }
+
+  getParticipant(
+    agentSessionId: string,
+    name: string,
+  ): ParticipantRow | undefined {
+    return this.#db
+      .select()
+      .from(participants)
+      .where(
+        and(
+          eq(participants.agentSessionId, agentSessionId),
+          eq(participants.name, name),
+        ),
+      )
+      .get();
+  }
+
+  insertParticipant(row: ParticipantRow): void {
+    this.#db.insert(participants).values(row).run();
+  }
+
+  patchParticipant(
+    agentSessionId: string,
+    name: string,
+    patch: Partial<
+      Pick<ParticipantRow, "sdkSessionId" | "lastSeenSeq" | "pendingTurnSeq">
+    >,
+  ): void {
+    this.#db
+      .update(participants)
+      .set(patch)
+      .where(
+        and(
+          eq(participants.agentSessionId, agentSessionId),
+          eq(participants.name, name),
+        ),
+      )
       .run();
   }
 }

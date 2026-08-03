@@ -1,5 +1,9 @@
 /** Shared test harness: in-memory DB + bus + runner over a scripted fake SDK. */
 import type { ConsoleEvent } from "@agentique-console/shared";
+import {
+  AgentSessionHost,
+  type AgentSessionHostDeps,
+} from "./agent-sessions/host.ts";
 import { loadConfig, type Config } from "./config.ts";
 import { openDb } from "./db/client.ts";
 import { Repo, type UserSessionRow } from "./db/repo.ts";
@@ -11,6 +15,7 @@ import {
   OrchestratorRunner,
   type OrchestratorDeps,
 } from "./orchestrator/runner.ts";
+import { buildConsoleMcpServer } from "./orchestrator/tools.ts";
 import { fakeSdk, type FakeProgram, type FakeSdk } from "./sdk/fake.ts";
 import { SqliteSessionStore } from "./sdk/session-store.ts";
 
@@ -91,6 +96,62 @@ export function makeHarness(
       return row.id;
     },
   };
+}
+
+export interface DelegationHarness extends Harness {
+  host: AgentSessionHost;
+}
+
+/**
+ * The full wiring (main.ts in miniature): runner with the console MCP server,
+ * host waking the runner. `lateFake` lets the program read its own prompts via
+ * a box populated after construction.
+ */
+export function makeDelegationHarness(
+  program: FakeProgram,
+  options: {
+    hopLimit?: number;
+    hostOverrides?: Partial<AgentSessionHostDeps>;
+  } = {},
+): DelegationHarness {
+  const base = makeHarness(program);
+  if (options.hopLimit !== undefined) {
+    (base.config as { hopLimit: number }).hopLimit = options.hopLimit;
+  }
+
+  let runnerRef: OrchestratorRunner | null = null;
+  const host = new AgentSessionHost({
+    repo: base.repo,
+    bus: base.bus,
+    config: base.config,
+    sdk: async () => base.fake.sdk,
+    sessionStore: base.sessionStore,
+    getWorkspaceRoot: () => "/tmp/test-workspace",
+    wake: (userSessionId, agentSessionId) =>
+      runnerRef?.enqueueWake(userSessionId, agentSessionId),
+    ...options.hostOverrides,
+  });
+  const runner = new OrchestratorRunner({
+    repo: base.repo,
+    bus: base.bus,
+    config: base.config,
+    sdk: async () => base.fake.sdk,
+    sessionStore: base.sessionStore,
+    interactions: base.interactions,
+    getWorkspaceRoot: () => "/tmp/test-workspace",
+    buildMcpServer: (userSessionId, sdk) =>
+      buildConsoleMcpServer({
+        sdk,
+        host,
+        repo: base.repo,
+        bus: base.bus,
+        userSessionId,
+      }),
+    buildWakeDigests: (userSessionId, ids) =>
+      host.buildWakeDigests(userSessionId, ids),
+  });
+  runnerRef = runner;
+  return { ...base, runner, host };
 }
 
 /**

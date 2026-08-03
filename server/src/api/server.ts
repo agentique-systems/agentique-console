@@ -1,6 +1,7 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import type { AppContext } from "../context.ts";
 import { ApiError } from "./errors.ts";
+import { registerAgentSessionRoutes } from "./routes/agent-sessions.ts";
 import { registerEventRoutes } from "./routes/events.ts";
 import { registerFsRoutes } from "./routes/fs.ts";
 import { registerUserSessionRoutes } from "./routes/user-sessions.ts";
@@ -44,6 +45,7 @@ export function buildServer(ctx: AppContext): FastifyInstance {
   registerFsRoutes(app, ctx);
   registerWorkspaceRoutes(app, ctx);
   registerUserSessionRoutes(app, ctx);
+  registerAgentSessionRoutes(app, ctx);
 
   return app;
 }

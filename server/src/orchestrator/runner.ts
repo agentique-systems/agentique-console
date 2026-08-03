@@ -45,7 +45,7 @@ export interface OrchestratorDeps {
     userSessionId: string;
   }) => SdkOptions["hooks"];
   /** M6: the console MCP server bound to one user session. */
-  buildMcpServer?: (userSessionId: string) => unknown;
+  buildMcpServer?: (userSessionId: string, sdk: ConsoleSdk) => unknown;
   /** M6: digest composer for wake turns (advances orchestrator watermarks). */
   buildWakeDigests?: (
     userSessionId: string,
@@ -164,6 +164,19 @@ export class OrchestratorRunner {
     const session = repo.getUserSession(sessionId);
     if (!session || session.status !== "open") return;
 
+    const prompt =
+      job.kind === "operator"
+        ? job.text
+        : job.kind === "wake"
+          ? composeWakePrompt(
+              this.#deps.buildWakeDigests?.(sessionId, job.agentSessionIds) ??
+                [],
+            )
+          : job.text;
+    // A wake whose digests were already consumed (read_agent_session raced
+    // it) has nothing to say — skip the turn entirely.
+    if (prompt === "") return;
+
     const turnId = newId("turn");
     const trigger =
       job.kind === "operator"
@@ -190,15 +203,6 @@ export class OrchestratorRunner {
 
     try {
       const sdk = await this.#deps.sdk();
-      const prompt =
-        job.kind === "operator"
-          ? job.text
-          : job.kind === "wake"
-            ? composeWakePrompt(
-                this.#deps.buildWakeDigests?.(sessionId, job.agentSessionIds) ??
-                  [],
-              )
-            : job.text;
       const options = buildOrchestratorOptions({
         workspaceRoot: this.#deps.getWorkspaceRoot(session.workspaceId),
         resume: session.sdkSessionId,
@@ -218,7 +222,7 @@ export class OrchestratorRunner {
           userSessionId: sessionId,
         }),
         sessionStore: sessionStore,
-        mcpServer: this.#deps.buildMcpServer?.(sessionId),
+        mcpServer: this.#deps.buildMcpServer?.(sessionId, sdk),
       });
 
       runtime.set("thinking");

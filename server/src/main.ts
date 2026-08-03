@@ -1,3 +1,4 @@
+import { AgentSessionHost } from "./agent-sessions/host.ts";
 import { loadConfig } from "./config.ts";
 import type { AppContext } from "./context.ts";
 import { openDb } from "./db/client.ts";
@@ -5,6 +6,7 @@ import { Repo } from "./db/repo.ts";
 import { EventBus } from "./events/bus.ts";
 import { InteractionService } from "./orchestrator/interactions.ts";
 import { OrchestratorRunner } from "./orchestrator/runner.ts";
+import { buildConsoleMcpServer } from "./orchestrator/tools.ts";
 import { resolveSdk } from "./sdk/client.ts";
 import { SqliteSessionStore } from "./sdk/session-store.ts";
 import { UserSessionService } from "./sessions/service.ts";
@@ -22,6 +24,22 @@ const workspaces = new WorkspaceService(
 );
 const interactions = new InteractionService(db, bus);
 const sessionStore = new SqliteSessionStore(db);
+const getWorkspaceRoot = (workspaceId: string): string =>
+  workspaces.get(workspaceId).rootPath;
+
+// Host and runner reference each other (host wakes the runner; the runner's
+// MCP tools drive the host) — a late-bound closure breaks the cycle.
+let runnerRef: OrchestratorRunner | null = null;
+const host = new AgentSessionHost({
+  repo,
+  bus,
+  config,
+  sdk: () => resolveSdk(config),
+  sessionStore,
+  getWorkspaceRoot,
+  wake: (userSessionId, agentSessionId) =>
+    runnerRef?.enqueueWake(userSessionId, agentSessionId),
+});
 const runner = new OrchestratorRunner({
   repo,
   bus,
@@ -29,8 +47,13 @@ const runner = new OrchestratorRunner({
   sdk: () => resolveSdk(config),
   sessionStore,
   interactions,
-  getWorkspaceRoot: (workspaceId) => workspaces.get(workspaceId).rootPath,
+  getWorkspaceRoot,
+  buildMcpServer: (userSessionId, sdk) =>
+    buildConsoleMcpServer({ sdk, host, repo, bus, userSessionId }),
+  buildWakeDigests: (userSessionId, ids) =>
+    host.buildWakeDigests(userSessionId, ids),
 });
+runnerRef = runner;
 const userSessions = new UserSessionService({
   repo,
   bus,
@@ -40,18 +63,22 @@ const userSessions = new UserSessionService({
 });
 
 // In-flight promises died with the previous process; their rows go stale so
-// the UI renders greyed cards whose answers become revival turns (M8).
+// the UI renders greyed cards whose answers become revival turns (M8), and
+// open agent sessions re-evaluate their drain from persisted rows.
 interactions.expirePendingOnBoot();
+host.boot();
 
 const ctx: AppContext = {
   config,
   db,
+  repo,
   bus,
   log: console,
   workspaces,
   userSessions,
   runner,
   interactions,
+  host,
 };
 
 const app = buildServer(ctx);
