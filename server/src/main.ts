@@ -39,7 +39,7 @@ const host = new AgentSessionHost({
   repo,
   bus,
   config,
-  sdk: () => resolveSdk(config),
+  sdk: () => resolveSdk(),
   sessionStore,
   getWorkspaceRoot,
   wake: (userSessionId, agentSessionId) =>
@@ -57,7 +57,7 @@ const runner = new OrchestratorRunner({
   repo,
   bus,
   config,
-  sdk: () => resolveSdk(config),
+  sdk: () => resolveSdk(),
   sessionStore,
   interactions,
   getWorkspaceRoot,
@@ -120,7 +120,7 @@ app
   .listen({ port: config.port, host: config.host })
   .then(() => {
     console.log(
-      `agentique-console server on http://${config.host}:${config.port} (db: ${config.dbFile}${config.fakeSdk ? ", FAKE SDK" : ""})`,
+      `agentique-console on http://${config.host}:${config.port} (db: ${config.dbFile})`,
     );
   })
   .catch((error) => {

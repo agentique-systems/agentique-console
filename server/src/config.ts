@@ -6,6 +6,8 @@ export interface Config {
   dbFile: string;
   port: number;
   host: string;
+  /** The built web bundle; served at / when present (absent in vite dev). */
+  webDir: string;
   /** Browse roots for the workspace directory picker. */
   fsRoots: { path: string; label: string }[];
   /** Model override for every session; undefined = SDK default. */
@@ -15,8 +17,6 @@ export interface Config {
   perSessionTurnCap: number;
   /** Max concurrent specialist turns across the whole process. */
   globalTurnCap: number;
-  /** Run against the in-process fake SDK (credential-free). */
-  fakeSdk: boolean;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -28,11 +28,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     dbFile: path.join(dataDir, "console.db"),
     port: Number(env.CONSOLE_PORT ?? 4400),
     host: env.CONSOLE_HOST ?? "127.0.0.1",
+    webDir: path.resolve(import.meta.dirname, "../../web/dist"),
     fsRoots: [{ path: home, label: "Home" }],
     model: env.CONSOLE_MODEL,
     hopLimit: Number(env.CONSOLE_HOP_LIMIT ?? 12),
     perSessionTurnCap: 3,
     globalTurnCap: 6,
-    fakeSdk: env.CONSOLE_FAKE_SDK === "1",
   };
 }

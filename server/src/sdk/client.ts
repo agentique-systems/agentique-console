@@ -1,29 +1,16 @@
 /**
- * The SDK injection seam. Production resolves the real
- * `@anthropic-ai/claude-agent-sdk` lazily (first turn pays the import);
- * CONSOLE_FAKE_SDK=1 swaps in the scripted dev fake. Tests construct services
- * with a `fakeSdk(...)` instance directly and never touch this file.
+ * The SDK injection seam: resolves the real `@anthropic-ai/claude-agent-sdk`
+ * lazily, so the first turn pays the import and a server with no sessions
+ * never loads it. Tests construct services with a `fakeSdk(...)` instance
+ * directly and never touch this file.
  */
-import type { Config } from "../config.ts";
-import { devProgram, fakeSdk, type FakeSdk } from "./fake.ts";
 import type { ConsoleSdk } from "./types.ts";
 
 let cached: Promise<ConsoleSdk> | null = null;
 
-export function resolveSdk(config: Config): Promise<ConsoleSdk> {
-  cached ??= config.fakeSdk ? Promise.resolve(devFake().sdk) : loadReal();
+export function resolveSdk(): Promise<ConsoleSdk> {
+  cached ??= loadReal();
   return cached;
-}
-
-function devFake(): FakeSdk {
-  // The program reads its own prompt back off the capture (recorded before
-  // the program starts) — a late-bound box breaks the construction cycle.
-  const box: { fake?: FakeSdk } = {};
-  const fake = fakeSdk(
-    devProgram(() => box.fake?.captured.prompts.at(-1) ?? ""),
-  );
-  box.fake = fake;
-  return fake;
 }
 
 async function loadReal(): Promise<ConsoleSdk> {

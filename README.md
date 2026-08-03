@@ -46,25 +46,28 @@ UserSessions  │  you ⇄ Orchestrator  │  AgentSession cards │  selected A
 
 ```bash
 npm install
-npm run verify                     # typecheck + 123 tests, credential-free
-CONSOLE_FAKE_SDK=1 npm -w server run dev   # server on :4400 (scripted fake SDK)
-npm -w web run dev                 # UI on :5173 (proxies /api → :4400)
+npm start          # → http://localhost:4400
 ```
 
-Drop `CONSOLE_FAKE_SDK=1` to run against the real Claude Agent SDK (uses your
-local Claude Code credentials). With the fake, say something containing
-"investigate" to watch a scripted two-seat delegation, or "ask me" for a
-question card.
+That's the whole thing: one command, one process, one port. It builds the UI
+and the API server serves it alongside `/api` and the event stream. Agents run
+through the real Claude Agent SDK using your local Claude Code credentials.
 
 - Data lives in `~/.agentique-console/console.db` (override: `CONSOLE_DATA_DIR`).
-- `server/scripts/smoke.ts` drives one real-SDK end-to-end (priced):
-  `npx tsx server/scripts/smoke.ts`.
+  Other knobs: `CONSOLE_PORT`, `CONSOLE_MODEL`, `CONSOLE_HOP_LIMIT`.
+- `npm run dev` — same app with HMR and server watch (UI moves to :5173,
+  proxying `/api` back to the server).
+- `npm run verify` — typecheck + 123 tests. The whole suite drives a fake SDK,
+  so it needs no credentials and spends nothing.
+- `npx tsx server/scripts/smoke.ts` — one real end-to-end run against a scratch
+  workspace (priced; prints the transcript, agent sessions, and tasks).
 
 ## Architecture
 
 ```
 shared/   the frozen wire contract: domain rows, event catalog, REST shapes
 server/   Fastify 5 + better-sqlite3/drizzle + @anthropic-ai/claude-agent-sdk
+          (also serves web/dist, so the app is a single process)
   events/bus.ts            global event spine (replay-then-tail SSE, seq = Last-Event-ID)
   orchestrator/runner.ts   one SDK conversation per UserSession; serialized turn queue
                            (operator | wake | answer-revival jobs)

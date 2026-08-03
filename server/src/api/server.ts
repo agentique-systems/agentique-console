@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance } from "fastify";
 import type { AppContext } from "../context.ts";
 import { ApiError } from "./errors.ts";
@@ -48,6 +50,25 @@ export function buildServer(ctx: AppContext): FastifyInstance {
   registerUserSessionRoutes(app, ctx);
   registerAgentSessionRoutes(app, ctx);
   registerTaskRoutes(app, ctx);
+
+  // The built UI rides along on this port, so the app is one process. In vite
+  // dev the bundle is absent and the dev server proxies /api here instead.
+  const hasWeb = existsSync(ctx.config.webDir);
+  if (hasWeb) {
+    void app.register(fastifyStatic, {
+      root: ctx.config.webDir,
+      wildcard: false,
+    });
+  }
+  app.setNotFoundHandler((request, reply) => {
+    if (request.url.startsWith("/api") || !hasWeb) {
+      return reply
+        .status(404)
+        .send({ error: { code: "not_found", message: "no such route" } });
+    }
+    // Anything else is a UI path — hand back the SPA shell.
+    return reply.sendFile("index.html");
+  });
 
   return app;
 }

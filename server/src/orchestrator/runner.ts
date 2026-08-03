@@ -241,8 +241,7 @@ export class OrchestratorRunner {
     } catch (error) {
       outcome.status = abort.signal.aborted ? "aborted" : "error";
       outcome.errorMessage = error instanceof Error ? error.message : String(error);
-      this.#deps.config.fakeSdk ||
-        console.error(`orchestrator turn failed (${sessionId}):`, error);
+      console.error(`orchestrator turn failed (${sessionId}):`, error);
     } finally {
       lane.abort = null;
       runtime.idle();

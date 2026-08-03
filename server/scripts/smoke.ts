@@ -30,10 +30,6 @@ import { TaskService } from "../src/tasks/service.ts";
 import { WorkspaceService } from "../src/workspaces/service.ts";
 
 const config = loadConfig();
-if (config.fakeSdk) {
-  console.error("Unset CONSOLE_FAKE_SDK — this smoke uses the real SDK.");
-  process.exit(1);
-}
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "console-smoke-"));
 fs.writeFileSync(
@@ -58,7 +54,7 @@ const host = new AgentSessionHost({
   repo,
   bus,
   config,
-  sdk: () => resolveSdk(config),
+  sdk: () => resolveSdk(),
   sessionStore,
   getWorkspaceRoot,
   wake: (us, as) => runnerRef?.enqueueWake(us, as),
@@ -75,7 +71,7 @@ const runner = new OrchestratorRunner({
   repo,
   bus,
   config,
-  sdk: () => resolveSdk(config),
+  sdk: () => resolveSdk(),
   sessionStore,
   interactions,
   getWorkspaceRoot,
