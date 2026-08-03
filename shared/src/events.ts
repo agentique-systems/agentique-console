@@ -7,7 +7,6 @@ import type {
   AgentSessionStatus,
   InteractionQuestion,
   SessionMessage,
-  SessionMode,
   SessionPhase,
   Task,
   UserSession,

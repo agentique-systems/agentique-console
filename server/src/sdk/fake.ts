@@ -106,6 +106,20 @@ export function fakeSdk(program: FakeProgram): FakeSdk {
   };
 }
 
+let permissionSeq = 0;
+
+/** A fully-shaped canUseTool context for driving permission flows from tests. */
+export function permissionContext(): Parameters<
+  NonNullable<SdkOptions["canUseTool"]>
+>[2] {
+  permissionSeq += 1;
+  return {
+    signal: new AbortController().signal,
+    toolUseID: `tu_fake_${permissionSeq}`,
+    requestId: `req_fake_${permissionSeq}`,
+  } as Parameters<NonNullable<SdkOptions["canUseTool"]>>[2];
+}
+
 // --- Message builders -------------------------------------------------------
 
 let fakeSession = 0;
