@@ -355,6 +355,28 @@ export class AgentSessionHost {
     }
   }
 
+  /**
+   * A seat's turn died with a previous process. The seat keeps its resume
+   * handle, so re-arming it lets the agent pick up where it left off rather
+   * than the session sitting silent forever — which is what an unrecovered
+   * turn looked like. Recovery writes the missing settle event, so each
+   * interruption is retried exactly once.
+   */
+  recoverSeatTurn(agentSessionId: string, participant: string): void {
+    const { repo } = this.#deps;
+    const session = repo.getAgentSession(agentSessionId);
+    const seat = repo.getParticipant(agentSessionId, participant);
+    if (!session || !seat || session.status !== "open") return;
+    this.#notice(
+      session,
+      `${participant}'s turn was interrupted by a server restart — retrying`,
+    );
+    repo.patchParticipant(agentSessionId, participant, {
+      pendingTurnSeq: repo.messagesHeadSeq("agent", agentSessionId),
+    });
+    this.#schedule(agentSessionId);
+  }
+
   // --- Drain loop -----------------------------------------------------------
 
   #lane(id: string): Lane {
@@ -763,6 +785,12 @@ export class AgentSessionHost {
   #setStatus(id: string, status: "working" | "idle"): void {
     const lane = this.#lane(id);
     if (lane.lastStatus === status) return;
+    // A session that boots idle has nothing to announce; without this every
+    // restart wrote an identical idle row to the spine.
+    if (lane.lastStatus === null && status === "idle") {
+      lane.lastStatus = status;
+      return;
+    }
     lane.lastStatus = status;
     const session = this.#deps.repo.getAgentSession(id);
     if (!session) return;

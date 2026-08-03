@@ -15,6 +15,16 @@ import type { Db } from "./client.ts";
 import { agentSessions, messages, participants, userSessions } from "./schema.ts";
 import { newId, nowIso } from "../ids.ts";
 
+export type UnsettledTurn =
+  | { kind: "user"; turnId: string; userSessionId: string }
+  | {
+      kind: "agent";
+      turnId: string;
+      userSessionId: string;
+      agentSessionId: string;
+      participant: string;
+    };
+
 export type MessageRow = typeof messages.$inferSelect;
 export type UserSessionRow = typeof userSessions.$inferSelect;
 export type AgentSessionRow = typeof agentSessions.$inferSelect;
@@ -211,6 +221,60 @@ export class Repo {
 
   insertAgentSession(row: AgentSessionRow): void {
     this.#db.insert(agentSessions).values(row).run();
+  }
+
+  /**
+   * Turns that started but never settled — every one is a turn that died with
+   * a previous process. Derived from the spine rather than a status column, so
+   * it stays true no matter how the process ended, and recovery writing the
+   * missing settle is what stops a turn being recovered twice.
+   */
+  findUnsettledTurns(): UnsettledTurn[] {
+    return this.#db
+      .all<{
+        type: string;
+        turnId: string | null;
+        userSessionId: string | null;
+        agentSessionId: string | null;
+        participant: string | null;
+      }>(sql`
+        select
+          type,
+          json_extract(payload, '$.turnId') as turnId,
+          user_session_id as userSessionId,
+          agent_session_id as agentSessionId,
+          json_extract(payload, '$.participant') as participant
+        from events
+        where type in ('user_session.turn.started', 'agent_session.turn.started')
+          and json_extract(payload, '$.turnId') not in (
+            select json_extract(payload, '$.turnId') from events
+            where type in ('user_session.turn.settled', 'agent_session.turn.settled')
+          )
+        order by seq
+      `)
+      .flatMap((row): UnsettledTurn[] => {
+        if (row.turnId === null) return [];
+        if (row.type === "agent_session.turn.started") {
+          if (row.agentSessionId === null || row.participant === null) return [];
+          return [
+            {
+              kind: "agent" as const,
+              turnId: row.turnId,
+              userSessionId: row.userSessionId ?? "",
+              agentSessionId: row.agentSessionId,
+              participant: row.participant,
+            },
+          ];
+        }
+        if (row.userSessionId === null) return [];
+        return [
+          {
+            kind: "user" as const,
+            turnId: row.turnId,
+            userSessionId: row.userSessionId,
+          },
+        ];
+      });
   }
 
   listOpenAgentSessions(): AgentSessionRow[] {

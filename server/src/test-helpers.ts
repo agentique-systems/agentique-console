@@ -105,8 +105,7 @@ export interface DelegationHarness extends Harness {
 
 /**
  * The full wiring (main.ts in miniature): runner with the console MCP server,
- * host waking the runner. `lateFake` lets the program read its own prompts via
- * a box populated after construction.
+ * host waking the runner.
  */
 export function makeDelegationHarness(
   program: FakeProgram,
@@ -119,7 +118,25 @@ export function makeDelegationHarness(
   if (options.hopLimit !== undefined) {
     (base.config as { hopLimit: number }).hopLimit = options.hopLimit;
   }
+  return { ...base, ...wire(base, options) };
+}
 
+/**
+ * A restart: fresh host and runner over the same database and fake SDK. Any
+ * turn the old pair had in flight is gone, exactly as it would be after the
+ * process died — which is what recovery has to cope with.
+ */
+export function restartHarness(
+  harness: DelegationHarness,
+  options: { hostOverrides?: Partial<AgentSessionHostDeps> } = {},
+): DelegationHarness {
+  return { ...harness, ...wire(harness, options) };
+}
+
+function wire(
+  base: Harness,
+  options: { hostOverrides?: Partial<AgentSessionHostDeps> },
+): { host: AgentSessionHost; runner: OrchestratorRunner } {
   let runnerRef: OrchestratorRunner | null = null;
   let hostRef: AgentSessionHost | null = null;
   const host = new AgentSessionHost({
@@ -159,7 +176,7 @@ export function makeDelegationHarness(
       host.buildWakeDigests(userSessionId, ids),
   });
   runnerRef = runner;
-  return { ...base, runner, host };
+  return { host, runner };
 }
 
 /**

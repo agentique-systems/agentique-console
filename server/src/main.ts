@@ -8,6 +8,7 @@ import { EventBus } from "./events/bus.ts";
 import { InteractionService } from "./orchestrator/interactions.ts";
 import { OrchestratorRunner } from "./orchestrator/runner.ts";
 import { buildConsoleMcpServer } from "./orchestrator/tools.ts";
+import { recoverInterruptedTurns } from "./recovery.ts";
 import { resolveSdk } from "./sdk/client.ts";
 import { SqliteSessionStore } from "./sdk/session-store.ts";
 import { UserSessionService } from "./sessions/service.ts";
@@ -83,9 +84,14 @@ const userSessions = new UserSessionService({
 });
 
 // In-flight promises died with the previous process; their rows go stale so
-// the UI renders greyed cards whose answers become revival turns (M8), and
+// the UI renders greyed cards whose answers become revival turns (M8). Turns
+// that died mid-flight are closed and their sessions put back in motion, and
 // open agent sessions re-evaluate their drain from persisted rows.
 interactions.expirePendingOnBoot();
+const recovered = recoverInterruptedTurns({ repo, bus, host });
+if (recovered > 0) {
+  console.log(`recovered ${recovered} turn(s) interrupted by the last shutdown`);
+}
 host.boot();
 
 const ctx: AppContext = {
