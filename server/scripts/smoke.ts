@@ -8,13 +8,11 @@
  * What to check afterwards (sqlite3 $CONSOLE_DATA_DIR/console.db):
  *   select type, count(*) from events group by 1;      -- spine coherent
  *   select status, count(*) from tasks group by 1;     -- mirror filled
- *   select count(*) from sdk_session_entries;          -- transcripts mirrored
  */
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { AgentSessionHost } from "../src/agent-sessions/host.ts";
-import { buildSeatPlanCapture } from "../src/agent-sessions/plan-capture.ts";
 import { loadConfig } from "../src/config.ts";
 import { openDb } from "../src/db/client.ts";
 import { Repo } from "../src/db/repo.ts";
@@ -23,7 +21,6 @@ import { InteractionService } from "../src/orchestrator/interactions.ts";
 import { OrchestratorRunner } from "../src/orchestrator/runner.ts";
 import { buildConsoleMcpServer } from "../src/orchestrator/tools.ts";
 import { resolveSdk } from "../src/sdk/client.ts";
-import { SqliteSessionStore } from "../src/sdk/session-store.ts";
 import { UserSessionService } from "../src/sessions/service.ts";
 import { buildTaskHooks } from "../src/tasks/hooks.ts";
 import { TaskService } from "../src/tasks/service.ts";
@@ -44,49 +41,47 @@ const bus = new EventBus(db);
 const repo = new Repo(db, sqlite);
 const workspaces = new WorkspaceService(db, bus, [os.tmpdir()]);
 const interactions = new InteractionService(db, bus);
-const sessionStore = new SqliteSessionStore(db);
 const tasks = new TaskService(db, bus);
 const getWorkspaceRoot = (id: string) => workspaces.get(id).rootPath;
 
-let runnerRef: OrchestratorRunner | null = null;
-let hostRef: AgentSessionHost | null = null;
-const host = new AgentSessionHost({
-  repo,
-  bus,
-  config,
-  sdk: () => resolveSdk(),
-  sessionStore,
-  getWorkspaceRoot,
-  wake: (us, as) => runnerRef?.enqueueWake(us, as),
-  buildHooks: (attr) => buildTaskHooks(tasks, attr),
-  taskLines: (id) => tasks.linesForAgentSession(id),
-  buildSeatCanUseTool: buildSeatPlanCapture({
-    host: () => hostRef as AgentSessionHost,
-    repo,
-    bus,
-  }),
-});
-hostRef = host;
+const host = new AgentSessionHost({ repo, bus });
 const runner = new OrchestratorRunner({
   repo,
   bus,
   config,
   sdk: () => resolveSdk(),
-  sessionStore,
   interactions,
   getWorkspaceRoot,
-  buildHooks: ({ workspaceId, userSessionId }) =>
-    buildTaskHooks(tasks, {
+  buildHooks: ({ workspaceId, userSessionId }) => ({
+    ...buildTaskHooks(tasks, {
       workspaceId,
       userSessionId,
       agentSessionId: null,
       participant: null,
     }),
+    SubagentStop: [
+      {
+        hooks: [
+          async (input: unknown) => {
+            const agentId = (input as { agent_id?: unknown }).agent_id;
+            if (typeof agentId === "string") host.releaseAgent(agentId);
+            return {};
+          },
+        ],
+      },
+    ],
+  }),
+  seats: {
+    spawn: (callId, spawnName, agentSessionId, subagentType) =>
+      host.observeAgentSpawn(callId, spawnName, agentSessionId, subagentType),
+    launch: (callId, agentId) => host.confirmAgentLaunch(callId, agentId),
+    seatOf: (callId) => host.seatOf(callId),
+    seatOfAddress: (to) => host.seatOfSpawnAddress(to),
+    recordMessage: (input) => host.recordDerivedMessage(input),
+  },
   buildMcpServer: (userSessionId, sdk) =>
-    buildConsoleMcpServer({ sdk, host, repo, bus, userSessionId }),
-  buildWakeDigests: (us, ids) => host.buildWakeDigests(us, ids),
+    buildConsoleMcpServer({ sdk, host, repo, bus, userSessionId, tasks }),
 });
-runnerRef = runner;
 const userSessions = new UserSessionService({
   repo,
   bus,
@@ -152,7 +147,9 @@ for (;;) {
     runner.busy(session.id) ||
     host.listForUserSession(session.id).some((s) => s.status === "working");
   quietFor = busy ? 0 : quietFor + 2000;
-  if (quietFor >= 10_000) break;
+  // A parked coordinator is invisible between specialist settle and its
+  // report — a longer quiet window keeps the smoke from cutting it off.
+  if (quietFor >= 20_000) break;
   if (Date.now() - start > 10 * 60_000) {
     console.error("smoke timed out after 10 minutes");
     break;
@@ -179,5 +176,7 @@ for (const task of tasks.listForUserSession(session.id)) {
 }
 console.log(`\nevents total: ${bus.headSeq()}`);
 bus.closeSubscriptions();
+// The persistent lane is a live CLI subprocess — close it or the script hangs.
+await runner.closeAll();
 sqlite.close();
 process.exit(0);

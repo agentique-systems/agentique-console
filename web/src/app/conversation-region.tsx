@@ -82,11 +82,7 @@ function ActiveSession({ session }: { session: UserSession }) {
         session={session}
         onRequestChanges={() => composerRef.current?.focus()}
       />
-      <Composer
-        ref={composerRef}
-        sessionId={session.id}
-        archived={session.status === "archived"}
-      />
+      <Composer ref={composerRef} session={session} busy={busy} />
     </div>
   );
 }

@@ -11,7 +11,12 @@ import type { EventBus } from "../events/bus.ts";
 import type { SdkOptions } from "../sdk/types.ts";
 import type { InteractionService } from "./interactions.ts";
 
-export interface TurnState {
+/**
+ * Per-lane callback state. Lives as long as the persistent query; the runner
+ * resets it at each turn start, preserving "plan falls back to the turn's
+ * last assistant text" semantics across the lane's lifetime.
+ */
+export interface LaneState {
   lastAssistantText: string;
 }
 
@@ -20,20 +25,31 @@ export interface CanUseToolInput {
   repo: Repo;
   bus: EventBus;
   interactions: InteractionService;
-  turnState: TurnState;
+  laneState: LaneState;
 }
 
 type CanUseTool = NonNullable<SdkOptions["canUseTool"]>;
 
 export function buildOrchestratorCanUseTool(input: CanUseToolInput): CanUseTool {
-  const { userSessionId, repo, bus, interactions, turnState } = input;
+  const { userSessionId, repo, bus, interactions, laneState } = input;
 
   return (async (
     toolName: string,
     toolInput: Record<string, unknown>,
-    context?: { signal?: AbortSignal; suggestions?: unknown },
+    context?: { signal?: AbortSignal; suggestions?: unknown; agentID?: string },
   ) => {
     if (toolName.startsWith("mcp__console__")) {
+      // Coordinator-only tools: the task board belongs to a session's
+      // coordinator (a subagent — context carries agentID); the parent has
+      // the SDK-native TaskCreate family instead.
+      const coordinatorOnly = toolName.startsWith("mcp__console__task_");
+      if (coordinatorOnly && context?.agentID === undefined) {
+        return {
+          behavior: "deny" as const,
+          message:
+            "This tool belongs to an agent session's coordinator — delegate the session instead.",
+        };
+      }
       return { behavior: "allow" as const, updatedInput: toolInput };
     }
 
@@ -77,7 +93,7 @@ export function buildOrchestratorCanUseTool(input: CanUseToolInput): CanUseTool 
       const plan =
         typeof toolInput.plan === "string" && toolInput.plan.length > 0
           ? toolInput.plan
-          : turnState.lastAssistantText;
+          : laneState.lastAssistantText;
       if (plan === "") {
         return {
           behavior: "deny" as const,

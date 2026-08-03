@@ -32,6 +32,14 @@ export interface SdkMessage {
       is_error?: boolean;
     }[];
   };
+  /** B3: user-message provenance — peer = an in-process agent's SendMessage. */
+  origin?: {
+    kind?: string;
+    from?: string;
+    name?: string;
+    senderTaskId?: string;
+    body?: string;
+  };
   // result fields
   structured_output?: unknown;
   total_cost_usd?: number;
@@ -47,6 +55,23 @@ export interface SdkMessage {
 export interface QueryHandle extends AsyncGenerator<SdkMessage, void, void> {
   interrupt?: () => Promise<void>;
   close?: () => void;
+}
+
+/**
+ * The user message a persistent lane pushes into its streaming-input query.
+ * Structural mirror of the SDK's SDKUserMessage (input side): operator input
+ * MUST carry origin {kind:"human"} — unattributed messages fail closed at the
+ * SDK's isHuman() trust gates — while console-synthesized pushes (wake digests,
+ * answer revivals) omit origin entirely; they are neither human nor peer.
+ */
+export interface SdkUserMessageLike {
+  type: "user";
+  message: { role: "user"; content: { type: "text"; text: string }[] };
+  parent_tool_use_id: null;
+  shouldQuery?: boolean;
+  uuid?: string;
+  timestamp?: string;
+  origin?: { kind: "human" };
 }
 
 export interface SdkToolResult {
@@ -69,7 +94,7 @@ export interface SdkMcpServerConfig {
 /** The injectable module surface: real SDK in production, fake in tests/dev. */
 export interface ConsoleSdk {
   query(params: {
-    prompt: string | AsyncIterable<unknown>;
+    prompt: string | AsyncIterable<SdkUserMessageLike>;
     options: SdkOptions;
   }): QueryHandle;
   tool(
@@ -81,17 +106,3 @@ export interface ConsoleSdk {
   createSdkMcpServer(config: SdkMcpServerConfig): unknown;
 }
 
-// --- SessionStore mirror (structural; the real SDK's SessionStore is
-// assignment-compatible with this shape) -----------------------------------
-
-export interface SessionKey {
-  projectKey: string;
-  sessionId: string;
-  subpath?: string;
-}
-
-export interface SessionStoreEntry {
-  type: string;
-  uuid?: unknown;
-  [key: string]: unknown;
-}

@@ -4,6 +4,8 @@ import type {
   CreateUserSessionBody,
   CreateUserSessionResponse,
   CreateWorkspaceBody,
+  ImproveMessageBody,
+  ImproveMessageResponse,
   Interaction,
   PatchUserSessionBody,
   PostMessageResponse,
@@ -86,6 +88,17 @@ export function useResolveInteraction() {
     onSuccess: (_data, { sessionId }) =>
       void queryClient.invalidateQueries({
         queryKey: keys.userSessions.detail(sessionId),
+      }),
+  });
+}
+
+/** A rewrite of the draft. Nothing persists, so there is nothing to invalidate. */
+export function useImproveMessage() {
+  return useMutation({
+    mutationFn: (body: ImproveMessageBody) =>
+      apiFetch<ImproveMessageResponse>("/api/compose/improve", {
+        method: "POST",
+        body: JSON.stringify(body),
       }),
   });
 }

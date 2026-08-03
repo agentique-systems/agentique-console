@@ -16,7 +16,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useScopeStore } from "@/stores/scope";
 import { useUiStore } from "@/stores/ui";
 
-import { ModeToggle } from "./session-header";
+import { ModeToggle, nextMode } from "./session-header";
 
 export function DraftView() {
   const create = useCreateUserSession();
@@ -63,15 +63,6 @@ export function DraftView() {
       </div>
       <div className="flex flex-1 flex-col justify-end gap-3 p-3">
         <div className="space-y-1">
-          <Label className="text-[10px] uppercase tracking-wider">Mode</Label>
-          <ModeToggle mode={mode} onChange={setMode} />
-          <div className="text-[10px] text-muted-foreground">
-            {mode === "plan_execute"
-              ? "the orchestrator plans first and waits for your approval"
-              : "the orchestrator gets straight to work"}
-          </div>
-        </div>
-        <div className="space-y-1">
           <Label className="text-[10px] uppercase tracking-wider">
             What do you want done?
           </Label>
@@ -85,9 +76,27 @@ export function DraftView() {
               if (event.key === "Enter" && !event.shiftKey) {
                 event.preventDefault();
                 send();
+                return;
+              }
+              if (event.key === "Tab" && event.shiftKey) {
+                event.preventDefault();
+                setMode(nextMode(mode));
               }
             }}
           />
+        </div>
+        {/* Mode sits under the box here too, so the gesture is the same one the
+            composer teaches once the session exists. */}
+        <div className="flex items-center gap-2">
+          <ModeToggle mode={mode} onChange={setMode} />
+          <span className="text-[10px] text-muted-foreground">
+            shift+tab to cycle
+          </span>
+        </div>
+        <div className="text-[10px] text-muted-foreground">
+          {mode === "plan_execute"
+            ? "the orchestrator plans first and waits for your approval"
+            : "the orchestrator gets straight to work"}
         </div>
         <Button size="sm" disabled={!ready || create.isPending} onClick={send}>
           {create.isPending ? "starting…" : "send — this starts the session"}

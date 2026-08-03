@@ -32,10 +32,6 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
   mode TEXT NOT NULL CHECK (mode IN ('execute','plan_execute')),
   phase TEXT NOT NULL DEFAULT 'executing' CHECK (phase IN ('planning','executing')),
   status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','archived')),
-  hop_limit INTEGER NOT NULL DEFAULT 12,
-  hop_count INTEGER NOT NULL DEFAULT 0,
-  last_routed_seq INTEGER NOT NULL DEFAULT 0,
-  owed_to_orchestrator INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -47,9 +43,7 @@ CREATE TABLE IF NOT EXISTS participants (
   preset TEXT,
   instructions TEXT NOT NULL,
   model TEXT,
-  sdk_session_id TEXT,
   last_seen_seq INTEGER NOT NULL DEFAULT 0,
-  pending_turn_seq INTEGER NOT NULL DEFAULT 0,
   ord INTEGER NOT NULL,
   created_at TEXT NOT NULL,
   PRIMARY KEY (agent_session_id, name)
@@ -116,19 +110,7 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS events_user_session ON events(user_session_id, seq);
 CREATE INDEX IF NOT EXISTS events_agent_session ON events(agent_session_id, seq);
-
-CREATE TABLE IF NOT EXISTS sdk_session_entries (
-  ord INTEGER PRIMARY KEY AUTOINCREMENT,
-  project_key TEXT NOT NULL,
-  session_id TEXT NOT NULL,
-  subpath TEXT NOT NULL DEFAULT '',
-  uuid TEXT,
-  type TEXT NOT NULL,
-  entry TEXT NOT NULL,
-  created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS sdk_entries_session ON sdk_session_entries(project_key, session_id, subpath);
-CREATE UNIQUE INDEX IF NOT EXISTS sdk_entries_uuid
-  ON sdk_session_entries(project_key, session_id, subpath, uuid)
-  WHERE uuid IS NOT NULL;
 `;
+// B1 note: sdk_session_entries (the SDK transcript mirror) was dropped; SDK
+// transcripts live in ~/.claude/projects like the CLI. Existing databases
+// keep the stray table harmlessly.

@@ -16,13 +16,13 @@ export interface Config {
   fsRoots: { path: string; label: string }[];
   /** Model override for every session; undefined = SDK default. */
   model: string | undefined;
+  /**
+   * Model for the composer's rewrite pass. Deliberately NOT `model`: this is a
+   * one-shot text edit, so it runs on a cheaper tier than the orchestrator.
+   */
+  improveModel: string;
   /** Reasoning effort for every session; undefined = SDK default. */
   effort: string | undefined;
-  hopLimit: number;
-  /** Max concurrent specialist turns per agent session. */
-  perSessionTurnCap: number;
-  /** Max concurrent specialist turns across the whole process. */
-  globalTurnCap: number;
 }
 
 function parseRoots(
@@ -56,9 +56,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     webDir: path.resolve(import.meta.dirname, "../../web/dist"),
     fsRoots: parseRoots(env.CONSOLE_FS_ROOTS, home),
     model: env.CONSOLE_MODEL,
+    improveModel: env.CONSOLE_IMPROVE_MODEL ?? "claude-sonnet-5",
     effort: env.CONSOLE_EFFORT,
-    hopLimit: Number(env.CONSOLE_HOP_LIMIT ?? 12),
-    perSessionTurnCap: 3,
-    globalTurnCap: 6,
   };
 }

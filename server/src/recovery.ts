@@ -16,7 +16,6 @@
  * Writing the settle is what makes this idempotent: a recovered turn can never
  * be recovered again.
  */
-import type { AgentSessionHost } from "./agent-sessions/host.ts";
 import { Repo, toWireMessage } from "./db/repo.ts";
 import type { EventBus } from "./events/bus.ts";
 
@@ -25,9 +24,8 @@ const RESTART_NOTE = "interrupted by a server restart";
 export function recoverInterruptedTurns(deps: {
   repo: Repo;
   bus: EventBus;
-  host: AgentSessionHost;
 }): number {
-  const { repo, bus, host } = deps;
+  const { repo, bus } = deps;
   const unsettled = repo.findUnsettledTurns();
 
   for (const turn of unsettled) {
@@ -61,6 +59,8 @@ export function recoverInterruptedTurns(deps: {
       continue;
     }
 
+    // Native subagents die with the process and have no resume handle — the
+    // settle closes the spinner; the Orchestrator respawns via the spawn plan.
     bus.append({
       type: "agent_session.turn.settled",
       userSessionId: turn.userSessionId,
@@ -73,7 +73,6 @@ export function recoverInterruptedTurns(deps: {
         errorMessage: RESTART_NOTE,
       },
     });
-    host.recoverSeatTurn(turn.agentSessionId, turn.participant);
   }
 
   return unsettled.length;

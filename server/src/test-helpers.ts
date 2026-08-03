@@ -4,7 +4,6 @@ import {
   AgentSessionHost,
   type AgentSessionHostDeps,
 } from "./agent-sessions/host.ts";
-import { buildSeatPlanCapture } from "./agent-sessions/plan-capture.ts";
 import { loadConfig, type Config } from "./config.ts";
 import { openDb } from "./db/client.ts";
 import { Repo, type UserSessionRow } from "./db/repo.ts";
@@ -18,7 +17,7 @@ import {
 } from "./orchestrator/runner.ts";
 import { buildConsoleMcpServer } from "./orchestrator/tools.ts";
 import { fakeSdk, type FakeProgram, type FakeSdk } from "./sdk/fake.ts";
-import { SqliteSessionStore } from "./sdk/session-store.ts";
+import { TaskService } from "./tasks/service.ts";
 
 export interface Harness {
   db: ReturnType<typeof openDb>["db"];
@@ -26,7 +25,6 @@ export interface Harness {
   bus: EventBus;
   repo: Repo;
   interactions: InteractionService;
-  sessionStore: SqliteSessionStore;
   runner: OrchestratorRunner;
   fake: FakeSdk;
   config: Config;
@@ -43,7 +41,6 @@ export function makeHarness(
   const bus = new EventBus(db);
   const repo = new Repo(db, sqlite);
   const interactions = new InteractionService(db, bus);
-  const sessionStore = new SqliteSessionStore(db);
   const fake = fakeSdk(program);
   const config = loadConfig({});
 
@@ -64,7 +61,6 @@ export function makeHarness(
     bus,
     config,
     sdk: async () => fake.sdk,
-    sessionStore,
     interactions,
     getWorkspaceRoot: () => "/tmp/test-workspace",
     ...overrides,
@@ -76,7 +72,6 @@ export function makeHarness(
     bus,
     repo,
     interactions,
-    sessionStore,
     runner,
     fake,
     config,
@@ -110,14 +105,10 @@ export interface DelegationHarness extends Harness {
 export function makeDelegationHarness(
   program: FakeProgram,
   options: {
-    hopLimit?: number;
     hostOverrides?: Partial<AgentSessionHostDeps>;
   } = {},
 ): DelegationHarness {
   const base = makeHarness(program);
-  if (options.hopLimit !== undefined) {
-    (base.config as { hopLimit: number }).hopLimit = options.hopLimit;
-  }
   return { ...base, ...wire(base, options) };
 }
 
@@ -137,31 +128,16 @@ function wire(
   base: Harness,
   options: { hostOverrides?: Partial<AgentSessionHostDeps> },
 ): { host: AgentSessionHost; runner: OrchestratorRunner } {
-  let runnerRef: OrchestratorRunner | null = null;
-  let hostRef: AgentSessionHost | null = null;
   const host = new AgentSessionHost({
     repo: base.repo,
     bus: base.bus,
-    config: base.config,
-    sdk: async () => base.fake.sdk,
-    sessionStore: base.sessionStore,
-    getWorkspaceRoot: () => "/tmp/test-workspace",
-    wake: (userSessionId, agentSessionId) =>
-      runnerRef?.enqueueWake(userSessionId, agentSessionId),
-    buildSeatCanUseTool: buildSeatPlanCapture({
-      host: () => hostRef as AgentSessionHost,
-      repo: base.repo,
-      bus: base.bus,
-    }),
     ...options.hostOverrides,
   });
-  hostRef = host;
   const runner = new OrchestratorRunner({
     repo: base.repo,
     bus: base.bus,
     config: base.config,
     sdk: async () => base.fake.sdk,
-    sessionStore: base.sessionStore,
     interactions: base.interactions,
     getWorkspaceRoot: () => "/tmp/test-workspace",
     buildMcpServer: (userSessionId, sdk) =>
@@ -171,11 +147,17 @@ function wire(
         repo: base.repo,
         bus: base.bus,
         userSessionId,
+        tasks: new TaskService(base.db, base.bus),
       }),
-    buildWakeDigests: (userSessionId, ids) =>
-      host.buildWakeDigests(userSessionId, ids),
+    seats: {
+      spawn: (callId, spawnName, agentSessionId, subagentType) =>
+        host.observeAgentSpawn(callId, spawnName, agentSessionId, subagentType),
+      launch: (callId, agentId) => host.confirmAgentLaunch(callId, agentId),
+      seatOf: (callId) => host.seatOf(callId),
+      seatOfAddress: (to) => host.seatOfSpawnAddress(to),
+      recordMessage: (input) => host.recordDerivedMessage(input),
+    },
   });
-  runnerRef = runner;
   return { host, runner };
 }
 

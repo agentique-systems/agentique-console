@@ -184,8 +184,9 @@ describe("OrchestratorRunner", () => {
     expect(startSeqs).toHaveLength(2);
     // Second turn starts only after the first settles.
     expect(settleSeqs[0]).toBeLessThan(startSeqs[1] ?? -1);
-    // Resume from turn 1 is passed into turn 2.
-    expect(h.fake.captured.options[1]?.resume).toBe("sess-1");
+    // One persistent lane serves both turns; the resume id tracks the stream.
+    expect(h.fake.captured.options).toHaveLength(1);
+    expect(h.repo.getUserSession(sessionId)?.sdkSessionId).toBe("sess-2");
   });
 
   it("routes AskUserQuestion through an interaction and back", async () => {
@@ -316,5 +317,151 @@ describe("OrchestratorRunner", () => {
     ).toMatchObject({ approved: true });
     expect(h.repo.getUserSession(sessionId)?.phase).toBe("executing");
     expect(h.fake.captured.options[0]?.permissionMode).toBe("plan");
+  });
+
+  it("interrupt settles the turn aborted and the lane survives for the next", async () => {
+    let calls = 0;
+    const h = makeHarness(async function* () {
+      calls += 1;
+      yield initMessage(`sess-${calls}`);
+      if (calls === 1) {
+        // A slow scripted turn: the interrupt races the pending pull.
+        yield deltaMessage("working…");
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+      yield textMessage(`reply ${calls}`);
+      yield successMessage();
+    });
+    const sessionId = h.addUserSession();
+
+    const firstSettled = collectUntil(h.bus, settled);
+    h.runner.postOperatorMessage(sessionId, "long job");
+    await collectUntil(h.bus, (e) => e.type === "stream.delta");
+    h.runner.interrupt(sessionId);
+    const first = await firstSettled;
+    expect(first.at(-1)?.payload).toMatchObject({ status: "aborted" });
+
+    // The same lane serves the next turn — no respawn, resume id intact.
+    // collectUntil replays from seq 1, so count settles rather than calls.
+    let settles = 0;
+    const secondSettled = collectUntil(
+      h.bus,
+      (e) => settled(e) && ++settles === 2,
+    );
+    h.runner.postOperatorMessage(sessionId, "again");
+    const second = await secondSettled;
+    expect(second.at(-1)?.payload).toMatchObject({ status: "completed" });
+    expect(h.fake.captured.options).toHaveLength(1);
+    await h.runner.closeAll();
+  });
+
+  it("a dead lane settles the open turn, notices, and respawns on the next job", async () => {
+    let calls = 0;
+    const h = makeHarness(async function* () {
+      calls += 1;
+      yield initMessage(`sess-${calls}`);
+      if (calls === 1) throw new Error("CLI exploded");
+      yield textMessage("recovered");
+      yield successMessage();
+    });
+    const sessionId = h.addUserSession();
+
+    const firstSettled = collectUntil(h.bus, settled);
+    h.runner.postOperatorMessage(sessionId, "boom");
+    const first = await firstSettled;
+    expect(first.at(-1)?.payload).toMatchObject({
+      status: "error",
+      errorMessage: "CLI exploded",
+    });
+    // The death notice lands after the settle; collectUntil replays it.
+    const noticed = await collectUntil(
+      h.bus,
+      (e) =>
+        e.type === "user_session.message" &&
+        (e.payload as { message: { kind: string } }).message.kind === "notice",
+    );
+    expect(
+      (noticed.at(-1)?.payload as { message: { text: string } }).message.text,
+    ).toContain("session process died");
+
+    // Next job spawns a fresh query with the persisted resume id.
+    let settles = 0;
+    const secondSettled = collectUntil(
+      h.bus,
+      (e) => settled(e) && ++settles === 2,
+    );
+    h.runner.postOperatorMessage(sessionId, "try again");
+    const second = await secondSettled;
+    expect(second.at(-1)?.payload).toMatchObject({ status: "completed" });
+    expect(h.fake.captured.options).toHaveLength(2);
+    expect(h.fake.captured.options[1]?.resume).toBe("sess-1");
+  });
+
+  it("a mid-turn message steers the live turn instead of queueing behind it", async () => {
+    let calls = 0;
+    const h = makeHarness(async function* () {
+      calls += 1;
+      yield initMessage(`sess-${calls}`);
+      if (calls === 1) {
+        yield deltaMessage("working…");
+        // Hold the turn open long enough for the steer to land.
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      yield textMessage(`reply ${calls}`);
+      yield successMessage();
+    });
+    const sessionId = h.addUserSession();
+
+    h.runner.postOperatorMessage(sessionId, "start the job");
+    await collectUntil(h.bus, (e) => e.type === "stream.delta");
+    // Mid-turn: steer, don't queue.
+    h.runner.postOperatorMessage(sessionId, "actually, use the other approach");
+
+    let settles = 0;
+    const events = await collectUntil(
+      h.bus,
+      (e) => settled(e) && ++settles === 2,
+    );
+    // The steer reached the stream as its own input (no new drain job), and
+    // the follow-up turn caught the CLI's answer to it.
+    expect(h.fake.captured.prompts).toEqual([
+      "start the job",
+      "actually, use the other approach",
+    ]);
+    const started = events.filter((e) => e.type === "user_session.turn.started");
+    expect(started).toHaveLength(2);
+    expect(started[1]?.payload).toMatchObject({ trigger: "operator" });
+    expect(events.at(-1)?.payload).toMatchObject({ status: "completed" });
+    expect(h.fake.captured.options).toHaveLength(1);
+    // The steered operator message is stamped human.
+    expect(h.fake.captured.inputs[1]?.origin).toEqual({ kind: "human" });
+  });
+
+  it("closeSession shuts the lane down; the next message reopens with resume", async () => {
+    let calls = 0;
+    const h = makeHarness(async function* () {
+      calls += 1;
+      yield initMessage(`sess-${calls}`);
+      yield textMessage(`reply ${calls}`);
+      yield successMessage();
+    });
+    const sessionId = h.addUserSession();
+
+    const firstSettled = collectUntil(h.bus, settled);
+    h.runner.postOperatorMessage(sessionId, "hello");
+    await firstSettled;
+    await h.runner.closeSession(sessionId);
+    expect(h.fake.captured.closed).toBe(true);
+
+    let settles = 0;
+    const secondSettled = collectUntil(
+      h.bus,
+      (e) => settled(e) && ++settles === 2,
+    );
+    h.runner.postOperatorMessage(sessionId, "back again");
+    const second = await secondSettled;
+    expect(second.at(-1)?.payload).toMatchObject({ status: "completed" });
+    expect(h.fake.captured.options).toHaveLength(2);
+    expect(h.fake.captured.options[1]?.resume).toBe("sess-1");
   });
 });

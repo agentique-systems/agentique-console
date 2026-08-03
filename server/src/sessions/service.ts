@@ -107,6 +107,13 @@ export class UserSessionService {
       userSessionId: id,
       payload: { sessionId: id, patch: changes },
     });
+    // The lane's options are frozen at spawn: archiving shuts it down, a mode
+    // change recycles it so the next message respawns with fresh options.
+    if (changes.status === "archived") {
+      void this.#runner.closeSession(id);
+    } else if (changes.mode !== undefined) {
+      this.#runner.recycleSession(id);
+    }
     const updated = this.#repo.getUserSession(id);
     return toWireUserSession(updated ?? row);
   }

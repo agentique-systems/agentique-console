@@ -1,18 +1,39 @@
 /**
  * Pure SDK-message → TurnEvent mapper (port of agentique-core's mapping.ts,
  * cut to what v2 consumes). One SDK message maps to zero or more events; the
- * consumer decides persistence. Subagent-parented blocks are skipped — the
- * transcript shows the top-level thread only.
+ * consumer decides persistence. Subagent-parented blocks (A4, with
+ * forwardSubagentText on) are TAGGED with their parentCallId rather than
+ * dropped: the runner routes a bound coordinator's traffic into its agent
+ * session's lane and drops the rest; the specialist consumer skips them all,
+ * so seat transcripts still show the top-level thread only.
  */
 import type { SdkMessage } from "./types.ts";
 
 export type TurnEvent =
   | { kind: "resume"; resumeId: string }
-  | { kind: "delta"; text: string }
-  | { kind: "reasoning-delta"; text: string }
-  | { kind: "message"; text: string }
-  | { kind: "tool.call"; callId: string; name: string; input: unknown }
-  | { kind: "tool.result"; callId: string; output: unknown; isError: boolean }
+  | { kind: "delta"; text: string; parentCallId?: string }
+  | { kind: "reasoning-delta"; text: string; parentCallId?: string }
+  | { kind: "message"; text: string; parentCallId?: string }
+  | {
+      kind: "tool.call";
+      callId: string;
+      name: string;
+      input: unknown;
+      parentCallId?: string;
+    }
+  | {
+      kind: "tool.result";
+      callId: string;
+      output: unknown;
+      isError: boolean;
+      /**
+       * The SDK's tool_use_result — the tool's full structured Output object
+       * (e.g. the Agent tool's {agentId, status} launch receipt), distinct
+       * from the text content sent to the model.
+       */
+      structured?: unknown;
+      parentCallId?: string;
+    }
   /**
    * Liveness from the provider — what it is doing while nothing else is
    * happening (requesting, retrying, rate-limited, a long tool tick). Never
@@ -20,13 +41,57 @@ export type TurnEvent =
    */
   | { kind: "notice"; text: string }
   | { kind: "result"; output: unknown; resumeId?: string; costUsd?: number }
-  | { kind: "error"; message: string; aborted: boolean };
+  | { kind: "error"; message: string; aborted: boolean }
+  /**
+   * The SDK's authoritative turn-over signal (session_state_changed → idle).
+   * A persistent lane settles its open turn on this even when the result
+   * message was lost or coalesced; single-shot consumers may ignore it.
+   */
+  | { kind: "turn-idle" }
+  /**
+   * A background task ended badly (A5). Completions are silent here — a
+   * coordinator reports its results itself — but a failed or stopped task
+   * would otherwise vanish without a trace, so the consumer persists these.
+   */
+  | { kind: "task-terminal"; status: "failed" | "stopped"; summary: string }
+  /**
+   * B3: a message from an in-process agent (SendMessage to "main") arriving
+   * in the lane as a peer-origin user message. `from` is the sender's display
+   * name when the harness stamped one, else its id.
+   */
+  | { kind: "peer-message"; from: string; senderTaskId?: string; text: string };
 
 export function mapSdkMessage(message: SdkMessage): TurnEvent[] {
   switch (message.type) {
     case "system": {
       if (message.subtype === "init" && message.session_id !== undefined) {
         return [{ kind: "resume", resumeId: message.session_id }];
+      }
+      if (message.subtype === "session_state_changed") {
+        return message.state === "idle" ? [{ kind: "turn-idle" }] : [];
+      }
+      // A5: background-task lifecycle. Progress (with its ~30s AI summary
+      // when enabled) is liveness; failures become persistent rows.
+      if (message.subtype === "task_progress") {
+        const summary = stringOf(message.summary);
+        const description = stringOf(message.description) ?? "background task";
+        return [
+          {
+            kind: "notice",
+            text: summary === undefined ? description : `${description} · ${summary}`,
+          },
+        ];
+      }
+      if (message.subtype === "task_notification") {
+        const status = stringOf(message.status);
+        if (status !== "failed" && status !== "stopped") return [];
+        return [
+          {
+            kind: "task-terminal",
+            status,
+            summary: stringOf(message.summary) ?? "no details",
+          },
+        ];
       }
       if (
         message.subtype === "permission_denied" &&
@@ -64,21 +129,20 @@ export function mapSdkMessage(message: SdkMessage): TurnEvent[] {
       return [{ kind: "notice", text: "rate limited — waiting for capacity" }];
 
     case "stream_event": {
-      // Subagent deltas would interleave with the main thread's text; skip them.
-      if (message.parent_tool_use_id != null) return [];
       const delta = message.event?.delta;
       if (message.event?.type !== "content_block_delta") return [];
       if (delta?.type === "text_delta") {
-        return [{ kind: "delta", text: delta.text ?? "" }];
+        return tagged(message, [{ kind: "delta", text: delta.text ?? "" }]);
       }
       if (delta?.type === "thinking_delta") {
-        return [{ kind: "reasoning-delta", text: delta.thinking ?? "" }];
+        return tagged(message, [
+          { kind: "reasoning-delta", text: delta.thinking ?? "" },
+        ]);
       }
       return [];
     }
 
     case "assistant": {
-      if (message.parent_tool_use_id != null) return [];
       const events: TurnEvent[] = [];
       for (const block of message.message?.content ?? []) {
         if (
@@ -96,11 +160,32 @@ export function mapSdkMessage(message: SdkMessage): TurnEvent[] {
           });
         }
       }
-      return events;
+      return tagged(message, events);
     }
 
     case "user": {
-      if (message.parent_tool_use_id != null) return [];
+      // A peer-origin user message is an agent's SendMessage to "main".
+      if (
+        message.parent_tool_use_id == null &&
+        message.origin?.kind === "peer"
+      ) {
+        const text =
+          message.origin.body ??
+          (message.message?.content ?? [])
+            .filter((block) => block.type === "text")
+            .map((block) => block.text ?? "")
+            .join("\n");
+        return [
+          {
+            kind: "peer-message",
+            from: message.origin.name ?? message.origin.from ?? "agent",
+            ...(message.origin.senderTaskId === undefined
+              ? {}
+              : { senderTaskId: message.origin.senderTaskId }),
+            text,
+          },
+        ];
+      }
       const events: TurnEvent[] = [];
       for (const block of message.message?.content ?? []) {
         if (block.type !== "tool_result" || block.tool_use_id === undefined) {
@@ -111,9 +196,12 @@ export function mapSdkMessage(message: SdkMessage): TurnEvent[] {
           callId: block.tool_use_id,
           output: block.content ?? null,
           isError: block.is_error === true,
+          ...(message.tool_use_result === undefined
+            ? {}
+            : { structured: message.tool_use_result }),
         });
       }
-      return events;
+      return tagged(message, events);
     }
 
     case "result": {
@@ -143,6 +231,13 @@ export function mapSdkMessage(message: SdkMessage): TurnEvent[] {
     default:
       return [];
   }
+}
+
+/** Stamps subagent-parented events with their parent tool_use id. */
+function tagged(message: SdkMessage, events: TurnEvent[]): TurnEvent[] {
+  const parentCallId = message.parent_tool_use_id;
+  if (parentCallId == null) return events;
+  return events.map((event) => ({ ...event, parentCallId }));
 }
 
 /**

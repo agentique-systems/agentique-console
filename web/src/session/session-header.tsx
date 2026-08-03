@@ -1,20 +1,15 @@
 /**
- * The conversation header: inline-editable title, the mode segment
- * (execute | plan_execute, with the phase chip while gated), the interrupt
- * button, and the busy spinner. Busy is fold-derived (turn.started/settled +
- * queuedJobs), not guessed from HTTP in-flight state.
+ * The conversation header: inline-editable title, the phase chip while gated,
+ * and the busy spinner. Busy is fold-derived (turn.started/settled +
+ * queuedJobs), not guessed from HTTP in-flight state. Mode switching and
+ * interrupting live in the composer, next to the textarea they act on.
  */
-import { OctagonXIcon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
-import {
-  useInterruptUserSession,
-  usePatchUserSession,
-} from "@/api/mutations";
+import { usePatchUserSession } from "@/api/mutations";
 import type { SessionMode, UserSession } from "@agentique-console/shared";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 
@@ -24,7 +19,12 @@ const MODE_LABEL: Record<SessionMode, string> = {
   plan_execute: "plan + execute",
 };
 
-/** Shared by the header and the draft view — the one mode picker. */
+/** The Shift+Tab step. Two modes today, so cycling is a flip. */
+export function nextMode(mode: SessionMode): SessionMode {
+  return MODES[(MODES.indexOf(mode) + 1) % MODES.length] as SessionMode;
+}
+
+/** Shared by the composer and the draft view — the one mode picker. */
 export function ModeToggle({
   mode,
   disabled = false,
@@ -73,7 +73,6 @@ export function SessionHeader({
   busy: boolean;
 }) {
   const patch = usePatchUserSession();
-  const interrupt = useInterruptUserSession();
   const [editing, setEditing] = useState(false);
   const [draftTitle, setDraftTitle] = useState("");
 
@@ -124,19 +123,6 @@ export function SessionHeader({
       <div className="flex shrink-0 items-center gap-2">
         {busy && <Spinner className="size-3.5 text-status-running" />}
 
-        <ModeToggle
-          mode={session.mode}
-          disabled={patch.isPending || session.status === "archived"}
-          onChange={(mode) =>
-            patch.mutate(
-              { id: session.id, mode },
-              {
-                onError: (error) =>
-                  toast.error(`Mode change failed: ${error.message}`),
-              },
-            )
-          }
-        />
         {session.mode === "plan_execute" && (
           <Badge
             variant="outline"
@@ -150,26 +136,6 @@ export function SessionHeader({
             {session.phase}
           </Badge>
         )}
-
-        <Button
-          variant="ghost"
-          size="xs"
-          className="gap-1"
-          disabled={!busy || interrupt.isPending}
-          title={busy ? "interrupt the running turn" : "nothing running"}
-          onClick={() =>
-            interrupt.mutate(
-              { id: session.id },
-              {
-                onError: (error) =>
-                  toast.error(`Interrupt failed: ${error.message}`),
-              },
-            )
-          }
-        >
-          <OctagonXIcon className="size-3.5" />
-          interrupt
-        </Button>
       </div>
     </div>
   );

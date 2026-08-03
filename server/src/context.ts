@@ -5,6 +5,7 @@ import type { Repo } from "./db/repo.ts";
 import type { EventBus } from "./events/bus.ts";
 import type { InteractionService } from "./orchestrator/interactions.ts";
 import type { OrchestratorRunner } from "./orchestrator/runner.ts";
+import type { ConsoleSdk } from "./sdk/types.ts";
 import type { UserSessionService } from "./sessions/service.ts";
 import type { TaskService } from "./tasks/service.ts";
 import type { WorkspaceService } from "./workspaces/service.ts";
@@ -28,4 +29,10 @@ export interface AppContext {
   interactions: InteractionService;
   host: AgentSessionHost;
   tasks: TaskService;
+  /**
+   * The SDK seam, for routes that talk to a model outside a session lane (the
+   * composer's rewrite pass). Same lazy resolver the runner and host get, so
+   * tests can inject `fakeSdk(...)` and `npm run verify` stays credential-free.
+   */
+  sdk: () => Promise<ConsoleSdk>;
 }

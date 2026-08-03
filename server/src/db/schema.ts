@@ -51,14 +51,6 @@ export const agentSessions = sqliteTable("agent_sessions", {
   status: text("status", { enum: ["open", "archived"] })
     .notNull()
     .default("open"),
-  hopLimit: integer("hop_limit").notNull().default(12),
-  hopCount: integer("hop_count").notNull().default(0),
-  /** Routing watermark — the drain routes the first message past this seq. */
-  lastRoutedSeq: integer("last_routed_seq").notNull().default(0),
-  /** Set when routing lands on the orchestrator seat; cleared when a wake is enqueued. */
-  owedToOrchestrator: integer("owed_to_orchestrator", { mode: "boolean" })
-    .notNull()
-    .default(false),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });
@@ -77,12 +69,8 @@ export const participants = sqliteTable(
     /** Resolved brief (preset + ad-hoc extension), verbatim. */
     instructions: text("instructions").notNull(),
     model: text("model"),
-    /** This seat's SDK resume id; NULL for the orchestrator's virtual seat. */
-    sdkSessionId: text("sdk_session_id"),
     /** Transcript watermark: highest message seq this seat has been shown. */
     lastSeenSeq: integer("last_seen_seq").notNull().default(0),
-    /** Durable wake marker: highest seq owed a turn; 0 = no turn owed. */
-    pendingTurnSeq: integer("pending_turn_seq").notNull().default(0),
     /** Seating order for accents and prompt listings. */
     ord: integer("ord").notNull(),
     createdAt: text("created_at").notNull(),
@@ -191,19 +179,3 @@ export const events = sqliteTable(
   ],
 );
 
-export const sdkSessionEntries = sqliteTable(
-  "sdk_session_entries",
-  {
-    ord: integer("ord").primaryKey({ autoIncrement: true }),
-    projectKey: text("project_key").notNull(),
-    sessionId: text("session_id").notNull(),
-    subpath: text("subpath").notNull().default(""),
-    uuid: text("uuid"),
-    type: text("type").notNull(),
-    entry: text("entry", { mode: "json" }).notNull(),
-    createdAt: text("created_at").notNull(),
-  },
-  (t) => [
-    index("sdk_entries_session").on(t.projectKey, t.sessionId, t.subpath),
-  ],
-);

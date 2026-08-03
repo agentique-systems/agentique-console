@@ -44,12 +44,4 @@ export function registerAgentSessionRoutes(
       return events;
     },
   );
-
-  app.post<{ Params: { id: string } }>(
-    "/api/agent-sessions/:id/interrupt",
-    async (request, reply) => {
-      ctx.host.interrupt(request.params.id);
-      return reply.status(202).send({ ok: true });
-    },
-  );
 }

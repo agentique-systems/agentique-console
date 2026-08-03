@@ -12,18 +12,28 @@ process per side — clone, install, run.
 - A **UserSession** is a conversation between you (the Human Operator) and the
   **Orchestrator** — the only agent you ever talk to. The left sidebar lists
   them; each keeps its own Claude session (resume id) across restarts.
-- An **AgentSession** is a conversation between the Orchestrator and 1–4
-  specialist agents (presets: explorer / implementer / reviewer / researcher,
-  or ad-hoc briefs). Each belongs to exactly one UserSession. Specialists
-  address each other with `@mentions` (hop-limited); unaddressed replies return
-  the floor to the Orchestrator. You observe these sessions read-only in the
-  right pane — the center strip shows their cards, live seat states, and a flow
-  indicator pulsing when delegation or results move between panes.
-- **Delegation is asynchronous**: the Orchestrator posts into an agent session
-  and ends its turn; when the session goes quiet with unseen results, the
-  server wakes the Orchestrator with a transcript digest and it reports back to
-  you. All human-in-the-loop — questions (AskUserQuestion) and plan approvals —
-  surfaces as cards in *your* conversation; there is no separate inbox.
+- An **AgentSession** is a group of 1–4 specialist agents (presets: explorer /
+  implementer / reviewer / researcher, or ad-hoc briefs) plus a coordinator,
+  working a coherent stream of work. Each belongs to exactly one UserSession.
+  Agents address each other by name over the SDK's native SendMessage. You
+  observe these sessions read-only in the right pane — the center strip shows
+  their cards, live seat states, and a flow indicator pulsing when delegation
+  or results move between panes.
+- **Every agent is a native SDK subagent.** The Orchestrator runs as one
+  persistent streaming SDK session per UserSession (the CLI's own
+  architecture); creating an agent session returns a SPAWN PLAN the
+  Orchestrator executes verbatim — each specialist and a **session
+  coordinator** spawned as flat, named, background subagents that talk to each
+  other (and to the Orchestrator) via the SDK's native SendMessage. The
+  console does not run agents at all anymore: it OBSERVES the stream —
+  SendMessage calls become the session transcript, spawn/stop bookends become
+  turn and status events — and persists only its own domain rows. Specialist
+  chatter stays out of your conversation; the coordinator reports conclusions
+  up. Plans work the SDK's own way: planning-variant seats (read-only) send
+  their plan up, and approval = respawning the seats as execute variants with
+  the approved plan in their prompts. All human-in-the-loop — questions
+  (AskUserQuestion) and the Orchestrator's own plan-mode approvals — surfaces
+  as cards in *your* conversation; there is no separate inbox.
 - **Modes**: every session is `execute` or `plan_execute`. For your session
   it's a toggle (plan_execute puts the Orchestrator in SDK plan mode: survey
   read-only, draft tasks, present the plan via ExitPlanMode for your approval).
@@ -54,15 +64,15 @@ and the API server serves it alongside `/api` and the event stream. Agents run
 through the real Claude Agent SDK using your local Claude Code credentials.
 
 - Data lives in `~/.agentique-console/console.db` (override: `CONSOLE_DATA_DIR`).
-  Other knobs: `CONSOLE_PORT`, `CONSOLE_MODEL`, `CONSOLE_EFFORT`,
-  `CONSOLE_HOP_LIMIT`, and `CONSOLE_FS_ROOTS` (colon-separated) to narrow where
-  workspaces may live — by default the whole filesystem is browsable.
+  Other knobs: `CONSOLE_PORT`, `CONSOLE_MODEL`, `CONSOLE_EFFORT`, and
+  `CONSOLE_FS_ROOTS` (colon-separated) to narrow where workspaces may live —
+  by default the whole filesystem is browsable.
 - Agents run with a sanitized environment. If you launch the server from inside
   another Claude Code session, its variables (`CLAUDE_EFFORT`, session ids) are
   stripped so the console's agents behave the same however you started it.
 - `npm run dev` — same app with HMR and server watch (UI moves to :5173,
   proxying `/api` back to the server).
-- `npm run verify` — typecheck + 123 tests. The whole suite drives a fake SDK,
+- `npm run verify` — typecheck + the full test suite. It drives a fake SDK,
   so it needs no credentials and spends nothing.
 - `npx tsx server/scripts/smoke.ts` — one real end-to-end run against a scratch
   workspace (priced; prints the transcript, agent sessions, and tasks).
@@ -74,15 +84,22 @@ shared/   the frozen wire contract: domain rows, event catalog, REST shapes
 server/   Fastify 5 + better-sqlite3/drizzle + @anthropic-ai/claude-agent-sdk
           (also serves web/dist, so the app is a single process)
   events/bus.ts            global event spine (replay-then-tail SSE, seq = Last-Event-ID)
-  orchestrator/runner.ts   one SDK conversation per UserSession; serialized turn queue
-                           (operator | wake | answer-revival jobs)
-  orchestrator/tools.ts    the console MCP server: create/send/read/list/approve
+  orchestrator/runner.ts   one PERSISTENT streaming SDK session per UserSession: jobs
+                           push user messages into the live lane, turns are detected
+                           from the stream (result + session_state_changed backstop),
+                           interrupt keeps the lane, mid-turn messages steer, agent
+                           reports (peer messages) mint their own turns
+  orchestrator/options.ts  lane options + ALL AgentDefinitions (presets, planning
+                           variants, the session coordinator) + forwardSubagentText
+  orchestrator/tools.ts    the console MCP server: create_agent_session (the
+                           spawn-plan factory), read/list, the coordinator's task board
   orchestrator/interactions.ts  question + plan cards (canUseTool bridge, restart revival)
-  agent-sessions/host.ts   the drain loop: route one message → dispatch owed turns →
-                           settle-if-quiet → wake the orchestrator (all watermark-derived,
-                           crash-recoverable)
+  agent-sessions/host.ts   the OBSERVER: SeatRegistry (Agent spawns → seats),
+                           derived transcript rows from SendMessage, derived
+                           turn/status/phase events, console-domain CRUD
   tasks/                   the SDK task-tool mirror via hooks
-  sdk/                     mapper (SDKMessage → events), SQLite SessionStore, fake
+  sdk/                     mapper (SDKMessage → events, subagent traffic tagged by
+                           parent_tool_use_id, peer messages), fake
 web/      Vite + React 19 + Tailwind 4 + zustand + TanStack Query
   live/                    one EventSource spine → router (prefix invalidation +
                            stream folds); transient deltas become overlays retired
@@ -90,7 +107,11 @@ web/      Vite + React 19 + Tailwind 4 + zustand + TanStack Query
   session/, agents/        the two transcript surfaces + strip + flow indicator
 ```
 
-Every turn is one `query()` with `resume`; transcripts are mirrored into
-SQLite via the SDK's `sessionStore`, so sessions survive restarts. In-flight
-turns die with the process; unanswered cards go stale and their late answers
-become fresh resumed turns.
+The Orchestrator's lane is one long-lived streaming `query()` reopened with
+`resume` after restarts or mode changes; every other agent lives inside it as
+a native subagent. Transcripts persist the CLI's way — JSONL files under
+`~/.claude/projects/…` (main session + per-subagent files), written by the SDK
+itself. The console's SQLite holds only its own domain: sessions, derived
+messages, events, tasks, cards. In-flight agents die with the process; the
+Orchestrator re-runs a session's spawn plan to restart them, and unanswered
+cards go stale, their late answers becoming fresh turns.

@@ -277,25 +277,10 @@ export class Repo {
       });
   }
 
-  listOpenAgentSessions(): AgentSessionRow[] {
-    return this.#db
-      .select()
-      .from(agentSessions)
-      .where(eq(agentSessions.status, "open"))
-      .all();
-  }
-
   patchAgentSession(
     id: string,
     patch: Partial<
-      Pick<
-        AgentSessionRow,
-        | "phase"
-        | "status"
-        | "hopCount"
-        | "lastRoutedSeq"
-        | "owedToOrchestrator"
-      >
+      Pick<AgentSessionRow, "phase" | "status">
     >,
   ): void {
     this.#db
@@ -338,9 +323,7 @@ export class Repo {
   patchParticipant(
     agentSessionId: string,
     name: string,
-    patch: Partial<
-      Pick<ParticipantRow, "sdkSessionId" | "lastSeenSeq" | "pendingTurnSeq">
-    >,
+    patch: Partial<Pick<ParticipantRow, "lastSeenSeq">>,
   ): void {
     this.#db
       .update(participants)

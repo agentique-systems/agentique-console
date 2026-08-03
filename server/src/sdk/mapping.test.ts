@@ -27,19 +27,93 @@ describe("mapSdkMessage", () => {
     ]);
   });
 
-  it("skips subagent-parented deltas and blocks", () => {
+  it("tags subagent-parented deltas and blocks with their parentCallId (A4)", () => {
     expect(
       mapSdkMessage({ ...deltaMessage("x"), parent_tool_use_id: "tu_1" }),
-    ).toEqual([]);
+    ).toEqual([{ kind: "delta", text: "x", parentCallId: "tu_1" }]);
     expect(
       mapSdkMessage({ ...textMessage("x"), parent_tool_use_id: "tu_1" }),
-    ).toEqual([]);
+    ).toEqual([{ kind: "message", text: "x", parentCallId: "tu_1" }]);
     expect(
       mapSdkMessage({
         ...toolResultMessage("tu_2", "out"),
         parent_tool_use_id: "tu_1",
       }),
+    ).toEqual([
+      {
+        kind: "tool.result",
+        callId: "tu_2",
+        output: "out",
+        isError: false,
+        parentCallId: "tu_1",
+      },
+    ]);
+  });
+
+  it("maps the authoritative idle signal to turn-idle, other states to nothing", () => {
+    expect(
+      mapSdkMessage({
+        type: "system",
+        subtype: "session_state_changed",
+        state: "idle",
+      }),
+    ).toEqual([{ kind: "turn-idle" }]);
+    expect(
+      mapSdkMessage({
+        type: "system",
+        subtype: "session_state_changed",
+        state: "running",
+      }),
     ).toEqual([]);
+  });
+
+  it("surfaces background-task lifecycle: progress as liveness, failure as terminal", () => {
+    expect(
+      mapSdkMessage({
+        type: "system",
+        subtype: "task_progress",
+        description: "recon session",
+        summary: "Reading the auth module",
+      }),
+    ).toEqual([
+      { kind: "notice", text: "recon session · Reading the auth module" },
+    ]);
+    expect(
+      mapSdkMessage({
+        type: "system",
+        subtype: "task_notification",
+        status: "failed",
+        summary: "API error",
+      }),
+    ).toEqual([{ kind: "task-terminal", status: "failed", summary: "API error" }]);
+    // Completions are silent — the coordinator reports its own results.
+    expect(
+      mapSdkMessage({
+        type: "system",
+        subtype: "task_notification",
+        status: "completed",
+        summary: "done",
+      }),
+    ).toEqual([]);
+  });
+
+  it("carries the structured tool_use_result on tool results", () => {
+    expect(
+      mapSdkMessage(
+        toolResultMessage("tu_9", "launched", false, {
+          agentId: "agent-42",
+          status: "async_launched",
+        }),
+      ),
+    ).toEqual([
+      {
+        kind: "tool.result",
+        callId: "tu_9",
+        output: "launched",
+        isError: false,
+        structured: { agentId: "agent-42", status: "async_launched" },
+      },
+    ]);
   });
 
   it("maps assistant text and tool_use blocks in order", () => {

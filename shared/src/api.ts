@@ -104,3 +104,12 @@ export interface GetAgentSessionResponse {
 
 // GET /api/user-sessions/:id/tasks
 export type ListTasksResponse = Task[];
+
+// POST /api/compose/improve — a one-shot rewrite of a draft message. Nothing
+// is persisted; the caller decides whether to keep the result.
+export interface ImproveMessageBody {
+  text: string;
+}
+export interface ImproveMessageResponse {
+  text: string;
+}

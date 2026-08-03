@@ -1,5 +1,4 @@
 import { AgentSessionHost } from "./agent-sessions/host.ts";
-import { buildSeatPlanCapture } from "./agent-sessions/plan-capture.ts";
 import { loadConfig } from "./config.ts";
 import type { AppContext } from "./context.ts";
 import { openDb } from "./db/client.ts";
@@ -10,7 +9,6 @@ import { OrchestratorRunner } from "./orchestrator/runner.ts";
 import { buildConsoleMcpServer } from "./orchestrator/tools.ts";
 import { recoverInterruptedTurns } from "./recovery.ts";
 import { resolveSdk } from "./sdk/client.ts";
-import { SqliteSessionStore } from "./sdk/session-store.ts";
 import { UserSessionService } from "./sessions/service.ts";
 import { buildTaskHooks } from "./tasks/hooks.ts";
 import { TaskService } from "./tasks/service.ts";
@@ -27,54 +25,50 @@ const workspaces = new WorkspaceService(
   config.fsRoots.map((r) => r.path),
 );
 const interactions = new InteractionService(db, bus);
-const sessionStore = new SqliteSessionStore(db);
 const tasks = new TaskService(db, bus);
 const getWorkspaceRoot = (workspaceId: string): string =>
   workspaces.get(workspaceId).rootPath;
 
-// Host and runner reference each other (host wakes the runner; the runner's
-// MCP tools drive the host) — late-bound closures break the cycles.
-let runnerRef: OrchestratorRunner | null = null;
-let hostRef: AgentSessionHost | null = null;
-const host = new AgentSessionHost({
-  repo,
-  bus,
-  config,
-  sdk: () => resolveSdk(),
-  sessionStore,
-  getWorkspaceRoot,
-  wake: (userSessionId, agentSessionId) =>
-    runnerRef?.enqueueWake(userSessionId, agentSessionId),
-  buildHooks: (attribution) => buildTaskHooks(tasks, attribution),
-  taskLines: (agentSessionId) => tasks.linesForAgentSession(agentSessionId),
-  buildSeatCanUseTool: buildSeatPlanCapture({
-    host: () => hostRef as AgentSessionHost,
-    repo,
-    bus,
-  }),
-});
-hostRef = host;
+// B5: the host is a pure observer/registry — no execution deps.
+const host = new AgentSessionHost({ repo, bus });
 const runner = new OrchestratorRunner({
   repo,
   bus,
   config,
   sdk: () => resolveSdk(),
-  sessionStore,
   interactions,
   getWorkspaceRoot,
-  buildHooks: ({ workspaceId, userSessionId }) =>
-    buildTaskHooks(tasks, {
+  buildHooks: ({ workspaceId, userSessionId }) => ({
+    ...buildTaskHooks(tasks, {
       workspaceId,
       userSessionId,
       agentSessionId: null,
       participant: null,
     }),
+    // B3: a finished agent unbinds its seat (turn.settled + status derive).
+    SubagentStop: [
+      {
+        hooks: [
+          async (input: unknown) => {
+            const agentId = (input as { agent_id?: unknown }).agent_id;
+            if (typeof agentId === "string") host.releaseAgent(agentId);
+            return {};
+          },
+        ],
+      },
+    ],
+  }),
+  seats: {
+    spawn: (callId, spawnName, agentSessionId, subagentType) =>
+      host.observeAgentSpawn(callId, spawnName, agentSessionId, subagentType),
+    launch: (callId, agentId) => host.confirmAgentLaunch(callId, agentId),
+    seatOf: (callId) => host.seatOf(callId),
+    seatOfAddress: (to) => host.seatOfSpawnAddress(to),
+    recordMessage: (input) => host.recordDerivedMessage(input),
+  },
   buildMcpServer: (userSessionId, sdk) =>
-    buildConsoleMcpServer({ sdk, host, repo, bus, userSessionId }),
-  buildWakeDigests: (userSessionId, ids) =>
-    host.buildWakeDigests(userSessionId, ids),
+    buildConsoleMcpServer({ sdk, host, repo, bus, userSessionId, tasks }),
 });
-runnerRef = runner;
 const userSessions = new UserSessionService({
   repo,
   bus,
@@ -88,11 +82,10 @@ const userSessions = new UserSessionService({
 // that died mid-flight are closed and their sessions put back in motion, and
 // open agent sessions re-evaluate their drain from persisted rows.
 interactions.expirePendingOnBoot();
-const recovered = recoverInterruptedTurns({ repo, bus, host });
+const recovered = recoverInterruptedTurns({ repo, bus });
 if (recovered > 0) {
   console.log(`recovered ${recovered} turn(s) interrupted by the last shutdown`);
 }
-host.boot();
 
 const ctx: AppContext = {
   config,
@@ -106,6 +99,7 @@ const ctx: AppContext = {
   interactions,
   host,
   tasks,
+  sdk: () => resolveSdk(),
 };
 
 const app = buildServer(ctx);
@@ -115,6 +109,8 @@ async function shutdown(): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
   bus.closeSubscriptions();
+  // Persistent lanes are CLI subprocesses — none may outlive the server.
+  await runner.closeAll().catch(() => undefined);
   await app.close().catch(() => undefined);
   sqlite.close();
   process.exit(0);

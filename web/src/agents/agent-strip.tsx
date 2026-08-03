@@ -1,8 +1,8 @@
 /**
  * The center strip: every agent session the orchestrator has delegated under
  * the ACTIVE user session, newest first, each on a flow stem off the left
- * rail; the task ledger below. Selection feeds the inspector via the ui
- * store's per-user-session memory.
+ * rail. Selection feeds the inspector via the ui store's per-user-session
+ * memory. Tasks are still fetched — each card carries its own count.
  */
 import { useMemo } from "react";
 
@@ -12,7 +12,6 @@ import { useUiStore } from "@/stores/ui";
 import { useActiveUserSessionId } from "./active-session";
 import { AgentCard } from "./agent-card";
 import { FlowStem } from "./flow-stem";
-import { TasksSection } from "./tasks-section";
 
 export function AgentStrip() {
   const userSessionId = useActiveUserSessionId();
@@ -75,8 +74,6 @@ export function AgentStrip() {
           </div>
         )}
       </div>
-
-      <TasksSection tasks={taskRows} />
     </div>
   );
 }

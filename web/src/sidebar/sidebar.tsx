@@ -1,28 +1,20 @@
 /**
- * The sessions sidebar: workspace header + switch, every session in the
- * workspace (server-sorted, newest activity first), the "new session" door
- * (draft posture — nothing persists until the first send), and the connection
- * dot footer.
+ * The sessions sidebar: every session in the workspace (server-sorted, newest
+ * activity first) and the "new session" door (draft posture — nothing persists
+ * until the first send). Workspace identity lives in the topbar.
  */
 import { MessagesSquare, Plus } from "lucide-react";
 
-import { useUserSessions, useWorkspaces } from "@/api/queries";
+import { useUserSessions } from "@/api/queries";
 import type { UserSession } from "@agentique-console/shared";
 import { Button } from "@/components/ui/button";
 import { timeAgo } from "@/lib/status";
 import { cn } from "@/lib/utils";
-import { useConnectionStore, type ConnectionStatus } from "@/stores/connection";
 import { useScopeStore } from "@/stores/scope";
 import { useUiStore } from "@/stores/ui";
 
 export function Sidebar() {
   const selectedWorkspaceId = useScopeStore((s) => s.selectedWorkspaceId);
-  const clearScope = useScopeStore((s) => s.clear);
-  const workspaces = useWorkspaces();
-  const workspace = workspaces.data?.find(
-    (candidate) => candidate.id === selectedWorkspaceId,
-  );
-
   const sessions = useUserSessions(selectedWorkspaceId);
   const activeId = useUiStore((s) => s.activeUserSessionId);
   const draftOpen = useUiStore((s) => s.draftOpen);
@@ -38,15 +30,6 @@ export function Sidebar() {
       data-testid="sidebar"
       className="flex min-h-0 flex-col border-r border-border bg-sidebar"
     >
-      <div className="flex items-center gap-2 border-b border-border px-3 py-2">
-        <span className="min-w-0 flex-1 truncate text-sm font-medium">
-          {workspace?.name ?? "—"}
-        </span>
-        <Button variant="ghost" size="xs" onClick={clearScope}>
-          switch
-        </Button>
-      </div>
-
       <div className="flex items-center justify-between border-b border-border px-3 py-2">
         <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
           Sessions
@@ -88,8 +71,6 @@ export function Sidebar() {
           </ul>
         )}
       </div>
-
-      <ConnectionFooter />
     </div>
   );
 }
@@ -142,29 +123,5 @@ function SessionRow({
         </span>
       </button>
     </li>
-  );
-}
-
-const CONNECTION_DOT: Record<ConnectionStatus, string> = {
-  open: "bg-status-completed",
-  connecting: "bg-status-waiting",
-  closed: "bg-status-failed",
-};
-const CONNECTION_LABEL: Record<ConnectionStatus, string> = {
-  open: "live",
-  connecting: "connecting…",
-  closed: "offline",
-};
-
-function ConnectionFooter() {
-  const status = useConnectionStore((s) => s.status);
-  return (
-    <div className="flex items-center gap-2 border-t border-border px-3 py-2 text-[11px] text-muted-foreground">
-      <span
-        aria-label={`connection ${status}`}
-        className={cn("size-1.5 rounded-full", CONNECTION_DOT[status])}
-      />
-      {CONNECTION_LABEL[status]}
-    </div>
   );
 }
