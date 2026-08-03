@@ -54,7 +54,12 @@ and the API server serves it alongside `/api` and the event stream. Agents run
 through the real Claude Agent SDK using your local Claude Code credentials.
 
 - Data lives in `~/.agentique-console/console.db` (override: `CONSOLE_DATA_DIR`).
-  Other knobs: `CONSOLE_PORT`, `CONSOLE_MODEL`, `CONSOLE_HOP_LIMIT`.
+  Other knobs: `CONSOLE_PORT`, `CONSOLE_MODEL`, `CONSOLE_EFFORT`,
+  `CONSOLE_HOP_LIMIT`, and `CONSOLE_FS_ROOTS` (colon-separated) to narrow where
+  workspaces may live — by default the whole filesystem is browsable.
+- Agents run with a sanitized environment. If you launch the server from inside
+  another Claude Code session, its variables (`CLAUDE_EFFORT`, session ids) are
+  stripped so the console's agents behave the same however you started it.
 - `npm run dev` — same app with HMR and server watch (UI moves to :5173,
   proxying `/api` back to the server).
 - `npm run verify` — typecheck + 123 tests. The whole suite drives a fake SDK,

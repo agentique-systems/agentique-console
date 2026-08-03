@@ -8,7 +8,14 @@ import type {
 export interface SeatRuntime {
   readonly state: AgentRuntimeState;
   readonly toolName?: string;
+  /** Provider liveness under this state (retry, rate limit, tool tick). */
+  readonly detail?: string;
   readonly at: number;
+  /**
+   * When this STATE began — held across detail-only updates, so an elapsed
+   * counter measures the wait rather than restarting on every ping.
+   */
+  readonly since: number;
 }
 
 /**
@@ -27,20 +34,33 @@ interface RuntimeState {
 export const useRuntimeStore = create<RuntimeState>((set) => ({
   bySession: {},
   ingest: (payload) =>
-    set((state) => ({
-      bySession: {
-        ...state.bySession,
-        [payload.scope.sessionId]: {
-          ...state.bySession[payload.scope.sessionId],
-          [payload.participant]: {
-            state: payload.state,
-            ...(payload.toolName === undefined
-              ? {}
-              : { toolName: payload.toolName }),
-            at: Date.now(),
+    set((state) => {
+      const now = Date.now();
+      const previous =
+        state.bySession[payload.scope.sessionId]?.[payload.participant];
+      const sameState =
+        previous !== undefined &&
+        previous.state === payload.state &&
+        previous.toolName === payload.toolName;
+      return {
+        bySession: {
+          ...state.bySession,
+          [payload.scope.sessionId]: {
+            ...state.bySession[payload.scope.sessionId],
+            [payload.participant]: {
+              state: payload.state,
+              ...(payload.toolName === undefined
+                ? {}
+                : { toolName: payload.toolName }),
+              ...(payload.detail === undefined
+                ? {}
+                : { detail: payload.detail }),
+              at: now,
+              since: sameState ? previous.since : now,
+            },
           },
         },
-      },
-    })),
+      };
+    }),
   clearAll: () => set({ bySession: {} }),
 }));

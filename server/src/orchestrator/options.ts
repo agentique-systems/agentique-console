@@ -5,6 +5,7 @@
  * Bash are delegation-first denials (D4).
  */
 import type { SessionMode, SessionPhase } from "@agentique-console/shared";
+import { sdkEnv } from "../sdk/env.ts";
 import type { SdkOptions } from "../sdk/types.ts";
 import {
   ORCHESTRATOR_BRIEF,
@@ -26,6 +27,7 @@ export interface OrchestratorOptionsInput {
   mode: SessionMode;
   phase: SessionPhase;
   model: string | undefined;
+  effort: string | undefined;
   maxTurns?: number;
   abortController: AbortController;
   canUseTool: NonNullable<SdkOptions["canUseTool"]>;
@@ -67,6 +69,11 @@ export function buildOrchestratorOptions(
     ],
     disallowedTools: ["Write", "Edit", "NotebookEdit", "Bash"],
     maxTurns: input.maxTurns ?? 80,
+    // Never inherit the launching session's agent settings (see sdkEnv).
+    env: sdkEnv(),
+    ...(input.effort === undefined
+      ? {}
+      : { effort: input.effort as SdkOptions["effort"] }),
     canUseTool: input.canUseTool,
     ...(input.hooks === undefined ? {} : { hooks: input.hooks }),
     ...(input.model === undefined ? {} : { model: input.model }),

@@ -13,6 +13,12 @@ export type TurnEvent =
   | { kind: "message"; text: string }
   | { kind: "tool.call"; callId: string; name: string; input: unknown }
   | { kind: "tool.result"; callId: string; output: unknown; isError: boolean }
+  /**
+   * Liveness from the provider — what it is doing while nothing else is
+   * happening (requesting, retrying, rate-limited, a long tool tick). Never
+   * persisted; it exists so a slow turn reads as working rather than stuck.
+   */
+  | { kind: "notice"; text: string }
   | { kind: "result"; output: unknown; resumeId?: string; costUsd?: number }
   | { kind: "error"; message: string; aborted: boolean };
 
@@ -35,8 +41,27 @@ export function mapSdkMessage(message: SdkMessage): TurnEvent[] {
           },
         ];
       }
-      return [];
+      return systemNotice(message);
     }
+
+    // Long tool ticks: the only sign of life during a slow tool call.
+    case "tool_progress": {
+      if (message.parent_tool_use_id != null) return [];
+      const seconds = numberOf(message.elapsed_time_seconds);
+      const name = stringOf(message.tool_name) ?? "a tool";
+      return [
+        {
+          kind: "notice",
+          text:
+            seconds === undefined
+              ? `${name} running`
+              : `${name} running · ${formatSeconds(seconds)}`,
+        },
+      ];
+    }
+
+    case "rate_limit_event":
+      return [{ kind: "notice", text: "rate limited — waiting for capacity" }];
 
     case "stream_event": {
       // Subagent deltas would interleave with the main thread's text; skip them.
@@ -118,6 +143,60 @@ export function mapSdkMessage(message: SdkMessage): TurnEvent[] {
     default:
       return [];
   }
+}
+
+/**
+ * System messages that carry no content but say what the provider is doing.
+ * v1 called these notices; without them a turn that spends minutes in retry
+ * backoff looks identical to a hung one.
+ */
+function systemNotice(message: SdkMessage): TurnEvent[] {
+  switch (message.subtype) {
+    case "status": {
+      const status = stringOf(message.status);
+      if (status === "requesting") return [{ kind: "notice", text: "requesting…" }];
+      if (status === "compacting") {
+        return [{ kind: "notice", text: "compacting the context…" }];
+      }
+      return [];
+    }
+    case "api_retry": {
+      const attempt = numberOf(message.attempt);
+      const max = numberOf(message.max_retries);
+      const delay = numberOf(message.retry_delay_ms);
+      const status = numberOf(message.error_status);
+      const parts = [
+        status === 429 ? "rate limited" : `API error${status === undefined ? "" : ` ${status}`}`,
+        attempt === undefined || max === undefined
+          ? "retrying"
+          : `retry ${attempt}/${max}`,
+        delay === undefined ? undefined : `in ${formatSeconds(delay / 1000)}`,
+      ].filter((part): part is string => part !== undefined);
+      return [{ kind: "notice", text: parts.join(" · ") }];
+    }
+    case "informational": {
+      const content = stringOf(message.content);
+      const level = stringOf(message.level);
+      if (content === undefined || level === "info") return [];
+      return [{ kind: "notice", text: content }];
+    }
+    default:
+      return [];
+  }
+}
+
+function stringOf(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function numberOf(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function formatSeconds(seconds: number): string {
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}m ${Math.round(seconds % 60)}s`;
 }
 
 function resultErrorMessage(message: SdkMessage): string {

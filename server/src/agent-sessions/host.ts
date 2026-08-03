@@ -584,6 +584,7 @@ export class AgentSessionHost {
         resume: seat.sdkSessionId,
         phase: session.phase,
         model: seat.model ?? config.model,
+        effort: config.effort,
         abortController: flight.abort,
         sessionStore: this.#deps.sessionStore,
         hooks: this.#deps.buildHooks?.({
@@ -640,6 +641,9 @@ export class AgentSessionHost {
                     text: event.text,
                   },
                 });
+                break;
+              case "notice":
+                runtime.note(event.text);
                 break;
               case "message":
                 // Narration streams via the overlay; only the structured

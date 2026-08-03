@@ -26,7 +26,7 @@ import {
   ReasoningContent,
   ReasoningTrigger,
 } from "@/components/ai-elements/reasoning";
-import { Shimmer } from "@/components/ai-elements/shimmer";
+import { WorkingLine } from "@/components/working-line";
 import { Button } from "@/components/ui/button";
 import { userStreamKey } from "@/live/watched";
 import { useConnectionStore } from "@/stores/connection";
@@ -161,14 +161,8 @@ export function UserTranscript({
             )}
           </div>
         ))}
-        {silentlyWorking && (
-          <div className="py-1">
-            <Shimmer className="text-xs">
-              {orchestrator?.state === "tool"
-                ? `running ${orchestrator.toolName ?? "a tool"}…`
-                : "orchestrator is thinking…"}
-            </Shimmer>
-          </div>
+        {silentlyWorking && orchestrator !== undefined && (
+          <WorkingLine name="orchestrator" runtime={orchestrator} />
         )}
       </ChatContent>
       <ChatScrollButton />

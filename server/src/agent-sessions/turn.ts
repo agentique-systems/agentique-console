@@ -6,6 +6,7 @@
  * is captured by the host's per-seat canUseTool (M8).
  */
 import type { SessionPhase } from "@agentique-console/shared";
+import { sdkEnv } from "../sdk/env.ts";
 import type { SdkOptions } from "../sdk/types.ts";
 import { SESSION_PROTOCOL } from "./presets.ts";
 
@@ -53,6 +54,7 @@ export interface SpecialistOptionsInput {
   resume: string | null;
   phase: SessionPhase;
   model: string | undefined;
+  effort: string | undefined;
   abortController: AbortController;
   sessionStore: unknown;
   hooks?: SdkOptions["hooks"];
@@ -80,6 +82,10 @@ export function buildSpecialistOptions(
         }),
     outputFormat: { type: "json_schema", schema: TURN_OUTPUT_SCHEMA },
     maxTurns: 50,
+    env: sdkEnv(),
+    ...(input.effort === undefined
+      ? {}
+      : { effort: input.effort as SdkOptions["effort"] }),
     ...(input.model === undefined ? {} : { model: input.model }),
     ...(input.resume === null ? {} : { resume: input.resume }),
     persistSession: true,

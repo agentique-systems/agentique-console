@@ -6,7 +6,9 @@ import type { EventBus } from "./bus.ts";
 
 /**
  * Broadcasts transient agent.state frames, deduping consecutive identical
- * states so the wire stays quiet while a state holds.
+ * states so the wire stays quiet while a state holds. `note()` carries
+ * provider liveness (retries, rate limits, tool ticks) under the current
+ * state; any real state change clears it, since a stale note reads as truth.
  */
 export class RuntimeBroadcaster {
   readonly #bus: EventBus;
@@ -15,6 +17,7 @@ export class RuntimeBroadcaster {
   readonly #ids: { userSessionId?: string; agentSessionId?: string };
   #state: AgentRuntimeState = "idle";
   #toolName: string | undefined;
+  #detail: string | undefined;
 
   constructor(
     bus: EventBus,
@@ -29,22 +32,41 @@ export class RuntimeBroadcaster {
   }
 
   set(state: AgentRuntimeState, toolName?: string): void {
-    if (state === this.#state && toolName === this.#toolName) return;
+    if (
+      state === this.#state &&
+      toolName === this.#toolName &&
+      this.#detail === undefined
+    ) {
+      return;
+    }
     this.#state = state;
     this.#toolName = toolName;
+    this.#detail = undefined;
+    this.#emit();
+  }
+
+  /** Provider liveness under the current state (retry, rate limit, tool tick). */
+  note(detail: string): void {
+    if (detail === this.#detail) return;
+    this.#detail = detail;
+    this.#emit();
+  }
+
+  idle(): void {
+    this.set("idle");
+  }
+
+  #emit(): void {
     this.#bus.broadcast({
       type: "agent.state",
       ...this.#ids,
       payload: {
         scope: this.#scope,
         participant: this.#participant,
-        state,
-        ...(toolName === undefined ? {} : { toolName }),
+        state: this.#state,
+        ...(this.#toolName === undefined ? {} : { toolName: this.#toolName }),
+        ...(this.#detail === undefined ? {} : { detail: this.#detail }),
       },
     });
-  }
-
-  idle(): void {
-    this.set("idle");
   }
 }

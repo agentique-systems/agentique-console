@@ -141,6 +141,91 @@ describe("mapSdkMessage", () => {
   });
 });
 
+// A turn can sit inside one provider call for minutes. These are the only
+// signals that distinguish "waiting" from "hung", so they must survive.
+describe("liveness notices", () => {
+  it("maps the requesting and compacting statuses", () => {
+    expect(
+      mapSdkMessage({ type: "system", subtype: "status", status: "requesting" }),
+    ).toEqual([{ kind: "notice", text: "requesting…" }]);
+    expect(
+      mapSdkMessage({ type: "system", subtype: "status", status: "compacting" }),
+    ).toEqual([{ kind: "notice", text: "compacting the context…" }]);
+    expect(
+      mapSdkMessage({ type: "system", subtype: "status", status: null }),
+    ).toEqual([]);
+  });
+
+  it("spells out rate-limit retries with the delay", () => {
+    expect(
+      mapSdkMessage({
+        type: "system",
+        subtype: "api_retry",
+        attempt: 2,
+        max_retries: 5,
+        retry_delay_ms: 90_000,
+        error_status: 429,
+      }),
+    ).toEqual([{ kind: "notice", text: "rate limited · retry 2/5 · in 1m 30s" }]);
+  });
+
+  it("names non-429 API errors by status", () => {
+    expect(
+      mapSdkMessage({
+        type: "system",
+        subtype: "api_retry",
+        attempt: 1,
+        max_retries: 3,
+        retry_delay_ms: 2_000,
+        error_status: 529,
+      }),
+    ).toEqual([{ kind: "notice", text: "API error 529 · retry 1/3 · in 2s" }]);
+  });
+
+  it("reports rate-limit events", () => {
+    expect(mapSdkMessage({ type: "rate_limit_event" })).toEqual([
+      { kind: "notice", text: "rate limited — waiting for capacity" },
+    ]);
+  });
+
+  it("ticks long-running tools, ignoring subagent ticks", () => {
+    expect(
+      mapSdkMessage({
+        type: "tool_progress",
+        tool_name: "Bash",
+        elapsed_time_seconds: 42,
+      }),
+    ).toEqual([{ kind: "notice", text: "Bash running · 42s" }]);
+    expect(
+      mapSdkMessage({
+        type: "tool_progress",
+        tool_name: "Bash",
+        elapsed_time_seconds: 42,
+        parent_tool_use_id: "tu_1",
+      }),
+    ).toEqual([]);
+  });
+
+  it("surfaces informational messages above the info level only", () => {
+    expect(
+      mapSdkMessage({
+        type: "system",
+        subtype: "informational",
+        level: "warning",
+        content: "context is nearly full",
+      }),
+    ).toEqual([{ kind: "notice", text: "context is nearly full" }]);
+    expect(
+      mapSdkMessage({
+        type: "system",
+        subtype: "informational",
+        level: "info",
+        content: "chatter",
+      }),
+    ).toEqual([]);
+  });
+});
+
 describe("capJson", () => {
   it("passes small values through", () => {
     expect(capJson({ a: 1 })).toEqual({ a: 1 });

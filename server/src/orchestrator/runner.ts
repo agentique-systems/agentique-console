@@ -209,6 +209,7 @@ export class OrchestratorRunner {
         mode: session.mode,
         phase: session.phase,
         model: config.model,
+        effort: config.effort,
         abortController: abort,
         canUseTool: buildOrchestratorCanUseTool({
           userSessionId: sessionId,
@@ -305,6 +306,10 @@ export class OrchestratorRunner {
             text: event.text,
           },
         });
+        return;
+      }
+      case "notice": {
+        runtime.note(event.text);
         return;
       }
       case "message": {

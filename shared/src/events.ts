@@ -186,6 +186,12 @@ export interface AgentStatePayload {
   participant: string;
   state: AgentRuntimeState;
   toolName?: string;
+  /**
+   * What the provider is doing right now when nothing else is visible —
+   * "requesting…", "rate limited · retry 2/5 · in 30s", "Grep running · 12s".
+   * Advisory liveness only; it never becomes a transcript row.
+   */
+  detail?: string;
 }
 
 // ---------------------------------------------------------------------------

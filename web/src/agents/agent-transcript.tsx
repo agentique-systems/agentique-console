@@ -25,7 +25,7 @@ import {
   ReasoningContent,
   ReasoningTrigger,
 } from "@/components/ai-elements/reasoning";
-import { Shimmer } from "@/components/ai-elements/shimmer";
+import { WorkingLine } from "@/components/working-line";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { agentStreamKey } from "@/live/watched";
@@ -99,15 +99,7 @@ export function AgentTranscript({ session }: { session: AgentSession }) {
     if (runtime === undefined) return [];
     if (runtime.state !== "thinking" && runtime.state !== "tool") return [];
     if (overlays.some((overlay) => overlay.key === name)) return [];
-    return [
-      {
-        name,
-        label:
-          runtime.state === "tool"
-            ? `running ${runtime.toolName ?? "a tool"}…`
-            : `${name} is thinking…`,
-      },
-    ];
+    return [{ name, runtime }];
   });
 
   return (
@@ -164,9 +156,11 @@ export function AgentTranscript({ session }: { session: AgentSession }) {
           </div>
         ))}
         {silentWorkers.map((worker) => (
-          <div key={worker.name} className="py-1">
-            <Shimmer className="text-xs">{worker.label}</Shimmer>
-          </div>
+          <WorkingLine
+            key={worker.name}
+            name={worker.name}
+            runtime={worker.runtime}
+          />
         ))}
       </ChatContent>
       <ChatScrollButton />

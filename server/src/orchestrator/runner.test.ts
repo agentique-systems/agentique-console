@@ -68,6 +68,51 @@ describe("OrchestratorRunner", () => {
     expect(h.fake.captured.options[0]?.permissionMode).toBe("default");
   });
 
+  it("broadcasts provider liveness so a slow turn never looks hung", async () => {
+    const h = makeHarness(async function* () {
+      yield initMessage();
+      yield { type: "system", subtype: "status", status: "requesting" };
+      yield {
+        type: "system",
+        subtype: "api_retry",
+        attempt: 1,
+        max_retries: 5,
+        retry_delay_ms: 30_000,
+        error_status: 429,
+      };
+      yield textMessage("finally");
+      yield successMessage();
+    });
+    const sessionId = h.addUserSession();
+    const collected = collectUntil(h.bus, settled);
+    h.runner.postOperatorMessage(sessionId, "go");
+    const events = await collected;
+
+    const details = events
+      .filter((e) => e.type === "agent.state")
+      .map((e) => (e.payload as { detail?: string }).detail)
+      .filter((detail) => detail !== undefined);
+    expect(details).toEqual([
+      "requesting…",
+      "rate limited · retry 1/5 · in 30s",
+    ]);
+
+    // The note is cleared once real output arrives — a stale note reads as truth.
+    const afterText = events
+      .slice(
+        events.findIndex(
+          (e) =>
+            e.type === "user_session.message" &&
+            (e.payload as { message: { text: string } }).message.text ===
+              "finally",
+        ),
+      )
+      .filter((e) => e.type === "agent.state");
+    expect(
+      afterText.every((e) => (e.payload as { detail?: string }).detail === undefined),
+    ).toBe(true);
+  });
+
   it("persists tool call/result events with capped payloads", async () => {
     const h = makeHarness(async function* () {
       yield initMessage();
