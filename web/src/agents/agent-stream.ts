@@ -36,6 +36,13 @@ export const AGENT_TRANSCRIPT_TYPES: ReadonlySet<ConsoleEventType> = new Set([
   "agent_session.tool.call",
   "agent_session.tool.result",
   "agent_session.phase",
+  "agent_session.mailbox",
+  "agent_session.runtime",
+  "agent_session.context.rotated",
+  "agent_session.process.started",
+  "agent_session.process.output",
+  "agent_session.process.exited",
+  "usage.recorded",
 ]);
 
 export const agentStreamKit = createStreamKit<

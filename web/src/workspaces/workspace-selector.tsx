@@ -51,7 +51,7 @@ export function WorkspaceSelector() {
         <PopoverTrigger asChild>
           <button
             type="button"
-            className="flex max-w-52 shrink-0 items-center gap-1.5 truncate rounded border border-border px-2 py-0.5 text-[11px] hover:bg-muted/40"
+            className="flex max-w-52 shrink-0 items-center gap-1.5 truncate rounded-md border border-border px-2 py-0.5 text-2xs hover:bg-muted/40"
             title="Switch workspace"
             data-testid="workspace-selector"
           >
@@ -91,7 +91,7 @@ export function WorkspaceSelector() {
                       <span className="block truncate font-medium">
                         {workspace.name}
                       </span>
-                      <span className="block truncate text-[10px] text-muted-foreground">
+                      <span className="block truncate text-3xs text-muted-foreground">
                         {shortPath(workspace.rootPath)}
                       </span>
                     </span>

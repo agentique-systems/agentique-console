@@ -38,6 +38,16 @@ export interface AgentSession {
   createdAt: string;
   updatedAt: string;
 }
+export interface AgentRunSummary {
+  participant: string;
+  profileId: string;
+  profile: Record<string, unknown>;
+  ownership: string[];
+  generation: number;
+  turnCount: number;
+  contextTokens: number;
+  providerSessionId: string | null;
+}
 
 export type SpeakerKind = "operator" | "orchestrator" | "agent" | "system";
 

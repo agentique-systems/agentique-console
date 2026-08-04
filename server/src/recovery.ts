@@ -10,8 +10,13 @@
  *
  * - the operator's session gets the missing settle plus a notice, so the
  *   composer frees up and the silence is explained rather than mysterious;
- * - a specialist seat gets the missing settle and is re-armed — it kept its
- *   resume handle, so it can carry on from where it was.
+ * - a specialist seat gets the missing settle and nothing else. Since B5 a
+ *   seat is a native subagent with no resume handle: it died with the process
+ *   and the Orchestrator respawns it from the spawn plan.
+ *
+ * This is a boot pass only. A seat whose background task dies inside a LIVE
+ * server is settled by the task-terminal path in the runner — if that ever
+ * regresses, the symptom is a pane that spins until the next restart.
  *
  * Writing the settle is what makes this idempotent: a recovered turn can never
  * be recovered again.
@@ -76,4 +81,33 @@ export function recoverInterruptedTurns(deps: {
   }
 
   return unsettled.length;
+}
+
+/** Rebuild event projections after a crash between an authoritative row and its journal append. */
+export async function reconcileDurableCommunication(deps: { repo: Repo; bus: EventBus }): Promise<number> {
+  const existing = new Set<string>();
+  for await (const event of deps.bus.readWithSeq({})) {
+    if (event.type === "user_session.message") existing.add(`message:user:${event.payload.sessionId}:${event.payload.message.seq}`);
+    else if (event.type === "agent_session.message") existing.add(`message:agent:${event.payload.agentSessionId}:${event.payload.message.seq}`);
+    else if (event.type === "agent_session.mailbox") existing.add(`delivery:${event.payload.deliveryId}:${event.payload.status}`);
+  }
+  let recovered = 0;
+  for (const row of deps.repo.listAllMessages()) {
+    const key = `message:${row.sessionKind}:${row.sessionId}:${row.seq}`;
+    if (existing.has(key)) continue;
+    if (row.sessionKind === "user") deps.bus.append({ type: "user_session.message", userSessionId: row.sessionId, payload: { sessionId: row.sessionId, message: toWireMessage(row) } });
+    else {
+      const session = deps.repo.getAgentSession(row.sessionId); if (!session) continue;
+      deps.bus.append({ type: "agent_session.message", userSessionId: session.userSessionId, agentSessionId: row.sessionId, payload: { agentSessionId: row.sessionId, message: toWireMessage(row) } });
+    }
+    recovered += 1;
+  }
+  for (const delivery of deps.repo.listAllDeliveries()) {
+    const key = `delivery:${delivery.id}:${delivery.status}`; if (existing.has(key)) continue;
+    const message = deps.repo.getMessageById(delivery.messageId);
+    deps.bus.append({ type: "agent_session.mailbox", userSessionId: delivery.userSessionId, agentSessionId: delivery.agentSessionId,
+      payload: { agentSessionId: delivery.agentSessionId, deliveryId: delivery.id, messageSeq: message?.seq ?? 0, sender: delivery.sender, recipient: delivery.recipient, category: delivery.category, status: delivery.status } });
+    recovered += 1;
+  }
+  return recovered;
 }

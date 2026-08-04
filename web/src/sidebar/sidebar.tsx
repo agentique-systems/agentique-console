@@ -31,13 +31,13 @@ export function Sidebar() {
       className="flex min-h-0 flex-col border-r border-border bg-sidebar"
     >
       <div className="flex items-center justify-between border-b border-border px-3 py-2">
-        <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
+        <span className="text-3xs uppercase tracking-wider text-muted-foreground">
           Sessions
         </span>
         <Button
           size="sm"
           variant="ghost"
-          className="h-6 gap-1 px-2 text-[11px]"
+          className="h-6 gap-1 px-2 text-2xs"
           data-testid="new-session"
           onClick={beginDraft}
         >
@@ -49,7 +49,7 @@ export function Sidebar() {
         {items.length === 0 && !draftOpen ? (
           <div className="flex flex-col items-center gap-2 px-3 py-8 text-center">
             <MessagesSquare className="size-6 text-muted-foreground" />
-            <div className="text-[11px] text-muted-foreground">
+            <div className="text-2xs text-muted-foreground">
               No sessions yet — start one and tell the orchestrator what you
               want done.
             </div>
@@ -57,7 +57,7 @@ export function Sidebar() {
         ) : (
           <ul>
             {draftOpen && (
-              <li className="border-b border-border/50 bg-accent/40 px-3 py-2 text-[11px] italic text-muted-foreground">
+              <li className="border-b border-border/50 bg-accent/40 px-3 py-2 text-2xs italic text-muted-foreground">
                 drafting a new session…
               </li>
             )}
@@ -111,14 +111,14 @@ function SessionRow({
           )}
           <span
             className={cn(
-              "truncate text-[12px]",
+              "truncate text-xs",
               session.title === null && "italic text-muted-foreground",
             )}
           >
             {session.title ?? "untitled"}
           </span>
         </span>
-        <span className="text-[10px] text-muted-foreground">
+        <span className="text-3xs text-muted-foreground">
           {timeAgo(session.updatedAt)}
         </span>
       </button>

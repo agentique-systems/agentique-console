@@ -15,6 +15,34 @@ export function openDb(dbFile: string) {
   sqlite.pragma("journal_mode = WAL");
   sqlite.pragma("foreign_keys = ON");
   sqlite.exec(DDL);
+  migrateAdditiveColumns(sqlite);
   const db = drizzle(sqlite, { schema });
   return { db, sqlite };
+}
+
+function migrateAdditiveColumns(sqlite: Database.Database): void {
+  const userColumns = new Set(sqlite.prepare("pragma table_info(user_sessions)").all().map((row) => (row as { name: string }).name));
+  for (const [name, ddl] of [["sdk_generation", "INTEGER NOT NULL DEFAULT 0"], ["sdk_turn_count", "INTEGER NOT NULL DEFAULT 0"], ["context_tokens", "INTEGER NOT NULL DEFAULT 0"], ["memory", "TEXT NOT NULL DEFAULT ''"]] as const) {
+    if (!userColumns.has(name)) sqlite.exec(`ALTER TABLE user_sessions ADD COLUMN ${name} ${ddl}`);
+  }
+  const columns = new Set(
+    sqlite
+      .prepare("pragma table_info(participants)")
+      .all()
+      .map((row) => (row as { name: string }).name),
+  );
+  const additions: [string, string][] = [
+    ["profile_id", "TEXT NOT NULL DEFAULT 'explorer'"],
+    ["profile_snapshot", "TEXT NOT NULL DEFAULT '{}'"],
+    ["ownership", "TEXT NOT NULL DEFAULT '[]'"],
+    ["sdk_session_id", "TEXT"],
+    ["generation", "INTEGER NOT NULL DEFAULT 0"],
+    ["turn_count", "INTEGER NOT NULL DEFAULT 0"],
+    ["context_tokens", "INTEGER NOT NULL DEFAULT 0"],
+    ["memory", "TEXT NOT NULL DEFAULT ''"],
+    ["pending_turn_seq", "INTEGER NOT NULL DEFAULT 0"],
+  ];
+  for (const [name, ddl] of additions) {
+    if (!columns.has(name)) sqlite.exec(`ALTER TABLE participants ADD COLUMN ${name} ${ddl}`);
+  }
 }

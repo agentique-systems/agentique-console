@@ -3,85 +3,131 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/*
+ * The console is greyscale. Every surface, border, and text token is pure
+ * neutral (chroma 0) so that the status vocabulary below is the ONLY colour in
+ * the product — if something is coloured, it is telling you about state.
+ */
 :root {
-  --radius: 0.625rem;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
+  --radius: 0.5rem;
+  --background: oklch(0.995 0 0);
+  --foreground: oklch(0.16 0 0);
   --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
+  --card-foreground: oklch(0.16 0 0);
   --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.16 0 0);
+  --primary: oklch(0.21 0 0);
   --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --destructive-foreground: oklch(0.985 0 0);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
+  --secondary: oklch(0.955 0 0);
+  --secondary-foreground: oklch(0.21 0 0);
+  --muted: oklch(0.965 0 0);
+  --muted-foreground: oklch(0.475 0 0);
+  --accent: oklch(0.94 0 0);
+  --accent-foreground: oklch(0.21 0 0);
+  --destructive: oklch(0.55 0.2 25);
+  --destructive-foreground: oklch(0.99 0 0);
+  --border: oklch(0.905 0 0);
+  /* One step nearer the surface: dividers INSIDE a card, not between panels. */
+  --border-subtle: oklch(0.945 0 0);
+  --input: oklch(0.9 0 0);
+  --ring: oklch(0.62 0 0);
+  --sidebar: oklch(0.975 0 0);
+  --sidebar-foreground: oklch(0.16 0 0);
+  --sidebar-primary: oklch(0.21 0 0);
   --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  --sidebar-accent: oklch(0.93 0 0);
+  --sidebar-accent-foreground: oklch(0.21 0 0);
+  --sidebar-border: oklch(0.9 0 0);
+  --sidebar-ring: oklch(0.62 0 0);
 
-  /* Status colors (shared vocabulary across rows, dots, borders) */
-  --status-pending: oklch(0.62 0.02 260);
-  --status-running: oklch(0.78 0.13 210);
-  --status-waiting: oklch(0.8 0.14 80);
-  --status-completed: oklch(0.62 0.09 150);
-  --status-failed: oklch(0.62 0.19 25);
-  --status-cancelled: oklch(0.55 0.02 260);
+  /* The inset top highlight that makes a raised surface read as layered. */
+  --raised-highlight: oklch(0 0 0 / 0.05);
+
+  /*
+   * Status colours (shared vocabulary across rows, dots, borders) — the only
+   * chroma in the app. Light theme runs them DARK so they carry on white; the
+   * .dark block below lifts the same hues to carry on near-black.
+   *
+   * Every token that can render as TEXT clears 4.5:1 against background, card,
+   * sidebar and muted in both themes. `cancelled`, `draft` and `withdrawn` sit
+   * below that on purpose — they mean "deliberately dimmed", and `cancelled`
+   * is only ever a dot fill (a shape, held to the 3:1 non-text bar, which it
+   * clears). Do not brighten them to chase a number they are not subject to.
+   */
+  --status-pending: oklch(0.53 0.015 260);
+  --status-running: oklch(0.52 0.13 235);
+  --status-waiting: oklch(0.55 0.13 65);
+  --status-completed: oklch(0.52 0.12 150);
+  --status-failed: oklch(0.53 0.2 27);
+  --status-cancelled: oklch(0.55 0.012 260);
   /* Agreed at the table, nothing dispatched: present but not yet alive. */
-  --status-draft: oklch(0.62 0.03 260);
+  --status-draft: oklch(0.55 0.02 260);
   /* Cancelled before launch: a struck plan row — cancelled's grey, one step dimmer. */
-  --status-withdrawn: oklch(0.48 0.015 260);
-  --attention: oklch(0.8 0.14 80);
+  --status-withdrawn: oklch(0.63 0.01 260);
+  --attention: oklch(0.55 0.13 65);
 }
 
 /*
- * Dark is the product theme. Surfaces sit near-black with cards one step
+ * Dark stays the product's home. Surfaces sit near-black with cards one step
  * above; glow is reserved for live/focused elements.
  */
 .dark {
-  --background: oklch(0.14 0.005 260);
-  --foreground: oklch(0.93 0.005 260);
-  --card: oklch(0.19 0.006 260);
-  --card-foreground: oklch(0.93 0.005 260);
-  --popover: oklch(0.17 0.006 260);
-  --popover-foreground: oklch(0.93 0.005 260);
-  --primary: oklch(0.82 0.11 210);
-  --primary-foreground: oklch(0.16 0.02 230);
-  --secondary: oklch(0.24 0.006 260);
-  --secondary-foreground: oklch(0.93 0.005 260);
-  --muted: oklch(0.23 0.006 260);
-  --muted-foreground: oklch(0.66 0.01 260);
-  --accent: oklch(0.26 0.01 240);
-  --accent-foreground: oklch(0.93 0.005 260);
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.965 0 0);
+  --card: oklch(0.185 0 0);
+  --card-foreground: oklch(0.965 0 0);
+  --popover: oklch(0.175 0 0);
+  --popover-foreground: oklch(0.965 0 0);
+  --primary: oklch(0.965 0 0);
+  --primary-foreground: oklch(0.165 0 0);
+  --secondary: oklch(0.235 0 0);
+  --secondary-foreground: oklch(0.965 0 0);
+  --muted: oklch(0.225 0 0);
+  --muted-foreground: oklch(0.68 0 0);
+  --accent: oklch(0.255 0 0);
+  --accent-foreground: oklch(0.965 0 0);
   --destructive: oklch(0.62 0.19 25);
   --destructive-foreground: oklch(0.97 0.01 25);
-  --border: oklch(0.28 0.008 260);
-  --input: oklch(0.28 0.008 260);
-  --ring: oklch(0.6 0.08 210);
-  --sidebar: oklch(0.12 0.005 260);
-  --sidebar-foreground: oklch(0.93 0.005 260);
-  --sidebar-primary: oklch(0.82 0.11 210);
-  --sidebar-primary-foreground: oklch(0.16 0.02 230);
-  --sidebar-accent: oklch(0.24 0.006 260);
-  --sidebar-accent-foreground: oklch(0.93 0.005 260);
-  --sidebar-border: oklch(0.24 0.008 260);
-  --sidebar-ring: oklch(0.6 0.08 210);
+  --border: oklch(0.265 0 0);
+  --border-subtle: oklch(0.225 0 0);
+  --input: oklch(0.275 0 0);
+  --ring: oklch(0.5 0 0);
+  --sidebar: oklch(0.125 0 0);
+  --sidebar-foreground: oklch(0.965 0 0);
+  --sidebar-primary: oklch(0.965 0 0);
+  --sidebar-primary-foreground: oklch(0.165 0 0);
+  --sidebar-accent: oklch(0.235 0 0);
+  --sidebar-accent-foreground: oklch(0.965 0 0);
+  --sidebar-border: oklch(0.235 0 0);
+  --sidebar-ring: oklch(0.5 0 0);
+
+  --raised-highlight: oklch(1 0 0 / 0.045);
+
+  /* Same hues, lifted to carry on near-black. */
+  --status-pending: oklch(0.64 0.02 260);
+  --status-running: oklch(0.78 0.13 235);
+  --status-waiting: oklch(0.8 0.14 65);
+  --status-completed: oklch(0.72 0.14 150);
+  --status-failed: oklch(0.68 0.19 27);
+  --status-cancelled: oklch(0.55 0.015 260);
+  --status-draft: oklch(0.62 0.03 260);
+  --status-withdrawn: oklch(0.48 0.015 260);
+  --attention: oklch(0.8 0.14 65);
 }
 
 @theme inline {
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, monospace;
+
+  /*
+   * Two steps below Tailwind's xs, because an operator surface labels things
+   * at 10-11px constantly. These replace the arbitrary text-[10px] values.
+   */
+  --text-3xs: 0.625rem;
+  --text-3xs--line-height: 0.875rem;
+  --text-2xs: 0.6875rem;
+  --text-2xs--line-height: 1rem;
+
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -103,6 +149,7 @@
   --color-destructive: var(--destructive);
   --color-destructive-foreground: var(--destructive-foreground);
   --color-border: var(--border);
+  --color-border-subtle: var(--border-subtle);
   --color-input: var(--input);
   --color-ring: var(--ring);
   --color-sidebar: var(--sidebar);
@@ -128,14 +175,42 @@
   * {
     @apply border-border outline-ring/50;
   }
+  html {
+    /* Native scrollbars and form controls follow the active theme. */
+    color-scheme: light;
+  }
+  html.dark {
+    color-scheme: dark;
+  }
   body {
     @apply bg-background text-foreground;
+    /*
+     * cv05 = l with a tail, cv11 = single-storey g. In a console full of
+     * paths, ids, and seat names, both are worth real money.
+     */
+    font-feature-settings:
+      "cv05" 1,
+      "cv11" 1;
+    -webkit-font-smoothing: antialiased;
   }
   html,
   body,
   #root {
     height: 100%;
   }
+  /* Elapsed clocks and seq counters must not jitter as digits change. */
+  .font-mono {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: normal;
+  }
+}
+
+/*
+ * A raised surface reads as layered through a 1px inner top highlight rather
+ * than a drop shadow — no muddy halo against a near-black background.
+ */
+@utility surface-raised {
+  box-shadow: inset 0 1px 0 0 var(--raised-highlight);
 }
 
 /* One-beat attention pulse (HITL materialize) — CSS only, runs once. */

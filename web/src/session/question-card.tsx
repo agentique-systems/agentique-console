@@ -15,6 +15,7 @@ import { ApiError } from "@/api/client";
 import { useResolveInteraction } from "@/api/mutations";
 import type { InteractionStatus } from "@agentique-console/shared";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardEyebrow, CardHeader } from "@/components/ui/card";
 import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 
@@ -77,31 +78,34 @@ export function QuestionCard({
   );
 
   return (
-    <div
+    <Card
       data-testid="question-card"
       className={cn(
-        "my-2 rounded-lg border border-attention/50 bg-attention/10 px-3 py-2",
+        "my-2 border-attention/50 bg-attention/10",
         answered && "border-border bg-muted/20",
         stale && "opacity-60",
       )}
     >
-      <div className="mb-2 flex items-center gap-2 text-xs">
-        <CircleHelpIcon className="size-3.5 shrink-0 text-attention" />
-        <span className="font-medium">the orchestrator asks</span>
+      <CardHeader>
+        <CardEyebrow className={cn(!answered && "text-attention")}>
+          <CircleHelpIcon className="size-3.5 shrink-0" />
+          <span>the orchestrator asks</span>
+        </CardEyebrow>
         {stale && (
-          <span className="text-muted-foreground">
+          <span className="text-2xs normal-case text-muted-foreground">
             predates a restart — answer anyway if still relevant
           </span>
         )}
-      </div>
+      </CardHeader>
 
+      <CardContent className="pt-0">
       {item.questions.map((question) => {
         const chosenNow = selections[question.question] ?? [];
         const chosenFinal = item.answer?.answers?.[question.question] ?? [];
         return (
           <div key={question.question} className="mb-2 last:mb-0">
             {question.header !== undefined && (
-              <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+              <div className="text-3xs uppercase tracking-wider text-muted-foreground">
                 {question.header}
               </div>
             )}
@@ -140,7 +144,7 @@ export function QuestionCard({
                       {option.label}
                     </span>
                     {option.description !== undefined && (
-                      <span className="text-[10px] text-muted-foreground">
+                      <span className="text-3xs text-muted-foreground">
                         {option.description}
                       </span>
                     )}
@@ -164,10 +168,11 @@ export function QuestionCard({
       )}
       {busy && immediate && <Spinner className="mt-1 size-3" />}
       {dismissed && (
-        <div className="mt-1 text-[11px] text-muted-foreground">
+        <div className="mt-1 text-2xs text-muted-foreground">
           dismissed — you answered in chat instead
         </div>
       )}
-    </div>
+      </CardContent>
+    </Card>
   );
 }

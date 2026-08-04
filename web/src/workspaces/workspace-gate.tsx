@@ -74,7 +74,7 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
     <button
       type="button"
       onClick={() => select(workspace.id)}
-      className="flex w-full items-center gap-3 rounded border border-border px-3 py-2.5 text-left hover:bg-muted/40"
+      className="flex w-full items-center gap-3 rounded-md border border-border px-3 py-2.5 text-left hover:bg-muted/40"
     >
       <Folder className="size-4 shrink-0 text-muted-foreground" />
       <span className="min-w-0 flex-1">
@@ -85,7 +85,7 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
           {workspace.rootPath}
         </span>
       </span>
-      <span className="shrink-0 text-[10px] text-muted-foreground">
+      <span className="shrink-0 text-3xs text-muted-foreground">
         {timeAgo(workspace.createdAt)}
       </span>
     </button>

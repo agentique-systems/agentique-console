@@ -3,6 +3,7 @@
 
 import type {
   AgentSession,
+  AgentRunSummary,
   Interaction,
   SessionMessage,
   SessionMode,
@@ -99,6 +100,7 @@ export type ListAgentSessionsResponse = AgentSession[];
 // GET /api/agent-sessions/:id
 export interface GetAgentSessionResponse {
   session: AgentSession;
+  runs: AgentRunSummary[];
   messages: SessionMessage[];
 }
 

@@ -10,8 +10,8 @@ import { and, asc, eq, gte, sql, type SQL } from "drizzle-orm";
 import type { ConsoleEvent } from "@agentique-console/shared";
 import { AsyncQueue } from "../async-queue.ts";
 import type { Db } from "../db/client.ts";
-import { events } from "../db/schema.ts";
-import { nowIso } from "../ids.ts";
+import { eventArtifacts, events } from "../db/schema.ts";
+import { newId, nowIso } from "../ids.ts";
 
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown
   ? Omit<T, K>
@@ -65,6 +65,29 @@ export class EventBus {
       .from(events)
       .get();
     return row?.seq ?? 0;
+  }
+
+  /** Keep event rows bounded without losing the authoritative payload. */
+  capture(value: unknown, scope: { workspaceId?: string; userSessionId?: string; agentSessionId?: string } = {}): unknown {
+    let serialized: string;
+    try { serialized = JSON.stringify(value) ?? "null"; } catch { serialized = JSON.stringify({ unserializable: true }); }
+    if (serialized.length <= 16_384) return value;
+    const artifact = this.storeArtifact(serialized, "application/json", scope);
+    return { truncated: true, preview: serialized.slice(0, 16_384), ...artifact };
+  }
+
+  storeArtifact(content: string, mediaType: string, scope: { workspaceId?: string; userSessionId?: string; agentSessionId?: string } = {}): { artifactId: string; bytes: number } {
+    const artifactId = newId("artifact");
+    const bytes = mediaType.endsWith(";base64") ? Buffer.from(content, "base64").byteLength : Buffer.byteLength(content);
+    this.#db.insert(eventArtifacts).values({ id: artifactId, eventSeq: null, workspaceId: scope.workspaceId ?? null,
+      userSessionId: scope.userSessionId ?? null, agentSessionId: scope.agentSessionId ?? null,
+      mediaType, bytes, content, createdAt: nowIso() }).run();
+    return { artifactId, bytes };
+  }
+
+  getArtifact(id: string): { id: string; mediaType: string; bytes: number; content: string; createdAt: string } | undefined {
+    return this.#db.select({ id: eventArtifacts.id, mediaType: eventArtifacts.mediaType, bytes: eventArtifacts.bytes, content: eventArtifacts.content, createdAt: eventArtifacts.createdAt })
+      .from(eventArtifacts).where(eq(eventArtifacts.id, id)).get();
   }
 
   /** Persist and publish. Returns the stamped event (with seq). */

@@ -18,6 +18,8 @@ import {
 import { buildConsoleMcpServer } from "./orchestrator/tools.ts";
 import { fakeSdk, type FakeProgram, type FakeSdk } from "./sdk/fake.ts";
 import { TaskService } from "./tasks/service.ts";
+import { AgentProfileRegistry } from "./agent-profiles/registry.ts";
+import { SqliteSessionStore } from "./sdk/session-store.ts";
 
 export interface Harness {
   db: ReturnType<typeof openDb>["db"];
@@ -85,6 +87,10 @@ export function makeHarness(
         phase: mode === "plan_execute" ? "planning" : "executing",
         status: "open",
         sdkSessionId: null,
+        sdkGeneration: 0,
+        sdkTurnCount: 0,
+        contextTokens: 0,
+        memory: "",
         createdAt: nowIso(),
         updatedAt: nowIso(),
       };
@@ -128,33 +134,30 @@ function wire(
   base: Harness,
   options: { hostOverrides?: Partial<AgentSessionHostDeps> },
 ): { host: AgentSessionHost; runner: OrchestratorRunner } {
+  const tasks = new TaskService(base.db, base.bus);
+  const sessionStore = new SqliteSessionStore(base.db);
+  let runner!: OrchestratorRunner;
   const host = new AgentSessionHost({
     repo: base.repo,
     bus: base.bus,
+    config: base.config,
+    profiles: new AgentProfileRegistry("/tmp/agentique-console-test-profiles-missing.json"),
+    sdk: async () => base.fake.sdk,
+    sessionStore,
+    getWorkspaceRoot: () => "/tmp/test-workspace",
+    interactions: base.interactions,
+    tasks,
+    wake: (userSessionId, agentSessionId, category, text) => runner.enqueueAgentMilestone(userSessionId, agentSessionId, category, text),
     ...options.hostOverrides,
   });
-  const runner = new OrchestratorRunner({
+  runner = new OrchestratorRunner({
     repo: base.repo,
     bus: base.bus,
     config: base.config,
     sdk: async () => base.fake.sdk,
     interactions: base.interactions,
     getWorkspaceRoot: () => "/tmp/test-workspace",
-    // Mirror main.ts: SubagentStop releases the seat binding, so programs can
-    // fire it (fireHook) and exercise the production release path.
-    buildHooks: () => ({
-      SubagentStop: [
-        {
-          hooks: [
-            async (input: unknown) => {
-              const agentId = (input as { agent_id?: unknown }).agent_id;
-              if (typeof agentId === "string") host.releaseAgent(agentId);
-              return {};
-            },
-          ],
-        },
-      ],
-    }),
+    sessionStore,
     buildMcpServer: (userSessionId, sdk) =>
       buildConsoleMcpServer({
         sdk,
@@ -162,16 +165,8 @@ function wire(
         repo: base.repo,
         bus: base.bus,
         userSessionId,
-        tasks: new TaskService(base.db, base.bus),
+        tasks,
       }),
-    seats: {
-      spawn: (callId, spawnName, agentSessionId, subagentType) =>
-        host.observeAgentSpawn(callId, spawnName, agentSessionId, subagentType),
-      launch: (callId, agentId) => host.confirmAgentLaunch(callId, agentId),
-      seatOf: (callId) => host.seatOf(callId),
-      seatOfAddress: (to) => host.seatOfSpawnAddress(to),
-      recordMessage: (input) => host.recordDerivedMessage(input),
-    },
   });
   return { host, runner };
 }

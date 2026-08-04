@@ -12,6 +12,13 @@ import { useResolveInteraction } from "@/api/mutations";
 import { MessageResponse } from "@/components/ai-elements/message";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardEyebrow,
+  CardFooter,
+  CardHeader,
+} from "@/components/ui/card";
 import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 
@@ -51,21 +58,20 @@ export function PlanCard({
   };
 
   return (
-    <div
+    <Card
       data-testid="plan-card"
-      className={cn(
-        "my-2 rounded-lg border border-border bg-card px-4 py-3",
-        !resolved && "border-attention/50",
-      )}
+      className={cn("my-2", !resolved && "border-attention/50")}
     >
-      <div className="mb-2 flex items-center gap-2 text-xs">
-        <FileTextIcon className="size-3.5 shrink-0 text-attention" />
-        <span className="font-medium">proposed plan</span>
+      <CardHeader>
+        <CardEyebrow className={cn(!resolved && "text-attention")}>
+          <FileTextIcon className="size-3.5 shrink-0" />
+          <span>proposed plan</span>
+        </CardEyebrow>
         {resolution !== undefined && (
           <Badge
             variant="outline"
             className={cn(
-              "text-[10px] uppercase",
+              "text-3xs uppercase",
               resolution.approved
                 ? "text-status-completed"
                 : "text-status-waiting",
@@ -74,21 +80,28 @@ export function PlanCard({
             {resolution.approved ? "approved" : "revised"}
           </Badge>
         )}
-      </div>
+      </CardHeader>
 
-      <div className="text-sm">
+      <CardContent className="pt-0">
         <MessageResponse>{item.plan}</MessageResponse>
-      </div>
+        {resolution?.note !== undefined && (
+          <div className="mt-2 text-2xs text-muted-foreground">
+            note: {resolution.note}
+          </div>
+        )}
+      </CardContent>
 
-      {resolution?.note !== undefined && (
-        <div className="mt-2 text-[11px] text-muted-foreground">
-          note: {resolution.note}
-        </div>
-      )}
-
-      <div className="mt-3 flex items-center gap-2">
-        <Button size="xs" disabled={resolved || resolve.isPending} onClick={approve}>
-          {resolve.isPending ? <Spinner className="size-3" /> : "Approve & execute"}
+      <CardFooter className="pt-0">
+        <Button
+          size="xs"
+          disabled={resolved || resolve.isPending}
+          onClick={approve}
+        >
+          {resolve.isPending ? (
+            <Spinner className="size-3" />
+          ) : (
+            "Approve & execute"
+          )}
         </Button>
         <Button
           size="xs"
@@ -98,7 +111,7 @@ export function PlanCard({
         >
           Request changes
         </Button>
-      </div>
-    </div>
+      </CardFooter>
+    </Card>
   );
 }

@@ -2,6 +2,7 @@ import {
   index,
   integer,
   primaryKey,
+  real,
   sqliteTable,
   text,
   uniqueIndex,
@@ -34,6 +35,10 @@ export const userSessions = sqliteTable("user_sessions", {
     .default("open"),
   /** Orchestrator resume id, captured from the SDK's system:init message. */
   sdkSessionId: text("sdk_session_id"),
+  sdkGeneration: integer("sdk_generation").notNull().default(0),
+  sdkTurnCount: integer("sdk_turn_count").notNull().default(0),
+  contextTokens: integer("context_tokens").notNull().default(0),
+  memory: text("memory").notNull().default(""),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });
@@ -69,6 +74,18 @@ export const participants = sqliteTable(
     /** Resolved brief (preset + ad-hoc extension), verbatim. */
     instructions: text("instructions").notNull(),
     model: text("model"),
+    profileId: text("profile_id").notNull().default("explorer"),
+    profileSnapshot: text("profile_snapshot", { mode: "json" })
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
+    ownership: text("ownership", { mode: "json" }).$type<string[]>().notNull().default([]),
+    sdkSessionId: text("sdk_session_id"),
+    generation: integer("generation").notNull().default(0),
+    turnCount: integer("turn_count").notNull().default(0),
+    contextTokens: integer("context_tokens").notNull().default(0),
+    memory: text("memory").notNull().default(""),
+    pendingTurnSeq: integer("pending_turn_seq").notNull().default(0),
     /** Transcript watermark: highest message seq this seat has been shown. */
     lastSeenSeq: integer("last_seen_seq").notNull().default(0),
     /** Seating order for accents and prompt listings. */
@@ -179,3 +196,75 @@ export const events = sqliteTable(
   ],
 );
 
+/** One durable delivery record per addressed transcript message. */
+export const mailboxDeliveries = sqliteTable(
+  "mailbox_deliveries",
+  {
+    id: text("id").primaryKey(),
+    messageId: text("message_id").notNull().references(() => messages.id),
+    userSessionId: text("user_session_id").notNull(),
+    agentSessionId: text("agent_session_id").notNull(),
+    sender: text("sender").notNull(),
+    recipient: text("recipient").notNull(),
+    category: text("category", {
+      enum: ["assignment", "update", "milestone", "failure", "final", "decision"],
+    }).notNull(),
+    status: text("status", {
+      enum: ["queued", "delivered", "acknowledged", "cancelled"],
+    }).notNull().default("queued"),
+    dedupeKey: text("dedupe_key"),
+    deliveredAt: text("delivered_at"),
+    acknowledgedAt: text("acknowledged_at"),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [
+    uniqueIndex("mailbox_message_recipient").on(t.messageId, t.recipient),
+    index("mailbox_recipient_status").on(t.agentSessionId, t.recipient, t.status),
+  ],
+);
+
+/** Full payloads live here; event rows contain only a bounded preview + id. */
+export const eventArtifacts = sqliteTable("event_artifacts", {
+  id: text("id").primaryKey(),
+  eventSeq: integer("event_seq"),
+  workspaceId: text("workspace_id"),
+  userSessionId: text("user_session_id"),
+  agentSessionId: text("agent_session_id"),
+  mediaType: text("media_type").notNull(),
+  bytes: integer("bytes").notNull(),
+  content: text("content").notNull(),
+  createdAt: text("created_at").notNull(),
+});
+
+/** Eager, console-owned mirror used by the SDK SessionStore. */
+export const providerEntries = sqliteTable(
+  "provider_entries_v2",
+  {
+    ord: integer("ord").primaryKey({ autoIncrement: true }),
+    projectKey: text("project_key").notNull(),
+    sessionId: text("session_id").notNull(),
+    subpath: text("subpath").notNull().default(""),
+    uuid: text("uuid"),
+    type: text("type").notNull(),
+    entry: text("entry", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [
+    index("provider_entries_session").on(t.projectKey, t.sessionId, t.subpath, t.ord),
+    uniqueIndex("provider_entries_uuid").on(t.projectKey, t.sessionId, t.subpath, t.uuid),
+  ],
+);
+
+export const usageSamples = sqliteTable("usage_samples", {
+  id: text("id").primaryKey(),
+  userSessionId: text("user_session_id").notNull(),
+  agentSessionId: text("agent_session_id"),
+  participant: text("participant").notNull(),
+  profileId: text("profile_id"),
+  generation: integer("generation").notNull(),
+  turnId: text("turn_id").notNull(),
+  inputTokens: integer("input_tokens").notNull().default(0),
+  outputTokens: integer("output_tokens").notNull().default(0),
+  costUsd: real("cost_usd"),
+  createdAt: text("created_at").notNull(),
+}, (t) => [index("usage_user_session").on(t.userSessionId, t.createdAt)]);

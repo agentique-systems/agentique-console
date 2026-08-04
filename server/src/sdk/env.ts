@@ -26,17 +26,6 @@ const HOST_SESSION_VARS: ReadonlySet<string> = new Set([
   "CLAUDE_EFFORT",
 ]);
 
-/**
- * Knobs the console pins deliberately (subagent defaults have moved several
- * times across SDK patch releases — never inherit them from the host): the
- * per-session subagent cap counts finished subagents and long-lived
- * UserSessions never /clear, so the default (200) would eventually starve
- * delegation.
- */
-const PINNED_VARS: Readonly<Record<string, string>> = {
-  CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION: "1000",
-};
-
 export function sdkEnv(
   source: NodeJS.ProcessEnv = process.env,
 ): Record<string, string> {
@@ -45,5 +34,7 @@ export function sdkEnv(
     if (value === undefined || HOST_SESSION_VARS.has(key)) continue;
     env[key] = value;
   }
-  return { ...env, ...PINNED_VARS };
+  // Native subagents are disabled; do not propagate or pin their knobs.
+  delete env.CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION;
+  return env;
 }

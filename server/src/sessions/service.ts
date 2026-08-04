@@ -24,6 +24,7 @@ export class UserSessionService {
   readonly #runner: OrchestratorRunner;
   readonly #interactions: InteractionService;
   readonly #workspaces: WorkspaceService;
+  readonly #archiveAgentSessions: ((userSessionId: string) => void) | undefined;
 
   constructor(deps: {
     repo: Repo;
@@ -31,12 +32,14 @@ export class UserSessionService {
     runner: OrchestratorRunner;
     interactions: InteractionService;
     workspaces: WorkspaceService;
+    archiveAgentSessions?: (userSessionId: string) => void;
   }) {
     this.#repo = deps.repo;
     this.#bus = deps.bus;
     this.#runner = deps.runner;
     this.#interactions = deps.interactions;
     this.#workspaces = deps.workspaces;
+    this.#archiveAgentSessions = deps.archiveAgentSessions;
   }
 
   create(body: CreateUserSessionBody): UserSession {
@@ -53,6 +56,10 @@ export class UserSessionService {
       phase: body.mode === "plan_execute" ? "planning" : "executing",
       status: "open",
       sdkSessionId: null,
+      sdkGeneration: 0,
+      sdkTurnCount: 0,
+      contextTokens: 0,
+      memory: "",
       createdAt: now,
       updatedAt: now,
     };
@@ -110,6 +117,7 @@ export class UserSessionService {
     // The lane's options are frozen at spawn: archiving shuts it down, a mode
     // change recycles it so the next message respawns with fresh options.
     if (changes.status === "archived") {
+      this.#archiveAgentSessions?.(id);
       void this.#runner.closeSession(id);
     } else if (changes.mode !== undefined) {
       this.#runner.recycleSession(id);

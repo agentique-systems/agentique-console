@@ -42,6 +42,7 @@ describe("OrchestratorRunner", () => {
       "stream.delta",
       "stream.delta",
       "user_session.message", // orchestrator
+      "usage.recorded",
       "agent.state", // idle
       "user_session.turn.settled",
     ]);

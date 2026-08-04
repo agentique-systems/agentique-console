@@ -24,7 +24,7 @@ import type { EventBus } from "../events/bus.ts";
 import { RuntimeBroadcaster } from "../events/runtime.ts";
 import { newId, nowIso } from "../ids.ts";
 import { badRequest, conflict, notFound } from "../api/errors.ts";
-import { capJson, mapSdkMessage } from "../sdk/mapping.ts";
+import { mapSdkMessage } from "../sdk/mapping.ts";
 import type {
   ConsoleSdk,
   QueryHandle,
@@ -37,10 +37,12 @@ import { buildOrchestratorCanUseTool, type LaneState } from "./permissions.ts";
 
 type Job =
   | { kind: "operator"; text: string }
-  | { kind: "answer-revival"; text: string };
+  | { kind: "answer-revival"; text: string }
+  | { kind: "agent-milestone"; text: string; agentSessionId: string };
 
 interface ActiveTurn {
   turnId: string;
+  trigger: "operator" | "wake" | "answer";
   settled: Promise<void>;
   resolve: () => void;
   outcome: {
@@ -71,11 +73,8 @@ interface Lane {
    * turn — the settle path mints a follow-up turn to catch that output.
    */
   steeredMidTurn: number;
-  /**
-   * Agent-session ids holding this lane open (A3 seam: a live
-   * sub-orchestrator must not be reaped). Always empty in A1.
-   */
-  backgroundHolds: Set<string>;
+  /** Exact duplicate suppression across wake turns (not reset per turn). */
+  lastOperatorFacingText: string;
 }
 
 export interface OrchestratorDeps {
@@ -85,45 +84,11 @@ export interface OrchestratorDeps {
   sdk: () => Promise<ConsoleSdk>;
   interactions: InteractionService;
   getWorkspaceRoot: (workspaceId: string) => string;
-  /** M7: task-mirror hooks per lane. */
-  buildHooks?: (attribution: {
-    workspaceId: string;
-    userSessionId: string;
-  }) => SdkOptions["hooks"];
   /** M6: the console MCP server bound to one user session. */
   buildMcpServer?: (userSessionId: string, sdk: ConsoleSdk) => unknown;
-  /**
-   * B3: the SeatRegistry observers (implemented by the host). The runner sees
-   * the Agent/SendMessage tool traffic; the host owns binding and events.
-   */
-  seats?: {
-    spawn(
-      callId: string,
-      spawnName: string,
-      agentSessionId: string,
-      subagentType: string,
-    ): void;
-    launch(callId: string, agentId: string): void;
-    /** The seat bound to a spawn call id, for attribution. */
-    seatOf(
-      callId: string,
-    ): { agentSessionId: string; participant: string } | null;
-    /** The seat a SendMessage `to` address resolves to. */
-    seatOfAddress(
-      to: string,
-    ): { agentSessionId: string; participant: string } | null;
-    /** Persist a derived transcript row (an observed SendMessage). */
-    recordMessage(input: {
-      agentSessionId: string;
-      speaker: { kind: "orchestrator" | "agent"; name: string };
-      to?: string;
-      text: string;
-    }): void;
-  };
+  /** Eager console-owned provider journal. */
+  sessionStore?: unknown;
 }
-
-/** An agent-session id appearing in an Agent tool prompt (spawn binding). */
-const AGENT_SESSION_ID_RE = /\bas_[a-z0-9]{20}\b/;
 
 /** Bounded grace for a closing lane's pump before the hard abort. */
 const CLOSE_GRACE_MS = 2_000;
@@ -185,6 +150,16 @@ export class OrchestratorRunner {
   /** M8: a stale interaction was answered after a restart. */
   enqueueRevival(userSessionId: string, text: string): void {
     this.#enqueue(userSessionId, { kind: "answer-revival", text });
+  }
+
+  /** Material AgentSession reports only. Repeated reports coalesce per session. */
+  enqueueAgentMilestone(userSessionId: string, agentSessionId: string, category: string, text: string): void {
+    const lane = this.#lane(userSessionId);
+    const prompt = `[AgentSession ${agentSessionId} ${category}]\n${text.slice(0, 8_192)}\n\nAct only if needed. Do not repeat an unchanged operator update. Use read_agent_session for additional detail only when necessary.`;
+    const existing = lane.queue.find((job): job is Extract<Job, { kind: "agent-milestone" }> => job.kind === "agent-milestone" && job.agentSessionId === agentSessionId);
+    if (existing) existing.text = prompt;
+    else lane.queue.push({ kind: "agent-milestone", agentSessionId, text: prompt });
+    if (!lane.draining) void this.#drain(userSessionId);
   }
 
   /**
@@ -263,7 +238,7 @@ export class OrchestratorRunner {
         ),
         recycleAfterTurn: false,
         steeredMidTurn: 0,
-        backgroundHolds: new Set(),
+        lastOperatorFacingText: "",
       };
       this.#lanes.set(sessionId, lane);
     }
@@ -299,7 +274,7 @@ export class OrchestratorRunner {
     if (prompt === "") return;
 
     const turnId = newId("turn");
-    const trigger = job.kind === "operator" ? "operator" : "answer";
+    const trigger = job.kind === "operator" ? "operator" : job.kind === "agent-milestone" ? "wake" : "answer";
     bus.append({
       type: "user_session.turn.started",
       userSessionId: sessionId,
@@ -313,6 +288,7 @@ export class OrchestratorRunner {
     });
     const turn: ActiveTurn = {
       turnId,
+      trigger,
       settled,
       resolve: resolveSettled,
       outcome: { status: "completed", errorMessage: undefined },
@@ -320,6 +296,7 @@ export class OrchestratorRunner {
     lane.activeTurn = turn;
 
     try {
+      await this.#rotateContextIfNeeded(sessionId, lane);
       await this.#ensureLaneQuery(sessionId, lane);
       lane.runtime.set("thinking");
       // Push synchronously after ensure — no await in between, so the input
@@ -373,11 +350,9 @@ export class OrchestratorRunner {
         interactions,
         laneState: lane.state,
       }),
-      hooks: this.#deps.buildHooks?.({
-        workspaceId: session.workspaceId,
-        userSessionId: sessionId,
-      }),
       mcpServer: this.#deps.buildMcpServer?.(sessionId, sdk),
+      sessionStore: this.#deps.sessionStore,
+      contextMemory: session.memory,
     });
 
     const query = sdk.query({ prompt: input, options });
@@ -476,34 +451,6 @@ export class OrchestratorRunner {
     };
   }
 
-  /**
-   * B3: assistant activity with no queued turn — an agent's SendMessage woke
-   * the model — mints its own turn (trigger "wake"); the normal result /
-   * turn-idle path settles it.
-   */
-  #ensureTurn(sessionId: string, lane: Lane): ActiveTurn {
-    if (lane.activeTurn) return lane.activeTurn;
-    const turnId = newId("turn");
-    this.#deps.bus.append({
-      type: "user_session.turn.started",
-      userSessionId: sessionId,
-      payload: { sessionId, turnId, trigger: "wake" },
-    });
-    lane.state.lastAssistantText = "";
-    let resolve: () => void = () => undefined;
-    const settled = new Promise<void>((r) => {
-      resolve = r;
-    });
-    lane.activeTurn = {
-      turnId,
-      settled,
-      resolve,
-      outcome: { status: "completed", errorMessage: undefined },
-    };
-    lane.runtime.set("thinking");
-    return lane.activeTurn;
-  }
-
   #settleTurn(sessionId: string, lane: Lane): void {
     const turn = lane.activeTurn;
     if (!turn) return;
@@ -546,6 +493,7 @@ export class OrchestratorRunner {
       });
       lane.activeTurn = {
         turnId: followId,
+        trigger: "operator",
         settled,
         resolve: resolveFollow,
         outcome: { status: "completed", errorMessage: undefined },
@@ -570,128 +518,6 @@ export class OrchestratorRunner {
     });
   }
 
-  /**
-   * B3: a bound seat's forwarded traffic renders inside ITS agent session,
-   * attributed to that participant — live overlays for narration/thinking,
-   * persisted tool events for the trace. A seat's SPEECH is its SendMessage
-   * calls: those become persisted transcript rows (the one-chat-lane rule
-   * with derivation replacing host.post). Plain message events stay
-   * overlay-only. Unbound subagent traffic is dropped entirely.
-   */
-  #applySubagentEvent(
-    sessionId: string,
-    event: ReturnType<typeof mapSdkMessage>[number] & { parentCallId: string },
-  ): void {
-    const { bus } = this.#deps;
-    const seat = this.#deps.seats?.seatOf(event.parentCallId);
-    if (seat == null) return;
-    const { agentSessionId, participant } = seat;
-    const scope = { kind: "agent" as const, sessionId: agentSessionId };
-    switch (event.kind) {
-      case "delta": {
-        bus.broadcast({
-          type: "stream.delta",
-          userSessionId: sessionId,
-          agentSessionId,
-          payload: {
-            scope,
-            speaker: participant,
-            turnId: event.parentCallId,
-            text: event.text,
-          },
-        });
-        return;
-      }
-      case "reasoning-delta": {
-        bus.broadcast({
-          type: "stream.reasoning",
-          userSessionId: sessionId,
-          agentSessionId,
-          payload: {
-            scope,
-            speaker: participant,
-            turnId: event.parentCallId,
-            text: event.text,
-          },
-        });
-        return;
-      }
-      case "tool.call": {
-        // A seat's SendMessage IS its speech — a transcript row, not a tool
-        // card. Reports to "main" also pulse the flow indicator; the content
-        // itself reaches the operator lane as a peer message.
-        if (event.name === "SendMessage") {
-          const input = event.input as {
-            to?: unknown;
-            message?: unknown;
-          } | null;
-          const to = typeof input?.to === "string" ? input.to : "";
-          const text =
-            typeof input?.message === "string"
-              ? input.message
-              : JSON.stringify(input?.message ?? "");
-          const target = this.#deps.seats?.seatOfAddress(to);
-          this.#deps.seats?.recordMessage({
-            agentSessionId,
-            speaker:
-              participant === "orchestrator"
-                ? { kind: "orchestrator", name: participant }
-                : { kind: "agent", name: participant },
-            to:
-              target && target.agentSessionId === agentSessionId
-                ? target.participant
-                : to,
-            text,
-          });
-          if (to === "main") {
-            bus.append({
-              type: "flow.result",
-              userSessionId: sessionId,
-              agentSessionId,
-              payload: {
-                userSessionId: sessionId,
-                agentSessionId,
-                digestPreview: text.slice(0, 140),
-              },
-            });
-          }
-          return;
-        }
-        bus.append({
-          type: "agent_session.tool.call",
-          userSessionId: sessionId,
-          agentSessionId,
-          payload: {
-            sessionId: agentSessionId,
-            turnId: event.parentCallId,
-            callId: event.callId,
-            name: event.name,
-            input: capJson(event.input),
-            participant,
-          },
-        });
-        return;
-      }
-      case "tool.result": {
-        bus.append({
-          type: "agent_session.tool.result",
-          userSessionId: sessionId,
-          agentSessionId,
-          payload: {
-            sessionId: agentSessionId,
-            callId: event.callId,
-            output: capJson(event.output),
-            ...(event.isError ? { isError: true } : {}),
-            participant,
-          },
-        });
-        return;
-      }
-      default:
-        return;
-    }
-  }
-
   #applyEvent(
     sessionId: string,
     lane: Lane,
@@ -699,10 +525,7 @@ export class OrchestratorRunner {
   ): void {
     const { repo, bus } = this.#deps;
     if ("parentCallId" in event && event.parentCallId !== undefined) {
-      this.#applySubagentEvent(
-        sessionId,
-        event as typeof event & { parentCallId: string },
-      );
+      bus.append({ type: "user_session.runtime", userSessionId: sessionId, payload: { sessionId, detail: `blocked unowned native subagent event (${event.kind})` } });
       return;
     }
     const turn = lane.activeTurn;
@@ -715,7 +538,8 @@ export class OrchestratorRunner {
         return;
       }
       case "delta": {
-        const active = turn ?? this.#ensureTurn(sessionId, lane);
+        if (!turn) { bus.append({ type: "user_session.runtime", userSessionId: sessionId, payload: { sessionId, detail: "ignored late stream delta after turn settlement" } }); return; }
+        const active = turn;
         lane.runtime.set("responding");
         bus.broadcast({
           type: "stream.delta",
@@ -730,7 +554,8 @@ export class OrchestratorRunner {
         return;
       }
       case "reasoning-delta": {
-        const active = turn ?? this.#ensureTurn(sessionId, lane);
+        if (!turn) { bus.append({ type: "user_session.runtime", userSessionId: sessionId, payload: { sessionId, detail: "ignored late reasoning delta after turn settlement" } }); return; }
+        const active = turn;
         lane.runtime.set("thinking");
         bus.broadcast({
           type: "stream.reasoning",
@@ -746,18 +571,25 @@ export class OrchestratorRunner {
       }
       case "notice": {
         lane.runtime.note(event.text);
+        bus.append({ type: "user_session.runtime", userSessionId: sessionId, payload: { sessionId, detail: event.text } });
         return;
       }
       case "message": {
-        const active = turn ?? this.#ensureTurn(sessionId, lane);
+        const active = turn;
         lane.state.lastAssistantText = event.text;
+        const normalized = event.text.trim().replace(/\s+/g, " ");
+        if (active?.trigger === "wake" && normalized !== "" && normalized === lane.lastOperatorFacingText) {
+          bus.append({ type: "user_session.runtime", userSessionId: sessionId, payload: { sessionId, detail: "suppressed an exact duplicate orchestrator message" } });
+          return;
+        }
+        lane.lastOperatorFacingText = normalized;
         const row = repo.appendMessage({
           sessionKind: "user",
           sessionId,
           speaker: { kind: "orchestrator", name: "orchestrator" },
           kind: "message",
           text: event.text,
-          turnId: active.turnId,
+          ...(active ? { turnId: active.turnId } : {}),
         });
         bus.append({
           type: "user_session.message",
@@ -767,93 +599,22 @@ export class OrchestratorRunner {
         return;
       }
       case "tool.call": {
-        const active = turn ?? this.#ensureTurn(sessionId, lane);
-        // A seat spawn: the Agent tool prompt names the agent session and the
-        // spawn name identifies the seat ("Task" is the tool's pre-rename
-        // name, still emitted by some SDK paths).
-        if (event.name === "Agent" || event.name === "Task") {
-          const input = event.input as {
-            prompt?: unknown;
-            name?: unknown;
-            subagent_type?: unknown;
-          } | null;
-          const prompt = typeof input?.prompt === "string" ? input.prompt : "";
-          const match = AGENT_SESSION_ID_RE.exec(prompt);
-          // The spawn name should arrive as the Agent tool's `name` param;
-          // fall back to the spawn-plan prompt templates ("(spawn name X)" /
-          // "Coordinator: X.") so observation survives a model that forgot it.
-          const spawnName =
-            typeof input?.name === "string"
-              ? input.name
-              : (/\(spawn name ([A-Za-z0-9_-]+)\)/.exec(prompt)?.[1] ??
-                (input?.subagent_type === "session-orchestrator"
-                  ? /Coordinator: ([A-Za-z0-9_-]+)\./.exec(prompt)?.[1]
-                  : undefined));
-          if (match && spawnName !== undefined) {
-            this.#deps.seats?.spawn(
-              event.callId,
-              spawnName,
-              match[0],
-              typeof input?.subagent_type === "string"
-                ? input.subagent_type
-                : "",
-            );
-          }
-        }
-        // The Orchestrator messaging a seat directly is delegation speech —
-        // derive the transcript row + the flow pulse.
-        if (event.name === "SendMessage") {
-          const input = event.input as {
-            to?: unknown;
-            message?: unknown;
-          } | null;
-          const to = typeof input?.to === "string" ? input.to : null;
-          const text =
-            typeof input?.message === "string"
-              ? input.message
-              : JSON.stringify(input?.message ?? "");
-          const target = to === null ? null : this.#deps.seats?.seatOfAddress(to);
-          if (target) {
-            this.#deps.seats?.recordMessage({
-              agentSessionId: target.agentSessionId,
-              speaker: { kind: "orchestrator", name: "orchestrator" },
-              to: target.participant,
-              text,
-            });
-            bus.append({
-              type: "flow.delegation",
-              userSessionId: sessionId,
-              agentSessionId: target.agentSessionId,
-              payload: {
-                userSessionId: sessionId,
-                agentSessionId: target.agentSessionId,
-                kind: "sent",
-                preview: text.slice(0, 140),
-              },
-            });
-          }
-        }
+        const active = turn;
         lane.runtime.set("tool", event.name);
         bus.append({
           type: "user_session.tool.call",
           userSessionId: sessionId,
           payload: {
             sessionId,
-            turnId: active.turnId,
+            turnId: active?.turnId ?? "unattributed",
             callId: event.callId,
             name: event.name,
-            input: capJson(event.input),
+            input: bus.capture(event.input, { userSessionId: sessionId }),
           },
         });
         return;
       }
       case "tool.result": {
-        // The Agent tool's structured launch receipt carries the subagent id.
-        const agentId = (event.structured as { agentId?: unknown } | undefined)
-          ?.agentId;
-        if (typeof agentId === "string") {
-          this.#deps.seats?.launch(event.callId, agentId);
-        }
         lane.runtime.set("thinking");
         bus.append({
           type: "user_session.tool.result",
@@ -861,7 +622,7 @@ export class OrchestratorRunner {
           payload: {
             sessionId,
             callId: event.callId,
-            output: capJson(event.output),
+            output: bus.capture(event.output, { userSessionId: sessionId }),
             ...(event.isError ? { isError: true } : {}),
           },
         });
@@ -876,6 +637,17 @@ export class OrchestratorRunner {
         ) {
           repo.patchUserSession(sessionId, { sdkSessionId: event.resumeId });
         }
+        if (session) {
+          const contextTokens = Math.max(session.contextTokens, event.inputTokens ?? 0);
+          repo.patchUserSession(sessionId, { sdkTurnCount: session.sdkTurnCount + 1, contextTokens });
+          if (session.sdkTurnCount + 1 >= this.#deps.config.contextTurnLimit || contextTokens >= this.#deps.config.contextTokenLimit) lane.recycleAfterTurn = true;
+          const usage = { id: newId("usage"), userSessionId: sessionId, agentSessionId: null, participant: "orchestrator", profileId: null,
+            generation: session.sdkGeneration, turnId: turn?.turnId ?? "unattributed", inputTokens: event.inputTokens ?? 0, outputTokens: event.outputTokens ?? 0,
+            costUsd: event.costUsd ?? null, createdAt: nowIso() };
+          repo.insertUsage(usage);
+          bus.append({ type: "usage.recorded", userSessionId: sessionId, payload: { sessionId, participant: "orchestrator", generation: session.sdkGeneration,
+            turnId: usage.turnId, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, ...(event.costUsd === undefined ? {} : { costUsd: event.costUsd }) } });
+        }
         this.#settleTurn(sessionId, lane);
         return;
       }
@@ -883,6 +655,18 @@ export class OrchestratorRunner {
         if (turn) {
           turn.outcome.status = event.aborted ? "aborted" : "error";
           turn.outcome.errorMessage = event.message;
+        }
+        const session = repo.getUserSession(sessionId);
+        if (session) {
+          const contextTokens = Math.max(session.contextTokens, event.inputTokens ?? 0);
+          repo.patchUserSession(sessionId, { sdkTurnCount: session.sdkTurnCount + 1, contextTokens });
+          const usage = { id: newId("usage"), userSessionId: sessionId, agentSessionId: null, participant: "orchestrator", profileId: null,
+            generation: session.sdkGeneration, turnId: turn?.turnId ?? "unattributed", inputTokens: event.inputTokens ?? 0, outputTokens: event.outputTokens ?? 0,
+            costUsd: event.costUsd ?? null, createdAt: nowIso() };
+          repo.insertUsage(usage);
+          bus.append({ type: "usage.recorded", userSessionId: sessionId, payload: { sessionId, participant: "orchestrator", generation: session.sdkGeneration,
+            turnId: usage.turnId, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, ...(event.costUsd === undefined ? {} : { costUsd: event.costUsd }) } });
+          if (session.sdkTurnCount + 1 >= this.#deps.config.contextTurnLimit || contextTokens >= this.#deps.config.contextTokenLimit) lane.recycleAfterTurn = true;
         }
         this.#settleTurn(sessionId, lane);
         return;
@@ -894,25 +678,8 @@ export class OrchestratorRunner {
         return;
       }
       case "peer-message": {
-        // An agent's report to "main": a visible row in the operator lane,
-        // attributed to the sending seat (spawn name → participant when the
-        // registry knows it). The assistant's reply mints its own turn.
-        const sender = this.#deps.seats?.seatOfAddress(event.from);
-        const row = repo.appendMessage({
-          sessionKind: "user",
-          sessionId,
-          speaker: {
-            kind: "agent",
-            name: sender?.participant ?? event.from,
-          },
-          kind: "message",
-          text: event.text,
-        });
-        bus.append({
-          type: "user_session.message",
-          userSessionId: sessionId,
-          payload: { sessionId, message: toWireMessage(row) },
-        });
+        bus.append({ type: "user_session.runtime", userSessionId: sessionId,
+          payload: { sessionId, detail: `blocked out-of-band peer message from ${event.from}; managed agents must use the Console mailbox` } });
         return;
       }
       case "task-terminal": {
@@ -925,5 +692,17 @@ export class OrchestratorRunner {
         return;
       }
     }
+  }
+
+  async #rotateContextIfNeeded(sessionId: string, lane: Lane): Promise<void> {
+    const session = this.#deps.repo.getUserSession(sessionId);
+    if (!session || (session.sdkTurnCount < this.#deps.config.contextTurnLimit && session.contextTokens < this.#deps.config.contextTokenLimit)) return;
+    if (lane.query) await this.#closeLane(lane, { interrupt: false });
+    const head = this.#deps.repo.messagesHeadSeq("user", sessionId);
+    const memory = this.#deps.repo.listMessages("user", sessionId, Math.max(0, head - 24))
+      .map((row) => `[${row.speakerName}] ${row.text}`).join("\n").slice(-4_000);
+    this.#deps.repo.patchUserSession(sessionId, { sdkSessionId: null, sdkGeneration: session.sdkGeneration + 1, sdkTurnCount: 0, contextTokens: 0, memory });
+    this.#deps.bus.append({ type: "user_session.context.rotated", userSessionId: sessionId,
+      payload: { sessionId, generation: session.sdkGeneration + 1, reason: session.contextTokens >= this.#deps.config.contextTokenLimit ? "token_limit" : "turn_limit", memoryChars: memory.length } });
   }
 }

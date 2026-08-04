@@ -75,6 +75,35 @@ describe("SeatRegistry", () => {
     expect(h.host.hasCoordinator(agentSessionId)).toBe(false);
   });
 
+  it("releases a seat whose background task died without a SubagentStop", async () => {
+    const h = makeDelegationHarness(idleProgram);
+    const { agentSessionId } = makeSession(h);
+    h.host.observeAgentSpawn(
+      "tu_1",
+      spawnNameOf(agentSessionId, "scout"),
+      agentSessionId,
+      "explorer",
+    );
+    h.host.confirmAgentLaunch("tu_1", "agent-scout");
+
+    // A killed task emits task_notification, never SubagentStop. Left bound,
+    // the seat reports "working" until a server restart runs recovery.
+    h.host.releaseSpawnCall("tu_1");
+
+    const settled = await collectUntil(
+      h.bus,
+      (e) => e.type === "agent_session.turn.settled",
+    );
+    expect(settled.at(-1)?.payload).toMatchObject({
+      participant: "scout",
+      turnId: "tu_1",
+      status: "aborted",
+    });
+    expect(h.host.seatOf("tu_1")).toBeNull();
+    // Unknown call ids are inert — a stray notification settles nothing.
+    expect(() => h.host.releaseSpawnCall("tu_missing")).not.toThrow();
+  });
+
   it("planning phase: a specialist's message to the coordinator is its plan; an execute spawn flips the phase", async () => {
     const h = makeDelegationHarness(idleProgram);
     const { agentSessionId } = makeSession(h);
@@ -111,7 +140,7 @@ describe("SeatRegistry", () => {
     expect(phase.at(-1)?.payload).toMatchObject({ phase: "executing" });
   });
 
-  it("denies the coordinator-only task board to the main thread, allows subagents", async () => {
+  it("allows the main thread to use the single Console task ledger", async () => {
     const h = makeDelegationHarness(idleProgram);
     const canUseTool = buildOrchestratorCanUseTool({
       userSessionId: h.addUserSession(),
@@ -126,13 +155,15 @@ describe("SeatRegistry", () => {
       { agentSessionId: "as_x", subject: "s" },
       permissionContext(),
     );
-    expect(fromParent).toMatchObject({ behavior: "deny" });
+    expect(fromParent).toMatchObject({ behavior: "allow" });
 
     const fromSubagent = await canUseTool(
       "mcp__console__task_create",
       { agentSessionId: "as_x", subject: "s" },
       { ...permissionContext(), agentID: "agent-123" },
     );
+    // Legacy agentID provenance does not change permission behavior. Managed
+    // participants receive their own bound MCP server and cannot call this one.
     expect(fromSubagent).toMatchObject({ behavior: "allow" });
 
     const createSession = await canUseTool(

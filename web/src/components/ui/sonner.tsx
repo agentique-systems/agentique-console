@@ -7,10 +7,15 @@ import {
 } from "lucide-react";
 import { Toaster as Sonner, type ToasterProps } from "sonner";
 
+import { useThemeStore } from "@/stores/theme";
+
 const Toaster = ({ ...props }: ToasterProps) => {
+  // Sonner portals outside the themed tree, so it needs the resolved value
+  // rather than inheriting the .dark class.
+  const theme = useThemeStore((s) => s.resolved);
   return (
     <Sonner
-      theme="dark"
+      theme={theme}
       className="toaster group"
       icons={{
         success: <CircleCheckIcon className="size-4" />,

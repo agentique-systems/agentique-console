@@ -2,8 +2,8 @@
  * The orchestrator's canUseTool bridge. Console MCP tools auto-allow;
  * AskUserQuestion becomes an operator question card; ExitPlanMode becomes a
  * plan-approval card (approve flips the session phase to executing);
- * anything else is a delegation-first denial (D4 — no generic approval card,
- * the requirements ban an inbox).
+ * anything else runs (no generic approval card — the requirements ban an
+ * inbox, and a denial here is indistinguishable from a broken tool).
  */
 import type { InteractionQuestion } from "@agentique-console/shared";
 import type { Repo } from "../db/repo.ts";
@@ -38,18 +38,10 @@ export function buildOrchestratorCanUseTool(input: CanUseToolInput): CanUseTool 
     toolInput: Record<string, unknown>,
     context?: { signal?: AbortSignal; suggestions?: unknown; agentID?: string },
   ) => {
+    if (["Agent", "Task", "SendMessage", "TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "Bash", "Write", "Edit", "NotebookEdit"].includes(toolName)) {
+      return { behavior: "deny" as const, message: "Main is coordination-only. Use profile-bound Console AgentSessions so ownership, execution, messaging, and events remain durable and observable." };
+    }
     if (toolName.startsWith("mcp__console__")) {
-      // Coordinator-only tools: the task board belongs to a session's
-      // coordinator (a subagent — context carries agentID); the parent has
-      // the SDK-native TaskCreate family instead.
-      const coordinatorOnly = toolName.startsWith("mcp__console__task_");
-      if (coordinatorOnly && context?.agentID === undefined) {
-        return {
-          behavior: "deny" as const,
-          message:
-            "This tool belongs to an agent session's coordinator — delegate the session instead.",
-        };
-      }
       return { behavior: "allow" as const, updatedInput: toolInput };
     }
 
@@ -129,10 +121,10 @@ export function buildOrchestratorCanUseTool(input: CanUseToolInput): CanUseTool 
       return { behavior: "deny" as const, message: note };
     }
 
-    return {
-      behavior: "deny" as const,
-      message:
-        "Not permitted for the Orchestrator — delegate this to an agent session.",
-    };
+    // Everything else runs. Delegation is a matter of judgement (the brief),
+    // not of capability: the previous blanket denial here meant the
+    // Orchestrator could not even fetch a page to answer its own seats, and
+    // reported to the operator that "web tools are blocked at my level".
+    return { behavior: "allow" as const, updatedInput: toolInput };
   }) as CanUseTool;
 }

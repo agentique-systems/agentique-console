@@ -5,8 +5,8 @@ import type {
 import type { EventBus } from "./bus.ts";
 
 /**
- * Broadcasts transient agent.state frames, deduping consecutive identical
- * states so the wire stays quiet while a state holds. `note()` carries
+ * Persists agent.state transitions, deduping consecutive identical states so
+ * the authoritative trace stays compact. `note()` carries
  * provider liveness (retries, rate limits, tool ticks) under the current
  * state; any real state change clears it, since a stale note reads as truth.
  */
@@ -57,7 +57,7 @@ export class RuntimeBroadcaster {
   }
 
   #emit(): void {
-    this.#bus.broadcast({
+    this.#bus.append({
       type: "agent.state",
       ...this.#ids,
       payload: {

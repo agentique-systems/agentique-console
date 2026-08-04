@@ -66,6 +66,7 @@ export interface TurnErrorItem {
   readonly turnId: string;
   readonly errorMessage: string;
 }
+export interface RuntimeItem { readonly type: "runtime"; readonly uid: string; readonly label: string; readonly detail: string; }
 
 export type UserItem =
   | MessageItem
@@ -73,7 +74,8 @@ export type UserItem =
   | QuestionItem
   | PlanItem
   | TurnItem
-  | TurnErrorItem;
+  | TurnErrorItem
+  | RuntimeItem;
 
 /** Stable render identity — every id is unique within its type's namespace. */
 export function itemKey(item: UserItem): string {
@@ -90,6 +92,8 @@ export function itemKey(item: UserItem): string {
       return `turn:${item.turnId}`;
     case "turn_error":
       return `turn_error:${item.turnId}`;
+    case "runtime":
+      return `runtime:${item.uid}`;
   }
 }
 
@@ -228,6 +232,20 @@ export function foldUserItems(events: readonly ConsoleEvent[]): UserItem[] {
         });
         break;
       }
+
+      case "user_session.runtime":
+        items.push({ type: "runtime", uid: `runtime:${event.seq ?? items.length}`, label: "runtime", detail: event.payload.detail });
+        break;
+
+      case "user_session.context.rotated":
+        items.push({ type: "runtime", uid: `context:${event.seq ?? event.payload.generation}`, label: "context rotated", detail: `generation ${event.payload.generation} · ${event.payload.reason} · ${event.payload.memoryChars} memory chars` });
+        break;
+
+      case "usage.recorded":
+        if (event.agentSessionId !== undefined) break;
+        items.push({ type: "runtime", uid: `usage:${event.seq ?? event.payload.turnId}`, label: "usage",
+          detail: `${event.payload.inputTokens.toLocaleString()} input · ${event.payload.outputTokens.toLocaleString()} output${event.payload.costUsd === undefined ? "" : ` · $${event.payload.costUsd.toFixed(4)}`} · generation ${event.payload.generation}` });
+        break;
 
       // Everything else — session lifecycle (created/updated: the header reads
       // those from REST), transients (overlays own them), other topics — folds

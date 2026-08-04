@@ -164,7 +164,7 @@ export function WorkspaceWizard({
                   />
                 }
               />
-              <dl className="grid grid-cols-[8rem_1fr] gap-x-3 gap-y-1.5 rounded border border-border p-3 text-xs">
+              <dl className="grid grid-cols-[8rem_1fr] gap-x-3 gap-y-1.5 rounded-md border border-border p-3 text-xs">
                 <Summary label="Inside" value={path ?? "—"} />
                 <Summary label="Directory" value={rootPath ?? "—"} />
               </dl>
@@ -174,7 +174,7 @@ export function WorkspaceWizard({
 
         {error !== null && (
           <p
-            className="text-[11px] text-status-failed"
+            className="text-2xs text-status-failed"
             data-testid="wizard-error"
           >
             {errorMessage(error)}
@@ -222,7 +222,7 @@ function Field({
 }) {
   return (
     <div className="flex flex-col gap-1">
-      <Label className="text-[11px] text-muted-foreground">{label}</Label>
+      <Label className="text-2xs text-muted-foreground">{label}</Label>
       {input}
     </div>
   );
@@ -238,7 +238,7 @@ function Summary({
   return (
     <>
       <dt className="text-muted-foreground">{label}</dt>
-      <dd className="truncate font-mono text-[11px]">{value}</dd>
+      <dd className="truncate font-mono text-2xs">{value}</dd>
     </>
   );
 }

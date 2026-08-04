@@ -63,6 +63,14 @@ export interface PhaseItem {
   readonly seq: number;
   readonly phase: SessionPhase;
 }
+export interface AgentTraceItem {
+  readonly type: "trace";
+  readonly uid: string;
+  readonly participant: string;
+  readonly label: string;
+  readonly detail: string;
+  readonly tone?: "error" | "muted";
+}
 
 export type AgentItem =
   | AgentMessageItem
@@ -70,7 +78,8 @@ export type AgentItem =
   | RoutedItem
   | AgentTurnItem
   | AgentTurnErrorItem
-  | PhaseItem;
+  | PhaseItem
+  | AgentTraceItem;
 
 /** Stable render identity — every id is unique within its type's namespace. */
 export function agentItemKey(item: AgentItem): string {
@@ -87,6 +96,8 @@ export function agentItemKey(item: AgentItem): string {
       return `turn_error:${item.turnId}`;
     case "phase":
       return `phase:${item.seq}`;
+    case "trace":
+      return `trace:${item.uid}`;
   }
 }
 
@@ -188,6 +199,45 @@ export function foldAgentItems(events: readonly ConsoleEvent[]): AgentItem[] {
           seq: event.seq ?? 0,
           phase: event.payload.phase,
         });
+        break;
+
+      case "agent_session.mailbox":
+        items.push({ type: "trace", uid: `mailbox:${event.seq ?? event.payload.deliveryId}:${event.payload.status}`,
+          participant: event.payload.sender, label: `mailbox ${event.payload.status}`,
+          detail: `${event.payload.sender} → ${event.payload.recipient} · ${event.payload.category}` });
+        break;
+
+      case "agent_session.runtime":
+        items.push({ type: "trace", uid: `runtime:${event.seq ?? event.payload.turnId ?? "unknown"}`,
+          participant: event.payload.participant, label: "runtime", detail: event.payload.detail,
+          ...(event.payload.detail.includes("failure") ? { tone: "error" as const } : { tone: "muted" as const }) });
+        break;
+
+      case "agent_session.context.rotated":
+        items.push({ type: "trace", uid: `context:${event.seq ?? event.payload.generation}`, participant: event.payload.participant,
+          label: "context rotated", detail: `generation ${event.payload.generation} · ${event.payload.reason} · ${event.payload.memoryChars} memory chars` });
+        break;
+
+      case "agent_session.process.started":
+        items.push({ type: "trace", uid: `process-start:${event.payload.processId}`, participant: event.payload.participant,
+          label: "process started", detail: `${event.payload.command} ${event.payload.args.join(" ")} · pid ${event.payload.pid ?? "?"}` });
+        break;
+
+      case "agent_session.process.output":
+        items.push({ type: "trace", uid: `process-output:${event.payload.processId}:${event.payload.seq}`, participant: event.payload.participant,
+          label: `${event.payload.stream} · ${event.payload.processId}`, detail: event.payload.text,
+          ...(event.payload.stream === "stderr" ? { tone: "error" as const } : { tone: "muted" as const }) });
+        break;
+
+      case "agent_session.process.exited":
+        items.push({ type: "trace", uid: `process-exit:${event.payload.processId}`, participant: event.payload.participant,
+          label: "process exited", detail: `code ${event.payload.code ?? "null"}${event.payload.signal ? ` · ${event.payload.signal}` : ""}`,
+          ...(event.payload.code && event.payload.code !== 0 ? { tone: "error" as const } : {}) });
+        break;
+
+      case "usage.recorded":
+        items.push({ type: "trace", uid: `usage:${event.seq ?? event.payload.turnId}`, participant: event.payload.participant,
+          label: "usage", detail: `${event.payload.inputTokens.toLocaleString()} input · ${event.payload.outputTokens.toLocaleString()} output${event.payload.costUsd === undefined ? "" : ` · $${event.payload.costUsd.toFixed(4)}`} · generation ${event.payload.generation}` });
         break;
 
       // Everything else folds to nothing: created (the strip reads the row

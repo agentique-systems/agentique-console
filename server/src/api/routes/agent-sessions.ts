@@ -23,12 +23,27 @@ export function registerAgentSessionRoutes(
       if (!row) throw notFound(`no agent session ${request.params.id}`);
       return {
         session: ctx.host.wireSession(row),
+        runs: ctx.repo.listParticipants(row.id).map((participant) => ({
+          participant: participant.name,
+          profileId: participant.profileId,
+          profile: participant.profileSnapshot,
+          ownership: participant.ownership,
+          generation: participant.generation,
+          turnCount: participant.turnCount,
+          contextTokens: participant.contextTokens,
+          providerSessionId: participant.sdkSessionId,
+        })),
         messages: ctx.repo
           .listMessages("agent", row.id)
           .map(toWireMessage),
       };
     },
   );
+
+  app.get("/api/agent-profiles", async () => ({
+    availability: ctx.host.runtimeAvailability(),
+    profiles: ctx.host.profiles().map(({ id, title, purpose, tools, runtime, sandboxRequired }) => ({ id, title, purpose, tools, runtime, sandboxRequired })),
+  }));
 
   app.get<{ Params: { id: string } }>(
     "/api/agent-sessions/:id/transcript",

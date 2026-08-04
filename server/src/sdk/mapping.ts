@@ -40,8 +40,8 @@ export type TurnEvent =
    * persisted; it exists so a slow turn reads as working rather than stuck.
    */
   | { kind: "notice"; text: string }
-  | { kind: "result"; output: unknown; resumeId?: string; costUsd?: number }
-  | { kind: "error"; message: string; aborted: boolean }
+  | { kind: "result"; output: unknown; resumeId?: string; costUsd?: number; inputTokens?: number; outputTokens?: number }
+  | { kind: "error"; message: string; aborted: boolean; inputTokens?: number; outputTokens?: number; costUsd?: number }
   /**
    * The SDK's authoritative turn-over signal (session_state_changed → idle).
    * A persistent lane settles its open turn on this even when the result
@@ -53,7 +53,13 @@ export type TurnEvent =
    * coordinator reports its results itself — but a failed or stopped task
    * would otherwise vanish without a trace, so the consumer persists these.
    */
-  | { kind: "task-terminal"; status: "failed" | "stopped"; summary: string }
+  | {
+      kind: "task-terminal";
+      status: "failed" | "stopped";
+      summary: string;
+      /** The spawning Agent call — the seat registry's key, when present. */
+      toolUseId?: string;
+    }
   /**
    * B3: a message from an in-process agent (SendMessage to "main") arriving
    * in the lane as a peer-origin user message. `from` is the sender's display
@@ -85,11 +91,13 @@ export function mapSdkMessage(message: SdkMessage): TurnEvent[] {
       if (message.subtype === "task_notification") {
         const status = stringOf(message.status);
         if (status !== "failed" && status !== "stopped") return [];
+        const toolUseId = stringOf(message.tool_use_id);
         return [
           {
             kind: "task-terminal",
             status,
             summary: stringOf(message.summary) ?? "no details",
+            ...(toolUseId === undefined ? {} : { toolUseId }),
           },
         ];
       }
@@ -216,6 +224,10 @@ export function mapSdkMessage(message: SdkMessage): TurnEvent[] {
             ...(message.total_cost_usd === undefined
               ? {}
               : { costUsd: message.total_cost_usd }),
+            ...((message.usage?.input_tokens ?? message.usage?.cache_creation_input_tokens ?? message.usage?.cache_read_input_tokens) === undefined ? {} : {
+              inputTokens: (message.usage?.input_tokens ?? 0) + (message.usage?.cache_creation_input_tokens ?? 0) + (message.usage?.cache_read_input_tokens ?? 0),
+            }),
+            ...(message.usage?.output_tokens === undefined ? {} : { outputTokens: message.usage.output_tokens }),
           },
         ];
       }
@@ -224,6 +236,7 @@ export function mapSdkMessage(message: SdkMessage): TurnEvent[] {
           kind: "error",
           message: resultErrorMessage(message),
           aborted: message.terminal_reason === "interrupted",
+          ...usageFields(message),
         },
       ];
     }
@@ -231,6 +244,15 @@ export function mapSdkMessage(message: SdkMessage): TurnEvent[] {
     default:
       return [];
   }
+}
+
+function usageFields(message: SdkMessage): { inputTokens?: number; outputTokens?: number; costUsd?: number } {
+  const hasInput = message.usage?.input_tokens !== undefined || message.usage?.cache_creation_input_tokens !== undefined || message.usage?.cache_read_input_tokens !== undefined;
+  return {
+    ...(hasInput ? { inputTokens: (message.usage?.input_tokens ?? 0) + (message.usage?.cache_creation_input_tokens ?? 0) + (message.usage?.cache_read_input_tokens ?? 0) } : {}),
+    ...(message.usage?.output_tokens === undefined ? {} : { outputTokens: message.usage.output_tokens }),
+    ...(message.total_cost_usd === undefined ? {} : { costUsd: message.total_cost_usd }),
+  };
 }
 
 /** Stamps subagent-parented events with their parent tool_use id. */

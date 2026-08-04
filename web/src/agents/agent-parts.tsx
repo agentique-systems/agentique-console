@@ -1,11 +1,15 @@
 /**
  * Rendering for agent-session transcript items — the single dispatch point;
  * new item types land here. The v1 session-parts shape with v2's items:
- * speaker-accented bubbles (seating-order accents), PLAN blocks, tool cards
- * under a participant label, routed micro-rows, per-participant turn
- * hairlines.
+ * speaker-accented bubbles (seating-order accents), PLAN blocks, routed
+ * micro-rows, per-participant turn hairlines.
+ *
+ * Input is an AgentGroup, not a raw AgentItem: a seat's consecutive tool calls
+ * arrive pre-collapsed into one run (agent-groups.ts) and render as a single
+ * Task block, because a working seat produces tool cards faster than anyone
+ * can read them.
  */
-import { FileTextIcon, OctagonXIcon } from "lucide-react";
+import { FileTextIcon, OctagonXIcon, WrenchIcon } from "lucide-react";
 
 import type { Speaker } from "@agentique-console/shared";
 import {
@@ -14,16 +18,25 @@ import {
   MessageResponse,
 } from "@/components/ai-elements/message";
 import {
+  Task,
+  TaskContent,
+  TaskItem,
+  TaskItemFile,
+  TaskTrigger,
+} from "@/components/ai-elements/task";
+import {
   Tool,
   ToolContent,
   ToolHeader,
   ToolInput,
   ToolOutput,
 } from "@/components/ai-elements/tool";
+import { shortenPath, subjectOf } from "@/lib/tool-text";
 import { cn } from "@/lib/utils";
 
 import { accentOf, accentOfName, type AccentMap } from "./accents";
-import type { AgentItem, RoutedItem } from "./agent-fold";
+import type { AgentToolItem, RoutedItem } from "./agent-fold";
+import { runSummary, type AgentGroup, type ToolRunItem } from "./agent-groups";
 
 export function SpeakerLabel({
   speaker,
@@ -37,7 +50,7 @@ export function SpeakerLabel({
   return (
     <div
       className={cn(
-        "mb-1 text-[10px] uppercase tracking-wide opacity-80",
+        "mb-1 text-3xs uppercase tracking-wide opacity-80",
         accentOf(accents, speaker),
       )}
     >
@@ -63,28 +76,107 @@ function routedLabel(item: RoutedItem): string {
   return item.hopCount > 1 ? `${base} · hop ${item.hopCount}` : base;
 }
 
+function toolState(item: AgentToolItem) {
+  if (item.isError === true) return "output-error" as const;
+  return item.output === undefined
+    ? ("input-available" as const)
+    : ("output-available" as const);
+}
+
+/** One call inside a run: a sentence, with the raw call folded behind it. */
+function RunStep({ item }: { item: AgentToolItem }) {
+  const subject = subjectOf(item.input);
+
+  return (
+    <TaskItem>
+      <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+        <span
+          className={cn(
+            "font-mono",
+            item.isError === true && "text-status-failed",
+          )}
+        >
+          {item.name}
+        </span>
+        {subject !== undefined && (
+          <TaskItemFile>
+            <span className="truncate">{shortenPath(subject, 2)}</span>
+          </TaskItemFile>
+        )}
+      </div>
+      <Tool className="mt-1 mb-0 rounded-sm border-border-subtle">
+        <ToolHeader compact toolName={item.name} state={toolState(item)} />
+        <ToolContent className="space-y-2 p-2">
+          <ToolInput input={item.input} />
+          {(item.output !== undefined || item.isError === true) && (
+            <ToolOutput
+              output={item.isError === true ? undefined : item.output}
+              errorText={
+                item.isError === true
+                  ? typeof item.output === "string"
+                    ? item.output
+                    : "tool failed"
+                  : undefined
+              }
+            />
+          )}
+        </ToolContent>
+      </Tool>
+    </TaskItem>
+  );
+}
+
+function ToolRun({ item, accents }: { item: ToolRunItem; accents: AccentMap }) {
+  return (
+    <div className="my-1">
+      <div
+        className={cn(
+          "mb-1 text-3xs uppercase tracking-wide opacity-80",
+          accentOfName(accents, item.participant),
+        )}
+      >
+        {item.participant}
+      </div>
+      <Task>
+        <TaskTrigger
+          icon={WrenchIcon}
+          title={`${runSummary(item.tools)}${item.active ? "…" : ""}`}
+        />
+        <TaskContent>
+          {item.tools.map((tool) => (
+            <RunStep key={tool.uid} item={tool} />
+          ))}
+        </TaskContent>
+      </Task>
+    </div>
+  );
+}
+
 export function AgentPart({
   item,
   accents,
 }: {
-  item: AgentItem;
+  item: AgentGroup;
   accents: AccentMap;
 }) {
   switch (item.type) {
+    case "tool_run":
+      return <ToolRun item={item} accents={accents} />;
+
     case "message": {
       if (item.kind === "notice" || item.speaker.kind === "system") {
         return (
-          <div className="my-1 px-1 text-center text-[11px] text-muted-foreground">
+          <div className="my-1 px-1 text-center text-2xs text-muted-foreground">
             {item.text}
           </div>
         );
       }
       if (item.kind === "plan") {
         return (
-          <div className="my-2 rounded-lg border border-border bg-card px-4 py-3">
+          <div className="surface-raised my-2 rounded-lg border border-border bg-card px-4 py-3">
             <div
               className={cn(
-                "mb-2 flex items-center gap-2 text-[10px] uppercase tracking-wide",
+                "mb-2 flex items-center gap-2 text-3xs uppercase tracking-wide",
                 accentOf(accents, item.speaker),
               )}
             >
@@ -111,50 +203,9 @@ export function AgentPart({
       );
     }
 
-    case "tool":
-      return (
-        <div>
-          <div
-            className={cn(
-              "mb-1 text-[10px] uppercase tracking-wide opacity-80",
-              accentOfName(accents, item.participant),
-            )}
-          >
-            {item.participant}
-          </div>
-          <Tool>
-            <ToolHeader
-              toolName={item.name}
-              state={
-                item.output === undefined && item.isError !== true
-                  ? "input-available"
-                  : item.isError === true
-                    ? "output-error"
-                    : "output-available"
-              }
-            />
-            <ToolContent>
-              <ToolInput input={item.input} />
-              {(item.output !== undefined || item.isError === true) && (
-                <ToolOutput
-                  output={item.isError === true ? undefined : item.output}
-                  errorText={
-                    item.isError === true
-                      ? typeof item.output === "string"
-                        ? item.output
-                        : "tool failed"
-                      : undefined
-                  }
-                />
-              )}
-            </ToolContent>
-          </Tool>
-        </div>
-      );
-
     case "routed":
       return (
-        <div className="my-1 px-1 font-mono text-[10px] text-muted-foreground">
+        <div className="my-1 px-1 font-mono text-3xs text-muted-foreground">
           {routedLabel(item)}
         </div>
       );
@@ -162,16 +213,16 @@ export function AgentPart({
     case "turn":
       return (
         <div className="my-3 flex items-center gap-2 text-xs">
-          <div className="h-px flex-1 bg-border" />
+          <div className="h-px flex-1 bg-border-subtle" />
           <span
             className={cn(
-              "font-mono text-[10px] uppercase tracking-wider",
+              "font-mono text-3xs uppercase tracking-wider",
               accentOfName(accents, item.participant),
             )}
           >
             {item.participant}
           </span>
-          <div className="h-px flex-1 bg-border" />
+          <div className="h-px flex-1 bg-border-subtle" />
         </div>
       );
 
@@ -187,8 +238,16 @@ export function AgentPart({
 
     case "phase":
       return (
-        <div className="my-1 px-1 text-center font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+        <div className="my-1 px-1 text-center font-mono text-3xs uppercase tracking-wider text-muted-foreground">
           phase: {item.phase}
+        </div>
+      );
+
+    case "trace":
+      return (
+        <div className={cn("my-1 rounded border border-border-subtle bg-muted/20 px-2 py-1 font-mono text-3xs text-muted-foreground", item.tone === "error" && "border-status-failed/40 text-status-failed")}>
+          <div className="mb-0.5 uppercase tracking-wide">{item.participant} · {item.label}</div>
+          <div className="whitespace-pre-wrap break-words">{item.detail}</div>
         </div>
       );
   }

@@ -5,7 +5,7 @@
  * switching user sessions restores each one's pick.
  */
 import { useAgentSession } from "@/api/queries";
-import type { AgentSession } from "@agentique-console/shared";
+import type { AgentRunSummary, AgentSession } from "@agentique-console/shared";
 import { Badge } from "@/components/ui/badge";
 import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
@@ -52,10 +52,10 @@ export function AgentPane() {
     );
   }
 
-  return <PaneBody session={detail.data.session} />;
+  return <PaneBody session={detail.data.session} runs={detail.data.runs} />;
 }
 
-function PaneBody({ session }: { session: AgentSession }) {
+function PaneBody({ session, runs }: { session: AgentSession; runs: AgentRunSummary[] }) {
   const accents = buildAccents(session.participants);
 
   return (
@@ -65,14 +65,14 @@ function PaneBody({ session }: { session: AgentSession }) {
           <span className="min-w-0 flex-1 truncate text-sm font-medium">
             {session.title}
           </span>
-          <Badge variant="outline" className="text-[10px] uppercase">
+          <Badge variant="outline" className="text-3xs uppercase">
             {session.mode === "plan_execute" ? "plan + execute" : "execute"}
           </Badge>
           {session.mode === "plan_execute" && (
             <Badge
               variant="outline"
               className={cn(
-                "text-[10px] uppercase",
+                "text-3xs uppercase",
                 session.phase === "planning"
                   ? "text-status-waiting"
                   : "text-status-running",
@@ -86,7 +86,7 @@ function PaneBody({ session }: { session: AgentSession }) {
           {session.participants.map((name) => (
             <span
               key={name}
-              className="flex items-center gap-1 font-mono text-[10px] text-muted-foreground"
+              className="flex items-center gap-1 font-mono text-3xs text-muted-foreground"
             >
               <span
                 aria-hidden
@@ -99,8 +99,16 @@ function PaneBody({ session }: { session: AgentSession }) {
             </span>
           ))}
         </div>
-        <div className="mt-1 text-[11px] text-muted-foreground">
-          read-only — the orchestrator runs this session
+        <div className="mt-1 text-2xs text-muted-foreground">
+          Console-managed · durable mailbox · read-only inspector
+        </div>
+        <div className="mt-1 grid gap-0.5">
+          {runs.map((run) => (
+            <div key={run.participant} className="flex min-w-0 items-center gap-1 font-mono text-3xs text-muted-foreground">
+              <span className="truncate" title={run.ownership.join(", ")}>{run.participant} · {run.profileId} · {run.ownership.join(", ") || "coordination"}</span>
+              <span className="ml-auto shrink-0">gen {run.generation} · {run.turnCount} turns · {run.contextTokens.toLocaleString()} ctx</span>
+            </div>
+          ))}
         </div>
       </div>
       <AgentTranscript session={session} />

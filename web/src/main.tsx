@@ -1,6 +1,11 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
+// Self-hosted variable fonts — imported before the stylesheet so the @theme
+// families below resolve to something already declared.
+import "@fontsource-variable/inter";
+import "@fontsource-variable/jetbrains-mono";
+
 import "@/styles/globals.css";
 
 import { App } from "@/app/app";

@@ -33,7 +33,8 @@ import { useConnectionStore } from "@/stores/connection";
 import { useRuntimeStore } from "@/stores/runtime";
 import { useUserSessionStreamsStore } from "@/stores/user-session-streams";
 
-import { foldUserItems, itemKey } from "./user-fold";
+import { foldUserItems } from "./user-fold";
+import { groupKey, groupUserItems } from "./user-groups";
 import { UserPart } from "./user-parts";
 
 const TAIL_LIMIT = 500;
@@ -84,7 +85,9 @@ export function UserTranscript({
   );
 
   const events = stream?.items ?? EMPTY_EVENTS;
-  const items = useMemo(() => foldUserItems(events), [events]);
+  // Fold to items, then collapse tool runs into chains. Trimming happens on
+  // the grouped list so a chain is never cut in half at the tail boundary.
+  const items = useMemo(() => groupUserItems(foldUserItems(events)), [events]);
   const visible = showAll ? items : items.slice(-TAIL_LIMIT);
 
   // Streaming overlays, one per speaker key with any text.
@@ -134,7 +137,7 @@ export function UserTranscript({
         )}
         {visible.map((item) => (
           <UserPart
-            key={itemKey(item)}
+            key={groupKey(item)}
             sessionId={id}
             item={item}
             pendingById={pendingById}
@@ -152,7 +155,7 @@ export function UserTranscript({
             {overlay.message !== "" && (
               <Message from="assistant">
                 <MessageContent>
-                  <div className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground opacity-80">
+                  <div className="mb-1 text-3xs uppercase tracking-wide text-muted-foreground opacity-80">
                     {overlay.key}
                   </div>
                   <MessageResponse>{overlay.message}</MessageResponse>

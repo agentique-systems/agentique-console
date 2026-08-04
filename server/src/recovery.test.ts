@@ -12,13 +12,22 @@ import {
   makeDelegationHarness,
   restartHarness,
 } from "./test-helpers.ts";
-import { recoverInterruptedTurns } from "./recovery.ts";
+import { reconcileDurableCommunication, recoverInterruptedTurns } from "./recovery.ts";
 import {
   ORCHESTRATOR_SEAT,
   spawnNameOf,
 } from "./agent-sessions/spawn-names.ts";
 
 describe("recoverInterruptedTurns", () => {
+  it("reconciles an authoritative message whose event append was interrupted", async () => {
+    const h = makeDelegationHarness(async function* () { yield successMessage(); });
+    const userSessionId = h.addUserSession();
+    h.repo.appendMessage({ sessionKind: "user", sessionId: userSessionId, speaker: { kind: "system", name: "system" }, kind: "notice", text: "committed before crash" });
+    expect(await reconcileDurableCommunication({ repo: h.repo, bus: h.bus })).toBe(1);
+    const events = await collectUntil(h.bus, (event) => event.type === "user_session.message");
+    expect(events.at(-1)?.payload).toMatchObject({ message: { text: "committed before crash" } });
+    expect(await reconcileDurableCommunication({ repo: h.repo, bus: h.bus })).toBe(0);
+  });
   it("closes a seat turn orphaned by a crash", async () => {
     const h = makeDelegationHarness(async function* () {
       yield initMessage("orch");

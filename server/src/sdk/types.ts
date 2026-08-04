@@ -46,6 +46,7 @@ export interface SdkMessage {
   num_turns?: number;
   terminal_reason?: string;
   errors?: string[];
+  usage?: { input_tokens?: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number; output_tokens?: number };
   // permission_denied fields
   tool_use_id?: string;
   tool_name?: string;
@@ -105,4 +106,3 @@ export interface ConsoleSdk {
   ): unknown;
   createSdkMcpServer(config: SdkMcpServerConfig): unknown;
 }
-

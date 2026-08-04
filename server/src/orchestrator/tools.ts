@@ -1,17 +1,10 @@
 /**
  * The console MCP server, bound to one UserSession: create_agent_session (the
- * spawn-plan factory), read/list, and the coordinator's task board. Execution
- * and messaging are native (Agent + SendMessage); these tools only register
- * metadata and read derived state.
+ * managed-session factory), durable messaging, read/list, profiles, and the
+ * single Console-owned task board. It never returns native Agent spawn plans.
  */
 import { z } from "zod";
-import type { AgentSessionHost } from "../agent-sessions/host.ts";
-import {
-  COORDINATOR_SEAT,
-  ORCHESTRATOR_SEAT,
-  spawnNameOf,
-} from "../agent-sessions/spawn-names.ts";
-import { SESSION_ORCHESTRATOR_AGENT } from "./options.ts";
+import { MAIN_RECIPIENT, ORCHESTRATOR_SEAT, type AgentSessionHost } from "../agent-sessions/host.ts";
 import { ApiError } from "../api/errors.ts";
 import type { EventBus } from "../events/bus.ts";
 import type { Repo } from "../db/repo.ts";
@@ -43,7 +36,7 @@ async function guarded(
     return ok(await run());
   } catch (error) {
     if (error instanceof ApiError) return fail(error.message);
-    throw error;
+    return fail(error instanceof Error ? error.message : String(error));
   }
 }
 
@@ -76,7 +69,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
   const tools = [
     sdk.tool(
       "create_agent_session",
-      "Register a new agent session (1-4 specialist seats) and get its SPAWN PLAN: the exact Agent-tool calls to make, in order. Spawn every entry verbatim (name, subagent_type, prompt), specialists first, coordinator LAST, all with run_in_background true. The agents talk via SendMessage; the coordinator reports to you.",
+      "Create and immediately launch a Console-managed AgentSession with one coordinator and 1-4 profile-bound specialists. The Console owns every provider session, mailbox delivery, retry, and event; never call Agent yourself.",
       {
         title: z.string().describe("Short working title for the session"),
         mode: z
@@ -90,10 +83,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
               name: z
                 .string()
                 .describe("Seat name, e.g. 'scout' — addressable via @name"),
-              preset: z
-                .enum(["explorer", "implementer", "reviewer", "researcher"])
-                .optional()
-                .describe("Built-in brief to use"),
+              profileId: z.string().describe("A profile id returned by list_agent_profiles"),
               instructions: z
                 .string()
                 .optional()
@@ -101,6 +91,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
                   "Ad-hoc brief (required when no preset; appended to the preset otherwise)",
                 ),
               model: z.string().optional().describe("Model override"),
+              owns: z.array(z.string()).min(1).describe("Explicit files, directories, component, or review scope this seat exclusively owns"),
             }),
           )
           .min(1)
@@ -117,9 +108,10 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         mode: "execute" | "plan_execute";
         agents: {
           name: string;
-          preset?: "explorer" | "implementer" | "reviewer" | "researcher";
+          profileId: string;
           instructions?: string;
           model?: string;
+          owns: string[];
         }[];
         briefing?: string;
       }) =>
@@ -129,48 +121,33 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
             title: args.title,
             mode: args.mode,
             agents: args.agents,
+            briefing: args.briefing,
           });
-          const planning = args.mode === "plan_execute";
-          const coordinatorName = spawnNameOf(agentSessionId, COORDINATOR_SEAT);
-          const seatNames = participants.map((seat) =>
-            spawnNameOf(agentSessionId, seat),
-          );
-          const rosterLine = `Agent session ${agentSessionId} "${args.title}". Coordinator: ${coordinatorName}. Seats: ${seatNames.join(", ")}.`;
-          const spawns = [
-            ...args.agents.map((agent, index) => ({
-              name: seatNames[index] as string,
-              subagent_type: `${agent.preset ?? "adhoc"}${planning ? "-planning" : ""}`,
-              ...(agent.model === undefined ? {} : { model: agent.model }),
-              prompt: [
-                `You are seat "${agent.name}" (spawn name ${seatNames[index]}) in ${rosterLine}`,
-                ...(agent.instructions === undefined
-                  ? []
-                  : [`Your brief: ${agent.instructions}`]),
-                planning
-                  ? "Draft your part of the plan and SendMessage it to the coordinator, then stop."
-                  : "Await your coordinator's brief via SendMessage; report results to it by name.",
-              ].join("\n"),
-            })),
-            {
-              name: coordinatorName,
-              subagent_type: SESSION_ORCHESTRATOR_AGENT,
-              prompt: [
-                `You coordinate ${rosterLine}`,
-                planning
-                  ? "This session is in its PLANNING phase: collect each seat's plan, then send the assembled plan to main for approval. Do not let seats execute until main approves."
-                  : "Brief the seats now and drive the session to completion.",
-                ...(args.briefing === undefined
-                  ? []
-                  : [`Mission from the Orchestrator: ${args.briefing}`]),
-              ].join("\n"),
-            },
-          ];
           return {
             agentSessionId,
-            spawns,
-            note: "Spawn each entry with ONE Agent tool call, in this order (coordinator last). Copy ALL THREE fields as the Agent tool's parameters: `name` (REQUIRED — without it agents cannot SendMessage each other), `subagent_type`, and `prompt`, plus run_in_background: true.",
+            participants,
+            coordinator: ORCHESTRATOR_SEAT,
+            status: "launched",
           };
         }),
+    ),
+
+    sdk.tool(
+      "send_agent_message",
+      "Send a focused assignment or response from main to an AgentSession coordinator. Direct specialist messaging is intentionally forbidden.",
+      { agentSessionId: z.string(), message: z.string().min(1), category: z.enum(["assignment", "update"]).default("assignment"), dedupeKey: z.string().optional() },
+      async (args: { agentSessionId: string; message: string; category: "assignment" | "update"; dedupeKey?: string }) => guarded(() => {
+        owned(args.agentSessionId);
+        const message = host.post({ agentSessionId: args.agentSessionId, speaker: { kind: "orchestrator", name: MAIN_RECIPIENT }, to: ORCHESTRATOR_SEAT, text: args.message, category: args.category, ...(args.dedupeKey ? { dedupeKey: args.dedupeKey } : {}) });
+        return { delivered: true, messageSeq: message.seq };
+      }),
+    ),
+
+    sdk.tool(
+      "list_agent_profiles",
+      "List the validated custom and built-in profiles available for managed AgentSessions.",
+      {},
+      async () => guarded(() => ({ availability: host.runtimeAvailability(), profiles: host.profiles().map(({ id, title, purpose, tools, runtime, sandboxRequired }) => ({ id, title, purpose, tools, runtime, sandboxRequired })) })),
     ),
 
     sdk.tool(

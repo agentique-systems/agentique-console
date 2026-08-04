@@ -49,13 +49,13 @@ export function DraftView() {
   return (
     <div className="flex h-full min-h-0 flex-col" data-testid="draft-session">
       <div className="flex items-center justify-between border-b border-border px-3 py-2">
-        <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
+        <span className="text-3xs uppercase tracking-wider text-muted-foreground">
           New session
         </span>
         <Button
           size="sm"
           variant="ghost"
-          className="h-6 px-2 text-[11px]"
+          className="h-6 px-2 text-2xs"
           onClick={cancelDraft}
         >
           cancel
@@ -63,7 +63,7 @@ export function DraftView() {
       </div>
       <div className="flex flex-1 flex-col justify-end gap-3 p-3">
         <div className="space-y-1">
-          <Label className="text-[10px] uppercase tracking-wider">
+          <Label className="text-3xs uppercase tracking-wider">
             What do you want done?
           </Label>
           <Textarea
@@ -89,11 +89,11 @@ export function DraftView() {
             composer teaches once the session exists. */}
         <div className="flex items-center gap-2">
           <ModeToggle mode={mode} onChange={setMode} />
-          <span className="text-[10px] text-muted-foreground">
+          <span className="text-3xs text-muted-foreground">
             shift+tab to cycle
           </span>
         </div>
-        <div className="text-[10px] text-muted-foreground">
+        <div className="text-3xs text-muted-foreground">
           {mode === "plan_execute"
             ? "the orchestrator plans first and waits for your approval"
             : "the orchestrator gets straight to work"}
@@ -101,7 +101,7 @@ export function DraftView() {
         <Button size="sm" disabled={!ready || create.isPending} onClick={send}>
           {create.isPending ? "starting…" : "send — this starts the session"}
         </Button>
-        <div className="text-[10px] text-muted-foreground">
+        <div className="text-3xs text-muted-foreground">
           Nothing is saved until you send. The session names itself from your
           first message.
         </div>

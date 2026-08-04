@@ -13,6 +13,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { AgentSessionHost } from "../src/agent-sessions/host.ts";
+import { AgentProfileRegistry } from "../src/agent-profiles/registry.ts";
 import { loadConfig } from "../src/config.ts";
 import { openDb } from "../src/db/client.ts";
 import { Repo } from "../src/db/repo.ts";
@@ -21,8 +22,8 @@ import { InteractionService } from "../src/orchestrator/interactions.ts";
 import { OrchestratorRunner } from "../src/orchestrator/runner.ts";
 import { buildConsoleMcpServer } from "../src/orchestrator/tools.ts";
 import { resolveSdk } from "../src/sdk/client.ts";
+import { SqliteSessionStore } from "../src/sdk/session-store.ts";
 import { UserSessionService } from "../src/sessions/service.ts";
-import { buildTaskHooks } from "../src/tasks/hooks.ts";
 import { TaskService } from "../src/tasks/service.ts";
 import { WorkspaceService } from "../src/workspaces/service.ts";
 
@@ -44,41 +45,21 @@ const interactions = new InteractionService(db, bus);
 const tasks = new TaskService(db, bus);
 const getWorkspaceRoot = (id: string) => workspaces.get(id).rootPath;
 
-const host = new AgentSessionHost({ repo, bus });
-const runner = new OrchestratorRunner({
+const sessionStore = new SqliteSessionStore(db);
+let runner!: OrchestratorRunner;
+const host = new AgentSessionHost({
+  repo, bus, config, profiles: new AgentProfileRegistry(config.profilesFile),
+  sdk: () => resolveSdk(), sessionStore, getWorkspaceRoot, interactions, tasks,
+  wake: (userSessionId, agentSessionId, category, text) => runner.enqueueAgentMilestone(userSessionId, agentSessionId, category, text),
+});
+runner = new OrchestratorRunner({
   repo,
   bus,
   config,
   sdk: () => resolveSdk(),
   interactions,
   getWorkspaceRoot,
-  buildHooks: ({ workspaceId, userSessionId }) => ({
-    ...buildTaskHooks(tasks, {
-      workspaceId,
-      userSessionId,
-      agentSessionId: null,
-      participant: null,
-    }),
-    SubagentStop: [
-      {
-        hooks: [
-          async (input: unknown) => {
-            const agentId = (input as { agent_id?: unknown }).agent_id;
-            if (typeof agentId === "string") host.releaseAgent(agentId);
-            return {};
-          },
-        ],
-      },
-    ],
-  }),
-  seats: {
-    spawn: (callId, spawnName, agentSessionId, subagentType) =>
-      host.observeAgentSpawn(callId, spawnName, agentSessionId, subagentType),
-    launch: (callId, agentId) => host.confirmAgentLaunch(callId, agentId),
-    seatOf: (callId) => host.seatOf(callId),
-    seatOfAddress: (to) => host.seatOfSpawnAddress(to),
-    recordMessage: (input) => host.recordDerivedMessage(input),
-  },
+  sessionStore,
   buildMcpServer: (userSessionId, sdk) =>
     buildConsoleMcpServer({ sdk, host, repo, bus, userSessionId, tasks }),
 });

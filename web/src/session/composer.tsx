@@ -4,22 +4,16 @@
  * and no addressing. Enter submits; Shift+Enter breaks a line; Shift+Tab cycles
  * the session mode (Claude Code's gesture).
  *
+ * Built on the vendored AI Elements prompt-input, which owns the shell, the
+ * composition-safe Enter handling (a bare keydown submits mid-IME-composition
+ * and breaks every CJK input method), and the ChatStatus-driven submit button.
+ *
  * The footer owns every control that acts on the textarea: mode on the left,
  * the rewrite pass and the one send/stop/steer button on the right. There is no
- * separate interrupt button — see `sendMode` for the four states.
+ * separate interrupt button — see `sendMode` for the states.
  */
-import {
-  CornerDownLeftIcon,
-  CornerDownRightIcon,
-  SparklesIcon,
-  SquareIcon,
-} from "lucide-react";
-import {
-  forwardRef,
-  useImperativeHandle,
-  useRef,
-  useState,
-} from "react";
+import { CornerDownRightIcon, SparklesIcon } from "lucide-react";
+import { forwardRef, useImperativeHandle, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { ApiError } from "@/api/client";
@@ -30,7 +24,16 @@ import {
   usePostUserMessage,
 } from "@/api/mutations";
 import type { SessionMode, UserSession } from "@agentique-console/shared";
-import { Button } from "@/components/ui/button";
+import {
+  PromptInput,
+  PromptInputBody,
+  PromptInputButton,
+  PromptInputFooter,
+  PromptInputSubmit,
+  PromptInputTextarea,
+  PromptInputTools,
+  type ChatStatus,
+} from "@/components/ai-elements/prompt-input";
 import { Spinner } from "@/components/ui/spinner";
 
 import { ModeToggle, nextMode } from "./session-header";
@@ -72,6 +75,13 @@ export const Composer = forwardRef<
   const empty = draft.trim() === "";
   const sendMode: SendMode =
     busy && !archived ? (empty ? "interrupt" : "steer") : "send";
+
+  /** The console's send modes, mapped onto prompt-input's four ChatStatuses. */
+  const status: ChatStatus = post.isPending
+    ? "submitted"
+    : sendMode === "interrupt"
+      ? "streaming"
+      : "ready";
 
   const send = () => {
     const text = draft.trim();
@@ -132,54 +142,50 @@ export const Composer = forwardRef<
   };
 
   return (
-    <form
-      className="border-t border-border p-3"
-      onSubmit={(event) => {
-        event.preventDefault();
-        send();
-      }}
-    >
-      <div className="flex flex-col rounded-xl border border-border bg-card shadow-xs focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/50">
-        <textarea
-          ref={textareaRef}
-          value={draft}
-          rows={2}
-          placeholder={
-            archived ? "session is archived" : "message the orchestrator…"
-          }
-          disabled={archived || post.isPending}
-          className="field-sizing-content max-h-48 min-h-16 w-full resize-none bg-transparent px-3 py-2 text-sm outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50"
-          onChange={(event) => setDraft(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey) {
-              event.preventDefault();
-              send();
-              return;
+    <div className="border-t border-border p-3">
+      <PromptInput
+        onSubmit={(event) => {
+          event.preventDefault();
+          send();
+        }}
+      >
+        <PromptInputBody>
+          <PromptInputTextarea
+            ref={textareaRef}
+            value={draft}
+            rows={2}
+            placeholder={
+              archived ? "session is archived" : "message the orchestrator…"
             }
-            if (event.key === "Tab" && event.shiftKey) {
-              event.preventDefault();
-              cycleMode();
-            }
-          }}
-        />
-        <div className="flex items-center justify-between gap-2 px-2 pb-2">
-          <div className="flex min-w-0 items-center gap-2">
+            disabled={archived || post.isPending}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Tab" && event.shiftKey) {
+                // preventDefault also stops prompt-input's own Enter handling,
+                // which is exactly the contract it documents.
+                event.preventDefault();
+                cycleMode();
+              }
+            }}
+          />
+        </PromptInputBody>
+
+        <PromptInputFooter>
+          <PromptInputTools>
             <ModeToggle
               mode={session.mode}
               disabled={patch.isPending || archived}
               onChange={setMode}
             />
-            <span className="truncate text-[10px] text-muted-foreground">
+            <span className="truncate text-3xs text-muted-foreground">
               shift+tab to cycle
             </span>
-          </div>
-          <div className="flex shrink-0 items-center gap-1">
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-xs"
+          </PromptInputTools>
+
+          <PromptInputTools className="shrink-0 gap-1">
+            <PromptInputButton
               aria-label="improve wording"
-              title="rewrite this message more effectively"
+              tooltip="rewrite this message more effectively"
               disabled={empty || archived || improve.isPending}
               onClick={runImprove}
             >
@@ -188,19 +194,18 @@ export const Composer = forwardRef<
               ) : (
                 <SparklesIcon className="size-3" />
               )}
-            </Button>
-            <Button
-              // Enter in the textarea must never reach a stop button.
-              type={sendMode === "interrupt" ? "button" : "submit"}
-              size="icon-xs"
+            </PromptInputButton>
+
+            <PromptInputSubmit
               aria-label={SEND_LABEL[sendMode]}
               title={SEND_LABEL[sendMode]}
+              status={status}
               disabled={
                 sendMode === "interrupt"
                   ? interrupt.isPending
                   : archived || post.isPending || empty
               }
-              onClick={
+              onStop={
                 sendMode === "interrupt"
                   ? () =>
                       interrupt.mutate(
@@ -213,19 +218,13 @@ export const Composer = forwardRef<
                   : undefined
               }
             >
-              {post.isPending ? (
-                <Spinner className="size-3" />
-              ) : sendMode === "interrupt" ? (
-                <SquareIcon className="size-3 fill-current" />
-              ) : sendMode === "steer" ? (
+              {sendMode === "steer" && !post.isPending ? (
                 <CornerDownRightIcon className="size-3" />
-              ) : (
-                <CornerDownLeftIcon className="size-3" />
-              )}
-            </Button>
-          </div>
-        </div>
-      </div>
-    </form>
+              ) : undefined}
+            </PromptInputSubmit>
+          </PromptInputTools>
+        </PromptInputFooter>
+      </PromptInput>
+    </div>
   );
 });

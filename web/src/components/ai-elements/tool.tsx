@@ -6,6 +6,7 @@ import {
   ClockIcon,
   WrenchIcon,
   XCircleIcon,
+  ExternalLinkIcon,
 } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
 
@@ -57,21 +58,47 @@ export type ToolHeaderProps = {
   toolName: string;
   state: ToolState;
   className?: string;
+  /**
+   * Local addition: the card also nests inside a chain-of-thought step, where
+   * the step already carries the human sentence and this is only the "show me
+   * the raw call" affordance. Compact shrinks it to that job.
+   */
+  compact?: boolean;
 };
 
-export const ToolHeader = ({ className, toolName, state }: ToolHeaderProps) => (
+export const ToolHeader = ({
+  className,
+  toolName,
+  state,
+  compact = false,
+}: ToolHeaderProps) => (
   <CollapsibleTrigger
     className={cn(
-      "flex w-full items-center justify-between gap-4 p-3",
+      "flex w-full items-center justify-between gap-4",
+      compact ? "gap-2 p-1.5" : "p-3",
       className,
     )}
   >
-    <div className="flex items-center gap-2">
-      <WrenchIcon className="size-4 text-muted-foreground" />
-      <span className="font-medium text-sm">{toolName}</span>
-      {getStatusBadge(state)}
+    <div className="flex min-w-0 items-center gap-2">
+      <WrenchIcon
+        className={cn("shrink-0 text-muted-foreground", compact ? "size-3" : "size-4")}
+      />
+      <span
+        className={cn(
+          "truncate font-medium",
+          compact ? "font-mono text-2xs" : "text-sm",
+        )}
+      >
+        {toolName}
+      </span>
+      {compact ? null : getStatusBadge(state)}
     </div>
-    <ChevronDownIcon className="size-4 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
+    <ChevronDownIcon
+      className={cn(
+        "shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-180",
+        compact ? "size-3" : "size-4",
+      )}
+    />
   </CollapsibleTrigger>
 );
 
@@ -124,6 +151,10 @@ export const ToolOutput = ({
     return null;
   }
 
+  const artifact = typeof output === "object" && output !== null && typeof (output as { artifactId?: unknown }).artifactId === "string"
+    ? output as { artifactId: string; bytes?: number }
+    : null;
+
   return (
     <div className={cn("space-y-2", className)} {...props}>
       <h4 className="font-medium text-muted-foreground text-xs uppercase tracking-wide">
@@ -138,6 +169,12 @@ export const ToolOutput = ({
         )}
       >
         {errorText !== undefined && <div className="px-3 pt-2">{errorText}</div>}
+        {artifact !== null && (
+          <a className="mx-3 mt-3 flex w-fit items-center gap-1 text-xs text-primary underline underline-offset-2" href={`/api/artifacts/${artifact.artifactId}`} target="_blank" rel="noreferrer">
+            Open complete artifact{artifact.bytes === undefined ? "" : ` (${artifact.bytes.toLocaleString()} bytes)`}
+            <ExternalLinkIcon className="size-3" />
+          </a>
+        )}
         {output !== undefined && <JsonBlock value={output} />}
       </div>
     </div>

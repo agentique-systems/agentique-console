@@ -23,6 +23,14 @@ export interface Config {
   improveModel: string;
   /** Reasoning effort for every session; undefined = SDK default. */
   effort: string | undefined;
+  /** Optional operator-owned profile overrides. Built-ins remain immutable. */
+  profilesFile: string;
+  /** Hard scheduler caps; queued work is durable and resumes when capacity frees. */
+  globalAgentTurns: number;
+  perAgentSessionTurns: number;
+  /** Rotate a participant onto a fresh provider session before the next turn. */
+  contextTokenLimit: number;
+  contextTurnLimit: number;
 }
 
 function parseRoots(
@@ -58,5 +66,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     model: env.CONSOLE_MODEL,
     improveModel: env.CONSOLE_IMPROVE_MODEL ?? "claude-sonnet-5",
     effort: env.CONSOLE_EFFORT,
+    profilesFile:
+      env.CONSOLE_PROFILES_FILE ?? path.join(dataDir, "profiles.json"),
+    globalAgentTurns: Number(env.CONSOLE_GLOBAL_AGENT_TURNS ?? 4),
+    perAgentSessionTurns: Number(env.CONSOLE_PER_SESSION_AGENT_TURNS ?? 2),
+    contextTokenLimit: Number(env.CONSOLE_CONTEXT_TOKEN_LIMIT ?? 120_000),
+    contextTurnLimit: Number(env.CONSOLE_CONTEXT_TURN_LIMIT ?? 30),
   };
 }

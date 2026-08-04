@@ -25,6 +25,39 @@ export function spawnNameOf(agentSessionId: string, seat: string): string {
   return `${sanitize(seat)}-${sessionSuffix(agentSessionId)}`.slice(0, 64);
 }
 
+/** The as_… id a spawn prompt claims membership of, if any. */
+export const AGENT_SESSION_ID_RE = /\bas_[a-z0-9]{20}\b/;
+
+/**
+ * The spawn name an Agent tool call carries, preferring the `name` parameter
+ * and falling back to the spawn-plan prompt templates ("(spawn name X)" /
+ * "Coordinator: X.").
+ *
+ * The fallback exists because a model that forgets `name` is the observed
+ * failure mode, not a hypothetical: it dropped the parameter on all 11 spawns
+ * of the first real multi-seat run. Recovering the name here lets the
+ * PreToolUse hook put it BACK on the tool call, which is what actually makes
+ * the seat addressable — parsing it for observation alone leaves siblings
+ * unable to SendMessage each other while the console's panes look correct.
+ */
+export function spawnNameFrom(input: {
+  name?: unknown;
+  prompt?: unknown;
+  subagent_type?: unknown;
+}): string | null {
+  if (typeof input.name === "string" && input.name !== "") return input.name;
+  const prompt = typeof input.prompt === "string" ? input.prompt : "";
+  const seat = /\(spawn name ([A-Za-z0-9_-]+)\)/.exec(prompt)?.[1];
+  if (seat !== undefined) return seat;
+  if (input.subagent_type === SESSION_ORCHESTRATOR_TYPE) {
+    return /Coordinator: ([A-Za-z0-9_-]+)\./.exec(prompt)?.[1] ?? null;
+  }
+  return null;
+}
+
+/** Kept here (not options.ts) so spawn-name logic has no orchestrator import. */
+const SESSION_ORCHESTRATOR_TYPE = "session-orchestrator";
+
 /** Reverses spawnNameOf against a candidate seat list; null if no match. */
 export function seatOfSpawnName(
   spawnName: string,

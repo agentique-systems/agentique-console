@@ -1,7 +1,6 @@
 "use client";
 
 import { useControllableState } from "@radix-ui/react-use-controllable-state";
-import { code } from "@streamdown/code";
 import { BrainIcon, ChevronDownIcon } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
 import {
@@ -23,6 +22,7 @@ import {
 } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
 
+import { markdownPlugins } from "./markdown-plugins";
 import { Shimmer } from "./shimmer";
 
 interface ReasoningContextValue {
@@ -202,7 +202,7 @@ export type ReasoningContentProps = ComponentProps<
   children: string;
 };
 
-const streamdownPlugins = { code };
+const streamdownPlugins = markdownPlugins;
 
 export const ReasoningContent = memo(
   ({ className, children, ...props }: ReasoningContentProps) => (

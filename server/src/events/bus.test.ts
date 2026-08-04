@@ -38,6 +38,14 @@ async function collect(
 }
 
 describe("EventBus", () => {
+  it("stores oversized payloads as retrievable durable artifacts", () => {
+    const { db } = openDb(":memory:");
+    const bus = new EventBus(db);
+    const captured = bus.capture({ output: "x".repeat(20_000) }) as { artifactId: string; truncated: boolean; bytes: number };
+    expect(captured.truncated).toBe(true);
+    expect(captured.bytes).toBeGreaterThan(20_000);
+    expect(JSON.parse(bus.getArtifact(captured.artifactId)?.content ?? "{}").output).toHaveLength(20_000);
+  });
   it("stamps increasing seq on append and reports headSeq", () => {
     const bus = makeBus();
     expect(bus.headSeq()).toBe(0);

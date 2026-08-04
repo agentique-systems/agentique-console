@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" class="dark">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -8,6 +8,26 @@
       href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🏭</text></svg>"
     />
     <title>Agentique Console</title>
+    <!--
+      Theme before first paint. Blocking on purpose and deliberately tiny: if
+      React decided this, every reload would flash the wrong theme. Dark is the
+      fallback because it is the console's home. The storage key is mirrored in
+      src/stores/theme.ts as THEME_STORAGE_KEY.
+    -->
+    <script>
+      (function () {
+        try {
+          var stored = localStorage.getItem("console:theme");
+          var dark =
+            stored === "dark" ||
+            ((stored === null || stored === "system") &&
+              !window.matchMedia("(prefers-color-scheme: light)").matches);
+          document.documentElement.classList.toggle("dark", dark);
+        } catch (_) {
+          document.documentElement.classList.add("dark");
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

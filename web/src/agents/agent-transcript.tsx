@@ -34,7 +34,8 @@ import { useConnectionStore } from "@/stores/connection";
 import { useRuntimeStore } from "@/stores/runtime";
 
 import { accentOfName, buildAccents } from "./accents";
-import { agentItemKey, foldAgentItems } from "./agent-fold";
+import { foldAgentItems } from "./agent-fold";
+import { agentGroupKey, groupAgentItems } from "./agent-groups";
 import { AgentPart } from "./agent-parts";
 
 const TAIL_LIMIT = 500;
@@ -67,7 +68,9 @@ export function AgentTranscript({ session }: { session: AgentSession }) {
   }, [transcript.data, buffering, hydrateStream, key]);
 
   const events = stream?.items ?? EMPTY_EVENTS;
-  const items = useMemo(() => foldAgentItems(events), [events]);
+  // Fold to items, then collapse each seat's tool run into one Task block.
+  // Trimming happens on the grouped list so a run is never cut in half.
+  const items = useMemo(() => groupAgentItems(foldAgentItems(events)), [events]);
   const visible = showAll ? items : items.slice(-TAIL_LIMIT);
 
   const accents = useMemo(
@@ -128,7 +131,7 @@ export function AgentTranscript({ session }: { session: AgentSession }) {
             />
           )}
         {visible.map((item) => (
-          <AgentPart key={agentItemKey(item)} item={item} accents={accents} />
+          <AgentPart key={agentGroupKey(item)} item={item} accents={accents} />
         ))}
         {overlays.map((overlay) => (
           <div key={overlay.key}>
@@ -143,7 +146,7 @@ export function AgentTranscript({ session }: { session: AgentSession }) {
                 <MessageContent>
                   <div
                     className={cn(
-                      "mb-1 text-[10px] uppercase tracking-wide opacity-80",
+                      "mb-1 text-3xs uppercase tracking-wide opacity-80",
                       accentOfName(accents, overlay.key),
                     )}
                   >

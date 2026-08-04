@@ -1,10 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { sdkEnv } from "./env.ts";
 
-const PINNED = {
-  CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION: "1000",
-};
-
 describe("sdkEnv", () => {
   it("strips the launching Claude Code session's coupling and behaviour vars", () => {
     const env = sdkEnv({
@@ -19,7 +15,7 @@ describe("sdkEnv", () => {
       CLAUDE_EFFORT: "xhigh",
       AI_AGENT: "claude-code",
     });
-    expect(env).toEqual(PINNED);
+    expect(env).toEqual({});
   });
 
   it("keeps paths, credentials and provider settings", () => {
@@ -39,16 +35,15 @@ describe("sdkEnv", () => {
       CLAUDE_CODE_OAUTH_TOKEN: "token",
       CLAUDE_CONFIG_DIR: "/home/me/.claude",
       HTTPS_PROXY: "http://proxy:8080",
-      ...PINNED,
     });
   });
 
   it("drops undefined values", () => {
-    expect(sdkEnv({ A: undefined, B: "b" })).toEqual({ B: "b", ...PINNED });
+    expect(sdkEnv({ A: undefined, B: "b" })).toEqual({ B: "b" });
   });
 
-  it("pins the console's subagent knobs over host-provided values", () => {
+  it("drops native subagent knobs", () => {
     const env = sdkEnv({ CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION: "5" });
-    expect(env).toEqual(PINNED);
+    expect(env).toEqual({});
   });
 });

@@ -58,6 +58,10 @@ export interface UserTurnSettledPayload {
   /** Jobs still queued for this session — UI keeps the busy state up while > 0. */
   queuedJobs: number;
 }
+export interface UserContextRotatedPayload {
+  sessionId: string; generation: number; reason: "token_limit" | "turn_limit"; memoryChars: number;
+}
+export interface UserRuntimePayload { sessionId: string; detail: string; }
 export interface ToolCallPayload {
   sessionId: string;
   turnId: string;
@@ -142,6 +146,44 @@ export interface AgentPlanCapturedPayload {
   participant: string;
   plan: string;
 }
+export interface AgentMailboxPayload {
+  agentSessionId: string;
+  deliveryId: string;
+  messageSeq: number;
+  sender: string;
+  recipient: string;
+  category: "assignment" | "update" | "milestone" | "failure" | "final" | "decision";
+  status: "queued" | "delivered" | "acknowledged" | "cancelled";
+}
+export interface AgentRuntimePayload {
+  agentSessionId: string;
+  participant: string;
+  turnId?: string;
+  detail: string;
+}
+export interface AgentContextRotatedPayload {
+  agentSessionId: string;
+  participant: string;
+  generation: number;
+  reason: "token_limit" | "turn_limit";
+  memoryChars: number;
+}
+export interface AgentProcessStartedPayload {
+  agentSessionId: string; participant: string; processId: string;
+  command: string; args: string[]; cwd: string; pid?: number;
+}
+export interface AgentProcessOutputPayload {
+  agentSessionId: string; participant: string; processId: string;
+  seq: number; stream: "stdout" | "stderr"; text: string;
+}
+export interface AgentProcessExitedPayload {
+  agentSessionId: string; participant: string; processId: string;
+  code: number | null; signal: string | null;
+}
+export interface UsageRecordedPayload {
+  sessionId: string; participant: string; profileId?: string; generation: number;
+  turnId: string; inputTokens: number; outputTokens: number; costUsd?: number;
+}
 
 export interface TaskCreatedPayload {
   task: Task;
@@ -164,7 +206,8 @@ export interface FlowResultPayload {
 }
 
 // ---------------------------------------------------------------------------
-// Transient payloads (never persisted, never replayed)
+// Streaming payloads are transient. Agent state is durable so crashes and
+// unexpected termination remain visible when a transcript is replayed.
 
 export interface StreamDeltaPayload {
   scope: EventScope;
@@ -216,6 +259,8 @@ export type ConsoleEvent = Base &
     | { type: "user_session.message"; payload: UserSessionMessagePayload }
     | { type: "user_session.turn.started"; payload: UserTurnStartedPayload }
     | { type: "user_session.turn.settled"; payload: UserTurnSettledPayload }
+    | { type: "user_session.context.rotated"; payload: UserContextRotatedPayload }
+    | { type: "user_session.runtime"; payload: UserRuntimePayload }
     | { type: "user_session.tool.call"; payload: ToolCallPayload }
     | { type: "user_session.tool.result"; payload: ToolResultPayload }
     | { type: "user_session.question.asked"; payload: QuestionAskedPayload }
@@ -232,8 +277,15 @@ export type ConsoleEvent = Base &
     | { type: "agent_session.status"; payload: AgentSessionStatusPayload }
     | { type: "agent_session.phase"; payload: AgentSessionPhasePayload }
     | { type: "agent_session.plan.captured"; payload: AgentPlanCapturedPayload }
+    | { type: "agent_session.mailbox"; payload: AgentMailboxPayload }
+    | { type: "agent_session.runtime"; payload: AgentRuntimePayload }
+    | { type: "agent_session.context.rotated"; payload: AgentContextRotatedPayload }
+    | { type: "agent_session.process.started"; payload: AgentProcessStartedPayload }
+    | { type: "agent_session.process.output"; payload: AgentProcessOutputPayload }
+    | { type: "agent_session.process.exited"; payload: AgentProcessExitedPayload }
     | { type: "task.created"; payload: TaskCreatedPayload }
     | { type: "task.updated"; payload: TaskUpdatedPayload }
+    | { type: "usage.recorded"; payload: UsageRecordedPayload }
     | { type: "flow.delegation"; payload: FlowDelegationPayload }
     | { type: "flow.result"; payload: FlowResultPayload }
     | { type: "stream.delta"; payload: StreamDeltaPayload }
@@ -246,7 +298,6 @@ export type ConsoleEventType = ConsoleEvent["type"];
 export const TRANSIENT_TYPES: ReadonlySet<ConsoleEventType> = new Set([
   "stream.delta",
   "stream.reasoning",
-  "agent.state",
 ]);
 
 /** Stable per-event identity used for client-side dedupe: seq for persisted events. */

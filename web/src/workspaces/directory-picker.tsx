@@ -48,13 +48,13 @@ export function DirectoryPicker({
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2">
       {/* Breadcrumb — doubles as up-navigation; `parent` is redundant with it. */}
-      <div className="flex flex-wrap items-center gap-0.5 text-[11px] text-muted-foreground">
+      <div className="flex flex-wrap items-center gap-0.5 text-2xs text-muted-foreground">
         {crumbs.map((crumb, index) => (
           <span key={crumb.path} className="flex items-center">
             {index > 0 && <span className="px-0.5 opacity-40">/</span>}
             <button
               type="button"
-              className="rounded px-1 hover:bg-muted/60 hover:text-foreground"
+              className="rounded-sm px-1 hover:bg-muted/60 hover:text-foreground"
               onClick={() => onPathChange(crumb.path)}
             >
               {crumb.label === "/" ? <Home className="size-3" /> : crumb.label}
@@ -78,12 +78,12 @@ export function DirectoryPicker({
         className="h-8 font-mono text-xs"
       />
       {listing.isError && (
-        <div className="text-[11px] text-status-failed">
+        <div className="text-2xs text-status-failed">
           {errorMessage(listing.error)}
         </div>
       )}
 
-      <ScrollArea className="min-h-0 flex-1 rounded border border-border">
+      <ScrollArea className="min-h-0 flex-1 rounded-md border border-border">
         <div className="flex flex-col p-1">
           {listing.isPending && (
             <div className="flex items-center justify-center py-8">
@@ -100,7 +100,7 @@ export function DirectoryPicker({
               key={entry.path}
               type="button"
               onClick={() => onPathChange(entry.path)}
-              className="flex items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-muted/50"
+              className="flex items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-muted/50"
             >
               <Folder className="size-3.5 shrink-0 text-muted-foreground" />
               <span
@@ -117,7 +117,7 @@ export function DirectoryPicker({
         </div>
       </ScrollArea>
 
-      <Label className="flex items-center gap-2 text-[11px] text-muted-foreground">
+      <Label className="flex items-center gap-2 text-2xs text-muted-foreground">
         <Checkbox
           checked={showHidden}
           onCheckedChange={(checked) => setShowHidden(checked === true)}

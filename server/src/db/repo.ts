@@ -3,7 +3,7 @@
  * MAX(seq)+1 inside a synchronous transaction — safe because this is a single
  * process and better-sqlite3 serializes writes.
  */
-import { and, asc, desc, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import type {
   AgentSession,
   MessageKind,
@@ -12,7 +12,14 @@ import type {
   UserSession,
 } from "@agentique-console/shared";
 import type { Db } from "./client.ts";
-import { agentSessions, messages, participants, userSessions } from "./schema.ts";
+import {
+  agentSessions,
+  mailboxDeliveries,
+  messages,
+  participants,
+  userSessions,
+  usageSamples,
+} from "./schema.ts";
 import { newId, nowIso } from "../ids.ts";
 
 export type UnsettledTurn =
@@ -29,6 +36,8 @@ export type MessageRow = typeof messages.$inferSelect;
 export type UserSessionRow = typeof userSessions.$inferSelect;
 export type AgentSessionRow = typeof agentSessions.$inferSelect;
 export type ParticipantRow = typeof participants.$inferSelect;
+export type MailboxDeliveryRow = typeof mailboxDeliveries.$inferSelect;
+export type UsageSampleRow = typeof usageSamples.$inferSelect;
 
 export function toWireAgentSession(
   row: AgentSessionRow,
@@ -125,6 +134,66 @@ export class Repo {
     return run();
   }
 
+  /** Atomically persists speech and its addressed mailbox delivery. */
+  appendMailboxMessage(input: AppendMessageInput & {
+    userSessionId: string;
+    agentSessionId: string;
+    recipient: string;
+    category: MailboxDeliveryRow["category"];
+    dedupeKey?: string;
+  }): { message: MessageRow; delivery: MailboxDeliveryRow } {
+    const run = this.#sqlite.transaction(() => {
+      const message = this.appendMessage(input);
+      const delivery: MailboxDeliveryRow = {
+        id: newId("delivery"),
+        messageId: message.id,
+        userSessionId: input.userSessionId,
+        agentSessionId: input.agentSessionId,
+        sender: input.speaker.name,
+        recipient: input.recipient,
+        category: input.category,
+        status: "queued",
+        dedupeKey: input.dedupeKey ?? null,
+        deliveredAt: null,
+        acknowledgedAt: null,
+        createdAt: nowIso(),
+      };
+      this.#db.insert(mailboxDeliveries).values(delivery).run();
+      return { message, delivery };
+    });
+    return run();
+  }
+
+  listQueuedDeliveries(agentSessionId?: string): MailboxDeliveryRow[] {
+    return this.#db.select().from(mailboxDeliveries)
+      .where(agentSessionId === undefined
+        ? eq(mailboxDeliveries.status, "queued")
+        : and(eq(mailboxDeliveries.agentSessionId, agentSessionId), eq(mailboxDeliveries.status, "queued")))
+      .orderBy(asc(mailboxDeliveries.createdAt)).all();
+  }
+  listActiveDeliveries(agentSessionId: string): MailboxDeliveryRow[] {
+    return this.#db.select().from(mailboxDeliveries).where(and(eq(mailboxDeliveries.agentSessionId, agentSessionId), inArray(mailboxDeliveries.status, ["queued", "delivered"]))).orderBy(asc(mailboxDeliveries.createdAt)).all();
+  }
+  findDeliveryByDedupe(agentSessionId: string, sender: string, recipient: string, dedupeKey: string): MailboxDeliveryRow | undefined {
+    return this.#db.select().from(mailboxDeliveries).where(and(eq(mailboxDeliveries.agentSessionId, agentSessionId), eq(mailboxDeliveries.sender, sender), eq(mailboxDeliveries.recipient, recipient), eq(mailboxDeliveries.dedupeKey, dedupeKey))).orderBy(desc(mailboxDeliveries.createdAt)).get();
+  }
+
+  getMessageById(id: string): MessageRow | undefined {
+    return this.#db.select().from(messages).where(eq(messages.id, id)).get();
+  }
+
+  patchDelivery(id: string, patch: Partial<Pick<MailboxDeliveryRow, "status" | "deliveredAt" | "acknowledgedAt">>): void {
+    this.#db.update(mailboxDeliveries).set(patch).where(eq(mailboxDeliveries.id, id)).run();
+  }
+
+  requeueUnacknowledgedDeliveries(): number {
+    return this.#db.update(mailboxDeliveries).set({ status: "queued", deliveredAt: null })
+      .where(eq(mailboxDeliveries.status, "delivered")).run().changes;
+  }
+
+  insertUsage(row: UsageSampleRow): void { this.#db.insert(usageSamples).values(row).run(); }
+  listUsage(userSessionId: string): UsageSampleRow[] { return this.#db.select().from(usageSamples).where(eq(usageSamples.userSessionId, userSessionId)).orderBy(asc(usageSamples.createdAt)).all(); }
+
   listMessages(
     sessionKind: "user" | "agent",
     sessionId: string,
@@ -143,6 +212,9 @@ export class Repo {
       .orderBy(asc(messages.seq))
       .all();
   }
+
+  listAllMessages(): MessageRow[] { return this.#db.select().from(messages).orderBy(asc(messages.createdAt)).all(); }
+  listAllDeliveries(): MailboxDeliveryRow[] { return this.#db.select().from(mailboxDeliveries).orderBy(asc(mailboxDeliveries.createdAt)).all(); }
 
   messagesHeadSeq(sessionKind: "user" | "agent", sessionId: string): number {
     const row = this.#db
@@ -182,7 +254,7 @@ export class Repo {
   patchUserSession(
     id: string,
     patch: Partial<
-      Pick<UserSessionRow, "title" | "mode" | "phase" | "status" | "sdkSessionId">
+      Pick<UserSessionRow, "title" | "mode" | "phase" | "status" | "sdkSessionId" | "sdkGeneration" | "sdkTurnCount" | "contextTokens" | "memory">
     >,
   ): void {
     this.#db
@@ -323,7 +395,11 @@ export class Repo {
   patchParticipant(
     agentSessionId: string,
     name: string,
-    patch: Partial<Pick<ParticipantRow, "lastSeenSeq">>,
+    patch: Partial<Pick<ParticipantRow,
+      "lastSeenSeq" | "pendingTurnSeq" | "sdkSessionId" | "generation" |
+      "turnCount" | "contextTokens" | "profileSnapshot" | "profileId"
+      | "memory"
+    >>,
   ): void {
     this.#db
       .update(participants)

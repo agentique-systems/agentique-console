@@ -1,11 +1,12 @@
 "use client";
 
-import { code } from "@streamdown/code";
 import type { ComponentProps, HTMLAttributes } from "react";
 import { memo } from "react";
 import { Streamdown } from "streamdown";
 
 import { cn } from "@/lib/utils";
+
+import { markdownPlugins } from "./markdown-plugins";
 
 /** Inlined from the v1 `ai` dependency: the console has exactly two chat roles. */
 export type MessageRole = "user" | "assistant";
@@ -47,7 +48,7 @@ export const MessageContent = ({
 
 export type MessageResponseProps = ComponentProps<typeof Streamdown>;
 
-const streamdownPlugins = { code };
+const streamdownPlugins = markdownPlugins;
 
 export const MessageResponse = memo(
   ({ className, ...props }: MessageResponseProps) => (

@@ -99,3 +99,55 @@ export const ConversationScrollButton = ({
     )
   );
 };
+
+/**
+ * Transcript export, ported from upstream's ConversationDownload (added to AI
+ * Elements after this file was first vendored).
+ *
+ * Local changes: upstream ships a Button pinned absolutely inside the
+ * Conversation and takes an eagerly-built `messages` array. The console puts
+ * the affordance in the session header instead and only folds the transcript
+ * when the operator actually clicks, so this exports the two pure pieces
+ * rather than the button.
+ *
+ * `UIMessage` is inlined to its structural shape, the same way message.tsx
+ * inlines MessageRole — the `ai` package is a type-only dependency upstream.
+ */
+export interface DownloadableMessage {
+  /** The speaker label: "operator", "orchestrator", a seat name. */
+  role: string;
+  parts: { type: string; text?: string }[];
+}
+
+const messageText = (message: DownloadableMessage): string =>
+  message.parts
+    .filter((part) => part.type === "text")
+    .map((part) => part.text ?? "")
+    .join("");
+
+const defaultFormatMessage = (message: DownloadableMessage): string => {
+  const label = message.role.charAt(0).toUpperCase() + message.role.slice(1);
+  return `**${label}:** ${messageText(message)}`;
+};
+
+export const messagesToMarkdown = (
+  messages: readonly DownloadableMessage[],
+  formatMessage: (
+    message: DownloadableMessage,
+    index: number,
+  ) => string = defaultFormatMessage,
+): string => messages.map((message, i) => formatMessage(message, i)).join("\n\n");
+
+/** Blob + object URL, no network. Revokes immediately after the click. */
+export function downloadMarkdown(markdown: string, filename: string): void {
+  const url = URL.createObjectURL(
+    new Blob([markdown], { type: "text/markdown" }),
+  );
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}

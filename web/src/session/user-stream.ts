@@ -37,6 +37,9 @@ export const USER_TRANSCRIPT_TYPES: ReadonlySet<ConsoleEventType> = new Set([
   "user_session.question.answered",
   "user_session.plan.proposed",
   "user_session.plan.resolved",
+  "user_session.runtime",
+  "user_session.context.rotated",
+  "usage.recorded",
 ]);
 
 export const userStreamKit = createStreamKit<

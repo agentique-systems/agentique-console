@@ -19,7 +19,7 @@ export interface SeatRuntime {
 }
 
 /**
- * Live per-participant runtime states from transient `agent.state` frames,
+ * Live per-participant runtime states from replayable `agent.state` frames,
  * keyed session → participant. Never replayed, so a reconnect clears the lot —
  * the next frames repaint it.
  */

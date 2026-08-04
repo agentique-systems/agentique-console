@@ -53,7 +53,7 @@ export function WorkingLine({
     <div className="flex items-baseline gap-2 py-1">
       <Shimmer className="text-xs">{describeRuntime(name, runtime)}</Shimmer>
       {elapsed >= SHOW_ELAPSED_AFTER_MS && (
-        <span className="font-mono text-[10px] tabular-nums text-muted-foreground">
+        <span className="font-mono text-3xs tabular-nums text-muted-foreground">
           {formatElapsed(elapsed)}
         </span>
       )}

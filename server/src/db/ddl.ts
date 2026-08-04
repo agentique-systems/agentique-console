@@ -21,6 +21,10 @@ CREATE TABLE IF NOT EXISTS user_sessions (
   phase TEXT NOT NULL DEFAULT 'planning' CHECK (phase IN ('planning','executing')),
   status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','archived')),
   sdk_session_id TEXT,
+  sdk_generation INTEGER NOT NULL DEFAULT 0,
+  sdk_turn_count INTEGER NOT NULL DEFAULT 0,
+  context_tokens INTEGER NOT NULL DEFAULT 0,
+  memory TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -43,6 +47,15 @@ CREATE TABLE IF NOT EXISTS participants (
   preset TEXT,
   instructions TEXT NOT NULL,
   model TEXT,
+  profile_id TEXT NOT NULL DEFAULT 'explorer',
+  profile_snapshot TEXT NOT NULL DEFAULT '{}',
+  ownership TEXT NOT NULL DEFAULT '[]',
+  sdk_session_id TEXT,
+  generation INTEGER NOT NULL DEFAULT 0,
+  turn_count INTEGER NOT NULL DEFAULT 0,
+  context_tokens INTEGER NOT NULL DEFAULT 0,
+  memory TEXT NOT NULL DEFAULT '',
+  pending_turn_seq INTEGER NOT NULL DEFAULT 0,
   last_seen_seq INTEGER NOT NULL DEFAULT 0,
   ord INTEGER NOT NULL,
   created_at TEXT NOT NULL,
@@ -110,7 +123,61 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS events_user_session ON events(user_session_id, seq);
 CREATE INDEX IF NOT EXISTS events_agent_session ON events(agent_session_id, seq);
+
+CREATE TABLE IF NOT EXISTS mailbox_deliveries (
+  id TEXT PRIMARY KEY,
+  message_id TEXT NOT NULL REFERENCES messages(id),
+  user_session_id TEXT NOT NULL,
+  agent_session_id TEXT NOT NULL,
+  sender TEXT NOT NULL,
+  recipient TEXT NOT NULL,
+  category TEXT NOT NULL CHECK (category IN ('assignment','update','milestone','failure','final','decision')),
+  status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued','delivered','acknowledged','cancelled')),
+  dedupe_key TEXT,
+  delivered_at TEXT,
+  acknowledged_at TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS mailbox_message_recipient ON mailbox_deliveries(message_id, recipient);
+CREATE INDEX IF NOT EXISTS mailbox_recipient_status ON mailbox_deliveries(agent_session_id, recipient, status);
+
+CREATE TABLE IF NOT EXISTS event_artifacts (
+  id TEXT PRIMARY KEY,
+  event_seq INTEGER,
+  workspace_id TEXT,
+  user_session_id TEXT,
+  agent_session_id TEXT,
+  media_type TEXT NOT NULL,
+  bytes INTEGER NOT NULL,
+  content TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS provider_entries_v2 (
+  ord INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_key TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  subpath TEXT NOT NULL DEFAULT '',
+  uuid TEXT,
+  type TEXT NOT NULL,
+  entry TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS provider_entries_session ON provider_entries_v2(project_key, session_id, subpath, ord);
+CREATE UNIQUE INDEX IF NOT EXISTS provider_entries_uuid ON provider_entries_v2(project_key, session_id, subpath, uuid) WHERE uuid IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS usage_samples (
+  id TEXT PRIMARY KEY,
+  user_session_id TEXT NOT NULL,
+  agent_session_id TEXT,
+  participant TEXT NOT NULL,
+  profile_id TEXT,
+  generation INTEGER NOT NULL,
+  turn_id TEXT NOT NULL,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  cost_usd REAL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS usage_user_session ON usage_samples(user_session_id, created_at);
 `;
-// B1 note: sdk_session_entries (the SDK transcript mirror) was dropped; SDK
-// transcripts live in ~/.claude/projects like the CLI. Existing databases
-// keep the stray table harmlessly.

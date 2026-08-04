@@ -49,7 +49,9 @@ export function AgentCard({
       type="button"
       data-testid="agent-card"
       className={cn(
-        "flex w-full flex-col gap-1.5 rounded-md border border-border bg-card px-3 py-2 text-left transition-colors hover:bg-accent",
+        "surface-raised flex w-full flex-col gap-1.5 rounded-md border border-border bg-card px-3 py-2 text-left transition-colors hover:bg-accent",
+        // --primary is near-white in dark / near-black in light, so this is a
+        // crisp selection edge. --ring is mid-grey and reads as unselected.
         selected && "border-primary bg-accent",
         running && "console-running-ring",
         session.status === "archived" && "opacity-60",
@@ -71,14 +73,14 @@ export function AgentCard({
                 SEAT_DOT[seats?.[name]?.state ?? "idle"],
               )}
             />
-            <span className="font-mono text-[10px] text-muted-foreground">
+            <span className="font-mono text-3xs text-muted-foreground">
               {name}
             </span>
           </span>
         ))}
       </div>
 
-      <div className="flex min-w-0 items-center gap-1.5 text-[10px] text-muted-foreground">
+      <div className="flex min-w-0 items-center gap-1.5 text-3xs text-muted-foreground">
         <span>{timeAgo(session.updatedAt)}</span>
         <span aria-hidden>·</span>
         <span>
@@ -87,7 +89,7 @@ export function AgentCard({
         {session.phase === "planning" && (
           <Badge
             variant="outline"
-            className="px-1 py-0 text-[9px] uppercase text-status-waiting"
+            className="px-1 py-0 text-3xs uppercase text-status-waiting"
           >
             planning
           </Badge>
