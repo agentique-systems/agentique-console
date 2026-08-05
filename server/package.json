@@ -8,6 +8,7 @@
     "start": "tsx src/main.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "eval:handoffs": "tsx scripts/eval-handoffs.ts",
     "import-legacy": "tsx scripts/import-legacy.ts"
   },
   "dependencies": {

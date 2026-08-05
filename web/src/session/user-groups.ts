@@ -44,6 +44,8 @@ function itemKeyOf(item: Exclude<UserItem, ToolItem>): string {
       return `turn_error:${item.turnId}`;
     case "runtime":
       return `runtime:${item.uid}`;
+    case "handoff":
+      return `handoff:${item.handoff.id}`;
   }
 }
 

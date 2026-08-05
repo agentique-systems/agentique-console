@@ -11,6 +11,7 @@ import type {
   UserSession,
   Workspace,
 } from "./domain.ts";
+import type { HandoffPage } from "./handoffs.ts";
 import type { ConsoleEvent } from "./events.ts";
 
 export interface ApiErrorBody {
@@ -106,6 +107,9 @@ export interface GetAgentSessionResponse {
 
 // GET /api/user-sessions/:id/tasks
 export type ListTasksResponse = Task[];
+
+// GET /api/handoffs/:id?section=&cursor=&maxBytes=
+export type ReadHandoffResponse = HandoffPage;
 
 // POST /api/compose/improve — a one-shot rewrite of a draft message. Nothing
 // is persisted; the caller decides whether to keep the result.

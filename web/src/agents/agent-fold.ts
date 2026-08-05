@@ -19,6 +19,7 @@ import {
   type MessageKind,
   type SessionPhase,
   type Speaker,
+  type HandoffSummary,
 } from "@agentique-console/shared";
 
 export interface AgentMessageItem {
@@ -29,6 +30,7 @@ export interface AgentMessageItem {
   readonly kind: MessageKind;
   readonly text: string;
   readonly createdAt: string;
+  readonly handoff?: HandoffSummary;
 }
 export interface AgentToolItem {
   readonly type: "tool";
@@ -125,6 +127,7 @@ export function foldAgentItems(events: readonly ConsoleEvent[]): AgentItem[] {
           kind: message.kind,
           text: message.text,
           createdAt: message.createdAt,
+          ...(message.handoff === undefined ? {} : { handoff: message.handoff }),
         });
         break;
       }

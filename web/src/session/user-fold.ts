@@ -18,6 +18,7 @@ import {
   type MessageKind,
   type Speaker,
   type TurnTrigger,
+  type HandoffSummary,
 } from "@agentique-console/shared";
 
 export interface MessageItem {
@@ -67,6 +68,7 @@ export interface TurnErrorItem {
   readonly errorMessage: string;
 }
 export interface RuntimeItem { readonly type: "runtime"; readonly uid: string; readonly label: string; readonly detail: string; }
+export interface HandoffItem { readonly type: "handoff"; readonly handoff: HandoffSummary; readonly sender: string; readonly recipient: string; }
 
 export type UserItem =
   | MessageItem
@@ -75,7 +77,8 @@ export type UserItem =
   | PlanItem
   | TurnItem
   | TurnErrorItem
-  | RuntimeItem;
+  | RuntimeItem
+  | HandoffItem;
 
 /** Stable render identity — every id is unique within its type's namespace. */
 export function itemKey(item: UserItem): string {
@@ -94,6 +97,8 @@ export function itemKey(item: UserItem): string {
       return `turn_error:${item.turnId}`;
     case "runtime":
       return `runtime:${item.uid}`;
+    case "handoff":
+      return `handoff:${item.handoff.id}`;
   }
 }
 
@@ -245,6 +250,11 @@ export function foldUserItems(events: readonly ConsoleEvent[]): UserItem[] {
         if (event.agentSessionId !== undefined) break;
         items.push({ type: "runtime", uid: `usage:${event.seq ?? event.payload.turnId}`, label: "usage",
           detail: `${event.payload.inputTokens.toLocaleString()} input · ${event.payload.outputTokens.toLocaleString()} output${event.payload.costUsd === undefined ? "" : ` · $${event.payload.costUsd.toFixed(4)}`} · generation ${event.payload.generation}` });
+        break;
+
+      case "handoff.created":
+        if (event.agentSessionId === undefined || event.payload.recipient !== "main") break;
+        items.push({ type: "handoff", handoff: event.payload.handoff, sender: event.payload.sender, recipient: event.payload.recipient });
         break;
 
       // Everything else — session lifecycle (created/updated: the header reads

@@ -15,6 +15,7 @@ import { ProcessManager } from "./runtime/process-manager.ts";
 import { BrowserManager } from "./runtime/browser-manager.ts";
 import { UserSessionService } from "./sessions/service.ts";
 import { TaskService } from "./tasks/service.ts";
+import { HandoffService } from "./handoffs/service.ts";
 import { WorkspaceService } from "./workspaces/service.ts";
 import { buildServer } from "./api/server.ts";
 
@@ -31,6 +32,7 @@ const interactions = new InteractionService(db, bus);
 const tasks = new TaskService(db, bus);
 const getWorkspaceRoot = (workspaceId: string): string =>
   workspaces.get(workspaceId).rootPath;
+const handoffs = new HandoffService({ repo, bus, getWorkspaceRoot });
 
 const profiles = new AgentProfileRegistry(config.profilesFile);
 const sessionStore = new SqliteSessionStore(db);
@@ -38,7 +40,7 @@ const processes = new ProcessManager(bus);
 const browsers = new BrowserManager(bus);
 let runner!: OrchestratorRunner;
 const host = new AgentSessionHost({
-  repo, bus, config, profiles, sdk: () => resolveSdk(), sessionStore, getWorkspaceRoot, processes, browsers, interactions, tasks,
+  repo, bus, config, profiles, sdk: () => resolveSdk(), sessionStore, getWorkspaceRoot, processes, browsers, interactions, tasks, handoffs,
   wake: (userSessionId, agentSessionId, category, text) =>
     runner.enqueueAgentMilestone(userSessionId, agentSessionId, category, text),
 });
@@ -48,10 +50,11 @@ runner = new OrchestratorRunner({
   config,
   sdk: () => resolveSdk(),
   interactions,
+  handoffs,
   sessionStore,
   getWorkspaceRoot,
   buildMcpServer: (userSessionId, sdk) =>
-    buildConsoleMcpServer({ sdk, host, repo, bus, userSessionId, tasks }),
+    buildConsoleMcpServer({ sdk, host, repo, bus, userSessionId, tasks, handoffs }),
 });
 const userSessions = new UserSessionService({
   repo,
@@ -89,6 +92,7 @@ const ctx: AppContext = {
   interactions,
   host,
   tasks,
+  handoffs,
   sdk: () => resolveSdk(),
 };
 

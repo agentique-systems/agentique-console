@@ -16,7 +16,7 @@
  * cumulatively across the whole session run, so any cap kills a long-lived
  * lane eventually.
  */
-import type { PostMessageResponse } from "@agentique-console/shared";
+import type { HandoffDraft, PostMessageResponse } from "@agentique-console/shared";
 import { AsyncQueue } from "../async-queue.ts";
 import type { Config } from "../config.ts";
 import { Repo, toWireMessage } from "../db/repo.ts";
@@ -34,6 +34,9 @@ import type {
 import type { InteractionService } from "./interactions.ts";
 import { buildOrchestratorOptions } from "./options.ts";
 import { buildOrchestratorCanUseTool, type LaneState } from "./permissions.ts";
+import type { HandoffService } from "../handoffs/service.ts";
+import { HandoffDraftSchema, HANDOFF_DRAFT_JSON_SCHEMA } from "../handoffs/schema.ts";
+import { sdkEnv } from "../sdk/env.ts";
 
 type Job =
   | { kind: "operator"; text: string }
@@ -88,6 +91,7 @@ export interface OrchestratorDeps {
   buildMcpServer?: (userSessionId: string, sdk: ConsoleSdk) => unknown;
   /** Eager console-owned provider journal. */
   sessionStore?: unknown;
+  handoffs: HandoffService;
 }
 
 /** Bounded grace for a closing lane's pump before the hard abort. */
@@ -352,7 +356,9 @@ export class OrchestratorRunner {
       }),
       mcpServer: this.#deps.buildMcpServer?.(sessionId, sdk),
       sessionStore: this.#deps.sessionStore,
-      contextMemory: session.memory,
+      contextMemory: session.latestHandoffId
+        ? JSON.stringify(this.#deps.handoffs.get(session.latestHandoffId), null, 2)
+        : session.memory,
     });
 
     const query = sdk.query({ prompt: input, options });
@@ -642,11 +648,13 @@ export class OrchestratorRunner {
           repo.patchUserSession(sessionId, { sdkTurnCount: session.sdkTurnCount + 1, contextTokens });
           if (session.sdkTurnCount + 1 >= this.#deps.config.contextTurnLimit || contextTokens >= this.#deps.config.contextTokenLimit) lane.recycleAfterTurn = true;
           const usage = { id: newId("usage"), userSessionId: sessionId, agentSessionId: null, participant: "orchestrator", profileId: null,
-            generation: session.sdkGeneration, turnId: turn?.turnId ?? "unattributed", inputTokens: event.inputTokens ?? 0, outputTokens: event.outputTokens ?? 0,
+            generation: session.sdkGeneration, turnId: turn?.turnId ?? "unattributed", inputTokens: event.inputTokens ?? 0,
+            uncachedInputTokens: event.uncachedInputTokens ?? 0, cacheCreationInputTokens: event.cacheCreationInputTokens ?? 0, cacheReadInputTokens: event.cacheReadInputTokens ?? 0, outputTokens: event.outputTokens ?? 0,
             costUsd: event.costUsd ?? null, createdAt: nowIso() };
           repo.insertUsage(usage);
           bus.append({ type: "usage.recorded", userSessionId: sessionId, payload: { sessionId, participant: "orchestrator", generation: session.sdkGeneration,
-            turnId: usage.turnId, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, ...(event.costUsd === undefined ? {} : { costUsd: event.costUsd }) } });
+            turnId: usage.turnId, inputTokens: usage.inputTokens, uncachedInputTokens: usage.uncachedInputTokens, cacheCreationInputTokens: usage.cacheCreationInputTokens, cacheReadInputTokens: usage.cacheReadInputTokens,
+            outputTokens: usage.outputTokens, ...(event.costUsd === undefined ? {} : { costUsd: event.costUsd }) } });
         }
         this.#settleTurn(sessionId, lane);
         return;
@@ -661,11 +669,13 @@ export class OrchestratorRunner {
           const contextTokens = Math.max(session.contextTokens, event.inputTokens ?? 0);
           repo.patchUserSession(sessionId, { sdkTurnCount: session.sdkTurnCount + 1, contextTokens });
           const usage = { id: newId("usage"), userSessionId: sessionId, agentSessionId: null, participant: "orchestrator", profileId: null,
-            generation: session.sdkGeneration, turnId: turn?.turnId ?? "unattributed", inputTokens: event.inputTokens ?? 0, outputTokens: event.outputTokens ?? 0,
+            generation: session.sdkGeneration, turnId: turn?.turnId ?? "unattributed", inputTokens: event.inputTokens ?? 0,
+            uncachedInputTokens: event.uncachedInputTokens ?? 0, cacheCreationInputTokens: event.cacheCreationInputTokens ?? 0, cacheReadInputTokens: event.cacheReadInputTokens ?? 0, outputTokens: event.outputTokens ?? 0,
             costUsd: event.costUsd ?? null, createdAt: nowIso() };
           repo.insertUsage(usage);
           bus.append({ type: "usage.recorded", userSessionId: sessionId, payload: { sessionId, participant: "orchestrator", generation: session.sdkGeneration,
-            turnId: usage.turnId, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, ...(event.costUsd === undefined ? {} : { costUsd: event.costUsd }) } });
+            turnId: usage.turnId, inputTokens: usage.inputTokens, uncachedInputTokens: usage.uncachedInputTokens, cacheCreationInputTokens: usage.cacheCreationInputTokens, cacheReadInputTokens: usage.cacheReadInputTokens,
+            outputTokens: usage.outputTokens, ...(event.costUsd === undefined ? {} : { costUsd: event.costUsd }) } });
           if (session.sdkTurnCount + 1 >= this.#deps.config.contextTurnLimit || contextTokens >= this.#deps.config.contextTokenLimit) lane.recycleAfterTurn = true;
         }
         this.#settleTurn(sessionId, lane);
@@ -696,13 +706,68 @@ export class OrchestratorRunner {
 
   async #rotateContextIfNeeded(sessionId: string, lane: Lane): Promise<void> {
     const session = this.#deps.repo.getUserSession(sessionId);
-    if (!session || (session.sdkTurnCount < this.#deps.config.contextTurnLimit && session.contextTokens < this.#deps.config.contextTokenLimit)) return;
+    if (!session) return;
+    const hard = session.sdkTurnCount >= this.#deps.config.contextTurnLimit || session.contextTokens >= this.#deps.config.contextTokenLimit;
+    const soft = session.sdkTurnCount >= Math.ceil(this.#deps.config.contextTurnLimit * 0.8) || session.contextTokens >= Math.ceil(this.#deps.config.contextTokenLimit * 0.75);
+    if (!soft) return;
+    const threshold = hard ? "hard" as const : "soft" as const;
     if (lane.query) await this.#closeLane(lane, { interrupt: false });
-    const head = this.#deps.repo.messagesHeadSeq("user", sessionId);
-    const memory = this.#deps.repo.listMessages("user", sessionId, Math.max(0, head - 24))
-      .map((row) => `[${row.speakerName}] ${row.text}`).join("\n").slice(-4_000);
-    this.#deps.repo.patchUserSession(sessionId, { sdkSessionId: null, sdkGeneration: session.sdkGeneration + 1, sdkTurnCount: 0, contextTokens: 0, memory });
+    let draft: HandoffDraft | null = null;
+    let failure: string | null = null;
+    const started = Date.now();
+    if (session.sdkSessionId) {
+      const sdk = await this.#deps.sdk();
+      const abort = new AbortController();
+      const query = sdk.query({ prompt: "Create a lossless rotation checkpoint for the next orchestrator context. Preserve operator intent, decisions, delegated work, verified evidence pointers, uncertainty, and exact next actions. Do not perform work or call tools.", options: {
+        cwd: this.#deps.getWorkspaceRoot(session.workspaceId), systemPrompt: { type: "preset", preset: "claude_code", append: "Checkpoint faithfully. Repository files, task ledger, artifacts, and provider journal are authoritative; do not invent corrections." },
+        settingSources: [], includePartialMessages: false, permissionMode: "plan", allowedTools: [],
+        disallowedTools: ["Agent", "SendMessage", "Task", "Bash", "Edit", "Write", "WebSearch", "WebFetch"],
+        outputFormat: { type: "json_schema", schema: HANDOFF_DRAFT_JSON_SCHEMA }, maxTurns: 2,
+        sandbox: { enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: false, allowUnsandboxedCommands: false,
+          filesystem: { allowManagedReadPathsOnly: true, allowRead: [this.#deps.getWorkspaceRoot(session.workspaceId)], allowWrite: [] } },
+        env: sdkEnv(), abortController: abort, persistSession: true,
+        ...(this.#deps.sessionStore === undefined ? {} : { sessionStore: this.#deps.sessionStore as SdkOptions["sessionStore"], sessionStoreFlush: "eager" as const }),
+        resume: session.sdkSessionId, ...(this.#deps.config.model ? { model: this.#deps.config.model } : {}),
+        ...(this.#deps.config.effort ? { effort: this.#deps.config.effort as SdkOptions["effort"] } : {}),
+      } });
+      try {
+        for await (const raw of query) for (const event of mapSdkMessage(raw)) {
+          if (event.kind === "result") {
+            const parsed = HandoffDraftSchema.safeParse(event.output);
+            if (parsed.success) draft = parsed.data;
+          } else if (event.kind === "error") failure = event.message;
+        }
+      } catch (error) { failure = error instanceof Error ? error.message : String(error); }
+      finally { query.close?.(); }
+    }
+    let degraded = false;
+    if (!draft) {
+      if (!hard) {
+        this.#deps.bus.append({ type: "handoff.checkpoint.failed", userSessionId: sessionId,
+          payload: { participant: "orchestrator", reason: failure ?? "checkpoint produced no valid handoff", threshold, degraded: false } });
+        return;
+      }
+      degraded = true;
+      const latest = this.#deps.repo.latestHandoff({ userSessionId: sessionId });
+      draft = latest ? { core: { ...latest.core, action: `Recovery checkpoint: ${latest.core.action}`, status: "needs_verification", risk: "high", requestExpandedContext: true }, extension: latest.extension }
+        : { core: { schemaVersion: 1, taskId: null, status: "needs_verification", risk: "high", action: "Recover orchestrator context",
+          state: { summary: "The checkpoint query failed. Reconstruct from operator messages, task ledger, repository, provider journal, and AgentSession handoffs.", evidence: [] },
+          result: { summary: null, artifacts: [] }, uncertainty: [failure ?? "no valid checkpoint output"], nextAction: "Verify authoritative state before acting.", requestExpandedContext: true },
+          extension: { kind: "coordination", data: {} } };
+      this.#deps.bus.append({ type: "handoff.checkpoint.failed", userSessionId: sessionId,
+        payload: { participant: "orchestrator", reason: failure ?? "checkpoint produced no valid handoff", threshold, degraded: true } });
+    }
+    const prepared = this.#deps.handoffs.prepare({ draft, userSessionId: sessionId, agentSessionId: null,
+      sender: "orchestrator", recipient: "orchestrator", profileId: "main", generation: session.sdkGeneration,
+      trigger: degraded ? "recovery" : "rotation", parentHandoffId: session.latestHandoffId, checkpoint: true });
+    this.#deps.repo.insertCheckpointHandoff(prepared.row);
+    this.#deps.handoffs.committed(prepared.record);
+    this.#deps.repo.patchUserSession(sessionId, { sdkSessionId: null, sdkGeneration: session.sdkGeneration + 1, sdkTurnCount: 0, contextTokens: 0, latestHandoffId: prepared.row.id });
     this.#deps.bus.append({ type: "user_session.context.rotated", userSessionId: sessionId,
-      payload: { sessionId, generation: session.sdkGeneration + 1, reason: session.contextTokens >= this.#deps.config.contextTokenLimit ? "token_limit" : "turn_limit", memoryChars: memory.length } });
+      payload: { sessionId, generation: session.sdkGeneration + 1,
+        reason: session.contextTokens >= Math.ceil(this.#deps.config.contextTokenLimit * 0.75) ? "token_limit" : "turn_limit", memoryChars: 0,
+        handoffId: prepared.row.id, threshold, checkpointBytes: prepared.row.bytes, degraded } });
+    this.#deps.bus.append({ type: "user_session.runtime", userSessionId: sessionId,
+      payload: { sessionId, detail: `checkpoint ${prepared.row.id} completed in ${Date.now() - started}ms` } });
   }
 }

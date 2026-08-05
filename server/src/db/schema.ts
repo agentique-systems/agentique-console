@@ -39,6 +39,7 @@ export const userSessions = sqliteTable("user_sessions", {
   sdkTurnCount: integer("sdk_turn_count").notNull().default(0),
   contextTokens: integer("context_tokens").notNull().default(0),
   memory: text("memory").notNull().default(""),
+  latestHandoffId: text("latest_handoff_id"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });
@@ -85,6 +86,8 @@ export const participants = sqliteTable(
     turnCount: integer("turn_count").notNull().default(0),
     contextTokens: integer("context_tokens").notNull().default(0),
     memory: text("memory").notNull().default(""),
+    latestHandoffId: text("latest_handoff_id"),
+    checkpointReady: integer("checkpoint_ready", { mode: "boolean" }).notNull().default(true),
     pendingTurnSeq: integer("pending_turn_seq").notNull().default(0),
     /** Transcript watermark: highest message seq this seat has been shown. */
     lastSeenSeq: integer("last_seen_seq").notNull().default(0),
@@ -264,7 +267,41 @@ export const usageSamples = sqliteTable("usage_samples", {
   generation: integer("generation").notNull(),
   turnId: text("turn_id").notNull(),
   inputTokens: integer("input_tokens").notNull().default(0),
+  uncachedInputTokens: integer("uncached_input_tokens").notNull().default(0),
+  cacheCreationInputTokens: integer("cache_creation_input_tokens").notNull().default(0),
+  cacheReadInputTokens: integer("cache_read_input_tokens").notNull().default(0),
   outputTokens: integer("output_tokens").notNull().default(0),
   costUsd: real("cost_usd"),
   createdAt: text("created_at").notNull(),
 }, (t) => [index("usage_user_session").on(t.userSessionId, t.createdAt)]);
+
+/** Lossless canonical handoffs. Transcript messages carry only a compact projection. */
+export const handoffRecords = sqliteTable(
+  "handoff_records",
+  {
+    id: text("id").primaryKey(),
+    userSessionId: text("user_session_id").notNull(),
+    agentSessionId: text("agent_session_id"),
+    messageId: text("message_id"),
+    sender: text("sender").notNull(),
+    recipient: text("recipient").notNull(),
+    profileId: text("profile_id"),
+    generation: integer("generation").notNull().default(0),
+    turnId: text("turn_id"),
+    trigger: text("trigger", { enum: ["assignment", "update", "milestone", "decision", "failure", "final", "rotation", "recovery"] }).notNull(),
+    parentHandoffId: text("parent_handoff_id"),
+    rootHandoffId: text("root_handoff_id").notNull(),
+    checkpoint: integer("checkpoint", { mode: "boolean" }).notNull().default(false),
+    core: text("core", { mode: "json" }).$type<import("@agentique-console/shared").HandoffCore>().notNull(),
+    extension: text("extension", { mode: "json" }).$type<import("@agentique-console/shared").HandoffExtension>().notNull(),
+    bytes: integer("bytes").notNull(),
+    softTargetBytes: integer("soft_target_bytes").notNull(),
+    overflow: integer("overflow", { mode: "boolean" }).notNull().default(false),
+    referenceWarnings: text("reference_warnings", { mode: "json" }).$type<string[]>().notNull().default([]),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [
+    index("handoffs_user_created").on(t.userSessionId, t.createdAt),
+    index("handoffs_agent_recipient").on(t.agentSessionId, t.recipient, t.createdAt),
+  ],
+);

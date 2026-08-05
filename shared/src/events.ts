@@ -12,6 +12,7 @@ import type {
   UserSession,
   Workspace,
 } from "./domain.ts";
+import type { HandoffSummary } from "./handoffs.ts";
 
 export type SessionKind = "user" | "agent";
 
@@ -60,6 +61,7 @@ export interface UserTurnSettledPayload {
 }
 export interface UserContextRotatedPayload {
   sessionId: string; generation: number; reason: "token_limit" | "turn_limit"; memoryChars: number;
+  handoffId?: string; threshold?: "soft" | "hard"; checkpointBytes?: number; degraded?: boolean;
 }
 export interface UserRuntimePayload { sessionId: string; detail: string; }
 export interface ToolCallPayload {
@@ -167,6 +169,7 @@ export interface AgentContextRotatedPayload {
   generation: number;
   reason: "token_limit" | "turn_limit";
   memoryChars: number;
+  handoffId?: string; threshold?: "soft" | "hard"; checkpointBytes?: number; degraded?: boolean;
 }
 export interface AgentProcessStartedPayload {
   agentSessionId: string; participant: string; processId: string;
@@ -183,7 +186,17 @@ export interface AgentProcessExitedPayload {
 export interface UsageRecordedPayload {
   sessionId: string; participant: string; profileId?: string; generation: number;
   turnId: string; inputTokens: number; outputTokens: number; costUsd?: number;
+  uncachedInputTokens?: number; cacheCreationInputTokens?: number; cacheReadInputTokens?: number;
 }
+
+export interface HandoffCreatedPayload {
+  handoff: HandoffSummary; sender: string; recipient: string; checkpoint: boolean;
+  bytes: number; softTargetBytes: number;
+}
+export interface HandoffConsumedPayload { handoffId: string; participant: string; mode: "compact" | "expanded"; }
+export interface HandoffRetrievedPayload { handoffId: string; section: "core" | "extension"; bytes: number; nextCursor: string | null; }
+export interface HandoffDiscrepancyPayload { handoffId: string; reporter: string; claim: string; evidence: string; }
+export interface HandoffCheckpointFailedPayload { participant: string; reason: string; threshold: "soft" | "hard"; degraded: boolean; }
 
 export interface TaskCreatedPayload {
   task: Task;
@@ -286,6 +299,11 @@ export type ConsoleEvent = Base &
     | { type: "task.created"; payload: TaskCreatedPayload }
     | { type: "task.updated"; payload: TaskUpdatedPayload }
     | { type: "usage.recorded"; payload: UsageRecordedPayload }
+    | { type: "handoff.created"; payload: HandoffCreatedPayload }
+    | { type: "handoff.consumed"; payload: HandoffConsumedPayload }
+    | { type: "handoff.retrieved"; payload: HandoffRetrievedPayload }
+    | { type: "handoff.discrepancy"; payload: HandoffDiscrepancyPayload }
+    | { type: "handoff.checkpoint.failed"; payload: HandoffCheckpointFailedPayload }
     | { type: "flow.delegation"; payload: FlowDelegationPayload }
     | { type: "flow.result"; payload: FlowResultPayload }
     | { type: "stream.delta"; payload: StreamDeltaPayload }

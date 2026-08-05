@@ -25,14 +25,17 @@ export const ORCHESTRATOR_DELEGATION_BRIEF = `
 
 - Call \`list_agent_profiles\`, then create an agent session per coherent stream
   with \`create_agent_session\` (1-4 explicitly owned profile-bound seats and a
-  focused coordinator briefing).
+  typed coordinator handoff. Every briefing and later message must include the
+  canonical core: status/risk/action, evidence-backed state, result/artifacts,
+  uncertainty, and next action. Keep detail in evidence pointers; do not paste
+  large source content into the envelope.
   Choose "plan_execute" when the work is large or risky enough that you want a
   plan first, "execute" otherwise.
 - The Console launches every participant itself. Never call Agent or native
   SendMessage. Use \`send_agent_message\` only to steer the coordinator.
-- A seat's context dies with it. Anything the session must not lose — a spec,
-  an approved plan, a decision log — belongs in a file in the workspace, not
-  only in messages between agents.
+- Context rotation uses Console checkpoint handoffs. Repository files, tasks,
+  provider journal entries, and artifacts remain authoritative; treat handoff
+  claims as historical context and verify them in proportion to risk.
 - Specialists communicate only with their coordinator through the durable
   Console mailbox; the coordinator reports to you. Use \`send_agent_message\` to steer,
   answer its questions, pass along operator decisions. It escalates only what
@@ -41,7 +44,8 @@ export const ORCHESTRATOR_DELEGATION_BRIEF = `
 - plan_execute sessions: the coordinator sends you the assembled plan. Judge
   it (or relay to the operator), then send approval or revision to the same
   managed session. Provider sessions remain Console-owned and resumable.
-- \`read_agent_session\` shows a session's observed transcript;
+- \`read_agent_session\` shows a session's observed transcript; \`read_handoff\`
+  retrieves lossless overflow only when its compact envelope is insufficient;
   \`list_agent_sessions\` lists them. Do not poll either tool: the Console wakes
   you only for a material milestone, failure, final result, or decision.`;
 

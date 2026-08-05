@@ -1,4 +1,4 @@
-import type { Speaker } from "@agentique-console/shared";
+import type { HandoffDraft, HandoffTrigger, Speaker } from "@agentique-console/shared";
 import fs from "node:fs";
 import { z } from "zod";
 import { badRequest, conflict, notFound } from "../api/errors.ts";
@@ -24,6 +24,8 @@ import type { ProcessManager } from "../runtime/process-manager.ts";
 import type { BrowserManager } from "../runtime/browser-manager.ts";
 import type { InteractionService } from "../orchestrator/interactions.ts";
 import type { TaskService } from "../tasks/service.ts";
+import type { HandoffService } from "../handoffs/service.ts";
+import { CheckpointClosingSchema, HandoffDraftSchema } from "../handoffs/schema.ts";
 import { COORDINATOR_SEAT, seatOfSpawnName } from "./spawn-names.ts";
 
 export const ORCHESTRATOR_SEAT = "orchestrator";
@@ -42,7 +44,7 @@ export interface CreateAgentSessionInput {
   title: string;
   mode: "execute" | "plan_execute";
   agents: { name: string; profileId?: string; preset?: string; instructions?: string; model?: string; owns?: string[] }[];
-  briefing?: string;
+  briefing?: HandoffDraft;
 }
 
 export interface AgentSessionHostDeps {
@@ -58,18 +60,10 @@ export interface AgentSessionHostDeps {
   browsers?: BrowserManager;
   interactions?: InteractionService;
   tasks?: TaskService;
+  handoffs?: HandoffService;
 }
 
-const OUTPUT_SCHEMA = {
-  type: "object",
-  properties: {
-    message: { type: ["string", "null"] },
-    to: { type: ["string", "null"] },
-    category: { enum: ["update", "milestone", "failure", "final", "decision"] },
-  },
-  required: ["message", "to", "category"],
-  additionalProperties: false,
-} as const;
+const OUTPUT_SCHEMA = CheckpointClosingSchema;
 
 function ok(value: unknown): SdkToolResult {
   return { content: [{ type: "text", text: JSON.stringify(value) }] };
@@ -126,18 +120,16 @@ export class AgentSessionHost {
       payload: { session: toWireAgentSession(row, specialists, false), participants: specialists } });
     bus.append({ type: "flow.delegation", userSessionId: row.userSessionId, agentSessionId: row.id,
       payload: { userSessionId: row.userSessionId, agentSessionId: row.id, kind: "created", preview: title } });
-    const briefing = input.briefing?.trim();
-    if (briefing) this.post({ agentSessionId: row.id, speaker: { kind: "orchestrator", name: MAIN_RECIPIENT }, to: ORCHESTRATOR_SEAT, text: briefing, category: "assignment" });
+    if (input.briefing) this.post({ agentSessionId: row.id, speaker: { kind: "orchestrator", name: MAIN_RECIPIENT }, to: ORCHESTRATOR_SEAT, handoff: input.briefing, category: "assignment" });
     return { agentSessionId: row.id, participants: specialists };
   }
 
-  post(input: { agentSessionId: string; speaker: Speaker; to: string; text: string; category?: Category; dedupeKey?: string; deferWake?: boolean }): MessageRow {
+  post(input: { agentSessionId: string; speaker: Speaker; to: string; handoff: HandoffDraft; category?: Category; dedupeKey?: string; deferWake?: boolean; turnId?: string }): MessageRow {
     const { repo, bus } = this.#deps;
     const session = repo.getAgentSession(input.agentSessionId);
     if (!session) throw notFound(`no agent session ${input.agentSessionId}`);
     if (session.status !== "open") throw conflict(`agent session ${input.agentSessionId} is archived`);
-    const text = input.text.trim();
-    if (!text) throw badRequest("message text is required");
+    if (!this.#deps.handoffs) throw new Error("handoff service unavailable");
     this.#assertRoute(session.id, input.speaker.name, input.to);
     const category = input.category ?? "update";
     if (input.dedupeKey) {
@@ -154,12 +146,25 @@ export class AgentSessionHost {
       const pendingInternal = repo.listActiveDeliveries(session.id).filter((delivery) => delivery.recipient !== MAIN_RECIPIENT);
       if (activeSpecialists.length > 0 || pendingInternal.length > 0) throw badRequest(`cannot report final while AgentSession work is active (${activeSpecialists.length} running, ${pendingInternal.length} queued/delivered)`);
     }
-    const { message, delivery } = repo.appendMailboxMessage({
+    const senderSeat = input.speaker.name === MAIN_RECIPIENT ? undefined : repo.getParticipant(session.id, input.speaker.name);
+    const prepared = this.#deps.handoffs.prepare({
+      draft: input.handoff, userSessionId: session.userSessionId, agentSessionId: session.id,
+      sender: input.speaker.name, recipient: input.to,
+      profileId: input.speaker.name === MAIN_RECIPIENT ? "main" : senderSeat?.profileId ?? null,
+      extensionKind: input.speaker.name === MAIN_RECIPIENT ? "coordination" : (senderSeat?.profileSnapshot as AgentProfile | undefined)?.handoffExtension,
+      generation: input.speaker.name === MAIN_RECIPIENT ? (repo.getUserSession(session.userSessionId)?.sdkGeneration ?? 0) : senderSeat?.generation ?? 0,
+      turnId: input.turnId, trigger: category as HandoffTrigger,
+      parentHandoffId: category === "assignment" ? null : (senderSeat?.latestHandoffId ?? (input.speaker.name === MAIN_RECIPIENT ? repo.getUserSession(session.userSessionId)?.latestHandoffId : null)),
+    });
+    const text = prepared.text;
+    const { message, delivery } = repo.appendHandoffMailbox({
       sessionKind: "agent", sessionId: session.id, userSessionId: session.userSessionId,
       agentSessionId: session.id, speaker: input.speaker, to: input.to, recipient: input.to,
       kind: category === "decision" && session.phase === "planning" ? "plan" : "message",
-      text, category, ...(input.dedupeKey ? { dedupeKey: input.dedupeKey } : {}),
+      text, category, handoff: prepared.row, summary: prepared.summary,
+      ...(input.turnId ? { turnId: input.turnId } : {}), ...(input.dedupeKey ? { dedupeKey: input.dedupeKey } : {}),
     });
+    this.#deps.handoffs.committed(prepared.record);
     bus.append({ type: "agent_session.message", userSessionId: session.userSessionId, agentSessionId: session.id,
       payload: { agentSessionId: session.id, message: toWireMessage(message) } });
     bus.append({ type: "agent_session.mailbox", userSessionId: session.userSessionId, agentSessionId: session.id,
@@ -280,7 +285,7 @@ export class AgentSessionHost {
     const instructions = [profile.instructions, extra.trim()].filter(Boolean).join("\n\nAssigned role context:\n");
     return { agentSessionId, name, role, preset: profile.id, instructions, model: model ?? profile.model ?? null,
       profileId: profile.id, profileSnapshot: profile, ownership, sdkSessionId: null, generation: 0, turnCount: 0,
-      contextTokens: 0, memory: "", pendingTurnSeq: 0, lastSeenSeq: 0, ord, createdAt };
+      contextTokens: 0, memory: "", latestHandoffId: null, checkpointReady: true, pendingTurnSeq: 0, lastSeenSeq: 0, ord, createdAt };
   }
 
   #profile(id: string): AgentProfile {
@@ -352,10 +357,11 @@ export class AgentSessionHost {
     let errorMessage: string | undefined;
     let output: Record<string, unknown> = {};
     const sentThisTurn = new Set<string>();
-    let latestSeat = this.#rotateIfNeeded(session, seat);
+    let latestSeat = seat;
     try {
       const sdk = await this.#deps.sdk?.();
       if (!sdk) throw new Error("SDK unavailable");
+      latestSeat = await this.#rotateIfNeeded(session, seat, sdk, flight);
       const user = repo.getUserSession(session.userSessionId);
       if (!user || !this.#deps.getWorkspaceRoot) throw new Error("workspace unavailable");
       const profile = latestSeat.profileSnapshot as AgentProfile;
@@ -364,7 +370,7 @@ export class AgentSessionHost {
       const prompt = this.#composePrompt(session, latestSeat, messages);
       const options: SdkOptions = {
         cwd: this.#deps.getWorkspaceRoot(user.workspaceId),
-        systemPrompt: { type: "preset", preset: "claude_code", append: `${latestSeat.instructions}${latestSeat.memory ? `\n\nStructured memory from the previous context generation:\n${latestSeat.memory}` : ""}\n\nUse mcp__console_agent__send_message for all communication. Never use native SendMessage or Agent tools.` },
+        systemPrompt: { type: "preset", preset: "claude_code", append: `${latestSeat.instructions}${this.#checkpointContext(latestSeat)}\n\nUse mcp__console_agent__send_message for all communication. Never use native SendMessage or Agent tools.` },
         settingSources: [], includePartialMessages: true,
         permissionMode: session.phase === "planning" ? "plan" : profile.permissionMode,
         ...(profile.permissionMode === "bypassPermissions" && session.phase !== "planning" ? { allowDangerouslySkipPermissions: true } : {}),
@@ -403,18 +409,22 @@ export class AgentSessionHost {
         }
       } finally { flight.query = null; query.close?.(); }
       for (const delivery of deliveries) this.#patchDelivery(session, delivery, "acknowledged");
-      repo.patchParticipant(session.id, seat.name, { turnCount: latestSeat.turnCount + 1 });
-      if (status === "completed" && typeof output?.message === "string" && output.message.trim()) {
+      repo.patchParticipant(session.id, seat.name, { turnCount: latestSeat.turnCount + 1,
+        checkpointReady: output?.checkpointReadiness !== "defer" });
+      const closing = HandoffDraftSchema.safeParse(output?.handoff);
+      if (status === "completed" && closing.success) {
         const to = typeof output.to === "string" ? output.to : (seat.name === ORCHESTRATOR_SEAT ? MAIN_RECIPIENT : ORCHESTRATOR_SEAT);
-        const category = typeof output.category === "string" && ["update", "milestone", "failure", "final", "decision"].includes(output.category) ? output.category as Category : "update";
-        if (!sentThisTurn.has(`${to}\u0000${output.message}`)) this.post({ agentSessionId: session.id, speaker: { kind: seat.role === "orchestrator" ? "orchestrator" : "agent", name: seat.name }, to, text: output.message, category });
+        const category = typeof output.category === "string" && ["assignment", "update", "milestone", "failure", "final", "decision"].includes(output.category) ? output.category as Category : "update";
+        const key = `${to}\u0000${JSON.stringify(closing.data)}`;
+        if (!sentThisTurn.has(key)) this.post({ agentSessionId: session.id, speaker: { kind: seat.role === "orchestrator" ? "orchestrator" : "agent", name: seat.name }, to, handoff: closing.data, category, turnId });
       }
     } catch (error) {
       status = flight.abort.signal.aborted ? "aborted" : "error";
       errorMessage = error instanceof Error ? error.message : String(error);
       if (status === "error" && repo.getAgentSession(session.id)?.status === "open") {
         const target = seat.name === ORCHESTRATOR_SEAT ? MAIN_RECIPIENT : ORCHESTRATOR_SEAT;
-        this.post({ agentSessionId: session.id, speaker: { kind: seat.role === "orchestrator" ? "orchestrator" : "agent", name: seat.name }, to: target, text: `Turn failed: ${errorMessage}`, category: "failure" });
+        this.post({ agentSessionId: session.id, speaker: { kind: seat.role === "orchestrator" ? "orchestrator" : "agent", name: seat.name }, to: target,
+          handoff: this.#simpleHandoff("Turn failed", "failed", `Provider turn failed: ${errorMessage}`, "Inspect the failure and retry or reassign."), category: "failure", turnId });
       }
     } finally {
       if (status !== "completed") for (const delivery of deliveries) this.#patchDelivery(session, delivery, "cancelled");
@@ -425,19 +435,31 @@ export class AgentSessionHost {
   }
 
   #buildParticipantMcp(sdk: ConsoleSdk, session: AgentSessionRow, seat: ParticipantRow, signal: AbortSignal, sentThisTurn: Set<string>): unknown {
-    const tool = sdk.tool("send_message", "Persist and deliver one focused message through the Console mailbox. Specialists may address only orchestrator; coordinators may address specialists or main. Use update only for information needed by the recipient; main is woken only for milestone, failure, final, or decision.", {
-      to: z.string(), message: z.string().min(1), category: z.enum(["update", "milestone", "failure", "final", "decision"]).default("update"), dedupeKey: z.string().optional(),
-    }, async (args: { to: string; message: string; category: Category; dedupeKey?: string }) => {
+    const tool = sdk.tool("send_message", "Persist and deliver one typed, evidence-bearing handoff through the Console mailbox. Specialists may address only orchestrator; coordinators may address specialists or main.", {
+      to: z.string(), handoff: HandoffDraftSchema, category: z.enum(["assignment", "update", "milestone", "failure", "final", "decision"]).default("update"), dedupeKey: z.string().optional(),
+    }, async (args: { to: string; handoff: HandoffDraft; category: Category; dedupeKey?: string }) => {
       try {
-        const message = this.post({ agentSessionId: session.id, speaker: { kind: seat.role === "orchestrator" ? "orchestrator" : "agent", name: seat.name }, to: args.to, text: args.message, category: args.category, ...(args.dedupeKey ? { dedupeKey: args.dedupeKey } : {}) });
-        sentThisTurn.add(`${args.to}\u0000${args.message.trim()}`);
-        return ok({ delivered: true, messageSeq: message.seq });
+        const message = this.post({ agentSessionId: session.id, speaker: { kind: seat.role === "orchestrator" ? "orchestrator" : "agent", name: seat.name }, to: args.to, handoff: args.handoff, category: args.category, ...(args.dedupeKey ? { dedupeKey: args.dedupeKey } : {}) });
+        sentThisTurn.add(`${args.to}\u0000${JSON.stringify(args.handoff)}`);
+        return ok({ delivered: true, messageSeq: message.seq, handoffId: (message.payload?.handoff as { id?: string } | undefined)?.id });
       } catch (error) {
         return { content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }], isError: true };
       }
     });
     const profile = seat.profileSnapshot as AgentProfile;
     const tools: unknown[] = [tool];
+    if (this.#deps.handoffs) {
+      tools.push(
+        sdk.tool("read_handoff", "Retrieve a lossless handoff section with cursor pagination. Use only when the compact envelope is insufficient.", {
+          handoffId: z.string(), section: z.enum(["core", "extension"]).default("core"), cursor: z.string().optional(), maxBytes: z.number().int().min(1).max(32 * 1024).default(8 * 1024),
+        }, async (args: { handoffId: string; section: "core" | "extension"; cursor?: string; maxBytes: number }) => ok(this.#deps.handoffs?.read(args.handoffId, args.section, args.cursor, args.maxBytes))),
+        sdk.tool("report_handoff_discrepancy", "Report a handoff claim contradicted by the repository, task ledger, journal, or artifact. The original evidence stays authoritative.", {
+          handoffId: z.string(), claim: z.string().min(1), evidence: z.string().min(1),
+        }, async (args: { handoffId: string; claim: string; evidence: string }) => {
+          this.#deps.handoffs?.reportDiscrepancy(args.handoffId, seat.name, args.claim, args.evidence); return ok({ recorded: true });
+        }),
+      );
+    }
     const user = this.#deps.repo.getUserSession(session.userSessionId);
     const workspaceRoot = user && this.#deps.getWorkspaceRoot ? this.#deps.getWorkspaceRoot(user.workspaceId) : "";
     if (profile.runtime.shell && this.#deps.processes) {
@@ -470,7 +492,9 @@ export class AgentSessionHost {
       }, async (args: { question: string; header?: string; options: { label: string; description?: string }[]; blocking: boolean; recommendation?: string }) => {
         const text = `${args.question}\n${args.recommendation ? `Recommendation: ${args.recommendation}\n` : ""}${args.options.map((option) => `- ${option.label}: ${option.description ?? ""}`).join("\n")}`;
         if (!args.blocking) {
-          this.post({ agentSessionId: session.id, speaker: { kind: "orchestrator", name: seat.name }, to: MAIN_RECIPIENT, text, category: "decision", dedupeKey: args.question, deferWake: true });
+          this.post({ agentSessionId: session.id, speaker: { kind: "orchestrator", name: seat.name }, to: MAIN_RECIPIENT,
+            handoff: this.#simpleHandoff("Operator decision requested", "blocked", text, "Main should decide or ask the operator."),
+            category: "decision", dedupeKey: args.question, deferWake: true });
           return ok({ queued: true });
         }
         const pending = this.#deps.interactions?.createQuestion(session.userSessionId, [{ question: args.question, ...(args.header ? { header: args.header } : {}), options: args.options }], `agent:${session.id}:${seat.name}:${newId("turn")}`, signal);
@@ -496,7 +520,7 @@ export class AgentSessionHost {
   }
 
   #runtimeToolNames(profile: AgentProfile, participant: string): string[] {
-    return ["mcp__console_agent__send_message",
+    return ["mcp__console_agent__send_message", "mcp__console_agent__read_handoff", "mcp__console_agent__report_handoff_discrepancy",
       ...(profile.runtime.shell ? ["mcp__console_agent__process_start", "mcp__console_agent__process_read", "mcp__console_agent__process_stop"] : []),
       ...(profile.runtime.browser ? ["mcp__console_agent__browser_open", "mcp__console_agent__browser_snapshot", "mcp__console_agent__browser_click", "mcp__console_agent__browser_fill", "mcp__console_agent__browser_console"] : []),
       ...(profile.runtime.browser && profile.runtime.screenshots ? ["mcp__console_agent__browser_screenshot"] : []),
@@ -507,20 +531,100 @@ export class AgentSessionHost {
 
   #composePrompt(session: AgentSessionRow, seat: ParticipantRow, rows: MessageRow[]): string {
     const roster = this.#deps.repo.listParticipants(session.id).map((p) => `${p.name} (${p.profileId}; owns: ${p.ownership.join(", ") || "coordination"})`).join("; ");
-    const messages = rows.map((row) => `[${row.speakerName} → ${row.toName} | ${row.createdAt}] ${row.text}`).join("\n\n");
-    return `AgentSession ${session.id}: ${session.title}\nYou are ${seat.name}. Participants: ${roster}.\n\nOnly the following addressed mailbox messages are new:\n${messages}\n\nAct on these messages. Do not restate them. Send necessary communication with the Console tool. Finish with one structured closing output.`;
+    const messages = rows.map((row) => {
+      const id = (row.payload?.handoff as { id?: string } | undefined)?.id;
+      if (!id || !this.#deps.handoffs) return `[${row.speakerName} → ${row.toName} | ${row.createdAt}] ${row.text}`;
+      const handoff = this.#deps.handoffs.get(id);
+      const expanded = handoff.core.risk === "high" || handoff.core.status === "needs_verification" || handoff.core.requestExpandedContext;
+      this.#deps.bus.append({ type: "handoff.consumed", userSessionId: session.userSessionId, agentSessionId: session.id,
+        payload: { handoffId: id, participant: seat.name, mode: expanded ? "expanded" : "compact" } });
+      return `[${row.speakerName} → ${row.toName} | ${row.createdAt}] Handoff ${id}\nCORE:\n${JSON.stringify(handoff.core, null, 2)}\nEVIDENCE MANIFEST: ${JSON.stringify([...handoff.core.state.evidence, ...handoff.core.result.artifacts])}${expanded ? `\nPROFILE EXTENSION:\n${JSON.stringify(handoff.extension, null, 2)}` : `\nExtension ${handoff.extension.kind} is available with read_handoff.`}`;
+    }).join("\n\n");
+    return `AgentSession ${session.id}: ${session.title}\nYou are ${seat.name}. Participants: ${roster}.\n\nOnly the following addressed handoffs are new:\n${messages}\n\nTreat handoff claims as historical context; verify risky claims against repository/task/journal evidence during normal work. Act without restating the envelope. Use typed send_message for every transfer. Finish with one structured closing output; set checkpointReadiness=defer only while state is genuinely unstable.`;
   }
 
-  #rotateIfNeeded(session: AgentSessionRow, seat: ParticipantRow): ParticipantRow {
+  #simpleHandoff(action: string, status: HandoffDraft["core"]["status"], summary: string, nextAction: string | null): HandoffDraft {
+    return { core: { schemaVersion: 1, taskId: null, status, risk: status === "failed" || status === "blocked" ? "high" : "medium",
+      action, state: { summary, evidence: [] }, result: { summary: null, artifacts: [] }, uncertainty: [], nextAction,
+      requestExpandedContext: status === "failed" }, extension: { kind: "generic", data: {} } };
+  }
+
+  async #rotateIfNeeded(session: AgentSessionRow, seat: ParticipantRow, sdk: ConsoleSdk, flight: Flight): Promise<ParticipantRow> {
     const config = this.#deps.config;
-    if (!config || (seat.turnCount < config.contextTurnLimit && seat.contextTokens < config.contextTokenLimit)) return seat;
-    const memory = this.#deps.repo.listMessages("agent", session.id, Math.max(0, this.#deps.repo.messagesHeadSeq("agent", session.id) - 20))
-      .filter((row) => row.toName === seat.name || row.speakerName === seat.name).map((row) => `[${row.speakerName}→${row.toName}] ${row.text}`).join("\n").slice(-4_000);
-    this.#deps.repo.patchParticipant(session.id, seat.name, { sdkSessionId: null, generation: seat.generation + 1, turnCount: 0, contextTokens: 0, memory });
+    if (!config || !this.#deps.handoffs) return seat;
+    const hard = seat.turnCount >= config.contextTurnLimit || seat.contextTokens >= config.contextTokenLimit;
+    const soft = seat.turnCount >= Math.ceil(config.contextTurnLimit * 0.8) || seat.contextTokens >= Math.ceil(config.contextTokenLimit * 0.75);
+    if (!soft || (!hard && !seat.checkpointReady)) return seat;
+    const threshold = hard ? "hard" as const : "soft" as const;
+    let draft: HandoffDraft | null = null;
+    let failure: string | null = null;
+    const started = Date.now();
+    if (seat.sdkSessionId) {
+      const checkpointAbort = new AbortController();
+      const profile = seat.profileSnapshot as AgentProfile;
+      const user = this.#deps.repo.getUserSession(session.userSessionId);
+      if (user && this.#deps.getWorkspaceRoot) {
+        const query = sdk.query({ prompt: "Create a lossless rotation checkpoint for your successor context. Capture only durable task state, verified evidence pointers, results, uncertainty, and the exact next action. Do not perform work or call tools.", options: {
+          cwd: this.#deps.getWorkspaceRoot(user.workspaceId), systemPrompt: { type: "preset", preset: "claude_code", append: "You are checkpointing your own context. Report faithfully; do not correct or embellish uncertain state." },
+          settingSources: [], includePartialMessages: false, permissionMode: "plan", allowedTools: [],
+          disallowedTools: ["Agent", "SendMessage", "Task", "Bash", "Edit", "Write", "WebSearch", "WebFetch"],
+          outputFormat: { type: "json_schema", schema: CheckpointClosingSchema.properties.handoff }, maxTurns: 2,
+          sandbox: { enabled: true, failIfUnavailable: profile.sandboxRequired, autoAllowBashIfSandboxed: false, allowUnsandboxedCommands: false,
+            filesystem: { allowManagedReadPathsOnly: true, allowRead: [this.#deps.getWorkspaceRoot(user.workspaceId)], allowWrite: [] } },
+          env: sdkEnv(), abortController: checkpointAbort, persistSession: true, sessionStore: this.#deps.sessionStore as never,
+          sessionStoreFlush: "eager", resume: seat.sdkSessionId, ...(seat.model ? { model: seat.model } : {}),
+          ...((profile.effort ?? config.effort) ? { effort: (profile.effort ?? config.effort) as SdkOptions["effort"] } : {}),
+        } });
+        flight.query = query;
+        try {
+          for await (const raw of query) for (const event of mapSdkMessage(raw)) {
+            if (event.kind === "result") {
+              const parsed = HandoffDraftSchema.safeParse(event.output);
+              if (parsed.success) draft = parsed.data;
+              this.#recordUsage(session, seat, `checkpoint:${newId("turn")}`, event);
+            } else if (event.kind === "error") failure = event.message;
+          }
+        } catch (error) { failure = error instanceof Error ? error.message : String(error); }
+        finally { flight.query = null; query.close?.(); }
+      }
+    }
+    let degraded = false;
+    if (!draft) {
+      if (!hard) {
+        this.#deps.bus.append({ type: "handoff.checkpoint.failed", userSessionId: session.userSessionId, agentSessionId: session.id,
+          payload: { participant: seat.name, reason: failure ?? "checkpoint produced no valid handoff", threshold, degraded: false } });
+        return seat;
+      }
+      degraded = true;
+      const latest = this.#deps.repo.latestHandoff({ userSessionId: session.userSessionId, agentSessionId: session.id, participant: seat.name });
+      draft = latest ? { core: { ...latest.core, action: `Recovery checkpoint: ${latest.core.action}`, status: "needs_verification", risk: "high", requestExpandedContext: true }, extension: latest.extension }
+        : this.#simpleHandoff("Recover interrupted context", "needs_verification", "No valid model checkpoint was available. Reconstruct state from the task ledger, repository, provider journal, and incoming assignment.", "Verify authoritative state before continuing.");
+      this.#deps.bus.append({ type: "handoff.checkpoint.failed", userSessionId: session.userSessionId, agentSessionId: session.id,
+        payload: { participant: seat.name, reason: failure ?? "checkpoint produced no valid handoff", threshold, degraded: true } });
+    }
+    const prepared = this.#deps.handoffs.prepare({ draft, userSessionId: session.userSessionId, agentSessionId: session.id,
+      sender: seat.name, recipient: seat.name, profileId: seat.profileId, generation: seat.generation,
+      extensionKind: (seat.profileSnapshot as AgentProfile).handoffExtension,
+      trigger: degraded ? "recovery" : "rotation", parentHandoffId: seat.latestHandoffId, checkpoint: true });
+    this.#deps.repo.insertCheckpointHandoff(prepared.row);
+    this.#deps.handoffs.committed(prepared.record);
+    this.#deps.repo.patchParticipant(session.id, seat.name, { sdkSessionId: null, generation: seat.generation + 1, turnCount: 0, contextTokens: 0, latestHandoffId: prepared.row.id, checkpointReady: true });
     const fresh = this.#deps.repo.getParticipant(session.id, seat.name) ?? seat;
     this.#deps.bus.append({ type: "agent_session.context.rotated", userSessionId: session.userSessionId, agentSessionId: session.id,
-      payload: { agentSessionId: session.id, participant: seat.name, generation: seat.generation + 1, reason: seat.contextTokens >= config.contextTokenLimit ? "token_limit" : "turn_limit", memoryChars: memory.length } });
+      payload: { agentSessionId: session.id, participant: seat.name, generation: seat.generation + 1,
+        reason: seat.contextTokens >= Math.ceil(config.contextTokenLimit * 0.75) ? "token_limit" : "turn_limit", memoryChars: 0,
+        handoffId: prepared.row.id, threshold, checkpointBytes: prepared.row.bytes, degraded } });
+    this.#deps.bus.append({ type: "agent_session.runtime", userSessionId: session.userSessionId, agentSessionId: session.id,
+      payload: { agentSessionId: session.id, participant: seat.name, detail: `checkpoint ${prepared.row.id} completed in ${Date.now() - started}ms` } });
     return fresh;
+  }
+
+  #checkpointContext(seat: ParticipantRow): string {
+    if (seat.latestHandoffId && this.#deps.handoffs) {
+      const handoff = this.#deps.handoffs.get(seat.latestHandoffId);
+      return `\n\n## Rotation checkpoint ${handoff.metadata.id}\n${JSON.stringify({ core: handoff.core, extension: handoff.extension }, null, 2)}`;
+    }
+    return seat.memory ? `\n\n## Read-only legacy context memory\n${seat.memory}` : "";
   }
 
   #recordNarration(session: AgentSessionRow, participant: string, text: string, turnId: string): void {
@@ -528,13 +632,16 @@ export class AgentSessionHost {
     this.#deps.bus.append({ type: "agent_session.message", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { agentSessionId: session.id, message: toWireMessage(row) } });
   }
 
-  #recordUsage(session: AgentSessionRow, seat: ParticipantRow, turnId: string, usageEvent: { inputTokens?: number; outputTokens?: number; costUsd?: number }): void {
+  #recordUsage(session: AgentSessionRow, seat: ParticipantRow, turnId: string, usageEvent: { inputTokens?: number; uncachedInputTokens?: number; cacheCreationInputTokens?: number; cacheReadInputTokens?: number; outputTokens?: number; costUsd?: number }): void {
     const usage = { id: newId("usage"), userSessionId: session.userSessionId, agentSessionId: session.id, participant: seat.name, profileId: seat.profileId,
-      generation: seat.generation, turnId, inputTokens: usageEvent.inputTokens ?? 0, outputTokens: usageEvent.outputTokens ?? 0, costUsd: usageEvent.costUsd ?? null, createdAt: nowIso() };
+      generation: seat.generation, turnId, inputTokens: usageEvent.inputTokens ?? 0, uncachedInputTokens: usageEvent.uncachedInputTokens ?? 0,
+      cacheCreationInputTokens: usageEvent.cacheCreationInputTokens ?? 0, cacheReadInputTokens: usageEvent.cacheReadInputTokens ?? 0,
+      outputTokens: usageEvent.outputTokens ?? 0, costUsd: usageEvent.costUsd ?? null, createdAt: nowIso() };
     this.#deps.repo.insertUsage(usage);
     this.#deps.bus.append({ type: "usage.recorded", userSessionId: session.userSessionId, agentSessionId: session.id,
       payload: { sessionId: session.id, participant: seat.name, profileId: seat.profileId, generation: seat.generation, turnId,
-        inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, ...(usageEvent.costUsd === undefined ? {} : { costUsd: usageEvent.costUsd }) } });
+        inputTokens: usage.inputTokens, uncachedInputTokens: usage.uncachedInputTokens, cacheCreationInputTokens: usage.cacheCreationInputTokens,
+        cacheReadInputTokens: usage.cacheReadInputTokens, outputTokens: usage.outputTokens, ...(usageEvent.costUsd === undefined ? {} : { costUsd: usageEvent.costUsd }) } });
   }
 
   #patchDelivery(session: AgentSessionRow, delivery: MailboxDeliveryRow, status: "delivered" | "acknowledged" | "cancelled"): void {

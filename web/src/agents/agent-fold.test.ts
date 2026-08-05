@@ -63,6 +63,16 @@ function message(
  * side changes shape, these cases must be re-checked against it.
  */
 describe("foldAgentItems", () => {
+  it("carries a structured handoff on the existing message row", () => {
+    const handoff = { id: "handoff_1", trigger: "milestone" as const, status: "in_progress" as const, risk: "medium" as const,
+      action: "Report state", stateSummary: "Parser is updated", resultSummary: null, nextAction: "Run tests",
+      evidenceCount: 1, artifactCount: 0, extensionKind: "implementation" as const, overflow: false, referenceWarnings: [] };
+    const items = foldAgentItems([ev("agent_session.message", { agentSessionId: "as_1", message: { seq: 1, speaker: SCOUT,
+      to: "orchestrator", kind: "message", text: "compact projection", handoff, createdAt: "2026-08-03T12:00:00.000Z" } })]);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ type: "message", handoff });
+  });
+
   it("agent_session.message is THE chat lane, speaker + to intact", () => {
     const items = foldAgentItems([
       message("found it in repo.ts", SCOUT, "message", "coder"),

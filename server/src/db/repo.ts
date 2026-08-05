@@ -3,9 +3,10 @@
  * MAX(seq)+1 inside a synchronous transaction — safe because this is a single
  * process and better-sqlite3 serializes writes.
  */
-import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, or, sql } from "drizzle-orm";
 import type {
   AgentSession,
+  HandoffSummary,
   MessageKind,
   SessionMessage,
   Speaker,
@@ -14,9 +15,13 @@ import type {
 import type { Db } from "./client.ts";
 import {
   agentSessions,
+  eventArtifacts,
+  handoffRecords,
   mailboxDeliveries,
   messages,
   participants,
+  providerEntries,
+  tasks,
   userSessions,
   usageSamples,
 } from "./schema.ts";
@@ -38,6 +43,7 @@ export type AgentSessionRow = typeof agentSessions.$inferSelect;
 export type ParticipantRow = typeof participants.$inferSelect;
 export type MailboxDeliveryRow = typeof mailboxDeliveries.$inferSelect;
 export type UsageSampleRow = typeof usageSamples.$inferSelect;
+export type HandoffRecordRow = typeof handoffRecords.$inferSelect;
 
 export function toWireAgentSession(
   row: AgentSessionRow,
@@ -58,12 +64,14 @@ export function toWireAgentSession(
 }
 
 export function toWireMessage(row: MessageRow): SessionMessage {
+  const handoff = row.payload?.handoff as HandoffSummary | undefined;
   return {
     seq: row.seq,
     speaker: { kind: row.speakerKind, name: row.speakerName },
     ...(row.toName === null ? {} : { to: row.toName }),
     kind: row.kind,
     text: row.text,
+    ...(handoff === undefined ? {} : { handoff }),
     createdAt: row.createdAt,
   };
 }
@@ -164,6 +172,69 @@ export class Repo {
     return run();
   }
 
+  /** Atomically stores the lossless handoff, compact message projection, and delivery. */
+  appendHandoffMailbox(input: AppendMessageInput & {
+    userSessionId: string;
+    agentSessionId: string;
+    recipient: string;
+    category: MailboxDeliveryRow["category"];
+    handoff: HandoffRecordRow;
+    summary: HandoffSummary;
+    dedupeKey?: string;
+  }): { message: MessageRow; delivery: MailboxDeliveryRow; handoff: HandoffRecordRow } {
+    return this.#sqlite.transaction(() => {
+      const { message, delivery } = this.appendMailboxMessage({
+        ...input,
+        payload: { ...(input.payload ?? {}), handoff: input.summary },
+      });
+      const handoff = { ...input.handoff, messageId: message.id };
+      this.#db.insert(handoffRecords).values(handoff).run();
+      for (const participant of new Set([input.recipient, input.speaker.name])) {
+        if (participant === "main") {
+          this.#db.update(userSessions).set({ latestHandoffId: handoff.id, updatedAt: nowIso() }).where(eq(userSessions.id, input.userSessionId)).run();
+        } else {
+          this.#db.update(participants).set({ latestHandoffId: handoff.id }).where(and(
+            eq(participants.agentSessionId, input.agentSessionId), eq(participants.name, participant),
+          )).run();
+        }
+      }
+      return { message, delivery, handoff };
+    })();
+  }
+
+  insertCheckpointHandoff(row: HandoffRecordRow): void {
+    this.#sqlite.transaction(() => {
+      this.#db.insert(handoffRecords).values(row).run();
+      if (row.agentSessionId === null) {
+        this.#db.update(userSessions).set({ latestHandoffId: row.id, updatedAt: nowIso() }).where(eq(userSessions.id, row.userSessionId)).run();
+      } else {
+        this.#db.update(participants).set({ latestHandoffId: row.id }).where(and(
+          eq(participants.agentSessionId, row.agentSessionId),
+          eq(participants.name, row.recipient),
+        )).run();
+      }
+    })();
+  }
+
+  getHandoff(id: string): HandoffRecordRow | undefined {
+    return this.#db.select().from(handoffRecords).where(eq(handoffRecords.id, id)).get();
+  }
+
+  latestHandoff(input: { userSessionId: string; agentSessionId?: string | null; participant?: string }): HandoffRecordRow | undefined {
+    const filters = [eq(handoffRecords.userSessionId, input.userSessionId)];
+    if (input.agentSessionId === null) filters.push(sql`${handoffRecords.agentSessionId} is null`);
+    else if (input.agentSessionId !== undefined) filters.push(eq(handoffRecords.agentSessionId, input.agentSessionId));
+    if (input.participant !== undefined) filters.push(eq(handoffRecords.recipient, input.participant));
+    return this.#db.select().from(handoffRecords).where(and(...filters)).orderBy(desc(handoffRecords.createdAt)).get();
+  }
+
+  hasDurableReference(kind: "journal" | "artifact" | "task", ref: string): boolean {
+    if (kind === "artifact") return this.#db.select({ id: eventArtifacts.id }).from(eventArtifacts).where(eq(eventArtifacts.id, ref)).get() !== undefined;
+    if (kind === "task") return this.#db.select({ id: tasks.sdkTaskId }).from(tasks).where(eq(tasks.sdkTaskId, ref)).get() !== undefined;
+    return this.#db.select({ id: providerEntries.ord }).from(providerEntries)
+      .where(or(eq(providerEntries.uuid, ref), eq(providerEntries.sessionId, ref))).get() !== undefined;
+  }
+
   listQueuedDeliveries(agentSessionId?: string): MailboxDeliveryRow[] {
     return this.#db.select().from(mailboxDeliveries)
       .where(agentSessionId === undefined
@@ -254,7 +325,7 @@ export class Repo {
   patchUserSession(
     id: string,
     patch: Partial<
-      Pick<UserSessionRow, "title" | "mode" | "phase" | "status" | "sdkSessionId" | "sdkGeneration" | "sdkTurnCount" | "contextTokens" | "memory">
+      Pick<UserSessionRow, "title" | "mode" | "phase" | "status" | "sdkSessionId" | "sdkGeneration" | "sdkTurnCount" | "contextTokens" | "memory" | "latestHandoffId">
     >,
   ): void {
     this.#db
@@ -398,7 +469,7 @@ export class Repo {
     patch: Partial<Pick<ParticipantRow,
       "lastSeenSeq" | "pendingTurnSeq" | "sdkSessionId" | "generation" |
       "turnCount" | "contextTokens" | "profileSnapshot" | "profileId"
-      | "memory"
+      | "memory" | "latestHandoffId" | "checkpointReady"
     >>,
   ): void {
     this.#db

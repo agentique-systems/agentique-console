@@ -60,6 +60,7 @@ export class UserSessionService {
       sdkTurnCount: 0,
       contextTokens: 0,
       memory: "",
+      latestHandoffId: null,
       createdAt: now,
       updatedAt: now,
     };

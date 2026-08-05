@@ -11,6 +11,9 @@ import type { Repo } from "../db/repo.ts";
 import { newId } from "../ids.ts";
 import type { ConsoleSdk, SdkToolResult } from "../sdk/types.ts";
 import type { TaskService } from "../tasks/service.ts";
+import type { HandoffDraft } from "@agentique-console/shared";
+import type { HandoffService } from "../handoffs/service.ts";
+import { HandoffDraftSchema } from "../handoffs/schema.ts";
 
 /**
  * Console-owned tasks are keyed by a synthetic SDK-session id: the
@@ -48,10 +51,11 @@ export interface ConsoleToolsInput {
   userSessionId: string;
   /** A2: console-owned task tools (absent until wired in main/tests). */
   tasks?: TaskService;
+  handoffs: HandoffService;
 }
 
 export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
-  const { sdk, host, repo, bus, userSessionId, tasks } = input;
+  const { sdk, host, repo, bus, userSessionId, tasks, handoffs } = input;
 
   /** Tools operate only on this UserSession's agent sessions. */
   const owned = (agentSessionId: string) => {
@@ -96,11 +100,9 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           )
           .min(1)
           .max(4),
-        briefing: z
-          .string()
-          .optional()
+        briefing: HandoffDraftSchema
           .describe(
-            "The coordinator's mission: what the session must deliver and any constraints (embedded into its spawn prompt)",
+            "Typed coordinator assignment: objective, current evidence, risk, uncertainty, and next action",
           ),
       },
       async (args: {
@@ -113,7 +115,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           model?: string;
           owns: string[];
         }[];
-        briefing?: string;
+        briefing: HandoffDraft;
       }) =>
         guarded(() => {
           const { agentSessionId, participants } = host.createSession({
@@ -135,11 +137,27 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
     sdk.tool(
       "send_agent_message",
       "Send a focused assignment or response from main to an AgentSession coordinator. Direct specialist messaging is intentionally forbidden.",
-      { agentSessionId: z.string(), message: z.string().min(1), category: z.enum(["assignment", "update"]).default("assignment"), dedupeKey: z.string().optional() },
-      async (args: { agentSessionId: string; message: string; category: "assignment" | "update"; dedupeKey?: string }) => guarded(() => {
+      { agentSessionId: z.string(), handoff: HandoffDraftSchema, category: z.enum(["assignment", "update"]).default("assignment"), dedupeKey: z.string().optional() },
+      async (args: { agentSessionId: string; handoff: HandoffDraft; category: "assignment" | "update"; dedupeKey?: string }) => guarded(() => {
         owned(args.agentSessionId);
-        const message = host.post({ agentSessionId: args.agentSessionId, speaker: { kind: "orchestrator", name: MAIN_RECIPIENT }, to: ORCHESTRATOR_SEAT, text: args.message, category: args.category, ...(args.dedupeKey ? { dedupeKey: args.dedupeKey } : {}) });
-        return { delivered: true, messageSeq: message.seq };
+        const message = host.post({ agentSessionId: args.agentSessionId, speaker: { kind: "orchestrator", name: MAIN_RECIPIENT }, to: ORCHESTRATOR_SEAT, handoff: args.handoff, category: args.category, ...(args.dedupeKey ? { dedupeKey: args.dedupeKey } : {}) });
+        return { delivered: true, messageSeq: message.seq, handoffId: (message.payload?.handoff as { id?: string } | undefined)?.id };
+      }),
+    ),
+
+    sdk.tool(
+      "read_handoff",
+      "Retrieve one lossless handoff section using bounded cursor pagination.",
+      { handoffId: z.string(), section: z.enum(["core", "extension"]).default("core"), cursor: z.string().optional(), maxBytes: z.number().int().min(1).max(32 * 1024).default(8 * 1024) },
+      async (args: { handoffId: string; section: "core" | "extension"; cursor?: string; maxBytes: number }) => guarded(() => handoffs.read(args.handoffId, args.section, args.cursor, args.maxBytes)),
+    ),
+
+    sdk.tool(
+      "report_handoff_discrepancy",
+      "Record a handoff claim contradicted by authoritative repository, task, journal, or artifact evidence.",
+      { handoffId: z.string(), claim: z.string().min(1), evidence: z.string().min(1) },
+      async (args: { handoffId: string; claim: string; evidence: string }) => guarded(() => {
+        handoffs.reportDiscrepancy(args.handoffId, "main", args.claim, args.evidence); return { recorded: true };
       }),
     ),
 

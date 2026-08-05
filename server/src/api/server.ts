@@ -7,6 +7,7 @@ import { registerAgentSessionRoutes } from "./routes/agent-sessions.ts";
 import { registerComposeRoutes } from "./routes/compose.ts";
 import { registerEventRoutes } from "./routes/events.ts";
 import { registerFsRoutes } from "./routes/fs.ts";
+import { registerHandoffRoutes } from "./routes/handoffs.ts";
 import { registerTaskRoutes } from "./routes/tasks.ts";
 import { registerUserSessionRoutes } from "./routes/user-sessions.ts";
 import { registerWorkspaceRoutes } from "./routes/workspaces.ts";
@@ -47,6 +48,7 @@ export function buildServer(ctx: AppContext): FastifyInstance {
 
   registerEventRoutes(app, ctx);
   registerFsRoutes(app, ctx);
+  registerHandoffRoutes(app, ctx);
   registerWorkspaceRoutes(app, ctx);
   registerUserSessionRoutes(app, ctx);
   registerAgentSessionRoutes(app, ctx);

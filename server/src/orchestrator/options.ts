@@ -20,6 +20,8 @@ export const CONSOLE_TOOL_NAMES = [
   "read_agent_session",
   "list_agent_sessions",
   "list_agent_profiles",
+  "read_handoff",
+  "report_handoff_discrepancy",
   "task_create",
   "task_update",
   "task_list",
@@ -60,8 +62,8 @@ export function buildOrchestratorOptions(
       type: "preset",
       preset: "claude_code",
       append: withDelegation
-        ? ORCHESTRATOR_BRIEF + ORCHESTRATOR_DELEGATION_BRIEF + (input.contextMemory ? `\n\n## Structured memory from the prior context generation\n${input.contextMemory}` : "")
-        : ORCHESTRATOR_BRIEF + (input.contextMemory ? `\n\n## Structured memory from the prior context generation\n${input.contextMemory}` : ""),
+        ? ORCHESTRATOR_BRIEF + ORCHESTRATOR_DELEGATION_BRIEF + (input.contextMemory ? `\n\n## Rotation checkpoint (or read-only legacy memory)\n${input.contextMemory}` : "")
+        : ORCHESTRATOR_BRIEF + (input.contextMemory ? `\n\n## Rotation checkpoint (or read-only legacy memory)\n${input.contextMemory}` : ""),
     },
     settingSources: [],
     includePartialMessages: true,

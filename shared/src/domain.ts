@@ -1,3 +1,5 @@
+import type { HandoffSummary } from "./handoffs.ts";
+
 // Domain rows as they appear on the wire. The server owns persistence shapes;
 // these are the JSON forms REST and the event spine agree on.
 
@@ -65,6 +67,8 @@ export interface SessionMessage {
   to?: string;
   kind: MessageKind;
   text: string;
+  /** Present only for structured v2 handoff rows; legacy rows remain plain text. */
+  handoff?: HandoffSummary;
   createdAt: string;
 }
 

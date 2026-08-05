@@ -40,8 +40,8 @@ export type TurnEvent =
    * persisted; it exists so a slow turn reads as working rather than stuck.
    */
   | { kind: "notice"; text: string }
-  | { kind: "result"; output: unknown; resumeId?: string; costUsd?: number; inputTokens?: number; outputTokens?: number }
-  | { kind: "error"; message: string; aborted: boolean; inputTokens?: number; outputTokens?: number; costUsd?: number }
+  | { kind: "result"; output: unknown; resumeId?: string; costUsd?: number; inputTokens?: number; uncachedInputTokens?: number; cacheCreationInputTokens?: number; cacheReadInputTokens?: number; outputTokens?: number }
+  | { kind: "error"; message: string; aborted: boolean; inputTokens?: number; uncachedInputTokens?: number; cacheCreationInputTokens?: number; cacheReadInputTokens?: number; outputTokens?: number; costUsd?: number }
   /**
    * The SDK's authoritative turn-over signal (session_state_changed → idle).
    * A persistent lane settles its open turn on this even when the result
@@ -226,6 +226,9 @@ export function mapSdkMessage(message: SdkMessage): TurnEvent[] {
               : { costUsd: message.total_cost_usd }),
             ...((message.usage?.input_tokens ?? message.usage?.cache_creation_input_tokens ?? message.usage?.cache_read_input_tokens) === undefined ? {} : {
               inputTokens: (message.usage?.input_tokens ?? 0) + (message.usage?.cache_creation_input_tokens ?? 0) + (message.usage?.cache_read_input_tokens ?? 0),
+              uncachedInputTokens: message.usage?.input_tokens ?? 0,
+              cacheCreationInputTokens: message.usage?.cache_creation_input_tokens ?? 0,
+              cacheReadInputTokens: message.usage?.cache_read_input_tokens ?? 0,
             }),
             ...(message.usage?.output_tokens === undefined ? {} : { outputTokens: message.usage.output_tokens }),
           },
@@ -246,10 +249,12 @@ export function mapSdkMessage(message: SdkMessage): TurnEvent[] {
   }
 }
 
-function usageFields(message: SdkMessage): { inputTokens?: number; outputTokens?: number; costUsd?: number } {
+function usageFields(message: SdkMessage): { inputTokens?: number; uncachedInputTokens?: number; cacheCreationInputTokens?: number; cacheReadInputTokens?: number; outputTokens?: number; costUsd?: number } {
   const hasInput = message.usage?.input_tokens !== undefined || message.usage?.cache_creation_input_tokens !== undefined || message.usage?.cache_read_input_tokens !== undefined;
   return {
-    ...(hasInput ? { inputTokens: (message.usage?.input_tokens ?? 0) + (message.usage?.cache_creation_input_tokens ?? 0) + (message.usage?.cache_read_input_tokens ?? 0) } : {}),
+    ...(hasInput ? { inputTokens: (message.usage?.input_tokens ?? 0) + (message.usage?.cache_creation_input_tokens ?? 0) + (message.usage?.cache_read_input_tokens ?? 0),
+      uncachedInputTokens: message.usage?.input_tokens ?? 0, cacheCreationInputTokens: message.usage?.cache_creation_input_tokens ?? 0,
+      cacheReadInputTokens: message.usage?.cache_read_input_tokens ?? 0 } : {}),
     ...(message.usage?.output_tokens === undefined ? {} : { outputTokens: message.usage.output_tokens }),
     ...(message.total_cost_usd === undefined ? {} : { costUsd: message.total_cost_usd }),
   };

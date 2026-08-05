@@ -20,6 +20,7 @@ import { fakeSdk, type FakeProgram, type FakeSdk } from "./sdk/fake.ts";
 import { TaskService } from "./tasks/service.ts";
 import { AgentProfileRegistry } from "./agent-profiles/registry.ts";
 import { SqliteSessionStore } from "./sdk/session-store.ts";
+import { HandoffService } from "./handoffs/service.ts";
 
 export interface Harness {
   db: ReturnType<typeof openDb>["db"];
@@ -45,6 +46,7 @@ export function makeHarness(
   const interactions = new InteractionService(db, bus);
   const fake = fakeSdk(program);
   const config = loadConfig({});
+  const handoffs = new HandoffService({ repo, bus, getWorkspaceRoot: () => "/tmp/test-workspace" });
 
   const workspaceId = newId("ws");
   db.insert(workspaces)
@@ -64,6 +66,7 @@ export function makeHarness(
     config,
     sdk: async () => fake.sdk,
     interactions,
+    handoffs,
     getWorkspaceRoot: () => "/tmp/test-workspace",
     ...overrides,
   });
@@ -91,6 +94,7 @@ export function makeHarness(
         sdkTurnCount: 0,
         contextTokens: 0,
         memory: "",
+        latestHandoffId: null,
         createdAt: nowIso(),
         updatedAt: nowIso(),
       };
@@ -136,6 +140,7 @@ function wire(
 ): { host: AgentSessionHost; runner: OrchestratorRunner } {
   const tasks = new TaskService(base.db, base.bus);
   const sessionStore = new SqliteSessionStore(base.db);
+  const handoffs = new HandoffService({ repo: base.repo, bus: base.bus, getWorkspaceRoot: () => "/tmp/test-workspace" });
   let runner!: OrchestratorRunner;
   const host = new AgentSessionHost({
     repo: base.repo,
@@ -146,6 +151,7 @@ function wire(
     sessionStore,
     getWorkspaceRoot: () => "/tmp/test-workspace",
     interactions: base.interactions,
+    handoffs,
     tasks,
     wake: (userSessionId, agentSessionId, category, text) => runner.enqueueAgentMilestone(userSessionId, agentSessionId, category, text),
     ...options.hostOverrides,
@@ -156,6 +162,7 @@ function wire(
     config: base.config,
     sdk: async () => base.fake.sdk,
     interactions: base.interactions,
+    handoffs,
     getWorkspaceRoot: () => "/tmp/test-workspace",
     sessionStore,
     buildMcpServer: (userSessionId, sdk) =>
@@ -166,6 +173,7 @@ function wire(
         bus: base.bus,
         userSessionId,
         tasks,
+        handoffs,
       }),
   });
   return { host, runner };

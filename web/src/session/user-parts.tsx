@@ -42,6 +42,7 @@ import {
   ToolOutput,
 } from "@/components/ai-elements/tool";
 import { cn } from "@/lib/utils";
+import { HandoffCard } from "@/components/handoff-card";
 import { shortenPath, subjectOf } from "@/lib/tool-text";
 
 import { PlanCard } from "./plan-card";
@@ -176,6 +177,9 @@ export function UserPart({
   switch (item.type) {
     case "chain":
       return <Chain item={item} />;
+
+    case "handoff":
+      return <HandoffCard handoff={item.handoff} sender={item.sender} recipient={item.recipient} />;
 
     case "message": {
       if (item.kind === "notice") {

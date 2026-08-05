@@ -14,7 +14,8 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "build": "npm run build --workspaces --if-present",
-    "verify": "npm run typecheck && npm test"
+    "verify": "npm run typecheck && npm test",
+    "eval:handoffs": "npm run eval:handoffs --workspace server"
   },
   "engines": {
     "node": ">=22"

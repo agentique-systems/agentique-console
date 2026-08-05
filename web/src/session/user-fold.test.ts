@@ -58,6 +58,14 @@ function message(
  * — if either side changes shape, these cases must be re-checked against it.
  */
 describe("foldUserItems", () => {
+  it("shows one compact card for an AgentSession handoff addressed to main", () => {
+    const handoff = { id: "handoff_1", trigger: "final" as const, status: "completed" as const, risk: "low" as const,
+      action: "Deliver result", stateSummary: "Work is complete", resultSummary: "Tests pass", nextAction: null,
+      evidenceCount: 1, artifactCount: 0, extensionKind: "coordination" as const, overflow: false, referenceWarnings: [] };
+    const items = foldUserItems([ev("handoff.created", { handoff, sender: "orchestrator", recipient: "main", checkpoint: false, bytes: 400, softTargetBytes: 4096 }, { agentSessionId: "as_1" })]);
+    expect(items).toEqual([{ type: "handoff", handoff, sender: "orchestrator", recipient: "main" }]);
+  });
+
   it("user_session.message is THE chat lane", () => {
     const items = foldUserItems([message("please check")]);
     expect(items).toHaveLength(1);

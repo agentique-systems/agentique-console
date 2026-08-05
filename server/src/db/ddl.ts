@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS user_sessions (
   sdk_turn_count INTEGER NOT NULL DEFAULT 0,
   context_tokens INTEGER NOT NULL DEFAULT 0,
   memory TEXT NOT NULL DEFAULT '',
+  latest_handoff_id TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -55,6 +56,8 @@ CREATE TABLE IF NOT EXISTS participants (
   turn_count INTEGER NOT NULL DEFAULT 0,
   context_tokens INTEGER NOT NULL DEFAULT 0,
   memory TEXT NOT NULL DEFAULT '',
+  latest_handoff_id TEXT,
+  checkpoint_ready INTEGER NOT NULL DEFAULT 1,
   pending_turn_seq INTEGER NOT NULL DEFAULT 0,
   last_seen_seq INTEGER NOT NULL DEFAULT 0,
   ord INTEGER NOT NULL,
@@ -175,9 +178,37 @@ CREATE TABLE IF NOT EXISTS usage_samples (
   generation INTEGER NOT NULL,
   turn_id TEXT NOT NULL,
   input_tokens INTEGER NOT NULL DEFAULT 0,
+  uncached_input_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_input_tokens INTEGER NOT NULL DEFAULT 0,
   output_tokens INTEGER NOT NULL DEFAULT 0,
   cost_usd REAL,
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS usage_user_session ON usage_samples(user_session_id, created_at);
+
+CREATE TABLE IF NOT EXISTS handoff_records (
+  id TEXT PRIMARY KEY,
+  user_session_id TEXT NOT NULL,
+  agent_session_id TEXT,
+  message_id TEXT,
+  sender TEXT NOT NULL,
+  recipient TEXT NOT NULL,
+  profile_id TEXT,
+  generation INTEGER NOT NULL DEFAULT 0,
+  turn_id TEXT,
+  trigger TEXT NOT NULL CHECK (trigger IN ('assignment','update','milestone','decision','failure','final','rotation','recovery')),
+  parent_handoff_id TEXT,
+  root_handoff_id TEXT NOT NULL,
+  checkpoint INTEGER NOT NULL DEFAULT 0,
+  core TEXT NOT NULL,
+  extension TEXT NOT NULL,
+  bytes INTEGER NOT NULL,
+  soft_target_bytes INTEGER NOT NULL,
+  overflow INTEGER NOT NULL DEFAULT 0,
+  reference_warnings TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS handoffs_user_created ON handoff_records(user_session_id, created_at);
+CREATE INDEX IF NOT EXISTS handoffs_agent_recipient ON handoff_records(agent_session_id, recipient, created_at);
 `;
