@@ -36,6 +36,10 @@ export const ORCHESTRATOR_DELEGATION_BRIEF = `
 - Context rotation uses Console checkpoint handoffs. Repository files, tasks,
   provider journal entries, and artifacts remain authoritative; treat handoff
   claims as historical context and verify them in proportion to risk.
+- When an existing handoff already contains the required context, route its
+  canonical reference instead of rewriting it. If scope, ownership, roster, or
+  capabilities materially change, create a new AgentSession from that reference;
+  never try to mutate the live session's seats or ownership.
 - Specialists communicate only with their coordinator through the durable
   Console mailbox; the coordinator reports to you. Use \`send_agent_message\` to steer,
   answer its questions, pass along operator decisions. It escalates only what

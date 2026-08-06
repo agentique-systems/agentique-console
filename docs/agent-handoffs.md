@@ -12,6 +12,12 @@ action, evidence-backed state, result artifacts, uncertainty, and an exact next
 action. The server adds identity, sender/recipient, generation, trigger, and
 root/parent lineage. Agents cannot author that metadata.
 
+Coordinators may route a handoff already delivered to them by canonical ID.
+The forwarding message contains only a typed purpose and bounded expected
+action; it does not create another handoff record or change the original
+author, evidence, extension, or lineage. Main may use the same mechanism to
+seed a new AgentSession when work crosses a material scope boundary.
+
 Profile extensions are selected by the server: coordination for main and
 coordinators, implementation for implementers, investigation for explorers and
 researchers, review for reviewers, and generic for custom profiles unless their

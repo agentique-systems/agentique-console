@@ -165,7 +165,7 @@ export function AgentPart({
       return <ToolRun item={item} accents={accents} />;
 
     case "message": {
-      if (item.handoff) return <HandoffCard handoff={item.handoff} sender={item.speaker.name} recipient={item.to} />;
+      if (item.handoff) return <HandoffCard handoff={item.handoff} sender={item.speaker.name} recipient={item.to} reference={item.handoffReference} />;
       if (item.kind === "notice" || item.speaker.kind === "system") {
         return (
           <div className="my-1 px-1 text-center text-2xs text-muted-foreground">

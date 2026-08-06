@@ -1,4 +1,10 @@
-import type { HandoffDraft, HandoffTrigger, Speaker } from "@agentique-console/shared";
+import type {
+  HandoffDraft,
+  HandoffReference,
+  HandoffReferencePurpose,
+  HandoffTrigger,
+  Speaker,
+} from "@agentique-console/shared";
 import fs from "node:fs";
 import { z } from "zod";
 import { badRequest, conflict, notFound } from "../api/errors.ts";
@@ -25,7 +31,11 @@ import type { BrowserManager } from "../runtime/browser-manager.ts";
 import type { InteractionService } from "../orchestrator/interactions.ts";
 import type { TaskService } from "../tasks/service.ts";
 import type { HandoffService } from "../handoffs/service.ts";
-import { CheckpointClosingSchema, HandoffDraftSchema } from "../handoffs/schema.ts";
+import {
+  CheckpointClosingSchema,
+  HandoffDraftSchema,
+  HandoffReferenceSchema,
+} from "../handoffs/schema.ts";
 import { COORDINATOR_SEAT, seatOfSpawnName } from "./spawn-names.ts";
 
 export const ORCHESTRATOR_SEAT = "orchestrator";
@@ -45,6 +55,11 @@ export interface CreateAgentSessionInput {
   mode: "execute" | "plan_execute";
   agents: { name: string; profileId?: string; preset?: string; instructions?: string; model?: string; owns?: string[] }[];
   briefing?: HandoffDraft;
+  briefingReference?: {
+    handoffId: string;
+    purpose: HandoffReferencePurpose;
+    expectedAction: string;
+  };
 }
 
 export interface AgentSessionHostDeps {
@@ -77,13 +92,32 @@ export class AgentSessionHost {
   readonly #deferredDecisions = new Map<string, string[]>();
   readonly #legacyBindings = new Map<string, { agentSessionId: string; participant: string; spawnName: string; agentId: string | null }>();
 
-  constructor(deps: AgentSessionHostDeps) { this.#deps = deps; }
+  constructor(deps: AgentSessionHostDeps) {
+    this.#deps = deps;
+    deps.tasks?.onAgentSessionChanged((agentSessionId) => {
+      this.#refreshDependencyGates(agentSessionId);
+    });
+  }
 
   createSession(input: CreateAgentSessionInput): { agentSessionId: string; participants: string[] } {
     const { repo, bus } = this.#deps;
     const user = repo.getUserSession(input.userSessionId);
     if (!user) throw notFound(`no user session ${input.userSessionId}`);
     if (input.agents.length < 1 || input.agents.length > 4) throw badRequest("an agent session seats 1 to 4 specialists");
+    if (input.briefing && input.briefingReference) {
+      throw badRequest("provide a briefing or a briefing handoff reference, not both");
+    }
+    if (input.briefingReference) {
+      if (!this.#deps.handoffs) throw new Error("handoff service unavailable");
+      const source = this.#deps.handoffs.get(input.briefingReference.handoffId);
+      if (source.metadata.userSessionId !== input.userSessionId) {
+        throw badRequest("a briefing handoff reference cannot cross UserSessions");
+      }
+      const expectedAction = input.briefingReference.expectedAction.trim();
+      if (expectedAction.length === 0 || expectedAction.length > 240) {
+        throw badRequest("a briefing reference expected action must be 1 to 240 characters");
+      }
+    }
     const names = new Set<string>();
     for (const agent of input.agents) {
       if (!SEAT_NAME_RE.test(agent.name) || RESERVED_NAMES.has(agent.name.toLowerCase())) throw badRequest(`invalid or reserved seat name \"${agent.name}\"`);
@@ -121,6 +155,15 @@ export class AgentSessionHost {
     bus.append({ type: "flow.delegation", userSessionId: row.userSessionId, agentSessionId: row.id,
       payload: { userSessionId: row.userSessionId, agentSessionId: row.id, kind: "created", preview: title } });
     if (input.briefing) this.post({ agentSessionId: row.id, speaker: { kind: "orchestrator", name: MAIN_RECIPIENT }, to: ORCHESTRATOR_SEAT, handoff: input.briefing, category: "assignment" });
+    if (input.briefingReference) {
+      this.forward({
+        agentSessionId: row.id,
+        speaker: { kind: "orchestrator", name: MAIN_RECIPIENT },
+        to: ORCHESTRATOR_SEAT,
+        category: "assignment",
+        ...input.briefingReference,
+      });
+    }
     return { agentSessionId: row.id, participants: specialists };
   }
 
@@ -137,15 +180,7 @@ export class AgentSessionHost {
       const priorMessage = prior ? repo.getMessageById(prior.messageId) : undefined;
       if (priorMessage) return priorMessage;
     }
-    if (input.speaker.name === ORCHESTRATOR_SEAT && input.to === MAIN_RECIPIENT && category === "final" && this.#deps.tasks) {
-      const incomplete = this.#deps.tasks.listForUserSession(session.userSessionId).filter((task) => task.agentSessionId === session.id && task.status !== "completed" && task.status !== "deleted");
-      if (incomplete.length > 0) throw badRequest(`cannot report final while ${incomplete.length} task(s) remain incomplete: ${incomplete.map((task) => task.subject).join(", ")}`);
-    }
-    if (input.speaker.name === ORCHESTRATOR_SEAT && input.to === MAIN_RECIPIENT && category === "final") {
-      const activeSpecialists = [...(this.#lanes.get(session.id)?.turns.keys() ?? [])].filter((name) => name !== ORCHESTRATOR_SEAT);
-      const pendingInternal = repo.listActiveDeliveries(session.id).filter((delivery) => delivery.recipient !== MAIN_RECIPIENT);
-      if (activeSpecialists.length > 0 || pendingInternal.length > 0) throw badRequest(`cannot report final while AgentSession work is active (${activeSpecialists.length} running, ${pendingInternal.length} queued/delivered)`);
-    }
+    this.#assertFinalAllowed(session, input.speaker.name, input.to, category);
     const senderSeat = input.speaker.name === MAIN_RECIPIENT ? undefined : repo.getParticipant(session.id, input.speaker.name);
     const prepared = this.#deps.handoffs.prepare({
       draft: input.handoff, userSessionId: session.userSessionId, agentSessionId: session.id,
@@ -156,19 +191,30 @@ export class AgentSessionHost {
       turnId: input.turnId, trigger: category as HandoffTrigger,
       parentHandoffId: category === "assignment" ? null : (senderSeat?.latestHandoffId ?? (input.speaker.name === MAIN_RECIPIENT ? repo.getUserSession(session.userSessionId)?.latestHandoffId : null)),
     });
+    const gate = this.#assignmentGate(
+      session,
+      input.speaker.name,
+      input.to,
+      category,
+      prepared.record.core.taskId,
+    );
     const text = prepared.text;
     const { message, delivery } = repo.appendHandoffMailbox({
       sessionKind: "agent", sessionId: session.id, userSessionId: session.userSessionId,
       agentSessionId: session.id, speaker: input.speaker, to: input.to, recipient: input.to,
       kind: category === "decision" && session.phase === "planning" ? "plan" : "message",
       text, category, handoff: prepared.row, summary: prepared.summary,
+      ...(gate.taskId ? { gateTaskId: gate.taskId } : {}),
+      dispatchState: gate.ready ? "ready" : "waiting_dependencies",
       ...(input.turnId ? { turnId: input.turnId } : {}), ...(input.dedupeKey ? { dedupeKey: input.dedupeKey } : {}),
     });
     this.#deps.handoffs.committed(prepared.record);
     bus.append({ type: "agent_session.message", userSessionId: session.userSessionId, agentSessionId: session.id,
       payload: { agentSessionId: session.id, message: toWireMessage(message) } });
     bus.append({ type: "agent_session.mailbox", userSessionId: session.userSessionId, agentSessionId: session.id,
-      payload: { agentSessionId: session.id, deliveryId: delivery.id, messageSeq: message.seq, sender: input.speaker.name, recipient: input.to, category, status: "queued" } });
+      payload: { agentSessionId: session.id, deliveryId: delivery.id, messageSeq: message.seq, sender: input.speaker.name, recipient: input.to, category, status: "queued",
+        dispatchState: delivery.dispatchState, ...(delivery.gateTaskId ? { gateTaskId: delivery.gateTaskId } : {}),
+        ...(gate.waitingOn.length > 0 ? { waitingOn: gate.waitingOn } : {}) } });
     if (input.to === MAIN_RECIPIENT) {
       this.#patchDelivery(session, delivery, "acknowledged");
       if (category === "decision" && input.deferWake === true) {
@@ -183,7 +229,109 @@ export class AgentSessionHost {
           payload: { userSessionId: session.userSessionId, agentSessionId: session.id, digestPreview: text.slice(0, 140) } });
         this.#deps.wake?.(session.userSessionId, session.id, category, wakeText);
       }
+    } else if (delivery.dispatchState === "ready") {
+      repo.patchParticipant(session.id, input.to, { pendingTurnSeq: message.seq });
+      this.#schedule(session.id);
+    }
+    return message;
+  }
+
+  /** Route an immutable canonical handoff without authoring another handoff. */
+  forward(input: {
+    agentSessionId: string;
+    speaker: Speaker;
+    to: string;
+    handoffId: string;
+    purpose: HandoffReferencePurpose;
+    expectedAction: string;
+    category?: Category;
+    dedupeKey?: string;
+    turnId?: string;
+  }): MessageRow {
+    const { repo, bus } = this.#deps;
+    const session = repo.getAgentSession(input.agentSessionId);
+    if (!session) throw notFound(`no agent session ${input.agentSessionId}`);
+    if (session.status !== "open") throw conflict(`agent session ${input.agentSessionId} is archived`);
+    if (!this.#deps.handoffs) throw new Error("handoff service unavailable");
+    this.#assertRoute(session.id, input.speaker.name, input.to);
+    const source = this.#deps.handoffs.get(input.handoffId);
+    if (source.metadata.userSessionId !== session.userSessionId) {
+      throw badRequest("a handoff reference cannot cross UserSessions");
+    }
+    if (input.speaker.name !== MAIN_RECIPIENT) {
+      if (
+        source.metadata.agentSessionId !== session.id ||
+        source.metadata.recipient !== input.speaker.name
+      ) {
+        throw badRequest("the coordinator may forward only handoffs delivered to it in this AgentSession");
+      }
+    }
+    const expectedAction = input.expectedAction.trim();
+    if (expectedAction.length === 0 || expectedAction.length > 240) {
+      throw badRequest("a forwarding expected action must be 1 to 240 characters");
+    }
+    const category = input.category ?? "update";
+    this.#assertFinalAllowed(session, input.speaker.name, input.to, category);
+    if (input.dedupeKey) {
+      const prior = repo.findDeliveryByDedupe(session.id, input.speaker.name, input.to, input.dedupeKey);
+      const priorMessage = prior ? repo.getMessageById(prior.messageId) : undefined;
+      if (priorMessage) return priorMessage;
+    }
+    const reference: HandoffReference = {
+      handoffId: source.metadata.id,
+      forwardedBy: input.speaker.name,
+      recipient: input.to,
+      purpose: input.purpose,
+      expectedAction,
+    };
+    const gate = this.#assignmentGate(
+      session,
+      input.speaker.name,
+      input.to,
+      category,
+      source.core.taskId,
+    );
+    const summary = this.#deps.handoffs.summary(source);
+    const text = `[Forwarded handoff ${source.metadata.id}] ${input.purpose.replaceAll("_", " ")}\nExpected action: ${expectedAction}`;
+    const { message, delivery } = repo.appendMailboxMessage({
+      sessionKind: "agent",
+      sessionId: session.id,
+      userSessionId: session.userSessionId,
+      agentSessionId: session.id,
+      speaker: input.speaker,
+      to: input.to,
+      recipient: input.to,
+      kind: "message",
+      text,
+      category,
+      payload: { handoff: summary, handoffReference: reference },
+      ...(gate.taskId ? { gateTaskId: gate.taskId } : {}),
+      dispatchState: gate.ready ? "ready" : "waiting_dependencies",
+      ...(input.turnId ? { turnId: input.turnId } : {}),
+      ...(input.dedupeKey ? { dedupeKey: input.dedupeKey } : {}),
+    });
+    if (input.to === MAIN_RECIPIENT) {
+      repo.patchUserSession(session.userSessionId, { latestHandoffId: source.metadata.id });
     } else {
+      repo.patchParticipant(session.id, input.to, { latestHandoffId: source.metadata.id });
+    }
+    bus.append({ type: "agent_session.message", userSessionId: session.userSessionId, agentSessionId: session.id,
+      payload: { agentSessionId: session.id, message: toWireMessage(message) } });
+    bus.append({ type: "agent_session.mailbox", userSessionId: session.userSessionId, agentSessionId: session.id,
+      payload: { agentSessionId: session.id, deliveryId: delivery.id, messageSeq: message.seq, sender: input.speaker.name,
+        recipient: input.to, category, status: "queued", dispatchState: delivery.dispatchState,
+        ...(delivery.gateTaskId ? { gateTaskId: delivery.gateTaskId } : {}),
+        ...(gate.waitingOn.length > 0 ? { waitingOn: gate.waitingOn } : {}) } });
+    bus.append({ type: "handoff.forwarded", userSessionId: session.userSessionId, agentSessionId: session.id,
+      payload: { reference, agentSessionId: session.id, messageSeq: message.seq } });
+    if (input.to === MAIN_RECIPIENT) {
+      this.#patchDelivery(session, delivery, "acknowledged");
+      if (MATERIAL_CATEGORIES.has(category)) {
+        bus.append({ type: "flow.result", userSessionId: session.userSessionId, agentSessionId: session.id,
+          payload: { userSessionId: session.userSessionId, agentSessionId: session.id, digestPreview: text.slice(0, 140) } });
+        this.#deps.wake?.(session.userSessionId, session.id, category, text);
+      }
+    } else if (delivery.dispatchState === "ready") {
       repo.patchParticipant(session.id, input.to, { pendingTurnSeq: message.seq });
       this.#schedule(session.id);
     }
@@ -241,7 +389,11 @@ export class AgentSessionHost {
   }
 
   boot(): void {
-    for (const delivery of this.#deps.repo.listQueuedDeliveries()) this.#schedule(delivery.agentSessionId);
+    const sessionIds = new Set(this.#deps.repo.listQueuedDeliveries().map((delivery) => delivery.agentSessionId));
+    for (const agentSessionId of sessionIds) {
+      this.#refreshDependencyGates(agentSessionId);
+      this.#schedule(agentSessionId);
+    }
   }
 
   profiles(): AgentProfile[] { return this.#deps.profiles?.list() ?? []; }
@@ -303,6 +455,79 @@ export class AgentSessionHost {
     if (!valid) throw badRequest(`route ${sender} → ${recipient} is not allowed; communication is main ↔ coordinator ↔ specialist`);
   }
 
+  #assertFinalAllowed(
+    session: AgentSessionRow,
+    sender: string,
+    recipient: string,
+    category: Category,
+  ): void {
+    if (sender !== ORCHESTRATOR_SEAT || recipient !== MAIN_RECIPIENT || category !== "final") return;
+    if (this.#deps.tasks) {
+      const incomplete = this.#deps.tasks
+        .listForUserSession(session.userSessionId)
+        .filter((task) => task.agentSessionId === session.id && task.status !== "completed" && task.status !== "deleted");
+      if (incomplete.length > 0) {
+        throw badRequest(`cannot report final while ${incomplete.length} task(s) remain incomplete: ${incomplete.map((task) => task.subject).join(", ")}`);
+      }
+    }
+    const activeSpecialists = [...(this.#lanes.get(session.id)?.turns.keys() ?? [])]
+      .filter((name) => name !== ORCHESTRATOR_SEAT);
+    const pendingInternal = this.#deps.repo
+      .listActiveDeliveries(session.id)
+      .filter((delivery) => delivery.recipient !== MAIN_RECIPIENT);
+    if (activeSpecialists.length > 0 || pendingInternal.length > 0) {
+      throw badRequest(`cannot report final while AgentSession work is active (${activeSpecialists.length} running, ${pendingInternal.length} queued/delivered)`);
+    }
+  }
+
+  #assignmentGate(
+    session: AgentSessionRow,
+    sender: string,
+    recipient: string,
+    category: Category,
+    taskId: string | null,
+  ): { taskId: string | null; ready: boolean; waitingOn: string[] } {
+    if (
+      sender !== ORCHESTRATOR_SEAT ||
+      recipient === MAIN_RECIPIENT ||
+      category !== "assignment" ||
+      taskId === null ||
+      !this.#deps.tasks
+    ) {
+      return { taskId: null, ready: true, waitingOn: [] };
+    }
+    const task = this.#deps.tasks.getForAgentSession(session.id, taskId);
+    if (!task) throw badRequest(`assignment task ${taskId} does not exist in this AgentSession`);
+    if (task.owner !== recipient) {
+      throw badRequest(`assignment task ${taskId} belongs to ${task.owner ?? "no owner"}, not ${recipient}`);
+    }
+    const readiness = this.#deps.tasks.readiness(session.id, taskId);
+    return { taskId, ready: readiness.ready, waitingOn: readiness.waitingOn };
+  }
+
+  #refreshDependencyGates(agentSessionId: string): void {
+    if (!this.#deps.tasks) return;
+    const session = this.#deps.repo.getAgentSession(agentSessionId);
+    if (!session || session.status !== "open") return;
+    let released = false;
+    for (const delivery of this.#deps.repo.listWaitingDependencyDeliveries(agentSessionId)) {
+      if (!delivery.gateTaskId) continue;
+      const readiness = this.#deps.tasks.readiness(agentSessionId, delivery.gateTaskId);
+      if (!readiness.ready) continue;
+      this.#deps.repo.patchDelivery(delivery.id, { dispatchState: "ready" });
+      const message = this.#deps.repo.getMessageById(delivery.messageId);
+      this.#deps.repo.patchParticipant(agentSessionId, delivery.recipient, {
+        pendingTurnSeq: message?.seq ?? 0,
+      });
+      this.#deps.bus.append({ type: "agent_session.mailbox", userSessionId: session.userSessionId, agentSessionId,
+        payload: { agentSessionId, deliveryId: delivery.id, messageSeq: message?.seq ?? 0, sender: delivery.sender,
+          recipient: delivery.recipient, category: delivery.category, status: "queued", dispatchState: "ready",
+          gateTaskId: delivery.gateTaskId, waitingOn: [] } });
+      released = true;
+    }
+    if (released) this.#schedule(agentSessionId);
+  }
+
   #lane(id: string): Lane {
     let lane = this.#lanes.get(id);
     if (!lane) { lane = { chain: Promise.resolve(), turns: new Map(), lastStatus: null }; this.#lanes.set(id, lane); }
@@ -321,19 +546,22 @@ export class AgentSessionHost {
     const session = this.#deps.repo.getAgentSession(id);
     if (!session || session.status !== "open") return;
     const lane = this.#lane(id);
+    this.#refreshDependencyGates(id);
     const queued = this.#deps.repo.listQueuedDeliveries(id);
-    for (const recipient of new Set(queued.map((d) => d.recipient))) {
+    const runnable = queued.filter((delivery) => delivery.dispatchState === "ready");
+    for (const recipient of new Set(runnable.map((d) => d.recipient))) {
       if (recipient === MAIN_RECIPIENT || lane.turns.has(recipient)) continue;
       if (lane.turns.size >= config.perAgentSessionTurns || this.#globalTurns >= config.globalAgentTurns) break;
       this.#startTurn(session, recipient);
     }
-    this.#setStatus(id, lane.turns.size > 0 || queued.some((d) => d.recipient !== MAIN_RECIPIENT) ? "working" : "idle");
+    this.#setStatus(id, lane.turns.size > 0 || runnable.some((d) => d.recipient !== MAIN_RECIPIENT) ? "working" : "idle");
   }
 
   #startTurn(session: AgentSessionRow, participant: string): void {
     const seat = this.#deps.repo.getParticipant(session.id, participant);
     if (!seat) return;
-    const deliveries = this.#deps.repo.listQueuedDeliveries(session.id).filter((d) => d.recipient === participant);
+    const deliveries = this.#deps.repo.listQueuedDeliveries(session.id)
+      .filter((d) => d.recipient === participant && d.dispatchState === "ready");
     if (deliveries.length === 0) return;
     const abort = new AbortController();
     const flight: Flight = { abort, query: null };
@@ -459,6 +687,38 @@ export class AgentSessionHost {
           this.#deps.handoffs?.reportDiscrepancy(args.handoffId, seat.name, args.claim, args.evidence); return ok({ recorded: true });
         }),
       );
+      if (seat.name === ORCHESTRATOR_SEAT) {
+        tools.push(sdk.tool(
+          "forward_handoff",
+          "Forward one canonical handoff unchanged to main or a specialist. Add only a short typed routing reason; do not summarize the source handoff.",
+          {
+            to: z.string(),
+            reference: HandoffReferenceSchema,
+            category: z.enum(["assignment", "update", "milestone", "final"]).default("update"),
+            dedupeKey: z.string().optional(),
+          },
+          async (args: {
+            to: string;
+            reference: { handoffId: string; purpose: HandoffReferencePurpose; expectedAction: string };
+            category: "assignment" | "update" | "milestone" | "final";
+            dedupeKey?: string;
+          }) => {
+            try {
+              const message = this.forward({
+                agentSessionId: session.id,
+                speaker: { kind: "orchestrator", name: seat.name },
+                to: args.to,
+                ...args.reference,
+                category: args.category,
+                ...(args.dedupeKey ? { dedupeKey: args.dedupeKey } : {}),
+              });
+              return ok({ delivered: true, messageSeq: message.seq, handoffId: args.reference.handoffId });
+            } catch (error) {
+              return { content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }], isError: true };
+            }
+          },
+        ));
+      }
     }
     const user = this.#deps.repo.getUserSession(session.userSessionId);
     const workspaceRoot = user && this.#deps.getWorkspaceRoot ? this.#deps.getWorkspaceRoot(user.workspaceId) : "";
@@ -510,8 +770,8 @@ export class AgentSessionHost {
           const taskId = newId("task"); this.#deps.tasks?.upsertFromCreate({ sdkSessionId: listId, sdkTaskId: taskId, subject: args.subject, description: args.description,
             attribution: { workspaceId: user.workspaceId, userSessionId: session.userSessionId, agentSessionId: session.id, participant: args.owner } }); return ok({ taskId });
         }),
-        sdk.tool("task_update", "Update status or ownership in the authoritative Console task ledger.", { taskId: z.string(), status: z.enum(["pending", "in_progress", "completed", "deleted"]).optional(), owner: z.string().optional(), description: z.string().optional() }, async (args: { taskId: string; status?: "pending" | "in_progress" | "completed" | "deleted"; owner?: string; description?: string }) => {
-          this.#deps.tasks?.applyUpdate({ sdkSessionId: listId, sdkTaskId: args.taskId, patch: { ...(args.status ? { status: args.status } : {}), ...(args.owner ? { owner: args.owner } : {}), ...(args.description ? { description: args.description } : {}) } }); return ok({ updated: true });
+        sdk.tool("task_update", "Update status, ownership, description, or prerequisites in the authoritative Console task ledger.", { taskId: z.string(), status: z.enum(["pending", "in_progress", "completed", "deleted"]).optional(), owner: z.string().optional(), description: z.string().optional(), addBlockedBy: z.array(z.string()).optional() }, async (args: { taskId: string; status?: "pending" | "in_progress" | "completed" | "deleted"; owner?: string; description?: string; addBlockedBy?: string[] }) => {
+          this.#deps.tasks?.applyUpdate({ sdkSessionId: listId, sdkTaskId: args.taskId, validateDependencies: true, patch: { ...(args.status ? { status: args.status } : {}), ...(args.owner ? { owner: args.owner } : {}), ...(args.description ? { description: args.description } : {}), ...(args.addBlockedBy ? { addBlockedBy: args.addBlockedBy } : {}) } }); return ok({ updated: true });
         }),
         sdk.tool("task_list", "List the AgentSession's authoritative Console tasks.", {}, async () => ok({ tasks: this.#deps.tasks?.listForUserSession(session.userSessionId).filter((task) => task.agentSessionId === session.id && task.status !== "deleted") ?? [] })),
       );
@@ -521,6 +781,7 @@ export class AgentSessionHost {
 
   #runtimeToolNames(profile: AgentProfile, participant: string): string[] {
     return ["mcp__console_agent__send_message", "mcp__console_agent__read_handoff", "mcp__console_agent__report_handoff_discrepancy",
+      ...(participant === ORCHESTRATOR_SEAT ? ["mcp__console_agent__forward_handoff"] : []),
       ...(profile.runtime.shell ? ["mcp__console_agent__process_start", "mcp__console_agent__process_read", "mcp__console_agent__process_stop"] : []),
       ...(profile.runtime.browser ? ["mcp__console_agent__browser_open", "mcp__console_agent__browser_snapshot", "mcp__console_agent__browser_click", "mcp__console_agent__browser_fill", "mcp__console_agent__browser_console"] : []),
       ...(profile.runtime.browser && profile.runtime.screenshots ? ["mcp__console_agent__browser_screenshot"] : []),
@@ -535,10 +796,14 @@ export class AgentSessionHost {
       const id = (row.payload?.handoff as { id?: string } | undefined)?.id;
       if (!id || !this.#deps.handoffs) return `[${row.speakerName} → ${row.toName} | ${row.createdAt}] ${row.text}`;
       const handoff = this.#deps.handoffs.get(id);
+      const reference = row.payload?.handoffReference as HandoffReference | undefined;
       const expanded = handoff.core.risk === "high" || handoff.core.status === "needs_verification" || handoff.core.requestExpandedContext;
       this.#deps.bus.append({ type: "handoff.consumed", userSessionId: session.userSessionId, agentSessionId: session.id,
         payload: { handoffId: id, participant: seat.name, mode: expanded ? "expanded" : "compact" } });
-      return `[${row.speakerName} → ${row.toName} | ${row.createdAt}] Handoff ${id}\nCORE:\n${JSON.stringify(handoff.core, null, 2)}\nEVIDENCE MANIFEST: ${JSON.stringify([...handoff.core.state.evidence, ...handoff.core.result.artifacts])}${expanded ? `\nPROFILE EXTENSION:\n${JSON.stringify(handoff.extension, null, 2)}` : `\nExtension ${handoff.extension.kind} is available with read_handoff.`}`;
+      const routing = reference
+        ? `\nFORWARDED BY: ${reference.forwardedBy}\nPURPOSE: ${reference.purpose}\nEXPECTED ACTION: ${reference.expectedAction}\nORIGINAL ROUTE: ${handoff.metadata.sender} → ${handoff.metadata.recipient}`
+        : "";
+      return `[${row.speakerName} → ${row.toName} | ${row.createdAt}] Handoff ${id}${routing}\nCORE:\n${JSON.stringify(handoff.core, null, 2)}\nEVIDENCE MANIFEST: ${JSON.stringify([...handoff.core.state.evidence, ...handoff.core.result.artifacts])}${expanded ? `\nPROFILE EXTENSION:\n${JSON.stringify(handoff.extension, null, 2)}` : `\nExtension ${handoff.extension.kind} is available with read_handoff.`}`;
     }).join("\n\n");
     return `AgentSession ${session.id}: ${session.title}\nYou are ${seat.name}. Participants: ${roster}.\n\nOnly the following addressed handoffs are new:\n${messages}\n\nTreat handoff claims as historical context; verify risky claims against repository/task/journal evidence during normal work. Act without restating the envelope. Use typed send_message for every transfer. Finish with one structured closing output; set checkpointReadiness=defer only while state is genuinely unstable.`;
   }
@@ -649,13 +914,14 @@ export class AgentSessionHost {
     this.#deps.repo.patchDelivery(delivery.id, { status, ...(status === "delivered" ? { deliveredAt: now } : {}), ...(status === "acknowledged" ? { acknowledgedAt: now, deliveredAt: delivery.deliveredAt ?? now } : {}) });
     const message = this.#deps.repo.getMessageById(delivery.messageId);
     this.#deps.bus.append({ type: "agent_session.mailbox", userSessionId: session.userSessionId, agentSessionId: session.id,
-      payload: { agentSessionId: session.id, deliveryId: delivery.id, messageSeq: message?.seq ?? 0, sender: delivery.sender, recipient: delivery.recipient, category: delivery.category, status } });
+      payload: { agentSessionId: session.id, deliveryId: delivery.id, messageSeq: message?.seq ?? 0, sender: delivery.sender, recipient: delivery.recipient, category: delivery.category, status,
+        dispatchState: delivery.dispatchState, ...(delivery.gateTaskId ? { gateTaskId: delivery.gateTaskId } : {}) } });
   }
 
   #specialists(id: string): ParticipantRow[] { return this.#deps.repo.listParticipants(id).filter((p) => p.role === "agent"); }
   #statusOf(row: AgentSessionRow): "working" | "idle" | "archived" {
     if (row.status === "archived") return "archived";
-    return (this.#lanes.get(row.id)?.turns.size ?? 0) > 0 || this.#deps.repo.listQueuedDeliveries(row.id).some((d) => d.recipient !== MAIN_RECIPIENT) ? "working" : "idle";
+    return (this.#lanes.get(row.id)?.turns.size ?? 0) > 0 || this.#deps.repo.listQueuedDeliveries(row.id).some((d) => d.recipient !== MAIN_RECIPIENT && d.dispatchState === "ready") ? "working" : "idle";
   }
   #setStatus(id: string, status: "working" | "idle"): void {
     const lane = this.#lane(id); if (lane.lastStatus === status) return;

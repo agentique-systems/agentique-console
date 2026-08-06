@@ -13,7 +13,7 @@ import type { ConsoleSdk, SdkToolResult } from "../sdk/types.ts";
 import type { TaskService } from "../tasks/service.ts";
 import type { HandoffDraft } from "@agentique-console/shared";
 import type { HandoffService } from "../handoffs/service.ts";
-import { HandoffDraftSchema } from "../handoffs/schema.ts";
+import { HandoffDraftSchema, HandoffReferenceSchema } from "../handoffs/schema.ts";
 
 /**
  * Console-owned tasks are keyed by a synthetic SDK-session id: the
@@ -101,9 +101,13 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           .min(1)
           .max(4),
         briefing: HandoffDraftSchema
+          .optional()
           .describe(
             "Typed coordinator assignment: objective, current evidence, risk, uncertainty, and next action",
           ),
+        briefingReference: HandoffReferenceSchema.optional().describe(
+          "Reference an existing canonical handoff instead of authoring another briefing",
+        ),
       },
       async (args: {
         title: string;
@@ -115,15 +119,24 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           model?: string;
           owns: string[];
         }[];
-        briefing: HandoffDraft;
+        briefing?: HandoffDraft;
+        briefingReference?: {
+          handoffId: string;
+          purpose: "assignment_context" | "dependency_result" | "review_input" | "final_result" | "scope_change";
+          expectedAction: string;
+        };
       }) =>
         guarded(() => {
+          if ((args.briefing === undefined) === (args.briefingReference === undefined)) {
+            throw new ApiError(400, "bad_request", "provide exactly one of briefing or briefingReference");
+          }
           const { agentSessionId, participants } = host.createSession({
             userSessionId,
             title: args.title,
             mode: args.mode,
             agents: args.agents,
-            briefing: args.briefing,
+            ...(args.briefing ? { briefing: args.briefing } : {}),
+            ...(args.briefingReference ? { briefingReference: args.briefingReference } : {}),
           });
           return {
             agentSessionId,
@@ -265,6 +278,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
                 tasks.applyUpdate({
                   sdkSessionId: consoleTaskListId(session.id),
                   sdkTaskId: args.taskId,
+                  validateDependencies: true,
                   patch: {
                     ...(args.status === undefined ? {} : { status: args.status }),
                     ...(args.owner === undefined ? {} : { owner: args.owner }),

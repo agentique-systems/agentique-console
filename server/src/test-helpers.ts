@@ -106,6 +106,8 @@ export function makeHarness(
 
 export interface DelegationHarness extends Harness {
   host: AgentSessionHost;
+  tasks: TaskService;
+  handoffs: HandoffService;
 }
 
 /**
@@ -137,7 +139,12 @@ export function restartHarness(
 function wire(
   base: Harness,
   options: { hostOverrides?: Partial<AgentSessionHostDeps> },
-): { host: AgentSessionHost; runner: OrchestratorRunner } {
+): {
+  host: AgentSessionHost;
+  runner: OrchestratorRunner;
+  tasks: TaskService;
+  handoffs: HandoffService;
+} {
   const tasks = new TaskService(base.db, base.bus);
   const sessionStore = new SqliteSessionStore(base.db);
   const handoffs = new HandoffService({ repo: base.repo, bus: base.bus, getWorkspaceRoot: () => "/tmp/test-workspace" });
@@ -176,7 +183,7 @@ function wire(
         handoffs,
       }),
   });
-  return { host, runner };
+  return { host, runner, tasks, handoffs };
 }
 
 /**

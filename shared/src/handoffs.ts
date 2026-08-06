@@ -128,6 +128,26 @@ export interface HandoffSummary {
   referenceWarnings: string[];
 }
 
+export type HandoffReferencePurpose =
+  | "assignment_context"
+  | "dependency_result"
+  | "review_input"
+  | "final_result"
+  | "scope_change";
+
+/**
+ * Routing metadata for re-delivering one immutable canonical handoff. The
+ * referenced handoff remains the only context payload; this envelope explains
+ * why a new recipient is seeing it without creating another summary.
+ */
+export interface HandoffReference {
+  handoffId: string;
+  forwardedBy: string;
+  recipient: string;
+  purpose: HandoffReferencePurpose;
+  expectedAction: string;
+}
+
 export interface HandoffPage {
   handoff: HandoffRecord;
   section: "core" | "extension";

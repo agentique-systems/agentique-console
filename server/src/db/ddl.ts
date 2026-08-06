@@ -137,6 +137,8 @@ CREATE TABLE IF NOT EXISTS mailbox_deliveries (
   category TEXT NOT NULL CHECK (category IN ('assignment','update','milestone','failure','final','decision')),
   status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued','delivered','acknowledged','cancelled')),
   dedupe_key TEXT,
+  gate_task_id TEXT,
+  dispatch_state TEXT NOT NULL DEFAULT 'ready' CHECK (dispatch_state IN ('ready','waiting_dependencies')),
   delivered_at TEXT,
   acknowledged_at TEXT,
   created_at TEXT NOT NULL

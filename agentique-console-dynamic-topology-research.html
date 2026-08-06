@@ -1,0 +1,1055 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="source-content-sha256" content="a53300651f5027648c79e44d21fcf2d99436920035a9657f02d4b7b3aa3c5d62">
+  <title>Agentique Console — Dynamic Topology Research</title>
+  <style>
+    :root {
+      --ground:#f4f6f7; --surface:#fff; --surface-2:#edf2f4; --ink:#10171b;
+      --ink-2:#45535b; --muted:#728089; --rule:#d7e0e4; --accent:#006f88;
+      --accent-soft:#e0f1f5; --evidence:#16734a; --inference:#8b5d00;
+      --risk:#9b3c46; --shadow:0 1px 2px rgba(16,23,27,.05),0 12px 32px -20px rgba(16,23,27,.3);
+      --serif:Charter,"Bitstream Charter","Sitka Text",Cambria,Georgia,serif;
+      --sans:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+      --mono:ui-monospace,"SFMono-Regular",Consolas,"Liberation Mono",monospace;
+    }
+    :root[data-theme="dark"] {
+      --ground:#0c1317; --surface:#121b20; --surface-2:#19252b; --ink:#e8eff2;
+      --ink-2:#a8b6bd; --muted:#768891; --rule:#29373e; --accent:#51c0d7;
+      --accent-soft:#102d35; --evidence:#65ca95; --inference:#dbb35c;
+      --risk:#ed8991; --shadow:0 1px 2px rgba(0,0,0,.4),0 12px 32px -20px rgba(0,0,0,.8);
+    }
+    @media (prefers-color-scheme:dark) {
+      :root:not([data-theme="light"]) {
+        --ground:#0c1317; --surface:#121b20; --surface-2:#19252b; --ink:#e8eff2;
+        --ink-2:#a8b6bd; --muted:#768891; --rule:#29373e; --accent:#51c0d7;
+        --accent-soft:#102d35; --evidence:#65ca95; --inference:#dbb35c;
+        --risk:#ed8991; --shadow:0 1px 2px rgba(0,0,0,.4),0 12px 32px -20px rgba(0,0,0,.8);
+      }
+    }
+    * { box-sizing:border-box; }
+    html { scroll-behavior:smooth; }
+    body { margin:0; background:var(--ground); color:var(--ink); font:17px/1.65 var(--serif); }
+    a { color:var(--accent); text-underline-offset:2px; }
+    a:focus-visible,button:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+    .shell { max-width:96rem; margin:auto; padding:0 clamp(1rem,4vw,3.5rem) 5rem; }
+    .topbar { display:flex; justify-content:space-between; align-items:center; gap:1rem; padding:1rem 0; border-bottom:1px solid var(--rule); }
+    .topbar .brand { font:600 .72rem/1 var(--mono); letter-spacing:.12em; text-transform:uppercase; color:var(--muted); }
+    button { border:1px solid var(--rule); border-radius:999px; background:var(--surface); color:var(--ink-2); padding:.5rem .8rem; font:600 .72rem/1 var(--sans); cursor:pointer; }
+    .layout { display:grid; grid-template-columns:17rem minmax(0,1fr); gap:clamp(2rem,5vw,5rem); align-items:start; }
+    .toc { position:sticky; top:1rem; max-height:calc(100vh - 2rem); overflow:auto; padding:2rem 0; }
+    .toc strong { display:block; margin-bottom:.8rem; color:var(--muted); font:600 .67rem/1 var(--mono); letter-spacing:.13em; text-transform:uppercase; }
+    .toc a { display:block; padding:.26rem .6rem; border-left:1px solid var(--rule); color:var(--ink-2); text-decoration:none; font:500 .74rem/1.35 var(--sans); }
+    .toc a:hover { border-left-color:var(--accent); color:var(--accent); }
+    .toc .toc-3 { padding-left:1.35rem; color:var(--muted); }
+    .report { min-width:0; max-width:76rem; padding:3.4rem 0; }
+    .report > h1:first-child { max-width:18ch; margin:0 0 1.2rem; font:650 clamp(2.3rem,6vw,4.8rem)/1.02 var(--serif); letter-spacing:-.035em; }
+    .report > h1:first-child + p { color:var(--muted); font:500 .78rem/1.7 var(--mono); }
+    h2 { margin:4.5rem 0 1.25rem; padding-top:.6rem; border-top:1px solid var(--rule); font:650 clamp(1.65rem,3vw,2.35rem)/1.15 var(--serif); letter-spacing:-.02em; }
+    h3 { margin:2.6rem 0 .75rem; font:650 1.22rem/1.3 var(--sans); }
+    h1:hover .anchor,h2:hover .anchor,h3:hover .anchor { opacity:1; }
+    .anchor { margin-left:.45rem; color:var(--muted); opacity:0; text-decoration:none; font:400 .8em/1 var(--mono); }
+    p,ul,ol,blockquote,pre,table { margin-top:0; margin-bottom:1.2rem; }
+    p,li { max-width:74ch; }
+    li + li { margin-top:.35rem; }
+    strong { font-weight:650; }
+    code { border:1px solid var(--rule); border-radius:.25rem; background:var(--surface-2); padding:.09em .3em; font:.86em/1.4 var(--mono); }
+    pre { max-width:100%; overflow:auto; border:1px solid var(--rule); border-radius:.65rem; background:var(--surface); padding:1rem 1.1rem; box-shadow:var(--shadow); }
+    pre code { border:0; background:none; padding:0; font-size:.82rem; }
+    blockquote { margin-left:0; border-left:3px solid var(--accent); background:var(--accent-soft); padding:.8rem 1rem; color:var(--ink-2); }
+    blockquote p:last-child { margin-bottom:0; }
+    hr { border:0; border-top:1px solid var(--rule); margin:3rem 0; }
+    .table-wrap { width:100%; overflow:auto; margin:1.5rem 0; border:1px solid var(--rule); border-radius:.65rem; background:var(--surface); box-shadow:var(--shadow); }
+    table { width:100%; min-width:42rem; border-collapse:collapse; margin:0; font:500 .82rem/1.45 var(--sans); }
+    th,td { padding:.72rem .8rem; border-bottom:1px solid var(--rule); text-align:left; vertical-align:top; }
+    th { background:var(--surface-2); color:var(--ink-2); font-size:.72rem; letter-spacing:.04em; text-transform:uppercase; }
+    tr:last-child td { border-bottom:0; }
+    .report > p:first-of-type + p { font-size:1.08rem; color:var(--ink-2); }
+    .report > h2:first-of-type { margin-top:3.5rem; }
+    @media (max-width:1050px) {
+      .layout { display:block; }
+      .toc { position:static; max-height:none; columns:2; padding:1.5rem 0 0; }
+      .toc strong { column-span:all; }
+      .toc .toc-3 { display:none; }
+      .report { padding-top:2rem; }
+    }
+    @media (max-width:650px) {
+      body { font-size:16px; }
+      .toc { columns:1; }
+      .report > h1:first-child { font-size:2.35rem; }
+      h2 { margin-top:3.3rem; }
+      .anchor { display:none; }
+    }
+    @media print {
+      :root { --ground:#fff; --surface:#fff; --surface-2:#f4f4f4; --ink:#111; --ink-2:#333; --muted:#555; --rule:#ccc; --accent:#005a70; }
+      .topbar,.toc { display:none; }
+      .layout { display:block; }
+      .shell { max-width:none; padding:0; }
+      .report { max-width:none; padding:0; }
+      h2,h3 { break-after:avoid; }
+      table,pre,blockquote { break-inside:avoid; box-shadow:none; }
+      a { color:inherit; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand">Agentique Console · Research</div>
+      <button id="theme" type="button" aria-label="Toggle color theme">Toggle theme</button>
+    </header>
+    <div class="layout">
+      <aside class="toc" aria-label="Table of contents"><strong>Contents</strong><a class="toc-2" href="#executive-assessment">Executive assessment</a>
+<a class="toc-3" href="#main-conclusion">Main conclusion</a>
+<a class="toc-2" href="#1-method-and-evidence-discipline">1. Method and evidence discipline</a>
+<a class="toc-2" href="#2-what-topology-should-mean-here">2. What “topology” should mean here</a>
+<a class="toc-3" href="#2-1-a-precise-definition">2.1 A precise definition</a>
+<a class="toc-3" href="#2-2-topology-is-not-one-thing">2.2 Topology is not one thing</a>
+<a class="toc-3" href="#2-3-four-meanings-of-dynamic">2.3 Four meanings of “dynamic”</a>
+<a class="toc-2" href="#3-current-agentique-console-topology">3. Current Agentique Console topology</a>
+<a class="toc-3" href="#3-1-the-stable-control-plane">3.1 The stable control plane</a>
+<a class="toc-3" href="#3-2-the-execution-structure-is-less-centralized-than-the-communication-structure">3.2 The execution structure is less centralized than the communication structure</a>
+<a class="toc-3" href="#3-3-the-usersession-already-composes-topology-dynamically">3.3 The UserSession already composes topology dynamically</a>
+<a class="toc-3" href="#3-4-what-is-fixed-today">3.4 What is fixed today</a>
+<a class="toc-3" href="#3-5-where-the-fixed-structure-provides-value">3.5 Where the fixed structure provides value</a>
+<a class="toc-3" href="#3-6-where-it-may-impose-avoidable-cost">3.6 Where it may impose avoidable cost</a>
+<a class="toc-3" href="#3-7-smaller-changes-may-address-much-of-the-problem">3.7 Smaller changes may address much of the problem</a>
+<a class="toc-2" href="#4-what-adjacent-research-establishes-and-does-not">4. What adjacent research establishes—and does not</a>
+<a class="toc-3" href="#4-1-task-structure-dominates-agent-count">4.1 Task structure dominates agent count</a>
+<a class="toc-3" href="#4-2-communication-is-an-information-bottleneck">4.2 Communication is an information bottleneck</a>
+<a class="toc-3" href="#4-3-distributed-systems-concepts-are-useful-when-the-analogy-is-bounded">4.3 Distributed-systems concepts are useful when the analogy is bounded</a>
+<a class="toc-3" href="#4-4-organizational-theory-explains-why-one-topology-cannot-fit-every-dependency">4.4 Organizational theory explains why one topology cannot fit every dependency</a>
+<a class="toc-3" href="#4-5-dynamic-graph-research-proves-feasibility-not-local-necessity">4.5 Dynamic graph research proves feasibility, not local necessity</a>
+<a class="toc-3" href="#4-6-existing-frameworks-favor-small-orchestration-primitives">4.6 Existing frameworks favor small orchestration primitives</a>
+<a class="toc-2" href="#5-a-useful-taxonomy-for-agentique">5. A useful taxonomy for Agentique</a>
+<a class="toc-2" href="#6-at-what-unit-should-topology-operate">6. At what unit should topology operate?</a>
+<a class="toc-3" href="#6-1-usersession-stable-authority-envelope">6.1 UserSession: stable authority envelope</a>
+<a class="toc-3" href="#6-2-task-or-coherent-workstream-primary-selection-unit">6.2 Task or coherent workstream: primary selection unit</a>
+<a class="toc-3" href="#6-3-phase-safe-adaptation-boundary">6.3 Phase: safe adaptation boundary</a>
+<a class="toc-3" href="#6-4-turn-scheduling-and-context-not-topology-by-default">6.4 Turn: scheduling and context, not topology by default</a>
+<a class="toc-2" href="#7-how-topology-should-be-selected">7. How topology should be selected</a>
+<a class="toc-3" href="#7-1-explicit-operator-selection">7.1 Explicit operator selection</a>
+<a class="toc-3" href="#7-2-inspectable-rule-policy">7.2 Inspectable rule policy</a>
+<a class="toc-3" href="#7-3-model-inferred-selection">7.3 Model-inferred selection</a>
+<a class="toc-3" href="#7-4-negotiation-during-execution">7.4 Negotiation during execution</a>
+<a class="toc-3" href="#7-5-learned-selection">7.5 Learned selection</a>
+<a class="toc-2" href="#8-information-required-for-reliable-decisions">8. Information required for reliable decisions</a>
+<a class="toc-3" href="#8-1-pre-execution-features">8.1 Pre-execution features</a>
+<a class="toc-3" href="#8-2-trajectory-signals">8.2 Trajectory signals</a>
+<a class="toc-3" href="#8-3-decision-confidence-and-abstention">8.3 Decision confidence and abstention</a>
+<a class="toc-3" href="#8-4-signals-that-complexity-is-probably-harmful">8.4 Signals that complexity is probably harmful</a>
+<a class="toc-3" href="#8-5-signals-that-more-structure-may-help">8.5 Signals that more structure may help</a>
+<a class="toc-2" href="#9-domain-and-runtime-representation">9. Domain and runtime representation</a>
+<a class="toc-3" href="#9-1-do-not-start-with-a-generic-graph">9.1 Do not start with a generic graph</a>
+<a class="toc-3" href="#9-2-if-composition-later-becomes-necessary">9.2 If composition later becomes necessary</a>
+<a class="toc-3" href="#9-3-interaction-with-existing-concepts">9.3 Interaction with existing concepts</a>
+<a class="toc-3" href="#9-4-required-invariants-for-any-future-topology">9.4 Required invariants for any future topology</a>
+<a class="toc-2" href="#10-design-directions-ranked-by-evidence-and-complexity">10. Design directions, ranked by evidence and complexity</a>
+<a class="toc-3" href="#direction-a-make-the-current-topology-observable">Direction A — Make the current topology observable</a>
+<a class="toc-3" href="#direction-b-add-one-fair-single-worker-lane">Direction B — Add one fair single-worker lane</a>
+<a class="toc-3" href="#direction-c-selective-independent-validation">Direction C — Selective independent validation</a>
+<a class="toc-3" href="#direction-d-phase-specific-composition-using-current-primitives">Direction D — Phase-specific composition using current primitives</a>
+<a class="toc-3" href="#direction-e-narrow-peer-notification">Direction E — Narrow peer notification</a>
+<a class="toc-3" href="#direction-f-boundary-reconfiguration">Direction F — Boundary reconfiguration</a>
+<a class="toc-3" href="#direction-g-learned-or-generated-topology">Direction G — Learned or generated topology</a>
+<a class="toc-2" href="#11-evaluation-framework">11. Evaluation framework</a>
+<a class="toc-3" href="#11-1-primary-objective">11.1 Primary objective</a>
+<a class="toc-3" href="#11-2-experimental-fairness">11.2 Experimental fairness</a>
+<a class="toc-3" href="#11-3-task-strata">11.3 Task strata</a>
+<a class="toc-3" href="#11-4-metrics">11.4 Metrics</a>
+<a class="toc-3" href="#11-5-missing-telemetry">11.5 Missing telemetry</a>
+<a class="toc-3" href="#11-6-experimental-sequence-and-stop-conditions">11.6 Experimental sequence and stop conditions</a>
+<a class="toc-2" href="#12-risks-and-unresolved-questions">12. Risks and unresolved questions</a>
+<a class="toc-3" href="#architectural-risks">Architectural risks</a>
+<a class="toc-3" href="#evaluation-risks">Evaluation risks</a>
+<a class="toc-3" href="#unresolved-empirical-questions">Unresolved empirical questions</a>
+<a class="toc-2" href="#13-final-conclusions">13. Final conclusions</a>
+<a class="toc-3" href="#established-from-the-repository">Established from the repository</a>
+<a class="toc-3" href="#supported-by-external-evidence">Supported by external evidence</a>
+<a class="toc-3" href="#strongest-design-interpretation">Strongest design interpretation</a>
+<a class="toc-3" href="#ideas-requiring-experimentation">Ideas requiring experimentation</a>
+<a class="toc-3" href="#neutral-recommendation">Neutral recommendation</a>
+<a class="toc-2" href="#references">References</a>
+<a class="toc-2" href="#repository-anchors">Repository anchors</a></aside>
+      <main class="report"><h1 id="agentique-console-dynamic-topology-research-report">Agentique Console: Dynamic Topology Research Report<a class="anchor" href="#agentique-console-dynamic-topology-research-report" aria-label="Link to this section">#</a></h1>
+<p><strong>Date:</strong> 2026-08-05<br><strong>Repository snapshot:</strong> <code>d07cf02</code> — <code>feat: implement agent handoff protocol with comprehensive evaluation and retrieval features</code><br><strong>Research question:</strong> Should topology become a more explicit, flexible, or adaptive capability in Agentique Console, and if so, at what level and for what measurable purpose?</p>
+<h2 id="executive-assessment">Executive assessment<a class="anchor" href="#executive-assessment" aria-label="Link to this section">#</a></h2>
+<p><code>Dynamic Topology</code> is a meaningful subject for Agentique Console, but the phrase is too broad to be an architectural requirement by itself.</p>
+<p>The Console does not have only one topology. It currently has several overlapping structures:</p>
+<ul>
+<li>an <strong>authority topology</strong>: operator → main orchestrator → AgentSession coordinator → specialists;</li>
+<li>a <strong>communication topology</strong>: an enforced bidirectional star, <code>main ↔ coordinator ↔ specialist</code>;</li>
+<li>an <strong>execution topology</strong>: independently resumable participant lanes scheduled concurrently under global and per-session limits;</li>
+<li>a <strong>task topology</strong>: task ownership plus <code>blocks</code>/<code>blockedBy</code> dependencies;</li>
+<li>a <strong>context topology</strong>: addressed, typed handoffs, evidence references, provider journals, and context-rotation lineage;</li>
+<li>a <strong>capability topology</strong>: profile-specific tools, permissions, models, effort, sandbox, shell, and browser access;</li>
+<li>a <strong>validation and integration topology</strong>: reviewers are isolated profiles, specialists report inward, coordinators gate completion, and main owns the operator-facing result.</li>
+</ul>
+<p>The current star is therefore not merely a messaging convention. It is the Console&#39;s control plane. It provides clear responsibility, bounded communication, durable recovery, and an integration point. Removing it casually would also weaken those properties.</p>
+<p>At the same time, the star fixes more than is always necessary. Every substantive delegated task pays for a coordinator, specialists cannot exchange a focused handoff directly, the roster and ownership scopes are fixed at AgentSession creation, and no runtime object explains why this structure was selected. At the <code>UserSession</code> level, main can create several stars, so the macro-structure is already dynamically composed; inside each AgentSession, however, topology is fixed.</p>
+<h3 id="main-conclusion">Main conclusion<a class="anchor" href="#main-conclusion" aria-label="Link to this section">#</a></h3>
+<p>The best-supported direction is <strong>not</strong> arbitrary runtime graph generation. It is to make topology an explicit, observable execution decision while keeping a stable authority envelope:</p>
+<ol>
+<li>Measure the current star before changing it.</li>
+<li>Distinguish topology selection from ordinary scheduling, routing, context management, and capability assignment.</li>
+<li>Add only the smallest alternative needed to test a concrete hypothesis—most importantly, whether short sequential work benefits from a direct single-worker lane that avoids the coordinator hop.</li>
+<li>Select a structure at the <strong>task or workstream</strong> level using inspectable rules and keep it stable through a coherent phase.</li>
+<li>Permit adaptation only at durable boundaries—task completion, phase transition, failure, material scope discovery, or context rotation—where ownership and context can be transferred explicitly.</li>
+<li>Consider richer graph composition or learned selection only if controlled local evidence shows that simpler structures leave repeatable value on the table.</li>
+</ol>
+<p>This conclusion is moderately supported by external evidence and strongly supported as a low-risk experimental sequence. It is <strong>not yet established</strong> that any alternative topology will outperform the current system on Agentique&#39;s actual workload.</p>
+<hr>
+<h2 id="1-method-and-evidence-discipline">1. Method and evidence discipline<a class="anchor" href="#1-method-and-evidence-discipline" aria-label="Link to this section">#</a></h2>
+<p>This report uses three labels:</p>
+<ul>
+<li><strong>Evidence</strong> — directly observed in the repository or reported by a cited primary source.</li>
+<li><strong>Inference</strong> — a reasoned application of evidence to Agentique Console.</li>
+<li><strong>Hypothesis</strong> — a falsifiable design idea requiring local experimentation.</li>
+</ul>
+<p>Repository source and tests are authoritative for current behavior. The earlier optimization reports are treated as prior analysis, not as proof. External results are weighted by:</p>
+<ol>
+<li>controlled comparison and budget fairness;</li>
+<li>similarity to long-running, tool-using software work;</li>
+<li>publication and reproducibility status;</li>
+<li>whether the result concerns communication topology, execution workflow, or merely agent count;</li>
+<li>whether quality, tokens, latency, and failure are measured together.</li>
+</ol>
+<p>This distinction matters. Several recent papers optimize communication graphs on reasoning benchmarks. They demonstrate that graph structure can be optimized in those settings; they do not establish that a mutable graph is the right abstraction for a durable software-work console.</p>
+<hr>
+<h2 id="2-what-topology-should-mean-here">2. What “topology” should mean here<a class="anchor" href="#2-what-topology-should-mean-here" aria-label="Link to this section">#</a></h2>
+<h3 id="2-1-a-precise-definition">2.1 A precise definition<a class="anchor" href="#2-1-a-precise-definition" aria-label="Link to this section">#</a></h3>
+<p>For Agentique Console, topology is:</p>
+<blockquote>
+<p>The runtime-enforced arrangement of actors and durable state that determines who may observe, decide, delegate, execute, validate, escalate, and integrate work, together with the permitted directions in which tasks, context, authority, and results may move.</p>
+</blockquote>
+<p>That definition is intentionally broader than a graph of chat links. A useful formal view is a typed, time-indexed multigraph:</p>
+<p><code>T(t) = (N(t), E_comm(t), E_control(t), E_task(t), E_context(t), E_capability(t), E_validation(t), C(t))</code></p>
+<p>where:</p>
+<ul>
+<li><code>N</code> contains operator, main, coordinators, specialists, durable task/artifact state, and possibly external validators;</li>
+<li>each edge set has a different meaning and should not automatically imply the others;</li>
+<li><code>C</code> contains invariants such as ownership exclusivity, concurrency limits, permission boundaries, finalization gates, and escalation policy;</li>
+<li><code>t</code> matters only if the structure may change during execution.</li>
+</ul>
+<p>The multigraph is an analytical model, not a recommendation to implement a generic graph engine.</p>
+<h3 id="2-2-topology-is-not-one-thing">2.2 Topology is not one thing<a class="anchor" href="#2-2-topology-is-not-one-thing" aria-label="Link to this section">#</a></h3>
+<table>
+<thead>
+<tr>
+<th>Concern</th>
+<th>Current representation</th>
+<th align="right">Is it topology?</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Who may send a handoff to whom</td>
+<td>Route assertion in <code>AgentSessionHost</code></td>
+<td align="right">Yes</td>
+<td>It is an enforced communication edge.</td>
+</tr>
+<tr>
+<td>Who has final authority</td>
+<td>Prompts, tools, decision flow, finalization checks</td>
+<td align="right">Yes</td>
+<td>It controls decisions and result ownership.</td>
+</tr>
+<tr>
+<td>Which tasks depend on others</td>
+<td><code>blocks</code> / <code>blockedBy</code></td>
+<td align="right">Adjacent</td>
+<td>This is a work DAG; it may inform execution topology without being the same graph.</td>
+</tr>
+<tr>
+<td>Which ready seat runs next</td>
+<td>Runtime scheduler and turn caps</td>
+<td align="right">Usually no</td>
+<td>This is scheduling over a topology.</td>
+</tr>
+<tr>
+<td>Which tools a participant has</td>
+<td>Profile snapshot</td>
+<td align="right">Partly</td>
+<td>Capability placement changes what work a node can perform.</td>
+</tr>
+<tr>
+<td>Which history a seat sees</td>
+<td>Addressed mailbox, handoff expansion, rotation checkpoint</td>
+<td align="right">Yes</td>
+<td>Information reachability is structurally important for agent quality.</td>
+</tr>
+<tr>
+<td>How the main agent chooses a profile</td>
+<td>Prompt-guided model decision</td>
+<td align="right">Policy</td>
+<td>It selects nodes/capabilities but is not itself a topology.</td>
+</tr>
+<tr>
+<td>Whether an agent session is planning or executing</td>
+<td>Session phase</td>
+<td align="right">Lifecycle</td>
+<td>A phase can be a safe topology boundary.</td>
+</tr>
+</tbody></table>
+<p>Conflating these concerns would create an abstraction that is powerful on paper and difficult to reason about in production.</p>
+<h3 id="2-3-four-meanings-of-dynamic">2.3 Four meanings of “dynamic”<a class="anchor" href="#2-3-four-meanings-of-dynamic" aria-label="Link to this section">#</a></h3>
+<p>The literature and agent frameworks use “dynamic topology” for materially different mechanisms:</p>
+<ol>
+<li><strong>Selection:</strong> choose one known workflow before execution.</li>
+<li><strong>Scheduling:</strong> keep the structure fixed but decide dynamically which ready node runs next.</li>
+<li><strong>Composition:</strong> construct a task-specific structure from a small set of primitives.</li>
+<li><strong>Reconfiguration:</strong> add/remove nodes or edges, transfer ownership, or change authority during execution.</li>
+</ol>
+<p>A fifth, more limited form is <strong>contextual adaptation</strong>: keep authority and communication fixed while changing which evidence, tools, validators, or memory are exposed. This can yield much of the apparent benefit of dynamic topology without changing the collaboration graph.</p>
+<p>Agentique already performs dynamic scheduling and contextual adaptation. The open questions concern explicit selection, composition, and reconfiguration.</p>
+<hr>
+<h2 id="3-current-agentique-console-topology">3. Current Agentique Console topology<a class="anchor" href="#3-current-agentique-console-topology" aria-label="Link to this section">#</a></h2>
+<h3 id="3-1-the-stable-control-plane">3.1 The stable control plane<a class="anchor" href="#3-1-the-stable-control-plane" aria-label="Link to this section">#</a></h3>
+<pre><code class="language-text">Human Operator
+      ↕
+Main Orchestrator
+      ↕ durable typed handoff
+AgentSession Coordinator
+   ↙    ↓    ↘
+Specialist seats (1–4)
+</code></pre>
+<p><strong>Evidence — session construction.</strong> <code>AgentSessionHost.createSession</code> requires one to four specialists, creates one virtual <code>orchestrator</code> participant with the built-in coordinator profile, snapshots every profile and ownership scope, and rejects duplicate non-reviewer ownership.</p>
+<p><strong>Evidence — route enforcement.</strong> <code>#assertRoute</code> permits only main→coordinator, coordinator→main or specialist, and specialist→coordinator. The server rejects all other paths rather than relying on prompts.</p>
+<p><strong>Evidence — durable coordination.</strong> Every managed transfer becomes a typed handoff, transcript message, mailbox delivery, and event before the recipient is scheduled. Delivery progresses through queued, delivered, acknowledged, or cancelled states.</p>
+<p><strong>Evidence — authority and integration.</strong> Only the coordinator can request operator decisions. A coordinator cannot send <code>final</code> while Console tasks are incomplete, specialists are running, or internal deliveries remain active. Main remains the only operator-facing synthesizer.</p>
+<h3 id="3-2-the-execution-structure-is-less-centralized-than-the-communication-structure">3.2 The execution structure is less centralized than the communication structure<a class="anchor" href="#3-2-the-execution-structure-is-less-centralized-than-the-communication-structure" aria-label="Link to this section">#</a></h3>
+<p>The coordinator is a communication hub, but it is not a single execution thread. Each participant has an independently resumable provider session. The host may run multiple recipients concurrently, constrained by global and per-AgentSession turn limits. The scheduler starts a seat when it has queued addressed deliveries.</p>
+<p><strong>Inference.</strong> Calling the current implementation a “hierarchical sequential pipeline” would be inaccurate. It is a centralized control topology over concurrent execution lanes.</p>
+<p>This distinction matters for experiments. Allowing peer messages might reduce relay cost, but it does not create parallel execution—the Console already has that.</p>
+<h3 id="3-3-the-usersession-already-composes-topology-dynamically">3.3 The UserSession already composes topology dynamically<a class="anchor" href="#3-3-the-usersession-already-composes-topology-dynamically" aria-label="Link to this section">#</a></h3>
+<p>Main may create multiple AgentSessions for coherent workstreams, choose one to four seats in each, select profiles and model overrides, assign disjoint ownership scopes, and send later steering messages. Nothing requires every UserSession to contain the same number of AgentSessions.</p>
+<p>Viewed at the UserSession level, the runtime graph is a “star of stars” whose branches are created on demand. Viewed at the AgentSession level, each branch is fixed after creation.</p>
+<p><strong>Established conclusion.</strong> Agentique does not need a wholly new idea to begin topology research. It already has an implicit composition mechanism: create another bounded AgentSession with a purpose-specific roster.</p>
+<h3 id="3-4-what-is-fixed-today">3.4 What is fixed today<a class="anchor" href="#3-4-what-is-fixed-today" aria-label="Link to this section">#</a></h3>
+<table>
+<thead>
+<tr>
+<th>Dimension</th>
+<th>Fixed scope</th>
+<th>Consequence</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Coordinator presence</td>
+<td>Every AgentSession</td>
+<td>Even one small worker has a coordination hop.</td>
+</tr>
+<tr>
+<td>Communication edges</td>
+<td>AgentSession lifetime</td>
+<td>No focused specialist↔specialist transfer.</td>
+</tr>
+<tr>
+<td>Participant roster</td>
+<td>AgentSession creation</td>
+<td>Seats cannot join or retire in place.</td>
+</tr>
+<tr>
+<td>Ownership declarations</td>
+<td>Participant creation, with task owner mutable separately</td>
+<td>Discovered scope changes require steering or a new session; the two ownership concepts can drift.</td>
+</tr>
+<tr>
+<td>Profile/capability snapshot</td>
+<td>Participant lifetime</td>
+<td>Strong reproducibility; capability changes require a new seat/session.</td>
+</tr>
+<tr>
+<td>Main&#39;s role</td>
+<td>UserSession lifetime</td>
+<td>Main coordinates and synthesizes; it cannot perform substantive write execution.</td>
+</tr>
+<tr>
+<td>Result integration</td>
+<td>Coordinator then main</td>
+<td>Two integration boundaries for delegated work.</td>
+</tr>
+<tr>
+<td>Decision escalation</td>
+<td>Coordinator → main → operator</td>
+<td>Clear authority, additional latency for blocking choices.</td>
+</tr>
+<tr>
+<td>Context reachability</td>
+<td>Addressed handoffs plus explicit retrieval</td>
+<td>Bounded context, possible relay loss.</td>
+</tr>
+<tr>
+<td>Topology identity and rationale</td>
+<td>Not represented</td>
+<td>Runs cannot be grouped by structural policy or audited for why a structure was chosen.</td>
+</tr>
+</tbody></table>
+<h3 id="3-5-where-the-fixed-structure-provides-value">3.5 Where the fixed structure provides value<a class="anchor" href="#3-5-where-the-fixed-structure-provides-value" aria-label="Link to this section">#</a></h3>
+<ol>
+<li><strong>Responsibility is legible.</strong> Main owns operator intent, coordinators own bounded workstreams, and specialists own explicit scopes.</li>
+<li><strong>Communication remains bounded.</strong> A full mesh grows possible directed communication paths as <code>n(n−1)</code>; a star keeps them linear and makes wake coalescing possible.</li>
+<li><strong>Authority is fail-closed.</strong> Specialists cannot treat peer output as operator approval or bypass the coordinator to redefine scope.</li>
+<li><strong>Integration has a named owner.</strong> Someone must reconcile conflicts, verify task completion, and decide what reaches main.</li>
+<li><strong>Recovery is tractable.</strong> Durable mailboxes, typed handoffs, lineage, profile snapshots, and provider journals identify who owed what to whom.</li>
+<li><strong>Permissions and observability are complete.</strong> Native agent messaging is denied so work cannot disappear outside the Console event model.</li>
+<li><strong>The structure contains error propagation.</strong> A central checkpoint can reject incomplete or inconsistent results before they spread.</li>
+</ol>
+<p>The controlled Google/MIT study of 180 configurations found that centralized systems contained error amplification better than independent systems (reported as 4.4× versus 17.2× in its experiments), while performance depended strongly on task structure. This supports centralized validation as a real benefit, not universal superiority of the star [1].</p>
+<h3 id="3-6-where-it-may-impose-avoidable-cost">3.6 Where it may impose avoidable cost<a class="anchor" href="#3-6-where-it-may-impose-avoidable-cost" aria-label="Link to this section">#</a></h3>
+<ol>
+<li><strong>Mandatory double harness.</strong> Main and the AgentSession coordinator both spend tokens interpreting, decomposing, and integrating a small delegated task.</li>
+<li><strong>Relay loss.</strong> A specialist&#39;s result is compressed into a handoff, interpreted by the coordinator, then compressed or synthesized again for main.</li>
+<li><strong>Coordinator bottleneck.</strong> Cross-cutting discoveries must wait for a coordinator turn even when a direct, typed notification could unblock another specialist.</li>
+<li><strong>Static roster.</strong> Early uncertainty encourages either over-seating “just in case” or creating another session later.</li>
+<li><strong>Weak fit for tightly reciprocal work.</strong> Two specialists whose outputs continuously constrain each other cannot mutually adjust directly; the coordinator must relay each revision.</li>
+<li><strong>Topology is invisible to evaluation.</strong> Usage is attributed to session and participant, but not to a named structural policy, selection decision, or transition.</li>
+<li><strong>Task ownership has two layers.</strong> Immutable seat <code>ownership</code> and mutable task <code>owner</code> are useful but not reconciled as one authority model.</li>
+</ol>
+<p>These are plausible costs, not measured local regressions.</p>
+<h3 id="3-7-smaller-changes-may-address-much-of-the-problem">3.7 Smaller changes may address much of the problem<a class="anchor" href="#3-7-smaller-changes-may-address-much-of-the-problem" aria-label="Link to this section">#</a></h3>
+<p>Before introducing generic topology, Agentique can test narrower interventions:</p>
+<ul>
+<li>add topology/strategy identity and decision telemetry without changing behavior;</li>
+<li>provide a direct single-worker AgentSession mode while retaining main, durable handoffs, profiles, tasks, and events;</li>
+<li>allow the coordinator to forward one canonical handoff reference instead of re-summarizing it;</li>
+<li>use task dependencies to schedule work without changing communication authority;</li>
+<li>add a narrowly scoped “notify affected owner” path whose payload remains typed and visible, while decisions still flow through the coordinator;</li>
+<li>create reviewer seats only when risk warrants independence;</li>
+<li>create a new AgentSession when scope changes rather than mutating a live one.</li>
+</ul>
+<p>Each change isolates one hypothesis. A generic graph would change all of them at once and make causal evaluation harder.</p>
+<hr>
+<h2 id="4-what-adjacent-research-establishes-and-does-not">4. What adjacent research establishes—and does not<a class="anchor" href="#4-what-adjacent-research-establishes-and-does-not" aria-label="Link to this section">#</a></h2>
+<h3 id="4-1-task-structure-dominates-agent-count">4.1 Task structure dominates agent count<a class="anchor" href="#4-1-task-structure-dominates-agent-count" aria-label="Link to this section">#</a></h3>
+<p>The Google/MIT scaling study compared single-agent, independent, centralized, decentralized, and hybrid architectures across agentic benchmarks. Centralized multi-agent execution improved the parallelizable finance task by 80.9%, while every multi-agent variant degraded the sequential planning task by 39–70%. Tool density also increased coordination cost. A task-feature model using decomposability and tool count selected the best tested architecture for 87% of unseen configurations, although its reported <code>R² = 0.513</code> shows substantial unexplained variance [1].</p>
+<p><strong>Evidence-supported conclusion:</strong> no fixed multi-agent structure is uniformly best across task regimes.</p>
+<p><strong>Uncertainty:</strong> the benchmarks are not Agentique coding sessions, and “best architecture among five experimental templates” is narrower than reliable production routing.</p>
+<p>Anthropic&#39;s production research system offers convergent but domain-specific evidence. Its orchestrator-worker structure is effective for wide, parallel web research, yet the company reports multi-agent runs at roughly 15× chat token use and explicitly says highly dependent work and much coding are poorer fits. It found token use alone explained much of BrowseComp variance, meaning some gains came from spending more compute rather than superior coordination [2].</p>
+<h3 id="4-2-communication-is-an-information-bottleneck">4.2 Communication is an information bottleneck<a class="anchor" href="#4-2-communication-is-an-information-bottleneck" aria-label="Link to this section">#</a></h3>
+<p>Yu et al. formalize multi-agent execution as isolated contexts connected by bounded relay messages. With an unbounded relay, a multi-agent system can reproduce a single agent&#39;s context flow; practical differences arise when compression removes redundant context or loses downstream-relevant information. Their controlled experiments find benefits when relays are near-sufficient and reversals when relay loss dominates, particularly for stronger models [3].</p>
+<p>This maps closely to Agentique&#39;s typed handoffs:</p>
+<ul>
+<li>typed cores, evidence pointers, optional expanded extensions, and durable artifacts reduce relay loss;</li>
+<li>the 4 KiB ordinary soft target and separate provider contexts impose a deliberate information bottleneck;</li>
+<li>coordinator and main hops can filter noise or discard necessary nuance;</li>
+<li>retrieving canonical handoffs by id is safer than serial re-summarization.</li>
+</ul>
+<p><strong>Inference:</strong> topology and context policy cannot be evaluated independently. A peer edge carrying a poor summary may be worse than a coordinator edge carrying a lossless evidence reference.</p>
+<h3 id="4-3-distributed-systems-concepts-are-useful-when-the-analogy-is-bounded">4.3 Distributed-systems concepts are useful when the analogy is bounded<a class="anchor" href="#4-3-distributed-systems-concepts-are-useful-when-the-analogy-is-bounded" aria-label="Link to this section">#</a></h3>
+<p>“Language Model Teams as Distributed Systems” studies teams through task graphs, critical paths, communication overhead, centralized scheduling, and self-coordination. The useful transfer is not that agents are processors; LLM agents are stochastic, context-sensitive, and may misunderstand the task. The useful transfer is to distinguish:</p>
+<ul>
+<li>the work DAG from the worker network;</li>
+<li>total work from critical-path latency;</li>
+<li>parallel fraction from coordination overhead;</li>
+<li>scheduling from authority;</li>
+<li>local recovery from replaying the entire job [4].</li>
+</ul>
+<p>Agentique already has durable state suitable for localized recovery: task rows, mailbox deliveries, handoff lineage, provider entries, artifacts, and participant generations.</p>
+<p><strong>Inference:</strong> task-graph-aware scheduling and failure recovery are likely lower-risk opportunities than dynamic communication edges.</p>
+<h3 id="4-4-organizational-theory-explains-why-one-topology-cannot-fit-every-dependency">4.4 Organizational theory explains why one topology cannot fit every dependency<a class="anchor" href="#4-4-organizational-theory-explains-why-one-topology-cannot-fit-every-dependency" aria-label="Link to this section">#</a></h3>
+<p>Galbraith&#39;s information-processing view links task uncertainty to organizational form: as uncertainty increases, an organization must either reduce the need for coordination or increase its capacity to process information [5]. Thompson&#39;s classic distinction among pooled, sequential, and reciprocal interdependence provides a useful diagnostic:</p>
+<ul>
+<li><strong>pooled:</strong> independent contributions combine at the end—parallel specialists plus centralized synthesis fit well;</li>
+<li><strong>sequential:</strong> one output becomes the next input—a single persistent worker or explicit pipeline avoids repeated re-briefing;</li>
+<li><strong>reciprocal:</strong> participants repeatedly adjust to each other&#39;s evolving work—mutual communication can help, but also raises chatter, conflict, and authority costs [6].</li>
+</ul>
+<p>These are analytical categories, not proof that human organization charts transfer directly to LLM agents. They are useful because Agentique can estimate dependency shape from tasks and ownership scopes.</p>
+<h3 id="4-5-dynamic-graph-research-proves-feasibility-not-local-necessity">4.5 Dynamic graph research proves feasibility, not local necessity<a class="anchor" href="#4-5-dynamic-graph-research-proves-feasibility-not-local-necessity" aria-label="Link to this section">#</a></h3>
+<p>Peer-reviewed work now explores several kinds of adaptation:</p>
+<ul>
+<li><strong>AgentDropout</strong> learns to remove redundant agents and communication edges across rounds, reporting lower prompt and completion token use with a small average task-performance gain [7].</li>
+<li><strong>Guided Topology Diffusion</strong> generates sparse task-conditioned communication graphs guided by a multi-objective proxy for accuracy, utility, cost, and robustness [8].</li>
+<li><strong>LLM-as-Scheduler</strong> chooses among workflows using a lightweight gate plus an LLM scheduler, reporting 43% fewer tokens and more than 36% lower latency for at most a 1.4-point accuracy loss against its strong fixed workflow [9].</li>
+<li><strong>TacoMAS</strong>, currently a preprint, adapts capabilities quickly and topology more slowly; its own premise is that topology needs stability while task capabilities respond faster [10].</li>
+</ul>
+<p>The strongest transferable point is that <strong>adaptation has several time scales</strong> and that sparse/selective execution can remove unnecessary work. The weakest transfer is the assumption that Agentique should generate arbitrary adjacency matrices. These systems generally optimize benchmark-specific graphs with reward signals and training or proxy models that Agentique does not currently possess.</p>
+<h3 id="4-6-existing-frameworks-favor-small-orchestration-primitives">4.6 Existing frameworks favor small orchestration primitives<a class="anchor" href="#4-6-existing-frameworks-favor-small-orchestration-primitives" aria-label="Link to this section">#</a></h3>
+<p>OpenAI&#39;s Agents SDK distinguishes manager-style “agents as tools,” where one agent retains final control, from handoffs, where control transfers to a specialist. LangGraph distinguishes subagents, handoffs, routers, skills, and custom workflows. AutoGen offers round-robin, model-selected group chat, and handoff-based swarm patterns [11–13].</p>
+<p>These are implementation examples, not comparative evidence. Their relevant lesson is architectural: complex workflows can be composed from a few explicit control-transfer and invocation primitives. Agentique should not introduce a universal graph type merely because other frameworks can express one.</p>
+<hr>
+<h2 id="5-a-useful-taxonomy-for-agentique">5. A useful taxonomy for Agentique<a class="anchor" href="#5-a-useful-taxonomy-for-agentique" aria-label="Link to this section">#</a></h2>
+<table>
+<thead>
+<tr>
+<th>Level</th>
+<th>Meaning</th>
+<th align="right">Current support</th>
+<th>Expected value</th>
+<th>Main risk</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>T0 — Implicit fixed topology</strong></td>
+<td>Current behavior encoded across code and prompts</td>
+<td align="right">Yes</td>
+<td>Simplicity and strong invariants</td>
+<td>Hard to evaluate or extend deliberately</td>
+</tr>
+<tr>
+<td><strong>T1 — Explicit fixed topology</strong></td>
+<td>Name/version the current star and record why it was used</td>
+<td align="right">No</td>
+<td>Observability and reproducibility</td>
+<td>Small schema/event cost</td>
+</tr>
+<tr>
+<td><strong>T2 — Task-level selection</strong></td>
+<td>Choose among a very small set of known structures before work</td>
+<td align="right">Partly, via creating different rosters</td>
+<td>Avoid needless coordination</td>
+<td>Misclassification and policy drift</td>
+</tr>
+<tr>
+<td><strong>T3 — Primitive composition</strong></td>
+<td>Build a workstream from manager, worker, reviewer, join, and escalation primitives</td>
+<td align="right">Partly implicit</td>
+<td>Better task fit without arbitrary edges</td>
+<td>More lifecycle states and integration cases</td>
+</tr>
+<tr>
+<td><strong>T4 — Boundary reconfiguration</strong></td>
+<td>Change roster/edges at phase, failure, or scope-discovery checkpoints</td>
+<td align="right">New</td>
+<td>Recover from incorrect initial assumptions</td>
+<td>Ownership/context transfer failures</td>
+</tr>
+<tr>
+<td><strong>T5 — Continuous self-reconfiguration</strong></td>
+<td>Agents add/remove nodes and edges during turns</td>
+<td align="right">No</td>
+<td>Potential adaptation to unforeseen work</td>
+<td>Instability, unbounded cost, weak auditability</td>
+</tr>
+<tr>
+<td><strong>T6 — Learned topology policy</strong></td>
+<td>Train a selector or graph generator from outcome data</td>
+<td align="right">No</td>
+<td>Possible long-run optimization</td>
+<td>Insufficient local data and reward quality</td>
+</tr>
+</tbody></table>
+<p><strong>Assessment:</strong> T1 is justified now as measurement infrastructure. T2 is the first behavior worth testing. T3 and T4 are contingent options. T5 and T6 are research ideas without a current Agentique-scale evidence base.</p>
+<hr>
+<h2 id="6-at-what-unit-should-topology-operate">6. At what unit should topology operate?<a class="anchor" href="#6-at-what-unit-should-topology-operate" aria-label="Link to this section">#</a></h2>
+<h3 id="6-1-usersession-stable-authority-envelope">6.1 UserSession: stable authority envelope<a class="anchor" href="#6-1-usersession-stable-authority-envelope" aria-label="Link to this section">#</a></h3>
+<p>The <code>UserSession</code> should retain one stable operator-facing authority model:</p>
+<ul>
+<li>the operator communicates with main;</li>
+<li>main owns interpretation, user decisions, and final response;</li>
+<li>all delegated execution remains durable and observable;</li>
+<li>permissions cannot be expanded by an agent message;</li>
+<li>topology changes cannot bypass approval or recovery invariants.</li>
+</ul>
+<p>Changing this layer mid-session would confuse responsibility and user expectations. There is no evidence that doing so would improve value per token.</p>
+<h3 id="6-2-task-or-coherent-workstream-primary-selection-unit">6.2 Task or coherent workstream: primary selection unit<a class="anchor" href="#6-2-task-or-coherent-workstream-primary-selection-unit" aria-label="Link to this section">#</a></h3>
+<p>This is the strongest candidate for topology selection. A task/workstream has a bounded goal, estimated dependencies, ownership, tool needs, risk, and acceptance checks. Main already creates AgentSessions at this level.</p>
+<p>Candidate decisions include:</p>
+<ul>
+<li>execute directly in one profile-bound worker lane;</li>
+<li>use the current coordinator plus one worker when integration or operator escalation is likely;</li>
+<li>use parallel, disjoint specialists with centralized synthesis;</li>
+<li>append one isolated reviewer after deterministic checks;</li>
+<li>keep work in one long-running seat and rotate context rather than distribute it spatially.</li>
+</ul>
+<h3 id="6-3-phase-safe-adaptation-boundary">6.3 Phase: safe adaptation boundary<a class="anchor" href="#6-3-phase-safe-adaptation-boundary" aria-label="Link to this section">#</a></h3>
+<p>Planning, exploration, implementation, verification, and recovery need different information and capabilities. A structure may remain stable within a phase while changing at the boundary:</p>
+<pre><code class="language-text">explore (parallel reads) → integrate decision → implement (single owner)
+→ deterministic validation → independent review if residual risk is high
+</code></pre>
+<p>The Console already has phases, structured closing handoffs, task status, and context checkpoints. Those provide safe points to change execution structure without silently invalidating in-flight work.</p>
+<h3 id="6-4-turn-scheduling-and-context-not-topology-by-default">6.4 Turn: scheduling and context, not topology by default<a class="anchor" href="#6-4-turn-scheduling-and-context-not-topology-by-default" aria-label="Link to this section">#</a></h3>
+<p>Turn-level decisions should normally cover which queued seat runs, which handoff expansion is needed, which tool is exposed, or whether a validator should fire. Editing authority or ownership edges every turn would make recovery and attribution substantially harder.</p>
+<p><strong>Conclusion:</strong> one system can require decisions at multiple levels, but they should have different stability guarantees:</p>
+<table>
+<thead>
+<tr>
+<th>Level</th>
+<th>Appropriate decision</th>
+<th>Stability</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>UserSession</td>
+<td>authority, operator interface, global safety envelope</td>
+<td>Stable</td>
+</tr>
+<tr>
+<td>Task/workstream</td>
+<td>execution strategy and initial roster</td>
+<td>Stable by default</td>
+</tr>
+<tr>
+<td>Phase/checkpoint</td>
+<td>reviewer addition, handoff, split/join, recovery</td>
+<td>Change only with recorded transition</td>
+</tr>
+<tr>
+<td>Turn</td>
+<td>scheduling, context retrieval, tool choice</td>
+<td>Freely adaptive within policy</td>
+</tr>
+</tbody></table>
+<hr>
+<h2 id="7-how-topology-should-be-selected">7. How topology should be selected<a class="anchor" href="#7-how-topology-should-be-selected" aria-label="Link to this section">#</a></h2>
+<h3 id="7-1-explicit-operator-selection">7.1 Explicit operator selection<a class="anchor" href="#7-1-explicit-operator-selection" aria-label="Link to this section">#</a></h3>
+<p>Useful for experimentation, debugging, and exceptional high-stakes work; poor as the everyday default because it exposes implementation detail and asks the operator to predict runtime behavior.</p>
+<h3 id="7-2-inspectable-rule-policy">7.2 Inspectable rule policy<a class="anchor" href="#7-2-inspectable-rule-policy" aria-label="Link to this section">#</a></h3>
+<p>The best first production candidate. Rules can be versioned, logged, overridden, and evaluated. They should default to the least expensive structure expected to meet the quality/risk requirement.</p>
+<p>An initial hypothesis—not a validated policy—is:</p>
+<pre><code class="language-text">single worker
+  unless independent scopes can proceed in parallel,
+  or expected context exceeds one healthy worker generation,
+  or integration/decision load justifies a coordinator,
+  or residual write risk justifies an isolated reviewer.
+</code></pre>
+<h3 id="7-3-model-inferred-selection">7.3 Model-inferred selection<a class="anchor" href="#7-3-model-inferred-selection" aria-label="Link to this section">#</a></h3>
+<p>Main already implicitly judges decomposition and roster size. Turning that judgment into a typed decision could improve observability, but the model should return features and rationale into a constrained policy rather than invent an unrestricted graph.</p>
+<h3 id="7-4-negotiation-during-execution">7.4 Negotiation during execution<a class="anchor" href="#7-4-negotiation-during-execution" aria-label="Link to this section">#</a></h3>
+<p>A seat may discover that scope is larger, dependencies are reciprocal, or its capability is insufficient. It should be able to request a structural change, but not enact authority changes unilaterally. The coordinator or main can approve the request at a durable boundary.</p>
+<p>This separates <strong>discovery</strong> (local and agentic) from <strong>authorization</strong> (central and auditable).</p>
+<h3 id="7-5-learned-selection">7.5 Learned selection<a class="anchor" href="#7-5-learned-selection" aria-label="Link to this section">#</a></h3>
+<p>A contextual bandit or learned router requires many representative decisions, stable arm definitions, reliable delayed rewards, and enough exploration to estimate counterfactual value. Agentique currently has none of these at useful scale. A learned policy should be deferred until a simple rule policy has a substantial, diverse outcome dataset and demonstrable residual regret.</p>
+<hr>
+<h2 id="8-information-required-for-reliable-decisions">8. Information required for reliable decisions<a class="anchor" href="#8-information-required-for-reliable-decisions" aria-label="Link to this section">#</a></h2>
+<h3 id="8-1-pre-execution-features">8.1 Pre-execution features<a class="anchor" href="#8-1-pre-execution-features" aria-label="Link to this section">#</a></h3>
+<ul>
+<li>estimated task length and context footprint;</li>
+<li>number of independent deliverables and dependency depth;</li>
+<li>pooled, sequential, or reciprocal interdependence;</li>
+<li>expected file/component ownership overlap;</li>
+<li>required profiles, tools, and permissions;</li>
+<li>availability of deterministic acceptance checks;</li>
+<li>reversibility and failure impact;</li>
+<li>ambiguity and likelihood of operator decisions;</li>
+<li>expected integration burden;</li>
+<li>latency sensitivity and token/cost budget.</li>
+</ul>
+<h3 id="8-2-trajectory-signals">8.2 Trajectory signals<a class="anchor" href="#8-2-trajectory-signals" aria-label="Link to this section">#</a></h3>
+<ul>
+<li>newly discovered scope or dependencies;</li>
+<li>repeated handoff retrieval or discrepancy reports;</li>
+<li>duplicate file/tool exploration across seats;</li>
+<li>coordinator queue delay and blocked work;</li>
+<li>context growth and rotation proximity;</li>
+<li>failed turns, retries, and reassignment;</li>
+<li>conflicting claims or write scopes;</li>
+<li>deterministic validation failures;</li>
+<li>task progress relative to tokens and elapsed time.</li>
+</ul>
+<h3 id="8-3-decision-confidence-and-abstention">8.3 Decision confidence and abstention<a class="anchor" href="#8-3-decision-confidence-and-abstention" aria-label="Link to this section">#</a></h3>
+<p>The policy must be able to say “insufficient evidence; retain the current structure.” Structural changes have switching costs: checkpoint generation, context transfer, scheduler churn, cache loss, new failure states, and additional messages. Adaptation should require expected benefit greater than both the switching cost and uncertainty margin.</p>
+<p>A conceptual trigger is:</p>
+<p><code>change iff E[quality/efficiency gain | evidence] &gt; switch_cost + uncertainty_margin</code></p>
+<p>Agentique cannot estimate this expression reliably today. The first implementation should record its components rather than pretend to compute a precise score.</p>
+<h3 id="8-4-signals-that-complexity-is-probably-harmful">8.4 Signals that complexity is probably harmful<a class="anchor" href="#8-4-signals-that-complexity-is-probably-harmful" aria-label="Link to this section">#</a></h3>
+<ul>
+<li>one clear sequential owner;</li>
+<li>short predicted duration;</li>
+<li>high shared-context requirement;</li>
+<li>low-risk reversible change with strong deterministic checks;</li>
+<li>no independent evidence partitions;</li>
+<li>coordinator work would merely restate the same assignment;</li>
+<li>expected communication and briefing tokens approach task-work tokens;</li>
+<li>no reliable selector or validator for parallel alternatives.</li>
+</ul>
+<h3 id="8-5-signals-that-more-structure-may-help">8.5 Signals that more structure may help<a class="anchor" href="#8-5-signals-that-more-structure-may-help" aria-label="Link to this section">#</a></h3>
+<ul>
+<li>genuinely independent scopes with low merge conflict;</li>
+<li>breadth/search tasks where coverage matters;</li>
+<li>one workstream would exceed healthy context limits;</li>
+<li>heterogeneous tools or permissions must be isolated;</li>
+<li>high-risk output benefits from an independent verifier;</li>
+<li>a failure can be retried locally without invalidating other branches;</li>
+<li>substantial latent parallelism lies off the critical path.</li>
+</ul>
+<p>These conditions are hypotheses to test locally, not automatic spawn rules.</p>
+<hr>
+<h2 id="9-domain-and-runtime-representation">9. Domain and runtime representation<a class="anchor" href="#9-domain-and-runtime-representation" aria-label="Link to this section">#</a></h2>
+<h3 id="9-1-do-not-start-with-a-generic-graph">9.1 Do not start with a generic graph<a class="anchor" href="#9-1-do-not-start-with-a-generic-graph" aria-label="Link to this section">#</a></h3>
+<p>If the only tested alternatives are “direct worker” and “coordinator star,” an enum-like execution strategy plus a versioned decision record is sufficient. A generic node/edge schema becomes justified only after several production-worthy structures require composition.</p>
+<p>The minimum useful conceptual records are:</p>
+<pre><code class="language-ts">type ExecutionStrategy =
+  | &quot;coordinator_star_v1&quot;
+  | &quot;direct_worker_v1&quot;;
+
+interface TopologyDecision {
+  id: string;
+  userSessionId: string;
+  taskId: string | null;
+  strategy: ExecutionStrategy;
+  policyVersion: string;
+  source: &quot;operator&quot; | &quot;rule&quot; | &quot;model_proposal&quot; | &quot;recovery&quot;;
+  features: Record&lt;string, string | number | boolean | null&gt;;
+  rationale: string;
+  confidence: number | null;
+  budget: { tokenLimit?: number; timeLimitMs?: number };
+  createdAt: string;
+}
+</code></pre>
+<p>This is a research sketch, not a committed API.</p>
+<h3 id="9-2-if-composition-later-becomes-necessary">9.2 If composition later becomes necessary<a class="anchor" href="#9-2-if-composition-later-becomes-necessary" aria-label="Link to this section">#</a></h3>
+<p>Prefer typed primitives over arbitrary edges:</p>
+<ul>
+<li><code>delegate</code> — transfer a bounded owned task;</li>
+<li><code>report</code> — return a result or milestone;</li>
+<li><code>notify</code> — share evidence without transferring authority;</li>
+<li><code>validate</code> — independently check an artifact/claim;</li>
+<li><code>escalate</code> — request a higher-authority decision;</li>
+<li><code>join</code> — integrate several completed branches;</li>
+<li><code>checkpoint</code> — transfer recoverable context at a phase/generation boundary.</li>
+</ul>
+<p>Every transition should identify the owner before and after, canonical handoff, pending deliveries, tasks affected, and rollback/recovery behavior.</p>
+<h3 id="9-3-interaction-with-existing-concepts">9.3 Interaction with existing concepts<a class="anchor" href="#9-3-interaction-with-existing-concepts" aria-label="Link to this section">#</a></h3>
+<table>
+<thead>
+<tr>
+<th>Existing concept</th>
+<th>Topology implication</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>UserSession</code></td>
+<td>Owns the stable authority envelope and global policy defaults.</td>
+</tr>
+<tr>
+<td><code>AgentSession</code></td>
+<td>Becomes one topology instance or workstream, not necessarily synonymous with a star forever.</td>
+</tr>
+<tr>
+<td>Participant/profile</td>
+<td>Defines a node&#39;s snapshotted capability and permission boundary.</td>
+</tr>
+<tr>
+<td>Task</td>
+<td>Supplies selection features, ownership, dependencies, and evaluation unit.</td>
+</tr>
+<tr>
+<td>Mailbox/message</td>
+<td>Remains the durable transport for every permitted communication edge.</td>
+</tr>
+<tr>
+<td>Handoff</td>
+<td>Remains the canonical context-transfer protocol across edges and transitions.</td>
+</tr>
+<tr>
+<td>Routing</td>
+<td>Enforces the active topology; it should not infer it ad hoc.</td>
+</tr>
+<tr>
+<td>Context management</td>
+<td>Decides information payload/retrieval independently of authority edges.</td>
+</tr>
+<tr>
+<td>Observability/event spine</td>
+<td>Records topology decision, activation, transition, rejection, and outcome attribution.</td>
+</tr>
+<tr>
+<td>Execution state</td>
+<td>Must prevent transition while turns, writes, or deliveries make ownership ambiguous.</td>
+</tr>
+</tbody></table>
+<h3 id="9-4-required-invariants-for-any-future-topology">9.4 Required invariants for any future topology<a class="anchor" href="#9-4-required-invariants-for-any-future-topology" aria-label="Link to this section">#</a></h3>
+<ol>
+<li>Exactly one operator-facing authority owns the response.</li>
+<li>Every mutable scope has at most one active writer unless an explicit merge protocol exists.</li>
+<li>Every communication edge uses durable Console transport.</li>
+<li>Tool and permission authority comes from snapshotted policy, never from messages.</li>
+<li>Every task has an attributable owner and terminal condition.</li>
+<li>Every join identifies who validates and integrates results.</li>
+<li>Reconfiguration occurs only after in-flight state is quiescent or explicitly transferred.</li>
+<li>Recovery can reconstruct topology, ownership, pending work, and latest canonical context from SQLite.</li>
+<li>Limits bound participants, messages, transitions, tokens, time, and retries.</li>
+<li>The UI can explain the active structure and why it changed.</li>
+</ol>
+<hr>
+<h2 id="10-design-directions-ranked-by-evidence-and-complexity">10. Design directions, ranked by evidence and complexity<a class="anchor" href="#10-design-directions-ranked-by-evidence-and-complexity" aria-label="Link to this section">#</a></h2>
+<h3 id="direction-a-make-the-current-topology-observable">Direction A — Make the current topology observable<a class="anchor" href="#direction-a-make-the-current-topology-observable" aria-label="Link to this section">#</a></h3>
+<p><strong>Status:</strong> strongest immediate direction.<br><strong>Change:</strong> record strategy/policy identity, selection rationale, task features, and topology-attributed outcomes while preserving the current star.<br><strong>Hypothesis:</strong> explicit attribution will reveal which task regimes pay disproportionate coordination cost or benefit from centralized containment.<br><strong>Value:</strong> enables every later experiment; negligible behavioral risk.<br><strong>Risk:</strong> telemetry without a quality corpus can still encourage optimizing easy cost metrics.</p>
+<h3 id="direction-b-add-one-fair-single-worker-lane">Direction B — Add one fair single-worker lane<a class="anchor" href="#direction-b-add-one-fair-single-worker-lane" aria-label="Link to this section">#</a></h3>
+<p><strong>Status:</strong> strongest behavioral experiment.<br><strong>Change:</strong> one profile-bound worker communicates durably with main without an obligatory AgentSession coordinator; tasks, handoffs, permissions, recovery, and events remain Console-owned.<br><strong>Hypothesis:</strong> short sequential, low-integration tasks preserve quality with fewer coordination tokens and lower latency.<br><strong>Do not infer:</strong> main should gain write tools, or all coordinators are waste.<br><strong>Risk:</strong> main absorbs integration/decision load, so the lane may only move rather than remove cost.</p>
+<h3 id="direction-c-selective-independent-validation">Direction C — Selective independent validation<a class="anchor" href="#direction-c-selective-independent-validation" aria-label="Link to this section">#</a></h3>
+<p><strong>Status:</strong> well-supported pattern, orthogonal to worker count.<br><strong>Change:</strong> add a fresh-context reviewer after deterministic checks only when risk and unverifiable residual properties justify it.<br><strong>Hypothesis:</strong> independent review improves reliability per token more consistently than adding collaborating peers.<br><strong>Risk:</strong> reviewers can duplicate deterministic work or rubber-stamp claims; review quality must be measured.</p>
+<h3 id="direction-d-phase-specific-composition-using-current-primitives">Direction D — Phase-specific composition using current primitives<a class="anchor" href="#direction-d-phase-specific-composition-using-current-primitives" aria-label="Link to this section">#</a></h3>
+<p><strong>Status:</strong> promising after A–C.<br><strong>Change:</strong> create separate bounded AgentSessions or seats for exploration, implementation, and review, joined by canonical handoffs and tasks.<br><strong>Hypothesis:</strong> broad exploration benefits from parallelism while implementation retains one writer and review retains independence.<br><strong>Risk:</strong> each phase boundary creates relay and cache-cold costs.</p>
+<h3 id="direction-e-narrow-peer-notification">Direction E — Narrow peer notification<a class="anchor" href="#direction-e-narrow-peer-notification" aria-label="Link to this section">#</a></h3>
+<p><strong>Status:</strong> conditional.<br><strong>Change:</strong> allow a specialist to send a typed, non-authoritative evidence notification to an affected owner while coordinator remains visible and responsible.<br><strong>Hypothesis:</strong> reciprocal or cross-cutting discoveries unblock work faster without full mesh coordination.<br><strong>Risk:</strong> increased context, interruptions, duplicate action, and ambiguous response obligations.<br><strong>Gate:</strong> test only after traces show coordinator relay delay is a repeated material bottleneck.</p>
+<h3 id="direction-f-boundary-reconfiguration">Direction F — Boundary reconfiguration<a class="anchor" href="#direction-f-boundary-reconfiguration" aria-label="Link to this section">#</a></h3>
+<p><strong>Status:</strong> research option.<br><strong>Change:</strong> add/retire a seat or split/join a workstream at explicit checkpoints.<br><strong>Hypothesis:</strong> runtime scope discovery makes initial task-level selection insufficient.<br><strong>Risk:</strong> ownership transfer, recovery, and UI state become substantially more complex.<br><strong>Gate:</strong> require evidence that creating a new AgentSession cannot solve the same cases adequately.</p>
+<h3 id="direction-g-learned-or-generated-topology">Direction G — Learned or generated topology<a class="anchor" href="#direction-g-learned-or-generated-topology" aria-label="Link to this section">#</a></h3>
+<p><strong>Status:</strong> defer.<br><strong>Hypothesis:</strong> a trained selector outperforms inspectable rules on a stable family of frequent tasks.<br><strong>Missing prerequisites:</strong> representative volume, stable arms, reliable outcome rewards, safe exploration, drift monitoring, and a reason generic graphs beat small primitives.</p>
+<hr>
+<h2 id="11-evaluation-framework">11. Evaluation framework<a class="anchor" href="#11-evaluation-framework" aria-label="Link to this section">#</a></h2>
+<h3 id="11-1-primary-objective">11.1 Primary objective<a class="anchor" href="#11-1-primary-objective" aria-label="Link to this section">#</a></h3>
+<p>Do not collapse the goal into one opaque score. Use a quality-constrained Pareto analysis:</p>
+<ol>
+<li>establish task success and quality non-inferiority;</li>
+<li>among acceptable-quality runs, compare tokens, latency, reliability, and operator effort;</li>
+<li>report variance and tail failures, not only means.</li>
+</ol>
+<h3 id="11-2-experimental-fairness">11.2 Experimental fairness<a class="anchor" href="#11-2-experimental-fairness" aria-label="Link to this section">#</a></h3>
+<p>Every topology comparison must hold constant or explicitly report:</p>
+<ul>
+<li>model and effort;</li>
+<li>total token and turn budgets;</li>
+<li>tools and permissions needed for the task;</li>
+<li>workspace snapshot and starting context;</li>
+<li>acceptance checks and grader;</li>
+<li>retry policy and timeout;</li>
+<li>degree of parallel wall-clock capacity;</li>
+<li>whether main/coordinator synthesis tokens are included;</li>
+<li>provider caching conditions.</li>
+</ul>
+<p>The current main cannot implement, so a “single agent” baseline must be a profile-bound worker with equivalent tools—not an artificially weakened read-only main.</p>
+<h3 id="11-3-task-strata">11.3 Task strata<a class="anchor" href="#11-3-task-strata" aria-label="Link to this section">#</a></h3>
+<table>
+<thead>
+<tr>
+<th>Stratum</th>
+<th>Structural prediction to test</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Short sequential diagnosis/fix</td>
+<td>Direct worker should avoid unnecessary relay cost.</td>
+</tr>
+<tr>
+<td>Long sequential implementation</td>
+<td>One persistent worker may win until context degradation makes checkpointing valuable.</td>
+</tr>
+<tr>
+<td>Independent repository exploration</td>
+<td>Parallel specialists may improve coverage and latency.</td>
+</tr>
+<tr>
+<td>Cross-component change with disjoint ownership</td>
+<td>Centralized parallel execution may help if integration is bounded.</td>
+</tr>
+<tr>
+<td>Tightly coupled shared-file change</td>
+<td>Multiple writers or frequent relays may harm quality.</td>
+</tr>
+<tr>
+<td>High-risk change with deterministic tests</td>
+<td>Deterministic gates first; reviewer adds value only for residual risk.</td>
+</tr>
+<tr>
+<td>Subjective UI/research output</td>
+<td>Independent review may help where deterministic checks are weak.</td>
+</tr>
+<tr>
+<td>Injected participant/coordinator failure</td>
+<td>Durable centralized state should enable localized recovery.</td>
+</tr>
+<tr>
+<td>Scope-discovery task</td>
+<td>Tests whether boundary adaptation beats starting a new workstream.</td>
+</tr>
+</tbody></table>
+<h3 id="11-4-metrics">11.4 Metrics<a class="anchor" href="#11-4-metrics" aria-label="Link to this section">#</a></h3>
+<h4>Output quality and completion</h4>
+<ul>
+<li>deterministic acceptance pass/fail;</li>
+<li>task completion and honest terminal state;</li>
+<li>blinded pairwise or rubric score for non-deterministic properties;</li>
+<li>regression, rollback, and rework rate;</li>
+<li>operator correction/intervention count.</li>
+</ul>
+<h4>Value per token</h4>
+<ul>
+<li>total, uncached input, cache creation/read, and output tokens;</li>
+<li>cost per successful run;</li>
+<li>tokens per accepted artifact/change;</li>
+<li>quality at matched token budget;</li>
+<li>success at matched cost.</li>
+</ul>
+<p>“Useful work per token” should be reported as a family of ratios after quality gating, not one universal scalar.</p>
+<h4>Coordination overhead</h4>
+<ul>
+<li>briefing, handoff, coordinator, synthesis, and topology-decision tokens;</li>
+<li>coordination turns divided by all turns;</li>
+<li>message count, bytes, retrievals, and relay depth;</li>
+<li>duplicate commands, overlapping reads/searches, and repeated evidence discovery;</li>
+<li>time waiting for coordinator, join, decision, or ownership release.</li>
+</ul>
+<h4>Latency and parallelism</h4>
+<ul>
+<li>end-to-end latency;</li>
+<li>provider/tool/queue time;</li>
+<li>critical-path duration;</li>
+<li>total active agent-seconds;</li>
+<li>realized concurrency and idle time;</li>
+<li>time-to-first-useful-artifact.</li>
+</ul>
+<h4>Reliability and recovery</h4>
+<ul>
+<li>turn/delivery/task failure rates;</li>
+<li>propagated versus contained defects;</li>
+<li>contradictory handoff claims and discrepancy reports;</li>
+<li>retry and reassignment success;</li>
+<li>recovery time and tokens;</li>
+<li>orphaned tasks/deliveries;</li>
+<li>variance and worst-decile quality.</li>
+</ul>
+<h4>Implementation complexity</h4>
+<ul>
+<li>number of new persistent states and transitions;</li>
+<li>number of routing/authority invariants;</li>
+<li>migration and recovery branches;</li>
+<li>test matrix size;</li>
+<li>operator-visible concepts;</li>
+<li>incidents attributable to topology selection or transition.</li>
+</ul>
+<h3 id="11-5-missing-telemetry">11.5 Missing telemetry<a class="anchor" href="#11-5-missing-telemetry" aria-label="Link to this section">#</a></h3>
+<p>Agentique already records participant-level token/cache/cost usage, mailbox transitions, handoff size/lineage/retrieval, task changes, context rotations, and failures. It still needs, for topology experiments:</p>
+<ul>
+<li>topology strategy, policy version, instance id, and selection source;</li>
+<li>selection features, rationale, confidence, rejected alternatives, and override;</li>
+<li>topology activation/transition timestamps and switching cost;</li>
+<li>per-turn queue/provider/tool/end-to-end durations;</li>
+<li>explicit coordination-work classification;</li>
+<li>experiment/arm/replicate identity;</li>
+<li>task outcome, acceptance results, and quality grade;</li>
+<li>retry/rework/rollback and operator intervention attribution.</li>
+</ul>
+<h3 id="11-6-experimental-sequence-and-stop-conditions">11.6 Experimental sequence and stop conditions<a class="anchor" href="#11-6-experimental-sequence-and-stop-conditions" aria-label="Link to this section">#</a></h3>
+<h4>E0 — Retrospective baseline</h4>
+<p>Instrument the unchanged current star. Build a task corpus and measure coordination share, latency, success, and failures by task stratum.</p>
+<p><strong>Stop if:</strong> task outcomes cannot be graded reliably. Fix evaluation before topology.</p>
+<h4>E1 — One-worker ablation</h4>
+<p>Compare a direct profile-bound worker with current star-plus-one-worker on paired short sequential tasks.</p>
+<p><strong>Advance if:</strong> quality is non-inferior and token or latency reduction is repeatable; otherwise retain the star.</p>
+<h4>E2 — Parallelism and review factorization</h4>
+<p>Separately test worker count, centralized synthesis, and isolated review on parallel, coupled, and high-risk strata.</p>
+<p><strong>Stop an arm if:</strong> it adds cost without a quality, coverage, latency, or reliability benefit in its target stratum.</p>
+<h4>E3 — Frozen rule selector</h4>
+<p>Use pre-execution features to select only among arms that already proved useful. Compare the selector with each fixed arm and an oracle chosen retrospectively.</p>
+<p>Measure selection accuracy, regret, abstention, and calibration—not only end quality.</p>
+<h4>E4 — Boundary adaptation</h4>
+<p>Inject late scope discoveries, validator failures, participant loss, and context pressure. Compare keeping the initial structure, creating a new AgentSession, and explicit phase-bound reconfiguration.</p>
+<p><strong>Advance if:</strong> reconfiguration improves recovery or quality beyond the simpler “new workstream” mechanism after switching cost is included.</p>
+<h4>E5 — Learned policy</h4>
+<p>Consider only after a frozen rule policy accumulates enough diverse, stable, graded decisions to justify training and held-out validation.</p>
+<p>No experiment should begin with unrestricted peer mesh or continuous graph mutation; neither has a specific unresolved Agentique failure hypothesis today.</p>
+<hr>
+<h2 id="12-risks-and-unresolved-questions">12. Risks and unresolved questions<a class="anchor" href="#12-risks-and-unresolved-questions" aria-label="Link to this section">#</a></h2>
+<h3 id="architectural-risks">Architectural risks<a class="anchor" href="#architectural-risks" aria-label="Link to this section">#</a></h3>
+<ul>
+<li>A generic topology domain may duplicate tasks, profiles, sessions, and routing rather than unify them.</li>
+<li>Dynamic ownership can create split-brain writers or ambiguous responsibility.</li>
+<li>More edges increase prompt-injection and authority-confusion surfaces.</li>
+<li>Reconfiguration can invalidate provider caches and discard context.</li>
+<li>A central selector becomes a new failure and bias point.</li>
+<li>A model may choose complexity because it appears diligent, not because it adds value.</li>
+<li>UI explanations and recovery logic may lag runtime flexibility.</li>
+</ul>
+<h3 id="evaluation-risks">Evaluation risks<a class="anchor" href="#evaluation-risks" aria-label="Link to this section">#</a></h3>
+<ul>
+<li>Better outcomes from multi-agent arms may simply reflect larger token or parallel-compute budgets.</li>
+<li>Deterministic checks cover only known properties; model judges can share the actors&#39; biases.</li>
+<li>Task strata may be misclassified, especially before exploration.</li>
+<li>Repository tasks are few and heterogeneous; aggregate averages can hide regime-specific reversals.</li>
+<li>Online learning at single-operator volume is unlikely to overcome delayed, noisy rewards.</li>
+<li>Topology changes are rare events, making tail reliability hard to estimate.</li>
+</ul>
+<h3 id="unresolved-empirical-questions">Unresolved empirical questions<a class="anchor" href="#unresolved-empirical-questions" aria-label="Link to this section">#</a></h3>
+<ol>
+<li>What fraction of real Agentique work is short and sequential enough to avoid a coordinator?</li>
+<li>How many coordinator tokens are integration that main would otherwise spend anyway?</li>
+<li>Does the typed handoff protocol make the second relay effectively lossless enough that the star&#39;s cost is small?</li>
+<li>How often do specialists become blocked specifically by the no-peer rule?</li>
+<li>Do ownership scopes predict decomposability and merge conflict accurately?</li>
+<li>When context rotation occurs, is a fresh generation within one seat better than spatial delegation to another seat?</li>
+<li>Does isolated review find defects after deterministic checks often enough to justify its cost?</li>
+<li>Is creating a new AgentSession an adequate substitute for live roster mutation?</li>
+<li>Can main select a structure reliably before exploration, or should it begin minimally and escalate at a checkpoint?</li>
+<li>Which quality signal is reliable enough to train or even tune a selector?</li>
+</ol>
+<hr>
+<h2 id="13-final-conclusions">13. Final conclusions<a class="anchor" href="#13-final-conclusions" aria-label="Link to this section">#</a></h2>
+<h3 id="established-from-the-repository">Established from the repository<a class="anchor" href="#established-from-the-repository" aria-label="Link to this section">#</a></h3>
+<ul>
+<li>Agentique&#39;s topology spans authority, context, capabilities, task ownership, validation, escalation, and integration—not only messages.</li>
+<li>The current star is fixed inside each AgentSession but dynamically composed across a UserSession through on-demand AgentSessions.</li>
+<li>The control topology is centralized while execution is already concurrent.</li>
+<li>Strong durability, permission, recovery, and finalization invariants depend on the current structure.</li>
+<li>Topology identity, selection rationale, transitions, and topology-attributed quality are not represented.</li>
+</ul>
+<h3 id="supported-by-external-evidence">Supported by external evidence<a class="anchor" href="#supported-by-external-evidence" aria-label="Link to this section">#</a></h3>
+<ul>
+<li>Task decomposability, sequential dependency, relay sufficiency, tool density, and validation structure materially affect whether multi-agent coordination helps.</li>
+<li>Centralized coordination can contain errors and integrate parallel work, but sequential or highly shared-context tasks can lose quality and efficiency.</li>
+<li>Workflow selection and sparse execution can reduce unnecessary token and latency cost in tested domains.</li>
+<li>Communication graphs can be optimized, but published benchmark results do not establish that arbitrary runtime graph mutation is valuable for Agentique.</li>
+</ul>
+<h3 id="strongest-design-interpretation">Strongest design interpretation<a class="anchor" href="#strongest-design-interpretation" aria-label="Link to this section">#</a></h3>
+<p><code>Dynamic Topology</code> should initially mean:</p>
+<blockquote>
+<p>An explicit, versioned, observable choice of execution/coordination strategy for a task or coherent workstream, operating inside a stable UserSession authority envelope, with any later structural change restricted to durable phase or recovery boundaries.</p>
+</blockquote>
+<p>This interpretation is meaningful, testable, and compatible with the Console&#39;s existing strengths.</p>
+<h3 id="ideas-requiring-experimentation">Ideas requiring experimentation<a class="anchor" href="#ideas-requiring-experimentation" aria-label="Link to this section">#</a></h3>
+<ul>
+<li>a direct single-worker lane;</li>
+<li>rule-based task-level selection;</li>
+<li>selective independent review;</li>
+<li>phase-specific composition;</li>
+<li>narrow peer notification;</li>
+<li>live roster/edge reconfiguration;</li>
+<li>learned topology selection.</li>
+</ul>
+<p>The first four have clear value hypotheses. The latter three should not be implemented until traces identify a specific failure that smaller changes cannot solve.</p>
+<h3 id="neutral-recommendation">Neutral recommendation<a class="anchor" href="#neutral-recommendation" aria-label="Link to this section">#</a></h3>
+<p>Do not commit Agentique Console to “multiple topologies” or “dynamic graph selection” as product abstractions yet. Commit instead to <strong>making structural decisions measurable</strong>. If the current star remains on the quality/value Pareto frontier after fair comparisons, explicit topology will still have paid for itself through reproducibility and evidence. If it does not, the same instrumentation will show exactly which smaller alternative earns a place.</p>
+<hr>
+<h2 id="references">References<a class="anchor" href="#references" aria-label="Link to this section">#</a></h2>
+<ol>
+<li>Kim et al., <a href="https://research.google/blog/towards-a-science-of-scaling-agent-systems-when-and-why-agent-systems-work/">“Towards a Science of Scaling Agent Systems: When and Why Agent Systems Work”</a>, Google Research/MIT, 2026; paper linked from the article.</li>
+<li>Anthropic, <a href="https://www.anthropic.com/engineering/multi-agent-research-system">“How we built our multi-agent research system”</a>, 2025.</li>
+<li>Yu et al., <a href="https://arxiv.org/abs/2607.16133">“When Do Multi-Agent Systems Help? An Information Bottleneck Perspective”</a>, arXiv:2607.16133, 2026 preprint.</li>
+<li>Chen et al., <a href="https://arxiv.org/abs/2603.12229">“Language Model Teams as Distributed Systems”</a>, arXiv:2603.12229, 2026 preprint.</li>
+<li>Galbraith, <a href="https://doi.org/10.1287/inte.4.3.28">“Organization Design: An Information Processing View”</a>, <em>Interfaces</em> 4(3), 1974.</li>
+<li>Thompson, <a href="https://books.google.com/books?id=YhHo7aHmBGMC"><em>Organizations in Action</em></a>, 1967. The pooled/sequential/reciprocal framework is used only as an analytical analogy.</li>
+<li>Wang et al., <a href="https://aclanthology.org/2025.acl-long.1170/">“AgentDropout: Dynamic Agent Elimination for Token-Efficient and High-Performance LLM-Based Multi-Agent Collaboration”</a>, ACL 2025.</li>
+<li>Jiang et al., <a href="https://aclanthology.org/2026.acl-long.1764/">“Dynamic Generation of Multi LLM Agents Communication Topologies with Graph Diffusion Models”</a>, ACL 2026.</li>
+<li>Xiang et al., <a href="https://aclanthology.org/2026.acl-long.581/">“LLM-as-Scheduler: Agentic Workflow Dynamic Scheduling”</a>, ACL 2026.</li>
+<li>Xu et al., <a href="https://arxiv.org/abs/2605.09539">“TacoMAS: Test-Time Co-Evolution of Topology and Capability in LLM-based Multi-Agent Systems”</a>, arXiv:2605.09539, 2026 preprint.</li>
+<li>OpenAI, <a href="https://openai.github.io/openai-agents-python/multi_agent/">Agents SDK: Agent orchestration</a>, current documentation.</li>
+<li>LangChain, <a href="https://langchain-ai.github.io/langgraph/tutorials/multi_agent/multi-agent-collaboration/">LangGraph multi-agent patterns</a>, current documentation.</li>
+<li>Microsoft, <a href="https://microsoft.github.io/autogen/stable/user-guide/agentchat-user-guide/tutorial/teams.html">AutoGen teams</a> and <a href="https://microsoft.github.io/autogen/dev/user-guide/core-user-guide/design-patterns/handoffs.html">handoffs</a>, current documentation.</li>
+</ol>
+<h2 id="repository-anchors">Repository anchors<a class="anchor" href="#repository-anchors" aria-label="Link to this section">#</a></h2>
+<ul>
+<li><code>README.md</code> — intended execution model and enforced star.</li>
+<li><code>shared/src/domain.ts</code> — UserSession, AgentSession, participant summaries, and tasks.</li>
+<li><code>shared/src/handoffs.ts</code> — canonical context-transfer contract and lineage.</li>
+<li><code>shared/src/events.ts</code> — mailbox, usage, context rotation, task, and handoff observability.</li>
+<li><code>server/src/agent-sessions/host.ts</code> — session creation, routing, scheduling, tools, finalization, and recovery.</li>
+<li><code>server/src/orchestrator/runner.ts</code> — serialized main turns, wake coalescing, usage, and rotation.</li>
+<li><code>server/src/orchestrator/tools.ts</code> — managed delegation and task interfaces.</li>
+<li><code>server/src/agent-profiles/registry.ts</code> — snapshotted capability and permission profiles.</li>
+<li><code>server/src/tasks/service.ts</code> — cross-session task attribution and dependencies.</li>
+<li><code>server/src/db/schema.ts</code> — durable participants, mailboxes, tasks, events, usage, and handoffs.</li>
+</ul>
+</main>
+    </div>
+  </div>
+  <script>
+    document.querySelectorAll('table').forEach((table) => {
+      const wrap = document.createElement('div'); wrap.className = 'table-wrap';
+      table.parentNode.insertBefore(wrap, table); wrap.appendChild(table);
+    });
+    const root = document.documentElement;
+    const stored = localStorage.getItem('agentique-report-theme');
+    if (stored) root.dataset.theme = stored;
+    document.getElementById('theme').addEventListener('click', () => {
+      const current = root.dataset.theme || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+      root.dataset.theme = current === 'dark' ? 'light' : 'dark';
+      localStorage.setItem('agentique-report-theme', root.dataset.theme);
+    });
+  </script>
+</body>
+</html>

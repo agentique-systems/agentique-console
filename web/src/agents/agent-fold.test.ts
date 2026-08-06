@@ -73,6 +73,18 @@ describe("foldAgentItems", () => {
     expect(items[0]).toMatchObject({ type: "message", handoff });
   });
 
+  it("carries forwarding metadata beside the unchanged handoff summary", () => {
+    const handoff = { id: "handoff_1", trigger: "milestone" as const, status: "completed" as const, risk: "low" as const,
+      action: "Canonical result", stateSummary: "Verified", resultSummary: "Done", nextAction: null,
+      evidenceCount: 1, artifactCount: 0, extensionKind: "investigation" as const, overflow: false, referenceWarnings: [] };
+    const handoffReference = { handoffId: "handoff_1", forwardedBy: "orchestrator", recipient: "scout",
+      purpose: "review_input" as const, expectedAction: "Review the original evidence." };
+    const [item] = foldAgentItems([ev("agent_session.message", { agentSessionId: "as_1", message: { seq: 1,
+      speaker: ORCHESTRATOR, to: "scout", kind: "message", text: "forwarded", handoff, handoffReference,
+      createdAt: "2026-08-03T12:00:00.000Z" } })]);
+    expect(item).toMatchObject({ type: "message", handoff, handoffReference });
+  });
+
   it("agent_session.message is THE chat lane, speaker + to intact", () => {
     const items = foldAgentItems([
       message("found it in repo.ts", SCOUT, "message", "coder"),

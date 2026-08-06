@@ -20,6 +20,7 @@ import {
   type SessionPhase,
   type Speaker,
   type HandoffSummary,
+  type HandoffReference,
 } from "@agentique-console/shared";
 
 export interface AgentMessageItem {
@@ -31,6 +32,7 @@ export interface AgentMessageItem {
   readonly text: string;
   readonly createdAt: string;
   readonly handoff?: HandoffSummary;
+  readonly handoffReference?: HandoffReference;
 }
 export interface AgentToolItem {
   readonly type: "tool";
@@ -128,6 +130,9 @@ export function foldAgentItems(events: readonly ConsoleEvent[]): AgentItem[] {
           text: message.text,
           createdAt: message.createdAt,
           ...(message.handoff === undefined ? {} : { handoff: message.handoff }),
+          ...(message.handoffReference === undefined
+            ? {}
+            : { handoffReference: message.handoffReference }),
         });
         break;
       }
@@ -207,7 +212,7 @@ export function foldAgentItems(events: readonly ConsoleEvent[]): AgentItem[] {
       case "agent_session.mailbox":
         items.push({ type: "trace", uid: `mailbox:${event.seq ?? event.payload.deliveryId}:${event.payload.status}`,
           participant: event.payload.sender, label: `mailbox ${event.payload.status}`,
-          detail: `${event.payload.sender} → ${event.payload.recipient} · ${event.payload.category}` });
+          detail: `${event.payload.sender} → ${event.payload.recipient} · ${event.payload.category}${event.payload.dispatchState === "waiting_dependencies" ? ` · waiting on ${(event.payload.waitingOn ?? []).join(", ") || "dependencies"}` : event.payload.gateTaskId && event.payload.status === "queued" ? " · dependencies ready" : ""}` });
         break;
 
       case "agent_session.runtime":

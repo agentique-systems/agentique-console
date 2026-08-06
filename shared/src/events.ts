@@ -12,7 +12,10 @@ import type {
   UserSession,
   Workspace,
 } from "./domain.ts";
-import type { HandoffSummary } from "./handoffs.ts";
+import type {
+  HandoffReference,
+  HandoffSummary,
+} from "./handoffs.ts";
 
 export type SessionKind = "user" | "agent";
 
@@ -156,6 +159,9 @@ export interface AgentMailboxPayload {
   recipient: string;
   category: "assignment" | "update" | "milestone" | "failure" | "final" | "decision";
   status: "queued" | "delivered" | "acknowledged" | "cancelled";
+  dispatchState?: "ready" | "waiting_dependencies";
+  gateTaskId?: string;
+  waitingOn?: string[];
 }
 export interface AgentRuntimePayload {
   agentSessionId: string;
@@ -197,6 +203,11 @@ export interface HandoffConsumedPayload { handoffId: string; participant: string
 export interface HandoffRetrievedPayload { handoffId: string; section: "core" | "extension"; bytes: number; nextCursor: string | null; }
 export interface HandoffDiscrepancyPayload { handoffId: string; reporter: string; claim: string; evidence: string; }
 export interface HandoffCheckpointFailedPayload { participant: string; reason: string; threshold: "soft" | "hard"; degraded: boolean; }
+export interface HandoffForwardedPayload {
+  reference: HandoffReference;
+  agentSessionId: string;
+  messageSeq: number;
+}
 
 export interface TaskCreatedPayload {
   task: Task;
@@ -304,6 +315,7 @@ export type ConsoleEvent = Base &
     | { type: "handoff.retrieved"; payload: HandoffRetrievedPayload }
     | { type: "handoff.discrepancy"; payload: HandoffDiscrepancyPayload }
     | { type: "handoff.checkpoint.failed"; payload: HandoffCheckpointFailedPayload }
+    | { type: "handoff.forwarded"; payload: HandoffForwardedPayload }
     | { type: "flow.delegation"; payload: FlowDelegationPayload }
     | { type: "flow.result"; payload: FlowResultPayload }
     | { type: "stream.delta"; payload: StreamDeltaPayload }

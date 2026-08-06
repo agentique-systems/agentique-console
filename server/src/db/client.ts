@@ -51,4 +51,7 @@ function migrateAdditiveColumns(sqlite: Database.Database): void {
   for (const name of ["uncached_input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"]) {
     if (!usageColumns.has(name)) sqlite.exec(`ALTER TABLE usage_samples ADD COLUMN ${name} INTEGER NOT NULL DEFAULT 0`);
   }
+  const deliveryColumns = new Set(sqlite.prepare("pragma table_info(mailbox_deliveries)").all().map((row) => (row as { name: string }).name));
+  if (!deliveryColumns.has("gate_task_id")) sqlite.exec("ALTER TABLE mailbox_deliveries ADD COLUMN gate_task_id TEXT");
+  if (!deliveryColumns.has("dispatch_state")) sqlite.exec("ALTER TABLE mailbox_deliveries ADD COLUMN dispatch_state TEXT NOT NULL DEFAULT 'ready'");
 }

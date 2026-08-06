@@ -30,6 +30,18 @@ export const HandoffDraftSchema = z.object({
   extension: HandoffExtensionSchema.optional(),
 });
 
+export const HandoffReferenceSchema = z.object({
+  handoffId: z.string().min(1),
+  purpose: z.enum([
+    "assignment_context",
+    "dependency_result",
+    "review_input",
+    "final_result",
+    "scope_change",
+  ]),
+  expectedAction: z.string().trim().min(1).max(240),
+});
+
 /** Provider-facing JSON schema mirrors the runtime Zod contract. */
 export const HANDOFF_DRAFT_JSON_SCHEMA = {
   type: "object",

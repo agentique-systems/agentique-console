@@ -14,6 +14,9 @@ single npm-workspaces application backed by SQLite and the Claude Agent SDK.
 - Communication follows one enforced star: `main ↔ coordinator ↔ specialist`.
   Specialists cannot message main or one another. Messages are committed to a
   durable mailbox before a participant is scheduled.
+- Coordinators can forward an immutable canonical handoff reference instead of
+  rewriting its evidence and result. Coordinator-authored assignments tied to
+  Console tasks wait durably until their `blockedBy` dependencies complete.
 - Native SDK `Agent`, `SendMessage`, and task tools are denied. They would
   bypass persistence and make the UI incomplete. One Console task ledger is
   shared by the main agent and coordinators.

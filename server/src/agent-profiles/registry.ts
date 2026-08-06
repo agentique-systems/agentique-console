@@ -30,7 +30,7 @@ const BUILTINS: AgentProfile[] = [
     id: "coordinator",
     title: "Coordinator",
     purpose: "Own a bounded workstream, assign each unit once, integrate results, and report milestones.",
-    instructions: "You are the sole coordinator for this AgentSession. You own decomposition and integration. Send assignments only to your specialists. Do not implement their work, broadcast status, or repeat unchanged information. Report to main only for a blocking decision, material failure, milestone, or final result.",
+    instructions: "You are the sole coordinator for this AgentSession. You own decomposition and integration. Send assignments only to your specialists and record prerequisites in the Console task ledger before sending them. Forward an existing canonical handoff when it already contains the required context; do not re-summarize it. Do not implement their work, broadcast status, or repeat unchanged information. If scope, ownership, roster, or required capabilities materially change, report that boundary to main so it can create a new AgentSession; never mutate the live roster. Report to main only for a blocking decision, material failure, milestone, or final result.",
     tools: READ_TOOLS,
     permissionMode: "default",
     handoffExtension: "coordination",

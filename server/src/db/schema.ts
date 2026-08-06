@@ -216,6 +216,13 @@ export const mailboxDeliveries = sqliteTable(
       enum: ["queued", "delivered", "acknowledged", "cancelled"],
     }).notNull().default("queued"),
     dedupeKey: text("dedupe_key"),
+    /** Task whose dependency readiness gates dispatch; null = ungated. */
+    gateTaskId: text("gate_task_id"),
+    dispatchState: text("dispatch_state", {
+      enum: ["ready", "waiting_dependencies"],
+    })
+      .notNull()
+      .default("ready"),
     deliveredAt: text("delivered_at"),
     acknowledgedAt: text("acknowledged_at"),
     createdAt: text("created_at").notNull(),

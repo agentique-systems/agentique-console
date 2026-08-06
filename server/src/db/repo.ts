@@ -6,6 +6,7 @@
 import { and, asc, desc, eq, inArray, or, sql } from "drizzle-orm";
 import type {
   AgentSession,
+  HandoffReference,
   HandoffSummary,
   MessageKind,
   SessionMessage,
@@ -65,6 +66,9 @@ export function toWireAgentSession(
 
 export function toWireMessage(row: MessageRow): SessionMessage {
   const handoff = row.payload?.handoff as HandoffSummary | undefined;
+  const handoffReference = row.payload?.handoffReference as
+    | HandoffReference
+    | undefined;
   return {
     seq: row.seq,
     speaker: { kind: row.speakerKind, name: row.speakerName },
@@ -72,6 +76,7 @@ export function toWireMessage(row: MessageRow): SessionMessage {
     kind: row.kind,
     text: row.text,
     ...(handoff === undefined ? {} : { handoff }),
+    ...(handoffReference === undefined ? {} : { handoffReference }),
     createdAt: row.createdAt,
   };
 }
@@ -149,6 +154,8 @@ export class Repo {
     recipient: string;
     category: MailboxDeliveryRow["category"];
     dedupeKey?: string;
+    gateTaskId?: string;
+    dispatchState?: MailboxDeliveryRow["dispatchState"];
   }): { message: MessageRow; delivery: MailboxDeliveryRow } {
     const run = this.#sqlite.transaction(() => {
       const message = this.appendMessage(input);
@@ -162,6 +169,8 @@ export class Repo {
         category: input.category,
         status: "queued",
         dedupeKey: input.dedupeKey ?? null,
+        gateTaskId: input.gateTaskId ?? null,
+        dispatchState: input.dispatchState ?? "ready",
         deliveredAt: null,
         acknowledgedAt: null,
         createdAt: nowIso(),
@@ -181,6 +190,8 @@ export class Repo {
     handoff: HandoffRecordRow;
     summary: HandoffSummary;
     dedupeKey?: string;
+    gateTaskId?: string;
+    dispatchState?: MailboxDeliveryRow["dispatchState"];
   }): { message: MessageRow; delivery: MailboxDeliveryRow; handoff: HandoffRecordRow } {
     return this.#sqlite.transaction(() => {
       const { message, delivery } = this.appendMailboxMessage({
@@ -242,6 +253,21 @@ export class Repo {
         : and(eq(mailboxDeliveries.agentSessionId, agentSessionId), eq(mailboxDeliveries.status, "queued")))
       .orderBy(asc(mailboxDeliveries.createdAt)).all();
   }
+  listWaitingDependencyDeliveries(agentSessionId?: string): MailboxDeliveryRow[] {
+    const filters = [
+      eq(mailboxDeliveries.status, "queued"),
+      eq(mailboxDeliveries.dispatchState, "waiting_dependencies"),
+    ];
+    if (agentSessionId !== undefined) {
+      filters.push(eq(mailboxDeliveries.agentSessionId, agentSessionId));
+    }
+    return this.#db
+      .select()
+      .from(mailboxDeliveries)
+      .where(and(...filters))
+      .orderBy(asc(mailboxDeliveries.createdAt))
+      .all();
+  }
   listActiveDeliveries(agentSessionId: string): MailboxDeliveryRow[] {
     return this.#db.select().from(mailboxDeliveries).where(and(eq(mailboxDeliveries.agentSessionId, agentSessionId), inArray(mailboxDeliveries.status, ["queued", "delivered"]))).orderBy(asc(mailboxDeliveries.createdAt)).all();
   }
@@ -253,7 +279,7 @@ export class Repo {
     return this.#db.select().from(messages).where(eq(messages.id, id)).get();
   }
 
-  patchDelivery(id: string, patch: Partial<Pick<MailboxDeliveryRow, "status" | "deliveredAt" | "acknowledgedAt">>): void {
+  patchDelivery(id: string, patch: Partial<Pick<MailboxDeliveryRow, "status" | "dispatchState" | "deliveredAt" | "acknowledgedAt">>): void {
     this.#db.update(mailboxDeliveries).set(patch).where(eq(mailboxDeliveries.id, id)).run();
   }
 

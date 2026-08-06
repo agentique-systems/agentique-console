@@ -8,9 +8,10 @@
 import { and, eq } from "drizzle-orm";
 import type { Task } from "@agentique-console/shared";
 import type { Db } from "../db/client.ts";
-import { tasks } from "../db/schema.ts";
+import { mailboxDeliveries, tasks } from "../db/schema.ts";
 import type { EventBus } from "../events/bus.ts";
 import { nowIso } from "../ids.ts";
+import { badRequest } from "../api/errors.ts";
 
 export interface TaskAttribution {
   workspaceId: string;
@@ -45,10 +46,38 @@ function toWire(row: TaskRow): Task {
 export class TaskService {
   readonly #db: Db;
   readonly #bus: EventBus;
+  readonly #listeners = new Set<(agentSessionId: string) => void>();
 
   constructor(db: Db, bus: EventBus) {
     this.#db = db;
     this.#bus = bus;
+  }
+
+  onAgentSessionChanged(listener: (agentSessionId: string) => void): () => void {
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
+  }
+
+  getForAgentSession(agentSessionId: string, taskId: string): Task | undefined {
+    const row = this.#db
+      .select()
+      .from(tasks)
+      .where(and(eq(tasks.agentSessionId, agentSessionId), eq(tasks.sdkTaskId, taskId)))
+      .get();
+    return row ? toWire(row) : undefined;
+  }
+
+  readiness(agentSessionId: string, taskId: string): {
+    ready: boolean;
+    waitingOn: string[];
+  } {
+    const task = this.getForAgentSession(agentSessionId, taskId);
+    if (!task) return { ready: false, waitingOn: [taskId] };
+    const waitingOn = task.blockedBy.filter((dependencyId) => {
+      const dependency = this.getForAgentSession(agentSessionId, dependencyId);
+      return dependency?.status !== "completed";
+    });
+    return { ready: waitingOn.length === 0, waitingOn };
   }
 
   /** From TaskCreated hooks and PostToolUse(TaskCreate). Idempotent. */
@@ -119,6 +148,8 @@ export class TaskService {
       metadata?: Record<string, unknown>;
     };
     updatedFields?: string[];
+    /** Console-owned task tools validate; SDK mirror hooks preserve provider state verbatim. */
+    validateDependencies?: boolean;
   }): void {
     const existing = this.#get(input.sdkSessionId, input.sdkTaskId);
     if (!existing) return; // unknown task — TaskList reconciliation will repair
@@ -133,6 +164,9 @@ export class TaskService {
       merged.blocks = [...new Set([...existing.blocks, ...patch.addBlocks])];
     }
     if (patch.addBlockedBy !== undefined && patch.addBlockedBy.length > 0) {
+      if (input.validateDependencies === true) {
+        this.#validateDependencies(existing, patch.addBlockedBy);
+      }
       merged.blockedBy = [
         ...new Set([...existing.blockedBy, ...patch.addBlockedBy]),
       ];
@@ -152,6 +186,19 @@ export class TaskService {
       .run();
     const updated = this.#get(input.sdkSessionId, input.sdkTaskId);
     if (updated) {
+      if (patch.addBlockedBy !== undefined) {
+        for (const dependencyId of patch.addBlockedBy) {
+          const dependency = this.#getInAgentSession(updated.agentSessionId, dependencyId);
+          if (!dependency || dependency.blocks.includes(updated.sdkTaskId)) continue;
+          this.#db
+            .update(tasks)
+            .set({ blocks: [...dependency.blocks, updated.sdkTaskId], updatedAt: nowIso() })
+            .where(this.#key(dependency.sdkSessionId, dependency.sdkTaskId))
+            .run();
+          const changedDependency = this.#get(dependency.sdkSessionId, dependency.sdkTaskId);
+          if (changedDependency) this.#emit("task.updated", changedDependency, ["blocks"]);
+        }
+      }
       this.#emit(
         "task.updated",
         updated,
@@ -253,6 +300,67 @@ export class TaskService {
       .get();
   }
 
+  #getInAgentSession(agentSessionId: string | null, sdkTaskId: string): TaskRow | undefined {
+    if (agentSessionId === null) return undefined;
+    return this.#db
+      .select()
+      .from(tasks)
+      .where(and(eq(tasks.agentSessionId, agentSessionId), eq(tasks.sdkTaskId, sdkTaskId)))
+      .get();
+  }
+
+  #validateDependencies(existing: TaskRow, additions: string[]): void {
+    if (existing.agentSessionId === null) {
+      throw badRequest("dependency-gated tasks must belong to an AgentSession");
+    }
+    if (existing.status === "in_progress" || existing.status === "completed") {
+      throw badRequest("cannot add dependencies after a task has started");
+    }
+    const activeAssignment = this.#db
+      .select({ id: mailboxDeliveries.id })
+      .from(mailboxDeliveries)
+      .where(
+        and(
+          eq(mailboxDeliveries.agentSessionId, existing.agentSessionId),
+          eq(mailboxDeliveries.gateTaskId, existing.sdkTaskId),
+          eq(mailboxDeliveries.dispatchState, "ready"),
+        ),
+      )
+      .get();
+    if (activeAssignment) {
+      throw badRequest("cannot add dependencies after an assignment is ready for dispatch");
+    }
+    for (const dependencyId of new Set(additions)) {
+      if (dependencyId === existing.sdkTaskId) {
+        throw badRequest("a task cannot depend on itself");
+      }
+      const dependency = this.#getInAgentSession(existing.agentSessionId, dependencyId);
+      if (!dependency) {
+        throw badRequest(`dependency task ${dependencyId} does not exist in this AgentSession`);
+      }
+      if (this.#dependsOn(existing.agentSessionId, dependency, existing.sdkTaskId, new Set())) {
+        throw badRequest(`dependency ${dependencyId} would create a task cycle`);
+      }
+    }
+  }
+
+  #dependsOn(
+    agentSessionId: string,
+    row: TaskRow,
+    targetId: string,
+    seen: Set<string>,
+  ): boolean {
+    if (row.sdkTaskId === targetId) return true;
+    if (seen.has(row.sdkTaskId)) return false;
+    seen.add(row.sdkTaskId);
+    return row.blockedBy.some((dependencyId) => {
+      const dependency = this.#getInAgentSession(agentSessionId, dependencyId);
+      return dependency
+        ? this.#dependsOn(agentSessionId, dependency, targetId, seen)
+        : false;
+    });
+  }
+
   #key(sdkSessionId: string, sdkTaskId: string) {
     return and(eq(tasks.sdkSessionId, sdkSessionId), eq(tasks.sdkTaskId, sdkTaskId));
   }
@@ -269,5 +377,8 @@ export class TaskService {
       payload:
         type === "task.created" ? { task } : { task, changed: changed ?? [] },
     } as Parameters<EventBus["append"]>[0]);
+    if (row.agentSessionId !== null) {
+      for (const listener of this.#listeners) listener(row.agentSessionId);
+    }
   }
 }

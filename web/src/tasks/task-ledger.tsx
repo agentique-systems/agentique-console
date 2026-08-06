@@ -48,10 +48,10 @@ function sortTasks(tasks: readonly Task[]): Task[] {
   );
 }
 
-function TaskRow({ task }: { task: Task }) {
+function TaskRow({ task, waitingOn }: { task: Task; waitingOn: string[] }) {
   const selectAgentSession = useUiStore((s) => s.selectAgentSession);
   const completed = task.status === "completed";
-  const blocked = task.blockedBy.length > 0 && task.status === "pending";
+  const blocked = waitingOn.length > 0 && task.status === "pending";
   // Orchestrator-owned tasks (agentSessionId null) have no pane to open.
   const target = task.agentSessionId;
 
@@ -81,7 +81,7 @@ function TaskRow({ task }: { task: Task }) {
             )}
             {blocked && (
               <span className="text-status-waiting">
-                blocked by {task.blockedBy.length}
+                blocked by {waitingOn.length}
               </span>
             )}
           </span>
@@ -103,6 +103,10 @@ const SECTIONS: readonly {
 
 export function TaskLedger({ userSessionId }: { userSessionId: string | null }) {
   const tasks = useTasks(userSessionId);
+  const taskStatus = useMemo(
+    () => new Map((tasks.data ?? []).map((task) => [task.sdkTaskId, task.status])),
+    [tasks.data],
+  );
 
   const byStatus = useMemo(() => {
     const groups = new Map<TaskStatus, Task[]>();
@@ -160,6 +164,9 @@ export function TaskLedger({ userSessionId }: { userSessionId: string | null }) 
                       <TaskRow
                         key={`${task.sdkSessionId}:${task.sdkTaskId}`}
                         task={task}
+                        waitingOn={task.blockedBy.filter(
+                          (dependencyId) => taskStatus.get(dependencyId) !== "completed",
+                        )}
                       />
                     ))}
                   </QueueList>
