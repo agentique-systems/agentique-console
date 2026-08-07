@@ -367,3 +367,41 @@
     opacity: 0;
   }
 }
+
+/* Third-party canvases inherit the console's neutral palette and status cues. */
+.vis-timeline,
+.vis-panel,
+.vis-labelset .vis-label,
+.vis-time-axis .vis-text {
+  border-color: var(--border) !important;
+  color: var(--foreground) !important;
+}
+.vis-labelset .vis-label,
+.vis-panel.vis-left,
+.vis-panel.vis-top {
+  background: var(--sidebar) !important;
+}
+.vis-time-axis .vis-grid.vis-minor,
+.vis-foreground .vis-group {
+  border-color: var(--border-subtle) !important;
+}
+.vis-item {
+  border-color: var(--border) !important;
+  background: var(--card) !important;
+  color: var(--card-foreground) !important;
+  font-size: 0.625rem !important;
+}
+.vis-item.vis-selected {
+  border-color: var(--primary) !important;
+  box-shadow: 0 0 0 1px var(--primary);
+}
+.vis-item.timeline-status-running { border-color: var(--status-running) !important; }
+.vis-item.timeline-status-error,
+.vis-item.timeline-status-aborted { border-color: var(--status-failed) !important; }
+.vis-item.timeline-status-completed { border-color: var(--status-completed) !important; }
+.react-flow__controls-button {
+  border-color: var(--border) !important;
+  background: var(--card) !important;
+  color: var(--foreground) !important;
+  fill: currentColor !important;
+}

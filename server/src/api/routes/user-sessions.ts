@@ -81,10 +81,10 @@ export function registerUserSessionRoutes(
     async (request, reply) => {
       const parsed = MessageBody.safeParse(request.body);
       if (!parsed.success) throw badRequest(parsed.error.message);
-      const result = ctx.runner.postOperatorMessage(
-        request.params.id,
-        parsed.data.text,
-      );
+      const session = ctx.repo.getUserSession(request.params.id);
+      const result = session?.purpose === "profile_manager"
+        ? ctx.manager.postMessage(request.params.id, parsed.data.text)
+        : ctx.runner.postOperatorMessage(request.params.id, parsed.data.text);
       return reply.status(202).send(result);
     },
   );

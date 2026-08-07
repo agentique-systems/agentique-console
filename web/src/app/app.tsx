@@ -1,4 +1,5 @@
 import { TriangleAlert } from "lucide-react";
+import { BrowserRouter } from "react-router";
 
 import { useWorkspaces } from "@/api/queries";
 import { Shell } from "@/app/shell";
@@ -47,5 +48,5 @@ export function App() {
       : undefined;
 
   if (selected === undefined) return <WorkspaceGate />;
-  return <Shell />;
+  return <BrowserRouter><Shell /></BrowserRouter>;
 }

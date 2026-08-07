@@ -6,7 +6,7 @@
  * queue buffers live events), replay committed rows, then drain the queue
  * skipping anything at or below the replay watermark.
  */
-import { and, asc, eq, gte, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, gte, lt, sql, type SQL } from "drizzle-orm";
 import type { ConsoleEvent } from "@agentique-console/shared";
 import { AsyncQueue } from "../async-queue.ts";
 import type { Db } from "../db/client.ts";
@@ -69,11 +69,16 @@ export class EventBus {
 
   /** Keep event rows bounded without losing the authoritative payload. */
   capture(value: unknown, scope: { workspaceId?: string; userSessionId?: string; agentSessionId?: string } = {}): unknown {
+    return this.captureSized(value, scope).value;
+  }
+
+  captureSized(value: unknown, scope: { workspaceId?: string; userSessionId?: string; agentSessionId?: string } = {}): { value: unknown; bytes: number } {
     let serialized: string;
     try { serialized = JSON.stringify(value) ?? "null"; } catch { serialized = JSON.stringify({ unserializable: true }); }
-    if (serialized.length <= 16_384) return value;
+    const bytes = Buffer.byteLength(serialized);
+    if (serialized.length <= 16_384) return { value, bytes };
     const artifact = this.storeArtifact(serialized, "application/json", scope);
-    return { truncated: true, preview: serialized.slice(0, 16_384), ...artifact };
+    return { value: { truncated: true, preview: serialized.slice(0, 16_384), ...artifact }, bytes };
   }
 
   storeArtifact(content: string, mediaType: string, scope: { workspaceId?: string; userSessionId?: string; agentSessionId?: string } = {}): { artifactId: string; bytes: number } {
@@ -155,6 +160,17 @@ export class EventBus {
         }
       },
     };
+  }
+
+  pageForUserSession(userSessionId: string, beforeSeq: number | undefined, limit: number): { events: ConsoleEvent[]; nextBeforeSeq: number | null } {
+    const conditions: SQL[] = [eq(events.userSessionId, userSessionId)];
+    if (beforeSeq !== undefined) conditions.push(lt(events.seq, beforeSeq));
+    const rows = this.#db.select().from(events).where(and(...conditions)).orderBy(desc(events.seq)).limit(limit + 1).all();
+    const page = rows.slice(0, limit).reverse().map((row) => ({ type: row.type, seq: row.seq, ts: row.createdAt,
+      ...(row.workspaceId === null ? {} : { workspaceId: row.workspaceId }),
+      ...(row.userSessionId === null ? {} : { userSessionId: row.userSessionId }),
+      ...(row.agentSessionId === null ? {} : { agentSessionId: row.agentSessionId }), payload: row.payload } as ConsoleEvent));
+    return { events: page, nextBeforeSeq: rows.length > limit ? (page[0]?.seq ?? null) : null };
   }
 
   #replay(selector: EventSelector): ConsoleEvent[] {

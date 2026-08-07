@@ -1,5 +1,14 @@
 import fs from "node:fs";
+import path from "node:path";
+import crypto from "node:crypto";
 import { z } from "zod";
+import { and, eq } from "drizzle-orm";
+import type { AgentProfileDetail, AgentProfileSummary, ProfileValidationIssue } from "@agentique-console/shared";
+import type { Db } from "../db/client.ts";
+import { agentProfileTrust } from "../db/schema.ts";
+import type { EventBus } from "../events/bus.ts";
+import { nowIso } from "../ids.ts";
+import { conflict, notFound } from "../api/errors.ts";
 
 export const ProfileSchema = z.object({
   id: z.string().regex(/^[a-z][a-z0-9-]*$/),
@@ -18,6 +27,11 @@ export const ProfileSchema = z.object({
     browser: z.boolean().default(false),
     screenshots: z.boolean().default(false),
   }),
+  skills: z.array(z.string()).optional(),
+  entryAgent: z.string().optional(),
+  pluginPath: z.string().optional(),
+  revision: z.string().optional(),
+  source: z.enum(["builtin", "workspace"]).optional(),
 });
 
 export type AgentProfile = z.infer<typeof ProfileSchema>;
@@ -107,10 +121,13 @@ const BUILTINS: AgentProfile[] = [
 
 export class AgentProfileRegistry {
   readonly #profiles: ReadonlyMap<string, AgentProfile>;
+  readonly #options: { getWorkspaceRoot: (workspaceId: string) => string; db: Db; bus: EventBus } | null;
 
-  constructor(profilesFile: string) {
+  constructor(profilesFile?: string, options?: { getWorkspaceRoot: (workspaceId: string) => string; db: Db; bus: EventBus }) {
     const profiles = new Map(BUILTINS.map((profile) => [profile.id, Object.freeze(profile)]));
-    if (fs.existsSync(profilesFile)) {
+    // Legacy loading remains only for isolated compatibility tests. Production
+    // constructs the registry with workspace options and never reads the old file.
+    if (options === undefined && profilesFile && fs.existsSync(profilesFile)) {
       const parsed = z.array(ProfileSchema).parse(JSON.parse(fs.readFileSync(profilesFile, "utf8")));
       for (const profile of parsed) {
         if (profiles.has(profile.id)) {
@@ -120,15 +137,105 @@ export class AgentProfileRegistry {
       }
     }
     this.#profiles = profiles;
+    this.#options = options ?? null;
   }
 
-  get(id: string): AgentProfile {
-    const profile = this.#profiles.get(id);
+  get(id: string, workspaceId?: string): AgentProfile {
+    const profile = workspaceId === undefined ? this.#profiles.get(id) : this.#resolvedWorkspaceProfile(workspaceId, id);
     if (!profile) throw new Error(`unknown agent profile \"${id}\"`);
+    if (workspaceId !== undefined && profile.source === "workspace" && !this.isTrusted(workspaceId, id, profile.revision ?? "")) {
+      throw new Error(`agent profile \"${id}\" revision is not trusted`);
+    }
     return profile;
   }
 
-  list(): AgentProfile[] {
-    return [...this.#profiles.values()];
+  list(workspaceId?: string): AgentProfile[] {
+    if (workspaceId === undefined || this.#options === null) return [...this.#profiles.values()];
+    const workspace = this.#workspaceProfiles(workspaceId).filter((entry) => entry.profile !== null).map((entry) => entry.profile!);
+    return [...this.#profiles.values(), ...workspace];
+  }
+
+  summaries(workspaceId: string): AgentProfileSummary[] {
+    const builtins = [...this.#profiles.values()].map((profile) => this.#summary(profile, "builtin", `builtin:${profile.id}`, true, true, []));
+    const workspace = this.#workspaceProfiles(workspaceId).map(({ id, profile, revision, issues, files }) =>
+      this.#summary(profile ?? this.#invalidPlaceholder(id), "workspace", revision, this.isTrusted(workspaceId, id, revision), issues.every((i) => i.level !== "error"), files));
+    return [...builtins, ...workspace];
+  }
+
+  detail(workspaceId: string, id: string): AgentProfileDetail | undefined {
+    const builtin = this.#profiles.get(id);
+    if (builtin) return this.#detail(builtin, "builtin", `builtin:${id}`, true, [], []);
+    const entry = this.#workspaceProfiles(workspaceId).find((candidate) => candidate.id === id);
+    if (!entry) return undefined;
+    return this.#detail(entry.profile ?? this.#invalidPlaceholder(id), "workspace", entry.revision,
+      this.isTrusted(workspaceId, id, entry.revision), entry.issues, entry.files);
+  }
+
+  trust(workspaceId: string, id: string, revision: string): void {
+    if (!this.#options) throw new Error("workspace profiles unavailable");
+    const detail = this.detail(workspaceId, id);
+    if (!detail || detail.source !== "workspace") throw notFound(`no workspace profile ${id}`);
+    if (!detail.valid || detail.revision !== revision) throw conflict("profile revision is invalid or stale");
+    this.#options.db.insert(agentProfileTrust).values({ workspaceId, profileId: id, revision, trustedAt: nowIso() }).onConflictDoNothing().run();
+    this.#options.bus.append({ type: "agent_profile.changed", workspaceId, payload: { workspaceId, profileId: id, revision, trusted: true } });
+  }
+
+  untrust(workspaceId: string, id: string): void {
+    if (!this.#options) return;
+    this.#options.db.delete(agentProfileTrust).where(and(eq(agentProfileTrust.workspaceId, workspaceId), eq(agentProfileTrust.profileId, id))).run();
+    const revision = this.detail(workspaceId, id)?.revision ?? "unknown";
+    this.#options.bus.append({ type: "agent_profile.changed", workspaceId, payload: { workspaceId, profileId: id, revision, trusted: false } });
+  }
+
+  isTrusted(workspaceId: string, id: string, revision: string): boolean {
+    if (this.#profiles.has(id)) return true;
+    return this.#options?.db.select().from(agentProfileTrust).where(and(eq(agentProfileTrust.workspaceId, workspaceId), eq(agentProfileTrust.profileId, id), eq(agentProfileTrust.revision, revision))).get() !== undefined;
+  }
+
+  profileRoot(workspaceId: string, id: string): string {
+    if (!this.#options) throw new Error("workspace profiles unavailable");
+    return path.join(this.#options.getWorkspaceRoot(workspaceId), ".agentique", "agents", id);
+  }
+
+  #resolvedWorkspaceProfile(workspaceId: string, id: string): AgentProfile | undefined {
+    return this.#workspaceProfiles(workspaceId).find((entry) => entry.id === id)?.profile ?? this.#profiles.get(id);
+  }
+
+  #workspaceProfiles(workspaceId: string): { id: string; profile: AgentProfile | null; revision: string; issues: ProfileValidationIssue[]; files: { path: string; content: string }[] }[] {
+    if (!this.#options) return [];
+    const base = path.join(this.#options.getWorkspaceRoot(workspaceId), ".agentique", "agents");
+    if (!fs.existsSync(base)) return [];
+    return fs.readdirSync(base, { withFileTypes: true }).filter((entry) => entry.isDirectory() && /^[a-z][a-z0-9-]*$/.test(entry.name)).map((entry) => {
+      const root = path.join(base, entry.name); const files = this.#readFiles(root); const revision = this.#revision(files); const issues: ProfileValidationIssue[] = [];
+      const manifest = files.find((file) => file.path === "agentique.profile.json");
+      if (!manifest) return { id: entry.name, profile: null, revision, files, issues: [{ level: "error", path: "agentique.profile.json", message: "missing Agentique profile manifest" }] };
+      try {
+        const parsed = ProfileSchema.safeParse(JSON.parse(manifest.content));
+        if (!parsed.success) return { id: entry.name, profile: null, revision, files, issues: [{ level: "error", path: manifest.path, message: parsed.error.message }] };
+        if (parsed.data.id !== entry.name) issues.push({ level: "error", path: manifest.path, message: "profile id must match its directory" });
+        const pluginManifest = files.some((file) => file.path === ".claude-plugin/plugin.json");
+        if (!pluginManifest) issues.push({ level: "warning", path: ".claude-plugin/plugin.json", message: "bundle has no Claude plugin manifest" });
+        return { id: entry.name, profile: { ...parsed.data, pluginPath: root, revision, source: "workspace" }, revision, files, issues };
+      } catch (error) { return { id: entry.name, profile: null, revision, files, issues: [{ level: "error", path: manifest.path, message: error instanceof Error ? error.message : String(error) }] }; }
+    });
+  }
+
+  #readFiles(root: string): { path: string; content: string }[] {
+    const output: { path: string; content: string }[] = [];
+    const visit = (dir: string) => { for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const absolute = path.join(dir, entry.name); const resolved = fs.realpathSync(absolute); if (!resolved.startsWith(`${fs.realpathSync(root)}${path.sep}`) && resolved !== fs.realpathSync(root)) continue;
+      if (entry.isDirectory()) visit(absolute); else if (entry.isFile() && fs.statSync(absolute).size <= 256_000) output.push({ path: path.relative(root, absolute), content: fs.readFileSync(absolute, "utf8") });
+    } };
+    visit(root); return output.sort((a, b) => a.path.localeCompare(b.path));
+  }
+
+  #revision(files: { path: string; content: string }[]): string { const hash = crypto.createHash("sha256"); for (const file of files) hash.update(file.path).update("\0").update(file.content).update("\0"); return hash.digest("hex"); }
+  #invalidPlaceholder(id: string): AgentProfile { return { id, title: id, purpose: "Invalid profile", instructions: "", tools: [], skills: [], permissionMode: "default", maxTurns: 1, sandboxRequired: true, runtime: { shell: false, browser: false, screenshots: false } }; }
+  #componentCounts(files: { path: string }[]): Record<string, number> { const counts: Record<string, number> = {}; for (const file of files) { const kind = file.path.startsWith("skills/") ? "skills" : file.path.startsWith("hooks/") ? "hooks" : file.path.startsWith("agents/") ? "agents" : file.path === ".mcp.json" ? "mcp" : "files"; counts[kind] = (counts[kind] ?? 0) + 1; } return counts; }
+  #summary(profile: AgentProfile, source: "builtin" | "workspace", revision: string, trusted: boolean, valid: boolean, files: { path: string }[]): AgentProfileSummary { return { id: profile.id, title: profile.title, purpose: profile.purpose, source, revision, trusted, valid, tools: profile.tools, skills: profile.skills ?? [], componentCounts: this.#componentCounts(files) }; }
+  #detail(profile: AgentProfile, source: "builtin" | "workspace", revision: string, trusted: boolean, issues: ProfileValidationIssue[], files: { path: string; content: string }[]): AgentProfileDetail {
+    const summary = this.#summary(profile, source, revision, trusted, issues.every((i) => i.level !== "error"), files);
+    const components = files.filter((file) => file.path !== "agentique.profile.json" && file.path !== ".claude-plugin/plugin.json").map((file) => { const kind = file.path.startsWith("skills/") ? "skill" : file.path.startsWith("hooks/") ? "hook" : file.path.startsWith("agents/") ? "agent" : file.path === ".mcp.json" ? "mcp" : file.path.startsWith("commands/") ? "command" : file.path.startsWith("monitors/") ? "monitor" : file.path === "settings.json" ? "settings" : "other"; return { kind, name: path.basename(file.path), path: file.path, supported: ["skill", "hook", "agent", "mcp", "command", "settings"].includes(kind), summary: file.content.slice(0, 160) } as AgentProfileDetail["components"][number]; });
+    return { ...summary, instructions: profile.instructions, permissionMode: profile.permissionMode, model: profile.model ?? null, effort: profile.effort ?? null, maxTurns: profile.maxTurns, sandboxRequired: profile.sandboxRequired, runtime: profile.runtime, handoffExtension: profile.handoffExtension ?? null, pluginPath: profile.pluginPath ?? null, components, files, issues };
   }
 }

@@ -26,6 +26,8 @@ export interface UserSession {
   updatedAt: string;
 }
 
+export type ConversationPurpose = "work" | "profile_manager";
+
 export type AgentSessionStatus = "working" | "idle" | "archived";
 
 export interface AgentSession {
@@ -75,6 +77,8 @@ export interface SessionMessage {
 export type TaskStatus = "pending" | "in_progress" | "completed" | "deleted";
 
 export interface Task {
+  /** Stable Console-owned identity; provider ids remain reconciliation keys. */
+  id: string;
   /** SDK session that owns the task list this task lives in. */
   sdkSessionId: string;
   /** The SDK's task id, unique within that session's list. */
@@ -92,9 +96,108 @@ export interface Task {
   owner: string | null;
   blocks: string[];
   blockedBy: string[];
+  dependencyIds: string[];
+  dependentIds: string[];
+  unresolvedDependencies: string[];
   metadata: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface TaskDependency {
+  blockerTaskId: string;
+  blockedTaskId: string;
+  source: "console" | "provider" | "migration";
+  createdAt: string;
+}
+
+export interface SessionTreeBranch {
+  session: UserSession;
+  agentSessions: AgentSession[];
+}
+
+export interface ProfileValidationIssue {
+  level: "error" | "warning";
+  path: string | null;
+  message: string;
+}
+
+export interface AgentProfileSummary {
+  id: string;
+  title: string;
+  purpose: string;
+  source: "builtin" | "workspace";
+  revision: string;
+  trusted: boolean;
+  valid: boolean;
+  tools: string[];
+  skills: string[];
+  componentCounts: Record<string, number>;
+}
+
+export interface AgentProfileComponent {
+  kind: "prompt" | "skill" | "hook" | "mcp" | "agent" | "command" | "monitor" | "settings" | "other";
+  name: string;
+  path: string;
+  supported: boolean;
+  summary: string;
+}
+
+export interface AgentProfileDetail extends AgentProfileSummary {
+  instructions: string;
+  permissionMode: "default" | "plan" | "bypassPermissions";
+  model: string | null;
+  effort: string | null;
+  maxTurns: number;
+  sandboxRequired: boolean;
+  runtime: { shell: boolean; browser: boolean; screenshots: boolean };
+  handoffExtension: string | null;
+  pluginPath: string | null;
+  components: AgentProfileComponent[];
+  files: { path: string; content: string }[];
+  issues: ProfileValidationIssue[];
+}
+
+export interface ManagerSession {
+  id: string;
+  workspaceId: string;
+  profileKey: string;
+  profileId: string | null;
+  title: string;
+  phase: SessionPhase;
+  status: "open" | "archived";
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProfileProposal {
+  managerSessionId: string;
+  baseRevision: string | null;
+  profileId: string | null;
+  files: { path: string; before: string | null; after: string | null }[];
+  issues: ProfileValidationIssue[];
+  valid: boolean;
+}
+
+export type TimelineLaneKind = "operator" | "orchestrator" | "agent_session" | "agent";
+export interface TimelineLane {
+  id: string;
+  kind: TimelineLaneKind;
+  label: string;
+  parentId: string | null;
+  order: number;
+}
+
+export interface TimelineItem {
+  id: string;
+  laneId: string;
+  kind: "message" | "turn" | "tool" | "process" | "task" | "handoff" | "decision" | "rotation" | "runtime" | "usage";
+  label: string;
+  start: string;
+  end: string | null;
+  status: string | null;
+  eventSeqs: number[];
+  detail: Record<string, unknown>;
 }
 
 export type InteractionKind = "question" | "plan_approval";

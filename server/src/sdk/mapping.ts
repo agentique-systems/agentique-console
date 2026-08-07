@@ -10,7 +10,7 @@
 import type { SdkMessage } from "./types.ts";
 
 export type TurnEvent =
-  | { kind: "resume"; resumeId: string }
+  | { kind: "resume"; resumeId: string; modelId?: string }
   | { kind: "delta"; text: string; parentCallId?: string }
   | { kind: "reasoning-delta"; text: string; parentCallId?: string }
   | { kind: "message"; text: string; parentCallId?: string }
@@ -40,8 +40,8 @@ export type TurnEvent =
    * persisted; it exists so a slow turn reads as working rather than stuck.
    */
   | { kind: "notice"; text: string }
-  | { kind: "result"; output: unknown; resumeId?: string; costUsd?: number; inputTokens?: number; uncachedInputTokens?: number; cacheCreationInputTokens?: number; cacheReadInputTokens?: number; outputTokens?: number }
-  | { kind: "error"; message: string; aborted: boolean; inputTokens?: number; uncachedInputTokens?: number; cacheCreationInputTokens?: number; cacheReadInputTokens?: number; outputTokens?: number; costUsd?: number }
+  | { kind: "result"; output: unknown; resumeId?: string; costUsd?: number; inputTokens?: number; uncachedInputTokens?: number; cacheCreationInputTokens?: number; cacheReadInputTokens?: number; outputTokens?: number; modelId?: string; apiDurationMs?: number; sdkDurationMs?: number; stopReason?: string }
+  | { kind: "error"; message: string; aborted: boolean; inputTokens?: number; uncachedInputTokens?: number; cacheCreationInputTokens?: number; cacheReadInputTokens?: number; outputTokens?: number; costUsd?: number; modelId?: string; apiDurationMs?: number; sdkDurationMs?: number; stopReason?: string }
   /**
    * The SDK's authoritative turn-over signal (session_state_changed → idle).
    * A persistent lane settles its open turn on this even when the result
@@ -71,7 +71,7 @@ export function mapSdkMessage(message: SdkMessage): TurnEvent[] {
   switch (message.type) {
     case "system": {
       if (message.subtype === "init" && message.session_id !== undefined) {
-        return [{ kind: "resume", resumeId: message.session_id }];
+        return [{ kind: "resume", resumeId: message.session_id, ...(message.model ? { modelId: message.model } : {}) }];
       }
       if (message.subtype === "session_state_changed") {
         return message.state === "idle" ? [{ kind: "turn-idle" }] : [];
@@ -231,6 +231,7 @@ export function mapSdkMessage(message: SdkMessage): TurnEvent[] {
               cacheReadInputTokens: message.usage?.cache_read_input_tokens ?? 0,
             }),
             ...(message.usage?.output_tokens === undefined ? {} : { outputTokens: message.usage.output_tokens }),
+            ...resultTelemetry(message),
           },
         ];
       }
@@ -249,7 +250,7 @@ export function mapSdkMessage(message: SdkMessage): TurnEvent[] {
   }
 }
 
-function usageFields(message: SdkMessage): { inputTokens?: number; uncachedInputTokens?: number; cacheCreationInputTokens?: number; cacheReadInputTokens?: number; outputTokens?: number; costUsd?: number } {
+function usageFields(message: SdkMessage): { inputTokens?: number; uncachedInputTokens?: number; cacheCreationInputTokens?: number; cacheReadInputTokens?: number; outputTokens?: number; costUsd?: number; modelId?: string; apiDurationMs?: number; sdkDurationMs?: number; stopReason?: string } {
   const hasInput = message.usage?.input_tokens !== undefined || message.usage?.cache_creation_input_tokens !== undefined || message.usage?.cache_read_input_tokens !== undefined;
   return {
     ...(hasInput ? { inputTokens: (message.usage?.input_tokens ?? 0) + (message.usage?.cache_creation_input_tokens ?? 0) + (message.usage?.cache_read_input_tokens ?? 0),
@@ -257,7 +258,13 @@ function usageFields(message: SdkMessage): { inputTokens?: number; uncachedInput
       cacheReadInputTokens: message.usage?.cache_read_input_tokens ?? 0 } : {}),
     ...(message.usage?.output_tokens === undefined ? {} : { outputTokens: message.usage.output_tokens }),
     ...(message.total_cost_usd === undefined ? {} : { costUsd: message.total_cost_usd }),
+    ...resultTelemetry(message),
   };
+}
+
+function resultTelemetry(message: SdkMessage): { modelId?: string; apiDurationMs?: number; sdkDurationMs?: number; stopReason?: string } {
+  const modelId = message.modelUsage ? Object.entries(message.modelUsage).sort((a, b) => (b[1].outputTokens ?? 0) - (a[1].outputTokens ?? 0))[0]?.[0] : message.model;
+  return { ...(modelId ? { modelId } : {}), ...(message.duration_api_ms === undefined ? {} : { apiDurationMs: message.duration_api_ms }), ...(message.duration_ms === undefined ? {} : { sdkDurationMs: message.duration_ms }), ...(message.stop_reason === undefined ? {} : { stopReason: message.stop_reason }) };
 }
 
 /** Stamps subagent-parented events with their parent tool_use id. */

@@ -89,6 +89,8 @@ export function makeHarness(
         mode,
         phase: mode === "plan_execute" ? "planning" : "executing",
         status: "open",
+        purpose: "work",
+        subjectKey: null,
         sdkSessionId: null,
         sdkGeneration: 0,
         sdkTurnCount: 0,

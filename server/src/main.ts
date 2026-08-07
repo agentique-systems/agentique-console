@@ -18,6 +18,9 @@ import { TaskService } from "./tasks/service.ts";
 import { HandoffService } from "./handoffs/service.ts";
 import { WorkspaceService } from "./workspaces/service.ts";
 import { buildServer } from "./api/server.ts";
+import { TimelineService } from "./timeline/service.ts";
+import { ManagerService } from "./agent-profiles/manager.ts";
+import { buildManagerMcpServer } from "./agent-profiles/tools.ts";
 
 const config = loadConfig();
 const { db, sqlite } = openDb(config.dbFile);
@@ -30,15 +33,17 @@ const workspaces = new WorkspaceService(
 );
 const interactions = new InteractionService(db, bus);
 const tasks = new TaskService(db, bus);
+const timeline = new TimelineService(repo, bus);
 const getWorkspaceRoot = (workspaceId: string): string =>
   workspaces.get(workspaceId).rootPath;
 const handoffs = new HandoffService({ repo, bus, getWorkspaceRoot });
 
-const profiles = new AgentProfileRegistry(config.profilesFile);
+const profiles = new AgentProfileRegistry(undefined, { getWorkspaceRoot, db, bus });
 const sessionStore = new SqliteSessionStore(db);
 const processes = new ProcessManager(bus);
 const browsers = new BrowserManager(bus);
 let runner!: OrchestratorRunner;
+const manager = new ManagerService({ repo, workspaces, profiles, config, bus, runner: () => runner });
 const host = new AgentSessionHost({
   repo, bus, config, profiles, sdk: () => resolveSdk(), sessionStore, getWorkspaceRoot, processes, browsers, interactions, tasks, handoffs,
   wake: (userSessionId, agentSessionId, category, text) =>
@@ -54,7 +59,9 @@ runner = new OrchestratorRunner({
   sessionStore,
   getWorkspaceRoot,
   buildMcpServer: (userSessionId, sdk) =>
-    buildConsoleMcpServer({ sdk, host, repo, bus, userSessionId, tasks, handoffs }),
+    repo.getUserSession(userSessionId)?.purpose === "profile_manager"
+      ? buildManagerMcpServer(sdk, manager, userSessionId)
+      : buildConsoleMcpServer({ sdk, host, repo, bus, userSessionId, tasks, handoffs }),
 });
 const userSessions = new UserSessionService({
   repo,
@@ -93,6 +100,9 @@ const ctx: AppContext = {
   host,
   tasks,
   handoffs,
+  timeline,
+  profiles,
+  manager,
   sdk: () => resolveSdk(),
 };
 

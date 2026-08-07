@@ -40,9 +40,9 @@ export function registerAgentSessionRoutes(
     },
   );
 
-  app.get("/api/agent-profiles", async () => ({
+  app.get<{ Querystring: { workspaceId?: string } }>("/api/agent-profiles", async (request) => ({
     availability: ctx.host.runtimeAvailability(),
-    profiles: ctx.host.profiles().map(({ id, title, purpose, tools, runtime, sandboxRequired }) => ({ id, title, purpose, tools, runtime, sandboxRequired })),
+    profiles: ctx.host.profiles(request.query.workspaceId).map(({ id, title, purpose, tools, runtime, sandboxRequired }) => ({ id, title, purpose, tools, runtime, sandboxRequired })),
   }));
 
   app.get<{ Params: { id: string } }>(

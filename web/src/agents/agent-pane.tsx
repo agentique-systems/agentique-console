@@ -12,16 +12,10 @@ import { cn } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui";
 
 import { buildAccents } from "./accents";
-import { useActiveUserSessionId } from "./active-session";
 import { AgentTranscript } from "./agent-transcript";
 
 export function AgentPane() {
-  const userSessionId = useActiveUserSessionId();
-  const selectedId = useUiStore((s) =>
-    userSessionId === null
-      ? undefined
-      : s.selectedAgentSessionByUserSession[userSessionId],
-  );
+  const selectedId = useUiStore((s) => s.activeAgentSessionId ?? undefined);
   const detail = useAgentSession(selectedId ?? null);
 
   if (selectedId === undefined) {

@@ -11,6 +11,7 @@ import { registerHandoffRoutes } from "./routes/handoffs.ts";
 import { registerTaskRoutes } from "./routes/tasks.ts";
 import { registerUserSessionRoutes } from "./routes/user-sessions.ts";
 import { registerWorkspaceRoutes } from "./routes/workspaces.ts";
+import { registerViewRoutes } from "./routes/views.ts";
 
 export function buildServer(ctx: AppContext): FastifyInstance {
   const app = Fastify({ logger: false });
@@ -54,6 +55,7 @@ export function buildServer(ctx: AppContext): FastifyInstance {
   registerAgentSessionRoutes(app, ctx);
   registerTaskRoutes(app, ctx);
   registerComposeRoutes(app, ctx);
+  registerViewRoutes(app, ctx);
 
   // The built UI rides along on this port, so the app is one process. In vite
   // dev the bundle is absent and the dev server proxies /api here instead.

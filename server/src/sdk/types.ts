@@ -45,6 +45,11 @@ export interface SdkMessage {
   total_cost_usd?: number;
   num_turns?: number;
   terminal_reason?: string;
+  stop_reason?: string;
+  duration_ms?: number;
+  duration_api_ms?: number;
+  model?: string;
+  modelUsage?: Record<string, { inputTokens?: number; outputTokens?: number; cacheReadInputTokens?: number; cacheCreationInputTokens?: number; costUSD?: number }>;
   errors?: string[];
   usage?: { input_tokens?: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number; output_tokens?: number };
   // permission_denied fields

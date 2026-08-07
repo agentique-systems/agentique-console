@@ -55,6 +55,8 @@ export class UserSessionService {
       mode: body.mode,
       phase: body.mode === "plan_execute" ? "planning" : "executing",
       status: "open",
+      purpose: "work",
+      subjectKey: null,
       sdkSessionId: null,
       sdkGeneration: 0,
       sdkTurnCount: 0,
@@ -102,6 +104,9 @@ export class UserSessionService {
       changes.title = title;
     }
     if (patch.status !== undefined) changes.status = patch.status;
+    if (row.purpose === "profile_manager" && patch.mode !== undefined && patch.mode !== "plan_execute") {
+      throw badRequest("profile Manager sessions always require plan approval");
+    }
     if (patch.mode !== undefined && patch.mode !== row.mode) {
       changes.mode = patch.mode;
       // Entering plan_execute re-arms planning; leaving it ends the gate.

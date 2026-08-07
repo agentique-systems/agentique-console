@@ -144,4 +144,22 @@ describe("task hooks", () => {
     ]);
     expect(tasks.linesForAgentSession("as_other")).toEqual([]);
   });
+
+  it("normalizes provider dependencies to stable ids and rejects cycles", async () => {
+    const { tasks, fire } = makeHooks();
+    await fire("TaskCreated", { session_id: "sdk-1", task_id: "2", task_subject: "Integration" });
+    await fire("PostToolUse", {
+      session_id: "sdk-1",
+      tool_name: "TaskUpdate",
+      tool_input: { taskId: "2", addBlockedBy: ["1"] },
+      tool_response: { success: true, taskId: "2", updatedFields: ["blockedBy"] },
+    });
+    expect(tasks.listForUserSession("us_1")[0]?.unresolvedDependencies).toEqual(["1"]);
+    await fire("TaskCreated", { session_id: "sdk-1", task_id: "1", task_subject: "Foundation" });
+    const list = tasks.listForUserSession("us_1"); const foundation = list.find((task) => task.sdkTaskId === "1"); const integration = list.find((task) => task.sdkTaskId === "2");
+    expect(integration?.dependencyIds).toEqual([foundation?.id]);
+    expect(integration?.unresolvedDependencies).toEqual([]);
+    expect(tasks.listDependencies("ws_1")).toHaveLength(1);
+    expect(() => tasks.addDependency(foundation!.id, integration!.id)).toThrow(/cycle/);
+  });
 });

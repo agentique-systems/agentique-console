@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 
 import type {
   FsDirsResponse,
@@ -11,6 +11,13 @@ import type {
   StatsResponse,
   TranscriptResponse,
   Workspace,
+  SessionTreeResponse,
+  WorkspaceTasksResponse,
+  ListAgentProfilesResponse,
+  GetAgentProfileResponse,
+  ManagerSession,
+  ManagerSessionResponse,
+  TimelinePageResponse,
 } from "@agentique-console/shared";
 
 import { apiFetch, withQuery } from "./client";
@@ -132,6 +139,35 @@ export function useTasks(userSessionId: string | null) {
     queryFn: () =>
       apiFetch<ListTasksResponse>(`/api/user-sessions/${userSessionId}/tasks`),
     enabled: userSessionId !== null,
+  });
+}
+
+export function useSessionTree(workspaceId: string | null) {
+  return useQuery({ queryKey: keys.sessionTree(workspaceId ?? ""), queryFn: () => apiFetch<SessionTreeResponse>(`/api/workspaces/${workspaceId}/session-tree`), enabled: workspaceId !== null });
+}
+
+export function useWorkspaceTasks(workspaceId: string | null, filter: { userSessionId?: string; agentSessionId?: string } = {}) {
+  return useQuery({ queryKey: keys.workspaceTasks(workspaceId ?? "", filter.userSessionId, filter.agentSessionId), queryFn: () => apiFetch<WorkspaceTasksResponse>(withQuery(`/api/workspaces/${workspaceId}/tasks`, filter)), enabled: workspaceId !== null });
+}
+
+export function useAgentProfiles(workspaceId: string | null) {
+  return useQuery({ queryKey: keys.profiles.list(workspaceId ?? ""), queryFn: () => apiFetch<ListAgentProfilesResponse>(`/api/workspaces/${workspaceId}/agent-profiles`), enabled: workspaceId !== null });
+}
+export function useAgentProfile(workspaceId: string | null, id: string | null) {
+  return useQuery({ queryKey: keys.profiles.detail(workspaceId ?? "", id ?? ""), queryFn: () => apiFetch<GetAgentProfileResponse>(`/api/workspaces/${workspaceId}/agent-profiles/${id}`), enabled: workspaceId !== null && id !== null });
+}
+export function useManagerSessions(workspaceId: string | null) {
+  return useQuery({ queryKey: keys.managerSessions(workspaceId ?? ""), queryFn: () => apiFetch<ManagerSession[]>(`/api/workspaces/${workspaceId}/manager-sessions`), enabled: workspaceId !== null });
+}
+export function useManagerSession(id: string | null) {
+  return useQuery({ queryKey: keys.managerSession(id ?? ""), queryFn: () => apiFetch<ManagerSessionResponse>(`/api/manager-sessions/${id}`), enabled: id !== null, refetchInterval: id ? 4_000 : false });
+}
+export function useTimeline(id: string | null) {
+  return useInfiniteQuery({ queryKey: keys.timeline(id ?? ""), initialPageParam: undefined as number | undefined,
+    queryFn: ({ pageParam }) => apiFetch<TimelinePageResponse>(withQuery(`/api/user-sessions/${id}/timeline`, { beforeSeq: pageParam, limit: 1000 })),
+    getNextPageParam: (last) => last.nextBeforeSeq ?? undefined, enabled: id !== null,
+    select: (result) => { const pages = [...result.pages].reverse(); const items = pages.flatMap((page) => page.items); const unique = [...new Map(items.map((item) => [item.id, item])).values()];
+      return { lanes: result.pages[0]?.lanes ?? [], items: unique, nextBeforeSeq: result.pages.at(-1)?.nextBeforeSeq ?? null }; },
   });
 }
 

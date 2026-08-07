@@ -58,8 +58,8 @@ const SEND_LABEL: Record<SendMode, string> = {
 
 export const Composer = forwardRef<
   ComposerHandle,
-  { session: UserSession; busy: boolean }
->(function Composer({ session, busy }, ref) {
+  { session: UserSession; busy: boolean; lockMode?: boolean }
+>(function Composer({ session, busy, lockMode = false }, ref) {
   const post = usePostUserMessage();
   const patch = usePatchUserSession();
   const interrupt = useInterruptUserSession();
@@ -160,7 +160,7 @@ export const Composer = forwardRef<
             disabled={archived || post.isPending}
             onChange={(event) => setDraft(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key === "Tab" && event.shiftKey) {
+              if (!lockMode && event.key === "Tab" && event.shiftKey) {
                 // preventDefault also stops prompt-input's own Enter handling,
                 // which is exactly the contract it documents.
                 event.preventDefault();
@@ -172,14 +172,14 @@ export const Composer = forwardRef<
 
         <PromptInputFooter>
           <PromptInputTools>
-            <ModeToggle
+            {lockMode ? <span className="truncate text-3xs text-muted-foreground">plan approval required</span> : <><ModeToggle
               mode={session.mode}
               disabled={patch.isPending || archived}
               onChange={setMode}
             />
             <span className="truncate text-3xs text-muted-foreground">
               shift+tab to cycle
-            </span>
+            </span></>}
           </PromptInputTools>
 
           <PromptInputTools className="shrink-0 gap-1">

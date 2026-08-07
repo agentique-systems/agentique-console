@@ -12,6 +12,7 @@ import type {
   ResolveInteractionBody,
   UserSession,
   Workspace,
+  ManagerSession,
 } from "@agentique-console/shared";
 
 import { apiFetch } from "./client";
@@ -110,4 +111,16 @@ export function useInterruptUserSession() {
         method: "POST",
       }),
   });
+}
+
+export function useCreateManagerSession() {
+  const queryClient = useQueryClient();
+  return useMutation({ mutationFn: ({ workspaceId, profileId, sourceProfileId }: { workspaceId: string; profileId?: string; sourceProfileId?: string }) => apiFetch<ManagerSession>(`/api/workspaces/${workspaceId}/manager-sessions`, { method: "POST", body: JSON.stringify({ profileId, sourceProfileId }) }), onSuccess: (_data, vars) => void queryClient.invalidateQueries({ queryKey: keys.managerSessions(vars.workspaceId) }) });
+}
+export function usePostManagerMessage() {
+  return useMutation({ mutationFn: ({ id, text }: { id: string; text: string }) => apiFetch<PostMessageResponse>(`/api/manager-sessions/${id}/messages`, { method: "POST", body: JSON.stringify({ text }) }) });
+}
+export function useTrustProfile() {
+  const queryClient = useQueryClient();
+  return useMutation({ mutationFn: ({ workspaceId, profileId, revision }: { workspaceId: string; profileId: string; revision: string }) => apiFetch<{ ok: true }>(`/api/workspaces/${workspaceId}/agent-profiles/${profileId}/trust`, { method: "POST", body: JSON.stringify({ revision }) }), onSuccess: () => void queryClient.invalidateQueries({ queryKey: keys.profiles.all }) });
 }

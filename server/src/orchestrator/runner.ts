@@ -46,6 +46,7 @@ type Job =
 interface ActiveTurn {
   turnId: string;
   trigger: "operator" | "wake" | "answer";
+  startedAt: number;
   settled: Promise<void>;
   resolve: () => void;
   outcome: {
@@ -78,6 +79,8 @@ interface Lane {
   steeredMidTurn: number;
   /** Exact duplicate suppression across wake turns (not reset per turn). */
   lastOperatorFacingText: string;
+  /** Tool-call start times used to emit useful timeline durations. */
+  toolStarts: Map<string, number>;
 }
 
 export interface OrchestratorDeps {
@@ -243,6 +246,7 @@ export class OrchestratorRunner {
         recycleAfterTurn: false,
         steeredMidTurn: 0,
         lastOperatorFacingText: "",
+        toolStarts: new Map(),
       };
       this.#lanes.set(sessionId, lane);
     }
@@ -293,6 +297,7 @@ export class OrchestratorRunner {
     const turn: ActiveTurn = {
       turnId,
       trigger,
+      startedAt: Date.now(),
       settled,
       resolve: resolveSettled,
       outcome: { status: "completed", errorMessage: undefined },
@@ -359,6 +364,7 @@ export class OrchestratorRunner {
       contextMemory: session.latestHandoffId
         ? JSON.stringify(this.#deps.handoffs.get(session.latestHandoffId), null, 2)
         : session.memory,
+      purpose: session.purpose,
     });
 
     const query = sdk.query({ prompt: input, options });
@@ -471,6 +477,7 @@ export class OrchestratorRunner {
         sessionId,
         turnId: turn.turnId,
         status: turn.outcome.status,
+        durationMs: Date.now() - turn.startedAt,
         ...(turn.outcome.errorMessage === undefined
           ? {}
           : { errorMessage: turn.outcome.errorMessage }),
@@ -500,6 +507,7 @@ export class OrchestratorRunner {
       lane.activeTurn = {
         turnId: followId,
         trigger: "operator",
+        startedAt: Date.now(),
         settled,
         resolve: resolveFollow,
         outcome: { status: "completed", errorMessage: undefined },
@@ -606,6 +614,7 @@ export class OrchestratorRunner {
       }
       case "tool.call": {
         const active = turn;
+        lane.toolStarts.set(event.callId, Date.now());
         lane.runtime.set("tool", event.name);
         bus.append({
           type: "user_session.tool.call",
@@ -622,13 +631,19 @@ export class OrchestratorRunner {
       }
       case "tool.result": {
         lane.runtime.set("thinking");
+        const captured = bus.captureSized(event.output, { userSessionId: sessionId });
+        const toolStartedAt = lane.toolStarts.get(event.callId);
+        lane.toolStarts.delete(event.callId);
         bus.append({
           type: "user_session.tool.result",
           userSessionId: sessionId,
           payload: {
             sessionId,
             callId: event.callId,
-            output: bus.capture(event.output, { userSessionId: sessionId }),
+            turnId: turn?.turnId,
+            output: captured.value,
+            bytes: captured.bytes,
+            ...(toolStartedAt === undefined ? {} : { durationMs: Date.now() - toolStartedAt }),
             ...(event.isError ? { isError: true } : {}),
           },
         });
@@ -650,11 +665,14 @@ export class OrchestratorRunner {
           const usage = { id: newId("usage"), userSessionId: sessionId, agentSessionId: null, participant: "orchestrator", profileId: null,
             generation: session.sdkGeneration, turnId: turn?.turnId ?? "unattributed", inputTokens: event.inputTokens ?? 0,
             uncachedInputTokens: event.uncachedInputTokens ?? 0, cacheCreationInputTokens: event.cacheCreationInputTokens ?? 0, cacheReadInputTokens: event.cacheReadInputTokens ?? 0, outputTokens: event.outputTokens ?? 0,
-            costUsd: event.costUsd ?? null, createdAt: nowIso() };
+            costUsd: event.costUsd ?? null, model: event.modelId ?? this.#deps.config.model ?? null, effort: this.#deps.config.effort ?? null,
+            trigger: turn?.trigger ?? null, durationMs: turn ? Date.now() - turn.startedAt : null, apiDurationMs: event.apiDurationMs ?? null, sdkDurationMs: event.sdkDurationMs ?? null, status: "completed", stopReason: event.stopReason ?? null, createdAt: nowIso() };
           repo.insertUsage(usage);
           bus.append({ type: "usage.recorded", userSessionId: sessionId, payload: { sessionId, participant: "orchestrator", generation: session.sdkGeneration,
             turnId: usage.turnId, inputTokens: usage.inputTokens, uncachedInputTokens: usage.uncachedInputTokens, cacheCreationInputTokens: usage.cacheCreationInputTokens, cacheReadInputTokens: usage.cacheReadInputTokens,
-            outputTokens: usage.outputTokens, ...(event.costUsd === undefined ? {} : { costUsd: event.costUsd }) } });
+            outputTokens: usage.outputTokens, ...(event.costUsd === undefined ? {} : { costUsd: event.costUsd }), model: usage.model ?? undefined, effort: usage.effort ?? undefined,
+            trigger: turn?.trigger, durationMs: usage.durationMs ?? undefined, apiDurationMs: usage.apiDurationMs ?? undefined, sdkDurationMs: usage.sdkDurationMs ?? undefined,
+            status: "completed", stopReason: usage.stopReason ?? undefined } });
         }
         this.#settleTurn(sessionId, lane);
         return;
@@ -671,11 +689,14 @@ export class OrchestratorRunner {
           const usage = { id: newId("usage"), userSessionId: sessionId, agentSessionId: null, participant: "orchestrator", profileId: null,
             generation: session.sdkGeneration, turnId: turn?.turnId ?? "unattributed", inputTokens: event.inputTokens ?? 0,
             uncachedInputTokens: event.uncachedInputTokens ?? 0, cacheCreationInputTokens: event.cacheCreationInputTokens ?? 0, cacheReadInputTokens: event.cacheReadInputTokens ?? 0, outputTokens: event.outputTokens ?? 0,
-            costUsd: event.costUsd ?? null, createdAt: nowIso() };
+            costUsd: event.costUsd ?? null, model: event.modelId ?? this.#deps.config.model ?? null, effort: this.#deps.config.effort ?? null,
+            trigger: turn?.trigger ?? null, durationMs: turn ? Date.now() - turn.startedAt : null, apiDurationMs: event.apiDurationMs ?? null, sdkDurationMs: event.sdkDurationMs ?? null, status: event.aborted ? "aborted" : "error", stopReason: event.stopReason ?? null, createdAt: nowIso() };
           repo.insertUsage(usage);
           bus.append({ type: "usage.recorded", userSessionId: sessionId, payload: { sessionId, participant: "orchestrator", generation: session.sdkGeneration,
             turnId: usage.turnId, inputTokens: usage.inputTokens, uncachedInputTokens: usage.uncachedInputTokens, cacheCreationInputTokens: usage.cacheCreationInputTokens, cacheReadInputTokens: usage.cacheReadInputTokens,
-            outputTokens: usage.outputTokens, ...(event.costUsd === undefined ? {} : { costUsd: event.costUsd }) } });
+            outputTokens: usage.outputTokens, ...(event.costUsd === undefined ? {} : { costUsd: event.costUsd }), model: usage.model ?? undefined, effort: usage.effort ?? undefined,
+            trigger: turn?.trigger, durationMs: usage.durationMs ?? undefined, apiDurationMs: usage.apiDurationMs ?? undefined, sdkDurationMs: usage.sdkDurationMs ?? undefined,
+            status: event.aborted ? "aborted" : "error", stopReason: usage.stopReason ?? undefined } });
           if (session.sdkTurnCount + 1 >= this.#deps.config.contextTurnLimit || contextTokens >= this.#deps.config.contextTokenLimit) lane.recycleAfterTurn = true;
         }
         this.#settleTurn(sessionId, lane);

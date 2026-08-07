@@ -35,6 +35,16 @@ export const keys = {
     all: ["tasks"] as const,
     list: (userSessionId: string) => ["tasks", "list", userSessionId] as const,
   },
+  sessionTreeAll: ["session-tree"] as const,
+  sessionTree: (workspaceId: string) => ["session-tree", workspaceId] as const,
+  workspaceTasksAll: ["workspace-tasks"] as const,
+  workspaceTasks: (workspaceId: string, userSessionId?: string, agentSessionId?: string) => ["workspace-tasks", workspaceId, userSessionId ?? "", agentSessionId ?? ""] as const,
+  profiles: { all: ["agent-profiles"] as const, list: (workspaceId: string) => ["agent-profiles", workspaceId] as const, detail: (workspaceId: string, id: string) => ["agent-profiles", workspaceId, id] as const },
+  managerSessions: (workspaceId: string) => ["manager-sessions", workspaceId] as const,
+  managerSession: (id: string) => ["manager-session", id] as const,
+  managerTranscript: (id: string) => ["manager-transcript", id] as const,
+  timeline: (id: string, beforeSeq?: number) => ["timeline", id, beforeSeq ?? "latest"] as const,
+  timelineAll: ["timeline"] as const,
   /**
    * Filesystem browsing for the workspace wizard. Its own topic on purpose:
    * NOTHING on the event spine announces a filesystem change, so these must

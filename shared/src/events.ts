@@ -58,6 +58,7 @@ export interface UserTurnSettledPayload {
   errorMessage?: string;
   /** Jobs still queued for this session — UI keeps the busy state up while > 0. */
   queuedJobs: number;
+  durationMs?: number;
 }
 export interface UserContextRotatedPayload {
   sessionId: string; generation: number; reason: "token_limit" | "turn_limit"; memoryChars: number;
@@ -75,9 +76,12 @@ export interface ToolCallPayload {
 export interface ToolResultPayload {
   sessionId: string;
   callId: string;
+  turnId?: string;
   /** Size-capped JSON value (~16KB serialized). */
   output: unknown;
   isError?: boolean;
+  durationMs?: number;
+  bytes?: number;
 }
 export interface QuestionAskedPayload {
   sessionId: string;
@@ -127,6 +131,7 @@ export interface AgentTurnSettledPayload {
   turnId: string;
   status: "completed" | "error" | "aborted";
   errorMessage?: string;
+  durationMs?: number;
 }
 export interface AgentToolCallPayload extends ToolCallPayload {
   participant: string;
@@ -187,6 +192,16 @@ export interface UsageRecordedPayload {
   sessionId: string; participant: string; profileId?: string; generation: number;
   turnId: string; inputTokens: number; outputTokens: number; costUsd?: number;
   uncachedInputTokens?: number; cacheCreationInputTokens?: number; cacheReadInputTokens?: number;
+  model?: string; effort?: string; trigger?: string; durationMs?: number;
+  apiDurationMs?: number; sdkDurationMs?: number;
+  status?: "completed" | "error" | "aborted"; stopReason?: string;
+}
+
+export interface AgentProfileChangedPayload {
+  workspaceId: string; profileId: string; revision: string; trusted: boolean;
+}
+export interface TaskDependencyPayload {
+  dependency: import("./domain.ts").TaskDependency;
 }
 
 export interface HandoffCreatedPayload {
@@ -298,6 +313,9 @@ export type ConsoleEvent = Base &
     | { type: "agent_session.process.exited"; payload: AgentProcessExitedPayload }
     | { type: "task.created"; payload: TaskCreatedPayload }
     | { type: "task.updated"; payload: TaskUpdatedPayload }
+    | { type: "task_dependency.created"; payload: TaskDependencyPayload }
+    | { type: "task_dependency.deleted"; payload: TaskDependencyPayload }
+    | { type: "agent_profile.changed"; payload: AgentProfileChangedPayload }
     | { type: "usage.recorded"; payload: UsageRecordedPayload }
     | { type: "handoff.created"; payload: HandoffCreatedPayload }
     | { type: "handoff.consumed"; payload: HandoffConsumedPayload }

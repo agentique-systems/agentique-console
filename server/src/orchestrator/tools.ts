@@ -165,7 +165,10 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
       "list_agent_profiles",
       "List the validated custom and built-in profiles available for managed AgentSessions.",
       {},
-      async () => guarded(() => ({ availability: host.runtimeAvailability(), profiles: host.profiles().map(({ id, title, purpose, tools, runtime, sandboxRequired }) => ({ id, title, purpose, tools, runtime, sandboxRequired })) })),
+      async () => guarded(() => {
+        const workspaceId = repo.getUserSession(userSessionId)?.workspaceId;
+        return { availability: host.runtimeAvailability(), profiles: host.profiles(workspaceId).map(({ id, title, purpose, tools, runtime, sandboxRequired }) => ({ id, title, purpose, tools, runtime, sandboxRequired })) };
+      }),
     ),
 
     sdk.tool(

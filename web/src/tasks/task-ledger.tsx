@@ -49,7 +49,7 @@ function sortTasks(tasks: readonly Task[]): Task[] {
 }
 
 function TaskRow({ task }: { task: Task }) {
-  const selectAgentSession = useUiStore((s) => s.selectAgentSession);
+  const openAgentSession = useUiStore((s) => s.openAgentSession);
   const completed = task.status === "completed";
   const blocked = task.blockedBy.length > 0 && task.status === "pending";
   // Orchestrator-owned tasks (agentSessionId null) have no pane to open.
@@ -65,7 +65,7 @@ function TaskRow({ task }: { task: Task }) {
           target !== null && "cursor-pointer",
         )}
         onClick={() => {
-          if (target !== null) selectAgentSession(task.userSessionId, target);
+          if (target !== null) openAgentSession(task.userSessionId, target);
         }}
       >
         <QueueItemIndicator completed={completed} />
@@ -101,12 +101,13 @@ const SECTIONS: readonly {
   { status: "completed", label: "done", defaultOpen: false },
 ];
 
-export function TaskLedger({ userSessionId }: { userSessionId: string | null }) {
+export function TaskLedger({ userSessionId, agentSessionId }: { userSessionId: string | null; agentSessionId?: string | null }) {
   const tasks = useTasks(userSessionId);
 
   const byStatus = useMemo(() => {
     const groups = new Map<TaskStatus, Task[]>();
     for (const task of tasks.data ?? []) {
+      if (agentSessionId && task.agentSessionId !== agentSessionId) continue;
       // `deleted` is a tombstone the SDK keeps; it is not a state to show.
       if (task.status === "deleted") continue;
       const bucket = groups.get(task.status);

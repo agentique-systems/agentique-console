@@ -49,19 +49,38 @@ export interface OrchestratorOptionsInput {
   mcpServer?: unknown;
   sessionStore?: unknown;
   contextMemory?: string;
+  purpose?: "work" | "profile_manager";
 }
+
+const MANAGER_BRIEF = `# Profile Manager
+
+You work directly with the Human Operator to design Agentique agent profiles.
+Inspect the workspace read-only so the profile fits the project. All profile
+changes must go through the profile_manager staging tools. During planning,
+stage a complete bundle, inspect its diff and validation, then use ExitPlanMode
+to ask the operator to Apply or discard it. After approval call apply_profile.
+Never modify files outside the staged profile bundle.`;
+
+const MANAGER_PLAN_MODE_BODY = `This is an interactive profile-editing session.
+Inspect the selected profile and workspace read-only, then build the complete
+candidate bundle only with the profile_manager staging tools. Keep the proposal
+valid as you work. Summarize the exact file diff, validation findings, and
+security-relevant capabilities, then use ExitPlanMode to request explicit Apply
+approval. After approval, call apply_profile once. Do not create Console tasks
+or AgentSessions for this workflow.`;
 
 export function buildOrchestratorOptions(
   input: OrchestratorOptionsInput,
 ): SdkOptions {
   const planning = input.mode === "plan_execute" && input.phase === "planning";
+  const manager = input.purpose === "profile_manager";
   const withDelegation = input.mcpServer !== undefined;
   const options: SdkOptions = {
     cwd: input.workspaceRoot,
     systemPrompt: {
       type: "preset",
       preset: "claude_code",
-      append: withDelegation
+      append: manager ? MANAGER_BRIEF + (input.contextMemory ? `\n\n## Selected profile (read-only baseline)\n${input.contextMemory}` : "") : withDelegation
         ? ORCHESTRATOR_BRIEF + ORCHESTRATOR_DELEGATION_BRIEF + (input.contextMemory ? `\n\n## Rotation checkpoint (or read-only legacy memory)\n${input.contextMemory}` : "")
         : ORCHESTRATOR_BRIEF + (input.contextMemory ? `\n\n## Rotation checkpoint (or read-only legacy memory)\n${input.contextMemory}` : ""),
     },
@@ -70,11 +89,13 @@ export function buildOrchestratorOptions(
     permissionMode: planning ? "plan" : "default",
     sandbox: { enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: true,
       allowUnsandboxedCommands: false, filesystem: { allowManagedReadPathsOnly: true, allowRead: [input.workspaceRoot], allowWrite: [input.workspaceRoot] } },
-    ...(planning ? { planModeInstructions: PLAN_MODE_BODY } : {}),
+    ...(planning ? { planModeInstructions: manager ? MANAGER_PLAN_MODE_BODY : PLAN_MODE_BODY } : {}),
     allowedTools: [
       ...MAIN_WORK_TOOLS,
       ...(withDelegation
-        ? CONSOLE_TOOL_NAMES.map((name) => `mcp__console__${name}`)
+        ? manager
+          ? ["read_profile_proposal", "stage_profile_file", "delete_profile_file", "apply_profile"].map((name) => `mcp__profile_manager__${name}`)
+          : CONSOLE_TOOL_NAMES.map((name) => `mcp__console__${name}`)
         : []),
     ],
     disallowedTools: ["Agent", "Task", "SendMessage", "TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "Bash", "Write", "Edit", "NotebookEdit"],
@@ -102,7 +123,7 @@ export function buildOrchestratorOptions(
       ? {}
       : {
           mcpServers: {
-            console: input.mcpServer as never,
+            [manager ? "profile_manager" : "console"]: input.mcpServer as never,
           },
         }),
   };

@@ -33,6 +33,10 @@ export const userSessions = sqliteTable("user_sessions", {
   status: text("status", { enum: ["open", "archived"] })
     .notNull()
     .default("open"),
+  purpose: text("purpose", { enum: ["work", "profile_manager"] })
+    .notNull()
+    .default("work"),
+  subjectKey: text("subject_key"),
   /** Orchestrator resume id, captured from the SDK's system:init message. */
   sdkSessionId: text("sdk_session_id"),
   sdkGeneration: integer("sdk_generation").notNull().default(0),
@@ -146,6 +150,7 @@ export const interactions = sqliteTable("interactions", {
 export const tasks = sqliteTable(
   "tasks",
   {
+    id: text("id").notNull(),
     sdkSessionId: text("sdk_session_id").notNull(),
     sdkTaskId: text("sdk_task_id").notNull(),
     workspaceId: text("workspace_id").notNull(),
@@ -178,8 +183,31 @@ export const tasks = sqliteTable(
   },
   (t) => [
     primaryKey({ columns: [t.sdkSessionId, t.sdkTaskId] }),
+    uniqueIndex("tasks_console_id").on(t.id),
     index("tasks_user_session").on(t.userSessionId),
   ],
+);
+
+export const taskDependencies = sqliteTable(
+  "task_dependencies",
+  {
+    blockerTaskId: text("blocker_task_id").notNull(),
+    blockedTaskId: text("blocked_task_id").notNull(),
+    source: text("source", { enum: ["console", "provider", "migration"] }).notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.blockerTaskId, t.blockedTaskId] })],
+);
+
+export const agentProfileTrust = sqliteTable(
+  "agent_profile_trust",
+  {
+    workspaceId: text("workspace_id").notNull(),
+    profileId: text("profile_id").notNull(),
+    revision: text("revision").notNull(),
+    trustedAt: text("trusted_at").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.profileId, t.revision] })],
 );
 
 export const events = sqliteTable(
@@ -272,6 +300,14 @@ export const usageSamples = sqliteTable("usage_samples", {
   cacheReadInputTokens: integer("cache_read_input_tokens").notNull().default(0),
   outputTokens: integer("output_tokens").notNull().default(0),
   costUsd: real("cost_usd"),
+  model: text("model"),
+  effort: text("effort"),
+  trigger: text("trigger"),
+  durationMs: integer("duration_ms"),
+  apiDurationMs: integer("api_duration_ms"),
+  sdkDurationMs: integer("sdk_duration_ms"),
+  status: text("status"),
+  stopReason: text("stop_reason"),
   createdAt: text("created_at").notNull(),
 }, (t) => [index("usage_user_session").on(t.userSessionId, t.createdAt)]);
 

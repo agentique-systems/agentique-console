@@ -313,9 +313,17 @@ export class Repo {
     return this.#db
       .select()
       .from(userSessions)
-      .where(eq(userSessions.workspaceId, workspaceId))
+      .where(and(eq(userSessions.workspaceId, workspaceId), eq(userSessions.purpose, "work")))
       .orderBy(desc(userSessions.updatedAt))
       .all();
+  }
+
+  listManagerSessions(workspaceId: string): UserSessionRow[] {
+    return this.#db.select().from(userSessions).where(and(eq(userSessions.workspaceId, workspaceId), eq(userSessions.purpose, "profile_manager"))).orderBy(desc(userSessions.updatedAt)).all();
+  }
+
+  findManagerSession(workspaceId: string, subjectKey: string): UserSessionRow | undefined {
+    return this.#db.select().from(userSessions).where(and(eq(userSessions.workspaceId, workspaceId), eq(userSessions.purpose, "profile_manager"), eq(userSessions.subjectKey, subjectKey))).get();
   }
 
   insertUserSession(row: UserSessionRow): void {
@@ -325,7 +333,7 @@ export class Repo {
   patchUserSession(
     id: string,
     patch: Partial<
-      Pick<UserSessionRow, "title" | "mode" | "phase" | "status" | "sdkSessionId" | "sdkGeneration" | "sdkTurnCount" | "contextTokens" | "memory" | "latestHandoffId">
+      Pick<UserSessionRow, "title" | "mode" | "phase" | "status" | "subjectKey" | "sdkSessionId" | "sdkGeneration" | "sdkTurnCount" | "contextTokens" | "memory" | "latestHandoffId">
     >,
   ): void {
     this.#db

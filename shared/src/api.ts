@@ -8,8 +8,16 @@ import type {
   SessionMessage,
   SessionMode,
   Task,
+  TaskDependency,
   UserSession,
   Workspace,
+  SessionTreeBranch,
+  AgentProfileSummary,
+  AgentProfileDetail,
+  ManagerSession,
+  ProfileProposal,
+  TimelineLane,
+  TimelineItem,
 } from "./domain.ts";
 import type { HandoffPage } from "./handoffs.ts";
 import type { ConsoleEvent } from "./events.ts";
@@ -107,6 +115,37 @@ export interface GetAgentSessionResponse {
 
 // GET /api/user-sessions/:id/tasks
 export type ListTasksResponse = Task[];
+
+// GET /api/workspaces/:id/session-tree
+export type SessionTreeResponse = SessionTreeBranch[];
+
+// GET /api/workspaces/:id/tasks
+export interface WorkspaceTasksResponse {
+  tasks: Task[];
+  dependencies: TaskDependency[];
+}
+
+// GET /api/workspaces/:id/agent-profiles
+export type ListAgentProfilesResponse = AgentProfileSummary[];
+// GET /api/workspaces/:id/agent-profiles/:profileId
+export type GetAgentProfileResponse = AgentProfileDetail;
+
+// POST /api/workspaces/:id/manager-sessions
+export interface CreateManagerSessionBody {
+  profileId?: string;
+  sourceProfileId?: string;
+}
+export interface ManagerSessionResponse {
+  session: ManagerSession;
+  proposal: ProfileProposal | null;
+}
+
+// GET /api/user-sessions/:id/timeline
+export interface TimelinePageResponse {
+  lanes: TimelineLane[];
+  items: TimelineItem[];
+  nextBeforeSeq: number | null;
+}
 
 // GET /api/handoffs/:id?section=&cursor=&maxBytes=
 export type ReadHandoffResponse = HandoffPage;

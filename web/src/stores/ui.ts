@@ -18,6 +18,11 @@ interface UiState {
    * memory on purpose: switching user sessions restores that session's pick.
    */
   readonly selectedAgentSessionByUserSession: Readonly<Record<string, string>>;
+  readonly activeAgentSessionId: string | null;
+  readonly selectedTaskId: string | null;
+  readonly selectedTimelineItemId: string | null;
+  readonly selectedProfileId: string | null;
+  readonly activeManagerSessionId: string | null;
   /**
    * Sessions with a pending question/plan card. Client-side on purpose: the
    * list endpoint doesn't carry "awaiting input", and fetching GET /:id per
@@ -31,6 +36,11 @@ interface UiState {
   beginDraft(): void;
   cancelDraft(): void;
   selectAgentSession(userSessionId: string, agentSessionId: string | null): void;
+  openAgentSession(userSessionId: string, agentSessionId: string): void;
+  selectTask(id: string | null): void;
+  selectTimelineItem(id: string | null): void;
+  selectProfile(id: string | null): void;
+  selectManagerSession(id: string | null): void;
   setAwaitingInput(sessionId: string, awaiting: boolean): void;
 }
 
@@ -38,8 +48,13 @@ export const useUiStore = create<UiState>((set) => ({
   activeUserSessionId: null,
   draftOpen: false,
   selectedAgentSessionByUserSession: {},
+  activeAgentSessionId: null,
+  selectedTaskId: null,
+  selectedTimelineItemId: null,
+  selectedProfileId: null,
+  activeManagerSessionId: null,
   awaitingInput: new Set<string>(),
-  openSession: (id) => set({ activeUserSessionId: id, draftOpen: false }),
+  openSession: (id) => set({ activeUserSessionId: id, activeAgentSessionId: null, draftOpen: false }),
   beginDraft: () => set({ draftOpen: true }),
   cancelDraft: () => set({ draftOpen: false }),
   selectAgentSession: (userSessionId, agentSessionId) =>
@@ -47,8 +62,13 @@ export const useUiStore = create<UiState>((set) => ({
       const next = { ...state.selectedAgentSessionByUserSession };
       if (agentSessionId === null) delete next[userSessionId];
       else next[userSessionId] = agentSessionId;
-      return { selectedAgentSessionByUserSession: next };
+      return { selectedAgentSessionByUserSession: next, activeAgentSessionId: agentSessionId };
     }),
+  openAgentSession: (activeUserSessionId, activeAgentSessionId) => set({ activeUserSessionId, activeAgentSessionId, draftOpen: false }),
+  selectTask: (selectedTaskId) => set({ selectedTaskId }),
+  selectTimelineItem: (selectedTimelineItemId) => set({ selectedTimelineItemId }),
+  selectProfile: (selectedProfileId) => set({ selectedProfileId }),
+  selectManagerSession: (activeManagerSessionId) => set({ activeManagerSessionId }),
   setAwaitingInput: (sessionId, awaiting) =>
     set((state) => {
       if (state.awaitingInput.has(sessionId) === awaiting) return state;

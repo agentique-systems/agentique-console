@@ -1,5 +1,6 @@
 import type { HandoffDraft, HandoffTrigger, Speaker } from "@agentique-console/shared";
 import fs from "node:fs";
+import path from "node:path";
 import { z } from "zod";
 import { badRequest, conflict, notFound } from "../api/errors.ts";
 import type { AgentProfile, AgentProfileRegistry } from "../agent-profiles/registry.ts";
@@ -103,16 +104,18 @@ export class AgentSessionHost {
     }
     const title = input.title.trim();
     if (!title) throw badRequest("a session title is required");
+    const parent = repo.getUserSession(input.userSessionId);
+    if (!parent) throw badRequest("unknown user session");
     const now = nowIso();
     const row: AgentSessionRow = {
       id: newId("as"), userSessionId: input.userSessionId, title, mode: input.mode,
       phase: input.mode === "plan_execute" ? "planning" : "executing", status: "open", createdAt: now, updatedAt: now,
     };
     repo.insertAgentSession(row);
-    const coordinator = this.#profile("coordinator");
+    const coordinator = this.#snapshotProfile(this.#profile("coordinator", parent.workspaceId));
     repo.insertParticipant(this.#participant(row.id, ORCHESTRATOR_SEAT, "orchestrator", coordinator, "", undefined, [], 0, now));
     input.agents.forEach((agent, index) => {
-      const profile = this.#profile(agent.profileId ?? agent.preset ?? "explorer");
+      const profile = this.#snapshotProfile(this.#profile(agent.profileId ?? agent.preset ?? "explorer", parent.workspaceId));
       repo.insertParticipant(this.#participant(row.id, agent.name, "agent", profile, agent.instructions ?? "", agent.model, agent.owns ?? [], index + 1, now));
     });
     const specialists = input.agents.map((agent) => agent.name);
@@ -244,7 +247,7 @@ export class AgentSessionHost {
     for (const delivery of this.#deps.repo.listQueuedDeliveries()) this.#schedule(delivery.agentSessionId);
   }
 
-  profiles(): AgentProfile[] { return this.#deps.profiles?.list() ?? []; }
+  profiles(workspaceId?: string): AgentProfile[] { return this.#deps.profiles?.list(workspaceId) ?? []; }
   runtimeAvailability(): { sandbox: boolean; chrome: boolean } {
     return { sandbox: fs.existsSync("/usr/bin/bwrap") || fs.existsSync("/usr/local/bin/bwrap"), chrome: fs.existsSync("/usr/bin/google-chrome") };
   }
@@ -288,8 +291,8 @@ export class AgentSessionHost {
       contextTokens: 0, memory: "", latestHandoffId: null, checkpointReady: true, pendingTurnSeq: 0, lastSeenSeq: 0, ord, createdAt };
   }
 
-  #profile(id: string): AgentProfile {
-    if (this.#deps.profiles) return this.#deps.profiles.get(id);
+  #profile(id: string, workspaceId?: string): AgentProfile {
+    if (this.#deps.profiles) return this.#deps.profiles.get(id, workspaceId);
     return { id, title: id, purpose: id, instructions: `You are the ${id} specialist.`, tools: ["Read", "Glob", "Grep"], permissionMode: "default", maxTurns: 30, sandboxRequired: true, runtime: { shell: false, browser: false, screenshots: false } };
   }
 
@@ -357,6 +360,8 @@ export class AgentSessionHost {
     let errorMessage: string | undefined;
     let output: Record<string, unknown> = {};
     const sentThisTurn = new Set<string>();
+    const startedAt = Date.now();
+    const toolStarts = new Map<string, number>();
     let latestSeat = seat;
     try {
       const sdk = await this.#deps.sdk?.();
@@ -383,6 +388,8 @@ export class AgentSessionHost {
         sessionStore: this.#deps.sessionStore as never, sessionStoreFlush: "eager",
         mcpServers: { console_agent: mcp as never },
         ...(latestSeat.model ? { model: latestSeat.model } : {}),
+        ...((profile.pluginPath && profile.source === "workspace") ? { plugins: [{ type: "local" as const, path: profile.pluginPath }] } : {}),
+        ...((profile.skills?.length ?? 0) > 0 ? { skills: profile.skills } : {}),
         ...((profile.effort ?? this.#deps.config?.effort) ? { effort: (profile.effort ?? this.#deps.config?.effort) as SdkOptions["effort"] } : {}),
         ...(latestSeat.sdkSessionId ? { resume: latestSeat.sdkSessionId } : {}),
       };
@@ -397,14 +404,18 @@ export class AgentSessionHost {
             else if (event.kind === "reasoning-delta") { runtime.set("thinking"); bus.broadcast({ type: "stream.reasoning", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { scope: { kind: "agent", sessionId: session.id }, speaker: seat.name, turnId, text: event.text } }); }
             else if (event.kind === "message") this.#recordNarration(session, seat.name, event.text, turnId);
             else if (event.kind === "notice") { runtime.note(event.text); bus.append({ type: "agent_session.runtime", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { agentSessionId: session.id, participant: seat.name, turnId, detail: event.text } }); }
-            else if (event.kind === "tool.call") { runtime.set("tool", event.name); bus.append({ type: "agent_session.tool.call", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { sessionId: session.id, participant: seat.name, turnId, callId: event.callId, name: event.name, input: bus.capture(event.input, { userSessionId: session.userSessionId, agentSessionId: session.id }) } }); }
-            else if (event.kind === "tool.result") { runtime.set("thinking"); bus.append({ type: "agent_session.tool.result", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { sessionId: session.id, participant: seat.name, callId: event.callId, output: bus.capture(event.output, { userSessionId: session.userSessionId, agentSessionId: session.id }), ...(event.isError ? { isError: true } : {}) } }); }
+            else if (event.kind === "tool.call") { toolStarts.set(event.callId, Date.now()); runtime.set("tool", event.name); bus.append({ type: "agent_session.tool.call", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { sessionId: session.id, participant: seat.name, turnId, callId: event.callId, name: event.name, input: bus.capture(event.input, { userSessionId: session.userSessionId, agentSessionId: session.id }) } }); }
+            else if (event.kind === "tool.result") {
+              const captured = bus.captureSized(event.output, { userSessionId: session.userSessionId, agentSessionId: session.id });
+              const toolStartedAt = toolStarts.get(event.callId); toolStarts.delete(event.callId);
+              runtime.set("thinking"); bus.append({ type: "agent_session.tool.result", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { sessionId: session.id, participant: seat.name, turnId, callId: event.callId, output: captured.value, bytes: captured.bytes, ...(toolStartedAt === undefined ? {} : { durationMs: Date.now() - toolStartedAt }), ...(event.isError ? { isError: true } : {}) } });
+            }
             else if (event.kind === "result") {
               output = event.output && typeof event.output === "object" ? event.output as Record<string, unknown> : {};
               repo.patchParticipant(session.id, seat.name, { ...(event.resumeId ? { sdkSessionId: event.resumeId } : {}), contextTokens: Math.max(latestSeat.contextTokens, event.inputTokens ?? 0) });
-              this.#recordUsage(session, latestSeat, turnId, event);
+              this.#recordUsage(session, latestSeat, turnId, event, "completed", Date.now() - startedAt);
             }
-            else if (event.kind === "error") { status = event.aborted ? "aborted" : "error"; errorMessage = event.message; this.#recordUsage(session, latestSeat, turnId, event); }
+            else if (event.kind === "error") { status = event.aborted ? "aborted" : "error"; errorMessage = event.message; this.#recordUsage(session, latestSeat, turnId, event, status, Date.now() - startedAt); }
           }
         }
       } finally { flight.query = null; query.close?.(); }
@@ -430,7 +441,7 @@ export class AgentSessionHost {
       if (status !== "completed") for (const delivery of deliveries) this.#patchDelivery(session, delivery, "cancelled");
       runtime.idle();
       bus.append({ type: "agent_session.turn.settled", userSessionId: session.userSessionId, agentSessionId: session.id,
-        payload: { agentSessionId: session.id, participant: seat.name, turnId, status, ...(errorMessage ? { errorMessage } : {}) } });
+        payload: { agentSessionId: session.id, participant: seat.name, turnId, status, durationMs: Date.now() - startedAt, ...(errorMessage ? { errorMessage } : {}) } });
     }
   }
 
@@ -527,6 +538,19 @@ export class AgentSessionHost {
       ...(participant === ORCHESTRATOR_SEAT ? ["mcp__console_agent__request_decision"] : []),
       ...(participant === ORCHESTRATOR_SEAT ? ["mcp__console_agent__task_create", "mcp__console_agent__task_update", "mcp__console_agent__task_list"] : []),
     ];
+  }
+
+  #snapshotProfile(profile: AgentProfile): AgentProfile {
+    if (profile.source !== "workspace" || !profile.pluginPath || !profile.revision || !this.#deps.config) return profile;
+    const parent = path.join(this.#deps.config.dataDir, "profile-snapshots");
+    const target = path.join(parent, profile.revision);
+    if (!fs.existsSync(target)) {
+      fs.mkdirSync(parent, { recursive: true });
+      const temp = path.join(parent, `.${profile.revision}-${newId("artifact")}`);
+      try { fs.cpSync(profile.pluginPath, temp, { recursive: true, dereference: true }); fs.renameSync(temp, target); }
+      catch (error) { if (fs.existsSync(temp)) fs.rmSync(temp, { recursive: true }); if (!fs.existsSync(target)) throw error; }
+    }
+    return { ...profile, pluginPath: target };
   }
 
   #composePrompt(session: AgentSessionRow, seat: ParticipantRow, rows: MessageRow[]): string {
@@ -632,16 +656,20 @@ export class AgentSessionHost {
     this.#deps.bus.append({ type: "agent_session.message", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { agentSessionId: session.id, message: toWireMessage(row) } });
   }
 
-  #recordUsage(session: AgentSessionRow, seat: ParticipantRow, turnId: string, usageEvent: { inputTokens?: number; uncachedInputTokens?: number; cacheCreationInputTokens?: number; cacheReadInputTokens?: number; outputTokens?: number; costUsd?: number }): void {
+  #recordUsage(session: AgentSessionRow, seat: ParticipantRow, turnId: string, usageEvent: { inputTokens?: number; uncachedInputTokens?: number; cacheCreationInputTokens?: number; cacheReadInputTokens?: number; outputTokens?: number; costUsd?: number; modelId?: string; apiDurationMs?: number; sdkDurationMs?: number; stopReason?: string }, status: "completed" | "error" | "aborted" = "completed", durationMs?: number): void {
     const usage = { id: newId("usage"), userSessionId: session.userSessionId, agentSessionId: session.id, participant: seat.name, profileId: seat.profileId,
       generation: seat.generation, turnId, inputTokens: usageEvent.inputTokens ?? 0, uncachedInputTokens: usageEvent.uncachedInputTokens ?? 0,
       cacheCreationInputTokens: usageEvent.cacheCreationInputTokens ?? 0, cacheReadInputTokens: usageEvent.cacheReadInputTokens ?? 0,
-      outputTokens: usageEvent.outputTokens ?? 0, costUsd: usageEvent.costUsd ?? null, createdAt: nowIso() };
+      outputTokens: usageEvent.outputTokens ?? 0, costUsd: usageEvent.costUsd ?? null,
+      model: usageEvent.modelId ?? seat.model, effort: (seat.profileSnapshot as AgentProfile).effort ?? this.#deps.config?.effort ?? null,
+      trigger: "delivery", durationMs: durationMs ?? null, apiDurationMs: usageEvent.apiDurationMs ?? null, sdkDurationMs: usageEvent.sdkDurationMs ?? null, status, stopReason: usageEvent.stopReason ?? null, createdAt: nowIso() };
     this.#deps.repo.insertUsage(usage);
     this.#deps.bus.append({ type: "usage.recorded", userSessionId: session.userSessionId, agentSessionId: session.id,
       payload: { sessionId: session.id, participant: seat.name, profileId: seat.profileId, generation: seat.generation, turnId,
         inputTokens: usage.inputTokens, uncachedInputTokens: usage.uncachedInputTokens, cacheCreationInputTokens: usage.cacheCreationInputTokens,
-        cacheReadInputTokens: usage.cacheReadInputTokens, outputTokens: usage.outputTokens, ...(usageEvent.costUsd === undefined ? {} : { costUsd: usageEvent.costUsd }) } });
+        cacheReadInputTokens: usage.cacheReadInputTokens, outputTokens: usage.outputTokens, ...(usageEvent.costUsd === undefined ? {} : { costUsd: usageEvent.costUsd }),
+        model: usage.model ?? undefined, effort: usage.effort ?? undefined, trigger: "delivery", durationMs: usage.durationMs ?? undefined,
+        apiDurationMs: usage.apiDurationMs ?? undefined, sdkDurationMs: usage.sdkDurationMs ?? undefined, status, stopReason: usage.stopReason ?? undefined } });
   }
 
   #patchDelivery(session: AgentSessionRow, delivery: MailboxDeliveryRow, status: "delivered" | "acknowledged" | "cancelled"): void {

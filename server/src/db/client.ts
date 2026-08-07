@@ -22,7 +22,7 @@ export function openDb(dbFile: string) {
 
 function migrateAdditiveColumns(sqlite: Database.Database): void {
   const userColumns = new Set(sqlite.prepare("pragma table_info(user_sessions)").all().map((row) => (row as { name: string }).name));
-  for (const [name, ddl] of [["sdk_generation", "INTEGER NOT NULL DEFAULT 0"], ["sdk_turn_count", "INTEGER NOT NULL DEFAULT 0"], ["context_tokens", "INTEGER NOT NULL DEFAULT 0"], ["memory", "TEXT NOT NULL DEFAULT ''"], ["latest_handoff_id", "TEXT"]] as const) {
+  for (const [name, ddl] of [["sdk_generation", "INTEGER NOT NULL DEFAULT 0"], ["sdk_turn_count", "INTEGER NOT NULL DEFAULT 0"], ["context_tokens", "INTEGER NOT NULL DEFAULT 0"], ["memory", "TEXT NOT NULL DEFAULT ''"], ["latest_handoff_id", "TEXT"], ["purpose", "TEXT NOT NULL DEFAULT 'work'"], ["subject_key", "TEXT"]] as const) {
     if (!userColumns.has(name)) sqlite.exec(`ALTER TABLE user_sessions ADD COLUMN ${name} ${ddl}`);
   }
   const columns = new Set(
@@ -51,4 +51,13 @@ function migrateAdditiveColumns(sqlite: Database.Database): void {
   for (const name of ["uncached_input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"]) {
     if (!usageColumns.has(name)) sqlite.exec(`ALTER TABLE usage_samples ADD COLUMN ${name} INTEGER NOT NULL DEFAULT 0`);
   }
+  const usageOptional: [string, string][] = [["model", "TEXT"], ["effort", "TEXT"], ["trigger", "TEXT"], ["duration_ms", "INTEGER"], ["api_duration_ms", "INTEGER"], ["sdk_duration_ms", "INTEGER"], ["status", "TEXT"], ["stop_reason", "TEXT"]];
+  for (const [name, ddl] of usageOptional) if (!usageColumns.has(name)) sqlite.exec(`ALTER TABLE usage_samples ADD COLUMN ${name} ${ddl}`);
+
+  const taskColumns = new Set(sqlite.prepare("pragma table_info(tasks)").all().map((row) => (row as { name: string }).name));
+  if (!taskColumns.has("id")) sqlite.exec("ALTER TABLE tasks ADD COLUMN id TEXT");
+  const missing = sqlite.prepare("SELECT sdk_session_id, sdk_task_id FROM tasks WHERE id IS NULL OR id = ''").all() as { sdk_session_id: string; sdk_task_id: string }[];
+  const updateTaskId = sqlite.prepare("UPDATE tasks SET id = ? WHERE sdk_session_id = ? AND sdk_task_id = ?");
+  for (const row of missing) updateTaskId.run(`task_${Buffer.from(`${row.sdk_session_id}\0${row.sdk_task_id}`).toString("base64url")}`, row.sdk_session_id, row.sdk_task_id);
+  sqlite.exec("CREATE UNIQUE INDEX IF NOT EXISTS tasks_console_id ON tasks(id)");
 }

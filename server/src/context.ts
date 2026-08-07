@@ -10,6 +10,9 @@ import type { ConsoleSdk } from "./sdk/types.ts";
 import type { UserSessionService } from "./sessions/service.ts";
 import type { TaskService } from "./tasks/service.ts";
 import type { WorkspaceService } from "./workspaces/service.ts";
+import type { TimelineService } from "./timeline/service.ts";
+import type { AgentProfileRegistry } from "./agent-profiles/registry.ts";
+import type { ManagerService } from "./agent-profiles/manager.ts";
 
 export interface Logger {
   info(...args: unknown[]): void;
@@ -31,6 +34,9 @@ export interface AppContext {
   host: AgentSessionHost;
   tasks: TaskService;
   handoffs: HandoffService;
+  timeline: TimelineService;
+  profiles: AgentProfileRegistry;
+  manager: ManagerService;
   /**
    * The SDK seam, for routes that talk to a model outside a session lane (the
    * composer's rewrite pass). Same lazy resolver the runner and host get, so

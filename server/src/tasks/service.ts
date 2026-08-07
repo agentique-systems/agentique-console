@@ -6,11 +6,11 @@
  * closure.
  */
 import { and, eq } from "drizzle-orm";
-import type { Task } from "@agentique-console/shared";
+import type { Task, TaskDependency } from "@agentique-console/shared";
 import type { Db } from "../db/client.ts";
-import { tasks } from "../db/schema.ts";
+import { taskDependencies, tasks } from "../db/schema.ts";
 import type { EventBus } from "../events/bus.ts";
-import { nowIso } from "../ids.ts";
+import { newId, nowIso } from "../ids.ts";
 
 export interface TaskAttribution {
   workspaceId: string;
@@ -21,8 +21,13 @@ export interface TaskAttribution {
 
 type TaskRow = typeof tasks.$inferSelect;
 
-function toWire(row: TaskRow): Task {
+type DependencyRow = typeof taskDependencies.$inferSelect;
+
+function toWire(row: TaskRow, deps: readonly DependencyRow[], allRows: readonly TaskRow[]): Task {
+  const dependencyIds = deps.filter((d) => d.blockedTaskId === row.id).map((d) => d.blockerTaskId);
+  const dependentIds = deps.filter((d) => d.blockerTaskId === row.id).map((d) => d.blockedTaskId);
   return {
+    id: row.id,
     sdkSessionId: row.sdkSessionId,
     sdkTaskId: row.sdkTaskId,
     workspaceId: row.workspaceId,
@@ -36,6 +41,12 @@ function toWire(row: TaskRow): Task {
     owner: row.owner,
     blocks: row.blocks,
     blockedBy: row.blockedBy,
+    dependencyIds,
+    dependentIds,
+    unresolvedDependencies: row.blockedBy.filter((raw) => {
+      const canonical = allRows.find((candidate) => candidate.sdkSessionId === row.sdkSessionId && candidate.sdkTaskId === raw)?.id;
+      return canonical === undefined || !deps.some((d) => d.blockedTaskId === row.id && d.blockerTaskId === canonical);
+    }),
     metadata: row.metadata,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -83,6 +94,7 @@ export class TaskService {
       return;
     }
     const row: TaskRow = {
+      id: newId("task"),
       sdkSessionId: input.sdkSessionId,
       sdkTaskId: input.sdkTaskId,
       workspaceId: input.attribution.workspaceId,
@@ -101,6 +113,8 @@ export class TaskService {
       updatedAt: now,
     };
     this.#db.insert(tasks).values(row).run();
+    this.#syncProviderDependencies(row);
+    this.#syncProviderReferencesTo(row);
     this.#emit("task.created", row);
   }
 
@@ -152,6 +166,7 @@ export class TaskService {
       .run();
     const updated = this.#get(input.sdkSessionId, input.sdkTaskId);
     if (updated) {
+      this.#syncProviderDependencies(updated);
       this.#emit(
         "task.updated",
         updated,
@@ -223,12 +238,40 @@ export class TaskService {
   }
 
   listForUserSession(userSessionId: string): Task[] {
-    return this.#db
+    const rows = this.#db
       .select()
       .from(tasks)
       .where(eq(tasks.userSessionId, userSessionId))
-      .all()
-      .map(toWire);
+      .all();
+    const deps = this.#db.select().from(taskDependencies).all();
+    const allRows = this.#db.select().from(tasks).all();
+    return rows.map((row) => toWire(row, deps, allRows));
+  }
+
+  listForWorkspace(workspaceId: string, filter: { userSessionId?: string; agentSessionId?: string } = {}): Task[] {
+    const rows = this.#db.select().from(tasks).where(eq(tasks.workspaceId, workspaceId)).all()
+      .filter((row) => filter.userSessionId === undefined || row.userSessionId === filter.userSessionId)
+      .filter((row) => filter.agentSessionId === undefined || row.agentSessionId === filter.agentSessionId);
+    const deps = this.#db.select().from(taskDependencies).all();
+    const allRows = this.#db.select().from(tasks).all();
+    return rows.map((row) => toWire(row, deps, allRows));
+  }
+
+  listDependencies(workspaceId: string): TaskDependency[] {
+    const ids = new Set(this.#db.select({ id: tasks.id }).from(tasks).where(eq(tasks.workspaceId, workspaceId)).all().map((r) => r.id));
+    return this.#db.select().from(taskDependencies).all().filter((d) => ids.has(d.blockerTaskId) || ids.has(d.blockedTaskId));
+  }
+
+  addDependency(blockedTaskId: string, blockerTaskId: string, source: TaskDependency["source"] = "console"): void {
+    if (blockedTaskId === blockerTaskId) throw new Error("a task cannot block itself");
+    const blocked = this.#byId(blockedTaskId); const blocker = this.#byId(blockerTaskId);
+    if (!blocked || !blocker) throw new Error("unknown task dependency endpoint");
+    if (blocked.workspaceId !== blocker.workspaceId) throw new Error("task dependencies cannot cross workspaces");
+    if (this.#reachable(blockedTaskId, blockerTaskId)) throw new Error("task dependency would create a cycle");
+    const row: DependencyRow = { blockerTaskId, blockedTaskId, source, createdAt: nowIso() };
+    this.#db.insert(taskDependencies).values(row).onConflictDoNothing().run();
+    this.#bus.append({ type: "task_dependency.created", workspaceId: blocked.workspaceId, userSessionId: blocked.userSessionId,
+      ...(blocked.agentSessionId ? { agentSessionId: blocked.agentSessionId } : {}), payload: { dependency: row } });
   }
 
   /** Compact lines for wake digests: the live tasks of one agent session. */
@@ -253,12 +296,44 @@ export class TaskService {
       .get();
   }
 
+  #byId(id: string): TaskRow | undefined { return this.#db.select().from(tasks).where(eq(tasks.id, id)).get(); }
+
+  #reachable(from: string, target: string): boolean {
+    const deps = this.#db.select().from(taskDependencies).all(); const seen = new Set<string>(); const queue = [from];
+    while (queue.length) { const id = queue.shift()!; if (id === target) return true; if (seen.has(id)) continue; seen.add(id);
+      for (const edge of deps) if (edge.blockerTaskId === id) queue.push(edge.blockedTaskId); }
+    return false;
+  }
+
+  #syncProviderDependencies(row: TaskRow): void {
+    for (const raw of row.blockedBy) {
+      const blocker = this.#get(row.sdkSessionId, raw) ?? this.#byId(raw);
+      if (!blocker || blocker.id === row.id) continue;
+      const exists = this.#db.select().from(taskDependencies).where(and(eq(taskDependencies.blockerTaskId, blocker.id), eq(taskDependencies.blockedTaskId, row.id))).get();
+      if (!exists) this.addDependency(row.id, blocker.id, "provider");
+    }
+    for (const raw of row.blocks) {
+      const blocked = this.#get(row.sdkSessionId, raw) ?? this.#byId(raw);
+      if (!blocked || blocked.id === row.id) continue;
+      const exists = this.#db.select().from(taskDependencies).where(and(eq(taskDependencies.blockerTaskId, row.id), eq(taskDependencies.blockedTaskId, blocked.id))).get();
+      if (!exists) this.addDependency(blocked.id, row.id, "provider");
+    }
+  }
+
+  #syncProviderReferencesTo(created: TaskRow): void {
+    const candidates = this.#db.select().from(tasks).where(eq(tasks.sdkSessionId, created.sdkSessionId)).all();
+    for (const candidate of candidates) {
+      if (candidate.id === created.id) continue;
+      if (candidate.blockedBy.includes(created.sdkTaskId) || candidate.blockedBy.includes(created.id) || candidate.blocks.includes(created.sdkTaskId) || candidate.blocks.includes(created.id)) this.#syncProviderDependencies(candidate);
+    }
+  }
+
   #key(sdkSessionId: string, sdkTaskId: string) {
     return and(eq(tasks.sdkSessionId, sdkSessionId), eq(tasks.sdkTaskId, sdkTaskId));
   }
 
   #emit(type: "task.created" | "task.updated", row: TaskRow, changed?: string[]): void {
-    const task = toWire(row);
+    const task = toWire(row, this.#db.select().from(taskDependencies).all(), this.#db.select().from(tasks).all());
     this.#bus.append({
       type,
       workspaceId: row.workspaceId,

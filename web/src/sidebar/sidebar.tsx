@@ -12,6 +12,7 @@ import { timeAgo } from "@/lib/status";
 import { cn } from "@/lib/utils";
 import { useScopeStore } from "@/stores/scope";
 import { useUiStore } from "@/stores/ui";
+export { SessionTree } from "./session-tree";
 
 export function Sidebar() {
   const selectedWorkspaceId = useScopeStore((s) => s.selectedWorkspaceId);

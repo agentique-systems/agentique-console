@@ -41,6 +41,7 @@ export interface RouterDeps {
  */
 export function routeEvent(event: ConsoleEvent, deps: RouterDeps): void {
   const type = event.type;
+  if (event.userSessionId && event.seq !== undefined) deps.invalidate(keys.timelineAll);
 
   // 1. Cache invalidation, by topic prefix. Agent-session invalidation is the
   // LIFECYCLE subset on purpose: message/tool/routed events arrive in storms
@@ -48,6 +49,7 @@ export function routeEvent(event: ConsoleEvent, deps: RouterDeps): void {
   // for each would be waste.
   if (type.startsWith("user_session.")) {
     deps.invalidate(keys.userSessions.all);
+    deps.invalidate(keys.sessionTreeAll);
   } else if (type.startsWith("workspace.")) {
     deps.invalidate(keys.workspaces);
   } else if (
@@ -58,8 +60,14 @@ export function routeEvent(event: ConsoleEvent, deps: RouterDeps): void {
     type === "agent_session.turn.settled"
   ) {
     deps.invalidate(keys.agentSessions.all);
+    deps.invalidate(keys.sessionTreeAll);
   } else if (type.startsWith("task.")) {
     deps.invalidate(keys.tasks.all);
+    deps.invalidate(keys.workspaceTasksAll);
+  } else if (type.startsWith("task_dependency.")) {
+    deps.invalidate(keys.workspaceTasksAll);
+  } else if (type.startsWith("agent_profile.")) {
+    deps.invalidate(keys.profiles.all);
   }
 
   switch (event.type) {
