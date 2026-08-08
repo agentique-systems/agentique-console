@@ -36,6 +36,7 @@ import { mainPeerName, peerNameOf } from "./peer-names.ts";
 import { buildTaskHooks } from "../tasks/hooks.ts";
 import {
   buildSendMessageMiddleware,
+  mergeHooks,
   type JournalResult,
   type ResolvedRecipient,
   type SendEnvelope,
@@ -78,18 +79,6 @@ function sleep(ms: number): Promise<void> {
 /** Console-synthesized lane input: neither human nor peer, so no origin. */
 function seatUserMessage(text: string): SdkUserMessageLike {
   return { type: "user", message: { role: "user", content: [{ type: "text", text }] }, parent_tool_use_id: null, shouldQuery: true };
-}
-
-/** Concatenating merge of hook fragments (later fragments append matchers). */
-function mergeHooks(fragments: SdkHooksFragment[]): SdkHooksFragment {
-  const merged: SdkHooksFragment = {};
-  for (const fragment of fragments) {
-    for (const [event, matchers] of Object.entries(fragment)) {
-      if (!matchers) continue;
-      merged[event] = [...(merged[event] ?? []), ...matchers];
-    }
-  }
-  return merged;
 }
 
 function seatMessagingBrief(roster: string, seatName: string): string {
@@ -597,37 +586,40 @@ export class AgentSessionHost {
 
   #journalPeer(identity: SenderIdentity, recipient: ResolvedRecipient, envelope: SendEnvelope, raw: string): JournalResult {
     const { repo } = this.#deps;
-    if (identity.kind === "main") throw new Error("main sends journal through the runner's governor binding");
-    const session = repo.getAgentSession(identity.agentSessionId);
-    if (!session) throw new Error(`unknown agent session ${identity.agentSessionId}`);
+    const sessionId = identity.kind === "main" ? recipient.agentSessionId as string : identity.agentSessionId;
+    const session = repo.getAgentSession(sessionId);
+    if (!session) throw new Error(`unknown agent session ${sessionId}`);
+    const senderName = identity.kind === "main" ? MAIN_RECIPIENT : identity.seat;
     const to = recipient.scope === "main" ? MAIN_RECIPIENT : recipient.seat as string;
-    const speaker: Speaker = { kind: identity.seat === ORCHESTRATOR_SEAT ? "orchestrator" : "agent", name: identity.seat };
+    const speaker: Speaker = identity.kind === "main"
+      ? { kind: "orchestrator", name: MAIN_RECIPIENT }
+      : { kind: identity.seat === ORCHESTRATOR_SEAT ? "orchestrator" : "agent", name: identity.seat };
     // Idempotency for the ref-confirmation retry: an identical unacknowledged
     // send reuses its journal row instead of forking a second handoff.
-    const fingerprint = `${session.id} ${identity.seat} ${to} ${raw}`;
+    const fingerprint = `${session.id} ${senderName} ${to} ${raw}`;
     const recent = this.#recentPeerSends.get(fingerprint);
     if (recent && Date.now() - recent.at < 600_000) {
       const existing = repo.getDeliveryById(recent.deliveryId);
       const message = existing ? repo.getMessageById(existing.messageId) : undefined;
       if (existing && message && (existing.status === "queued" || existing.status === "delivered")) {
         const handoffId = (message.payload?.handoff as { id?: string } | undefined)?.id ?? "";
-        return { deliveryId: existing.id, handoffId, renderedBody: message.text, summary: this.#sendSummary(identity.seat, envelope), reused: true };
+        return { deliveryId: existing.id, handoffId, renderedBody: message.text, summary: this.#sendSummary(senderName, envelope), reused: true };
       }
     }
     if (envelope.dedupeKey) {
-      const prior = repo.findDeliveryByDedupe(session.id, identity.seat, to, envelope.dedupeKey);
+      const prior = repo.findDeliveryByDedupe(session.id, senderName, to, envelope.dedupeKey);
       if (prior && prior.status === "acknowledged") throw new Error(`duplicate of delivery ${prior.id}; already delivered — do not resend`);
       if (prior && (prior.status === "queued" || prior.status === "delivered")) {
         const message = repo.getMessageById(prior.messageId);
         if (message) {
           const handoffId = (message.payload?.handoff as { id?: string } | undefined)?.id ?? "";
-          return { deliveryId: prior.id, handoffId, renderedBody: message.text, summary: this.#sendSummary(identity.seat, envelope), reused: true };
+          return { deliveryId: prior.id, handoffId, renderedBody: message.text, summary: this.#sendSummary(senderName, envelope), reused: true };
         }
       }
     }
     const { message, delivery, text, handoffId } = this.#journal(session, speaker, to, envelope.handoff, envelope.category, {
       transport: "peer", ...(envelope.dedupeKey ? { dedupeKey: envelope.dedupeKey } : {}),
-      ...(this.#seats.get(session.id)?.get(identity.seat)?.activeTurn ? { turnId: this.#seats.get(session.id)?.get(identity.seat)?.activeTurn?.turnId } : {}),
+      ...(identity.kind === "seat" && this.#seats.get(session.id)?.get(identity.seat)?.activeTurn ? { turnId: this.#seats.get(session.id)?.get(identity.seat)?.activeTurn?.turnId } : {}),
     });
     this.#recentPeerSends.set(fingerprint, { deliveryId: delivery.id, at: Date.now() });
     if (this.#recentPeerSends.size > 512) {
@@ -636,14 +628,16 @@ export class AgentSessionHost {
     }
     // The envelope carries the seat's own stability claim; a turn that ends
     // without any send is presumptively unstable (settle handles that side).
-    const lane = this.#seats.get(session.id)?.get(identity.seat);
-    if (lane?.activeTurn) lane.activeTurn.sawSend = true;
-    repo.patchParticipant(session.id, identity.seat, { checkpointReady: envelope.checkpointReadiness !== "defer" });
+    if (identity.kind === "seat") {
+      const lane = this.#seats.get(session.id)?.get(identity.seat);
+      if (lane?.activeTurn) lane.activeTurn.sawSend = true;
+      repo.patchParticipant(session.id, identity.seat, { checkpointReady: envelope.checkpointReadiness !== "defer" });
+    }
     if (to === MAIN_RECIPIENT && MATERIAL_CATEGORIES.has(envelope.category)) {
       this.#deps.bus.append({ type: "flow.result", userSessionId: session.userSessionId, agentSessionId: session.id,
         payload: { userSessionId: session.userSessionId, agentSessionId: session.id, digestPreview: text.slice(0, 140) } });
     }
-    return { deliveryId: delivery.id, handoffId, renderedBody: text, summary: this.#sendSummary(identity.seat, envelope), reused: false };
+    return { deliveryId: delivery.id, handoffId, renderedBody: text, summary: this.#sendSummary(senderName, envelope), reused: false };
   }
 
   #sendSummary(sender: string, envelope: SendEnvelope): string {

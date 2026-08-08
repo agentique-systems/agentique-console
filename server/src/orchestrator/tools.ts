@@ -1,7 +1,8 @@
 /**
  * The console MCP server, bound to one UserSession: create_agent_session (the
- * managed-session factory), durable messaging, read/list, profiles, and the
- * single Console-owned task board. It never returns native Agent spawn plans.
+ * managed-session factory) plus read/list/profile and handoff retrieval.
+ * Messaging is the native SendMessage tool (middleware-governed) and tasks are
+ * the native task tools (hook-mirrored); neither lives here anymore.
  */
 import { z } from "zod";
 import { MAIN_RECIPIENT, ORCHESTRATOR_SEAT, type AgentSessionHost } from "../agent-sessions/host.ts";
@@ -126,24 +127,15 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
             agents: args.agents,
             briefing: args.briefing,
           });
+          const coordinator = repo.getParticipant(agentSessionId, ORCHESTRATOR_SEAT);
           return {
             agentSessionId,
             participants,
             coordinator: ORCHESTRATOR_SEAT,
+            coordinatorAddress: coordinator?.peerName ?? ORCHESTRATOR_SEAT,
             status: "launched",
           };
         }),
-    ),
-
-    sdk.tool(
-      "send_agent_message",
-      "Send a focused assignment or response from main to an AgentSession coordinator. Direct specialist messaging is intentionally forbidden.",
-      { agentSessionId: z.string(), handoff: HandoffDraftSchema, category: z.enum(["assignment", "update"]).default("assignment"), dedupeKey: z.string().optional() },
-      async (args: { agentSessionId: string; handoff: HandoffDraft; category: "assignment" | "update"; dedupeKey?: string }) => guarded(() => {
-        owned(args.agentSessionId);
-        const message = host.post({ agentSessionId: args.agentSessionId, speaker: { kind: "orchestrator", name: MAIN_RECIPIENT }, to: ORCHESTRATOR_SEAT, handoff: args.handoff, category: args.category, ...(args.dedupeKey ? { dedupeKey: args.dedupeKey } : {}) });
-        return { delivered: true, messageSeq: message.seq, handoffId: (message.payload?.handoff as { id?: string } | undefined)?.id };
-      }),
     ),
 
     sdk.tool(
@@ -207,118 +199,6 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
       async () => guarded(() => ({ sessions: host.listForUserSession(userSessionId) })),
     ),
 
-    ...(tasks === undefined
-      ? []
-      : [
-          sdk.tool(
-            "task_create",
-            "Create a task on this agent session's board. Use one task per coherent unit of work; set the owner to the seat doing it.",
-            {
-              agentSessionId: z.string(),
-              subject: z.string(),
-              description: z.string().optional(),
-              owner: z.string().optional().describe("Seat name doing the work"),
-            },
-            async (args: {
-              agentSessionId: string;
-              subject: string;
-              description?: string;
-              owner?: string;
-            }) =>
-              guarded(() => {
-                const session = owned(args.agentSessionId);
-                const userSession = repo.getUserSession(userSessionId);
-                if (!userSession) {
-                  throw new ApiError(404, "not_found", "no user session");
-                }
-                const sdkTaskId = newId("task");
-                tasks.upsertFromCreate({
-                  sdkSessionId: consoleTaskListId(session.id),
-                  sdkTaskId,
-                  subject: args.subject,
-                  ...(args.description === undefined
-                    ? {}
-                    : { description: args.description }),
-                  attribution: {
-                    workspaceId: userSession.workspaceId,
-                    userSessionId,
-                    agentSessionId: session.id,
-                    participant: args.owner ?? ORCHESTRATOR_SEAT,
-                  },
-                });
-                return { taskId: sdkTaskId };
-              }),
-          ),
-
-          sdk.tool(
-            "task_update",
-            "Update a task on this agent session's board: status, owner, subject, description, or dependencies.",
-            {
-              agentSessionId: z.string(),
-              taskId: z.string(),
-              status: z
-                .enum(["pending", "in_progress", "completed", "deleted"])
-                .optional(),
-              owner: z.string().optional(),
-              subject: z.string().optional(),
-              description: z.string().optional(),
-              addBlockedBy: z.array(z.string()).optional(),
-            },
-            async (args: {
-              agentSessionId: string;
-              taskId: string;
-              status?: "pending" | "in_progress" | "completed" | "deleted";
-              owner?: string;
-              subject?: string;
-              description?: string;
-              addBlockedBy?: string[];
-            }) =>
-              guarded(() => {
-                const session = owned(args.agentSessionId);
-                tasks.applyUpdate({
-                  sdkSessionId: consoleTaskListId(session.id),
-                  sdkTaskId: args.taskId,
-                  patch: {
-                    ...(args.status === undefined ? {} : { status: args.status }),
-                    ...(args.owner === undefined ? {} : { owner: args.owner }),
-                    ...(args.subject === undefined
-                      ? {}
-                      : { subject: args.subject }),
-                    ...(args.description === undefined
-                      ? {}
-                      : { description: args.description }),
-                    ...(args.addBlockedBy === undefined
-                      ? {}
-                      : { addBlockedBy: args.addBlockedBy }),
-                  },
-                });
-                return { updated: args.taskId };
-              }),
-          ),
-
-          sdk.tool(
-            "task_list",
-            "List this conversation's tasks (optionally scoped to one agent session) with status, owner, and dependencies. Retrieval is paged (tail-first, default 8KiB window; cursors continue).",
-            {
-              agentSessionId: z.string().optional(),
-              cursor: z.string().optional(),
-              maxBytes: z.number().int().min(1).max(32 * 1024).default(8 * 1024),
-            },
-            async (args: { agentSessionId?: string; cursor?: string; maxBytes: number }) =>
-              guarded(() => {
-                if (args.agentSessionId !== undefined) owned(args.agentSessionId);
-                const rows = tasks
-                  .listForUserSession(userSessionId)
-                  .filter(
-                    (task) =>
-                      args.agentSessionId === undefined ||
-                      task.agentSessionId === args.agentSessionId,
-                  )
-                  .filter((task) => task.status !== "deleted");
-                return { taskCount: rows.length, tasks: pageTail(JSON.stringify(rows, null, 2), args.cursor, args.maxBytes) };
-              }),
-          ),
-        ]),
   ];
 
   return sdk.createSdkMcpServer({ name: "console", version: "1.0.0", tools });

@@ -38,9 +38,12 @@ export function buildOrchestratorCanUseTool(input: CanUseToolInput): CanUseTool 
     toolInput: Record<string, unknown>,
     context?: { signal?: AbortSignal; suggestions?: unknown; agentID?: string },
   ) => {
-    if (["Agent", "Task", "SendMessage", "TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "Bash", "Write", "Edit", "NotebookEdit"].includes(toolName)) {
-      return { behavior: "deny" as const, message: "Main is coordination-only. Use profile-bound Console AgentSessions so ownership, execution, messaging, and events remain durable and observable." };
+    if (["Agent", "Task", "Bash", "Write", "Edit", "NotebookEdit"].includes(toolName)) {
+      return { behavior: "deny" as const, message: "Main is coordination-only. Delegate execution to profile-bound Console AgentSessions; in-process subagents fork ungoverned context." };
     }
+    // Native SendMessage never reaches this callback — its PreToolUse
+    // middleware decides allow/deny; task and cron tools run and are
+    // mirrored by PostToolUse hooks.
     if (toolName.startsWith("mcp__console__")) {
       return { behavior: "allow" as const, updatedInput: toolInput };
     }

@@ -2,8 +2,9 @@
  * Assembles SDK Options for one orchestrator turn. Hermetic by construction:
  * settingSources [] keeps filesystem CLAUDE.md/hooks/skills out; the tool
  * surface is the main agent's working set plus Console-managed delegation.
- * Native SDK subagents and SendMessage are denied: they bypass the durable
- * mailbox and authoritative event journal.
+ * Native SendMessage, task, and cron tools are ALLOWED and governed by hook
+ * middleware — the journal observes every send; denial is reserved for
+ * in-process subagents (Agent/Task), which would fork ungoverned context.
  */
 import type { SessionMode, SessionPhase } from "@agentique-console/shared";
 import { sdkEnv } from "../sdk/env.ts";
@@ -16,16 +17,19 @@ import {
 
 export const CONSOLE_TOOL_NAMES = [
   "create_agent_session",
-  "send_agent_message",
   "read_agent_session",
   "list_agent_sessions",
   "list_agent_profiles",
   "read_handoff",
   "report_handoff_discrepancy",
-  "task_create",
-  "task_update",
-  "task_list",
 ] as const;
+
+/** Native harness tools the work lane may call; hooks govern and mirror them. */
+const MAIN_NATIVE_TOOLS = [
+  "SendMessage",
+  "TaskCreate", "TaskUpdate", "TaskGet", "TaskList",
+  "CronCreate", "CronList", "CronDelete",
+];
 
 const MAIN_WORK_TOOLS = [
   "Read",
@@ -50,6 +54,10 @@ export interface OrchestratorOptionsInput {
   sessionStore?: unknown;
   contextMemory?: string;
   purpose?: "work" | "profile_manager";
+  /** The lane's registry address (CLAUDE_CODE_SESSION_NAME). */
+  peerName?: string;
+  /** Governance/mirror hooks (SendMessage middleware, task + cron mirrors). */
+  hooks?: SdkOptions["hooks"];
 }
 
 const MANAGER_BRIEF = `# Profile Manager
@@ -95,15 +103,18 @@ export function buildOrchestratorOptions(
       ...(withDelegation
         ? manager
           ? ["read_profile_proposal", "stage_profile_file", "delete_profile_file", "apply_profile"].map((name) => `mcp__profile_manager__${name}`)
-          : CONSOLE_TOOL_NAMES.map((name) => `mcp__console__${name}`)
+          : [...CONSOLE_TOOL_NAMES.map((name) => `mcp__console__${name}`), ...MAIN_NATIVE_TOOLS]
         : []),
     ],
-    disallowedTools: ["Agent", "Task", "SendMessage", "TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "Bash", "Write", "Edit", "NotebookEdit"],
+    disallowedTools: ["Agent", "Task", "Bash", "Write", "Edit", "NotebookEdit",
+      ...(withDelegation && !manager ? [] : ["SendMessage", "TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "CronCreate", "CronList", "CronDelete"])],
+    ...(input.hooks === undefined ? {} : { hooks: input.hooks }),
+    settings: { crossSessionInbound: "accept" } as unknown as SdkOptions["settings"],
     // In streaming mode maxTurns counts cumulatively over the whole session
     // run — any default here would kill a long-lived lane. Callers opt in.
     ...(input.maxTurns === undefined ? {} : { maxTurns: input.maxTurns }),
     // Never inherit the launching session's agent settings (see sdkEnv).
-    env: sdkEnv(),
+    env: sdkEnv(input.peerName === undefined ? {} : { sessionName: input.peerName }),
     ...(input.effort === undefined
       ? {}
       : { effort: input.effort as SdkOptions["effort"] }),

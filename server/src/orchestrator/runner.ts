@@ -39,6 +39,12 @@ import { buildOrchestratorCanUseTool, type LaneState } from "./permissions.ts";
 import type { HandoffService } from "../handoffs/service.ts";
 import { HandoffDraftSchema, HANDOFF_DRAFT_JSON_SCHEMA } from "../handoffs/schema.ts";
 import { sdkEnv } from "../sdk/env.ts";
+import type { AgentSessionHost } from "../agent-sessions/host.ts";
+import { mainPeerName } from "../agent-sessions/peer-names.ts";
+import { buildSendMessageMiddleware, deliveryTagOf, mergeHooks } from "../agent-sessions/send-middleware.ts";
+import { buildTaskHooks } from "../tasks/hooks.ts";
+import type { TaskService } from "../tasks/service.ts";
+import type { SdkHooksFragment } from "../sdk/types.ts";
 
 type Job =
   | { kind: "operator"; text: string }
@@ -97,6 +103,11 @@ export interface OrchestratorDeps {
   /** Eager console-owned provider journal. */
   sessionStore?: unknown;
   handoffs: HandoffService;
+  /** Lazy — the host is constructed after the runner; it backs the lane's
+   * SendMessage middleware (main identity) and peer-inbound resolution. */
+  host?: () => AgentSessionHost;
+  /** Native task-tool mirroring for the lane. */
+  tasks?: TaskService;
 }
 
 /** Bounded grace for a closing lane's pump before the hard abort. */
@@ -336,6 +347,22 @@ export class OrchestratorRunner {
     }
   }
 
+  /**
+   * A turn the CLI started on its own (a peer message draining into the idle
+   * lane): give it console bookends so the timeline pairs started/settled.
+   * Nobody awaits its settle — result/turn-idle events close it normally.
+   */
+  #mintExogenousTurn(sessionId: string, lane: Lane): void {
+    const turnId = newId("turn");
+    this.#deps.bus.append({ type: "user_session.turn.started", userSessionId: sessionId,
+      payload: { sessionId, turnId, trigger: "wake" } });
+    let resolveSettled: () => void = () => undefined;
+    const settled = new Promise<void>((resolve) => { resolveSettled = resolve; });
+    lane.activeTurn = { turnId, trigger: "wake", startedAt: Date.now(), settled, resolve: resolveSettled,
+      outcome: { status: "completed", errorMessage: undefined } };
+    lane.runtime.set("thinking");
+  }
+
   /** Spawns the persistent query if the lane has none (lazy + post-death). */
   async #ensureLaneQuery(sessionId: string, lane: Lane): Promise<void> {
     if (lane.query) return;
@@ -346,6 +373,22 @@ export class OrchestratorRunner {
     const sdk = await this.#deps.sdk();
     const abort = new AbortController();
     const input = new AsyncQueue<SdkUserMessageLike>();
+    const host = this.#deps.host?.();
+    const fragments: SdkHooksFragment[] = [];
+    if (host && session.purpose !== "profile_manager") {
+      fragments.push(buildSendMessageMiddleware({
+        identity: { kind: "main", userSessionId: sessionId },
+        governor: host.governor(),
+        sendWakeTimeoutMs: config.sendWakeTimeoutMs,
+        deliveryHoldLeaseMs: config.deliveryHoldLeaseMs,
+      }));
+      if (this.#deps.tasks) {
+        fragments.push(buildTaskHooks(this.#deps.tasks, {
+          workspaceId: session.workspaceId, userSessionId: sessionId,
+          agentSessionId: null, participant: null,
+        }) as SdkHooksFragment);
+      }
+    }
     const options = buildOrchestratorOptions({
       workspaceRoot: this.#deps.getWorkspaceRoot(session.workspaceId),
       resume: session.sdkSessionId,
@@ -367,6 +410,8 @@ export class OrchestratorRunner {
         ? JSON.stringify(this.#deps.handoffs.get(session.latestHandoffId), null, 2)
         : session.memory,
       purpose: session.purpose,
+      peerName: mainPeerName(config.peerNamePrefix, sessionId),
+      ...(fragments.length > 0 ? { hooks: mergeHooks(fragments) as SdkOptions["hooks"] } : {}),
     });
 
     const query = sdk.query({ prompt: input, options });
@@ -711,8 +756,23 @@ export class OrchestratorRunner {
         return;
       }
       case "peer-message": {
+        // Native inbound from a console peer (a coordinator reporting up).
+        // The sender-side middleware journaled it; the carry receipt acked it.
+        // Here we surface arrival, back-stop the ack, and make sure the CLI's
+        // exogenous turn has console bookends.
+        const tag = deliveryTagOf(event.text);
+        const known = tag ? this.#deps.repo.getDeliveryById(tag.deliveryId) : undefined;
+        if (!known) {
+          bus.append({ type: "user_session.runtime", userSessionId: sessionId,
+            payload: { sessionId, detail: `ignored peer message from ${event.from}: no console delivery tag` } });
+          return;
+        }
+        if (known.status !== "acknowledged") {
+          this.#deps.repo.patchDelivery(known.id, { status: "acknowledged", acknowledgedAt: nowIso(), deliveredAt: known.deliveredAt ?? nowIso() });
+        }
         bus.append({ type: "user_session.runtime", userSessionId: sessionId,
-          payload: { sessionId, detail: `blocked out-of-band peer message from ${event.from}; managed agents must use the Console mailbox` } });
+          payload: { sessionId, detail: `peer report from ${event.from} (delivery ${known.id})` } });
+        if (!lane.activeTurn) this.#mintExogenousTurn(sessionId, lane);
         return;
       }
       case "task-terminal": {

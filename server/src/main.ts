@@ -60,6 +60,8 @@ runner = new OrchestratorRunner({
   handoffs,
   sessionStore,
   getWorkspaceRoot,
+  host: () => host,
+  tasks,
   buildMcpServer: (userSessionId, sdk) =>
     repo.getUserSession(userSessionId)?.purpose === "profile_manager"
       ? buildManagerMcpServer(sdk, manager, userSessionId)
