@@ -1,11 +1,14 @@
 /** Paged retrieval on the model-facing big-payload tools. */
 import { describe, expect, it } from "vitest";
-import { initMessage, successMessage } from "../sdk/fake.ts";
+import { initMessage, sendMessageUse, successMessage } from "../sdk/fake.ts";
 import { collectUntil, makeDelegationHarness } from "../test-helpers.ts";
 
 const handoff = (action: string, status: "pending" | "completed") => ({ core: { schemaVersion: 1 as const, taskId: null, status, risk: "low" as const,
   action, state: { summary: action, evidence: [] }, result: { summary: status === "completed" ? action : null, artifacts: [] },
   uncertainty: [], nextAction: status === "completed" ? null : action, requestExpandedContext: false }, extension: { kind: "generic" as const, data: {} } });
+
+const envelope = (action: string, status: "pending" | "completed", category: string) =>
+  JSON.stringify({ handoff: handoff(action, status), category, checkpointReadiness: "stable" });
 
 async function runFlow() {
   let coordinatorTurns = 0;
@@ -15,11 +18,13 @@ async function runFlow() {
     yield initMessage(coordinator ? `coord-${coordinatorTurns}` : "scout-1");
     if (coordinator) {
       coordinatorTurns += 1;
-      yield successMessage(coordinatorTurns === 1
-        ? { handoff: handoff("Report a very long observation about the workspace state.", "pending"), to: "scout", category: "assignment", checkpointReadiness: "stable" }
-        : { handoff: handoff("Session done", "completed"), to: "main", category: "final", checkpointReadiness: "stable" });
+      yield coordinatorTurns === 1
+        ? sendMessageUse("send-1", "scout", envelope("Report a very long observation about the workspace state.", "pending", "assignment"))
+        : sendMessageUse(`send-${coordinatorTurns}`, "main", envelope("Session done", "completed", "final"));
+      yield successMessage();
     } else {
-      yield successMessage({ handoff: handoff(`observation: ${"x".repeat(2_000)}`, "completed"), to: "orchestrator", category: "milestone", checkpointReadiness: "stable" });
+      yield sendMessageUse("scout-close", "orchestrator", envelope(`observation: ${"x".repeat(2_000)}`, "completed", "milestone"));
+      yield successMessage();
     }
   });
   const userSessionId = h.addUserSession();
@@ -47,12 +52,14 @@ describe("paged tool retrieval", () => {
     expect(Buffer.byteLength(earlier.transcript!.content)).toBeLessThanOrEqual(256);
   });
 
-  it("task_list returns a paged window with taskCount", async () => {
-    const { h } = await runFlow();
-    const tool = h.fake.captured.tools.find((t) => t.name === "task_list");
+  it("read_handoff pages a lossless section with cursors", async () => {
+    const { h, created } = await runFlow();
+    const record = h.repo.latestHandoff({ userSessionId: h.repo.getAgentSession(created.agentSessionId)!.userSessionId, agentSessionId: created.agentSessionId });
+    expect(record).toBeDefined();
+    const tool = h.fake.captured.tools.find((t) => t.name === "read_handoff");
     expect(tool).toBeDefined();
-    const result = parse(await tool!.handler({ maxBytes: 64 }, {}));
-    expect(result.taskCount).toBe(0);
-    expect((result.tasks as { content: string }).content).toBeDefined();
+    const window = parse(await tool!.handler({ handoffId: record!.id, section: "core", maxBytes: 128 }, {}));
+    expect(Buffer.byteLength((window as unknown as { content: string }).content)).toBeLessThanOrEqual(128);
+    expect((window as unknown as { nextCursor: string | null }).nextCursor).not.toBeNull();
   });
 });

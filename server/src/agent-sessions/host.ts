@@ -371,7 +371,10 @@ export class AgentSessionHost {
     }
     const lanes = this.#seats.get(session.id);
     const activeSpecialists = [...(lanes?.entries() ?? [])].filter(([name, lane]) => name !== ORCHESTRATOR_SEAT && lane.activeTurn !== null).map(([name]) => name);
-    const pendingInternal = this.#deps.repo.listActiveDeliveries(session.id).filter((delivery) => delivery.recipient !== MAIN_RECIPIENT);
+    // Only deliveries addressed to SPECIALISTS count as outstanding work: a
+    // native final goes out mid-turn, so the very report that woke the
+    // coordinator is still unacknowledged in its own inbox.
+    const pendingInternal = this.#deps.repo.listActiveDeliveries(session.id).filter((delivery) => delivery.recipient !== MAIN_RECIPIENT && delivery.recipient !== ORCHESTRATOR_SEAT);
     if (activeSpecialists.length > 0 || pendingInternal.length > 0) throw badRequest(`cannot report final while AgentSession work is active (${activeSpecialists.length} running, ${pendingInternal.length} queued/delivered)`);
   }
 
@@ -659,6 +662,12 @@ export class AgentSessionHost {
       if (!lane) return null;
       return this.#takeHold(lane);
     } catch {
+      // Deny-with-receipt: the row stays queued; retry the console carry once
+      // capacity has likely freed (a settled turn parks its lane).
+      const timer = setTimeout(() => {
+        void this.#deliverConsole(recipient.agentSessionId as string, recipient.seat as string).catch(() => undefined);
+      }, 1_000);
+      timer.unref?.();
       return null;
     }
   }

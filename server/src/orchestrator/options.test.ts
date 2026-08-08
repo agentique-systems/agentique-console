@@ -1,6 +1,8 @@
 /**
- * Main never owns participant processes. Native delegation is denied and the
- * only coordination surface is the durable Console MCP server.
+ * Main never owns participant processes: in-process subagents and write tools
+ * stay denied, while native SendMessage/task/cron tools are allowed and
+ * governed by hook middleware. The lane registers under its peer name and
+ * accepts cross-session inbound.
  */
 import { describe, expect, it } from "vitest";
 import { buildOrchestratorOptions } from "./options.ts";
@@ -17,33 +19,46 @@ function options(withDelegation = true) {
     effort: undefined,
     abortController: new AbortController(),
     canUseTool: async () => ({ behavior: "allow", updatedInput: {} }),
+    peerName: "console-main-abc123",
     ...(withDelegation ? { mcpServer: {} } : {}),
   });
 }
 
 describe("orchestrator options", () => {
-  it("denies native subagents, messaging, and the split SDK task ledger", () => {
+  it("denies in-process subagents and write tools; allows governed native tools", () => {
     const disallowed = options().disallowedTools ?? [];
-    expect(disallowed).toEqual(expect.arrayContaining(["Agent", "SendMessage", "TaskCreate", "TaskUpdate", "TaskList"]));
+    expect(disallowed).toEqual(expect.arrayContaining(["Agent", "Task", "Bash", "Write", "Edit"]));
+    expect(disallowed).not.toContain("SendMessage");
+    expect(disallowed).not.toContain("TaskCreate");
+    const allowed = options().allowedTools ?? [];
+    expect(allowed).toEqual(expect.arrayContaining(["SendMessage", "TaskCreate", "TaskUpdate", "TaskList", "CronCreate", "CronList", "CronDelete"]));
   });
 
   it("enables fail-closed workspace sandboxing", () => {
     expect(options().sandbox).toMatchObject({ enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false });
   });
 
+  it("registers under its peer name and accepts cross-session inbound", () => {
+    const built = options();
+    expect((built.env as Record<string, string>).CLAUDE_CODE_SESSION_NAME).toBe("console-main-abc123");
+    expect(built.settings).toMatchObject({ crossSessionInbound: "accept" });
+  });
+
   it("restricts main to inspection and durable coordination", () => {
     const allowed = options().allowedTools ?? [];
     expect(allowed).not.toEqual(expect.arrayContaining(WRITE_TOOLS));
-    expect(allowed).toEqual(expect.arrayContaining(["mcp__console__create_agent_session", "mcp__console__send_agent_message", "mcp__console__list_agent_profiles"]));
-    expect(allowed).not.toEqual(expect.arrayContaining(["Agent", "SendMessage", "TaskCreate"]));
+    expect(allowed).toEqual(expect.arrayContaining(["mcp__console__create_agent_session", "mcp__console__read_agent_session", "mcp__console__list_agent_profiles"]));
+    expect(allowed).not.toContain("Agent");
     // The two that must reach canUseTool to become operator cards.
     expect(allowed).not.toContain("AskUserQuestion");
     expect(allowed).not.toContain("ExitPlanMode");
   });
 
-  it("withholds delegation tools until the console MCP server is wired", () => {
+  it("withholds delegation and native messaging until the console MCP server is wired", () => {
     const allowed = options(false).allowedTools ?? [];
     expect(allowed.some((tool) => tool.startsWith("mcp__console__"))).toBe(false);
+    expect(allowed).not.toContain("SendMessage");
+    expect(options(false).disallowedTools).toEqual(expect.arrayContaining(["SendMessage", "TaskCreate"]));
     expect(allowed).not.toEqual(expect.arrayContaining(WRITE_TOOLS));
   });
 });

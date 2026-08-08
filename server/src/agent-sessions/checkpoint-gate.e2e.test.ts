@@ -5,12 +5,15 @@
  */
 import { describe, expect, it } from "vitest";
 import type { HandoffDraft } from "@agentique-console/shared";
-import { initMessage, successMessage } from "../sdk/fake.ts";
+import { initMessage, sendMessageUse, successMessage } from "../sdk/fake.ts";
 import { collectUntil, makeDelegationHarness } from "../test-helpers.ts";
 
 const handoff = (action: string, status: "pending" | "completed") => ({ core: { schemaVersion: 1 as const, taskId: null, status, risk: "low" as const,
   action, state: { summary: action, evidence: [] }, result: { summary: status === "completed" ? action : null, artifacts: [] },
   uncertainty: [], nextAction: status === "completed" ? null : action, requestExpandedContext: false }, extension: { kind: "generic" as const, data: {} } });
+
+const envelope = (action: string, status: "pending" | "completed", category: string) =>
+  JSON.stringify({ handoff: handoff(action, status), category, checkpointReadiness: "stable" });
 
 /** Fails the gate: in_progress with no evidence refs. */
 const failingDraft: HandoffDraft = { core: { schemaVersion: 1, taskId: null, status: "in_progress", risk: "low",
@@ -38,19 +41,22 @@ function makeGateHarness(checkpointDrafts: HandoffDraft[]) {
     yield initMessage(coordinator ? `coord-${coordinatorTurns}` : "scout-1");
     if (coordinator) {
       coordinatorTurns += 1;
-      yield successMessage(coordinatorTurns === 1
-        ? { handoff: handoff("inspect", "pending"), to: "scout", category: "assignment", checkpointReadiness: "stable" }
-        : { handoff: handoff("done", "completed"), to: "main", category: "final", checkpointReadiness: "stable" });
+      yield coordinatorTurns === 1
+        ? sendMessageUse("send-1", "scout", envelope("inspect", "pending", "assignment"))
+        : sendMessageUse(`send-${coordinatorTurns}`, "main", envelope("done", "completed", "final"));
+      yield successMessage();
     } else {
-      yield successMessage({ handoff: handoff("looked", "completed"), to: "orchestrator", category: "milestone", checkpointReadiness: "stable" });
+      yield sendMessageUse("scout-close", "orchestrator", envelope("looked", "completed", "milestone"));
+      yield successMessage();
     }
   });
   return { h, checkpointCount: () => checkpoints };
 }
 
-async function runToResult(h: ReturnType<typeof makeGateHarness>["h"], contextTokens: number) {
+async function runToResult(h: ReturnType<typeof makeGateHarness>["h"], contextTokens: number,
+  until: (event: { type: string }) => boolean) {
   const userSessionId = h.addUserSession();
-  const done = collectUntil(h.bus, (event) => event.type === "flow.result", 10_000);
+  const done = collectUntil(h.bus, (event) => until(event), 10_000);
   const created = h.host.createSession({ userSessionId, title: "gate", mode: "execute",
     agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("go", "pending") });
   h.repo.patchParticipant(created.agentSessionId, "scout", { contextTokens, sdkSessionId: "seed" });
@@ -60,7 +66,7 @@ async function runToResult(h: ReturnType<typeof makeGateHarness>["h"], contextTo
 describe("checkpoint quality gate (fake SDK)", () => {
   it("hard threshold: failing draft retried once with feedback, retry accepted", async () => {
     const { h, checkpointCount } = makeGateHarness([failingDraft, passingDraft]);
-    const { created, events } = await runToResult(h, 200_000);
+    const { created, events } = await runToResult(h, 200_000, (event) => event.type === "agent_session.context.rotated");
     expect(checkpointCount()).toBe(2);
     const retried = events.filter((event) => event.type === "handoff.checkpoint.retried");
     expect(retried.map((event) => event.payload.accepted)).toEqual(["none", "retry"]);
@@ -75,7 +81,7 @@ describe("checkpoint quality gate (fake SDK)", () => {
 
   it("soft threshold: a gate-failing pair defers rotation", async () => {
     const { h, checkpointCount } = makeGateHarness([failingDraft, failingDraft]);
-    const { events } = await runToResult(h, 95_000);
+    const { events } = await runToResult(h, 95_000, (event) => event.type === "handoff.checkpoint.failed");
     expect(checkpointCount()).toBe(2);
     const failed = events.filter((event) => event.type === "handoff.checkpoint.failed");
     expect(failed).toHaveLength(1);
@@ -86,7 +92,7 @@ describe("checkpoint quality gate (fake SDK)", () => {
 
   it("hard threshold: a gate-failing pair still rotates with the better draft, journaled", async () => {
     const { h } = makeGateHarness([failingDraft, failingDraft]);
-    const { created, events } = await runToResult(h, 200_000);
+    const { created, events } = await runToResult(h, 200_000, (event) => event.type === "agent_session.context.rotated");
     const retried = events.filter((event) => event.type === "handoff.checkpoint.retried");
     expect(retried.map((event) => event.payload.accepted)).toEqual(["none", "retry"]);
     expect(retried[1]?.payload.failures).not.toHaveLength(0);

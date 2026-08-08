@@ -10,7 +10,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { HandoffService } from "../handoffs/service.ts";
 import { WorktreeManager } from "../runtime/worktree-manager.ts";
-import { initMessage, successMessage } from "../sdk/fake.ts";
+import { initMessage, sendMessageUse, successMessage } from "../sdk/fake.ts";
 import { collectUntil, makeDelegationHarness, type DelegationHarness } from "../test-helpers.ts";
 
 const git = (cwd: string, ...args: string[]) =>
@@ -19,6 +19,9 @@ const git = (cwd: string, ...args: string[]) =>
 const handoff = (action: string, status: "pending" | "completed") => ({ core: { schemaVersion: 1 as const, taskId: null, status, risk: "low" as const,
   action, state: { summary: action, evidence: [] }, result: { summary: status === "completed" ? action : null, artifacts: [] },
   uncertainty: [], nextAction: status === "completed" ? null : action, requestExpandedContext: false }, extension: { kind: "generic" as const, data: {} } });
+
+const envelope = (action: string, status: "pending" | "completed", category: string) =>
+  JSON.stringify({ handoff: handoff(action, status), category, checkpointReadiness: "stable" });
 
 function makeRepoDir(): { repo: string; dataDir: string } {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "agentique-bon-"));
@@ -57,28 +60,29 @@ function makeBonWorld(selection: { winner?: string; rejectAll?: boolean }): BonW
           : { winner: world.selection.winner, rejectAll: false, reason: "cleaner diff and passing shape" }, {});
         world.selectResults.push(JSON.parse((result as { content: { text?: string }[] }).content[0]?.text ?? "null"));
       }
-      yield successMessage({ handoff: handoff("selection recorded", "completed"), to: "orchestrator", category: "milestone", checkpointReadiness: "stable" });
+      yield sendMessageUse("review-close", "orchestrator", envelope("selection recorded", "completed", "milestone"));
+      yield successMessage();
       return;
     }
     if (append.includes("attempt seat of a best-of-N group")) {
       yield initMessage(`attempt-${path.basename(options.cwd ?? "")}`);
       const cwd = options.cwd ?? "";
       fs.writeFileSync(path.join(cwd, `out-${path.basename(cwd)}.txt`), "attempt work\n");
-      yield successMessage({ handoff: handoff("implemented my variant", "completed"), to: "orchestrator", category: "milestone", checkpointReadiness: "stable" });
+      yield sendMessageUse(`attempt-close-${path.basename(cwd)}`, "orchestrator", envelope("implemented my variant", "completed", "milestone"));
+      yield successMessage();
       return;
     }
     if (append.includes("sole coordinator")) {
       yield initMessage(`coord-${Math.random().toString(36).slice(2, 8)}`);
       const latest = world.h?.fake.captured.prompts.at(-1) ?? "";
       if (latest.includes(".review → orchestrator")) {
-        yield successMessage({ handoff: handoff("best-of-N landed", "completed"), to: "main", category: "final", checkpointReadiness: "stable" });
-      } else {
-        yield successMessage({});
+        yield sendMessageUse("coord-final", "main", envelope("best-of-N landed", "completed", "final"));
       }
+      yield successMessage();
       return;
     }
     yield initMessage("other-1");
-    yield successMessage({});
+    yield successMessage();
   }, {
     hostOverrides: {
       getWorkspaceRoot: () => repo,
@@ -162,7 +166,7 @@ describe("best-of-N worktree execution (fake SDK + real git)", () => {
     const plainDir = fs.mkdtempSync(path.join(os.tmpdir(), "agentique-plain-"));
     const h = makeDelegationHarness(async function* () {
       yield initMessage("idle-1");
-      yield successMessage({});
+      yield successMessage();
     }, { hostOverrides: { getWorkspaceRoot: () => plainDir, worktrees: new WorktreeManager({ dataDir: path.join(plainDir, "data") }) } });
     const userSessionId = h.addUserSession();
     const created = h.host.createSession({ userSessionId, title: "no-git", mode: "execute", agents: [{ name: "scout", profileId: "explorer" }] });

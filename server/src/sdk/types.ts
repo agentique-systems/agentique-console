@@ -77,7 +77,8 @@ export interface SdkUserMessageLike {
   shouldQuery?: boolean;
   uuid?: string;
   timestamp?: string;
-  origin?: { kind: "human" };
+  /** human = operator input; peer = a cross-session SendMessage delivery. */
+  origin?: { kind: "human" } | { kind: "peer"; from: string };
 }
 
 export interface SdkToolResult {

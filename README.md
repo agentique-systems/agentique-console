@@ -8,15 +8,25 @@ single npm-workspaces application backed by SQLite and the Claude Agent SDK.
 - A **Workspace** is a local directory.
 - A **UserSession** is the Human Operator's conversation with the main
   Orchestrator.
-- An **AgentSession** is one Console-managed coordinator plus 1–4 named
-  specialists. Every participant has its own resumable provider session and a
-  snapshotted agent profile.
-- Communication follows one enforced star: `main ↔ coordinator ↔ specialist`.
-  Specialists cannot message main or one another. Messages are committed to a
-  durable mailbox before a participant is scheduled.
-- Native SDK `Agent`, `SendMessage`, and task tools are denied. They would
-  bypass persistence and make the UI incomplete. One Console task ledger is
-  shared by the main agent and coordinators.
+- An **AgentSession** is one Console-managed coordinator plus 1–20 named
+  specialists. Every participant is a persistent, name-addressed peer session
+  (registered under `CLAUDE_CODE_SESSION_NAME` in the machine's session
+  registry) with its own resumable provider session and a snapshotted agent
+  profile. Idle seats park (process closed, resume handle kept) and wake on
+  the next delivery.
+- Agents talk over the harness's native cross-session `SendMessage` mesh,
+  governed by console hook middleware: every send is resolved, route-checked
+  against the enforced star (`main ↔ coordinator ↔ specialist`), validated as
+  a typed handoff envelope, and journaled to SQLite BEFORE it is carried.
+  A send to a parked seat is denied with a queued receipt and the console
+  carries it on wake — a message is never lost, at worst re-carried once.
+- Native task tools (`TaskCreate`/`TaskUpdate`/…) are the authoritative
+  ledger, mirrored into the console by `TaskCreated`/`TaskCompleted` and
+  PostToolUse hooks. Native `EnterWorktree` is backed by the console's own
+  WorktreeManager via the `WorktreeCreate` hook; `CronCreate` schedules are
+  mirrored with a console fallback scheduler for closed lanes. Only
+  in-process subagents (`Agent`/`Task`) remain denied — they would fork
+  ungoverned context.
 - Main wakes only for a decision, failure, milestone, or final result. Repeated
   pending reports from one AgentSession coalesce; ordinary updates never wake
   it. Runtime state is rendered as trace data instead of chat narration.

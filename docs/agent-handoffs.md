@@ -5,6 +5,32 @@ decisions, failures, final results, context rotation, and recovery. Plain-text
 managed transfers are not produced by the v2 tools; old transcript rows remain
 readable.
 
+## Transport and delivery timing
+
+Agents carry handoffs over the harness's native cross-session `SendMessage`
+mesh: every console session registers a peer name, and the `message` field MUST
+be the JSON envelope `{"handoff": <HandoffDraft>, "category": …,
+"dedupeKey"?: …, "checkpointReadiness"?: "stable"|"defer"}`. A PreToolUse
+middleware resolves the address, enforces the star topology, zod-validates the
+envelope (denying with the exact failures so the sender self-corrects),
+journals the handoff and its delivery row, and rewrites the tool input to the
+canonical peer name and a `[handoff … delivery …]`-tagged normalized body.
+
+Journal states are the delivery contract: `queued` (journaled, not yet
+carried) → `delivered` (native carry succeeded — the sender's tool result
+returned `success:true` with a `msg_id` — or a console input push landed) →
+`acknowledged` (consumed by a settled turn; for main, the carry receipt).
+A send to an unreachable seat is denied with a *queued receipt* ("queued as
+delivery … do not resend"); the console re-carries the row when the seat
+wakes. First cross-session contact demands ref confirmation (`name [ref]`) —
+the middleware treats the identical retry as the same delivery, never a
+duplicate.
+
+Delivery into a running seat is native steering: messages enqueue and drain at
+the receiver's next tool round, mid-turn. Console-path pushes (briefings,
+redeliveries) steer the live turn the same way, with a
+`steered mid-turn` runtime notice.
+
 ## Contract and authority
 
 Every handoff has a versioned core containing task/status/risk, the requested

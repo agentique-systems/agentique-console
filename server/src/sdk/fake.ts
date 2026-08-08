@@ -63,6 +63,14 @@ function promptTextOf(message: SdkUserMessageLike): string {
   return JSON.stringify(message);
 }
 
+/** A matcher entry from Options.hooks, structurally typed. */
+type FakeHookMatcher = { matcher?: string; hooks: ((input: unknown, toolUseId: string | undefined, extra: { signal?: AbortSignal }) => Promise<Record<string, unknown>>)[] };
+
+function hookMatchers(options: SdkOptions, event: string, toolName: string): FakeHookMatcher[] {
+  const all = (options.hooks as Record<string, FakeHookMatcher[]> | undefined)?.[event] ?? [];
+  return all.filter((entry) => entry.matcher === undefined || new RegExp(`^(?:${entry.matcher})$`).test(toolName));
+}
+
 export function fakeSdk(program: FakeProgram): FakeSdk {
   const captured: FakeSdk["captured"] = {
     prompts: [],
@@ -73,6 +81,61 @@ export function fakeSdk(program: FakeProgram): FakeSdk {
     tools: [],
   };
   const waiters: { index: number; resolve: (text: string) => void }[] = [];
+
+  /**
+   * The peer mesh in miniature: streaming queries whose env carries
+   * CLAUDE_CODE_SESSION_NAME register their input queue under that name for
+   * the life of the query — exactly the visibility window of the real
+   * registry+socket. SendMessage delivery pushes into the target queue.
+   */
+  const peers = new Map<string, { push: (message: SdkUserMessageLike) => void }>();
+
+  /**
+   * Native-SendMessage execution: run the sender's PreToolUse chain (the
+   * console middleware), deliver on allow, and synthesize the tool_result the
+   * real harness would return. Returns the frames to emit downstream.
+   */
+  async function executeSendMessage(options: SdkOptions, callId: string, input: Record<string, unknown>): Promise<SdkMessage[]> {
+    let updatedInput: Record<string, unknown> | undefined;
+    for (const matcher of hookMatchers(options, "PreToolUse", "SendMessage")) {
+      for (const hook of matcher.hooks) {
+        const out = await hook({ hook_event_name: "PreToolUse", tool_name: "SendMessage", tool_input: updatedInput ?? input }, callId, {});
+        const specific = (out as { hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string; updatedInput?: Record<string, unknown> } }).hookSpecificOutput;
+        if (specific?.permissionDecision === "deny") {
+          return [toolResultMessage(callId, specific.permissionDecisionReason ?? "denied", true)];
+        }
+        if (specific?.updatedInput) updatedInput = specific.updatedInput;
+      }
+    }
+    const final = updatedInput ?? input;
+    const to = typeof final.to === "string" ? final.to.replace(/\s+\[[0-9a-f]+\]$/, "") : "";
+    const target = peers.get(to);
+    const response = target
+      ? `{"success":true,"message":"delivered","msg_id":"fake-${callId}"}`
+      : `{"success":false,"message":"'${to}' is not an agent in this conversation. Re-send with the ref to confirm."}`;
+    for (const matcher of hookMatchers(options, "PostToolUse", "SendMessage")) {
+      for (const hook of matcher.hooks) {
+        await hook({ hook_event_name: "PostToolUse", tool_name: "SendMessage", tool_input: final, tool_response: [{ type: "text", text: response }] }, callId, {});
+      }
+    }
+    if (target) {
+      const from = (options.env as Record<string, string> | undefined)?.CLAUDE_CODE_SESSION_NAME ?? "peer";
+      target.push({
+        type: "user",
+        message: { role: "user", content: [{ type: "text", text: typeof final.message === "string" ? final.message : "" }] },
+        parent_tool_use_id: null,
+        origin: { kind: "peer", from },
+      } as SdkUserMessageLike);
+    }
+    return [toolResultMessage(callId, [{ type: "text", text: response }])];
+  }
+
+  function sendMessageCall(message: SdkMessage): { callId: string; input: Record<string, unknown> } | null {
+    if (message.type !== "assistant") return null;
+    const block = (message.message?.content ?? []).find((entry) => entry.type === "tool_use" && entry.name === "SendMessage");
+    if (!block) return null;
+    return { callId: block.id ?? "unknown", input: (block.input ?? {}) as Record<string, unknown> };
+  }
 
   const record = (text: string): void => {
     captured.prompts.push(text);
@@ -114,41 +177,60 @@ export function fakeSdk(program: FakeProgram): FakeSdk {
         signalClose = () => resolve("close");
       });
 
+      // Peer-mesh registration: named streaming queries are addressable for
+      // exactly as long as the query lives (the registry+socket in miniature).
+      const peerName = (options.env as Record<string, string> | undefined)?.CLAUDE_CODE_SESSION_NAME;
+      const pushable = stream as { push?: (message: SdkUserMessageLike) => void };
+      if (peerName !== undefined && typeof pushable.push === "function") {
+        peers.set(peerName, { push: (message) => pushable.push!(message) });
+      }
+      const unregister = () => { if (peerName !== undefined && peers.get(peerName)?.push !== undefined) peers.delete(peerName); };
+
       async function* consume(): AsyncGenerator<SdkMessage, void, void> {
-        for await (const message of stream) {
-          captured.inputs.push(message);
-          if (message.shouldQuery === false) continue;
-          record(promptTextOf(message));
-          const turn = program(options, captured.tools);
-          let interrupted = false;
-          const interruptRequested = new Promise<"interrupt">((resolve) => {
-            signalInterrupt = () => resolve("interrupt");
-          });
-          try {
-            for (;;) {
-              const raced = await Promise.race([
-                turn.next(),
-                interruptRequested,
-                closeRequested,
-              ]);
-              if (raced === "close") return;
-              if (raced === "interrupt") {
-                interrupted = true;
-                // Abandon the (possibly forever-parked) pending pull.
-                void turn.return(undefined).catch(() => undefined);
-                break;
-              }
-              if (raced.done) break;
-              yield raced.value;
-            }
-          } finally {
-            signalInterrupt = null;
-          }
-          if (interrupted) {
-            yield errorMessage("error_during_execution", {
-              terminal_reason: "interrupted",
+        try {
+          for await (const message of stream) {
+            captured.inputs.push(message);
+            if (message.shouldQuery === false) continue;
+            record(promptTextOf(message));
+            const turn = program(options, captured.tools);
+            let interrupted = false;
+            const interruptRequested = new Promise<"interrupt">((resolve) => {
+              signalInterrupt = () => resolve("interrupt");
             });
+            try {
+              for (;;) {
+                const raced = await Promise.race([
+                  turn.next(),
+                  interruptRequested,
+                  closeRequested,
+                ]);
+                if (raced === "close") return;
+                if (raced === "interrupt") {
+                  interrupted = true;
+                  // Abandon the (possibly forever-parked) pending pull.
+                  void turn.return(undefined).catch(() => undefined);
+                  break;
+                }
+                if (raced.done) break;
+                yield raced.value;
+                // A scripted native SendMessage executes for real: middleware
+                // chain, delivery into the target peer's queue, tool_result.
+                const send = sendMessageCall(raced.value);
+                if (send) {
+                  for (const frame of await executeSendMessage(options, send.callId, send.input)) yield frame;
+                }
+              }
+            } finally {
+              signalInterrupt = null;
+            }
+            if (interrupted) {
+              yield errorMessage("error_during_execution", {
+                terminal_reason: "interrupted",
+              });
+            }
           }
+        } finally {
+          unregister();
         }
       }
       return Object.assign(consume(), {
@@ -158,6 +240,7 @@ export function fakeSdk(program: FakeProgram): FakeSdk {
         },
         close: () => {
           captured.closed = true;
+          unregister();
           signalClose?.();
         },
       });

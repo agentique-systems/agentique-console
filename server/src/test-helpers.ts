@@ -167,6 +167,8 @@ function wire(
     handoffs,
     getWorkspaceRoot: () => "/tmp/test-workspace",
     sessionStore,
+    host: () => host,
+    tasks,
     buildMcpServer: (userSessionId, sdk) =>
       buildConsoleMcpServer({
         sdk,

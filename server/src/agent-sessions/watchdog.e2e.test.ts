@@ -4,12 +4,16 @@
  * failure handoff to the coordinator. Operator aborts stay "aborted".
  */
 import { describe, expect, it } from "vitest";
-import { initMessage, successMessage, toolResultMessage, toolUseMessage } from "../sdk/fake.ts";
+import { initMessage, sendMessageUse, successMessage, toolResultMessage, toolUseMessage } from "../sdk/fake.ts";
 import { collectUntil, makeDelegationHarness } from "../test-helpers.ts";
 
 const handoff = (action: string, status: "pending" | "completed") => ({ core: { schemaVersion: 1 as const, taskId: null, status, risk: "low" as const,
   action, state: { summary: action, evidence: [] }, result: { summary: status === "completed" ? action : null, artifacts: [] },
   uncertainty: [], nextAction: status === "completed" ? null : action, requestExpandedContext: false }, extension: { kind: "generic" as const, data: {} } });
+
+/** A native send: the envelope is the JSON message body the middleware demands. */
+const envelope = (action: string, status: "pending" | "completed", category: string) =>
+  JSON.stringify({ handoff: handoff(action, status), category, checkpointReadiness: "stable" });
 
 type ScoutTurn = () => AsyncGenerator<ReturnType<typeof initMessage>, void, void>;
 
@@ -21,9 +25,10 @@ function makeWatchdogHarness(scoutTurn: ScoutTurn) {
     if (coordinator) {
       coordinatorTurns += 1;
       yield initMessage(`coord-${coordinatorTurns}`);
-      yield successMessage(coordinatorTurns === 1
-        ? { handoff: handoff("inspect", "pending"), to: "scout", category: "assignment", checkpointReadiness: "stable" }
-        : { handoff: handoff("wrapped up after failure", "completed"), to: "main", category: "final", checkpointReadiness: "stable" });
+      yield coordinatorTurns === 1
+        ? sendMessageUse("send-1", "scout", envelope("inspect", "pending", "assignment"))
+        : sendMessageUse(`send-${coordinatorTurns}`, "main", envelope("wrapped up after failure", "completed", "final"));
+      yield successMessage();
     } else {
       yield* scoutTurn();
     }
@@ -46,7 +51,8 @@ describe("seat turn watchdog (fake SDK)", () => {
         yield toolUseMessage(`grep-${i}`, "Grep", { pattern: "needle", path: "src" });
         yield toolResultMessage(`grep-${i}`, "no matches");
       }
-      yield successMessage({ handoff: handoff("never reached", "completed"), to: "orchestrator", category: "milestone", checkpointReadiness: "stable" });
+      yield sendMessageUse("scout-close", "orchestrator", envelope("never reached", "completed", "milestone"));
+      yield successMessage();
     });
     const { created, events } = await runFlow(h);
     const watchdogEvents = events.filter((event) => event.type === "agent_session.watchdog");
@@ -68,7 +74,8 @@ describe("seat turn watchdog (fake SDK)", () => {
         yield toolUseMessage(`cmd-${i}`, "Read", { file_path: `src/${i}.ts` });
         yield toolResultMessage(`cmd-${i}`, "boom", true);
       }
-      yield successMessage({ handoff: handoff("never reached", "completed"), to: "orchestrator", category: "milestone", checkpointReadiness: "stable" });
+      yield sendMessageUse("scout-close", "orchestrator", envelope("never reached", "completed", "milestone"));
+      yield successMessage();
     });
     const { events } = await runFlow(h);
     const watchdogEvents = events.filter((event) => event.type === "agent_session.watchdog");
@@ -89,7 +96,8 @@ describe("seat turn watchdog (fake SDK)", () => {
         yield toolUseMessage(`b-${i}`, "Grep", { pattern: "needle" });
         yield toolResultMessage(`b-${i}`, "no matches");
       }
-      yield successMessage({ handoff: handoff("all seen", "completed"), to: "orchestrator", category: "milestone", checkpointReadiness: "stable" });
+      yield sendMessageUse("scout-close", "orchestrator", envelope("all seen", "completed", "milestone"));
+      yield successMessage();
     });
     const { events } = await runFlow(h);
     expect(events.some((event) => event.type === "agent_session.watchdog")).toBe(false);
@@ -104,7 +112,8 @@ describe("seat turn watchdog (fake SDK)", () => {
         yield toolUseMessage(`c-${i}`, "Read", { file_path: `src/${i}.ts` });
         yield toolResultMessage(`c-${i}`, i % 2 === 0 ? "boom" : "fine", i % 2 === 0);
       }
-      yield successMessage({ handoff: handoff("survived", "completed"), to: "orchestrator", category: "milestone", checkpointReadiness: "stable" });
+      yield sendMessageUse("scout-close", "orchestrator", envelope("survived", "completed", "milestone"));
+      yield successMessage();
     });
     const { events } = await runFlow(h);
     expect(events.some((event) => event.type === "agent_session.watchdog")).toBe(false);

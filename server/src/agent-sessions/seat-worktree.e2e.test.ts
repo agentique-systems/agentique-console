@@ -9,7 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { WorktreeManager } from "../runtime/worktree-manager.ts";
-import { initMessage, successMessage, toolResultMessage, toolUseMessage } from "../sdk/fake.ts";
+import { initMessage, sendMessageUse, successMessage, toolResultMessage, toolUseMessage } from "../sdk/fake.ts";
 import { collectUntil, makeDelegationHarness, type DelegationHarness } from "../test-helpers.ts";
 
 const git = (cwd: string, ...args: string[]) =>
@@ -18,6 +18,9 @@ const git = (cwd: string, ...args: string[]) =>
 const handoff = (action: string, status: "pending" | "completed" | "failed") => ({ core: { schemaVersion: 1 as const, taskId: null, status, risk: "low" as const,
   action, state: { summary: action, evidence: [] }, result: { summary: status === "completed" ? action : null, artifacts: [] },
   uncertainty: [], nextAction: status === "completed" ? null : action, requestExpandedContext: false }, extension: { kind: "generic" as const, data: {} } });
+
+const envelope = (action: string, status: "pending" | "completed" | "failed", category: string) =>
+  JSON.stringify({ handoff: handoff(action, status), category, checkpointReadiness: "stable" });
 
 function makeRepoDir(): { repo: string; dataDir: string } {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "agentique-swt-"));
@@ -42,9 +45,10 @@ function makeWorld(devStatus: "completed" | "failed", options: { conflict?: bool
     if (append.includes("sole coordinator")) {
       coordinatorTurns += 1;
       yield initMessage(`coord-${coordinatorTurns}`);
-      yield successMessage(coordinatorTurns === 1
-        ? { handoff: handoff("implement the widget", "pending"), to: "dev", category: "assignment", checkpointReadiness: "stable" }
-        : { handoff: handoff("wrapped", "completed"), to: "main", category: "final", checkpointReadiness: "stable" });
+      yield coordinatorTurns === 1
+        ? sendMessageUse("send-1", "dev", envelope("implement the widget", "pending", "assignment"))
+        : sendMessageUse(`send-${coordinatorTurns}`, "main", envelope("wrapped", "completed", "final"));
+      yield successMessage();
       return;
     }
     if (append.includes("exclusively own the assigned files")) {
@@ -59,7 +63,8 @@ function makeWorld(devStatus: "completed" | "failed", options: { conflict?: bool
       fs.writeFileSync(path.join(cwd, "widget.txt"), "implemented\n");
       yield toolUseMessage("w-1", "Write", { file_path: "widget.txt" });
       yield toolResultMessage("w-1", "ok");
-      yield successMessage({ handoff: handoff("widget implemented", devStatus), to: "orchestrator", category: "milestone", checkpointReadiness: "stable" });
+      yield sendMessageUse("dev-close", "orchestrator", envelope("widget implemented", devStatus, "milestone"));
+      yield successMessage();
       return;
     }
     yield initMessage("other-1");
@@ -134,13 +139,15 @@ describe("seat worktree isolation (fake SDK + real git)", () => {
       if (append.includes("sole coordinator")) {
         coordinatorTurns += 1;
         yield initMessage(`coord-${coordinatorTurns}`);
-        yield successMessage(coordinatorTurns === 1
-          ? { handoff: handoff("inspect the widget", "pending"), to: "dev", category: "assignment", checkpointReadiness: "stable" }
-          : { handoff: handoff("done", "completed"), to: "main", category: "final", checkpointReadiness: "stable" });
+        yield coordinatorTurns === 1
+          ? sendMessageUse("send-1", "dev", envelope("inspect the widget", "pending", "assignment"))
+          : sendMessageUse(`send-${coordinatorTurns}`, "main", envelope("done", "completed", "final"));
+        yield successMessage();
         return;
       }
       yield initMessage("seat-1");
-      yield successMessage({ handoff: handoff("looked around", "completed"), to: "orchestrator", category: "milestone", checkpointReadiness: "stable" });
+      yield sendMessageUse("seat-close", "orchestrator", envelope("looked around", "completed", "milestone"));
+      yield successMessage();
     }, { hostOverrides: { getWorkspaceRoot: () => plain, worktrees: new WorktreeManager({ dataDir: path.join(plain, "data") }) } });
     const userSessionId = h.addUserSession();
     const done = collectUntil(h.bus, (event) => event.type === "flow.result", 20_000);
@@ -162,10 +169,9 @@ describe("seat worktree isolation (fake SDK + real git)", () => {
       const append = typeof opts.systemPrompt === "object" && !Array.isArray(opts.systemPrompt) ? opts.systemPrompt.append ?? "" : "";
       yield initMessage(append.includes("sole coordinator") ? "coord-1" : "dev-1");
       if (append.includes("sole coordinator")) {
-        yield successMessage({ handoff: handoff("done", "completed"), to: "main", category: "final", checkpointReadiness: "stable" });
-      } else {
-        yield successMessage({});
+        yield sendMessageUse("send-1", "main", envelope("done", "completed", "final"));
       }
+      yield successMessage();
     }, { hostOverrides: { getWorkspaceRoot: () => repo, worktrees: new WorktreeManager({ dataDir }) } });
     (h.config as { seatWorktrees: boolean }).seatWorktrees = false;
     const userSessionId = h.addUserSession();
