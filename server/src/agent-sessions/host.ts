@@ -33,6 +33,7 @@ import type { HandoffService } from "../handoffs/service.ts";
 import { CheckpointClosingSchema, HandoffDraftSchema } from "../handoffs/schema.ts";
 import { evaluateCheckpointDraft } from "../handoffs/checkpoint-gate.ts";
 import { COORDINATOR_SEAT, seatOfSpawnName } from "./spawn-names.ts";
+import { peerNameOf } from "./peer-names.ts";
 
 export const ORCHESTRATOR_SEAT = "orchestrator";
 export const MAIN_RECIPIENT = "main";
@@ -605,7 +606,9 @@ export class AgentSessionHost {
   #participant(agentSessionId: string, name: string, role: "orchestrator" | "agent", profile: AgentProfile, extra: string, model: string | undefined, ownership: string[], ord: number, createdAt: string): ParticipantRow {
     const instructions = [profile.instructions, extra.trim()].filter(Boolean).join("\n\nAssigned role context:\n");
     return { agentSessionId, name, role, preset: profile.id, instructions, model: model ?? profile.model ?? null,
-      profileId: profile.id, profileSnapshot: profile, ownership, sdkSessionId: null, generation: 0, turnCount: 0,
+      profileId: profile.id, profileSnapshot: profile, ownership, sdkSessionId: null,
+      peerName: peerNameOf(this.#deps.config?.peerNamePrefix ?? "console-", agentSessionId, name), lastActiveAt: null,
+      generation: 0, turnCount: 0,
       contextTokens: 0, memory: "", latestHandoffId: null, checkpointReady: true, pendingTurnSeq: 0, lastSeenSeq: 0,
       worktreePath: null, worktreeBaseCommit: null, worktreeBranch: null, attemptGroupId: null, attemptRole: null, ord, createdAt };
   }

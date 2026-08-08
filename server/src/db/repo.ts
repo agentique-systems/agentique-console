@@ -16,6 +16,7 @@ import type { Db } from "./client.ts";
 import {
   agentSessions,
   attemptGroups,
+  crons,
   eventArtifacts,
   handoffRecords,
   mailboxDeliveries,
@@ -46,6 +47,7 @@ export type MailboxDeliveryRow = typeof mailboxDeliveries.$inferSelect;
 export type UsageSampleRow = typeof usageSamples.$inferSelect;
 export type HandoffRecordRow = typeof handoffRecords.$inferSelect;
 export type AttemptGroupRow = typeof attemptGroups.$inferSelect;
+export type CronRow = typeof crons.$inferSelect;
 
 export function toWireAgentSession(
   row: AgentSessionRow,
@@ -150,6 +152,7 @@ export class Repo {
     agentSessionId: string;
     recipient: string;
     category: MailboxDeliveryRow["category"];
+    transport?: MailboxDeliveryRow["transport"];
     dedupeKey?: string;
   }): { message: MessageRow; delivery: MailboxDeliveryRow } {
     const run = this.#sqlite.transaction(() => {
@@ -163,6 +166,7 @@ export class Repo {
         recipient: input.recipient,
         category: input.category,
         status: "queued",
+        transport: input.transport ?? "console",
         dedupeKey: input.dedupeKey ?? null,
         deliveredAt: null,
         acknowledgedAt: null,
@@ -180,6 +184,7 @@ export class Repo {
     agentSessionId: string;
     recipient: string;
     category: MailboxDeliveryRow["category"];
+    transport?: MailboxDeliveryRow["transport"];
     handoff: HandoffRecordRow;
     summary: HandoffSummary;
     dedupeKey?: string;
@@ -255,8 +260,31 @@ export class Repo {
     return this.#db.select().from(messages).where(eq(messages.id, id)).get();
   }
 
-  patchDelivery(id: string, patch: Partial<Pick<MailboxDeliveryRow, "status" | "deliveredAt" | "acknowledgedAt">>): void {
+  patchDelivery(id: string, patch: Partial<Pick<MailboxDeliveryRow, "status" | "transport" | "deliveredAt" | "acknowledgedAt">>): void {
     this.#db.update(mailboxDeliveries).set(patch).where(eq(mailboxDeliveries.id, id)).run();
+  }
+
+  /** Journal rows a (re)spawning recipient must be handed again: not yet consumed. */
+  listUnackedDeliveries(agentSessionId: string, recipient: string): MailboxDeliveryRow[] {
+    return this.#db.select().from(mailboxDeliveries)
+      .where(and(
+        eq(mailboxDeliveries.agentSessionId, agentSessionId),
+        eq(mailboxDeliveries.recipient, recipient),
+        inArray(mailboxDeliveries.status, ["queued", "delivered"]),
+      ))
+      .orderBy(asc(mailboxDeliveries.createdAt)).all();
+  }
+
+  insertCron(row: CronRow): void {
+    this.#db.insert(crons).values(row).run();
+  }
+  listCrons(userSessionId: string): CronRow[] {
+    return this.#db.select().from(crons)
+      .where(and(eq(crons.userSessionId, userSessionId), eq(crons.status, "active")))
+      .orderBy(asc(crons.createdAt)).all();
+  }
+  patchCron(id: string, patch: Partial<Pick<CronRow, "schedule" | "prompt" | "status">>): void {
+    this.#db.update(crons).set({ ...patch, updatedAt: nowIso() }).where(eq(crons.id, id)).run();
   }
 
   requeueUnacknowledgedDeliveries(): number {
@@ -481,6 +509,7 @@ export class Repo {
       "turnCount" | "contextTokens" | "profileSnapshot" | "profileId"
       | "memory" | "latestHandoffId" | "checkpointReady"
       | "worktreePath" | "worktreeBaseCommit" | "worktreeBranch" | "attemptGroupId" | "attemptRole"
+      | "peerName" | "lastActiveAt"
     >>,
   ): void {
     this.#db

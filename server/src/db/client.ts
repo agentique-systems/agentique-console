@@ -48,10 +48,14 @@ function migrateAdditiveColumns(sqlite: Database.Database): void {
     ["worktree_branch", "TEXT"],
     ["attempt_group_id", "TEXT"],
     ["attempt_role", "TEXT"],
+    ["peer_name", "TEXT NOT NULL DEFAULT ''"],
+    ["last_active_at", "TEXT"],
   ];
   for (const [name, ddl] of additions) {
     if (!columns.has(name)) sqlite.exec(`ALTER TABLE participants ADD COLUMN ${name} ${ddl}`);
   }
+  const mailboxColumns = new Set(sqlite.prepare("pragma table_info(mailbox_deliveries)").all().map((row) => (row as { name: string }).name));
+  if (!mailboxColumns.has("transport")) sqlite.exec("ALTER TABLE mailbox_deliveries ADD COLUMN transport TEXT NOT NULL DEFAULT 'console'");
   const usageColumns = new Set(sqlite.prepare("pragma table_info(usage_samples)").all().map((row) => (row as { name: string }).name));
   for (const name of ["uncached_input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"]) {
     if (!usageColumns.has(name)) sqlite.exec(`ALTER TABLE usage_samples ADD COLUMN ${name} INTEGER NOT NULL DEFAULT 0`);

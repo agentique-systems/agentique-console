@@ -54,6 +54,8 @@ CREATE TABLE IF NOT EXISTS participants (
   profile_snapshot TEXT NOT NULL DEFAULT '{}',
   ownership TEXT NOT NULL DEFAULT '[]',
   sdk_session_id TEXT,
+  peer_name TEXT NOT NULL DEFAULT '',
+  last_active_at TEXT,
   generation INTEGER NOT NULL DEFAULT 0,
   turn_count INTEGER NOT NULL DEFAULT 0,
   context_tokens INTEGER NOT NULL DEFAULT 0,
@@ -180,6 +182,7 @@ CREATE TABLE IF NOT EXISTS mailbox_deliveries (
   recipient TEXT NOT NULL,
   category TEXT NOT NULL CHECK (category IN ('assignment','update','milestone','failure','final','decision')),
   status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued','delivered','acknowledged','cancelled')),
+  transport TEXT NOT NULL DEFAULT 'console' CHECK (transport IN ('console','peer')),
   dedupe_key TEXT,
   delivered_at TEXT,
   acknowledged_at TEXT,
@@ -187,6 +190,19 @@ CREATE TABLE IF NOT EXISTS mailbox_deliveries (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS mailbox_message_recipient ON mailbox_deliveries(message_id, recipient);
 CREATE INDEX IF NOT EXISTS mailbox_recipient_status ON mailbox_deliveries(agent_session_id, recipient, status);
+
+CREATE TABLE IF NOT EXISTS crons (
+  id TEXT PRIMARY KEY,
+  user_session_id TEXT NOT NULL,
+  sdk_cron_id TEXT NOT NULL,
+  schedule TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  one_shot INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','deleted')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS crons_session ON crons(user_session_id, status);
 
 CREATE TABLE IF NOT EXISTS event_artifacts (
   id TEXT PRIMARY KEY,

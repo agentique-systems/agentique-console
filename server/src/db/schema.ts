@@ -86,6 +86,10 @@ export const participants = sqliteTable(
       .default({}),
     ownership: text("ownership", { mode: "json" }).$type<string[]>().notNull().default([]),
     sdkSessionId: text("sdk_session_id"),
+    /** Machine-registry address (CLAUDE_CODE_SESSION_NAME); stable across rotations. */
+    peerName: text("peer_name").notNull().default(""),
+    /** Last turn activity; park/reap bookkeeping that survives restarts. */
+    lastActiveAt: text("last_active_at"),
     generation: integer("generation").notNull().default(0),
     turnCount: integer("turn_count").notNull().default(0),
     contextTokens: integer("context_tokens").notNull().default(0),
@@ -187,6 +191,23 @@ export const interactions = sqliteTable("interactions", {
   resolvedAt: text("resolved_at"),
 });
 
+/** Mirror of native CronCreate jobs; the CLI's schedule is authoritative. */
+export const crons = sqliteTable(
+  "crons",
+  {
+    id: text("id").primaryKey(),
+    userSessionId: text("user_session_id").notNull(),
+    sdkCronId: text("sdk_cron_id").notNull(),
+    schedule: text("schedule").notNull(),
+    prompt: text("prompt").notNull(),
+    oneShot: integer("one_shot", { mode: "boolean" }).notNull().default(false),
+    status: text("status", { enum: ["active", "deleted"] }).notNull().default("active"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (t) => [index("crons_session").on(t.userSessionId, t.status)],
+);
+
 export const tasks = sqliteTable(
   "tasks",
   {
@@ -283,6 +304,8 @@ export const mailboxDeliveries = sqliteTable(
     status: text("status", {
       enum: ["queued", "delivered", "acknowledged", "cancelled"],
     }).notNull().default("queued"),
+    /** Which carrier moved it: native peer socket, or a console input push. */
+    transport: text("transport", { enum: ["console", "peer"] }).notNull().default("console"),
     dedupeKey: text("dedupe_key"),
     deliveredAt: text("delivered_at"),
     acknowledgedAt: text("acknowledged_at"),
