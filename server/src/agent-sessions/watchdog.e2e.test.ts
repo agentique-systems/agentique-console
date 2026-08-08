@@ -4,7 +4,7 @@
  * failure handoff to the coordinator. Operator aborts stay "aborted".
  */
 import { describe, expect, it } from "vitest";
-import { initMessage, sendMessageUse, successMessage, toolResultMessage, toolUseMessage } from "../sdk/fake.ts";
+import { initMessage, sendHandoffUse, successMessage, toolResultMessage, toolUseMessage } from "../sdk/fake.ts";
 import { collectUntil, makeDelegationHarness } from "../test-helpers.ts";
 
 const handoff = (action: string, status: "pending" | "completed") => ({ core: { schemaVersion: 1 as const, taskId: null, status, risk: "low" as const,
@@ -26,8 +26,8 @@ function makeWatchdogHarness(scoutTurn: ScoutTurn) {
       coordinatorTurns += 1;
       yield initMessage(`coord-${coordinatorTurns}`);
       yield coordinatorTurns === 1
-        ? sendMessageUse("send-1", "scout", envelope("inspect", "pending", "assignment"))
-        : sendMessageUse(`send-${coordinatorTurns}`, "main", envelope("wrapped up after failure", "completed", "final"));
+        ? sendHandoffUse("send-1", "scout", { action: "inspect", status: "pending", category: "assignment" })
+        : sendHandoffUse(`send-${coordinatorTurns}`, "main", { action: "wrapped up after failure", status: "completed", category: "final" });
       yield successMessage();
     } else {
       yield* scoutTurn();
@@ -51,7 +51,7 @@ describe("seat turn watchdog (fake SDK)", () => {
         yield toolUseMessage(`grep-${i}`, "Grep", { pattern: "needle", path: "src" });
         yield toolResultMessage(`grep-${i}`, "no matches");
       }
-      yield sendMessageUse("scout-close", "orchestrator", envelope("never reached", "completed", "milestone"));
+      yield sendHandoffUse("scout-close", "orchestrator", { action: "never reached", status: "completed", category: "milestone" });
       yield successMessage();
     });
     const { created, events } = await runFlow(h);
@@ -74,7 +74,7 @@ describe("seat turn watchdog (fake SDK)", () => {
         yield toolUseMessage(`cmd-${i}`, "Read", { file_path: `src/${i}.ts` });
         yield toolResultMessage(`cmd-${i}`, "boom", true);
       }
-      yield sendMessageUse("scout-close", "orchestrator", envelope("never reached", "completed", "milestone"));
+      yield sendHandoffUse("scout-close", "orchestrator", { action: "never reached", status: "completed", category: "milestone" });
       yield successMessage();
     });
     const { events } = await runFlow(h);
@@ -96,7 +96,7 @@ describe("seat turn watchdog (fake SDK)", () => {
         yield toolUseMessage(`b-${i}`, "Grep", { pattern: "needle" });
         yield toolResultMessage(`b-${i}`, "no matches");
       }
-      yield sendMessageUse("scout-close", "orchestrator", envelope("all seen", "completed", "milestone"));
+      yield sendHandoffUse("scout-close", "orchestrator", { action: "all seen", status: "completed", category: "milestone" });
       yield successMessage();
     });
     const { events } = await runFlow(h);
@@ -112,7 +112,7 @@ describe("seat turn watchdog (fake SDK)", () => {
         yield toolUseMessage(`c-${i}`, "Read", { file_path: `src/${i}.ts` });
         yield toolResultMessage(`c-${i}`, i % 2 === 0 ? "boom" : "fine", i % 2 === 0);
       }
-      yield sendMessageUse("scout-close", "orchestrator", envelope("survived", "completed", "milestone"));
+      yield sendHandoffUse("scout-close", "orchestrator", { action: "survived", status: "completed", category: "milestone" });
       yield successMessage();
     });
     const { events } = await runFlow(h);

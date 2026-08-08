@@ -15,6 +15,20 @@ import path from "node:path";
 const GIT_IDENTITY = ["-c", "user.name=Agentique Console", "-c", "user.email=console@agentique.invalid"];
 const GIT_TIMEOUT_MS = 60_000;
 
+/**
+ * The sandbox materializes empty placeholder files for host dotfiles it masks
+ * (`.bashrc`, `.idea`, `.claude/settings.json`, …). An unscoped `git add -A`
+ * swept 21 of them into the operator's repo in the db-live-1 run, so seat
+ * commits exclude them unless the seat's declared ownership names them.
+ */
+const SANDBOX_STUB_EXCLUDES = [
+  ":(exclude,glob).claude/**", ":(exclude).claude",
+  ":(exclude).bashrc", ":(exclude).bash_profile", ":(exclude).profile",
+  ":(exclude).zshrc", ":(exclude).zprofile",
+  ":(exclude).gitconfig", ":(exclude).gitmodules", ":(exclude).ripgreprc",
+  ":(exclude).mcp.json", ":(exclude).idea", ":(exclude).vscode",
+];
+
 export interface WorktreeRef {
   path: string;
   branch: string;
@@ -83,10 +97,22 @@ export class WorktreeManager {
     return { path: worktreePath, branch, baseCommit };
   }
 
-  /** git add -A && commit on the worktree's branch; null when nothing changed. */
-  commitAll(worktreePath: string, message: string): string | null {
-    this.#git(worktreePath, ["add", "-A"]);
-    if (this.#git(worktreePath, ["status", "--porcelain"]).trim() === "") return null;
+  /**
+   * Stage and commit the seat's work; null when nothing changed. Sandbox
+   * placeholder dotfiles are excluded unless `owns` explicitly names a path
+   * under them — a seat that legitimately owns `.claude/settings.json` still
+   * gets it committed, but no seat leaks the harness's scaffolding.
+   */
+  commitAll(worktreePath: string, message: string, owns: string[] = []): string | null {
+    const claimsExcluded = owns.some((scope) => SANDBOX_STUB_EXCLUDES.some((rule) => {
+      const bare = rule.replace(/^:\((?:exclude,glob|exclude)\)/, "").replace(/\/\*\*$/, "");
+      return scope === bare || scope.startsWith(`${bare}/`);
+    }));
+    this.#git(worktreePath, ["add", "-A", "--", ".", ...(claimsExcluded ? [] : SANDBOX_STUB_EXCLUDES)]);
+    // Must test the INDEX, not the worktree: excluded stubs stay permanently
+    // untracked, so `status --porcelain` is never empty once they exist and a
+    // stub-only turn would try (and fail) to commit nothing.
+    if (this.#git(worktreePath, ["diff", "--cached", "--name-only"]).trim() === "") return null;
     this.#git(worktreePath, [...GIT_IDENTITY, "commit", "-m", message, "--no-gpg-sign"]);
     return this.#git(worktreePath, ["rev-parse", "HEAD"]).trim();
   }

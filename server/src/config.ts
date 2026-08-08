@@ -52,7 +52,30 @@ export interface Config {
    * atomic merge-on-completion. CONSOLE_SEAT_WORKTREES=0 disables.
    */
   seatWorktrees: boolean;
+  /**
+   * Hosts sandboxed commands may reach, workspace-wide. Profiles narrow this
+   * or opt out entirely. Nothing here is a security boundary on its own — the
+   * filesystem scope is — it exists so a coding agent can install and fetch
+   * what the work actually needs. CONSOLE_ALLOWED_DOMAINS overrides
+   * (comma-separated; empty string means fully offline).
+   */
+  allowedDomains: string[];
 }
+
+/**
+ * Package registries and the CDNs their docs point at. Deliberately not
+ * "everything": egress stays enumerable, and an operator who needs more sets
+ * CONSOLE_ALLOWED_DOMAINS. The db-live-1 run failed its own brief because this
+ * list was effectively empty and nothing said so.
+ */
+const DEFAULT_ALLOWED_DOMAINS = [
+  "registry.npmjs.org", "*.npmjs.org",
+  "pypi.org", "*.pythonhosted.org",
+  "crates.io", "*.crates.io",
+  "proxy.golang.org", "sum.golang.org",
+  "github.com", "*.githubusercontent.com", "codeload.github.com",
+  "unpkg.com", "cdn.jsdelivr.net", "esm.sh", "cdnjs.cloudflare.com",
+];
 
 function parseRoots(
   configured: string | undefined,
@@ -98,5 +121,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     contextTokenLimit: Number(env.CONSOLE_CONTEXT_TOKEN_LIMIT ?? 120_000),
     contextTurnLimit: Number(env.CONSOLE_CONTEXT_TURN_LIMIT ?? 30),
     seatWorktrees: env.CONSOLE_SEAT_WORKTREES !== "0",
+    allowedDomains: env.CONSOLE_ALLOWED_DOMAINS === undefined
+      ? DEFAULT_ALLOWED_DOMAINS
+      : env.CONSOLE_ALLOWED_DOMAINS.split(",").map((entry) => entry.trim()).filter((entry) => entry !== ""),
   };
 }

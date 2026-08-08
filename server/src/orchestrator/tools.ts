@@ -201,5 +201,5 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
 
   ];
 
-  return sdk.createSdkMcpServer({ name: "console", version: "1.0.0", tools });
+  return sdk.createSdkMcpServer({ name: "console", version: "1.0.0", tools, alwaysLoad: true });
 }

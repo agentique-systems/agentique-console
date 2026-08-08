@@ -227,12 +227,24 @@ export class Repo {
     return this.#db.select().from(handoffRecords).where(eq(handoffRecords.id, id)).get();
   }
 
-  latestHandoff(input: { userSessionId: string; agentSessionId?: string | null; participant?: string }): HandoffRecordRow | undefined {
+  /**
+   * `participant` matches the RECIPIENT — "the last handoff addressed to X".
+   * `sender` matches the AUTHOR — "the last thing X itself reported". Rotation
+   * recovery must use `sender`: a seat's inheritance is its own last report,
+   * never the last message someone else sent it.
+   */
+  latestHandoff(input: { userSessionId: string; agentSessionId?: string | null; participant?: string; sender?: string; excludeCheckpoints?: boolean }): HandoffRecordRow | undefined {
     const filters = [eq(handoffRecords.userSessionId, input.userSessionId)];
     if (input.agentSessionId === null) filters.push(sql`${handoffRecords.agentSessionId} is null`);
     else if (input.agentSessionId !== undefined) filters.push(eq(handoffRecords.agentSessionId, input.agentSessionId));
     if (input.participant !== undefined) filters.push(eq(handoffRecords.recipient, input.participant));
-    return this.#db.select().from(handoffRecords).where(and(...filters)).orderBy(desc(handoffRecords.createdAt)).get();
+    if (input.sender !== undefined) filters.push(eq(handoffRecords.sender, input.sender));
+    if (input.excludeCheckpoints === true) filters.push(eq(handoffRecords.checkpoint, false));
+    // rowid breaks createdAt ties: handoffs written in the same millisecond are
+    // ordinary (an ack and its follow-up), and "latest" must not be a coin flip
+    // when a rotation checkpoint depends on it.
+    return this.#db.select().from(handoffRecords).where(and(...filters))
+      .orderBy(desc(handoffRecords.createdAt), desc(sql`rowid`)).get();
   }
 
   hasDurableReference(kind: "journal" | "artifact" | "task", ref: string): boolean {

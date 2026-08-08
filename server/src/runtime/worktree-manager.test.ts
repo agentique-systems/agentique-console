@@ -29,6 +29,42 @@ describe("WorktreeManager", () => {
     expect(() => manager.addWorktree(plain, "as_1", "g-1", "g/1")).toThrow(/requires the workspace to be a git repository/);
   });
 
+  it("keeps sandbox placeholder dotfiles out of the seat's commit", () => {
+    // The sandbox materializes empty stand-ins for masked host dotfiles. An
+    // unscoped `git add -A` swept 21 of them into the operator's repo in the
+    // db-live-1 run, alongside the single file the seat actually wrote.
+    const { repo, manager } = makeRepo();
+    const ref = manager.addWorktree(repo, "as_1", "g-1", "g/1");
+    for (const stub of [".bashrc", ".zshrc", ".gitconfig", ".mcp.json", ".idea", ".vscode", ".ripgreprc"]) {
+      fs.writeFileSync(path.join(ref.path, stub), "");
+    }
+    fs.mkdirSync(path.join(ref.path, ".claude"), { recursive: true });
+    fs.writeFileSync(path.join(ref.path, ".claude", "settings.json"), "");
+    fs.mkdirSync(path.join(ref.path, "src"), { recursive: true });
+    fs.writeFileSync(path.join(ref.path, "src", "game.js"), "export const start = () => {};\n");
+
+    const commit = manager.commitAll(ref.path, "seat renderer: reported completed", ["src/game.js"]);
+    expect(commit).not.toBeNull();
+    const tracked = git(ref.path, "ls-tree", "-r", "HEAD", "--name-only").trim().split("\n");
+    expect(tracked).toContain("src/game.js");
+    // Only what the base commit already carried, plus the seat's own file.
+    expect(tracked.filter((file) => file.startsWith("."))).toEqual([".gitignore"]);
+    expect(tracked).toHaveLength(3);
+
+    // Stub-only churn must read as "nothing to land", not as an empty commit.
+    fs.writeFileSync(path.join(ref.path, ".profile"), "");
+    expect(manager.commitAll(ref.path, "stubs only", ["src/game.js"])).toBeNull();
+  });
+
+  it("still commits an excluded path when the seat explicitly owns it", () => {
+    const { repo, manager } = makeRepo();
+    const ref = manager.addWorktree(repo, "as_2", "g-2", "g/2");
+    fs.mkdirSync(path.join(ref.path, ".claude"), { recursive: true });
+    fs.writeFileSync(path.join(ref.path, ".claude", "settings.json"), '{"model":"opus"}\n');
+    expect(manager.commitAll(ref.path, "config work", [".claude/settings.json"])).not.toBeNull();
+    expect(git(ref.path, "ls-tree", "-r", "HEAD", "--name-only")).toContain(".claude/settings.json");
+  });
+
   it("isolates edits, honors .gitignore in capture, and commits identity-free", () => {
     const { repo, manager } = makeRepo();
     const ref = manager.addWorktree(repo, "as_1", "g-1", "g/1");

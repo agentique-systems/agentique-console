@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from "vitest";
 import type { HandoffDraft } from "@agentique-console/shared";
-import { initMessage, sendMessageUse, successMessage } from "../sdk/fake.ts";
+import { initMessage, sendHandoffUse, successMessage } from "../sdk/fake.ts";
 import { collectUntil, makeDelegationHarness } from "../test-helpers.ts";
 
 const handoff = (action: string, status: "pending" | "completed") => ({ core: { schemaVersion: 1 as const, taskId: null, status, risk: "low" as const,
@@ -42,11 +42,11 @@ function makeGateHarness(checkpointDrafts: HandoffDraft[]) {
     if (coordinator) {
       coordinatorTurns += 1;
       yield coordinatorTurns === 1
-        ? sendMessageUse("send-1", "scout", envelope("inspect", "pending", "assignment"))
-        : sendMessageUse(`send-${coordinatorTurns}`, "main", envelope("done", "completed", "final"));
+        ? sendHandoffUse("send-1", "scout", { action: "inspect", status: "pending", category: "assignment" })
+        : sendHandoffUse(`send-${coordinatorTurns}`, "main", { action: "done", status: "completed", category: "final" });
       yield successMessage();
     } else {
-      yield sendMessageUse("scout-close", "orchestrator", envelope("looked", "completed", "milestone"));
+      yield sendHandoffUse("scout-close", "orchestrator", { action: "looked", status: "completed", category: "milestone" });
       yield successMessage();
     }
   });

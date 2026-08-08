@@ -40,8 +40,15 @@ export type TurnEvent =
    * persisted; it exists so a slow turn reads as working rather than stuck.
    */
   | { kind: "notice"; text: string }
-  | { kind: "result"; output: unknown; resumeId?: string; costUsd?: number; inputTokens?: number; uncachedInputTokens?: number; cacheCreationInputTokens?: number; cacheReadInputTokens?: number; outputTokens?: number; modelId?: string; apiDurationMs?: number; sdkDurationMs?: number; stopReason?: string }
-  | { kind: "error"; message: string; aborted: boolean; inputTokens?: number; uncachedInputTokens?: number; cacheCreationInputTokens?: number; cacheReadInputTokens?: number; outputTokens?: number; costUsd?: number; modelId?: string; apiDurationMs?: number; sdkDurationMs?: number; stopReason?: string }
+  /**
+   * Context-window occupancy after one API call — `input + cache_creation +
+   * cache_read` from an assistant message's own usage. The consumer keeps the
+   * running max as the rotation signal. Emitted per assistant message, never
+   * persisted.
+   */
+  | { kind: "context"; occupancyTokens: number }
+  | { kind: "result"; output: unknown; resumeId?: string; cumulativeCostUsd?: number; inputTokens?: number; uncachedInputTokens?: number; cacheCreationInputTokens?: number; cacheReadInputTokens?: number; outputTokens?: number; modelId?: string; cumulativeApiDurationMs?: number; sdkDurationMs?: number; stopReason?: string }
+  | { kind: "error"; message: string; aborted: boolean; inputTokens?: number; uncachedInputTokens?: number; cacheCreationInputTokens?: number; cacheReadInputTokens?: number; outputTokens?: number; cumulativeCostUsd?: number; modelId?: string; cumulativeApiDurationMs?: number; sdkDurationMs?: number; stopReason?: string }
   /**
    * The SDK's authoritative turn-over signal (session_state_changed → idle).
    * A persistent lane settles its open turn on this even when the result
@@ -152,6 +159,11 @@ export function mapSdkMessage(message: SdkMessage): TurnEvent[] {
 
     case "assistant": {
       const events: TurnEvent[] = [];
+      const usage = message.message?.usage;
+      if (usage !== undefined) {
+        const occupancyTokens = (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0);
+        if (occupancyTokens > 0) events.push({ kind: "context", occupancyTokens });
+      }
       for (const block of message.message?.content ?? []) {
         if (
           block.type === "text" &&
@@ -213,7 +225,10 @@ export function mapSdkMessage(message: SdkMessage): TurnEvent[] {
     }
 
     case "result": {
-      if (message.subtype === "success") {
+      // A CLI-level failure is reported as subtype "success" with is_error set,
+      // and carries zeroed usage. Treating it as a result recorded junk usage
+      // rows and hid real failures behind a "completed" turn.
+      if (message.subtype === "success" && message.is_error !== true) {
         return [
           {
             kind: "result",
@@ -223,7 +238,7 @@ export function mapSdkMessage(message: SdkMessage): TurnEvent[] {
               : { resumeId: message.session_id }),
             ...(message.total_cost_usd === undefined
               ? {}
-              : { costUsd: message.total_cost_usd }),
+              : { cumulativeCostUsd: message.total_cost_usd }),
             ...((message.usage?.input_tokens ?? message.usage?.cache_creation_input_tokens ?? message.usage?.cache_read_input_tokens) === undefined ? {} : {
               inputTokens: (message.usage?.input_tokens ?? 0) + (message.usage?.cache_creation_input_tokens ?? 0) + (message.usage?.cache_read_input_tokens ?? 0),
               uncachedInputTokens: message.usage?.input_tokens ?? 0,
@@ -250,21 +265,26 @@ export function mapSdkMessage(message: SdkMessage): TurnEvent[] {
   }
 }
 
-function usageFields(message: SdkMessage): { inputTokens?: number; uncachedInputTokens?: number; cacheCreationInputTokens?: number; cacheReadInputTokens?: number; outputTokens?: number; costUsd?: number; modelId?: string; apiDurationMs?: number; sdkDurationMs?: number; stopReason?: string } {
+function usageFields(message: SdkMessage): { inputTokens?: number; uncachedInputTokens?: number; cacheCreationInputTokens?: number; cacheReadInputTokens?: number; outputTokens?: number; cumulativeCostUsd?: number; modelId?: string; cumulativeApiDurationMs?: number; sdkDurationMs?: number; stopReason?: string } {
   const hasInput = message.usage?.input_tokens !== undefined || message.usage?.cache_creation_input_tokens !== undefined || message.usage?.cache_read_input_tokens !== undefined;
   return {
     ...(hasInput ? { inputTokens: (message.usage?.input_tokens ?? 0) + (message.usage?.cache_creation_input_tokens ?? 0) + (message.usage?.cache_read_input_tokens ?? 0),
       uncachedInputTokens: message.usage?.input_tokens ?? 0, cacheCreationInputTokens: message.usage?.cache_creation_input_tokens ?? 0,
       cacheReadInputTokens: message.usage?.cache_read_input_tokens ?? 0 } : {}),
     ...(message.usage?.output_tokens === undefined ? {} : { outputTokens: message.usage.output_tokens }),
-    ...(message.total_cost_usd === undefined ? {} : { costUsd: message.total_cost_usd }),
+    ...(message.total_cost_usd === undefined ? {} : { cumulativeCostUsd: message.total_cost_usd }),
     ...resultTelemetry(message),
   };
 }
 
-function resultTelemetry(message: SdkMessage): { modelId?: string; apiDurationMs?: number; sdkDurationMs?: number; stopReason?: string } {
+/**
+ * `total_cost_usd` and `duration_api_ms` are CUMULATIVE per provider session —
+ * each result restates the running total. The names carry that so consumers
+ * are forced to delta rather than sum (summing overstated db-live-1 by 25%).
+ */
+function resultTelemetry(message: SdkMessage): { modelId?: string; cumulativeApiDurationMs?: number; sdkDurationMs?: number; stopReason?: string } {
   const modelId = message.modelUsage ? Object.entries(message.modelUsage).sort((a, b) => (b[1].outputTokens ?? 0) - (a[1].outputTokens ?? 0))[0]?.[0] : message.model;
-  return { ...(modelId ? { modelId } : {}), ...(message.duration_api_ms === undefined ? {} : { apiDurationMs: message.duration_api_ms }), ...(message.duration_ms === undefined ? {} : { sdkDurationMs: message.duration_ms }), ...(message.stop_reason === undefined ? {} : { stopReason: message.stop_reason }) };
+  return { ...(modelId ? { modelId } : {}), ...(message.duration_api_ms === undefined ? {} : { cumulativeApiDurationMs: message.duration_api_ms }), ...(message.duration_ms === undefined ? {} : { sdkDurationMs: message.duration_ms }), ...(message.stop_reason === undefined ? {} : { stopReason: message.stop_reason }) };
 }
 
 /** Stamps subagent-parented events with their parent tool_use id. */

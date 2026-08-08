@@ -31,6 +31,13 @@ export interface SdkMessage {
       content?: unknown;
       is_error?: boolean;
     }[];
+    /**
+     * Per-API-call usage on an assistant message. `input + cache_creation +
+     * cache_read` is that ONE request's prompt size — i.e. actual context
+     * occupancy. The result message's `usage` is the turn-wide SUM and is not
+     * an occupancy measure; do not use it to decide rotation.
+     */
+    usage?: { input_tokens?: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number; output_tokens?: number };
   };
   /** B3: user-message provenance — peer = an in-process agent's SendMessage. */
   origin?: {
@@ -42,6 +49,9 @@ export interface SdkMessage {
   };
   // result fields
   structured_output?: unknown;
+  /** A "success" result may still carry is_error:true when the CLI itself failed. */
+  is_error?: boolean;
+  /** CUMULATIVE across turns in a streaming session — never sum these. */
   total_cost_usd?: number;
   num_turns?: number;
   terminal_reason?: string;
@@ -133,6 +143,13 @@ export interface SdkMcpServerConfig {
   name: string;
   version?: string;
   tools: unknown[];
+  /**
+   * Keep this server's tools in the prompt instead of deferring them behind
+   * ToolSearch. The console already decided a seat's tools via its profile;
+   * making it rediscover them costs a full API round-trip each time (21 of them
+   * in the db-live-1 run, ~10% of its input tokens).
+   */
+  alwaysLoad?: boolean;
 }
 
 /** The injectable module surface: real SDK in production, fake in tests/dev. */

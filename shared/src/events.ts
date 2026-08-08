@@ -212,6 +212,34 @@ export interface HandoffConsumedPayload { handoffId: string; participant: string
 export interface HandoffRetrievedPayload { handoffId: string; section: "core" | "extension"; bytes: number; nextCursor: string | null; }
 export interface HandoffDiscrepancyPayload { handoffId: string; reporter: string; claim: string; evidence: string; }
 export interface HandoffCheckpointFailedPayload { participant: string; reason: string; threshold: "soft" | "hard"; degraded: boolean; checkFailures?: string[]; }
+/**
+ * The checkpoint request never reached the model (a provider 4xx = a console
+ * bug). Distinct from `failed` because the response differs: rotation is
+ * abandoned and the seat keeps its working context rather than inheriting a
+ * reconstruction. A run with any of these has a console defect, not a weak model.
+ */
+export interface HandoffCheckpointTransportFailedPayload { participant: string; reason: string; threshold: "soft" | "hard"; }
+
+/**
+ * A `final` reached the operator with work still outstanding. The conditions
+ * ride along with the report rather than suppressing it — the operator can
+ * judge an incomplete result, but cannot judge silence.
+ */
+export interface HandoffFinalCaveatsPayload { agentSessionId: string; sender: string; caveats: string[]; }
+
+/**
+ * The Console closed an operator obligation the coordinator left open. Any
+ * occurrence is a coordination defect worth reading — the run produced results
+ * that would otherwise have reached nobody.
+ */
+export interface AgentSessionUnreportedPayload { agentSessionId: string; seatReports: number; hadCoordinatorReport: boolean; }
+
+/**
+ * Two seats landed different versions of one dependency. Disjoint file
+ * ownership prevents collisions on files, not on shared facts — and neither
+ * seat can see the other's diff.
+ */
+export interface DependencyDriftPayload { agentSessionId: string; dependency: string; versions: { seat: string; version: string }[]; }
 
 /** The host interrupted a seat turn that was repeating itself without progress. */
 export interface AgentWatchdogPayload {
@@ -237,6 +265,30 @@ export interface SendDeniedPayload {
   to: string;
   kind: "missing_to" | "unknown_recipient" | "invalid_json" | "invalid_envelope" | "route" | "wake_timeout" | "middleware_error";
   reason: string;
+}
+
+/** Envelope repairs the middleware applied instead of denying. */
+export interface SendCoercedPayload {
+  sender: string;
+  senderScope: "main" | "seat";
+  agentSessionId?: string;
+  to: string;
+  coercions: string[];
+}
+
+/**
+ * The message was carried, but its envelope could not be parsed or repaired,
+ * so it landed as unstructured prose. Delivery is unconditional once the
+ * address resolves; this is the quality signal that replaces the lost-message
+ * failure mode it used to have.
+ */
+export interface SendDegradedPayload {
+  sender: string;
+  senderScope: "main" | "seat";
+  agentSessionId?: string;
+  to: string;
+  reason: string;
+  bytes: number;
 }
 
 /** Governance: the orchestrator lane's canUseTool denied a tool call. */
@@ -455,9 +507,15 @@ export type ConsoleEvent = Base &
     | { type: "handoff.retrieved"; payload: HandoffRetrievedPayload }
     | { type: "handoff.discrepancy"; payload: HandoffDiscrepancyPayload }
     | { type: "handoff.checkpoint.failed"; payload: HandoffCheckpointFailedPayload }
+    | { type: "handoff.checkpoint.transport_failed"; payload: HandoffCheckpointTransportFailedPayload }
+    | { type: "handoff.final.caveats"; payload: HandoffFinalCaveatsPayload }
+    | { type: "agent_session.unreported"; payload: AgentSessionUnreportedPayload }
+    | { type: "agent_session.dependency_drift"; payload: DependencyDriftPayload }
     | { type: "handoff.checkpoint.retried"; payload: HandoffCheckpointRetriedPayload }
     | { type: "agent_session.watchdog"; payload: AgentWatchdogPayload }
     | { type: "governance.send.denied"; payload: SendDeniedPayload }
+    | { type: "governance.send.coerced"; payload: SendCoercedPayload }
+    | { type: "governance.send.degraded"; payload: SendDegradedPayload }
     | { type: "governance.tool.denied"; payload: ToolDeniedPayload }
     | { type: "agent_session.attempt_group.started"; payload: AttemptGroupStartedPayload }
     | { type: "agent_session.attempt.completed"; payload: AttemptCompletedPayload }

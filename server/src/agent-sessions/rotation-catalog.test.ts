@@ -4,7 +4,7 @@
  * the configured 120K limit binding.
  */
 import { describe, expect, it } from "vitest";
-import { initMessage, sendMessageUse, successMessage } from "../sdk/fake.ts";
+import { initMessage, sendHandoffUse, successMessage } from "../sdk/fake.ts";
 import { collectUntil, makeDelegationHarness } from "../test-helpers.ts";
 
 const handoff = (action: string, status: "pending" | "completed") => ({ core: { schemaVersion: 1 as const, taskId: null, status, risk: "low" as const,
@@ -23,11 +23,11 @@ function makeFlowHarness() {
     if (coordinator) {
       coordinatorTurns += 1;
       yield coordinatorTurns === 1
-        ? sendMessageUse("send-1", "scout", envelope("look around", "pending", "assignment"))
-        : sendMessageUse(`send-${coordinatorTurns}`, "main", envelope("done", "completed", "final"));
+        ? sendHandoffUse("send-1", "scout", { action: "look around", status: "pending", category: "assignment" })
+        : sendHandoffUse(`send-${coordinatorTurns}`, "main", { action: "done", status: "completed", category: "final" });
       yield successMessage();
     } else {
-      yield sendMessageUse("scout-close", "orchestrator", envelope("seen", "completed", "milestone"));
+      yield sendHandoffUse("scout-close", "orchestrator", { action: "seen", status: "completed", category: "milestone" });
       yield successMessage();
     }
   });

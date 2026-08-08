@@ -167,4 +167,65 @@ table(all(
    from events where type in ('user_session.runtime', 'agent_session.runtime')
    group by 1 having kind is not null order by count desc`), ["kind", "count"]);
 
+// ── Health scorecard ─────────────────────────────────────────────────────────
+// The ratios a run must be judged on. Every one of these was a silent failure
+// in db-live-1: 59% of sends denied, 13/13 checkpoints failed, 13 spurious
+// rotations, zero reports to the operator, and a cost figure 25% too high —
+// none of it visible without forensics. A run summary should make them obvious.
+heading("Health scorecard");
+
+const one = <T = number>(sql: string): T => (all<Record<string, T>>(sql)[0]?.n ?? 0 as T);
+const sends = one(`select count(*) as n from events where type = 'agent_session.tool.call'
+  and json_extract(payload, '$.name') in ('SendMessage', 'mcp__console_agent__send_handoff')`);
+// Historical only: the native SendMessage transport and its envelope
+// validation are gone. Non-zero here means you are reading a pre-consolidation
+// run — in db-live-1 it was 59% of every send.
+const denied = one(`select count(*) as n from events where type = 'governance.send.denied'
+  and json_extract(payload, '$.kind') != 'wake_timeout'`);
+const degraded = one(`select count(*) as n from events where type = 'governance.send.degraded'`);
+const coerced = one(`select count(*) as n from events where type = 'governance.send.coerced'`);
+const peerCarried = one(`select count(*) as n from mailbox_deliveries where transport = 'peer'`);
+const rotations = one(`select count(*) as n from events where type = 'agent_session.context.rotated'`);
+const cpFailed = one(`select count(*) as n from events where type = 'handoff.checkpoint.failed'`);
+const cpTransport = one(`select count(*) as n from events where type = 'handoff.checkpoint.transport_failed'`);
+const toMain = one(`select count(*) as n from mailbox_deliveries where recipient = 'main'`);
+const unreported = one(`select count(*) as n from events where type = 'agent_session.unreported'`);
+const drift = one(`select count(*) as n from events where type = 'agent_session.dependency_drift'`);
+const toolSearch = one(`select count(*) as n from events where type in ('agent_session.tool.call','user_session.tool.call')
+  and json_extract(payload, '$.name') = 'ToolSearch'`);
+const cliSessions = one(`select count(distinct session_id) as n from provider_entries_v2`);
+const pct = (part: number, whole: number) => whole === 0 ? "–" : `${Math.round((part / whole) * 100)}%`;
+
+table([
+  { metric: "transfers", value: num(sends), note: "send_handoff calls (plus legacy SendMessage on old runs)" },
+  { metric: "peer-carried deliveries", value: num(peerCarried), note: "LEGACY — one transport now; non-zero means a pre-consolidation run" },
+  { metric: "envelope denials", value: `${num(denied)} (${pct(denied, sends)})`, note: "LEGACY — the hand-written envelope is gone; db-live-1 was 59%" },
+  { metric: "delivered degraded", value: num(degraded), note: "LEGACY — typed fields cannot be malformed" },
+  { metric: "envelopes repaired", value: num(coerced), note: "LEGACY — nothing to repair" },
+  { metric: "context rotations", value: num(rotations), note: "spurious rotation is the usual cause of repeated work" },
+  { metric: "checkpoints failed", value: num(cpFailed), note: "successor inherited a reconstruction, not its own state" },
+  { metric: "checkpoint transport failures", value: num(cpTransport), note: "NON-ZERO MEANS A CONSOLE BUG — the request never reached the model" },
+  { metric: "reports to operator", value: num(toMain), note: "zero means the run finished in silence" },
+  { metric: "operator debts discharged", value: num(unreported), note: "non-zero means a coordinator left the operator uninformed" },
+  { metric: "dependency drift", value: num(drift), note: "two seats landed different versions of one dependency" },
+  { metric: "ToolSearch calls", value: num(toolSearch), note: "tool rediscovery; should be ~0 with alwaysLoad" },
+  { metric: "CLI sessions", value: num(cliSessions), note: "cold prompt-cache starts — one per participant is ideal" },
+], ["metric", "value", "note"]);
+
+// Cost is recorded per turn as a delta of the SDK's cumulative figure. If a
+// row still looks cumulative the ledger is over-reporting, as db-live-1's was.
+const costRows = all<{ participant: string; recorded: number; largest: number; turns: number }>(
+  `select participant, sum(cost_usd) as recorded, max(cost_usd) as largest, count(*) as turns
+   from usage_samples where cost_usd is not null group by participant order by recorded desc`);
+if (costRows.length > 0) {
+  heading("Cost (per-turn deltas)");
+  table(costRows.map((row) => ({
+    participant: row.participant,
+    total: `$${row.recorded.toFixed(2)}`,
+    turns: num(row.turns),
+    largest_turn: `$${row.largest.toFixed(2)}`,
+  })), ["participant", "total", "turns", "largest_turn"]);
+  console.log(`\nTotal: $${costRows.reduce((sum, row) => sum + row.recorded, 0).toFixed(2)}`);
+}
+
 db.close();

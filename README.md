@@ -14,19 +14,28 @@ single npm-workspaces application backed by SQLite and the Claude Agent SDK.
   registry) with its own resumable provider session and a snapshotted agent
   profile. Idle seats park (process closed, resume handle kept) and wake on
   the next delivery.
-- Agents talk over the harness's native cross-session `SendMessage` mesh,
-  governed by console hook middleware: every send is resolved, route-checked
-  against the enforced star (`main ↔ coordinator ↔ specialist`), validated as
-  a typed handoff envelope, and journaled to SQLite BEFORE it is carried.
-  A send to a parked seat is denied with a queued receipt and the console
-  carries it on wake — a message is never lost, at worst re-carried once.
-- Native task tools (`TaskCreate`/`TaskUpdate`/…) are the authoritative
-  ledger, mirrored into the console by `TaskCreated`/`TaskCompleted` and
-  PostToolUse hooks. Native `EnterWorktree` is backed by the console's own
-  WorktreeManager via the `WorktreeCreate` hook; `CronCreate` schedules are
-  mirrored with a console fallback scheduler for closed lanes. Only
-  in-process subagents (`Agent`/`Task`) remain denied — they would fork
-  ungoverned context.
+- Agents transfer work with one console-owned tool, `send_handoff`. Its
+  parameters *are* the handoff core, so the provider validates the shape and
+  nothing is serialized by hand. Every transfer is route-checked against the
+  enforced star (`main ↔ coordinator ↔ specialist`) and journaled to SQLite
+  before it is carried, then pushed into the recipient's live lane — waking a
+  parked seat or steering a running turn. One transport, every direction.
+- **Native for capability, console for coordination.** The SDK supplies the
+  sandbox, managed processes, local Chrome, git worktrees behind
+  `EnterWorktree`, and model invocation — real engineering with no
+  console-specific semantics. Addressing, delivery, the task ledger, context
+  lifetime and the operator obligation stay console-owned, because the console
+  holds invariants the native versions do not know about: a fixed roster, a
+  seat that outlives many provider sessions, journal-as-truth, and a human who
+  is owed a report. The native cross-session `SendMessage` mesh and the native
+  `Task*` ledger were tried for those jobs and removed; both keyed durable
+  state to the provider session, which dies at every context rotation.
+- The task ledger is console-owned (`task_list`/`task_create`/`task_update`),
+  keyed to the AgentSession so it survives rotation and every seat reads the
+  same list. `CronCreate` schedules are mirrored with a console fallback
+  scheduler for closed lanes. In-process subagents (`Agent`/`Task`) are denied —
+  they would fork ungoverned context — as are any built-in tools a seat's
+  profile does not grant.
 - Main wakes only for a decision, failure, milestone, or final result. Repeated
   pending reports from one AgentSession coalesce; ordinary updates never wake
   it. Runtime state is rendered as trace data instead of chat narration.
@@ -68,16 +77,35 @@ Add local profiles in `~/.agentique-console/profiles.json` (override with
 Shell-capable profiles receive Console-owned start/read/stop process tools;
 `process_read` can wait for a state change so agents do not poll. Frontend and
 visual profiles also receive managed local-Chrome navigation, interaction,
-console, snapshot, and screenshot tools. Process execution and SDK Bash are
-fail-closed when the Linux sandbox is unavailable.
+keyboard, JS evaluation, console, snapshot, and screenshot tools. Any seat can
+dereference an artifact it or a teammate produced with `read_artifact`.
+Process execution and SDK Bash are fail-closed when the Linux sandbox is
+unavailable.
+
+A profile's `tools` list is binding: every built-in it does not grant is denied
+by name, not merely left un-auto-approved. `runtime.network` sets the sandbox
+egress allowlist — `"default"` takes the workspace list
+(`CONSOLE_ALLOWED_DOMAINS`, package registries and common CDNs), `[]` is
+offline, or name hosts explicitly. Loopback is always reachable so a seat can
+verify a server it started. Each seat is told its own capabilities and
+allowlist at spawn, so a limit is a stated fact rather than something to
+discover by failing.
 
 ## Context and decisions
 
-Provider sessions rotate before the next turn at 120,000 context tokens or 30
-model turns by default. Rotation keeps at most 4,000 characters of structured
-recent memory and starts a new provider generation; the full prior journal
-remains durable. Tune with `CONSOLE_CONTEXT_TOKEN_LIMIT` and
-`CONSOLE_CONTEXT_TURN_LIMIT`.
+Provider sessions rotate before the next turn at 120,000 tokens of measured
+context occupancy or 30 model turns by default. Occupancy is the largest
+single request's prompt — never the turn's summed input, which counts every
+cache read again per round trip and would rotate a healthy seat after one turn.
+Rotation asks the seat for a checkpoint; if that fails, the Console
+deterministically reconstructs one from state it owns (task ledger, ownership,
+worktree branch and diff, the seat's own last report), so a successor always
+inherits something true. The full prior journal remains durable. Tune with
+`CONSOLE_CONTEXT_TOKEN_LIMIT` and `CONSOLE_CONTEXT_TURN_LIMIT`.
+
+An AgentSession owes the operator a reply. If it goes idle without its
+coordinator reporting, the Console closes the loop itself from the journal —
+labelled as Console-assembled, never as a coordinator result.
 
 Coordinators have a typed `request_decision` tool. Blocking operator decisions
 surface immediately as cards. Nonblocking decisions travel as coalesced
@@ -100,14 +128,14 @@ summarize it afterwards with
 `npx tsx server/scripts/report-run.ts [path/to/console.db]`.
 
 Settings: `CONSOLE_PORT`, `CONSOLE_HOST`, `CONSOLE_MODEL`,
-`CONSOLE_IMPROVE_MODEL`, `CONSOLE_EFFORT`, `CONSOLE_FS_ROOTS`. Peer-mesh knobs:
-`CONSOLE_MAX_RESIDENT_SEATS` (default 8),
+`CONSOLE_IMPROVE_MODEL`, `CONSOLE_EFFORT`, `CONSOLE_FS_ROOTS`,
+`CONSOLE_ALLOWED_DOMAINS` (comma-separated; empty string is fully offline).
+Seat-residency knobs: `CONSOLE_MAX_RESIDENT_SEATS` (default 8),
 `CONSOLE_MAX_RESIDENT_SEATS_PER_SESSION` (default 4),
 `CONSOLE_SEAT_IDLE_REAP_MS` (default 300000),
 `CONSOLE_SEND_WAKE_TIMEOUT_MS` (default 30000),
-`CONSOLE_DELIVERY_HOLD_LEASE_MS` (default 60000),
-`CONSOLE_PEER_NAME_PREFIX` (default `console-`), and
-`CONSOLE_SEAT_WORKTREES=0` to disable seat worktree isolation.
+`CONSOLE_PEER_NAME_PREFIX` (default `console-`, the session-registry
+namespace), and `CONSOLE_SEAT_WORKTREES=0` to disable seat worktree isolation.
 
 Historical SDK JSONL can be copied into the authoritative provider journal:
 

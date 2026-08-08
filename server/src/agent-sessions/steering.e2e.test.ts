@@ -4,7 +4,7 @@
  * background-retry path when resident capacity is exhausted.
  */
 import { describe, expect, it } from "vitest";
-import { initMessage, sendMessageUse, successMessage, toolResultMessage, toolUseMessage } from "../sdk/fake.ts";
+import { initMessage, sendHandoffUse, successMessage, toolResultMessage, toolUseMessage } from "../sdk/fake.ts";
 import { collectUntil, makeDelegationHarness } from "../test-helpers.ts";
 
 const handoff = (action: string, status: "pending" | "completed") => ({ core: { schemaVersion: 1 as const, taskId: null, status, risk: "low" as const,
@@ -24,7 +24,7 @@ describe("peer-lane delivery semantics (fake SDK)", () => {
       if (append.includes("sole coordinator")) {
         coordinatorTurns += 1;
         yield initMessage(`coord-${coordinatorTurns}`);
-        if (coordinatorTurns === 1) yield sendMessageUse("send-1", "scout", envelope("dig in", "pending", "assignment"));
+        if (coordinatorTurns === 1) yield sendHandoffUse("send-1", "scout", { action: "dig in", status: "pending", category: "assignment" });
         yield successMessage();
         return;
       }
@@ -34,7 +34,7 @@ describe("peer-lane delivery semantics (fake SDK)", () => {
         yield toolUseMessage("t-1", "Read", { file_path: "a.ts" });
         yield toolResultMessage("t-1", "…");
         await scoutGate; // held mid-turn until the steer lands
-        yield sendMessageUse("scout-close", "orchestrator", envelope("dug", "completed", "milestone"));
+        yield sendHandoffUse("scout-close", "orchestrator", { action: "dug", status: "completed", category: "milestone" });
       }
       yield successMessage();
     });
@@ -94,32 +94,32 @@ describe("peer-lane delivery semantics (fake SDK)", () => {
     expect(scoutOptions.at(-1)?.resume).toBe("scout-session");
   });
 
-  it("denies with a queued receipt at capacity, then the retry carries it", async () => {
+  it("holds a delivery at capacity and carries it when a lane frees, with no sender-visible failure", async () => {
     let scoutRan = false;
     const h = makeDelegationHarness(async function* (options) {
       const append = typeof options.systemPrompt === "object" && !Array.isArray(options.systemPrompt) ? options.systemPrompt.append ?? "" : "";
       if (append.includes("sole coordinator")) {
         yield initMessage("coord-1");
-        yield sendMessageUse("send-1", "scout", envelope("squeeze in", "pending", "assignment"));
+        yield sendHandoffUse("send-1", "scout", { action: "squeeze in", status: "pending", category: "assignment" });
         yield successMessage();
         return;
       }
       scoutRan = true;
       yield initMessage("scout-1");
-      yield sendMessageUse("scout-close", "orchestrator", envelope("made it", "completed", "milestone"));
+      yield sendHandoffUse("scout-close", "orchestrator", { action: "made it", status: "completed", category: "milestone" });
       yield successMessage();
     });
     (h.config as { seatMaxResidentPerSession: number }).seatMaxResidentPerSession = 1;
     (h.config as { sendWakeTimeoutMs: number }).sendWakeTimeoutMs = 150;
     const userSessionId = h.addUserSession();
-    const denied = collectUntil(h.bus, (event) =>
-      event.type === "agent_session.tool.result" && JSON.stringify(event.payload).includes("queued as delivery"), 10_000);
     const created = h.host.createSession({ userSessionId, title: "capacity", mode: "execute",
       agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("go", "pending") });
-    const deniedEvents = await denied;
-    expect(JSON.stringify(deniedEvents.at(-1)?.payload)).toContain("Do not resend");
-    // The coordinator settles, its lane becomes parkable, and the background
-    // retry carries the queued assignment to a freshly woken scout.
+
+    // One console-carried path means capacity is not a delivery outcome. The
+    // row is journaled and waits; the sender is never handed a receipt to
+    // reason about, and there is no "do not resend" contract to get wrong.
+    // The native path made this a DENIAL the model had to interpret — and it
+    // then counted toward the tool-error watchdog.
     await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled" && event.payload.participant === "scout", 15_000);
     expect(scoutRan).toBe(true);
     expect(h.repo.listUnackedDeliveries(created.agentSessionId, "scout")).toHaveLength(0);

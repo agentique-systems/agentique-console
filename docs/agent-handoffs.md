@@ -7,29 +7,33 @@ readable.
 
 ## Transport and delivery timing
 
-Agents carry handoffs over the harness's native cross-session `SendMessage`
-mesh: every console session registers a peer name, and the `message` field MUST
-be the JSON envelope `{"handoff": <HandoffDraft>, "category": …,
-"dedupeKey"?: …, "checkpointReadiness"?: "stable"|"defer"}`. A PreToolUse
-middleware resolves the address, enforces the star topology, zod-validates the
-envelope (denying with the exact failures so the sender self-corrects),
-journals the handoff and its delivery row, and rewrites the tool input to the
-canonical peer name and a `[handoff … delivery …]`-tagged normalized body.
+One transport, every direction. Agents call the console-owned `send_handoff`
+tool, whose parameters *are* the handoff core — `to`, `category`, `status`,
+`risk`, `action`, `stateSummary`, `evidence[]`, `resultSummary`, `artifacts[]`,
+`uncertainty[]`, `nextAction`. The provider validates that shape before the
+call is emitted, so there is no envelope to hand-serialize and no parse step
+that can reject a finished report.
 
-Journal states are the delivery contract: `queued` (journaled, not yet
-carried) → `delivered` (native carry succeeded — the sender's tool result
-returned `success:true` with a `msg_id` — or a console input push landed) →
-`acknowledged` (consumed by a settled turn; for main, the carry receipt).
-A send to an unreachable seat is denied with a *queued receipt* ("queued as
-delivery … do not resend"); the console re-carries the row when the seat
-wakes. First cross-session contact demands ref confirmation (`name [ref]`) —
-the middleware treats the identical retry as the same delivery, never a
-duplicate.
+The console route-checks the star topology, journals the handoff and its
+delivery row, then pushes into the recipient's lane: waking a parked seat,
+or steering a running turn so the message drains at its next tool round with a
+`steered mid-turn` runtime notice. Journal states are the delivery contract:
+`queued` (journaled, not yet carried) → `delivered` → `acknowledged` (consumed
+by a settled turn). Capacity is not a delivery outcome — a row simply waits for
+a lane and is carried when one frees, with nothing for the sender to interpret.
 
-Delivery into a running seat is native steering: messages enqueue and drain at
-the receiver's next tool round, mid-turn. Console-path pushes (briefings,
-redeliveries) steer the live turn the same way, with a
-`steered mid-turn` runtime notice.
+A route violation is the only thing that fails a send, because a message with
+no legal destination has nowhere to go. Everything else about a transfer is
+either valid by construction or repaired by the console.
+
+> Earlier revisions carried handoffs over the harness's native cross-session
+> `SendMessage` mesh, with a JSON envelope in the `message` string, ref
+> confirmation on first contact, and queued receipts. It was removed: the
+> envelope had to be escaped by hand (in one live run 59% of sends were
+> rejected, and a completed review reached nobody), and peer pins lived in
+> provider-process memory that every context rotation destroyed. Native
+> primitives now cover capability — sandbox, processes, browser, worktrees —
+> while addressing and delivery stay console-owned.
 
 ## Contract and authority
 

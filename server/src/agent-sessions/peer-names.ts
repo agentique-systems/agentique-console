@@ -40,16 +40,6 @@ export function mainPeerName(prefix: string, userSessionId: string): string {
   return `${sanitize(`${prefix}main`)}-${sessionSuffix(userSessionId)}`.slice(0, 64);
 }
 
-/**
- * Splits a SendMessage address into its name and optional ` [ref]` suffix.
- * Cross-session first contact demands the ref form ("name [abc123]"); route
- * resolution must see through it.
- */
-export function parsePeerAddress(to: string): { name: string; ref: string | null } {
-  const match = /^(.*?)\s+\[([0-9a-f]{4,12})\]$/.exec(to.trim());
-  if (match) return { name: match[1] ?? "", ref: match[2] ?? null };
-  return { name: to.trim(), ref: null };
-}
 
 /** Reverses peerNameOf against a seat list; null if the name is not ours. */
 export function seatOfPeerName(

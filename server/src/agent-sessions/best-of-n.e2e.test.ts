@@ -10,7 +10,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { HandoffService } from "../handoffs/service.ts";
 import { WorktreeManager } from "../runtime/worktree-manager.ts";
-import { initMessage, sendMessageUse, successMessage } from "../sdk/fake.ts";
+import { initMessage, sendHandoffUse, successMessage } from "../sdk/fake.ts";
 import { collectUntil, makeDelegationHarness, type DelegationHarness } from "../test-helpers.ts";
 
 const git = (cwd: string, ...args: string[]) =>
@@ -60,7 +60,7 @@ function makeBonWorld(selection: { winner?: string; rejectAll?: boolean }): BonW
           : { winner: world.selection.winner, rejectAll: false, reason: "cleaner diff and passing shape" }, {});
         world.selectResults.push(JSON.parse((result as { content: { text?: string }[] }).content[0]?.text ?? "null"));
       }
-      yield sendMessageUse("review-close", "orchestrator", envelope("selection recorded", "completed", "milestone"));
+      yield sendHandoffUse("review-close", "orchestrator", { action: "selection recorded", status: "completed", category: "milestone" });
       yield successMessage();
       return;
     }
@@ -68,7 +68,7 @@ function makeBonWorld(selection: { winner?: string; rejectAll?: boolean }): BonW
       yield initMessage(`attempt-${path.basename(options.cwd ?? "")}`);
       const cwd = options.cwd ?? "";
       fs.writeFileSync(path.join(cwd, `out-${path.basename(cwd)}.txt`), "attempt work\n");
-      yield sendMessageUse(`attempt-close-${path.basename(cwd)}`, "orchestrator", envelope("implemented my variant", "completed", "milestone"));
+      yield sendHandoffUse(`attempt-close-${path.basename(cwd)}`, "orchestrator", { action: "implemented my variant", status: "completed", category: "milestone" });
       yield successMessage();
       return;
     }
@@ -76,7 +76,7 @@ function makeBonWorld(selection: { winner?: string; rejectAll?: boolean }): BonW
       yield initMessage(`coord-${Math.random().toString(36).slice(2, 8)}`);
       const latest = world.h?.fake.captured.prompts.at(-1) ?? "";
       if (latest.includes(".review → orchestrator")) {
-        yield sendMessageUse("coord-final", "main", envelope("best-of-N landed", "completed", "final"));
+        yield sendHandoffUse("coord-final", "main", { action: "best-of-N landed", status: "completed", category: "final" });
       }
       yield successMessage();
       return;

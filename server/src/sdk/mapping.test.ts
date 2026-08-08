@@ -176,9 +176,27 @@ describe("mapSdkMessage", () => {
         kind: "result",
         output: { message: "done", to: null },
         resumeId: "sess-2",
-        costUsd: 0.42,
+        // Named cumulative because it IS: the SDK restates the session's
+        // running total on every result, so consumers must delta, not sum.
+        cumulativeCostUsd: 0.42,
       },
     ]);
+  });
+
+  it("routes a CLI-level failure to the error branch despite subtype success", () => {
+    const events = mapSdkMessage(successMessage(undefined, { is_error: true, session_id: "sess-3" }));
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ kind: "error" });
+  });
+
+  it("emits context occupancy from an assistant message's own usage", () => {
+    // Per-call prompt size — the rotation signal. The result message's usage is
+    // the turn-wide sum and would overstate occupancy several-fold.
+    const events = mapSdkMessage({
+      type: "assistant",
+      message: { content: [{ type: "text", text: "hi" }], usage: { input_tokens: 12, cache_creation_input_tokens: 300, cache_read_input_tokens: 41_000 } },
+    });
+    expect(events).toContainEqual({ kind: "context", occupancyTokens: 41_312 });
   });
 
   it("maps success without structured output (orchestrator turns)", () => {

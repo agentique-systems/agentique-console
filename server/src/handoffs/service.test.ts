@@ -22,6 +22,38 @@ describe("HandoffService", () => {
     expect(prepared.record.metadata.referenceWarnings[0]).toContain("does not exist");
   });
 
+  it("selects a seat's own last report for rotation recovery, not the last message sent to it", () => {
+    // The degraded-rotation fallback used to filter on RECIPIENT, so a seat
+    // inherited whatever another agent last sent it, relabelled as its own
+    // state. In db-live-1 the coordinator successively inherited page's
+    // completion report, then check's junk probe, then "Turn failed" — 395
+    // bytes as the entire context of generation 8.
+    const h = makeHarness(async function* () {});
+    const userSessionId = h.addUserSession();
+    const service = new HandoffService({ repo: h.repo, bus: h.bus, getWorkspaceRoot: () => "/tmp/test-workspace" });
+    const agentSessionId = "as_recovery";
+
+    const own = service.prepare({ draft: draft({ action: "renderer's own report" }), userSessionId, agentSessionId,
+      sender: "renderer", recipient: "orchestrator", profileId: "implementer", generation: 0, trigger: "milestone" });
+    h.repo.insertCheckpointHandoff(own.row);
+    const inbound = service.prepare({ draft: draft({ action: "orchestrator's status ping" }), userSessionId, agentSessionId,
+      sender: "orchestrator", recipient: "renderer", profileId: "coordinator", generation: 0, trigger: "update" });
+    h.repo.insertCheckpointHandoff(inbound.row);
+    const priorCheckpoint = service.prepare({ draft: draft({ action: "Recovery checkpoint: renderer's own report" }), userSessionId, agentSessionId,
+      sender: "renderer", recipient: "renderer", profileId: "implementer", generation: 1, trigger: "recovery", checkpoint: true });
+    h.repo.insertCheckpointHandoff(priorCheckpoint.row);
+
+    const recovered = h.repo.latestHandoff({ userSessionId, agentSessionId, sender: "renderer", excludeCheckpoints: true });
+    expect(recovered?.core.action).toBe("renderer's own report");
+    // The recipient filter still works — it just answers a different question,
+    // and answering it here is what produced the amnesia spiral.
+    expect(h.repo.latestHandoff({ userSessionId, agentSessionId, participant: "renderer", excludeCheckpoints: true })?.core.action)
+      .toBe("orchestrator's status ping");
+    // Excluding checkpoints stops the "Recovery checkpoint: " prefix accreting
+    // across generations (db-live-1 reached a double-prefixed clone at gen 4).
+    expect(recovered?.core.action.startsWith("Recovery checkpoint: ")).toBe(false);
+  });
+
   it("persists overflow losslessly and pages retrieval at a bounded cursor", () => {
     const h = makeHarness(async function* () {});
     const userSessionId = h.addUserSession();

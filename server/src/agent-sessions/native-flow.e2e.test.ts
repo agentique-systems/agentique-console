@@ -5,7 +5,7 @@
  * and the star topology enforced on both transports.
  */
 import { describe, expect, it } from "vitest";
-import { initMessage, sendMessageUse, successMessage, toolResultMessage, toolUseMessage } from "../sdk/fake.ts";
+import { initMessage, sendHandoffUse, successMessage, toolResultMessage, toolUseMessage } from "../sdk/fake.ts";
 import { collectUntil, makeDelegationHarness } from "../test-helpers.ts";
 
 describe("managed AgentSession e2e (fake SDK)", () => {
@@ -24,13 +24,13 @@ describe("managed AgentSession e2e (fake SDK)", () => {
       if (coordinator) {
         coordinatorTurns += 1;
         yield coordinatorTurns === 1
-          ? sendMessageUse("send-1", "scout", envelope("Inspect README and report the answer.", "pending", "assignment"))
-          : sendMessageUse(`send-${coordinatorTurns}`, "main", envelope("Session done: pelican", "completed", "final"));
+          ? sendHandoffUse("send-1", "scout", { action: "Inspect README and report the answer.", status: "pending", category: "assignment" })
+          : sendHandoffUse(`send-${coordinatorTurns}`, "main", { action: "Session done: pelican", status: "completed", category: "final" });
         yield successMessage();
       } else {
         yield toolUseMessage("read-1", "Read", { file_path: "README.md" });
         yield toolResultMessage("read-1", "the answer is pelican");
-        yield sendMessageUse("scout-close", "orchestrator", envelope("answer: pelican", "completed", "milestone"));
+        yield sendHandoffUse("scout-close", "orchestrator", { action: "answer: pelican", status: "completed", category: "milestone" });
         yield successMessage();
       }
     });
@@ -60,10 +60,10 @@ describe("managed AgentSession e2e (fake SDK)", () => {
       const coordinator = append.includes("sole coordinator");
       yield initMessage();
       if (coordinator) {
-        yield sendMessageUse("send-1", "scout", envelope("go", "pending", "assignment"));
+        yield sendHandoffUse("send-1", "scout", { action: "go", status: "pending", category: "assignment" });
       } else {
         // scout tries to reach its sibling directly — the middleware denies
-        yield sendMessageUse("bad-send", "impl", envelope("psst", "pending", "update"));
+        yield sendHandoffUse("bad-send", "impl", { action: "psst", status: "pending", category: "update" });
       }
       yield successMessage();
     });
@@ -77,21 +77,49 @@ describe("managed AgentSession e2e (fake SDK)", () => {
     expect(JSON.stringify(denial?.payload)).toContain("main ↔ coordinator ↔ specialist");
   });
 
-  it("denies a schema-invalid envelope with the contract", async () => {
+  it("salvages a seat's unsent work when its turn dies", async () => {
+    // The guarantee that survives the transport consolidation. A typed
+    // send_handoff cannot be malformed, so "the seat could not serialize its
+    // report" is gone — but "the seat finished and then its turn died" is not.
+    // db-live-1 lost its best output exactly there: `check` completed a real
+    // review, the watchdog killed the turn, and the coordinator was handed an
+    // empty "Turn failed" with no evidence and no result.
+    let coordinatorTurns = 0;
+    let scoutTurns = 0;
     const h = makeDelegationHarness(async function* (options) {
       const append = typeof options.systemPrompt === "object" && !Array.isArray(options.systemPrompt) ? options.systemPrompt.append ?? "" : "";
       yield initMessage();
       if (append.includes("sole coordinator")) {
-        yield sendMessageUse("send-1", "scout", "just some prose, no JSON");
+        coordinatorTurns += 1;
+        // Assign exactly once: the failure handoff wakes the coordinator again,
+        // and re-assigning would loop the seat through the same failure.
+        if (coordinatorTurns === 1) yield sendHandoffUse("send-1", "scout", { action: "verify the build", status: "pending", category: "assignment" });
+        yield successMessage();
+        return;
+      }
+      scoutTurns += 1;
+      if (scoutTurns > 1) { yield successMessage(); return; }
+      // The seat does the work and says so — then burns its turn on failures.
+      yield { type: "assistant", message: { content: [{ type: "text", text: "Collision tunneling at src/game.js:191 — obstacles step 2.4 units through a 2.0-unit window." }] } };
+      for (let i = 0; i < 11; i += 1) {
+        yield toolUseMessage(`probe-${i}`, "Read", { file_path: `f${i}.ts` });
+        yield toolResultMessage(`probe-${i}`, "boom", true);
       }
       yield successMessage();
     });
     const userSessionId = h.addUserSession();
-    const done = collectUntil(h.bus, (event) =>
-      event.type === "agent_session.tool.result" && JSON.stringify(event.payload).includes("must be JSON"), 10_000);
-    h.host.createSession({ userSessionId, title: "envelope", mode: "execute",
-      agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("go", "pending") });
-    const events = await done;
-    expect(JSON.stringify(events.at(-1)?.payload)).toContain("handoff");
+    const done = collectUntil(h.bus, (event) => event.type === "agent_session.watchdog", 10_000);
+    const created = h.host.createSession({ userSessionId, title: "salvage", mode: "execute",
+      agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("verify", "pending") });
+    await done;
+    await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled"
+      && JSON.stringify(event.payload).includes("scout"), 10_000);
+
+    const failure = h.repo.latestHandoff({ userSessionId, agentSessionId: created.agentSessionId, sender: "scout" });
+    expect(failure?.core.status).toBe("failed");
+    // The finding reaches the coordinator instead of dying with the turn...
+    expect(failure?.core.state.summary).toContain("Collision tunneling at src/game.js:191");
+    // ...clearly marked as never having passed through a handoff.
+    expect(failure?.core.state.summary).toContain("never passed through a handoff");
   });
 });

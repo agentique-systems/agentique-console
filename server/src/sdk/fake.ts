@@ -19,6 +19,7 @@
  * yields turnIdleMessage() deliberately).
  */
 import { AsyncQueue } from "../async-queue.ts";
+import { assertProviderToolSchema } from "../handoffs/schema.ts";
 import type {
   CompiledTool,
   ConsoleSdk,
@@ -69,6 +70,43 @@ type FakeHookMatcher = { matcher?: string; hooks: ((input: unknown, toolUseId: s
 function hookMatchers(options: SdkOptions, event: string, toolName: string): FakeHookMatcher[] {
   const all = (options.hooks as Record<string, FakeHookMatcher[]> | undefined)?.[event] ?? [];
   return all.filter((entry) => entry.matcher === undefined || new RegExp(`^(?:${entry.matcher})$`).test(toolName));
+}
+
+/**
+ * The fake must fail wherever the real API would, or `npm run verify` is
+ * theatre. db-live-1 ran with 13/13 context rotations failing on a provider
+ * 400 while the suite stayed green, because nothing here ever looked at the
+ * schemas the console hands the SDK.
+ *
+ * `sdk.tool` takes a zod-shape object; a plain JSON Schema handed here would be
+ * compiled into an `input_schema` the API rejects.
+ */
+function assertToolParameterShape(name: string, schema: unknown): void {
+  if (schema === null || typeof schema !== "object") {
+    throw new Error(`tool ${name}: parameters must be an object of zod fields`);
+  }
+  const asJsonSchema = schema as { type?: unknown; properties?: unknown };
+  if (typeof asJsonSchema.type === "string" || Array.isArray(asJsonSchema.type)) {
+    throw new Error(`tool ${name}: parameters look like a raw JSON Schema (has "type"); pass a zod shape so the SDK can compile a valid input_schema`);
+  }
+  for (const [field, value] of Object.entries(schema as Record<string, unknown>)) {
+    const zodLike = value as { safeParse?: unknown; _def?: unknown } | null;
+    if (zodLike === null || typeof zodLike !== "object" || (typeof zodLike.safeParse !== "function" && zodLike._def === undefined)) {
+      throw new Error(`tool ${name}: parameter "${field}" is not a zod schema`);
+    }
+  }
+}
+
+/**
+ * `outputFormat: {type: "json_schema"}` becomes a synthetic `StructuredOutput`
+ * tool whose `input_schema` is this value verbatim, so it must satisfy the
+ * provider's tool-schema rules. Enforcing it here is what makes the
+ * `type: ["object","null"]` regression impossible to reintroduce silently.
+ */
+function assertOutputFormat(options: SdkOptions): void {
+  const format = (options as { outputFormat?: { type?: string; schema?: unknown } }).outputFormat;
+  if (!format || format.type !== "json_schema") return;
+  assertProviderToolSchema("outputFormat.schema", format.schema);
 }
 
 export function fakeSdk(program: FakeProgram): FakeSdk {
@@ -137,6 +175,40 @@ export function fakeSdk(program: FakeProgram): FakeSdk {
     return { callId: block.id ?? "unknown", input: (block.input ?? {}) as Record<string, unknown> };
   }
 
+  function mcpToolCall(message: SdkMessage): { callId: string; name: string; input: unknown } | null {
+    if (message.type !== "assistant") return null;
+    const block = (message.message?.content ?? []).find((entry) => entry.type === "tool_use" && (entry.name ?? "").startsWith("mcp__"));
+    if (!block) return null;
+    return { callId: block.id ?? "unknown", name: block.name ?? "", input: block.input ?? {} };
+  }
+
+  /**
+   * Run a console MCP tool for real, the way the SDK does: resolve the handler
+   * the console registered, invoke it, and feed the result back as a
+   * tool_result. Without this the fake could only script NATIVE tool calls, so
+   * no e2e ever exercised the seat → console-tool path that now carries every
+   * transfer — the suite would have kept passing while testing a dead route.
+   */
+  async function executeMcpTool(options: SdkOptions, callId: string, qualifiedName: string, input: unknown): Promise<SdkMessage[]> {
+    // MUST resolve from THIS query's own servers. Every seat registers its own
+    // `send_handoff` bound to its own identity, so a global lookup by name
+    // silently runs a specialist's call as the coordinator — which routes
+    // orchestrator→orchestrator and vanishes.
+    const servers = (options.mcpServers ?? {}) as Record<string, { instance?: { tools?: unknown[] } }>;
+    const own: CompiledTool[] = Object.values(servers)
+      .flatMap((server) => (server?.instance?.tools ?? []) as CompiledTool[])
+      .filter((candidate) => typeof candidate?.name === "string");
+    const tool = own.find((candidate) => qualifiedName.endsWith(`__${candidate.name}`) || candidate.name === qualifiedName);
+    if (!tool) return [toolResultMessage(callId, `no such tool: ${qualifiedName}`, true)];
+    try {
+      const result = await tool.handler(input as never, {});
+      const text = result.content.map((part) => (part as { text?: string }).text ?? "").join("");
+      return [toolResultMessage(callId, text, result.isError === true)];
+    } catch (error) {
+      return [toolResultMessage(callId, error instanceof Error ? error.message : String(error), true)];
+    }
+  }
+
   const record = (text: string): void => {
     captured.prompts.push(text);
     for (const waiter of waiters.splice(0)) {
@@ -148,6 +220,7 @@ export function fakeSdk(program: FakeProgram): FakeSdk {
 
   const sdk: ConsoleSdk = {
     query({ prompt, options }) {
+      assertOutputFormat(options);
       captured.options.push(options);
       if (typeof prompt === "string") {
         record(prompt);
@@ -219,6 +292,10 @@ export function fakeSdk(program: FakeProgram): FakeSdk {
                 if (send) {
                   for (const frame of await executeSendMessage(options, send.callId, send.input)) yield frame;
                 }
+                const mcp = mcpToolCall(raced.value);
+                if (mcp) {
+                  for (const frame of await executeMcpTool(options, mcp.callId, mcp.name, mcp.input)) yield frame;
+                }
               }
             } finally {
               signalInterrupt = null;
@@ -245,7 +322,8 @@ export function fakeSdk(program: FakeProgram): FakeSdk {
         },
       });
     },
-    tool(name, description, _schema, handler) {
+    tool(name, description, schema, handler) {
+      assertToolParameterShape(name, schema);
       const compiled: CompiledTool = {
         name,
         description,
@@ -402,6 +480,47 @@ export function sendMessageUse(
   message: string,
 ): SdkMessage {
   return toolUseMessage(callId, "SendMessage", { to, message });
+}
+
+/**
+ * A scripted `send_handoff` — the console-carried typed transfer that replaced
+ * the native envelope. The fake dispatches it to the real registered handler,
+ * so a test drives the same path production does.
+ */
+export function sendHandoffUse(
+  callId: string,
+  to: string,
+  fields: {
+    action: string;
+    stateSummary?: string;
+    status?: "pending" | "in_progress" | "blocked" | "needs_verification" | "completed" | "failed";
+    category?: "assignment" | "update" | "milestone" | "failure" | "final" | "decision";
+    risk?: "low" | "medium" | "high";
+    evidence?: { kind: string; ref: string }[];
+    resultSummary?: string | null;
+    artifacts?: { kind: string; ref: string }[];
+    uncertainty?: string[];
+    nextAction?: string | null;
+    taskId?: string | null;
+    dedupeKey?: string;
+  },
+): SdkMessage {
+  return toolUseMessage(callId, "mcp__console_agent__send_handoff", {
+    to,
+    category: fields.category ?? "update",
+    status: fields.status ?? "in_progress",
+    risk: fields.risk ?? "low",
+    action: fields.action,
+    stateSummary: fields.stateSummary ?? fields.action,
+    evidence: fields.evidence ?? [],
+    resultSummary: fields.resultSummary ?? null,
+    artifacts: fields.artifacts ?? [],
+    uncertainty: fields.uncertainty ?? [],
+    nextAction: fields.nextAction ?? null,
+    taskId: fields.taskId ?? null,
+    requestExpandedContext: false,
+    ...(fields.dedupeKey === undefined ? {} : { dedupeKey: fields.dedupeKey }),
+  });
 }
 
 /** An agent's SendMessage to "main", as the peer-origin user frame it becomes. */

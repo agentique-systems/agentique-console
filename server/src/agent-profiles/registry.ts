@@ -26,6 +26,14 @@ export const ProfileSchema = z.object({
     shell: z.boolean().default(false),
     browser: z.boolean().default(false),
     screenshots: z.boolean().default(false),
+    /**
+     * Outbound hosts this profile may reach from sandboxed commands.
+     * `"default"` takes the workspace allowlist (CONSOLE_ALLOWED_DOMAINS);
+     * `[]` means offline; an explicit list overrides. Loopback is always
+     * permitted — a seat must be able to reach a server it just started,
+     * which db-live-1 could not.
+     */
+    network: z.union([z.literal("default"), z.array(z.string())]).default("default"),
   }),
   skills: z.array(z.string()).optional(),
   entryAgent: z.string().optional(),
@@ -44,13 +52,13 @@ const BUILTINS: AgentProfile[] = [
     id: "coordinator",
     title: "Coordinator",
     purpose: "Own a bounded workstream, assign each unit once, integrate results, and report milestones.",
-    instructions: "You are the sole coordinator for this AgentSession. You own decomposition and integration. Send assignments only to your specialists. Do not implement their work, broadcast status, or repeat unchanged information. Report to main only for a blocking decision, material failure, milestone, or final result. For one high-stakes implementation unit you may use start_attempts (when available) to race 2-3 isolated attempts and let a reviewer pick the winner; a merge-conflict failure means reassign against the current HEAD.",
+    instructions: "You are the sole coordinator for this AgentSession. You own decomposition and integration. Send assignments only to your specialists. Do not implement their work, broadcast status, or repeat unchanged information. For one high-stakes implementation unit you may use start_attempts (when available) to race 2-3 isolated attempts and let a reviewer pick the winner; a merge-conflict failure means reassign against the current HEAD.\n\nWrite seats work in ISOLATED worktrees. Files they create are not visible in your workspace until they report completed and the Console merges them — an `ls` that shows nothing proves nothing. Read their progress from the roster line or ask the seat; never conclude from the filesystem that a seat has done nothing.\n\nReport to main for a blocking decision, material failure, milestone, or final result — and always before you go idle. If you are unsure whether a result is worth reporting, report it: the operator can act on a partial result and cannot act on silence. Relay what your specialists actually found, including defects and anything they could not verify, rather than a summary that they finished.",
     tools: READ_TOOLS,
     permissionMode: "default",
     model: "claude-sonnet-5",
     handoffExtension: "coordination",
     maxTurns: 35, sandboxRequired: true,
-    runtime: { shell: false, browser: false, screenshots: false },
+    runtime: { shell: false, browser: false, screenshots: false, network: [] },
   },
   {
     id: "explorer",
@@ -62,7 +70,7 @@ const BUILTINS: AgentProfile[] = [
     model: "claude-sonnet-5",
     handoffExtension: "investigation",
     maxTurns: 30, sandboxRequired: true,
-    runtime: { shell: false, browser: false, screenshots: false },
+    runtime: { shell: false, browser: false, screenshots: false, network: [] },
   },
   {
     id: "implementer",
@@ -74,7 +82,7 @@ const BUILTINS: AgentProfile[] = [
     model: "claude-opus-5",
     handoffExtension: "implementation",
     maxTurns: 50, sandboxRequired: true,
-    runtime: { shell: true, browser: false, screenshots: false },
+    runtime: { shell: true, browser: false, screenshots: false, network: "default" },
   },
   {
     id: "frontend-implementer",
@@ -86,7 +94,7 @@ const BUILTINS: AgentProfile[] = [
     model: "claude-opus-5",
     handoffExtension: "implementation",
     maxTurns: 50, sandboxRequired: true,
-    runtime: { shell: true, browser: true, screenshots: true },
+    runtime: { shell: true, browser: true, screenshots: true, network: "default" },
   },
   {
     id: "reviewer",
@@ -98,7 +106,7 @@ const BUILTINS: AgentProfile[] = [
     model: "claude-opus-5",
     handoffExtension: "review",
     maxTurns: 35, sandboxRequired: true,
-    runtime: { shell: true, browser: false, screenshots: false },
+    runtime: { shell: true, browser: false, screenshots: false, network: [] },
   },
   {
     id: "visual-reviewer",
@@ -110,7 +118,7 @@ const BUILTINS: AgentProfile[] = [
     model: "claude-opus-5",
     handoffExtension: "review",
     maxTurns: 35, sandboxRequired: true,
-    runtime: { shell: true, browser: true, screenshots: true },
+    runtime: { shell: true, browser: true, screenshots: true, network: "default" },
   },
   {
     id: "researcher",
@@ -122,7 +130,7 @@ const BUILTINS: AgentProfile[] = [
     model: "claude-sonnet-5",
     handoffExtension: "investigation",
     maxTurns: 30, sandboxRequired: true,
-    runtime: { shell: false, browser: false, screenshots: false },
+    runtime: { shell: false, browser: false, screenshots: false, network: "default" },
   },
 ];
 
@@ -237,7 +245,7 @@ export class AgentProfileRegistry {
   }
 
   #revision(files: { path: string; content: string }[]): string { const hash = crypto.createHash("sha256"); for (const file of files) hash.update(file.path).update("\0").update(file.content).update("\0"); return hash.digest("hex"); }
-  #invalidPlaceholder(id: string): AgentProfile { return { id, title: id, purpose: "Invalid profile", instructions: "", tools: [], skills: [], permissionMode: "default", maxTurns: 1, sandboxRequired: true, runtime: { shell: false, browser: false, screenshots: false } }; }
+  #invalidPlaceholder(id: string): AgentProfile { return { id, title: id, purpose: "Invalid profile", instructions: "", tools: [], skills: [], permissionMode: "default", maxTurns: 1, sandboxRequired: true, runtime: { shell: false, browser: false, screenshots: false, network: [] } }; }
   #componentCounts(files: { path: string }[]): Record<string, number> { const counts: Record<string, number> = {}; for (const file of files) { const kind = file.path.startsWith("skills/") ? "skills" : file.path.startsWith("hooks/") ? "hooks" : file.path.startsWith("agents/") ? "agents" : file.path === ".mcp.json" ? "mcp" : "files"; counts[kind] = (counts[kind] ?? 0) + 1; } return counts; }
   #summary(profile: AgentProfile, source: "builtin" | "workspace", revision: string, trusted: boolean, valid: boolean, files: { path: string }[]): AgentProfileSummary { return { id: profile.id, title: profile.title, purpose: profile.purpose, source, revision, trusted, valid, tools: profile.tools, skills: profile.skills ?? [], componentCounts: this.#componentCounts(files) }; }
   #detail(profile: AgentProfile, source: "builtin" | "workspace", revision: string, trusted: boolean, issues: ProfileValidationIssue[], files: { path: string; content: string }[]): AgentProfileDetail {

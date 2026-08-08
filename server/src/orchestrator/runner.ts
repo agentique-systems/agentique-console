@@ -41,7 +41,7 @@ import { HandoffDraftSchema, HANDOFF_DRAFT_JSON_SCHEMA } from "../handoffs/schem
 import { sdkEnv } from "../sdk/env.ts";
 import type { AgentSessionHost } from "../agent-sessions/host.ts";
 import { mainPeerName } from "../agent-sessions/peer-names.ts";
-import { buildSendMessageMiddleware, deliveryTagOf, mergeHooks } from "../agent-sessions/send-middleware.ts";
+import { mergeHooks } from "../sdk/hooks.ts";
 import { buildCronHooks, cronDue } from "./cron-hooks.ts";
 import { buildTaskHooks } from "../tasks/hooks.ts";
 import type { TaskService } from "../tasks/service.ts";
@@ -91,6 +91,29 @@ interface Lane {
   lastOperatorFacingText: string;
   /** Tool-call start times used to emit useful timeline durations. */
   toolStarts: Map<string, number>;
+  /**
+   * Peak context-window occupancy this provider session, from per-API-call
+   * usage — NOT the result message's turn-wide `inputTokens` sum, which
+   * overstates occupancy by 5-25x on a tool-heavy turn and made every seat
+   * rotate after a single turn in the db-live-1 run.
+   */
+  contextTokens: number;
+  /** Last cumulative cost/api-duration seen, for per-turn deltas. */
+  lastCumulative: { costUsd: number; apiDurationMs: number };
+}
+
+/**
+ * `cumulativeCostUsd`/`cumulativeApiDurationMs` restate the provider session's
+ * running total on every result, so a turn's own figure is the delta since the
+ * lane last saw one. Recording them raw overstated the db-live-1 ledger by 25%.
+ * Mutates the lane's watermark as a side effect — call exactly once per result.
+ */
+function laneUsageDeltas(lane: Lane, event: { cumulativeCostUsd?: number; cumulativeApiDurationMs?: number }): { costUsd: number | null; apiDurationMs: number | null } {
+  const costUsd = event.cumulativeCostUsd === undefined ? null : Math.max(0, event.cumulativeCostUsd - lane.lastCumulative.costUsd);
+  const apiDurationMs = event.cumulativeApiDurationMs === undefined ? null : Math.max(0, event.cumulativeApiDurationMs - lane.lastCumulative.apiDurationMs);
+  if (event.cumulativeCostUsd !== undefined) lane.lastCumulative.costUsd = event.cumulativeCostUsd;
+  if (event.cumulativeApiDurationMs !== undefined) lane.lastCumulative.apiDurationMs = event.cumulativeApiDurationMs;
+  return { costUsd, apiDurationMs };
 }
 
 export interface OrchestratorDeps {
@@ -295,6 +318,8 @@ export class OrchestratorRunner {
         steeredMidTurn: 0,
         lastOperatorFacingText: "",
         toolStarts: new Map(),
+        contextTokens: 0,
+        lastCumulative: { costUsd: 0, apiDurationMs: 0 },
       };
       this.#lanes.set(sessionId, lane);
     }
@@ -411,15 +436,8 @@ export class OrchestratorRunner {
     const host = this.#deps.host?.();
     const fragments: SdkHooksFragment[] = [];
     if (host && session.purpose !== "profile_manager") {
-      fragments.push(buildSendMessageMiddleware({
-        identity: { kind: "main", userSessionId: sessionId },
-        governor: host.governor(),
-        sendWakeTimeoutMs: config.sendWakeTimeoutMs,
-        deliveryHoldLeaseMs: config.deliveryHoldLeaseMs,
-        onDenied: (denial) => bus.append({ type: "governance.send.denied", userSessionId: sessionId,
-          payload: { sender: "main", senderScope: "main", to: denial.to,
-            kind: denial.kind, reason: denial.reason.slice(0, 500) } }),
-      }));
+      // Main reaches its coordinator through the console tool surface, the same
+      // single path every seat uses. No send middleware, no peer carry.
       if (this.#deps.tasks) {
         fragments.push(buildTaskHooks(this.#deps.tasks, {
           workspaceId: session.workspaceId, userSessionId: sessionId,
@@ -457,6 +475,11 @@ export class OrchestratorRunner {
     lane.query = query;
     lane.input = input;
     lane.abort = abort;
+    // A fresh CLI process restarts both counters: cumulative cost/duration
+    // begin at zero, and occupancy is re-reported by its first assistant
+    // message. Carrying the old watermarks forward would zero out real spend.
+    lane.contextTokens = 0;
+    lane.lastCumulative = { costUsd: 0, apiDurationMs: 0 };
     lane.pump = this.#pumpOutput(sessionId, lane, query);
   }
 
@@ -735,6 +758,10 @@ export class OrchestratorRunner {
         });
         return;
       }
+      case "context": {
+        lane.contextTokens = Math.max(lane.contextTokens, event.occupancyTokens);
+        return;
+      }
       case "result": {
         const session = repo.getUserSession(sessionId);
         if (
@@ -745,18 +772,19 @@ export class OrchestratorRunner {
           repo.patchUserSession(sessionId, { sdkSessionId: event.resumeId });
         }
         if (session) {
-          const contextTokens = Math.max(session.contextTokens, event.inputTokens ?? 0);
+          const contextTokens = Math.max(session.contextTokens, lane.contextTokens);
           repo.patchUserSession(sessionId, { sdkTurnCount: session.sdkTurnCount + 1, contextTokens });
           if (session.sdkTurnCount + 1 >= this.#deps.config.contextTurnLimit || contextTokens >= rotationTokenLimit(this.#deps.config.contextTokenLimit, this.#deps.config.model)) lane.recycleAfterTurn = true;
+          const { costUsd, apiDurationMs } = laneUsageDeltas(lane, event);
           const usage = { id: newId("usage"), userSessionId: sessionId, agentSessionId: null, participant: "orchestrator", profileId: null,
             generation: session.sdkGeneration, turnId: turn?.turnId ?? "unattributed", inputTokens: event.inputTokens ?? 0,
             uncachedInputTokens: event.uncachedInputTokens ?? 0, cacheCreationInputTokens: event.cacheCreationInputTokens ?? 0, cacheReadInputTokens: event.cacheReadInputTokens ?? 0, outputTokens: event.outputTokens ?? 0,
-            costUsd: event.costUsd ?? null, model: event.modelId ?? this.#deps.config.model ?? null, effort: this.#deps.config.effort ?? null,
-            trigger: turn?.trigger ?? null, durationMs: turn ? Date.now() - turn.startedAt : null, apiDurationMs: event.apiDurationMs ?? null, sdkDurationMs: event.sdkDurationMs ?? null, status: "completed", stopReason: event.stopReason ?? null, createdAt: nowIso() };
+            costUsd, model: event.modelId ?? this.#deps.config.model ?? null, effort: this.#deps.config.effort ?? null,
+            trigger: turn?.trigger ?? null, durationMs: turn ? Date.now() - turn.startedAt : null, apiDurationMs, sdkDurationMs: event.sdkDurationMs ?? null, status: "completed", stopReason: event.stopReason ?? null, createdAt: nowIso() };
           repo.insertUsage(usage);
           bus.append({ type: "usage.recorded", userSessionId: sessionId, payload: { sessionId, participant: "orchestrator", generation: session.sdkGeneration,
             turnId: usage.turnId, inputTokens: usage.inputTokens, uncachedInputTokens: usage.uncachedInputTokens, cacheCreationInputTokens: usage.cacheCreationInputTokens, cacheReadInputTokens: usage.cacheReadInputTokens,
-            outputTokens: usage.outputTokens, ...(event.costUsd === undefined ? {} : { costUsd: event.costUsd }), model: usage.model ?? undefined, effort: usage.effort ?? undefined,
+            outputTokens: usage.outputTokens, ...(costUsd === null ? {} : { costUsd }), model: usage.model ?? undefined, effort: usage.effort ?? undefined,
             trigger: turn?.trigger, durationMs: usage.durationMs ?? undefined, apiDurationMs: usage.apiDurationMs ?? undefined, sdkDurationMs: usage.sdkDurationMs ?? undefined,
             status: "completed", stopReason: usage.stopReason ?? undefined } });
         }
@@ -770,17 +798,18 @@ export class OrchestratorRunner {
         }
         const session = repo.getUserSession(sessionId);
         if (session) {
-          const contextTokens = Math.max(session.contextTokens, event.inputTokens ?? 0);
+          const contextTokens = Math.max(session.contextTokens, lane.contextTokens);
           repo.patchUserSession(sessionId, { sdkTurnCount: session.sdkTurnCount + 1, contextTokens });
+          const { costUsd, apiDurationMs } = laneUsageDeltas(lane, event);
           const usage = { id: newId("usage"), userSessionId: sessionId, agentSessionId: null, participant: "orchestrator", profileId: null,
             generation: session.sdkGeneration, turnId: turn?.turnId ?? "unattributed", inputTokens: event.inputTokens ?? 0,
             uncachedInputTokens: event.uncachedInputTokens ?? 0, cacheCreationInputTokens: event.cacheCreationInputTokens ?? 0, cacheReadInputTokens: event.cacheReadInputTokens ?? 0, outputTokens: event.outputTokens ?? 0,
-            costUsd: event.costUsd ?? null, model: event.modelId ?? this.#deps.config.model ?? null, effort: this.#deps.config.effort ?? null,
-            trigger: turn?.trigger ?? null, durationMs: turn ? Date.now() - turn.startedAt : null, apiDurationMs: event.apiDurationMs ?? null, sdkDurationMs: event.sdkDurationMs ?? null, status: event.aborted ? "aborted" : "error", stopReason: event.stopReason ?? null, createdAt: nowIso() };
+            costUsd, model: event.modelId ?? this.#deps.config.model ?? null, effort: this.#deps.config.effort ?? null,
+            trigger: turn?.trigger ?? null, durationMs: turn ? Date.now() - turn.startedAt : null, apiDurationMs, sdkDurationMs: event.sdkDurationMs ?? null, status: event.aborted ? "aborted" : "error", stopReason: event.stopReason ?? null, createdAt: nowIso() };
           repo.insertUsage(usage);
           bus.append({ type: "usage.recorded", userSessionId: sessionId, payload: { sessionId, participant: "orchestrator", generation: session.sdkGeneration,
             turnId: usage.turnId, inputTokens: usage.inputTokens, uncachedInputTokens: usage.uncachedInputTokens, cacheCreationInputTokens: usage.cacheCreationInputTokens, cacheReadInputTokens: usage.cacheReadInputTokens,
-            outputTokens: usage.outputTokens, ...(event.costUsd === undefined ? {} : { costUsd: event.costUsd }), model: usage.model ?? undefined, effort: usage.effort ?? undefined,
+            outputTokens: usage.outputTokens, ...(costUsd === null ? {} : { costUsd }), model: usage.model ?? undefined, effort: usage.effort ?? undefined,
             trigger: turn?.trigger, durationMs: usage.durationMs ?? undefined, apiDurationMs: usage.apiDurationMs ?? undefined, sdkDurationMs: usage.sdkDurationMs ?? undefined,
             status: event.aborted ? "aborted" : "error", stopReason: usage.stopReason ?? undefined } });
           if (session.sdkTurnCount + 1 >= this.#deps.config.contextTurnLimit || contextTokens >= rotationTokenLimit(this.#deps.config.contextTokenLimit, this.#deps.config.model)) lane.recycleAfterTurn = true;
@@ -794,24 +823,10 @@ export class OrchestratorRunner {
         this.#settleTurn(sessionId, lane);
         return;
       }
+      // Inbound native peer traffic no longer exists: every delivery is
+      // console-carried and journalled on the sender side, so arrival needs no
+      // backstop. Kept as a no-op guard in case a stray frame appears.
       case "peer-message": {
-        // Native inbound from a console peer (a coordinator reporting up).
-        // The sender-side middleware journaled it; the carry receipt acked it.
-        // Here we surface arrival, back-stop the ack, and make sure the CLI's
-        // exogenous turn has console bookends.
-        const tag = deliveryTagOf(event.text);
-        const known = tag ? this.#deps.repo.getDeliveryById(tag.deliveryId) : undefined;
-        if (!known) {
-          bus.append({ type: "user_session.runtime", userSessionId: sessionId,
-            payload: { sessionId, detail: `ignored peer message from ${event.from}: no console delivery tag` } });
-          return;
-        }
-        if (known.status !== "acknowledged") {
-          this.#deps.repo.patchDelivery(known.id, { status: "acknowledged", acknowledgedAt: nowIso(), deliveredAt: known.deliveredAt ?? nowIso() });
-        }
-        bus.append({ type: "user_session.runtime", userSessionId: sessionId,
-          payload: { sessionId, detail: `peer report from ${event.from} (delivery ${known.id})` } });
-        if (!lane.activeTurn) this.#mintExogenousTurn(sessionId, lane);
         return;
       }
       case "task-terminal": {

@@ -30,20 +30,14 @@ import type { WorktreeManager } from "../runtime/worktree-manager.ts";
 import type { InteractionService } from "../orchestrator/interactions.ts";
 import type { TaskService } from "../tasks/service.ts";
 import type { HandoffService } from "../handoffs/service.ts";
-import { CheckpointClosingSchema, HandoffDraftSchema } from "../handoffs/schema.ts";
+import { EvidenceRefSchema, HANDOFF_DRAFT_JSON_SCHEMA, HandoffCoreSchema, HandoffDraftSchema } from "../handoffs/schema.ts";
 import { evaluateCheckpointDraft } from "../handoffs/checkpoint-gate.ts";
 import { mainPeerName, peerNameOf } from "./peer-names.ts";
 import { buildTaskHooks } from "../tasks/hooks.ts";
 import { buildWorktreeHooks } from "./worktree-hook.ts";
-import {
-  buildSendMessageMiddleware,
-  mergeHooks,
-  type JournalResult,
-  type ResolvedRecipient,
-  type SendEnvelope,
-  type SendGovernor,
-  type SenderIdentity,
-} from "./send-middleware.ts";
+import { consoleTaskListId } from "../orchestrator/tools.ts";
+import { SESSION_PROTOCOL } from "./presets.ts";
+import { mergeHooks } from "../sdk/hooks.ts";
 import { AsyncQueue } from "../async-queue.ts";
 
 export const ORCHESTRATOR_SEAT = "orchestrator";
@@ -60,6 +54,37 @@ const MATERIAL_CATEGORIES = new Set(["milestone", "failure", "final", "decision"
  */
 const WATCHDOG_IDENTICAL_CALLS = 5;
 const WATCHDOG_ERROR_STREAK = 10;
+/** Rotation blocks every sender to the seat; a checkpoint may not run forever. */
+const CHECKPOINT_TIMEOUT_MS = 90_000;
+
+/** Failed-turn redeliveries per delivery row before the console gives up. */
+const MAX_REDELIVERY_ATTEMPTS = 2;
+
+/**
+ * Built-in tools a profile may grant. Anything here that a profile does NOT
+ * list is explicitly denied, which is what makes `profile.tools` a real
+ * boundary rather than an auto-approval hint. Harness conveniences a governed
+ * seat should never reach (subagent spawning, scheduling, its own review
+ * tooling) are denied unconditionally alongside these.
+ */
+const GOVERNED_BUILTIN_TOOLS = [
+  "Bash", "Edit", "Write", "NotebookEdit", "Read", "Glob", "Grep",
+  "WebFetch", "WebSearch",
+] as const;
+
+/** Rotation-recovery prefix, applied at most once (it used to accrete). */
+const RECOVERY_PREFIX = "Recovery checkpoint: ";
+function recoveryAction(action: string): string {
+  return action.startsWith(RECOVERY_PREFIX) ? action : `${RECOVERY_PREFIX}${action}`;
+}
+
+/**
+ * A provider-side 4xx means the request was malformed by US and never reached
+ * the model — categorically different from a model that produced nothing.
+ */
+function isTransportFailure(failure: string | null): boolean {
+  return failure !== null && /API Error: 4\d\d/.test(failure);
+}
 
 /** Seat names may contain chars git refs forbid; branch components drop them. */
 function branchSafe(name: string): string {
@@ -77,16 +102,101 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => { const timer = setTimeout(resolve, ms); timer.unref?.(); });
 }
 
+/**
+ * What this seat can actually do, stated up front.
+ *
+ * Every capability limit in db-live-1 was discovered mid-run at high cost:
+ * renderer spent a 595s turn learning the sandbox has no outbound network,
+ * `check` spent four tool searches learning it had no keyboard primitive, and
+ * both hunted the filesystem for artifacts that live in SQLite. None of that
+ * is discoverable from inside; all of it is known here at spawn.
+ */
+/**
+ * Sandbox network policy for a seat. `allowLocalBinding` is unconditional: a
+ * seat must be able to reach a server it started itself, and in db-live-1
+ * `check` could not — it got ECONNREFUSED on its own dev server and had to
+ * report the traversal and error branches as unverified.
+ */
+function sandboxNetwork(profile: AgentProfile, workspaceDomains: string[]): { allowedDomains: string[]; allowLocalBinding: true; strictAllowlist: true } {
+  const configured = profile.runtime.network;
+  return {
+    allowedDomains: configured === "default" ? workspaceDomains : configured,
+    allowLocalBinding: true,
+    strictAllowlist: true,
+  };
+}
+
+function resolvedDomains(profile: AgentProfile, workspaceDomains: string[]): string[] {
+  return profile.runtime.network === "default" ? workspaceDomains : profile.runtime.network;
+}
+
+function capabilityBrief(profile: AgentProfile, hasWorktree: boolean, workspaceDomains: string[]): string {
+  const can: string[] = [];
+  const cannot: string[] = [];
+  if (profile.runtime.shell) can.push("run processes (process_start/read/stop) and Bash inside a sandbox");
+  else cannot.push("run any process or shell command");
+  if (profile.runtime.browser) {
+    can.push("drive a real local Chrome: open, click, fill, press keys, evaluate JS, read the console");
+    if (profile.runtime.screenshots) can.push("capture screenshots as durable artifacts (read them back with read_artifact)");
+    else cannot.push("take screenshots");
+  } else cannot.push("open a browser");
+  const domains = resolvedDomains(profile, workspaceDomains);
+  can.push("connect to localhost — servers you start are reachable from your own commands and from the browser");
+  if (domains.length === 0) {
+    cannot.push("reach any outbound host. Anything fetched from a CDN or registry at runtime will fail; vendor it locally or verify without it");
+  } else {
+    can.push(`reach these hosts and no others: ${domains.join(", ")}. A fetch outside that list fails — say so rather than working around it`);
+  }
+  cannot.push("read outside the paths below, or write outside your own working copy");
+  return `## Your capabilities\nYou can: ${can.join("; ") || "read files only"}.\nYou cannot: ${cannot.join("; ")}.\n` +
+    `${hasWorktree ? "Your cwd is an isolated worktree; teammates and the coordinator cannot see your files until the Console merges them when you report completed.\n" : ""}` +
+    `If an assignment needs something in the "cannot" list, say so immediately in a handoff rather than working around it — the limit is real and will not change mid-run.`;
+}
+
+/**
+ * `name@semver` pins introduced by a diff's added lines. Deliberately
+ * syntax-agnostic: one pattern covers npm specifiers, CDN URLs and import-map
+ * entries without parsing any of them. It does not see `"pkg": "1.2.3"`
+ * object form — two seats editing the same manifest collide in git anyway.
+ */
+export function dependencyPinsInPatch(patch: string): { name: string; version: string }[] {
+  const pins: { name: string; version: string }[] = [];
+  for (const line of patch.split("\n")) {
+    if (!line.startsWith("+") || line.startsWith("+++")) continue;
+    for (const match of line.matchAll(/(?:^|[/"'\s@])([a-z][a-z0-9._-]{1,40})@(\d+\.\d+\.\d+)/gi)) {
+      pins.push({ name: (match[1] as string).toLowerCase(), version: match[2] as string });
+    }
+  }
+  return pins;
+}
+
+/** Compact capability tag for roster lines — what this seat can be asked to do. */
+function capabilityTag(profile: AgentProfile): string {
+  const caps = [
+    ...(profile.tools.includes("Edit") || profile.tools.includes("Write") ? ["writes files"] : ["read-only"]),
+    ...(profile.runtime.shell ? ["runs processes"] : []),
+    ...(profile.runtime.browser ? [profile.runtime.screenshots ? "browser+keyboard+screenshots" : "browser+keyboard"] : []),
+  ];
+  return `can: ${caps.join(", ")}`;
+}
+
 /** Console-synthesized lane input: neither human nor peer, so no origin. */
 function seatUserMessage(text: string): SdkUserMessageLike {
   return { type: "user", message: { role: "user", content: [{ type: "text", text }] }, parent_tool_use_id: null, shouldQuery: true };
 }
 
+/**
+ * The seat's messaging documentation. Short by construction: there is one way
+ * to transfer, its fields are typed, and nothing has to be serialized by hand.
+ * The predecessor to this brief had to teach a JSON envelope by example and
+ * still cost 5-9 rejections per seat before the first message landed.
+ */
 function seatMessagingBrief(roster: string, seatName: string): string {
-  return `Communication: use the native SendMessage tool for every transfer — your plain text output reaches no one. Participants: ${roster}. ` +
-    `Address seats by bare name (e.g. "orchestrator"); the console rewrites it to the registry address. If a tool result asks you to re-send with a ref, re-send using the exact "name [ref]" it shows. ` +
-    `The message field MUST be a JSON handoff envelope: {"handoff": <HandoffDraft>, "category": "assignment"|"update"|"milestone"|"failure"|"final"|"decision", "checkpointReadiness"?: "stable"|"defer"}; invalid envelopes are denied with the reason — fix and re-send. ` +
-    `${seatName === ORCHESTRATOR_SEAT ? "You may address your specialists and main." : "You may address only orchestrator."} Never use the Agent tool.`;
+  return `Communication: your plain text output reaches no one. To transfer anything — an assignment, progress, findings, a failure, a final result — call send_handoff. Its fields are typed; there is no JSON to write or escape. Participants: ${roster}. ` +
+    `Address participants by bare name (e.g. "orchestrator"); "main" reaches the Orchestrator. ` +
+    `${seatName === ORCHESTRATOR_SEAT ? "You may address your specialists and main." : "You may address only orchestrator."} ` +
+    `Put the substance in stateSummary — the findings themselves, not a description of having found them — and say what you could not verify in uncertainty. ` +
+    `Never use the Agent or SendMessage tools.`;
 }
 
 type Category = MailboxDeliveryRow["category"];
@@ -113,12 +223,27 @@ interface SeatLane {
     deliveries: MailboxDeliveryRow[];
     sawSend: boolean;
     toolStarts: Map<string, number>;
+    /**
+     * The seat's most recent narration. Harvested into the synthetic failure
+     * handoff when a turn dies: in db-live-1 `check` had finished its review
+     * and could only print it, so the interrupt destroyed the run's best output.
+     */
+    lastNarration: string;
     watchdog: { lastKey: string; identical: number; errorStreak: number; tripped: string | null };
   } | null;
   /** Console pushes awaiting attribution to the next minted turn. */
   pendingDeliveries: MailboxDeliveryRow[];
-  /** Sender-side delivery holds; a held lane cannot park or rotate. */
-  holds: number;
+  /** deliveryId → failed-turn redelivery attempts, capped so retries end. */
+  redeliveryAttempts: Map<string, number>;
+  /**
+   * Peak context-window occupancy observed this provider session, from
+   * per-assistant-message usage. This is the rotation signal — NOT the result
+   * message's `inputTokens`, which sums every API round-trip in the turn and
+   * so overstates occupancy by 5-25x on a tool-heavy turn.
+   */
+  contextTokens: number;
+  /** Last cumulative cost/api-duration seen, for per-turn deltas. */
+  lastCumulative: { costUsd: number; apiDurationMs: number };
   /** Set while rotating/recycling; senders await it before ensureLive. */
   rotationGate: Promise<void> | null;
   releaseRotation: (() => void) | null;
@@ -154,7 +279,23 @@ export interface AgentSessionHostDeps {
   worktrees?: WorktreeManager;
 }
 
-const OUTPUT_SCHEMA = CheckpointClosingSchema;
+/** The flat, provider-validated parameter surface of `send_handoff`. */
+interface SendHandoffArgs {
+  to: string;
+  category: Category;
+  status: HandoffDraft["core"]["status"];
+  risk: HandoffDraft["core"]["risk"];
+  action: string;
+  stateSummary: string;
+  evidence: HandoffDraft["core"]["state"]["evidence"];
+  resultSummary: string | null;
+  artifacts: HandoffDraft["core"]["result"]["artifacts"];
+  uncertainty: string[];
+  nextAction: string | null;
+  taskId: string | null;
+  requestExpandedContext: boolean;
+  dedupeKey?: string;
+}
 
 function ok(value: unknown): SdkToolResult {
   return { content: [{ type: "text", text: JSON.stringify(value) }] };
@@ -338,7 +479,13 @@ export class AgentSessionHost {
       const priorMessage = prior ? repo.getMessageById(prior.messageId) : undefined;
       if (priorMessage) return priorMessage;
     }
-    this.#assertFinalGates(session, input.speaker.name, input.to, category);
+    const caveats = this.#finalReportCaveats(session, input.speaker.name, input.to, category);
+    if (caveats.length > 0) {
+      input = { ...input, handoff: { ...input.handoff, core: { ...input.handoff.core,
+        uncertainty: [...input.handoff.core.uncertainty, `Console: reported final with work outstanding — ${caveats.join("; ")}.`] } } };
+      this.#deps.bus.append({ type: "handoff.final.caveats", userSessionId: session.userSessionId, agentSessionId: session.id,
+        payload: { agentSessionId: session.id, sender: input.speaker.name, caveats } });
+    }
     const { message, delivery, text } = this.#journal(session, input.speaker, input.to, input.handoff, category, {
       transport: "console", ...(input.dedupeKey ? { dedupeKey: input.dedupeKey } : {}), ...(input.turnId ? { turnId: input.turnId } : {}),
     });
@@ -362,12 +509,20 @@ export class AgentSessionHost {
     return message;
   }
 
-  /** The category gates a `final` report must clear before it reaches main. */
-  #assertFinalGates(session: AgentSessionRow, sender: string, to: string, category: Category): void {
-    if (sender !== ORCHESTRATOR_SEAT || to !== MAIN_RECIPIENT || category !== "final") return;
+  /**
+   * Conditions a `final` report has not met. These used to THROW, which made
+   * the operator's report conditional on model-maintained state: in db-live-1
+   * the ledger orphaned on rotation, so a `final` was structurally impossible
+   * and the operator heard nothing for 35 minutes. The console may enforce
+   * only on facts it owns — so unmet conditions now travel WITH the report,
+   * where the operator can weigh them, instead of suppressing it.
+   */
+  #finalReportCaveats(session: AgentSessionRow, sender: string, to: string, category: Category): string[] {
+    if (sender !== ORCHESTRATOR_SEAT || to !== MAIN_RECIPIENT || category !== "final") return [];
+    const caveats: string[] = [];
     if (this.#deps.tasks) {
       const incomplete = this.#deps.tasks.listForUserSession(session.userSessionId).filter((task) => task.agentSessionId === session.id && task.status !== "completed" && task.status !== "deleted");
-      if (incomplete.length > 0) throw badRequest(`cannot report final while ${incomplete.length} task(s) remain incomplete: ${incomplete.map((task) => task.subject).join(", ")}`);
+      if (incomplete.length > 0) caveats.push(`${incomplete.length} task(s) still open in the ledger: ${incomplete.map((task) => task.subject).join(", ")}`);
     }
     const lanes = this.#seats.get(session.id);
     const activeSpecialists = [...(lanes?.entries() ?? [])].filter(([name, lane]) => name !== ORCHESTRATOR_SEAT && lane.activeTurn !== null).map(([name]) => name);
@@ -375,7 +530,9 @@ export class AgentSessionHost {
     // native final goes out mid-turn, so the very report that woke the
     // coordinator is still unacknowledged in its own inbox.
     const pendingInternal = this.#deps.repo.listActiveDeliveries(session.id).filter((delivery) => delivery.recipient !== MAIN_RECIPIENT && delivery.recipient !== ORCHESTRATOR_SEAT);
-    if (activeSpecialists.length > 0 || pendingInternal.length > 0) throw badRequest(`cannot report final while AgentSession work is active (${activeSpecialists.length} running, ${pendingInternal.length} queued/delivered)`);
+    if (activeSpecialists.length > 0) caveats.push(`still running: ${activeSpecialists.join(", ")}`);
+    if (pendingInternal.length > 0) caveats.push(`${pendingInternal.length} delivery(ies) to specialists not yet acknowledged`);
+    return caveats;
   }
 
   /** Journal core shared by the console path and the SendMessage middleware. */
@@ -520,197 +677,6 @@ export class AgentSessionHost {
     return { sandbox: fs.existsSync("/usr/bin/bwrap") || fs.existsSync("/usr/local/bin/bwrap"), chrome: fs.existsSync("/usr/bin/google-chrome") };
   }
 
-  /**
-   * The governance surface the SendMessage middleware runs against. One
-   * governor serves every identity — seats get it via #buildSeatHooks, the
-   * orchestrator runner via its own middleware build with a main identity.
-   */
-  governor(): SendGovernor {
-    return {
-      resolve: (identity, name) => this.#resolvePeer(identity, name),
-      assertSendAllowed: (identity, recipient, envelope) => this.#assertSendAllowed(identity, recipient, envelope),
-      journal: (identity, recipient, envelope, raw) => this.#journalPeer(identity, recipient, envelope, raw),
-      ensureLive: (recipient, timeoutMs) => this.#ensureLiveForSend(recipient, timeoutMs),
-      markDelivered: (deliveryId, msgId) => this.#settleCarry(deliveryId, "delivered", msgId),
-      markCarryFailed: (deliveryId, reason) => this.#settleCarry(deliveryId, "failed", reason),
-    };
-  }
-
-  #resolvePeer(identity: SenderIdentity, name: string): ResolvedRecipient | { error: string } {
-    const { repo } = this.#deps;
-    const prefix = this.#deps.config?.peerNamePrefix ?? "console-";
-    if (identity.kind === "seat") {
-      const session = repo.getAgentSession(identity.agentSessionId);
-      if (!session) return { error: `unknown agent session ${identity.agentSessionId}` };
-      if (name === MAIN_RECIPIENT || name === mainPeerName(prefix, session.userSessionId)) {
-        return { scope: "main", peerName: mainPeerName(prefix, session.userSessionId) };
-      }
-      const alias = name === "coordinator" ? ORCHESTRATOR_SEAT : name;
-      for (const participant of repo.listParticipants(identity.agentSessionId)) {
-        if (participant.name === alias || participant.peerName === name) {
-          return { scope: "seat", agentSessionId: identity.agentSessionId, seat: participant.name, peerName: participant.peerName };
-        }
-      }
-      const roster = repo.listParticipants(identity.agentSessionId).map((p) => p.name).join(", ");
-      return { error: `unknown recipient "${name}" — valid addresses: ${roster}, main` };
-    }
-    const sessions = repo.listAgentSessions(identity.userSessionId).filter((row) => row.status === "open");
-    for (const session of sessions) {
-      const coordinator = repo.getParticipant(session.id, ORCHESTRATOR_SEAT);
-      if (coordinator && (coordinator.peerName === name || (name === ORCHESTRATOR_SEAT && sessions.length === 1))) {
-        return { scope: "seat", agentSessionId: session.id, seat: ORCHESTRATOR_SEAT, peerName: coordinator.peerName };
-      }
-    }
-    const addresses = sessions.map((session) => repo.getParticipant(session.id, ORCHESTRATOR_SEAT)?.peerName).filter(Boolean).join(", ");
-    return { error: `unknown recipient "${name}" — main may address coordinators only: ${addresses || "none open"}` };
-  }
-
-  #assertSendAllowed(identity: SenderIdentity, recipient: ResolvedRecipient, envelope: SendEnvelope): string | null {
-    try {
-      if (identity.kind === "main") {
-        if (recipient.scope !== "seat" || recipient.seat !== ORCHESTRATOR_SEAT) {
-          return "main may address coordinators only; direct specialist messaging is intentionally forbidden";
-        }
-        if (envelope.category !== "assignment" && envelope.category !== "update") {
-          return `main sends assignment or update, not ${envelope.category}`;
-        }
-        return null;
-      }
-      const session = this.#deps.repo.getAgentSession(identity.agentSessionId);
-      if (!session) return `unknown agent session ${identity.agentSessionId}`;
-      if (session.status !== "open") return `agent session ${identity.agentSessionId} is archived`;
-      const to = recipient.scope === "main" ? MAIN_RECIPIENT : recipient.seat as string;
-      this.#assertRoute(identity.agentSessionId, identity.seat, to);
-      this.#assertFinalGates(session, identity.seat, to, envelope.category);
-      return null;
-    } catch (error) {
-      return error instanceof Error ? error.message : String(error);
-    }
-  }
-
-  #journalPeer(identity: SenderIdentity, recipient: ResolvedRecipient, envelope: SendEnvelope, raw: string): JournalResult {
-    const { repo } = this.#deps;
-    const sessionId = identity.kind === "main" ? recipient.agentSessionId as string : identity.agentSessionId;
-    const session = repo.getAgentSession(sessionId);
-    if (!session) throw new Error(`unknown agent session ${sessionId}`);
-    const senderName = identity.kind === "main" ? MAIN_RECIPIENT : identity.seat;
-    const to = recipient.scope === "main" ? MAIN_RECIPIENT : recipient.seat as string;
-    const speaker: Speaker = identity.kind === "main"
-      ? { kind: "orchestrator", name: MAIN_RECIPIENT }
-      : { kind: identity.seat === ORCHESTRATOR_SEAT ? "orchestrator" : "agent", name: identity.seat };
-    // Idempotency for the ref-confirmation retry: an identical unacknowledged
-    // send reuses its journal row instead of forking a second handoff.
-    const fingerprint = `${session.id} ${senderName} ${to} ${raw}`;
-    const recent = this.#recentPeerSends.get(fingerprint);
-    if (recent && Date.now() - recent.at < 600_000) {
-      const existing = repo.getDeliveryById(recent.deliveryId);
-      const message = existing ? repo.getMessageById(existing.messageId) : undefined;
-      if (existing && message && (existing.status === "queued" || existing.status === "delivered")) {
-        const handoffId = (message.payload?.handoff as { id?: string } | undefined)?.id ?? "";
-        return { deliveryId: existing.id, handoffId, renderedBody: message.text, summary: this.#sendSummary(senderName, envelope), reused: true };
-      }
-    }
-    if (envelope.dedupeKey) {
-      const prior = repo.findDeliveryByDedupe(session.id, senderName, to, envelope.dedupeKey);
-      if (prior && prior.status === "acknowledged") throw new Error(`duplicate of delivery ${prior.id}; already delivered — do not resend`);
-      if (prior && (prior.status === "queued" || prior.status === "delivered")) {
-        const message = repo.getMessageById(prior.messageId);
-        if (message) {
-          const handoffId = (message.payload?.handoff as { id?: string } | undefined)?.id ?? "";
-          return { deliveryId: prior.id, handoffId, renderedBody: message.text, summary: this.#sendSummary(senderName, envelope), reused: true };
-        }
-      }
-    }
-    const { message, delivery, text, handoffId } = this.#journal(session, speaker, to, envelope.handoff, envelope.category, {
-      transport: "peer", ...(envelope.dedupeKey ? { dedupeKey: envelope.dedupeKey } : {}),
-      ...(identity.kind === "seat" && this.#seats.get(session.id)?.get(identity.seat)?.activeTurn ? { turnId: this.#seats.get(session.id)?.get(identity.seat)?.activeTurn?.turnId } : {}),
-    });
-    this.#recentPeerSends.set(fingerprint, { deliveryId: delivery.id, at: Date.now() });
-    if (this.#recentPeerSends.size > 512) {
-      const cutoff = Date.now() - 600_000;
-      for (const [key, entry] of this.#recentPeerSends) if (entry.at < cutoff) this.#recentPeerSends.delete(key);
-    }
-    // The envelope carries the seat's own stability claim; a turn that ends
-    // without any send is presumptively unstable (settle handles that side).
-    if (identity.kind === "seat") {
-      const lane = this.#seats.get(session.id)?.get(identity.seat);
-      if (lane?.activeTurn) lane.activeTurn.sawSend = true;
-      repo.patchParticipant(session.id, identity.seat, { checkpointReady: envelope.checkpointReadiness !== "defer" });
-    }
-    if (to === MAIN_RECIPIENT && MATERIAL_CATEGORIES.has(envelope.category)) {
-      this.#deps.bus.append({ type: "flow.result", userSessionId: session.userSessionId, agentSessionId: session.id,
-        payload: { userSessionId: session.userSessionId, agentSessionId: session.id, digestPreview: text.slice(0, 140) } });
-    }
-    return { deliveryId: delivery.id, handoffId, renderedBody: text, summary: this.#sendSummary(senderName, envelope), reused: false };
-  }
-
-  #sendSummary(sender: string, envelope: SendEnvelope): string {
-    return `${envelope.category} from ${sender}: ${envelope.handoff.core.action}`.slice(0, 190);
-  }
-
-  /** Middleware wake: make the recipient's inbox socket exist and pin it live. */
-  async #ensureLiveForSend(recipient: ResolvedRecipient, timeoutMs: number): Promise<(() => void) | null> {
-    try {
-      if (recipient.scope === "main") {
-        // The runner lane is respawned by its own machinery; native carry to a
-        // cold lane fails into markCarryFailed → the wake fallback delivers.
-        return () => undefined;
-      }
-      const deadline = Date.now() + timeoutMs;
-      await this.ensureSeatLive(recipient.agentSessionId as string, recipient.seat as string, deadline);
-      const lane = this.#seats.get(recipient.agentSessionId as string)?.get(recipient.seat as string);
-      if (!lane) return null;
-      return this.#takeHold(lane);
-    } catch (error) {
-      // Deny-with-receipt: the row stays queued; retry the console carry once
-      // capacity has likely freed (a settled turn parks its lane). The cause
-      // matters for tuning — capacity waits and spawn failures look identical
-      // to the sender but need opposite responses from the operator.
-      const session = this.#deps.repo.getAgentSession(recipient.agentSessionId as string);
-      if (session) {
-        this.#deps.bus.append({ type: "agent_session.runtime", userSessionId: session.userSessionId, agentSessionId: session.id,
-          payload: { agentSessionId: session.id, participant: recipient.seat as string,
-            detail: `wake for delivery failed: ${error instanceof Error ? error.message : String(error)}` } });
-      }
-      const timer = setTimeout(() => {
-        void this.#deliverConsole(recipient.agentSessionId as string, recipient.seat as string).catch(() => undefined);
-      }, 1_000);
-      timer.unref?.();
-      return null;
-    }
-  }
-
-  #takeHold(lane: SeatLane): () => void {
-    lane.holds += 1;
-    let released = false;
-    return () => {
-      if (released) return;
-      released = true;
-      lane.holds -= 1;
-    };
-  }
-
-  #settleCarry(deliveryId: string, outcome: "delivered" | "failed", detail: string | null): void {
-    const { repo } = this.#deps;
-    const delivery = repo.getDeliveryById(deliveryId);
-    if (!delivery) return;
-    const session = repo.getAgentSession(delivery.agentSessionId);
-    if (!session) return;
-    if (outcome === "delivered") {
-      // Main has no settle-based ack loop; the carry receipt is its ack.
-      this.#patchDelivery(session, delivery, delivery.recipient === MAIN_RECIPIENT ? "acknowledged" : "delivered");
-      return;
-    }
-    this.#deps.bus.append({ type: "agent_session.runtime", userSessionId: session.userSessionId, agentSessionId: session.id,
-      payload: { agentSessionId: session.id, participant: delivery.sender, detail: `native carry failed for ${deliveryId}; console redelivery takes over (${(detail ?? "").slice(0, 200)})` } });
-    if (delivery.recipient === MAIN_RECIPIENT) {
-      const message = repo.getMessageById(delivery.messageId);
-      this.#patchDelivery(session, delivery, "acknowledged");
-      if (message && MATERIAL_CATEGORIES.has(delivery.category)) this.#deps.wake?.(session.userSessionId, session.id, delivery.category, message.text);
-      return;
-    }
-    void this.#deliverConsole(session.id, delivery.recipient).catch((error) => this.#recordHostFailure(session.id, error));
-  }
 
   /**
    * Default-on isolation for write seats in git workspaces: a lazy worktree
@@ -754,7 +720,7 @@ export class AgentSessionHost {
     const workspaceRoot = this.#deps.getWorkspaceRoot(user.workspaceId);
     const release = () => repo.patchParticipant(session.id, seat.name, { worktreePath: null, worktreeBaseCommit: null, worktreeBranch: null });
     try {
-      worktrees.commitAll(seat.worktreePath, `seat ${seat.name}: reported ${status}`);
+      worktrees.commitAll(seat.worktreePath, `seat ${seat.name}: reported ${status}`, seat.ownership);
       const diff = worktrees.captureDiff(workspaceRoot, seat.worktreeBaseCommit, seat.worktreeBranch);
       const artifactId = diff.filesChanged === 0 ? null
         : bus.storeArtifact(`${diff.stat}\n\n${diff.patch}`, "text/x-patch", { userSessionId: session.userSessionId, agentSessionId: session.id }).artifactId;
@@ -772,6 +738,7 @@ export class AgentSessionHost {
       if (outcome.merged) {
         bus.append({ type: "agent_session.worktree.merged", userSessionId: session.userSessionId, agentSessionId: session.id,
           payload: { agentSessionId: session.id, seat: seat.name, mergeCommit: outcome.commit, filesChanged: diff.filesChanged, artifactId } });
+        this.#checkDependencyDrift(session, seat, diff.patch);
         return;
       }
       bus.append({ type: "agent_session.worktree.merge_failed", userSessionId: session.userSessionId, agentSessionId: session.id,
@@ -809,7 +776,7 @@ export class AgentSessionHost {
     let filesChanged = 0;
     let attemptStatus: "completed" | "failed" = status;
     try {
-      commit = worktrees.commitAll(seat.worktreePath, `attempt ${seat.name}: ${group.profileId} work`);
+      commit = worktrees.commitAll(seat.worktreePath, `attempt ${seat.name}: ${group.profileId} work`, seat.ownership);
       const diff = worktrees.captureDiff(workspaceRoot, group.baseCommit, entry.branch);
       filesChanged = diff.filesChanged;
       const content = diff.patch.length > 4 * 1024 * 1024
@@ -899,7 +866,7 @@ export class AgentSessionHost {
 
   #profile(id: string, workspaceId?: string): AgentProfile {
     if (this.#deps.profiles) return this.#deps.profiles.get(id, workspaceId);
-    return { id, title: id, purpose: id, instructions: `You are the ${id} specialist.`, tools: ["Read", "Glob", "Grep"], permissionMode: "default", maxTurns: 30, sandboxRequired: true, runtime: { shell: false, browser: false, screenshots: false } };
+    return { id, title: id, purpose: id, instructions: `You are the ${id} specialist.`, tools: ["Read", "Glob", "Grep"], permissionMode: "default", maxTurns: 30, sandboxRequired: true, runtime: { shell: false, browser: false, screenshots: false, network: [] } };
   }
 
   #assertRoute(agentSessionId: string, sender: string, recipient: string): void {
@@ -920,7 +887,8 @@ export class AgentSessionHost {
     let lane = lanes.get(seat);
     if (!lane) {
       lane = { state: "unspawned", input: null, query: null, abort: null, pump: null, ready: null,
-        activeTurn: null, pendingDeliveries: [], holds: 0, rotationGate: null, releaseRotation: null,
+        activeTurn: null, pendingDeliveries: [], redeliveryAttempts: new Map(), contextTokens: 0,
+        lastCumulative: { costUsd: 0, apiDurationMs: 0 }, rotationGate: null, releaseRotation: null,
         idleTimer: null, assignmentTurns: 0, lastActiveAt: 0, lastStatus: null };
       lanes.set(seat, lane);
     }
@@ -977,7 +945,7 @@ export class AgentSessionHost {
   #parkLeastRecentIdle(): boolean {
     let victim: { sessionId: string; seat: string; lane: SeatLane } | null = null;
     for (const [sessionId, lanes] of this.#seats) for (const [seat, lane] of lanes) {
-      if (lane.state !== "live" || lane.activeTurn !== null || lane.holds > 0) continue;
+      if (lane.state !== "live" || lane.activeTurn !== null) continue;
       if (this.#deps.repo.listUnackedDeliveries(sessionId, seat).length > 0) continue;
       if (!victim || lane.lastActiveAt < victim.lane.lastActiveAt) victim = { sessionId, seat, lane };
     }
@@ -996,6 +964,11 @@ export class AgentSessionHost {
     lane.abort = new AbortController();
     lane.input = new AsyncQueue<SdkUserMessageLike>();
     lane.lastActiveAt = Date.now();
+    // A fresh CLI process restarts both counters: cumulative cost/duration
+    // begin at zero, and occupancy is re-reported by its first assistant
+    // message. Carrying the old watermarks forward would zero out real spend.
+    lane.contextTokens = 0;
+    lane.lastCumulative = { costUsd: 0, apiDurationMs: 0 };
     lane.ready = (async () => {
       const sdk = await this.#deps.sdk!();
       const user = this.#deps.repo.getUserSession(session.userSessionId);
@@ -1007,26 +980,47 @@ export class AgentSessionHost {
       const mcp = this.#buildParticipantMcp(sdk, session, latestSeat, lane.abort!.signal);
       const options: SdkOptions = {
         cwd: seatRoot,
-        systemPrompt: { type: "preset", preset: "claude_code", append: `${latestSeat.instructions}${this.#checkpointContext(latestSeat)}${latestSeat.worktreePath && !latestSeat.attemptRole ? "\n\nYou work in an isolated worktree (your cwd); the Console merges your changes into the workspace when you report completed. Never run git commit. Install dependencies only if you must run validation." : ""}\n\n${seatMessagingBrief(this.#roster(session), latestSeat.name)}` },
+        // Order matters for prompt caching: the invariant part (instructions,
+        // capabilities, messaging brief) comes first and is byte-identical
+        // across generations; the volatile checkpoint goes last.
+        systemPrompt: { type: "preset", preset: "claude_code", append: `${latestSeat.instructions}\n\n${capabilityBrief(profile, latestSeat.worktreePath !== null && !latestSeat.attemptRole, this.#deps.config?.allowedDomains ?? [])}${latestSeat.worktreePath && !latestSeat.attemptRole ? "\nNever run git commit — the Console lands your work when you report completed. Install dependencies only if you must run validation." : ""}\n\n${seatMessagingBrief(this.#roster(session), latestSeat.name)}\n${SESSION_PROTOCOL}${this.#checkpointContext(latestSeat)}` },
         settingSources: [], includePartialMessages: true,
         settings: { crossSessionInbound: "accept" } as unknown as SdkOptions["settings"],
         permissionMode: session.phase === "planning" ? "plan" : profile.permissionMode,
         ...(profile.permissionMode === "bypassPermissions" && session.phase !== "planning" ? { allowDangerouslySkipPermissions: true } : {}),
-        allowedTools: [...profile.tools, "SendMessage",
-          ...(latestSeat.name === ORCHESTRATOR_SEAT ? ["TaskCreate", "TaskUpdate", "TaskGet", "TaskList"] : []),
+        allowedTools: [...profile.tools,
           ...(profile.tools.includes("Edit") || profile.tools.includes("Write") ? ["EnterWorktree", "ExitWorktree"] : []),
           ...this.#runtimeToolNames(profile, latestSeat.name, latestSeat.attemptRole)],
-        disallowedTools: ["Agent", "Task",
-          ...(latestSeat.name === ORCHESTRATOR_SEAT ? [] : ["TaskCreate", "TaskUpdate", "TaskList", "TaskGet"])],
+        // A profile's tool list must be BINDING. `allowedTools` is only an
+        // auto-approval list, so the db-live-1 coordinator — profile
+        // ["Read","Glob","Grep"], brief "your own tools are intentionally
+        // read-only" — ran Bash 20 times, including curl and `find /`.
+        // Everything the profile did not grant is denied by name.
+        //
+        // The native Task* tools are additionally scoped to the provider
+        // session, so their ledger dies at every rotation; seats use the
+        // console-owned task_list/task_create/task_update instead.
+        disallowedTools: [...new Set([
+          // One transport. `send_handoff` is console-carried, so there is no
+          // second wire whose delivery semantics, ref handshake, or hand-
+          // written envelope can diverge from it.
+          "Agent", "Task", "SendMessage", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet",
+          ...GOVERNED_BUILTIN_TOOLS.filter((name) => !profile.tools.includes(name)),
+        ])],
         hooks: this.#buildSeatHooks(session, latestSeat) as SdkOptions["hooks"],
         sandbox: { enabled: true, failIfUnavailable: profile.sandboxRequired, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: false,
-          filesystem: { allowManagedReadPathsOnly: true, allowRead: latestSeat.worktreePath ? [seatRoot, workspaceRoot] : [workspaceRoot], allowWrite: [seatRoot] } },
+          filesystem: { allowManagedReadPathsOnly: true, allowRead: latestSeat.worktreePath ? [seatRoot, workspaceRoot] : [workspaceRoot], allowWrite: [seatRoot] },
+          network: sandboxNetwork(profile, this.#deps.config?.allowedDomains ?? []) },
         env: sdkEnv({ sessionName: latestSeat.peerName }), abortController: lane.abort!, persistSession: true,
         sessionStore: this.#deps.sessionStore as never, sessionStoreFlush: "eager",
         mcpServers: { console_agent: mcp as never },
         ...(latestSeat.model ? { model: latestSeat.model } : {}),
         ...((profile.pluginPath && profile.source === "workspace") ? { plugins: [{ type: "local" as const, path: profile.pluginPath }] } : {}),
-        ...((profile.skills?.length ?? 0) > 0 ? { skills: profile.skills } : {}),
+        // Always explicit: omitting the key lets the CLI fall back to the
+        // OPERATOR's personal skill listing, which was injected verbatim into
+        // all 14 db-live-1 sessions (~18.6K tokens of dataviz/keybindings noise
+        // in three.js seats) despite settingSources: [].
+        skills: profile.skills ?? [],
         ...((profile.effort ?? this.#deps.config?.effort) ? { effort: (profile.effort ?? this.#deps.config?.effort) as SdkOptions["effort"] } : {}),
         ...(latestSeat.sdkSessionId ? { resume: latestSeat.sdkSessionId } : {}),
       };
@@ -1045,22 +1039,19 @@ export class AgentSessionHost {
   #roster(session: AgentSessionRow): string {
     return this.#deps.repo.listParticipants(session.id).map((p) => {
       const scopes = p.ownership.slice(0, 3).join(", ") + (p.ownership.length > 3 ? ` +${p.ownership.length - 3} more` : "");
-      return `${p.name} (${p.profileId}; owns: ${scopes || "coordination"})`;
+      // Capability tag so a coordinator assigns work a seat can actually do.
+      // db-live-1 assigned "play a round using arrow keys" to a seat with no
+      // keyboard primitive; nothing in the system could notice before the seat
+      // had spent twenty minutes discovering it.
+      return `${p.name} (${p.profileId}; ${capabilityTag(p.profileSnapshot as AgentProfile)}; owns: ${scopes || "coordination"})`;
     }).join("; ");
   }
 
   #buildSeatHooks(session: AgentSessionRow, seat: ParticipantRow): SdkHooksFragment {
-    const config = this.#deps.config;
-    const fragments: SdkHooksFragment[] = [buildSendMessageMiddleware({
-      identity: { kind: "seat", agentSessionId: session.id, seat: seat.name },
-      governor: this.governor(),
-      sendWakeTimeoutMs: config?.sendWakeTimeoutMs ?? 30_000,
-      deliveryHoldLeaseMs: config?.deliveryHoldLeaseMs ?? 60_000,
-      onDenied: (denial) => this.#deps.bus.append({ type: "governance.send.denied",
-        userSessionId: session.userSessionId, agentSessionId: session.id,
-        payload: { sender: seat.name, senderScope: "seat", agentSessionId: session.id,
-          to: denial.to, kind: denial.kind, reason: denial.reason.slice(0, 500) } }),
-    })];
+    // No send middleware: transfers go through the console-owned `send_handoff`
+    // tool, which is journalled by `post()` directly. There is no second wire to
+    // govern, and therefore no envelope to validate, coerce, or degrade.
+    const fragments: SdkHooksFragment[] = [];
     const user = this.#deps.repo.getUserSession(session.userSessionId);
     if (this.#deps.tasks && user && seat.name === ORCHESTRATOR_SEAT) {
       fragments.push(buildTaskHooks(this.#deps.tasks, {
@@ -1108,6 +1099,7 @@ export class AgentSessionHost {
             runtime.set("thinking");
             bus.broadcast({ type: "stream.reasoning", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { scope: { kind: "agent", sessionId: session.id }, speaker: seatName, turnId, text: event.text } });
           } else if (event.kind === "message") {
+            if (turn) turn.lastNarration = event.text;
             this.#recordNarration(session, seatName, event.text, turnId);
           } else if (event.kind === "tool.call") {
             turn?.toolStarts.set(event.callId, Date.now());
@@ -1134,16 +1126,21 @@ export class AgentSessionHost {
                   detail: `watchdog: ${turn.watchdog.errorStreak} consecutive tool errors` });
               }
             }
+          } else if (event.kind === "context") {
+            lane.contextTokens = Math.max(lane.contextTokens, event.occupancyTokens);
           } else if (event.kind === "result") {
             const seat = repo.getParticipant(session.id, seatName);
             if (seat) {
-              repo.patchParticipant(session.id, seatName, { ...(event.resumeId ? { sdkSessionId: event.resumeId } : {}), contextTokens: Math.max(seat.contextTokens, event.inputTokens ?? 0) });
-              this.#recordUsage(session, seat, turnId || newId("turn"), event, "completed", turn ? Date.now() - turn.startedAt : undefined);
+              repo.patchParticipant(session.id, seatName, { ...(event.resumeId ? { sdkSessionId: event.resumeId } : {}), contextTokens: Math.max(seat.contextTokens, lane.contextTokens) });
+              this.#recordUsage(session, seat, lane.lastCumulative, turnId || newId("turn"), event, "completed", turn ? Date.now() - turn.startedAt : undefined);
             }
             this.#settleSeatTurn(session, seatName, lane, runtime, "completed");
           } else if (event.kind === "error") {
             const seat = repo.getParticipant(session.id, seatName);
-            if (seat) this.#recordUsage(session, seat, turnId || newId("turn"), event, event.aborted ? "aborted" : "error", turn ? Date.now() - turn.startedAt : undefined);
+            if (seat) {
+              repo.patchParticipant(session.id, seatName, { contextTokens: Math.max(seat.contextTokens, lane.contextTokens) });
+              this.#recordUsage(session, seat, lane.lastCumulative, turnId || newId("turn"), event, event.aborted ? "aborted" : "error", turn ? Date.now() - turn.startedAt : undefined);
+            }
             this.#settleSeatTurn(session, seatName, lane, runtime, event.aborted ? "aborted" : "error", event.message);
           }
         }
@@ -1153,6 +1150,15 @@ export class AgentSessionHost {
       runtime.idle();
       if (lane.state === "live" || lane.state === "waking") { lane.state = "parked"; lane.input = null; lane.query = null; this.#signalCapacity(); }
     }
+  }
+
+  /** Console-synthesized nudge into a live turn; a no-op on a parked lane. */
+  #steer(session: AgentSessionRow, seatName: string, text: string, detail: string): void {
+    const lane = this.#laneOf(session.id, seatName);
+    if (!lane.input || !lane.activeTurn) return;
+    lane.input.push(seatUserMessage(text));
+    this.#deps.bus.append({ type: "agent_session.runtime", userSessionId: session.userSessionId, agentSessionId: session.id,
+      payload: { agentSessionId: session.id, participant: seatName, turnId: lane.activeTurn.turnId, detail } });
   }
 
   #tripWatchdog(session: AgentSessionRow, seatName: string, lane: SeatLane, tripped: { kind: "repeat_tool_calls" | "tool_error_streak"; detail: string; toolName?: string; count: number }): void {
@@ -1170,7 +1176,7 @@ export class AgentSessionHost {
     const attributed = deliveries.length > 0 ? deliveries
       : this.#deps.repo.listUnackedDeliveries(session.id, seatName).filter((row) => row.status === "delivered");
     lane.activeTurn = { turnId: newId("turn"), startedAt: Date.now(), trigger, deliveries: attributed, sawSend: false,
-      toolStarts: new Map(), watchdog: { lastKey: "", identical: 0, errorStreak: 0, tripped: null } };
+      toolStarts: new Map(), lastNarration: "", watchdog: { lastKey: "", identical: 0, errorStreak: 0, tripped: null } };
     lane.lastActiveAt = Date.now();
     if (lane.idleTimer) { clearTimeout(lane.idleTimer); lane.idleTimer = null; }
     this.#deps.bus.append({ type: "agent_session.turn.started", userSessionId: session.userSessionId, agentSessionId: session.id,
@@ -1184,10 +1190,29 @@ export class AgentSessionHost {
     lane.activeTurn = null;
     const { repo, bus } = this.#deps;
     if (turn.watchdog.tripped !== null) { status = "error"; errorMessage = turn.watchdog.tripped; }
+    let requeued = false;
     if (status === "completed") {
       for (const delivery of turn.deliveries) this.#patchDelivery(session, delivery, "acknowledged");
+      for (const delivery of turn.deliveries) lane.redeliveryAttempts.delete(delivery.id);
     } else {
-      for (const delivery of turn.deliveries) this.#patchDelivery(session, delivery, "cancelled");
+      // A provider or transport failure is not consent to drop the work —
+      // cancelling unconditionally broke the documented "a message is never
+      // lost" guarantee. But a watchdog trip means the seat malfunctioned ON
+      // THIS INPUT and an operator abort is a deliberate stop; redelivering
+      // either just reproduces the failure. Those cancel, and the coordinator
+      // decides from the failure handoff (which now carries the seat's work).
+      const retryable = status === "error" && turn.watchdog.tripped === null;
+      for (const delivery of turn.deliveries) {
+        const attempts = (lane.redeliveryAttempts.get(delivery.id) ?? 0) + 1;
+        if (!retryable || attempts > MAX_REDELIVERY_ATTEMPTS) {
+          lane.redeliveryAttempts.delete(delivery.id);
+          this.#patchDelivery(session, delivery, "cancelled");
+          continue;
+        }
+        lane.redeliveryAttempts.set(delivery.id, attempts);
+        this.#patchDelivery(session, delivery, "queued");
+        requeued = true;
+      }
     }
     const seat = repo.getParticipant(session.id, seatName);
     if (seat) {
@@ -1198,9 +1223,13 @@ export class AgentSessionHost {
     lane.lastActiveAt = Date.now();
     if (status === "error" && repo.getAgentSession(session.id)?.status === "open") {
       const target = seatName === ORCHESTRATOR_SEAT ? MAIN_RECIPIENT : ORCHESTRATOR_SEAT;
+      // Carry the seat's last narration: a seat whose transport failed may
+      // already hold the finished work, and an empty "Turn failed" tells the
+      // coordinator only that something broke — not what was learned.
+      const salvaged = turn.lastNarration.trim();
       this.post({ agentSessionId: session.id, speaker: { kind: seatName === ORCHESTRATOR_SEAT ? "orchestrator" : "agent", name: seatName }, to: target,
         handoff: this.#simpleHandoff("Turn failed", "failed",
-          turn.watchdog.tripped ?? `Provider turn failed: ${errorMessage}`,
+          `${turn.watchdog.tripped ?? `Provider turn failed: ${errorMessage}`}${salvaged === "" ? "" : `\n\nUnsent work recovered from ${seatName}'s last output (unverified — it never passed through a handoff):\n${salvaged.slice(0, 8_000)}`}`,
           "Inspect the failure and retry or reassign."), category: "failure", turnId: turn.turnId });
     }
     const profile = seat?.profileSnapshot as AgentProfile | undefined;
@@ -1217,9 +1246,12 @@ export class AgentSessionHost {
     // lossless, and the completion diff (base..branch) is unaffected.
     const current = repo.getParticipant(session.id, seatName);
     if (current?.worktreePath && this.#deps.worktrees && fs.existsSync(current.worktreePath)) {
-      try { this.#deps.worktrees.commitAll(current.worktreePath, `turn ${turn.turnId}`); } catch { /* snapshot is best-effort */ }
+      try { this.#deps.worktrees.commitAll(current.worktreePath, `turn ${turn.turnId}`, current.ownership); } catch { /* snapshot is best-effort */ }
     }
     runtime.idle();
+    if (requeued && repo.getAgentSession(session.id)?.status === "open") {
+      void this.#deliverConsole(session.id, seatName).catch((error) => this.#recordHostFailure(session.id, error));
+    }
     this.#refreshStatus(session.id);
     this.#armIdleTimer(session.id, seatName, lane);
     void this.#maybeRotate(session.id, seatName).catch((error) => this.#recordHostFailure(session.id, error));
@@ -1257,7 +1289,7 @@ export class AgentSessionHost {
     if (lane.idleTimer) clearTimeout(lane.idleTimer);
     lane.idleTimer = setTimeout(() => {
       lane.idleTimer = null;
-      if (lane.state !== "live" || lane.activeTurn !== null || lane.holds > 0) return;
+      if (lane.state !== "live" || lane.activeTurn !== null) return;
       if (this.#deps.repo.listUnackedDeliveries(agentSessionId, seatName).length > 0) return;
       this.#parkSeat(agentSessionId, seatName, lane, "idle");
     }, config.seatIdleReapMs);
@@ -1300,8 +1332,6 @@ export class AgentSessionHost {
     lane.state = "rotating";
     lane.rotationGate = new Promise((resolve) => { lane.releaseRotation = resolve; });
     try {
-      const holdDeadline = Date.now() + config.deliveryHoldLeaseMs;
-      while (lane.holds > 0 && Date.now() < holdDeadline) await sleep(25);
       lane.input?.close(); lane.input = null;
       const closing = lane.pump;
       lane.query?.close?.(); lane.query = null;
@@ -1325,7 +1355,94 @@ export class AgentSessionHost {
     // Messaging is native SendMessage (governed by the PreToolUse middleware);
     // this server carries only handoff retrieval and console-owned runtime.
     const profile = seat.profileSnapshot as AgentProfile;
+    const user = this.#deps.repo.getUserSession(session.userSessionId);
+    const workspaceRoot = user && this.#deps.getWorkspaceRoot ? this.#deps.getWorkspaceRoot(user.workspaceId) : "";
     const tools: unknown[] = [];
+    // The disciplined transfer path. Its parameters ARE the handoff core, so
+    // the provider enforces the shape and there is nothing to hand-serialize —
+    // which removes the failure that destroyed db-live-1's verification report
+    // (a 4KB body could not be escaped into a JSON string, 15 times running).
+    // It is console-carried, so it also has no peer ref handshake to lose.
+    tools.push(sdk.tool("send_handoff",
+      "Send a typed handoff to another participant. This is the preferred way to transfer anything — assignments, progress, findings, failures, final results. Fill the fields; the console builds and journals the envelope. Your plain text output reaches no one.",
+      {
+        to: z.string().min(1).describe("Recipient's bare seat name, or \"main\" to reach the Orchestrator."),
+        category: z.enum(["assignment", "update", "milestone", "failure", "final", "decision"]).default("update"),
+        status: HandoffCoreSchema.shape.status,
+        risk: HandoffCoreSchema.shape.risk.default("medium"),
+        action: z.string().min(1).describe("The request or the work this handoff is about, in one line."),
+        stateSummary: z.string().min(1).describe("What is true now — the substance. Write the findings themselves, not a description of having found them."),
+        evidence: z.array(EvidenceRefSchema).default([]).describe("Pointers backing the state: files, artifacts, tasks, commands, urls."),
+        resultSummary: z.string().nullable().default(null),
+        artifacts: z.array(EvidenceRefSchema).default([]),
+        uncertainty: z.array(z.string()).default([]).describe("What you could not verify. Say so plainly rather than omitting it."),
+        nextAction: z.string().nullable().default(null).describe("The exact next step for the recipient, or null when nothing is owed."),
+        taskId: z.string().nullable().default(null),
+        requestExpandedContext: z.boolean().default(false),
+        dedupeKey: z.string().optional(),
+      },
+      async (args: SendHandoffArgs) => {
+        const draft: HandoffDraft = { core: {
+          schemaVersion: 1, taskId: args.taskId, status: args.status, risk: args.risk, action: args.action,
+          state: { summary: args.stateSummary, evidence: args.evidence },
+          result: { summary: args.resultSummary, artifacts: args.artifacts },
+          uncertainty: args.uncertainty, nextAction: args.nextAction, requestExpandedContext: args.requestExpandedContext,
+        }, extension: { kind: profile.handoffExtension ?? "generic", data: {} } };
+        const message = this.post({ agentSessionId: session.id, speaker: { kind: seat.name === ORCHESTRATOR_SEAT ? "orchestrator" : "agent", name: seat.name },
+          to: args.to, handoff: draft, category: args.category, ...(args.dedupeKey ? { dedupeKey: args.dedupeKey } : {}),
+          ...(this.#laneOf(session.id, seat.name).activeTurn ? { turnId: this.#laneOf(session.id, seat.name).activeTurn!.turnId } : {}) });
+        const lane = this.#laneOf(session.id, seat.name);
+        if (lane.activeTurn) lane.activeTurn.sawSend = true;
+        return ok({ delivered: true, messageSeq: message.seq, to: args.to, category: args.category });
+      }));
+    // Console-owned ledger. Keyed on a synthetic id derived from the agent
+    // session, so it survives context rotation and is shared by every seat —
+    // the native Task* tools are per-provider-session, which meant the
+    // db-live-1 coordinator watched its own four tasks vanish at the first
+    // rotation and never touched the ledger again for 28 minutes.
+    if (this.#deps.tasks && user) {
+      const listId = consoleTaskListId(session.id);
+      const attribution = { workspaceId: user.workspaceId, userSessionId: session.userSessionId, agentSessionId: session.id, participant: seat.name };
+      tools.push(sdk.tool("task_list", "Read the AgentSession's task ledger. Authoritative and shared by every seat; it survives context rotation.", {},
+        async () => ok({ tasks: this.#deps.tasks?.listForUserSession(session.userSessionId).filter((task) => task.agentSessionId === session.id) ?? [] })));
+      if (seat.name === ORCHESTRATOR_SEAT) {
+        tools.push(
+          sdk.tool("task_create", "Add a unit of work to the ledger. Track every unit you delegate.", {
+            taskId: z.string().min(1).describe("Short stable id you choose, e.g. \"1\" or \"interface\"."),
+            subject: z.string().min(1), description: z.string().default(""),
+          }, async (args: { taskId: string; subject: string; description: string }) => {
+            this.#deps.tasks?.upsertFromCreate({ sdkSessionId: listId, sdkTaskId: args.taskId, subject: args.subject, description: args.description, attribution });
+            return ok({ taskId: args.taskId, created: true });
+          }),
+          sdk.tool("task_update", "Update a ledger entry. Keep status honest as work progresses — the Console reports open tasks to the operator alongside your final.", {
+            taskId: z.string().min(1),
+            status: z.enum(["pending", "in_progress", "completed", "deleted"]).optional(),
+            owner: z.string().optional(), subject: z.string().optional(), description: z.string().optional(),
+            addBlockedBy: z.array(z.string()).optional(),
+          }, async (args: { taskId: string; status?: "pending" | "in_progress" | "completed" | "deleted"; owner?: string; subject?: string; description?: string; addBlockedBy?: string[] }) => {
+            const { taskId, ...patch } = args;
+            this.#deps.tasks?.applyUpdate({ sdkSessionId: listId, sdkTaskId: taskId, patch });
+            return ok({ taskId, updated: true });
+          }),
+        );
+      }
+    }
+    // Artifacts live in SQLite, outside every seat's read scope, and
+    // browser_screenshot hands back an opaque id. Without this a seat cannot
+    // inspect its own evidence: in db-live-1 both renderer and `check` resorted
+    // to scanning the filesystem for artifact files that were never on disk.
+    tools.push(sdk.tool("read_artifact",
+      "Read back an artifact you or a teammate produced (screenshot, diff, captured payload) by its artifact id. Images return as viewable content.",
+      { artifactId: z.string().min(1), cursor: z.string().optional(), maxBytes: z.number().int().min(1).max(32 * 1024).default(8 * 1024) },
+      async (args: { artifactId: string; cursor?: string; maxBytes: number }) => {
+        const artifact = this.#deps.bus.getArtifact(args.artifactId);
+        if (!artifact) return ok({ error: `no artifact ${args.artifactId}` });
+        if (artifact.mediaType.startsWith("image/")) {
+          const mediaType = artifact.mediaType.replace(/;base64$/, "");
+          return { content: [{ type: "image", source: { type: "base64", media_type: mediaType, data: artifact.content } }] } as unknown as SdkToolResult;
+        }
+        return ok({ artifactId: artifact.id, mediaType: artifact.mediaType, bytes: artifact.bytes, content: pageTail(artifact.content, args.cursor, args.maxBytes) });
+      }));
     if (this.#deps.handoffs) {
       tools.push(
         sdk.tool("read_handoff", "Retrieve a lossless handoff section with cursor pagination. Use only when the compact envelope is insufficient.", {
@@ -1338,8 +1455,6 @@ export class AgentSessionHost {
         }),
       );
     }
-    const user = this.#deps.repo.getUserSession(session.userSessionId);
-    const workspaceRoot = user && this.#deps.getWorkspaceRoot ? this.#deps.getWorkspaceRoot(user.workspaceId) : "";
     if (profile.runtime.shell && this.#deps.processes) {
       const scope = { workspaceRoot: seat.worktreePath ?? workspaceRoot, userSessionId: session.userSessionId, agentSessionId: session.id, participant: seat.name };
       const processOwner = `${session.id}:${seat.name}`;
@@ -1362,6 +1477,14 @@ export class AgentSessionHost {
         sdk.tool("browser_click", "Click a locator (CSS or Playwright text locator syntax).", { selector: z.string() }, async (args: { selector: string }) => { await this.#deps.browsers?.click(key, args.selector); return ok({ clicked: true }); }),
         sdk.tool("browser_fill", "Fill an input located by CSS or Playwright locator syntax.", { selector: z.string(), value: z.string() }, async (args: { selector: string; value: string }) => { await this.#deps.browsers?.fill(key, args.selector, args.value); return ok({ filled: true }); }),
         sdk.tool("browser_console", "Read browser console and page errors.", {}, async () => ok(await this.#deps.browsers?.consoleMessages(key))),
+        sdk.tool("browser_press", "Press a key (e.g. \"ArrowLeft\", \"Enter\", \"Space\"). Use this to exercise keyboard-driven UI — games, shortcuts, form submission. Target the page by default, or a locator to focus first.", {
+          keys: z.string().min(1), selector: z.string().optional(),
+          repeat: z.number().int().min(1).max(100).default(1), delayMs: z.number().int().min(0).max(2_000).optional(),
+        }, async (args: { keys: string; selector?: string; repeat: number; delayMs?: number }) =>
+          ok(await this.#deps.browsers?.press(key, args.keys, { ...(args.selector ? { selector: args.selector } : {}), repeat: args.repeat, ...(args.delayMs === undefined ? {} : { delayMs: args.delayMs }) }))),
+        sdk.tool("browser_evaluate", "Evaluate JavaScript in the page and return the result as JSON. Use it to read state the rendered text does not expose — localStorage, canvas/game state, module exports.", {
+          expression: z.string().min(1),
+        }, async (args: { expression: string }) => ok(await this.#deps.browsers?.evaluate(key, args.expression))),
       );
       if (profile.runtime.screenshots) {
         tools.push(sdk.tool("browser_screenshot", "Capture a full-page screenshot as a durable Console artifact.", {}, async () => ok(await this.#deps.browsers?.screenshot(key, { userSessionId: session.userSessionId, agentSessionId: session.id }))));
@@ -1425,13 +1548,19 @@ export class AgentSessionHost {
         }),
       );
     }
-    return sdk.createSdkMcpServer({ name: "console_agent", version: "2", tools });
+    // alwaysLoad: the profile already decided this seat's tools. Deferring them
+    // behind ToolSearch made every seat spend a round-trip rediscovering what
+    // the console had granted it — 21 lookups in db-live-1, and a seat that
+    // wrongly concluded it lacked a capability it had.
+    return sdk.createSdkMcpServer({ name: "console_agent", version: "2", tools, alwaysLoad: true });
   }
 
   #runtimeToolNames(profile: AgentProfile, participant: string, attemptRole?: string | null): string[] {
-    return ["mcp__console_agent__read_handoff", "mcp__console_agent__report_handoff_discrepancy",
+    return ["mcp__console_agent__send_handoff", "mcp__console_agent__read_handoff", "mcp__console_agent__report_handoff_discrepancy",
+      "mcp__console_agent__task_list", "mcp__console_agent__read_artifact",
+      ...(participant === ORCHESTRATOR_SEAT ? ["mcp__console_agent__task_create", "mcp__console_agent__task_update"] : []),
       ...(profile.runtime.shell ? ["mcp__console_agent__process_start", "mcp__console_agent__process_read", "mcp__console_agent__process_stop"] : []),
-      ...(profile.runtime.browser ? ["mcp__console_agent__browser_open", "mcp__console_agent__browser_snapshot", "mcp__console_agent__browser_click", "mcp__console_agent__browser_fill", "mcp__console_agent__browser_console"] : []),
+      ...(profile.runtime.browser ? ["mcp__console_agent__browser_open", "mcp__console_agent__browser_snapshot", "mcp__console_agent__browser_click", "mcp__console_agent__browser_fill", "mcp__console_agent__browser_console", "mcp__console_agent__browser_press", "mcp__console_agent__browser_evaluate"] : []),
       ...(profile.runtime.browser && profile.runtime.screenshots ? ["mcp__console_agent__browser_screenshot"] : []),
       ...(participant === ORCHESTRATOR_SEAT ? ["mcp__console_agent__request_decision"] : []),
       ...(participant === ORCHESTRATOR_SEAT && this.#deps.worktrees ? ["mcp__console_agent__start_attempts"] : []),
@@ -1457,7 +1586,10 @@ export class AgentSessionHost {
     // scopes per seat; the full ownership list stays in the DB and the API.
     const roster = this.#deps.repo.listParticipants(session.id).map((p) => {
       const scopes = p.ownership.slice(0, 3).join(", ") + (p.ownership.length > 3 ? ` +${p.ownership.length - 3} more` : "");
-      return `${p.name} (${p.profileId}; owns: ${scopes || "coordination"})`;
+      // Seat worktree state on every line: the coordinator otherwise has no
+      // way to see in-progress work and infers absence from `ls` on the shared
+      // workspace — which cost db-live-1 ten minutes and three generations.
+      return `${p.name} (${p.profileId}; ${capabilityTag(p.profileSnapshot as AgentProfile)}; owns: ${scopes || "coordination"}${p.worktreeBranch ? `; ${this.#seatWorkState(p)}` : ""})`;
     }).join("; ");
     const messages = rows.map((row) => {
       const id = (row.payload?.handoff as { id?: string } | undefined)?.id;
@@ -1466,9 +1598,107 @@ export class AgentSessionHost {
       const expanded = handoff.core.risk === "high" || handoff.core.status === "needs_verification" || handoff.core.requestExpandedContext;
       this.#deps.bus.append({ type: "handoff.consumed", userSessionId: session.userSessionId, agentSessionId: session.id,
         payload: { handoffId: id, participant: seat.name, mode: expanded ? "expanded" : "compact" } });
-      return `[${row.speakerName} → ${row.toName} | ${row.createdAt}] Handoff ${id}\nCORE:\n${JSON.stringify(handoff.core, null, 2)}\nEVIDENCE MANIFEST: ${JSON.stringify([...handoff.core.state.evidence, ...handoff.core.result.artifacts])}${expanded ? `\nPROFILE EXTENSION:\n${JSON.stringify(handoff.extension, null, 2)}` : `\nExtension ${handoff.extension.kind} is available with read_handoff.`}`;
+      // Rendered in SEND shape, not as a top-level `CORE:` blob. The flat
+      // rendering was the seat's only worked example of a handoff, so it
+      // taught the exact mistake the middleware then rejected.
+      return `[${row.speakerName} → ${row.toName} | ${row.createdAt}] Handoff ${id}\n${JSON.stringify({ handoff: { core: handoff.core, extension: expanded ? handoff.extension : undefined } }, null, 2)}${expanded ? "" : `\nExtension ${handoff.extension.kind} is available with read_handoff.`}`;
     }).join("\n\n");
-    return `AgentSession ${session.id}: ${session.title}\nYou are ${seat.name}. Participants: ${roster}.\n\nOnly the following addressed handoffs are new:\n${messages}\n\nTreat handoff claims as historical context; verify risky claims against repository/task/journal evidence during normal work. Act without restating the envelope. Use typed send_message for every transfer. Finish with one structured closing output; set checkpointReadiness=defer only while state is genuinely unstable.`;
+    return `AgentSession ${session.id}: ${session.title}\nYou are ${seat.name}. Participants: ${roster}.\n\nOnly the following addressed handoffs are new:\n${messages}\n\nTreat handoff claims as historical context; verify risky claims against repository/task/journal evidence during normal work. Act without restating the envelope. Set checkpointReadiness=defer only while state is genuinely unstable.`;
+  }
+
+  /**
+   * The successor's inheritance when the model could not produce a checkpoint.
+   *
+   * Built from facts the console owns — the task ledger, the seat's declared
+   * ownership, its worktree branch and diff, the assignment it is working, and
+   * its own last report. It therefore always exists and is always true, where
+   * the old fallback reused whatever message happened to be latest and
+   * degraded a little further each generation (db-live-1's coordinator
+   * inherited another seat's report, then a junk probe, then 395 bytes of
+   * "Turn failed"). A failed model checkpoint should cost fidelity, not truth.
+   */
+  #reconstructCheckpoint(session: AgentSessionRow, seat: ParticipantRow): HandoffDraft {
+    const { repo } = this.#deps;
+    const evidence: HandoffDraft["core"]["state"]["evidence"] = [];
+    const facts: string[] = [];
+
+    const assignment = repo.latestHandoff({ userSessionId: session.userSessionId, agentSessionId: session.id, participant: seat.name, excludeCheckpoints: true });
+    const own = repo.latestHandoff({ userSessionId: session.userSessionId, agentSessionId: session.id, sender: seat.name, excludeCheckpoints: true });
+
+    if (seat.ownership.length > 0) facts.push(`Owns: ${seat.ownership.join(", ")}.`);
+    const taskLines = this.#deps.tasks?.linesForAgentSession(session.id) ?? [];
+    if (taskLines.length > 0) facts.push(`Task ledger:\n${taskLines.join("\n")}`);
+    if (seat.worktreePath && this.#deps.worktrees && seat.worktreeBranch && seat.worktreeBaseCommit) {
+      try {
+        const diff = this.#deps.worktrees.captureDiff(seat.worktreePath, seat.worktreeBaseCommit, seat.worktreeBranch);
+        facts.push(`Isolated worktree ${seat.worktreeBranch}: ${diff.stat || "no changes yet"}. Not visible in the shared workspace until you report completed.`);
+      } catch { facts.push(`Isolated worktree ${seat.worktreeBranch} (diff unavailable).`); }
+    }
+    if (assignment) {
+      facts.push(`Current assignment from ${assignment.sender}: ${assignment.core.action}${assignment.core.nextAction ? ` — next: ${assignment.core.nextAction}` : ""}`);
+      evidence.push({ kind: "journal", ref: assignment.id, label: `assignment from ${assignment.sender}` });
+    }
+    if (own) {
+      facts.push(`Your last report (${own.core.status}): ${own.core.state.summary.slice(0, 600)}`);
+      evidence.push({ kind: "journal", ref: own.id, label: "your last report" });
+    }
+
+    return {
+      core: {
+        schemaVersion: 1,
+        taskId: own?.core.taskId ?? assignment?.core.taskId ?? null,
+        status: "needs_verification",
+        risk: "high",
+        action: recoveryAction(assignment?.core.action ?? own?.core.action ?? "Resume interrupted work"),
+        state: {
+          summary: `Context was rotated before ${seat.name} could write a checkpoint, so this was reconstructed by the Console from authoritative state — not from the previous context's memory. Treat it as a starting point and re-derive anything not listed.\n\n${facts.join("\n")}`,
+          evidence,
+        },
+        result: { summary: null, artifacts: [] },
+        uncertainty: ["Reconstructed checkpoint: the prior context's reasoning and any unreported findings were lost. Re-verify before reporting completion."],
+        nextAction: assignment?.core.nextAction ?? own?.core.nextAction ?? "Re-read the assignment and continue.",
+        requestExpandedContext: true,
+      },
+      extension: { kind: (seat.profileSnapshot as AgentProfile).handoffExtension ?? "generic", data: { source: "reconstructed" } },
+    };
+  }
+
+  /**
+   * Cross-seat dependency drift, read from the merged diff rather than from
+   * anything a seat declared.
+   *
+   * Disjoint file ownership stops seats from colliding on files, but not on
+   * facts: in db-live-1 `page` pinned three@0.169.0 in an import map while
+   * `renderer` imported 0.160.0 by URL — the version the operator specified.
+   * Three agents examined that graph and all three called it fine. The
+   * evidence was in the diffs all along.
+   */
+  #checkDependencyDrift(session: AgentSessionRow, seat: ParticipantRow, patch: string): void {
+    const seen = this.#dependencyPins.get(session.id) ?? new Map<string, { version: string; seat: string }>();
+    this.#dependencyPins.set(session.id, seen);
+    for (const { name, version } of dependencyPinsInPatch(patch)) {
+      const prior = seen.get(name);
+      if (!prior) { seen.set(name, { version, seat: seat.name }); continue; }
+      if (prior.version === version || prior.seat === seat.name) continue;
+      this.#deps.bus.append({ type: "agent_session.dependency_drift", userSessionId: session.userSessionId, agentSessionId: session.id,
+        payload: { agentSessionId: session.id, dependency: name, versions: [{ seat: prior.seat, version: prior.version }, { seat: seat.name, version }] } });
+      this.post({ agentSessionId: session.id, speaker: { kind: "agent", name: seat.name }, to: ORCHESTRATOR_SEAT,
+        handoff: this.#simpleHandoff(`Dependency drift on ${name}`, "needs_verification",
+          `${prior.seat} landed ${name}@${prior.version} and ${seat.name} landed ${name}@${version}. Two versions of one dependency in a single build load twice and fail cross-module identity checks. Neither seat can see this — their files are disjoint.`,
+          `Decide the single version for ${name} and have the owning seat align.`), category: "failure" });
+      seen.set(name, { version, seat: seat.name });
+    }
+  }
+
+  /** One-line, always-true summary of a seat's unmerged work. */
+  #seatWorkState(seat: ParticipantRow): string {
+    if (!seat.worktreePath || !seat.worktreeBranch || !seat.worktreeBaseCommit || !this.#deps.worktrees) return "no isolated worktree";
+    try {
+      const diff = this.#deps.worktrees.captureDiff(seat.worktreePath, seat.worktreeBaseCommit, seat.worktreeBranch);
+      return diff.filesChanged === 0
+        ? "unmerged worktree, nothing written yet"
+        : `unmerged worktree: ${diff.filesChanged} file(s) +${diff.insertions}/-${diff.deletions}, not visible in the workspace until they report completed`;
+    } catch { return "unmerged worktree (state unavailable)"; }
   }
 
   #simpleHandoff(action: string, status: HandoffDraft["core"]["status"], summary: string, nextAction: string | null): HandoffDraft {
@@ -1522,15 +1752,21 @@ export class AgentSessionHost {
     }
     let degraded = false;
     if (!draft) {
+      // A 4xx means the request never reached the model — that is a console
+      // bug, not a model failure, and a fabricated checkpoint would be strictly
+      // worse than the working context we already have. Keep the context.
+      if (isTransportFailure(failure)) {
+        this.#deps.bus.append({ type: "handoff.checkpoint.transport_failed", userSessionId: session.userSessionId, agentSessionId: session.id,
+          payload: { participant: seat.name, reason: failure ?? "checkpoint request failed", threshold } });
+        return seat;
+      }
       if (!hard) {
         this.#deps.bus.append({ type: "handoff.checkpoint.failed", userSessionId: session.userSessionId, agentSessionId: session.id,
           payload: { participant: seat.name, reason: failure ?? "checkpoint produced no valid handoff", threshold, degraded: false } });
         return seat;
       }
       degraded = true;
-      const latest = this.#deps.repo.latestHandoff({ userSessionId: session.userSessionId, agentSessionId: session.id, participant: seat.name });
-      draft = latest ? { core: { ...latest.core, action: `Recovery checkpoint: ${latest.core.action}`, status: "needs_verification", risk: "high", requestExpandedContext: true }, extension: latest.extension }
-        : this.#simpleHandoff("Recover interrupted context", "needs_verification", "No valid model checkpoint was available. Reconstruct state from the task ledger, repository, provider journal, and incoming assignment.", "Verify authoritative state before continuing.");
+      draft = this.#reconstructCheckpoint(session, seat);
       this.#deps.bus.append({ type: "handoff.checkpoint.failed", userSessionId: session.userSessionId, agentSessionId: session.id,
         payload: { participant: seat.name, reason: failure ?? "checkpoint produced no valid handoff", threshold, degraded: true } });
     }
@@ -1562,11 +1798,18 @@ export class AgentSessionHost {
     const user = this.#deps.repo.getUserSession(session.userSessionId);
     if (!user || !this.#deps.getWorkspaceRoot) return { draft, failure };
     const checkpointRoot = seat.worktreePath ?? this.#deps.getWorkspaceRoot(user.workspaceId);
+    // The abort controller is useless unarmed: a provider-side outage makes the
+    // CLI retry for minutes while #maybeRotate's gate blocks every sender.
+    const checkpointDeadline = setTimeout(() => checkpointAbort.abort(), CHECKPOINT_TIMEOUT_MS);
+    checkpointDeadline.unref?.();
     const query = sdk.query({ prompt: `Create a lossless rotation checkpoint for your successor context. Capture only durable task state, verified evidence pointers, results, uncertainty, and the exact next action. Do not perform work or call tools.${promptSuffix}`, options: {
       cwd: checkpointRoot, systemPrompt: { type: "preset", preset: "claude_code", append: "You are checkpointing your own context. Report faithfully; do not correct or embellish uncertain state." },
       settingSources: [], includePartialMessages: false, permissionMode: "plan", allowedTools: [],
       disallowedTools: ["Agent", "SendMessage", "Task", "Bash", "Edit", "Write", "WebSearch", "WebFetch"],
-      outputFormat: { type: "json_schema", schema: CheckpointClosingSchema.properties.handoff }, maxTurns: 2,
+      // MUST be object-rooted: the CLI turns this into a synthetic
+      // `StructuredOutput` tool and ships it verbatim as input_schema, and the
+      // API rejects anything whose root `type` is not the string "object".
+      outputFormat: { type: "json_schema", schema: HANDOFF_DRAFT_JSON_SCHEMA }, maxTurns: 2,
       sandbox: { enabled: true, failIfUnavailable: profile.sandboxRequired, autoAllowBashIfSandboxed: false, allowUnsandboxedCommands: false,
         filesystem: { allowManagedReadPathsOnly: true, allowRead: seat.worktreePath ? [checkpointRoot, this.#deps.getWorkspaceRoot(user.workspaceId)] : [checkpointRoot], allowWrite: [] } },
       env: sdkEnv(), abortController: checkpointAbort, persistSession: true, sessionStore: this.#deps.sessionStore as never,
@@ -1574,16 +1817,19 @@ export class AgentSessionHost {
       ...((profile.effort ?? config?.effort) ? { effort: (profile.effort ?? config?.effort) as SdkOptions["effort"] } : {}),
     } });
     flight.query = query;
+    // Its own baseline: this is a separate query() process, so its cumulative
+    // totals start from zero rather than continuing the seat lane's.
+    const cumulative = { costUsd: 0, apiDurationMs: 0 };
     try {
       for await (const raw of query) for (const event of mapSdkMessage(raw)) {
         if (event.kind === "result") {
           const parsed = HandoffDraftSchema.safeParse(event.output);
           if (parsed.success) draft = parsed.data;
-          this.#recordUsage(session, seat, `checkpoint:${newId("turn")}`, event);
+          this.#recordUsage(session, seat, cumulative, `checkpoint:${newId("turn")}`, event);
         } else if (event.kind === "error") failure = event.message;
       }
     } catch (error) { failure = error instanceof Error ? error.message : String(error); }
-    finally { flight.query = null; query.close?.(); }
+    finally { clearTimeout(checkpointDeadline); flight.query = null; query.close?.(); }
     return { draft, failure };
   }
 
@@ -1600,23 +1846,37 @@ export class AgentSessionHost {
     this.#deps.bus.append({ type: "agent_session.message", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { agentSessionId: session.id, message: toWireMessage(row) } });
   }
 
-  #recordUsage(session: AgentSessionRow, seat: ParticipantRow, turnId: string, usageEvent: { inputTokens?: number; uncachedInputTokens?: number; cacheCreationInputTokens?: number; cacheReadInputTokens?: number; outputTokens?: number; costUsd?: number; modelId?: string; apiDurationMs?: number; sdkDurationMs?: number; stopReason?: string }, status: "completed" | "error" | "aborted" = "completed", durationMs?: number): void {
+  /**
+   * `cumulativeCostUsd`/`cumulativeApiDurationMs` restate the provider
+   * session's running total on every result, so the per-turn figure is the
+   * delta against what this lane last saw. Recording them raw overstated the
+   * db-live-1 ledger by 25% and produced an api-duration 20x the wall clock.
+   */
+  #recordUsage(session: AgentSessionRow, seat: ParticipantRow, cumulative: { costUsd: number; apiDurationMs: number }, turnId: string, usageEvent: { inputTokens?: number; uncachedInputTokens?: number; cacheCreationInputTokens?: number; cacheReadInputTokens?: number; outputTokens?: number; cumulativeCostUsd?: number; modelId?: string; cumulativeApiDurationMs?: number; sdkDurationMs?: number; stopReason?: string }, status: "completed" | "error" | "aborted" = "completed", durationMs?: number): void {
+    // A result carrying no tokens at all is a CLI-level artifact, not a turn.
+    if ((usageEvent.inputTokens ?? 0) === 0 && (usageEvent.outputTokens ?? 0) === 0) return;
+    const costUsd = usageEvent.cumulativeCostUsd === undefined ? null
+      : Math.max(0, usageEvent.cumulativeCostUsd - cumulative.costUsd);
+    const apiDurationMs = usageEvent.cumulativeApiDurationMs === undefined ? null
+      : Math.max(0, usageEvent.cumulativeApiDurationMs - cumulative.apiDurationMs);
+    if (usageEvent.cumulativeCostUsd !== undefined) cumulative.costUsd = usageEvent.cumulativeCostUsd;
+    if (usageEvent.cumulativeApiDurationMs !== undefined) cumulative.apiDurationMs = usageEvent.cumulativeApiDurationMs;
     const usage = { id: newId("usage"), userSessionId: session.userSessionId, agentSessionId: session.id, participant: seat.name, profileId: seat.profileId,
       generation: seat.generation, turnId, inputTokens: usageEvent.inputTokens ?? 0, uncachedInputTokens: usageEvent.uncachedInputTokens ?? 0,
       cacheCreationInputTokens: usageEvent.cacheCreationInputTokens ?? 0, cacheReadInputTokens: usageEvent.cacheReadInputTokens ?? 0,
-      outputTokens: usageEvent.outputTokens ?? 0, costUsd: usageEvent.costUsd ?? null,
+      outputTokens: usageEvent.outputTokens ?? 0, costUsd,
       model: usageEvent.modelId ?? seat.model, effort: (seat.profileSnapshot as AgentProfile).effort ?? this.#deps.config?.effort ?? null,
-      trigger: "delivery", durationMs: durationMs ?? null, apiDurationMs: usageEvent.apiDurationMs ?? null, sdkDurationMs: usageEvent.sdkDurationMs ?? null, status, stopReason: usageEvent.stopReason ?? null, createdAt: nowIso() };
+      trigger: "delivery", durationMs: durationMs ?? null, apiDurationMs, sdkDurationMs: usageEvent.sdkDurationMs ?? null, status, stopReason: usageEvent.stopReason ?? null, createdAt: nowIso() };
     this.#deps.repo.insertUsage(usage);
     this.#deps.bus.append({ type: "usage.recorded", userSessionId: session.userSessionId, agentSessionId: session.id,
       payload: { sessionId: session.id, participant: seat.name, profileId: seat.profileId, generation: seat.generation, turnId,
         inputTokens: usage.inputTokens, uncachedInputTokens: usage.uncachedInputTokens, cacheCreationInputTokens: usage.cacheCreationInputTokens,
-        cacheReadInputTokens: usage.cacheReadInputTokens, outputTokens: usage.outputTokens, ...(usageEvent.costUsd === undefined ? {} : { costUsd: usageEvent.costUsd }),
+        cacheReadInputTokens: usage.cacheReadInputTokens, outputTokens: usage.outputTokens, ...(costUsd === null ? {} : { costUsd }),
         model: usage.model ?? undefined, effort: usage.effort ?? undefined, trigger: "delivery", durationMs: usage.durationMs ?? undefined,
         apiDurationMs: usage.apiDurationMs ?? undefined, sdkDurationMs: usage.sdkDurationMs ?? undefined, status, stopReason: usage.stopReason ?? undefined } });
   }
 
-  #patchDelivery(session: AgentSessionRow, delivery: MailboxDeliveryRow, status: "delivered" | "acknowledged" | "cancelled"): void {
+  #patchDelivery(session: AgentSessionRow, delivery: MailboxDeliveryRow, status: "queued" | "delivered" | "acknowledged" | "cancelled"): void {
     const now = nowIso();
     this.#deps.repo.patchDelivery(delivery.id, { status, ...(status === "delivered" ? { deliveredAt: now } : {}), ...(status === "acknowledged" ? { acknowledgedAt: now, deliveredAt: delivery.deliveredAt ?? now } : {}) });
     const message = this.#deps.repo.getMessageById(delivery.messageId);
@@ -1626,10 +1886,53 @@ export class AgentSessionHost {
 
   #specialists(id: string): ParticipantRow[] { return this.#deps.repo.listParticipants(id).filter((p) => p.role === "agent"); }
   #sessionStatus = new Map<string, "working" | "idle" | null>();
+  /** Sessions whose operator obligation is closed — reported, or discharged. */
+  readonly #operatorDebtSettled = new Set<string>();
+  /** agentSessionId → dependency name → the version last merged, and by whom. */
+  readonly #dependencyPins = new Map<string, Map<string, { version: string; seat: string }>>();
   #refreshStatus(agentSessionId: string): void {
     const row = this.#deps.repo.getAgentSession(agentSessionId);
     if (!row || row.status !== "open") return;
-    this.#setStatus(agentSessionId, this.#statusOf(row) === "working" ? "working" : "idle");
+    const status = this.#statusOf(row) === "working" ? "working" : "idle";
+    this.#setStatus(agentSessionId, status);
+    if (status === "idle") this.#dischargeOperatorDebt(row);
+  }
+
+  /**
+   * An AgentSession that accepted an assignment owes the operator a reply. The
+   * coordinator is asked to send it, but the obligation is the CONSOLE's — in
+   * db-live-1 the session simply went idle with `owedToOrchestrator: false`
+   * hardcoded, and the operator's last information was 35 minutes stale while
+   * a finished review sat unreported in the journal.
+   *
+   * Discharged from whatever evidence exists: the coordinator's last report,
+   * or failing that every seat's last word. An incomplete report beats silence.
+   */
+  #dischargeOperatorDebt(session: AgentSessionRow): void {
+    if (this.#operatorDebtSettled.has(session.id)) return;
+    const { repo } = this.#deps;
+    if (repo.listActiveDeliveries(session.id).length > 0) return;
+    const reportedToMain = repo.latestHandoff({ userSessionId: session.userSessionId, agentSessionId: session.id, participant: MAIN_RECIPIENT });
+    if (reportedToMain) { this.#operatorDebtSettled.add(session.id); return; }
+
+    const coordinator = repo.latestHandoff({ userSessionId: session.userSessionId, agentSessionId: session.id, sender: ORCHESTRATOR_SEAT, excludeCheckpoints: true });
+    const seatReports = this.#specialists(session.id)
+      .map((seat) => repo.latestHandoff({ userSessionId: session.userSessionId, agentSessionId: session.id, sender: seat.name, excludeCheckpoints: true }))
+      .filter((row): row is NonNullable<typeof row> => row !== undefined);
+    if (!coordinator && seatReports.length === 0) return;
+
+    this.#operatorDebtSettled.add(session.id);
+    const lines = seatReports.map((row) => `- ${row.sender} (${row.core.status}): ${row.core.state.summary.slice(0, 1_500)}`);
+    const summary = `This AgentSession went idle without its coordinator reporting a result, so the Console is closing the loop from the journal. Nothing below was assembled or endorsed by the coordinator.\n\n` +
+      `${coordinator ? `Coordinator's last word (${coordinator.core.status}): ${coordinator.core.state.summary.slice(0, 2_000)}\n\n` : ""}` +
+      `${lines.length > 0 ? `Specialist reports:\n${lines.join("\n")}` : "No specialist reported."}`;
+    this.#deps.bus.append({ type: "agent_session.unreported", userSessionId: session.userSessionId, agentSessionId: session.id,
+      payload: { agentSessionId: session.id, seatReports: seatReports.length, hadCoordinatorReport: coordinator !== undefined } });
+    try {
+      this.post({ agentSessionId: session.id, speaker: { kind: "orchestrator", name: ORCHESTRATOR_SEAT }, to: MAIN_RECIPIENT,
+        handoff: this.#simpleHandoff("AgentSession went idle without a final report", "needs_verification", summary,
+          "Review the seat reports above and decide whether the work is complete."), category: "milestone" });
+    } catch (error) { this.#recordHostFailure(session.id, error); }
   }
   #statusOf(row: AgentSessionRow): "working" | "idle" | "archived" {
     if (row.status === "archived") return "archived";
@@ -1639,6 +1942,9 @@ export class AgentSessionHost {
   }
   #setStatus(id: string, status: "working" | "idle"): void {
     const last = this.#sessionStatus.get(id) ?? null;
+    // New work re-opens the obligation: a session that was discharged once and
+    // then given more to do owes the operator another word.
+    if (status === "working") this.#operatorDebtSettled.delete(id);
     if (last === status) return;
     if (last === null && status === "idle") { this.#sessionStatus.set(id, status); return; }
     this.#sessionStatus.set(id, status);

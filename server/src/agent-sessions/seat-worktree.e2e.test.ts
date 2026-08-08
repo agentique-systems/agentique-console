@@ -9,7 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { WorktreeManager } from "../runtime/worktree-manager.ts";
-import { initMessage, sendMessageUse, successMessage, toolResultMessage, toolUseMessage } from "../sdk/fake.ts";
+import { initMessage, sendHandoffUse, successMessage, toolResultMessage, toolUseMessage } from "../sdk/fake.ts";
 import { collectUntil, makeDelegationHarness, type DelegationHarness } from "../test-helpers.ts";
 
 const git = (cwd: string, ...args: string[]) =>
@@ -46,8 +46,8 @@ function makeWorld(devStatus: "completed" | "failed", options: { conflict?: bool
       coordinatorTurns += 1;
       yield initMessage(`coord-${coordinatorTurns}`);
       yield coordinatorTurns === 1
-        ? sendMessageUse("send-1", "dev", envelope("implement the widget", "pending", "assignment"))
-        : sendMessageUse(`send-${coordinatorTurns}`, "main", envelope("wrapped", "completed", "final"));
+        ? sendHandoffUse("send-1", "dev", { action: "implement the widget", status: "pending", category: "assignment" })
+        : sendHandoffUse(`send-${coordinatorTurns}`, "main", { action: "wrapped", status: "completed", category: "final" });
       yield successMessage();
       return;
     }
@@ -63,7 +63,7 @@ function makeWorld(devStatus: "completed" | "failed", options: { conflict?: bool
       fs.writeFileSync(path.join(cwd, "widget.txt"), "implemented\n");
       yield toolUseMessage("w-1", "Write", { file_path: "widget.txt" });
       yield toolResultMessage("w-1", "ok");
-      yield sendMessageUse("dev-close", "orchestrator", envelope("widget implemented", devStatus, "milestone"));
+      yield sendHandoffUse("dev-close", "orchestrator", { action: "widget implemented", status: devStatus, category: "milestone" });
       yield successMessage();
       return;
     }
@@ -140,13 +140,13 @@ describe("seat worktree isolation (fake SDK + real git)", () => {
         coordinatorTurns += 1;
         yield initMessage(`coord-${coordinatorTurns}`);
         yield coordinatorTurns === 1
-          ? sendMessageUse("send-1", "dev", envelope("inspect the widget", "pending", "assignment"))
-          : sendMessageUse(`send-${coordinatorTurns}`, "main", envelope("done", "completed", "final"));
+          ? sendHandoffUse("send-1", "dev", { action: "inspect the widget", status: "pending", category: "assignment" })
+          : sendHandoffUse(`send-${coordinatorTurns}`, "main", { action: "done", status: "completed", category: "final" });
         yield successMessage();
         return;
       }
       yield initMessage("seat-1");
-      yield sendMessageUse("seat-close", "orchestrator", envelope("looked around", "completed", "milestone"));
+      yield sendHandoffUse("seat-close", "orchestrator", { action: "looked around", status: "completed", category: "milestone" });
       yield successMessage();
     }, { hostOverrides: { getWorkspaceRoot: () => plain, worktrees: new WorktreeManager({ dataDir: path.join(plain, "data") }) } });
     const userSessionId = h.addUserSession();
@@ -169,7 +169,7 @@ describe("seat worktree isolation (fake SDK + real git)", () => {
       const append = typeof opts.systemPrompt === "object" && !Array.isArray(opts.systemPrompt) ? opts.systemPrompt.append ?? "" : "";
       yield initMessage(append.includes("sole coordinator") ? "coord-1" : "dev-1");
       if (append.includes("sole coordinator")) {
-        yield sendMessageUse("send-1", "main", envelope("done", "completed", "final"));
+        yield sendHandoffUse("send-1", "main", { action: "done", status: "completed", category: "final" });
       }
       yield successMessage();
     }, { hostOverrides: { getWorkspaceRoot: () => repo, worktrees: new WorktreeManager({ dataDir }) } });
