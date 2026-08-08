@@ -29,9 +29,6 @@ export interface Config {
   effort: string | undefined;
   /** Optional operator-owned profile overrides. Built-ins remain immutable. */
   profilesFile: string;
-  /** Hard scheduler caps; queued work is durable and resumes when capacity frees. */
-  globalAgentTurns: number;
-  perAgentSessionTurns: number;
   /**
    * Peer-mesh knobs. Seats are persistent, name-addressed SDK sessions; these
    * bound resident CLI processes and the delivery/wake protocol around them.
@@ -92,8 +89,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     effort: env.CONSOLE_EFFORT,
     profilesFile:
       env.CONSOLE_PROFILES_FILE ?? path.join(dataDir, "profiles.json"),
-    globalAgentTurns: Number(env.CONSOLE_GLOBAL_AGENT_TURNS ?? 8),
-    perAgentSessionTurns: Number(env.CONSOLE_PER_SESSION_AGENT_TURNS ?? 4),
     seatIdleReapMs: Number(env.CONSOLE_SEAT_IDLE_REAP_MS ?? 300_000),
     seatMaxResident: Number(env.CONSOLE_MAX_RESIDENT_SEATS ?? 8),
     seatMaxResidentPerSession: Number(env.CONSOLE_MAX_RESIDENT_SEATS_PER_SESSION ?? 4),

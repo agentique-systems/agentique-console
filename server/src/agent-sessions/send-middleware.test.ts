@@ -118,6 +118,45 @@ describe("SendMessage PreToolUse", () => {
     const out = await pre(call("orchestrator", validEnvelope), "t1", {});
     expect(out.hookSpecificOutput?.permissionDecisionReason).toContain("console middleware failure: db locked");
   });
+
+  it("reports every denial kind through onDenied and none on success", async () => {
+    const denials: { kind: string; to: string; reason: string }[] = [];
+    const fragment = buildSendMessageMiddleware({
+      identity: seatIdentity, governor: stubGovernor({ ensureLive: async () => null }),
+      sendWakeTimeoutMs: 50, deliveryHoldLeaseMs: 1_000,
+      onDenied: (denial) => denials.push(denial),
+    });
+    const pre = fragment.PreToolUse?.[0]?.hooks[0] as SdkHookCallback;
+    await pre(call("", validEnvelope), "t1", {});
+    await pre(call("stranger", validEnvelope), "t2", {});
+    await pre(call("orchestrator", "just text"), "t3", {});
+    await pre(call("orchestrator", JSON.stringify({ handoff: { core: {} } })), "t4", {});
+    await pre(call("orchestrator", validEnvelope), "t5", {}); // wake fails → queued receipt
+    expect(denials.map((denial) => denial.kind)).toEqual(
+      ["missing_to", "unknown_recipient", "invalid_json", "invalid_envelope", "wake_timeout"]);
+    expect(denials[4]?.reason).toContain("queued as delivery delivery_1");
+
+    const okDenials: unknown[] = [];
+    const okFragment = buildSendMessageMiddleware({
+      identity: seatIdentity, governor: stubGovernor(), sendWakeTimeoutMs: 50, deliveryHoldLeaseMs: 1_000,
+      onDenied: (denial) => okDenials.push(denial),
+    });
+    const okPre = okFragment.PreToolUse?.[0]?.hooks[0] as SdkHookCallback;
+    const out = await okPre(call("orchestrator", validEnvelope), "t6", {});
+    expect(out.hookSpecificOutput?.permissionDecision).toBe("allow");
+    expect(okDenials).toHaveLength(0);
+  });
+
+  it("a throwing onDenied never changes the decision", async () => {
+    const fragment = buildSendMessageMiddleware({
+      identity: seatIdentity, governor: stubGovernor(), sendWakeTimeoutMs: 50, deliveryHoldLeaseMs: 1_000,
+      onDenied: () => { throw new Error("telemetry down"); },
+    });
+    const pre = fragment.PreToolUse?.[0]?.hooks[0] as SdkHookCallback;
+    const out = await pre(call("stranger", validEnvelope), "t1", {});
+    expect(out.hookSpecificOutput?.permissionDecision).toBe("deny");
+    expect(out.hookSpecificOutput?.permissionDecisionReason).toContain("unknown recipient");
+  });
 });
 
 describe("SendMessage PostToolUse", () => {

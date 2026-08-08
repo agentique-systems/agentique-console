@@ -96,6 +96,11 @@ export interface SendGovernor {
   markCarryFailed(deliveryId: string, reason: string): void;
 }
 
+/** Why a send was denied; `wake_timeout` alone is post-journal (queued receipt). */
+export type SendDenialKind =
+  | "missing_to" | "unknown_recipient" | "invalid_json" | "invalid_envelope"
+  | "route" | "wake_timeout" | "middleware_error";
+
 const TAG_RE = /^\[handoff (handoff_[A-Za-z0-9_-]+) delivery (delivery_[A-Za-z0-9_-]+)\]/;
 
 /** The `[handoff … delivery …]` prefix a carried body starts with. */
@@ -126,43 +131,50 @@ export function buildSendMessageMiddleware(deps: {
   governor: SendGovernor;
   sendWakeTimeoutMs: number;
   deliveryHoldLeaseMs: number;
+  /** Persistent denial telemetry; exceptions here never affect the decision. */
+  onDenied?: (denial: { kind: SendDenialKind; to: string; reason: string }) => void;
 }): SdkHooksFragment {
   const { identity, governor } = deps;
   /** toolUseId → journal row + hold releaser, settled by PostToolUse or lease expiry. */
   const inFlight = new Map<string, { deliveryId: string; release: () => void; lease: NodeJS.Timeout }>();
 
+  const denied = (kind: SendDenialKind, to: string, reason: string): SdkHookOutput => {
+    try { deps.onDenied?.({ kind, to, reason }); } catch { /* telemetry must not decide */ }
+    return deny(reason);
+  };
+
   const pre = async (input: SdkHookInput, toolUseId: string | undefined): Promise<SdkHookOutput> => {
+    const toolInput = (input.tool_input ?? {}) as { to?: unknown; message?: unknown; summary?: unknown };
+    const rawTo = typeof toolInput.to === "string" ? toolInput.to : "";
     try {
-      const toolInput = (input.tool_input ?? {}) as { to?: unknown; message?: unknown; summary?: unknown };
-      const rawTo = typeof toolInput.to === "string" ? toolInput.to : "";
       const rawMessage = typeof toolInput.message === "string" ? toolInput.message : "";
-      if (rawTo === "") return deny("SendMessage requires a `to` address.");
+      if (rawTo === "") return denied("missing_to", rawTo, "SendMessage requires a `to` address.");
 
       const address = parsePeerAddress(rawTo);
       const resolved = governor.resolve(identity, address.name);
-      if ("error" in resolved) return deny(resolved.error);
+      if ("error" in resolved) return denied("unknown_recipient", rawTo, resolved.error);
 
       let parsedJson: unknown;
       try {
         parsedJson = JSON.parse(stripDeliveryTag(rawMessage));
       } catch {
-        return deny(`SendMessage message must be JSON. ${ENVELOPE_CONTRACT}`);
+        return denied("invalid_json", rawTo, `SendMessage message must be JSON. ${ENVELOPE_CONTRACT}`);
       }
       const envelope = SendEnvelopeSchema.safeParse(parsedJson);
       if (!envelope.success) {
         const issues = envelope.error.issues.slice(0, 5)
           .map((issue) => `${issue.path.join(".") || "(root)"}: ${issue.message}`).join("; ");
-        return deny(`Invalid handoff envelope — ${issues}. ${ENVELOPE_CONTRACT}`);
+        return denied("invalid_envelope", rawTo, `Invalid handoff envelope — ${issues}. ${ENVELOPE_CONTRACT}`);
       }
 
       const routeError = governor.assertSendAllowed(identity, resolved, envelope.data);
-      if (routeError !== null) return deny(routeError);
+      if (routeError !== null) return denied("route", rawTo, routeError);
 
       const journaled = governor.journal(identity, resolved, envelope.data, rawMessage);
 
       const release = await governor.ensureLive(resolved, deps.sendWakeTimeoutMs);
       if (release === null) {
-        return deny(
+        return denied("wake_timeout", rawTo,
           `queued as delivery ${journaled.deliveryId} — the recipient is not reachable right now; ` +
           `the console will deliver it when the recipient wakes. Do not resend this message.`,
         );
@@ -193,7 +205,8 @@ export function buildSendMessageMiddleware(deps: {
         },
       };
     } catch (error) {
-      return deny(`console middleware failure: ${error instanceof Error ? error.message : String(error)}`);
+      return denied("middleware_error", rawTo,
+        `console middleware failure: ${error instanceof Error ? error.message : String(error)}`);
     }
   };
 

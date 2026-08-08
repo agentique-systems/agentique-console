@@ -661,9 +661,17 @@ export class AgentSessionHost {
       const lane = this.#seats.get(recipient.agentSessionId as string)?.get(recipient.seat as string);
       if (!lane) return null;
       return this.#takeHold(lane);
-    } catch {
+    } catch (error) {
       // Deny-with-receipt: the row stays queued; retry the console carry once
-      // capacity has likely freed (a settled turn parks its lane).
+      // capacity has likely freed (a settled turn parks its lane). The cause
+      // matters for tuning — capacity waits and spawn failures look identical
+      // to the sender but need opposite responses from the operator.
+      const session = this.#deps.repo.getAgentSession(recipient.agentSessionId as string);
+      if (session) {
+        this.#deps.bus.append({ type: "agent_session.runtime", userSessionId: session.userSessionId, agentSessionId: session.id,
+          payload: { agentSessionId: session.id, participant: recipient.seat as string,
+            detail: `wake for delivery failed: ${error instanceof Error ? error.message : String(error)}` } });
+      }
       const timer = setTimeout(() => {
         void this.#deliverConsole(recipient.agentSessionId as string, recipient.seat as string).catch(() => undefined);
       }, 1_000);
@@ -1048,6 +1056,10 @@ export class AgentSessionHost {
       governor: this.governor(),
       sendWakeTimeoutMs: config?.sendWakeTimeoutMs ?? 30_000,
       deliveryHoldLeaseMs: config?.deliveryHoldLeaseMs ?? 60_000,
+      onDenied: (denial) => this.#deps.bus.append({ type: "governance.send.denied",
+        userSessionId: session.userSessionId, agentSessionId: session.id,
+        payload: { sender: seat.name, senderScope: "seat", agentSessionId: session.id,
+          to: denial.to, kind: denial.kind, reason: denial.reason.slice(0, 500) } }),
     })];
     const user = this.#deps.repo.getUserSession(session.userSessionId);
     if (this.#deps.tasks && user && seat.name === ORCHESTRATOR_SEAT) {

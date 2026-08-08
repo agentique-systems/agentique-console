@@ -416,6 +416,9 @@ export class OrchestratorRunner {
         governor: host.governor(),
         sendWakeTimeoutMs: config.sendWakeTimeoutMs,
         deliveryHoldLeaseMs: config.deliveryHoldLeaseMs,
+        onDenied: (denial) => bus.append({ type: "governance.send.denied", userSessionId: sessionId,
+          payload: { sender: "main", senderScope: "main", to: denial.to,
+            kind: denial.kind, reason: denial.reason.slice(0, 500) } }),
       }));
       if (this.#deps.tasks) {
         fragments.push(buildTaskHooks(this.#deps.tasks, {

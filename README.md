@@ -91,13 +91,23 @@ local integration do not.
 npm install
 npm start                    # http://localhost:4400
 npm run dev                  # Vite HMR + watched server
-npm run verify               # credential-free fake-SDK tests
+npm run verify               # credential-free tests (fake SDK; worktree suites use real git)
 ```
 
-Data defaults to `~/.agentique-console/console.db`. Other useful settings are
-`CONSOLE_PORT`, `CONSOLE_MODEL`, `CONSOLE_EFFORT`, `CONSOLE_FS_ROOTS`,
-`CONSOLE_GLOBAL_AGENT_TURNS` (default 4), and
-`CONSOLE_PER_SESSION_AGENT_TURNS` (default 2).
+Data defaults to `~/.agentique-console/console.db`; point `CONSOLE_DATA_DIR`
+somewhere fresh to make a run's database a self-contained artifact, then
+summarize it afterwards with
+`npx tsx server/scripts/report-run.ts [path/to/console.db]`.
+
+Settings: `CONSOLE_PORT`, `CONSOLE_HOST`, `CONSOLE_MODEL`,
+`CONSOLE_IMPROVE_MODEL`, `CONSOLE_EFFORT`, `CONSOLE_FS_ROOTS`. Peer-mesh knobs:
+`CONSOLE_MAX_RESIDENT_SEATS` (default 8),
+`CONSOLE_MAX_RESIDENT_SEATS_PER_SESSION` (default 4),
+`CONSOLE_SEAT_IDLE_REAP_MS` (default 300000),
+`CONSOLE_SEND_WAKE_TIMEOUT_MS` (default 30000),
+`CONSOLE_DELIVERY_HOLD_LEASE_MS` (default 60000),
+`CONSOLE_PEER_NAME_PREFIX` (default `console-`), and
+`CONSOLE_SEAT_WORKTREES=0` to disable seat worktree isolation.
 
 Historical SDK JSONL can be copied into the authoritative provider journal:
 

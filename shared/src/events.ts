@@ -224,6 +224,29 @@ export interface AgentWatchdogPayload {
   detail: string;
 }
 
+/**
+ * Governance: the SendMessage middleware denied a send. Pre-journal kinds mean
+ * nothing was persisted for the send itself; `wake_timeout` is the queued
+ * receipt (journaled, carried later). The denial rate per kind is a primary
+ * live-tuning signal for the envelope contract.
+ */
+export interface SendDeniedPayload {
+  sender: string;
+  senderScope: "main" | "seat";
+  agentSessionId?: string;
+  to: string;
+  kind: "missing_to" | "unknown_recipient" | "invalid_json" | "invalid_envelope" | "route" | "wake_timeout" | "middleware_error";
+  reason: string;
+}
+
+/** Governance: the orchestrator lane's canUseTool denied a tool call. */
+export interface ToolDeniedPayload {
+  sessionId: string;
+  toolName: string;
+  kind: "coordination_only" | "empty_question" | "question_declined" | "plan_missing" | "plan_rejected";
+  reason: string;
+}
+
 /** Seat worktree isolation: write seats land completed work atomically. */
 export interface SeatWorktreeCreatedPayload {
   agentSessionId: string;
@@ -434,6 +457,8 @@ export type ConsoleEvent = Base &
     | { type: "handoff.checkpoint.failed"; payload: HandoffCheckpointFailedPayload }
     | { type: "handoff.checkpoint.retried"; payload: HandoffCheckpointRetriedPayload }
     | { type: "agent_session.watchdog"; payload: AgentWatchdogPayload }
+    | { type: "governance.send.denied"; payload: SendDeniedPayload }
+    | { type: "governance.tool.denied"; payload: ToolDeniedPayload }
     | { type: "agent_session.attempt_group.started"; payload: AttemptGroupStartedPayload }
     | { type: "agent_session.attempt.completed"; payload: AttemptCompletedPayload }
     | { type: "agent_session.attempt_group.review_started"; payload: AttemptGroupReviewStartedPayload }

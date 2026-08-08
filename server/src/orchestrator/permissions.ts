@@ -33,13 +33,23 @@ type CanUseTool = NonNullable<SdkOptions["canUseTool"]>;
 export function buildOrchestratorCanUseTool(input: CanUseToolInput): CanUseTool {
   const { userSessionId, repo, bus, interactions, laneState } = input;
 
+  const deny = (
+    toolName: string,
+    kind: "coordination_only" | "empty_question" | "question_declined" | "plan_missing" | "plan_rejected",
+    message: string,
+  ): { behavior: "deny"; message: string } => {
+    bus.append({ type: "governance.tool.denied", userSessionId,
+      payload: { sessionId: userSessionId, toolName, kind, reason: message.slice(0, 500) } });
+    return { behavior: "deny", message };
+  };
+
   return (async (
     toolName: string,
     toolInput: Record<string, unknown>,
     context?: { signal?: AbortSignal; suggestions?: unknown; agentID?: string },
   ) => {
     if (["Agent", "Task", "Bash", "Write", "Edit", "NotebookEdit"].includes(toolName)) {
-      return { behavior: "deny" as const, message: "Main is coordination-only. Delegate execution to profile-bound Console AgentSessions; in-process subagents fork ungoverned context." };
+      return deny(toolName, "coordination_only", "Main is coordination-only. Delegate execution to profile-bound Console AgentSessions; in-process subagents fork ungoverned context.");
     }
     // Native SendMessage never reaches this callback — its PreToolUse
     // middleware decides allow/deny; task and cron tools run and are
@@ -51,10 +61,7 @@ export function buildOrchestratorCanUseTool(input: CanUseToolInput): CanUseTool 
     if (toolName === "AskUserQuestion") {
       const questions = (toolInput.questions ?? []) as InteractionQuestion[];
       if (questions.length === 0) {
-        return {
-          behavior: "deny" as const,
-          message: "AskUserQuestion requires at least one question.",
-        };
+        return deny(toolName, "empty_question", "AskUserQuestion requires at least one question.");
       }
       const { resolution } = interactions.createQuestion(
         userSessionId,
@@ -81,7 +88,7 @@ export function buildOrchestratorCanUseTool(input: CanUseToolInput): CanUseTool 
         resolved.kind === "dismissed"
           ? resolved.reason
           : "The operator declined.";
-      return { behavior: "deny" as const, message: reason };
+      return deny(toolName, "question_declined", reason);
     }
 
     if (toolName === "ExitPlanMode") {
@@ -90,11 +97,8 @@ export function buildOrchestratorCanUseTool(input: CanUseToolInput): CanUseTool 
           ? toolInput.plan
           : laneState.lastAssistantText;
       if (plan === "") {
-        return {
-          behavior: "deny" as const,
-          message:
-            "No plan text was captured — write the plan out, then call ExitPlanMode again.",
-        };
+        return deny(toolName, "plan_missing",
+          "No plan text was captured — write the plan out, then call ExitPlanMode again.");
       }
       const { resolution } = interactions.createPlanApproval(
         userSessionId,
@@ -121,7 +125,7 @@ export function buildOrchestratorCanUseTool(input: CanUseToolInput): CanUseTool 
           : resolved.kind === "dismissed"
             ? resolved.reason
             : "Revise the plan.";
-      return { behavior: "deny" as const, message: note };
+      return deny(toolName, "plan_rejected", note);
     }
 
     // Everything else runs. Delegation is a matter of judgement (the brief),
