@@ -343,6 +343,10 @@ export class Repo {
       .get();
   }
 
+  listOpenUserSessions(): UserSessionRow[] {
+    return this.#db.select().from(userSessions).where(eq(userSessions.status, "open")).all();
+  }
+
   listUserSessions(workspaceId: string): UserSessionRow[] {
     return this.#db
       .select()

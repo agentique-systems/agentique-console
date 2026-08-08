@@ -34,6 +34,7 @@ import { CheckpointClosingSchema, HandoffDraftSchema } from "../handoffs/schema.
 import { evaluateCheckpointDraft } from "../handoffs/checkpoint-gate.ts";
 import { mainPeerName, peerNameOf } from "./peer-names.ts";
 import { buildTaskHooks } from "../tasks/hooks.ts";
+import { buildWorktreeHooks } from "./worktree-hook.ts";
 import {
   buildSendMessageMiddleware,
   mergeHooks,
@@ -996,6 +997,7 @@ export class AgentSessionHost {
         ...(profile.permissionMode === "bypassPermissions" && session.phase !== "planning" ? { allowDangerouslySkipPermissions: true } : {}),
         allowedTools: [...profile.tools, "SendMessage",
           ...(latestSeat.name === ORCHESTRATOR_SEAT ? ["TaskCreate", "TaskUpdate", "TaskGet", "TaskList"] : []),
+          ...(profile.tools.includes("Edit") || profile.tools.includes("Write") ? ["EnterWorktree", "ExitWorktree"] : []),
           ...this.#runtimeToolNames(profile, latestSeat.name, latestSeat.attemptRole)],
         disallowedTools: ["Agent", "Task",
           ...(latestSeat.name === ORCHESTRATOR_SEAT ? [] : ["TaskCreate", "TaskUpdate", "TaskList", "TaskGet"])],
@@ -1044,6 +1046,13 @@ export class AgentSessionHost {
         workspaceId: user.workspaceId, userSessionId: session.userSessionId,
         agentSessionId: session.id, participant: seat.name,
       }) as SdkHooksFragment);
+    }
+    if (this.#deps.worktrees && user && this.#deps.getWorkspaceRoot) {
+      fragments.push(buildWorktreeHooks({
+        repo: this.#deps.repo, bus: this.#deps.bus, worktrees: this.#deps.worktrees,
+        workspaceRoot: this.#deps.getWorkspaceRoot(user.workspaceId),
+        userSessionId: session.userSessionId, agentSessionId: session.id, seat: seat.name,
+      }));
     }
     return mergeHooks(fragments);
   }

@@ -42,6 +42,7 @@ import { sdkEnv } from "../sdk/env.ts";
 import type { AgentSessionHost } from "../agent-sessions/host.ts";
 import { mainPeerName } from "../agent-sessions/peer-names.ts";
 import { buildSendMessageMiddleware, deliveryTagOf, mergeHooks } from "../agent-sessions/send-middleware.ts";
+import { buildCronHooks, cronDue } from "./cron-hooks.ts";
 import { buildTaskHooks } from "../tasks/hooks.ts";
 import type { TaskService } from "../tasks/service.ts";
 import type { SdkHooksFragment } from "../sdk/types.ts";
@@ -49,7 +50,8 @@ import type { SdkHooksFragment } from "../sdk/types.ts";
 type Job =
   | { kind: "operator"; text: string }
   | { kind: "answer-revival"; text: string }
-  | { kind: "agent-milestone"; text: string; agentSessionId: string };
+  | { kind: "agent-milestone"; text: string; agentSessionId: string }
+  | { kind: "cron"; text: string };
 
 interface ActiveTurn {
   turnId: string;
@@ -170,6 +172,39 @@ export class OrchestratorRunner {
   /** M8: a stale interaction was answered after a restart. */
   enqueueRevival(userSessionId: string, text: string): void {
     this.#enqueue(userSessionId, { kind: "answer-revival", text });
+  }
+
+  /**
+   * Fallback scheduler for mirrored crons. The CLI fires its own jobs while
+   * the lane process lives; a closed lane (parked, recycled, restarted) has
+   * no scheduler, so the console re-fires due crons from the mirror — only
+   * when the lane is closed, which is what prevents double-firing.
+   */
+  #cronTimer: NodeJS.Timeout | null = null;
+  #cronFired = new Map<string, string>();
+  startCronFallback(): void {
+    if (this.#cronTimer) return;
+    this.#cronTimer = setInterval(() => this.#cronTick(new Date()), 30_000);
+    this.#cronTimer.unref?.();
+  }
+  stopCronFallback(): void {
+    if (this.#cronTimer) { clearInterval(this.#cronTimer); this.#cronTimer = null; }
+  }
+  #cronTick(now: Date): void {
+    const minute = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}T${now.getHours()}:${now.getMinutes()}`;
+    for (const session of this.#deps.repo.listOpenUserSessions()) {
+      const lane = this.#lanes.get(session.id);
+      if (lane?.query) continue; // the CLI's own scheduler owns a live lane
+      for (const cron of this.#deps.repo.listCrons(session.id)) {
+        if (this.#cronFired.get(cron.id) === minute || !cronDue(cron.schedule, now)) continue;
+        this.#cronFired.set(cron.id, minute);
+        this.#deps.bus.append({ type: "user_session.runtime", userSessionId: session.id,
+          payload: { sessionId: session.id, detail: `cron fallback fired ${cron.sdkCronId} (${cron.schedule})` } });
+        this.#enqueue(session.id, { kind: "cron", text: `[Scheduled task ${cron.sdkCronId} fired (${cron.schedule})]\n${cron.prompt}` });
+        if (cron.oneShot) this.#deps.repo.patchCron(cron.id, { status: "deleted" });
+      }
+    }
+    if (this.#cronFired.size > 256) this.#cronFired.clear();
   }
 
   /** Material AgentSession reports only. Repeated reports coalesce per session. */
@@ -295,7 +330,7 @@ export class OrchestratorRunner {
     if (prompt === "") return;
 
     const turnId = newId("turn");
-    const trigger = job.kind === "operator" ? "operator" : job.kind === "agent-milestone" ? "wake" : "answer";
+    const trigger = job.kind === "operator" ? "operator" : job.kind === "agent-milestone" || job.kind === "cron" ? "wake" : "answer";
     bus.append({
       type: "user_session.turn.started",
       userSessionId: sessionId,
@@ -388,6 +423,7 @@ export class OrchestratorRunner {
           agentSessionId: null, participant: null,
         }) as SdkHooksFragment);
       }
+      fragments.push(buildCronHooks({ repo, bus, userSessionId: sessionId }));
     }
     const options = buildOrchestratorOptions({
       workspaceRoot: this.#deps.getWorkspaceRoot(session.workspaceId),

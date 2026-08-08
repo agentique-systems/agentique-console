@@ -112,6 +112,7 @@ const orphaned = worktrees.recoverOrphans(
 );
 if (orphaned > 0) console.log(`removed ${orphaned} orphaned worktree(s)`);
 host.boot();
+runner.startCronFallback();
 
 const ctx: AppContext = {
   config,
