@@ -85,6 +85,43 @@ export interface SdkToolResult {
   isError?: boolean;
 }
 
+/**
+ * Structural hook plumbing (mirrors the SDK's HookCallbackMatcher wire shape).
+ * Options carries the real types; these exist so console middleware and the
+ * fake can construct/fire hooks without importing SDK internals. Cast at the
+ * options boundary: `hooks: fragment as SdkOptions["hooks"]`.
+ */
+export interface SdkHookInput {
+  hook_event_name?: string;
+  tool_name?: string;
+  tool_input?: unknown;
+  tool_response?: unknown;
+  session_id?: string;
+  [key: string]: unknown;
+}
+export interface SdkHookOutput {
+  decision?: "approve" | "block";
+  systemMessage?: string;
+  hookSpecificOutput?: {
+    hookEventName: string;
+    permissionDecision?: "allow" | "deny" | "ask" | "defer";
+    permissionDecisionReason?: string;
+    updatedInput?: Record<string, unknown>;
+    additionalContext?: string;
+    worktreePath?: string;
+  };
+}
+export type SdkHookCallback = (
+  input: SdkHookInput,
+  toolUseId: string | undefined,
+  extra: { signal?: AbortSignal },
+) => Promise<SdkHookOutput>;
+export interface SdkHookMatcher {
+  matcher?: string;
+  hooks: SdkHookCallback[];
+}
+export type SdkHooksFragment = Partial<Record<string, SdkHookMatcher[]>>;
+
 export interface CompiledTool {
   name: string;
   description: string;
