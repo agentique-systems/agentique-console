@@ -95,11 +95,51 @@ export const participants = sqliteTable(
     pendingTurnSeq: integer("pending_turn_seq").notNull().default(0),
     /** Transcript watermark: highest message seq this seat has been shown. */
     lastSeenSeq: integer("last_seen_seq").notNull().default(0),
+    /** Isolated git worktree this seat works in; NULL = the real workspace. */
+    worktreePath: text("worktree_path"),
+    /** The commit the seat's worktree branched from (diff base). */
+    worktreeBaseCommit: text("worktree_base_commit"),
+    /** The worktree's branch ref (merge target on completion). */
+    worktreeBranch: text("worktree_branch"),
+    /** Best-of-N group membership; NULL for ordinary seats. */
+    attemptGroupId: text("attempt_group_id"),
+    attemptRole: text("attempt_role", { enum: ["attempt", "reviewer"] }),
     /** Seating order for accents and prompt listings. */
     ord: integer("ord").notNull(),
     createdAt: text("created_at").notNull(),
   },
   (t) => [primaryKey({ columns: [t.agentSessionId, t.name] })],
+);
+
+/** One best-of-N run: N attempt seats racing the same assignment. */
+export const attemptGroups = sqliteTable(
+  "attempt_groups",
+  {
+    id: text("id").primaryKey(),
+    agentSessionId: text("agent_session_id")
+      .notNull()
+      .references(() => agentSessions.id),
+    userSessionId: text("user_session_id").notNull(),
+    profileId: text("profile_id").notNull(),
+    baseSeat: text("base_seat").notNull(),
+    attempts: integer("attempts").notNull(),
+    baseCommit: text("base_commit").notNull(),
+    status: text("status", { enum: ["running", "reviewing", "merged", "rejected", "failed", "abandoned"] })
+      .notNull()
+      .default("running"),
+    reviewerSeat: text("reviewer_seat"),
+    winnerSeat: text("winner_seat"),
+    mergeCommit: text("merge_commit"),
+    dirtyWorkspace: integer("dirty_workspace", { mode: "boolean" }).notNull().default(false),
+    /** seat -> {branch, worktreePath, commit, artifactId, status}. */
+    attemptsState: text("attempts_state", { mode: "json" })
+      .$type<Record<string, { branch: string; worktreePath: string; commit: string | null; artifactId: string | null; status: "running" | "completed" | "failed" }>>()
+      .notNull()
+      .default({}),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (t) => [index("attempt_groups_session").on(t.agentSessionId, t.status)],
 );
 
 export const messages = sqliteTable(

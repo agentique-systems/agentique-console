@@ -23,6 +23,8 @@ import { Repo, toWireMessage } from "../db/repo.ts";
 import type { EventBus } from "../events/bus.ts";
 import { RuntimeBroadcaster } from "../events/runtime.ts";
 import { newId, nowIso } from "../ids.ts";
+import { rotationTokenLimit } from "../model-catalog.ts";
+import { evaluateCheckpointDraft } from "../handoffs/checkpoint-gate.ts";
 import { badRequest, conflict, notFound } from "../api/errors.ts";
 import { mapSdkMessage } from "../sdk/mapping.ts";
 import type {
@@ -661,7 +663,7 @@ export class OrchestratorRunner {
         if (session) {
           const contextTokens = Math.max(session.contextTokens, event.inputTokens ?? 0);
           repo.patchUserSession(sessionId, { sdkTurnCount: session.sdkTurnCount + 1, contextTokens });
-          if (session.sdkTurnCount + 1 >= this.#deps.config.contextTurnLimit || contextTokens >= this.#deps.config.contextTokenLimit) lane.recycleAfterTurn = true;
+          if (session.sdkTurnCount + 1 >= this.#deps.config.contextTurnLimit || contextTokens >= rotationTokenLimit(this.#deps.config.contextTokenLimit, this.#deps.config.model)) lane.recycleAfterTurn = true;
           const usage = { id: newId("usage"), userSessionId: sessionId, agentSessionId: null, participant: "orchestrator", profileId: null,
             generation: session.sdkGeneration, turnId: turn?.turnId ?? "unattributed", inputTokens: event.inputTokens ?? 0,
             uncachedInputTokens: event.uncachedInputTokens ?? 0, cacheCreationInputTokens: event.cacheCreationInputTokens ?? 0, cacheReadInputTokens: event.cacheReadInputTokens ?? 0, outputTokens: event.outputTokens ?? 0,
@@ -697,7 +699,7 @@ export class OrchestratorRunner {
             outputTokens: usage.outputTokens, ...(event.costUsd === undefined ? {} : { costUsd: event.costUsd }), model: usage.model ?? undefined, effort: usage.effort ?? undefined,
             trigger: turn?.trigger, durationMs: usage.durationMs ?? undefined, apiDurationMs: usage.apiDurationMs ?? undefined, sdkDurationMs: usage.sdkDurationMs ?? undefined,
             status: event.aborted ? "aborted" : "error", stopReason: usage.stopReason ?? undefined } });
-          if (session.sdkTurnCount + 1 >= this.#deps.config.contextTurnLimit || contextTokens >= this.#deps.config.contextTokenLimit) lane.recycleAfterTurn = true;
+          if (session.sdkTurnCount + 1 >= this.#deps.config.contextTurnLimit || contextTokens >= rotationTokenLimit(this.#deps.config.contextTokenLimit, this.#deps.config.model)) lane.recycleAfterTurn = true;
         }
         this.#settleTurn(sessionId, lane);
         return;
@@ -728,38 +730,44 @@ export class OrchestratorRunner {
   async #rotateContextIfNeeded(sessionId: string, lane: Lane): Promise<void> {
     const session = this.#deps.repo.getUserSession(sessionId);
     if (!session) return;
-    const hard = session.sdkTurnCount >= this.#deps.config.contextTurnLimit || session.contextTokens >= this.#deps.config.contextTokenLimit;
-    const soft = session.sdkTurnCount >= Math.ceil(this.#deps.config.contextTurnLimit * 0.8) || session.contextTokens >= Math.ceil(this.#deps.config.contextTokenLimit * 0.75);
+    const tokenLimit = rotationTokenLimit(this.#deps.config.contextTokenLimit, this.#deps.config.model);
+    const hard = session.sdkTurnCount >= this.#deps.config.contextTurnLimit || session.contextTokens >= tokenLimit;
+    const soft = session.sdkTurnCount >= Math.ceil(this.#deps.config.contextTurnLimit * 0.8) || session.contextTokens >= Math.ceil(tokenLimit * 0.75);
     if (!soft) return;
     const threshold = hard ? "hard" as const : "soft" as const;
     if (lane.query) await this.#closeLane(lane, { interrupt: false });
-    let draft: HandoffDraft | null = null;
-    let failure: string | null = null;
     const started = Date.now();
-    if (session.sdkSessionId) {
-      const sdk = await this.#deps.sdk();
-      const abort = new AbortController();
-      const query = sdk.query({ prompt: "Create a lossless rotation checkpoint for the next orchestrator context. Preserve operator intent, decisions, delegated work, verified evidence pointers, uncertainty, and exact next actions. Do not perform work or call tools.", options: {
-        cwd: this.#deps.getWorkspaceRoot(session.workspaceId), systemPrompt: { type: "preset", preset: "claude_code", append: "Checkpoint faithfully. Repository files, task ledger, artifacts, and provider journal are authoritative; do not invent corrections." },
-        settingSources: [], includePartialMessages: false, permissionMode: "plan", allowedTools: [],
-        disallowedTools: ["Agent", "SendMessage", "Task", "Bash", "Edit", "Write", "WebSearch", "WebFetch"],
-        outputFormat: { type: "json_schema", schema: HANDOFF_DRAFT_JSON_SCHEMA }, maxTurns: 2,
-        sandbox: { enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: false, allowUnsandboxedCommands: false,
-          filesystem: { allowManagedReadPathsOnly: true, allowRead: [this.#deps.getWorkspaceRoot(session.workspaceId)], allowWrite: [] } },
-        env: sdkEnv(), abortController: abort, persistSession: true,
-        ...(this.#deps.sessionStore === undefined ? {} : { sessionStore: this.#deps.sessionStore as SdkOptions["sessionStore"], sessionStoreFlush: "eager" as const }),
-        resume: session.sdkSessionId, ...(this.#deps.config.model ? { model: this.#deps.config.model } : {}),
-        ...(this.#deps.config.effort ? { effort: this.#deps.config.effort as SdkOptions["effort"] } : {}),
-      } });
-      try {
-        for await (const raw of query) for (const event of mapSdkMessage(raw)) {
-          if (event.kind === "result") {
-            const parsed = HandoffDraftSchema.safeParse(event.output);
-            if (parsed.success) draft = parsed.data;
-          } else if (event.kind === "error") failure = event.message;
+    let { draft, failure } = await this.#checkpointQuery(session, "");
+    // Deterministic quality gate with one feedback retry (mirrors the seat
+    // rotation path): soft thresholds defer on a gate-failing pair, hard
+    // thresholds accept the better draft and journal it.
+    if (draft) {
+      const gate = (candidate: HandoffDraft) => evaluateCheckpointDraft({ draft: candidate,
+        referenceWarnings: this.#deps.handoffs.referenceWarnings(sessionId, [...candidate.core.state.evidence, ...candidate.core.result.artifacts]),
+        taskResolves: candidate.core.taskId == null ? null : this.#deps.repo.hasDurableReference("task", candidate.core.taskId) });
+      const initialFailures = gate(draft);
+      if (initialFailures.length > 0) {
+        this.#deps.bus.append({ type: "handoff.checkpoint.retried", userSessionId: sessionId,
+          payload: { participant: "orchestrator", threshold, failures: initialFailures, accepted: "none" } });
+        const retry = await this.#checkpointQuery(session,
+          `\n\nA previous checkpoint attempt failed these deterministic checks — fix each one:\n- ${initialFailures.join("\n- ")}`);
+        const retryFailures = retry.draft ? gate(retry.draft) : null;
+        if (retry.draft && retryFailures !== null && retryFailures.length === 0) {
+          draft = retry.draft;
+          this.#deps.bus.append({ type: "handoff.checkpoint.retried", userSessionId: sessionId,
+            payload: { participant: "orchestrator", threshold, failures: [], accepted: "retry" } });
+        } else if (!hard) {
+          this.#deps.bus.append({ type: "handoff.checkpoint.failed", userSessionId: sessionId,
+            payload: { participant: "orchestrator", reason: "checkpoint failed the quality gate", threshold, degraded: false,
+              checkFailures: retryFailures ?? initialFailures } });
+          return;
+        } else {
+          const useRetry = retry.draft !== null && retryFailures !== null && retryFailures.length <= initialFailures.length;
+          draft = useRetry ? retry.draft : draft;
+          this.#deps.bus.append({ type: "handoff.checkpoint.retried", userSessionId: sessionId,
+            payload: { participant: "orchestrator", threshold, failures: useRetry ? retryFailures ?? [] : initialFailures, accepted: useRetry ? "retry" : "initial" } });
         }
-      } catch (error) { failure = error instanceof Error ? error.message : String(error); }
-      finally { query.close?.(); }
+      }
     }
     let degraded = false;
     if (!draft) {
@@ -786,9 +794,40 @@ export class OrchestratorRunner {
     this.#deps.repo.patchUserSession(sessionId, { sdkSessionId: null, sdkGeneration: session.sdkGeneration + 1, sdkTurnCount: 0, contextTokens: 0, latestHandoffId: prepared.row.id });
     this.#deps.bus.append({ type: "user_session.context.rotated", userSessionId: sessionId,
       payload: { sessionId, generation: session.sdkGeneration + 1,
-        reason: session.contextTokens >= Math.ceil(this.#deps.config.contextTokenLimit * 0.75) ? "token_limit" : "turn_limit", memoryChars: 0,
+        reason: session.contextTokens >= Math.ceil(tokenLimit * 0.75) ? "token_limit" : "turn_limit", memoryChars: 0,
         handoffId: prepared.row.id, threshold, checkpointBytes: prepared.row.bytes, degraded } });
     this.#deps.bus.append({ type: "user_session.runtime", userSessionId: sessionId,
       payload: { sessionId, detail: `checkpoint ${prepared.row.id} completed in ${Date.now() - started}ms` } });
+  }
+
+  /** One tool-free checkpoint query against the lane's current context. */
+  async #checkpointQuery(session: { sdkSessionId: string | null; workspaceId: string }, promptSuffix: string): Promise<{ draft: HandoffDraft | null; failure: string | null }> {
+    let draft: HandoffDraft | null = null;
+    let failure: string | null = null;
+    if (!session.sdkSessionId) return { draft, failure };
+    const sdk = await this.#deps.sdk();
+    const abort = new AbortController();
+    const query = sdk.query({ prompt: `Create a lossless rotation checkpoint for the next orchestrator context. Preserve operator intent, decisions, delegated work, verified evidence pointers, uncertainty, and exact next actions. Do not perform work or call tools.${promptSuffix}`, options: {
+      cwd: this.#deps.getWorkspaceRoot(session.workspaceId), systemPrompt: { type: "preset", preset: "claude_code", append: "Checkpoint faithfully. Repository files, task ledger, artifacts, and provider journal are authoritative; do not invent corrections." },
+      settingSources: [], includePartialMessages: false, permissionMode: "plan", allowedTools: [],
+      disallowedTools: ["Agent", "SendMessage", "Task", "Bash", "Edit", "Write", "WebSearch", "WebFetch"],
+      outputFormat: { type: "json_schema", schema: HANDOFF_DRAFT_JSON_SCHEMA }, maxTurns: 2,
+      sandbox: { enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: false, allowUnsandboxedCommands: false,
+        filesystem: { allowManagedReadPathsOnly: true, allowRead: [this.#deps.getWorkspaceRoot(session.workspaceId)], allowWrite: [] } },
+      env: sdkEnv(), abortController: abort, persistSession: true,
+      ...(this.#deps.sessionStore === undefined ? {} : { sessionStore: this.#deps.sessionStore as SdkOptions["sessionStore"], sessionStoreFlush: "eager" as const }),
+      resume: session.sdkSessionId, ...(this.#deps.config.model ? { model: this.#deps.config.model } : {}),
+      ...(this.#deps.config.effort ? { effort: this.#deps.config.effort as SdkOptions["effort"] } : {}),
+    } });
+    try {
+      for await (const raw of query) for (const event of mapSdkMessage(raw)) {
+        if (event.kind === "result") {
+          const parsed = HandoffDraftSchema.safeParse(event.output);
+          if (parsed.success) draft = parsed.data;
+        } else if (event.kind === "error") failure = event.message;
+      }
+    } catch (error) { failure = error instanceof Error ? error.message : String(error); }
+    finally { query.close?.(); }
+    return { draft, failure };
   }
 }

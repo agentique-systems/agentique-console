@@ -62,10 +62,35 @@ CREATE TABLE IF NOT EXISTS participants (
   checkpoint_ready INTEGER NOT NULL DEFAULT 1,
   pending_turn_seq INTEGER NOT NULL DEFAULT 0,
   last_seen_seq INTEGER NOT NULL DEFAULT 0,
+  worktree_path TEXT,
+  worktree_base_commit TEXT,
+  worktree_branch TEXT,
+  attempt_group_id TEXT,
+  attempt_role TEXT,
   ord INTEGER NOT NULL,
   created_at TEXT NOT NULL,
   PRIMARY KEY (agent_session_id, name)
 );
+
+CREATE TABLE IF NOT EXISTS attempt_groups (
+  id TEXT PRIMARY KEY,
+  agent_session_id TEXT NOT NULL REFERENCES agent_sessions(id),
+  user_session_id TEXT NOT NULL,
+  profile_id TEXT NOT NULL,
+  base_seat TEXT NOT NULL,
+  attempts INTEGER NOT NULL,
+  base_commit TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'running'
+    CHECK (status IN ('running','reviewing','merged','rejected','failed','abandoned')),
+  reviewer_seat TEXT,
+  winner_seat TEXT,
+  merge_commit TEXT,
+  dirty_workspace INTEGER NOT NULL DEFAULT 0,
+  attempts_state TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS attempt_groups_session ON attempt_groups(agent_session_id, status);
 
 CREATE TABLE IF NOT EXISTS messages (
   id TEXT PRIMARY KEY,

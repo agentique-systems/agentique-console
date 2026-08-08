@@ -13,6 +13,7 @@ import { resolveSdk } from "./sdk/client.ts";
 import { SqliteSessionStore } from "./sdk/session-store.ts";
 import { ProcessManager } from "./runtime/process-manager.ts";
 import { BrowserManager } from "./runtime/browser-manager.ts";
+import { WorktreeManager } from "./runtime/worktree-manager.ts";
 import { UserSessionService } from "./sessions/service.ts";
 import { TaskService } from "./tasks/service.ts";
 import { HandoffService } from "./handoffs/service.ts";
@@ -42,10 +43,11 @@ const profiles = new AgentProfileRegistry(undefined, { getWorkspaceRoot, db, bus
 const sessionStore = new SqliteSessionStore(db);
 const processes = new ProcessManager(bus);
 const browsers = new BrowserManager(bus);
+const worktrees = new WorktreeManager({ dataDir: config.dataDir });
 let runner!: OrchestratorRunner;
 const manager = new ManagerService({ repo, workspaces, profiles, config, bus, runner: () => runner });
 const host = new AgentSessionHost({
-  repo, bus, config, profiles, sdk: () => resolveSdk(), sessionStore, getWorkspaceRoot, processes, browsers, interactions, tasks, handoffs,
+  repo, bus, config, profiles, sdk: () => resolveSdk(), sessionStore, getWorkspaceRoot, processes, browsers, interactions, tasks, handoffs, worktrees,
   wake: (userSessionId, agentSessionId, category, text) =>
     runner.enqueueAgentMilestone(userSessionId, agentSessionId, category, text),
 });
@@ -85,6 +87,28 @@ if (recovered > 0) {
 }
 if (requeued > 0) console.log(`requeued ${requeued} unacknowledged mailbox delivery(s)`);
 if (reconciled > 0) console.log(`reconciled ${reconciled} durable communication event(s)`);
+// Worktrees intentionally survive restarts (their seats resume in place);
+// only directories whose session is gone/archived or whose group is terminal
+// are orphans.
+const liveWorktrees = new Set([
+  ...repo.listNonTerminalAttemptGroups().flatMap((group) =>
+    Object.values(group.attemptsState).map((attempt) => attempt.worktreePath)),
+  ...repo.listWorktreeSeats().map((seat) => seat.worktreePath),
+]);
+const orphaned = worktrees.recoverOrphans(
+  (agentSessionId, dirName) => {
+    const session = repo.getAgentSession(agentSessionId);
+    if (!session || session.status !== "open") return false;
+    for (const path of liveWorktrees) if (path.endsWith(dirName)) return true;
+    return false;
+  },
+  (agentSessionId) => {
+    const session = repo.getAgentSession(agentSessionId);
+    const user = session ? repo.getUserSession(session.userSessionId) : undefined;
+    try { return user ? getWorkspaceRoot(user.workspaceId) : null; } catch { return null; }
+  },
+);
+if (orphaned > 0) console.log(`removed ${orphaned} orphaned worktree(s)`);
 host.boot();
 
 const ctx: AppContext = {

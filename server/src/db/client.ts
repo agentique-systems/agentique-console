@@ -43,6 +43,11 @@ function migrateAdditiveColumns(sqlite: Database.Database): void {
     ["latest_handoff_id", "TEXT"],
     ["checkpoint_ready", "INTEGER NOT NULL DEFAULT 1"],
     ["pending_turn_seq", "INTEGER NOT NULL DEFAULT 0"],
+    ["worktree_path", "TEXT"],
+    ["worktree_base_commit", "TEXT"],
+    ["worktree_branch", "TEXT"],
+    ["attempt_group_id", "TEXT"],
+    ["attempt_role", "TEXT"],
   ];
   for (const [name, ddl] of additions) {
     if (!columns.has(name)) sqlite.exec(`ALTER TABLE participants ADD COLUMN ${name} ${ddl}`);

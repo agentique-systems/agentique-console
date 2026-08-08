@@ -14,8 +14,12 @@ export interface Config {
    * home as a shortcut; narrow it with CONSOLE_FS_ROOTS (colon-separated).
    */
   fsRoots: { path: string; label: string }[];
-  /** Model override for every session; undefined = SDK default. */
-  model: string | undefined;
+  /**
+   * Orchestrator-lane model (also the profile-manager lane and the lane's
+   * rotation checkpoint). Seats carry their own profile models; they never
+   * read this. CONSOLE_MODEL overrides.
+   */
+  model: string;
   /**
    * Model for the composer's rewrite pass. Deliberately NOT `model`: this is a
    * one-shot text edit, so it runs on a cheaper tier than the orchestrator.
@@ -31,6 +35,11 @@ export interface Config {
   /** Rotate a participant onto a fresh provider session before the next turn. */
   contextTokenLimit: number;
   contextTurnLimit: number;
+  /**
+   * Write-profile seats in git workspaces work in isolated worktrees with
+   * atomic merge-on-completion. CONSOLE_SEAT_WORKTREES=0 disables.
+   */
+  seatWorktrees: boolean;
 }
 
 function parseRoots(
@@ -63,14 +72,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     host: env.CONSOLE_HOST ?? "127.0.0.1",
     webDir: path.resolve(import.meta.dirname, "../../web/dist"),
     fsRoots: parseRoots(env.CONSOLE_FS_ROOTS, home),
-    model: env.CONSOLE_MODEL,
+    model: env.CONSOLE_MODEL ?? "claude-sonnet-5",
     improveModel: env.CONSOLE_IMPROVE_MODEL ?? "claude-sonnet-5",
     effort: env.CONSOLE_EFFORT,
     profilesFile:
       env.CONSOLE_PROFILES_FILE ?? path.join(dataDir, "profiles.json"),
-    globalAgentTurns: Number(env.CONSOLE_GLOBAL_AGENT_TURNS ?? 4),
-    perAgentSessionTurns: Number(env.CONSOLE_PER_SESSION_AGENT_TURNS ?? 2),
+    globalAgentTurns: Number(env.CONSOLE_GLOBAL_AGENT_TURNS ?? 8),
+    perAgentSessionTurns: Number(env.CONSOLE_PER_SESSION_AGENT_TURNS ?? 4),
     contextTokenLimit: Number(env.CONSOLE_CONTEXT_TOKEN_LIMIT ?? 120_000),
     contextTurnLimit: Number(env.CONSOLE_CONTEXT_TURN_LIMIT ?? 30),
+    seatWorktrees: env.CONSOLE_SEAT_WORKTREES !== "0",
   };
 }

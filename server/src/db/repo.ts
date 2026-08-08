@@ -3,7 +3,7 @@
  * MAX(seq)+1 inside a synchronous transaction — safe because this is a single
  * process and better-sqlite3 serializes writes.
  */
-import { and, asc, desc, eq, inArray, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, or, sql } from "drizzle-orm";
 import type {
   AgentSession,
   HandoffSummary,
@@ -15,6 +15,7 @@ import type {
 import type { Db } from "./client.ts";
 import {
   agentSessions,
+  attemptGroups,
   eventArtifacts,
   handoffRecords,
   mailboxDeliveries,
@@ -44,6 +45,7 @@ export type ParticipantRow = typeof participants.$inferSelect;
 export type MailboxDeliveryRow = typeof mailboxDeliveries.$inferSelect;
 export type UsageSampleRow = typeof usageSamples.$inferSelect;
 export type HandoffRecordRow = typeof handoffRecords.$inferSelect;
+export type AttemptGroupRow = typeof attemptGroups.$inferSelect;
 
 export function toWireAgentSession(
   row: AgentSessionRow,
@@ -478,6 +480,7 @@ export class Repo {
       "lastSeenSeq" | "pendingTurnSeq" | "sdkSessionId" | "generation" |
       "turnCount" | "contextTokens" | "profileSnapshot" | "profileId"
       | "memory" | "latestHandoffId" | "checkpointReady"
+      | "worktreePath" | "worktreeBaseCommit" | "worktreeBranch" | "attemptGroupId" | "attemptRole"
     >>,
   ): void {
     this.#db
@@ -490,5 +493,36 @@ export class Repo {
         ),
       )
       .run();
+  }
+
+  /** Every seat currently bound to a worktree (boot orphan-recovery input). */
+  listWorktreeSeats(): { agentSessionId: string; name: string; worktreePath: string }[] {
+    return this.#db.select({ agentSessionId: participants.agentSessionId, name: participants.name, worktreePath: participants.worktreePath })
+      .from(participants).where(isNotNull(participants.worktreePath)).all()
+      .map((row) => ({ ...row, worktreePath: row.worktreePath! }));
+  }
+
+  insertAttemptGroup(row: AttemptGroupRow): void {
+    this.#db.insert(attemptGroups).values(row).run();
+  }
+
+  getAttemptGroup(id: string): AttemptGroupRow | undefined {
+    return this.#db.select().from(attemptGroups).where(eq(attemptGroups.id, id)).get();
+  }
+
+  /** The single non-terminal group for a session, if any. */
+  findOpenAttemptGroup(agentSessionId: string): AttemptGroupRow | undefined {
+    return this.#db.select().from(attemptGroups)
+      .where(and(eq(attemptGroups.agentSessionId, agentSessionId), inArray(attemptGroups.status, ["running", "reviewing"])))
+      .get();
+  }
+
+  listNonTerminalAttemptGroups(): AttemptGroupRow[] {
+    return this.#db.select().from(attemptGroups).where(inArray(attemptGroups.status, ["running", "reviewing"])).all();
+  }
+
+  patchAttemptGroup(id: string, patch: Partial<Pick<AttemptGroupRow,
+    "status" | "reviewerSeat" | "winnerSeat" | "mergeCommit" | "attemptsState" | "updatedAt">>): void {
+    this.#db.update(attemptGroups).set({ ...patch, updatedAt: nowIso() }).where(eq(attemptGroups.id, id)).run();
   }
 }

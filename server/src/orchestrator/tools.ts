@@ -9,6 +9,7 @@ import { ApiError } from "../api/errors.ts";
 import type { EventBus } from "../events/bus.ts";
 import type { Repo } from "../db/repo.ts";
 import { newId } from "../ids.ts";
+import { pageTail } from "../paging.ts";
 import type { ConsoleSdk, SdkToolResult } from "../sdk/types.ts";
 import type { TaskService } from "../tasks/service.ts";
 import type { HandoffDraft } from "@agentique-console/shared";
@@ -73,7 +74,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
   const tools = [
     sdk.tool(
       "create_agent_session",
-      "Create and immediately launch a Console-managed AgentSession with one coordinator and 1-4 profile-bound specialists. The Console owns every provider session, mailbox delivery, retry, and event; never call Agent yourself.",
+      "Create and immediately launch a Console-managed AgentSession with one coordinator and 1-20 profile-bound specialists. The Console owns every provider session, mailbox delivery, retry, and event; never call Agent yourself.",
       {
         title: z.string().describe("Short working title for the session"),
         mode: z
@@ -99,7 +100,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
             }),
           )
           .min(1)
-          .max(4),
+          .max(20),
         briefing: HandoffDraftSchema
           .describe(
             "Typed coordinator assignment: objective, current evidence, risk, uncertainty, and next action",
@@ -173,20 +174,29 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
 
     sdk.tool(
       "read_agent_session",
-      "Read an agent session's transcript (defaults to what you have not seen yet). Reading marks it seen.",
+      "Read an agent session's transcript (defaults to what you have not seen yet). Reading marks it seen. Returns the newest window (default 8KiB) of the serialized messages plus cursors — retrieval is paged; never assume one call returned everything. Use afterSeq/limit to narrow before paging.",
       {
         agentSessionId: z.string(),
         afterSeq: z.number().int().optional(),
         limit: z.number().int().optional(),
+        cursor: z.string().optional(),
+        maxBytes: z.number().int().min(1).max(32 * 1024).default(8 * 1024),
       },
       async (args: {
         agentSessionId: string;
         afterSeq?: number;
         limit?: number;
+        cursor?: string;
+        maxBytes: number;
       }) =>
         guarded(() => {
           owned(args.agentSessionId);
-          return host.readSession(args);
+          const full = host.readSession({ agentSessionId: args.agentSessionId,
+            ...(args.afterSeq === undefined ? {} : { afterSeq: args.afterSeq }),
+            ...(args.limit === undefined ? {} : { limit: args.limit }) });
+          const { messages, ...meta } = full as { messages: unknown[] } & Record<string, unknown>;
+          return { ...meta, messageCount: messages.length,
+            transcript: pageTail(JSON.stringify(messages, null, 2), args.cursor, args.maxBytes) };
         }),
     ),
 
@@ -288,9 +298,13 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
 
           sdk.tool(
             "task_list",
-            "List this conversation's tasks (optionally scoped to one agent session) with status, owner, and dependencies.",
-            { agentSessionId: z.string().optional() },
-            async (args: { agentSessionId?: string }) =>
+            "List this conversation's tasks (optionally scoped to one agent session) with status, owner, and dependencies. Retrieval is paged (tail-first, default 8KiB window; cursors continue).",
+            {
+              agentSessionId: z.string().optional(),
+              cursor: z.string().optional(),
+              maxBytes: z.number().int().min(1).max(32 * 1024).default(8 * 1024),
+            },
+            async (args: { agentSessionId?: string; cursor?: string; maxBytes: number }) =>
               guarded(() => {
                 if (args.agentSessionId !== undefined) owned(args.agentSessionId);
                 const rows = tasks
@@ -301,7 +315,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
                       task.agentSessionId === args.agentSessionId,
                   )
                   .filter((task) => task.status !== "deleted");
-                return { tasks: rows };
+                return { taskCount: rows.length, tasks: pageTail(JSON.stringify(rows, null, 2), args.cursor, args.maxBytes) };
               }),
           ),
         ]),

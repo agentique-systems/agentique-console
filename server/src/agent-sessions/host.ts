@@ -10,6 +10,7 @@ import {
   toWireAgentSession,
   toWireMessage,
   type AgentSessionRow,
+  type AttemptGroupRow,
   type MailboxDeliveryRow,
   type MessageRow,
   type ParticipantRow,
@@ -17,16 +18,20 @@ import {
 import type { EventBus } from "../events/bus.ts";
 import { RuntimeBroadcaster } from "../events/runtime.ts";
 import { newId, nowIso } from "../ids.ts";
+import { rotationTokenLimit } from "../model-catalog.ts";
+import { pageTail } from "../paging.ts";
 import { mapSdkMessage } from "../sdk/mapping.ts";
 import type { SqliteSessionStore } from "../sdk/session-store.ts";
 import type { ConsoleSdk, QueryHandle, SdkOptions, SdkToolResult } from "../sdk/types.ts";
 import { sdkEnv } from "../sdk/env.ts";
 import type { ProcessManager } from "../runtime/process-manager.ts";
 import type { BrowserManager } from "../runtime/browser-manager.ts";
+import type { WorktreeManager } from "../runtime/worktree-manager.ts";
 import type { InteractionService } from "../orchestrator/interactions.ts";
 import type { TaskService } from "../tasks/service.ts";
 import type { HandoffService } from "../handoffs/service.ts";
 import { CheckpointClosingSchema, HandoffDraftSchema } from "../handoffs/schema.ts";
+import { evaluateCheckpointDraft } from "../handoffs/checkpoint-gate.ts";
 import { COORDINATOR_SEAT, seatOfSpawnName } from "./spawn-names.ts";
 
 export const ORCHESTRATOR_SEAT = "orchestrator";
@@ -34,6 +39,27 @@ export const MAIN_RECIPIENT = "main";
 const SEAT_NAME_RE = /^[A-Za-z0-9_.:-]+$/;
 const RESERVED_NAMES = new Set([ORCHESTRATOR_SEAT, "operator", "system", MAIN_RECIPIENT, "coordinator"]);
 const MATERIAL_CATEGORIES = new Set(["milestone", "failure", "final", "decision"]);
+
+/**
+ * Watchdog thresholds: a seat repeating the identical tool call, or piling up
+ * consecutive tool errors, is burning its maxTurns allowance without
+ * progress. Conservative on purpose — legitimate retries reset the counters
+ * on any different call or any success.
+ */
+const WATCHDOG_IDENTICAL_CALLS = 5;
+const WATCHDOG_ERROR_STREAK = 10;
+
+/** Seat names may contain chars git refs forbid; branch components drop them. */
+function branchSafe(name: string): string {
+  return name.replace(/[^A-Za-z0-9_-]/g, "-");
+}
+
+/** JSON with recursively sorted object keys — a stable identity for tool inputs. */
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "undefined";
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  return `{${Object.keys(value as Record<string, unknown>).sort().map((key) => `${JSON.stringify(key)}:${stableStringify((value as Record<string, unknown>)[key])}`).join(",")}}`;
+}
 
 type Category = MailboxDeliveryRow["category"];
 
@@ -62,6 +88,7 @@ export interface AgentSessionHostDeps {
   interactions?: InteractionService;
   tasks?: TaskService;
   handoffs?: HandoffService;
+  worktrees?: WorktreeManager;
 }
 
 const OUTPUT_SCHEMA = CheckpointClosingSchema;
@@ -84,7 +111,7 @@ export class AgentSessionHost {
     const { repo, bus } = this.#deps;
     const user = repo.getUserSession(input.userSessionId);
     if (!user) throw notFound(`no user session ${input.userSessionId}`);
-    if (input.agents.length < 1 || input.agents.length > 4) throw badRequest("an agent session seats 1 to 4 specialists");
+    if (input.agents.length < 1 || input.agents.length > 20) throw badRequest("an agent session seats 1 to 20 specialists");
     const names = new Set<string>();
     for (const agent of input.agents) {
       if (!SEAT_NAME_RE.test(agent.name) || RESERVED_NAMES.has(agent.name.toLowerCase())) throw badRequest(`invalid or reserved seat name \"${agent.name}\"`);
@@ -127,6 +154,106 @@ export class AgentSessionHost {
     return { agentSessionId: row.id, participants: specialists };
   }
 
+  /**
+   * Best-of-N fan-out: seats N attempt copies of one profile, each in an
+   * isolated worktree, and posts them the same assignment. Seat identity,
+   * worktree binding, and group metadata are server-authored; attempts share
+   * scope intentionally — the isolation is the worktree, not the scope.
+   */
+  startAttempts(input: { agentSessionId: string; assignment: HandoffDraft; profileId?: string; attempts?: number; baseSeatName?: string; owns: string[]; instructions?: string; model?: string; turnId?: string }): { groupId: string; seats: string[]; branches: string[]; baseCommit: string; dirtyWorkspace: boolean } {
+    const { repo, bus } = this.#deps;
+    const worktrees = this.#deps.worktrees;
+    if (!worktrees) throw new Error("worktree manager unavailable");
+    const session = repo.getAgentSession(input.agentSessionId);
+    if (!session) throw notFound(`no agent session ${input.agentSessionId}`);
+    if (session.status !== "open") throw conflict(`agent session ${input.agentSessionId} is archived`);
+    const user = repo.getUserSession(session.userSessionId);
+    if (!user || !this.#deps.getWorkspaceRoot) throw new Error("workspace unavailable");
+    const workspaceRoot = this.#deps.getWorkspaceRoot(user.workspaceId);
+    if (!worktrees.isGitRepo(workspaceRoot)) {
+      throw badRequest(`best-of-N attempts require the workspace to be a git repository; ${workspaceRoot} is not one (git init it or run the work as a single assignment)`);
+    }
+    if (repo.findOpenAttemptGroup(session.id)) throw conflict("an attempt group is already active for this session; wait for it to finish");
+    const attempts = Math.max(2, Math.min(3, input.attempts ?? 2));
+    const base = (input.baseSeatName ?? input.profileId ?? "implementer").trim();
+    if (!SEAT_NAME_RE.test(base) || RESERVED_NAMES.has(base.toLowerCase())) throw badRequest(`invalid or reserved attempt base name "${base}"`);
+    const existing = new Set(repo.listParticipants(session.id).map((p) => p.name));
+    const seatNames = Array.from({ length: attempts }, (_, i) => `${base}.${i + 1}`);
+    for (const name of [...seatNames, `${base}.review`]) if (existing.has(name)) throw conflict(`seat name "${name}" is already taken`);
+    const profile = this.#snapshotProfile(this.#profile(input.profileId ?? "implementer", user.workspaceId));
+    const groupId = newId("bon");
+    const dirtyWorkspace = worktrees.isDirty(workspaceRoot);
+    const now = nowIso();
+    const attemptsState: NonNullable<AttemptGroupRow["attemptsState"]> = {};
+    const branches: string[] = [];
+    let baseCommit = "";
+    const attemptInstructions = `${input.instructions ?? ""}\n\nYou are attempt seat of a best-of-N group: work independently in your own isolated worktree (your cwd). Never run git commit — the Console captures your changes when you report. Install dependencies only if you must run validation.`.trim();
+    for (let i = 0; i < attempts; i += 1) {
+      const ref = worktrees.addWorktree(workspaceRoot, session.id, `${groupId}-${i + 1}`, `attempt/${session.id}/${groupId}/${i + 1}`);
+      baseCommit = ref.baseCommit;
+      branches.push(ref.branch);
+      const row = this.#participant(session.id, seatNames[i]!, "agent", profile, attemptInstructions, input.model, input.owns, existing.size + i, now);
+      repo.insertParticipant({ ...row, worktreePath: ref.path, worktreeBaseCommit: ref.baseCommit, worktreeBranch: ref.branch, attemptGroupId: groupId, attemptRole: "attempt" });
+      attemptsState[seatNames[i]!] = { branch: ref.branch, worktreePath: ref.path, commit: null, artifactId: null, status: "running" };
+    }
+    repo.insertAttemptGroup({ id: groupId, agentSessionId: session.id, userSessionId: session.userSessionId,
+      profileId: profile.id, baseSeat: base, attempts, baseCommit, status: "running", reviewerSeat: null,
+      winnerSeat: null, mergeCommit: null, dirtyWorkspace, attemptsState, createdAt: now, updatedAt: now });
+    bus.append({ type: "agent_session.attempt_group.started", userSessionId: session.userSessionId, agentSessionId: session.id,
+      payload: { agentSessionId: session.id, groupId, seats: seatNames, profileId: profile.id, attempts, baseCommit, dirtyWorkspace } });
+    for (const name of seatNames) {
+      this.post({ agentSessionId: session.id, speaker: { kind: "orchestrator", name: ORCHESTRATOR_SEAT }, to: name,
+        handoff: input.assignment, category: "assignment", dedupeKey: `bon:${groupId}:${name}`, ...(input.turnId ? { turnId: input.turnId } : {}) });
+    }
+    return { groupId, seats: seatNames, branches, baseCommit, dirtyWorkspace };
+  }
+
+  /**
+   * The reviewer's single selection call. Merge runs synchronously so the
+   * returned outcome is ground truth for the reviewer's closing handoff; a
+   * conflict aborts cleanly (workspace untouched) and fails the group.
+   */
+  selectAttemptWinner(input: { agentSessionId: string; groupId: string; reviewer: string; winner?: string; rejectAll?: boolean; reason: string }):
+    { merged: true; commit: string; winner: string } | { merged: false; conflicts: string[]; detail: string; winner: string } | { rejected: true } {
+    const { repo, bus } = this.#deps;
+    const worktrees = this.#deps.worktrees;
+    if (!worktrees) throw new Error("worktree manager unavailable");
+    const session = repo.getAgentSession(input.agentSessionId);
+    if (!session) throw notFound(`no agent session ${input.agentSessionId}`);
+    const group = repo.getAttemptGroup(input.groupId);
+    if (!group || group.agentSessionId !== session.id) throw notFound(`no attempt group ${input.groupId}`);
+    if (group.status !== "reviewing") throw conflict(`attempt group ${input.groupId} is ${group.status}; selection is closed`);
+    if (group.reviewerSeat !== input.reviewer) throw badRequest(`only ${group.reviewerSeat} may select for group ${input.groupId}`);
+    if ((input.winner === undefined) === (input.rejectAll !== true)) throw badRequest("pass exactly one of winner or rejectAll");
+    const user = repo.getUserSession(session.userSessionId);
+    if (!user || !this.#deps.getWorkspaceRoot) throw new Error("workspace unavailable");
+    const workspaceRoot = this.#deps.getWorkspaceRoot(user.workspaceId);
+    if (input.rejectAll === true) {
+      bus.append({ type: "agent_session.attempt_group.selected", userSessionId: session.userSessionId, agentSessionId: session.id,
+        payload: { agentSessionId: session.id, groupId: group.id, winner: null, rejectedAll: true, reason: input.reason } });
+      this.#closeAttemptGroup(session, group, "rejected");
+      return { rejected: true };
+    }
+    const winner = input.winner!;
+    const entry = group.attemptsState[winner];
+    if (!entry || entry.status !== "completed") throw badRequest(`"${winner}" is not a completed attempt of group ${input.groupId}`);
+    bus.append({ type: "agent_session.attempt_group.selected", userSessionId: session.userSessionId, agentSessionId: session.id,
+      payload: { agentSessionId: session.id, groupId: group.id, winner, rejectedAll: false, reason: input.reason } });
+    const outcome = worktrees.mergeBranch(workspaceRoot, entry.branch,
+      `Merge best-of-N winner ${winner} (group ${group.id})\n\nAttempt-Group: ${group.id}\nAttempt-Seat: ${winner}`);
+    if (outcome.merged) {
+      repo.patchAttemptGroup(group.id, { winnerSeat: winner, mergeCommit: outcome.commit });
+      bus.append({ type: "agent_session.attempt_group.merged", userSessionId: session.userSessionId, agentSessionId: session.id,
+        payload: { agentSessionId: session.id, groupId: group.id, winner, mergeCommit: outcome.commit } });
+      this.#closeAttemptGroup(session, { ...group, winnerSeat: winner }, "merged");
+      return { merged: true, commit: outcome.commit, winner };
+    }
+    bus.append({ type: "agent_session.attempt_group.merge_failed", userSessionId: session.userSessionId, agentSessionId: session.id,
+      payload: { agentSessionId: session.id, groupId: group.id, winner, conflicts: outcome.conflicts, detail: outcome.detail } });
+    this.#closeAttemptGroup(session, group, "failed");
+    return { merged: false, conflicts: outcome.conflicts, detail: outcome.detail, winner };
+  }
+
   post(input: { agentSessionId: string; speaker: Speaker; to: string; handoff: HandoffDraft; category?: Category; dedupeKey?: string; deferWake?: boolean; turnId?: string }): MessageRow {
     const { repo, bus } = this.#deps;
     const session = repo.getAgentSession(input.agentSessionId);
@@ -158,6 +285,7 @@ export class AgentSessionHost {
       generation: input.speaker.name === MAIN_RECIPIENT ? (repo.getUserSession(session.userSessionId)?.sdkGeneration ?? 0) : senderSeat?.generation ?? 0,
       turnId: input.turnId, trigger: category as HandoffTrigger,
       parentHandoffId: category === "assignment" ? null : (senderSeat?.latestHandoffId ?? (input.speaker.name === MAIN_RECIPIENT ? repo.getUserSession(session.userSessionId)?.latestHandoffId : null)),
+      ...(senderSeat?.worktreePath ? { resolveRoot: senderSeat.worktreePath } : {}),
     });
     const text = prepared.text;
     const { message, delivery } = repo.appendHandoffMailbox({
@@ -168,6 +296,11 @@ export class AgentSessionHost {
       ...(input.turnId ? { turnId: input.turnId } : {}), ...(input.dedupeKey ? { dedupeKey: input.dedupeKey } : {}),
     });
     this.#deps.handoffs.committed(prepared.record);
+    if (senderSeat?.attemptRole === "attempt" && (prepared.record.core.status === "completed" || prepared.record.core.status === "failed")) {
+      this.#onAttemptPost(session, senderSeat, prepared.record.core.status);
+    } else if (senderSeat && senderSeat.attemptRole === null && senderSeat.worktreePath && (prepared.record.core.status === "completed" || prepared.record.core.status === "failed")) {
+      this.#onSeatWorktreePost(session, senderSeat, prepared.record.core.status);
+    }
     bus.append({ type: "agent_session.message", userSessionId: session.userSessionId, agentSessionId: session.id,
       payload: { agentSessionId: session.id, message: toWireMessage(message) } });
     bus.append({ type: "agent_session.mailbox", userSessionId: session.userSessionId, agentSessionId: session.id,
@@ -236,6 +369,16 @@ export class AgentSessionHost {
       this.interrupt(session.id);
       this.#deps.processes?.stopSession(session.id);
       void this.#deps.browsers?.closeSession(session.id);
+      const openGroup = this.#deps.repo.findOpenAttemptGroup(session.id);
+      if (openGroup) this.#closeAttemptGroup(session, openGroup, "abandoned");
+      if (this.#deps.worktrees && this.#deps.getWorkspaceRoot) {
+        const user = this.#deps.repo.getUserSession(session.userSessionId);
+        for (const seat of this.#deps.repo.listParticipants(session.id)) {
+          if (!seat.worktreePath || seat.attemptRole !== null || !user) continue;
+          try { this.#deps.worktrees.remove(this.#deps.getWorkspaceRoot(user.workspaceId), seat.worktreePath, seat.worktreeBranch ?? "", { archiveBranch: true }); } catch { /* best effort */ }
+          this.#deps.repo.patchParticipant(session.id, seat.name, { worktreePath: null, worktreeBaseCommit: null, worktreeBranch: null });
+        }
+      }
       for (const delivery of this.#deps.repo.listActiveDeliveries(session.id)) this.#patchDelivery(session, delivery, "cancelled");
       this.#deps.repo.patchAgentSession(session.id, { status: "archived" });
       this.#deps.bus.append({ type: "agent_session.status", userSessionId, agentSessionId: session.id,
@@ -284,11 +427,187 @@ export class AgentSessionHost {
     this.#deps.bus.append({ type: "agent_session.turn.settled", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { agentSessionId: session.id, participant: binding.participant, turnId: callId, status } });
   }
 
+  /**
+   * Default-on isolation for write seats in git workspaces: a lazy worktree
+   * per assignment, so completed work lands atomically and interrupted work
+   * leaves zero residue. Fail-open — if the worktree cannot be created the
+   * seat runs directly in the workspace, with a runtime notice.
+   */
+  #ensureSeatWorktree(session: AgentSessionRow, seat: ParticipantRow, workspaceRoot: string): ParticipantRow {
+    const { repo, bus } = this.#deps;
+    const worktrees = this.#deps.worktrees;
+    const profile = seat.profileSnapshot as AgentProfile;
+    const writes = profile.tools.includes("Edit") || profile.tools.includes("Write");
+    if (!worktrees || this.#deps.config?.seatWorktrees === false || seat.role !== "agent" || seat.attemptRole !== null
+      || seat.worktreePath !== null || !writes || !worktrees.isGitRepo(workspaceRoot)) return seat;
+    try {
+      const dirName = `seat-${branchSafe(seat.name)}-${seat.generation}-${newId("turn").slice(-6)}`;
+      const ref = worktrees.addWorktree(workspaceRoot, session.id, dirName, `seat/${session.id}/${branchSafe(seat.name)}-${seat.generation}`);
+      repo.patchParticipant(session.id, seat.name, { worktreePath: ref.path, worktreeBaseCommit: ref.baseCommit, worktreeBranch: ref.branch });
+      bus.append({ type: "agent_session.worktree.created", userSessionId: session.userSessionId, agentSessionId: session.id,
+        payload: { agentSessionId: session.id, seat: seat.name, branch: ref.branch, baseCommit: ref.baseCommit } });
+      return repo.getParticipant(session.id, seat.name) ?? seat;
+    } catch (error) {
+      bus.append({ type: "agent_session.runtime", userSessionId: session.userSessionId, agentSessionId: session.id,
+        payload: { agentSessionId: session.id, participant: seat.name, detail: `worktree isolation unavailable (${error instanceof Error ? error.message : String(error)}); working directly in the workspace` } });
+      return seat;
+    }
+  }
+
+  /**
+   * A worktree'd write seat reported terminal status: completed work merges
+   * atomically into the workspace (conflict → failure handoff, workspace
+   * untouched); failed work is discarded with its diff retained. Fail-open on
+   * git errors — the mailbox append already happened.
+   */
+  #onSeatWorktreePost(session: AgentSessionRow, seat: ParticipantRow, status: "completed" | "failed"): void {
+    const { repo, bus } = this.#deps;
+    const worktrees = this.#deps.worktrees;
+    if (!worktrees || !seat.worktreePath || !seat.worktreeBranch || !seat.worktreeBaseCommit || !this.#deps.getWorkspaceRoot) return;
+    const user = repo.getUserSession(session.userSessionId);
+    if (!user) return;
+    const workspaceRoot = this.#deps.getWorkspaceRoot(user.workspaceId);
+    const release = () => repo.patchParticipant(session.id, seat.name, { worktreePath: null, worktreeBaseCommit: null, worktreeBranch: null });
+    try {
+      worktrees.commitAll(seat.worktreePath, `seat ${seat.name}: reported ${status}`);
+      const diff = worktrees.captureDiff(workspaceRoot, seat.worktreeBaseCommit, seat.worktreeBranch);
+      const artifactId = diff.filesChanged === 0 ? null
+        : bus.storeArtifact(`${diff.stat}\n\n${diff.patch}`, "text/x-patch", { userSessionId: session.userSessionId, agentSessionId: session.id }).artifactId;
+      if (status === "failed" || diff.filesChanged === 0) {
+        worktrees.remove(workspaceRoot, seat.worktreePath, seat.worktreeBranch);
+        release();
+        bus.append({ type: "agent_session.worktree.discarded", userSessionId: session.userSessionId, agentSessionId: session.id,
+          payload: { agentSessionId: session.id, seat: seat.name, reason: status === "failed" ? "seat reported failed" : "no changes to land", artifactId } });
+        return;
+      }
+      const outcome = worktrees.mergeBranch(workspaceRoot, seat.worktreeBranch,
+        `Merge seat ${seat.name} (session ${session.id})\n\nSeat-Worktree: ${seat.worktreeBranch}`);
+      worktrees.remove(workspaceRoot, seat.worktreePath, seat.worktreeBranch, { archiveBranch: !outcome.merged });
+      release();
+      if (outcome.merged) {
+        bus.append({ type: "agent_session.worktree.merged", userSessionId: session.userSessionId, agentSessionId: session.id,
+          payload: { agentSessionId: session.id, seat: seat.name, mergeCommit: outcome.commit, filesChanged: diff.filesChanged, artifactId } });
+        return;
+      }
+      bus.append({ type: "agent_session.worktree.merge_failed", userSessionId: session.userSessionId, agentSessionId: session.id,
+        payload: { agentSessionId: session.id, seat: seat.name, conflicts: outcome.conflicts, detail: outcome.detail, artifactId } });
+      this.post({ agentSessionId: session.id, speaker: { kind: "agent", name: seat.name }, to: ORCHESTRATOR_SEAT,
+        handoff: this.#simpleHandoff("Completed work failed to merge", "failed",
+          `The workspace advanced past this seat's base; merging its changes conflicts in: ${outcome.conflicts.join(", ") || "unknown files"}. The diff is retained as artifact ${artifactId ?? "n/a"}.`,
+          "Reassign the unit against the current HEAD."), category: "failure" });
+    } catch (error) {
+      bus.append({ type: "agent_session.runtime", userSessionId: session.userSessionId, agentSessionId: session.id,
+        payload: { agentSessionId: session.id, participant: seat.name, detail: `worktree landing failed: ${error instanceof Error ? error.message : String(error)}` } });
+    }
+  }
+
+  /**
+   * An attempt seat reported terminal status: commit its worktree, capture the
+   * diff as a durable artifact, and when the whole group is settled either
+   * seat the reviewer or fail the group. Fail-open — a git error marks the
+   * attempt failed but never blocks the mailbox append that already happened.
+   */
+  #onAttemptPost(session: AgentSessionRow, seat: ParticipantRow, status: "completed" | "failed"): void {
+    const { repo, bus } = this.#deps;
+    const worktrees = this.#deps.worktrees;
+    const group = seat.attemptGroupId ? repo.getAttemptGroup(seat.attemptGroupId) : undefined;
+    if (!group || group.status !== "running" || !worktrees || !seat.worktreePath || !this.#deps.getWorkspaceRoot) return;
+    const user = repo.getUserSession(session.userSessionId);
+    if (!user) return;
+    const workspaceRoot = this.#deps.getWorkspaceRoot(user.workspaceId);
+    const state = { ...group.attemptsState };
+    const entry = state[seat.name];
+    if (!entry || entry.status !== "running") return;
+    let commit: string | null = null;
+    let artifactId: string | null = null;
+    let diffBytes = 0;
+    let filesChanged = 0;
+    let attemptStatus: "completed" | "failed" = status;
+    try {
+      commit = worktrees.commitAll(seat.worktreePath, `attempt ${seat.name}: ${group.profileId} work`);
+      const diff = worktrees.captureDiff(workspaceRoot, group.baseCommit, entry.branch);
+      filesChanged = diff.filesChanged;
+      const content = diff.patch.length > 4 * 1024 * 1024
+        ? `${diff.stat}\n\n[patch truncated at 4MiB — full history retained on archived branch]\n${diff.patch.slice(0, 4 * 1024 * 1024)}`
+        : `${diff.stat}\n\n${diff.patch}`;
+      const stored = bus.storeArtifact(content, "text/x-patch", { userSessionId: session.userSessionId, agentSessionId: session.id });
+      artifactId = stored.artifactId;
+      diffBytes = stored.bytes;
+    } catch (error) {
+      attemptStatus = "failed";
+      bus.append({ type: "agent_session.runtime", userSessionId: session.userSessionId, agentSessionId: session.id,
+        payload: { agentSessionId: session.id, participant: seat.name, detail: `attempt capture failed: ${error instanceof Error ? error.message : String(error)}` } });
+    }
+    state[seat.name] = { ...entry, commit, artifactId, status: attemptStatus };
+    repo.patchAttemptGroup(group.id, { attemptsState: state });
+    bus.append({ type: "agent_session.attempt.completed", userSessionId: session.userSessionId, agentSessionId: session.id,
+      payload: { agentSessionId: session.id, groupId: group.id, seat: seat.name, status: attemptStatus,
+        branch: entry.branch, commit, artifactId, diffBytes, filesChanged } });
+    const settled = Object.values(state);
+    if (settled.some((attempt) => attempt.status === "running")) return;
+    if (settled.every((attempt) => attempt.status === "failed")) {
+      this.#closeAttemptGroup(session, { ...group, attemptsState: state }, "failed");
+      this.post({ agentSessionId: session.id, speaker: { kind: "agent", name: seat.name }, to: ORCHESTRATOR_SEAT,
+        handoff: this.#simpleHandoff(`All ${group.attempts} attempts failed`, "failed",
+          `Every attempt in best-of-N group ${group.id} failed. Diffs (if any) are retained as artifacts.`,
+          "Decide whether to retry with a fresh attempt group or rework the assignment."), category: "failure" });
+      return;
+    }
+    this.#seatReviewer(session, { ...group, attemptsState: state });
+  }
+
+  #seatReviewer(session: AgentSessionRow, group: AttemptGroupRow): void {
+    const { repo, bus } = this.#deps;
+    const user = repo.getUserSession(session.userSessionId);
+    if (!user) return;
+    const reviewerName = `${group.baseSeat}.review`;
+    const profile = this.#snapshotProfile(this.#profile("reviewer", user.workspaceId));
+    const now = nowIso();
+    const instructions = "You are selecting the winning attempt of a best-of-N group. Compare the attempts' diffs and reports with evidence, run read-only validation where useful, and you MUST call select_attempt_winner exactly once before your closing handoff. Reject all attempts only when none is sound.";
+    const existing = repo.listParticipants(session.id);
+    if (!existing.some((p) => p.name === reviewerName)) {
+      const row = this.#participant(session.id, reviewerName, "agent", profile, instructions, undefined, [], existing.length, now);
+      repo.insertParticipant({ ...row, attemptGroupId: group.id, attemptRole: "reviewer" });
+    }
+    repo.patchAttemptGroup(group.id, { status: "reviewing", reviewerSeat: reviewerName });
+    bus.append({ type: "agent_session.attempt_group.review_started", userSessionId: session.userSessionId, agentSessionId: session.id,
+      payload: { agentSessionId: session.id, groupId: group.id, reviewer: reviewerName } });
+    const completed = Object.entries(group.attemptsState).filter(([, attempt]) => attempt.status === "completed");
+    const evidence = completed.map(([seatName, attempt]) => ({ kind: "artifact" as const, ref: attempt.artifactId ?? "", label: `diff ${seatName}` })).filter((ref) => ref.ref !== "");
+    this.post({ agentSessionId: session.id, speaker: { kind: "orchestrator", name: ORCHESTRATOR_SEAT }, to: reviewerName,
+      handoff: { core: { schemaVersion: 1, taskId: null, status: "pending", risk: "medium",
+        action: `Select the winning attempt for best-of-N group ${group.id}`,
+        state: { summary: `${completed.length} of ${group.attempts} attempts completed (base ${group.baseCommit.slice(0, 12)}; branches: ${completed.map(([, attempt]) => attempt.branch).join(", ")}). Compare their diffs with read_attempt_diff or git, then select.`, evidence },
+        result: { summary: null, artifacts: [] }, uncertainty: [],
+        nextAction: "Call select_attempt_winner with the winning seat, or rejectAll.", requestExpandedContext: false },
+        extension: { kind: "coordination", data: { attempts: Object.fromEntries(completed.map(([seatName, attempt]) => [seatName, { branch: attempt.branch, commit: attempt.commit }])) } } },
+      category: "assignment", dedupeKey: `bon:${group.id}:review` });
+  }
+
+  /** Terminal transition: clean up worktrees (diffs are already durable) and journal. */
+  #closeAttemptGroup(session: AgentSessionRow, group: AttemptGroupRow, status: "merged" | "rejected" | "failed" | "abandoned"): void {
+    const { repo, bus } = this.#deps;
+    const worktrees = this.#deps.worktrees;
+    const user = repo.getUserSession(session.userSessionId);
+    const workspaceRoot = user && this.#deps.getWorkspaceRoot ? this.#deps.getWorkspaceRoot(user.workspaceId) : null;
+    if (worktrees && workspaceRoot) {
+      for (const [seatName, attempt] of Object.entries(group.attemptsState)) {
+        const oversized = attempt.artifactId === null && attempt.status === "completed";
+        try { worktrees.remove(workspaceRoot, attempt.worktreePath, attempt.branch, { archiveBranch: oversized }); } catch { /* best effort */ }
+        repo.patchParticipant(session.id, seatName, { worktreePath: null });
+      }
+    }
+    repo.patchAttemptGroup(group.id, { status });
+    bus.append({ type: "agent_session.attempt_group.closed", userSessionId: session.userSessionId, agentSessionId: session.id,
+      payload: { agentSessionId: session.id, groupId: group.id, status } });
+  }
+
   #participant(agentSessionId: string, name: string, role: "orchestrator" | "agent", profile: AgentProfile, extra: string, model: string | undefined, ownership: string[], ord: number, createdAt: string): ParticipantRow {
     const instructions = [profile.instructions, extra.trim()].filter(Boolean).join("\n\nAssigned role context:\n");
     return { agentSessionId, name, role, preset: profile.id, instructions, model: model ?? profile.model ?? null,
       profileId: profile.id, profileSnapshot: profile, ownership, sdkSessionId: null, generation: 0, turnCount: 0,
-      contextTokens: 0, memory: "", latestHandoffId: null, checkpointReady: true, pendingTurnSeq: 0, lastSeenSeq: 0, ord, createdAt };
+      contextTokens: 0, memory: "", latestHandoffId: null, checkpointReady: true, pendingTurnSeq: 0, lastSeenSeq: 0,
+      worktreePath: null, worktreeBaseCommit: null, worktreeBranch: null, attemptGroupId: null, attemptRole: null, ord, createdAt };
   }
 
   #profile(id: string, workspaceId?: string): AgentProfile {
@@ -362,6 +681,17 @@ export class AgentSessionHost {
     const sentThisTurn = new Set<string>();
     const startedAt = Date.now();
     const toolStarts = new Map<string, number>();
+    const watchdog = { lastKey: "", identical: 0, errorStreak: 0,
+      tripped: null as null | { kind: "repeat_tool_calls" | "tool_error_streak"; detail: string; toolName?: string; count: number } };
+    const trip = (tripped: NonNullable<typeof watchdog.tripped>, flightRef: Flight) => {
+      if (watchdog.tripped) return;
+      watchdog.tripped = tripped;
+      bus.append({ type: "agent_session.watchdog", userSessionId: session.userSessionId, agentSessionId: session.id,
+        payload: { agentSessionId: session.id, participant: seat.name, turnId, kind: tripped.kind,
+          ...(tripped.toolName ? { toolName: tripped.toolName } : {}), count: tripped.count, detail: tripped.detail } });
+      flightRef.abort.abort();
+      void flightRef.query?.interrupt?.()?.catch?.(() => undefined);
+    };
     let latestSeat = seat;
     try {
       const sdk = await this.#deps.sdk?.();
@@ -369,21 +699,26 @@ export class AgentSessionHost {
       latestSeat = await this.#rotateIfNeeded(session, seat, sdk, flight);
       const user = repo.getUserSession(session.userSessionId);
       if (!user || !this.#deps.getWorkspaceRoot) throw new Error("workspace unavailable");
+      latestSeat = this.#ensureSeatWorktree(session, latestSeat, this.#deps.getWorkspaceRoot(user.workspaceId));
       const profile = latestSeat.profileSnapshot as AgentProfile;
       const mcp = this.#buildParticipantMcp(sdk, session, latestSeat, flight.abort.signal, sentThisTurn);
       const messages = deliveries.map((delivery) => repo.getMessageById(delivery.messageId)).filter((row): row is MessageRow => row !== undefined);
       const prompt = this.#composePrompt(session, latestSeat, messages);
+      // A worktree'd seat lives in its isolated copy: cwd and writes stay
+      // there; the real workspace remains readable so git history resolves.
+      const workspaceRoot = this.#deps.getWorkspaceRoot(user.workspaceId);
+      const seatRoot = latestSeat.worktreePath ?? workspaceRoot;
       const options: SdkOptions = {
-        cwd: this.#deps.getWorkspaceRoot(user.workspaceId),
-        systemPrompt: { type: "preset", preset: "claude_code", append: `${latestSeat.instructions}${this.#checkpointContext(latestSeat)}\n\nUse mcp__console_agent__send_message for all communication. Never use native SendMessage or Agent tools.` },
+        cwd: seatRoot,
+        systemPrompt: { type: "preset", preset: "claude_code", append: `${latestSeat.instructions}${this.#checkpointContext(latestSeat)}${latestSeat.worktreePath && !latestSeat.attemptRole ? "\n\nYou work in an isolated worktree (your cwd); the Console merges your changes into the workspace when you report completed. Never run git commit. Install dependencies only if you must run validation." : ""}\n\nUse mcp__console_agent__send_message for all communication. Never use native SendMessage or Agent tools.` },
         settingSources: [], includePartialMessages: true,
         permissionMode: session.phase === "planning" ? "plan" : profile.permissionMode,
         ...(profile.permissionMode === "bypassPermissions" && session.phase !== "planning" ? { allowDangerouslySkipPermissions: true } : {}),
-        allowedTools: [...profile.tools, ...this.#runtimeToolNames(profile, latestSeat.name)],
+        allowedTools: [...profile.tools, ...this.#runtimeToolNames(profile, latestSeat.name, latestSeat.attemptRole)],
         disallowedTools: ["Agent", "SendMessage", "Task", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet"],
         outputFormat: { type: "json_schema", schema: OUTPUT_SCHEMA }, maxTurns: profile.maxTurns,
         sandbox: { enabled: true, failIfUnavailable: profile.sandboxRequired, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: false,
-          filesystem: { allowManagedReadPathsOnly: true, allowRead: [this.#deps.getWorkspaceRoot(user.workspaceId)], allowWrite: [this.#deps.getWorkspaceRoot(user.workspaceId)] } },
+          filesystem: { allowManagedReadPathsOnly: true, allowRead: latestSeat.worktreePath ? [seatRoot, workspaceRoot] : [workspaceRoot], allowWrite: [seatRoot] } },
         env: sdkEnv(), abortController: flight.abort, persistSession: true,
         sessionStore: this.#deps.sessionStore as never, sessionStoreFlush: "eager",
         mcpServers: { console_agent: mcp as never },
@@ -404,11 +739,21 @@ export class AgentSessionHost {
             else if (event.kind === "reasoning-delta") { runtime.set("thinking"); bus.broadcast({ type: "stream.reasoning", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { scope: { kind: "agent", sessionId: session.id }, speaker: seat.name, turnId, text: event.text } }); }
             else if (event.kind === "message") this.#recordNarration(session, seat.name, event.text, turnId);
             else if (event.kind === "notice") { runtime.note(event.text); bus.append({ type: "agent_session.runtime", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { agentSessionId: session.id, participant: seat.name, turnId, detail: event.text } }); }
-            else if (event.kind === "tool.call") { toolStarts.set(event.callId, Date.now()); runtime.set("tool", event.name); bus.append({ type: "agent_session.tool.call", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { sessionId: session.id, participant: seat.name, turnId, callId: event.callId, name: event.name, input: bus.capture(event.input, { userSessionId: session.userSessionId, agentSessionId: session.id }) } }); }
+            else if (event.kind === "tool.call") {
+              toolStarts.set(event.callId, Date.now()); runtime.set("tool", event.name); bus.append({ type: "agent_session.tool.call", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { sessionId: session.id, participant: seat.name, turnId, callId: event.callId, name: event.name, input: bus.capture(event.input, { userSessionId: session.userSessionId, agentSessionId: session.id }) } });
+              const key = `${event.name} ${stableStringify(event.input)}`;
+              watchdog.identical = key === watchdog.lastKey ? watchdog.identical + 1 : 1;
+              watchdog.lastKey = key;
+              if (watchdog.identical >= WATCHDOG_IDENTICAL_CALLS) trip({ kind: "repeat_tool_calls", toolName: event.name, count: watchdog.identical,
+                detail: `watchdog: ${watchdog.identical} identical consecutive calls to ${event.name}` }, flight);
+            }
             else if (event.kind === "tool.result") {
               const captured = bus.captureSized(event.output, { userSessionId: session.userSessionId, agentSessionId: session.id });
               const toolStartedAt = toolStarts.get(event.callId); toolStarts.delete(event.callId);
               runtime.set("thinking"); bus.append({ type: "agent_session.tool.result", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { sessionId: session.id, participant: seat.name, turnId, callId: event.callId, output: captured.value, bytes: captured.bytes, ...(toolStartedAt === undefined ? {} : { durationMs: Date.now() - toolStartedAt }), ...(event.isError ? { isError: true } : {}) } });
+              watchdog.errorStreak = event.isError ? watchdog.errorStreak + 1 : 0;
+              if (watchdog.errorStreak >= WATCHDOG_ERROR_STREAK) trip({ kind: "tool_error_streak", count: watchdog.errorStreak,
+                detail: `watchdog: ${watchdog.errorStreak} consecutive tool errors` }, flight);
             }
             else if (event.kind === "result") {
               output = event.output && typeof event.output === "object" ? event.output as Record<string, unknown> : {};
@@ -416,9 +761,14 @@ export class AgentSessionHost {
               this.#recordUsage(session, latestSeat, turnId, event, "completed", Date.now() - startedAt);
             }
             else if (event.kind === "error") { status = event.aborted ? "aborted" : "error"; errorMessage = event.message; this.#recordUsage(session, latestSeat, turnId, event, status, Date.now() - startedAt); }
+            if (watchdog.tripped) break;
           }
+          // The provider (and the fake, whose string-prompt interrupt only
+          // records) may keep streaming after our abort — leave explicitly.
+          if (watchdog.tripped) break;
         }
       } finally { flight.query = null; query.close?.(); }
+      if (watchdog.tripped) throw new Error(watchdog.tripped.detail);
       for (const delivery of deliveries) this.#patchDelivery(session, delivery, "acknowledged");
       repo.patchParticipant(session.id, seat.name, { turnCount: latestSeat.turnCount + 1,
         checkpointReady: output?.checkpointReadiness !== "defer" });
@@ -432,16 +782,28 @@ export class AgentSessionHost {
     } catch (error) {
       status = flight.abort.signal.aborted ? "aborted" : "error";
       errorMessage = error instanceof Error ? error.message : String(error);
+      // A watchdog abort must not read as an operator abort: it is an error
+      // with one canonical message, and the coordinator hears about it.
+      if (watchdog.tripped) { status = "error"; errorMessage = watchdog.tripped.detail; }
       if (status === "error" && repo.getAgentSession(session.id)?.status === "open") {
         const target = seat.name === ORCHESTRATOR_SEAT ? MAIN_RECIPIENT : ORCHESTRATOR_SEAT;
         this.post({ agentSessionId: session.id, speaker: { kind: seat.role === "orchestrator" ? "orchestrator" : "agent", name: seat.name }, to: target,
-          handoff: this.#simpleHandoff("Turn failed", "failed", `Provider turn failed: ${errorMessage}`, "Inspect the failure and retry or reassign."), category: "failure", turnId });
+          handoff: this.#simpleHandoff("Turn failed", "failed",
+            watchdog.tripped ? watchdog.tripped.detail : `Provider turn failed: ${errorMessage}`,
+            "Inspect the failure and retry or reassign."), category: "failure", turnId });
       }
     } finally {
       if (status !== "completed") for (const delivery of deliveries) this.#patchDelivery(session, delivery, "cancelled");
       runtime.idle();
       bus.append({ type: "agent_session.turn.settled", userSessionId: session.userSessionId, agentSessionId: session.id,
         payload: { agentSessionId: session.id, participant: seat.name, turnId, status, durationMs: Date.now() - startedAt, ...(errorMessage ? { errorMessage } : {}) } });
+      // File-state snapshot per settled turn: mid-assignment crash recovery is
+      // lossless, and the completion diff (base..branch) is unaffected. The
+      // worktree may already be merged away by this turn's closing handoff.
+      const current = repo.getParticipant(session.id, seat.name);
+      if (current?.worktreePath && this.#deps.worktrees && fs.existsSync(current.worktreePath)) {
+        try { this.#deps.worktrees.commitAll(current.worktreePath, `turn ${turnId}`); } catch { /* snapshot is best-effort */ }
+      }
     }
   }
 
@@ -474,11 +836,16 @@ export class AgentSessionHost {
     const user = this.#deps.repo.getUserSession(session.userSessionId);
     const workspaceRoot = user && this.#deps.getWorkspaceRoot ? this.#deps.getWorkspaceRoot(user.workspaceId) : "";
     if (profile.runtime.shell && this.#deps.processes) {
-      const scope = { workspaceRoot, userSessionId: session.userSessionId, agentSessionId: session.id, participant: seat.name };
+      const scope = { workspaceRoot: seat.worktreePath ?? workspaceRoot, userSessionId: session.userSessionId, agentSessionId: session.id, participant: seat.name };
       const processOwner = `${session.id}:${seat.name}`;
       tools.push(
         sdk.tool("process_start", "Start a Console-owned long-running process. Pass an executable and argv separately; cwd must remain in the workspace.", { command: z.string(), args: z.array(z.string()).default([]), cwd: z.string().default(".") }, async (args: { command: string; args: string[]; cwd: string }) => ok(this.#deps.processes?.start(scope, args.command, args.args, args.cwd))),
-        sdk.tool("process_read", "Read new process output, optionally waiting once for a state change. Use waitMs instead of polling.", { processId: z.string(), afterSeq: z.number().int().default(0), waitMs: z.number().int().min(0).max(60_000).default(0) }, async (args: { processId: string; afterSeq: number; waitMs: number }) => ok(await this.#deps.processes?.read(processOwner, args.processId, args.afterSeq, args.waitMs))),
+        sdk.tool("process_read", "Read new process output, optionally waiting once for a state change. Use waitMs instead of polling. Output is paged tail-first (default 8KiB, newest last); use cursors for more, afterSeq for incremental reads.", { processId: z.string(), afterSeq: z.number().int().default(0), waitMs: z.number().int().min(0).max(60_000).default(0), cursor: z.string().optional(), maxBytes: z.number().int().min(1).max(32 * 1024).default(8 * 1024) }, async (args: { processId: string; afterSeq: number; waitMs: number; cursor?: string; maxBytes: number }) => {
+          const result = await this.#deps.processes?.read(processOwner, args.processId, args.afterSeq, args.waitMs);
+          if (!result) return ok(result);
+          const text = result.chunks.map((chunk) => `[${chunk.stream} #${chunk.seq}] ${chunk.text}`).join("");
+          return ok({ headSeq: result.headSeq, exit: result.exit, output: pageTail(text, args.cursor, args.maxBytes) });
+        }),
         sdk.tool("process_stop", "Stop a process owned by this participant.", { processId: z.string() }, async (args: { processId: string }) => { this.#deps.processes?.stop(processOwner, args.processId); return ok({ stopped: true }); }),
       );
     }
@@ -514,6 +881,45 @@ export class AgentSessionHost {
         return ok(resolution);
       }));
     }
+    if (seat.name === ORCHESTRATOR_SEAT && this.#deps.worktrees) {
+      tools.push(sdk.tool("start_attempts", "Run best-of-N parallel attempts at one high-stakes assignment: N isolated worktree seats race the same work, a fresh reviewer picks the winner, and only the winner's changes merge into the workspace. Requires the workspace to be a git repository. One active group at a time.", {
+        assignment: HandoffDraftSchema, profileId: z.string().default("implementer"), attempts: z.number().int().min(2).max(3).default(2),
+        baseSeatName: z.string().optional(), owns: z.array(z.string()).min(1), instructions: z.string().optional(), model: z.string().optional(),
+      }, async (args: { assignment: HandoffDraft; profileId: string; attempts: number; baseSeatName?: string; owns: string[]; instructions?: string; model?: string }) => {
+        try {
+          return ok(this.startAttempts({ agentSessionId: session.id, assignment: args.assignment, profileId: args.profileId,
+            attempts: args.attempts, ...(args.baseSeatName ? { baseSeatName: args.baseSeatName } : {}), owns: args.owns,
+            ...(args.instructions ? { instructions: args.instructions } : {}), ...(args.model ? { model: args.model } : {}) }));
+        } catch (error) {
+          return { content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }], isError: true };
+        }
+      }));
+    }
+    if (seat.attemptRole === "reviewer" && seat.attemptGroupId && this.#deps.worktrees) {
+      const groupId = seat.attemptGroupId;
+      tools.push(
+        sdk.tool("read_attempt_diff", "Read one attempt's captured diff (paged tail-first; cursors continue).", {
+          seat: z.string(), cursor: z.string().optional(), maxBytes: z.number().int().min(1).max(32 * 1024).default(8 * 1024),
+        }, async (args: { seat: string; cursor?: string; maxBytes: number }) => {
+          const group = this.#deps.repo.getAttemptGroup(groupId);
+          const artifactId = group?.attemptsState[args.seat]?.artifactId;
+          if (!artifactId) return { content: [{ type: "text", text: `no captured diff for attempt seat "${args.seat}"` }], isError: true };
+          const artifact = this.#deps.bus.getArtifact(artifactId);
+          if (!artifact) return { content: [{ type: "text", text: `diff artifact ${artifactId} is missing` }], isError: true };
+          return ok({ seat: args.seat, artifactId, diff: pageTail(artifact.content, args.cursor, args.maxBytes) });
+        }),
+        sdk.tool("select_attempt_winner", "Declare the winning attempt (merged into the workspace immediately) or reject all. Exactly one call; the structured result reports the real merge outcome.", {
+          winner: z.string().optional(), rejectAll: z.boolean().default(false), reason: z.string().min(1),
+        }, async (args: { winner?: string; rejectAll: boolean; reason: string }) => {
+          try {
+            return ok(this.selectAttemptWinner({ agentSessionId: session.id, groupId, reviewer: seat.name,
+              ...(args.winner ? { winner: args.winner } : {}), rejectAll: args.rejectAll, reason: args.reason }));
+          } catch (error) {
+            return { content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }], isError: true };
+          }
+        }),
+      );
+    }
     if (seat.name === ORCHESTRATOR_SEAT && this.#deps.tasks && user) {
       const listId = `console:${session.id}:${ORCHESTRATOR_SEAT}`;
       tools.push(
@@ -524,19 +930,24 @@ export class AgentSessionHost {
         sdk.tool("task_update", "Update status or ownership in the authoritative Console task ledger.", { taskId: z.string(), status: z.enum(["pending", "in_progress", "completed", "deleted"]).optional(), owner: z.string().optional(), description: z.string().optional() }, async (args: { taskId: string; status?: "pending" | "in_progress" | "completed" | "deleted"; owner?: string; description?: string }) => {
           this.#deps.tasks?.applyUpdate({ sdkSessionId: listId, sdkTaskId: args.taskId, patch: { ...(args.status ? { status: args.status } : {}), ...(args.owner ? { owner: args.owner } : {}), ...(args.description ? { description: args.description } : {}) } }); return ok({ updated: true });
         }),
-        sdk.tool("task_list", "List the AgentSession's authoritative Console tasks.", {}, async () => ok({ tasks: this.#deps.tasks?.listForUserSession(session.userSessionId).filter((task) => task.agentSessionId === session.id && task.status !== "deleted") ?? [] })),
+        sdk.tool("task_list", "List the AgentSession's authoritative Console tasks. Retrieval is paged (tail-first, default 8KiB window; cursors continue).", { cursor: z.string().optional(), maxBytes: z.number().int().min(1).max(32 * 1024).default(8 * 1024) }, async (args: { cursor?: string; maxBytes: number }) => {
+          const rows = this.#deps.tasks?.listForUserSession(session.userSessionId).filter((task) => task.agentSessionId === session.id && task.status !== "deleted") ?? [];
+          return ok({ taskCount: rows.length, tasks: pageTail(JSON.stringify(rows, null, 2), args.cursor, args.maxBytes) });
+        }),
       );
     }
     return sdk.createSdkMcpServer({ name: "console_agent", version: "2", tools });
   }
 
-  #runtimeToolNames(profile: AgentProfile, participant: string): string[] {
+  #runtimeToolNames(profile: AgentProfile, participant: string, attemptRole?: string | null): string[] {
     return ["mcp__console_agent__send_message", "mcp__console_agent__read_handoff", "mcp__console_agent__report_handoff_discrepancy",
       ...(profile.runtime.shell ? ["mcp__console_agent__process_start", "mcp__console_agent__process_read", "mcp__console_agent__process_stop"] : []),
       ...(profile.runtime.browser ? ["mcp__console_agent__browser_open", "mcp__console_agent__browser_snapshot", "mcp__console_agent__browser_click", "mcp__console_agent__browser_fill", "mcp__console_agent__browser_console"] : []),
       ...(profile.runtime.browser && profile.runtime.screenshots ? ["mcp__console_agent__browser_screenshot"] : []),
       ...(participant === ORCHESTRATOR_SEAT ? ["mcp__console_agent__request_decision"] : []),
       ...(participant === ORCHESTRATOR_SEAT ? ["mcp__console_agent__task_create", "mcp__console_agent__task_update", "mcp__console_agent__task_list"] : []),
+      ...(participant === ORCHESTRATOR_SEAT && this.#deps.worktrees ? ["mcp__console_agent__start_attempts"] : []),
+      ...(attemptRole === "reviewer" ? ["mcp__console_agent__select_attempt_winner", "mcp__console_agent__read_attempt_diff"] : []),
     ];
   }
 
@@ -554,7 +965,12 @@ export class AgentSessionHost {
   }
 
   #composePrompt(session: AgentSessionRow, seat: ParticipantRow, rows: MessageRow[]): string {
-    const roster = this.#deps.repo.listParticipants(session.id).map((p) => `${p.name} (${p.profileId}; owns: ${p.ownership.join(", ") || "coordination"})`).join("; ");
+    // At up to 20 seats the roster header is advisory: render at most three
+    // scopes per seat; the full ownership list stays in the DB and the API.
+    const roster = this.#deps.repo.listParticipants(session.id).map((p) => {
+      const scopes = p.ownership.slice(0, 3).join(", ") + (p.ownership.length > 3 ? ` +${p.ownership.length - 3} more` : "");
+      return `${p.name} (${p.profileId}; owns: ${scopes || "coordination"})`;
+    }).join("; ");
     const messages = rows.map((row) => {
       const id = (row.payload?.handoff as { id?: string } | undefined)?.id;
       if (!id || !this.#deps.handoffs) return `[${row.speakerName} → ${row.toName} | ${row.createdAt}] ${row.text}`;
@@ -576,40 +992,43 @@ export class AgentSessionHost {
   async #rotateIfNeeded(session: AgentSessionRow, seat: ParticipantRow, sdk: ConsoleSdk, flight: Flight): Promise<ParticipantRow> {
     const config = this.#deps.config;
     if (!config || !this.#deps.handoffs) return seat;
-    const hard = seat.turnCount >= config.contextTurnLimit || seat.contextTokens >= config.contextTokenLimit;
-    const soft = seat.turnCount >= Math.ceil(config.contextTurnLimit * 0.8) || seat.contextTokens >= Math.ceil(config.contextTokenLimit * 0.75);
+    const tokenLimit = rotationTokenLimit(config.contextTokenLimit, seat.model ?? config.model);
+    const hard = seat.turnCount >= config.contextTurnLimit || seat.contextTokens >= tokenLimit;
+    const soft = seat.turnCount >= Math.ceil(config.contextTurnLimit * 0.8) || seat.contextTokens >= Math.ceil(tokenLimit * 0.75);
     if (!soft || (!hard && !seat.checkpointReady)) return seat;
     const threshold = hard ? "hard" as const : "soft" as const;
-    let draft: HandoffDraft | null = null;
-    let failure: string | null = null;
     const started = Date.now();
-    if (seat.sdkSessionId) {
-      const checkpointAbort = new AbortController();
-      const profile = seat.profileSnapshot as AgentProfile;
-      const user = this.#deps.repo.getUserSession(session.userSessionId);
-      if (user && this.#deps.getWorkspaceRoot) {
-        const query = sdk.query({ prompt: "Create a lossless rotation checkpoint for your successor context. Capture only durable task state, verified evidence pointers, results, uncertainty, and the exact next action. Do not perform work or call tools.", options: {
-          cwd: this.#deps.getWorkspaceRoot(user.workspaceId), systemPrompt: { type: "preset", preset: "claude_code", append: "You are checkpointing your own context. Report faithfully; do not correct or embellish uncertain state." },
-          settingSources: [], includePartialMessages: false, permissionMode: "plan", allowedTools: [],
-          disallowedTools: ["Agent", "SendMessage", "Task", "Bash", "Edit", "Write", "WebSearch", "WebFetch"],
-          outputFormat: { type: "json_schema", schema: CheckpointClosingSchema.properties.handoff }, maxTurns: 2,
-          sandbox: { enabled: true, failIfUnavailable: profile.sandboxRequired, autoAllowBashIfSandboxed: false, allowUnsandboxedCommands: false,
-            filesystem: { allowManagedReadPathsOnly: true, allowRead: [this.#deps.getWorkspaceRoot(user.workspaceId)], allowWrite: [] } },
-          env: sdkEnv(), abortController: checkpointAbort, persistSession: true, sessionStore: this.#deps.sessionStore as never,
-          sessionStoreFlush: "eager", resume: seat.sdkSessionId, ...(seat.model ? { model: seat.model } : {}),
-          ...((profile.effort ?? config.effort) ? { effort: (profile.effort ?? config.effort) as SdkOptions["effort"] } : {}),
-        } });
-        flight.query = query;
-        try {
-          for await (const raw of query) for (const event of mapSdkMessage(raw)) {
-            if (event.kind === "result") {
-              const parsed = HandoffDraftSchema.safeParse(event.output);
-              if (parsed.success) draft = parsed.data;
-              this.#recordUsage(session, seat, `checkpoint:${newId("turn")}`, event);
-            } else if (event.kind === "error") failure = event.message;
-          }
-        } catch (error) { failure = error instanceof Error ? error.message : String(error); }
-        finally { flight.query = null; query.close?.(); }
+    let { draft, failure } = await this.#checkpointQuery(session, seat, sdk, flight, "");
+    // Deterministic quality gate with one feedback retry: the checkpoint is
+    // the successor's only inheritance, so a structurally weak draft gets one
+    // chance to fix the named failures before the threshold rules decide.
+    if (draft && this.#deps.handoffs) {
+      const gate = (candidate: HandoffDraft) => evaluateCheckpointDraft({ draft: candidate,
+        referenceWarnings: this.#deps.handoffs!.referenceWarnings(session.userSessionId, [...candidate.core.state.evidence, ...candidate.core.result.artifacts]),
+        taskResolves: candidate.core.taskId == null ? null : this.#deps.repo.hasDurableReference("task", candidate.core.taskId) });
+      const initialFailures = gate(draft);
+      if (initialFailures.length > 0) {
+        this.#deps.bus.append({ type: "handoff.checkpoint.retried", userSessionId: session.userSessionId, agentSessionId: session.id,
+          payload: { participant: seat.name, threshold, failures: initialFailures, accepted: "none" } });
+        const retry = await this.#checkpointQuery(session, seat, sdk, flight,
+          `\n\nA previous checkpoint attempt failed these deterministic checks — fix each one:\n- ${initialFailures.join("\n- ")}`);
+        const retryFailures = retry.draft ? gate(retry.draft) : null;
+        if (retry.draft && retryFailures !== null && retryFailures.length === 0) {
+          draft = retry.draft;
+          this.#deps.bus.append({ type: "handoff.checkpoint.retried", userSessionId: session.userSessionId, agentSessionId: session.id,
+            payload: { participant: seat.name, threshold, failures: [], accepted: "retry" } });
+        } else if (!hard) {
+          this.#deps.bus.append({ type: "handoff.checkpoint.failed", userSessionId: session.userSessionId, agentSessionId: session.id,
+            payload: { participant: seat.name, reason: "checkpoint failed the quality gate", threshold, degraded: false,
+              checkFailures: retryFailures ?? initialFailures } });
+          return seat;
+        } else {
+          // Hard threshold: rotation cannot wait — accept the better draft.
+          const useRetry = retry.draft !== null && retryFailures !== null && retryFailures.length <= initialFailures.length;
+          draft = useRetry ? retry.draft : draft;
+          this.#deps.bus.append({ type: "handoff.checkpoint.retried", userSessionId: session.userSessionId, agentSessionId: session.id,
+            payload: { participant: seat.name, threshold, failures: useRetry ? retryFailures ?? [] : initialFailures, accepted: useRetry ? "retry" : "initial" } });
+        }
       }
     }
     let degraded = false;
@@ -636,11 +1055,47 @@ export class AgentSessionHost {
     const fresh = this.#deps.repo.getParticipant(session.id, seat.name) ?? seat;
     this.#deps.bus.append({ type: "agent_session.context.rotated", userSessionId: session.userSessionId, agentSessionId: session.id,
       payload: { agentSessionId: session.id, participant: seat.name, generation: seat.generation + 1,
-        reason: seat.contextTokens >= Math.ceil(config.contextTokenLimit * 0.75) ? "token_limit" : "turn_limit", memoryChars: 0,
+        reason: seat.contextTokens >= Math.ceil(tokenLimit * 0.75) ? "token_limit" : "turn_limit", memoryChars: 0,
         handoffId: prepared.row.id, threshold, checkpointBytes: prepared.row.bytes, degraded } });
     this.#deps.bus.append({ type: "agent_session.runtime", userSessionId: session.userSessionId, agentSessionId: session.id,
       payload: { agentSessionId: session.id, participant: seat.name, detail: `checkpoint ${prepared.row.id} completed in ${Date.now() - started}ms` } });
     return fresh;
+  }
+
+  /** One tool-free checkpoint query against the seat's current context. */
+  async #checkpointQuery(session: AgentSessionRow, seat: ParticipantRow, sdk: ConsoleSdk, flight: Flight, promptSuffix: string): Promise<{ draft: HandoffDraft | null; failure: string | null }> {
+    const config = this.#deps.config;
+    let draft: HandoffDraft | null = null;
+    let failure: string | null = null;
+    if (!seat.sdkSessionId) return { draft, failure };
+    const checkpointAbort = new AbortController();
+    const profile = seat.profileSnapshot as AgentProfile;
+    const user = this.#deps.repo.getUserSession(session.userSessionId);
+    if (!user || !this.#deps.getWorkspaceRoot) return { draft, failure };
+    const checkpointRoot = seat.worktreePath ?? this.#deps.getWorkspaceRoot(user.workspaceId);
+    const query = sdk.query({ prompt: `Create a lossless rotation checkpoint for your successor context. Capture only durable task state, verified evidence pointers, results, uncertainty, and the exact next action. Do not perform work or call tools.${promptSuffix}`, options: {
+      cwd: checkpointRoot, systemPrompt: { type: "preset", preset: "claude_code", append: "You are checkpointing your own context. Report faithfully; do not correct or embellish uncertain state." },
+      settingSources: [], includePartialMessages: false, permissionMode: "plan", allowedTools: [],
+      disallowedTools: ["Agent", "SendMessage", "Task", "Bash", "Edit", "Write", "WebSearch", "WebFetch"],
+      outputFormat: { type: "json_schema", schema: CheckpointClosingSchema.properties.handoff }, maxTurns: 2,
+      sandbox: { enabled: true, failIfUnavailable: profile.sandboxRequired, autoAllowBashIfSandboxed: false, allowUnsandboxedCommands: false,
+        filesystem: { allowManagedReadPathsOnly: true, allowRead: seat.worktreePath ? [checkpointRoot, this.#deps.getWorkspaceRoot(user.workspaceId)] : [checkpointRoot], allowWrite: [] } },
+      env: sdkEnv(), abortController: checkpointAbort, persistSession: true, sessionStore: this.#deps.sessionStore as never,
+      sessionStoreFlush: "eager", resume: seat.sdkSessionId, ...(seat.model ? { model: seat.model } : {}),
+      ...((profile.effort ?? config?.effort) ? { effort: (profile.effort ?? config?.effort) as SdkOptions["effort"] } : {}),
+    } });
+    flight.query = query;
+    try {
+      for await (const raw of query) for (const event of mapSdkMessage(raw)) {
+        if (event.kind === "result") {
+          const parsed = HandoffDraftSchema.safeParse(event.output);
+          if (parsed.success) draft = parsed.data;
+          this.#recordUsage(session, seat, `checkpoint:${newId("turn")}`, event);
+        } else if (event.kind === "error") failure = event.message;
+      }
+    } catch (error) { failure = error instanceof Error ? error.message : String(error); }
+    finally { flight.query = null; query.close?.(); }
+    return { draft, failure };
   }
 
   #checkpointContext(seat: ParticipantRow): string {

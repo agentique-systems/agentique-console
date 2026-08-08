@@ -40,6 +40,20 @@ may defer while state is unstable. At a stable boundary the old provider context
 runs a tool-free checkpoint pass using the same model and effort. A failed soft
 checkpoint leaves the old context resumable and retries later.
 
+The token limit is the configured cap, lowered — never raised — by a per-model
+context catalog whose windows are deliberate under-estimates: an unknown model
+rotates earlier rather than risking hard overflow.
+
+A checkpoint draft that parses must also pass a deterministic quality gate:
+non-blank summary, a next action and at least one resolving evidence ref for
+non-completed work, and a resolving task ref when one is claimed. A failing
+draft is retried once with the specific failures appended to the prompt; the
+attempt is journaled (`handoff.checkpoint.retried`). If both drafts fail the
+gate, a soft rotation defers exactly like a failed soft checkpoint, and a hard
+rotation accepts the better draft and records its remaining failures. Checks
+are structural only — an honest empty-work checkpoint passes, and length is
+never scored.
+
 Hard limits remain the configured token/turn caps. A failed hard checkpoint
 rotates with a degraded, high-risk recovery handoff assembled from the latest
 valid envelope and durable authorities. Recent transcript slicing is never used.

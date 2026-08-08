@@ -211,7 +211,117 @@ export interface HandoffCreatedPayload {
 export interface HandoffConsumedPayload { handoffId: string; participant: string; mode: "compact" | "expanded"; }
 export interface HandoffRetrievedPayload { handoffId: string; section: "core" | "extension"; bytes: number; nextCursor: string | null; }
 export interface HandoffDiscrepancyPayload { handoffId: string; reporter: string; claim: string; evidence: string; }
-export interface HandoffCheckpointFailedPayload { participant: string; reason: string; threshold: "soft" | "hard"; degraded: boolean; }
+export interface HandoffCheckpointFailedPayload { participant: string; reason: string; threshold: "soft" | "hard"; degraded: boolean; checkFailures?: string[]; }
+
+/** The host interrupted a seat turn that was repeating itself without progress. */
+export interface AgentWatchdogPayload {
+  agentSessionId: string;
+  participant: string;
+  turnId: string;
+  kind: "repeat_tool_calls" | "tool_error_streak";
+  toolName?: string;
+  count: number;
+  detail: string;
+}
+
+/** Seat worktree isolation: write seats land completed work atomically. */
+export interface SeatWorktreeCreatedPayload {
+  agentSessionId: string;
+  seat: string;
+  branch: string;
+  baseCommit: string;
+}
+
+export interface SeatWorktreeMergedPayload {
+  agentSessionId: string;
+  seat: string;
+  mergeCommit: string;
+  filesChanged: number;
+  artifactId: string | null;
+}
+
+export interface SeatWorktreeMergeFailedPayload {
+  agentSessionId: string;
+  seat: string;
+  conflicts: string[];
+  detail: string;
+  artifactId: string | null;
+}
+
+export interface SeatWorktreeDiscardedPayload {
+  agentSessionId: string;
+  seat: string;
+  reason: string;
+  artifactId: string | null;
+}
+
+/** Best-of-N: N attempt seats racing one assignment in isolated worktrees. */
+export interface AttemptGroupStartedPayload {
+  agentSessionId: string;
+  groupId: string;
+  seats: string[];
+  profileId: string;
+  attempts: number;
+  baseCommit: string;
+  dirtyWorkspace: boolean;
+}
+
+export interface AttemptCompletedPayload {
+  agentSessionId: string;
+  groupId: string;
+  seat: string;
+  status: "completed" | "failed";
+  branch: string;
+  commit: string | null;
+  artifactId: string | null;
+  diffBytes: number;
+  filesChanged: number;
+}
+
+export interface AttemptGroupReviewStartedPayload {
+  agentSessionId: string;
+  groupId: string;
+  reviewer: string;
+}
+
+export interface AttemptGroupSelectedPayload {
+  agentSessionId: string;
+  groupId: string;
+  winner: string | null;
+  rejectedAll: boolean;
+  reason: string;
+}
+
+export interface AttemptGroupMergedPayload {
+  agentSessionId: string;
+  groupId: string;
+  winner: string;
+  mergeCommit: string;
+}
+
+export interface AttemptGroupMergeFailedPayload {
+  agentSessionId: string;
+  groupId: string;
+  winner: string;
+  conflicts: string[];
+  detail: string;
+}
+
+export interface AttemptGroupClosedPayload {
+  agentSessionId: string;
+  groupId: string;
+  status: "merged" | "rejected" | "failed" | "abandoned";
+}
+
+/** A checkpoint draft failed the deterministic quality gate; journal of the retry decision. */
+export interface HandoffCheckpointRetriedPayload {
+  participant: string;
+  threshold: "soft" | "hard";
+  /** The gate failures that triggered (or survived) the retry. */
+  failures: string[];
+  /** "none" while the retry is being issued; the final event records the winner. */
+  accepted: "initial" | "retry" | "none";
+}
 
 export interface TaskCreatedPayload {
   task: Task;
@@ -322,6 +432,19 @@ export type ConsoleEvent = Base &
     | { type: "handoff.retrieved"; payload: HandoffRetrievedPayload }
     | { type: "handoff.discrepancy"; payload: HandoffDiscrepancyPayload }
     | { type: "handoff.checkpoint.failed"; payload: HandoffCheckpointFailedPayload }
+    | { type: "handoff.checkpoint.retried"; payload: HandoffCheckpointRetriedPayload }
+    | { type: "agent_session.watchdog"; payload: AgentWatchdogPayload }
+    | { type: "agent_session.attempt_group.started"; payload: AttemptGroupStartedPayload }
+    | { type: "agent_session.attempt.completed"; payload: AttemptCompletedPayload }
+    | { type: "agent_session.attempt_group.review_started"; payload: AttemptGroupReviewStartedPayload }
+    | { type: "agent_session.attempt_group.selected"; payload: AttemptGroupSelectedPayload }
+    | { type: "agent_session.attempt_group.merged"; payload: AttemptGroupMergedPayload }
+    | { type: "agent_session.attempt_group.merge_failed"; payload: AttemptGroupMergeFailedPayload }
+    | { type: "agent_session.attempt_group.closed"; payload: AttemptGroupClosedPayload }
+    | { type: "agent_session.worktree.created"; payload: SeatWorktreeCreatedPayload }
+    | { type: "agent_session.worktree.merged"; payload: SeatWorktreeMergedPayload }
+    | { type: "agent_session.worktree.merge_failed"; payload: SeatWorktreeMergeFailedPayload }
+    | { type: "agent_session.worktree.discarded"; payload: SeatWorktreeDiscardedPayload }
     | { type: "flow.delegation"; payload: FlowDelegationPayload }
     | { type: "flow.result"; payload: FlowResultPayload }
     | { type: "stream.delta"; payload: StreamDeltaPayload }

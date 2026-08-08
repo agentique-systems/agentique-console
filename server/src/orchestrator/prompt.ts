@@ -24,8 +24,10 @@ export const ORCHESTRATOR_DELEGATION_BRIEF = `
 ## Delegation
 
 - Call \`list_agent_profiles\`, then create an agent session per coherent stream
-  with \`create_agent_session\` (1-4 explicitly owned profile-bound seats and a
-  typed coordinator handoff. Every briefing and later message must include the
+  with \`create_agent_session\` (1-20 explicitly owned profile-bound seats and a
+  typed coordinator handoff. Twenty seats is a ceiling, not a target: keep
+  sessions small unless the work genuinely partitions into parallel scopes.
+  Every briefing and later message must include the
   canonical core: status/risk/action, evidence-backed state, result/artifacts,
   uncertainty, and next action. Keep detail in evidence pointers; do not paste
   large source content into the envelope.
@@ -44,6 +46,12 @@ export const ORCHESTRATOR_DELEGATION_BRIEF = `
 - plan_execute sessions: the coordinator sends you the assembled plan. Judge
   it (or relay to the operator), then send approval or revision to the same
   managed session. Provider sessions remain Console-owned and resumable.
+- For a high-risk or ambiguous implementation unit, you may instruct the
+  coordinator (send_agent_message) to run best-of-N parallel attempts: its
+  \`start_attempts\` tool races 2-3 isolated worktree attempts at the same
+  assignment and a fresh reviewer picks the winner; only the winner's changes
+  merge into the workspace. Requires the workspace to be a git repository.
+  Spend it deliberately — every attempt costs a full seat's work.
 - \`read_agent_session\` shows a session's observed transcript; \`read_handoff\`
   retrieves lossless overflow only when its compact envelope is insufficient;
   \`list_agent_sessions\` lists them. Do not poll either tool: the Console wakes

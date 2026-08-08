@@ -16,6 +16,7 @@ import {
   handoffExtensionKindForProfile,
 } from "@agentique-console/shared";
 import { badRequest, notFound } from "../api/errors.ts";
+import { decodeCursor, encodeCursor, sliceUtf8Window } from "../paging.ts";
 import type { HandoffRecordRow, Repo } from "../db/repo.ts";
 import type { EventBus } from "../events/bus.ts";
 import { newId, nowIso } from "../ids.ts";
@@ -34,6 +35,8 @@ export interface PrepareHandoffInput {
   parentHandoffId?: string | null;
   checkpoint?: boolean;
   extensionKind?: HandoffExtensionKind;
+  /** Root for file-ref validation; a worktree'd seat's refs resolve there. */
+  resolveRoot?: string;
 }
 
 export class HandoffService {
@@ -43,7 +46,7 @@ export class HandoffService {
     const parsed = HandoffDraftSchema.parse(input.draft);
     const extensionKind = input.extensionKind ?? handoffExtensionKindForProfile(input.profileId);
     const extension = { kind: extensionKind, data: parsed.extension?.data ?? {} };
-    const referenceWarnings = this.#referenceWarnings(input.userSessionId, [...parsed.core.state.evidence, ...parsed.core.result.artifacts]);
+    const referenceWarnings = this.referenceWarnings(input.userSessionId, [...parsed.core.state.evidence, ...parsed.core.result.artifacts], input.resolveRoot);
     const core = referenceWarnings.length > 0 && parsed.core.risk === "low" ? { ...parsed.core, risk: "medium" as const } : parsed.core;
     const id = newId("handoff");
     const parent = input.parentHandoffId ? this.deps.repo.getHandoff(input.parentHandoffId) : undefined;
@@ -81,15 +84,12 @@ export class HandoffService {
   read(id: string, section: "core" | "extension" = "core", cursor?: string, maxBytes = HANDOFF_READ_DEFAULT_BYTES): HandoffPage {
     const handoff = this.get(id);
     const bounded = Math.max(4, Math.min(HANDOFF_READ_MAX_BYTES, Math.floor(maxBytes)));
-    const offset = cursor ? this.#decodeCursor(cursor) : 0;
+    const offset = cursor ? decodeCursor(cursor, "handoff cursor") : 0;
     const serialized = JSON.stringify(section === "core" ? handoff.core : handoff.extension, null, 2);
     const buffer = Buffer.from(serialized, "utf8");
     if (offset > buffer.length) throw badRequest("handoff cursor is past the end of the section");
-    let end = Math.min(buffer.length, offset + bounded);
-    while (end < buffer.length && end > offset && ((buffer[end] ?? 0) & 0xc0) === 0x80) end -= 1;
-    const content = buffer.subarray(offset, end).toString("utf8");
-    const nextOffset = end;
-    const nextCursor = nextOffset < buffer.length ? Buffer.from(String(nextOffset)).toString("base64url") : null;
+    const { content, end } = sliceUtf8Window(buffer, offset, bounded);
+    const nextCursor = end < buffer.length ? encodeCursor(end) : null;
     this.deps.bus.append({ type: "handoff.retrieved", userSessionId: handoff.metadata.userSessionId,
       ...(handoff.metadata.agentSessionId ? { agentSessionId: handoff.metadata.agentSessionId } : {}),
       payload: { handoffId: id, section, bytes: Buffer.byteLength(content), nextCursor } });
@@ -129,10 +129,10 @@ export class HandoffService {
     return lines.join("\n");
   }
 
-  #referenceWarnings(userSessionId: string, refs: HandoffDraft["core"]["state"]["evidence"]): string[] {
+  referenceWarnings(userSessionId: string, refs: HandoffDraft["core"]["state"]["evidence"], resolveRoot?: string): string[] {
     const session = this.deps.repo.getUserSession(userSessionId);
     if (!session) return ["owning user session is missing"];
-    const root = path.resolve(this.deps.getWorkspaceRoot(session.workspaceId));
+    const root = path.resolve(resolveRoot ?? this.deps.getWorkspaceRoot(session.workspaceId));
     return refs.flatMap((item) => {
       if (item.kind === "file") {
         const target = path.resolve(root, item.ref.split(":")[0] ?? item.ref);
@@ -149,9 +149,4 @@ export class HandoffService {
     });
   }
 
-  #decodeCursor(cursor: string): number {
-    const value = Number(Buffer.from(cursor, "base64url").toString("utf8"));
-    if (!Number.isSafeInteger(value) || value < 0) throw badRequest("invalid handoff cursor");
-    return value;
-  }
 }
