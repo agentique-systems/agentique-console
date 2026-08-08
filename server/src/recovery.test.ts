@@ -1,9 +1,8 @@
 /**
- * A turn that dies with the process must not leave the UI spinning. Under B5,
- * agent-side "turns" are native-subagent lifetimes (spawn → SubagentStop);
- * a crash leaves turn.started with no settle, and recovery closes it — the
- * agents themselves are gone (no resume handle) and the Orchestrator respawns
- * them via the spawn plan.
+ * A turn that dies with the process must not leave the UI spinning. A crash
+ * leaves turn.started with no settle, and recovery closes it — the seat's
+ * provider session survives (resume handle in participants) and the journal
+ * redelivers anything unacknowledged when the seat next wakes.
  */
 import { describe, expect, it } from "vitest";
 import { initMessage, successMessage, textMessage } from "./sdk/fake.ts";
@@ -13,10 +12,7 @@ import {
   restartHarness,
 } from "./test-helpers.ts";
 import { reconcileDurableCommunication, recoverInterruptedTurns } from "./recovery.ts";
-import {
-  ORCHESTRATOR_SEAT,
-  spawnNameOf,
-} from "./agent-sessions/spawn-names.ts";
+import { ORCHESTRATOR_SEAT } from "./agent-sessions/peer-names.ts";
 
 describe("recoverInterruptedTurns", () => {
   it("reconciles an authoritative message whose event append was interrupted", async () => {
@@ -40,14 +36,11 @@ describe("recoverInterruptedTurns", () => {
       mode: "execute",
       agents: [{ name: "web", preset: "implementer" }],
     });
-    // A live seat (turn.started emitted), then the process dies before any
-    // SubagentStop — the registry state vanishes with it.
-    h.host.observeAgentSpawn(
-      "tu_web",
-      spawnNameOf(agentSessionId, "web"),
-      agentSessionId,
-      "implementer",
-    );
+    // A live seat (turn.started emitted), then the process dies before the
+    // settle — the in-memory lane state vanishes with it.
+    const session = h.repo.getAgentSession(agentSessionId)!;
+    h.bus.append({ type: "agent_session.turn.started", userSessionId: session.userSessionId, agentSessionId,
+      payload: { agentSessionId, participant: "web", turnId: "tu_web" } });
     expect(h.repo.findUnsettledTurns()).toHaveLength(1);
 
     const rebooted = restartHarness(h);

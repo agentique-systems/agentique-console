@@ -22,7 +22,7 @@ import { rotationTokenLimit } from "../model-catalog.ts";
 import { pageTail } from "../paging.ts";
 import { mapSdkMessage } from "../sdk/mapping.ts";
 import type { SqliteSessionStore } from "../sdk/session-store.ts";
-import type { ConsoleSdk, QueryHandle, SdkOptions, SdkToolResult } from "../sdk/types.ts";
+import type { ConsoleSdk, QueryHandle, SdkHooksFragment, SdkOptions, SdkToolResult, SdkUserMessageLike } from "../sdk/types.ts";
 import { sdkEnv } from "../sdk/env.ts";
 import type { ProcessManager } from "../runtime/process-manager.ts";
 import type { BrowserManager } from "../runtime/browser-manager.ts";
@@ -32,8 +32,17 @@ import type { TaskService } from "../tasks/service.ts";
 import type { HandoffService } from "../handoffs/service.ts";
 import { CheckpointClosingSchema, HandoffDraftSchema } from "../handoffs/schema.ts";
 import { evaluateCheckpointDraft } from "../handoffs/checkpoint-gate.ts";
-import { COORDINATOR_SEAT, seatOfSpawnName } from "./spawn-names.ts";
-import { peerNameOf } from "./peer-names.ts";
+import { mainPeerName, peerNameOf } from "./peer-names.ts";
+import { buildTaskHooks } from "../tasks/hooks.ts";
+import {
+  buildSendMessageMiddleware,
+  type JournalResult,
+  type ResolvedRecipient,
+  type SendEnvelope,
+  type SendGovernor,
+  type SenderIdentity,
+} from "./send-middleware.ts";
+import { AsyncQueue } from "../async-queue.ts";
 
 export const ORCHESTRATOR_SEAT = "orchestrator";
 export const MAIN_RECIPIENT = "main";
@@ -62,10 +71,73 @@ function stableStringify(value: unknown): string {
   return `{${Object.keys(value as Record<string, unknown>).sort().map((key) => `${JSON.stringify(key)}:${stableStringify((value as Record<string, unknown>)[key])}`).join(",")}}`;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => { const timer = setTimeout(resolve, ms); timer.unref?.(); });
+}
+
+/** Console-synthesized lane input: neither human nor peer, so no origin. */
+function seatUserMessage(text: string): SdkUserMessageLike {
+  return { type: "user", message: { role: "user", content: [{ type: "text", text }] }, parent_tool_use_id: null, shouldQuery: true };
+}
+
+/** Concatenating merge of hook fragments (later fragments append matchers). */
+function mergeHooks(fragments: SdkHooksFragment[]): SdkHooksFragment {
+  const merged: SdkHooksFragment = {};
+  for (const fragment of fragments) {
+    for (const [event, matchers] of Object.entries(fragment)) {
+      if (!matchers) continue;
+      merged[event] = [...(merged[event] ?? []), ...matchers];
+    }
+  }
+  return merged;
+}
+
+function seatMessagingBrief(roster: string, seatName: string): string {
+  return `Communication: use the native SendMessage tool for every transfer — your plain text output reaches no one. Participants: ${roster}. ` +
+    `Address seats by bare name (e.g. "orchestrator"); the console rewrites it to the registry address. If a tool result asks you to re-send with a ref, re-send using the exact "name [ref]" it shows. ` +
+    `The message field MUST be a JSON handoff envelope: {"handoff": <HandoffDraft>, "category": "assignment"|"update"|"milestone"|"failure"|"final"|"decision", "checkpointReadiness"?: "stable"|"defer"}; invalid envelopes are denied with the reason — fix and re-send. ` +
+    `${seatName === ORCHESTRATOR_SEAT ? "You may address your specialists and main." : "You may address only orchestrator."} Never use the Agent tool.`;
+}
+
 type Category = MailboxDeliveryRow["category"];
 
-interface Flight { abort: AbortController; query: QueryHandle | null; }
-interface Lane { chain: Promise<void>; turns: Map<string, Flight>; lastStatus: "working" | "idle" | null; }
+/**
+ * A seat's persistent peer session. One streaming-input query per live seat;
+ * the process registers the seat's peer name and binds its inbox socket, so a
+ * seat is natively addressable exactly while its lane is live. Parked lanes
+ * keep only the resume handle — the journal owns anything undelivered.
+ */
+interface SeatLane {
+  state: "unspawned" | "waking" | "live" | "rotating" | "parked";
+  input: AsyncQueue<SdkUserMessageLike> | null;
+  query: QueryHandle | null;
+  abort: AbortController | null;
+  pump: Promise<void> | null;
+  /** Resolves when the current spawn is accepting input. */
+  ready: Promise<void> | null;
+  /** The in-flight turn; null between turns. */
+  activeTurn: {
+    turnId: string;
+    startedAt: number;
+    trigger: "delivery" | "peer" | "steer";
+    deliveries: MailboxDeliveryRow[];
+    sawSend: boolean;
+    toolStarts: Map<string, number>;
+    watchdog: { lastKey: string; identical: number; errorStreak: number; tripped: string | null };
+  } | null;
+  /** Console pushes awaiting attribution to the next minted turn. */
+  pendingDeliveries: MailboxDeliveryRow[];
+  /** Sender-side delivery holds; a held lane cannot park or rotate. */
+  holds: number;
+  /** Set while rotating/recycling; senders await it before ensureLive. */
+  rotationGate: Promise<void> | null;
+  releaseRotation: (() => void) | null;
+  idleTimer: NodeJS.Timeout | null;
+  /** Cumulative settled turns since the last assignment delivery. */
+  assignmentTurns: number;
+  lastActiveAt: number;
+  lastStatus: "working" | "idle" | null;
+}
 
 export interface CreateAgentSessionInput {
   userSessionId: string;
@@ -101,10 +173,13 @@ function ok(value: unknown): SdkToolResult {
 /** Console-managed, independently resumable participant sessions and durable mailbox. */
 export class AgentSessionHost {
   readonly #deps: AgentSessionHostDeps;
-  readonly #lanes = new Map<string, Lane>();
-  #globalTurns = 0;
+  /** agentSessionId → seat name → its persistent lane. */
+  readonly #seats = new Map<string, Map<string, SeatLane>>();
   readonly #deferredDecisions = new Map<string, string[]>();
-  readonly #legacyBindings = new Map<string, { agentSessionId: string; participant: string; spawnName: string; agentId: string | null }>();
+  /** Idempotency for peer-carry retries: send fingerprint → delivery id. */
+  readonly #recentPeerSends = new Map<string, { deliveryId: string; at: number }>();
+  /** Waiters for a resident-capacity slot, resolved oldest-first on park/close. */
+  readonly #capacityWaiters: (() => void)[] = [];
 
   constructor(deps: AgentSessionHostDeps) { this.#deps = deps; }
 
@@ -255,12 +330,17 @@ export class AgentSessionHost {
     return { merged: false, conflicts: outcome.conflicts, detail: outcome.detail, winner };
   }
 
+  /**
+   * Console-path send: journal, then deliver by pushing into the recipient's
+   * lane input. Used by briefings, best-of-N fan-out, failure notices, and
+   * redelivery — the model-to-model path is native SendMessage governed by
+   * the middleware, which shares #journal via the SendGovernor surface.
+   */
   post(input: { agentSessionId: string; speaker: Speaker; to: string; handoff: HandoffDraft; category?: Category; dedupeKey?: string; deferWake?: boolean; turnId?: string }): MessageRow {
-    const { repo, bus } = this.#deps;
+    const { repo } = this.#deps;
     const session = repo.getAgentSession(input.agentSessionId);
     if (!session) throw notFound(`no agent session ${input.agentSessionId}`);
     if (session.status !== "open") throw conflict(`agent session ${input.agentSessionId} is archived`);
-    if (!this.#deps.handoffs) throw new Error("handoff service unavailable");
     this.#assertRoute(session.id, input.speaker.name, input.to);
     const category = input.category ?? "update";
     if (input.dedupeKey) {
@@ -268,44 +348,10 @@ export class AgentSessionHost {
       const priorMessage = prior ? repo.getMessageById(prior.messageId) : undefined;
       if (priorMessage) return priorMessage;
     }
-    if (input.speaker.name === ORCHESTRATOR_SEAT && input.to === MAIN_RECIPIENT && category === "final" && this.#deps.tasks) {
-      const incomplete = this.#deps.tasks.listForUserSession(session.userSessionId).filter((task) => task.agentSessionId === session.id && task.status !== "completed" && task.status !== "deleted");
-      if (incomplete.length > 0) throw badRequest(`cannot report final while ${incomplete.length} task(s) remain incomplete: ${incomplete.map((task) => task.subject).join(", ")}`);
-    }
-    if (input.speaker.name === ORCHESTRATOR_SEAT && input.to === MAIN_RECIPIENT && category === "final") {
-      const activeSpecialists = [...(this.#lanes.get(session.id)?.turns.keys() ?? [])].filter((name) => name !== ORCHESTRATOR_SEAT);
-      const pendingInternal = repo.listActiveDeliveries(session.id).filter((delivery) => delivery.recipient !== MAIN_RECIPIENT);
-      if (activeSpecialists.length > 0 || pendingInternal.length > 0) throw badRequest(`cannot report final while AgentSession work is active (${activeSpecialists.length} running, ${pendingInternal.length} queued/delivered)`);
-    }
-    const senderSeat = input.speaker.name === MAIN_RECIPIENT ? undefined : repo.getParticipant(session.id, input.speaker.name);
-    const prepared = this.#deps.handoffs.prepare({
-      draft: input.handoff, userSessionId: session.userSessionId, agentSessionId: session.id,
-      sender: input.speaker.name, recipient: input.to,
-      profileId: input.speaker.name === MAIN_RECIPIENT ? "main" : senderSeat?.profileId ?? null,
-      extensionKind: input.speaker.name === MAIN_RECIPIENT ? "coordination" : (senderSeat?.profileSnapshot as AgentProfile | undefined)?.handoffExtension,
-      generation: input.speaker.name === MAIN_RECIPIENT ? (repo.getUserSession(session.userSessionId)?.sdkGeneration ?? 0) : senderSeat?.generation ?? 0,
-      turnId: input.turnId, trigger: category as HandoffTrigger,
-      parentHandoffId: category === "assignment" ? null : (senderSeat?.latestHandoffId ?? (input.speaker.name === MAIN_RECIPIENT ? repo.getUserSession(session.userSessionId)?.latestHandoffId : null)),
-      ...(senderSeat?.worktreePath ? { resolveRoot: senderSeat.worktreePath } : {}),
+    this.#assertFinalGates(session, input.speaker.name, input.to, category);
+    const { message, delivery, text } = this.#journal(session, input.speaker, input.to, input.handoff, category, {
+      transport: "console", ...(input.dedupeKey ? { dedupeKey: input.dedupeKey } : {}), ...(input.turnId ? { turnId: input.turnId } : {}),
     });
-    const text = prepared.text;
-    const { message, delivery } = repo.appendHandoffMailbox({
-      sessionKind: "agent", sessionId: session.id, userSessionId: session.userSessionId,
-      agentSessionId: session.id, speaker: input.speaker, to: input.to, recipient: input.to,
-      kind: category === "decision" && session.phase === "planning" ? "plan" : "message",
-      text, category, handoff: prepared.row, summary: prepared.summary,
-      ...(input.turnId ? { turnId: input.turnId } : {}), ...(input.dedupeKey ? { dedupeKey: input.dedupeKey } : {}),
-    });
-    this.#deps.handoffs.committed(prepared.record);
-    if (senderSeat?.attemptRole === "attempt" && (prepared.record.core.status === "completed" || prepared.record.core.status === "failed")) {
-      this.#onAttemptPost(session, senderSeat, prepared.record.core.status);
-    } else if (senderSeat && senderSeat.attemptRole === null && senderSeat.worktreePath && (prepared.record.core.status === "completed" || prepared.record.core.status === "failed")) {
-      this.#onSeatWorktreePost(session, senderSeat, prepared.record.core.status);
-    }
-    bus.append({ type: "agent_session.message", userSessionId: session.userSessionId, agentSessionId: session.id,
-      payload: { agentSessionId: session.id, message: toWireMessage(message) } });
-    bus.append({ type: "agent_session.mailbox", userSessionId: session.userSessionId, agentSessionId: session.id,
-      payload: { agentSessionId: session.id, deliveryId: delivery.id, messageSeq: message.seq, sender: input.speaker.name, recipient: input.to, category, status: "queued" } });
     if (input.to === MAIN_RECIPIENT) {
       this.#patchDelivery(session, delivery, "acknowledged");
       if (category === "decision" && input.deferWake === true) {
@@ -316,15 +362,65 @@ export class AgentSessionHost {
         const deferred = this.#deferredDecisions.get(session.id) ?? [];
         this.#deferredDecisions.delete(session.id);
         const wakeText = deferred.length === 0 ? text : `${text}\n\nBatched nonblocking operator decisions:\n${deferred.map((decision, index) => `${index + 1}. ${decision}`).join("\n")}`;
-        bus.append({ type: "flow.result", userSessionId: session.userSessionId, agentSessionId: session.id,
+        this.#deps.bus.append({ type: "flow.result", userSessionId: session.userSessionId, agentSessionId: session.id,
           payload: { userSessionId: session.userSessionId, agentSessionId: session.id, digestPreview: text.slice(0, 140) } });
         this.#deps.wake?.(session.userSessionId, session.id, category, wakeText);
       }
     } else {
-      repo.patchParticipant(session.id, input.to, { pendingTurnSeq: message.seq });
-      this.#schedule(session.id);
+      void this.#deliverConsole(session.id, input.to).catch((error) => this.#recordHostFailure(session.id, error));
     }
     return message;
+  }
+
+  /** The category gates a `final` report must clear before it reaches main. */
+  #assertFinalGates(session: AgentSessionRow, sender: string, to: string, category: Category): void {
+    if (sender !== ORCHESTRATOR_SEAT || to !== MAIN_RECIPIENT || category !== "final") return;
+    if (this.#deps.tasks) {
+      const incomplete = this.#deps.tasks.listForUserSession(session.userSessionId).filter((task) => task.agentSessionId === session.id && task.status !== "completed" && task.status !== "deleted");
+      if (incomplete.length > 0) throw badRequest(`cannot report final while ${incomplete.length} task(s) remain incomplete: ${incomplete.map((task) => task.subject).join(", ")}`);
+    }
+    const lanes = this.#seats.get(session.id);
+    const activeSpecialists = [...(lanes?.entries() ?? [])].filter(([name, lane]) => name !== ORCHESTRATOR_SEAT && lane.activeTurn !== null).map(([name]) => name);
+    const pendingInternal = this.#deps.repo.listActiveDeliveries(session.id).filter((delivery) => delivery.recipient !== MAIN_RECIPIENT);
+    if (activeSpecialists.length > 0 || pendingInternal.length > 0) throw badRequest(`cannot report final while AgentSession work is active (${activeSpecialists.length} running, ${pendingInternal.length} queued/delivered)`);
+  }
+
+  /** Journal core shared by the console path and the SendMessage middleware. */
+  #journal(session: AgentSessionRow, speaker: Speaker, to: string, handoff: HandoffDraft, category: Category, opts: {
+    transport: MailboxDeliveryRow["transport"]; dedupeKey?: string; turnId?: string;
+  }): { message: MessageRow; delivery: MailboxDeliveryRow; text: string; handoffId: string } {
+    const { repo, bus } = this.#deps;
+    if (!this.#deps.handoffs) throw new Error("handoff service unavailable");
+    const senderSeat = speaker.name === MAIN_RECIPIENT ? undefined : repo.getParticipant(session.id, speaker.name);
+    const prepared = this.#deps.handoffs.prepare({
+      draft: handoff, userSessionId: session.userSessionId, agentSessionId: session.id,
+      sender: speaker.name, recipient: to,
+      profileId: speaker.name === MAIN_RECIPIENT ? "main" : senderSeat?.profileId ?? null,
+      extensionKind: speaker.name === MAIN_RECIPIENT ? "coordination" : (senderSeat?.profileSnapshot as AgentProfile | undefined)?.handoffExtension,
+      generation: speaker.name === MAIN_RECIPIENT ? (repo.getUserSession(session.userSessionId)?.sdkGeneration ?? 0) : senderSeat?.generation ?? 0,
+      turnId: opts.turnId, trigger: category as HandoffTrigger,
+      parentHandoffId: category === "assignment" ? null : (senderSeat?.latestHandoffId ?? (speaker.name === MAIN_RECIPIENT ? repo.getUserSession(session.userSessionId)?.latestHandoffId : null)),
+      ...(senderSeat?.worktreePath ? { resolveRoot: senderSeat.worktreePath } : {}),
+    });
+    const text = prepared.text;
+    const { message, delivery } = repo.appendHandoffMailbox({
+      sessionKind: "agent", sessionId: session.id, userSessionId: session.userSessionId,
+      agentSessionId: session.id, speaker, to, recipient: to,
+      kind: category === "decision" && session.phase === "planning" ? "plan" : "message",
+      text, category, transport: opts.transport, handoff: prepared.row, summary: prepared.summary,
+      ...(opts.turnId ? { turnId: opts.turnId } : {}), ...(opts.dedupeKey ? { dedupeKey: opts.dedupeKey } : {}),
+    });
+    this.#deps.handoffs.committed(prepared.record);
+    if (senderSeat?.attemptRole === "attempt" && (prepared.record.core.status === "completed" || prepared.record.core.status === "failed")) {
+      this.#onAttemptPost(session, senderSeat, prepared.record.core.status);
+    } else if (senderSeat && senderSeat.attemptRole === null && senderSeat.worktreePath && (prepared.record.core.status === "completed" || prepared.record.core.status === "failed")) {
+      this.#onSeatWorktreePost(session, senderSeat, prepared.record.core.status);
+    }
+    bus.append({ type: "agent_session.message", userSessionId: session.userSessionId, agentSessionId: session.id,
+      payload: { agentSessionId: session.id, message: toWireMessage(message) } });
+    bus.append({ type: "agent_session.mailbox", userSessionId: session.userSessionId, agentSessionId: session.id,
+      payload: { agentSessionId: session.id, deliveryId: delivery.id, messageSeq: message.seq, sender: speaker.name, recipient: to, category, status: "queued" } });
+    return { message, delivery, text, handoffId: prepared.row.id };
   }
 
   readSession(input: { agentSessionId: string; afterSeq?: number; limit?: number }) {
@@ -348,20 +444,47 @@ export class AgentSessionHost {
 
   wireSession(row: AgentSessionRow) { return toWireAgentSession(row, this.#specialists(row.id).map((p) => p.name), this.#statusOf(row) === "working"); }
 
+  /** Whole-session stop (archive/shutdown): every lane closes hard. */
   interrupt(agentSessionId: string): void {
-    for (const turn of this.#lanes.get(agentSessionId)?.turns.values() ?? []) {
-      turn.abort.abort(); void turn.query?.interrupt?.().catch(() => undefined);
+    for (const lane of this.#seats.get(agentSessionId)?.values() ?? []) this.#closeLaneHard(lane);
+  }
+
+  /**
+   * Scoped stop: abort one specialist's in-flight turn without touching its
+   * siblings. Its delivered work is cancelled so redelivery does not restart
+   * the same assignment; the lane survives for the corrected one.
+   */
+  interruptParticipant(agentSessionId: string, participant: string, reason: string): void {
+    const session = this.#deps.repo.getAgentSession(agentSessionId);
+    if (!session) throw notFound(`no agent session ${agentSessionId}`);
+    const lane = this.#seats.get(agentSessionId)?.get(participant);
+    if (!lane || lane.activeTurn === null) throw conflict(`${participant} has no turn in flight`);
+    for (const delivery of this.#deps.repo.listUnackedDeliveries(agentSessionId, participant)) {
+      if (delivery.status === "delivered") this.#patchDelivery(session, delivery, "cancelled");
     }
+    this.#deps.bus.append({ type: "agent_session.runtime", userSessionId: session.userSessionId, agentSessionId,
+      payload: { agentSessionId, participant, turnId: lane.activeTurn.turnId, detail: `stopped: ${reason}` } });
+    if (lane.activeTurn) lane.activeTurn.watchdog.tripped = `stopped: ${reason}`;
+    void lane.query?.interrupt?.().catch(() => undefined);
   }
 
   async closeAll(): Promise<void> {
     const pending: Promise<unknown>[] = [];
-    for (const lane of this.#lanes.values()) for (const turn of lane.turns.values()) {
-      turn.abort.abort();
-      if (turn.query?.interrupt) pending.push(turn.query.interrupt().catch(() => undefined));
-      turn.query?.close?.();
+    for (const lanes of this.#seats.values()) for (const lane of lanes.values()) {
+      this.#closeLaneHard(lane);
+      if (lane.pump) pending.push(lane.pump.catch(() => undefined));
     }
     await Promise.all(pending);
+  }
+
+  #closeLaneHard(lane: SeatLane): void {
+    lane.input?.close();
+    lane.abort?.abort();
+    void lane.query?.interrupt?.().catch(() => undefined);
+    lane.query?.close?.();
+    if (lane.idleTimer) { clearTimeout(lane.idleTimer); lane.idleTimer = null; }
+    lane.state = "parked";
+    this.#signalCapacity();
   }
 
   archiveForUserSession(userSessionId: string): void {
@@ -388,7 +511,15 @@ export class AgentSessionHost {
   }
 
   boot(): void {
-    for (const delivery of this.#deps.repo.listQueuedDeliveries()) this.#schedule(delivery.agentSessionId);
+    const wakes = new Set<string>();
+    for (const delivery of this.#deps.repo.listQueuedDeliveries()) {
+      if (delivery.recipient === MAIN_RECIPIENT) continue;
+      wakes.add(`${delivery.agentSessionId} ${delivery.recipient}`);
+    }
+    for (const key of wakes) {
+      const [agentSessionId, recipient] = key.split(" ") as [string, string];
+      void this.#deliverConsole(agentSessionId, recipient).catch((error) => this.#recordHostFailure(agentSessionId, error));
+    }
   }
 
   profiles(workspaceId?: string): AgentProfile[] { return this.#deps.profiles?.list(workspaceId) ?? []; }
@@ -396,36 +527,177 @@ export class AgentSessionHost {
     return { sandbox: fs.existsSync("/usr/bin/bwrap") || fs.existsSync("/usr/local/bin/bwrap"), chrome: fs.existsSync("/usr/bin/google-chrome") };
   }
 
-  /** Legacy observation seam retained only for importing/closing old native runs. */
-  observeAgentSpawn(callId: string, spawnName: string, agentSessionId: string, subagentType = ""): void {
-    const session = this.#deps.repo.getAgentSession(agentSessionId); if (!session) return;
-    const seat = seatOfSpawnName(spawnName, agentSessionId, this.#specialists(agentSessionId).map((p) => p.name));
-    if (seat === null) return;
-    const participant = seat === COORDINATOR_SEAT ? ORCHESTRATOR_SEAT : seat;
-    if (session.phase === "planning" && participant !== ORCHESTRATOR_SEAT && subagentType && !subagentType.endsWith("-planning")) {
-      this.#deps.repo.patchAgentSession(agentSessionId, { phase: "executing" });
-      this.#deps.bus.append({ type: "agent_session.phase", userSessionId: session.userSessionId, agentSessionId, payload: { agentSessionId, phase: "executing" } });
-    }
-    this.#legacyBindings.set(callId, { agentSessionId, participant, spawnName, agentId: null });
-    this.#deps.bus.append({ type: "agent_session.turn.started", userSessionId: session.userSessionId, agentSessionId, payload: { agentSessionId, participant, turnId: callId } });
-  }
-  confirmAgentLaunch(callId: string, agentId: string): void { const binding = this.#legacyBindings.get(callId); if (binding) binding.agentId = agentId; }
-  seatOf(callId: string): { agentSessionId: string; participant: string } | null { const b = this.#legacyBindings.get(callId); return b ? { agentSessionId: b.agentSessionId, participant: b.participant } : null; }
-  seatOfSpawnAddress(to: string): { agentSessionId: string; participant: string; callId: string } | null { for (const [callId, b] of this.#legacyBindings) if (b.spawnName === to) return { agentSessionId: b.agentSessionId, participant: b.participant, callId }; return null; }
-  hasCoordinator(agentSessionId: string): boolean { return [...this.#legacyBindings.values()].some((b) => b.agentSessionId === agentSessionId && b.participant === ORCHESTRATOR_SEAT); }
-  releaseAgent(agentId: string): void { for (const [callId, b] of this.#legacyBindings) if (b.agentId === agentId) { this.#releaseLegacy(callId, b, "completed"); return; } }
-  releaseSpawnCall(callId: string): void { const b = this.#legacyBindings.get(callId); if (b) this.#releaseLegacy(callId, b, "aborted"); }
-  recordDerivedMessage(input: { agentSessionId: string; speaker: { kind: "orchestrator" | "agent"; name: string }; to?: string; text: string }): void {
-    const session = this.#deps.repo.getAgentSession(input.agentSessionId); if (!session) return;
-    const isPlan = session.phase === "planning" && input.speaker.kind === "agent" && input.to === ORCHESTRATOR_SEAT;
-    const row = this.#deps.repo.appendMessage({ sessionKind: "agent", sessionId: session.id, speaker: input.speaker, ...(input.to ? { to: input.to } : {}), kind: isPlan ? "plan" : "message", text: input.text });
-    this.#deps.bus.append({ type: "agent_session.message", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { agentSessionId: session.id, message: toWireMessage(row) } });
-    if (isPlan) this.#deps.bus.append({ type: "agent_session.plan.captured", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { agentSessionId: session.id, participant: input.speaker.name, plan: input.text } });
+  /**
+   * The governance surface the SendMessage middleware runs against. One
+   * governor serves every identity — seats get it via #buildSeatHooks, the
+   * orchestrator runner via its own middleware build with a main identity.
+   */
+  governor(): SendGovernor {
+    return {
+      resolve: (identity, name) => this.#resolvePeer(identity, name),
+      assertSendAllowed: (identity, recipient, envelope) => this.#assertSendAllowed(identity, recipient, envelope),
+      journal: (identity, recipient, envelope, raw) => this.#journalPeer(identity, recipient, envelope, raw),
+      ensureLive: (recipient, timeoutMs) => this.#ensureLiveForSend(recipient, timeoutMs),
+      markDelivered: (deliveryId, msgId) => this.#settleCarry(deliveryId, "delivered", msgId),
+      markCarryFailed: (deliveryId, reason) => this.#settleCarry(deliveryId, "failed", reason),
+    };
   }
 
-  #releaseLegacy(callId: string, binding: { agentSessionId: string; participant: string }, status: "completed" | "aborted"): void {
-    this.#legacyBindings.delete(callId); const session = this.#deps.repo.getAgentSession(binding.agentSessionId); if (!session) return;
-    this.#deps.bus.append({ type: "agent_session.turn.settled", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { agentSessionId: session.id, participant: binding.participant, turnId: callId, status } });
+  #resolvePeer(identity: SenderIdentity, name: string): ResolvedRecipient | { error: string } {
+    const { repo } = this.#deps;
+    const prefix = this.#deps.config?.peerNamePrefix ?? "console-";
+    if (identity.kind === "seat") {
+      const session = repo.getAgentSession(identity.agentSessionId);
+      if (!session) return { error: `unknown agent session ${identity.agentSessionId}` };
+      if (name === MAIN_RECIPIENT || name === mainPeerName(prefix, session.userSessionId)) {
+        return { scope: "main", peerName: mainPeerName(prefix, session.userSessionId) };
+      }
+      const alias = name === "coordinator" ? ORCHESTRATOR_SEAT : name;
+      for (const participant of repo.listParticipants(identity.agentSessionId)) {
+        if (participant.name === alias || participant.peerName === name) {
+          return { scope: "seat", agentSessionId: identity.agentSessionId, seat: participant.name, peerName: participant.peerName };
+        }
+      }
+      const roster = repo.listParticipants(identity.agentSessionId).map((p) => p.name).join(", ");
+      return { error: `unknown recipient "${name}" — valid addresses: ${roster}, main` };
+    }
+    const sessions = repo.listAgentSessions(identity.userSessionId).filter((row) => row.status === "open");
+    for (const session of sessions) {
+      const coordinator = repo.getParticipant(session.id, ORCHESTRATOR_SEAT);
+      if (coordinator && (coordinator.peerName === name || (name === ORCHESTRATOR_SEAT && sessions.length === 1))) {
+        return { scope: "seat", agentSessionId: session.id, seat: ORCHESTRATOR_SEAT, peerName: coordinator.peerName };
+      }
+    }
+    const addresses = sessions.map((session) => repo.getParticipant(session.id, ORCHESTRATOR_SEAT)?.peerName).filter(Boolean).join(", ");
+    return { error: `unknown recipient "${name}" — main may address coordinators only: ${addresses || "none open"}` };
+  }
+
+  #assertSendAllowed(identity: SenderIdentity, recipient: ResolvedRecipient, envelope: SendEnvelope): string | null {
+    try {
+      if (identity.kind === "main") {
+        if (recipient.scope !== "seat" || recipient.seat !== ORCHESTRATOR_SEAT) {
+          return "main may address coordinators only; direct specialist messaging is intentionally forbidden";
+        }
+        if (envelope.category !== "assignment" && envelope.category !== "update") {
+          return `main sends assignment or update, not ${envelope.category}`;
+        }
+        return null;
+      }
+      const session = this.#deps.repo.getAgentSession(identity.agentSessionId);
+      if (!session) return `unknown agent session ${identity.agentSessionId}`;
+      if (session.status !== "open") return `agent session ${identity.agentSessionId} is archived`;
+      const to = recipient.scope === "main" ? MAIN_RECIPIENT : recipient.seat as string;
+      this.#assertRoute(identity.agentSessionId, identity.seat, to);
+      this.#assertFinalGates(session, identity.seat, to, envelope.category);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  #journalPeer(identity: SenderIdentity, recipient: ResolvedRecipient, envelope: SendEnvelope, raw: string): JournalResult {
+    const { repo } = this.#deps;
+    if (identity.kind === "main") throw new Error("main sends journal through the runner's governor binding");
+    const session = repo.getAgentSession(identity.agentSessionId);
+    if (!session) throw new Error(`unknown agent session ${identity.agentSessionId}`);
+    const to = recipient.scope === "main" ? MAIN_RECIPIENT : recipient.seat as string;
+    const speaker: Speaker = { kind: identity.seat === ORCHESTRATOR_SEAT ? "orchestrator" : "agent", name: identity.seat };
+    // Idempotency for the ref-confirmation retry: an identical unacknowledged
+    // send reuses its journal row instead of forking a second handoff.
+    const fingerprint = `${session.id} ${identity.seat} ${to} ${raw}`;
+    const recent = this.#recentPeerSends.get(fingerprint);
+    if (recent && Date.now() - recent.at < 600_000) {
+      const existing = repo.getDeliveryById(recent.deliveryId);
+      const message = existing ? repo.getMessageById(existing.messageId) : undefined;
+      if (existing && message && (existing.status === "queued" || existing.status === "delivered")) {
+        const handoffId = (message.payload?.handoff as { id?: string } | undefined)?.id ?? "";
+        return { deliveryId: existing.id, handoffId, renderedBody: message.text, summary: this.#sendSummary(identity.seat, envelope), reused: true };
+      }
+    }
+    if (envelope.dedupeKey) {
+      const prior = repo.findDeliveryByDedupe(session.id, identity.seat, to, envelope.dedupeKey);
+      if (prior && prior.status === "acknowledged") throw new Error(`duplicate of delivery ${prior.id}; already delivered — do not resend`);
+      if (prior && (prior.status === "queued" || prior.status === "delivered")) {
+        const message = repo.getMessageById(prior.messageId);
+        if (message) {
+          const handoffId = (message.payload?.handoff as { id?: string } | undefined)?.id ?? "";
+          return { deliveryId: prior.id, handoffId, renderedBody: message.text, summary: this.#sendSummary(identity.seat, envelope), reused: true };
+        }
+      }
+    }
+    const { message, delivery, text, handoffId } = this.#journal(session, speaker, to, envelope.handoff, envelope.category, {
+      transport: "peer", ...(envelope.dedupeKey ? { dedupeKey: envelope.dedupeKey } : {}),
+      ...(this.#seats.get(session.id)?.get(identity.seat)?.activeTurn ? { turnId: this.#seats.get(session.id)?.get(identity.seat)?.activeTurn?.turnId } : {}),
+    });
+    this.#recentPeerSends.set(fingerprint, { deliveryId: delivery.id, at: Date.now() });
+    if (this.#recentPeerSends.size > 512) {
+      const cutoff = Date.now() - 600_000;
+      for (const [key, entry] of this.#recentPeerSends) if (entry.at < cutoff) this.#recentPeerSends.delete(key);
+    }
+    // The envelope carries the seat's own stability claim; a turn that ends
+    // without any send is presumptively unstable (settle handles that side).
+    const lane = this.#seats.get(session.id)?.get(identity.seat);
+    if (lane?.activeTurn) lane.activeTurn.sawSend = true;
+    repo.patchParticipant(session.id, identity.seat, { checkpointReady: envelope.checkpointReadiness !== "defer" });
+    if (to === MAIN_RECIPIENT && MATERIAL_CATEGORIES.has(envelope.category)) {
+      this.#deps.bus.append({ type: "flow.result", userSessionId: session.userSessionId, agentSessionId: session.id,
+        payload: { userSessionId: session.userSessionId, agentSessionId: session.id, digestPreview: text.slice(0, 140) } });
+    }
+    return { deliveryId: delivery.id, handoffId, renderedBody: text, summary: this.#sendSummary(identity.seat, envelope), reused: false };
+  }
+
+  #sendSummary(sender: string, envelope: SendEnvelope): string {
+    return `${envelope.category} from ${sender}: ${envelope.handoff.core.action}`.slice(0, 190);
+  }
+
+  /** Middleware wake: make the recipient's inbox socket exist and pin it live. */
+  async #ensureLiveForSend(recipient: ResolvedRecipient, timeoutMs: number): Promise<(() => void) | null> {
+    try {
+      if (recipient.scope === "main") {
+        // The runner lane is respawned by its own machinery; native carry to a
+        // cold lane fails into markCarryFailed → the wake fallback delivers.
+        return () => undefined;
+      }
+      const deadline = Date.now() + timeoutMs;
+      await this.ensureSeatLive(recipient.agentSessionId as string, recipient.seat as string, deadline);
+      const lane = this.#seats.get(recipient.agentSessionId as string)?.get(recipient.seat as string);
+      if (!lane) return null;
+      return this.#takeHold(lane);
+    } catch {
+      return null;
+    }
+  }
+
+  #takeHold(lane: SeatLane): () => void {
+    lane.holds += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      lane.holds -= 1;
+    };
+  }
+
+  #settleCarry(deliveryId: string, outcome: "delivered" | "failed", detail: string | null): void {
+    const { repo } = this.#deps;
+    const delivery = repo.getDeliveryById(deliveryId);
+    if (!delivery) return;
+    const session = repo.getAgentSession(delivery.agentSessionId);
+    if (!session) return;
+    if (outcome === "delivered") {
+      // Main has no settle-based ack loop; the carry receipt is its ack.
+      this.#patchDelivery(session, delivery, delivery.recipient === MAIN_RECIPIENT ? "acknowledged" : "delivered");
+      return;
+    }
+    this.#deps.bus.append({ type: "agent_session.runtime", userSessionId: session.userSessionId, agentSessionId: session.id,
+      payload: { agentSessionId: session.id, participant: delivery.sender, detail: `native carry failed for ${deliveryId}; console redelivery takes over (${(detail ?? "").slice(0, 200)})` } });
+    if (delivery.recipient === MAIN_RECIPIENT) {
+      const message = repo.getMessageById(delivery.messageId);
+      this.#patchDelivery(session, delivery, "acknowledged");
+      if (message && MATERIAL_CATEGORIES.has(delivery.category)) this.#deps.wake?.(session.userSessionId, session.id, delivery.category, message.text);
+      return;
+    }
+    void this.#deliverConsole(session.id, delivery.recipient).catch((error) => this.#recordHostFailure(session.id, error));
   }
 
   /**
@@ -628,101 +900,115 @@ export class AgentSessionHost {
     if (!valid) throw badRequest(`route ${sender} → ${recipient} is not allowed; communication is main ↔ coordinator ↔ specialist`);
   }
 
-  #lane(id: string): Lane {
-    let lane = this.#lanes.get(id);
-    if (!lane) { lane = { chain: Promise.resolve(), turns: new Map(), lastStatus: null }; this.#lanes.set(id, lane); }
+  // ── Persistent seat lanes ────────────────────────────────────────────────
+
+  #laneOf(agentSessionId: string, seat: string): SeatLane {
+    let lanes = this.#seats.get(agentSessionId);
+    if (!lanes) { lanes = new Map(); this.#seats.set(agentSessionId, lanes); }
+    let lane = lanes.get(seat);
+    if (!lane) {
+      lane = { state: "unspawned", input: null, query: null, abort: null, pump: null, ready: null,
+        activeTurn: null, pendingDeliveries: [], holds: 0, rotationGate: null, releaseRotation: null,
+        idleTimer: null, assignmentTurns: 0, lastActiveAt: 0, lastStatus: null };
+      lanes.set(seat, lane);
+    }
     return lane;
   }
 
-  #schedule(id: string): void {
-    if (!this.#deps.sdk || !this.#deps.config) return;
-    const lane = this.#lane(id);
-    lane.chain = lane.chain.then(() => this.#drain(id)).catch((error) => this.#recordHostFailure(id, error));
+  /** Spawn or unpark a seat so its peer session is registered and accepting input. */
+  async ensureSeatLive(agentSessionId: string, seat: string, deadline?: number): Promise<void> {
+    const { repo } = this.#deps;
+    const until = deadline ?? Date.now() + (this.#deps.config?.sendWakeTimeoutMs ?? 30_000);
+    const lane = this.#laneOf(agentSessionId, seat);
+    while (lane.rotationGate) await lane.rotationGate;
+    if (lane.state === "live" || lane.state === "waking") { await lane.ready; return; }
+    const session = repo.getAgentSession(agentSessionId);
+    if (!session || session.status !== "open") throw conflict(`agent session ${agentSessionId} is not open`);
+    const seatRow = repo.getParticipant(agentSessionId, seat);
+    if (!seatRow) throw notFound(`no participant ${seat} in ${agentSessionId}`);
+    await this.#reserveCapacity(agentSessionId, until);
+    const raced = lane.state as SeatLane["state"];
+    if (raced === "live" || raced === "waking") { await lane.ready; return; }
+    this.#spawnSeat(session, seatRow, lane);
+    await lane.ready;
+    // A respawn may inherit rows the previous process took delivery of but
+    // never consumed; requeue them so the console path re-carries exactly once.
+    const stale = repo.listUnackedDeliveries(agentSessionId, seat).filter((row) => row.status === "delivered" && row.transport === "console");
+    for (const row of stale) repo.patchDelivery(row.id, { status: "queued", deliveredAt: null });
   }
 
-  async #drain(id: string): Promise<void> {
+  #resident(agentSessionId?: string): number {
+    let count = 0;
+    for (const [sessionId, lanes] of this.#seats) {
+      if (agentSessionId !== undefined && sessionId !== agentSessionId) continue;
+      for (const lane of lanes.values()) if (lane.state === "live" || lane.state === "waking" || lane.state === "rotating") count += 1;
+    }
+    return count;
+  }
+
+  /** Resident CLI processes are the scarce resource now, not concurrent turns. */
+  async #reserveCapacity(agentSessionId: string, until: number): Promise<void> {
     const config = this.#deps.config;
     if (!config) return;
-    const session = this.#deps.repo.getAgentSession(id);
-    if (!session || session.status !== "open") return;
-    const lane = this.#lane(id);
-    const queued = this.#deps.repo.listQueuedDeliveries(id);
-    for (const recipient of new Set(queued.map((d) => d.recipient))) {
-      if (recipient === MAIN_RECIPIENT || lane.turns.has(recipient)) continue;
-      if (lane.turns.size >= config.perAgentSessionTurns || this.#globalTurns >= config.globalAgentTurns) break;
-      this.#startTurn(session, recipient);
+    for (;;) {
+      if (this.#resident() < config.seatMaxResident && this.#resident(agentSessionId) < config.seatMaxResidentPerSession) return;
+      if (this.#parkLeastRecentIdle()) continue;
+      if (Date.now() >= until) throw new Error("no resident seat capacity");
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, Math.min(1_000, Math.max(50, until - Date.now())));
+        timer.unref?.();
+        this.#capacityWaiters.push(() => { clearTimeout(timer); resolve(); });
+      });
     }
-    this.#setStatus(id, lane.turns.size > 0 || queued.some((d) => d.recipient !== MAIN_RECIPIENT) ? "working" : "idle");
   }
 
-  #startTurn(session: AgentSessionRow, participant: string): void {
-    const seat = this.#deps.repo.getParticipant(session.id, participant);
-    if (!seat) return;
-    const deliveries = this.#deps.repo.listQueuedDeliveries(session.id).filter((d) => d.recipient === participant);
-    if (deliveries.length === 0) return;
-    const abort = new AbortController();
-    const flight: Flight = { abort, query: null };
-    const lane = this.#lane(session.id);
-    lane.turns.set(participant, flight); this.#globalTurns += 1;
-    const turnId = newId("turn");
-    for (const delivery of deliveries) this.#patchDelivery(session, delivery, "delivered");
-    this.#deps.bus.append({ type: "agent_session.turn.started", userSessionId: session.userSessionId, agentSessionId: session.id,
-      payload: { agentSessionId: session.id, participant, turnId } });
-    void this.#runTurn(session, seat, deliveries, turnId, flight).finally(() => {
-      lane.turns.delete(participant); this.#globalTurns -= 1; this.#schedule(session.id);
-      for (const other of this.#lanes.keys()) if (other !== session.id) this.#schedule(other);
-    });
+  #parkLeastRecentIdle(): boolean {
+    let victim: { sessionId: string; seat: string; lane: SeatLane } | null = null;
+    for (const [sessionId, lanes] of this.#seats) for (const [seat, lane] of lanes) {
+      if (lane.state !== "live" || lane.activeTurn !== null || lane.holds > 0) continue;
+      if (this.#deps.repo.listUnackedDeliveries(sessionId, seat).length > 0) continue;
+      if (!victim || lane.lastActiveAt < victim.lane.lastActiveAt) victim = { sessionId, seat, lane };
+    }
+    if (!victim) return false;
+    this.#parkSeat(victim.sessionId, victim.seat, victim.lane, "capacity");
+    return true;
   }
 
-  async #runTurn(session: AgentSessionRow, seat: ParticipantRow, deliveries: MailboxDeliveryRow[], turnId: string, flight: Flight): Promise<void> {
-    const { repo, bus } = this.#deps;
-    const runtime = new RuntimeBroadcaster(bus, { kind: "agent", sessionId: session.id }, seat.name,
-      { userSessionId: session.userSessionId, agentSessionId: session.id });
-    let status: "completed" | "error" | "aborted" = "completed";
-    let errorMessage: string | undefined;
-    let output: Record<string, unknown> = {};
-    const sentThisTurn = new Set<string>();
-    const startedAt = Date.now();
-    const toolStarts = new Map<string, number>();
-    const watchdog = { lastKey: "", identical: 0, errorStreak: 0,
-      tripped: null as null | { kind: "repeat_tool_calls" | "tool_error_streak"; detail: string; toolName?: string; count: number } };
-    const trip = (tripped: NonNullable<typeof watchdog.tripped>, flightRef: Flight) => {
-      if (watchdog.tripped) return;
-      watchdog.tripped = tripped;
-      bus.append({ type: "agent_session.watchdog", userSessionId: session.userSessionId, agentSessionId: session.id,
-        payload: { agentSessionId: session.id, participant: seat.name, turnId, kind: tripped.kind,
-          ...(tripped.toolName ? { toolName: tripped.toolName } : {}), count: tripped.count, detail: tripped.detail } });
-      flightRef.abort.abort();
-      void flightRef.query?.interrupt?.()?.catch?.(() => undefined);
-    };
-    let latestSeat = seat;
-    try {
-      const sdk = await this.#deps.sdk?.();
-      if (!sdk) throw new Error("SDK unavailable");
-      latestSeat = await this.#rotateIfNeeded(session, seat, sdk, flight);
-      const user = repo.getUserSession(session.userSessionId);
-      if (!user || !this.#deps.getWorkspaceRoot) throw new Error("workspace unavailable");
-      latestSeat = this.#ensureSeatWorktree(session, latestSeat, this.#deps.getWorkspaceRoot(user.workspaceId));
+  #signalCapacity(): void {
+    this.#capacityWaiters.shift()?.();
+  }
+
+  #spawnSeat(session: AgentSessionRow, seatRow: ParticipantRow, lane: SeatLane): void {
+    if (!this.#deps.sdk || !this.#deps.config || !this.#deps.getWorkspaceRoot) throw new Error("SDK unavailable");
+    lane.state = "waking";
+    lane.abort = new AbortController();
+    lane.input = new AsyncQueue<SdkUserMessageLike>();
+    lane.lastActiveAt = Date.now();
+    lane.ready = (async () => {
+      const sdk = await this.#deps.sdk!();
+      const user = this.#deps.repo.getUserSession(session.userSessionId);
+      if (!user) throw new Error("workspace unavailable");
+      const workspaceRoot = this.#deps.getWorkspaceRoot!(user.workspaceId);
+      const latestSeat = this.#ensureSeatWorktree(session, this.#deps.repo.getParticipant(session.id, seatRow.name) ?? seatRow, workspaceRoot);
       const profile = latestSeat.profileSnapshot as AgentProfile;
-      const mcp = this.#buildParticipantMcp(sdk, session, latestSeat, flight.abort.signal, sentThisTurn);
-      const messages = deliveries.map((delivery) => repo.getMessageById(delivery.messageId)).filter((row): row is MessageRow => row !== undefined);
-      const prompt = this.#composePrompt(session, latestSeat, messages);
-      // A worktree'd seat lives in its isolated copy: cwd and writes stay
-      // there; the real workspace remains readable so git history resolves.
-      const workspaceRoot = this.#deps.getWorkspaceRoot(user.workspaceId);
       const seatRoot = latestSeat.worktreePath ?? workspaceRoot;
+      const mcp = this.#buildParticipantMcp(sdk, session, latestSeat, lane.abort!.signal);
       const options: SdkOptions = {
         cwd: seatRoot,
-        systemPrompt: { type: "preset", preset: "claude_code", append: `${latestSeat.instructions}${this.#checkpointContext(latestSeat)}${latestSeat.worktreePath && !latestSeat.attemptRole ? "\n\nYou work in an isolated worktree (your cwd); the Console merges your changes into the workspace when you report completed. Never run git commit. Install dependencies only if you must run validation." : ""}\n\nUse mcp__console_agent__send_message for all communication. Never use native SendMessage or Agent tools.` },
+        systemPrompt: { type: "preset", preset: "claude_code", append: `${latestSeat.instructions}${this.#checkpointContext(latestSeat)}${latestSeat.worktreePath && !latestSeat.attemptRole ? "\n\nYou work in an isolated worktree (your cwd); the Console merges your changes into the workspace when you report completed. Never run git commit. Install dependencies only if you must run validation." : ""}\n\n${seatMessagingBrief(this.#roster(session), latestSeat.name)}` },
         settingSources: [], includePartialMessages: true,
+        settings: { crossSessionInbound: "accept" } as unknown as SdkOptions["settings"],
         permissionMode: session.phase === "planning" ? "plan" : profile.permissionMode,
         ...(profile.permissionMode === "bypassPermissions" && session.phase !== "planning" ? { allowDangerouslySkipPermissions: true } : {}),
-        allowedTools: [...profile.tools, ...this.#runtimeToolNames(profile, latestSeat.name, latestSeat.attemptRole)],
-        disallowedTools: ["Agent", "SendMessage", "Task", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet"],
-        outputFormat: { type: "json_schema", schema: OUTPUT_SCHEMA }, maxTurns: profile.maxTurns,
+        allowedTools: [...profile.tools, "SendMessage",
+          ...(latestSeat.name === ORCHESTRATOR_SEAT ? ["TaskCreate", "TaskUpdate", "TaskGet", "TaskList"] : []),
+          ...this.#runtimeToolNames(profile, latestSeat.name, latestSeat.attemptRole)],
+        disallowedTools: ["Agent", "Task",
+          ...(latestSeat.name === ORCHESTRATOR_SEAT ? [] : ["TaskCreate", "TaskUpdate", "TaskList", "TaskGet"])],
+        hooks: this.#buildSeatHooks(session, latestSeat) as SdkOptions["hooks"],
         sandbox: { enabled: true, failIfUnavailable: profile.sandboxRequired, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: false,
           filesystem: { allowManagedReadPathsOnly: true, allowRead: latestSeat.worktreePath ? [seatRoot, workspaceRoot] : [workspaceRoot], allowWrite: [seatRoot] } },
-        env: sdkEnv(), abortController: flight.abort, persistSession: true,
+        env: sdkEnv({ sessionName: latestSeat.peerName }), abortController: lane.abort!, persistSession: true,
         sessionStore: this.#deps.sessionStore as never, sessionStoreFlush: "eager",
         mcpServers: { console_agent: mcp as never },
         ...(latestSeat.model ? { model: latestSeat.model } : {}),
@@ -731,99 +1017,291 @@ export class AgentSessionHost {
         ...((profile.effort ?? this.#deps.config?.effort) ? { effort: (profile.effort ?? this.#deps.config?.effort) as SdkOptions["effort"] } : {}),
         ...(latestSeat.sdkSessionId ? { resume: latestSeat.sdkSessionId } : {}),
       };
-      runtime.set("thinking");
-      const query = sdk.query({ prompt, options }); flight.query = query;
-      try {
-        for await (const raw of query) {
-          for (const event of mapSdkMessage(raw)) {
-            if ("parentCallId" in event && event.parentCallId) continue;
-            if (event.kind === "resume") repo.patchParticipant(session.id, seat.name, { sdkSessionId: event.resumeId });
-            else if (event.kind === "delta") { runtime.set("responding"); bus.broadcast({ type: "stream.delta", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { scope: { kind: "agent", sessionId: session.id }, speaker: seat.name, turnId, text: event.text } }); }
-            else if (event.kind === "reasoning-delta") { runtime.set("thinking"); bus.broadcast({ type: "stream.reasoning", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { scope: { kind: "agent", sessionId: session.id }, speaker: seat.name, turnId, text: event.text } }); }
-            else if (event.kind === "message") this.#recordNarration(session, seat.name, event.text, turnId);
-            else if (event.kind === "notice") { runtime.note(event.text); bus.append({ type: "agent_session.runtime", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { agentSessionId: session.id, participant: seat.name, turnId, detail: event.text } }); }
-            else if (event.kind === "tool.call") {
-              toolStarts.set(event.callId, Date.now()); runtime.set("tool", event.name); bus.append({ type: "agent_session.tool.call", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { sessionId: session.id, participant: seat.name, turnId, callId: event.callId, name: event.name, input: bus.capture(event.input, { userSessionId: session.userSessionId, agentSessionId: session.id }) } });
-              const key = `${event.name} ${stableStringify(event.input)}`;
-              watchdog.identical = key === watchdog.lastKey ? watchdog.identical + 1 : 1;
-              watchdog.lastKey = key;
-              if (watchdog.identical >= WATCHDOG_IDENTICAL_CALLS) trip({ kind: "repeat_tool_calls", toolName: event.name, count: watchdog.identical,
-                detail: `watchdog: ${watchdog.identical} identical consecutive calls to ${event.name}` }, flight);
-            }
-            else if (event.kind === "tool.result") {
-              const captured = bus.captureSized(event.output, { userSessionId: session.userSessionId, agentSessionId: session.id });
-              const toolStartedAt = toolStarts.get(event.callId); toolStarts.delete(event.callId);
-              runtime.set("thinking"); bus.append({ type: "agent_session.tool.result", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { sessionId: session.id, participant: seat.name, turnId, callId: event.callId, output: captured.value, bytes: captured.bytes, ...(toolStartedAt === undefined ? {} : { durationMs: Date.now() - toolStartedAt }), ...(event.isError ? { isError: true } : {}) } });
-              watchdog.errorStreak = event.isError ? watchdog.errorStreak + 1 : 0;
-              if (watchdog.errorStreak >= WATCHDOG_ERROR_STREAK) trip({ kind: "tool_error_streak", count: watchdog.errorStreak,
-                detail: `watchdog: ${watchdog.errorStreak} consecutive tool errors` }, flight);
-            }
-            else if (event.kind === "result") {
-              output = event.output && typeof event.output === "object" ? event.output as Record<string, unknown> : {};
-              repo.patchParticipant(session.id, seat.name, { ...(event.resumeId ? { sdkSessionId: event.resumeId } : {}), contextTokens: Math.max(latestSeat.contextTokens, event.inputTokens ?? 0) });
-              this.#recordUsage(session, latestSeat, turnId, event, "completed", Date.now() - startedAt);
-            }
-            else if (event.kind === "error") { status = event.aborted ? "aborted" : "error"; errorMessage = event.message; this.#recordUsage(session, latestSeat, turnId, event, status, Date.now() - startedAt); }
-            if (watchdog.tripped) break;
+      const query = sdk.query({ prompt: lane.input as AsyncIterable<SdkUserMessageLike>, options });
+      lane.query = query;
+      lane.state = "live";
+      lane.pump = this.#pumpSeat(session, latestSeat.name, lane, query).catch((error) => this.#recordHostFailure(session.id, error));
+    })().catch((error) => {
+      lane.state = "parked";
+      lane.input?.close(); lane.input = null;
+      this.#signalCapacity();
+      throw error;
+    });
+  }
+
+  #roster(session: AgentSessionRow): string {
+    return this.#deps.repo.listParticipants(session.id).map((p) => {
+      const scopes = p.ownership.slice(0, 3).join(", ") + (p.ownership.length > 3 ? ` +${p.ownership.length - 3} more` : "");
+      return `${p.name} (${p.profileId}; owns: ${scopes || "coordination"})`;
+    }).join("; ");
+  }
+
+  #buildSeatHooks(session: AgentSessionRow, seat: ParticipantRow): SdkHooksFragment {
+    const config = this.#deps.config;
+    const fragments: SdkHooksFragment[] = [buildSendMessageMiddleware({
+      identity: { kind: "seat", agentSessionId: session.id, seat: seat.name },
+      governor: this.governor(),
+      sendWakeTimeoutMs: config?.sendWakeTimeoutMs ?? 30_000,
+      deliveryHoldLeaseMs: config?.deliveryHoldLeaseMs ?? 60_000,
+    })];
+    const user = this.#deps.repo.getUserSession(session.userSessionId);
+    if (this.#deps.tasks && user && seat.name === ORCHESTRATOR_SEAT) {
+      fragments.push(buildTaskHooks(this.#deps.tasks, {
+        workspaceId: user.workspaceId, userSessionId: session.userSessionId,
+        agentSessionId: session.id, participant: seat.name,
+      }) as SdkHooksFragment);
+    }
+    return mergeHooks(fragments);
+  }
+
+  async #pumpSeat(session: AgentSessionRow, seatName: string, lane: SeatLane, query: QueryHandle): Promise<void> {
+    const { repo, bus } = this.#deps;
+    const runtime = new RuntimeBroadcaster(bus, { kind: "agent", sessionId: session.id }, seatName,
+      { userSessionId: session.userSessionId, agentSessionId: session.id });
+    try {
+      for await (const raw of query) {
+        for (const event of mapSdkMessage(raw)) {
+          if ("parentCallId" in event && event.parentCallId) continue;
+          if (event.kind === "resume") { repo.patchParticipant(session.id, seatName, { sdkSessionId: event.resumeId }); continue; }
+          if (event.kind === "turn-idle") { this.#settleSeatTurn(session, seatName, lane, runtime, "completed"); continue; }
+          if (event.kind === "task-terminal") { runtime.note(event.summary); continue; }
+          if (event.kind === "notice") {
+            runtime.note(event.text);
+            bus.append({ type: "agent_session.runtime", userSessionId: session.userSessionId, agentSessionId: session.id,
+              payload: { agentSessionId: session.id, participant: seatName, ...(lane.activeTurn ? { turnId: lane.activeTurn.turnId } : {}), detail: event.text } });
+            continue;
           }
-          // The provider (and the fake, whose string-prompt interrupt only
-          // records) may keep streaming after our abort — leave explicitly.
-          if (watchdog.tripped) break;
+          // An event with no open turn is native inbound waking the seat.
+          if (!lane.activeTurn && (event.kind === "delta" || event.kind === "reasoning-delta" || event.kind === "message" || event.kind === "tool.call" || event.kind === "peer-message")) {
+            this.#mintTurn(session, seatName, lane, "peer", []);
+          }
+          const turn = lane.activeTurn;
+          const turnId = turn?.turnId ?? "";
+          if (event.kind === "delta") {
+            runtime.set("responding");
+            bus.broadcast({ type: "stream.delta", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { scope: { kind: "agent", sessionId: session.id }, speaker: seatName, turnId, text: event.text } });
+          } else if (event.kind === "reasoning-delta") {
+            runtime.set("thinking");
+            bus.broadcast({ type: "stream.reasoning", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { scope: { kind: "agent", sessionId: session.id }, speaker: seatName, turnId, text: event.text } });
+          } else if (event.kind === "message") {
+            this.#recordNarration(session, seatName, event.text, turnId);
+          } else if (event.kind === "tool.call") {
+            turn?.toolStarts.set(event.callId, Date.now());
+            runtime.set("tool", event.name);
+            bus.append({ type: "agent_session.tool.call", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { sessionId: session.id, participant: seatName, turnId, callId: event.callId, name: event.name, input: bus.capture(event.input, { userSessionId: session.userSessionId, agentSessionId: session.id }) } });
+            if (turn) {
+              const key = `${event.name} ${stableStringify(event.input)}`;
+              turn.watchdog.identical = key === turn.watchdog.lastKey ? turn.watchdog.identical + 1 : 1;
+              turn.watchdog.lastKey = key;
+              if (turn.watchdog.identical >= WATCHDOG_IDENTICAL_CALLS) {
+                this.#tripWatchdog(session, seatName, lane, { kind: "repeat_tool_calls", toolName: event.name, count: turn.watchdog.identical,
+                  detail: `watchdog: ${turn.watchdog.identical} identical consecutive calls to ${event.name}` });
+              }
+            }
+          } else if (event.kind === "tool.result") {
+            const captured = bus.captureSized(event.output, { userSessionId: session.userSessionId, agentSessionId: session.id });
+            const startedAt = turn?.toolStarts.get(event.callId); turn?.toolStarts.delete(event.callId);
+            runtime.set("thinking");
+            bus.append({ type: "agent_session.tool.result", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { sessionId: session.id, participant: seatName, turnId, callId: event.callId, output: captured.value, bytes: captured.bytes, ...(startedAt === undefined ? {} : { durationMs: Date.now() - startedAt }), ...(event.isError ? { isError: true } : {}) } });
+            if (turn) {
+              turn.watchdog.errorStreak = event.isError ? turn.watchdog.errorStreak + 1 : 0;
+              if (turn.watchdog.errorStreak >= WATCHDOG_ERROR_STREAK) {
+                this.#tripWatchdog(session, seatName, lane, { kind: "tool_error_streak", count: turn.watchdog.errorStreak,
+                  detail: `watchdog: ${turn.watchdog.errorStreak} consecutive tool errors` });
+              }
+            }
+          } else if (event.kind === "result") {
+            const seat = repo.getParticipant(session.id, seatName);
+            if (seat) {
+              repo.patchParticipant(session.id, seatName, { ...(event.resumeId ? { sdkSessionId: event.resumeId } : {}), contextTokens: Math.max(seat.contextTokens, event.inputTokens ?? 0) });
+              this.#recordUsage(session, seat, turnId || newId("turn"), event, "completed", turn ? Date.now() - turn.startedAt : undefined);
+            }
+            this.#settleSeatTurn(session, seatName, lane, runtime, "completed");
+          } else if (event.kind === "error") {
+            const seat = repo.getParticipant(session.id, seatName);
+            if (seat) this.#recordUsage(session, seat, turnId || newId("turn"), event, event.aborted ? "aborted" : "error", turn ? Date.now() - turn.startedAt : undefined);
+            this.#settleSeatTurn(session, seatName, lane, runtime, event.aborted ? "aborted" : "error", event.message);
+          }
         }
-      } finally { flight.query = null; query.close?.(); }
-      if (watchdog.tripped) throw new Error(watchdog.tripped.detail);
-      for (const delivery of deliveries) this.#patchDelivery(session, delivery, "acknowledged");
-      repo.patchParticipant(session.id, seat.name, { turnCount: latestSeat.turnCount + 1,
-        checkpointReady: output?.checkpointReadiness !== "defer" });
-      const closing = HandoffDraftSchema.safeParse(output?.handoff);
-      if (status === "completed" && closing.success) {
-        const to = typeof output.to === "string" ? output.to : (seat.name === ORCHESTRATOR_SEAT ? MAIN_RECIPIENT : ORCHESTRATOR_SEAT);
-        const category = typeof output.category === "string" && ["assignment", "update", "milestone", "failure", "final", "decision"].includes(output.category) ? output.category as Category : "update";
-        const key = `${to}\u0000${JSON.stringify(closing.data)}`;
-        if (!sentThisTurn.has(key)) this.post({ agentSessionId: session.id, speaker: { kind: seat.role === "orchestrator" ? "orchestrator" : "agent", name: seat.name }, to, handoff: closing.data, category, turnId });
-      }
-    } catch (error) {
-      status = flight.abort.signal.aborted ? "aborted" : "error";
-      errorMessage = error instanceof Error ? error.message : String(error);
-      // A watchdog abort must not read as an operator abort: it is an error
-      // with one canonical message, and the coordinator hears about it.
-      if (watchdog.tripped) { status = "error"; errorMessage = watchdog.tripped.detail; }
-      if (status === "error" && repo.getAgentSession(session.id)?.status === "open") {
-        const target = seat.name === ORCHESTRATOR_SEAT ? MAIN_RECIPIENT : ORCHESTRATOR_SEAT;
-        this.post({ agentSessionId: session.id, speaker: { kind: seat.role === "orchestrator" ? "orchestrator" : "agent", name: seat.name }, to: target,
-          handoff: this.#simpleHandoff("Turn failed", "failed",
-            watchdog.tripped ? watchdog.tripped.detail : `Provider turn failed: ${errorMessage}`,
-            "Inspect the failure and retry or reassign."), category: "failure", turnId });
       }
     } finally {
-      if (status !== "completed") for (const delivery of deliveries) this.#patchDelivery(session, delivery, "cancelled");
+      this.#settleSeatTurn(session, seatName, lane, runtime, "aborted", "the seat stream ended");
       runtime.idle();
-      bus.append({ type: "agent_session.turn.settled", userSessionId: session.userSessionId, agentSessionId: session.id,
-        payload: { agentSessionId: session.id, participant: seat.name, turnId, status, durationMs: Date.now() - startedAt, ...(errorMessage ? { errorMessage } : {}) } });
-      // File-state snapshot per settled turn: mid-assignment crash recovery is
-      // lossless, and the completion diff (base..branch) is unaffected. The
-      // worktree may already be merged away by this turn's closing handoff.
-      const current = repo.getParticipant(session.id, seat.name);
-      if (current?.worktreePath && this.#deps.worktrees && fs.existsSync(current.worktreePath)) {
-        try { this.#deps.worktrees.commitAll(current.worktreePath, `turn ${turnId}`); } catch { /* snapshot is best-effort */ }
-      }
+      if (lane.state === "live" || lane.state === "waking") { lane.state = "parked"; lane.input = null; lane.query = null; this.#signalCapacity(); }
     }
   }
 
-  #buildParticipantMcp(sdk: ConsoleSdk, session: AgentSessionRow, seat: ParticipantRow, signal: AbortSignal, sentThisTurn: Set<string>): unknown {
-    const tool = sdk.tool("send_message", "Persist and deliver one typed, evidence-bearing handoff through the Console mailbox. Specialists may address only orchestrator; coordinators may address specialists or main.", {
-      to: z.string(), handoff: HandoffDraftSchema, category: z.enum(["assignment", "update", "milestone", "failure", "final", "decision"]).default("update"), dedupeKey: z.string().optional(),
-    }, async (args: { to: string; handoff: HandoffDraft; category: Category; dedupeKey?: string }) => {
-      try {
-        const message = this.post({ agentSessionId: session.id, speaker: { kind: seat.role === "orchestrator" ? "orchestrator" : "agent", name: seat.name }, to: args.to, handoff: args.handoff, category: args.category, ...(args.dedupeKey ? { dedupeKey: args.dedupeKey } : {}) });
-        sentThisTurn.add(`${args.to}\u0000${JSON.stringify(args.handoff)}`);
-        return ok({ delivered: true, messageSeq: message.seq, handoffId: (message.payload?.handoff as { id?: string } | undefined)?.id });
-      } catch (error) {
-        return { content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }], isError: true };
-      }
-    });
+  #tripWatchdog(session: AgentSessionRow, seatName: string, lane: SeatLane, tripped: { kind: "repeat_tool_calls" | "tool_error_streak"; detail: string; toolName?: string; count: number }): void {
+    const turn = lane.activeTurn;
+    if (!turn || turn.watchdog.tripped) return;
+    turn.watchdog.tripped = tripped.detail;
+    this.#deps.bus.append({ type: "agent_session.watchdog", userSessionId: session.userSessionId, agentSessionId: session.id,
+      payload: { agentSessionId: session.id, participant: seatName, turnId: turn.turnId, kind: tripped.kind,
+        ...(tripped.toolName ? { toolName: tripped.toolName } : {}), count: tripped.count, detail: tripped.detail } });
+    // Interrupt, never abort: the turn dies, the lane (and its inbox) survive.
+    void lane.query?.interrupt?.().catch(() => undefined);
+  }
+
+  #mintTurn(session: AgentSessionRow, seatName: string, lane: SeatLane, trigger: "delivery" | "peer" | "steer", deliveries: MailboxDeliveryRow[]): void {
+    const attributed = deliveries.length > 0 ? deliveries
+      : this.#deps.repo.listUnackedDeliveries(session.id, seatName).filter((row) => row.status === "delivered");
+    lane.activeTurn = { turnId: newId("turn"), startedAt: Date.now(), trigger, deliveries: attributed, sawSend: false,
+      toolStarts: new Map(), watchdog: { lastKey: "", identical: 0, errorStreak: 0, tripped: null } };
+    lane.lastActiveAt = Date.now();
+    if (lane.idleTimer) { clearTimeout(lane.idleTimer); lane.idleTimer = null; }
+    this.#deps.bus.append({ type: "agent_session.turn.started", userSessionId: session.userSessionId, agentSessionId: session.id,
+      payload: { agentSessionId: session.id, participant: seatName, turnId: lane.activeTurn.turnId } });
+    this.#setStatus(session.id, "working");
+  }
+
+  #settleSeatTurn(session: AgentSessionRow, seatName: string, lane: SeatLane, runtime: RuntimeBroadcaster, status: "completed" | "error" | "aborted", errorMessage?: string): void {
+    const turn = lane.activeTurn;
+    if (!turn) return;
+    lane.activeTurn = null;
+    const { repo, bus } = this.#deps;
+    if (turn.watchdog.tripped !== null) { status = "error"; errorMessage = turn.watchdog.tripped; }
+    if (status === "completed") {
+      for (const delivery of turn.deliveries) this.#patchDelivery(session, delivery, "acknowledged");
+    } else {
+      for (const delivery of turn.deliveries) this.#patchDelivery(session, delivery, "cancelled");
+    }
+    const seat = repo.getParticipant(session.id, seatName);
+    if (seat) {
+      repo.patchParticipant(session.id, seatName, { turnCount: seat.turnCount + 1, lastActiveAt: nowIso(),
+        ...(turn.sawSend ? {} : { checkpointReady: false }) });
+    }
+    lane.assignmentTurns += 1;
+    lane.lastActiveAt = Date.now();
+    if (status === "error" && repo.getAgentSession(session.id)?.status === "open") {
+      const target = seatName === ORCHESTRATOR_SEAT ? MAIN_RECIPIENT : ORCHESTRATOR_SEAT;
+      this.post({ agentSessionId: session.id, speaker: { kind: seatName === ORCHESTRATOR_SEAT ? "orchestrator" : "agent", name: seatName }, to: target,
+        handoff: this.#simpleHandoff("Turn failed", "failed",
+          turn.watchdog.tripped ?? `Provider turn failed: ${errorMessage}`,
+          "Inspect the failure and retry or reassign."), category: "failure", turnId: turn.turnId });
+    }
+    const profile = seat?.profileSnapshot as AgentProfile | undefined;
+    if (status === "completed" && profile && lane.assignmentTurns === profile.maxTurns + 1 && repo.getAgentSession(session.id)?.status === "open") {
+      const target = seatName === ORCHESTRATOR_SEAT ? MAIN_RECIPIENT : ORCHESTRATOR_SEAT;
+      this.post({ agentSessionId: session.id, speaker: { kind: seatName === ORCHESTRATOR_SEAT ? "orchestrator" : "agent", name: seatName }, to: target,
+        handoff: this.#simpleHandoff("Turn budget exhausted", "blocked",
+          `${seatName} has spent ${lane.assignmentTurns - 1} turns on the current assignment (budget ${profile.maxTurns}).`,
+          "Refocus, reassign, or explicitly continue the work."), category: "failure", turnId: turn.turnId });
+    }
+    bus.append({ type: "agent_session.turn.settled", userSessionId: session.userSessionId, agentSessionId: session.id,
+      payload: { agentSessionId: session.id, participant: seatName, turnId: turn.turnId, status, durationMs: Date.now() - turn.startedAt, ...(errorMessage ? { errorMessage } : {}) } });
+    // File-state snapshot per settled turn: mid-assignment crash recovery is
+    // lossless, and the completion diff (base..branch) is unaffected.
+    const current = repo.getParticipant(session.id, seatName);
+    if (current?.worktreePath && this.#deps.worktrees && fs.existsSync(current.worktreePath)) {
+      try { this.#deps.worktrees.commitAll(current.worktreePath, `turn ${turn.turnId}`); } catch { /* snapshot is best-effort */ }
+    }
+    runtime.idle();
+    this.#refreshStatus(session.id);
+    this.#armIdleTimer(session.id, seatName, lane);
+    void this.#maybeRotate(session.id, seatName).catch((error) => this.#recordHostFailure(session.id, error));
+  }
+
+  /** Console-path delivery: render queued journal rows into the lane input. */
+  async #deliverConsole(agentSessionId: string, recipient: string): Promise<void> {
+    await this.ensureSeatLive(agentSessionId, recipient);
+    const { repo, bus } = this.#deps;
+    const session = repo.getAgentSession(agentSessionId);
+    const lane = this.#laneOf(agentSessionId, recipient);
+    const seatRow = repo.getParticipant(agentSessionId, recipient);
+    if (!session || !lane.input || !seatRow) return;
+    const rows = repo.listUnackedDeliveries(agentSessionId, recipient).filter((row) => row.status === "queued");
+    if (rows.length === 0) return;
+    const messages = rows.map((row) => repo.getMessageById(row.messageId)).filter((row): row is MessageRow => row !== undefined);
+    for (const row of rows) this.#patchDelivery(session, row, "delivered");
+    if (rows.some((row) => row.category === "assignment")) lane.assignmentTurns = 0;
+    const prompt = this.#composePrompt(session, seatRow, messages);
+    if (lane.activeTurn) {
+      lane.activeTurn.deliveries.push(...rows);
+      lane.input.push(seatUserMessage(`New addressed handoffs arrived while you were working — fold them into the work in progress.\n\n${prompt}`));
+      bus.append({ type: "agent_session.runtime", userSessionId: session.userSessionId, agentSessionId: session.id,
+        payload: { agentSessionId: session.id, participant: recipient, turnId: lane.activeTurn.turnId, detail: `steered mid-turn (${rows.length} deliveries)` } });
+    } else {
+      this.#mintTurn(session, recipient, lane, "delivery", rows);
+      lane.input.push(seatUserMessage(prompt));
+    }
+    if (messages.length > 0) repo.patchParticipant(agentSessionId, recipient, { pendingTurnSeq: messages[messages.length - 1]!.seq });
+  }
+
+  #armIdleTimer(agentSessionId: string, seatName: string, lane: SeatLane): void {
+    const config = this.#deps.config;
+    if (!config) return;
+    if (lane.idleTimer) clearTimeout(lane.idleTimer);
+    lane.idleTimer = setTimeout(() => {
+      lane.idleTimer = null;
+      if (lane.state !== "live" || lane.activeTurn !== null || lane.holds > 0) return;
+      if (this.#deps.repo.listUnackedDeliveries(agentSessionId, seatName).length > 0) return;
+      this.#parkSeat(agentSessionId, seatName, lane, "idle");
+    }, config.seatIdleReapMs);
+    lane.idleTimer.unref?.();
+  }
+
+  /** Close the process (name and socket unregister); keep the resume handle. */
+  #parkSeat(agentSessionId: string, seatName: string, lane: SeatLane, reason: string): void {
+    lane.state = "parked";
+    lane.input?.close(); lane.input = null;
+    const query = lane.query; lane.query = null;
+    query?.close?.();
+    lane.abort = null;
+    const session = this.#deps.repo.getAgentSession(agentSessionId);
+    if (session) {
+      this.#deps.bus.append({ type: "agent_session.runtime", userSessionId: session.userSessionId, agentSessionId,
+        payload: { agentSessionId, participant: seatName, detail: `seat parked (${reason}); provider session retained` } });
+    }
+    this.#signalCapacity();
+  }
+
+  /**
+   * Context rotation at a turn boundary, under a gate that blocks senders:
+   * checkpoint the old process, close it, respawn the same peer name on a
+   * fresh provider session, then re-carry anything unacknowledged.
+   */
+  async #maybeRotate(agentSessionId: string, seatName: string): Promise<void> {
+    const config = this.#deps.config;
+    if (!config || !this.#deps.handoffs || !this.#deps.sdk) return;
+    const lane = this.#laneOf(agentSessionId, seatName);
+    if (lane.state !== "live" || lane.activeTurn !== null || lane.rotationGate !== null) return;
+    const { repo } = this.#deps;
+    const session = repo.getAgentSession(agentSessionId);
+    const seat = repo.getParticipant(agentSessionId, seatName);
+    if (!session || session.status !== "open" || !seat) return;
+    const tokenLimit = rotationTokenLimit(config.contextTokenLimit, seat.model ?? config.model);
+    const hard = seat.turnCount >= config.contextTurnLimit || seat.contextTokens >= tokenLimit;
+    const soft = seat.turnCount >= Math.ceil(config.contextTurnLimit * 0.8) || seat.contextTokens >= Math.ceil(tokenLimit * 0.75);
+    if (!soft || (!hard && !seat.checkpointReady)) return;
+    lane.state = "rotating";
+    lane.rotationGate = new Promise((resolve) => { lane.releaseRotation = resolve; });
+    try {
+      const holdDeadline = Date.now() + config.deliveryHoldLeaseMs;
+      while (lane.holds > 0 && Date.now() < holdDeadline) await sleep(25);
+      lane.input?.close(); lane.input = null;
+      const closing = lane.pump;
+      lane.query?.close?.(); lane.query = null;
+      await closing?.catch(() => undefined);
+      const sdk = await this.#deps.sdk();
+      const rotated = await this.#rotateNow(session, repo.getParticipant(agentSessionId, seatName) ?? seat, sdk, hard, tokenLimit);
+      this.#spawnSeat(session, rotated, lane);
+      await lane.ready;
+    } finally {
+      const release = lane.releaseRotation;
+      lane.rotationGate = null; lane.releaseRotation = null;
+      if (lane.state === "rotating") lane.state = lane.query ? "live" : "parked";
+      release?.();
+      const stale = repo.listUnackedDeliveries(agentSessionId, seatName).filter((row) => row.status === "delivered");
+      for (const row of stale) repo.patchDelivery(row.id, { status: "queued", deliveredAt: null });
+      void this.#deliverConsole(agentSessionId, seatName).catch((error) => this.#recordHostFailure(agentSessionId, error));
+    }
+  }
+
+  #buildParticipantMcp(sdk: ConsoleSdk, session: AgentSessionRow, seat: ParticipantRow, signal: AbortSignal): unknown {
+    // Messaging is native SendMessage (governed by the PreToolUse middleware);
+    // this server carries only handoff retrieval and console-owned runtime.
     const profile = seat.profileSnapshot as AgentProfile;
-    const tools: unknown[] = [tool];
+    const tools: unknown[] = [];
     if (this.#deps.handoffs) {
       tools.push(
         sdk.tool("read_handoff", "Retrieve a lossless handoff section with cursor pagination. Use only when the compact envelope is insufficient.", {
@@ -923,32 +1401,15 @@ export class AgentSessionHost {
         }),
       );
     }
-    if (seat.name === ORCHESTRATOR_SEAT && this.#deps.tasks && user) {
-      const listId = `console:${session.id}:${ORCHESTRATOR_SEAT}`;
-      tools.push(
-        sdk.tool("task_create", "Create one authoritative task for a coherent unit and assign an explicit specialist owner.", { subject: z.string(), description: z.string().default(""), owner: z.string() }, async (args: { subject: string; description: string; owner: string }) => {
-          const taskId = newId("task"); this.#deps.tasks?.upsertFromCreate({ sdkSessionId: listId, sdkTaskId: taskId, subject: args.subject, description: args.description,
-            attribution: { workspaceId: user.workspaceId, userSessionId: session.userSessionId, agentSessionId: session.id, participant: args.owner } }); return ok({ taskId });
-        }),
-        sdk.tool("task_update", "Update status or ownership in the authoritative Console task ledger.", { taskId: z.string(), status: z.enum(["pending", "in_progress", "completed", "deleted"]).optional(), owner: z.string().optional(), description: z.string().optional() }, async (args: { taskId: string; status?: "pending" | "in_progress" | "completed" | "deleted"; owner?: string; description?: string }) => {
-          this.#deps.tasks?.applyUpdate({ sdkSessionId: listId, sdkTaskId: args.taskId, patch: { ...(args.status ? { status: args.status } : {}), ...(args.owner ? { owner: args.owner } : {}), ...(args.description ? { description: args.description } : {}) } }); return ok({ updated: true });
-        }),
-        sdk.tool("task_list", "List the AgentSession's authoritative Console tasks. Retrieval is paged (tail-first, default 8KiB window; cursors continue).", { cursor: z.string().optional(), maxBytes: z.number().int().min(1).max(32 * 1024).default(8 * 1024) }, async (args: { cursor?: string; maxBytes: number }) => {
-          const rows = this.#deps.tasks?.listForUserSession(session.userSessionId).filter((task) => task.agentSessionId === session.id && task.status !== "deleted") ?? [];
-          return ok({ taskCount: rows.length, tasks: pageTail(JSON.stringify(rows, null, 2), args.cursor, args.maxBytes) });
-        }),
-      );
-    }
     return sdk.createSdkMcpServer({ name: "console_agent", version: "2", tools });
   }
 
   #runtimeToolNames(profile: AgentProfile, participant: string, attemptRole?: string | null): string[] {
-    return ["mcp__console_agent__send_message", "mcp__console_agent__read_handoff", "mcp__console_agent__report_handoff_discrepancy",
+    return ["mcp__console_agent__read_handoff", "mcp__console_agent__report_handoff_discrepancy",
       ...(profile.runtime.shell ? ["mcp__console_agent__process_start", "mcp__console_agent__process_read", "mcp__console_agent__process_stop"] : []),
       ...(profile.runtime.browser ? ["mcp__console_agent__browser_open", "mcp__console_agent__browser_snapshot", "mcp__console_agent__browser_click", "mcp__console_agent__browser_fill", "mcp__console_agent__browser_console"] : []),
       ...(profile.runtime.browser && profile.runtime.screenshots ? ["mcp__console_agent__browser_screenshot"] : []),
       ...(participant === ORCHESTRATOR_SEAT ? ["mcp__console_agent__request_decision"] : []),
-      ...(participant === ORCHESTRATOR_SEAT ? ["mcp__console_agent__task_create", "mcp__console_agent__task_update", "mcp__console_agent__task_list"] : []),
       ...(participant === ORCHESTRATOR_SEAT && this.#deps.worktrees ? ["mcp__console_agent__start_attempts"] : []),
       ...(attemptRole === "reviewer" ? ["mcp__console_agent__select_attempt_winner", "mcp__console_agent__read_attempt_diff"] : []),
     ];
@@ -992,16 +1453,17 @@ export class AgentSessionHost {
       requestExpandedContext: status === "failed" }, extension: { kind: "generic", data: {} } };
   }
 
-  async #rotateIfNeeded(session: AgentSessionRow, seat: ParticipantRow, sdk: ConsoleSdk, flight: Flight): Promise<ParticipantRow> {
+  /**
+   * The checkpoint-and-rotate body, run by #maybeRotate under its gate after
+   * the seat's process has closed. Returns the successor participant row.
+   */
+  async #rotateNow(session: AgentSessionRow, seat: ParticipantRow, sdk: ConsoleSdk, hard: boolean, tokenLimit: number): Promise<ParticipantRow> {
     const config = this.#deps.config;
     if (!config || !this.#deps.handoffs) return seat;
-    const tokenLimit = rotationTokenLimit(config.contextTokenLimit, seat.model ?? config.model);
-    const hard = seat.turnCount >= config.contextTurnLimit || seat.contextTokens >= tokenLimit;
-    const soft = seat.turnCount >= Math.ceil(config.contextTurnLimit * 0.8) || seat.contextTokens >= Math.ceil(tokenLimit * 0.75);
-    if (!soft || (!hard && !seat.checkpointReady)) return seat;
     const threshold = hard ? "hard" as const : "soft" as const;
     const started = Date.now();
-    let { draft, failure } = await this.#checkpointQuery(session, seat, sdk, flight, "");
+    const holder: { query: QueryHandle | null } = { query: null };
+    let { draft, failure } = await this.#checkpointQuery(session, seat, sdk, holder, "");
     // Deterministic quality gate with one feedback retry: the checkpoint is
     // the successor's only inheritance, so a structurally weak draft gets one
     // chance to fix the named failures before the threshold rules decide.
@@ -1013,7 +1475,7 @@ export class AgentSessionHost {
       if (initialFailures.length > 0) {
         this.#deps.bus.append({ type: "handoff.checkpoint.retried", userSessionId: session.userSessionId, agentSessionId: session.id,
           payload: { participant: seat.name, threshold, failures: initialFailures, accepted: "none" } });
-        const retry = await this.#checkpointQuery(session, seat, sdk, flight,
+        const retry = await this.#checkpointQuery(session, seat, sdk, holder,
           `\n\nA previous checkpoint attempt failed these deterministic checks — fix each one:\n- ${initialFailures.join("\n- ")}`);
         const retryFailures = retry.draft ? gate(retry.draft) : null;
         if (retry.draft && retryFailures !== null && retryFailures.length === 0) {
@@ -1066,7 +1528,7 @@ export class AgentSessionHost {
   }
 
   /** One tool-free checkpoint query against the seat's current context. */
-  async #checkpointQuery(session: AgentSessionRow, seat: ParticipantRow, sdk: ConsoleSdk, flight: Flight, promptSuffix: string): Promise<{ draft: HandoffDraft | null; failure: string | null }> {
+  async #checkpointQuery(session: AgentSessionRow, seat: ParticipantRow, sdk: ConsoleSdk, flight: { query: QueryHandle | null }, promptSuffix: string): Promise<{ draft: HandoffDraft | null; failure: string | null }> {
     const config = this.#deps.config;
     let draft: HandoffDraft | null = null;
     let failure: string | null = null;
@@ -1139,14 +1601,24 @@ export class AgentSessionHost {
   }
 
   #specialists(id: string): ParticipantRow[] { return this.#deps.repo.listParticipants(id).filter((p) => p.role === "agent"); }
+  #sessionStatus = new Map<string, "working" | "idle" | null>();
+  #refreshStatus(agentSessionId: string): void {
+    const row = this.#deps.repo.getAgentSession(agentSessionId);
+    if (!row || row.status !== "open") return;
+    this.#setStatus(agentSessionId, this.#statusOf(row) === "working" ? "working" : "idle");
+  }
   #statusOf(row: AgentSessionRow): "working" | "idle" | "archived" {
     if (row.status === "archived") return "archived";
-    return (this.#lanes.get(row.id)?.turns.size ?? 0) > 0 || this.#deps.repo.listQueuedDeliveries(row.id).some((d) => d.recipient !== MAIN_RECIPIENT) ? "working" : "idle";
+    const lanes = this.#seats.get(row.id);
+    const anyTurn = [...(lanes?.values() ?? [])].some((lane) => lane.activeTurn !== null);
+    return anyTurn || this.#deps.repo.listQueuedDeliveries(row.id).some((d) => d.recipient !== MAIN_RECIPIENT) ? "working" : "idle";
   }
   #setStatus(id: string, status: "working" | "idle"): void {
-    const lane = this.#lane(id); if (lane.lastStatus === status) return;
-    if (lane.lastStatus === null && status === "idle") { lane.lastStatus = status; return; }
-    lane.lastStatus = status; const session = this.#deps.repo.getAgentSession(id); if (!session) return;
+    const last = this.#sessionStatus.get(id) ?? null;
+    if (last === status) return;
+    if (last === null && status === "idle") { this.#sessionStatus.set(id, status); return; }
+    this.#sessionStatus.set(id, status);
+    const session = this.#deps.repo.getAgentSession(id); if (!session) return;
     this.#deps.bus.append({ type: "agent_session.status", userSessionId: session.userSessionId, agentSessionId: id, payload: { agentSessionId: id, status, owedToOrchestrator: false } });
   }
   #recordHostFailure(id: string, error: unknown): void {

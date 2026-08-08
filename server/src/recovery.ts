@@ -10,9 +10,9 @@
  *
  * - the operator's session gets the missing settle plus a notice, so the
  *   composer frees up and the silence is explained rather than mysterious;
- * - a specialist seat gets the missing settle and nothing else. Since B5 a
- *   seat is a native subagent with no resume handle: it died with the process
- *   and the Orchestrator respawns it from the spawn plan.
+ * - a specialist seat gets the missing settle and nothing else. Its provider
+ *   session survives in participants.sdk_session_id, and the journal's
+ *   unacknowledged rows redeliver when the seat's lane next wakes.
  *
  * This is a boot pass only. A seat whose background task dies inside a LIVE
  * server is settled by the task-terminal path in the runner — if that ever

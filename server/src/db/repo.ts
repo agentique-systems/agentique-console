@@ -264,6 +264,10 @@ export class Repo {
     this.#db.update(mailboxDeliveries).set(patch).where(eq(mailboxDeliveries.id, id)).run();
   }
 
+  getDeliveryById(id: string): MailboxDeliveryRow | undefined {
+    return this.#db.select().from(mailboxDeliveries).where(eq(mailboxDeliveries.id, id)).get();
+  }
+
   /** Journal rows a (re)spawning recipient must be handed again: not yet consumed. */
   listUnackedDeliveries(agentSessionId: string, recipient: string): MailboxDeliveryRow[] {
     return this.#db.select().from(mailboxDeliveries)
