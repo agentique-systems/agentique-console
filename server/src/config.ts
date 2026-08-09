@@ -89,6 +89,27 @@ export interface Config {
    */
   seatWorktrees: boolean;
   /**
+   * Pattern-level TerminationPolicy ceilings, applied when a session's
+   * contract does not set its own bound. 0 disables a ceiling.
+   */
+  /** Agent-authored handoffs per session before the console asks for a close-out. */
+  patternHandoffCap: number;
+  /** Settled turns in a row without a handoff before the stall trip. */
+  patternStallTurns: number;
+  /** Session wall-clock bound in ms; 0 = off. */
+  patternWallClockMs: number;
+  /** Kill switch for nesting: gates only the create_child_session grant. */
+  enableChildSessions: boolean;
+  /** Open child sessions one parent may have at a time. */
+  maxChildSessionsPerParent: number;
+  /**
+   * Resident seat processes per session TREE (a parent and its children share
+   * this budget). Defaults to the per-session cap, so childless sessions are
+   * unchanged and a parent that spawns children shares its slots rather than
+   * multiplying its footprint.
+   */
+  seatMaxResidentPerTree: number;
+  /**
    * Hosts sandboxed commands may reach, workspace-wide. Profiles narrow this
    * or opt out entirely. Nothing here is a security boundary on its own — the
    * filesystem scope is — it exists so a coding agent can install and fetch
@@ -163,6 +184,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     contextTokenLimit: Number(env.CONSOLE_CONTEXT_TOKEN_LIMIT ?? 120_000),
     contextTurnLimit: Number(env.CONSOLE_CONTEXT_TURN_LIMIT ?? 30),
     seatWorktrees: env.CONSOLE_SEAT_WORKTREES !== "0",
+    patternHandoffCap: Number(env.CONSOLE_PATTERN_HANDOFF_CAP ?? 40),
+    patternStallTurns: Number(env.CONSOLE_PATTERN_STALL_TURNS ?? 8),
+    patternWallClockMs: Number(env.CONSOLE_PATTERN_WALL_CLOCK_MS ?? 0),
+    enableChildSessions: env.CONSOLE_CHILD_SESSIONS !== "0",
+    maxChildSessionsPerParent: Number(env.CONSOLE_MAX_CHILD_SESSIONS ?? 3),
+    seatMaxResidentPerTree: Number(env.CONSOLE_MAX_RESIDENT_SEATS_PER_TREE ?? env.CONSOLE_MAX_RESIDENT_SEATS_PER_SESSION ?? 4),
     allowedDomains: env.CONSOLE_ALLOWED_DOMAINS === undefined
       ? DEFAULT_ALLOWED_DOMAINS
       : env.CONSOLE_ALLOWED_DOMAINS.split(",").map((entry) => entry.trim()).filter((entry) => entry !== ""),

@@ -182,12 +182,6 @@ export interface AgentSessionMessagePayload {
   agentSessionId: string;
   message: SessionMessage;
 }
-export interface AgentSessionRoutedPayload {
-  agentSessionId: string;
-  messageSeq: number;
-  decisions: { recipient: string; reason: string }[];
-  hopCount: number;
-}
 export interface AgentTurnStartedPayload {
   agentSessionId: string;
   participant: string;
@@ -210,7 +204,57 @@ export interface AgentToolResultPayload extends ToolResultPayload {
 export interface AgentSessionStatusPayload {
   agentSessionId: string;
   status: AgentSessionStatus;
-  owedToOrchestrator: boolean;
+}
+/** A session's orchestration pattern, fixed at creation. */
+export interface AgentSessionPatternSelectedPayload {
+  agentSessionId: string;
+  pattern: string;
+  roles: { seat: string; role: string }[];
+  parentAgentSessionId: string | null;
+  depth: number;
+}
+/** A session-level TerminationPolicy bound was hit; the console asks for close-out. */
+export interface AgentSessionTerminationTrippedPayload {
+  agentSessionId: string;
+  pattern: string;
+  rule: string;
+  detail: string;
+}
+/** A seat re-posted a received handoff to main verbatim (forward_message). */
+export interface HandoffForwardedPayload {
+  agentSessionId: string;
+  originalId: string;
+  sender: string;
+}
+/** A fan-in met its mode; the held reports flushed to the collector in one turn. */
+export interface AgentSessionJoinCompletedPayload {
+  agentSessionId: string;
+  joinId: string;
+  mode: string;
+  arrived: string[];
+  of: number;
+  failed: number;
+}
+/**
+ * Boundary-edge events. These are ALSO the nesting flow pulses: the web maps
+ * child.spawned/child.reported onto the parent card's delegation/result
+ * animations, while the legacy `flow.delegation`/`flow.result` pair keeps
+ * carrying the root main↔session edges. No third flow vocabulary.
+ */
+/** A controller seat spawned a child session; agentSessionId is the PARENT. */
+export interface AgentSessionChildSpawnedPayload {
+  agentSessionId: string;
+  childAgentSessionId: string;
+  pattern: string;
+  byParticipant: string;
+  title: string;
+}
+/** A child's final/failure crossed the boundary into its parent. */
+export interface AgentSessionChildReportedPayload {
+  agentSessionId: string;
+  childAgentSessionId: string;
+  status: "completed" | "failed";
+  handoffId: string;
 }
 export interface AgentMailboxPayload {
   agentSessionId: string;
@@ -327,45 +371,6 @@ export interface AgentWatchdogPayload {
   toolName?: string;
   count: number;
   detail: string;
-}
-
-/**
- * Governance: the SendMessage middleware denied a send. Pre-journal kinds mean
- * nothing was persisted for the send itself; `wake_timeout` is the queued
- * receipt (journaled, carried later). The denial rate per kind is a primary
- * live-tuning signal for the envelope contract.
- */
-export interface SendDeniedPayload {
-  sender: string;
-  senderScope: "main" | "seat";
-  agentSessionId?: string;
-  to: string;
-  kind: "missing_to" | "unknown_recipient" | "invalid_json" | "invalid_envelope" | "route" | "wake_timeout" | "middleware_error";
-  reason: string;
-}
-
-/** Envelope repairs the middleware applied instead of denying. */
-export interface SendCoercedPayload {
-  sender: string;
-  senderScope: "main" | "seat";
-  agentSessionId?: string;
-  to: string;
-  coercions: string[];
-}
-
-/**
- * The message was carried, but its envelope could not be parsed or repaired,
- * so it landed as unstructured prose. Delivery is unconditional once the
- * address resolves; this is the quality signal that replaces the lost-message
- * failure mode it used to have.
- */
-export interface SendDegradedPayload {
-  sender: string;
-  senderScope: "main" | "seat";
-  agentSessionId?: string;
-  to: string;
-  reason: string;
-  bytes: number;
 }
 
 /** Governance: the orchestrator lane's canUseTool denied a tool call. */
@@ -568,8 +573,13 @@ export type ConsoleEvent = Base &
     | { type: "user_session.plan.proposed"; payload: PlanProposedPayload }
     | { type: "user_session.plan.resolved"; payload: PlanResolvedPayload }
     | { type: "agent_session.created"; payload: AgentSessionCreatedPayload }
+    | { type: "agent_session.pattern.selected"; payload: AgentSessionPatternSelectedPayload }
+    | { type: "agent_session.termination.tripped"; payload: AgentSessionTerminationTrippedPayload }
+    | { type: "agent_session.join.completed"; payload: AgentSessionJoinCompletedPayload }
+    | { type: "agent_session.child.spawned"; payload: AgentSessionChildSpawnedPayload }
+    | { type: "agent_session.child.reported"; payload: AgentSessionChildReportedPayload }
+    | { type: "handoff.forwarded"; payload: HandoffForwardedPayload }
     | { type: "agent_session.message"; payload: AgentSessionMessagePayload }
-    | { type: "agent_session.routed"; payload: AgentSessionRoutedPayload }
     | { type: "agent_session.turn.started"; payload: AgentTurnStartedPayload }
     | { type: "agent_session.turn.settled"; payload: AgentTurnSettledPayload }
     | { type: "agent_session.tool.call"; payload: AgentToolCallPayload }
@@ -604,9 +614,6 @@ export type ConsoleEvent = Base &
     | { type: "agent_session.dependency_drift"; payload: DependencyDriftPayload }
     | { type: "handoff.checkpoint.retried"; payload: HandoffCheckpointRetriedPayload }
     | { type: "agent_session.watchdog"; payload: AgentWatchdogPayload }
-    | { type: "governance.send.denied"; payload: SendDeniedPayload }
-    | { type: "governance.send.coerced"; payload: SendCoercedPayload }
-    | { type: "governance.send.degraded"; payload: SendDegradedPayload }
     | { type: "governance.tool.denied"; payload: ToolDeniedPayload }
     | { type: "agent_session.attempt_group.started"; payload: AttemptGroupStartedPayload }
     | { type: "agent_session.attempt.completed"; payload: AttemptCompletedPayload }

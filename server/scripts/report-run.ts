@@ -98,10 +98,6 @@ for (const transport of ["peer", "console"]) {
 }
 
 // ── Governance denials ───────────────────────────────────────────────────────
-heading("Send denials (governance.send.denied)");
-table(all(
-  `select json_extract(payload, '$.sender') as sender, json_extract(payload, '$.kind') as kind, count(*) as count
-   from events where type = 'governance.send.denied' group by 1, 2 order by count desc`), ["sender", "kind", "count"]);
 heading("Tool denials (governance.tool.denied)");
 table(all(
   `select json_extract(payload, '$.toolName') as tool, json_extract(payload, '$.kind') as kind, count(*) as count

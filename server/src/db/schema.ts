@@ -101,6 +101,18 @@ export const agentSessions = sqliteTable("agent_sessions", {
   status: text("status", { enum: ["open", "archived"] })
     .notNull()
     .default("open"),
+  /** Orchestration-pattern catalog id — a forensic label; the host executes `topology`. */
+  pattern: text("pattern").notNull().default("hub_and_spoke"),
+  /** Compiled TopologyContract snapshot; '{}' = pre-contract row, read as the hub default. */
+  topology: text("topology", { mode: "json" })
+    .$type<Record<string, unknown>>()
+    .notNull()
+    .default({}),
+  /** NULL = top-level. One level of nesting only. */
+  parentAgentSessionId: text("parent_agent_session_id"),
+  /** Seat in the PARENT that receives this child's boundary traffic; snapshotted at spawn. */
+  parentControllerSeat: text("parent_controller_seat"),
+  depth: integer("depth").notNull().default(0),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });
@@ -153,6 +165,8 @@ export const participants = sqliteTable(
     /** Best-of-N group membership; NULL for ordinary seats. */
     attemptGroupId: text("attempt_group_id"),
     attemptRole: text("attempt_role", { enum: ["attempt", "reviewer"] }),
+    /** Contract role binding; NULL derives from `role` (orchestrator→coordinator, agent→specialist). */
+    patternRole: text("pattern_role"),
     /** Seating order for accents and prompt listings. */
     ord: integer("ord").notNull(),
     createdAt: text("created_at").notNull(),
@@ -190,6 +204,33 @@ export const attemptGroups = sqliteTable(
   },
   (t) => [index("attempt_groups_session").on(t.agentSessionId, t.status)],
 );
+
+/**
+ * Per-session pattern progression: counters, join arrivals, cursor. Written
+ * only by the pattern-progression module (the attempt_groups precedent for
+ * pattern-scoped state that does not belong on the session row).
+ */
+export const patternState = sqliteTable("pattern_state", {
+  agentSessionId: text("agent_session_id")
+    .primaryKey()
+    .references(() => agentSessions.id),
+  rounds: integer("rounds").notNull().default(0),
+  /** Non-checkpoint handoffs journaled, session-wide. */
+  handoffCount: integer("handoff_count").notNull().default(0),
+  /** Settled turns in a row that journaled no terminal report. */
+  stallTurns: integer("stall_turns").notNull().default(0),
+  lastProgressAt: text("last_progress_at"),
+  /** Ring buffer of recent "sender>recipient" hops — oscillation detection. */
+  recentEdges: text("recent_edges", { mode: "json" }).$type<string[]>().notNull().default([]),
+  /** Pattern cursor (pipeline stage index, phase marker) — progression-defined. */
+  cursor: text("cursor", { mode: "json" }).$type<Record<string, unknown>>(),
+  /** joinId → { expected: seats[], reports: seat → {handoffId, status} }. */
+  joins: text("joins", { mode: "json" }).$type<Record<string, unknown>>().notNull().default({}),
+  /** Termination reason once tripped; NULL = live. */
+  tripped: text("tripped"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
 
 export const messages = sqliteTable(
   "messages",

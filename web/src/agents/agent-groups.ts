@@ -39,8 +39,6 @@ function itemKeyOf(item: Exclude<AgentItem, AgentToolItem>): string {
   switch (item.type) {
     case "message":
       return `message:${item.seq}`;
-    case "routed":
-      return `routed:${item.messageSeq}`;
     case "turn":
       return `turn:${item.turnId}`;
     case "turn_error":

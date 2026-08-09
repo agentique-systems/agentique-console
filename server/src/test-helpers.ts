@@ -176,6 +176,24 @@ function wire(
 }
 
 /**
+ * The console-owned seat identity a spawn carried in its env (host.#spawnSeat).
+ * Fake programs receive the spawn options as their first argument, so this is
+ * the role discriminator — prompt-text sniffing is the legacy alternative.
+ */
+export function seatRoleOf(options: { env?: Record<string, string | undefined> } | undefined): {
+  agentSessionId?: string; seat?: string; role?: string; pattern?: string; depth?: number;
+} {
+  const env = options?.env ?? {};
+  return {
+    ...(env.CONSOLE_AGENT_SESSION_ID !== undefined ? { agentSessionId: env.CONSOLE_AGENT_SESSION_ID } : {}),
+    ...(env.CONSOLE_SEAT_NAME !== undefined ? { seat: env.CONSOLE_SEAT_NAME } : {}),
+    ...(env.CONSOLE_PATTERN_ROLE !== undefined ? { role: env.CONSOLE_PATTERN_ROLE } : {}),
+    ...(env.CONSOLE_PATTERN !== undefined ? { pattern: env.CONSOLE_PATTERN } : {}),
+    ...(env.CONSOLE_SESSION_DEPTH !== undefined ? { depth: Number(env.CONSOLE_SESSION_DEPTH) } : {}),
+  };
+}
+
+/**
  * Follows the bus from seq 1 and resolves with every event seen up to and
  * including the first one matching `predicate`. Includes transient frames.
  */

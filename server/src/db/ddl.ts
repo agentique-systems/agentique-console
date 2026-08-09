@@ -81,6 +81,14 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
   mode TEXT NOT NULL CHECK (mode IN ('execute','plan_execute')),
   phase TEXT NOT NULL DEFAULT 'executing' CHECK (phase IN ('planning','executing')),
   status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','archived')),
+  -- No CHECK on pattern: the catalog grows, and a table's CHECK cannot widen.
+  pattern TEXT NOT NULL DEFAULT 'hub_and_spoke',
+  -- Compiled TopologyContract snapshot; '{}' reads as the hub default.
+  topology TEXT NOT NULL DEFAULT '{}',
+  -- NULL = top-level. One level of nesting only.
+  parent_agent_session_id TEXT,
+  parent_controller_seat TEXT,
+  depth INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -118,6 +126,8 @@ CREATE TABLE IF NOT EXISTS participants (
   worktree_branch TEXT,
   attempt_group_id TEXT,
   attempt_role TEXT,
+  -- Contract role binding; NULL derives from role (orchestrator→coordinator).
+  pattern_role TEXT,
   ord INTEGER NOT NULL,
   created_at TEXT NOT NULL,
   PRIMARY KEY (agent_session_id, name)
@@ -142,6 +152,22 @@ CREATE TABLE IF NOT EXISTS attempt_groups (
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS attempt_groups_session ON attempt_groups(agent_session_id, status);
+
+-- Per-session pattern progression: counters, join arrivals, cursor. Written
+-- only by the pattern-progression module (the attempt_groups precedent).
+CREATE TABLE IF NOT EXISTS pattern_state (
+  agent_session_id TEXT PRIMARY KEY REFERENCES agent_sessions(id),
+  rounds INTEGER NOT NULL DEFAULT 0,
+  handoff_count INTEGER NOT NULL DEFAULT 0,
+  stall_turns INTEGER NOT NULL DEFAULT 0,
+  last_progress_at TEXT,
+  recent_edges TEXT NOT NULL DEFAULT '[]',
+  cursor TEXT,
+  joins TEXT NOT NULL DEFAULT '{}',
+  tripped TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS messages (
   id TEXT PRIMARY KEY,

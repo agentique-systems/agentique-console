@@ -1,8 +1,8 @@
 /**
  * Rendering for agent-session transcript items — the single dispatch point;
  * new item types land here. The v1 session-parts shape with v2's items:
- * speaker-accented bubbles (seating-order accents), PLAN blocks, routed
- * micro-rows, per-participant turn hairlines.
+ * speaker-accented bubbles (seating-order accents), PLAN blocks,
+ * per-participant turn hairlines.
  *
  * Input is an AgentGroup, not a raw AgentItem: a seat's consecutive tool calls
  * arrive pre-collapsed into one run (agent-groups.ts) and render as a single
@@ -36,7 +36,7 @@ import { cn } from "@/lib/utils";
 import { HandoffCard } from "@/components/handoff-card";
 
 import { accentOf, accentOfName, type AccentMap } from "./accents";
-import type { AgentToolItem, RoutedItem } from "./agent-fold";
+import type { AgentToolItem } from "./agent-fold";
 import { runSummary, type AgentGroup, type ToolRunItem } from "./agent-groups";
 
 export function SpeakerLabel({
@@ -61,21 +61,6 @@ export function SpeakerLabel({
   );
 }
 
-/** "→ scout, coder (mention)" — reasons collapse when they all agree. */
-function routedLabel(item: RoutedItem): string {
-  if (item.decisions.length === 0) return "→ nobody";
-  const reasons = new Set(item.decisions.map((decision) => decision.reason));
-  const only = [...reasons][0];
-  const base =
-    reasons.size === 1
-      ? `→ ${item.decisions.map((d) => d.recipient).join(", ")}${
-          only === undefined || only === "" ? "" : ` (${only})`
-        }`
-      : `→ ${item.decisions
-          .map((d) => `${d.recipient} (${d.reason})`)
-          .join(", ")}`;
-  return item.hopCount > 1 ? `${base} · hop ${item.hopCount}` : base;
-}
 
 function toolState(item: AgentToolItem) {
   if (item.isError === true) return "output-error" as const;
@@ -204,13 +189,6 @@ export function AgentPart({
         </Message>
       );
     }
-
-    case "routed":
-      return (
-        <div className="my-1 px-1 font-mono text-3xs text-muted-foreground">
-          {routedLabel(item)}
-        </div>
-      );
 
     case "turn":
       return (

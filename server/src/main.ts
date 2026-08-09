@@ -101,6 +101,10 @@ if (orphaned > 0) console.log(`removed ${orphaned} orphaned worktree(s)`);
 const orphanProcesses = reapOrphanedProcesses({ repo, bus });
 if (orphanProcesses > 0) console.log(`reaped ${orphanProcesses} orphaned process(es) from a previous run`);
 host.boot();
+// Children whose parent archived or vanished across the restart can never
+// report to anyone — the one genuinely new orphan class nesting introduces.
+const orphanChildren = host.archiveOrphanChildren();
+if (orphanChildren > 0) console.log(`archived ${orphanChildren} orphaned child session(s)`);
 runner.startCronFallback();
 // A run that finished while the process was down still deserves its card.
 for (const session of repo.listOpenWorkSessions()) completion.schedule(session.id);

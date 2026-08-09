@@ -94,6 +94,12 @@ export function AgentCard({
             planning
           </Badge>
         )}
+        {/* The overwhelmingly common case (a top-level hub) stays unbadged. */}
+        {(session.pattern !== "hub_and_spoke" || session.parentAgentSessionId !== null) && (
+          <Badge variant="outline" className="px-1 py-0 font-mono text-3xs lowercase">
+            {session.pattern.replaceAll("_", "-")}
+          </Badge>
+        )}
         {toolSeat !== undefined && (
           <span className="min-w-0 truncate text-status-waiting">
             running {toolSeat.toolName ?? "a tool"}

@@ -7,6 +7,14 @@ import { timeAgo } from "@/lib/status";
 import { useScopeStore } from "@/stores/scope";
 import { useUiStore } from "@/stores/ui";
 
+/** Each top-level session followed by its children, indented one level. */
+function orderTree(agentSessions: AgentSession[]): AgentSession[] {
+  const roots = agentSessions.filter((agent) => agent.parentAgentSessionId === null);
+  return roots.flatMap((root) => [root,
+    ...agentSessions.filter((agent) => agent.parentAgentSessionId === root.id)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))]);
+}
+
 export function SessionTree({ showAll = false, allSelected = false, onSelectAll, onSelectUser, onSelectAgent, allowNew = false }: {
   showAll?: boolean; allSelected?: boolean; onSelectAll?: () => void;
   onSelectUser?: (session: UserSession) => void; onSelectAgent?: (session: AgentSession) => void; allowNew?: boolean;
@@ -27,7 +35,7 @@ export function SessionTree({ showAll = false, allSelected = false, onSelectAll,
           <span className="truncate text-xs">{session.title ?? "untitled"}</span><span className="text-3xs text-muted-foreground">{timeAgo(session.updatedAt)} · {agentSessions.length} agents</span>
         </button>
         <div role="group" className="border-b border-border/50 bg-background/20 py-1">
-          {agentSessions.map((agent) => <button key={agent.id} role="treeitem" aria-selected={!allSelected && agent.id === activeAgent} className={cn("flex w-full items-center gap-2 border-l pl-6 pr-3 py-1.5 text-left hover:bg-accent", !allSelected && agent.id === activeAgent && "border-l-primary bg-accent")} onClick={() => onSelectAgent ? onSelectAgent(agent) : openAgent(agent.userSessionId, agent.id)}>
+          {orderTree(agentSessions).map((agent) => <button key={agent.id} role="treeitem" aria-selected={!allSelected && agent.id === activeAgent} className={cn("flex w-full items-center gap-2 border-l pr-3 py-1.5 text-left hover:bg-accent", agent.parentAgentSessionId === null ? "pl-6" : "pl-9", !allSelected && agent.id === activeAgent && "border-l-primary bg-accent")} onClick={() => onSelectAgent ? onSelectAgent(agent) : openAgent(agent.userSessionId, agent.id)}>
             <Bot className={cn("size-3 shrink-0", agent.status === "working" ? "text-status-running" : "text-muted-foreground")} />
             <span className="min-w-0 flex-1 truncate text-2xs">{agent.title}</span><span className="text-3xs text-muted-foreground">{agent.participants.length}</span>
           </button>)}

@@ -25,6 +25,17 @@ function migrateAdditiveColumns(sqlite: Database.Database): void {
   for (const [name, ddl] of [["sdk_generation", "INTEGER NOT NULL DEFAULT 0"], ["sdk_turn_count", "INTEGER NOT NULL DEFAULT 0"], ["context_tokens", "INTEGER NOT NULL DEFAULT 0"], ["memory", "TEXT NOT NULL DEFAULT ''"], ["latest_handoff_id", "TEXT"], ["purpose", "TEXT NOT NULL DEFAULT 'work'"], ["subject_key", "TEXT"], ["cumulative_cost_usd", "REAL NOT NULL DEFAULT 0"], ["cumulative_api_duration_ms", "INTEGER NOT NULL DEFAULT 0"], ["run_state", "TEXT NOT NULL DEFAULT 'active' CHECK (run_state IN ('active','awaiting_signoff','completed'))"], ["run_base_commit", "TEXT"]] as const) {
     if (!userColumns.has(name)) sqlite.exec(`ALTER TABLE user_sessions ADD COLUMN ${name} ${ddl}`);
   }
+  const agentSessionColumns = new Set(sqlite.prepare("pragma table_info(agent_sessions)").all().map((row) => (row as { name: string }).name));
+  for (const [name, ddl] of [
+    // No CHECK on pattern — the catalog grows, and a CHECK cannot widen.
+    ["pattern", "TEXT NOT NULL DEFAULT 'hub_and_spoke'"],
+    ["topology", "TEXT NOT NULL DEFAULT '{}'"],
+    ["parent_agent_session_id", "TEXT"],
+    ["parent_controller_seat", "TEXT"],
+    ["depth", "INTEGER NOT NULL DEFAULT 0"],
+  ] as const) {
+    if (!agentSessionColumns.has(name)) sqlite.exec(`ALTER TABLE agent_sessions ADD COLUMN ${name} ${ddl}`);
+  }
   const columns = new Set(
     sqlite
       .prepare("pragma table_info(participants)")
@@ -53,6 +64,7 @@ function migrateAdditiveColumns(sqlite: Database.Database): void {
     ["cumulative_cost_usd", "REAL NOT NULL DEFAULT 0"],
     ["cumulative_api_duration_ms", "INTEGER NOT NULL DEFAULT 0"],
     ["last_decision_at", "TEXT"],
+    ["pattern_role", "TEXT"],
   ];
   for (const [name, ddl] of additions) {
     if (!columns.has(name)) sqlite.exec(`ALTER TABLE participants ADD COLUMN ${name} ${ddl}`);

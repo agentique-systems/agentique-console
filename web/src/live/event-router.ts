@@ -44,7 +44,7 @@ export function routeEvent(event: ConsoleEvent, deps: RouterDeps): void {
   if (event.userSessionId && event.seq !== undefined) deps.invalidate(keys.timelineAll);
 
   // 1. Cache invalidation, by topic prefix. Agent-session invalidation is the
-  // LIFECYCLE subset on purpose: message/tool/routed events arrive in storms
+  // LIFECYCLE subset on purpose: message/tool events arrive in storms
   // and already reach the strip via the stream store — refetching the list
   // for each would be waste.
   if (type.startsWith("user_session.")) {
@@ -121,7 +121,6 @@ export function routeEvent(event: ConsoleEvent, deps: RouterDeps): void {
     // deviation as the user lane: the store drops unknown ids, and LINGERING
     // streams must keep receiving persisted rows to stay gapless.
     case "agent_session.message":
-    case "agent_session.routed":
     case "agent_session.turn.started":
     case "agent_session.turn.settled":
       deps.appendAgentStreamEvent(event.payload.agentSessionId, event);
@@ -137,6 +136,14 @@ export function routeEvent(event: ConsoleEvent, deps: RouterDeps): void {
     // reconnect replay from animating stale hops.
     case "flow.delegation":
       deps.pulseFlow(event.payload.agentSessionId, "delegation", event.ts);
+      return;
+    // Boundary hops pulse the PARENT card — the child's own card already
+    // pulses via the flow.delegation its creation emitted.
+    case "agent_session.child.spawned":
+      deps.pulseFlow(event.payload.agentSessionId, "delegation", event.ts);
+      return;
+    case "agent_session.child.reported":
+      deps.pulseFlow(event.payload.agentSessionId, "result", event.ts);
       return;
     case "flow.result":
       deps.pulseFlow(event.payload.agentSessionId, "result", event.ts);

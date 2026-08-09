@@ -17,6 +17,8 @@ const SESSION: AgentSession = {
   mode: "execute",
   phase: "executing",
   status: "idle",
+  pattern: "hub_and_spoke",
+  parentAgentSessionId: null,
   participants: ["scout", "coder"],
   createdAt: "2026-08-03T11:00:00.000Z",
   updatedAt: "2026-08-03T11:30:00.000Z",

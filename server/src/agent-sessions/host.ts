@@ -1,4 +1,4 @@
-import type { AgentSessionStatus, HandoffDraft, HandoffTrigger, Interaction, InteractionQuestion, InteractionUrgency, Speaker } from "@agentique-console/shared";
+import type { AgentSessionStatus, EdgeSpec, HandoffDraft, HandoffTrigger, Interaction, InteractionQuestion, InteractionUrgency, PatternId, Speaker } from "@agentique-console/shared";
 import fs from "node:fs";
 import path from "node:path";
 import { badRequest, conflict, notFound } from "../api/errors.ts";
@@ -33,7 +33,7 @@ import type { HandoffService } from "../handoffs/service.ts";
 import { HANDOFF_DRAFT_JSON_SCHEMA, HandoffDraftSchema } from "../handoffs/schema.ts";
 import type { ReapResult } from "../completion/summary.ts";
 import { evaluateCheckpointDraft } from "../handoffs/checkpoint-gate.ts";
-import { peerNameOf } from "./peer-names.ts";
+import { CHILD_SENDER_PREFIX, peerNameOf } from "./peer-names.ts";
 import {
   assignmentBlockers,
   deliveryTaskId,
@@ -61,7 +61,10 @@ import {
   type StartAttemptsResult,
 } from "./attempts.ts";
 import { buildWorktreeHooks } from "./worktree-hook.ts";
-import { SESSION_PROTOCOL } from "./presets.ts";
+import { compileContract, contractOfSession, hubContract, roleOfSeat, type CompiledContract } from "./topology.ts";
+import { grantedTools, runtimeToolNames, type SeatToolName } from "./grants.ts";
+import { dispatchWorkItems, onPatternPost, onTurnSettled, sweep as patternSweep, type DispatchWorkItemsInput, type PatternContext } from "./patterns/progression.ts";
+import { buildContract } from "./patterns/catalog.ts";
 import { mergeHooks } from "../sdk/hooks.ts";
 import { AsyncQueue } from "../async-queue.ts";
 
@@ -237,10 +240,9 @@ function seatUserMessage(text: string): SdkUserMessageLike {
  * The predecessor to this brief had to teach a JSON envelope by example and
  * still cost 5-9 rejections per seat before the first message landed.
  */
-function seatMessagingBrief(roster: string, seatName: string): string {
+function seatMessagingBrief(roster: string, addressing: string): string {
   return `Communication: your plain text output reaches no one. To transfer anything — an assignment, progress, findings, a failure, a final result — call send_handoff. Its fields are typed; there is no JSON to write or escape. Participants: ${roster}. ` +
-    `Address participants by bare name (e.g. "orchestrator"); "main" reaches the Orchestrator. ` +
-    `${seatName === ORCHESTRATOR_SEAT ? "You may address your specialists and main." : "You may address only orchestrator."} ` +
+    `${addressing} ` +
     `The Human Operator is reachable separately and directly with ask_operator — that path does not go through anyone. ` +
     `Put the substance in stateSummary — the findings themselves, not a description of having found them — and say what you could not verify in uncertainty. ` +
     `Size is not a constraint on truth: if the substance is long, put it in write_note and reference the artifact. Never shorten a finding to fit. ` +
@@ -322,6 +324,16 @@ export interface CreateAgentSessionInput {
    * mode on the USER session is a separate, fully implemented thing.
    */
   mode: "execute";
+  /** Orchestration pattern; omitted = hub_and_spoke (the historical default). */
+  pattern?: PatternId;
+  /** Pattern-specific config, validated by the pattern's builder. */
+  patternConfig?: Record<string, unknown>;
+  /**
+   * Set when a controller seat spawns this as a CHILD session. The child's
+   * "main" traffic then crosses to `controllerSeat` in the parent instead of
+   * waking the runner. One level only — children never get the spawn grant.
+   */
+  parent?: { agentSessionId: string; controllerSeat: string };
   agents: { name: string; profileId?: string; preset?: string; instructions?: string; model?: string; owns?: string[] }[];
   briefing?: HandoffDraft;
 }
@@ -392,14 +404,30 @@ export class AgentSessionHost {
 
   constructor(deps: AgentSessionHostDeps) { this.#deps = deps; }
 
-  createSession(input: CreateAgentSessionInput): { agentSessionId: string; participants: string[] } {
+  createSession(input: CreateAgentSessionInput): { agentSessionId: string; participants: string[]; entrySeat: string } {
     const { repo, bus } = this.#deps;
     const user = repo.getUserSession(input.userSessionId);
     if (!user) throw notFound(`no user session ${input.userSessionId}`);
-    if (input.agents.length < 1 || input.agents.length > 20) throw badRequest("an agent session seats 1 to 20 specialists");
+    // The pattern builder owns roster bounds, role assignment, prompts and
+    // wiring; the host only executes what comes out.
+    const build = buildContract(input.pattern ?? "hub_and_spoke", {
+      agents: input.agents, config: input.patternConfig,
+      resolveProfile: (id) => this.#profile(id, user.workspaceId),
+    });
+    let parentRow: AgentSessionRow | null = null;
+    if (input.parent) {
+      parentRow = repo.getAgentSession(input.parent.agentSessionId) ?? null;
+      if (!parentRow || parentRow.status !== "open") throw badRequest(`parent session ${input.parent.agentSessionId} is not open`);
+      if (parentRow.parentAgentSessionId !== null) throw badRequest("a child session cannot spawn children of its own — one level of nesting only");
+      if (parentRow.userSessionId !== input.userSessionId) throw badRequest("a child session belongs to its parent's run");
+      const openChildren = repo.listChildSessions(parentRow.id).filter((child) => child.status === "open");
+      if (openChildren.length >= this.#deps.config.maxChildSessionsPerParent) {
+        throw badRequest(`parent already has ${openChildren.length} open child session(s); finish or abandon one first (cap ${this.#deps.config.maxChildSessionsPerParent})`);
+      }
+    }
     const names = new Set<string>();
     for (const agent of input.agents) {
-      if (!SEAT_NAME_RE.test(agent.name) || RESERVED_NAMES.has(agent.name.toLowerCase())) throw badRequest(`invalid or reserved seat name \"${agent.name}\"`);
+      if (!SEAT_NAME_RE.test(agent.name) || RESERVED_NAMES.has(agent.name.toLowerCase()) || agent.name.toLowerCase().startsWith(CHILD_SENDER_PREFIX)) throw badRequest(`invalid or reserved seat name \"${agent.name}\"`);
       if (names.has(agent.name)) throw badRequest(`duplicate seat name \"${agent.name}\"`);
       names.add(agent.name);
     }
@@ -422,6 +450,21 @@ export class AgentSessionHost {
       }
     }
     const ownedScopes = new Map<string, string>();
+    if (parentRow) {
+      // Cross-tree disjointness: parent-tree seats and this child's seats all
+      // merge worktrees into ONE workspace, so their write scopes must not
+      // collide any more than sibling seats' may.
+      const treeSessions = [parentRow, ...repo.listChildSessions(parentRow.id).filter((child) => child.status === "open")];
+      for (const treeSession of treeSessions) {
+        for (const seat of repo.listParticipants(treeSession.id)) {
+          if (seat.profileId.includes("reviewer")) continue;
+          for (const scope of seat.ownership) {
+            const normalized = scope.trim(); if (!normalized) continue;
+            ownedScopes.set(normalized, `${seat.name} (in ${treeSession.id})`);
+          }
+        }
+      }
+    }
     for (const agent of input.agents) {
       const profileId = agent.profileId ?? agent.preset ?? "explorer";
       if (profileId.includes("reviewer")) continue;
@@ -450,24 +493,50 @@ export class AgentSessionHost {
       } catch { /* not a repo — the summary falls back to handoff claims */ }
     }
     const now = nowIso();
+    const contract = build.contract;
     const row: AgentSessionRow = {
       id: newId("as"), userSessionId: input.userSessionId, title, mode: input.mode,
       phase: "executing", status: "open", createdAt: now, updatedAt: now,
+      pattern: contract.pattern, topology: contract as unknown as Record<string, unknown>,
+      parentAgentSessionId: parentRow?.id ?? null,
+      parentControllerSeat: parentRow ? input.parent!.controllerSeat : null,
+      depth: parentRow ? 1 : 0,
     };
     repo.insertAgentSession(row);
-    const coordinator = this.#snapshotProfile(this.#profile("coordinator", parent.workspaceId));
-    repo.insertParticipant(this.#participant(row.id, ORCHESTRATOR_SEAT, "orchestrator", coordinator, "", undefined, [], 0, now));
-    input.agents.forEach((agent, index) => {
-      const profile = this.#snapshotProfile(this.#profile(agent.profileId ?? agent.preset ?? "explorer", parent.workspaceId));
-      repo.insertParticipant(this.#participant(row.id, agent.name, "agent", profile, agent.instructions ?? "", agent.model, agent.owns ?? [], index + 1, now));
-    });
+    if (parentRow) {
+      bus.append({ type: "agent_session.child.spawned", userSessionId: row.userSessionId, agentSessionId: parentRow.id,
+        payload: { agentSessionId: parentRow.id, childAgentSessionId: row.id, pattern: row.pattern,
+          byParticipant: input.parent!.controllerSeat, title } });
+    }
+    for (const seat of build.seats) {
+      const profile = this.#snapshotProfile(this.#profile(seat.profileId, parent.workspaceId));
+      repo.insertParticipant(this.#participant(row.id, seat.name, seat.dbRole, profile, seat.instructions ?? "", seat.model, seat.owns, seat.ord, now, seat.patternRole));
+    }
     const specialists = input.agents.map((agent) => agent.name);
     bus.append({ type: "agent_session.created", userSessionId: row.userSessionId, agentSessionId: row.id,
       payload: { session: toWireAgentSession(row, specialists, false), participants: specialists } });
+    bus.append({ type: "agent_session.pattern.selected", userSessionId: row.userSessionId, agentSessionId: row.id,
+      payload: { agentSessionId: row.id, pattern: row.pattern,
+        roles: repo.listParticipants(row.id).map((seat) => ({ seat: seat.name, role: roleOfSeat(seat) })),
+        parentAgentSessionId: row.parentAgentSessionId, depth: row.depth } });
     bus.append({ type: "flow.delegation", userSessionId: row.userSessionId, agentSessionId: row.id,
       payload: { userSessionId: row.userSessionId, agentSessionId: row.id, kind: "created", preview: title } });
-    if (input.briefing) this.post({ agentSessionId: row.id, speaker: { kind: "orchestrator", name: MAIN_RECIPIENT }, to: ORCHESTRATOR_SEAT, handoff: input.briefing, category: "assignment" });
-    return { agentSessionId: row.id, participants: specialists };
+    const entry = this.#contractOf(row).contract.entry;
+    const entrySeats = this.#seatsOfRole(row.id, entry.role);
+    if (input.briefing) {
+      for (const seat of entry.broadcast ? entrySeats : entrySeats.slice(0, 1)) {
+        this.post({ agentSessionId: row.id, speaker: { kind: "orchestrator", name: MAIN_RECIPIENT }, to: seat.name, handoff: input.briefing, category: "assignment" });
+      }
+    }
+    return { agentSessionId: row.id, participants: specialists, entrySeat: entrySeats[0]?.name ?? ORCHESTRATOR_SEAT };
+  }
+
+  /** The seat main steers: the contract entry role's first seat. */
+  entrySeat(agentSessionId: string): string {
+    const session = this.#deps.repo.getAgentSession(agentSessionId);
+    if (!session) throw notFound(`no agent session ${agentSessionId}`);
+    const entry = this.#contractOf(session).contract.entry;
+    return this.#seatsOfRole(agentSessionId, entry.role)[0]?.name ?? ORCHESTRATOR_SEAT;
   }
 
   /** Best-of-N fan-out; the machinery lives in attempts.ts. */
@@ -505,8 +574,9 @@ export class AgentSessionHost {
     const session = repo.getAgentSession(input.agentSessionId);
     if (!session) throw notFound(`no agent session ${input.agentSessionId}`);
     if (session.status !== "open") throw conflict(`agent session ${input.agentSessionId} is archived`);
-    this.#assertRoute(session.id, input.speaker.name, input.to);
     const category = input.category ?? "update";
+    const edge = this.#assertRoute(session, input.speaker.name, input.to, category);
+    const finalSeat = this.#completionSeat(session, "finalFrom");
     if (input.dedupeKey) {
       const prior = repo.findDeliveryByDedupe(session.id, input.speaker.name, input.to, input.dedupeKey);
       const priorMessage = prior ? repo.getMessageById(prior.messageId) : undefined;
@@ -524,10 +594,10 @@ export class AgentSessionHost {
     // more work, so the judgement that made it non-gating has expired. This is
     // the precise shape of db-live-2's ending: a question the coordinator
     // thought was minor, asked eleven seconds after it declared the run done.
-    const promoted = isFinalToMain(input.speaker.name, input.to, category)
+    const promoted = isFinalToMain(finalSeat, input.speaker.name, input.to, category)
       ? this.#deps.interactions.promoteDeferredToBlocking(session.id)
       : 0;
-    const blockers = finalReportBlockers(this.#deps, session, input.speaker.name, input.to, category);
+    const blockers = finalReportBlockers(this.#deps, session, finalSeat, input.speaker.name, input.to, category);
     if (blockers.length > 0) {
       this.#withheldFinals.add(session.id);
       this.#deps.bus.append({ type: "handoff.final.blocked", userSessionId: session.userSessionId, agentSessionId: session.id,
@@ -551,9 +621,23 @@ export class AgentSessionHost {
         `When the operator answers, the Console delivers their answer to you and you may report final then.`,
       );
     }
-    const caveats = finalReportCaveats(this.#deps, session, input.speaker.name, input.to, category, () => {
+    // A parent's final waits for its children: their finals are the boundary
+    // milestones the report must reflect, and abandon_child_session is the
+    // deliberate escape hatch for one that no longer matters. A hold, never an
+    // error — the release notice fires when the last child reports.
+    if (isFinalToMain(finalSeat, input.speaker.name, input.to, category)) {
+      const unsettled = repo.listChildSessions(session.id).filter((child) => child.status === "open" && this.#statusOf(child) !== "reported");
+      if (unsettled.length > 0) {
+        this.#withheldFinals.add(session.id);
+        throw new WithheldFinalError([], promoted,
+          `final report withheld: ${unsettled.length} child session(s) of this session have not reported — ${unsettled.map((child) => `"${child.title}" (${child.id})`).join("; ")}. ` +
+          `Their finals arrive to you as milestones; wait for them, or abandon_child_session the ones that no longer matter. ` +
+          `This is a hold, not a failure — do not re-send the same final.`);
+      }
+    }
+    const caveats = finalReportCaveats(this.#deps, session, finalSeat, input.speaker.name, input.to, category, () => {
       const lanes = this.#seats.get(session.id);
-      return [...(lanes?.entries() ?? [])].filter(([name, lane]) => name !== ORCHESTRATOR_SEAT && lane.activeTurn !== null).map(([name]) => name);
+      return [...(lanes?.entries() ?? [])].filter(([name, lane]) => name !== input.speaker.name && lane.activeTurn !== null).map(([name]) => name);
     });
     if (caveats.length > 0) {
       input = { ...input, handoff: { ...input.handoff, core: { ...input.handoff.core,
@@ -571,6 +655,21 @@ export class AgentSessionHost {
       transport: "console", ...(input.dedupeKey ? { dedupeKey: input.dedupeKey } : {}), ...(input.turnId ? { turnId: input.turnId } : {}),
     });
     if (input.to === MAIN_RECIPIENT) {
+      if (session.parentAgentSessionId !== null) {
+        // A child session's "main" is its parent's controller. The literal
+        // stays "main" in the child's journal and every governance predicate;
+        // only the SINK differs: re-post the handoff verbatim into the parent
+        // (its own record, mailbox row, and lane wake), then ack child-side.
+        // The dedupe key makes a crash between re-post and ack replay-safe.
+        // The parent's release check runs AFTER the ack — before it, this very
+        // delivery still counts the child as unsettled.
+        if (MATERIAL_CATEGORIES.has(category)) this.#crossBoundary(session, message, input.handoff, category);
+        this.#patchDelivery(session, delivery, "acknowledged");
+        if (category === "final" || category === "failure") {
+          const parent = session.parentAgentSessionId === null ? undefined : this.#deps.repo.getAgentSession(session.parentAgentSessionId);
+          if (parent && parent.status === "open") this.#maybeReleaseParentFinal(parent);
+        }
+      } else {
       this.#patchDelivery(session, delivery, "acknowledged");
       if (MATERIAL_CATEGORIES.has(category)) {
         // Answered operator questions ride along with the next material wake.
@@ -592,6 +691,7 @@ export class AgentSessionHost {
           payload: { userSessionId: session.userSessionId, agentSessionId: session.id, digestPreview: text.slice(0, 140) } });
         this.#deps.wake?.(session.userSessionId, session.id, category, withAsks);
       }
+      }
     } else {
       // An assignment whose blocker is open is JOURNALED AND QUEUED — not
       // denied, and not delivered with a warning.
@@ -604,6 +704,19 @@ export class AgentSessionHost {
       // contract it never confirmed. Queuing keeps the "a message is never
       // lost" guarantee and lets the Console carry it the moment the blocker
       // clears.
+      // A tripped session's fan-out is closed: NEW assignments queue behind
+      // the close-out instead of delivering. Reports and finals still flow —
+      // the trip asks for a wrap-up, it never silences one.
+      if (category === "assignment") {
+        const tripped = this.#deps.repo.getPatternState(session.id)?.tripped;
+        if (tripped) {
+          this.#deps.bus.append({ type: "governance.tool.denied", userSessionId: session.userSessionId, agentSessionId: session.id,
+            payload: { sessionId: session.userSessionId, agentSessionId: session.id, participant: input.speaker.name,
+              toolName: "send_handoff", kind: "blocked_by_dependency",
+              reason: `assignment to ${input.to} held: the session's termination policy tripped (${tripped}); close out instead of assigning new work` } });
+          return { ...message, queuedBehind: [`termination policy tripped (${tripped}) — send your final instead`] };
+        }
+      }
       const blockers = assignmentBlockers(this.#deps, session, input.to, category, input.handoff.core.taskId);
       if (blockers.length > 0) {
         this.#deps.bus.append({ type: "governance.tool.denied", userSessionId: session.userSessionId, agentSessionId: session.id,
@@ -615,8 +728,20 @@ export class AgentSessionHost {
         // reports "delivered" and nobody watches for the release.
         return { ...message, queuedBehind: blockers };
       }
-      void this.#deliverConsole(session.id, input.to).catch((error) => this.#recordHostFailure(session.id, error));
+      // A router edge delivers now; a console-advanced edge stays journaled
+      // and queued for the pattern progression to carry (joins, stages).
+      if (edge.advance === "router") {
+        void this.#deliverConsole(session.id, input.to).catch((error) => this.#recordHostFailure(session.id, error));
+      }
     }
+    // Counters and termination bounds see every hop, AFTER it is journaled and
+    // routed — a trip defers its own action, so this cannot fail the transfer.
+    try {
+      onPatternPost(this.#patternCtx(), session, { sender: input.speaker.name, recipient: input.to, category,
+        status: input.handoff.core.status,
+        consoleSynthesized: (input.handoff.extension?.data as { consoleSynthesized?: boolean } | undefined)?.consoleSynthesized === true,
+        countsRound: edge.countsRound === true, advance: edge.advance });
+    } catch (error) { this.#recordHostFailure(session.id, error); }
     return message;
   }
 
@@ -810,30 +935,80 @@ export class AgentSessionHost {
 
   archiveForUserSession(userSessionId: string): void {
     this.reapForUserSession(userSessionId);
-    for (const session of this.#deps.repo.listAgentSessions(userSessionId)) {
-      if (session.status !== "open") continue;
-      this.interrupt(session.id);
-      this.#deps.processes?.stopSession(session.id);
-      void this.#deps.browsers?.closeSession(session.id);
-      const openGroup = this.#deps.repo.findOpenAttemptGroup(session.id);
-      if (openGroup) closeAttemptGroup(this.#attemptsContext(), session, openGroup, "abandoned");
-      if (this.#deps.worktrees && this.#deps.getWorkspaceRoot) {
-        const user = this.#deps.repo.getUserSession(session.userSessionId);
-        for (const seat of this.#deps.repo.listParticipants(session.id)) {
-          if (!seat.worktreePath || seat.attemptRole !== null || !user) continue;
-          try { this.#deps.worktrees.remove(this.#deps.getWorkspaceRoot(user.workspaceId), seat.worktreePath, seat.worktreeBranch ?? "", { archiveBranch: true }); } catch { /* best effort */ }
-          this.#deps.repo.patchParticipant(session.id, seat.name, { worktreePath: null, worktreeBaseCommit: null, worktreeBranch: null });
-        }
+    // Children first (they sort newer), so a child's cancelled deliveries can
+    // never race its parent's teardown. Children share the userSessionId, so
+    // the flat list covers the whole tree by construction.
+    const open = this.#deps.repo.listAgentSessions(userSessionId)
+      .filter((session) => session.status === "open")
+      .sort((a, b) => b.depth - a.depth);
+    for (const session of open) this.#archiveOne(session);
+  }
+
+  #archiveOne(session: AgentSessionRow): void {
+    this.interrupt(session.id);
+    this.#deps.processes?.stopSession(session.id);
+    void this.#deps.browsers?.closeSession(session.id);
+    const openGroup = this.#deps.repo.findOpenAttemptGroup(session.id);
+    if (openGroup) closeAttemptGroup(this.#attemptsContext(), session, openGroup, "abandoned");
+    if (this.#deps.worktrees && this.#deps.getWorkspaceRoot) {
+      const user = this.#deps.repo.getUserSession(session.userSessionId);
+      for (const seat of this.#deps.repo.listParticipants(session.id)) {
+        if (!seat.worktreePath || seat.attemptRole !== null || !user) continue;
+        try { this.#deps.worktrees.remove(this.#deps.getWorkspaceRoot(user.workspaceId), seat.worktreePath, seat.worktreeBranch ?? "", { archiveBranch: true }); } catch { /* best effort */ }
+        this.#deps.repo.patchParticipant(session.id, seat.name, { worktreePath: null, worktreeBaseCommit: null, worktreeBranch: null });
       }
-      for (const delivery of this.#deps.repo.listActiveDeliveries(session.id)) this.#patchDelivery(session, delivery, "cancelled");
-      this.#withheldFinals.delete(session.id);
-      for (const [deliveryId, held] of this.#blockedAssignments) {
-        if (held.agentSessionId === session.id) this.#blockedAssignments.delete(deliveryId);
-      }
-      this.#deps.repo.patchAgentSession(session.id, { status: "archived" });
-      this.#deps.bus.append({ type: "agent_session.status", userSessionId, agentSessionId: session.id,
-        payload: { agentSessionId: session.id, status: "archived", owedToOrchestrator: false } });
     }
+    for (const delivery of this.#deps.repo.listActiveDeliveries(session.id)) this.#patchDelivery(session, delivery, "cancelled");
+    this.#withheldFinals.delete(session.id);
+    for (const [deliveryId, held] of this.#blockedAssignments) {
+      if (held.agentSessionId === session.id) this.#blockedAssignments.delete(deliveryId);
+    }
+    this.#deps.repo.patchAgentSession(session.id, { status: "archived" });
+    this.#contracts.delete(session.id);
+    this.#deps.bus.append({ type: "agent_session.status", userSessionId: session.userSessionId, agentSessionId: session.id,
+      payload: { agentSessionId: session.id, status: "archived" } });
+  }
+
+  /**
+   * Boot sweep: children whose parent is archived or gone can never report to
+   * anyone — the only genuinely new orphan class nesting introduces.
+   */
+  archiveOrphanChildren(): number {
+    let archived = 0;
+    for (const session of this.#deps.repo.listOpenAgentSessions()) {
+      if (session.parentAgentSessionId === null) continue;
+      const parent = this.#deps.repo.getAgentSession(session.parentAgentSessionId);
+      if (parent && parent.status === "open") continue;
+      this.#archiveOne(session);
+      archived += 1;
+      this.#deps.bus.append({ type: "agent_session.runtime", userSessionId: session.userSessionId, agentSessionId: session.id,
+        payload: { agentSessionId: session.id, participant: "system", detail: "archived: parent session is no longer open" } });
+    }
+    return archived;
+  }
+
+  /**
+   * The escape hatch for a wedged child: archive it and hand the parent's
+   * controller a console failure so the tree can still conclude.
+   */
+  abandonChildSession(parentAgentSessionId: string, controllerSeat: string, childAgentSessionId: string, reason: string): void {
+    const child = this.#deps.repo.getAgentSession(childAgentSessionId);
+    if (!child || child.parentAgentSessionId !== parentAgentSessionId) {
+      throw badRequest(`${childAgentSessionId} is not a child of this session`);
+    }
+    if (child.status === "open") this.#archiveOne(child);
+    const parent = this.#deps.repo.getAgentSession(parentAgentSessionId);
+    if (!parent || parent.status !== "open") return;
+    try {
+      this.post({ agentSessionId: parent.id, speaker: { kind: "agent", name: `${CHILD_SENDER_PREFIX}${child.id}` },
+        to: child.parentControllerSeat ?? controllerSeat, category: "failure", dedupeKey: `child-abandoned:${child.id}`,
+        handoff: this.#simpleHandoff(`Child session "${child.title}" abandoned`, "failed",
+          `Abandoned by ${controllerSeat}: ${reason}. Whatever the child journaled is retrievable with read_handoff; nothing further will arrive from it.`,
+          "Account for the abandoned work in your plan and your final report.") });
+    } catch (error) { this.#recordHostFailure(parent.id, error); }
+    this.#deps.bus.append({ type: "agent_session.child.reported", userSessionId: child.userSessionId, agentSessionId: parentAgentSessionId,
+      payload: { agentSessionId: parentAgentSessionId, childAgentSessionId: child.id, status: "failed", handoffId: "" } });
+    if (parent) this.#maybeReleaseParentFinal(parent);
   }
 
   onStatusChanged(handler: (userSessionId: string) => void): void {
@@ -865,6 +1040,11 @@ export class AgentSessionHost {
           this.#detachOperatorAsk(lane, `no answer within ${Math.round(limit / 60_000)} minutes; the question stays open`);
         }
       }
+      // Time-based termination bounds (wall clock, cost) live here — they can
+      // trip while every lane is quiet, which is exactly when they matter.
+      for (const session of this.#deps.repo.listOpenAgentSessions()) {
+        try { patternSweep(this.#patternCtx(), session); } catch (error) { this.#recordHostFailure(session.id, error); }
+      }
     }, intervalMs);
     this.#askSweep.unref?.();
   }
@@ -892,9 +1072,12 @@ export class AgentSessionHost {
     // what every later prompt will say.
     const decision = decisionOf(this.#deps.interactions.get(interaction.id));
     const answer = decision === null ? `${asked} → (no answer recorded)` : renderDecision(decision);
+    const session = this.#deps.repo.getAgentSession(interaction.agentSessionId);
+    if (!session) return;
+    const speaker = this.#answerSpeaker(session, interaction.participant);
     this.post({
       agentSessionId: interaction.agentSessionId,
-      speaker: { kind: "orchestrator", name: ORCHESTRATOR_SEAT },
+      speaker,
       to: interaction.participant,
       handoff: this.#simpleHandoff(
         `Operator answered: ${asked}`,
@@ -905,6 +1088,54 @@ export class AgentSessionHost {
       category: "decision",
       dedupeKey: `answer:${interaction.id}`,
     });
+  }
+
+  /**
+   * The console voice for a delivery TO `recipient`: the completion voice
+   * when it has a legal edge there, else any seat whose role does. A recipient
+   * nothing can reach keeps the voice seat, and `post()` throws exactly as it
+   * always has — a self-send was never legal.
+   */
+  #answerSpeaker(session: AgentSessionRow, recipient: string): Speaker {
+    const contract = this.#contractOf(session);
+    const toRole = this.#roleOf(session.id, recipient);
+    const voice = this.#completionSeat(session, "voice");
+    const speakerOf = (name: string): Speaker => {
+      const row = this.#deps.repo.getParticipant(session.id, name);
+      return { kind: row?.role === "orchestrator" ? "orchestrator" : "agent", name };
+    };
+    if (voice !== recipient && contract.edge(this.#roleOf(session.id, voice), toRole)) return speakerOf(voice);
+    if (contract.edge("main", toRole)) return { kind: "orchestrator", name: MAIN_RECIPIENT };
+    for (const seat of this.#deps.repo.listParticipants(session.id)) {
+      if (seat.name !== recipient && contract.edge(roleOfSeat(seat), toRole)) return speakerOf(seat.name);
+    }
+    return speakerOf(voice);
+  }
+
+  /** The bound context patterns/progression.ts runs over. */
+  #patternCtx(): PatternContext {
+    return {
+      deps: { repo: this.#deps.repo, bus: this.#deps.bus, config: this.#deps.config },
+      contract: (session) => this.#contractOf(session).contract,
+      completionSeat: (session, which) => this.#completionSeat(session, which),
+      answerSpeaker: (session, recipient) => this.#answerSpeaker(session, recipient),
+      post: (input) => this.post(input),
+      simpleHandoff: (action, status, summary, nextAction) => this.#simpleHandoff(action, status, summary, nextAction),
+      deliverNow: (agentSessionId, recipient) => void this.#deliverConsole(agentSessionId, recipient).catch((error) => this.#recordHostFailure(agentSessionId, error)),
+      profile: (id, workspaceId) => this.#profile(id, workspaceId),
+      snapshotProfile: (profile) => this.#snapshotProfile(profile),
+      participant: (agentSessionId, name, role, profile, extra, model, ownership, ord, createdAt, patternRole) =>
+        this.#participant(agentSessionId, name, role, profile, extra, model, ownership, ord, createdAt, patternRole),
+    };
+  }
+
+  /** map_reduce fan-out; the machinery lives in patterns/progression.ts. */
+  dispatchWorkItems(dispatcherSeat: string, input: DispatchWorkItemsInput): { joinId: string; seats: string[] } {
+    const session = this.#deps.repo.getAgentSession(input.agentSessionId);
+    if (!session) throw notFound(`no agent session ${input.agentSessionId}`);
+    const dispatcher = this.#deps.repo.getParticipant(session.id, dispatcherSeat);
+    if (!dispatcher) throw notFound(`no seat ${dispatcherSeat} in ${input.agentSessionId}`);
+    return dispatchWorkItems(this.#patternCtx(), session, dispatcher, input);
   }
 
   /**
@@ -920,13 +1151,15 @@ export class AgentSessionHost {
   onBlockingQuestionsCleared(userSessionId: string, agentSessionId: string): void {
     const session = this.#deps.repo.getAgentSession(agentSessionId);
     if (!session || session.status !== "open") return;
-    const lane = this.#seats.get(agentSessionId)?.get(ORCHESTRATOR_SEAT);
+    const finalSeat = this.#completionSeat(session, "finalFrom");
+    const voiceSeat = this.#completionSeat(session, "voice");
+    const lane = this.#seats.get(agentSessionId)?.get(finalSeat);
     // Only meaningful if a final was actually withheld from this session.
     if (!this.#withheldFinals.delete(agentSessionId)) return;
     try {
       this.post({
         agentSessionId,
-        speaker: { kind: "orchestrator", name: ORCHESTRATOR_SEAT },
+        speaker: { kind: this.#deps.repo.getParticipant(agentSessionId, voiceSeat)?.role === "orchestrator" ? "orchestrator" : "agent", name: voiceSeat },
         to: MAIN_RECIPIENT,
         handoff: this.#simpleHandoff(
           "Operator answered; the withheld final can now be sent",
@@ -936,15 +1169,82 @@ export class AgentSessionHost {
         ),
         category: "milestone",
       });
-    } catch { /* the notice is best effort; the coordinator still gets its delivery */ }
-    if (lane) void this.#deliverConsole(agentSessionId, ORCHESTRATOR_SEAT).catch(() => undefined);
+    } catch { /* the notice is best effort; the reporting seat still gets its delivery */ }
+    if (lane) void this.#deliverConsole(agentSessionId, finalSeat).catch(() => undefined);
     void userSessionId;
+  }
+
+  /**
+   * A child's material report crosses into its parent as a journaled handoff
+   * to the parent's controller — verbatim core and extension, a state-summary
+   * preamble naming the child, and the child final downgraded to a parent
+   * MILESTONE (a child finishing is a milestone of the parent's work; keeping
+   * `isFinalToMain` false on the boundary keeps the parent's final gate
+   * honest). Uncertainty was already classified child-side, so the boundary
+   * hop never re-promotes it. Idempotent by dedupe key across restarts.
+   */
+  #crossBoundary(child: AgentSessionRow, message: MessageRow, draft: HandoffDraft, category: Category): void {
+    const parent = child.parentAgentSessionId === null ? undefined : this.#deps.repo.getAgentSession(child.parentAgentSessionId);
+    if (!parent || parent.status !== "open" || child.parentControllerSeat === null) return;
+    const mapped: Category = category === "final" ? "milestone" : category === "failure" ? "failure" : "update";
+    const handoffId = (message.payload?.handoff as { id?: string } | undefined)?.id ?? message.id;
+    const boundaryDraft: HandoffDraft = {
+      core: { ...draft.core, state: { ...draft.core.state,
+        summary: `Child session "${child.title}" (${child.id}) reports:\n${draft.core.state.summary}` } },
+      extension: draft.extension,
+    };
+    try {
+      this.post({ agentSessionId: parent.id, speaker: { kind: "agent", name: `${CHILD_SENDER_PREFIX}${child.id}` },
+        to: child.parentControllerSeat, handoff: boundaryDraft, category: mapped, dedupeKey: `child:${handoffId}` });
+      if (category === "final" || category === "failure") {
+        this.#deps.bus.append({ type: "agent_session.child.reported", userSessionId: parent.userSessionId, agentSessionId: parent.id,
+          payload: { agentSessionId: parent.id, childAgentSessionId: child.id,
+            status: category === "final" ? "completed" : "failed", handoffId } });
+      }
+    } catch (error) { this.#recordHostFailure(child.id, error); }
+  }
+
+  /** The child-hold counterpart of onBlockingQuestionsCleared. */
+  #maybeReleaseParentFinal(parent: AgentSessionRow): void {
+    if (!this.#withheldFinals.has(parent.id)) return;
+    const unsettled = this.#deps.repo.listChildSessions(parent.id)
+      .filter((child) => child.status === "open" && this.#statusOf(child) !== "reported");
+    if (unsettled.length > 0) return;
+    this.#withheldFinals.delete(parent.id);
+    const finalSeat = this.#completionSeat(parent, "finalFrom");
+    try {
+      this.post({ agentSessionId: parent.id, speaker: this.#answerSpeaker(parent, finalSeat), to: finalSeat,
+        handoff: this.#simpleHandoff("All child sessions have reported", "in_progress",
+          "Every child session's final has crossed into this session. The withheld final may be sent now.",
+          "Compile and send your final report."),
+        category: "decision", dedupeKey: `children-clear:${parent.id}` });
+    } catch { /* best effort — the next final attempt re-evaluates the gate */ }
+  }
+
+  /** Boot replay of a crash between a child's journal write and its boundary ack. */
+  #redriveChildBoundary(session: AgentSessionRow, delivery: MailboxDeliveryRow): void {
+    try {
+      const message = this.#deps.repo.getMessageById(delivery.messageId);
+      const summary = message?.payload?.handoff as { id?: string } | undefined;
+      if (!message) return;
+      if (summary?.id && this.#deps.handoffs && MATERIAL_CATEGORIES.has(delivery.category)) {
+        const record = this.#deps.handoffs.get(summary.id);
+        this.#crossBoundary(session, message, { core: record.core, extension: record.extension }, delivery.category);
+      }
+      this.#patchDelivery(session, delivery, "acknowledged");
+      const parent = session.parentAgentSessionId === null ? undefined : this.#deps.repo.getAgentSession(session.parentAgentSessionId);
+      if (parent && parent.status === "open") this.#maybeReleaseParentFinal(parent);
+    } catch (error) { this.#recordHostFailure(session.id, error); }
   }
 
   boot(): void {
     const wakes = new Set<string>();
     for (const delivery of this.#deps.repo.listQueuedDeliveries()) {
-      if (delivery.recipient === MAIN_RECIPIENT) continue;
+      if (delivery.recipient === MAIN_RECIPIENT) {
+        const session = this.#deps.repo.getAgentSession(delivery.agentSessionId);
+        if (session && session.status === "open" && session.parentAgentSessionId !== null) this.#redriveChildBoundary(session, delivery);
+        continue;
+      }
       // Holds are recomputed from durable truth (the task rows), never trusted
       // to the in-memory map a restart wipes: a queued assignment whose
       // declared blocker is still open goes back on hold instead of leaking
@@ -1053,7 +1353,7 @@ export class AgentSessionHost {
       }
       bus.append({ type: "agent_session.worktree.merge_failed", userSessionId: session.userSessionId, agentSessionId: session.id,
         payload: { agentSessionId: session.id, seat: seat.name, conflicts: outcome.conflicts, detail: outcome.detail, artifactId } });
-      this.post({ agentSessionId: session.id, speaker: { kind: "agent", name: seat.name }, to: ORCHESTRATOR_SEAT,
+      this.post({ agentSessionId: session.id, speaker: { kind: "agent", name: seat.name }, to: this.#escalationTarget(session, seat.name),
         handoff: this.#simpleHandoff("Completed work failed to merge", "failed",
           `The workspace advanced past this seat's base; merging its changes conflicts in: ${outcome.conflicts.join(", ") || "unknown files"}. The diff is retained as artifact ${artifactId ?? "n/a"}.`,
           "Reassign the unit against the current HEAD."), category: "failure" });
@@ -1063,7 +1363,7 @@ export class AgentSessionHost {
     }
   }
 
-  #participant(agentSessionId: string, name: string, role: "orchestrator" | "agent", profile: AgentProfile, extra: string, model: string | undefined, ownership: string[], ord: number, createdAt: string): ParticipantRow {
+  #participant(agentSessionId: string, name: string, role: "orchestrator" | "agent", profile: AgentProfile, extra: string, model: string | undefined, ownership: string[], ord: number, createdAt: string, patternRole?: string): ParticipantRow {
     const instructions = [profile.instructions, extra.trim()].filter(Boolean).join("\n\nAssigned role context:\n");
     return { agentSessionId, name, role, preset: profile.id, instructions, model: model ?? profile.model ?? null,
       profileId: profile.id, profileSnapshot: profile, ownership, sdkSessionId: null,
@@ -1071,7 +1371,8 @@ export class AgentSessionHost {
       generation: 0, turnCount: 0,
       contextTokens: 0, memory: "", latestHandoffId: null, checkpointReady: true, pendingTurnSeq: 0, lastSeenSeq: 0,
       cumulativeCostUsd: 0, cumulativeApiDurationMs: 0, lastDecisionAt: null,
-      worktreePath: null, worktreeBaseCommit: null, worktreeBranch: null, attemptGroupId: null, attemptRole: null, ord, createdAt };
+      worktreePath: null, worktreeBaseCommit: null, worktreeBranch: null, attemptGroupId: null, attemptRole: null,
+      patternRole: patternRole ?? null, ord, createdAt };
   }
 
   #profile(id: string, workspaceId?: string): AgentProfile {
@@ -1079,14 +1380,66 @@ export class AgentSessionHost {
     return { id, title: id, purpose: id, instructions: `You are the ${id} specialist.`, tools: ["Read", "Glob", "Grep"], permissionMode: "default", maxTurns: 30, sandboxRequired: true, runtime: { shell: false, browser: false, screenshots: false, network: [] } };
   }
 
-  #assertRoute(agentSessionId: string, sender: string, recipient: string): void {
-    const specialists = new Set(this.#specialists(agentSessionId).map((p) => p.name));
-    const valid = sender === MAIN_RECIPIENT
-      ? recipient === ORCHESTRATOR_SEAT
-      : sender === ORCHESTRATOR_SEAT
-        ? recipient === MAIN_RECIPIENT || specialists.has(recipient)
-        : specialists.has(sender) && recipient === ORCHESTRATOR_SEAT;
-    if (!valid) throw badRequest(`route ${sender} → ${recipient} is not allowed; communication is main ↔ coordinator ↔ specialist`);
+  // ── Topology contracts ───────────────────────────────────────────────────
+
+  /** Compiled per session and memoized — contracts are frozen at creation. */
+  #contracts = new Map<string, CompiledContract>();
+  #contractOf(session: AgentSessionRow): CompiledContract {
+    let compiled = this.#contracts.get(session.id);
+    if (!compiled) { compiled = compileContract(contractOfSession(session)); this.#contracts.set(session.id, compiled); }
+    return compiled;
+  }
+
+  /** A participant's contract role; "main" is the user-session lane's pseudo-role. */
+  #roleOf(agentSessionId: string, name: string): string {
+    if (name === MAIN_RECIPIENT) return "main";
+    const seat = this.#deps.repo.getParticipant(agentSessionId, name);
+    return seat ? roleOfSeat(seat) : "";
+  }
+
+  #seatsOfRole(agentSessionId: string, role: string): ParticipantRow[] {
+    return this.#deps.repo.listParticipants(agentSessionId)
+      .filter((row) => roleOfSeat(row) === role)
+      .sort((a, b) => a.ord - b.ord);
+  }
+
+  /**
+   * The seat named by a completion-spec role. Builders guarantee `finalFrom`
+   * and `voice` are single-seat roles, so first-by-ord IS the seat.
+   */
+  #completionSeat(session: AgentSessionRow, which: "finalFrom" | "voice"): string {
+    const role = this.#contractOf(session).contract.completion[which];
+    return this.#seatsOfRole(session.id, role)[0]?.name ?? ORCHESTRATOR_SEAT;
+  }
+
+  /** Where a seat's console-synthesized failures go (RoleSpec.escalateTo). */
+  #escalationTarget(session: AgentSessionRow, seatName: string): string {
+    const seat = this.#deps.repo.getParticipant(session.id, seatName);
+    const spec = seat ? this.#contractOf(session).role(roleOfSeat(seat)) : undefined;
+    const target = spec?.escalateTo ?? "main";
+    if (target === "main") return MAIN_RECIPIENT;
+    return this.#seatsOfRole(session.id, target).filter((row) => row.name !== seatName)[0]?.name ?? MAIN_RECIPIENT;
+  }
+
+  #assertRoute(session: AgentSessionRow, sender: string, recipient: string, category: Category): EdgeSpec {
+    // Boundary hops: a child session's report enters its parent under the
+    // reserved `child:<id>` sender, valid only toward that child's controller.
+    if (sender.startsWith(CHILD_SENDER_PREFIX)) {
+      const child = this.#deps.repo.getAgentSession(sender.slice(CHILD_SENDER_PREFIX.length));
+      if (child && child.parentAgentSessionId === session.id && recipient === child.parentControllerSeat) {
+        return { from: "child", to: "controller", advance: "router" };
+      }
+      throw badRequest(`route ${sender} → ${recipient} is not allowed; a child session reports only to its own controller`);
+    }
+    const contract = this.#contractOf(session);
+    const from = this.#roleOf(session.id, sender);
+    const to = this.#roleOf(session.id, recipient);
+    const edge = from === "" || to === "" || sender === recipient ? undefined : contract.edge(from, to);
+    if (!edge) throw badRequest(`route ${sender} → ${recipient} is not allowed; communication is ${contract.contract.routeSummary}`);
+    if (edge.categories && !edge.categories.includes(category)) {
+      throw badRequest(`route ${sender} → ${recipient} does not carry "${category}" handoffs; communication is ${contract.contract.routeSummary}`);
+    }
+    return edge;
   }
 
   // ── Persistent seat lanes ────────────────────────────────────────────────
@@ -1136,18 +1489,41 @@ export class AgentSessionHost {
     return count;
   }
 
+  /** Session ids sharing one resident budget: the root and its children. */
+  #treeSessionIds(agentSessionId: string): Set<string> {
+    const row = this.#deps.repo.getAgentSession(agentSessionId);
+    const rootId = row?.parentAgentSessionId ?? agentSessionId;
+    const ids = new Set([rootId]);
+    for (const child of this.#deps.repo.listChildSessions(rootId)) ids.add(child.id);
+    return ids;
+  }
+
+  #residentIn(sessionIds: ReadonlySet<string>): number {
+    let count = 0;
+    for (const [sessionId, lanes] of this.#seats) {
+      if (!sessionIds.has(sessionId)) continue;
+      for (const lane of lanes.values()) if (lane.state === "live" || lane.state === "waking" || lane.state === "rotating") count += 1;
+    }
+    return count;
+  }
+
   /** Resident CLI processes are the scarce resource now, not concurrent turns. */
   async #reserveCapacity(agentSessionId: string, until: number): Promise<void> {
     const config = this.#deps.config;
     if (!config) return;
     for (;;) {
+      const tree = this.#treeSessionIds(agentSessionId);
       const globalFull = this.#resident() >= config.seatMaxResident;
       const sessionFull = this.#resident(agentSessionId) >= config.seatMaxResidentPerSession;
-      if (!globalFull && !sessionFull) return;
+      // A parent and its children SHARE a budget: nesting must not multiply
+      // the footprint, and a tree self-throttles before it thrashes strangers.
+      const treeFull = this.#residentIn(tree) >= config.seatMaxResidentPerTree;
+      if (!globalFull && !sessionFull && !treeFull) return;
       // Evict only where it frees the BINDING constraint: when the session cap
       // is what blocks us, a victim in another session gives up its process
-      // for nothing.
-      const scope = globalFull ? undefined : agentSessionId;
+      // for nothing. When the global cap binds, try our own tree first.
+      const scope = globalFull ? undefined : sessionFull ? new Set([agentSessionId]) : tree;
+      if (scope === undefined && this.#parkLeastRecentIdle(tree)) continue;
       if (this.#parkLeastRecentIdle(scope)) continue;
       // Nothing idle: cut loose the oldest operator wait — a seat blocked on
       // the operator is not WORKING, it is pinned by a human who may be away
@@ -1164,10 +1540,10 @@ export class AgentSessionHost {
     }
   }
 
-  #parkLeastRecentIdle(withinSessionId?: string): boolean {
+  #parkLeastRecentIdle(within?: ReadonlySet<string>): boolean {
     let victim: { sessionId: string; seat: string; lane: SeatLane } | null = null;
     for (const [sessionId, lanes] of this.#seats) {
-      if (withinSessionId !== undefined && sessionId !== withinSessionId) continue;
+      if (within !== undefined && !within.has(sessionId)) continue;
       for (const [seat, lane] of lanes) {
         if (lane.state !== "live" || lane.activeTurn !== null) continue;
         if (this.#deps.repo.listUnackedDeliveries(sessionId, seat).length > 0) continue;
@@ -1184,10 +1560,10 @@ export class AgentSessionHost {
    * the question: the row stays open and the answer arrives later as a
    * delivery.
    */
-  #detachOldestOperatorWait(withinSessionId?: string): void {
+  #detachOldestOperatorWait(within?: ReadonlySet<string>): void {
     let waiting: { lane: SeatLane; since: number } | null = null;
     for (const [sessionId, lanes] of this.#seats) {
-      if (withinSessionId !== undefined && sessionId !== withinSessionId) continue;
+      if (within !== undefined && !within.has(sessionId)) continue;
       for (const [, lane] of lanes) {
         const asking = lane.activeTurn?.awaitingOperator;
         if (!asking) continue;
@@ -1318,19 +1694,30 @@ export class AgentSessionHost {
       const latestSeat = this.#ensureSeatWorktree(session, this.#deps.repo.getParticipant(session.id, seatRow.name) ?? seatRow, workspaceRoot);
       const profile = latestSeat.profileSnapshot as AgentProfile;
       const seatRoot = latestSeat.worktreePath ?? workspaceRoot;
-      const mcp = this.#buildParticipantMcp(sdk, session, latestSeat, lane);
+      const contract = this.#contractOf(session);
+      const seatRole = roleOfSeat(latestSeat);
+      // Builders must supply a prompt for every role; the hub specialist pack
+      // is the conservative fallback for a snapshot that somehow lacks one.
+      const rolePrompt = contract.prompt(seatRole) ?? hubContract().promptPack.specialist!;
+      const granted = grantedTools(contract.role(seatRole), profile, latestSeat, {
+        tasks: Boolean(this.#deps.tasks), handoffs: Boolean(this.#deps.handoffs),
+        processes: Boolean(this.#deps.processes), browsers: Boolean(this.#deps.browsers),
+        contracts: Boolean(this.#deps.contracts), worktrees: Boolean(this.#deps.worktrees), user: Boolean(user),
+        childSessions: this.#deps.config.enableChildSessions !== false && session.parentAgentSessionId === null,
+      });
+      const mcp = this.#buildParticipantMcp(sdk, session, latestSeat, lane, granted);
       const options: SdkOptions = {
         cwd: seatRoot,
         // Order matters for prompt caching: the invariant part (instructions,
         // capabilities, messaging brief) comes first and is byte-identical
         // across generations; the volatile checkpoint goes last.
-        systemPrompt: { type: "preset", preset: "claude_code", append: `${latestSeat.instructions}\n\n${capabilityBrief(profile, latestSeat.worktreePath !== null && !latestSeat.attemptRole, this.#deps.config.allowedDomains ?? [])}${latestSeat.worktreePath && !latestSeat.attemptRole ? "\nNever run git commit — the Console lands your work when you report completed. Install dependencies only if you must run validation." : ""}\n\n${seatMessagingBrief(this.#roster(session), latestSeat.name)}\n${SESSION_PROTOCOL}${this.#decisionContext(session)}${this.#checkpointContext(latestSeat)}` },
+        systemPrompt: { type: "preset", preset: "claude_code", append: `${latestSeat.instructions}\n\n${capabilityBrief(profile, latestSeat.worktreePath !== null && !latestSeat.attemptRole, this.#deps.config.allowedDomains ?? [])}${latestSeat.worktreePath && !latestSeat.attemptRole ? "\nNever run git commit — the Console lands your work when you report completed. Install dependencies only if you must run validation." : ""}\n\n${seatMessagingBrief(this.#roster(session), rolePrompt.addressing)}\n${rolePrompt.protocol}${this.#decisionContext(session)}${this.#checkpointContext(latestSeat)}` },
         settingSources: [], includePartialMessages: true,
         permissionMode: profile.permissionMode,
         ...(profile.permissionMode === "bypassPermissions" ? { allowDangerouslySkipPermissions: true } : {}),
         allowedTools: [...profile.tools,
           ...(profile.tools.includes("Edit") || profile.tools.includes("Write") ? ["EnterWorktree", "ExitWorktree"] : []),
-          ...this.#runtimeToolNames(profile, latestSeat.name, latestSeat.attemptRole)],
+          ...runtimeToolNames(granted)],
         // A profile's tool list must be BINDING. `allowedTools` is only an
         // auto-approval list, so the db-live-1 coordinator — profile
         // ["Read","Glob","Grep"], brief "your own tools are intentionally
@@ -1351,7 +1738,17 @@ export class AgentSessionHost {
         sandbox: { enabled: true, failIfUnavailable: profile.sandboxRequired, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: false,
           filesystem: { allowManagedReadPathsOnly: true, allowRead: latestSeat.worktreePath ? [seatRoot, workspaceRoot] : [workspaceRoot], allowWrite: [seatRoot] },
           network: sandboxNetwork(profile, this.#deps.config.allowedDomains ?? []) },
-        env: sdkEnv(), abortController: lane.abort!, persistSession: true,
+        // Seat identity rides the ENV, not the prompt: visible to process
+        // forensics and the test discriminator without costing prompt bytes
+        // or perturbing the cache-invariant system-prompt head above.
+        env: { ...sdkEnv(),
+          CONSOLE_AGENT_SESSION_ID: session.id,
+          CONSOLE_SEAT_NAME: latestSeat.name,
+          CONSOLE_PATTERN_ROLE: seatRole,
+          CONSOLE_PATTERN: session.pattern,
+          CONSOLE_SESSION_DEPTH: String(session.depth),
+        },
+        abortController: lane.abort!, persistSession: true,
         sessionStore: this.#deps.sessionStore as never, sessionStoreFlush: "eager",
         mcpServers: { console_agent: mcp as never },
         ...(latestSeat.model ? { model: latestSeat.model } : {}),
@@ -1635,8 +2032,11 @@ export class AgentSessionHost {
     }
     lane.assignmentTurns += 1;
     lane.lastActiveAt = Date.now();
+    if (repo.getAgentSession(session.id)?.status === "open") {
+      try { onTurnSettled(this.#patternCtx(), session, turn.sawSend); } catch (error) { this.#recordHostFailure(session.id, error); }
+    }
     if (status === "error" && repo.getAgentSession(session.id)?.status === "open") {
-      const target = seatName === ORCHESTRATOR_SEAT ? MAIN_RECIPIENT : ORCHESTRATOR_SEAT;
+      const target = this.#escalationTarget(session, seatName);
       // A dead turn must hand its successor real state.
       //
       // This used to be `#simpleHandoff` plus whatever narration happened to be
@@ -1665,13 +2065,13 @@ export class AgentSessionHost {
       } catch {
         draft = this.#simpleHandoff("Turn failed", "failed", reason, "Inspect the failure and retry or reassign.");
       }
-      this.post({ agentSessionId: session.id, speaker: { kind: seatName === ORCHESTRATOR_SEAT ? "orchestrator" : "agent", name: seatName }, to: target,
+      this.post({ agentSessionId: session.id, speaker: { kind: seat?.role === "orchestrator" ? "orchestrator" : "agent", name: seatName }, to: target,
         handoff: draft, category: "failure", turnId: turn.turnId });
     }
     const profile = seat?.profileSnapshot as AgentProfile | undefined;
     if (status === "completed" && profile && lane.assignmentTurns === profile.maxTurns + 1 && repo.getAgentSession(session.id)?.status === "open") {
-      const target = seatName === ORCHESTRATOR_SEAT ? MAIN_RECIPIENT : ORCHESTRATOR_SEAT;
-      this.post({ agentSessionId: session.id, speaker: { kind: seatName === ORCHESTRATOR_SEAT ? "orchestrator" : "agent", name: seatName }, to: target,
+      const target = this.#escalationTarget(session, seatName);
+      this.post({ agentSessionId: session.id, speaker: { kind: seat?.role === "orchestrator" ? "orchestrator" : "agent", name: seatName }, to: target,
         handoff: this.#simpleHandoff("Turn budget exhausted", "blocked",
           `${seatName} has spent ${lane.assignmentTurns - 1} turns on the current assignment (budget ${profile.maxTurns}).`,
           "Refocus, reassign, or explicitly continue the work."), category: "failure", turnId: turn.turnId });
@@ -1811,11 +2211,19 @@ export class AgentSessionHost {
    * mechanical cause of db-live-2's orphan question, which is still unresolved
    * in that database today. Each ask now mints its own controller.
    */
-  #buildParticipantMcp(sdk: ConsoleSdk, session: AgentSessionRow, seat: ParticipantRow, lane: SeatLane): unknown {
+  #buildParticipantMcp(sdk: ConsoleSdk, session: AgentSessionRow, seat: ParticipantRow, lane: SeatLane, granted: ReadonlySet<SeatToolName>): unknown {
     const user = this.#deps.repo.getUserSession(session.userSessionId);
     const workspaceRoot = user && this.#deps.getWorkspaceRoot ? this.#deps.getWorkspaceRoot(user.workspaceId) : "";
     const tools = buildSeatTools({
       sdk, deps: this.#deps, session, seat, profile: seat.profileSnapshot as AgentProfile, user, workspaceRoot,
+      granted,
+      legalRecipient: (candidate) => {
+        const fresh = this.#deps.repo.getAgentSession(session.id) ?? session;
+        const toRole = this.#roleOf(session.id, candidate);
+        const fromRole = this.#roleOf(session.id, seat.name);
+        if (toRole !== "" && candidate !== seat.name && this.#contractOf(fresh).edge(fromRole, toRole)) return candidate;
+        return this.#escalationTarget(fresh, seat.name);
+      },
       post: (input) => this.post(input),
       askOperator: (args) => this.#askOperator(session, seat, lane, args),
       currentTurnId: () => this.#laneOf(session.id, seat.name).activeTurn?.turnId,
@@ -1824,6 +2232,15 @@ export class AgentSessionHost {
       simpleHandoff: (action, status, summary, nextAction) => this.#simpleHandoff(action, status, summary, nextAction),
       startAttempts: (input) => this.startAttempts(input),
       selectAttemptWinner: (input) => this.selectAttemptWinner(input),
+      dispatchWorkItems: (input) => this.dispatchWorkItems(seat.name, input),
+      createChildSession: (input) => this.createSession({
+        userSessionId: session.userSessionId, title: input.title, mode: "execute",
+        pattern: input.pattern as PatternId,
+        ...(input.patternConfig ? { patternConfig: input.patternConfig } : {}),
+        parent: { agentSessionId: session.id, controllerSeat: seat.name },
+        agents: input.agents, briefing: input.briefing,
+      }),
+      abandonChildSession: (childAgentSessionId, reason) => this.abandonChildSession(session.id, seat.name, childAgentSessionId, reason),
     });
     // alwaysLoad: the profile already decided this seat's tools. Deferring them
     // behind ToolSearch made every seat spend a round-trip rediscovering what
@@ -1832,22 +2249,6 @@ export class AgentSessionHost {
     return sdk.createSdkMcpServer({ name: "console_agent", version: "2", tools, alwaysLoad: true });
   }
 
-  #runtimeToolNames(profile: AgentProfile, participant: string, attemptRole?: string | null): string[] {
-    return ["mcp__console_agent__send_handoff", "mcp__console_agent__read_handoff", "mcp__console_agent__report_handoff_discrepancy",
-      "mcp__console_agent__task_list", "mcp__console_agent__read_artifact", "mcp__console_agent__write_note", "mcp__console_agent__roster_status",
-      ...(profile.runtime.shell ? ["mcp__console_agent__http_probe"] : []),
-      "mcp__console_agent__read_contract", "mcp__console_agent__accept_contract", "mcp__console_agent__propose_contract_amendment", "mcp__console_agent__object_to_contract",
-      ...(this.#deps.contracts && participant === ORCHESTRATOR_SEAT ? ["mcp__console_agent__declare_contract", "mcp__console_agent__supersede_contract"] : []),
-      ...(participant === ORCHESTRATOR_SEAT ? ["mcp__console_agent__task_create", "mcp__console_agent__task_update"] : []),
-      ...(profile.runtime.shell ? ["mcp__console_agent__process_start", "mcp__console_agent__process_read", "mcp__console_agent__process_stop"] : []),
-      ...(profile.runtime.browser ? ["mcp__console_agent__browser_open", "mcp__console_agent__browser_snapshot", "mcp__console_agent__browser_click", "mcp__console_agent__browser_fill", "mcp__console_agent__browser_console", "mcp__console_agent__browser_press", "mcp__console_agent__browser_evaluate"] : []),
-      ...(profile.runtime.browser && profile.runtime.screenshots ? ["mcp__console_agent__browser_screenshot"] : []),
-      // Every seat can reach the operator, so this is unconditional.
-      "mcp__console_agent__ask_operator",
-      ...(participant === ORCHESTRATOR_SEAT && this.#deps.worktrees ? ["mcp__console_agent__start_attempts"] : []),
-      ...(attemptRole === "reviewer" ? ["mcp__console_agent__select_attempt_winner", "mcp__console_agent__read_attempt_diff"] : []),
-    ];
-  }
 
   #snapshotProfile(profile: AgentProfile): AgentProfile {
     if (profile.source !== "workspace" || !profile.pluginPath || !profile.revision || !this.#deps.config) return profile;
@@ -1991,7 +2392,7 @@ export class AgentSessionHost {
       if (prior.version === version || prior.seat === seat.name) continue;
       this.#deps.bus.append({ type: "agent_session.dependency_drift", userSessionId: session.userSessionId, agentSessionId: session.id,
         payload: { agentSessionId: session.id, dependency: name, versions: [{ seat: prior.seat, version: prior.version }, { seat: seat.name, version }] } });
-      this.post({ agentSessionId: session.id, speaker: { kind: "agent", name: seat.name }, to: ORCHESTRATOR_SEAT,
+      this.post({ agentSessionId: session.id, speaker: { kind: "agent", name: seat.name }, to: this.#escalationTarget(session, seat.name),
         handoff: this.#simpleHandoff(`Dependency drift on ${name}`, "needs_verification",
           `${prior.seat} landed ${name}@${prior.version} and ${seat.name} landed ${name}@${version}. Two versions of one dependency in a single build load twice and fail cross-module identity checks. Neither seat can see this — their files are disjoint.`,
           `Decide the single version for ${name} and have the owning seat align.`), category: "failure" });
@@ -2226,7 +2627,8 @@ export class AgentSessionHost {
   }
 
   #recordNarration(session: AgentSessionRow, participant: string, text: string, turnId: string): void {
-    const row = this.#deps.repo.appendMessage({ sessionKind: "agent", sessionId: session.id, speaker: { kind: participant === ORCHESTRATOR_SEAT ? "orchestrator" : "agent", name: participant }, kind: "notice", text, turnId, payload: { channel: "model_output" } });
+    const seatRow = this.#deps.repo.getParticipant(session.id, participant);
+    const row = this.#deps.repo.appendMessage({ sessionKind: "agent", sessionId: session.id, speaker: { kind: seatRow?.role === "orchestrator" ? "orchestrator" : "agent", name: participant }, kind: "notice", text, turnId, payload: { channel: "model_output" } });
     this.#deps.bus.append({ type: "agent_session.message", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { agentSessionId: session.id, message: toWireMessage(row) } });
   }
 
@@ -2299,8 +2701,16 @@ export class AgentSessionHost {
   #refreshStatus(agentSessionId: string): void {
     const row = this.#deps.repo.getAgentSession(agentSessionId);
     if (!row || row.status !== "open") return;
-    const status = this.#statusOf(row) === "working" ? "working" : "idle";
+    const computed = this.#statusOf(row);
+    const status = computed === "working" ? "working" : "idle";
     this.#setStatus(agentSessionId, status);
+    // A child settling into `reported` may be the LAST hold on its parent's
+    // withheld final — the delivery acks that gate the flip land after the
+    // boundary hop itself, so this recompute is the reliable release point.
+    if (computed === "reported" && row.parentAgentSessionId !== null) {
+      const parent = this.#deps.repo.getAgentSession(row.parentAgentSessionId);
+      if (parent && parent.status === "open") this.#maybeReleaseParentFinal(parent);
+    }
     if (status === "idle") this.#dischargeOperatorDebt(row);
   }
 
@@ -2321,8 +2731,10 @@ export class AgentSessionHost {
     const reportedToMain = repo.latestHandoff({ userSessionId: session.userSessionId, agentSessionId: session.id, participant: MAIN_RECIPIENT });
     if (reportedToMain) { this.#operatorDebtSettled.add(session.id); return; }
 
-    const coordinator = repo.latestHandoff({ userSessionId: session.userSessionId, agentSessionId: session.id, sender: ORCHESTRATOR_SEAT, excludeCheckpoints: true });
-    const seatReports = this.#specialists(session.id)
+    const voiceSeat = this.#completionSeat(session, "voice");
+    const coordinator = repo.latestHandoff({ userSessionId: session.userSessionId, agentSessionId: session.id, sender: voiceSeat, excludeCheckpoints: true });
+    const seatReports = repo.listParticipants(session.id)
+      .filter((seat) => seat.name !== voiceSeat)
       .map((seat) => repo.latestHandoff({ userSessionId: session.userSessionId, agentSessionId: session.id, sender: seat.name, excludeCheckpoints: true }))
       .filter((row): row is NonNullable<typeof row> => row !== undefined);
     if (!coordinator && seatReports.length === 0) return;
@@ -2335,7 +2747,7 @@ export class AgentSessionHost {
     this.#deps.bus.append({ type: "agent_session.unreported", userSessionId: session.userSessionId, agentSessionId: session.id,
       payload: { agentSessionId: session.id, seatReports: seatReports.length, hadCoordinatorReport: coordinator !== undefined } });
     try {
-      this.post({ agentSessionId: session.id, speaker: { kind: "orchestrator", name: ORCHESTRATOR_SEAT }, to: MAIN_RECIPIENT,
+      this.post({ agentSessionId: session.id, speaker: { kind: repo.getParticipant(session.id, voiceSeat)?.role === "orchestrator" ? "orchestrator" : "agent", name: voiceSeat }, to: MAIN_RECIPIENT,
         handoff: this.#simpleHandoff("AgentSession went idle without a final report", "needs_verification", summary,
           "Review the seat reports above and decide whether the work is complete."), category: "milestone" });
     } catch (error) { this.#recordHostFailure(session.id, error); }
@@ -2360,11 +2772,18 @@ export class AgentSessionHost {
     if (this.#deps.repo.listQueuedDeliveries(row.id).some((d) => d.recipient !== MAIN_RECIPIENT)) return "working";
     const reported = this.#deps.repo.latestHandoff({
       userSessionId: row.userSessionId, agentSessionId: row.id,
-      participant: MAIN_RECIPIENT, sender: ORCHESTRATOR_SEAT, excludeCheckpoints: true,
-      // Only what the coordinator ITSELF sent counts as having reported.
+      participant: MAIN_RECIPIENT, sender: this.#completionSeat(row, "finalFrom"), excludeCheckpoints: true,
+      // Only what the reporting seat ITSELF sent counts as having reported.
       excludeConsoleSynthesized: true,
     });
-    if (reported && this.#deps.repo.listActiveDeliveries(row.id).length === 0) return "reported";
+    if (reported && this.#deps.repo.listActiveDeliveries(row.id).length === 0) {
+      // Bottom-up settling: a parent has not truly reported while an open
+      // child still owes its final — the parent's report could not have
+      // reflected work that has not concluded.
+      const unsettledChild = this.#deps.repo.listChildSessions(row.id)
+        .some((child) => child.status === "open" && this.#statusOf(child) !== "reported");
+      return unsettledChild ? "idle" : "reported";
+    }
     return "idle";
   }
   #setStatus(id: string, status: AgentSessionStatus): void {
@@ -2380,7 +2799,7 @@ export class AgentSessionHost {
     if (last === null && status === "idle") { this.#sessionStatus.set(id, status); return; }
     this.#sessionStatus.set(id, status);
     if (!session) return;
-    this.#deps.bus.append({ type: "agent_session.status", userSessionId: session.userSessionId, agentSessionId: id, payload: { agentSessionId: id, status, owedToOrchestrator: false } });
+    this.#deps.bus.append({ type: "agent_session.status", userSessionId: session.userSessionId, agentSessionId: id, payload: { agentSessionId: id, status } });
   }
   #recordHostFailure(id: string, error: unknown): void {
     const session = this.#deps.repo.getAgentSession(id); if (!session) return;

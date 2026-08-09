@@ -100,9 +100,13 @@ export class RunCompletionService {
     if (runner.queuedJobs(userSessionId) > 0) return false;
     if (!runner.laneIdle(userSessionId)) return false;
 
-    // Somebody must actually have reported a final. Idle is not done.
+    // Somebody TOP-LEVEL must actually have reported a final. Idle is not
+    // done, and a child's "final" never reaches the literal main lane — it
+    // crossed into its parent as a milestone — so children cannot satisfy
+    // this clause and must not be consulted for it.
     return repo.listAgentSessions(userSessionId).some((agentSession) =>
-      repo.latestHandoff({
+      agentSession.parentAgentSessionId === null
+      && repo.latestHandoff({
         userSessionId, agentSessionId: agentSession.id,
         participant: "main", excludeCheckpoints: true,
       })?.trigger === "final");

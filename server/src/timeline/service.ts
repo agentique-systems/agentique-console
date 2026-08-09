@@ -20,9 +20,15 @@ export class TimelineService {
       { id: "orchestrator", kind: "orchestrator", label: "Orchestrator Agent", parentId: null, order: 1 },
     ];
     let order = 2;
-    for (const agentSession of this.repo.listAgentSessions(userSessionId)) {
+    // Children lane directly under their parent, with REAL depth: a child
+    // session's lane parents on the parent session's, not on the root.
+    const all = this.repo.listAgentSessions(userSessionId);
+    const ordered = all.filter((row) => row.parentAgentSessionId === null)
+      .flatMap((root) => [root, ...all.filter((row) => row.parentAgentSessionId === root.id)]);
+    for (const agentSession of ordered) {
       const parent = `agent-session:${agentSession.id}`;
-      lanes.push({ id: parent, kind: "agent_session", label: agentSession.title, parentId: null, order: order++ });
+      lanes.push({ id: parent, kind: "agent_session", label: agentSession.title,
+        parentId: agentSession.parentAgentSessionId === null ? null : `agent-session:${agentSession.parentAgentSessionId}`, order: order++ });
       for (const participant of this.repo.listParticipants(agentSession.id)) {
         lanes.push({ id: `agent:${agentSession.id}:${participant.name}`, kind: "agent", label: participant.name, parentId: parent, order: order++ });
       }

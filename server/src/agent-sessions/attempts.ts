@@ -2,6 +2,12 @@
  * Best-of-N attempt groups: fan-out, capture, reviewer seating, selection and
  * teardown. Free functions over a narrow context — seat spawning, journalling
  * and profile resolution stay host-private and arrive as bound callbacks.
+ *
+ * Deliberately ORTHOGONAL to the pattern catalog: attempts race N copies of
+ * one assignment in isolated worktrees and merge one winner, which is
+ * map-reduce-with-arbitration in worktree clothing. A later release may
+ * express it as a map_reduce variant (replicable role + quorum-1 judge join);
+ * until then the two mechanisms share the minting shape but not the state.
  */
 import type { HandoffDraft, Speaker } from "@agentique-console/shared";
 import { badRequest, conflict, notFound } from "../api/errors.ts";

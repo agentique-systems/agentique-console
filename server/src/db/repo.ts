@@ -24,6 +24,7 @@ import {
   mailboxDeliveries,
   messages,
   participants,
+  patternState,
   providerEntries,
   tasks,
   userSessions,
@@ -50,6 +51,7 @@ export type UsageSampleRow = typeof usageSamples.$inferSelect;
 export type HandoffRecordRow = typeof handoffRecords.$inferSelect;
 export type AttemptGroupRow = typeof attemptGroups.$inferSelect;
 export type CronRow = typeof crons.$inferSelect;
+export type PatternStateRow = typeof patternState.$inferSelect;
 
 export function toWireAgentSession(
   row: AgentSessionRow,
@@ -63,6 +65,8 @@ export function toWireAgentSession(
     mode: row.mode,
     phase: row.phase,
     status: row.status === "archived" ? "archived" : working ? "working" : "idle",
+    pattern: row.pattern,
+    parentAgentSessionId: row.parentAgentSessionId,
     participants: specialists,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -510,6 +514,46 @@ export class Repo {
 
   insertAgentSession(row: AgentSessionRow): void {
     this.#db.insert(agentSessions).values(row).run();
+  }
+
+  listOpenAgentSessions(): AgentSessionRow[] {
+    return this.#db
+      .select()
+      .from(agentSessions)
+      .where(eq(agentSessions.status, "open"))
+      .all();
+  }
+
+  listChildSessions(parentAgentSessionId: string): AgentSessionRow[] {
+    return this.#db
+      .select()
+      .from(agentSessions)
+      .where(eq(agentSessions.parentAgentSessionId, parentAgentSessionId))
+      .orderBy(asc(agentSessions.createdAt))
+      .all();
+  }
+
+  // --- Pattern state (progression-module-owned) -----------------------------
+
+  getPatternState(agentSessionId: string): PatternStateRow | undefined {
+    return this.#db.select().from(patternState).where(eq(patternState.agentSessionId, agentSessionId)).get();
+  }
+
+  /** Creates the row on first touch; merges the patch into the existing one after. */
+  upsertPatternState(agentSessionId: string, patch: Partial<Omit<PatternStateRow, "agentSessionId" | "createdAt" | "updatedAt">>): PatternStateRow {
+    const now = nowIso();
+    const existing = this.getPatternState(agentSessionId);
+    if (!existing) {
+      const row: PatternStateRow = {
+        agentSessionId, rounds: 0, handoffCount: 0, stallTurns: 0, lastProgressAt: null,
+        recentEdges: [], cursor: null, joins: {}, tripped: null, createdAt: now, updatedAt: now,
+        ...patch,
+      };
+      this.#db.insert(patternState).values(row).run();
+      return row;
+    }
+    this.#db.update(patternState).set({ ...patch, updatedAt: now }).where(eq(patternState.agentSessionId, agentSessionId)).run();
+    return { ...existing, ...patch, updatedAt: now };
   }
 
   /**

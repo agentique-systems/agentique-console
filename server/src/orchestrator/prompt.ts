@@ -28,21 +28,42 @@ export const ORCHESTRATOR_DELEGATION_BRIEF = `
 ## Delegation
 
 - Call \`list_agent_profiles\`, then create an agent session per coherent stream
-  with \`create_agent_session\` (1-20 explicitly owned profile-bound seats and a
-  typed coordinator handoff. Twenty seats is a ceiling, not a target: keep
-  sessions small unless the work genuinely partitions into parallel scopes.
-  Every briefing and later message must include the
-  canonical core: status/risk/action, evidence-backed state, result/artifacts,
-  uncertainty, and next action. Keep detail in evidence pointers; do not paste
-  large source content into the envelope.
-  Choose "plan_execute" when the work is large or risky enough that you want a
-  plan first, "execute" otherwise.
+  with \`create_agent_session\`: pick an orchestration pattern, seat profile-bound
+  agents with explicit ownership, and send a typed briefing handoff. Seats are
+  a ceiling, not a target: keep sessions small unless the work genuinely
+  partitions. Every briefing and later message must include the canonical core:
+  status/risk/action, evidence-backed state, result/artifacts, uncertainty, and
+  next action. Keep detail in evidence pointers; do not paste large source
+  content into the envelope.
+
+### Choosing the pattern
+
+First: would a SINGLE seat suffice? A one-specialist hub session is cheaper and
+usually better — multi-agent pays 3-10x tokens and only wins when the work
+splits along real context boundaries. Then read the task's shape:
+- Path known in advance, stages that each ADD information → \`pipeline\`
+  (the agents ARE the stages, in order; a relay that adds nothing loses quality).
+- One deliverable judged against a rubric, revised until it passes →
+  \`evaluator_optimizer\` (exactly 2 seats; pass patternConfig.rubric).
+- Many INDEPENDENT items of runtime-decided count, results synthesized →
+  \`map_reduce\` (seat only the reducer; it fans out with dispatch_work_items).
+- Same question argued independently, disagreement is signal →
+  \`debate\` (2-8 debaters; the console seats the judge).
+- Decomposition unknown or evolving, a conductor should sequence →
+  \`hub_and_spoke\` (the default), or \`plan_execute\` when the units and their
+  dependencies deserve an explicit task DAG the Console dispatches on.
+- Small crew that genuinely must hand work directly to each other →
+  \`peer_to_peer\` — use it RARELY and small: unmanaged meshes amplify errors,
+  so the Console hard-caps its handoffs and stops ping-pong.
+Weigh parallel width against dependency depth: wide and independent points to
+map_reduce/debate, long and coupled to pipeline/plan_execute, unknown to hub.
 - Steer a running session with \`send_to_coordinator\`, passing the
-  agentSessionId create_agent_session returned. Its fields ARE the handoff —
-  there is no envelope to write or escape — and the Console route-checks,
-  journals and carries it. Coordinators report back the same way; their reports
-  arrive as addressed handoffs. You address coordinators only, never
-  specialists, and never the Agent tool.
+  agentSessionId create_agent_session returned; it reaches the session's ENTRY
+  seat (hub coordinator, first pipeline stage, generator, reducer, closer,
+  planner). Its fields ARE the handoff — there is no envelope to write or
+  escape — and the Console route-checks, journals and carries it. Sessions
+  report back the same way; their reports arrive as addressed handoffs. You
+  address entry seats only, never the seats inside, and never the Agent tool.
 - Context rotation uses Console checkpoint handoffs. Repository files, tasks,
   provider journal entries, and artifacts remain authoritative; treat handoff
   claims as historical context and verify them in proportion to risk.

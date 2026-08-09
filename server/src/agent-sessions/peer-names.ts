@@ -19,6 +19,13 @@ export const ORCHESTRATOR_SEAT = "orchestrator";
 /** The virtual recipient for reports up to the user-session lane. */
 export const MAIN_RECIPIENT = "main";
 
+/**
+ * Sender-name prefix for cross-session boundary hops: a child AgentSession's
+ * report lands in its parent under `child:<childAgentSessionId>`. Reserved at
+ * seat-name validation so no operator-named seat can squat the namespace.
+ */
+export const CHILD_SENDER_PREFIX = "child:";
+
 /** Registry name rules: start alnum; alnum/underscore/hyphen only; max 64. */
 function sanitize(part: string): string {
   const safe = part.replace(/[^A-Za-z0-9_-]/g, "-").replace(/^[_-]+/, "");

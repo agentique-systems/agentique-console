@@ -30,7 +30,6 @@ export type AgentStream = Stream<ConsoleEvent, null>;
 /** The persisted event types the transcript renders (via agent-fold.ts). */
 export const AGENT_TRANSCRIPT_TYPES: ReadonlySet<ConsoleEventType> = new Set([
   "agent_session.message",
-  "agent_session.routed",
   "agent_session.turn.started",
   "agent_session.turn.settled",
   "agent_session.tool.call",

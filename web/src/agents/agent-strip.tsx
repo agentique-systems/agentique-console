@@ -25,16 +25,28 @@ export function AgentStrip() {
       : s.selectedAgentSessionByUserSession[userSessionId],
   );
 
-  // createdAt desc, id as tiebreak — a stable order that never reshuffles
-  // mid-glance when updatedAt churns.
-  const cards = useMemo(
-    () =>
-      [...(agentSessions.data ?? [])].sort(
-        (a, b) =>
-          b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id),
-      ),
-    [agentSessions.data],
-  );
+  // Top-level sessions createdAt desc (a stable order that never reshuffles
+  // mid-glance when updatedAt churns); each followed by its children,
+  // createdAt asc, indented one level under their parent.
+  const cards = useMemo(() => {
+    const all = agentSessions.data ?? [];
+    const children = new Map<string, typeof all>();
+    for (const session of all) {
+      if (session.parentAgentSessionId === null) continue;
+      const siblings = children.get(session.parentAgentSessionId) ?? [];
+      siblings.push(session);
+      children.set(session.parentAgentSessionId, siblings);
+    }
+    const roots = all
+      .filter((session) => session.parentAgentSessionId === null)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id));
+    return roots.flatMap((root) => [
+      { session: root, nested: false },
+      ...(children.get(root.id) ?? [])
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))
+        .map((child) => ({ session: child, nested: true })),
+    ]);
+  }, [agentSessions.data]);
 
   const taskRows = tasks.data ?? [];
   const taskCountBySession = useMemo(() => {
@@ -62,14 +74,16 @@ export function AgentStrip() {
           </div>
         ) : (
           <div className="flex flex-col gap-2 border-l border-border">
-            {cards.map((session) => (
-              <FlowStem key={session.id} agentSessionId={session.id}>
-                <AgentCard
-                  session={session}
-                  taskCount={taskCountBySession.get(session.id) ?? 0}
-                  selected={session.id === selectedId}
-                />
-              </FlowStem>
+            {cards.map(({ session, nested }) => (
+              <div key={session.id} className={nested ? "border-l border-border-subtle pl-4" : undefined}>
+                <FlowStem agentSessionId={session.id}>
+                  <AgentCard
+                    session={session}
+                    taskCount={taskCountBySession.get(session.id) ?? 0}
+                    selected={session.id === selectedId}
+                  />
+                </FlowStem>
+              </div>
             ))}
           </div>
         )}

@@ -14,7 +14,7 @@ import type { TaskService } from "../tasks/service.ts";
 import type { HandoffService } from "../handoffs/service.ts";
 import { classifyUncertainty, type EscalationCategory, type EscalationItem } from "../handoffs/escalation.ts";
 import { consoleTaskListId } from "../orchestrator/tools.ts";
-import { MAIN_RECIPIENT, ORCHESTRATOR_SEAT } from "./peer-names.ts";
+import { MAIN_RECIPIENT } from "./peer-names.ts";
 
 export type Category = MailboxDeliveryRow["category"];
 
@@ -186,14 +186,18 @@ export function assignmentBlockers(deps: GovernanceDeps, session: AgentSessionRo
  * still `pending` in that database, and was the last row written. A report
  * that precedes its own outstanding questions is not a report.
  */
-export function finalReportBlockers(deps: GovernanceDeps, session: AgentSessionRow, sender: string, to: string, category: Category): Interaction[] {
-  if (!isFinalToMain(sender, to, category)) return [];
+export function finalReportBlockers(deps: GovernanceDeps, session: AgentSessionRow, finalSeat: string, sender: string, to: string, category: Category): Interaction[] {
+  if (!isFinalToMain(finalSeat, sender, to, category)) return [];
   return deps.interactions.listUnresolvedForAgentSession(session.id)
     .filter((row) => row.urgency === "blocking");
 }
 
-export function isFinalToMain(sender: string, to: string, category: Category): boolean {
-  return sender === ORCHESTRATOR_SEAT && to === MAIN_RECIPIENT && category === "final";
+/**
+ * `finalSeat` is the seat of the contract's `completion.finalFrom` role — the
+ * one whose final→main is THE report the gate governs. Hub: the coordinator.
+ */
+export function isFinalToMain(finalSeat: string, sender: string, to: string, category: Category): boolean {
+  return sender === finalSeat && to === MAIN_RECIPIENT && category === "final";
 }
 
 /**
@@ -204,18 +208,18 @@ export function isFinalToMain(sender: string, to: string, category: Category): b
  * only on facts it owns — so unmet conditions now travel WITH the report,
  * where the operator can weigh them, instead of suppressing it.
  */
-export function finalReportCaveats(deps: GovernanceDeps, session: AgentSessionRow, sender: string, to: string, category: Category, activeSpecialists: () => string[]): string[] {
-  if (sender !== ORCHESTRATOR_SEAT || to !== MAIN_RECIPIENT || category !== "final") return [];
+export function finalReportCaveats(deps: GovernanceDeps, session: AgentSessionRow, finalSeat: string, sender: string, to: string, category: Category, activeSpecialists: () => string[]): string[] {
+  if (!isFinalToMain(finalSeat, sender, to, category)) return [];
   const caveats: string[] = [];
   if (deps.tasks) {
     const incomplete = deps.tasks.listForUserSession(session.userSessionId).filter((task) => task.agentSessionId === session.id && task.status !== "completed" && task.status !== "deleted");
     if (incomplete.length > 0) caveats.push(`${incomplete.length} task(s) still open in the ledger: ${incomplete.map((task) => task.subject).join(", ")}`);
   }
   const running = activeSpecialists();
-  // Only deliveries addressed to SPECIALISTS count as outstanding work: a
+  // Only deliveries addressed to OTHER seats count as outstanding work: a
   // native final goes out mid-turn, so the very report that woke the
-  // coordinator is still unacknowledged in its own inbox.
-  const pendingInternal = deps.repo.listActiveDeliveries(session.id).filter((delivery) => delivery.recipient !== MAIN_RECIPIENT && delivery.recipient !== ORCHESTRATOR_SEAT);
+  // reporting seat is still unacknowledged in its own inbox.
+  const pendingInternal = deps.repo.listActiveDeliveries(session.id).filter((delivery) => delivery.recipient !== MAIN_RECIPIENT && delivery.recipient !== sender);
   if (running.length > 0) caveats.push(`still running: ${running.join(", ")}`);
   if (pendingInternal.length > 0) caveats.push(`${pendingInternal.length} delivery(ies) to specialists not yet acknowledged`);
   return caveats;

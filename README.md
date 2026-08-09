@@ -8,18 +8,38 @@ single npm-workspaces application backed by SQLite and the Claude Agent SDK.
 - A **Workspace** is a local directory.
 - A **UserSession** is the Human Operator's conversation with the main
   Orchestrator.
-- An **AgentSession** is one Console-managed coordinator plus 1–20 named
-  specialists. Every participant is a persistent, name-addressed peer session
-  (registered under `CLAUDE_CODE_SESSION_NAME` in the machine's session
-  registry) with its own resumable provider session and a snapshotted agent
-  profile. Idle seats park (process closed, resume handle kept) and wake on
-  the next delivery.
+- An **AgentSession** is a Console-managed team of named seats running an
+  **orchestration pattern**. Each seat has its own resumable provider session
+  and a snapshotted agent profile. Idle seats park (process closed, resume
+  handle kept) and wake on the next delivery.
+- **Patterns are topology contracts.** At creation the chosen pattern's builder
+  compiles a per-session contract — roles with tool grants, a route table,
+  fan-in joins, a composite termination policy, a completion spec, and per-role
+  prompts — snapshotted onto the session row. The host executes contracts and
+  never branches on pattern names. The catalog: `hub_and_spoke` (the default:
+  one coordinator + 1–20 specialists), `pipeline` (the agents are the stages,
+  in order), `evaluator_optimizer` (generate → judge cycles with a round cap),
+  `map_reduce` (a reducer fans out runtime-minted mappers with
+  `dispatch_work_items`; the join delivers all reports in one turn), `debate`
+  (independent positions, console-seated judge), `peer_to_peer` (a bounded
+  mesh: hard handoff cap, oscillation detection, a designated closer), and
+  `plan_execute` (a planner over the task DAG the Console dispatches on).
+- **One level of nesting.** A controller seat (hub coordinator, planner) may
+  spawn a child AgentSession running any pattern with
+  `create_child_session`. The child's `main` resolves to that controller — its
+  final crosses the boundary as a milestone — and a parent's own final is
+  withheld until every child has reported (or is abandoned). Child seats never
+  receive the spawn tools, so the depth cap is the granting itself.
 - Agents transfer work with one console-owned tool, `send_handoff`. Its
   parameters *are* the handoff core, so the provider validates the shape and
   nothing is serialized by hand. Every transfer is route-checked against the
-  enforced star (`main ↔ coordinator ↔ specialist`) and journaled to SQLite
+  session's contract (hub sessions keep the familiar
+  `main ↔ coordinator ↔ specialist` star) and journaled to SQLite
   before it is carried, then pushed into the recipient's live lane — waking a
   parked seat or steering a running turn. One transport, every direction.
+  A coordinator can pass a specialist's report upward verbatim with
+  `forward_message` — the operator reads the specialist's words, not a
+  paraphrase.
 - **Native for capability, console for coordination.** The SDK supplies the
   sandbox, managed processes, local Chrome, git worktrees behind
   `EnterWorktree`, and model invocation — real engineering with no
@@ -107,11 +127,11 @@ An AgentSession owes the operator a reply. If it goes idle without its
 coordinator reporting, the Console closes the loop itself from the journal —
 labelled as Console-assembled, never as a coordinator result.
 
-Coordinators have a typed `request_decision` tool. Blocking operator decisions
-surface immediately as cards. Nonblocking decisions travel as coalesced
-milestones. Product scope, fidelity, licensing, budget, security, and
-irreversible choices belong to the operator; routine technical sequencing and
-local integration do not.
+Every seat — not just coordinators — has the typed `ask_operator` tool.
+Blocking operator decisions surface immediately as cards. Nonblocking
+decisions travel as coalesced milestones. Product scope, fidelity, licensing,
+budget, security, and irreversible choices belong to the operator; routine
+technical sequencing and local integration do not.
 
 ## Running
 

@@ -71,6 +71,10 @@ export interface AgentSession {
   mode: SessionMode;
   phase: SessionPhase;
   status: AgentSessionStatus;
+  /** Orchestration-pattern catalog id (hub_and_spoke, pipeline, …). */
+  pattern: string;
+  /** NULL = top-level; set = this is a child session nested one level down. */
+  parentAgentSessionId: string | null;
   /** Specialist seat names in seating order (excludes the orchestrator's virtual seat). */
   participants: string[];
   createdAt: string;

@@ -56,4 +56,29 @@ describe("database migration", () => {
       .toEqual(expect.arrayContaining([expect.objectContaining({ name: "interactions_agent_open" })]));
     sqlite.close();
   });
+
+  it("opens pre-contract agent_sessions/participants and backfills topology columns", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agentique-db-")); dirs.push(dir); const file = path.join(dir, "console.db");
+    const legacy = new Database(file);
+    legacy.exec(`
+      CREATE TABLE workspaces (id TEXT PRIMARY KEY, name TEXT NOT NULL, root_path TEXT NOT NULL UNIQUE, metadata TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+      CREATE TABLE user_sessions (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspaces(id), title TEXT, mode TEXT NOT NULL CHECK (mode IN ('execute','plan_execute')), phase TEXT NOT NULL DEFAULT 'planning', status TEXT NOT NULL DEFAULT 'open', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+      CREATE TABLE agent_sessions (id TEXT PRIMARY KEY, user_session_id TEXT NOT NULL REFERENCES user_sessions(id), title TEXT NOT NULL, mode TEXT NOT NULL CHECK (mode IN ('execute','plan_execute')), phase TEXT NOT NULL DEFAULT 'executing', status TEXT NOT NULL DEFAULT 'open', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+      CREATE TABLE participants (agent_session_id TEXT NOT NULL REFERENCES agent_sessions(id), name TEXT NOT NULL, role TEXT NOT NULL CHECK (role IN ('orchestrator','agent')), preset TEXT, instructions TEXT NOT NULL, model TEXT, last_seen_seq INTEGER NOT NULL DEFAULT 0, ord INTEGER NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (agent_session_id, name));
+    `);
+    legacy.prepare("INSERT INTO workspaces VALUES (?,?,?,?,?,?)").run("ws-1", "w", "/tmp/ws-1", "{}", "2026-01-01", "2026-01-01");
+    legacy.prepare("INSERT INTO user_sessions VALUES (?,?,?,?,?,?,?,?)").run("us-1", "ws-1", "t", "execute", "executing", "open", "2026-01-01", "2026-01-01");
+    legacy.prepare("INSERT INTO agent_sessions VALUES (?,?,?,?,?,?,?,?)").run("as-1", "us-1", "star run", "execute", "executing", "open", "2026-01-01", "2026-01-01");
+    legacy.prepare("INSERT INTO participants VALUES (?,?,?,?,?,?,?,?,?)").run("as-1", "orchestrator", "orchestrator", null, "brief", null, 0, 0, "2026-01-01");
+    legacy.close();
+
+    const { sqlite } = openDb(file);
+    // A pre-contract session row reads as a top-level hub instance.
+    const session = sqlite.prepare("SELECT pattern, topology, parent_agent_session_id, depth FROM agent_sessions").get() as Record<string, unknown>;
+    expect(session).toMatchObject({ pattern: "hub_and_spoke", topology: "{}", parent_agent_session_id: null, depth: 0 });
+    const seat = sqlite.prepare("SELECT pattern_role FROM participants").get() as Record<string, unknown>;
+    expect(seat).toMatchObject({ pattern_role: null });
+    expect(sqlite.prepare("SELECT count(*) as n FROM pattern_state").get()).toMatchObject({ n: 0 });
+    sqlite.close();
+  });
 });

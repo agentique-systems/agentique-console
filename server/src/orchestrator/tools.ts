@@ -75,9 +75,13 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
   const tools = [
     sdk.tool(
       "create_agent_session",
-      "Create and immediately launch a Console-managed AgentSession with one coordinator and 1-20 profile-bound specialists. The Console owns every provider session, mailbox delivery, retry, and event; never call Agent yourself.",
+      "Create and immediately launch a Console-managed AgentSession running an orchestration pattern over profile-bound seats. Default pattern hub_and_spoke = one coordinator + 1-20 specialists; pipeline = the agents ARE the stages in order; evaluator_optimizer = exactly 2 agents (generator, evaluator) cycling until accept or the round cap. The Console owns every provider session, mailbox delivery, retry, and event; never call Agent yourself.",
       {
         title: z.string().describe("Short working title for the session"),
+        pattern: z.enum(["hub_and_spoke", "pipeline", "evaluator_optimizer", "map_reduce", "debate", "peer_to_peer", "plan_execute"]).default("hub_and_spoke")
+          .describe("Orchestration pattern; the delegation brief's decision tree says when each fits. hub_and_spoke: coordinator + specialists. pipeline: agents ARE the stages in order. evaluator_optimizer: exactly 2 (generator, evaluator). map_reduce: seat ONLY the reducer. debate: 2-8 debaters, judge auto-seated. peer_to_peer: bounded mesh, use rarely. plan_execute: planner + executors over a task DAG."),
+        patternConfig: z.record(z.string(), z.unknown()).optional()
+          .describe("Pattern-specific config. evaluator_optimizer: {rubric, maxRounds?, generatorSeat?, requireDistinctModels?}. map_reduce: {join?: \"all\"|\"any\"|{quorum:n}, onPartialFailure?, maxMappers?}. debate: {rubric?, judgeProfileId?, judgeModel?}. peer_to_peer: {closerSeat?, maxHandoffs?, oscillationWindow?}. plan_execute: {plannerSeat?}."),
         // `plan_execute` is deliberately not offered. Nothing anywhere moved an
         // AgentSession's phase to `executing`, so every seat in such a session
         // spawned permissionMode:"plan" forever and implementers never got
@@ -112,6 +116,8 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
       async (args: {
         title: string;
         mode: "execute";
+        pattern: "hub_and_spoke" | "pipeline" | "evaluator_optimizer" | "map_reduce" | "debate" | "peer_to_peer" | "plan_execute";
+        patternConfig?: Record<string, unknown>;
         agents: {
           name: string;
           profileId: string;
@@ -122,20 +128,24 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         briefing: HandoffDraft;
       }) =>
         guarded(() => {
-          const { agentSessionId, participants } = host.createSession({
+          const { agentSessionId, participants, entrySeat } = host.createSession({
             userSessionId,
             title: args.title,
             mode: args.mode,
+            pattern: args.pattern,
+            ...(args.patternConfig ? { patternConfig: args.patternConfig } : {}),
             agents: args.agents,
             briefing: args.briefing,
           });
           return {
             agentSessionId,
             participants,
+            pattern: args.pattern,
             // Steer it with `send_to_coordinator`, not with a peer address:
             // the native mesh is gone and a peer name is only live while the
-            // seat's process is.
-            coordinator: ORCHESTRATOR_SEAT,
+            // seat's process is. The tool reaches this session's entry seat.
+            entrySeat,
+            ...(args.pattern === "hub_and_spoke" ? { coordinator: ORCHESTRATOR_SEAT } : {}),
             status: "launched",
           };
         }),
@@ -159,7 +169,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
      */
     sdk.tool(
       "send_to_coordinator",
-      "Send a typed handoff to an AgentSession's coordinator. This is how you steer a running session after its briefing: assign more work, redirect, or relay an operator decision. The fields ARE the handoff; the Console builds, journals and carries the envelope.",
+      "Send a typed handoff to an AgentSession's entry seat — its coordinator in a hub session, the first stage of a pipeline, the generator of an evaluator loop. This is how you steer a running session after its briefing: assign more work, redirect, or relay an operator decision. The fields ARE the handoff; the Console builds, journals and carries the envelope.",
       {
         agentSessionId: z.string().min(1),
         category: z.enum(["assignment", "update"]).default("update"),
@@ -183,10 +193,11 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         uncertainty: string[]; nextAction: string | null; taskId: string | null; requestExpandedContext: boolean;
       }) => guarded(() => {
         owned(args.agentSessionId);
+        const entrySeat = host.entrySeat(args.agentSessionId);
         const message = host.post({
           agentSessionId: args.agentSessionId,
           speaker: { kind: "orchestrator", name: "main" },
-          to: ORCHESTRATOR_SEAT,
+          to: entrySeat,
           handoff: {
             core: {
               schemaVersion: 1, taskId: args.taskId, status: args.status, risk: args.risk, action: args.action,
@@ -199,7 +210,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           },
           category: args.category,
         });
-        return { delivered: true, messageSeq: message.seq, to: ORCHESTRATOR_SEAT, category: args.category };
+        return { delivered: true, messageSeq: message.seq, to: entrySeat, category: args.category };
       }),
     ),
 

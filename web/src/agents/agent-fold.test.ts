@@ -175,29 +175,6 @@ describe("foldAgentItems", () => {
     expect(items).toHaveLength(0);
   });
 
-  it("routed folds to a micro-row with decisions + hopCount", () => {
-    const items = foldAgentItems([
-      ev("agent_session.routed", {
-        agentSessionId: "as_1",
-        messageSeq: 7,
-        decisions: [
-          { recipient: "scout", reason: "mention" },
-          { recipient: "coder", reason: "mention" },
-        ],
-        hopCount: 2,
-      }),
-    ]);
-    expect(items[0]).toMatchObject({
-      type: "routed",
-      messageSeq: 7,
-      decisions: [
-        { recipient: "scout", reason: "mention" },
-        { recipient: "coder", reason: "mention" },
-      ],
-      hopCount: 2,
-    });
-  });
-
   it("turn.started folds to a marker with its participant", () => {
     const items = foldAgentItems([
       ev("agent_session.turn.started", {
@@ -264,7 +241,6 @@ describe("foldAgentItems", () => {
       ev("agent_session.status", {
         agentSessionId: "as_1",
         status: "idle",
-        owedToOrchestrator: false,
       }),
       ev("user_session.message", {
         sessionId: "us_1",

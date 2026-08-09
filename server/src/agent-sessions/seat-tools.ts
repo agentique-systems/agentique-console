@@ -20,8 +20,9 @@ import type { HandoffService } from "../handoffs/service.ts";
 import { EvidenceRefSchema, HandoffCoreSchema, HandoffDraftSchema } from "../handoffs/schema.ts";
 import { consoleTaskListId } from "../orchestrator/tools.ts";
 import { pageTail } from "../paging.ts";
-import { ORCHESTRATOR_SEAT } from "./peer-names.ts";
+import { MAIN_RECIPIENT } from "./peer-names.ts";
 import { resolvedDomains, WithheldFinalError, type Category } from "./governance.ts";
+import type { SeatToolName } from "./grants.ts";
 
 /**
  * Provider ceiling for an inline base64 image (~5MB). A full-page screenshot at
@@ -96,6 +97,10 @@ export interface SeatToolsContext {
   profile: AgentProfile;
   user: UserSessionRow | undefined;
   workspaceRoot: string;
+  /** From grants.ts — the same set the spawn allow-list is built from. */
+  granted: ReadonlySet<SeatToolName>;
+  /** `candidate` if the contract has an edge to it, else this seat's escalation target. */
+  legalRecipient(candidate: string): string;
   // Host-private operations, bound as closures so nothing becomes public.
   post(input: { agentSessionId: string; speaker: Speaker; to: string; handoff: HandoffDraft; category?: Category; dedupeKey?: string; turnId?: string }): MessageRow & { queuedBehind?: string[] };
   askOperator(args: AskOperatorArgs): Promise<SdkToolResult>;
@@ -106,6 +111,9 @@ export interface SeatToolsContext {
   seatWorkState(seat: ParticipantRow): string;
   simpleHandoff(action: string, status: HandoffDraft["core"]["status"], summary: string, nextAction: string | null): HandoffDraft;
   startAttempts(input: { agentSessionId: string; assignment: HandoffDraft; profileId?: string; attempts?: number; baseSeatName?: string; owns: string[]; instructions?: string; model?: string; turnId?: string }): { groupId: string; seats: string[]; branches: string[]; baseCommit: string; dirtyWorkspace: boolean };
+  dispatchWorkItems(input: { agentSessionId: string; items: { assignment: string; name?: string; owns?: string[] }[]; profileId?: string; instructions?: string; model?: string }): { joinId: string; seats: string[] };
+  createChildSession(input: { pattern: string; title: string; patternConfig?: Record<string, unknown>; agents: { name: string; profileId: string; instructions?: string; model?: string; owns: string[] }[]; briefing: HandoffDraft }): { agentSessionId: string; participants: string[]; entrySeat: string };
+  abandonChildSession(childAgentSessionId: string, reason: string): void;
   selectAttemptWinner(input: { agentSessionId: string; groupId: string; reviewer: string; winner?: string; rejectAll?: boolean; reason: string }):
     { merged: true; commit: string; winner: string } | { merged: false; conflicts: string[]; detail: string; winner: string } | { rejected: true };
 }
@@ -155,7 +163,7 @@ export function buildSeatTools(ctx: SeatToolsContext): unknown[] {
       let message: MessageRow & { queuedBehind?: string[] };
       try {
         const turnId = ctx.currentTurnId();
-        message = ctx.post({ agentSessionId: session.id, speaker: { kind: seat.name === ORCHESTRATOR_SEAT ? "orchestrator" : "agent", name: seat.name },
+        message = ctx.post({ agentSessionId: session.id, speaker: { kind: seat.role === "orchestrator" ? "orchestrator" : "agent", name: seat.name },
           to: args.to, handoff: draft, category: args.category, ...(args.dedupeKey ? { dedupeKey: args.dedupeKey } : {}),
           ...(turnId ? { turnId } : {}) });
       } catch (error) {
@@ -181,7 +189,7 @@ export function buildSeatTools(ctx: SeatToolsContext): unknown[] {
     const attribution = { workspaceId: user.workspaceId, userSessionId: session.userSessionId, agentSessionId: session.id, participant: seat.name };
     tools.push(sdk.tool("task_list", "Read the AgentSession's task ledger. Authoritative and shared by every seat; it survives context rotation.", {},
       async () => ok({ tasks: deps.tasks?.listForUserSession(session.userSessionId).filter((task) => task.agentSessionId === session.id) ?? [] })));
-    if (seat.name === ORCHESTRATOR_SEAT) {
+    if (ctx.granted.has("task_create")) {
       tools.push(
         sdk.tool("task_create", "Add a unit of work to the ledger. Track every unit you delegate.", {
           taskId: z.string().min(1).describe("Short stable id you choose, e.g. \"1\" or \"interface\"."),
@@ -260,6 +268,41 @@ export function buildSeatTools(ctx: SeatToolsContext): unknown[] {
       return ok({ ...stored, title: args.title,
         use: `Reference it as evidence: {"kind":"artifact","ref":"${stored.artifactId}"}` });
     }));
+  // The supervisor "translation problem", fixed at the wire: a coordinator
+  // that RETYPES a specialist's report pays a measured quality tax (LangChain
+  // recovered ~50% of supervisor underperformance with exactly this tool).
+  // The forward carries the original core+extension untouched, so a forwarded
+  // final counts as the session's own report; commentary travels separately.
+  if (ctx.granted.has("forward_message") && deps.handoffs) {
+    const handoffsService = deps.handoffs;
+    tools.push(sdk.tool("forward_message",
+      "Forward a handoff you received to main VERBATIM by its id. Use this when a specialist's report should reach the operator in the specialist's own words — do not retype or summarize it. Your own commentary, if any, goes in a separate send_handoff.",
+      {
+        handoffId: z.string().min(1).describe("The id of a handoff addressed to you."),
+        category: z.enum(["milestone", "final", "failure"]).default("milestone"),
+      },
+      async (args: { handoffId: string; category: "milestone" | "final" | "failure" }) => {
+        let record: ReturnType<HandoffService["get"]>;
+        try { record = handoffsService.get(args.handoffId); }
+        catch (error) { return fail(error); }
+        if (record.metadata.agentSessionId !== session.id) return fail(`handoff ${args.handoffId} is not from this session`);
+        if (record.metadata.recipient !== seat.name) return fail(`handoff ${args.handoffId} was not addressed to you; forward only what you received`);
+        try {
+          const message = ctx.post({ agentSessionId: session.id,
+            speaker: { kind: seat.role === "orchestrator" ? "orchestrator" : "agent", name: seat.name },
+            to: MAIN_RECIPIENT, handoff: { core: record.core, extension: record.extension },
+            category: args.category, dedupeKey: `fwd:${record.metadata.id}` });
+          deps.bus.append({ type: "handoff.forwarded", userSessionId: session.userSessionId, agentSessionId: session.id,
+            payload: { agentSessionId: session.id, originalId: record.metadata.id, sender: seat.name } });
+          return ok({ forwarded: true, messageSeq: message.seq, originalId: record.metadata.id, originalSender: record.metadata.sender });
+        } catch (error) {
+          if (error instanceof WithheldFinalError) {
+            return ok({ delivered: false, withheld: true, blockers: error.blockers, guidance: error.message });
+          }
+          return fail(error);
+        }
+      }));
+  }
   if (deps.handoffs) {
     tools.push(
       sdk.tool("read_handoff", "Retrieve a lossless handoff section with cursor pagination. Use only when the compact envelope is insufficient.", {
@@ -410,7 +453,7 @@ export function buildSeatTools(ctx: SeatToolsContext): unknown[] {
 
   {
     const contracts = deps.contracts;
-    if (seat.name === ORCHESTRATOR_SEAT) {
+    if (ctx.granted.has("declare_contract")) {
       tools.push(sdk.tool("declare_contract",
         "Declare a shared interface two or more seats must agree BEFORE any of them writes to it — a module signature, a data shape, a file format. The Console denies writes to the declared scopes until every party accepts. Use this whenever two seats' work has to fit together.",
         {
@@ -477,8 +520,8 @@ export function buildSeatTools(ctx: SeatToolsContext): unknown[] {
           for (const party of contract.parties.map((entry) => entry.participant)) {
             if (party === seat.name) continue;
             try {
-              ctx.post({ agentSessionId: session.id, speaker: { kind: seat.name === ORCHESTRATOR_SEAT ? "orchestrator" : "agent", name: seat.name },
-                to: party === ORCHESTRATOR_SEAT || seat.name === ORCHESTRATOR_SEAT ? party : ORCHESTRATOR_SEAT,
+              ctx.post({ agentSessionId: session.id, speaker: { kind: seat.role === "orchestrator" ? "orchestrator" : "agent", name: seat.name },
+                to: ctx.legalRecipient(party),
                 handoff: ctx.simpleHandoff(`Contract "${contract.name}" amended to revision ${contract.revision}`, "pending",
                   `${args.rationale}\n\n${contract.body}`,
                   `Re-read and accept revision ${contract.revision}; your earlier acceptance no longer applies.`),
@@ -496,7 +539,68 @@ export function buildSeatTools(ctx: SeatToolsContext): unknown[] {
         catch (error) { return fail(error); }
       }));
   }
-  if (seat.name === ORCHESTRATOR_SEAT && deps.worktrees) {
+  // One level of nesting: a controller may spawn a CHILD AgentSession running
+  // any pattern. The child's "main" resolves to THIS seat — its finals arrive
+  // here as milestones — and child seats never receive these tools, so the
+  // depth cap is the granting itself.
+  if (ctx.granted.has("create_child_session")) {
+    tools.push(sdk.tool("create_child_session",
+      "Spawn a child AgentSession running its own orchestration pattern, briefed by you and reporting to you. Its final arrives to you as a milestone; your own final is withheld until every child has reported (or you abandon it). Use a child session when a sub-problem deserves its own topology — a pipeline inside your hub, a debate inside your plan.",
+      {
+        pattern: z.enum(["hub_and_spoke", "pipeline", "evaluator_optimizer", "map_reduce", "debate", "peer_to_peer", "plan_execute"]),
+        title: z.string().min(1).describe("Short working title for the child session"),
+        patternConfig: z.record(z.string(), z.unknown()).optional(),
+        agents: z.array(z.object({
+          name: z.string(), profileId: z.string(), instructions: z.string().optional(), model: z.string().optional(),
+          owns: z.array(z.string()).default([]).describe("Must not collide with any seat's scopes anywhere in this session tree."),
+        })).min(1).max(20),
+        briefing: HandoffDraftSchema.describe("The child's assignment: objective, evidence, risk, uncertainty, next action."),
+      },
+      async (args: { pattern: string; title: string; patternConfig?: Record<string, unknown>; agents: { name: string; profileId: string; instructions?: string; model?: string; owns: string[] }[]; briefing: HandoffDraft }) => {
+        try {
+          return ok({ ...ctx.createChildSession(args), status: "launched",
+            note: "The child works autonomously; its material reports arrive to you as handoffs. Do not poll it." });
+        } catch (error) {
+          return fail(error);
+        }
+      }));
+    tools.push(sdk.tool("abandon_child_session",
+      "Archive a child session that no longer matters or cannot conclude. Its journal stays readable; a console failure handoff closes your obligation to wait for it.",
+      { childAgentSessionId: z.string().min(1), reason: z.string().min(1) },
+      async (args: { childAgentSessionId: string; reason: string }) => {
+        try {
+          ctx.abandonChildSession(args.childAgentSessionId, args.reason);
+          return ok({ archived: true, childAgentSessionId: args.childAgentSessionId });
+        } catch (error) {
+          return fail(error);
+        }
+      }));
+  }
+  if (ctx.granted.has("dispatch_work_items")) {
+    tools.push(sdk.tool("dispatch_work_items",
+      "Fan the work out: mint one mapper seat per independent work item and assign each its item. The Console holds every mapper report until the join is met, then delivers them ALL to you in one turn for synthesis. One dispatch in flight at a time.",
+      {
+        items: z.array(z.object({
+          assignment: z.string().min(1).describe("The complete, self-contained work item — the mapper sees nothing else."),
+          name: z.string().optional().describe("Optional seat name; default map.<dispatch>.<n>."),
+          owns: z.array(z.string()).optional().describe("Ownership scopes if the item writes files."),
+        })).min(1).max(8),
+        profileId: z.string().optional().describe("Mapper profile; default explorer."),
+        instructions: z.string().optional(),
+        model: z.string().optional(),
+      },
+      async (args: { items: { assignment: string; name?: string; owns?: string[] }[]; profileId?: string; instructions?: string; model?: string }) => {
+        try {
+          return ok(ctx.dispatchWorkItems({ agentSessionId: session.id, items: args.items,
+            ...(args.profileId ? { profileId: args.profileId } : {}),
+            ...(args.instructions ? { instructions: args.instructions } : {}),
+            ...(args.model ? { model: args.model } : {}) }));
+        } catch (error) {
+          return fail(error);
+        }
+      }));
+  }
+  if (ctx.granted.has("start_attempts")) {
     tools.push(sdk.tool("start_attempts", "Run best-of-N parallel attempts at one high-stakes assignment: N isolated worktree seats race the same work, a fresh reviewer picks the winner, and only the winner's changes merge into the workspace. Requires the workspace to be a git repository. One active group at a time.", {
       assignment: HandoffDraftSchema, profileId: z.string().default("implementer"), attempts: z.number().int().min(2).max(3).default(2),
       baseSeatName: z.string().optional(), owns: z.array(z.string()).min(1), instructions: z.string().optional(), model: z.string().optional(),
@@ -510,7 +614,7 @@ export function buildSeatTools(ctx: SeatToolsContext): unknown[] {
       }
     }));
   }
-  if (seat.attemptRole === "reviewer" && seat.attemptGroupId && deps.worktrees) {
+  if (ctx.granted.has("select_attempt_winner") && seat.attemptGroupId) {
     const groupId = seat.attemptGroupId;
     tools.push(
       sdk.tool("read_attempt_diff", "Read one attempt's captured diff (paged tail-first; cursors continue).", {

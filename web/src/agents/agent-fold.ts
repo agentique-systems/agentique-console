@@ -42,12 +42,6 @@ export interface AgentToolItem {
   readonly output?: unknown;
   readonly isError?: boolean;
 }
-export interface RoutedItem {
-  readonly type: "routed";
-  readonly messageSeq: number;
-  readonly decisions: readonly { recipient: string; reason: string }[];
-  readonly hopCount: number;
-}
 export interface AgentTurnItem {
   readonly type: "turn";
   readonly turnId: string;
@@ -71,7 +65,6 @@ export interface AgentTraceItem {
 export type AgentItem =
   | AgentMessageItem
   | AgentToolItem
-  | RoutedItem
   | AgentTurnItem
   | AgentTurnErrorItem
   | AgentTraceItem;
@@ -83,8 +76,6 @@ export function agentItemKey(item: AgentItem): string {
       return `message:${item.seq}`;
     case "tool":
       return `tool:${item.uid}`;
-    case "routed":
-      return `routed:${item.messageSeq}`;
     case "turn":
       return `turn:${item.turnId}`;
     case "turn_error":
@@ -153,15 +144,6 @@ export function foldAgentItems(events: readonly ConsoleEvent[]): AgentItem[] {
         };
         break;
       }
-
-      case "agent_session.routed":
-        items.push({
-          type: "routed",
-          messageSeq: event.payload.messageSeq,
-          decisions: event.payload.decisions,
-          hopCount: event.payload.hopCount,
-        });
-        break;
 
       case "agent_session.turn.started":
         items.push({

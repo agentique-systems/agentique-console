@@ -87,4 +87,33 @@ describe("routeEvent — attention", () => {
     } as unknown as ConsoleEvent, d);
     expect(d.setAwaitingInput).toHaveBeenCalledWith("us_1", false);
   });
+
+  it("raises attention for a question asked inside a CHILD session", () => {
+    // Regression guard: children share the root userSessionId, and the router
+    // must keep setting awaitingInput unconditionally — "fixing" it to filter
+    // by session level would silence nested asks.
+    const d = deps();
+    routeEvent({
+      type: "user_session.question.asked", seq: 12, ts: "2026-08-09T10:02:00.000Z",
+      userSessionId: "us_1",
+      payload: { sessionId: "us_1", interactionId: "int_2", agentSessionId: "as_child", participant: "scout", questions: [] },
+    } as unknown as ConsoleEvent, d);
+    expect(d.setAwaitingInput).toHaveBeenCalledWith("us_1", true);
+  });
+});
+
+describe("routeEvent — boundary flow pulses", () => {
+  it("pulses the parent card for child spawn and child report", () => {
+    const d = deps();
+    routeEvent({
+      type: "agent_session.child.spawned", seq: 20, ts: "2026-08-09T10:03:00.000Z", userSessionId: "us_1",
+      payload: { agentSessionId: "as_parent", childAgentSessionId: "as_child", pattern: "pipeline", byParticipant: "orchestrator", title: "sub" },
+    } as unknown as ConsoleEvent, d);
+    expect(d.pulseFlow).toHaveBeenCalledWith("as_parent", "delegation", "2026-08-09T10:03:00.000Z");
+    routeEvent({
+      type: "agent_session.child.reported", seq: 21, ts: "2026-08-09T10:04:00.000Z", userSessionId: "us_1",
+      payload: { agentSessionId: "as_parent", childAgentSessionId: "as_child", status: "completed", handoffId: "h1" },
+    } as unknown as ConsoleEvent, d);
+    expect(d.pulseFlow).toHaveBeenCalledWith("as_parent", "result", "2026-08-09T10:04:00.000Z");
+  });
 });

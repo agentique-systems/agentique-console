@@ -54,8 +54,8 @@ claims during normal work in proportion to risk and report contradictions with
 
 ## Size and retrieval
 
-Ordinary records have a 4 KiB soft target and rotation checkpoints a 12 KiB soft
-target. Targets never truncate storage. The full core and evidence manifest are
+Ordinary records have a 6 KiB soft target; reports and rotation checkpoints a
+12 KiB soft target. Targets never truncate storage. The full core and evidence manifest are
 delivered; high-risk, needs-verification, or explicitly requested context also
 gets its profile extension immediately. Other extensions remain available via
 `read_handoff`, whose cursor pages default to 8 KiB and cannot exceed 32 KiB.
