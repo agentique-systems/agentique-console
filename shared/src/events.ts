@@ -8,6 +8,7 @@ import type {
   InteractionQuestion,
   InteractionSource,
   InteractionUrgency,
+  RunSummaryStats,
   SessionMessage,
   SessionPhase,
   Task,
@@ -123,21 +124,10 @@ export interface FinalBlockedPayload {
  * agree. Carries a render-ready projection so the card needs no second fetch
  * to be useful; the expanded view fetches the full document.
  */
-export interface RunCompletionProposedPayload {
+export interface RunCompletionProposedPayload extends RunSummaryStats {
   sessionId: string;
   runId: string;
   summaryId: string;
-  headline: string;
-  verdict: "completed" | "completed_with_caveats" | "failed";
-  filesChanged: number;
-  tasks: { completed: number; total: number };
-  durationMs: number;
-  deadAirMs: number;
-  costUsd: number | null;
-  /** 1 = every observed turn has a usage row. Below 0.9 the cost reads "partial". */
-  costCoverage: number;
-  openUncertainty: number;
-  reaped: { processes: number; browsers: number; leakedBefore: number };
 }
 /**
  * The operator's verdict. Deliberately no separate `run.completed` event —

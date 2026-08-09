@@ -48,8 +48,6 @@ const QUIET_WINDOW_MS = 2_000;
 export class RunCompletionService {
   readonly #deps: RunCompletionDeps;
   readonly #timers = new Map<string, ReturnType<typeof setTimeout>>();
-  /** Sessions already proposed; cleared by a change request so it can re-fire. */
-  readonly #armed = new Set<string>();
 
   constructor(deps: RunCompletionDeps) {
     this.#deps = deps;
@@ -110,11 +108,13 @@ export class RunCompletionService {
       })?.trigger === "final");
   }
 
-  /** Fires at most one proposal per active→awaiting_signoff transition. */
+  /**
+   * Fires at most one proposal per active→awaiting_signoff transition —
+   * `isComplete` requires `runState === "active"` and `#propose` leaves it
+   * `awaiting_signoff` synchronously, so the run state IS the arming latch.
+   */
   evaluate(userSessionId: string): boolean {
-    if (this.#armed.has(userSessionId)) return false;
     if (!this.isComplete(userSessionId)) return false;
-    this.#armed.add(userSessionId);
     this.#propose(userSessionId);
     return true;
   }
@@ -133,7 +133,7 @@ export class RunCompletionService {
       .orderBy(desc(runSummaries.createdAt)).get();
     const seqFrom = previous ? previous.seqTo + 1 : 0;
     const document = buildRunSummary({
-      db, repo, bus, userSessionId, seqFrom, reaped,
+      db, repo, userSessionId, seqFrom, reaped,
       interactions: this.#deps.interactions,
       ...(this.#deps.getWorkspaceRoot ? { getWorkspaceRoot: this.#deps.getWorkspaceRoot } : {}),
     });
@@ -144,7 +144,7 @@ export class RunCompletionService {
       document: document as unknown as Record<string, unknown>,
       status: "proposed", note: null, createdAt: nowIso(), resolvedAt: null,
     }).run();
-    repo.patchUserSession(userSessionId, { runState: "awaiting_signoff", latestRunSummaryId: id });
+    repo.patchUserSession(userSessionId, { runState: "awaiting_signoff" });
 
     bus.append({
       type: "run.completion.proposed",
@@ -153,7 +153,7 @@ export class RunCompletionService {
         sessionId: userSessionId, runId: id, summaryId: id,
         headline: document.headline, verdict: document.verdict,
         filesChanged: document.build.filesChanged,
-        tasks: document.tasks,
+        tasks: { completed: document.tasks.completed, total: document.tasks.total },
         durationMs: document.durationMs,
         deadAirMs: document.deadAirMs,
         costUsd: document.cost.usd,
@@ -183,11 +183,9 @@ export class RunCompletionService {
     if (session.runState !== "awaiting_signoff") {
       throw conflict(`run is ${session.runState}, not awaiting sign-off`);
     }
-    const summary = session.latestRunSummaryId
-      ? db.select().from(runSummaries).where(eq(runSummaries.id, session.latestRunSummaryId)).get()
-      : db.select().from(runSummaries)
-          .where(and(eq(runSummaries.userSessionId, userSessionId), eq(runSummaries.status, "proposed")))
-          .orderBy(desc(runSummaries.createdAt)).get();
+    const summary = db.select().from(runSummaries)
+      .where(and(eq(runSummaries.userSessionId, userSessionId), eq(runSummaries.status, "proposed")))
+      .orderBy(desc(runSummaries.createdAt)).get();
     const now = nowIso();
     if (summary) {
       db.update(runSummaries)
@@ -213,7 +211,6 @@ export class RunCompletionService {
     // must restart its server on a change request is honest, and a survivor is
     // exactly the trap db-live-2 left for the next run.
     repo.patchUserSession(userSessionId, { runState: "active" });
-    this.#armed.delete(userSessionId);
     bus.append({ type: "run.signoff.resolved", userSessionId,
       payload: { sessionId: userSessionId, runId: summary?.id ?? "", decision: "changes", ...(note === undefined ? {} : { note }) } });
     bus.append({ type: "run.reopened", userSessionId,
@@ -240,11 +237,4 @@ export class RunCompletionService {
     return true;
   }
 
-  latestSummary(userSessionId: string): { id: string; document: RunSummaryDocument; status: string; note: string | null } | undefined {
-    const row = this.#deps.db.select().from(runSummaries)
-      .where(eq(runSummaries.userSessionId, userSessionId))
-      .orderBy(desc(runSummaries.createdAt)).get();
-    if (!row) return undefined;
-    return { id: row.id, document: row.document as unknown as RunSummaryDocument, status: row.status, note: row.note };
-  }
 }

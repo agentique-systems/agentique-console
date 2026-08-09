@@ -475,7 +475,7 @@ export class Repo {
   patchUserSession(
     id: string,
     patch: Partial<
-      Pick<UserSessionRow, "title" | "mode" | "phase" | "status" | "subjectKey" | "sdkSessionId" | "sdkGeneration" | "sdkTurnCount" | "contextTokens" | "memory" | "latestHandoffId" | "cumulativeCostUsd" | "cumulativeApiDurationMs" | "runState" | "runBaseCommit" | "latestRunSummaryId">
+      Pick<UserSessionRow, "title" | "mode" | "phase" | "status" | "subjectKey" | "sdkSessionId" | "sdkGeneration" | "sdkTurnCount" | "contextTokens" | "memory" | "latestHandoffId" | "cumulativeCostUsd" | "cumulativeApiDurationMs" | "runState" | "runBaseCommit">
     >,
   ): void {
     this.#db

@@ -25,7 +25,7 @@ export class ManagerService {
       mode: "plan_execute", phase: "planning", status: "open", purpose: "profile_manager", subjectKey: profileKey,
       sdkSessionId: null, sdkGeneration: 0, sdkTurnCount: 0, contextTokens: 0,
       memory: selected ? this.#profileContext(selected) : "",
-      latestHandoffId: null, cumulativeCostUsd: 0, cumulativeApiDurationMs: 0, runState: "active" as const, runBaseCommit: null, latestRunSummaryId: null, createdAt: now, updatedAt: now };
+      latestHandoffId: null, cumulativeCostUsd: 0, cumulativeApiDurationMs: 0, runState: "active" as const, runBaseCommit: null, createdAt: now, updatedAt: now };
     this.deps.repo.insertUserSession(row);
     if (input.sourceProfileId) this.#seed(row.id, workspaceId, input.sourceProfileId);
     else if (selected?.source === "workspace") for (const file of selected.files) this.stageFile(row.id, file.path, file.content);

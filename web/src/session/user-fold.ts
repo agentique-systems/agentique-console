@@ -19,6 +19,7 @@ import {
   type Speaker,
   type TurnTrigger,
   type HandoffSummary,
+  type RunSummaryStats,
 } from "@agentique-console/shared";
 
 export interface MessageItem {
@@ -67,19 +68,8 @@ export interface RunSummaryItem {
   readonly type: "run_summary";
   readonly runId: string;
   readonly summaryId: string;
-  readonly headline: string;
-  readonly verdict: "completed" | "completed_with_caveats" | "failed";
-  readonly stats: {
-    readonly filesChanged: number;
-    readonly tasks: { readonly completed: number; readonly total: number };
-    readonly durationMs: number;
-    readonly deadAirMs: number;
-    readonly costUsd: number | null;
-    /** Below 0.9 the cost renders as partial rather than as a confident figure. */
-    readonly costCoverage: number;
-    readonly openUncertainty: number;
-    readonly reaped: { readonly processes: number; readonly browsers: number; readonly leakedBefore: number };
-  };
+  /** The SHARED projection — the same type the event payload extends. */
+  readonly stats: RunSummaryStats;
   readonly resolution?: {
     readonly decision: "accept" | "changes";
     readonly note?: string;
@@ -222,23 +212,10 @@ export function foldUserItems(events: readonly ConsoleEvent[]): UserItem[] {
 
       case "run.completion.proposed": {
         runSummaryIndex.set(event.payload.runId, items.length);
-        items.push({
-          type: "run_summary",
-          runId: event.payload.runId,
-          summaryId: event.payload.summaryId,
-          headline: event.payload.headline,
-          verdict: event.payload.verdict,
-          stats: {
-            filesChanged: event.payload.filesChanged,
-            tasks: event.payload.tasks,
-            durationMs: event.payload.durationMs,
-            deadAirMs: event.payload.deadAirMs,
-            costUsd: event.payload.costUsd,
-            costCoverage: event.payload.costCoverage,
-            openUncertainty: event.payload.openUncertainty,
-            reaped: event.payload.reaped,
-          },
-        });
+        // The payload IS `{ sessionId, runId, summaryId } & RunSummaryStats`,
+        // so the rest-spread is exactly the shared projection.
+        const { sessionId: _sessionId, runId, summaryId, ...stats } = event.payload;
+        items.push({ type: "run_summary", runId, summaryId, stats });
         break;
       }
 

@@ -444,6 +444,15 @@ export class AgentSessionHost {
     if (!title) throw badRequest("a session title is required");
     const parent = repo.getUserSession(input.userSessionId);
     if (!parent) throw badRequest("unknown user session");
+    // The run's baseline for "what was built": HEAD at the first delegation.
+    // The Run Summary diffs the working tree against this — a fact, where a
+    // handoff's changedPaths is a model's claim.
+    if (parent.runBaseCommit === null && this.#deps.worktrees && this.#deps.getWorkspaceRoot) {
+      try {
+        const root = this.#deps.getWorkspaceRoot(user.workspaceId);
+        repo.patchUserSession(input.userSessionId, { runBaseCommit: this.#deps.worktrees.headCommit(root) });
+      } catch { /* not a repo — the summary falls back to handoff claims */ }
+    }
     const now = nowIso();
     const row: AgentSessionRow = {
       id: newId("as"), userSessionId: input.userSessionId, title, mode: input.mode,

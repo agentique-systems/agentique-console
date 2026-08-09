@@ -61,7 +61,6 @@ export const userSessions = sqliteTable("user_sessions", {
     .default("active"),
   /** HEAD when the first agent session was created; diff base for the summary. */
   runBaseCommit: text("run_base_commit"),
-  latestRunSummaryId: text("latest_run_summary_id"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });

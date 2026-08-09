@@ -49,7 +49,6 @@ CREATE TABLE IF NOT EXISTS user_sessions (
   -- HEAD when the first agent session was created; the diff base for
   -- "what was built".
   run_base_commit TEXT,
-  latest_run_summary_id TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );

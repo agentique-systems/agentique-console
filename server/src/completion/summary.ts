@@ -9,10 +9,10 @@
  * are. A confident number that is quietly wrong is worse than a number with a
  * caveat attached — which is why `cost.coverage` exists.
  */
-import { and, asc, eq, gte, inArray, lte } from "drizzle-orm";
+import { execFileSync } from "node:child_process";
+import { and, asc, eq, gte, inArray } from "drizzle-orm";
 import type { Db } from "../db/client.ts";
 import type { Repo } from "../db/repo.ts";
-import type { EventBus } from "../events/bus.ts";
 import type { InteractionService } from "../orchestrator/interactions.ts";
 import { events, handoffRecords, tasks, usageSamples } from "../db/schema.ts";
 
@@ -59,7 +59,6 @@ export interface RunSummaryDocument {
 export interface BuildRunSummaryInput {
   db: Db;
   repo: Repo;
-  bus: EventBus;
   interactions: InteractionService;
   userSessionId: string;
   seqFrom: number;
@@ -159,7 +158,7 @@ export function buildRunSummary(input: BuildRunSummaryInput): RunSummaryDocument
     watchdogTrips: window.filter((row) => row.type === "agent_session.watchdog").length,
   };
 
-  const build = collectBuild(db, repo, userSessionId, seqFrom);
+  const build = collectBuild(db, repo, userSessionId, input.getWorkspaceRoot);
   const verdict: RunSummaryDocument["verdict"] =
     finals.some((row) => row.core.status === "failed") ? "failed"
       : open.length > 0 || uncertainty.length > 0 || deviations.length > 0 ? "completed_with_caveats"
@@ -217,9 +216,36 @@ function collectDeviations(window: readonly (typeof events.$inferSelect)[], open
 /**
  * "What was built", best source first. Records WHICH source it used, because
  * a file list from a handoff is a model's claim and a git diff is a fact.
+ *
+ * The fact: `git diff --numstat <run_base_commit>` — the working tree against
+ * the commit captured when the run's first agent session was created. Diffing
+ * against the WORKING TREE (not HEAD) is deliberate: a seat running without a
+ * worktree writes directly and commits nothing, and its files must still
+ * count.
  */
-function collectBuild(db: Db, repo: Repo, userSessionId: string, seqFrom: number): RunSummaryDocument["build"] {
+function collectBuild(
+  db: Db,
+  repo: Repo,
+  userSessionId: string,
+  getWorkspaceRoot?: (workspaceId: string) => string,
+): RunSummaryDocument["build"] {
   const session = repo.getUserSession(userSessionId);
+  if (session?.runBaseCommit && getWorkspaceRoot) {
+    try {
+      const root = getWorkspaceRoot(session.workspaceId);
+      const git = (args: string[]): string =>
+        execFileSync("git", args, { cwd: root, encoding: "utf8", timeout: 10_000 }).trim();
+      const numstat = git(["diff", "--numstat", session.runBaseCommit]);
+      // A run's most common product is NEW files, which `git diff` does not
+      // list until something commits them — count the untracked ones too.
+      const untracked = git(["ls-files", "--others", "--exclude-standard"]);
+      const files = [...new Set([
+        ...(numstat === "" ? [] : numstat.split("\n")).map((line) => line.split("\t")[2]),
+        ...(untracked === "" ? [] : untracked.split("\n")),
+      ])].filter((file): file is string => file !== undefined && file !== "");
+      if (files.length > 0) return { filesChanged: files.length, files: [...files].sort(), source: "git" };
+    } catch { /* not a repo, base gone, git missing — fall to the model's claim */ }
+  }
   const agentSessionIds = repo.listAgentSessions(userSessionId).map((row) => row.id);
   if (agentSessionIds.length > 0) {
     const records = db.select().from(handoffRecords)
@@ -233,7 +259,6 @@ function collectBuild(db: Db, repo: Repo, userSessionId: string, seqFrom: number
     }
     if (files.size > 0) return { filesChanged: files.size, files: [...files].sort(), source: "handoff" };
   }
-  void session; void seqFrom; void lte;
   return { filesChanged: 0, files: [], source: "none" };
 }
 

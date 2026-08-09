@@ -447,8 +447,10 @@ describe("run summary fold", () => {
     const cards = items.filter((item) => item.type === "run_summary");
     expect(cards).toHaveLength(1);
     expect(cards[0]).toMatchObject({
-      headline: "Lane Runner is done and verified.",
-      verdict: "completed_with_caveats",
+      stats: {
+        headline: "Lane Runner is done and verified.",
+        verdict: "completed_with_caveats",
+      },
       resolution: { decision: "accept" },
     });
   });

@@ -36,6 +36,25 @@ export interface UserSession {
 
 export type RunState = "active" | "awaiting_signoff" | "completed";
 
+/**
+ * The render-ready projection of a run summary — ONE shape shared by the
+ * `run.completion.proposed` payload and the web fold's card, so the three
+ * copies that used to exist cannot drift.
+ */
+export interface RunSummaryStats {
+  headline: string;
+  verdict: "completed" | "completed_with_caveats" | "failed";
+  filesChanged: number;
+  tasks: { completed: number; total: number };
+  durationMs: number;
+  deadAirMs: number;
+  costUsd: number | null;
+  /** 1 = every observed turn has a usage row. Below 0.9 the cost reads "partial". */
+  costCoverage: number;
+  openUncertainty: number;
+  reaped: { processes: number; browsers: number; leakedBefore: number };
+}
+
 export type ConversationPurpose = "work" | "profile_manager";
 
 /**

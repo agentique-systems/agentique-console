@@ -125,14 +125,6 @@ export interface RunSignoffBody {
   decision: "accept" | "changes";
   note?: string;
 }
-// GET /api/user-sessions/:id/run-summary
-export interface RunSummaryResponse {
-  summaryId: string;
-  status: "proposed" | "accepted" | "changes_requested" | "superseded";
-  note: string | null;
-  document: unknown;
-}
-
 // GET /api/user-sessions/:id/transcript
 // GET /api/agent-sessions/:id/transcript
 export type TranscriptResponse = ConsoleEvent[];

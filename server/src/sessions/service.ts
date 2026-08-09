@@ -71,7 +71,6 @@ export class UserSessionService {
       cumulativeApiDurationMs: 0,
       runState: "active",
       runBaseCommit: null,
-      latestRunSummaryId: null,
       createdAt: now,
       updatedAt: now,
     };

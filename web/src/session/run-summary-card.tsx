@@ -28,15 +28,16 @@ import {
 import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 
+import type { RunSummaryStats } from "@agentique-console/shared";
 import type { RunSummaryItem } from "./user-fold";
 
-const VERDICT_LABEL: Record<RunSummaryItem["verdict"], string> = {
+const VERDICT_LABEL: Record<RunSummaryStats["verdict"], string> = {
   completed: "completed",
   completed_with_caveats: "completed with caveats",
   failed: "failed",
 };
 
-const VERDICT_TONE: Record<RunSummaryItem["verdict"], string> = {
+const VERDICT_TONE: Record<RunSummaryStats["verdict"], string> = {
   completed: "text-status-completed",
   completed_with_caveats: "text-status-waiting",
   failed: "text-status-failed",
@@ -99,13 +100,13 @@ export function RunSummaryCard({
           <CheckCircle2Icon className="size-3.5 shrink-0" />
           <span>{resolved ? "run complete" : "run complete — your call"}</span>
         </CardEyebrow>
-        <Badge variant="outline" className={cn("text-3xs uppercase", VERDICT_TONE[item.verdict])}>
-          {VERDICT_LABEL[item.verdict]}
+        <Badge variant="outline" className={cn("text-3xs uppercase", VERDICT_TONE[stats.verdict])}>
+          {VERDICT_LABEL[stats.verdict]}
         </Badge>
       </CardHeader>
 
       <CardContent className="pt-0">
-        <p className="text-sm">{item.headline}</p>
+        <p className="text-sm">{stats.headline}</p>
         <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-2xs text-muted-foreground">
           <span>{stats.filesChanged} file{stats.filesChanged === 1 ? "" : "s"}</span>
           <span>{stats.tasks.completed}/{stats.tasks.total} tasks</span>

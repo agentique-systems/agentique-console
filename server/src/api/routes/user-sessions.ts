@@ -102,15 +102,6 @@ export function registerUserSessionRoutes(
     },
   );
 
-  app.get<{ Params: { id: string } }>(
-    "/api/user-sessions/:id/run-summary",
-    async (request) => {
-      const summary = ctx.completion.latestSummary(request.params.id);
-      if (!summary) throw notFound(`no run summary for ${request.params.id}`);
-      return { summaryId: summary.id, status: summary.status, note: summary.note, document: summary.document };
-    },
-  );
-
   app.post<{ Params: { id: string } }>(
     "/api/user-sessions/:id/messages",
     async (request, reply) => {
