@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import type { EventBus } from "../events/bus.ts";
 import { newId } from "../ids.ts";
@@ -32,11 +33,19 @@ export interface RuntimeScope { workspaceRoot: string; userSessionId: string; ag
  * which is the right failure mode for a change like this.
  */
 export function sandboxBinds(): string[] {
+  const home = os.homedir();
   const readOnly = [
     "/usr", "/bin", "/sbin", "/lib", "/lib64", "/opt",
     "/etc/resolv.conf", "/etc/ssl", "/etc/ca-certificates", "/etc/pki",
     "/etc/passwd", "/etc/group", "/etc/hosts", "/etc/nsswitch.conf",
     "/etc/alternatives", "/etc/localtime",
+    // Common per-user toolchain roots, read-only: `childEnv` passes PATH
+    // through, and on an nvm/rustup/bun machine the interpreter it names lives
+    // under $HOME — without these binds every managed `node server.mjs` dies
+    // with a missing-binary error. Deliberately narrow; never $HOME itself
+    // (that is where the credentials this sandbox exists to hide live).
+    path.join(home, ".nvm"), path.join(home, ".local"),
+    path.join(home, ".cargo"), path.join(home, ".rustup"), path.join(home, ".bun"),
   ];
   const argv: string[] = [];
   for (const entry of readOnly) {

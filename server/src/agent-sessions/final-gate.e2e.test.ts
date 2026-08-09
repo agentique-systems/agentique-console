@@ -78,17 +78,27 @@ describe("final report gate", () => {
 
     const result = await send.handler(finalArgs, {});
 
-    expect(result.isError).toBe(true);
-    const text = (result.content[0] as { text: string }).text;
-    expect(text).toMatch(/final report withheld/);
+    // A hold, NOT an error: an isError result feeds WATCHDOG_ERROR_STREAK and
+    // a retry feeds WATCHDOG_IDENTICAL_CALLS — the Console must not punish the
+    // seat for its own gate. Same doctrine as ask_operator and queued
+    // assignments.
+    expect(result.isError).not.toBe(true);
+    const hold = JSON.parse((result.content[0] as { text: string }).text) as {
+      delivered: boolean; withheld: boolean; guidance: string;
+      blockers: { question: string; asker: string; ageMinutes: number }[];
+    };
+    expect(hold.delivered).toBe(false);
+    expect(hold.withheld).toBe(true);
     // It must name the question, its asker and its age — a refusal the
     // coordinator cannot act on is just a different kind of silence.
-    expect(text).toContain("start gate");
-    expect(text).toMatch(/asked \d+m ago/);
-    // And say, explicitly, not to retry: an identical retry trips
-    // WATCHDOG_IDENTICAL_CALLS (5) and kills the turn.
-    expect(text).toMatch(/Do NOT retry this final/);
-    expect(text).toMatch(/milestone/);
+    expect(hold.blockers[0]?.question).toContain("start gate");
+    // The captured ask_operator belongs to the coordinator seat — the first
+    // to spawn — so that is who the card is attributed to.
+    expect(hold.blockers[0]?.asker).toBe("orchestrator");
+    expect(hold.guidance).toMatch(/final report withheld/);
+    expect(hold.guidance).toMatch(/asked \d+m ago/);
+    expect(hold.guidance).toMatch(/do not re-send/i);
+    expect(hold.guidance).toMatch(/milestone/);
 
     await blocked;
     // Nothing was journalled — a withheld final leaves no half-record.
@@ -140,8 +150,10 @@ describe("final report gate", () => {
     // "Deferred" was a judgement that the answer could wait until later. A
     // final says there is no later. So the attempt promotes it and is
     // withheld — which is exactly the moment db-live-2 skipped past.
-    expect(result.isError).toBe(true);
-    expect((result.content[0] as { text: string }).text).toMatch(/no "later" left/);
+    expect(result.isError).not.toBe(true);
+    const hold = JSON.parse((result.content[0] as { text: string }).text) as { withheld: boolean; guidance: string };
+    expect(hold.withheld).toBe(true);
+    expect(hold.guidance).toMatch(/no "later" left/);
     expect(h.db.select().from(interactionRows).all()[0]?.urgency).toBe("blocking");
   });
 

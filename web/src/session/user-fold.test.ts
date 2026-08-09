@@ -496,4 +496,14 @@ describe("foldPosture", () => {
   it("returns to busy once the card is answered", () => {
     expect(foldPosture([started, asked, answered])).toEqual({ busy: true, blocked: false });
   });
+
+  it("ignores a SEAT's card — it parks the seat's turn, not the main lane", () => {
+    // A seat-raised ask_operator (participant set, even blocking) must not
+    // stop the main lane's spinner or swap the interrupt affordance: main is
+    // genuinely running. Deferred seat cards doubly so.
+    const seatAsked = { type: "user_session.question.asked", seq: 4, ts: "t", userSessionId: "us_1",
+      payload: { sessionId: "us_1", interactionId: "int_2", questions: [], agentSessionId: "agsess_1",
+        participant: "renderer", urgency: "blocking", source: "agent", allowFreeText: true } } as unknown as ConsoleEvent;
+    expect(foldPosture([started, seatAsked])).toEqual({ busy: true, blocked: false });
+  });
 });

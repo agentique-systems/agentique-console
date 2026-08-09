@@ -678,11 +678,10 @@ export class InteractionService {
       const questions = (row.payload as { questions?: InteractionQuestion[] }).questions ?? [];
       const answers: Record<string, string[]> = {};
       for (const question of questions) answers[question.question] = [row.defaultOption as string];
-      this.#db
-        .update(interactions)
-        .set({ status: "answered", response: { answers, autoTaken: true }, resolvedAt: now, autoTaken: true })
-        .where(eq(interactions.id, row.id))
-        .run();
+      // Through #markResolved, not a raw update: resolving a row must fire
+      // #onResolved, or a run whose LAST blocker was TTL-answered never
+      // re-evaluates completion and the sign-off card silently fails to appear.
+      this.#markResolved(row.id, "answered", { answers, autoTaken: true }, { autoTaken: true });
       this.#bus.append({
         type: "user_session.question.answered",
         userSessionId: row.userSessionId,
@@ -784,10 +783,11 @@ export class InteractionService {
     id: string,
     status: "answered" | "rejected" | "dismissed",
     response: Record<string, unknown>,
+    extra: { autoTaken?: boolean } = {},
   ): void {
     this.#db
       .update(interactions)
-      .set({ status, response, resolvedAt: nowIso() })
+      .set({ status, response, resolvedAt: nowIso(), ...extra })
       .where(eq(interactions.id, id))
       .run();
     const row = this.#db.select().from(interactions).where(eq(interactions.id, id)).get();

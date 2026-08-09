@@ -109,7 +109,7 @@ for (const session of repo.listOpenWorkSessions()) completion.schedule(session.i
 // the question answerable; they only stop a human's absence from pinning a
 // process indefinitely.
 interactions.startTtlSweep();
-host.startOperatorAskSweep();
+host.startGovernanceSweep();
 
 const ctx: AppContext = {
   config,
@@ -140,7 +140,7 @@ async function shutdown(): Promise<void> {
   bus.closeSubscriptions();
   interactions.stopTtlSweep();
   completion.stop();
-  host.stopOperatorAskSweep();
+  host.stopGovernanceSweep();
   // Persistent lanes are CLI subprocesses — none may outlive the server.
   await runner.closeAll().catch(() => undefined);
   await host.closeAll().catch(() => undefined);

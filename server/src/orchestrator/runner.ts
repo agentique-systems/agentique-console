@@ -847,12 +847,13 @@ export class OrchestratorRunner {
         }
         if (session) {
           const contextTokens = Math.max(session.contextTokens, lane.contextTokens);
-          repo.patchUserSession(sessionId, { sdkTurnCount: session.sdkTurnCount + 1, contextTokens });
           if (session.sdkTurnCount + 1 >= this.#deps.config.contextTurnLimit || contextTokens >= rotationTokenLimit(this.#deps.config.contextTokenLimit, this.#deps.config.model)) lane.recycleAfterTurn = true;
           const { costUsd, apiDurationMs } = laneUsageDeltas(lane, event);
-          // Persist the advanced baseline with the provider session it belongs
-          // to, so the next process to resume it inherits the watermark.
-          repo.patchUserSession(sessionId, { cumulativeCostUsd: lane.lastCumulative.costUsd, cumulativeApiDurationMs: lane.lastCumulative.apiDurationMs });
+          // One patch: turn count, context, and the advanced cumulative
+          // baseline (persisted with the provider session it belongs to, so
+          // the next process to resume it inherits the watermark).
+          repo.patchUserSession(sessionId, { sdkTurnCount: session.sdkTurnCount + 1, contextTokens,
+            cumulativeCostUsd: lane.lastCumulative.costUsd, cumulativeApiDurationMs: lane.lastCumulative.apiDurationMs });
           const usage = { id: newId("usage"), userSessionId: sessionId, agentSessionId: null, participant: "orchestrator", profileId: null,
             generation: session.sdkGeneration, turnId: turn?.turnId ?? "unattributed", inputTokens: event.inputTokens ?? 0,
             uncachedInputTokens: event.uncachedInputTokens ?? 0, cacheCreationInputTokens: event.cacheCreationInputTokens ?? 0, cacheReadInputTokens: event.cacheReadInputTokens ?? 0, outputTokens: event.outputTokens ?? 0,
@@ -876,11 +877,12 @@ export class OrchestratorRunner {
         const session = repo.getUserSession(sessionId);
         if (session) {
           const contextTokens = Math.max(session.contextTokens, lane.contextTokens);
-          repo.patchUserSession(sessionId, { sdkTurnCount: session.sdkTurnCount + 1, contextTokens });
           const { costUsd, apiDurationMs } = laneUsageDeltas(lane, event);
-          // Persist the advanced baseline with the provider session it belongs
-          // to, so the next process to resume it inherits the watermark.
-          repo.patchUserSession(sessionId, { cumulativeCostUsd: lane.lastCumulative.costUsd, cumulativeApiDurationMs: lane.lastCumulative.apiDurationMs });
+          // One patch: turn count, context, and the advanced cumulative
+          // baseline (persisted with the provider session it belongs to, so
+          // the next process to resume it inherits the watermark).
+          repo.patchUserSession(sessionId, { sdkTurnCount: session.sdkTurnCount + 1, contextTokens,
+            cumulativeCostUsd: lane.lastCumulative.costUsd, cumulativeApiDurationMs: lane.lastCumulative.apiDurationMs });
           const usage = { id: newId("usage"), userSessionId: sessionId, agentSessionId: null, participant: "orchestrator", profileId: null,
             generation: session.sdkGeneration, turnId: turn?.turnId ?? "unattributed", inputTokens: event.inputTokens ?? 0,
             uncachedInputTokens: event.uncachedInputTokens ?? 0, cacheCreationInputTokens: event.cacheCreationInputTokens ?? 0, cacheReadInputTokens: event.cacheReadInputTokens ?? 0, outputTokens: event.outputTokens ?? 0,

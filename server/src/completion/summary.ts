@@ -87,7 +87,9 @@ export function buildRunSummary(input: BuildRunSummaryInput): RunSummaryDocument
   const window = db.select().from(events)
     .where(and(eq(events.userSessionId, userSessionId), gte(events.seq, seqFrom)))
     .orderBy(asc(events.seq)).all();
-  const seqTo = window.length > 0 ? (window[window.length - 1]!.seq ?? seqFrom) : seqFrom;
+  // An empty window consumed nothing: seqTo must stay BELOW seqFrom, or the
+  // next summary's cursor (seqTo + 1) silently skips one future seq.
+  const seqTo = window.length > 0 ? (window[window.length - 1]!.seq ?? seqFrom) : seqFrom - 1;
   const first = window[0]?.createdAt;
   const last = window[window.length - 1]?.createdAt;
   const durationMs = first && last ? Math.max(0, Date.parse(last) - Date.parse(first)) : 0;

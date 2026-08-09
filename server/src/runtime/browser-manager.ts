@@ -108,20 +108,26 @@ export class BrowserManager {
    */
   async evaluate(key: string, expression: string, timeoutMs = 15_000): Promise<EvaluateOutcome> {
     const seat = await this.#seat(key);
-    return Promise.race([
-      // `runInPage` is passed by reference, not as a closure: Playwright
-      // serializes it into the page, so it must stay self-contained — which is
-      // also what lets the test suite call it directly (see
-      // browser-evaluate.test.ts). `new Function` behaves identically in Node
-      // and in Chrome, so that test exercises the real code path.
-      seat.page.evaluate<EvaluateOutcome, string>(runInPage, expression),
-      new Promise<EvaluateOutcome>((resolve) =>
-        setTimeout(
-          () => resolve({ result: null, timedOut: true }),
-          Math.max(1_000, Math.min(timeoutMs, 60_000)),
-        ).unref?.(),
-      ),
-    ]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        // `runInPage` is passed by reference, not as a closure: Playwright
+        // serializes it into the page, so it must stay self-contained — which is
+        // also what lets the test suite call it directly (see
+        // browser-evaluate.test.ts). `new Function` behaves identically in Node
+        // and in Chrome, so that test exercises the real code path.
+        seat.page.evaluate<EvaluateOutcome, string>(runInPage, expression),
+        new Promise<EvaluateOutcome>((resolve) => {
+          timer = setTimeout(
+            () => resolve({ result: null, timedOut: true }),
+            Math.max(1_000, Math.min(timeoutMs, 60_000)),
+          );
+          timer.unref?.();
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
   }
   async screenshot(key: string, scope: { userSessionId: string; agentSessionId: string }): Promise<{ artifactId: string; bytes: number }> {
     const buffer = await (await this.#seat(key)).page.screenshot({ fullPage: true, type: "png" });

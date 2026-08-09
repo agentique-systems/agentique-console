@@ -9,7 +9,7 @@
  *
  * Headless: mounted once, renders nothing, drives browser-level surfaces.
  */
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { toast } from "sonner";
 
 import { useUserSessions } from "@/api/queries";
@@ -39,13 +39,20 @@ export function AttentionBridge(): null {
   const announced = useRef(new Set<string>());
   const originalIcon = useRef<string | null>(null);
 
-  const needsYou = (sessions.data ?? []).filter(
-    (session) =>
-      session.status === "open" &&
-      (session.pendingInteractions > 0 || session.runState === "awaiting_signoff" || awaiting.has(session.id)),
+  // Memoized: this array is an effect dependency, and a fresh identity every
+  // render would run the effects every render.
+  const needsYou = useMemo(
+    () => (sessions.data ?? []).filter(
+      (session) =>
+        session.status === "open" &&
+        (session.pendingInteractions > 0 || session.runState === "awaiting_signoff" || awaiting.has(session.id)),
+    ),
+    [sessions.data, awaiting],
   );
 
-  // Title + favicon: the two surfaces visible from another tab.
+  // Title + favicon: the two surfaces visible from another tab. Restored only
+  // on unmount — a cleanup keyed to the count briefly stripped the badge on
+  // every transition.
   useEffect(() => {
     const count = needsYou.length;
     document.title = count === 0 ? BASE_TITLE : `(${count}) ${BASE_TITLE}`;
@@ -54,16 +61,20 @@ export function AttentionBridge(): null {
       if (originalIcon.current === null) originalIcon.current = link.getAttribute("href");
       link.href = count === 0 ? (originalIcon.current ?? link.href) : badgedFavicon();
     }
-    return () => {
-      document.title = BASE_TITLE;
-    };
   }, [needsYou.length]);
+  useEffect(() => () => {
+    document.title = BASE_TITLE;
+    const link = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
+    if (link && originalIcon.current !== null) link.href = originalIcon.current;
+  }, []);
 
   // Toast + notification on the RISING EDGE only.
   useEffect(() => {
     const live = new Set<string>();
     for (const session of needsYou) {
-      const key = `${session.id}:${session.runState}:${session.pendingInteractions}`;
+      // Keyed per session and REASON — never the pending count. Answering one
+      // of two open questions must not evict the key and re-toast the other.
+      const key = `${session.id}:${session.runState === "awaiting_signoff" ? "signoff" : "ask"}`;
       live.add(key);
       if (announced.current.has(key)) continue;
       announced.current.add(key);
@@ -87,8 +98,13 @@ export function AttentionBridge(): null {
         };
       }
     }
-    // Forget keys that no longer apply, so a later re-ask announces again.
-    for (const key of [...announced.current]) if (!live.has(key)) announced.current.delete(key);
+    // A session that stopped needing you takes its toast with it, and its key
+    // is forgotten so a later re-ask announces again.
+    for (const key of [...announced.current]) {
+      if (live.has(key)) continue;
+      announced.current.delete(key);
+      toast.dismiss(key.slice(0, key.lastIndexOf(":")));
+    }
   }, [needsYou]);
 
   return null;

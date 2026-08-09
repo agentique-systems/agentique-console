@@ -32,6 +32,7 @@ export type ContractPartyState = "pending" | "accepted" | "objected";
 export interface ContractView {
   id: string;
   agentSessionId: string;
+  userSessionId: string;
   name: string;
   declaredBy: string;
   status: ContractStatus;
@@ -163,7 +164,7 @@ export class ContractService {
   get(id: string): ContractView {
     const row = this.#row(id);
     return {
-      id: row.id, agentSessionId: row.agentSessionId, name: row.name, declaredBy: row.declaredBy,
+      id: row.id, agentSessionId: row.agentSessionId, userSessionId: row.userSessionId, name: row.name, declaredBy: row.declaredBy,
       status: row.status, revision: row.revision, body: row.body, scopes: row.scopes,
       parties: this.#parties(id).map((party) => ({
         participant: party.participant, state: party.state, revision: party.revision, comment: party.comment,
@@ -234,7 +235,7 @@ export class ContractService {
   #emit(type: string, contract: ContractView, extra: Record<string, unknown> = {}): void {
     this.#bus.append({
       type: "agent_session.contract",
-      userSessionId: this.#row(contract.id).userSessionId,
+      userSessionId: contract.userSessionId,
       agentSessionId: contract.agentSessionId,
       payload: {
         agentSessionId: contract.agentSessionId,

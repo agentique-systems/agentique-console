@@ -375,7 +375,12 @@ export function foldPosture(events: readonly ConsoleEvent[]): SessionPosture {
     } else if (event.type === "user_session.turn.settled") {
       open.delete(event.payload.turnId);
       queuedJobs = event.payload.queuedJobs;
-    } else if (event.type === "user_session.question.asked" || event.type === "user_session.plan.proposed") {
+    } else if (event.type === "user_session.question.asked") {
+      // Only MAIN-LANE cards park the lane this posture describes. A seat's
+      // card (participant set) parks that seat's turn — main keeps running,
+      // and stopping the spinner for it would misreport a live lane as idle.
+      if (event.payload.participant === undefined) pending.add(event.payload.interactionId);
+    } else if (event.type === "user_session.plan.proposed") {
       pending.add(event.payload.interactionId);
     } else if (event.type === "user_session.question.answered" || event.type === "user_session.plan.resolved") {
       pending.delete(event.payload.interactionId);

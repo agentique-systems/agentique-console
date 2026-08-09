@@ -236,13 +236,15 @@ export class Repo {
    * recovery must use `sender`: a seat's inheritance is its own last report,
    * never the last message someone else sent it.
    */
-  latestHandoff(input: { userSessionId: string; agentSessionId?: string | null; participant?: string; sender?: string; excludeCheckpoints?: boolean }): HandoffRecordRow | undefined {
+  latestHandoff(input: { userSessionId: string; agentSessionId?: string | null; participant?: string; sender?: string; excludeCheckpoints?: boolean; excludeConsoleSynthesized?: boolean }): HandoffRecordRow | undefined {
     const filters = [eq(handoffRecords.userSessionId, input.userSessionId)];
     if (input.agentSessionId === null) filters.push(sql`${handoffRecords.agentSessionId} is null`);
     else if (input.agentSessionId !== undefined) filters.push(eq(handoffRecords.agentSessionId, input.agentSessionId));
     if (input.participant !== undefined) filters.push(eq(handoffRecords.recipient, input.participant));
     if (input.sender !== undefined) filters.push(eq(handoffRecords.sender, input.sender));
     if (input.excludeCheckpoints === true) filters.push(eq(handoffRecords.checkpoint, false));
+    // Console-authored notices (see host `#simpleHandoff`) are not reports.
+    if (input.excludeConsoleSynthesized === true) filters.push(sql`coalesce(json_extract(${handoffRecords.extension}, '$.data.consoleSynthesized'), 0) = 0`);
     // rowid breaks createdAt ties: handoffs written in the same millisecond are
     // ordinary (an ack and its follow-up), and "latest" must not be a coin flip
     // when a rotation checkpoint depends on it.

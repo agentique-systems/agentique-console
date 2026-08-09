@@ -175,8 +175,11 @@ describe("uncertainty promotion", () => {
       nextAction: null, taskId: null, requestExpandedContext: false,
     }, {});
 
-    expect(result.isError).toBe(true);
-    expect((result.content[0] as { text: string }).text).toMatch(/final report withheld/);
+    // A structured NON-error hold — the gate must not feed the watchdogs.
+    expect(result.isError).not.toBe(true);
+    const hold = JSON.parse((result.content[0] as { text: string }).text) as { withheld: boolean; guidance: string };
+    expect(hold.withheld).toBe(true);
+    expect(hold.guidance).toMatch(/final report withheld/);
     expect(cards(h)).toHaveLength(1);
     expect(cards(h)[0]?.urgency).toBe("blocking");
   });

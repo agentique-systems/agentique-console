@@ -23,7 +23,7 @@ import { describe, expect, it } from "vitest";
 import { initMessage, successMessage } from "../sdk/fake.ts";
 import { collectUntil, makeDelegationHarness } from "../test-helpers.ts";
 import { loadConfig } from "../config.ts";
-import { buildContractHooks, ownsPath } from "./contract-hook.ts";
+import { buildContractHooks, ownsPath, toWorkspacePath } from "./contract-hook.ts";
 
 const briefing = (action: string) => ({
   core: {
@@ -184,6 +184,54 @@ describe("writes gate on acceptance", () => {
       { tool_name: "Write", tool_input: { file_path: "README.md" } }, undefined, {},
     );
     expect(decision).toEqual({});
+  });
+});
+
+describe("gating in a seat worktree", () => {
+  // The original hook resolved the write target against the seat's WORKTREE
+  // while scopes live in WORKSPACE coordinates — the paths could never match,
+  // so contract gating silently never fired for a worktree'd seat (the default
+  // for writers) and ownership enforcement would have denied every write.
+  const WORKTREE = "/tmp/console-data/worktrees/agsess-1-renderer-0";
+  const worktreeHook = (h: Awaited<ReturnType<typeof session>>["h"], agentSessionId: string, seat: string, ownership: string[], enforceOwnership = false) =>
+    buildContractHooks({
+      contracts: h.contracts, bus: h.bus, userSessionId: "us", agentSessionId, seat,
+      seatRoot: WORKTREE, workspaceRoot: "/tmp/test-workspace",
+      ownership, enforceOwnership,
+    }).PreToolUse![0]!.hooks[0]!;
+
+  it("denies an unaccepted governed write addressed relative to the worktree", async () => {
+    const { h, agentSessionId, tool } = await session();
+    await tool("declare_contract").handler(CONTRACT, {});
+    const decision = await worktreeHook(h, agentSessionId, "renderer", ["src/game.js"])(
+      { tool_name: "Write", tool_input: { file_path: "src/game.js" } }, undefined, {},
+    ) as { hookSpecificOutput?: { permissionDecision?: string } };
+    expect(decision.hookSpecificOutput?.permissionDecision).toBe("deny");
+  });
+
+  it("denies an unaccepted governed write addressed absolutely inside the worktree", async () => {
+    const { h, agentSessionId, tool } = await session();
+    await tool("declare_contract").handler(CONTRACT, {});
+    const decision = await worktreeHook(h, agentSessionId, "renderer", ["src/game.js"])(
+      { tool_name: "Write", tool_input: { file_path: `${WORKTREE}/src/game.js` } }, undefined, {},
+    ) as { hookSpecificOutput?: { permissionDecision?: string } };
+    expect(decision.hookSpecificOutput?.permissionDecision).toBe("deny");
+  });
+
+  it("ownership enforcement allows in-scope worktree writes and denies out-of-scope ones", async () => {
+    const { h, agentSessionId } = await session();
+    const hook = worktreeHook(h, agentSessionId, "renderer", ["src/game.js"], true);
+    expect(await hook({ tool_name: "Write", tool_input: { file_path: "src/game.js" } }, undefined, {})).toEqual({});
+    const outside = await hook(
+      { tool_name: "Write", tool_input: { file_path: ".renderer-dev/serve.mjs" } }, undefined, {},
+    ) as { hookSpecificOutput?: { permissionDecision?: string } };
+    expect(outside.hookSpecificOutput?.permissionDecision).toBe("deny");
+  });
+
+  it("maps worktree paths to workspace coordinates and leaves foreign paths alone", () => {
+    expect(toWorkspacePath("/data/wt/src/a.ts", "/data/wt", "/w")).toBe("/w/src/a.ts");
+    expect(toWorkspacePath("/w/src/a.ts", "/w", "/w")).toBe("/w/src/a.ts");
+    expect(toWorkspacePath("/elsewhere/x.ts", "/data/wt", "/w")).toBe("/elsewhere/x.ts");
   });
 });
 

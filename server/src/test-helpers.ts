@@ -22,6 +22,7 @@ import {
 import { fakeSdk, type FakeProgram, type FakeSdk } from "./sdk/fake.ts";
 import { AgentProfileRegistry } from "./agent-profiles/registry.ts";
 import { HandoffService } from "./handoffs/service.ts";
+import type { TaskService } from "./tasks/service.ts";
 
 export interface Harness {
   db: ReturnType<typeof openDb>["db"];
@@ -122,6 +123,8 @@ export function makeHarness(
 export interface DelegationHarness extends Harness {
   host: AgentSessionHost;
   completion: RunCompletionService;
+  tasks: TaskService;
+  handoffs: HandoffService;
 }
 
 /**

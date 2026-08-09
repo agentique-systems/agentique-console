@@ -206,9 +206,13 @@ export class WorktreeManager {
     return this.#git(worktreePath, ["rev-parse", "HEAD"]).trim();
   }
 
-  captureDiff(workspaceRoot: string, baseCommit: string, branch: string): DiffCapture {
-    const patch = this.#git(workspaceRoot, ["diff", "--binary", "-M", `${baseCommit}..${branch}`]);
-    const stat = this.#git(workspaceRoot, ["diff", "--shortstat", `${baseCommit}..${branch}`]).trim();
+  /**
+   * Counts only, one `git diff --numstat` subprocess. The prompt hot paths
+   * (roster work-state, checkpoint reconstruction) need the numbers, not the
+   * patch — `captureDiff` materializes the full `--binary` patch, which at 20
+   * seats per delivery is real money on every seat wake.
+   */
+  captureDiffStats(workspaceRoot: string, baseCommit: string, branch: string): { filesChanged: number; insertions: number; deletions: number } {
     const numstat = this.#git(workspaceRoot, ["diff", "--numstat", `${baseCommit}..${branch}`]).trim();
     let filesChanged = 0, insertions = 0, deletions = 0;
     for (const line of numstat === "" ? [] : numstat.split("\n")) {
@@ -217,7 +221,13 @@ export class WorktreeManager {
       insertions += Number(added) || 0;
       deletions += Number(removed) || 0;
     }
-    return { patch, stat, filesChanged, insertions, deletions };
+    return { filesChanged, insertions, deletions };
+  }
+
+  captureDiff(workspaceRoot: string, baseCommit: string, branch: string): DiffCapture {
+    const patch = this.#git(workspaceRoot, ["diff", "--binary", "-M", `${baseCommit}..${branch}`]);
+    const stat = this.#git(workspaceRoot, ["diff", "--shortstat", `${baseCommit}..${branch}`]).trim();
+    return { patch, stat, ...this.captureDiffStats(workspaceRoot, baseCommit, branch) };
   }
 
   /** --no-ff so --abort semantics are clean and branch commits stay reachable. */

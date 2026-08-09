@@ -360,6 +360,26 @@ export interface AgentSessionHostDeps {
   worktrees?: WorktreeManager;
 }
 
+/**
+ * A `final` withheld by the gate. Deliberately NOT an ApiError: the
+ * `send_handoff` handler catches this and answers with a structured non-error
+ * hold — `ask_operator` never returns `isError` for the operator's silence, and
+ * blocked assignments answer `{queued:true}`, for the same reason: an error
+ * result feeds the error-streak watchdog, and a model retrying a refusal feeds
+ * the identical-call watchdog. Punishing a seat for a hold the Console imposed
+ * kills the very turn that must stay alive to react when the hold clears.
+ */
+export class WithheldFinalError extends Error {
+  constructor(
+    readonly blockers: { id: string; question: string; asker: string; ageMinutes: number }[],
+    readonly promoted: number,
+    guidance: string,
+  ) {
+    super(guidance);
+    this.name = "WithheldFinalError";
+  }
+}
+
 /** The flat, provider-validated parameter surface of `send_handoff`. */
 interface SendHandoffArgs {
   to: string;
@@ -477,6 +497,8 @@ export class AgentSessionHost {
   readonly #withheldFinals = new Set<string>();
   /** deliveryId → assignment held until its blocker task completes. */
   readonly #blockedAssignments = new Map<string, { agentSessionId: string; recipient: string; since: number }>();
+  /** Roster work-state diff lines, memoized 15s — see `#seatWorkState`. */
+  readonly #workStateDiffCache = new Map<string, { at: number; line: string }>();
 
   constructor(deps: AgentSessionHostDeps) { this.#deps = deps; }
 
@@ -655,7 +677,7 @@ export class AgentSessionHost {
    * redelivery — the model-to-model path is native SendMessage governed by
    * the middleware, which shares #journal via the SendGovernor surface.
    */
-  post(input: { agentSessionId: string; speaker: Speaker; to: string; handoff: HandoffDraft; category?: Category; dedupeKey?: string; turnId?: string }): MessageRow {
+  post(input: { agentSessionId: string; speaker: Speaker; to: string; handoff: HandoffDraft; category?: Category; dedupeKey?: string; turnId?: string }): MessageRow & { queuedBehind?: string[] } {
     const { repo } = this.#deps;
     const session = repo.getAgentSession(input.agentSessionId);
     if (!session) throw notFound(`no agent session ${input.agentSessionId}`);
@@ -688,15 +710,20 @@ export class AgentSessionHost {
       this.#deps.bus.append({ type: "handoff.final.blocked", userSessionId: session.userSessionId, agentSessionId: session.id,
         payload: { agentSessionId: session.id, sender: input.speaker.name, interactionIds: blockers.map((row) => row.id) } });
       const now = Date.now();
-      const listed = blockers.map((row) => {
-        const age = Math.max(0, Math.round((now - Date.parse(row.createdAt)) / 60_000));
-        return `[${row.id}] "${questionTextOf(row)}" (asked ${age}m ago by ${row.participant ?? "main"})`;
-      }).join("; ");
-      throw conflict(
+      const structured = blockers.map((row) => ({
+        id: row.id,
+        question: questionTextOf(row),
+        asker: row.participant ?? "main",
+        ageMinutes: Math.max(0, Math.round((now - Date.parse(row.createdAt)) / 60_000)),
+      }));
+      const listed = structured
+        .map((b) => `[${b.id}] "${b.question}" (asked ${b.ageMinutes}m ago by ${b.asker})`)
+        .join("; ");
+      throw new WithheldFinalError(structured, promoted,
         `final report withheld: ${blockers.length} question(s) this session put to the operator ${blockers.length === 1 ? "is" : "are"} still unanswered — ${listed}. ` +
         `${promoted > 0 ? `${promoted} question(s) you had marked deferred are now blocking: at final time there is no "later" left to answer them in. ` : ""}` +
         `Those cards are on the operator's screen now; you cannot answer them and neither can main. ` +
-        `Do NOT retry this final — an identical retry trips the repeat-call watchdog and kills your turn. ` +
+        `This is a hold, not a failure — do not re-send the same final. ` +
         `Either continue other work, or send category:"milestone" with what you have. ` +
         `When the operator answers, the Console delivers their answer to you and you may report final then.`,
       );
@@ -758,7 +785,9 @@ export class AgentSessionHost {
             toolName: "send_handoff", kind: "blocked_by_dependency",
             reason: `assignment to ${input.to} held: ${blockers.join("; ")}` } });
         this.#blockedAssignments.set(delivery.id, { agentSessionId: session.id, recipient: input.to, since: Date.now() });
-        return message;
+        // The sender must learn it was QUEUED, not delivered — otherwise it
+        // reports "delivered" and nobody watches for the release.
+        return { ...message, queuedBehind: blockers };
       }
       void this.#deliverConsole(session.id, input.to).catch((error) => this.#recordHostFailure(session.id, error));
     }
@@ -808,6 +837,19 @@ export class AgentSessionHost {
     } catch { /* a ledger write must never fail a transfer */ }
   }
 
+  /**
+   * The task a journaled delivery's handoff was about. The message payload
+   * carries only a HandoffSummary (no taskId); the full core lives in
+   * handoff_records — read it from there, or the release path would derive
+   * `null`, find no blockers, and free every hold on the first task change.
+   */
+  #deliveryTaskId(messageId: string): string | null {
+    const message = this.#deps.repo.getMessageById(messageId);
+    const summary = message?.payload?.handoff as { id?: string } | undefined;
+    if (!summary?.id || !this.#deps.handoffs) return null;
+    try { return this.#deps.handoffs.get(summary.id).core.taskId; } catch { return null; }
+  }
+
   #assignmentBlockers(session: AgentSessionRow, to: string, category: Category, taskId: string | null): string[] {
     if (category !== "assignment" || taskId === null || !this.#deps.tasks) return [];
     void to;
@@ -839,9 +881,7 @@ export class AgentSessionHost {
       if (!session || session.status !== "open") { this.#blockedAssignments.delete(deliveryId); continue; }
       const delivery = this.#deps.repo.getDeliveryById(deliveryId);
       if (!delivery || delivery.status !== "queued") { this.#blockedAssignments.delete(deliveryId); continue; }
-      const message = this.#deps.repo.getMessageById(delivery.messageId);
-      const taskId = ((message?.payload?.handoff as { taskId?: string } | undefined)?.taskId) ?? null;
-      const stillBlocked = this.#assignmentBlockers(session, held.recipient, "assignment", taskId);
+      const stillBlocked = this.#assignmentBlockers(session, held.recipient, "assignment", this.#deliveryTaskId(delivery.messageId));
       const expired = now - held.since >= grace;
       if (stillBlocked.length > 0 && !expired) continue;
       this.#blockedAssignments.delete(deliveryId);
@@ -1142,26 +1182,37 @@ export class AgentSessionHost {
         }
       }
       for (const delivery of this.#deps.repo.listActiveDeliveries(session.id)) this.#patchDelivery(session, delivery, "cancelled");
+      this.#withheldFinals.delete(session.id);
+      for (const [deliveryId, held] of this.#blockedAssignments) {
+        if (held.agentSessionId === session.id) this.#blockedAssignments.delete(deliveryId);
+      }
       this.#deps.repo.patchAgentSession(session.id, { status: "archived" });
       this.#deps.bus.append({ type: "agent_session.status", userSessionId, agentSessionId: session.id,
         payload: { agentSessionId: session.id, status: "archived", owedToOrchestrator: false } });
     }
   }
 
-  /**
-   * Releases any `ask_operator` wait older than `operatorAskDetachMs`. The
-   * third of three mechanisms bounding a blocking ask, alongside the
-   * concurrent-card cap and the capacity-eviction second pass — this is the one
-   * that fires when nothing else needs the slot and the human is simply away.
-   */
   onStatusChanged(handler: (userSessionId: string) => void): void {
     if (this.#onStatusChanged) throw new Error("onStatusChanged is already registered — wire callbacks once, in createApp");
     this.#onStatusChanged = handler;
   }
 
-  startOperatorAskSweep(intervalMs = 30_000): void {
+  /**
+   * The governance clock. Two time-bounded holds expire here:
+   *
+   * - any `ask_operator` wait older than `operatorAskDetachMs` is detached —
+   *   the third of three mechanisms bounding a blocking ask, alongside the
+   *   concurrent-card cap and the capacity-eviction second pass; this is the
+   *   one that fires when nothing else needs the slot and the human is away.
+   * - held assignments past `assignmentBlockGraceMs` are released. Without a
+   *   clock of its own the grace could only ever be OBSERVED from a task
+   *   change — a blocker nobody touched again would hold its assignment
+   *   forever, the exact deadlock the grace exists to rule out.
+   */
+  startGovernanceSweep(intervalMs = 30_000): void {
     if (this.#askSweep) return;
     this.#askSweep = setInterval(() => {
+      this.releaseBlockedAssignments();
       const limit = this.#deps.config?.operatorAskDetachMs;
       if (limit === undefined) return;
       const cutoff = Date.now() - limit;
@@ -1175,7 +1226,7 @@ export class AgentSessionHost {
     this.#askSweep.unref?.();
   }
 
-  stopOperatorAskSweep(): void {
+  stopGovernanceSweep(): void {
     if (this.#askSweep) clearInterval(this.#askSweep);
     this.#askSweep = null;
   }
@@ -1254,6 +1305,18 @@ export class AgentSessionHost {
     const wakes = new Set<string>();
     for (const delivery of this.#deps.repo.listQueuedDeliveries()) {
       if (delivery.recipient === MAIN_RECIPIENT) continue;
+      // Holds are recomputed from durable truth (the task rows), never trusted
+      // to the in-memory map a restart wipes: a queued assignment whose
+      // declared blocker is still open goes back on hold instead of leaking
+      // out with the reboot. The grace clock restarts — later than deadlock.
+      if (delivery.category === "assignment") {
+        const session = this.#deps.repo.getAgentSession(delivery.agentSessionId);
+        if (session?.status === "open"
+          && this.#assignmentBlockers(session, delivery.recipient, "assignment", this.#deliveryTaskId(delivery.messageId)).length > 0) {
+          this.#blockedAssignments.set(delivery.id, { agentSessionId: delivery.agentSessionId, recipient: delivery.recipient, since: Date.now() });
+          continue;
+        }
+      }
       wakes.add(`${delivery.agentSessionId} ${delivery.recipient}`);
     }
     for (const key of wakes) {
@@ -1540,8 +1603,20 @@ export class AgentSessionHost {
     const config = this.#deps.config;
     if (!config) return;
     for (;;) {
-      if (this.#resident() < config.seatMaxResident && this.#resident(agentSessionId) < config.seatMaxResidentPerSession) return;
-      if (this.#parkLeastRecentIdle()) continue;
+      const globalFull = this.#resident() >= config.seatMaxResident;
+      const sessionFull = this.#resident(agentSessionId) >= config.seatMaxResidentPerSession;
+      if (!globalFull && !sessionFull) return;
+      // Evict only where it frees the BINDING constraint: when the session cap
+      // is what blocks us, a victim in another session gives up its process
+      // for nothing.
+      const scope = globalFull ? undefined : agentSessionId;
+      if (this.#parkLeastRecentIdle(scope)) continue;
+      // Nothing idle: cut loose the oldest operator wait — a seat blocked on
+      // the operator is not WORKING, it is pinned by a human who may be away
+      // for hours. A detach frees the slot only when the released turn settles,
+      // asynchronously, so fall through to the timed wait rather than assuming
+      // the slot is already free; #signalCapacity resolves it early.
+      this.#detachOldestOperatorWait(scope);
       if (Date.now() >= until) throw new Error("no resident seat capacity");
       await new Promise<void>((resolve) => {
         const timer = setTimeout(resolve, Math.min(1_000, Math.max(50, until - Date.now())));
@@ -1551,30 +1626,37 @@ export class AgentSessionHost {
     }
   }
 
-  #parkLeastRecentIdle(): boolean {
+  #parkLeastRecentIdle(withinSessionId?: string): boolean {
     let victim: { sessionId: string; seat: string; lane: SeatLane } | null = null;
-    for (const [sessionId, lanes] of this.#seats) for (const [seat, lane] of lanes) {
-      if (lane.state !== "live" || lane.activeTurn !== null) continue;
-      if (this.#deps.repo.listUnackedDeliveries(sessionId, seat).length > 0) continue;
-      if (!victim || lane.lastActiveAt < victim.lane.lastActiveAt) victim = { sessionId, seat, lane };
+    for (const [sessionId, lanes] of this.#seats) {
+      if (withinSessionId !== undefined && sessionId !== withinSessionId) continue;
+      for (const [seat, lane] of lanes) {
+        if (lane.state !== "live" || lane.activeTurn !== null) continue;
+        if (this.#deps.repo.listUnackedDeliveries(sessionId, seat).length > 0) continue;
+        if (!victim || lane.lastActiveAt < victim.lane.lastActiveAt) victim = { sessionId, seat, lane };
+      }
     }
-    if (victim) {
-      this.#parkSeat(victim.sessionId, victim.seat, victim.lane, "capacity");
-      return true;
-    }
-    // Second pass: nothing is idle, but a seat blocked on the operator is not
-    // WORKING — it is waiting on a human who may be away for hours. Detaching
-    // the oldest such wait frees its process without losing the question: the
-    // row stays open and the answer arrives later as a delivery.
-    let waiting: { sessionId: string; seat: string; lane: SeatLane; since: number } | null = null;
-    for (const [sessionId, lanes] of this.#seats) for (const [seat, lane] of lanes) {
-      const asking = lane.activeTurn?.awaitingOperator;
-      if (!asking) continue;
-      if (!waiting || asking.since < waiting.since) waiting = { sessionId, seat, lane, since: asking.since };
-    }
-    if (!waiting) return false;
-    this.#detachOperatorAsk(waiting.lane, "another seat needed this process while you waited on the operator");
+    if (!victim) return false;
+    this.#parkSeat(victim.sessionId, victim.seat, victim.lane, "capacity");
     return true;
+  }
+
+  /**
+   * Detaching the oldest `ask_operator` wait frees its process without losing
+   * the question: the row stays open and the answer arrives later as a
+   * delivery.
+   */
+  #detachOldestOperatorWait(withinSessionId?: string): void {
+    let waiting: { lane: SeatLane; since: number } | null = null;
+    for (const [sessionId, lanes] of this.#seats) {
+      if (withinSessionId !== undefined && sessionId !== withinSessionId) continue;
+      for (const [, lane] of lanes) {
+        const asking = lane.activeTurn?.awaitingOperator;
+        if (!asking) continue;
+        if (!waiting || asking.since < waiting.since) waiting = { lane, since: asking.since };
+      }
+    }
+    if (waiting) this.#detachOperatorAsk(waiting.lane, "another seat needed this process while you waited on the operator");
   }
 
   /**
@@ -2231,20 +2313,29 @@ export class AgentSessionHost {
           result: { summary: args.resultSummary, artifacts: args.artifacts },
           uncertainty: args.uncertainty, nextAction: args.nextAction, requestExpandedContext: args.requestExpandedContext,
         }, extension: { kind: profile.handoffExtension ?? "generic", data: {} } };
-        // `post()` throws for a forbidden route and for a withheld final. Both
-        // are things the SEAT must read and act on, so they come back as tool
-        // errors rather than escaping the handler — the in-process MCP server's
-        // behaviour on a throwing handler is not something to bet a gate on.
-        let message: MessageRow;
+        // `post()` throws for a forbidden route (a genuine seat mistake → tool
+        // error) and for a withheld final (a Console-imposed HOLD → a
+        // structured NON-error, for the same reason ask_operator never returns
+        // isError: error results feed the error-streak watchdog and retries
+        // feed the identical-call watchdog, and punishing a seat for a hold the
+        // Console imposed kills the turn that must stay alive for the release).
+        let message: MessageRow & { queuedBehind?: string[] };
         try {
           message = this.post({ agentSessionId: session.id, speaker: { kind: seat.name === ORCHESTRATOR_SEAT ? "orchestrator" : "agent", name: seat.name },
             to: args.to, handoff: draft, category: args.category, ...(args.dedupeKey ? { dedupeKey: args.dedupeKey } : {}),
             ...(this.#laneOf(session.id, seat.name).activeTurn ? { turnId: this.#laneOf(session.id, seat.name).activeTurn!.turnId } : {}) });
         } catch (error) {
+          if (error instanceof WithheldFinalError) {
+            return ok({ delivered: false, withheld: true, blockers: error.blockers, guidance: error.message });
+          }
           return { content: [{ type: "text" as const, text: error instanceof Error ? error.message : String(error) }], isError: true };
         }
         const lane = this.#laneOf(session.id, seat.name);
         if (lane.activeTurn) lane.activeTurn.sawSend = true;
+        if (message.queuedBehind) {
+          return ok({ delivered: false, queued: true, blockedBy: message.queuedBehind,
+            note: "Journaled and held: the Console delivers it the moment the blocking task(s) complete. Do not re-send." });
+        }
         return ok({ delivered: true, messageSeq: message.seq, to: args.to, category: args.category });
       }));
     // Console-owned ledger. Keyed on a synthetic id derived from the agent
@@ -2729,8 +2820,9 @@ export class AgentSessionHost {
     if (taskLines.length > 0) facts.push(`Task ledger:\n${taskLines.join("\n")}`);
     if (seat.worktreePath && this.#deps.worktrees && seat.worktreeBranch && seat.worktreeBaseCommit) {
       try {
-        const diff = this.#deps.worktrees.captureDiff(seat.worktreePath, seat.worktreeBaseCommit, seat.worktreeBranch);
-        facts.push(`Isolated worktree ${seat.worktreeBranch}: ${diff.stat || "no changes yet"}. Not visible in the shared workspace until you report completed.`);
+        const diff = this.#deps.worktrees.captureDiffStats(seat.worktreePath, seat.worktreeBaseCommit, seat.worktreeBranch);
+        const stat = diff.filesChanged === 0 ? "no changes yet" : `${diff.filesChanged} file(s) +${diff.insertions}/-${diff.deletions}`;
+        facts.push(`Isolated worktree ${seat.worktreeBranch}: ${stat}. Not visible in the shared workspace until you report completed.`);
       } catch { facts.push(`Isolated worktree ${seat.worktreeBranch} (diff unavailable).`); }
     }
     if (assignment) {
@@ -2816,20 +2908,41 @@ export class AgentSessionHost {
       } catch { /* a handoff we cannot read tells the roster nothing */ }
     }
     if (seat.worktreePath && seat.worktreeBranch && seat.worktreeBaseCommit && this.#deps.worktrees) {
-      try {
-        const diff = this.#deps.worktrees.captureDiff(seat.worktreePath, seat.worktreeBaseCommit, seat.worktreeBranch);
-        facts.push(diff.filesChanged === 0
-          ? "unmerged worktree, nothing written yet"
-          : `unmerged worktree: ${diff.filesChanged} file(s) +${diff.insertions}/-${diff.deletions}, not visible in the workspace until they report completed`);
-      } catch { facts.push("unmerged worktree (state unavailable)"); }
+      // Memoized: `#composePrompt` renders this for EVERY seat on EVERY
+      // delivery, which at the 20-seat cap would be 20 git subprocesses per
+      // message. The diff only moves when the seat writes; a 15s-stale count
+      // in a prompt hint is invisible, 60 spawned `git diff`s are not.
+      const key = `${seat.worktreePath}:${seat.worktreeBranch}`;
+      const cached = this.#workStateDiffCache.get(key);
+      if (cached && Date.now() - cached.at < 15_000) {
+        facts.push(cached.line);
+      } else {
+        let line: string;
+        try {
+          const diff = this.#deps.worktrees.captureDiffStats(seat.worktreePath, seat.worktreeBaseCommit, seat.worktreeBranch);
+          line = diff.filesChanged === 0
+            ? "unmerged worktree, nothing written yet"
+            : `unmerged worktree: ${diff.filesChanged} file(s) +${diff.insertions}/-${diff.deletions}, not visible in the workspace until they report completed`;
+        } catch { line = "unmerged worktree (state unavailable)"; }
+        this.#workStateDiffCache.set(key, { at: Date.now(), line });
+        facts.push(line);
+      }
     }
     return facts.join("; ");
   }
 
+  /**
+   * A Console-authored notice draft. Every draft minted here is marked
+   * `consoleSynthesized`, because models never write through this path — and
+   * `#statusOf` needs to tell a report the COORDINATOR sent from a notice the
+   * Console posted in its name. Without the marker, the discharge and
+   * withheld-final-cleared notices flipped a session to `reported`, which is
+   * precisely the confusion that status was added to remove.
+   */
   #simpleHandoff(action: string, status: HandoffDraft["core"]["status"], summary: string, nextAction: string | null): HandoffDraft {
     return { core: { schemaVersion: 1, taskId: null, status, risk: status === "failed" || status === "blocked" ? "high" : "medium",
       action, state: { summary, evidence: [] }, result: { summary: null, artifacts: [] }, uncertainty: [], nextAction,
-      requestExpandedContext: status === "failed" }, extension: { kind: "generic", data: {} } };
+      requestExpandedContext: status === "failed" }, extension: { kind: "generic", data: { consoleSynthesized: true } } };
   }
 
   /**
@@ -3006,14 +3119,15 @@ export class AgentSessionHost {
    * db-live-1 ledger by 25% and produced an api-duration 20x the wall clock.
    */
   #recordUsage(session: AgentSessionRow, seat: ParticipantRow, cumulative: { costUsd: number; apiDurationMs: number }, turnId: string, usageEvent: { inputTokens?: number; uncachedInputTokens?: number; cacheCreationInputTokens?: number; cacheReadInputTokens?: number; outputTokens?: number; cumulativeCostUsd?: number; modelId?: string; cumulativeApiDurationMs?: number; sdkDurationMs?: number; stopReason?: string }, status: "completed" | "error" | "aborted" = "completed", durationMs?: number, trigger = "delivery"): void {
-    // Every settled turn gets a row, including one that burned wall clock and
-    // bought nothing. A zero-token `error` is the MOST interesting row in the
-    // ledger — db-live-2's two DNS-dead orchestrator turns consumed 9m11s
-    // between them and were invisible to billing, while renderer's errored
-    // turn WAS recorded. Skipping them made failure accounting inconsistent
-    // with the runner, which has always recorded unconditionally.
+    // Every settled turn gets a row — with ONE exception. A zero-token `error`
+    // is the MOST interesting row in the ledger (db-live-2's two DNS-dead
+    // orchestrator turns consumed 9m11s and were invisible to billing), so
+    // errors and aborts record unconditionally, like the runner always has.
+    // A zero-token COMPLETED result, by contrast, is a CLI-level artifact
+    // frame, not a turn that happened — recording those would inflate turn
+    // counts with phantoms.
     const empty = (usageEvent.inputTokens ?? 0) === 0 && (usageEvent.outputTokens ?? 0) === 0;
-    if (empty && status === "completed") return; // a genuine CLI-level artifact
+    if (empty && status === "completed") return;
     // The SDK restates the provider session's running total on every result,
     // so a turn's figure is the delta against what we last saw. If the total
     // came back BELOW the baseline the counter restarted underneath us (a
@@ -3134,6 +3248,8 @@ export class AgentSessionHost {
     const reported = this.#deps.repo.latestHandoff({
       userSessionId: row.userSessionId, agentSessionId: row.id,
       participant: MAIN_RECIPIENT, sender: ORCHESTRATOR_SEAT, excludeCheckpoints: true,
+      // Only what the coordinator ITSELF sent counts as having reported.
+      excludeConsoleSynthesized: true,
     });
     if (reported && this.#deps.repo.listActiveDeliveries(row.id).length === 0) return "reported";
     return "idle";
