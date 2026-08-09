@@ -6,23 +6,24 @@
  * `AskUserQuestion`'s answer lived in `updatedInput.answers` inside a single
  * provider transcript and died at that session's next rotation. A coordinator's
  * escalation returned the answer to exactly one seat, and its siblings never
- * learned it. `CoordinationHandoffData.operatorDecisions` was declared in the
- * shared types and never written by anything.
+ * learned it. The cost, from db-live-1: the operator was asked one reserved
+ * question ("dodge obstacles or collect targets?"), answered it in 11.8
+ * seconds, and the word "dodge" then appeared in ZERO of the three
+ * specialists' sessions.
  *
- * The cost, from db-live-1: the operator was asked one reserved question
- * ("dodge obstacles or collect targets?"), answered it in 11.8 seconds, and the
- * word "dodge" then appeared in ZERO of the three specialists' sessions. They
- * built the right game only because the operator's own prompt text independently
- * implied it. Had they answered "collect", that run builds the wrong thing and
- * nobody notices until the end.
- *
- * So: one row per decision, one writer, and read back into every seat's prompt.
+ * This is a READ-MODEL, not a table. A decision IS a resolved interaction row
+ * — the answers, the asker, the note and the auto-taken flag all already live
+ * there durably — so a second `operator_decisions` table was a projection of
+ * facts stored one join away, with a writer to keep in sync and its own copy
+ * of every rendering. One source of truth, one mapper (`decisionOf`), one
+ * renderer (`renderDecision`), read back into every seat's prompt.
  */
-import { and, desc, eq, gt } from "drizzle-orm";
+import { and, eq, inArray, or } from "drizzle-orm";
 import type { Db } from "../db/client.ts";
-import { operatorDecisions } from "../db/schema.ts";
-import type { EventBus } from "../events/bus.ts";
-import { newId, nowIso } from "../ids.ts";
+import { interactions } from "../db/schema.ts";
+import type { InteractionQuestion } from "@agentique-console/shared";
+
+type InteractionRow = typeof interactions.$inferSelect;
 
 export type DecisionSource = "interaction" | "plan_approval" | "ttl_default";
 
@@ -30,27 +31,30 @@ export interface OperatorDecision {
   id: string;
   userSessionId: string;
   agentSessionId: string | null;
-  interactionId: string | null;
+  interactionId: string;
   askedBy: string;
   source: DecisionSource;
   question: string;
   answer: string;
   note: string | null;
   autoTaken: boolean;
-  supersededBy: string | null;
+  /** When the operator decided — the interaction's resolution time. */
   createdAt: string;
 }
 
-export interface RecordDecisionInput {
+/** The structural slice of an interaction (row or wire) a decision reads. */
+export interface DecisionSourceRow {
+  id: string;
   userSessionId: string;
-  agentSessionId?: string | null;
-  interactionId?: string | null;
-  askedBy: string;
-  source: DecisionSource;
-  question: string;
-  answer: string;
-  note?: string | null;
-  autoTaken?: boolean;
+  agentSessionId: string | null;
+  participant: string | null;
+  kind: string;
+  status: string;
+  payload: unknown;
+  response: unknown;
+  autoTaken?: boolean | null;
+  resolvedAt?: string | null;
+  createdAt: string;
 }
 
 /** Bounds on the digest injected into prompts. Newest first, oldest dropped. */
@@ -65,73 +69,84 @@ const DIGEST_MAX_BYTES = 4 * 1024;
  */
 const PIN_RE = /(?:^|[\s"'`(/@])([a-z][a-z0-9._-]{1,40})[@ ]v?(\d+\.\d+(?:\.\d+)?|r\d{2,3})\b/gi;
 
+/** Chosen labels plus anything the operator typed, as one readable answer. */
+export function renderAnswer(answers: Record<string, string[]>, freeText?: Record<string, string>): string {
+  const chosen = Object.values(answers).flat().filter((label) => label !== "");
+  const typed = Object.values(freeText ?? {}).filter((text) => text.trim() !== "");
+  return [...chosen, ...typed].join(" · ");
+}
+
+/**
+ * The decision a resolved interaction records, or null when it records none
+ * (unresolved, dismissed, or contentless). Rejected plans count — "requested
+ * changes" is a decision the run must respect.
+ */
+export function decisionOf(row: DecisionSourceRow): OperatorDecision | null {
+  const isPlan = row.kind === "plan_approval";
+  if (row.status !== "answered" && !(isPlan && row.status === "rejected")) return null;
+  const response = (row.response ?? {}) as {
+    answers?: Record<string, string[]>; freeText?: Record<string, string>;
+    note?: string; decision?: string; autoTaken?: boolean;
+  };
+  const question = isPlan
+    ? "Plan approval"
+    : ((row.payload as { questions?: InteractionQuestion[] }).questions ?? []).map((q) => q.question).join(" | ");
+  const answer = isPlan
+    ? `${response.decision === "approve" ? "Approved the plan" : "Requested changes to the plan"}${response.note === undefined ? "" : `: ${response.note}`}`
+    : renderAnswer(response.answers ?? {}, response.freeText);
+  if (question === "" && answer === "") return null;
+  const autoTaken = row.autoTaken === true || response.autoTaken === true;
+  return {
+    id: row.id,
+    userSessionId: row.userSessionId,
+    agentSessionId: row.agentSessionId,
+    interactionId: row.id,
+    // Attribution matters: "renderer asked this" reads very differently from
+    // "the console asked this" when the operator reviews the run.
+    askedBy: row.participant ?? "main",
+    source: isPlan ? "plan_approval" : autoTaken ? "ttl_default" : "interaction",
+    question,
+    answer,
+    note: isPlan ? null : (response.note ?? null),
+    autoTaken,
+    createdAt: row.resolvedAt ?? row.createdAt,
+  };
+}
+
 export class DecisionLedger {
   readonly #db: Db;
-  readonly #bus: EventBus;
 
-  constructor(db: Db, bus: EventBus) {
+  constructor(db: Db) {
     this.#db = db;
-    this.#bus = bus;
-  }
-
-  record(input: RecordDecisionInput): OperatorDecision {
-    const row: OperatorDecision = {
-      id: newId("decision"),
-      userSessionId: input.userSessionId,
-      agentSessionId: input.agentSessionId ?? null,
-      interactionId: input.interactionId ?? null,
-      askedBy: input.askedBy,
-      source: input.source,
-      question: input.question,
-      answer: input.answer,
-      note: input.note ?? null,
-      autoTaken: input.autoTaken ?? false,
-      supersededBy: null,
-      createdAt: nowIso(),
-    };
-    this.#db.insert(operatorDecisions).values(row).run();
-    this.#bus.append({
-      type: "operator.decision.recorded",
-      userSessionId: row.userSessionId,
-      ...(row.agentSessionId ? { agentSessionId: row.agentSessionId } : {}),
-      payload: {
-        sessionId: row.userSessionId,
-        decisionId: row.id,
-        ...(row.agentSessionId ? { agentSessionId: row.agentSessionId } : {}),
-        ...(row.interactionId ? { interactionId: row.interactionId } : {}),
-        askedBy: row.askedBy,
-        source: row.source,
-        question: row.question,
-        answer: row.answer,
-        ...(row.autoTaken ? { autoTaken: true } : {}),
-      },
-    });
-    return row;
   }
 
   list(userSessionId: string): OperatorDecision[] {
-    return this.#db
+    const rows: InteractionRow[] = this.#db
       .select()
-      .from(operatorDecisions)
-      .where(eq(operatorDecisions.userSessionId, userSessionId))
-      .orderBy(operatorDecisions.createdAt)
+      .from(interactions)
+      .where(and(
+        eq(interactions.userSessionId, userSessionId),
+        or(
+          eq(interactions.status, "answered"),
+          and(eq(interactions.kind, "plan_approval"), inArray(interactions.status, ["answered", "rejected"])),
+        ),
+      ))
       .all();
+    return rows
+      .map((row) => decisionOf(row))
+      .filter((decision): decision is OperatorDecision => decision !== null)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }
 
-  /** Decisions recorded strictly after an ISO watermark. Feeds the per-delivery delta. */
+  /** Decisions made strictly after an ISO watermark. Feeds the per-delivery delta. */
   since(userSessionId: string, watermark: string | null): OperatorDecision[] {
-    if (watermark === null) return this.list(userSessionId);
-    return this.#db
-      .select()
-      .from(operatorDecisions)
-      .where(and(eq(operatorDecisions.userSessionId, userSessionId), gt(operatorDecisions.createdAt, watermark)))
-      .orderBy(operatorDecisions.createdAt)
-      .all();
+    const rows = this.list(userSessionId);
+    return watermark === null ? rows : rows.filter((row) => row.createdAt > watermark);
   }
 
   /** One line per decision, newest-relevant last, for prompt injection. */
   lines(userSessionId: string, opts: { max?: number } = {}): string[] {
-    const rows = this.list(userSessionId).filter((row) => row.supersededBy === null);
+    const rows = this.list(userSessionId);
     const kept = opts.max === undefined ? rows : rows.slice(-opts.max);
     return kept.map((row) => renderDecision(row));
   }
@@ -142,7 +157,7 @@ export class DecisionLedger {
    * long run must not silently push the checkpoint out of the prompt.
    */
   digest(userSessionId: string): string {
-    const rows = this.list(userSessionId).filter((row) => row.supersededBy === null).reverse();
+    const rows = this.list(userSessionId).reverse();
     const lines: string[] = [];
     let bytes = 0;
     let dropped = 0;
@@ -181,24 +196,8 @@ export class DecisionLedger {
   /** Raw answer strings, for substring checks against a seat's uncertainty. */
   constraints(userSessionId: string): string[] {
     return this.list(userSessionId)
-      .filter((row) => row.supersededBy === null)
       .map((row) => row.answer)
       .filter((answer) => answer.trim() !== "");
-  }
-
-  /** A later decision replaces an earlier one; the original stays for the record. */
-  supersede(id: string, byId: string): void {
-    this.#db.update(operatorDecisions).set({ supersededBy: byId }).where(eq(operatorDecisions.id, id)).run();
-  }
-
-  latestAt(userSessionId: string): string | null {
-    const row = this.#db
-      .select({ createdAt: operatorDecisions.createdAt })
-      .from(operatorDecisions)
-      .where(eq(operatorDecisions.userSessionId, userSessionId))
-      .orderBy(desc(operatorDecisions.createdAt))
-      .get();
-    return row?.createdAt ?? null;
   }
 }
 

@@ -27,7 +27,7 @@ import { sdkEnv } from "../sdk/env.ts";
 import type { ProcessManager } from "../runtime/process-manager.ts";
 import type { BrowserManager } from "../runtime/browser-manager.ts";
 import type { WorktreeManager } from "../runtime/worktree-manager.ts";
-import { renderDecision, type DecisionLedger } from "../orchestrator/decisions.ts";
+import { decisionOf, renderDecision, type DecisionLedger } from "../orchestrator/decisions.ts";
 import type { ContractService } from "../contracts/service.ts";
 import { buildContractHooks } from "./contract-hook.ts";
 import { dedupeKeyFor, type InteractionService } from "../orchestrator/interactions.ts";
@@ -470,14 +470,10 @@ function questionTextOf(interaction: Interaction): string {
 }
 
 /** "What was asked → what the operator said", rendered once for every consumer. */
+/** The one canonical decision rendering — see `orchestrator/decisions.ts`. */
 function summarizeAnswer(interaction: Interaction): string {
-  const asked = questionTextOf(interaction);
-  const response = (interaction.response ?? {}) as { answers?: Record<string, string[]>; freeText?: Record<string, string>; note?: string };
-  const chosen = Object.values(response.answers ?? {}).flat().join(", ");
-  const free = Object.values(response.freeText ?? {}).join(" ");
-  const parts = [chosen, free, response.note].filter((part) => part !== undefined && part !== "");
-  if (asked === "" && parts.length === 0) return "";
-  return `${asked} → ${parts.join(" · ") || "(no answer recorded)"}${interaction.autoTaken ? " [auto-taken on timeout, not chosen by the operator]" : ""}`;
+  const decision = decisionOf(interaction);
+  return decision === null ? "" : renderDecision(decision);
 }
 
 /** Console-managed, independently resumable participant sessions and durable mailbox. */
@@ -1241,17 +1237,14 @@ export class AgentSessionHost {
    * `system` speaker would not be. The dedupe key makes a double answer a
    * no-op.
    */
-  deliverOperatorAnswer(interaction: Interaction, body: ResolveInteractionBody): void {
+  deliverOperatorAnswer(interaction: Interaction): void {
     if (!interaction.agentSessionId || !interaction.participant) return;
-    const questions = (interaction.payload as { questions?: InteractionQuestion[] }).questions ?? [];
-    const asked = questions.map((question) => question.question).join(" | ");
-    const answer = "answers" in body
-      ? [
-          Object.entries(body.answers).map(([question, labels]) => `${question} → ${labels.join(", ")}`).join("\n"),
-          ...(body.freeText === undefined ? [] : [`In their own words: ${Object.values(body.freeText).join(" ")}`]),
-          ...(body.note === undefined ? [] : [`Note: ${body.note}`]),
-        ].filter(Boolean).join("\n")
-      : `${body.decision === "approve" ? "Approved" : "Changes requested"}${body.note === undefined ? "" : `: ${body.note}`}`;
+    const asked = questionTextOf(interaction);
+    // The route resolved the row before calling this — render from the durable
+    // record, through the one canonical renderer, so the seat reads exactly
+    // what every later prompt will say.
+    const decision = decisionOf(this.#deps.interactions.get(interaction.id));
+    const answer = decision === null ? `${asked} → (no answer recorded)` : renderDecision(decision);
     this.post({
       agentSessionId: interaction.agentSessionId,
       speaker: { kind: "orchestrator", name: ORCHESTRATOR_SEAT },

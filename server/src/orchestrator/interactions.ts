@@ -27,7 +27,7 @@ import type {
 } from "@agentique-console/shared";
 import type { Db } from "../db/client.ts";
 import { interactions } from "../db/schema.ts";
-import type { DecisionLedger } from "./decisions.ts";
+import { renderAnswer } from "./decisions.ts";
 import type { EventBus } from "../events/bus.ts";
 import { newId, nowIso } from "../ids.ts";
 import { conflict, notFound, badRequest } from "../api/errors.ts";
@@ -66,13 +66,6 @@ function toWire(row: InteractionRow): Interaction {
     createdAt: row.createdAt,
     resolvedAt: row.resolvedAt,
   };
-}
-
-/** Chosen labels plus anything the operator typed, as one readable answer. */
-function renderAnswer(answers: Record<string, string[]>, freeText?: Record<string, string>): string {
-  const chosen = Object.values(answers).flat().filter((label) => label !== "");
-  const typed = Object.values(freeText ?? {}).filter((text) => text.trim() !== "");
-  return [...chosen, ...typed].join(" · ");
 }
 
 /** Collapses whitespace and case so a re-asked question is recognisably the same one. */
@@ -129,13 +122,6 @@ export interface CreateOperatorQuestionInput {
 export class InteractionService {
   readonly #db: Db;
   readonly #bus: EventBus;
-  /**
-   * The decision ledger's ONLY writer is this service. Every answer path — the
-   * REST endpoint, the TTL sweep, and the plan branch of chat-dismissal — runs
-   * through here, so there is no second source to keep in sync and no way for
-   * an answer to be recorded in one place and not the other.
-   */
-  #decisions: DecisionLedger | undefined;
   readonly #pending = new Map<string, (res: InteractionResolution) => void>();
   /** Fired when a session's last unresolved BLOCKING row resolves — see the final gate. */
   #onBlockingCleared: ((userSessionId: string, agentSessionId: string) => void) | undefined;
@@ -143,15 +129,9 @@ export class InteractionService {
   #onResolved: ((userSessionId: string) => void) | undefined;
   #sweep: ReturnType<typeof setInterval> | null = null;
 
-  constructor(db: Db, bus: EventBus, decisions?: DecisionLedger) {
+  constructor(db: Db, bus: EventBus) {
     this.#db = db;
     this.#bus = bus;
-    this.#decisions = decisions;
-  }
-
-  /** Late-bound so `main.ts` can construct both in either order. */
-  useDecisionLedger(decisions: DecisionLedger): void {
-    this.#decisions = decisions;
   }
 
   /**
@@ -703,27 +683,37 @@ export class InteractionService {
   }
 
   /** The single write point into the decision ledger. */
+  /**
+   * A resolved interaction IS the decision record — the `DecisionLedger` is a
+   * read-model over these rows, so there is nothing to write and keep in sync.
+   * What remains here is the timeline event (the Run Summary reads decisions
+   * from the event window; a live UI can, too).
+   */
   #recordDecision(
     row: InteractionRow,
     input: { answer: string; note?: string; source: "interaction" | "plan_approval" | "ttl_default"; autoTaken?: boolean },
   ): void {
-    if (!this.#decisions) return;
     const question = row.kind === "plan_approval"
       ? "Plan approval"
       : ((row.payload as { questions?: InteractionQuestion[] }).questions ?? []).map((q) => q.question).join(" | ");
     if (question === "" && input.answer === "") return;
-    this.#decisions.record({
+    this.#bus.append({
+      type: "operator.decision.recorded",
       userSessionId: row.userSessionId,
-      agentSessionId: row.agentSessionId,
-      interactionId: row.id,
-      // Attribution matters: "renderer asked this" reads very differently from
-      // "the console asked this" when the operator reviews the run.
-      askedBy: row.participant ?? "main",
-      source: input.source,
-      question,
-      answer: input.answer,
-      ...(input.note === undefined ? {} : { note: input.note }),
-      ...(input.autoTaken === undefined ? {} : { autoTaken: input.autoTaken }),
+      ...(row.agentSessionId ? { agentSessionId: row.agentSessionId } : {}),
+      payload: {
+        sessionId: row.userSessionId,
+        decisionId: row.id,
+        ...(row.agentSessionId ? { agentSessionId: row.agentSessionId } : {}),
+        interactionId: row.id,
+        // Attribution matters: "renderer asked this" reads very differently
+        // from "the console asked this" when the operator reviews the run.
+        askedBy: row.participant ?? "main",
+        source: input.source,
+        question,
+        answer: input.answer,
+        ...(input.autoTaken === true ? { autoTaken: true } : {}),
+      },
     });
   }
 

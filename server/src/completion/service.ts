@@ -138,7 +138,7 @@ export class RunCompletionService {
       ...(this.#deps.getWorkspaceRoot ? { getWorkspaceRoot: this.#deps.getWorkspaceRoot } : {}),
     });
 
-    const id = newId("decision").replace("decision_", "run_");
+    const id = newId("run");
     db.insert(runSummaries).values({
       id, userSessionId, seqFrom, seqTo: document.seqTo, verdict: document.verdict,
       document: document as unknown as Record<string, unknown>,

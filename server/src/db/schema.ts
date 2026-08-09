@@ -258,34 +258,10 @@ export const interactions = sqliteTable("interactions", {
   resolvedAt: text("resolved_at"),
 });
 
-/**
- * Decisions the operator has actually made. Durable, session-scoped, and read
- * back into every seat's prompt — so an answer given once is known by every
- * agent and every later generation, instead of dying in the transcript of the
- * one session that happened to ask.
- */
-export const operatorDecisions = sqliteTable(
-  "operator_decisions",
-  {
-    id: text("id").primaryKey(),
-    userSessionId: text("user_session_id")
-      .notNull()
-      .references(() => userSessions.id),
-    agentSessionId: text("agent_session_id"),
-    interactionId: text("interaction_id"),
-    /** Seat name, "orchestrator", "main", or "console". */
-    askedBy: text("asked_by").notNull(),
-    source: text("source", { enum: ["interaction", "plan_approval", "ttl_default"] }).notNull(),
-    question: text("question").notNull(),
-    answer: text("answer").notNull(),
-    note: text("note"),
-    /** Taken on TTL expiry rather than chosen — weaker evidence of intent. */
-    autoTaken: integer("auto_taken", { mode: "boolean" }).notNull().default(false),
-    supersededBy: text("superseded_by"),
-    createdAt: text("created_at").notNull(),
-  },
-  (table) => [index("operator_decisions_session").on(table.userSessionId, table.createdAt)],
-);
+// Operator decisions are NOT a table: a decision is a resolved `interactions`
+// row, and `orchestrator/decisions.ts` is a read-model over them. (A legacy
+// `operator_decisions` table may exist in older databases; it is simply
+// unused.)
 
 /**
  * A shared interface the parties must agree before any of them writes to its

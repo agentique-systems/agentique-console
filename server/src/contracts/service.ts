@@ -72,7 +72,7 @@ export class ContractService {
     if (open) throw conflict(`contract "${input.name}" already exists (${open.id}, ${open.status}); amend it rather than declaring a second one`);
 
     const now = nowIso();
-    const id = newId("handoff").replace("handoff_", "contract_");
+    const id = newId("contract");
     this.#db.insert(contracts).values({
       id, agentSessionId: input.agentSessionId, userSessionId: input.userSessionId,
       name: input.name, declaredBy: input.declaredBy, status: "proposed", revision: 1,

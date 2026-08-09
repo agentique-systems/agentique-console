@@ -139,7 +139,7 @@ export function registerUserSessionRoutes(
       // exists, and a seat is not revived by a lane — it is woken by a
       // delivery. So a detached or stale SEAT question is answered by mailbox.
       if (before.participant !== null && (before.detached || before.status === "stale")) {
-        ctx.host.deliverOperatorAnswer(before, parsed.data);
+        ctx.host.deliverOperatorAnswer(before);
         return resolved;
       }
       // A stale MAIN-LANE interaction's parked promise died with a previous

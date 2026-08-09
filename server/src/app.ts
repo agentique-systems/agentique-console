@@ -70,9 +70,9 @@ export interface App {
 
 export function createApp(options: CreateAppOptions): App {
   const { config, db, bus, repo, sdk, getWorkspaceRoot, profiles } = options;
-  const decisions = new DecisionLedger(db, bus);
+  const decisions = new DecisionLedger(db);
   const contracts = new ContractService(db, bus);
-  const interactions = new InteractionService(db, bus, decisions);
+  const interactions = new InteractionService(db, bus);
   const tasks = new TaskService(db, bus);
   const handoffs = new HandoffService({ repo, bus, getWorkspaceRoot });
   const sessionStore = new SqliteSessionStore(db);

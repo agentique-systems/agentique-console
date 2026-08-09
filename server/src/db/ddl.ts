@@ -205,33 +205,10 @@ CREATE TABLE IF NOT EXISTS interactions (
 -- CREATE TABLE IF NOT EXISTS is a no-op while CREATE INDEX is not — so an
 -- index naming a column the old table lacks fails the whole boot.
 
--- Every decision the operator has actually made, as a first-class durable
--- object rather than a side effect of one tool call.
---
--- Before this, an answer lived in updatedInput.answers inside ONE provider
--- transcript and died at that session's next rotation; a coordinator's
--- escalation returned it to one seat and its siblings never learned it.
--- In db-live-1 the operator's answer ("DODGE") reached ZERO of the three
--- specialists — they built the right game only because the prompt happened to
--- imply it. Had the operator said "COLLECT", that run builds the wrong thing.
-CREATE TABLE IF NOT EXISTS operator_decisions (
-  id TEXT PRIMARY KEY,
-  user_session_id TEXT NOT NULL REFERENCES user_sessions(id),
-  agent_session_id TEXT,
-  interaction_id TEXT,
-  -- Seat name, 'orchestrator', 'main', or 'console'.
-  asked_by TEXT NOT NULL,
-  source TEXT NOT NULL CHECK (source IN ('interaction','plan_approval','ttl_default')),
-  question TEXT NOT NULL,
-  answer TEXT NOT NULL,
-  note TEXT,
-  -- Taken by TTL expiry rather than chosen by the operator. Weaker evidence of
-  -- intent, and the Run Summary must be able to say so.
-  auto_taken INTEGER NOT NULL DEFAULT 0,
-  superseded_by TEXT,
-  created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS operator_decisions_session ON operator_decisions(user_session_id, created_at);
+-- Operator decisions are not a table: a decision IS a resolved interactions
+-- row (answers, asker, note and auto_taken all live there), and
+-- orchestrator/decisions.ts reads them back into every prompt. An older
+-- database may carry a legacy operator_decisions table; it is unused.
 
 -- A shared interface two or more seats must agree BEFORE either writes code.
 --

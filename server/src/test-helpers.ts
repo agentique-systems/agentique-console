@@ -47,9 +47,9 @@ export function makeHarness(
   const { db, sqlite } = openDb(":memory:");
   const bus = new EventBus(db);
   const repo = new Repo(db, sqlite);
-  const decisions = new DecisionLedger(db, bus);
+  const decisions = new DecisionLedger(db);
   const contracts = new ContractService(db, bus);
-  const interactions = new InteractionService(db, bus, decisions);
+  const interactions = new InteractionService(db, bus);
   const fake = fakeSdk(program);
   const config = loadConfig({});
   const handoffs = new HandoffService({ repo, bus, getWorkspaceRoot: () => "/tmp/test-workspace" });
