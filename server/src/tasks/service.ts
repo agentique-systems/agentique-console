@@ -1,9 +1,10 @@
 /**
- * The task mirror: every SDK session's TaskCreate/TaskUpdate tool traffic
- * lands here via hooks, giving the per-UserSession global view the SDK cannot
- * provide across sessions. Keyed (sdkSessionId, sdkTaskId); attribution
- * (workspace/user session/agent session/participant) rides in from the hook
- * closure.
+ * The console-owned task ledger, written by the console MCP tools
+ * (task_create/task_update) and the host's journal-driven auto-transitions.
+ * Keyed (sdkSessionId, sdkTaskId) where the "session id" is the SYNTHETIC
+ * per-agent-session list id — never a provider session id, which dies at
+ * every rotation and is how db-live-1's coordinator watched its own ledger
+ * vanish.
  */
 import { and, eq } from "drizzle-orm";
 import type { Task, TaskDependency } from "@agentique-console/shared";
@@ -63,7 +64,7 @@ export class TaskService {
     this.#bus = bus;
   }
 
-  /** From TaskCreated hooks and PostToolUse(TaskCreate). Idempotent. */
+  /** From the `task_create` console tool. Idempotent. */
   upsertFromCreate(input: {
     sdkSessionId: string;
     sdkTaskId: string;
@@ -125,7 +126,7 @@ export class TaskService {
     this.#emit("task.created", row);
   }
 
-  /** From PostToolUse(TaskUpdate): the input carries every changed field. */
+  /** From the `task_update` console tool and the journal auto-transitions. */
   applyUpdate(input: {
     sdkSessionId: string;
     sdkTaskId: string;
@@ -142,7 +143,7 @@ export class TaskService {
     updatedFields?: string[];
   }): void {
     const existing = this.#get(input.sdkSessionId, input.sdkTaskId);
-    if (!existing) return; // unknown task — TaskList reconciliation will repair
+    if (!existing) return;
     const patch = input.patch;
     const merged: Partial<TaskRow> = { updatedAt: nowIso() };
     if (patch.subject !== undefined) merged.subject = patch.subject;
@@ -182,7 +183,6 @@ export class TaskService {
     }
   }
 
-  /** From TaskCompleted hooks. */
   markCompleted(sdkSessionId: string, sdkTaskId: string): void {
     this.applyUpdate({
       sdkSessionId,
@@ -190,58 +190,6 @@ export class TaskService {
       patch: { status: "completed" },
       updatedFields: ["status"],
     });
-  }
-
-  /** Opportunistic drift repair from TaskList/TaskGet outputs. */
-  reconcileFromList(
-    sdkSessionId: string,
-    listed: {
-      id: string;
-      subject: string;
-      status: "pending" | "in_progress" | "completed";
-      owner?: string;
-      blockedBy?: string[];
-    }[],
-    attribution: TaskAttribution,
-  ): void {
-    for (const item of listed) {
-      const existing = this.#get(sdkSessionId, item.id);
-      if (!existing) {
-        this.upsertFromCreate({
-          sdkSessionId,
-          sdkTaskId: item.id,
-          subject: item.subject,
-          attribution,
-        });
-        this.applyUpdate({
-          sdkSessionId,
-          sdkTaskId: item.id,
-          patch: {
-            status: item.status,
-            ...(item.owner === undefined ? {} : { owner: item.owner }),
-            ...(item.blockedBy === undefined
-              ? {}
-              : { addBlockedBy: item.blockedBy }),
-          },
-        });
-        continue;
-      }
-      const drift =
-        existing.status !== item.status ||
-        existing.subject !== item.subject ||
-        (item.owner !== undefined && existing.owner !== item.owner);
-      if (drift) {
-        this.applyUpdate({
-          sdkSessionId,
-          sdkTaskId: item.id,
-          patch: {
-            status: item.status,
-            subject: item.subject,
-            ...(item.owner === undefined ? {} : { owner: item.owner }),
-          },
-        });
-      }
-    }
   }
 
   listForUserSession(userSessionId: string): Task[] {

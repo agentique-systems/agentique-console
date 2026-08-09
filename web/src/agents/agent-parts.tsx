@@ -238,13 +238,6 @@ export function AgentPart({
         </div>
       );
 
-    case "phase":
-      return (
-        <div className="my-1 px-1 text-center font-mono text-3xs uppercase tracking-wider text-muted-foreground">
-          phase: {item.phase}
-        </div>
-      );
-
     case "trace":
       return (
         <div className={cn("my-1 rounded border border-border-subtle bg-muted/20 px-2 py-1 font-mono text-3xs text-muted-foreground", item.tone === "error" && "border-status-failed/40 text-status-failed")}>

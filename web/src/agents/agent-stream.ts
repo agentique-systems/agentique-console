@@ -35,7 +35,6 @@ export const AGENT_TRANSCRIPT_TYPES: ReadonlySet<ConsoleEventType> = new Set([
   "agent_session.turn.settled",
   "agent_session.tool.call",
   "agent_session.tool.result",
-  "agent_session.phase",
   "agent_session.mailbox",
   "agent_session.runtime",
   "agent_session.context.rotated",

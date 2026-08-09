@@ -232,7 +232,7 @@ CREATE TABLE IF NOT EXISTS contracts (
   name TEXT NOT NULL,
   declared_by TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'proposed'
-    CHECK (status IN ('proposed','accepted','superseded','abandoned')),
+    CHECK (status IN ('proposed','accepted','superseded')),
   revision INTEGER NOT NULL DEFAULT 1,
   body TEXT NOT NULL,
   -- Paths this contract governs. Writes to them are denied until every party

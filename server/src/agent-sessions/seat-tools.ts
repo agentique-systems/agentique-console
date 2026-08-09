@@ -110,8 +110,9 @@ export interface SeatToolsContext {
     { merged: true; commit: string; winner: string } | { merged: false; conflicts: string[]; detail: string; winner: string } | { rejected: true };
 }
 
-// Messaging is native SendMessage (governed by the PreToolUse middleware);
-// this server carries only handoff retrieval and console-owned runtime.
+// Messaging IS this server: `send_handoff` is the one transfer path (there is
+// no native SendMessage wire), alongside handoff retrieval, the shared ledger,
+// operator asks, contracts, and the console-owned runtime tools.
 export function buildSeatTools(ctx: SeatToolsContext): unknown[] {
   const { sdk, deps, session, seat, profile, user, workspaceRoot } = ctx;
   const tools: unknown[] = [];

@@ -254,17 +254,7 @@ describe("foldAgentItems", () => {
     });
   });
 
-  it("phase folds to a micro-row", () => {
-    const items = foldAgentItems([
-      ev("agent_session.phase", {
-        agentSessionId: "as_1",
-        phase: "executing",
-      }),
-    ]);
-    expect(items[0]).toMatchObject({ type: "phase", phase: "executing" });
-  });
-
-  it("MUST-IGNORE set: lifecycle, status, plan.captured, other topics, transients", () => {
+  it("MUST-IGNORE set: lifecycle, status, other topics, transients", () => {
     for (const event of [
       ev("agent_session.created", {
         session: { id: "as_1" },
@@ -275,12 +265,6 @@ describe("foldAgentItems", () => {
         agentSessionId: "as_1",
         status: "idle",
         owedToOrchestrator: false,
-      }),
-      // The plan arrives as the kind:'plan' message — captured folds to nothing.
-      ev("agent_session.plan.captured", {
-        agentSessionId: "as_1",
-        participant: "scout",
-        plan: "# Plan",
       }),
       ev("user_session.message", {
         sessionId: "us_1",

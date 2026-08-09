@@ -45,8 +45,6 @@ function itemKeyOf(item: Exclude<AgentItem, AgentToolItem>): string {
       return `turn:${item.turnId}`;
     case "turn_error":
       return `turn_error:${item.turnId}`;
-    case "phase":
-      return `phase:${item.seq}`;
     case "trace":
       return `trace:${item.uid}`;
   }

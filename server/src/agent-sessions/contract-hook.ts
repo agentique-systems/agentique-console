@@ -106,7 +106,8 @@ export function buildContractHooks(deps: {
       }
       return {};
     } catch {
-      // Fail-open, per worktree-hook.ts and tasks/hooks.ts.
+      // Fail-open, per worktree-hook.ts: a hook that throws must never be the
+      // reason a seat cannot work.
       return {};
     }
   };

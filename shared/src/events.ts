@@ -10,7 +10,6 @@ import type {
   InteractionUrgency,
   RunSummaryStats,
   SessionMessage,
-  SessionPhase,
   Task,
   UserSession,
   Workspace,
@@ -213,15 +212,6 @@ export interface AgentSessionStatusPayload {
   status: AgentSessionStatus;
   owedToOrchestrator: boolean;
 }
-export interface AgentSessionPhasePayload {
-  agentSessionId: string;
-  phase: SessionPhase;
-}
-export interface AgentPlanCapturedPayload {
-  agentSessionId: string;
-  participant: string;
-  plan: string;
-}
 export interface AgentMailboxPayload {
   agentSessionId: string;
   deliveryId: string;
@@ -240,7 +230,7 @@ export interface AgentContractPayload {
   contractId: string;
   name: string;
   event: string;
-  status: "proposed" | "accepted" | "superseded" | "abandoned";
+  status: "proposed" | "accepted" | "superseded";
   revision: number;
   parties: { participant: string; state: "pending" | "accepted" | "objected" }[];
   participant?: string;
@@ -585,8 +575,6 @@ export type ConsoleEvent = Base &
     | { type: "agent_session.tool.call"; payload: AgentToolCallPayload }
     | { type: "agent_session.tool.result"; payload: AgentToolResultPayload }
     | { type: "agent_session.status"; payload: AgentSessionStatusPayload }
-    | { type: "agent_session.phase"; payload: AgentSessionPhasePayload }
-    | { type: "agent_session.plan.captured"; payload: AgentPlanCapturedPayload }
     | { type: "agent_session.mailbox"; payload: AgentMailboxPayload }
     | { type: "agent_session.runtime"; payload: AgentRuntimePayload }
     | { type: "agent_session.contract"; payload: AgentContractPayload }

@@ -1,8 +1,8 @@
 /**
- * The full native-messaging flow over the fake peer mesh: briefing delivered
- * console-path, coordinator assigns and specialist reports via native
- * SendMessage (middleware journaling every hop), main woken once for final,
- * and the star topology enforced on both transports.
+ * The full messaging flow: briefing delivered console-path, coordinator
+ * assigns and specialist reports via the console-owned `send_handoff` tool
+ * (journaled on every hop), main woken once for final, and the star topology
+ * enforced throughout.
  */
 import { describe, expect, it } from "vitest";
 import { initMessage, sendHandoffUse, successMessage, toolResultMessage, toolUseMessage } from "../sdk/fake.ts";
@@ -46,7 +46,7 @@ describe("managed AgentSession e2e (fake SDK)", () => {
     ]);
     expect(events.filter((event) => event.type === "flow.result")).toHaveLength(1);
     expect(events.some((event) => event.type === "agent_session.tool.call" && event.payload.participant === "scout")).toBe(true);
-    // Journal states settle: nothing queued, and the model→model hops rode the peer transport.
+    // Journal states settle: nothing queued, every hop journaled on the console transport.
     const deliveries = h.repo.listQueuedDeliveries(created.agentSessionId);
     expect(deliveries).toHaveLength(0);
     const transports = h.repo.listUnackedDeliveries(created.agentSessionId, "scout");

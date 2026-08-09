@@ -26,7 +26,7 @@ import type { EventBus } from "../events/bus.ts";
 import { newId, nowIso } from "../ids.ts";
 import { badRequest, conflict, notFound } from "../api/errors.ts";
 
-export type ContractStatus = "proposed" | "accepted" | "superseded" | "abandoned";
+export type ContractStatus = "proposed" | "accepted" | "superseded";
 export type ContractPartyState = "pending" | "accepted" | "objected";
 
 export interface ContractView {
@@ -47,16 +47,10 @@ export interface ContractView {
 export class ContractService {
   readonly #db: Db;
   readonly #bus: EventBus;
-  /** Notified when a contract reaches `accepted`, so the Console can say so. */
-  #onAccepted: ((contract: ContractView) => void) | undefined;
 
   constructor(db: Db, bus: EventBus) {
     this.#db = db;
     this.#bus = bus;
-  }
-
-  onAccepted(handler: (contract: ContractView) => void): void {
-    this.#onAccepted = handler;
   }
 
   declare(input: {
@@ -132,7 +126,6 @@ export class ContractService {
       this.#db.update(contracts).set({ status: "accepted", updatedAt: now }).where(eq(contracts.id, id)).run();
       const view = this.get(id);
       this.#emit("contract.accepted", view);
-      this.#onAccepted?.(view);
       return view;
     }
     const view = this.get(id);

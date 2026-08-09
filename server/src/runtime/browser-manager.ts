@@ -13,7 +13,7 @@ interface BrowserSeat { browser: Browser; page: Page; console: string[]; }
 export interface EvaluateOutcome {
   result: unknown;
   /** The expression evaluated to `undefined` rather than to `null`. */
-  undefined?: boolean;
+  wasUndefined?: boolean;
   /** The page threw. A finding, not a tool failure. */
   threw?: string;
   /** The source would not parse as either an expression or a statement body. */
@@ -58,7 +58,7 @@ export async function runInPage(source: string): Promise<EvaluateOutcome> {
     const value = await run();
     // `undefined` is reported as such rather than collapsed into null: "this
     // produced nothing" and "this produced null" are different findings.
-    return value === undefined ? { result: null, undefined: true } : { result: value };
+    return value === undefined ? { result: null, wasUndefined: true } : { result: value };
   } catch (pageError) {
     // A thrown page exception is DATA for a reviewer, not a tool failure —
     // surfaced named, never as a bare null.

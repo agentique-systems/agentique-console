@@ -6,8 +6,8 @@
  * THE load-bearing rule (the one-chat-lane rule): chat rows come ONLY from
  * persisted `agent_session.message` events. Stream deltas are overlays owned
  * by the stream kit, retired by that speaker's persisted message; they never
- * fold. The plan arrives as a kind:'plan' message, so `plan.captured` folds
- * to nothing; `status` is a card concern (the strip), not a transcript row.
+ * fold. The plan arrives as a kind:'plan' message; `status` is a card
+ * concern (the strip), not a transcript row.
  *
  * Pure and idempotent: same array in, same items out — duplicate events (a
  * hydration/live race the stream kit normally dedupes) are also deduped here
@@ -17,7 +17,6 @@ import {
   eventId,
   type ConsoleEvent,
   type MessageKind,
-  type SessionPhase,
   type Speaker,
   type HandoffSummary,
 } from "@agentique-console/shared";
@@ -60,11 +59,6 @@ export interface AgentTurnErrorItem {
   readonly participant: string;
   readonly errorMessage: string;
 }
-export interface PhaseItem {
-  readonly type: "phase";
-  readonly seq: number;
-  readonly phase: SessionPhase;
-}
 export interface AgentTraceItem {
   readonly type: "trace";
   readonly uid: string;
@@ -80,7 +74,6 @@ export type AgentItem =
   | RoutedItem
   | AgentTurnItem
   | AgentTurnErrorItem
-  | PhaseItem
   | AgentTraceItem;
 
 /** Stable render identity — every id is unique within its type's namespace. */
@@ -96,8 +89,6 @@ export function agentItemKey(item: AgentItem): string {
       return `turn:${item.turnId}`;
     case "turn_error":
       return `turn_error:${item.turnId}`;
-    case "phase":
-      return `phase:${item.seq}`;
     case "trace":
       return `trace:${item.uid}`;
   }
@@ -196,14 +187,6 @@ export function foldAgentItems(events: readonly ConsoleEvent[]): AgentItem[] {
         break;
       }
 
-      case "agent_session.phase":
-        items.push({
-          type: "phase",
-          seq: event.seq ?? 0,
-          phase: event.payload.phase,
-        });
-        break;
-
       case "agent_session.mailbox":
         items.push({ type: "trace", uid: `mailbox:${event.seq ?? event.payload.deliveryId}:${event.payload.status}`,
           participant: event.payload.sender, label: `mailbox ${event.payload.status}`,
@@ -244,9 +227,8 @@ export function foldAgentItems(events: readonly ConsoleEvent[]): AgentItem[] {
         break;
 
       // Everything else folds to nothing: created (the strip reads the row
-      // from REST), status (a card concern), plan.captured (the plan arrives
-      // as the kind:'plan' message), other topics, transients (overlays own
-      // them).
+      // from REST), status (a card concern), other topics, transients
+      // (overlays own them).
       default:
         break;
     }

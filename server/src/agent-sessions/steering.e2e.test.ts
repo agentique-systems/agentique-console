@@ -80,7 +80,14 @@ describe("peer-lane delivery semantics (fake SDK)", () => {
     h.host.post({ agentSessionId: created.agentSessionId, speaker: { kind: "orchestrator", name: "orchestrator" }, to: "scout",
       handoff: handoff("look", "pending"), category: "assignment" });
     await parked;
-    scoutSpawns = h.fake.captured.options.filter((options) => (options.env as Record<string, string> | undefined)?.CLAUDE_CODE_SESSION_NAME?.startsWith("console-scout")).length;
+    // A scout spawn is any non-coordinator spawn — same discriminator the
+    // program generator above uses.
+    const isScout = (options: { systemPrompt?: unknown }): boolean => {
+      const append = typeof options.systemPrompt === "object" && options.systemPrompt !== null && !Array.isArray(options.systemPrompt)
+        ? (options.systemPrompt as { append?: string }).append ?? "" : "";
+      return !append.includes("sole coordinator");
+    };
+    scoutSpawns = h.fake.captured.options.filter(isScout).length;
     let scoutSettles = 0;
     const woken = collectUntil(h.bus, (event) => {
       if (event.type === "agent_session.turn.settled" && event.payload.participant === "scout") scoutSettles += 1;
@@ -89,7 +96,7 @@ describe("peer-lane delivery semantics (fake SDK)", () => {
     h.host.post({ agentSessionId: created.agentSessionId, speaker: { kind: "orchestrator", name: "orchestrator" }, to: "scout",
       handoff: handoff("look again", "pending"), category: "assignment" });
     await woken;
-    const scoutOptions = h.fake.captured.options.filter((options) => (options.env as Record<string, string> | undefined)?.CLAUDE_CODE_SESSION_NAME?.startsWith("console-scout"));
+    const scoutOptions = h.fake.captured.options.filter(isScout);
     expect(scoutOptions.length).toBe(scoutSpawns + 1);
     expect(scoutOptions.at(-1)?.resume).toBe("scout-session");
   });

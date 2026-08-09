@@ -25,7 +25,7 @@ describe("runInPage — expressions containing the word `return`", () => {
     ];
     const outcome = await runInPage("globalThis.__probe().filter(function(b){return b.kind==='obstacle'})");
     expect(outcome.result).toEqual([{ kind: "obstacle", z: 1 }, { kind: "obstacle", z: 2 }]);
-    expect(outcome.undefined).toBeUndefined();
+    expect(outcome.wasUndefined).toBeUndefined();
     expect(outcome.compileError).toBeUndefined();
   });
 
@@ -67,14 +67,14 @@ describe("runInPage — the four outcomes stay distinguishable", () => {
   it("reports a genuine null as a result, not as an absence", async () => {
     const outcome = await runInPage("null");
     expect(outcome.result).toBeNull();
-    expect(outcome.undefined).toBeUndefined();
+    expect(outcome.wasUndefined).toBeUndefined();
     expect(outcome.threw).toBeUndefined();
   });
 
   it("marks `undefined` distinctly from null", async () => {
     const outcome = await runInPage("undefined");
     expect(outcome.result).toBeNull();
-    expect(outcome.undefined).toBe(true);
+    expect(outcome.wasUndefined).toBe(true);
   });
 
   it("names a page exception rather than swallowing it into null", async () => {

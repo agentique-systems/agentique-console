@@ -276,7 +276,7 @@ export const contracts = sqliteTable(
     userSessionId: text("user_session_id").notNull(),
     name: text("name").notNull(),
     declaredBy: text("declared_by").notNull(),
-    status: text("status", { enum: ["proposed", "accepted", "superseded", "abandoned"] })
+    status: text("status", { enum: ["proposed", "accepted", "superseded"] })
       .notNull()
       .default("proposed"),
     revision: integer("revision").notNull().default(1),

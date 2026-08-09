@@ -83,7 +83,7 @@ describe("groupAgentItems", () => {
   it("passes non-tool items through untouched and in order", () => {
     const items: AgentItem[] = [
       message(1),
-      { type: "phase", seq: 2, phase: "executing" },
+      message(2),
     ];
     expect(groupAgentItems(items)).toEqual(items);
   });

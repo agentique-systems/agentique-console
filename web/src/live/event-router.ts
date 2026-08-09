@@ -55,7 +55,6 @@ export function routeEvent(event: ConsoleEvent, deps: RouterDeps): void {
   } else if (
     type === "agent_session.created" ||
     type === "agent_session.status" ||
-    type === "agent_session.phase" ||
     type === "agent_session.turn.started" ||
     type === "agent_session.turn.settled"
   ) {
@@ -125,7 +124,6 @@ export function routeEvent(event: ConsoleEvent, deps: RouterDeps): void {
     case "agent_session.routed":
     case "agent_session.turn.started":
     case "agent_session.turn.settled":
-    case "agent_session.phase":
       deps.appendAgentStreamEvent(event.payload.agentSessionId, event);
       return;
     // Tool payloads inherit the user-lane shape: `sessionId` IS the agent

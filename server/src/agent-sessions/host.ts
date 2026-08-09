@@ -1,4 +1,4 @@
-import type { AgentSessionStatus, HandoffDraft, HandoffTrigger, Interaction, InteractionQuestion, InteractionUrgency, ResolveInteractionBody, Speaker } from "@agentique-console/shared";
+import type { AgentSessionStatus, HandoffDraft, HandoffTrigger, Interaction, InteractionQuestion, InteractionUrgency, Speaker } from "@agentique-console/shared";
 import fs from "node:fs";
 import path from "node:path";
 import { badRequest, conflict, notFound } from "../api/errors.ts";
@@ -33,7 +33,7 @@ import type { HandoffService } from "../handoffs/service.ts";
 import { HANDOFF_DRAFT_JSON_SCHEMA, HandoffDraftSchema } from "../handoffs/schema.ts";
 import type { ReapResult } from "../completion/summary.ts";
 import { evaluateCheckpointDraft } from "../handoffs/checkpoint-gate.ts";
-import { mainPeerName, peerNameOf } from "./peer-names.ts";
+import { peerNameOf } from "./peer-names.ts";
 import {
   assignmentBlockers,
   deliveryTaskId,
@@ -113,10 +113,6 @@ function recoveryAction(action: string): string {
 }
 
 /**
- * A provider-side 4xx means the request was malformed by US and never reached
- * the model — categorically different from a model that produced nothing.
- */
-/**
  * The request never reached the model, so nothing about the seat's context is
  * suspect. Broadened beyond 4xx: a DNS or connection error is even more
  * clearly transport, and db-live-2's three destroyed turns were all
@@ -139,10 +135,6 @@ function stableStringify(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "undefined";
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
   return `{${Object.keys(value as Record<string, unknown>).sort().map((key) => `${JSON.stringify(key)}:${stableStringify((value as Record<string, unknown>)[key])}`).join(",")}}`;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => { const timer = setTimeout(resolve, ms); timer.unref?.(); });
 }
 
 /**
@@ -274,7 +266,6 @@ interface SeatLane {
   activeTurn: {
     turnId: string;
     startedAt: number;
-    trigger: "delivery" | "peer" | "steer";
     deliveries: MailboxDeliveryRow[];
     sawSend: boolean;
     toolStarts: Map<string, number>;
@@ -324,7 +315,13 @@ interface SeatLane {
 export interface CreateAgentSessionInput {
   userSessionId: string;
   title: string;
-  mode: "execute" | "plan_execute";
+  /**
+   * Only "execute". The `plan_execute` seat mode was removed: nothing ever
+   * transitioned an agent session's phase to executing, so every seat spawned
+   * permissionMode:"plan" forever — implementers included. Operator-level plan
+   * mode on the USER session is a separate, fully implemented thing.
+   */
+  mode: "execute";
   agents: { name: string; profileId?: string; preset?: string; instructions?: string; model?: string; owns?: string[] }[];
   briefing?: HandoffDraft;
 }
@@ -332,7 +329,8 @@ export interface CreateAgentSessionInput {
 export interface AgentSessionHostDeps {
   repo: Repo;
   bus: EventBus;
-  config?: Config;
+  /** Required — every knob's default lives in `loadConfig`, nowhere else. */
+  config: Config;
   profiles?: AgentProfileRegistry;
   sdk?: () => Promise<ConsoleSdk>;
   sessionStore?: SqliteSessionStore;
@@ -374,8 +372,6 @@ export class AgentSessionHost {
   readonly #deps: AgentSessionHostDeps;
   /** agentSessionId → seat name → its persistent lane. */
   readonly #seats = new Map<string, Map<string, SeatLane>>();
-  /** Idempotency for peer-carry retries: send fingerprint → delivery id. */
-  readonly #recentPeerSends = new Map<string, { deliveryId: string; at: number }>();
   /** Waiters for a resident-capacity slot, resolved oldest-first on park/close. */
   readonly #capacityWaiters: (() => void)[] = [];
   /** Timer releasing `ask_operator` waits the operator has not returned to. */
@@ -498,10 +494,11 @@ export class AgentSessionHost {
   }
 
   /**
-   * Console-path send: journal, then deliver by pushing into the recipient's
-   * lane input. Used by briefings, best-of-N fan-out, failure notices, and
-   * redelivery — the model-to-model path is native SendMessage governed by
-   * the middleware, which shares #journal via the SendGovernor surface.
+   * The ONE transfer path: journal, then deliver by pushing into the
+   * recipient's lane input. Every hop — briefings, seat reports via the
+   * `send_handoff` tool, best-of-N fan-out, failure notices, redelivery —
+   * comes through here, which is what makes the governance gates below
+   * inescapable.
    */
   post(input: { agentSessionId: string; speaker: Speaker; to: string; handoff: HandoffDraft; category?: Category; dedupeKey?: string; turnId?: string }): MessageRow & { queuedBehind?: string[] } {
     const { repo } = this.#deps;
@@ -630,7 +627,7 @@ export class AgentSessionHost {
    * run — the same instinct that made `#finalReportCaveats` stop throwing.
    */
   releaseBlockedAssignments(): void {
-    const grace = this.#deps.config?.assignmentBlockGraceMs ?? 600_000;
+    const grace = this.#deps.config.assignmentBlockGraceMs;
     const now = Date.now();
     for (const [deliveryId, held] of [...this.#blockedAssignments]) {
       const session = this.#deps.repo.getAgentSession(held.agentSessionId);
@@ -665,7 +662,7 @@ export class AgentSessionHost {
     return { extensionDefaults: { operatorDecisions: lines } };
   }
 
-  /** Journal core shared by the console path and the SendMessage middleware. */
+  /** Journal core: persist the handoff and mint its mailbox delivery. */
   #journal(session: AgentSessionRow, speaker: Speaker, to: string, handoff: HandoffDraft, category: Category, opts: {
     transport: MailboxDeliveryRow["transport"]; dedupeKey?: string; turnId?: string;
   }): { message: MessageRow; delivery: MailboxDeliveryRow; text: string; handoffId: string } {
@@ -860,8 +857,7 @@ export class AgentSessionHost {
     if (this.#askSweep) return;
     this.#askSweep = setInterval(() => {
       this.releaseBlockedAssignments();
-      const limit = this.#deps.config?.operatorAskDetachMs;
-      if (limit === undefined) return;
+      const limit = this.#deps.config.operatorAskDetachMs;
       const cutoff = Date.now() - limit;
       for (const lanes of this.#seats.values()) for (const lane of lanes.values()) {
         const asking = lane.activeTurn?.awaitingOperator;
@@ -976,7 +972,7 @@ export class AgentSessionHost {
 
 
   /**
-   * Default-on isolation for write seats in git workspaces: a lazy worktree
+   * Default-on isolation for EVERY seat in a git workspace: a lazy worktree
    * per assignment, so completed work lands atomically and interrupted work
    * leaves zero residue. Fail-open — if the worktree cannot be created the
    * seat runs directly in the workspace, with a runtime notice.
@@ -984,7 +980,6 @@ export class AgentSessionHost {
   #ensureSeatWorktree(session: AgentSessionRow, seat: ParticipantRow, workspaceRoot: string): ParticipantRow {
     const { repo, bus } = this.#deps;
     const worktrees = this.#deps.worktrees;
-    const profile = seat.profileSnapshot as AgentProfile;
     // Read-only seats get one too.
     //
     // The gate used to be `writes`, which is why `check` had no worktree in
@@ -993,7 +988,7 @@ export class AgentSessionHost {
     // check verified a tree that renderer was still editing. Its worktree is
     // discarded rather than merged — `#onSeatWorktreePost` only merges a seat
     // whose profile can write.
-    if (!worktrees || this.#deps.config?.seatWorktrees === false || seat.role !== "agent" || seat.attemptRole !== null
+    if (!worktrees || this.#deps.config.seatWorktrees === false || seat.role !== "agent" || seat.attemptRole !== null
       || seat.worktreePath !== null || !worktrees.isGitRepo(workspaceRoot)) return seat;
     try {
       const dirName = `seat-${branchSafe(seat.name)}-${seat.generation}-${newId("turn").slice(-6)}`;
@@ -1072,7 +1067,7 @@ export class AgentSessionHost {
     const instructions = [profile.instructions, extra.trim()].filter(Boolean).join("\n\nAssigned role context:\n");
     return { agentSessionId, name, role, preset: profile.id, instructions, model: model ?? profile.model ?? null,
       profileId: profile.id, profileSnapshot: profile, ownership, sdkSessionId: null,
-      peerName: peerNameOf(this.#deps.config?.peerNamePrefix ?? "console-", agentSessionId, name), lastActiveAt: null,
+      peerName: peerNameOf(this.#deps.config.peerNamePrefix ?? "console-", agentSessionId, name), lastActiveAt: null,
       generation: 0, turnCount: 0,
       contextTokens: 0, memory: "", latestHandoffId: null, checkpointReady: true, pendingTurnSeq: 0, lastSeenSeq: 0,
       cumulativeCostUsd: 0, cumulativeApiDurationMs: 0, lastDecisionAt: null,
@@ -1113,7 +1108,7 @@ export class AgentSessionHost {
   /** Spawn or unpark a seat so its peer session is registered and accepting input. */
   async ensureSeatLive(agentSessionId: string, seat: string, deadline?: number): Promise<void> {
     const { repo } = this.#deps;
-    const until = deadline ?? Date.now() + (this.#deps.config?.sendWakeTimeoutMs ?? 30_000);
+    const until = deadline ?? Date.now() + (this.#deps.config.sendWakeTimeoutMs ?? 30_000);
     const lane = this.#laneOf(agentSessionId, seat);
     while (lane.rotationGate) await lane.rotationGate;
     if (lane.state === "live" || lane.state === "waking") { await lane.ready; return; }
@@ -1329,9 +1324,8 @@ export class AgentSessionHost {
         // Order matters for prompt caching: the invariant part (instructions,
         // capabilities, messaging brief) comes first and is byte-identical
         // across generations; the volatile checkpoint goes last.
-        systemPrompt: { type: "preset", preset: "claude_code", append: `${latestSeat.instructions}\n\n${capabilityBrief(profile, latestSeat.worktreePath !== null && !latestSeat.attemptRole, this.#deps.config?.allowedDomains ?? [])}${latestSeat.worktreePath && !latestSeat.attemptRole ? "\nNever run git commit — the Console lands your work when you report completed. Install dependencies only if you must run validation." : ""}\n\n${seatMessagingBrief(this.#roster(session), latestSeat.name)}\n${SESSION_PROTOCOL}${this.#decisionContext(session)}${this.#checkpointContext(latestSeat)}` },
+        systemPrompt: { type: "preset", preset: "claude_code", append: `${latestSeat.instructions}\n\n${capabilityBrief(profile, latestSeat.worktreePath !== null && !latestSeat.attemptRole, this.#deps.config.allowedDomains ?? [])}${latestSeat.worktreePath && !latestSeat.attemptRole ? "\nNever run git commit — the Console lands your work when you report completed. Install dependencies only if you must run validation." : ""}\n\n${seatMessagingBrief(this.#roster(session), latestSeat.name)}\n${SESSION_PROTOCOL}${this.#decisionContext(session)}${this.#checkpointContext(latestSeat)}` },
         settingSources: [], includePartialMessages: true,
-        settings: { crossSessionInbound: "accept" } as unknown as SdkOptions["settings"],
         permissionMode: profile.permissionMode,
         ...(profile.permissionMode === "bypassPermissions" ? { allowDangerouslySkipPermissions: true } : {}),
         allowedTools: [...profile.tools,
@@ -1356,8 +1350,8 @@ export class AgentSessionHost {
         hooks: this.#buildSeatHooks(session, latestSeat) as SdkOptions["hooks"],
         sandbox: { enabled: true, failIfUnavailable: profile.sandboxRequired, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: false,
           filesystem: { allowManagedReadPathsOnly: true, allowRead: latestSeat.worktreePath ? [seatRoot, workspaceRoot] : [workspaceRoot], allowWrite: [seatRoot] },
-          network: sandboxNetwork(profile, this.#deps.config?.allowedDomains ?? []) },
-        env: sdkEnv({ sessionName: latestSeat.peerName }), abortController: lane.abort!, persistSession: true,
+          network: sandboxNetwork(profile, this.#deps.config.allowedDomains ?? []) },
+        env: sdkEnv(), abortController: lane.abort!, persistSession: true,
         sessionStore: this.#deps.sessionStore as never, sessionStoreFlush: "eager",
         mcpServers: { console_agent: mcp as never },
         ...(latestSeat.model ? { model: latestSeat.model } : {}),
@@ -1367,7 +1361,7 @@ export class AgentSessionHost {
         // all 14 db-live-1 sessions (~18.6K tokens of dataviz/keybindings noise
         // in three.js seats) despite settingSources: [].
         skills: profile.skills ?? [],
-        ...((profile.effort ?? this.#deps.config?.effort) ? { effort: (profile.effort ?? this.#deps.config?.effort) as SdkOptions["effort"] } : {}),
+        ...((profile.effort ?? this.#deps.config.effort) ? { effort: (profile.effort ?? this.#deps.config.effort) as SdkOptions["effort"] } : {}),
         ...(latestSeat.sdkSessionId ? { resume: latestSeat.sdkSessionId } : {}),
       };
       const query = sdk.query({ prompt: lane.input as AsyncIterable<SdkUserMessageLike>, options });
@@ -1389,12 +1383,12 @@ export class AgentSessionHost {
    */
   #ensureWorkspaceRepo(workspaceId: string, userSessionId: string): void {
     const worktrees = this.#deps.worktrees;
-    if (!worktrees || !this.#deps.getWorkspaceRoot || this.#deps.config?.autoInitGit === false) return;
-    if (this.#deps.config?.seatWorktrees === false) return;
+    if (!worktrees || !this.#deps.getWorkspaceRoot || this.#deps.config.autoInitGit === false) return;
+    if (this.#deps.config.seatWorktrees === false) return;
     let root: string;
     try { root = this.#deps.getWorkspaceRoot(workspaceId); } catch { return; }
     if (worktrees.isGitRepo(root)) return;
-    const forbidden = (this.#deps.config?.fsRoots ?? []).map((entry) => entry.path);
+    const forbidden = (this.#deps.config.fsRoots ?? []).map((entry) => entry.path);
     const outcome = worktrees.initRepo(root, { forbiddenRoots: forbidden });
     this.#deps.bus.append({
       type: "user_session.runtime", userSessionId,
@@ -1453,7 +1447,7 @@ export class AgentSessionHost {
       seatRoot: seat.worktreePath ?? workspaceRoot,
       workspaceRoot,
       ownership: seat.ownership,
-      enforceOwnership: this.#deps.config?.enforceOwnership === true,
+      enforceOwnership: this.#deps.config.enforceOwnership === true,
     }));
     return mergeHooks(fragments);
   }
@@ -1475,9 +1469,11 @@ export class AgentSessionHost {
               payload: { agentSessionId: session.id, participant: seatName, ...(lane.activeTurn ? { turnId: lane.activeTurn.turnId } : {}), detail: event.text } });
             continue;
           }
-          // An event with no open turn is native inbound waking the seat.
-          if (!lane.activeTurn && (event.kind === "delta" || event.kind === "reasoning-delta" || event.kind === "message" || event.kind === "tool.call" || event.kind === "peer-message")) {
-            this.#mintTurn(session, seatName, lane, "peer", []);
+          // Output with no open turn: the CLI resumed work on its own (e.g.
+          // after an interrupt landed mid-stream). Mint a turn so the work is
+          // attributed rather than orphaned.
+          if (!lane.activeTurn && (event.kind === "delta" || event.kind === "reasoning-delta" || event.kind === "message" || event.kind === "tool.call")) {
+            this.#mintTurn(session, seatName, lane, []);
           }
           const turn = lane.activeTurn;
           const turnId = turn?.turnId ?? "";
@@ -1494,7 +1490,7 @@ export class AgentSessionHost {
             // console already persists (tool inputs and results carry the same
             // workspace content), but it is still more, and that should be the
             // operator's call.
-            if (turn && this.#deps.config?.persistReasoning === true && turn.reasoning.length < MAX_REASONING_CHARS) {
+            if (turn && this.#deps.config.persistReasoning === true && turn.reasoning.length < MAX_REASONING_CHARS) {
               turn.reasoning += event.text;
             }
           } else if (event.kind === "message") {
@@ -1532,7 +1528,7 @@ export class AgentSessionHost {
             // and hands the successor real state instead of an error string.
             if (turn) {
               turn.retryMs += event.delayMs;
-              const budget = this.#deps.config?.retryBudgetMs ?? 90_000;
+              const budget = this.#deps.config.retryBudgetMs;
               if (turn.retryMs >= budget && turn.watchdog.tripped === null) {
                 this.#tripWatchdog(session, seatName, lane, {
                   kind: "retry_budget", count: Math.round(turn.retryMs / 1000),
@@ -1566,15 +1562,6 @@ export class AgentSessionHost {
     }
   }
 
-  /** Console-synthesized nudge into a live turn; a no-op on a parked lane. */
-  #steer(session: AgentSessionRow, seatName: string, text: string, detail: string): void {
-    const lane = this.#laneOf(session.id, seatName);
-    if (!lane.input || !lane.activeTurn) return;
-    lane.input.push(seatUserMessage(text));
-    this.#deps.bus.append({ type: "agent_session.runtime", userSessionId: session.userSessionId, agentSessionId: session.id,
-      payload: { agentSessionId: session.id, participant: seatName, turnId: lane.activeTurn.turnId, detail } });
-  }
-
   #tripWatchdog(session: AgentSessionRow, seatName: string, lane: SeatLane, tripped: { kind: "repeat_tool_calls" | "tool_error_streak" | "retry_budget"; detail: string; toolName?: string; count: number }): void {
     const turn = lane.activeTurn;
     if (!turn || turn.watchdog.tripped) return;
@@ -1586,10 +1573,10 @@ export class AgentSessionHost {
     void lane.query?.interrupt?.().catch(() => undefined);
   }
 
-  #mintTurn(session: AgentSessionRow, seatName: string, lane: SeatLane, trigger: "delivery" | "peer" | "steer", deliveries: MailboxDeliveryRow[]): void {
+  #mintTurn(session: AgentSessionRow, seatName: string, lane: SeatLane, deliveries: MailboxDeliveryRow[]): void {
     const attributed = deliveries.length > 0 ? deliveries
       : this.#deps.repo.listUnackedDeliveries(session.id, seatName).filter((row) => row.status === "delivered");
-    lane.activeTurn = { turnId: newId("turn"), startedAt: Date.now(), trigger, deliveries: attributed, sawSend: false,
+    lane.activeTurn = { turnId: newId("turn"), startedAt: Date.now(), deliveries: attributed, sawSend: false,
       toolStarts: new Map(), lastNarration: "", watchdog: { lastKey: "", identical: 0, errorStreak: 0, tripped: null }, awaitingOperator: null, retryMs: 0, reasoning: "" };
     lane.lastActiveAt = Date.now();
     if (lane.idleTimer) { clearTimeout(lane.idleTimer); lane.idleTimer = null; }
@@ -1726,7 +1713,7 @@ export class AgentSessionHost {
       bus.append({ type: "agent_session.runtime", userSessionId: session.userSessionId, agentSessionId: session.id,
         payload: { agentSessionId: session.id, participant: recipient, turnId: lane.activeTurn.turnId, detail: `steered mid-turn (${rows.length} deliveries)` } });
     } else {
-      this.#mintTurn(session, recipient, lane, "delivery", rows);
+      this.#mintTurn(session, recipient, lane, rows);
       lane.input.push(seatUserMessage(prompt));
     }
     if (messages.length > 0) repo.patchParticipant(agentSessionId, recipient, { pendingTurnSeq: messages[messages.length - 1]!.seq });
@@ -1889,7 +1876,7 @@ export class AgentSessionHost {
         payload: { handoffId: id, participant: seat.name, mode: expanded ? "expanded" : "compact" } });
       // Rendered in SEND shape, not as a top-level `CORE:` blob. The flat
       // rendering was the seat's only worked example of a handoff, so it
-      // taught the exact mistake the middleware then rejected.
+      // taught a shape `send_handoff` then rejected.
       return `[${row.speakerName} → ${row.toName} | ${row.createdAt}] Handoff ${id}\n${JSON.stringify({ handoff: { core: handoff.core, extension: expanded ? handoff.extension : undefined } }, null, 2)}${expanded ? "" : `\nExtension ${handoff.extension.kind} is available with read_handoff.`}`;
     }).join("\n\n");
     // The operator's answers to THIS seat's own questions. This delivery does
@@ -2283,7 +2270,7 @@ export class AgentSessionHost {
       generation: seat.generation, turnId, inputTokens: usageEvent.inputTokens ?? 0, uncachedInputTokens: usageEvent.uncachedInputTokens ?? 0,
       cacheCreationInputTokens: usageEvent.cacheCreationInputTokens ?? 0, cacheReadInputTokens: usageEvent.cacheReadInputTokens ?? 0,
       outputTokens: usageEvent.outputTokens ?? 0, costUsd,
-      model: usageEvent.modelId ?? seat.model, effort: (seat.profileSnapshot as AgentProfile).effort ?? this.#deps.config?.effort ?? null,
+      model: usageEvent.modelId ?? seat.model, effort: (seat.profileSnapshot as AgentProfile).effort ?? this.#deps.config.effort ?? null,
       trigger, durationMs: durationMs ?? null, apiDurationMs, sdkDurationMs: usageEvent.sdkDurationMs ?? null, status, stopReason: usageEvent.stopReason ?? null, createdAt: nowIso() };
     this.#deps.repo.insertUsage(usage);
     this.#deps.bus.append({ type: "usage.recorded", userSessionId: session.userSessionId, agentSessionId: session.id,

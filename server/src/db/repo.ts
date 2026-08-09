@@ -19,9 +19,9 @@ import {
   crons,
   eventArtifacts,
   handoffRecords,
+  events,
   interactions,
   mailboxDeliveries,
-  events,
   messages,
   participants,
   providerEntries,
@@ -266,21 +266,12 @@ export class Repo {
         : and(eq(mailboxDeliveries.agentSessionId, agentSessionId), eq(mailboxDeliveries.status, "queued")))
       .orderBy(asc(mailboxDeliveries.createdAt)).all();
   }
-  /**
-   * Process start/exit rows for a run, oldest first. The ledger's own record of
-   * what is still running — which is how a leak becomes visible at all.
-   */
   /** Open, non-manager sessions — the ones a run can complete in. */
   listOpenWorkSessions(): UserSessionRow[] {
     return this.#db.select().from(userSessions)
       .where(and(eq(userSessions.status, "open"), eq(userSessions.purpose, "work"))).all();
   }
 
-  /**
-   * Processes the journal shows as started with no matching exit, across every
-   * session. The boot-time leak scan; carries the recorded argv so the caller
-   * can guard against pid reuse before killing anything.
-   */
   /** userSessionId -> open card count, for the sidebar's attention dots. */
   countPendingInteractions(workspaceId: string): Map<string, number> {
     const rows = this.#db.select({ id: interactions.userSessionId })
@@ -293,6 +284,11 @@ export class Repo {
     return counts;
   }
 
+  /**
+   * Processes the journal shows as started with no matching exit, across every
+   * session, oldest first — the boot-time leak scan. Carries the recorded argv
+   * so the caller can guard against pid reuse before killing anything.
+   */
   listOrphanedProcesses(): { processId: string; pid: number | null; command: string; args: string[]; userSessionId: string; agentSessionId: string; participant: string }[] {
     const rows = this.#db.select({ type: events.type, userSessionId: events.userSessionId, agentSessionId: events.agentSessionId, payload: events.payload })
       .from(events)
