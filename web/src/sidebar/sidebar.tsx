@@ -8,6 +8,7 @@ import { MessagesSquare, Plus } from "lucide-react";
 import { useUserSessions } from "@/api/queries";
 import type { UserSessionListItem } from "@agentique-console/shared";
 import { Button } from "@/components/ui/button";
+import { deriveSessionState, SESSION_STATE_LABEL } from "@/lib/session-state";
 import { timeAgo } from "@/lib/status";
 import { cn } from "@/lib/utils";
 import { useScopeStore } from "@/stores/scope";
@@ -91,8 +92,18 @@ function SessionRow({
   // a run is waiting on them.
   const overlay = useUiStore((s) => s.awaitingInput.has(session.id));
   const archived = session.status === "archived";
-  const done = session.runState === "completed";
-  const awaiting = !archived && (session.pendingInteractions > 0 || session.runState === "awaiting_signoff" || overlay);
+  // The shared five-state model; list rows carry no stream fold, so the
+  // posture inputs are neutral and only the server-derived states can fire.
+  const state = deriveSessionState({
+    runState: session.runState,
+    archived,
+    needsYou: !archived && (session.pendingInteractions > 0 || overlay),
+    posture: { busy: false, blocked: false },
+    lastTurnErrored: false,
+    spineOpen: true,
+  });
+  const done = state === "done";
+  const awaiting = state === "needs_you";
 
   return (
     <li>
@@ -129,7 +140,7 @@ function SessionRow({
           </span>
         </span>
         <span className="text-3xs text-muted-foreground">
-          {awaiting ? "needs you · " : done ? "done · " : ""}{timeAgo(session.updatedAt)}
+          {awaiting || done ? `${SESSION_STATE_LABEL[state]} · ` : ""}{timeAgo(session.updatedAt)}
         </span>
       </button>
     </li>

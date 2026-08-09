@@ -1,16 +1,20 @@
 /**
  * The conversation header: inline-editable title, the phase chip while gated,
- * the transcript export, and the busy spinner. Busy is fold-derived
- * (turn.started/settled + queuedJobs), not guessed from HTTP in-flight state.
- * Mode switching and interrupting live in the composer, next to the textarea
- * they act on.
+ * the transcript export, and the session-state chip. The state is the shared
+ * five-value model (`lib/session-state.ts`) — "working", "needs you",
+ * "blocked", "done" and "ready" stopped being the same pixels. Mode switching
+ * and interrupting live in the composer, next to the textarea they act on.
  */
-import { ArchiveIcon, DownloadIcon } from "lucide-react";
+import { ArchiveIcon, BellIcon, DownloadIcon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
 import { usePatchUserSession } from "@/api/mutations";
 import type { SessionMode, UserSession } from "@agentique-console/shared";
+import {
+  SESSION_STATE_LABEL,
+  type SessionState,
+} from "@/lib/session-state";
 import {
   downloadMarkdown,
   messagesToMarkdown,
@@ -81,16 +85,45 @@ export function ModeToggle({
   );
 }
 
+/**
+ * The one visual per state. `needs_you` uses --attention, not a status tone:
+ * it is the only state that means "you, now", and it has a colour reserved.
+ */
+function StateChip({ state }: { state: SessionState }) {
+  if (state === "working") return <Spinner className="size-3.5 text-status-running" />;
+  if (state === "ready") return null;
+  return (
+    <Badge
+      variant="outline"
+      className={cn(
+        "text-3xs uppercase",
+        state === "needs_you" && "border-attention text-attention",
+        state === "blocked" && "text-status-failed",
+        state === "done" && "text-status-completed",
+      )}
+    >
+      {SESSION_STATE_LABEL[state]}
+    </Badge>
+  );
+}
+
 export function SessionHeader({
   session,
-  busy,
+  state,
 }: {
   session: UserSession;
-  busy: boolean;
+  state: SessionState;
 }) {
   const patch = usePatchUserSession();
   const [editing, setEditing] = useState(false);
   const [draftTitle, setDraftTitle] = useState("");
+  const busy = state === "working";
+  // The Notification API only grants permission from a user gesture — asking
+  // unprompted on load is exactly the dialog everyone reflexively declines.
+  // One small bell, shown only while the choice is still open.
+  const [notifPermission, setNotifPermission] = useState(
+    typeof Notification === "undefined" ? "unsupported" : Notification.permission,
+  );
 
   /**
    * Folded lazily, on click: the header renders on every stream tick, and
@@ -167,7 +200,28 @@ export function SessionHeader({
       )}
 
       <div className="flex shrink-0 items-center gap-2">
-        {busy && <Spinner className="size-3.5 text-status-running" />}
+        <StateChip state={state} />
+
+        {notifPermission === "default" && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                aria-label="enable desktop notifications"
+                onClick={() => {
+                  void Notification.requestPermission().then((granted) => setNotifPermission(granted));
+                }}
+              >
+                <BellIcon className="size-3" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              get a desktop notification when a run needs you and this tab is hidden
+            </TooltipContent>
+          </Tooltip>
+        )}
 
         <Tooltip>
           <TooltipTrigger asChild>

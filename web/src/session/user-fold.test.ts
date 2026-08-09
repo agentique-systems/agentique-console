@@ -485,18 +485,18 @@ describe("foldPosture", () => {
     payload: { sessionId: "us_1", interactionId: "int_1", answers: {} } } as unknown as ConsoleEvent;
 
   it("reports a running turn as busy", () => {
-    expect(foldPosture([started])).toEqual({ busy: true, blocked: false });
+    expect(foldPosture([started])).toEqual({ busy: true, blocked: false, lastTurnErrored: false });
   });
 
   it("reports a turn parked on a card as BLOCKED, not busy", () => {
     // The db-live-2 state exactly: the turn never settles because the tool
     // awaits the operator. Calling that "busy" is what made "done" and
     // "waiting on you" render identically.
-    expect(foldPosture([started, asked])).toEqual({ busy: false, blocked: true });
+    expect(foldPosture([started, asked])).toEqual({ busy: false, blocked: true, lastTurnErrored: false });
   });
 
   it("returns to busy once the card is answered", () => {
-    expect(foldPosture([started, asked, answered])).toEqual({ busy: true, blocked: false });
+    expect(foldPosture([started, asked, answered])).toEqual({ busy: true, blocked: false, lastTurnErrored: false });
   });
 
   it("ignores a SEAT's card — it parks the seat's turn, not the main lane", () => {
@@ -506,6 +506,12 @@ describe("foldPosture", () => {
     const seatAsked = { type: "user_session.question.asked", seq: 4, ts: "t", userSessionId: "us_1",
       payload: { sessionId: "us_1", interactionId: "int_2", questions: [], agentSessionId: "agsess_1",
         participant: "renderer", urgency: "blocking", source: "agent", allowFreeText: true } } as unknown as ConsoleEvent;
-    expect(foldPosture([started, seatAsked])).toEqual({ busy: true, blocked: false });
+    expect(foldPosture([started, seatAsked])).toEqual({ busy: true, blocked: false, lastTurnErrored: false });
+  });
+
+  it("surfaces an errored last turn for the blocked session state", () => {
+    const settledError = { type: "user_session.turn.settled", seq: 5, ts: "t", userSessionId: "us_1",
+      payload: { sessionId: "us_1", turnId: "t1", status: "error", queuedJobs: 0 } } as unknown as ConsoleEvent;
+    expect(foldPosture([started, settledError])).toEqual({ busy: false, blocked: false, lastTurnErrored: true });
   });
 });

@@ -334,6 +334,8 @@ export interface SessionPosture {
   readonly busy: boolean;
   /** A turn is parked on a card only the operator can resolve. */
   readonly blocked: boolean;
+  /** The most recent settled turn errored — feeds the `blocked` session state. */
+  readonly lastTurnErrored: boolean;
 }
 
 export function foldPosture(events: readonly ConsoleEvent[]): SessionPosture {
@@ -341,6 +343,7 @@ export function foldPosture(events: readonly ConsoleEvent[]): SessionPosture {
   const open = new Set<string>();
   const pending = new Set<string>();
   let queuedJobs = 0;
+  let lastTurnErrored = false;
   for (const event of events) {
     const id = eventId(event);
     if (id !== null) {
@@ -352,6 +355,7 @@ export function foldPosture(events: readonly ConsoleEvent[]): SessionPosture {
     } else if (event.type === "user_session.turn.settled") {
       open.delete(event.payload.turnId);
       queuedJobs = event.payload.queuedJobs;
+      lastTurnErrored = (event.payload as { status?: string }).status === "error";
     } else if (event.type === "user_session.question.asked") {
       // Only MAIN-LANE cards park the lane this posture describes. A seat's
       // card (participant set) parks that seat's turn — main keeps running,
@@ -366,7 +370,7 @@ export function foldPosture(events: readonly ConsoleEvent[]): SessionPosture {
   const blocked = pending.size > 0;
   // A turn parked on a card is NOT busy. Reporting it as busy is what kept the
   // spinner running after db-live-2's run was over.
-  return { busy: !blocked && (open.size > 0 || queuedJobs > 0), blocked };
+  return { busy: !blocked && (open.size > 0 || queuedJobs > 0), blocked, lastTurnErrored };
 }
 
 export function foldBusy(events: readonly ConsoleEvent[]): boolean {

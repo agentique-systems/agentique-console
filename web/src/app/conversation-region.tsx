@@ -10,14 +10,15 @@ import { useRef } from "react";
 
 import { FlowEdgeTick } from "@/agents/flow-stem";
 import { useUserSessions } from "@/api/queries";
-import type { UserSession } from "@agentique-console/shared";
+import type { UserSessionListItem } from "@agentique-console/shared";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
+import { deriveSessionState } from "@/lib/session-state";
 import { userStreamKey } from "@/live/watched";
 import { Composer, type ComposerHandle } from "@/session/composer";
 import { DraftView } from "@/session/draft-view";
 import { SessionHeader } from "@/session/session-header";
-import { foldBusy } from "@/session/user-fold";
+import { foldPosture } from "@/session/user-fold";
 import { UserTranscript } from "@/session/user-transcript";
 import { useScopeStore } from "@/stores/scope";
 import { useUiStore } from "@/stores/ui";
@@ -66,23 +67,34 @@ export function ConversationRegion() {
   return <ActiveSession session={session} />;
 }
 
-function ActiveSession({ session }: { session: UserSession }) {
+function ActiveSession({ session }: { session: UserSessionListItem }) {
   const composerRef = useRef<ComposerHandle>(null);
-  // Busy is fold-derived from the live stream's turn events.
-  const busy = useUserSessionStreamsStore((s) =>
-    foldBusy(s.streams[userStreamKey(session.id)]?.items ?? []),
+  // Posture is fold-derived from the live stream's turn events; the rest of
+  // the state inputs are server-authoritative fields off the list row.
+  const posture = useUserSessionStreamsStore((s) =>
+    foldPosture(s.streams[userStreamKey(session.id)]?.items ?? []),
   );
+  const overlay = useUiStore((s) => s.awaitingInput.has(session.id));
+  const state = deriveSessionState({
+    runState: session.runState,
+    archived: session.status === "archived",
+    needsYou: session.pendingInteractions > 0 || overlay,
+    posture,
+    lastTurnErrored: posture.lastTurnErrored,
+    // No live connection signal is plumbed yet; the spine reconnects itself.
+    spineOpen: true,
+  });
 
   return (
     <div className="relative flex min-h-0 flex-col border-r border-border">
       {/* Flow pulses glow this edge tick — the eye's cue toward the strip. */}
       <FlowEdgeTick />
-      <SessionHeader session={session} busy={busy} />
+      <SessionHeader session={session} state={state} />
       <UserTranscript
         session={session}
         onRequestChanges={() => composerRef.current?.focus()}
       />
-      <Composer ref={composerRef} session={session} busy={busy} />
+      <Composer ref={composerRef} session={session} busy={posture.busy} />
     </div>
   );
 }

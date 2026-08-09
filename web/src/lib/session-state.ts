@@ -9,12 +9,13 @@
  * `AnyStatus` in `./status.ts` stays the visual vocabulary; this is the mapping
  * onto it.
  */
+import type { RunState } from "@agentique-console/shared";
 import type { AnyStatus } from "./status";
 
 export type SessionState = "working" | "needs_you" | "blocked" | "done" | "ready";
 
 export interface SessionStateInput {
-  runState: "active" | "awaiting_signoff" | "completed";
+  runState: RunState;
   archived: boolean;
   /** Open cards, or a proposed completion — anything only the operator resolves. */
   needsYou: boolean;
