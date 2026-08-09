@@ -1,7 +1,6 @@
 import type { AgentSessionStatus, HandoffDraft, HandoffTrigger, Interaction, InteractionQuestion, InteractionUrgency, ResolveInteractionBody, Speaker } from "@agentique-console/shared";
 import fs from "node:fs";
 import path from "node:path";
-import { z } from "zod";
 import { badRequest, conflict, notFound } from "../api/errors.ts";
 import type { AgentProfile, AgentProfileRegistry } from "../agent-profiles/registry.ts";
 import type { Config } from "../config.ts";
@@ -10,7 +9,6 @@ import {
   toWireAgentSession,
   toWireMessage,
   type AgentSessionRow,
-  type AttemptGroupRow,
   type MailboxDeliveryRow,
   type MessageRow,
   type ParticipantRow,
@@ -19,7 +17,6 @@ import type { EventBus } from "../events/bus.ts";
 import { RuntimeBroadcaster } from "../events/runtime.ts";
 import { newId, nowIso } from "../ids.ts";
 import { rotationTokenLimit } from "../model-catalog.ts";
-import { pageTail } from "../paging.ts";
 import { mapSdkMessage } from "../sdk/mapping.ts";
 import type { SqliteSessionStore } from "../sdk/session-store.ts";
 import type { ConsoleSdk, QueryHandle, SdkHooksFragment, SdkOptions, SdkToolResult, SdkUserMessageLike } from "../sdk/types.ts";
@@ -33,21 +30,44 @@ import { buildContractHooks } from "./contract-hook.ts";
 import { dedupeKeyFor, type InteractionService } from "../orchestrator/interactions.ts";
 import type { TaskService } from "../tasks/service.ts";
 import type { HandoffService } from "../handoffs/service.ts";
-import { EvidenceRefSchema, HANDOFF_DRAFT_JSON_SCHEMA, HandoffCoreSchema, HandoffDraftSchema } from "../handoffs/schema.ts";
-import { classifyUncertainty, type EscalationCategory, type EscalationItem } from "../handoffs/escalation.ts";
+import { HANDOFF_DRAFT_JSON_SCHEMA, HandoffDraftSchema } from "../handoffs/schema.ts";
 import type { ReapResult } from "../completion/summary.ts";
 import { evaluateCheckpointDraft } from "../handoffs/checkpoint-gate.ts";
 import { mainPeerName, peerNameOf } from "./peer-names.ts";
+import {
+  assignmentBlockers,
+  deliveryTaskId,
+  finalReportBlockers,
+  finalReportCaveats,
+  isFinalToMain,
+  promoteUncertainty,
+  resolvedDomains,
+  syncLedgerFromHandoff,
+  WithheldFinalError,
+  type Category,
+} from "./governance.ts";
+import { buildSeatTools, ok, type AskOperatorArgs } from "./seat-tools.ts";
+import {
+  closeAttemptGroup,
+  onAttemptPost,
+  RESERVED_NAMES,
+  SEAT_NAME_RE,
+  startAttempts,
+  selectAttemptWinner,
+  type AttemptsContext,
+  type SelectAttemptWinnerInput,
+  type SelectAttemptWinnerResult,
+  type StartAttemptsInput,
+  type StartAttemptsResult,
+} from "./attempts.ts";
 import { buildWorktreeHooks } from "./worktree-hook.ts";
-import { consoleTaskListId } from "../orchestrator/tools.ts";
 import { SESSION_PROTOCOL } from "./presets.ts";
 import { mergeHooks } from "../sdk/hooks.ts";
 import { AsyncQueue } from "../async-queue.ts";
 
 export const ORCHESTRATOR_SEAT = "orchestrator";
 export const MAIN_RECIPIENT = "main";
-const SEAT_NAME_RE = /^[A-Za-z0-9_.:-]+$/;
-const RESERVED_NAMES = new Set([ORCHESTRATOR_SEAT, "operator", "system", MAIN_RECIPIENT, "coordinator"]);
+export { WithheldFinalError } from "./governance.ts";
 const MATERIAL_CATEGORIES = new Set(["milestone", "failure", "final", "decision"]);
 
 /**
@@ -62,14 +82,6 @@ const WATCHDOG_ERROR_STREAK = 10;
 const CHECKPOINT_TIMEOUT_MS = 90_000;
 
 /**
- * Provider ceiling for an inline base64 image (~5MB). A full-page screenshot at
- * a large viewport can exceed it, and an oversize image fails the whole tool
- * result rather than degrading — so `read_artifact` returns a text explanation
- * instead, which the seat can act on.
- */
-const MAX_IMAGE_BASE64_CHARS = 5 * 1024 * 1024;
-
-/**
  * Unresolved blocking questions allowed per AgentSession before further asks
  * are downgraded to deferred. A wall of simultaneous cards is unanswerable, and
  * each blocking ask pins one of `seatMaxResidentPerSession` (4) processes.
@@ -78,16 +90,6 @@ const MAX_CONCURRENT_BLOCKING_ASKS = 3;
 
 /** Per-turn cap on stored reasoning; it is forensics, not an archive. */
 const MAX_REASONING_CHARS = 64 * 1024;
-
-interface AskOperatorArgs {
-  question: string;
-  header?: string;
-  context?: string;
-  options: { label: string; description?: string }[];
-  recommendation?: string;
-  urgency: InteractionUrgency;
-  allowFreeText: boolean;
-}
 
 /** Failed-turn redeliveries per delivery row before the console gives up. */
 const MAX_REDELIVERY_ATTEMPTS = 2;
@@ -165,10 +167,6 @@ function sandboxNetwork(profile: AgentProfile, workspaceDomains: string[]): { al
     allowLocalBinding: true,
     strictAllowlist: true,
   };
-}
-
-function resolvedDomains(profile: AgentProfile, workspaceDomains: string[]): string[] {
-  return profile.runtime.network === "default" ? workspaceDomains : profile.runtime.network;
 }
 
 function capabilityBrief(profile: AgentProfile, hasWorktree: boolean, workspaceDomains: string[]): string {
@@ -257,8 +255,6 @@ function seatMessagingBrief(roster: string, seatName: string): string {
     `If send_handoff ever rejects your input as unparseable, do NOT retry the same payload — move the body into write_note and re-send with the reference. ` +
     `Never use the Agent or SendMessage tools.`;
 }
-
-type Category = MailboxDeliveryRow["category"];
 
 /**
  * A seat's persistent peer session. One streaming-input query per live seat;
@@ -360,109 +356,6 @@ export interface AgentSessionHostDeps {
   worktrees?: WorktreeManager;
 }
 
-/**
- * A `final` withheld by the gate. Deliberately NOT an ApiError: the
- * `send_handoff` handler catches this and answers with a structured non-error
- * hold — `ask_operator` never returns `isError` for the operator's silence, and
- * blocked assignments answer `{queued:true}`, for the same reason: an error
- * result feeds the error-streak watchdog, and a model retrying a refusal feeds
- * the identical-call watchdog. Punishing a seat for a hold the Console imposed
- * kills the very turn that must stay alive to react when the hold clears.
- */
-export class WithheldFinalError extends Error {
-  constructor(
-    readonly blockers: { id: string; question: string; asker: string; ageMinutes: number }[],
-    readonly promoted: number,
-    guidance: string,
-  ) {
-    super(guidance);
-    this.name = "WithheldFinalError";
-  }
-}
-
-/** The flat, provider-validated parameter surface of `send_handoff`. */
-interface SendHandoffArgs {
-  to: string;
-  category: Category;
-  status: HandoffDraft["core"]["status"];
-  risk: HandoffDraft["core"]["risk"];
-  action: string;
-  stateSummary: string;
-  evidence: HandoffDraft["core"]["state"]["evidence"];
-  resultSummary: string | null;
-  artifacts: HandoffDraft["core"]["result"]["artifacts"];
-  uncertainty: string[];
-  nextAction: string | null;
-  taskId: string | null;
-  requestExpandedContext: boolean;
-  dedupeKey?: string;
-}
-
-function ok(value: unknown): SdkToolResult {
-  return { content: [{ type: "text", text: JSON.stringify(value) }] };
-}
-
-/** Questions on one auto-promoted card before the rest spill into context. */
-const MAX_QUESTIONS_PER_CARD = 4;
-
-/** Capability shape for a sender the console has no profile for (main). */
-const FALLBACK_PROFILE_RUNTIME = { runtime: { shell: false, browser: false, screenshots: false, network: [] as string[] } } as AgentProfile;
-
-const ESCALATION_HEADER: Record<EscalationCategory, string> = {
-  version_substitution: "Version",
-  spec_deviation: "Deviation",
-  capability_gap: "Blocked",
-  unverifiable_claim: "Unverified",
-  ambiguity: "Ambiguous",
-  volume: "Open items",
-};
-
-/** Stable question text, so a re-reported uncertainty is recognisably the same. */
-function uncertaintyQuestion(item: EscalationItem): string {
-  if (item.category === "version_substitution" && item.versions) {
-    return `${item.versions.dependency}: ship ${item.versions.shipped}, or hold for ${item.versions.expected}?`;
-  }
-  return item.text;
-}
-
-/**
- * The card block for one escalated uncertainty.
- *
- * For `version_substitution` the console genuinely knows both versions, so it
- * offers REAL choices. For every other category it does not know the domain,
- * so it poses the meta-decision it CAN pose correctly and puts the seat's own
- * words in `context` verbatim.
- *
- * Deliberately never fabricates domain-specific labels. It would be wrong often
- * enough that the operator would click through them, and a wrong answer
- * laundered through the decision ledger is worse than no card at all.
- */
-function uncertaintyBlock(item: EscalationItem, spilled: readonly EscalationItem[] = []): InteractionQuestion {
-  const extra = spilled.length === 0 ? "" : `\n\nAlso open from this seat:\n${spilled.map((other) => `- ${other.text}`).join("\n")}`;
-  if (item.category === "version_substitution" && item.versions) {
-    const { dependency, shipped, expected } = item.versions;
-    return {
-      question: uncertaintyQuestion(item),
-      header: ESCALATION_HEADER[item.category],
-      context: `${item.text}${extra}`,
-      options: [
-        { label: `Ship ${shipped}`, description: `Keep what is built. ${dependency} stays at ${shipped}.` },
-        { label: `Hold for ${expected}`, description: `The version named earlier. May not be reachable right now.` },
-      ],
-    };
-  }
-  return {
-    question: uncertaintyQuestion(item),
-    header: ESCALATION_HEADER[item.category],
-    context: `Raised as an uncertainty by the agent that reported it:\n${item.text}${extra}`,
-    options: [
-      { label: "Proceed anyway", description: "Accept this and keep going." },
-      { label: "Stop and fix this first", description: "Treat it as blocking; the work is not done until it is resolved." },
-      { label: "I'll answer in chat", description: "Neither option fits — say what you want in your own words." },
-    ],
-  };
-}
-
 /** The question text of an interaction, for prompts and operator-facing lines. */
 function questionTextOf(interaction: Interaction): string {
   const questions = (interaction.payload as { questions?: InteractionQuestion[] }).questions ?? [];
@@ -495,6 +388,11 @@ export class AgentSessionHost {
   readonly #blockedAssignments = new Map<string, { agentSessionId: string; recipient: string; since: number }>();
   /** Roster work-state diff lines, memoized 15s — see `#seatWorkState`. */
   readonly #workStateDiffCache = new Map<string, { at: number; line: string }>();
+  #sessionStatus = new Map<string, AgentSessionStatus | null>();
+  /** Sessions whose operator obligation is closed — reported, or discharged. */
+  readonly #operatorDebtSettled = new Set<string>();
+  /** agentSessionId → dependency name → the version last merged, and by whom. */
+  readonly #dependencyPins = new Map<string, Map<string, { version: string; seat: string }>>();
 
   constructor(deps: AgentSessionHostDeps) { this.#deps = deps; }
 
@@ -567,104 +465,27 @@ export class AgentSessionHost {
     return { agentSessionId: row.id, participants: specialists };
   }
 
-  /**
-   * Best-of-N fan-out: seats N attempt copies of one profile, each in an
-   * isolated worktree, and posts them the same assignment. Seat identity,
-   * worktree binding, and group metadata are server-authored; attempts share
-   * scope intentionally — the isolation is the worktree, not the scope.
-   */
-  startAttempts(input: { agentSessionId: string; assignment: HandoffDraft; profileId?: string; attempts?: number; baseSeatName?: string; owns: string[]; instructions?: string; model?: string; turnId?: string }): { groupId: string; seats: string[]; branches: string[]; baseCommit: string; dirtyWorkspace: boolean } {
-    const { repo, bus } = this.#deps;
-    const worktrees = this.#deps.worktrees;
-    if (!worktrees) throw new Error("worktree manager unavailable");
-    const session = repo.getAgentSession(input.agentSessionId);
-    if (!session) throw notFound(`no agent session ${input.agentSessionId}`);
-    if (session.status !== "open") throw conflict(`agent session ${input.agentSessionId} is archived`);
-    const user = repo.getUserSession(session.userSessionId);
-    if (!user || !this.#deps.getWorkspaceRoot) throw new Error("workspace unavailable");
-    const workspaceRoot = this.#deps.getWorkspaceRoot(user.workspaceId);
-    if (!worktrees.isGitRepo(workspaceRoot)) {
-      throw badRequest(`best-of-N attempts require the workspace to be a git repository; ${workspaceRoot} is not one (git init it or run the work as a single assignment)`);
-    }
-    if (repo.findOpenAttemptGroup(session.id)) throw conflict("an attempt group is already active for this session; wait for it to finish");
-    const attempts = Math.max(2, Math.min(3, input.attempts ?? 2));
-    const base = (input.baseSeatName ?? input.profileId ?? "implementer").trim();
-    if (!SEAT_NAME_RE.test(base) || RESERVED_NAMES.has(base.toLowerCase())) throw badRequest(`invalid or reserved attempt base name "${base}"`);
-    const existing = new Set(repo.listParticipants(session.id).map((p) => p.name));
-    const seatNames = Array.from({ length: attempts }, (_, i) => `${base}.${i + 1}`);
-    for (const name of [...seatNames, `${base}.review`]) if (existing.has(name)) throw conflict(`seat name "${name}" is already taken`);
-    const profile = this.#snapshotProfile(this.#profile(input.profileId ?? "implementer", user.workspaceId));
-    const groupId = newId("bon");
-    const dirtyWorkspace = worktrees.isDirty(workspaceRoot);
-    const now = nowIso();
-    const attemptsState: NonNullable<AttemptGroupRow["attemptsState"]> = {};
-    const branches: string[] = [];
-    let baseCommit = "";
-    const attemptInstructions = `${input.instructions ?? ""}\n\nYou are attempt seat of a best-of-N group: work independently in your own isolated worktree (your cwd). Never run git commit — the Console captures your changes when you report. Install dependencies only if you must run validation.`.trim();
-    for (let i = 0; i < attempts; i += 1) {
-      const ref = worktrees.addWorktree(workspaceRoot, session.id, `${groupId}-${i + 1}`, `attempt/${session.id}/${groupId}/${i + 1}`);
-      baseCommit = ref.baseCommit;
-      branches.push(ref.branch);
-      const row = this.#participant(session.id, seatNames[i]!, "agent", profile, attemptInstructions, input.model, input.owns, existing.size + i, now);
-      repo.insertParticipant({ ...row, worktreePath: ref.path, worktreeBaseCommit: ref.baseCommit, worktreeBranch: ref.branch, attemptGroupId: groupId, attemptRole: "attempt" });
-      attemptsState[seatNames[i]!] = { branch: ref.branch, worktreePath: ref.path, commit: null, artifactId: null, status: "running" };
-    }
-    repo.insertAttemptGroup({ id: groupId, agentSessionId: session.id, userSessionId: session.userSessionId,
-      profileId: profile.id, baseSeat: base, attempts, baseCommit, status: "running", reviewerSeat: null,
-      winnerSeat: null, mergeCommit: null, dirtyWorkspace, attemptsState, createdAt: now, updatedAt: now });
-    bus.append({ type: "agent_session.attempt_group.started", userSessionId: session.userSessionId, agentSessionId: session.id,
-      payload: { agentSessionId: session.id, groupId, seats: seatNames, profileId: profile.id, attempts, baseCommit, dirtyWorkspace } });
-    for (const name of seatNames) {
-      this.post({ agentSessionId: session.id, speaker: { kind: "orchestrator", name: ORCHESTRATOR_SEAT }, to: name,
-        handoff: input.assignment, category: "assignment", dedupeKey: `bon:${groupId}:${name}`, ...(input.turnId ? { turnId: input.turnId } : {}) });
-    }
-    return { groupId, seats: seatNames, branches, baseCommit, dirtyWorkspace };
+  /** Best-of-N fan-out; the machinery lives in attempts.ts. */
+  startAttempts(input: StartAttemptsInput): StartAttemptsResult {
+    return startAttempts(this.#attemptsContext(), input);
   }
 
-  /**
-   * The reviewer's single selection call. Merge runs synchronously so the
-   * returned outcome is ground truth for the reviewer's closing handoff; a
-   * conflict aborts cleanly (workspace untouched) and fails the group.
-   */
-  selectAttemptWinner(input: { agentSessionId: string; groupId: string; reviewer: string; winner?: string; rejectAll?: boolean; reason: string }):
-    { merged: true; commit: string; winner: string } | { merged: false; conflicts: string[]; detail: string; winner: string } | { rejected: true } {
-    const { repo, bus } = this.#deps;
-    const worktrees = this.#deps.worktrees;
-    if (!worktrees) throw new Error("worktree manager unavailable");
-    const session = repo.getAgentSession(input.agentSessionId);
-    if (!session) throw notFound(`no agent session ${input.agentSessionId}`);
-    const group = repo.getAttemptGroup(input.groupId);
-    if (!group || group.agentSessionId !== session.id) throw notFound(`no attempt group ${input.groupId}`);
-    if (group.status !== "reviewing") throw conflict(`attempt group ${input.groupId} is ${group.status}; selection is closed`);
-    if (group.reviewerSeat !== input.reviewer) throw badRequest(`only ${group.reviewerSeat} may select for group ${input.groupId}`);
-    if ((input.winner === undefined) === (input.rejectAll !== true)) throw badRequest("pass exactly one of winner or rejectAll");
-    const user = repo.getUserSession(session.userSessionId);
-    if (!user || !this.#deps.getWorkspaceRoot) throw new Error("workspace unavailable");
-    const workspaceRoot = this.#deps.getWorkspaceRoot(user.workspaceId);
-    if (input.rejectAll === true) {
-      bus.append({ type: "agent_session.attempt_group.selected", userSessionId: session.userSessionId, agentSessionId: session.id,
-        payload: { agentSessionId: session.id, groupId: group.id, winner: null, rejectedAll: true, reason: input.reason } });
-      this.#closeAttemptGroup(session, group, "rejected");
-      return { rejected: true };
-    }
-    const winner = input.winner!;
-    const entry = group.attemptsState[winner];
-    if (!entry || entry.status !== "completed") throw badRequest(`"${winner}" is not a completed attempt of group ${input.groupId}`);
-    bus.append({ type: "agent_session.attempt_group.selected", userSessionId: session.userSessionId, agentSessionId: session.id,
-      payload: { agentSessionId: session.id, groupId: group.id, winner, rejectedAll: false, reason: input.reason } });
-    const outcome = worktrees.mergeBranch(workspaceRoot, entry.branch,
-      `Merge best-of-N winner ${winner} (group ${group.id})\n\nAttempt-Group: ${group.id}\nAttempt-Seat: ${winner}`);
-    if (outcome.merged) {
-      repo.patchAttemptGroup(group.id, { winnerSeat: winner, mergeCommit: outcome.commit });
-      bus.append({ type: "agent_session.attempt_group.merged", userSessionId: session.userSessionId, agentSessionId: session.id,
-        payload: { agentSessionId: session.id, groupId: group.id, winner, mergeCommit: outcome.commit } });
-      this.#closeAttemptGroup(session, { ...group, winnerSeat: winner }, "merged");
-      return { merged: true, commit: outcome.commit, winner };
-    }
-    bus.append({ type: "agent_session.attempt_group.merge_failed", userSessionId: session.userSessionId, agentSessionId: session.id,
-      payload: { agentSessionId: session.id, groupId: group.id, winner, conflicts: outcome.conflicts, detail: outcome.detail } });
-    this.#closeAttemptGroup(session, group, "failed");
-    return { merged: false, conflicts: outcome.conflicts, detail: outcome.detail, winner };
+  /** The reviewer's single selection call; the machinery lives in attempts.ts. */
+  selectAttemptWinner(input: SelectAttemptWinnerInput): SelectAttemptWinnerResult {
+    return selectAttemptWinner(this.#attemptsContext(), input);
+  }
+
+  /** Bound host-private operations the attempt machinery invokes. */
+  #attemptsContext(): AttemptsContext {
+    return {
+      deps: this.#deps,
+      post: (input) => this.post(input),
+      simpleHandoff: (action, status, summary, nextAction) => this.#simpleHandoff(action, status, summary, nextAction),
+      profile: (id, workspaceId) => this.#profile(id, workspaceId),
+      snapshotProfile: (profile) => this.#snapshotProfile(profile),
+      participant: (agentSessionId, name, role, profile, extra, model, ownership, ord, createdAt) =>
+        this.#participant(agentSessionId, name, role, profile, extra, model, ownership, ord, createdAt),
+    };
   }
 
   /**
@@ -689,7 +510,7 @@ export class AgentSessionHost {
     // this very handoff raised can withhold this very final. That ordering is
     // the whole point on a `final`: db-live-2's report and the question about
     // its open items were eleven seconds apart, in the wrong order.
-    this.#promoteUncertainty(session, input.speaker.name, input.handoff, category);
+    promoteUncertainty(this.#deps, session, input.speaker.name, input.handoff, category);
     // Withheld BEFORE journalling, so a blocked final leaves no half-record.
     //
     // A `final` attempt promotes every DEFERRED question first. Deferred means
@@ -697,10 +518,10 @@ export class AgentSessionHost {
     // more work, so the judgement that made it non-gating has expired. This is
     // the precise shape of db-live-2's ending: a question the coordinator
     // thought was minor, asked eleven seconds after it declared the run done.
-    const promoted = this.#isFinalToMain(input.speaker.name, input.to, category)
+    const promoted = isFinalToMain(input.speaker.name, input.to, category)
       ? this.#deps.interactions.promoteDeferredToBlocking(session.id)
       : 0;
-    const blockers = this.#finalReportBlockers(session, input.speaker.name, input.to, category);
+    const blockers = finalReportBlockers(this.#deps, session, input.speaker.name, input.to, category);
     if (blockers.length > 0) {
       this.#withheldFinals.add(session.id);
       this.#deps.bus.append({ type: "handoff.final.blocked", userSessionId: session.userSessionId, agentSessionId: session.id,
@@ -724,7 +545,10 @@ export class AgentSessionHost {
         `When the operator answers, the Console delivers their answer to you and you may report final then.`,
       );
     }
-    const caveats = this.#finalReportCaveats(session, input.speaker.name, input.to, category);
+    const caveats = finalReportCaveats(this.#deps, session, input.speaker.name, input.to, category, () => {
+      const lanes = this.#seats.get(session.id);
+      return [...(lanes?.entries() ?? [])].filter(([name, lane]) => name !== ORCHESTRATOR_SEAT && lane.activeTurn !== null).map(([name]) => name);
+    });
     if (caveats.length > 0) {
       input = { ...input, handoff: { ...input.handoff, core: { ...input.handoff.core,
         uncertainty: [...input.handoff.core.uncertainty, `Console: reported final with work outstanding — ${caveats.join("; ")}.`] } } };
@@ -736,7 +560,7 @@ export class AgentSessionHost {
     // unit 1 was marked complete 10m17s after implementation finished, unit 2
     // went in_progress 11m16s after the file was written, and the lag mapped
     // exactly onto coordinator turns that were dead or asleep.
-    this.#syncLedgerFromHandoff(session, input.to, input.handoff, category);
+    syncLedgerFromHandoff(this.#deps, session, input.to, input.handoff, category);
     const { message, delivery, text } = this.#journal(session, input.speaker, input.to, input.handoff, category, {
       transport: "console", ...(input.dedupeKey ? { dedupeKey: input.dedupeKey } : {}), ...(input.turnId ? { turnId: input.turnId } : {}),
     });
@@ -774,7 +598,7 @@ export class AgentSessionHost {
       // contract it never confirmed. Queuing keeps the "a message is never
       // lost" guarantee and lets the Console carry it the moment the blocker
       // clears.
-      const blockers = this.#assignmentBlockers(session, input.to, category, input.handoff.core.taskId);
+      const blockers = assignmentBlockers(this.#deps, session, input.to, category, input.handoff.core.taskId);
       if (blockers.length > 0) {
         this.#deps.bus.append({ type: "governance.tool.denied", userSessionId: session.userSessionId, agentSessionId: session.id,
           payload: { sessionId: session.userSessionId, agentSessionId: session.id, participant: input.speaker.name,
@@ -791,79 +615,6 @@ export class AgentSessionHost {
   }
 
   /**
-   * Conditions that make a `final` a lie the Console can PROVE.
-   *
-   * The distinction from `#finalReportCaveats` below is the whole design.
-   * Caveats are model-maintained facts — an open ledger task, a specialist
-   * still running — and those must never block, because in db-live-1 the
-   * ledger orphaned on rotation and a blocking rule made `final` structurally
-   * impossible while the operator heard nothing for 35 minutes.
-   *
-   * An unanswered operator question is different in kind: the Console owns it
-   * end to end. It knows the question was asked, that nobody but the operator
-   * can answer it, and that it has not been answered. db-live-2 declared a run
-   * done and THEN asked whether two open items mattered — a question that is
-   * still `pending` in that database, and was the last row written. A report
-   * that precedes its own outstanding questions is not a report.
-   */
-  /**
-   * Incomplete blockers of the task this assignment carries. Advisory
-   * `blocked_by` edges become a real gate here — before this, `task_dependencies`
-   * had eight rows in db-live-2 and nothing ever consulted them.
-   */
-  /**
-   * An assignment carrying a taskId starts that unit; a terminal-status report
-   * finishes it. Both are facts the console already holds at this moment.
-   */
-  #syncLedgerFromHandoff(session: AgentSessionRow, to: string, handoff: HandoffDraft, category: Category): void {
-    const tasks = this.#deps.tasks;
-    const taskId = handoff.core.taskId;
-    if (!tasks || taskId === null) return;
-    const listId = consoleTaskListId(session.id);
-    try {
-      if (category === "assignment") {
-        tasks.applyUpdate({ sdkSessionId: listId, sdkTaskId: taskId, patch: { status: "in_progress", owner: to } });
-        return;
-      }
-      if (handoff.core.status === "completed") {
-        tasks.applyUpdate({ sdkSessionId: listId, sdkTaskId: taskId, patch: { status: "completed" } });
-      } else if (handoff.core.status === "failed" || handoff.core.status === "blocked") {
-        tasks.applyUpdate({ sdkSessionId: listId, sdkTaskId: taskId, patch: { status: "pending" } });
-      }
-    } catch { /* a ledger write must never fail a transfer */ }
-  }
-
-  /**
-   * The task a journaled delivery's handoff was about. The message payload
-   * carries only a HandoffSummary (no taskId); the full core lives in
-   * handoff_records — read it from there, or the release path would derive
-   * `null`, find no blockers, and free every hold on the first task change.
-   */
-  #deliveryTaskId(messageId: string): string | null {
-    const message = this.#deps.repo.getMessageById(messageId);
-    const summary = message?.payload?.handoff as { id?: string } | undefined;
-    if (!summary?.id || !this.#deps.handoffs) return null;
-    try { return this.#deps.handoffs.get(summary.id).core.taskId; } catch { return null; }
-  }
-
-  #assignmentBlockers(session: AgentSessionRow, to: string, category: Category, taskId: string | null): string[] {
-    if (category !== "assignment" || taskId === null || !this.#deps.tasks) return [];
-    void to;
-    const all = this.#deps.tasks.listForUserSession(session.userSessionId)
-      .filter((task) => task.agentSessionId === session.id);
-    const target = all.find((task) => task.sdkTaskId === taskId || task.id === taskId);
-    if (!target) return [];
-    const open: string[] = [];
-    for (const blockerId of target.dependencyIds) {
-      const blocker = all.find((task) => task.id === blockerId);
-      if (blocker && blocker.status !== "completed" && blocker.status !== "deleted") {
-        open.push(`"${target.subject}" is blocked_by "${blocker.subject}" (${blocker.status})`);
-      }
-    }
-    return open;
-  }
-
-  /**
    * A blocker completed, or the grace expired. Carries anything now unblocked.
    *
    * The grace is NOT optional. A mis-declared dependency must never deadlock a
@@ -877,7 +628,7 @@ export class AgentSessionHost {
       if (!session || session.status !== "open") { this.#blockedAssignments.delete(deliveryId); continue; }
       const delivery = this.#deps.repo.getDeliveryById(deliveryId);
       if (!delivery || delivery.status !== "queued") { this.#blockedAssignments.delete(deliveryId); continue; }
-      const stillBlocked = this.#assignmentBlockers(session, held.recipient, "assignment", this.#deliveryTaskId(delivery.messageId));
+      const stillBlocked = assignmentBlockers(this.#deps, session, held.recipient, "assignment", deliveryTaskId(this.#deps, delivery.messageId));
       const expired = now - held.since >= grace;
       if (stillBlocked.length > 0 && !expired) continue;
       this.#blockedAssignments.delete(deliveryId);
@@ -888,116 +639,6 @@ export class AgentSessionHost {
       }
       void this.#deliverConsole(held.agentSessionId, held.recipient).catch(() => undefined);
     }
-  }
-
-  #finalReportBlockers(session: AgentSessionRow, sender: string, to: string, category: Category): Interaction[] {
-    if (!this.#isFinalToMain(sender, to, category)) return [];
-    return this.#deps.interactions.listUnresolvedForAgentSession(session.id)
-      .filter((row) => row.urgency === "blocking");
-  }
-
-  #isFinalToMain(sender: string, to: string, category: Category): boolean {
-    return sender === ORCHESTRATOR_SEAT && to === MAIN_RECIPIENT && category === "final";
-  }
-
-  /**
-   * Conditions a `final` report has not met. These used to THROW, which made
-   * the operator's report conditional on model-maintained state: in db-live-1
-   * the ledger orphaned on rotation, so a `final` was structurally impossible
-   * and the operator heard nothing for 35 minutes. The console may enforce
-   * only on facts it owns — so unmet conditions now travel WITH the report,
-   * where the operator can weigh them, instead of suppressing it.
-   */
-  #finalReportCaveats(session: AgentSessionRow, sender: string, to: string, category: Category): string[] {
-    if (sender !== ORCHESTRATOR_SEAT || to !== MAIN_RECIPIENT || category !== "final") return [];
-    const caveats: string[] = [];
-    if (this.#deps.tasks) {
-      const incomplete = this.#deps.tasks.listForUserSession(session.userSessionId).filter((task) => task.agentSessionId === session.id && task.status !== "completed" && task.status !== "deleted");
-      if (incomplete.length > 0) caveats.push(`${incomplete.length} task(s) still open in the ledger: ${incomplete.map((task) => task.subject).join(", ")}`);
-    }
-    const lanes = this.#seats.get(session.id);
-    const activeSpecialists = [...(lanes?.entries() ?? [])].filter(([name, lane]) => name !== ORCHESTRATOR_SEAT && lane.activeTurn !== null).map(([name]) => name);
-    // Only deliveries addressed to SPECIALISTS count as outstanding work: a
-    // native final goes out mid-turn, so the very report that woke the
-    // coordinator is still unacknowledged in its own inbox.
-    const pendingInternal = this.#deps.repo.listActiveDeliveries(session.id).filter((delivery) => delivery.recipient !== MAIN_RECIPIENT && delivery.recipient !== ORCHESTRATOR_SEAT);
-    if (activeSpecialists.length > 0) caveats.push(`still running: ${activeSpecialists.join(", ")}`);
-    if (pendingInternal.length > 0) caveats.push(`${pendingInternal.length} delivery(ies) to specialists not yet acknowledged`);
-    return caveats;
-  }
-
-  /** Journal core shared by the console path and the SendMessage middleware. */
-  /**
-   * Read `core.uncertainty[]` and put what belongs to the operator in front of
-   * them.
-   *
-   * Hooked here in `post()` rather than in `HandoffService.prepare` for two
-   * reasons. `prepare` is also the ROTATION CHECKPOINT path, and a checkpoint's
-   * uncertainty is a seat's private note to its own successor — the wrong
-   * audience entirely — and it runs inside `#maybeRotate`'s gate, which blocks
-   * every sender to that seat and is the last place to do anything that can
-   * wait. `post()` also has what the classifier needs: the interaction service,
-   * the decision ledger, and the sender's real profile capabilities.
-   *
-   * CONSEQUENCE, stated plainly: `post()` is synchronous, so this is
-   * fire-and-forget card creation. An auto-promoted BLOCKING item does not stop
-   * the seat mid-turn — you cannot retroactively block a tool call that has
-   * already returned. It stops the next `final`. The only thing that stops a
-   * seat immediately is its own `ask_operator(urgency:'blocking')`. That is
-   * precisely why both paths exist.
-   */
-  #promoteUncertainty(session: AgentSessionRow, sender: string, handoff: HandoffDraft, category: Category): void {
-    const interactions = this.#deps.interactions;
-    if (!interactions || handoff.core.uncertainty.length === 0) return;
-    const senderSeat = sender === MAIN_RECIPIENT ? undefined : this.#deps.repo.getParticipant(session.id, sender);
-    const profile = senderSeat?.profileSnapshot as AgentProfile | undefined;
-    const items = classifyUncertainty(handoff.core, {
-      trigger: category as HandoffTrigger,
-      operatorPins: this.#deps.decisions.pins(session.userSessionId),
-      operatorConstraints: this.#deps.decisions.constraints(session.userSessionId),
-      capabilities: {
-        shell: profile?.runtime.shell ?? false,
-        browser: profile?.runtime.browser ?? false,
-        screenshots: profile?.runtime.screenshots ?? false,
-        network: resolvedDomains(profile ?? FALLBACK_PROFILE_RUNTIME, this.#deps.config?.allowedDomains ?? []),
-      },
-    });
-    if (items.length === 0) return;
-
-    // One card per (session, sender). A wall of simultaneous cards is
-    // unanswerable, and re-reporting the same uncertainty on every update
-    // would otherwise mint one each time.
-    const existing = interactions.listUnresolvedForAgentSession(session.id)
-      .find((row) => row.source === "uncertainty" && row.participant === sender);
-    const already = new Set(
-      (existing ? ((existing.payload as { questions?: InteractionQuestion[] }).questions ?? []) : [])
-        .map((question) => question.question),
-    );
-    const fresh = items.filter((item) => !already.has(uncertaintyQuestion(item)));
-    if (fresh.length === 0) return;
-    if (existing) {
-      // Merging into an open card rather than opening a second one keeps the
-      // operator's screen honest: one seat, one outstanding ask.
-      interactions.mergeQuestions(
-        existing.id,
-        fresh.slice(0, MAX_QUESTIONS_PER_CARD).map((item) => uncertaintyBlock(item)),
-        fresh.some((item) => item.urgency === "blocking") ? "blocking" : undefined,
-      );
-      return;
-    }
-    const shown = fresh.slice(0, MAX_QUESTIONS_PER_CARD);
-    const spilled = fresh.slice(MAX_QUESTIONS_PER_CARD);
-    const blocks = shown.map((item) => uncertaintyBlock(item, spilled));
-    interactions.createOperatorQuestion({
-      userSessionId: session.userSessionId,
-      agentSessionId: session.id,
-      participant: sender,
-      questions: blocks,
-      urgency: fresh.some((item) => item.urgency === "blocking") ? "blocking" : "deferred",
-      source: "uncertainty",
-      allowFreeText: true,
-      dedupeKey: `uncertainty:${sender}`,
-    });
   }
 
   /**
@@ -1015,6 +656,7 @@ export class AgentSessionHost {
     return { extensionDefaults: { operatorDecisions: lines } };
   }
 
+  /** Journal core shared by the console path and the SendMessage middleware. */
   #journal(session: AgentSessionRow, speaker: Speaker, to: string, handoff: HandoffDraft, category: Category, opts: {
     transport: MailboxDeliveryRow["transport"]; dedupeKey?: string; turnId?: string;
   }): { message: MessageRow; delivery: MailboxDeliveryRow; text: string; handoffId: string } {
@@ -1046,7 +688,7 @@ export class AgentSessionHost {
     });
     this.#deps.handoffs.committed(prepared.record);
     if (senderSeat?.attemptRole === "attempt" && (prepared.record.core.status === "completed" || prepared.record.core.status === "failed")) {
-      this.#onAttemptPost(session, senderSeat, prepared.record.core.status);
+      onAttemptPost(this.#attemptsContext(), session, senderSeat, prepared.record.core.status);
     } else if (senderSeat && senderSeat.attemptRole === null && senderSeat.worktreePath && (prepared.record.core.status === "completed" || prepared.record.core.status === "failed")) {
       this.#onSeatWorktreePost(session, senderSeat, prepared.record.core.status);
     }
@@ -1168,7 +810,7 @@ export class AgentSessionHost {
       this.#deps.processes?.stopSession(session.id);
       void this.#deps.browsers?.closeSession(session.id);
       const openGroup = this.#deps.repo.findOpenAttemptGroup(session.id);
-      if (openGroup) this.#closeAttemptGroup(session, openGroup, "abandoned");
+      if (openGroup) closeAttemptGroup(this.#attemptsContext(), session, openGroup, "abandoned");
       if (this.#deps.worktrees && this.#deps.getWorkspaceRoot) {
         const user = this.#deps.repo.getUserSession(session.userSessionId);
         for (const seat of this.#deps.repo.listParticipants(session.id)) {
@@ -1305,7 +947,7 @@ export class AgentSessionHost {
       if (delivery.category === "assignment") {
         const session = this.#deps.repo.getAgentSession(delivery.agentSessionId);
         if (session?.status === "open"
-          && this.#assignmentBlockers(session, delivery.recipient, "assignment", this.#deliveryTaskId(delivery.messageId)).length > 0) {
+          && assignmentBlockers(this.#deps, session, delivery.recipient, "assignment", deliveryTaskId(this.#deps, delivery.messageId)).length > 0) {
           this.#blockedAssignments.set(delivery.id, { agentSessionId: delivery.agentSessionId, recipient: delivery.recipient, since: Date.now() });
           continue;
         }
@@ -1415,107 +1057,6 @@ export class AgentSessionHost {
       bus.append({ type: "agent_session.runtime", userSessionId: session.userSessionId, agentSessionId: session.id,
         payload: { agentSessionId: session.id, participant: seat.name, detail: `worktree landing failed: ${error instanceof Error ? error.message : String(error)}` } });
     }
-  }
-
-  /**
-   * An attempt seat reported terminal status: commit its worktree, capture the
-   * diff as a durable artifact, and when the whole group is settled either
-   * seat the reviewer or fail the group. Fail-open — a git error marks the
-   * attempt failed but never blocks the mailbox append that already happened.
-   */
-  #onAttemptPost(session: AgentSessionRow, seat: ParticipantRow, status: "completed" | "failed"): void {
-    const { repo, bus } = this.#deps;
-    const worktrees = this.#deps.worktrees;
-    const group = seat.attemptGroupId ? repo.getAttemptGroup(seat.attemptGroupId) : undefined;
-    if (!group || group.status !== "running" || !worktrees || !seat.worktreePath || !this.#deps.getWorkspaceRoot) return;
-    const user = repo.getUserSession(session.userSessionId);
-    if (!user) return;
-    const workspaceRoot = this.#deps.getWorkspaceRoot(user.workspaceId);
-    const state = { ...group.attemptsState };
-    const entry = state[seat.name];
-    if (!entry || entry.status !== "running") return;
-    let commit: string | null = null;
-    let artifactId: string | null = null;
-    let diffBytes = 0;
-    let filesChanged = 0;
-    let attemptStatus: "completed" | "failed" = status;
-    try {
-      commit = worktrees.commitAll(seat.worktreePath, `attempt ${seat.name}: ${group.profileId} work`, seat.ownership);
-      const diff = worktrees.captureDiff(workspaceRoot, group.baseCommit, entry.branch);
-      filesChanged = diff.filesChanged;
-      const content = diff.patch.length > 4 * 1024 * 1024
-        ? `${diff.stat}\n\n[patch truncated at 4MiB — full history retained on archived branch]\n${diff.patch.slice(0, 4 * 1024 * 1024)}`
-        : `${diff.stat}\n\n${diff.patch}`;
-      const stored = bus.storeArtifact(content, "text/x-patch", { userSessionId: session.userSessionId, agentSessionId: session.id });
-      artifactId = stored.artifactId;
-      diffBytes = stored.bytes;
-    } catch (error) {
-      attemptStatus = "failed";
-      bus.append({ type: "agent_session.runtime", userSessionId: session.userSessionId, agentSessionId: session.id,
-        payload: { agentSessionId: session.id, participant: seat.name, detail: `attempt capture failed: ${error instanceof Error ? error.message : String(error)}` } });
-    }
-    state[seat.name] = { ...entry, commit, artifactId, status: attemptStatus };
-    repo.patchAttemptGroup(group.id, { attemptsState: state });
-    bus.append({ type: "agent_session.attempt.completed", userSessionId: session.userSessionId, agentSessionId: session.id,
-      payload: { agentSessionId: session.id, groupId: group.id, seat: seat.name, status: attemptStatus,
-        branch: entry.branch, commit, artifactId, diffBytes, filesChanged } });
-    const settled = Object.values(state);
-    if (settled.some((attempt) => attempt.status === "running")) return;
-    if (settled.every((attempt) => attempt.status === "failed")) {
-      this.#closeAttemptGroup(session, { ...group, attemptsState: state }, "failed");
-      this.post({ agentSessionId: session.id, speaker: { kind: "agent", name: seat.name }, to: ORCHESTRATOR_SEAT,
-        handoff: this.#simpleHandoff(`All ${group.attempts} attempts failed`, "failed",
-          `Every attempt in best-of-N group ${group.id} failed. Diffs (if any) are retained as artifacts.`,
-          "Decide whether to retry with a fresh attempt group or rework the assignment."), category: "failure" });
-      return;
-    }
-    this.#seatReviewer(session, { ...group, attemptsState: state });
-  }
-
-  #seatReviewer(session: AgentSessionRow, group: AttemptGroupRow): void {
-    const { repo, bus } = this.#deps;
-    const user = repo.getUserSession(session.userSessionId);
-    if (!user) return;
-    const reviewerName = `${group.baseSeat}.review`;
-    const profile = this.#snapshotProfile(this.#profile("reviewer", user.workspaceId));
-    const now = nowIso();
-    const instructions = "You are selecting the winning attempt of a best-of-N group. Compare the attempts' diffs and reports with evidence, run read-only validation where useful, and you MUST call select_attempt_winner exactly once before your closing handoff. Reject all attempts only when none is sound.";
-    const existing = repo.listParticipants(session.id);
-    if (!existing.some((p) => p.name === reviewerName)) {
-      const row = this.#participant(session.id, reviewerName, "agent", profile, instructions, undefined, [], existing.length, now);
-      repo.insertParticipant({ ...row, attemptGroupId: group.id, attemptRole: "reviewer" });
-    }
-    repo.patchAttemptGroup(group.id, { status: "reviewing", reviewerSeat: reviewerName });
-    bus.append({ type: "agent_session.attempt_group.review_started", userSessionId: session.userSessionId, agentSessionId: session.id,
-      payload: { agentSessionId: session.id, groupId: group.id, reviewer: reviewerName } });
-    const completed = Object.entries(group.attemptsState).filter(([, attempt]) => attempt.status === "completed");
-    const evidence = completed.map(([seatName, attempt]) => ({ kind: "artifact" as const, ref: attempt.artifactId ?? "", label: `diff ${seatName}` })).filter((ref) => ref.ref !== "");
-    this.post({ agentSessionId: session.id, speaker: { kind: "orchestrator", name: ORCHESTRATOR_SEAT }, to: reviewerName,
-      handoff: { core: { schemaVersion: 1, taskId: null, status: "pending", risk: "medium",
-        action: `Select the winning attempt for best-of-N group ${group.id}`,
-        state: { summary: `${completed.length} of ${group.attempts} attempts completed (base ${group.baseCommit.slice(0, 12)}; branches: ${completed.map(([, attempt]) => attempt.branch).join(", ")}). Compare their diffs with read_attempt_diff or git, then select.`, evidence },
-        result: { summary: null, artifacts: [] }, uncertainty: [],
-        nextAction: "Call select_attempt_winner with the winning seat, or rejectAll.", requestExpandedContext: false },
-        extension: { kind: "coordination", data: { attempts: Object.fromEntries(completed.map(([seatName, attempt]) => [seatName, { branch: attempt.branch, commit: attempt.commit }])) } } },
-      category: "assignment", dedupeKey: `bon:${group.id}:review` });
-  }
-
-  /** Terminal transition: clean up worktrees (diffs are already durable) and journal. */
-  #closeAttemptGroup(session: AgentSessionRow, group: AttemptGroupRow, status: "merged" | "rejected" | "failed" | "abandoned"): void {
-    const { repo, bus } = this.#deps;
-    const worktrees = this.#deps.worktrees;
-    const user = repo.getUserSession(session.userSessionId);
-    const workspaceRoot = user && this.#deps.getWorkspaceRoot ? this.#deps.getWorkspaceRoot(user.workspaceId) : null;
-    if (worktrees && workspaceRoot) {
-      for (const [seatName, attempt] of Object.entries(group.attemptsState)) {
-        const oversized = attempt.artifactId === null && attempt.status === "completed";
-        try { worktrees.remove(workspaceRoot, attempt.worktreePath, attempt.branch, { archiveBranch: oversized }); } catch { /* best effort */ }
-        repo.patchParticipant(session.id, seatName, { worktreePath: null });
-      }
-    }
-    repo.patchAttemptGroup(group.id, { status });
-    bus.append({ type: "agent_session.attempt_group.closed", userSessionId: session.userSessionId, agentSessionId: session.id,
-      payload: { agentSessionId: session.id, groupId: group.id, status } });
   }
 
   #participant(agentSessionId: string, name: string, role: "orchestrator" | "agent", profile: AgentProfile, extra: string, model: string | undefined, ownership: string[], ord: number, createdAt: string): ParticipantRow {
@@ -1857,34 +1398,39 @@ export class AgentSessionHost {
     });
   }
 
+  /**
+   * One roster seat line. At up to 20 seats the roster header is advisory:
+   * render at most three scopes per seat; the full ownership list stays in the
+   * DB and the API. The capability tag is there so a coordinator assigns work
+   * a seat can actually do — db-live-1 assigned "play a round using arrow
+   * keys" to a seat with no keyboard primitive; nothing in the system could
+   * notice before the seat had spent twenty minutes discovering it.
+   */
+  #seatLine(p: ParticipantRow, workState?: string): string {
+    const scopes = p.ownership.slice(0, 3).join(", ") + (p.ownership.length > 3 ? ` +${p.ownership.length - 3} more` : "");
+    return `${p.name} (${p.profileId}; ${capabilityTag(p.profileSnapshot as AgentProfile)}; owns: ${scopes || "coordination"}${workState === undefined ? "" : `; ${workState}`})`;
+  }
+
   #roster(session: AgentSessionRow): string {
-    return this.#deps.repo.listParticipants(session.id).map((p) => {
-      const scopes = p.ownership.slice(0, 3).join(", ") + (p.ownership.length > 3 ? ` +${p.ownership.length - 3} more` : "");
-      // Capability tag so a coordinator assigns work a seat can actually do.
-      // db-live-1 assigned "play a round using arrow keys" to a seat with no
-      // keyboard primitive; nothing in the system could notice before the seat
-      // had spent twenty minutes discovering it.
-      return `${p.name} (${p.profileId}; ${capabilityTag(p.profileSnapshot as AgentProfile)}; owns: ${scopes || "coordination"})`;
-    }).join("; ");
+    return this.#deps.repo.listParticipants(session.id).map((p) => this.#seatLine(p)).join("; ");
   }
 
   #buildSeatHooks(session: AgentSessionRow, seat: ParticipantRow): SdkHooksFragment {
-    const workspaceRoot = (() => {
-      const user = this.#deps.repo.getUserSession(session.userSessionId);
-      try { return user && this.#deps.getWorkspaceRoot ? this.#deps.getWorkspaceRoot(user.workspaceId) : ""; } catch { return ""; }
-    })();
+    // One workspace-root resolution for every fragment below.
+    const user = this.#deps.repo.getUserSession(session.userSessionId);
+    let workspaceRoot = "";
+    try { workspaceRoot = user && this.#deps.getWorkspaceRoot ? this.#deps.getWorkspaceRoot(user.workspaceId) : ""; } catch { workspaceRoot = ""; }
     // No send middleware: transfers go through the console-owned `send_handoff`
     // tool, which is journalled by `post()` directly. There is no second wire to
     // govern, and therefore no envelope to validate, coerce, or degrade.
     const fragments: SdkHooksFragment[] = [];
-    const user = this.#deps.repo.getUserSession(session.userSessionId);
     // No native task mirror: all four Task* tools are in every seat's
     // `disallowedTools`, so this fragment could never have fired. Seats use the
     // console-owned task_list/task_create/task_update.
-    if (this.#deps.worktrees && user && this.#deps.getWorkspaceRoot) {
+    if (this.#deps.worktrees && workspaceRoot !== "") {
       fragments.push(buildWorktreeHooks({
         repo: this.#deps.repo, bus: this.#deps.bus, worktrees: this.#deps.worktrees,
-        workspaceRoot: this.#deps.getWorkspaceRoot(user.workspaceId),
+        workspaceRoot,
         userSessionId: session.userSessionId, agentSessionId: session.id, seat: seat.name,
       }));
     }
@@ -2270,431 +1816,19 @@ export class AgentSessionHost {
    * in that database today. Each ask now mints its own controller.
    */
   #buildParticipantMcp(sdk: ConsoleSdk, session: AgentSessionRow, seat: ParticipantRow, lane: SeatLane): unknown {
-    // Messaging is native SendMessage (governed by the PreToolUse middleware);
-    // this server carries only handoff retrieval and console-owned runtime.
-    const profile = seat.profileSnapshot as AgentProfile;
     const user = this.#deps.repo.getUserSession(session.userSessionId);
     const workspaceRoot = user && this.#deps.getWorkspaceRoot ? this.#deps.getWorkspaceRoot(user.workspaceId) : "";
-    const tools: unknown[] = [];
-    // The disciplined transfer path. Its parameters ARE the handoff core, so
-    // the provider enforces the shape and there is nothing to hand-serialize —
-    // which removes the failure that destroyed db-live-1's verification report
-    // (a 4KB body could not be escaped into a JSON string, 15 times running).
-    // It is console-carried, so it also has no peer ref handshake to lose.
-    tools.push(sdk.tool("send_handoff",
-      "Send a typed handoff to another participant. This is the preferred way to transfer anything — assignments, progress, findings, failures, final results. Fill the fields; the console builds and journals the envelope. Your plain text output reaches no one.",
-      {
-        to: z.string().min(1).describe("Recipient's bare seat name, or \"main\" to reach the Orchestrator."),
-        category: z.enum(["assignment", "update", "milestone", "failure", "final", "decision"]).default("update"),
-        status: HandoffCoreSchema.shape.status,
-        risk: HandoffCoreSchema.shape.risk.default("medium"),
-        action: z.string().min(1).describe("The request or the work this handoff is about, in one line."),
-        stateSummary: z.string().min(1).describe("What is true now — the substance. Write the findings themselves, not a description of having found them."),
-        evidence: z.array(EvidenceRefSchema).default([]).describe("Pointers backing the state: files, artifacts, tasks, commands, urls."),
-        resultSummary: z.string().nullable().default(null),
-        artifacts: z.array(EvidenceRefSchema).default([]),
-        uncertainty: z.array(z.string()).default([]).describe("What you could not verify. Say so plainly rather than omitting it."),
-        nextAction: z.string().nullable().default(null).describe("The exact next step for the recipient, or null when nothing is owed."),
-        taskId: z.string().nullable().default(null),
-        requestExpandedContext: z.boolean().default(false),
-        dedupeKey: z.string().optional(),
-      },
-      async (args: SendHandoffArgs) => {
-        const draft: HandoffDraft = { core: {
-          schemaVersion: 1, taskId: args.taskId, status: args.status, risk: args.risk, action: args.action,
-          state: { summary: args.stateSummary, evidence: args.evidence },
-          result: { summary: args.resultSummary, artifacts: args.artifacts },
-          uncertainty: args.uncertainty, nextAction: args.nextAction, requestExpandedContext: args.requestExpandedContext,
-        }, extension: { kind: profile.handoffExtension ?? "generic", data: {} } };
-        // `post()` throws for a forbidden route (a genuine seat mistake → tool
-        // error) and for a withheld final (a Console-imposed HOLD → a
-        // structured NON-error, for the same reason ask_operator never returns
-        // isError: error results feed the error-streak watchdog and retries
-        // feed the identical-call watchdog, and punishing a seat for a hold the
-        // Console imposed kills the turn that must stay alive for the release).
-        let message: MessageRow & { queuedBehind?: string[] };
-        try {
-          message = this.post({ agentSessionId: session.id, speaker: { kind: seat.name === ORCHESTRATOR_SEAT ? "orchestrator" : "agent", name: seat.name },
-            to: args.to, handoff: draft, category: args.category, ...(args.dedupeKey ? { dedupeKey: args.dedupeKey } : {}),
-            ...(this.#laneOf(session.id, seat.name).activeTurn ? { turnId: this.#laneOf(session.id, seat.name).activeTurn!.turnId } : {}) });
-        } catch (error) {
-          if (error instanceof WithheldFinalError) {
-            return ok({ delivered: false, withheld: true, blockers: error.blockers, guidance: error.message });
-          }
-          return { content: [{ type: "text" as const, text: error instanceof Error ? error.message : String(error) }], isError: true };
-        }
-        const lane = this.#laneOf(session.id, seat.name);
-        if (lane.activeTurn) lane.activeTurn.sawSend = true;
-        if (message.queuedBehind) {
-          return ok({ delivered: false, queued: true, blockedBy: message.queuedBehind,
-            note: "Journaled and held: the Console delivers it the moment the blocking task(s) complete. Do not re-send." });
-        }
-        return ok({ delivered: true, messageSeq: message.seq, to: args.to, category: args.category });
-      }));
-    // Console-owned ledger. Keyed on a synthetic id derived from the agent
-    // session, so it survives context rotation and is shared by every seat —
-    // the native Task* tools are per-provider-session, which meant the
-    // db-live-1 coordinator watched its own four tasks vanish at the first
-    // rotation and never touched the ledger again for 28 minutes.
-    if (this.#deps.tasks && user) {
-      const listId = consoleTaskListId(session.id);
-      const attribution = { workspaceId: user.workspaceId, userSessionId: session.userSessionId, agentSessionId: session.id, participant: seat.name };
-      tools.push(sdk.tool("task_list", "Read the AgentSession's task ledger. Authoritative and shared by every seat; it survives context rotation.", {},
-        async () => ok({ tasks: this.#deps.tasks?.listForUserSession(session.userSessionId).filter((task) => task.agentSessionId === session.id) ?? [] })));
-      if (seat.name === ORCHESTRATOR_SEAT) {
-        tools.push(
-          sdk.tool("task_create", "Add a unit of work to the ledger. Track every unit you delegate.", {
-            taskId: z.string().min(1).describe("Short stable id you choose, e.g. \"1\" or \"interface\"."),
-            subject: z.string().min(1), description: z.string().default(""),
-            owner: z.string().min(1).describe("The seat that will DO this work — not you. The roster, the final caveats and the operator's run summary all read this."),
-          }, async (args: { taskId: string; subject: string; description: string; owner: string }) => {
-            const seats = new Set(this.#deps.repo.listParticipants(session.id).map((row) => row.name));
-            if (!seats.has(args.owner)) {
-              return { content: [{ type: "text" as const, text: `no seat named "${args.owner}" in this session; owners are one of: ${[...seats].join(", ")}` }], isError: true };
-            }
-            this.#deps.tasks?.upsertFromCreate({ sdkSessionId: listId, sdkTaskId: args.taskId, subject: args.subject, description: args.description, owner: args.owner, attribution });
-            return ok({ taskId: args.taskId, created: true, owner: args.owner });
-          }),
-          sdk.tool("task_update", "Update a ledger entry. Keep status honest as work progresses — the Console reports open tasks to the operator alongside your final.", {
-            taskId: z.string().min(1),
-            status: z.enum(["pending", "in_progress", "completed", "deleted"]).optional(),
-            owner: z.string().optional(), subject: z.string().optional(), description: z.string().optional(),
-            addBlockedBy: z.array(z.string()).optional(),
-          }, async (args: { taskId: string; status?: "pending" | "in_progress" | "completed" | "deleted"; owner?: string; subject?: string; description?: string; addBlockedBy?: string[] }) => {
-            const { taskId, ...patch } = args;
-            this.#deps.tasks?.applyUpdate({ sdkSessionId: listId, sdkTaskId: taskId, patch });
-            return ok({ taskId, updated: true });
-          }),
-        );
-      }
-    }
-    // Artifacts live in SQLite, outside every seat's read scope, and
-    // browser_screenshot hands back an opaque id. Without this a seat cannot
-    // inspect its own evidence: in db-live-1 both renderer and `check` resorted
-    // to scanning the filesystem for artifact files that were never on disk.
-    tools.push(sdk.tool("read_artifact",
-      "Read back an artifact you or a teammate produced (screenshot, diff, captured payload) by its artifact id. Images return as viewable content.",
-      { artifactId: z.string().min(1), cursor: z.string().optional(), maxBytes: z.number().int().min(1).max(32 * 1024).default(8 * 1024) },
-      async (args: { artifactId: string; cursor?: string; maxBytes: number }) => {
-        const artifact = this.#deps.bus.getArtifact(args.artifactId);
-        if (!artifact) return ok({ error: `no artifact ${args.artifactId}` });
-        if (artifact.mediaType.startsWith("image/")) {
-          // MCP's ImageContent is {type,data,mimeType} — NOT the Messages API's
-          // nested `source`. The old shape failed schema validation on every
-          // call, so db-live-2 captured three valid screenshots that no agent
-          // could open and `check` reimplemented visual verification in
-          // gl.readPixels instead. The `;base64` suffix is the storage
-          // convention (bus.storeArtifact branches on it for byte accounting);
-          // strip it only here, at the boundary.
-          const mimeType = artifact.mediaType.replace(/;base64$/, "");
-          if (artifact.content.length > MAX_IMAGE_BASE64_CHARS) {
-            return ok({ artifactId: artifact.id, mediaType: artifact.mediaType, bytes: artifact.bytes,
-              error: `image is ${Math.round(artifact.bytes / 1024)}KiB, over the ${Math.round(MAX_IMAGE_BASE64_CHARS / 4 * 3 / 1024)}KiB provider limit for inline images. Capture a narrower region, or verify it another way.` });
-          }
-          return { content: [{ type: "image", data: artifact.content, mimeType }] };
-        }
-        return ok({ artifactId: artifact.id, mediaType: artifact.mediaType, bytes: artifact.bytes, content: pageTail(artifact.content, args.cursor, args.maxBytes) });
-      }));
-    /**
-     * A place to put a long body that is NOT a JSON string parameter.
-     *
-     * db-live-2's `renderer` hit `InputValidationError: could not be parsed as
-     * JSON` twice on ~4.5KB `send_handoff` payloads, concluded "the handoff
-     * payload is getting truncated", and shipped a shortened report. Main hit
-     * the same failure family on its first `create_agent_session` and needed
-     * two retries. Any tool whose input embeds a long free-text body is exposed
-     * to it, and the model's own recovery strategy is self-truncation.
-     *
-     * With this, a 12KB verification report is an artifact referenced by
-     * `evidence`, and the handoff carries a short summary plus the pointer.
-     */
-    tools.push(sdk.tool("write_note",
-      "Store a long body — a verification report, a full log, an analysis — as a durable artifact and get its id back. Reference that id from send_handoff's evidence instead of pasting the body into a field. Never shorten a finding to make it fit a parameter.",
-      { title: z.string().min(1).max(200), body: z.string().min(1) },
-      async (args: { title: string; body: string }) => {
-        const stored = this.#deps.bus.storeArtifact(
-          `# ${args.title}\n\n${args.body}`,
-          "text/markdown",
-          { userSessionId: session.userSessionId, agentSessionId: session.id },
-        );
-        return ok({ ...stored, title: args.title,
-          use: `Reference it as evidence: {"kind":"artifact","ref":"${stored.artifactId}"}` });
-      }));
-    if (this.#deps.handoffs) {
-      tools.push(
-        sdk.tool("read_handoff", "Retrieve a lossless handoff section with cursor pagination. Use only when the compact envelope is insufficient.", {
-          handoffId: z.string(), section: z.enum(["core", "extension"]).default("core"), cursor: z.string().optional(), maxBytes: z.number().int().min(1).max(32 * 1024).default(8 * 1024),
-        }, async (args: { handoffId: string; section: "core" | "extension"; cursor?: string; maxBytes: number }) => ok(this.#deps.handoffs?.read(args.handoffId, args.section, args.cursor, args.maxBytes))),
-        sdk.tool("report_handoff_discrepancy", "Report a handoff claim contradicted by the repository, task ledger, journal, or artifact. The original evidence stays authoritative.", {
-          handoffId: z.string(), claim: z.string().min(1), evidence: z.string().min(1),
-        }, async (args: { handoffId: string; claim: string; evidence: string }) => {
-          this.#deps.handoffs?.reportDiscrepancy(args.handoffId, seat.name, args.claim, args.evidence); return ok({ recorded: true });
-        }),
-      );
-    }
-    if (profile.runtime.shell && this.#deps.processes) {
-      const scope = { workspaceRoot: seat.worktreePath ?? workspaceRoot, userSessionId: session.userSessionId, agentSessionId: session.id, participant: seat.name };
-      const processOwner = `${session.id}:${seat.name}`;
-      tools.push(
-        sdk.tool("process_start", "Start a Console-owned long-running process. Pass an executable and argv separately; cwd must remain in the workspace.", { command: z.string(), args: z.array(z.string()).default([]), cwd: z.string().default(".") }, async (args: { command: string; args: string[]; cwd: string }) => ok(this.#deps.processes?.start(scope, args.command, args.args, args.cwd))),
-        sdk.tool("process_read", "Read new process output, optionally waiting once for a state change. Use waitMs instead of polling. Output is paged tail-first (default 8KiB, newest last); use cursors for more, afterSeq for incremental reads.", { processId: z.string(), afterSeq: z.number().int().default(0), waitMs: z.number().int().min(0).max(60_000).default(0), cursor: z.string().optional(), maxBytes: z.number().int().min(1).max(32 * 1024).default(8 * 1024) }, async (args: { processId: string; afterSeq: number; waitMs: number; cursor?: string; maxBytes: number }) => {
-          const result = await this.#deps.processes?.read(processOwner, args.processId, args.afterSeq, args.waitMs);
-          if (!result) return ok(result);
-          const text = result.chunks.map((chunk) => `[${chunk.stream} #${chunk.seq}] ${chunk.text}`).join("");
-          return ok({ headSeq: result.headSeq, exit: result.exit, output: pageTail(text, args.cursor, args.maxBytes) });
-        }),
-        sdk.tool("process_stop", "Stop a process owned by this participant.", { processId: z.string() }, async (args: { processId: string }) => { this.#deps.processes?.stop(processOwner, args.processId); return ok({ stopped: true }); }),
-      );
-    }
-    if (profile.runtime.browser && this.#deps.browsers) {
-      const key = `${session.id}:${seat.name}`;
-      tools.push(
-        sdk.tool("browser_open", "Open a URL in the participant's managed local Chrome page.", { url: z.string() }, async (args: { url: string }) => ok(await this.#deps.browsers?.open(key, args.url))),
-        sdk.tool("browser_snapshot", "Inspect current URL, title, and rendered body text.", {}, async () => ok(await this.#deps.browsers?.snapshot(key))),
-        sdk.tool("browser_click", "Click a locator (CSS or Playwright text locator syntax).", { selector: z.string() }, async (args: { selector: string }) => { await this.#deps.browsers?.click(key, args.selector); return ok({ clicked: true }); }),
-        sdk.tool("browser_fill", "Fill an input located by CSS or Playwright locator syntax.", { selector: z.string(), value: z.string() }, async (args: { selector: string; value: string }) => { await this.#deps.browsers?.fill(key, args.selector, args.value); return ok({ filled: true }); }),
-        sdk.tool("browser_console", "Read browser console and page errors.", {}, async () => ok(await this.#deps.browsers?.consoleMessages(key))),
-        sdk.tool("browser_press", "Press a key (e.g. \"ArrowLeft\", \"Enter\", \"Space\"). Use this to exercise keyboard-driven UI — games, shortcuts, form submission. Target the page by default, or a locator to focus first.", {
-          keys: z.string().min(1), selector: z.string().optional(),
-          repeat: z.number().int().min(1).max(100).default(1), delayMs: z.number().int().min(0).max(2_000).optional(),
-        }, async (args: { keys: string; selector?: string; repeat: number; delayMs?: number }) =>
-          ok(await this.#deps.browsers?.press(key, args.keys, { ...(args.selector ? { selector: args.selector } : {}), repeat: args.repeat, ...(args.delayMs === undefined ? {} : { delayMs: args.delayMs }) }))),
-        sdk.tool("browser_evaluate", "Evaluate JavaScript in the page and return the result as JSON. Use it to read state the rendered text does not expose — localStorage, canvas/game state, module exports. Bare expressions and statement bodies both work. A result carrying `threw` means the page raised (a finding); `undefined:true` means the expression produced nothing, which is different from producing null.", {
-          expression: z.string().min(1),
-          timeoutMs: z.number().int().min(1_000).max(60_000).default(15_000),
-        }, async (args: { expression: string; timeoutMs: number }) => {
-          const outcome = await this.#deps.browsers?.evaluate(key, args.expression, args.timeoutMs);
-          // Only a compile failure is the SEAT's error — that is its own
-          // JavaScript failing to parse, and it is actionable. A page
-          // exception or a null is data, and marking those `isError` would
-          // feed the consecutive-error watchdog for legitimate probing.
-          if (outcome?.compileError !== undefined) {
-            return { content: [{ type: "text" as const, text: JSON.stringify(outcome) }], isError: true };
-          }
-          return ok(outcome);
-        }),
-      );
-      if (profile.runtime.screenshots) {
-        tools.push(sdk.tool("browser_screenshot", "Capture a full-page screenshot as a durable Console artifact.", {}, async () => ok(await this.#deps.browsers?.screenshot(key, { userSessionId: session.userSessionId, agentSessionId: session.id }))));
-      }
-    }
-    // Available to EVERY seat, not just the coordinator.
-    //
-    // `request_decision` was coordinator-only, so a specialist's question took
-    // three model hops to reach a human — specialist → coordinator judges →
-    // coordinator escalates — and every hop could drop it. In db-live-1 one
-    // did: `renderer` diagnosed the defect that made the deliverable
-    // non-functional and asked permission to fix it; the coordinator replied
-    // "Leave game.js as-is… do not report it as a bug," and the operator never
-    // learned the option existed. Two tools doing the same job is also how you
-    // get a model calling neither, so this replaces it outright.
-    {
-      tools.push(sdk.tool("ask_operator",
-        "Ask the Human Operator a question only they can answer. This reaches them DIRECTLY — do not route it through your coordinator. " +
-        "Use urgency:'blocking' when continuing would waste the work, or when you would otherwise substitute your own judgement for theirs: a version, a scope cut, a deviation from the brief. " +
-        "Use urgency:'deferred' when you can keep working meanwhile; the card renders now and their answer reaches you at your next delivery. " +
-        "Every answer is recorded and reaches every seat in this session, so you never need to relay it.",
-        {
-          question: z.string().min(1).describe("One concrete question. State the decision, not the background."),
-          header: z.string().max(24).optional().describe("Two or three words for the card's eyebrow."),
-          context: z.string().max(2_000).optional().describe("Why you are asking and what you already tried. Not an option."),
-          options: z.array(z.object({
-            label: z.string().min(1).max(60),
-            description: z.string().max(300).optional(),
-          })).min(2).max(4).describe("Real, mutually exclusive choices."),
-          recommendation: z.string().max(400).optional().describe("Which option you recommend and why. Always give one."),
-          urgency: z.enum(["blocking", "deferred"]).default("blocking"),
-          allowFreeText: z.boolean().default(true).describe("Let the operator answer outside your options."),
-        },
-        async (args: AskOperatorArgs) => {
-          try {
-            return await this.#askOperator(session, seat, lane, args);
-          } catch (error) {
-            return { content: [{ type: "text" as const, text: error instanceof Error ? error.message : String(error) }], isError: true };
-          }
-        }));
-    }
-    // Who is doing what, on demand. The roster carries this on every delivery
-    // already; this is for the seat that is ABOUT to start something and can
-    // check first. db-live-2's renderer spent ~16 minutes building a private
-    // duplicate of a dev server `page` had already written and was serving.
-    tools.push(sdk.tool("roster_status",
-      "See what every seat in this session is doing right now — live state, what they own, and what they last reported. Check before starting anything substantial that a teammate may already have done.",
-      {},
-      async () => ok({
-        seats: this.#deps.repo.listParticipants(session.id).map((row) => ({
-          name: row.name,
-          profile: row.profileId,
-          owns: row.ownership,
-          state: this.#seatWorkState(row),
-        })),
-      })));
-
-    // The curl that actually works.
-    //
-    // Managed children run in the HOST network namespace (`bwrap --share-net`)
-    // while a seat's Bash runs inside the SDK sandbox's own, so a seat cannot
-    // reach a server it just started. db-live-2's renderer burned three failed
-    // curls discovering this and concluded, correctly, "servers started via
-    // process_start live in a different network namespace than my Bash shell".
-    // Executed in the SERVER process, which shares the children's namespace.
-    if (profile.runtime.shell) {
-      tools.push(sdk.tool("http_probe",
-        "Make an HTTP request from the Console's own process — the only way to reach a server you started with process_start, since your Bash shell is in a different network namespace. Use this instead of curl for localhost checks.",
-        {
-          url: z.string().min(1).describe("http(s) URL. Loopback, or a host your profile is allowed to reach."),
-          method: z.enum(["GET", "HEAD", "POST"]).default("GET"),
-          timeoutMs: z.number().int().min(100).max(30_000).default(5_000),
-          maxBytes: z.number().int().min(1).max(32 * 1024).default(8 * 1024),
-        },
-        async (args: { url: string; method: "GET" | "HEAD" | "POST"; timeoutMs: number; maxBytes: number }) => {
-          let parsed: URL;
-          try { parsed = new URL(args.url); } catch { return ok({ error: `not a URL: ${args.url}` }); }
-          if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-            return ok({ error: "http_probe accepts only http(s) URLs" });
-          }
-          const loopback = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1" || parsed.hostname === "::1";
-          const allowed = resolvedDomains(profile, this.#deps.config?.allowedDomains ?? []);
-          if (!loopback && !allowed.some((domain) => domain === parsed.hostname || (domain.startsWith("*.") && parsed.hostname.endsWith(domain.slice(1))))) {
-            return ok({ error: `${parsed.hostname} is outside this profile's allowed hosts (${allowed.join(", ") || "none"})` });
-          }
-          try {
-            const response = await fetch(parsed, { method: args.method, signal: AbortSignal.timeout(args.timeoutMs) });
-            const body = args.method === "HEAD" ? "" : (await response.text()).slice(0, args.maxBytes);
-            return ok({ status: response.status, ok: response.ok, headers: Object.fromEntries(response.headers), body });
-          } catch (error) {
-            return ok({ error: error instanceof Error ? error.message : String(error) });
-          }
-        }));
-    }
-
-    {
-      const contracts = this.#deps.contracts;
-      if (seat.name === ORCHESTRATOR_SEAT) {
-        tools.push(sdk.tool("declare_contract",
-          "Declare a shared interface two or more seats must agree BEFORE any of them writes to it — a module signature, a data shape, a file format. The Console denies writes to the declared scopes until every party accepts. Use this whenever two seats' work has to fit together.",
-          {
-            name: z.string().min(1).max(60).describe("Short stable name, e.g. \"game-module\"."),
-            body: z.string().min(1).describe("The interface itself: signatures, params, return shapes, shared constants. Concrete enough that a party could implement against it without asking you anything."),
-            parties: z.array(z.string().min(1)).min(2).describe("Seat names that must agree. At least two — a contract with one party is a note."),
-            scopes: z.array(z.string().min(1)).min(1).describe("Files or directories this governs; writes to them are gated on acceptance."),
-          },
-          async (args: { name: string; body: string; parties: string[]; scopes: string[] }) => {
-            try {
-              const contract = contracts.declare({
-                agentSessionId: session.id, userSessionId: session.userSessionId,
-                declaredBy: seat.name, name: args.name, body: args.body,
-                parties: args.parties, scopes: args.scopes,
-              });
-              // The parties learn about it the same way they learn about
-              // everything else — a journaled handoff through the star.
-              for (const party of args.parties) {
-                try {
-                  this.post({ agentSessionId: session.id, speaker: { kind: "orchestrator", name: seat.name }, to: party,
-                    handoff: this.#simpleHandoff(`Contract "${args.name}" needs your agreement`, "pending",
-                      `${args.body}\n\nGoverns: ${args.scopes.join(", ")}. Parties: ${args.parties.join(", ")}.`,
-                      `Read it with read_contract("${contract.id}") and accept_contract({contractId:"${contract.id}", revision:${contract.revision}}) — or propose_contract_amendment if it is wrong. You cannot write to the governed paths until you do.`),
-                    category: "decision", dedupeKey: `contract:${contract.id}:${contract.revision}` });
-                } catch { /* one unreachable party must not fail the declaration */ }
-              }
-              return ok(contract);
-            } catch (error) {
-              return { content: [{ type: "text" as const, text: error instanceof Error ? error.message : String(error) }], isError: true };
-            }
-          }));
-        tools.push(sdk.tool("supersede_contract", "Retire a contract that no longer describes the work.", {
-          contractId: z.string().min(1), reason: z.string().min(1),
-        }, async (args: { contractId: string; reason: string }) => {
-          try { return ok(contracts.supersede(args.contractId, args.reason)); }
-          catch (error) { return { content: [{ type: "text" as const, text: error instanceof Error ? error.message : String(error) }], isError: true }; }
-        }));
-      }
-      tools.push(sdk.tool("read_contract", "Read a shared-interface contract: its body, revision, and where each party stands.", {
-        contractId: z.string().optional(), name: z.string().optional(),
-      }, async (args: { contractId?: string; name?: string }) => {
-        try {
-          if (args.contractId) return ok(contracts.get(args.contractId));
-          if (args.name) {
-            const found = contracts.findByName(session.id, args.name);
-            return ok(found ?? { error: `no open contract named ${args.name}` });
-          }
-          return ok({ contracts: contracts.listForSession(session.id) });
-        } catch (error) { return { content: [{ type: "text" as const, text: error instanceof Error ? error.message : String(error) }], isError: true }; }
-      }));
-      tools.push(sdk.tool("accept_contract",
-        "Accept a contract's CURRENT revision. Do this only once you have read it and can implement against it — accepting unblocks your writes to its scopes and tells the other parties you are building to this shape.",
-        { contractId: z.string().min(1), revision: z.number().int().min(1) },
-        async (args: { contractId: string; revision: number }) => {
-          try { return ok(contracts.accept(args.contractId, seat.name, args.revision)); }
-          catch (error) { return { content: [{ type: "text" as const, text: error instanceof Error ? error.message : String(error) }], isError: true }; }
-        }));
-      tools.push(sdk.tool("propose_contract_amendment",
-        "Change a contract you are party to. This bumps the revision and RESETS every acceptance, including your own — an amendment nobody re-agreed to would be a contract nobody agreed to. Use it when the shape is wrong, not to record a preference.",
-        { contractId: z.string().min(1), body: z.string().min(1), rationale: z.string().min(1) },
-        async (args: { contractId: string; body: string; rationale: string }) => {
-          try {
-            const contract = contracts.amend(args.contractId, seat.name, args.body, args.rationale);
-            for (const party of contract.parties.map((entry) => entry.participant)) {
-              if (party === seat.name) continue;
-              try {
-                this.post({ agentSessionId: session.id, speaker: { kind: seat.name === ORCHESTRATOR_SEAT ? "orchestrator" : "agent", name: seat.name },
-                  to: party === ORCHESTRATOR_SEAT || seat.name === ORCHESTRATOR_SEAT ? party : ORCHESTRATOR_SEAT,
-                  handoff: this.#simpleHandoff(`Contract "${contract.name}" amended to revision ${contract.revision}`, "pending",
-                    `${args.rationale}\n\n${contract.body}`,
-                    `Re-read and accept revision ${contract.revision}; your earlier acceptance no longer applies.`),
-                  category: "decision", dedupeKey: `contract:${contract.id}:${contract.revision}` });
-              } catch { /* notification is best effort */ }
-            }
-            return ok(contract);
-          } catch (error) { return { content: [{ type: "text" as const, text: error instanceof Error ? error.message : String(error) }], isError: true }; }
-        }));
-      tools.push(sdk.tool("object_to_contract",
-        "Say a contract is wrong without proposing the fix yourself. Reopens it for amendment and tells the coordinator why.",
-        { contractId: z.string().min(1), reason: z.string().min(1) },
-        async (args: { contractId: string; reason: string }) => {
-          try { return ok(contracts.object(args.contractId, seat.name, args.reason)); }
-          catch (error) { return { content: [{ type: "text" as const, text: error instanceof Error ? error.message : String(error) }], isError: true }; }
-        }));
-    }
-    if (seat.name === ORCHESTRATOR_SEAT && this.#deps.worktrees) {
-      tools.push(sdk.tool("start_attempts", "Run best-of-N parallel attempts at one high-stakes assignment: N isolated worktree seats race the same work, a fresh reviewer picks the winner, and only the winner's changes merge into the workspace. Requires the workspace to be a git repository. One active group at a time.", {
-        assignment: HandoffDraftSchema, profileId: z.string().default("implementer"), attempts: z.number().int().min(2).max(3).default(2),
-        baseSeatName: z.string().optional(), owns: z.array(z.string()).min(1), instructions: z.string().optional(), model: z.string().optional(),
-      }, async (args: { assignment: HandoffDraft; profileId: string; attempts: number; baseSeatName?: string; owns: string[]; instructions?: string; model?: string }) => {
-        try {
-          return ok(this.startAttempts({ agentSessionId: session.id, assignment: args.assignment, profileId: args.profileId,
-            attempts: args.attempts, ...(args.baseSeatName ? { baseSeatName: args.baseSeatName } : {}), owns: args.owns,
-            ...(args.instructions ? { instructions: args.instructions } : {}), ...(args.model ? { model: args.model } : {}) }));
-        } catch (error) {
-          return { content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }], isError: true };
-        }
-      }));
-    }
-    if (seat.attemptRole === "reviewer" && seat.attemptGroupId && this.#deps.worktrees) {
-      const groupId = seat.attemptGroupId;
-      tools.push(
-        sdk.tool("read_attempt_diff", "Read one attempt's captured diff (paged tail-first; cursors continue).", {
-          seat: z.string(), cursor: z.string().optional(), maxBytes: z.number().int().min(1).max(32 * 1024).default(8 * 1024),
-        }, async (args: { seat: string; cursor?: string; maxBytes: number }) => {
-          const group = this.#deps.repo.getAttemptGroup(groupId);
-          const artifactId = group?.attemptsState[args.seat]?.artifactId;
-          if (!artifactId) return { content: [{ type: "text", text: `no captured diff for attempt seat "${args.seat}"` }], isError: true };
-          const artifact = this.#deps.bus.getArtifact(artifactId);
-          if (!artifact) return { content: [{ type: "text", text: `diff artifact ${artifactId} is missing` }], isError: true };
-          return ok({ seat: args.seat, artifactId, diff: pageTail(artifact.content, args.cursor, args.maxBytes) });
-        }),
-        sdk.tool("select_attempt_winner", "Declare the winning attempt (merged into the workspace immediately) or reject all. Exactly one call; the structured result reports the real merge outcome.", {
-          winner: z.string().optional(), rejectAll: z.boolean().default(false), reason: z.string().min(1),
-        }, async (args: { winner?: string; rejectAll: boolean; reason: string }) => {
-          try {
-            return ok(this.selectAttemptWinner({ agentSessionId: session.id, groupId, reviewer: seat.name,
-              ...(args.winner ? { winner: args.winner } : {}), rejectAll: args.rejectAll, reason: args.reason }));
-          } catch (error) {
-            return { content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }], isError: true };
-          }
-        }),
-      );
-    }
+    const tools = buildSeatTools({
+      sdk, deps: this.#deps, session, seat, profile: seat.profileSnapshot as AgentProfile, user, workspaceRoot,
+      post: (input) => this.post(input),
+      askOperator: (args) => this.#askOperator(session, seat, lane, args),
+      currentTurnId: () => this.#laneOf(session.id, seat.name).activeTurn?.turnId,
+      markSawSend: () => { const current = this.#laneOf(session.id, seat.name); if (current.activeTurn) current.activeTurn.sawSend = true; },
+      seatWorkState: (row) => this.#seatWorkState(row),
+      simpleHandoff: (action, status, summary, nextAction) => this.#simpleHandoff(action, status, summary, nextAction),
+      startAttempts: (input) => this.startAttempts(input),
+      selectAttemptWinner: (input) => this.selectAttemptWinner(input),
+    });
     // alwaysLoad: the profile already decided this seat's tools. Deferring them
     // behind ToolSearch made every seat spend a round-trip rediscovering what
     // the console had granted it — 21 lookups in db-live-1, and a seat that
@@ -2733,15 +1867,10 @@ export class AgentSessionHost {
   }
 
   #composePrompt(session: AgentSessionRow, seat: ParticipantRow, rows: MessageRow[]): string {
-    // At up to 20 seats the roster header is advisory: render at most three
-    // scopes per seat; the full ownership list stays in the DB and the API.
-    const roster = this.#deps.repo.listParticipants(session.id).map((p) => {
-      const scopes = p.ownership.slice(0, 3).join(", ") + (p.ownership.length > 3 ? ` +${p.ownership.length - 3} more` : "");
-      // Seat worktree state on every line: the coordinator otherwise has no
-      // way to see in-progress work and infers absence from `ls` on the shared
-      // workspace — which cost db-live-1 ten minutes and three generations.
-      return `${p.name} (${p.profileId}; ${capabilityTag(p.profileSnapshot as AgentProfile)}; owns: ${scopes || "coordination"}; ${this.#seatWorkState(p)})`;
-    }).join("; ");
+    // Seat worktree state on every line: the coordinator otherwise has no
+    // way to see in-progress work and infers absence from `ls` on the shared
+    // workspace — which cost db-live-1 ten minutes and three generations.
+    const roster = this.#deps.repo.listParticipants(session.id).map((p) => this.#seatLine(p, this.#seatWorkState(p))).join("; ");
     const messages = rows.map((row) => {
       const id = (row.payload?.handoff as { id?: string } | undefined)?.id;
       if (!id || !this.#deps.handoffs) return `[${row.speakerName} → ${row.toName} | ${row.createdAt}] ${row.text}`;
@@ -3171,11 +2300,6 @@ export class AgentSessionHost {
   }
 
   #specialists(id: string): ParticipantRow[] { return this.#deps.repo.listParticipants(id).filter((p) => p.role === "agent"); }
-  #sessionStatus = new Map<string, AgentSessionStatus | null>();
-  /** Sessions whose operator obligation is closed — reported, or discharged. */
-  readonly #operatorDebtSettled = new Set<string>();
-  /** agentSessionId → dependency name → the version last merged, and by whom. */
-  readonly #dependencyPins = new Map<string, Map<string, { version: string; seat: string }>>();
   #refreshStatus(agentSessionId: string): void {
     const row = this.#deps.repo.getAgentSession(agentSessionId);
     if (!row || row.status !== "open") return;

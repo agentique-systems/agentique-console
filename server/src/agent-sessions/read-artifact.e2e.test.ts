@@ -108,10 +108,13 @@ describe("read_artifact (fake SDK)", () => {
     expect(JSON.stringify(payload.content)).toContain("hello");
   });
 
-  it("reports a missing artifact rather than throwing", async () => {
+  it("reports a missing artifact as a tool error rather than throwing", async () => {
     const { tool } = await seatWithArtifacts();
     const result = await tool.handler({ artifactId: "artifact_missing", maxBytes: 8 * 1024 }, {});
-    const payload = JSON.parse((result.content[0] as { text: string }).text) as { error: string };
-    expect(payload.error).toContain("artifact_missing");
+    // The same convention as read_attempt_diff: a reference to something that
+    // does not exist is the seat's mistake, so it is an isError result — not
+    // an `ok({error})` success shape the model has to notice.
+    expect(result.isError).toBe(true);
+    expect((result.content[0] as { text: string }).text).toContain("artifact_missing");
   });
 });
