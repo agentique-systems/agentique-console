@@ -177,14 +177,6 @@ heading("Health scorecard");
 const one = <T = number>(sql: string): T => (all<Record<string, T>>(sql)[0]?.n ?? 0 as T);
 const sends = one(`select count(*) as n from events where type = 'agent_session.tool.call'
   and json_extract(payload, '$.name') in ('SendMessage', 'mcp__console_agent__send_handoff')`);
-// Historical only: the native SendMessage transport and its envelope
-// validation are gone. Non-zero here means you are reading a pre-consolidation
-// run — in db-live-1 it was 59% of every send.
-const denied = one(`select count(*) as n from events where type = 'governance.send.denied'
-  and json_extract(payload, '$.kind') != 'wake_timeout'`);
-const degraded = one(`select count(*) as n from events where type = 'governance.send.degraded'`);
-const coerced = one(`select count(*) as n from events where type = 'governance.send.coerced'`);
-const peerCarried = one(`select count(*) as n from mailbox_deliveries where transport = 'peer'`);
 const rotations = one(`select count(*) as n from events where type = 'agent_session.context.rotated'`);
 const cpFailed = one(`select count(*) as n from events where type = 'handoff.checkpoint.failed'`);
 const cpTransport = one(`select count(*) as n from events where type = 'handoff.checkpoint.transport_failed'`);
@@ -194,14 +186,13 @@ const drift = one(`select count(*) as n from events where type = 'agent_session.
 const toolSearch = one(`select count(*) as n from events where type in ('agent_session.tool.call','user_session.tool.call')
   and json_extract(payload, '$.name') = 'ToolSearch'`);
 const cliSessions = one(`select count(distinct session_id) as n from provider_entries_v2`);
-const pct = (part: number, whole: number) => whole === 0 ? "–" : `${Math.round((part / whole) * 100)}%`;
 
 table([
   { metric: "transfers", value: num(sends), note: "send_handoff calls (plus legacy SendMessage on old runs)" },
-  { metric: "peer-carried deliveries", value: num(peerCarried), note: "LEGACY — one transport now; non-zero means a pre-consolidation run" },
-  { metric: "envelope denials", value: `${num(denied)} (${pct(denied, sends)})`, note: "LEGACY — the hand-written envelope is gone; db-live-1 was 59%" },
-  { metric: "delivered degraded", value: num(degraded), note: "LEGACY — typed fields cannot be malformed" },
-  { metric: "envelopes repaired", value: num(coerced), note: "LEGACY — nothing to repair" },
+  // The four LEGACY rows that used to sit here (peer-carried deliveries,
+  // envelope denials, delivered degraded, envelopes repaired) are gone. They
+  // are structurally zero on any post-consolidation run, and a scorecard whose
+  // value is that every row means something cannot afford rows that never do.
   { metric: "context rotations", value: num(rotations), note: "spurious rotation is the usual cause of repeated work" },
   { metric: "checkpoints failed", value: num(cpFailed), note: "successor inherited a reconstruction, not its own state" },
   { metric: "checkpoint transport failures", value: num(cpTransport), note: "NON-ZERO MEANS A CONSOLE BUG — the request never reached the model" },

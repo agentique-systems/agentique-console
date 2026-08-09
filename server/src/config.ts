@@ -38,6 +38,42 @@ export interface Config {
   /** Max resident seat processes machine-wide / per agent session. */
   seatMaxResident: number;
   seatMaxResidentPerSession: number;
+  /**
+   * How long a seat may sit parked inside `ask_operator` before the Console
+   * detaches the wait. The question stays open and answerable; only the held
+   * process is released, so a worst case is a seat idle for this long rather
+   * than one pinned until a human happens to return.
+   */
+  operatorAskDetachMs: number;
+  /**
+   * `git init` a non-repo workspace so seat isolation can engage. Off makes the
+   * Console leave operator directories alone at the cost of running every seat
+   * in one shared tree.
+   */
+  autoInitGit: boolean;
+  /**
+   * Wall-clock budget for provider retries within one turn. Past it the Console
+   * interrupts the turn deliberately instead of waiting out a schedule that has
+   * stopped growing.
+   */
+  retryBudgetMs: number;
+  /**
+   * Deny a seat's Write/Edit outside its declared ownership. Opt-in for one
+   * release: it can block a seat mid-work, and the roster's live work-state
+   * already removes most of the reason a seat strays.
+   */
+  enforceOwnership: boolean;
+  /**
+   * Hold an assignment whose blocker task is incomplete, releasing it when the
+   * blocker completes. The grace below stops a mis-declared dependency
+   * deadlocking a run.
+   */
+  assignmentBlockGraceMs: number;
+  /**
+   * Persist reasoning blocks as artifacts. Off by default: it is more of data
+   * the console already stores in tool inputs, but it is still more.
+   */
+  persistReasoning: boolean;
   /** How long a SendMessage waits for its recipient to spawn or unpark. */
   sendWakeTimeoutMs: number;
   /** Lease on a delivery hold (recipient pinned live) before it self-releases. */
@@ -115,6 +151,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     seatIdleReapMs: Number(env.CONSOLE_SEAT_IDLE_REAP_MS ?? 300_000),
     seatMaxResident: Number(env.CONSOLE_MAX_RESIDENT_SEATS ?? 8),
     seatMaxResidentPerSession: Number(env.CONSOLE_MAX_RESIDENT_SEATS_PER_SESSION ?? 4),
+    operatorAskDetachMs: Number(env.CONSOLE_OPERATOR_ASK_DETACH_MS ?? 300_000),
+    autoInitGit: env.CONSOLE_AUTO_INIT_GIT !== "0",
+    retryBudgetMs: Number(env.CONSOLE_RETRY_BUDGET_MS ?? 90_000),
+    enforceOwnership: env.CONSOLE_ENFORCE_OWNERSHIP === "1",
+    assignmentBlockGraceMs: Number(env.CONSOLE_ASSIGNMENT_BLOCK_GRACE_MS ?? 600_000),
+    persistReasoning: env.CONSOLE_PERSIST_REASONING === "1",
     sendWakeTimeoutMs: Number(env.CONSOLE_SEND_WAKE_TIMEOUT_MS ?? 30_000),
     deliveryHoldLeaseMs: Number(env.CONSOLE_DELIVERY_HOLD_LEASE_MS ?? 60_000),
     peerNamePrefix: env.CONSOLE_PEER_NAME_PREFIX ?? "console-",

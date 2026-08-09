@@ -1,8 +1,8 @@
 /**
  * The console MCP server, bound to one UserSession: create_agent_session (the
  * managed-session factory) plus read/list/profile and handoff retrieval.
- * Messaging is the native SendMessage tool (middleware-governed) and tasks are
- * the native task tools (hook-mirrored); neither lives here anymore.
+ * Messaging to a coordinator is `send_to_coordinator` — console-owned, route-
+ * checked and journaled, like every other transfer in the system.
  */
 import { z } from "zod";
 import { MAIN_RECIPIENT, ORCHESTRATOR_SEAT, type AgentSessionHost } from "../agent-sessions/host.ts";
@@ -15,7 +15,7 @@ import type { ConsoleSdk, SdkToolResult } from "../sdk/types.ts";
 import type { TaskService } from "../tasks/service.ts";
 import type { HandoffDraft } from "@agentique-console/shared";
 import type { HandoffService } from "../handoffs/service.ts";
-import { HandoffDraftSchema } from "../handoffs/schema.ts";
+import { EvidenceRefSchema, HandoffCoreSchema, HandoffDraftSchema } from "../handoffs/schema.ts";
 
 /**
  * Console-owned tasks are keyed by a synthetic SDK-session id: the
@@ -78,11 +78,13 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
       "Create and immediately launch a Console-managed AgentSession with one coordinator and 1-20 profile-bound specialists. The Console owns every provider session, mailbox delivery, retry, and event; never call Agent yourself.",
       {
         title: z.string().describe("Short working title for the session"),
-        mode: z
-          .enum(["execute", "plan_execute"])
-          .describe(
-            "plan_execute makes seats plan first and route the plan to you for approval",
-          ),
+        // `plan_execute` is deliberately not offered. Nothing anywhere moved an
+        // AgentSession's phase to `executing`, so every seat in such a session
+        // spawned permissionMode:"plan" forever and implementers never got
+        // write access — a mode the brief recommended and the runtime could not
+        // honour. Planning belongs on the UserSession lane, where the operator
+        // actually is.
+        mode: z.literal("execute").default("execute"),
         agents: z
           .array(
             z.object({
@@ -97,7 +99,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
                   "Ad-hoc brief (required when no preset; appended to the preset otherwise)",
                 ),
               model: z.string().optional().describe("Model override"),
-              owns: z.array(z.string()).min(1).describe("Explicit files, directories, component, or review scope this seat exclusively owns"),
+              owns: z.array(z.string()).default([]).describe("Files or directories this seat exclusively owns. Required for a seat that writes; leave empty for a read-only seat such as a reviewer — it owns no files."),
             }),
           )
           .min(1)
@@ -109,7 +111,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
       },
       async (args: {
         title: string;
-        mode: "execute" | "plan_execute";
+        mode: "execute";
         agents: {
           name: string;
           profileId: string;
@@ -127,15 +129,170 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
             agents: args.agents,
             briefing: args.briefing,
           });
-          const coordinator = repo.getParticipant(agentSessionId, ORCHESTRATOR_SEAT);
           return {
             agentSessionId,
             participants,
+            // Steer it with `send_to_coordinator`, not with a peer address:
+            // the native mesh is gone and a peer name is only live while the
+            // seat's process is.
             coordinator: ORCHESTRATOR_SEAT,
-            coordinatorAddress: coordinator?.peerName ?? ORCHESTRATOR_SEAT,
             status: "launched",
           };
         }),
+    ),
+
+    /**
+     * Main's ONLY journaled path to a coordinator after the initial briefing.
+     *
+     * Before this there was none. `prompt.ts` still instructed main to steer
+     * with native `SendMessage` and a JSON handoff envelope that the Console
+     * "validates, journals and rewrites" — but that middleware was deleted, so
+     * both of db-live-2's attempts came back "No agent named
+     * 'console-orchestrator-a8b946' is reachable", and even had one landed it
+     * would have bypassed `post()` entirely: no handoff record, no mailbox row,
+     * no route check. The console could not steer its own coordinator.
+     *
+     * Routing is free here: `#assertRoute` already permits exactly
+     * main → orchestrator and nothing else. Delivery goes through
+     * `#deliverConsole`, which spawns a parked seat — so a coordinator whose
+     * process has died is no longer an unreachable one.
+     */
+    sdk.tool(
+      "send_to_coordinator",
+      "Send a typed handoff to an AgentSession's coordinator. This is how you steer a running session after its briefing: assign more work, redirect, or relay an operator decision. The fields ARE the handoff; the Console builds, journals and carries the envelope.",
+      {
+        agentSessionId: z.string().min(1),
+        category: z.enum(["assignment", "update"]).default("update"),
+        status: HandoffCoreSchema.shape.status,
+        risk: HandoffCoreSchema.shape.risk.default("medium"),
+        action: z.string().min(1).describe("The request, in one line."),
+        stateSummary: z.string().min(1).describe("What is true now — the substance, not a description of it."),
+        evidence: z.array(EvidenceRefSchema).default([]),
+        resultSummary: z.string().nullable().default(null),
+        artifacts: z.array(EvidenceRefSchema).default([]),
+        uncertainty: z.array(z.string()).default([]),
+        nextAction: z.string().nullable().default(null),
+        taskId: z.string().nullable().default(null),
+        requestExpandedContext: z.boolean().default(false),
+      },
+      async (args: {
+        agentSessionId: string; category: "assignment" | "update";
+        status: HandoffDraft["core"]["status"]; risk: HandoffDraft["core"]["risk"];
+        action: string; stateSummary: string; evidence: HandoffDraft["core"]["state"]["evidence"];
+        resultSummary: string | null; artifacts: HandoffDraft["core"]["result"]["artifacts"];
+        uncertainty: string[]; nextAction: string | null; taskId: string | null; requestExpandedContext: boolean;
+      }) => guarded(() => {
+        owned(args.agentSessionId);
+        const message = host.post({
+          agentSessionId: args.agentSessionId,
+          speaker: { kind: "orchestrator", name: "main" },
+          to: ORCHESTRATOR_SEAT,
+          handoff: {
+            core: {
+              schemaVersion: 1, taskId: args.taskId, status: args.status, risk: args.risk, action: args.action,
+              state: { summary: args.stateSummary, evidence: args.evidence },
+              result: { summary: args.resultSummary, artifacts: args.artifacts },
+              uncertainty: args.uncertainty, nextAction: args.nextAction,
+              requestExpandedContext: args.requestExpandedContext,
+            },
+            extension: { kind: "coordination", data: {} },
+          },
+          category: args.category,
+        });
+        return { delivered: true, messageSeq: message.seq, to: ORCHESTRATOR_SEAT, category: args.category };
+      }),
+    ),
+
+    /**
+     * Main's ledger, console-owned and keyed to the AgentSession.
+     *
+     * It used to be the NATIVE Task* tools mirrored by `tasks/hooks.ts`, keyed
+     * on the provider `session_id` — which changes at every rotation. That is
+     * the exact orphan-on-rotation failure the README says was removed; it was
+     * removed for seats and left in place for main. db-live-2 ended with two
+     * parallel ledgers, 26 `task.updated` events for 4 real units, and the
+     * wrong owner on every row of one of them.
+     */
+    sdk.tool(
+      "task_create",
+      "Add a unit of work to the ledger. Track every unit you delegate; the Console reports open units to the operator alongside any final report.",
+      {
+        agentSessionId: z.string().min(1).describe("The session that will do the work."),
+        taskId: z.string().min(1).describe("Short stable id you choose, e.g. \"1\" or \"interface\"."),
+        subject: z.string().min(1),
+        description: z.string().default(""),
+        owner: z.string().min(1).describe("The seat that will DO this work — not you."),
+      },
+      async (args: { agentSessionId: string; taskId: string; subject: string; description: string; owner: string }) =>
+        guarded(() => {
+          const session = owned(args.agentSessionId);
+          tasks?.upsertFromCreate({
+            sdkSessionId: consoleTaskListId(args.agentSessionId), sdkTaskId: args.taskId,
+            subject: args.subject, description: args.description, owner: args.owner,
+            attribution: { workspaceId: repo.getUserSession(userSessionId)?.workspaceId ?? "", userSessionId, agentSessionId: session.id, participant: null },
+          });
+          return { taskId: args.taskId, created: true, owner: args.owner };
+        }),
+    ),
+
+    sdk.tool(
+      "task_update",
+      "Update a ledger entry. Keep statuses honest: in_progress when started, completed only when verified.",
+      {
+        agentSessionId: z.string().min(1),
+        taskId: z.string().min(1),
+        status: z.enum(["pending", "in_progress", "completed", "deleted"]).optional(),
+        owner: z.string().optional(),
+        subject: z.string().optional(),
+        description: z.string().optional(),
+        addBlockedBy: z.array(z.string()).optional(),
+      },
+      async (args: { agentSessionId: string; taskId: string; status?: "pending" | "in_progress" | "completed" | "deleted"; owner?: string; subject?: string; description?: string; addBlockedBy?: string[] }) =>
+        guarded(() => {
+          owned(args.agentSessionId);
+          const { agentSessionId, taskId, ...patch } = args;
+          tasks?.applyUpdate({ sdkSessionId: consoleTaskListId(agentSessionId), sdkTaskId: taskId, patch });
+          return { taskId, updated: true };
+        }),
+    ),
+
+    sdk.tool(
+      "task_list",
+      "Read the ledger for this conversation. Authoritative, shared with every seat, and it survives context rotation.",
+      { agentSessionId: z.string().optional() },
+      async (args: { agentSessionId?: string }) =>
+        guarded(() => ({
+          tasks: (tasks?.listForUserSession(userSessionId) ?? [])
+            .filter((task) => args.agentSessionId === undefined || task.agentSessionId === args.agentSessionId),
+        })),
+    ),
+
+    /**
+     * The replacement for the removed native `ScheduleWakeup`.
+     *
+     * That tool worked, but it woke a console-owned lane with no mailbox row,
+     * no handoff and no turn attribution — exactly the class of second wire the
+     * send-middleware deletion was meant to eliminate. It also failed twice in
+     * each live run because the model omitted a required field it could not
+     * discover.
+     */
+    sdk.tool(
+      "set_deadline",
+      "Wake yourself later. Use it when you are waiting on something the Console cannot notify you about; you do NOT need it for agent reports, which wake you automatically.",
+      {
+        delaySeconds: z.number().int().min(30).max(86_400),
+        reason: z.string().min(1).describe("What you want to check when it fires. You will be handed this text."),
+      },
+      async (args: { delaySeconds: number; reason: string }) => guarded(() => {
+        const id = newId("cron");
+        const dueAt = new Date(Date.now() + args.delaySeconds * 1000).toISOString();
+        repo.insertCron({
+          id, userSessionId, sdkCronId: id, schedule: `@once ${dueAt}`,
+          prompt: args.reason, oneShot: true, dueAt, status: "active",
+          createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+        });
+        return { deadlineId: id, dueAt, reason: args.reason };
+      }),
     ),
 
     sdk.tool(

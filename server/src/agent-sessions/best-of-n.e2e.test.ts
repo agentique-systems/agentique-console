@@ -3,6 +3,7 @@
  * server-side diff capture, reviewer selection through the dedicated tool,
  * and winner-only merge-back.
  */
+import { loadConfig } from "../config.ts";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -161,13 +162,16 @@ describe("best-of-N worktree execution (fake SDK + real git)", () => {
     }
   });
 
-  it("refuses fan-out in a non-git workspace with an explanatory error", async () => {
+  it("refuses fan-out when the workspace cannot be isolated, with an explanatory error", async () => {
     const world = makeBonWorld({ winner: "impl.1" });
     const plainDir = fs.mkdtempSync(path.join(os.tmpdir(), "agentique-plain-"));
     const h = makeDelegationHarness(async function* () {
       yield initMessage("idle-1");
       yield successMessage();
-    }, { hostOverrides: { getWorkspaceRoot: () => plainDir, worktrees: new WorktreeManager({ dataDir: path.join(plainDir, "data") }) } });
+      // Auto-init would otherwise make this a repo; best-of-N genuinely
+      // cannot run without one, and this is the path a nested repo produces.
+    }, { hostOverrides: { getWorkspaceRoot: () => plainDir, worktrees: new WorktreeManager({ dataDir: path.join(plainDir, "data") }),
+      config: { ...loadConfig({}), autoInitGit: false } } });
     const userSessionId = h.addUserSession();
     const created = h.host.createSession({ userSessionId, title: "no-git", mode: "execute", agents: [{ name: "scout", profileId: "explorer" }] });
     expect(() => h.host.startAttempts({ agentSessionId: created.agentSessionId, assignment: handoff("go", "pending"), owns: ["x"] }))

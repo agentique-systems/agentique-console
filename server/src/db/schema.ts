@@ -44,9 +44,50 @@ export const userSessions = sqliteTable("user_sessions", {
   contextTokens: integer("context_tokens").notNull().default(0),
   memory: text("memory").notNull().default(""),
   latestHandoffId: text("latest_handoff_id"),
+  /**
+   * Baseline for the SDK's cumulative `total_cost_usd` / `duration_api_ms`.
+   * Persisted rather than held in the lane, because a resumed provider session
+   * carries its running total across the process that started it.
+   */
+  cumulativeCostUsd: real("cumulative_cost_usd").notNull().default(0),
+  cumulativeApiDurationMs: integer("cumulative_api_duration_ms").notNull().default(0),
+  /**
+   * Orthogonal to `status`. `status` is "in my active list"; this is "is the
+   * work done". `awaiting_signoff` is its own state because it is the only one
+   * where the Console asserts done and the operator has not agreed.
+   */
+  runState: text("run_state", { enum: ["active", "awaiting_signoff", "completed"] })
+    .notNull()
+    .default("active"),
+  /** HEAD when the first agent session was created; diff base for the summary. */
+  runBaseCommit: text("run_base_commit"),
+  latestRunSummaryId: text("latest_run_summary_id"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });
+
+/** One proposed end-of-run report, awaiting or carrying the operator's verdict. */
+export const runSummaries = sqliteTable(
+  "run_summaries",
+  {
+    id: text("id").primaryKey(),
+    userSessionId: text("user_session_id")
+      .notNull()
+      .references(() => userSessions.id),
+    /** Events window covered; the next summary starts at seqTo + 1. */
+    seqFrom: integer("seq_from").notNull(),
+    seqTo: integer("seq_to").notNull(),
+    verdict: text("verdict", { enum: ["completed", "completed_with_caveats", "failed"] }).notNull(),
+    document: text("document", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
+    status: text("status", { enum: ["proposed", "accepted", "changes_requested", "superseded"] })
+      .notNull()
+      .default("proposed"),
+    note: text("note"),
+    createdAt: text("created_at").notNull(),
+    resolvedAt: text("resolved_at"),
+  },
+  (table) => [index("run_summaries_session").on(table.userSessionId, table.createdAt)],
+);
 
 export const agentSessions = sqliteTable("agent_sessions", {
   id: text("id").primaryKey(),
@@ -99,6 +140,11 @@ export const participants = sqliteTable(
     pendingTurnSeq: integer("pending_turn_seq").notNull().default(0),
     /** Transcript watermark: highest message seq this seat has been shown. */
     lastSeenSeq: integer("last_seen_seq").notNull().default(0),
+    /** See userSessions: the cumulative baseline outlives the lane process. */
+    cumulativeCostUsd: real("cumulative_cost_usd").notNull().default(0),
+    cumulativeApiDurationMs: integer("cumulative_api_duration_ms").notNull().default(0),
+    /** Watermark for the per-delivery operator-decision delta. */
+    lastDecisionAt: text("last_decision_at"),
     /** Isolated git worktree this seat works in; NULL = the real workspace. */
     worktreePath: text("worktree_path"),
     /** The commit the seat's worktree branched from (diff base). */
@@ -176,12 +222,33 @@ export const interactions = sqliteTable("interactions", {
   userSessionId: text("user_session_id")
     .notNull()
     .references(() => userSessions.id),
+  /** Where it was raised. null/null = the main lane; else the asking seat. */
+  agentSessionId: text("agent_session_id"),
+  participant: text("participant"),
   kind: text("kind", { enum: ["question", "plan_approval"] }).notNull(),
   status: text("status", {
     enum: ["pending", "answered", "rejected", "dismissed", "stale"],
   })
     .notNull()
     .default("pending"),
+  /** blocking parks the asker; deferred hands the answer over at its next delivery. */
+  urgency: text("urgency", { enum: ["blocking", "deferred"] })
+    .notNull()
+    .default("blocking"),
+  source: text("source", { enum: ["agent", "uncertainty", "console"] })
+    .notNull()
+    .default("agent"),
+  recommendation: text("recommendation"),
+  /** Normalized (asker, question) — an open duplicate returns the same card. */
+  dedupeKey: text("dedupe_key"),
+  allowFreeText: integer("allow_free_text", { mode: "boolean" }).notNull().default(false),
+  /** The asker's promise died; the answer will arrive by mailbox, not by return. */
+  detached: integer("detached", { mode: "boolean" }).notNull().default(false),
+  expiresAt: text("expires_at"),
+  defaultOption: text("default_option"),
+  autoTaken: integer("auto_taken", { mode: "boolean" }).notNull().default(false),
+  /** When the ASKING SEAT was told — distinct from resolvedAt (when the operator answered). */
+  flushedAt: text("flushed_at"),
   payload: text("payload", { mode: "json" })
     .$type<Record<string, unknown>>()
     .notNull(),
@@ -190,6 +257,77 @@ export const interactions = sqliteTable("interactions", {
   createdAt: text("created_at").notNull(),
   resolvedAt: text("resolved_at"),
 });
+
+/**
+ * Decisions the operator has actually made. Durable, session-scoped, and read
+ * back into every seat's prompt — so an answer given once is known by every
+ * agent and every later generation, instead of dying in the transcript of the
+ * one session that happened to ask.
+ */
+export const operatorDecisions = sqliteTable(
+  "operator_decisions",
+  {
+    id: text("id").primaryKey(),
+    userSessionId: text("user_session_id")
+      .notNull()
+      .references(() => userSessions.id),
+    agentSessionId: text("agent_session_id"),
+    interactionId: text("interaction_id"),
+    /** Seat name, "orchestrator", "main", or "console". */
+    askedBy: text("asked_by").notNull(),
+    source: text("source", { enum: ["interaction", "plan_approval", "ttl_default"] }).notNull(),
+    question: text("question").notNull(),
+    answer: text("answer").notNull(),
+    note: text("note"),
+    /** Taken on TTL expiry rather than chosen — weaker evidence of intent. */
+    autoTaken: integer("auto_taken", { mode: "boolean" }).notNull().default(false),
+    supersededBy: text("superseded_by"),
+    createdAt: text("created_at").notNull(),
+  },
+  (table) => [index("operator_decisions_session").on(table.userSessionId, table.createdAt)],
+);
+
+/**
+ * A shared interface the parties must agree before any of them writes to its
+ * scopes. Four statuses plus a revision counter: amending is revision+1 with
+ * every acceptance reset, because an amendment that leaves prior acceptances
+ * standing is a contract nobody agreed to.
+ */
+export const contracts = sqliteTable(
+  "contracts",
+  {
+    id: text("id").primaryKey(),
+    agentSessionId: text("agent_session_id").notNull().references(() => agentSessions.id),
+    userSessionId: text("user_session_id").notNull(),
+    name: text("name").notNull(),
+    declaredBy: text("declared_by").notNull(),
+    status: text("status", { enum: ["proposed", "accepted", "superseded", "abandoned"] })
+      .notNull()
+      .default("proposed"),
+    revision: integer("revision").notNull().default(1),
+    body: text("body").notNull(),
+    /** Paths this contract governs; writes to them are gated on acceptance. */
+    scopes: text("scopes", { mode: "json" }).$type<string[]>().notNull().default([]),
+    supersedes: text("supersedes"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [index("contracts_session").on(table.agentSessionId, table.status)],
+);
+
+export const contractParties = sqliteTable(
+  "contract_parties",
+  {
+    contractId: text("contract_id").notNull().references(() => contracts.id),
+    participant: text("participant").notNull(),
+    state: text("state", { enum: ["pending", "accepted", "objected"] }).notNull().default("pending"),
+    /** Which revision this party accepted; an amendment bumps past it. */
+    revision: integer("revision").notNull().default(0),
+    comment: text("comment"),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.contractId, table.participant] })],
+);
 
 /** Mirror of native CronCreate jobs; the CLI's schedule is authoritative. */
 export const crons = sqliteTable(
@@ -201,6 +339,8 @@ export const crons = sqliteTable(
     schedule: text("schedule").notNull(),
     prompt: text("prompt").notNull(),
     oneShot: integer("one_shot", { mode: "boolean" }).notNull().default(false),
+    /** Absolute firing time for a console-owned deadline; null for a cron. */
+    dueAt: text("due_at"),
     status: text("status", { enum: ["active", "deleted"] }).notNull().default("active"),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),

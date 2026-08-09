@@ -6,7 +6,7 @@
 import { MessagesSquare, Plus } from "lucide-react";
 
 import { useUserSessions } from "@/api/queries";
-import type { UserSession } from "@agentique-console/shared";
+import type { UserSessionListItem } from "@agentique-console/shared";
 import { Button } from "@/components/ui/button";
 import { timeAgo } from "@/lib/status";
 import { cn } from "@/lib/utils";
@@ -80,16 +80,19 @@ function SessionRow({
   session,
   active,
 }: {
-  session: UserSession;
+  session: UserSessionListItem;
   active: boolean;
 }) {
   const openSession = useUiStore((s) => s.openSession);
-  // Attention is a CLIENT-SIDE derivation: the list endpoint doesn't carry
-  // pending interactions, and a GET /:id per row would be wasteful — so the
-  // event router maintains ui.awaitingInput from question.asked/plan.proposed
-  // (set) and answered/resolved/message (clear). See stores/ui.ts.
-  const awaiting = useUiStore((s) => s.awaitingInput.has(session.id));
+  // Attention is SERVER-authoritative now (`pendingInteractions` on the list
+  // response), with ui.awaitingInput kept as a low-latency overlay for the gap
+  // between an event arriving and the list refetching. The overlay alone was
+  // lossy on cold boot — which is exactly when the operator most needs to know
+  // a run is waiting on them.
+  const overlay = useUiStore((s) => s.awaitingInput.has(session.id));
   const archived = session.status === "archived";
+  const done = session.runState === "completed";
+  const awaiting = !archived && (session.pendingInteractions > 0 || session.runState === "awaiting_signoff" || overlay);
 
   return (
     <li>
@@ -104,10 +107,16 @@ function SessionRow({
         onClick={() => openSession(session.id)}
       >
         <span className="flex items-center gap-1.5">
-          {awaiting && !archived && (
+          {awaiting && (
             <span
               aria-label="needs you"
-              className="size-1.5 shrink-0 rounded-full bg-attention"
+              className="size-2 shrink-0 rounded-full bg-attention"
+            />
+          )}
+          {done && !awaiting && (
+            <span
+              aria-label="done"
+              className="size-2 shrink-0 rounded-full bg-status-completed"
             />
           )}
           <span
@@ -120,7 +129,7 @@ function SessionRow({
           </span>
         </span>
         <span className="text-3xs text-muted-foreground">
-          {timeAgo(session.updatedAt)}
+          {awaiting ? "needs you · " : done ? "done · " : ""}{timeAgo(session.updatedAt)}
         </span>
       </button>
     </li>

@@ -8,6 +8,7 @@ import type {
   GetUserSessionResponse,
   PatchUserSessionBody,
   UserSession,
+  UserSessionListItem,
 } from "@agentique-console/shared";
 import { badRequest, notFound } from "../api/errors.ts";
 import { Repo, toWireUserSession, type UserSessionRow } from "../db/repo.ts";
@@ -25,6 +26,7 @@ export class UserSessionService {
   readonly #interactions: InteractionService;
   readonly #workspaces: WorkspaceService;
   readonly #archiveAgentSessions: ((userSessionId: string) => void) | undefined;
+  readonly #completion: { schedule(userSessionId: string): void } | undefined;
 
   constructor(deps: {
     repo: Repo;
@@ -33,6 +35,7 @@ export class UserSessionService {
     interactions: InteractionService;
     workspaces: WorkspaceService;
     archiveAgentSessions?: (userSessionId: string) => void;
+    completion?: { schedule(userSessionId: string): void };
   }) {
     this.#repo = deps.repo;
     this.#bus = deps.bus;
@@ -40,6 +43,7 @@ export class UserSessionService {
     this.#interactions = deps.interactions;
     this.#workspaces = deps.workspaces;
     this.#archiveAgentSessions = deps.archiveAgentSessions;
+    this.#completion = deps.completion;
   }
 
   create(body: CreateUserSessionBody): UserSession {
@@ -63,6 +67,11 @@ export class UserSessionService {
       contextTokens: 0,
       memory: "",
       latestHandoffId: null,
+      cumulativeCostUsd: 0,
+      cumulativeApiDurationMs: 0,
+      runState: "active",
+      runBaseCommit: null,
+      latestRunSummaryId: null,
       createdAt: now,
       updatedAt: now,
     };
@@ -78,8 +87,13 @@ export class UserSessionService {
     return session;
   }
 
-  list(workspaceId: string): UserSession[] {
-    return this.#repo.listUserSessions(workspaceId).map(toWireUserSession);
+  list(workspaceId: string): UserSessionListItem[] {
+    // One grouped query rather than N: the sidebar renders every session.
+    const pending = this.#repo.countPendingInteractions(workspaceId);
+    return this.#repo.listUserSessions(workspaceId).map((row) => ({
+      ...toWireUserSession(row),
+      pendingInteractions: pending.get(row.id) ?? 0,
+    }));
   }
 
   get(id: string): GetUserSessionResponse {
@@ -123,6 +137,7 @@ export class UserSessionService {
     // The lane's options are frozen at spawn: archiving shuts it down, a mode
     // change recycles it so the next message respawns with fresh options.
     if (changes.status === "archived") {
+      this.#completion?.schedule(id);
       this.#archiveAgentSessions?.(id);
       void this.#runner.closeSession(id);
     } else if (changes.mode !== undefined) {

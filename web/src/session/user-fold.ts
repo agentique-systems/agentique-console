@@ -57,6 +57,34 @@ export interface PlanItem {
     readonly note?: string;
   };
 }
+/**
+ * The Console's end-of-run report, awaiting the operator's verdict.
+ *
+ * Carries the bounded projection from the event so the collapsed card needs no
+ * fetch; the expanded view pulls the full document.
+ */
+export interface RunSummaryItem {
+  readonly type: "run_summary";
+  readonly runId: string;
+  readonly summaryId: string;
+  readonly headline: string;
+  readonly verdict: "completed" | "completed_with_caveats" | "failed";
+  readonly stats: {
+    readonly filesChanged: number;
+    readonly tasks: { readonly completed: number; readonly total: number };
+    readonly durationMs: number;
+    readonly deadAirMs: number;
+    readonly costUsd: number | null;
+    /** Below 0.9 the cost renders as partial rather than as a confident figure. */
+    readonly costCoverage: number;
+    readonly openUncertainty: number;
+    readonly reaped: { readonly processes: number; readonly browsers: number; readonly leakedBefore: number };
+  };
+  readonly resolution?: {
+    readonly decision: "accept" | "changes";
+    readonly note?: string;
+  };
+}
 export interface TurnItem {
   readonly type: "turn";
   readonly turnId: string;
@@ -75,6 +103,7 @@ export type UserItem =
   | ToolItem
   | QuestionItem
   | PlanItem
+  | RunSummaryItem
   | TurnItem
   | TurnErrorItem
   | RuntimeItem
@@ -91,6 +120,8 @@ export function itemKey(item: UserItem): string {
       return `question:${item.interactionId}`;
     case "plan":
       return `plan:${item.interactionId}`;
+    case "run_summary":
+      return `run_summary:${item.runId}`;
     case "turn":
       return `turn:${item.turnId}`;
     case "turn_error":
@@ -109,6 +140,7 @@ export function foldUserItems(events: readonly ConsoleEvent[]): UserItem[] {
   const toolCounts = new Map<string, number>();
   const questionIndex = new Map<string, number>();
   const planIndex = new Map<string, number>();
+  const runSummaryIndex = new Map<string, number>();
 
   for (const event of events) {
     const id = eventId(event);
@@ -187,6 +219,47 @@ export function foldUserItems(events: readonly ConsoleEvent[]): UserItem[] {
         };
         break;
       }
+
+      case "run.completion.proposed": {
+        runSummaryIndex.set(event.payload.runId, items.length);
+        items.push({
+          type: "run_summary",
+          runId: event.payload.runId,
+          summaryId: event.payload.summaryId,
+          headline: event.payload.headline,
+          verdict: event.payload.verdict,
+          stats: {
+            filesChanged: event.payload.filesChanged,
+            tasks: event.payload.tasks,
+            durationMs: event.payload.durationMs,
+            deadAirMs: event.payload.deadAirMs,
+            costUsd: event.payload.costUsd,
+            costCoverage: event.payload.costCoverage,
+            openUncertainty: event.payload.openUncertainty,
+            reaped: event.payload.reaped,
+          },
+        });
+        break;
+      }
+
+      case "run.signoff.resolved": {
+        const index = runSummaryIndex.get(event.payload.runId);
+        if (index === undefined) break;
+        const summary = items[index];
+        if (summary?.type !== "run_summary") break;
+        items[index] = {
+          ...summary,
+          resolution: {
+            decision: event.payload.decision,
+            ...(event.payload.note === undefined ? {} : { note: event.payload.note }),
+          },
+        };
+        break;
+      }
+
+      // `run.reopened` deliberately does NOT clear the resolved card. It stays
+      // in the transcript as a record of what was proposed and what the
+      // operator said; the next proposal pushes a NEW card below it.
 
       case "user_session.plan.proposed": {
         planIndex.set(event.payload.interactionId, items.length);
@@ -271,9 +344,25 @@ export function foldUserItems(events: readonly ConsoleEvent[]): UserItem[] {
  * Busy = an unsettled turn is in flight, or the last settle left jobs queued.
  * Drives the header spinner + interrupt affordance.
  */
-export function foldBusy(events: readonly ConsoleEvent[]): boolean {
+/**
+ * What the session is actually doing.
+ *
+ * `busy` alone was the db-live-2 lie: `AskUserQuestion` parks its turn forever,
+ * so an open turn meant busy meant a spinner — and "working", "waiting on you",
+ * and "finished but nobody said so" were the same pixels. `blocked` separates
+ * the middle case, which is the one the operator can act on.
+ */
+export interface SessionPosture {
+  /** A turn is genuinely running. */
+  readonly busy: boolean;
+  /** A turn is parked on a card only the operator can resolve. */
+  readonly blocked: boolean;
+}
+
+export function foldPosture(events: readonly ConsoleEvent[]): SessionPosture {
   const seen = new Set<string>();
   const open = new Set<string>();
+  const pending = new Set<string>();
   let queuedJobs = 0;
   for (const event of events) {
     const id = eventId(event);
@@ -286,7 +375,18 @@ export function foldBusy(events: readonly ConsoleEvent[]): boolean {
     } else if (event.type === "user_session.turn.settled") {
       open.delete(event.payload.turnId);
       queuedJobs = event.payload.queuedJobs;
+    } else if (event.type === "user_session.question.asked" || event.type === "user_session.plan.proposed") {
+      pending.add(event.payload.interactionId);
+    } else if (event.type === "user_session.question.answered" || event.type === "user_session.plan.resolved") {
+      pending.delete(event.payload.interactionId);
     }
   }
-  return open.size > 0 || queuedJobs > 0;
+  const blocked = pending.size > 0;
+  // A turn parked on a card is NOT busy. Reporting it as busy is what kept the
+  // spinner running after db-live-2's run was over.
+  return { busy: !blocked && (open.size > 0 || queuedJobs > 0), blocked };
+}
+
+export function foldBusy(events: readonly ConsoleEvent[]): boolean {
+  return foldPosture(events).busy;
 }

@@ -10,7 +10,13 @@
  */
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+
+/** Compares resolved paths so a symlinked or trailing-slash root still matches. */
+function samePath(a: string, b: string): boolean {
+  try { return fs.realpathSync(a) === fs.realpathSync(b); } catch { return path.resolve(a) === path.resolve(b); }
+}
 
 const GIT_IDENTITY = ["-c", "user.name=Agentique Console", "-c", "user.email=console@agentique.invalid"];
 const GIT_TIMEOUT_MS = 60_000;
@@ -64,11 +70,94 @@ export class WorktreeManager {
     }
   }
 
+  /**
+   * Whether the workspace is a repository ROOT — not merely somewhere inside
+   * one.
+   *
+   * `--is-inside-work-tree` is true for any subdirectory of any repo, so on its
+   * own it would happily report `true` for a workspace nested in a monorepo.
+   * The seat worktrees would then branch off the PARENT repo's HEAD, and
+   * `#onSeatWorktreePost` would merge a seat's work straight into the parent —
+   * a repository the operator never pointed the Console at.
+   *
+   * Requiring the toplevel to BE the workspace root is what makes isolation a
+   * containment guarantee rather than a naming convention.
+   */
   isGitRepo(workspaceRoot: string): boolean {
     try {
-      return this.#git(workspaceRoot, ["rev-parse", "--is-inside-work-tree"]).trim() === "true";
+      if (this.#git(workspaceRoot, ["rev-parse", "--is-inside-work-tree"]).trim() !== "true") return false;
+      const toplevel = this.#git(workspaceRoot, ["rev-parse", "--show-toplevel"]).trim();
+      return samePath(toplevel, workspaceRoot);
     } catch {
       return false;
+    }
+  }
+
+  /**
+   * Inside somebody else's repository. Distinct from "not a repo at all",
+   * because the two want opposite treatment: a plain directory can be safely
+   * `git init`ed, and a nested one absolutely cannot.
+   */
+  isInsideOtherRepo(workspaceRoot: string): boolean {
+    try {
+      if (this.#git(workspaceRoot, ["rev-parse", "--is-inside-work-tree"]).trim() !== "true") return false;
+      const toplevel = this.#git(workspaceRoot, ["rev-parse", "--show-toplevel"]).trim();
+      return !samePath(toplevel, workspaceRoot);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Turn a plain directory into a repository so seat isolation can engage.
+   *
+   * db-live-2's workspace was not a repo, so `#ensureSeatWorktree` never fired:
+   * all four seats wrote into one directory, `page` read files out of the
+   * PREVIOUS run's workspace (the only `reference_warnings` hit in either
+   * database), and nothing could be rolled back or landed atomically.
+   *
+   * Every refusal below is a case where initialising would be worse than doing
+   * nothing. Returns what happened so the caller can say so out loud.
+   */
+  initRepo(workspaceRoot: string, opts: { forbiddenRoots?: readonly string[] } = {}):
+    { initialized: boolean; reason: string } {
+    if (this.isGitRepo(workspaceRoot)) return { initialized: false, reason: "already a git repository" };
+    // The containment hazard. Initialising here would leave a repo inside a
+    // repo; NOT initialising leaves seat work merging into somebody else's.
+    // Neither is acceptable, so isolation stays off and says why.
+    if (this.isInsideOtherRepo(workspaceRoot)) {
+      return { initialized: false, reason: "inside another git repository; seat isolation is disabled to avoid committing into it" };
+    }
+    for (const forbidden of [os.homedir(), ...(opts.forbiddenRoots ?? [])]) {
+      if (samePath(workspaceRoot, forbidden)) {
+        return { initialized: false, reason: `refusing to git init ${forbidden}` };
+      }
+    }
+    // A tree this size is a signal the workspace is not what the operator
+    // thinks it is — a home directory, a mounted volume, node_modules.
+    try {
+      const entries = fs.readdirSync(workspaceRoot, { recursive: true }) as string[];
+      if (entries.length > 20_000) {
+        return { initialized: false, reason: `${entries.length} files; too large to initialise safely` };
+      }
+    } catch { /* unreadable is handled by the init attempt below */ }
+    try {
+      this.#git(workspaceRoot, ["init", "-b", "main"]);
+      const gitignore = path.join(workspaceRoot, ".gitignore");
+      // An existing .gitignore is the operator's, byte for byte.
+      if (!fs.existsSync(gitignore)) {
+        fs.writeFileSync(gitignore, "node_modules/\n.env\ndist/\n.DS_Store\n", "utf8");
+      }
+      this.#git(workspaceRoot, ["add", "-A", "--", ".", ...SANDBOX_STUB_EXCLUDES]);
+      if (this.#git(workspaceRoot, ["diff", "--cached", "--name-only"]).trim() === "") {
+        // An empty workspace still needs a HEAD for worktrees to branch from.
+        this.#git(workspaceRoot, [...GIT_IDENTITY, "commit", "--allow-empty", "-m", "Agentique Console: workspace baseline", "--no-gpg-sign"]);
+      } else {
+        this.#git(workspaceRoot, [...GIT_IDENTITY, "commit", "-m", "Agentique Console: workspace baseline", "--no-gpg-sign"]);
+      }
+      return { initialized: true, reason: "initialised with a baseline commit" };
+    } catch (error) {
+      return { initialized: false, reason: error instanceof Error ? error.message : String(error) };
     }
   }
 

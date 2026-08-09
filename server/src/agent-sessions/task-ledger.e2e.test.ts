@@ -38,8 +38,11 @@ describe("console-owned task ledger (fake SDK)", () => {
     const list = h.fake.captured.tools.find((t) => t.name === "task_list");
     expect(create && update && list).toBeTruthy();
 
-    await create!.handler({ taskId: "1", subject: "Agree the module interface", description: "before either writes code" }, {});
-    await create!.handler({ taskId: "2", subject: "Implement src/game.js", description: "" }, {});
+    // `owner` is required now: it names the seat that will DO the work, not the
+    // one writing the row. Defaulting it to the writer put "orchestrator" on
+    // every row of db-live-2's coordinator ledger.
+    await create!.handler({ taskId: "1", subject: "Agree the module interface", description: "before either writes code", owner: "scout" }, {});
+    await create!.handler({ taskId: "2", subject: "Implement src/game.js", description: "", owner: "scout" }, {});
     await update!.handler({ taskId: "1", status: "completed", owner: "orchestrator" }, {});
 
     // The key is derived from the agent session, never from a provider session.

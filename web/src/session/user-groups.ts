@@ -38,6 +38,8 @@ function itemKeyOf(item: Exclude<UserItem, ToolItem>): string {
       return `question:${item.interactionId}`;
     case "plan":
       return `plan:${item.interactionId}`;
+    case "run_summary":
+      return `run_summary:${item.runId}`;
     case "turn":
       return `turn:${item.turnId}`;
     case "turn_error":

@@ -43,6 +43,10 @@ export function sdkEnv(
   }
   // In-process subagents stay console-disabled; never propagate their knobs.
   delete env.CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION;
+  // Attempts 7-10 of the observed schedule were flat ~34s each and bought
+  // nothing; the console's own wall-clock budget is the real control, and this
+  // stops the CLI from spending three minutes before that budget can act.
+  env.CLAUDE_CODE_MAX_RETRIES = env.CLAUDE_CODE_MAX_RETRIES ?? "5";
   if (options.sessionName !== undefined) {
     env.CLAUDE_CODE_SESSION_NAME = options.sessionName;
   }

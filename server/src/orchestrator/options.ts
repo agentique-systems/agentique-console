@@ -16,6 +16,11 @@ import {
 } from "./prompt.ts";
 
 export const CONSOLE_TOOL_NAMES = [
+  "send_to_coordinator",
+  "set_deadline",
+  "task_create",
+  "task_update",
+  "task_list",
   "create_agent_session",
   "read_agent_session",
   "list_agent_sessions",
@@ -25,11 +30,26 @@ export const CONSOLE_TOOL_NAMES = [
 ] as const;
 
 /** Native harness tools the work lane may call; hooks govern and mirror them. */
+/**
+ * Native tools main may still use. `SendMessage` is NOT among them: the mesh it
+ * addressed is gone, its envelope middleware was deleted, and every send it
+ * made in db-live-2 failed with "No agent named … is reachable". Coordinator
+ * traffic goes through the console-owned `send_to_coordinator`, which is
+ * route-checked and journaled.
+ */
 const MAIN_NATIVE_TOOLS = [
-  "SendMessage",
-  "TaskCreate", "TaskUpdate", "TaskGet", "TaskList",
   "CronCreate", "CronList", "CronDelete",
 ];
+
+/**
+ * Never available to main, in any configuration. `SendMessage` bypasses the
+ * journal; `ScheduleWakeup`/`Monitor`/`TaskStop` wake a console-owned lane with
+ * no mailbox row, no handoff and no turn attribution.
+ */
+const MAIN_DENIED_TOOLS = ["Agent", "Task", "Bash", "Write", "Edit", "NotebookEdit", "SendMessage", "ScheduleWakeup", "Monitor", "TaskStop",
+  // The native ledger is keyed on the provider session id, which changes at
+  // every rotation — the orphan-on-rotation failure seats were already spared.
+  "TaskCreate", "TaskUpdate", "TaskGet", "TaskList"];
 
 const MAIN_WORK_TOOLS = [
   "Read",
@@ -53,6 +73,12 @@ export interface OrchestratorOptionsInput {
   mcpServer?: unknown;
   sessionStore?: unknown;
   contextMemory?: string;
+  /**
+   * The operator's decisions, appended AFTER the rotation checkpoint. Main
+   * must not contradict a call the operator already made, and must not relay
+   * one — every seat has it already.
+   */
+  decisionDigest?: string;
   purpose?: "work" | "profile_manager";
   /** The lane's registry address (CLAUDE_CODE_SESSION_NAME). */
   peerName?: string;
@@ -88,9 +114,10 @@ export function buildOrchestratorOptions(
     systemPrompt: {
       type: "preset",
       preset: "claude_code",
-      append: manager ? MANAGER_BRIEF + (input.contextMemory ? `\n\n## Selected profile (read-only baseline)\n${input.contextMemory}` : "") : withDelegation
+      append: (manager ? MANAGER_BRIEF + (input.contextMemory ? `\n\n## Selected profile (read-only baseline)\n${input.contextMemory}` : "") : withDelegation
         ? ORCHESTRATOR_BRIEF + ORCHESTRATOR_DELEGATION_BRIEF + (input.contextMemory ? `\n\n## Rotation checkpoint (or read-only legacy memory)\n${input.contextMemory}` : "")
-        : ORCHESTRATOR_BRIEF + (input.contextMemory ? `\n\n## Rotation checkpoint (or read-only legacy memory)\n${input.contextMemory}` : ""),
+        : ORCHESTRATOR_BRIEF + (input.contextMemory ? `\n\n## Rotation checkpoint (or read-only legacy memory)\n${input.contextMemory}` : ""))
+        + (input.decisionDigest ? `\n\n## Operator decisions (authoritative)\nThe operator made these. Do not re-litigate them, do not contradict them, and do not relay them to seats — they already have them.\n${input.decisionDigest}` : ""),
     },
     settingSources: [],
     includePartialMessages: true,
@@ -106,8 +133,8 @@ export function buildOrchestratorOptions(
           : [...CONSOLE_TOOL_NAMES.map((name) => `mcp__console__${name}`), ...MAIN_NATIVE_TOOLS]
         : []),
     ],
-    disallowedTools: ["Agent", "Task", "Bash", "Write", "Edit", "NotebookEdit",
-      ...(withDelegation && !manager ? [] : ["SendMessage", "TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "CronCreate", "CronList", "CronDelete"])],
+    disallowedTools: [...MAIN_DENIED_TOOLS,
+      ...(withDelegation && !manager ? [] : ["CronCreate", "CronList", "CronDelete"])],
     ...(input.hooks === undefined ? {} : { hooks: input.hooks }),
     settings: { crossSessionInbound: "accept" } as unknown as SdkOptions["settings"],
     // In streaming mode maxTurns counts cumulatively over the whole session

@@ -21,14 +21,29 @@ export interface UserSession {
   title: string | null;
   mode: SessionMode;
   phase: SessionPhase;
+  /** Is this in the operator's active list. Orthogonal to `runState`. */
   status: "open" | "archived";
+  /**
+   * Is the work done. `awaiting_signoff` is the Console asserting it believes
+   * the run is finished while the operator has not yet agreed — the state
+   * db-live-2 had no way to express, so its ending looked exactly like
+   * work-in-progress.
+   */
+  runState: RunState;
   createdAt: string;
   updatedAt: string;
 }
 
+export type RunState = "active" | "awaiting_signoff" | "completed";
+
 export type ConversationPurpose = "work" | "profile_manager";
 
-export type AgentSessionStatus = "working" | "idle" | "archived";
+/**
+ * `reported` is derived, not stored: the coordinator has delivered a result to
+ * main and nothing is in flight. Without it a finished session renders with the
+ * same grey dot as one that died.
+ */
+export type AgentSessionStatus = "working" | "idle" | "reported" | "archived";
 
 export interface AgentSession {
   id: string;
@@ -208,19 +223,56 @@ export type InteractionStatus =
   | "dismissed"
   | "stale";
 
+/**
+ * Blocking parks the asker until the operator answers; deferred renders the
+ * card immediately and hands the answer over at the asker's next delivery.
+ * A column rather than a status, because `status`'s CHECK cannot be widened on
+ * an existing database.
+ */
+export type InteractionUrgency = "blocking" | "deferred";
+/** Who raised it: an agent directly, the uncertainty classifier, or the Console. */
+export type InteractionSource = "agent" | "uncertainty" | "console";
+
 /** One AskUserQuestion question block, as the SDK tool shapes it. */
 export interface InteractionQuestion {
   question: string;
   header?: string;
   options: { label: string; description?: string }[];
   multiSelect?: boolean;
+  /**
+   * Which option the asker recommends, and why. `request_decision` accepted
+   * this and then dropped it on the blocking path, so the operator never saw
+   * the asker's own read of its own question.
+   */
+  recommendation?: string;
+  /** Why they are asking and what they already tried. Never an option. */
+  context?: string;
 }
 
 export interface Interaction {
   id: string;
   userSessionId: string;
+  /** Null = the main lane. Otherwise the AgentSession the asker sits in. */
+  agentSessionId: string | null;
+  /** Null = the main lane. Otherwise the seat name ("orchestrator" for a coordinator). */
+  participant: string | null;
   kind: InteractionKind;
   status: InteractionStatus;
+  urgency: InteractionUrgency;
+  source: InteractionSource;
+  /** Card-level recommendation for Console-generated cards. */
+  recommendation: string | null;
+  allowFreeText: boolean;
+  /**
+   * The asker's parked promise died (park, rotation, watchdog, restart). The
+   * row is still answerable — the answer is delivered by mailbox instead of
+   * returned from the tool call.
+   */
+  detached: boolean;
+  expiresAt: string | null;
+  defaultOption: string | null;
+  /** Resolved by TTL expiry using `defaultOption`, not by the operator. */
+  autoTaken: boolean;
   payload:
     | { questions: InteractionQuestion[] }
     | { plan: string };

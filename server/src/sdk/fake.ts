@@ -73,6 +73,42 @@ function hookMatchers(options: SdkOptions, event: string, toolName: string): Fak
 }
 
 /**
+ * The other half of the same doctrine, on the way back out. `read_artifact`
+ * returned Messages-API image content for an in-process MCP server that only
+ * accepts MCP `ContentBlock`s, and every call failed with `invalid_union` in
+ * db-live-2 — while this file happily did `part.text ?? ""`, turning an invalid
+ * block into an empty string and a green test.
+ *
+ * Validates each block against MCP's ContentBlock shape and throws, so a wrong
+ * result shape fails here the way it fails against the real server.
+ */
+function assertMcpToolResult(name: string, result: SdkToolResult): void {
+  if (result === null || typeof result !== "object" || !Array.isArray(result.content)) {
+    throw new Error(`tool ${name}: result must be { content: ContentBlock[] }`);
+  }
+  for (const [index, block] of result.content.entries()) {
+    const at = `tool ${name}: content[${index}]`;
+    if (block === null || typeof block !== "object") throw new Error(`${at} is not an object`);
+    const kind = (block as { type?: unknown }).type;
+    if (kind === "text") {
+      if (typeof (block as { text?: unknown }).text !== "string") throw new Error(`${at} is type "text" but has no string \`text\``);
+      continue;
+    }
+    if (kind === "image") {
+      const image = block as { data?: unknown; mimeType?: unknown; source?: unknown };
+      if (image.source !== undefined) {
+        throw new Error(`${at} uses the Messages API image shape (\`source\`); MCP wants { type: "image", data, mimeType }`);
+      }
+      if (typeof image.data !== "string") throw new Error(`${at} is type "image" but has no string \`data\``);
+      if (typeof image.mimeType !== "string") throw new Error(`${at} is type "image" but has no string \`mimeType\``);
+      if (image.mimeType.endsWith(";base64")) throw new Error(`${at} mimeType "${image.mimeType}" carries the console's storage suffix; strip \`;base64\` at the tool boundary`);
+      continue;
+    }
+    throw new Error(`${at} has unsupported type ${JSON.stringify(kind)}; MCP content must be "text" or "image"`);
+  }
+}
+
+/**
  * The fake must fail wherever the real API would, or `npm run verify` is
  * theatre. db-live-1 ran with 13/13 context rotations failing on a provider
  * 400 while the suite stayed green, because nothing here ever looked at the
@@ -202,7 +238,13 @@ export function fakeSdk(program: FakeProgram): FakeSdk {
     if (!tool) return [toolResultMessage(callId, `no such tool: ${qualifiedName}`, true)];
     try {
       const result = await tool.handler(input as never, {});
-      const text = result.content.map((part) => (part as { text?: string }).text ?? "").join("");
+      assertMcpToolResult(tool.name, result);
+      // Image blocks are rendered as a marker rather than dropped, so a test
+      // can assert the seat actually received one. Silently coercing them to
+      // "" is what hid the read_artifact defect for a whole live run.
+      const text = result.content
+        .map((part) => (part.type === "text" ? part.text : `[image ${part.mimeType} ${part.data.length}b64]`))
+        .join("");
       return [toolResultMessage(callId, text, result.isError === true)];
     } catch (error) {
       return [toolResultMessage(callId, error instanceof Error ? error.message : String(error), true)];
@@ -435,6 +477,20 @@ export function successMessage(
     ...(output === undefined ? {} : { structured_output: output }),
     ...extra,
   };
+}
+
+/**
+ * A provider retry frame, with the numbers the console budgets on. db-live-2's
+ * three fatal bursts each ran the CLI's schedule to 10/10 —
+ * 610, 1142, 2493, 4928, 9369, 18403, 36478, 36781, 37485, 33306 ms — for
+ * 181s, 173s and 172s of pure back-off, and destroyed their turns.
+ */
+export function apiRetryMessage(attempt: number, maxRetries: number, delayMs: number, status?: number): SdkMessage {
+  return {
+    type: "system", subtype: "api_retry",
+    attempt, max_retries: maxRetries, retry_delay_ms: delayMs,
+    ...(status === undefined ? {} : { error_status: status }),
+  } as SdkMessage;
 }
 
 export function errorMessage(subtype: string, extra: Partial<SdkMessage> = {}): SdkMessage {

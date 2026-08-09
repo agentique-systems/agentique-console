@@ -91,8 +91,21 @@ export interface SdkUserMessageLike {
   origin?: { kind: "human" } | { kind: "peer"; from: string };
 }
 
+/**
+ * MCP's `ContentBlock`, not the Messages API's. The two differ exactly where it
+ * matters: MCP images are `{type:"image", data, mimeType}` while the Messages
+ * API nests them under `source:{type:"base64", media_type, data}`. Modelling
+ * only the text arm forced a cast at the one call site that returned an image,
+ * and the cast is what let `read_artifact` ship a shape the in-process MCP
+ * server rejects with `invalid_union` — every screenshot in db-live-2 was
+ * unreadable by every agent, including the one that took it.
+ */
+export type SdkToolContent =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string };
+
 export interface SdkToolResult {
-  content: { type: "text"; text: string }[];
+  content: SdkToolContent[];
   isError?: boolean;
 }
 

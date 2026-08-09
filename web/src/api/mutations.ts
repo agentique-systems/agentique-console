@@ -8,6 +8,7 @@ import type {
   ImproveMessageResponse,
   Interaction,
   PatchUserSessionBody,
+  RunSignoffBody,
   PostMessageResponse,
   ResolveInteractionBody,
   UserSession,
@@ -66,6 +67,26 @@ export function usePostUserMessage() {
         method: "POST",
         body: JSON.stringify({ text }),
       }),
+  });
+}
+
+/**
+ * The operator's verdict on a proposed run completion. 409 = the run is no
+ * longer awaiting one (someone else resolved it, or a chat message already
+ * reopened it).
+ */
+export function useResolveSignoff() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ sessionId, body }: { sessionId: string; body: RunSignoffBody }) =>
+      apiFetch<UserSession>(`/api/user-sessions/${sessionId}/signoff`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    onSuccess: (_data, { sessionId }) => {
+      void queryClient.invalidateQueries({ queryKey: keys.userSessions.detail(sessionId) });
+      void queryClient.invalidateQueries({ queryKey: keys.userSessions.all });
+    },
   });
 }
 

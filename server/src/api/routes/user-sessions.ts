@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { AppContext } from "../../context.ts";
 import { revivalPrompt } from "../../orchestrator/interactions.ts";
-import { badRequest } from "../errors.ts";
+import { badRequest, notFound } from "../errors.ts";
 
 const CreateBody = z.object({
   workspaceId: z.string(),
@@ -18,8 +18,22 @@ const PatchBody = z.object({
 
 const MessageBody = z.object({ text: z.string() });
 
+const SignoffBody = z.object({
+  decision: z.enum(["accept", "changes"]),
+  note: z.string().optional(),
+});
+
 const ResolveBody = z.union([
-  z.object({ answers: z.record(z.string(), z.array(z.string())) }),
+  z.object({
+    answers: z.record(z.string(), z.array(z.string())),
+    // Free text keyed by question. The service 400s if the card was not raised
+    // with `allowFreeText`. Without this the only way to say something the
+    // asker did not anticipate was to type in chat — which DISMISSES the card
+    // rather than answering it, and (before this release) silently dismissed
+    // every seat's card along with it.
+    freeText: z.record(z.string(), z.string()).optional(),
+    note: z.string().optional(),
+  }),
   z.object({
     decision: z.enum(["approve", "reject"]),
     note: z.string().optional(),
@@ -76,6 +90,27 @@ export function registerUserSessionRoutes(
     },
   );
 
+  // The operator's verdict on a proposed run completion. 409s unless the run
+  // is actually awaiting one, so a stale card cannot re-close a reopened run.
+  app.post<{ Params: { id: string } }>(
+    "/api/user-sessions/:id/signoff",
+    async (request) => {
+      const parsed = SignoffBody.safeParse(request.body);
+      if (!parsed.success) throw badRequest(parsed.error.message);
+      ctx.completion.resolve(request.params.id, parsed.data.decision, parsed.data.note);
+      return ctx.userSessions.get(request.params.id).session;
+    },
+  );
+
+  app.get<{ Params: { id: string } }>(
+    "/api/user-sessions/:id/run-summary",
+    async (request) => {
+      const summary = ctx.completion.latestSummary(request.params.id);
+      if (!summary) throw notFound(`no run summary for ${request.params.id}`);
+      return { summaryId: summary.id, status: summary.status, note: summary.note, document: summary.document };
+    },
+  );
+
   app.post<{ Params: { id: string } }>(
     "/api/user-sessions/:id/messages",
     async (request, reply) => {
@@ -100,9 +135,16 @@ export function registerUserSessionRoutes(
         request.params.interactionId,
         parsed.data,
       );
-      // A stale interaction's parked promise died with a previous process —
-      // its answer becomes a fresh resumed turn instead (M8 revival).
-      if (before.status === "stale") {
+      // A seat's answer cannot come back through a tool call that no longer
+      // exists, and a seat is not revived by a lane — it is woken by a
+      // delivery. So a detached or stale SEAT question is answered by mailbox.
+      if (before.participant !== null && (before.detached || before.status === "stale")) {
+        ctx.host.deliverOperatorAnswer(before, parsed.data);
+        return resolved;
+      }
+      // A stale MAIN-LANE interaction's parked promise died with a previous
+      // process — its answer becomes a fresh resumed turn instead (M8 revival).
+      if (before.participant === null && before.status === "stale") {
         if (
           before.kind === "plan_approval" &&
           "decision" in parsed.data &&

@@ -1,4 +1,5 @@
 import type { AgentSessionHost } from "./agent-sessions/host.ts";
+import type { RunCompletionService } from "./completion/service.ts";
 import type { Config } from "./config.ts";
 import type { Db } from "./db/client.ts";
 import type { Repo } from "./db/repo.ts";
@@ -32,6 +33,8 @@ export interface AppContext {
   runner: OrchestratorRunner;
   interactions: InteractionService;
   host: AgentSessionHost;
+  /** Run-level completion predicate, sign-off, and the end-of-run summary. */
+  completion: RunCompletionService;
   tasks: TaskService;
   handoffs: HandoffService;
   timeline: TimelineService;

@@ -33,6 +33,7 @@ import type {
   SdkOptions,
   SdkUserMessageLike,
 } from "../sdk/types.ts";
+import type { DecisionLedger } from "./decisions.ts";
 import type { InteractionService } from "./interactions.ts";
 import { buildOrchestratorOptions } from "./options.ts";
 import { buildOrchestratorCanUseTool, type LaneState } from "./permissions.ts";
@@ -43,7 +44,6 @@ import type { AgentSessionHost } from "../agent-sessions/host.ts";
 import { mainPeerName } from "../agent-sessions/peer-names.ts";
 import { mergeHooks } from "../sdk/hooks.ts";
 import { buildCronHooks, cronDue } from "./cron-hooks.ts";
-import { buildTaskHooks } from "../tasks/hooks.ts";
 import type { TaskService } from "../tasks/service.ts";
 import type { SdkHooksFragment } from "../sdk/types.ts";
 
@@ -109,6 +109,13 @@ interface Lane {
  * Mutates the lane's watermark as a side effect — call exactly once per result.
  */
 function laneUsageDeltas(lane: Lane, event: { cumulativeCostUsd?: number; cumulativeApiDurationMs?: number }): { costUsd: number | null; apiDurationMs: number | null } {
+  // A total BELOW the watermark means the counter restarted underneath us (a
+  // genuinely fresh provider session). Take the raw value rather than clamping
+  // a real turn to zero — correct under either SDK behaviour.
+  if (event.cumulativeCostUsd !== undefined && event.cumulativeCostUsd < lane.lastCumulative.costUsd) {
+    lane.lastCumulative.costUsd = 0;
+    lane.lastCumulative.apiDurationMs = 0;
+  }
   const costUsd = event.cumulativeCostUsd === undefined ? null : Math.max(0, event.cumulativeCostUsd - lane.lastCumulative.costUsd);
   const apiDurationMs = event.cumulativeApiDurationMs === undefined ? null : Math.max(0, event.cumulativeApiDurationMs - lane.lastCumulative.apiDurationMs);
   if (event.cumulativeCostUsd !== undefined) lane.lastCumulative.costUsd = event.cumulativeCostUsd;
@@ -128,6 +135,11 @@ export interface OrchestratorDeps {
   /** Eager console-owned provider journal. */
   sessionStore?: unknown;
   handoffs: HandoffService;
+  /**
+   * Operator decisions, injected into the lane's system prompt so main never
+   * contradicts a call the operator already made — and never has to relay one.
+   */
+  decisions?: DecisionLedger;
   /** Lazy — the host is constructed after the runner; it backs the lane's
    * SendMessage middleware (main identity) and peer-inbound resolution. */
   host?: () => AgentSessionHost;
@@ -148,6 +160,10 @@ function sleep(ms: number): Promise<void> {
 export class OrchestratorRunner {
   readonly #deps: OrchestratorDeps;
   readonly #lanes = new Map<string, Lane>();
+  /** Notified after every turn settle; the completion predicate re-evaluates. */
+  #onSettled: ((userSessionId: string) => void) | undefined;
+  /** Notified before an operator message is processed; reopens a signed-off run. */
+  #onOperatorMessage: ((userSessionId: string) => void) | undefined;
 
   constructor(deps: OrchestratorDeps) {
     this.#deps = deps;
@@ -155,6 +171,10 @@ export class OrchestratorRunner {
 
   /** Persists an operator message, dismisses pending cards, queues a turn. */
   postOperatorMessage(sessionId: string, text: string): PostMessageResponse {
+    // Chat while a sign-off card is open IS a change request. Without this the
+    // operator types "actually add X", the orchestrator answers, and the card
+    // sits there still claiming the run is done.
+    this.#onOperatorMessage?.(sessionId);
     const { repo, bus, interactions } = this.#deps;
     const session = repo.getUserSession(sessionId);
     if (!session) throw notFound(`no user session ${sessionId}`);
@@ -216,6 +236,15 @@ export class OrchestratorRunner {
   #cronTick(now: Date): void {
     const minute = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}T${now.getHours()}:${now.getMinutes()}`;
     for (const session of this.#deps.repo.listOpenUserSessions()) {
+      // Console-owned deadlines fire whether or not the lane is live — that is
+      // the whole reason for owning them, and the minute-resolution cron
+      // matcher below is too coarse for a check-in timer anyway.
+      for (const deadline of this.#deps.repo.listDueDeadlines(session.id, now.toISOString())) {
+        this.#deps.repo.patchCron(deadline.id, { status: "deleted" });
+        this.#deps.bus.append({ type: "user_session.runtime", userSessionId: session.id,
+          payload: { sessionId: session.id, detail: `deadline fired: ${deadline.prompt}` } });
+        this.#enqueue(session.id, { kind: "cron", text: `[Deadline you set has arrived]\n${deadline.prompt}` });
+      }
       const lane = this.#lanes.get(session.id);
       if (lane?.query) continue; // the CLI's own scheduler owns a live lane
       for (const cron of this.#deps.repo.listCrons(session.id)) {
@@ -233,9 +262,13 @@ export class OrchestratorRunner {
   /** Material AgentSession reports only. Repeated reports coalesce per session. */
   enqueueAgentMilestone(userSessionId: string, agentSessionId: string, category: string, text: string): void {
     const lane = this.#lane(userSessionId);
-    const prompt = `[AgentSession ${agentSessionId} ${category}]\n${text.slice(0, 8_192)}\n\nAct only if needed. Do not repeat an unchanged operator update. Use read_agent_session for additional detail only when necessary.`;
+    const prompt = `[AgentSession ${agentSessionId} ${category}]\n${text.slice(0, 8_192)}`;
     const existing = lane.queue.find((job): job is Extract<Job, { kind: "agent-milestone" }> => job.kind === "agent-milestone" && job.agentSessionId === agentSessionId);
-    if (existing) existing.text = prompt;
+    // APPEND, never overwrite. `existing.text = prompt` looked like coalescing
+    // and was actually data loss: two reports arriving before the coordinator
+    // drained meant the first one silently vanished. Losing a milestone is
+    // strictly worse than a longer prompt.
+    if (existing) existing.text = `${existing.text}\n\n${prompt}`;
     else lane.queue.push({ kind: "agent-milestone", agentSessionId, text: prompt });
     if (!lane.draining) void this.#drain(userSessionId);
   }
@@ -288,12 +321,32 @@ export class OrchestratorRunner {
   }
 
   /** True while a turn is in flight or queued. */
+  onSettled(handler: (userSessionId: string) => void): void { this.#onSettled = handler; }
+
+  onOperatorMessage(handler: (userSessionId: string) => void): void { this.#onOperatorMessage = handler; }
+
   busy(sessionId: string): boolean {
     // activeTurn covers the steer-minted follow-up turn no drain job owns.
     return (
       this.queuedJobs(sessionId) > 0 ||
       this.#lanes.get(sessionId)?.activeTurn != null
     );
+  }
+
+  /**
+   * Like `busy()` inverted, except a turn parked inside `canUseTool` waiting on
+   * an operator card does NOT count as working.
+   *
+   * This distinction is the whole reason the method exists. db-live-2's last
+   * turn never settled because `AskUserQuestion` awaits its resolution forever
+   * — so `busy()` was true, the spinner ran, and nothing could tell "finished"
+   * from "in progress". The run had not gone quiet; it had gone interrogative.
+   */
+  laneIdle(sessionId: string): boolean {
+    const lane = this.#lanes.get(sessionId);
+    if (!lane) return true;
+    if (lane.queue.length > 0 || lane.draining) return false;
+    return lane.activeTurn === null || this.#deps.interactions.listPending(sessionId).length > 0;
   }
 
   #lane(sessionId: string): Lane {
@@ -351,7 +404,12 @@ export class OrchestratorRunner {
     const session = repo.getUserSession(sessionId);
     if (!session || session.status !== "open") return;
 
-    const prompt = job.text;
+    // The standing instruction goes on ONCE, at drain, rather than being
+    // baked into each milestone — several appended reports would otherwise
+    // repeat it verbatim and teach the model to skim.
+    const prompt = job.kind === "agent-milestone"
+      ? `${job.text}\n\nAct only if needed. Do not repeat an unchanged operator update. Use read_agent_session for additional detail only when necessary.`
+      : job.text;
     if (prompt === "") return;
 
     const turnId = newId("turn");
@@ -436,14 +494,10 @@ export class OrchestratorRunner {
     const host = this.#deps.host?.();
     const fragments: SdkHooksFragment[] = [];
     if (host && session.purpose !== "profile_manager") {
-      // Main reaches its coordinator through the console tool surface, the same
-      // single path every seat uses. No send middleware, no peer carry.
-      if (this.#deps.tasks) {
-        fragments.push(buildTaskHooks(this.#deps.tasks, {
-          workspaceId: session.workspaceId, userSessionId: sessionId,
-          agentSessionId: null, participant: null,
-        }) as SdkHooksFragment);
-      }
+      // Main reaches its coordinator, and its ledger, through the console tool
+      // surface — the same single path every seat uses. No send middleware, no
+      // peer carry, and no native task mirror keyed to a provider session that
+      // dies at every rotation.
       fragments.push(buildCronHooks({ repo, bus, userSessionId: sessionId }));
     }
     const options = buildOrchestratorOptions({
@@ -466,6 +520,7 @@ export class OrchestratorRunner {
       contextMemory: session.latestHandoffId
         ? JSON.stringify(this.#deps.handoffs.get(session.latestHandoffId), null, 2)
         : session.memory,
+      decisionDigest: this.#deps.decisions?.digest(sessionId) ?? "",
       purpose: session.purpose,
       peerName: mainPeerName(config.peerNamePrefix, sessionId),
       ...(fragments.length > 0 ? { hooks: mergeHooks(fragments) as SdkOptions["hooks"] } : {}),
@@ -475,11 +530,17 @@ export class OrchestratorRunner {
     lane.query = query;
     lane.input = input;
     lane.abort = abort;
-    // A fresh CLI process restarts both counters: cumulative cost/duration
-    // begin at zero, and occupancy is re-reported by its first assistant
-    // message. Carrying the old watermarks forward would zero out real spend.
+    // Occupancy is re-reported by the first assistant message of any new
+    // process, so it always restarts at zero.
     lane.contextTokens = 0;
-    lane.lastCumulative = { costUsd: 0, apiDurationMs: 0 };
+    // Cost and api-duration do NOT: `resume: session.sdkSessionId` above keeps
+    // the same provider session, and the SDK's cumulative totals continue
+    // across the process that started them. The baseline therefore belongs to
+    // the provider session and is persisted with it — zeroing it here billed a
+    // whole session-to-date to one turn (db-live-1: $4.4875 for 55 seconds).
+    lane.lastCumulative = session.sdkSessionId === null
+      ? { costUsd: 0, apiDurationMs: 0 }
+      : { costUsd: session.cumulativeCostUsd, apiDurationMs: session.cumulativeApiDurationMs };
     lane.pump = this.#pumpOutput(sessionId, lane, query);
   }
 
@@ -573,6 +634,10 @@ export class OrchestratorRunner {
   }
 
   #settleTurn(sessionId: string, lane: Lane): void {
+    // Fired FIRST so every return path below still schedules a re-evaluation.
+    // Reading stale state here is harmless: the completion predicate is
+    // debounced and re-runs when its timer fires, not when it was scheduled.
+    this.#onSettled?.(sessionId);
     const turn = lane.activeTurn;
     if (!turn) return;
     lane.activeTurn = null;
@@ -776,6 +841,9 @@ export class OrchestratorRunner {
           repo.patchUserSession(sessionId, { sdkTurnCount: session.sdkTurnCount + 1, contextTokens });
           if (session.sdkTurnCount + 1 >= this.#deps.config.contextTurnLimit || contextTokens >= rotationTokenLimit(this.#deps.config.contextTokenLimit, this.#deps.config.model)) lane.recycleAfterTurn = true;
           const { costUsd, apiDurationMs } = laneUsageDeltas(lane, event);
+          // Persist the advanced baseline with the provider session it belongs
+          // to, so the next process to resume it inherits the watermark.
+          repo.patchUserSession(sessionId, { cumulativeCostUsd: lane.lastCumulative.costUsd, cumulativeApiDurationMs: lane.lastCumulative.apiDurationMs });
           const usage = { id: newId("usage"), userSessionId: sessionId, agentSessionId: null, participant: "orchestrator", profileId: null,
             generation: session.sdkGeneration, turnId: turn?.turnId ?? "unattributed", inputTokens: event.inputTokens ?? 0,
             uncachedInputTokens: event.uncachedInputTokens ?? 0, cacheCreationInputTokens: event.cacheCreationInputTokens ?? 0, cacheReadInputTokens: event.cacheReadInputTokens ?? 0, outputTokens: event.outputTokens ?? 0,
@@ -801,6 +869,9 @@ export class OrchestratorRunner {
           const contextTokens = Math.max(session.contextTokens, lane.contextTokens);
           repo.patchUserSession(sessionId, { sdkTurnCount: session.sdkTurnCount + 1, contextTokens });
           const { costUsd, apiDurationMs } = laneUsageDeltas(lane, event);
+          // Persist the advanced baseline with the provider session it belongs
+          // to, so the next process to resume it inherits the watermark.
+          repo.patchUserSession(sessionId, { cumulativeCostUsd: lane.lastCumulative.costUsd, cumulativeApiDurationMs: lane.lastCumulative.apiDurationMs });
           const usage = { id: newId("usage"), userSessionId: sessionId, agentSessionId: null, participant: "orchestrator", profileId: null,
             generation: session.sdkGeneration, turnId: turn?.turnId ?? "unattributed", inputTokens: event.inputTokens ?? 0,
             uncachedInputTokens: event.uncachedInputTokens ?? 0, cacheCreationInputTokens: event.cacheCreationInputTokens ?? 0, cacheReadInputTokens: event.cacheReadInputTokens ?? 0, outputTokens: event.outputTokens ?? 0,
@@ -900,12 +971,19 @@ export class OrchestratorRunner {
       this.#deps.bus.append({ type: "handoff.checkpoint.failed", userSessionId: sessionId,
         payload: { participant: "orchestrator", reason: failure ?? "checkpoint produced no valid handoff", threshold, degraded: true } });
     }
+    // Operator decisions ride the checkpoint into the successor generation.
+    // Without this a rotation silently forgets what the operator decided, and
+    // the next generation is free to contradict them.
+    const decisionLines = this.#deps.decisions?.lines(sessionId, { max: 12 }) ?? [];
     const prepared = this.#deps.handoffs.prepare({ draft, userSessionId: sessionId, agentSessionId: null,
       sender: "orchestrator", recipient: "orchestrator", profileId: "main", generation: session.sdkGeneration,
-      trigger: degraded ? "recovery" : "rotation", parentHandoffId: session.latestHandoffId, checkpoint: true });
+      trigger: degraded ? "recovery" : "rotation", parentHandoffId: session.latestHandoffId, checkpoint: true,
+      ...(decisionLines.length > 0 ? { extensionDefaults: { operatorDecisions: decisionLines } } : {}) });
     this.#deps.repo.insertCheckpointHandoff(prepared.row);
     this.#deps.handoffs.committed(prepared.record);
-    this.#deps.repo.patchUserSession(sessionId, { sdkSessionId: null, sdkGeneration: session.sdkGeneration + 1, sdkTurnCount: 0, contextTokens: 0, latestHandoffId: prepared.row.id });
+    // Rotation retires the provider session, so its cumulative baseline retires
+    // with it — the successor genuinely starts from zero.
+    this.#deps.repo.patchUserSession(sessionId, { sdkSessionId: null, sdkGeneration: session.sdkGeneration + 1, sdkTurnCount: 0, contextTokens: 0, latestHandoffId: prepared.row.id, cumulativeCostUsd: 0, cumulativeApiDurationMs: 0 });
     this.#deps.bus.append({ type: "user_session.context.rotated", userSessionId: sessionId,
       payload: { sessionId, generation: session.sdkGeneration + 1,
         reason: session.contextTokens >= Math.ceil(tokenLimit * 0.75) ? "token_limit" : "turn_limit", memoryChars: 0,

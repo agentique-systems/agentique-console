@@ -6,6 +6,8 @@ import type {
   AgentSession,
   AgentSessionStatus,
   InteractionQuestion,
+  InteractionSource,
+  InteractionUrgency,
   SessionMessage,
   SessionPhase,
   Task,
@@ -38,7 +40,7 @@ export interface UserSessionCreatedPayload {
 export interface UserSessionUpdatedPayload {
   sessionId: string;
   patch: Partial<
-    Pick<UserSession, "title" | "mode" | "phase" | "status">
+    Pick<UserSession, "title" | "mode" | "phase" | "status" | "runState">
   >;
 }
 export interface UserSessionMessagePayload {
@@ -87,12 +89,89 @@ export interface QuestionAskedPayload {
   sessionId: string;
   interactionId: string;
   questions: InteractionQuestion[];
+  /** The asking seat, so the card can name it. Absent = the main lane. */
+  agentSessionId?: string;
+  participant?: string;
+  urgency: InteractionUrgency;
+  source: InteractionSource;
+  recommendation?: string;
+  allowFreeText: boolean;
+  expiresAt?: string;
 }
 export interface QuestionAnsweredPayload {
   sessionId: string;
   interactionId: string;
   answers?: Record<string, string[]>;
+  freeText?: Record<string, string>;
+  note?: string;
   dismissed?: boolean;
+  /** Resolved by TTL expiry rather than by the operator. */
+  autoTaken?: boolean;
+}
+/**
+ * A `final` report was withheld because questions this session put to the
+ * operator are still unanswered. The coordinator cannot answer them and
+ * neither can main.
+ */
+export interface FinalBlockedPayload {
+  agentSessionId: string;
+  sender: string;
+  interactionIds: string[];
+}
+/**
+ * The Console believes the run is finished and is asking the operator to
+ * agree. Carries a render-ready projection so the card needs no second fetch
+ * to be useful; the expanded view fetches the full document.
+ */
+export interface RunCompletionProposedPayload {
+  sessionId: string;
+  runId: string;
+  summaryId: string;
+  headline: string;
+  verdict: "completed" | "completed_with_caveats" | "failed";
+  filesChanged: number;
+  tasks: { completed: number; total: number };
+  durationMs: number;
+  deadAirMs: number;
+  costUsd: number | null;
+  /** 1 = every observed turn has a usage row. Below 0.9 the cost reads "partial". */
+  costCoverage: number;
+  openUncertainty: number;
+  reaped: { processes: number; browsers: number; leakedBefore: number };
+}
+/**
+ * The operator's verdict. Deliberately no separate `run.completed` event —
+ * `decision:"accept"` IS completion, and a second event could disagree with it.
+ */
+export interface RunSignoffResolvedPayload {
+  sessionId: string;
+  runId: string;
+  decision: "accept" | "changes";
+  note?: string;
+}
+export interface RunReopenedPayload {
+  sessionId: string;
+  runId: string;
+  reason: "changes_requested" | "operator_message";
+}
+
+/**
+ * The operator decided something. Durable and session-scoped: every seat and
+ * every later generation reads these back, so an answer given once never has
+ * to be relayed or re-derived.
+ */
+export interface OperatorDecisionRecordedPayload {
+  sessionId: string;
+  decisionId: string;
+  agentSessionId?: string;
+  interactionId?: string;
+  /** Seat name, "orchestrator", "main", or "console". */
+  askedBy: string;
+  source: "interaction" | "plan_approval" | "ttl_default";
+  question: string;
+  answer: string;
+  /** Taken on TTL expiry rather than chosen by the operator. */
+  autoTaken?: boolean;
 }
 export interface PlanProposedPayload {
   sessionId: string;
@@ -161,6 +240,23 @@ export interface AgentMailboxPayload {
   recipient: string;
   category: "assignment" | "update" | "milestone" | "failure" | "final" | "decision";
   status: "queued" | "delivered" | "acknowledged" | "cancelled";
+}
+/**
+ * A shared-interface contract changed state. The mechanism that makes "agree
+ * before either writes code" enforceable rather than aspirational.
+ */
+export interface AgentContractPayload {
+  agentSessionId: string;
+  contractId: string;
+  name: string;
+  event: string;
+  status: "proposed" | "accepted" | "superseded" | "abandoned";
+  revision: number;
+  parties: { participant: string; state: "pending" | "accepted" | "objected" }[];
+  participant?: string;
+  reason?: string;
+  rationale?: string;
+  by?: string;
 }
 export interface AgentRuntimePayload {
   agentSessionId: string;
@@ -246,7 +342,8 @@ export interface AgentWatchdogPayload {
   agentSessionId: string;
   participant: string;
   turnId: string;
-  kind: "repeat_tool_calls" | "tool_error_streak";
+  /** `retry_budget`: provider back-off consumed the turn's wall-clock budget. */
+  kind: "repeat_tool_calls" | "tool_error_streak" | "retry_budget";
   toolName?: string;
   count: number;
   detail: string;
@@ -294,8 +391,18 @@ export interface SendDegradedPayload {
 /** Governance: the orchestrator lane's canUseTool denied a tool call. */
 export interface ToolDeniedPayload {
   sessionId: string;
+  /** Present for a seat-level denial; absent for the main lane's. */
+  agentSessionId?: string;
+  participant?: string;
   toolName: string;
-  kind: "coordination_only" | "empty_question" | "question_declined" | "plan_missing" | "plan_rejected";
+  kind:
+    | "coordination_only" | "empty_question" | "question_declined" | "plan_missing" | "plan_rejected"
+    /** A shared-interface contract governs this path and the seat has not accepted it. */
+    | "contract_unaccepted"
+    /** The path is outside the seat's declared ownership. */
+    | "outside_ownership"
+    /** The assignment's blocker task is not complete. */
+    | "blocked_by_dependency";
   reason: string;
 }
 
@@ -492,6 +599,7 @@ export type ConsoleEvent = Base &
     | { type: "agent_session.plan.captured"; payload: AgentPlanCapturedPayload }
     | { type: "agent_session.mailbox"; payload: AgentMailboxPayload }
     | { type: "agent_session.runtime"; payload: AgentRuntimePayload }
+    | { type: "agent_session.contract"; payload: AgentContractPayload }
     | { type: "agent_session.context.rotated"; payload: AgentContextRotatedPayload }
     | { type: "agent_session.process.started"; payload: AgentProcessStartedPayload }
     | { type: "agent_session.process.output"; payload: AgentProcessOutputPayload }
@@ -509,6 +617,11 @@ export type ConsoleEvent = Base &
     | { type: "handoff.checkpoint.failed"; payload: HandoffCheckpointFailedPayload }
     | { type: "handoff.checkpoint.transport_failed"; payload: HandoffCheckpointTransportFailedPayload }
     | { type: "handoff.final.caveats"; payload: HandoffFinalCaveatsPayload }
+    | { type: "handoff.final.blocked"; payload: FinalBlockedPayload }
+    | { type: "operator.decision.recorded"; payload: OperatorDecisionRecordedPayload }
+    | { type: "run.completion.proposed"; payload: RunCompletionProposedPayload }
+    | { type: "run.signoff.resolved"; payload: RunSignoffResolvedPayload }
+    | { type: "run.reopened"; payload: RunReopenedPayload }
     | { type: "agent_session.unreported"; payload: AgentSessionUnreportedPayload }
     | { type: "agent_session.dependency_drift"; payload: DependencyDriftPayload }
     | { type: "handoff.checkpoint.retried"; payload: HandoffCheckpointRetriedPayload }

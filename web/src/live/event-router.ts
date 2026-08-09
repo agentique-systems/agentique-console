@@ -98,9 +98,18 @@ export function routeEvent(event: ConsoleEvent, deps: RouterDeps): void {
     // receiving persisted rows or a quick re-watch would show a gapped view.
     case "user_session.message":
       deps.appendUserStreamEvent(event.payload.sessionId, event);
-      // Chat while a card is pending dismisses it server-side; clearing here
-      // keeps the dot honest even before those resolution events land.
-      deps.setAwaitingInput(event.payload.sessionId, false);
+      // OPERATOR chat while a card is pending dismisses it server-side
+      // (runner.postOperatorMessage → interactions.dismissPendingForChat), so
+      // clearing here keeps the dot honest before those resolution events land.
+      //
+      // It must be gated on the speaker. Clearing on ANY user_session.message
+      // meant an orchestrator reply, a system notice, or the post-restart
+      // recovery notice silently cleared "needs you" while the question was
+      // still pending — the one signal the operator has that a run is waiting
+      // on them, switched off by the run talking to them.
+      if (event.payload.message.speaker.kind === "operator") {
+        deps.setAwaitingInput(event.payload.sessionId, false);
+      }
       return;
     case "user_session.tool.call":
     case "user_session.tool.result":

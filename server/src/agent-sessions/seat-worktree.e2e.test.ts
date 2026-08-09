@@ -3,6 +3,7 @@
  * workspaces, atomic merge-on-completion, per-turn snapshots, conflict
  * surfacing, and the CONSOLE_SEAT_WORKTREES=0 escape hatch.
  */
+import { loadConfig } from "../config.ts";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -131,7 +132,10 @@ describe("seat worktree isolation (fake SDK + real git)", () => {
     expect(failures).toHaveLength(1);
   });
 
-  it("read-only seats never get worktrees; non-git workspaces run direct", async () => {
+  it("read-only seats never get worktrees; a workspace with isolation off runs direct", async () => {
+    // Auto-init would normally make this directory a repo, so isolation is
+    // explicitly disabled here — the genuine no-isolation path, which a nested
+    // repo or CONSOLE_AUTO_INIT_GIT=0 also produces.
     const plain = fs.mkdtempSync(path.join(os.tmpdir(), "agentique-plain-"));
     let coordinatorTurns = 0;
     const h = makeDelegationHarness(async function* (opts) {
@@ -148,11 +152,12 @@ describe("seat worktree isolation (fake SDK + real git)", () => {
       yield initMessage("seat-1");
       yield sendHandoffUse("seat-close", "orchestrator", { action: "looked around", status: "completed", category: "milestone" });
       yield successMessage();
-    }, { hostOverrides: { getWorkspaceRoot: () => plain, worktrees: new WorktreeManager({ dataDir: path.join(plain, "data") }) } });
+    }, { hostOverrides: { getWorkspaceRoot: () => plain, worktrees: new WorktreeManager({ dataDir: path.join(plain, "data") }),
+      config: { ...loadConfig({}), autoInitGit: false } } });
     const userSessionId = h.addUserSession();
     const done = collectUntil(h.bus, (event) => event.type === "flow.result", 20_000);
     h.host.createSession({ userSessionId, title: "plain", mode: "execute",
-      agents: [{ name: "dev", profileId: "implementer" }, { name: "scout", profileId: "explorer" }], briefing: handoff("go", "pending") });
+      agents: [{ name: "dev", profileId: "implementer", owns: ["src/widget.ts"] }, { name: "scout", profileId: "explorer" }], briefing: handoff("go", "pending") });
     const events = await done;
     expect(events.some((event) => event.type === "agent_session.worktree.created")).toBe(false);
     const seatOptions = h.fake.captured.options.filter((opts) => {
@@ -177,7 +182,7 @@ describe("seat worktree isolation (fake SDK + real git)", () => {
     const userSessionId = h.addUserSession();
     const done = collectUntil(h.bus, (event) => event.type === "flow.result", 20_000);
     h.host.createSession({ userSessionId, title: "off", mode: "execute",
-      agents: [{ name: "dev", profileId: "implementer" }], briefing: handoff("go", "pending") });
+      agents: [{ name: "dev", profileId: "implementer", owns: ["src/widget.ts"] }], briefing: handoff("go", "pending") });
     const events = await done;
     expect(events.some((event) => event.type === "agent_session.worktree.created")).toBe(false);
   });

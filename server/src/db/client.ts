@@ -22,7 +22,7 @@ export function openDb(dbFile: string) {
 
 function migrateAdditiveColumns(sqlite: Database.Database): void {
   const userColumns = new Set(sqlite.prepare("pragma table_info(user_sessions)").all().map((row) => (row as { name: string }).name));
-  for (const [name, ddl] of [["sdk_generation", "INTEGER NOT NULL DEFAULT 0"], ["sdk_turn_count", "INTEGER NOT NULL DEFAULT 0"], ["context_tokens", "INTEGER NOT NULL DEFAULT 0"], ["memory", "TEXT NOT NULL DEFAULT ''"], ["latest_handoff_id", "TEXT"], ["purpose", "TEXT NOT NULL DEFAULT 'work'"], ["subject_key", "TEXT"]] as const) {
+  for (const [name, ddl] of [["sdk_generation", "INTEGER NOT NULL DEFAULT 0"], ["sdk_turn_count", "INTEGER NOT NULL DEFAULT 0"], ["context_tokens", "INTEGER NOT NULL DEFAULT 0"], ["memory", "TEXT NOT NULL DEFAULT ''"], ["latest_handoff_id", "TEXT"], ["purpose", "TEXT NOT NULL DEFAULT 'work'"], ["subject_key", "TEXT"], ["cumulative_cost_usd", "REAL NOT NULL DEFAULT 0"], ["cumulative_api_duration_ms", "INTEGER NOT NULL DEFAULT 0"], ["run_state", "TEXT NOT NULL DEFAULT 'active' CHECK (run_state IN ('active','awaiting_signoff','completed'))"], ["run_base_commit", "TEXT"], ["latest_run_summary_id", "TEXT"]] as const) {
     if (!userColumns.has(name)) sqlite.exec(`ALTER TABLE user_sessions ADD COLUMN ${name} ${ddl}`);
   }
   const columns = new Set(
@@ -50,10 +50,37 @@ function migrateAdditiveColumns(sqlite: Database.Database): void {
     ["attempt_role", "TEXT"],
     ["peer_name", "TEXT NOT NULL DEFAULT ''"],
     ["last_active_at", "TEXT"],
+    ["cumulative_cost_usd", "REAL NOT NULL DEFAULT 0"],
+    ["cumulative_api_duration_ms", "INTEGER NOT NULL DEFAULT 0"],
+    ["last_decision_at", "TEXT"],
   ];
   for (const [name, ddl] of additions) {
     if (!columns.has(name)) sqlite.exec(`ALTER TABLE participants ADD COLUMN ${name} ${ddl}`);
   }
+  // Bare, no CHECKs — the `transport` precedent below. An existing table's
+  // CHECK cannot be widened, so the service treats these as typed by drizzle
+  // and validated at the boundary rather than by the database.
+  const interactionColumns = new Set(sqlite.prepare("pragma table_info(interactions)").all().map((row) => (row as { name: string }).name));
+  for (const [name, ddl] of [
+    ["agent_session_id", "TEXT"],
+    ["participant", "TEXT"],
+    ["urgency", "TEXT NOT NULL DEFAULT 'blocking'"],
+    ["source", "TEXT NOT NULL DEFAULT 'agent'"],
+    ["recommendation", "TEXT"],
+    ["dedupe_key", "TEXT"],
+    ["allow_free_text", "INTEGER NOT NULL DEFAULT 0"],
+    ["detached", "INTEGER NOT NULL DEFAULT 0"],
+    ["expires_at", "TEXT"],
+    ["default_option", "TEXT"],
+    ["auto_taken", "INTEGER NOT NULL DEFAULT 0"],
+    ["flushed_at", "TEXT"],
+  ] as const) {
+    if (!interactionColumns.has(name)) sqlite.exec(`ALTER TABLE interactions ADD COLUMN ${name} ${ddl}`);
+  }
+  sqlite.exec("CREATE INDEX IF NOT EXISTS interactions_session_status ON interactions(user_session_id, status)");
+  sqlite.exec("CREATE INDEX IF NOT EXISTS interactions_agent_open ON interactions(agent_session_id, status, urgency)");
+  const cronColumns = new Set(sqlite.prepare("pragma table_info(crons)").all().map((row) => (row as { name: string }).name));
+  if (!cronColumns.has("due_at")) sqlite.exec("ALTER TABLE crons ADD COLUMN due_at TEXT");
   const mailboxColumns = new Set(sqlite.prepare("pragma table_info(mailbox_deliveries)").all().map((row) => (row as { name: string }).name));
   if (!mailboxColumns.has("transport")) sqlite.exec("ALTER TABLE mailbox_deliveries ADD COLUMN transport TEXT NOT NULL DEFAULT 'console'");
   const usageColumns = new Set(sqlite.prepare("pragma table_info(usage_samples)").all().map((row) => (row as { name: string }).name));

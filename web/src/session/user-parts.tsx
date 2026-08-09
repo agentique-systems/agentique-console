@@ -46,6 +46,7 @@ import { HandoffCard } from "@/components/handoff-card";
 import { shortenPath, subjectOf } from "@/lib/tool-text";
 
 import { PlanCard } from "./plan-card";
+import { RunSummaryCard } from "./run-summary-card";
 import { QuestionCard } from "./question-card";
 import type { ToolItem } from "./user-fold";
 import {
@@ -211,6 +212,15 @@ export function UserPart({
     case "plan":
       return (
         <PlanCard
+          sessionId={sessionId}
+          item={item}
+          onRequestChanges={onRequestChanges}
+        />
+      );
+
+    case "run_summary":
+      return (
+        <RunSummaryCard
           sessionId={sessionId}
           item={item}
           onRequestChanges={onRequestChanges}

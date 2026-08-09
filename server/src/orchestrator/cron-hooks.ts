@@ -21,7 +21,7 @@ export function buildCronHooks(deps: { repo: Repo; bus: EventBus; userSessionId:
         const prompt = typeof toolInput.prompt === "string" ? toolInput.prompt : "";
         if (!sdkCronId || schedule === "" || prompt === "") return {};
         deps.repo.insertCron({ id: newId("cron"), userSessionId: deps.userSessionId, sdkCronId, schedule, prompt,
-          oneShot: toolInput.recurring === false, status: "active", createdAt: nowIso(), updatedAt: nowIso() });
+          oneShot: toolInput.recurring === false, dueAt: null, status: "active", createdAt: nowIso(), updatedAt: nowIso() });
         deps.bus.append({ type: "user_session.runtime", userSessionId: deps.userSessionId,
           payload: { sessionId: deps.userSessionId, detail: `cron mirrored: ${schedule} (${sdkCronId})` } });
       } else if (input.tool_name === "CronDelete") {

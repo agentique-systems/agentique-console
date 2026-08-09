@@ -10,6 +10,9 @@ import { Repo, type UserSessionRow } from "./db/repo.ts";
 import { workspaces } from "./db/schema.ts";
 import { EventBus } from "./events/bus.ts";
 import { newId, nowIso } from "./ids.ts";
+import { RunCompletionService } from "./completion/service.ts";
+import { ContractService } from "./contracts/service.ts";
+import { DecisionLedger } from "./orchestrator/decisions.ts";
 import { InteractionService } from "./orchestrator/interactions.ts";
 import {
   OrchestratorRunner,
@@ -28,6 +31,8 @@ export interface Harness {
   bus: EventBus;
   repo: Repo;
   interactions: InteractionService;
+  decisions: DecisionLedger;
+  contracts: ContractService;
   runner: OrchestratorRunner;
   fake: FakeSdk;
   config: Config;
@@ -43,7 +48,9 @@ export function makeHarness(
   const { db, sqlite } = openDb(":memory:");
   const bus = new EventBus(db);
   const repo = new Repo(db, sqlite);
-  const interactions = new InteractionService(db, bus);
+  const decisions = new DecisionLedger(db, bus);
+  const contracts = new ContractService(db, bus);
+  const interactions = new InteractionService(db, bus, decisions);
   const fake = fakeSdk(program);
   const config = loadConfig({});
   const handoffs = new HandoffService({ repo, bus, getWorkspaceRoot: () => "/tmp/test-workspace" });
@@ -66,6 +73,7 @@ export function makeHarness(
     config,
     sdk: async () => fake.sdk,
     interactions,
+    decisions,
     handoffs,
     getWorkspaceRoot: () => "/tmp/test-workspace",
     ...overrides,
@@ -77,6 +85,8 @@ export function makeHarness(
     bus,
     repo,
     interactions,
+    decisions,
+    contracts,
     runner,
     fake,
     config,
@@ -97,6 +107,11 @@ export function makeHarness(
         contextTokens: 0,
         memory: "",
         latestHandoffId: null,
+        cumulativeCostUsd: 0,
+        cumulativeApiDurationMs: 0,
+        runState: "active",
+        runBaseCommit: null,
+        latestRunSummaryId: null,
         createdAt: nowIso(),
         updatedAt: nowIso(),
       };
@@ -108,6 +123,7 @@ export function makeHarness(
 
 export interface DelegationHarness extends Harness {
   host: AgentSessionHost;
+  completion: RunCompletionService;
 }
 
 /**
@@ -139,7 +155,7 @@ export function restartHarness(
 function wire(
   base: Harness,
   options: { hostOverrides?: Partial<AgentSessionHostDeps> },
-): { host: AgentSessionHost; runner: OrchestratorRunner } {
+): { host: AgentSessionHost; runner: OrchestratorRunner; completion: RunCompletionService } {
   const tasks = new TaskService(base.db, base.bus);
   const sessionStore = new SqliteSessionStore(base.db);
   const handoffs = new HandoffService({ repo: base.repo, bus: base.bus, getWorkspaceRoot: () => "/tmp/test-workspace" });
@@ -153,17 +169,23 @@ function wire(
     sessionStore,
     getWorkspaceRoot: () => "/tmp/test-workspace",
     interactions: base.interactions,
+    decisions: base.decisions,
+    contracts: base.contracts,
     handoffs,
     tasks,
     wake: (userSessionId, agentSessionId, category, text) => runner.enqueueAgentMilestone(userSessionId, agentSessionId, category, text),
     ...options.hostOverrides,
   });
+  // Same wiring as main.ts: a withheld final must not become a silence.
+  base.interactions.onBlockingCleared((userSessionId, agentSessionId) =>
+    host.onBlockingQuestionsCleared(userSessionId, agentSessionId));
   runner = new OrchestratorRunner({
     repo: base.repo,
     bus: base.bus,
     config: base.config,
     sdk: async () => base.fake.sdk,
     interactions: base.interactions,
+    decisions: base.decisions,
     handoffs,
     getWorkspaceRoot: () => "/tmp/test-workspace",
     sessionStore,
@@ -180,7 +202,21 @@ function wire(
         handoffs,
       }),
   });
-  return { host, runner };
+  // main.ts in miniature: the completion predicate re-evaluates on every
+  // settle, status change and answered card.
+  const completion = new RunCompletionService({
+    db: base.db, repo: base.repo, bus: base.bus, interactions: base.interactions,
+    host: () => host, runner: () => runner,
+    getWorkspaceRoot: () => "/tmp/test-workspace",
+    // The real window is 2s; tests would otherwise pay it on every case.
+    quietWindowMs: 25,
+  });
+  tasks.onChange(() => host.releaseBlockedAssignments());
+  runner.onSettled((userSessionId) => completion.schedule(userSessionId));
+  runner.onOperatorMessage((userSessionId) => completion.noteOperatorMessage(userSessionId));
+  host.onStatusChanged((userSessionId) => completion.schedule(userSessionId));
+  base.interactions.onResolved((userSessionId) => completion.schedule(userSessionId));
+  return { host, runner, completion };
 }
 
 /**

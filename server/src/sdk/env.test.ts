@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { sdkEnv } from "./env.ts";
 
+/**
+ * `CLAUDE_CODE_MAX_RETRIES` is set on every child. The CLI's own back-off
+ * schedule stopped growing after attempt 7 in db-live-2, so attempts 7-10 were
+ * ~34s each and bought nothing; the Console's wall-clock budget is the real
+ * control and this stops the CLI burning three minutes before it can act.
+ */
+const RETRY_CAP = { CLAUDE_CODE_MAX_RETRIES: "5" };
+
 describe("sdkEnv", () => {
   it("strips the launching Claude Code session's coupling and behaviour vars", () => {
     const env = sdkEnv({ source: {
@@ -16,7 +24,7 @@ describe("sdkEnv", () => {
       CLAUDE_EFFORT: "xhigh",
       AI_AGENT: "claude-code",
     } });
-    expect(env).toEqual({});
+    expect(env).toEqual({ ...RETRY_CAP });
   });
 
   it("keeps paths, credentials and provider settings", () => {
@@ -30,6 +38,7 @@ describe("sdkEnv", () => {
       CLAUDE_EFFORT: "xhigh",
     } });
     expect(env).toEqual({
+      ...RETRY_CAP,
       PATH: "/usr/bin",
       HOME: "/home/me",
       ANTHROPIC_API_KEY: "sk-test",
@@ -40,12 +49,12 @@ describe("sdkEnv", () => {
   });
 
   it("drops undefined values", () => {
-    expect(sdkEnv({ source: { A: undefined, B: "b" } })).toEqual({ B: "b" });
+    expect(sdkEnv({ source: { A: undefined, B: "b" } })).toEqual({ ...RETRY_CAP, B: "b" });
   });
 
   it("drops native subagent knobs", () => {
     const env = sdkEnv({ source: { CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION: "5" } });
-    expect(env).toEqual({});
+    expect(env).toEqual({ ...RETRY_CAP });
   });
 
   it("names the session, displacing any inherited name", () => {
@@ -53,6 +62,6 @@ describe("sdkEnv", () => {
       sessionName: "console-scout-8fbb2c",
       source: { PATH: "/usr/bin", CLAUDE_CODE_SESSION_NAME: "operators-own-name" },
     });
-    expect(env).toEqual({ PATH: "/usr/bin", CLAUDE_CODE_SESSION_NAME: "console-scout-8fbb2c" });
+    expect(env).toEqual({ ...RETRY_CAP, PATH: "/usr/bin", CLAUDE_CODE_SESSION_NAME: "console-scout-8fbb2c" });
   });
 });

@@ -28,9 +28,52 @@ CREATE TABLE IF NOT EXISTS user_sessions (
   context_tokens INTEGER NOT NULL DEFAULT 0,
   memory TEXT NOT NULL DEFAULT '',
   latest_handoff_id TEXT,
+  -- The SDK reports cost/api-duration CUMULATIVELY per query(), and a RESUMED
+  -- session continues its running total. Holding the baseline in process
+  -- memory therefore mis-bills every respawn-over-resume as one enormous turn:
+  -- db-live-1 recorded $4.4875 for a 55-second turn, 33.4% of that whole run.
+  -- Persisted here so it survives the process that owned it.
+  cumulative_cost_usd REAL NOT NULL DEFAULT 0,
+  cumulative_api_duration_ms INTEGER NOT NULL DEFAULT 0,
+  -- Orthogonal to status, deliberately. status (open|archived) answers
+  -- "is this in the operator's active list"; run_state answers "is the work
+  -- done". Overloading one column collapses two questions that have different
+  -- answers: a completed run is NOT hidden, and an archived run may never have
+  -- finished.
+  --
+  -- awaiting_signoff is its own state because it is the only one in which the
+  -- Console asserts "I believe this is done" and the operator has not agreed.
+  -- Collapsing it into completed recreates the db-live-2 failure (the moment
+  -- passes in silence); collapsing it into active leaves the spinner spinning.
+  run_state TEXT NOT NULL DEFAULT 'active' CHECK (run_state IN ('active','awaiting_signoff','completed')),
+  -- HEAD when the first agent session was created; the diff base for
+  -- "what was built".
+  run_base_commit TEXT,
+  latest_run_summary_id TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+-- One proposed end-of-run report. Persisted rather than recomputed: the reap
+-- counts are in-memory and unrecoverable a second later, and worktree diffs are
+-- taken against branches that archival renames.
+CREATE TABLE IF NOT EXISTS run_summaries (
+  id TEXT PRIMARY KEY,
+  user_session_id TEXT NOT NULL REFERENCES user_sessions(id),
+  -- The events window this summary covers. After a change request the next
+  -- summary starts at seq_to + 1, so a second run in one session is
+  -- summarizable without double-counting the first.
+  seq_from INTEGER NOT NULL,
+  seq_to INTEGER NOT NULL,
+  verdict TEXT NOT NULL,
+  document TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'proposed'
+    CHECK (status IN ('proposed','accepted','changes_requested','superseded')),
+  note TEXT,
+  created_at TEXT NOT NULL,
+  resolved_at TEXT
+);
+CREATE INDEX IF NOT EXISTS run_summaries_session ON run_summaries(user_session_id, created_at);
 
 CREATE TABLE IF NOT EXISTS agent_sessions (
   id TEXT PRIMARY KEY,
@@ -64,6 +107,13 @@ CREATE TABLE IF NOT EXISTS participants (
   checkpoint_ready INTEGER NOT NULL DEFAULT 1,
   pending_turn_seq INTEGER NOT NULL DEFAULT 0,
   last_seen_seq INTEGER NOT NULL DEFAULT 0,
+  -- See user_sessions: the cumulative baseline must outlive the lane process,
+  -- because the provider session it belongs to does.
+  cumulative_cost_usd REAL NOT NULL DEFAULT 0,
+  cumulative_api_duration_ms INTEGER NOT NULL DEFAULT 0,
+  -- Watermark for the per-delivery operator-decision delta. NULL means the
+  -- seat has been told nothing yet, so its first delivery carries everything.
+  last_decision_at TEXT,
   worktree_path TEXT,
   worktree_base_commit TEXT,
   worktree_branch TEXT,
@@ -111,16 +161,123 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE UNIQUE INDEX IF NOT EXISTS messages_session_seq ON messages(session_kind, session_id, seq);
 CREATE INDEX IF NOT EXISTS messages_session ON messages(session_kind, session_id);
 
+-- kind and status are FROZEN value sets. SQLite cannot widen a CHECK, and
+-- migrateAdditiveColumns adds columns bare (no CHECK) -- so any new dimension
+-- must arrive as a new COLUMN, never as a new enum value on these two. That is
+-- why urgency, source and detached are separate columns rather than statuses.
 CREATE TABLE IF NOT EXISTS interactions (
   id TEXT PRIMARY KEY,
   user_session_id TEXT NOT NULL REFERENCES user_sessions(id),
+  -- Where it was raised. NULL/NULL = the main orchestrator lane; otherwise the
+  -- seat that asked, so the card can say who wants to know and the answer can
+  -- be delivered back to them.
+  agent_session_id TEXT,
+  participant TEXT,
   kind TEXT NOT NULL CHECK (kind IN ('question','plan_approval')),
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','answered','rejected','dismissed','stale')),
+  -- blocking stops the asker until answered; deferred posts the card now and
+  -- hands the answer over at the asker's next delivery.
+  urgency TEXT NOT NULL DEFAULT 'blocking' CHECK (urgency IN ('blocking','deferred')),
+  source TEXT NOT NULL DEFAULT 'agent' CHECK (source IN ('agent','uncertainty','console')),
+  recommendation TEXT,
+  -- Normalized (asker, question); an unresolved duplicate returns the open card
+  -- instead of minting a second one, which is what keeps a re-asking seat from
+  -- feeding the identical-call watchdog.
+  dedupe_key TEXT,
+  allow_free_text INTEGER NOT NULL DEFAULT 0,
+  -- The asker's parked promise died (park, rotation, watchdog, restart). The
+  -- row stays answerable; the answer arrives by mailbox instead of by return.
+  detached INTEGER NOT NULL DEFAULT 0,
+  expires_at TEXT,
+  default_option TEXT,
+  auto_taken INTEGER NOT NULL DEFAULT 0,
+  -- When the ASKING SEAT was told the answer. Distinct from resolved_at, which
+  -- is when the operator answered.
+  flushed_at TEXT,
   payload TEXT NOT NULL,
   response TEXT,
   tool_use_id TEXT,
   created_at TEXT NOT NULL,
   resolved_at TEXT
+);
+-- Indexes on the columns above live in migrateAdditiveColumns, NOT here. This
+-- block runs before the additive migration, and on an existing database
+-- CREATE TABLE IF NOT EXISTS is a no-op while CREATE INDEX is not — so an
+-- index naming a column the old table lacks fails the whole boot.
+
+-- Every decision the operator has actually made, as a first-class durable
+-- object rather than a side effect of one tool call.
+--
+-- Before this, an answer lived in updatedInput.answers inside ONE provider
+-- transcript and died at that session's next rotation; a coordinator's
+-- escalation returned it to one seat and its siblings never learned it.
+-- In db-live-1 the operator's answer ("DODGE") reached ZERO of the three
+-- specialists — they built the right game only because the prompt happened to
+-- imply it. Had the operator said "COLLECT", that run builds the wrong thing.
+CREATE TABLE IF NOT EXISTS operator_decisions (
+  id TEXT PRIMARY KEY,
+  user_session_id TEXT NOT NULL REFERENCES user_sessions(id),
+  agent_session_id TEXT,
+  interaction_id TEXT,
+  -- Seat name, 'orchestrator', 'main', or 'console'.
+  asked_by TEXT NOT NULL,
+  source TEXT NOT NULL CHECK (source IN ('interaction','plan_approval','ttl_default')),
+  question TEXT NOT NULL,
+  answer TEXT NOT NULL,
+  note TEXT,
+  -- Taken by TTL expiry rather than chosen by the operator. Weaker evidence of
+  -- intent, and the Run Summary must be able to say so.
+  auto_taken INTEGER NOT NULL DEFAULT 0,
+  superseded_by TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS operator_decisions_session ON operator_decisions(user_session_id, created_at);
+
+-- A shared interface two or more seats must agree BEFORE either writes code.
+--
+-- The operator's instruction in db-live-2 was explicit: "renderer and page must
+-- agree the exact module interface BEFORE either writes code -- that contract
+-- is the handoff, and neither should guess the other's shape." What happened:
+-- the two seats exchanged ZERO messages all run, the coordinator authored the
+-- contract alone and told both to "proceed straight to implementation once they
+-- confirm", renderer wrote game.js 61 seconds later without confirming, and
+-- page confirmed 5m50s AFTER it had written all three of its files -- having
+-- verified the contract by grepping renderer's file off disk. It worked only
+-- because they happened to share a directory.
+--
+-- Four statuses plus a revision counter, not five. Declaring IS proposing
+-- revision 1, and amending is revision+1 with every acceptance reset -- an
+-- amendment that leaves prior acceptances standing is a contract nobody agreed
+-- to, and modelling "amended" as a status would allow exactly that.
+CREATE TABLE IF NOT EXISTS contracts (
+  id TEXT PRIMARY KEY,
+  agent_session_id TEXT NOT NULL REFERENCES agent_sessions(id),
+  user_session_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  declared_by TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'proposed'
+    CHECK (status IN ('proposed','accepted','superseded','abandoned')),
+  revision INTEGER NOT NULL DEFAULT 1,
+  body TEXT NOT NULL,
+  -- Paths this contract governs. Writes to them are denied until every party
+  -- has accepted the current revision.
+  scopes TEXT NOT NULL DEFAULT '[]',
+  supersedes TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS contracts_session ON contracts(agent_session_id, status);
+
+CREATE TABLE IF NOT EXISTS contract_parties (
+  contract_id TEXT NOT NULL REFERENCES contracts(id),
+  participant TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','accepted','objected')),
+  -- The revision this party accepted. An amendment bumps the contract past it,
+  -- which is what makes a stale acceptance visible rather than silent.
+  revision INTEGER NOT NULL DEFAULT 0,
+  comment TEXT,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (contract_id, participant)
 );
 
 CREATE TABLE IF NOT EXISTS tasks (
@@ -198,6 +355,11 @@ CREATE TABLE IF NOT EXISTS crons (
   schedule TEXT NOT NULL,
   prompt TEXT NOT NULL,
   one_shot INTEGER NOT NULL DEFAULT 0,
+  -- Absolute firing time for a console-owned deadline. The cron matcher is
+  -- minute-resolution, which is too coarse for a check-in timer, and a
+  -- console-owned one-shot must fire whether or not the lane happens to be
+  -- live -- that is the entire point of owning it.
+  due_at TEXT,
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','deleted')),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL

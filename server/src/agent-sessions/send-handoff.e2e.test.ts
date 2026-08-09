@@ -73,10 +73,16 @@ describe("send_handoff (fake SDK)", () => {
     await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled", 10_000);
 
     const tool = h.fake.captured.tools.find((t) => t.name === "send_handoff");
-    await expect(tool!.handler({
+    // Surfaced as a tool ERROR the seat can read and act on, not as a throw
+    // escaping the handler. The in-process MCP server's behaviour on a
+    // throwing handler is not something the route check — or the final gate,
+    // which shares this path — should be betting on.
+    const result = await tool!.handler({
       to: "nobody", category: "update", status: "in_progress", risk: "low", action: "x",
       stateSummary: "y", evidence: [], resultSummary: null, artifacts: [], uncertainty: [],
       nextAction: null, taskId: null, requestExpandedContext: false,
-    }, {})).rejects.toThrow();
+    }, {});
+    expect(result.isError).toBe(true);
+    expect((result.content[0] as { text: string }).text).toMatch(/route .* is not allowed/);
   });
 });

@@ -60,7 +60,16 @@ export interface CreateWorkspaceBody {
 }
 
 // GET /api/user-sessions?workspaceId=
-export type ListUserSessionsResponse = UserSession[];
+/**
+ * `pendingInteractions` is server-authoritative attention. The client's
+ * `ui.awaitingInput` is a live overlay only — it is rebuilt from events and is
+ * therefore lossy on a cold boot, which is exactly when the operator most needs
+ * to know a run is waiting on them.
+ */
+export interface UserSessionListItem extends UserSession {
+  pendingInteractions: number;
+}
+export type ListUserSessionsResponse = UserSessionListItem[];
 
 // POST /api/user-sessions — create-on-first-message
 export interface CreateUserSessionBody {
@@ -96,8 +105,33 @@ export interface PostMessageResponse {
 
 // POST /api/user-sessions/:id/interactions/:interactionId
 export type ResolveInteractionBody =
-  | { answers: Record<string, string[]> }
+  | {
+      /** Chosen option labels per question. May be `{}` when freeText covers every question. */
+      answers: Record<string, string[]>;
+      /**
+       * Free-text answer per question, keyed by question text. Only accepted
+       * when the card was raised with `allowFreeText`. Without this the only
+       * way to say something the asker did not anticipate was to type in chat,
+       * which DISMISSES the card rather than answering it.
+       */
+      freeText?: Record<string, string>;
+      /** Card-level note attached to any answer. */
+      note?: string;
+    }
   | { decision: "approve" | "reject"; note?: string };
+
+// POST /api/user-sessions/:id/signoff
+export interface RunSignoffBody {
+  decision: "accept" | "changes";
+  note?: string;
+}
+// GET /api/user-sessions/:id/run-summary
+export interface RunSummaryResponse {
+  summaryId: string;
+  status: "proposed" | "accepted" | "changes_requested" | "superseded";
+  note: string | null;
+  document: unknown;
+}
 
 // GET /api/user-sessions/:id/transcript
 // GET /api/agent-sessions/:id/transcript

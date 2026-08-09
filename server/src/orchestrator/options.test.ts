@@ -1,8 +1,14 @@
 /**
  * Main never owns participant processes: in-process subagents and write tools
- * stay denied, while native SendMessage/task/cron tools are allowed and
- * governed by hook middleware. The lane registers under its peer name and
- * accepts cross-session inbound.
+ * stay denied, while the native task/cron tools are allowed and governed by
+ * hook middleware. The lane registers under its peer name and accepts
+ * cross-session inbound.
+ *
+ * `SendMessage` is now denied unconditionally. The mesh it addressed is gone,
+ * its envelope middleware was deleted, and both of db-live-2's sends failed
+ * with "No agent named … is reachable" — so coordinator traffic goes through
+ * the console-owned `send_to_coordinator` instead, which is route-checked and
+ * journaled like every other transfer.
  */
 import { describe, expect, it } from "vitest";
 import { buildOrchestratorOptions } from "./options.ts";
@@ -28,10 +34,22 @@ describe("orchestrator options", () => {
   it("denies in-process subagents and write tools; allows governed native tools", () => {
     const disallowed = options().disallowedTools ?? [];
     expect(disallowed).toEqual(expect.arrayContaining(["Agent", "Task", "Bash", "Write", "Edit"]));
-    expect(disallowed).not.toContain("SendMessage");
-    expect(disallowed).not.toContain("TaskCreate");
+    // Denied in every configuration: it bypasses the journal entirely.
+    expect(disallowed).toContain("SendMessage");
+    // As do the lane-waking natives, which fire a turn with no mailbox row,
+    // no handoff and no attribution.
+    expect(disallowed).toEqual(expect.arrayContaining(["ScheduleWakeup", "Monitor", "TaskStop"]));
+    // The native ledger is denied too: it is keyed on the provider session id,
+    // which changes at every rotation — the orphan failure seats were already
+    // spared. Main uses the console-owned task tools.
+    expect(disallowed).toContain("TaskCreate");
     const allowed = options().allowedTools ?? [];
-    expect(allowed).toEqual(expect.arrayContaining(["SendMessage", "TaskCreate", "TaskUpdate", "TaskList", "CronCreate", "CronList", "CronDelete"]));
+    expect(allowed).toEqual(expect.arrayContaining(["CronCreate", "CronList", "CronDelete"]));
+    expect(allowed).toEqual(expect.arrayContaining([
+      "mcp__console__task_create", "mcp__console__task_update", "mcp__console__task_list",
+    ]));
+    expect(allowed).toContain("mcp__console__send_to_coordinator");
+    expect(allowed).not.toContain("SendMessage");
   });
 
   it("enables fail-closed workspace sandboxing", () => {

@@ -54,6 +54,7 @@ function toWire(row: TaskRow, deps: readonly DependencyRow[], allRows: readonly 
 }
 
 export class TaskService {
+  #onChange: ((task: Task) => void) | undefined;
   readonly #db: Db;
   readonly #bus: EventBus;
 
@@ -70,6 +71,8 @@ export class TaskService {
     description?: string;
     activeForm?: string;
     metadata?: Record<string, unknown>;
+    /** The seat that will DO the work — not the seat writing the row. */
+    owner?: string | null;
     attribution: TaskAttribution;
   }): void {
     const existing = this.#get(input.sdkSessionId, input.sdkTaskId);
@@ -105,7 +108,11 @@ export class TaskService {
       description: input.description ?? "",
       activeForm: input.activeForm ?? null,
       status: "pending",
-      owner: input.attribution.participant,
+      // NOT the writer. Defaulting to whoever called the tool meant all four
+      // orchestrator-side rows in db-live-2 said owner="orchestrator" — which
+      // is precisely the wrong information for the roster, for the final
+      // caveats, and for the operator reading the run summary.
+      owner: input.owner ?? null,
       blocks: [],
       blockedBy: [],
       metadata: input.metadata ?? {},
@@ -332,8 +339,17 @@ export class TaskService {
     return and(eq(tasks.sdkSessionId, sdkSessionId), eq(tasks.sdkTaskId, sdkTaskId));
   }
 
+  /**
+   * Notified after every task write. An explicit callback rather than a bus
+   * subscription: it is synchronous and testable without a spine, and the one
+   * consumer — releasing assignments whose blocker just completed — has to run
+   * before anything else observes the new state.
+   */
+  onChange(handler: (task: Task) => void): void { this.#onChange = handler; }
+
   #emit(type: "task.created" | "task.updated", row: TaskRow, changed?: string[]): void {
     const task = toWire(row, this.#db.select().from(taskDependencies).all(), this.#db.select().from(tasks).all());
+    this.#onChange?.(task);
     this.#bus.append({
       type,
       workspaceId: row.workspaceId,

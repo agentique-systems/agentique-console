@@ -1,0 +1,250 @@
+/**
+ * When is a run done, and who says so.
+ *
+ * db-live-2 had no answer to either question. There was no `completed` state,
+ * no run-level terminal event, and no archive affordance — so "done", "stuck",
+ * "crashed" and "waiting on a question" all rendered as a spinner that stopped.
+ * The run's last act was to ask a question eleven seconds AFTER declaring
+ * itself finished; that question is still `pending` in that database, and it is
+ * the last row ever written to it.
+ *
+ * The predicate below spans both lanes plus the interactions table, which is
+ * why it lives in its own service: `host.#refreshStatus` and
+ * `runner.#settleTurn` are hot, single-lane, and already do enough. They call
+ * this; they do not contain it.
+ */
+import type { EventBus } from "../events/bus.ts";
+import type { Repo } from "../db/repo.ts";
+import type { AgentSessionHost } from "../agent-sessions/host.ts";
+import type { OrchestratorRunner } from "../orchestrator/runner.ts";
+import type { InteractionService } from "../orchestrator/interactions.ts";
+import { newId, nowIso } from "../ids.ts";
+import { buildRunSummary, type RunSummaryDocument } from "./summary.ts";
+import { runSummaries } from "../db/schema.ts";
+import type { Db } from "../db/client.ts";
+import { and, desc, eq } from "drizzle-orm";
+import { conflict, notFound } from "../api/errors.ts";
+
+export interface RunCompletionDeps {
+  db: Db;
+  repo: Repo;
+  bus: EventBus;
+  interactions: InteractionService;
+  host: () => AgentSessionHost;
+  runner: () => OrchestratorRunner;
+  getWorkspaceRoot?: (workspaceId: string) => string;
+  /** Overridable so tests do not pay the real quiet window on every case. */
+  quietWindowMs?: number;
+}
+
+/**
+ * Long enough that a settle followed 1ms later by the next turn is a non-event,
+ * short enough that the operator does not notice it. The predicate is
+ * re-evaluated when the timer FIRES, not when it was scheduled, so a new turn
+ * starting inside the window simply makes it false again.
+ */
+const QUIET_WINDOW_MS = 2_000;
+
+export class RunCompletionService {
+  readonly #deps: RunCompletionDeps;
+  readonly #timers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Sessions already proposed; cleared by a change request so it can re-fire. */
+  readonly #armed = new Set<string>();
+
+  constructor(deps: RunCompletionDeps) {
+    this.#deps = deps;
+  }
+
+  /** Debounced re-evaluation. Safe to call from anywhere, as often as you like. */
+  schedule(userSessionId: string): void {
+    const existing = this.#timers.get(userSessionId);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      this.#timers.delete(userSessionId);
+      try { this.evaluate(userSessionId); } catch { /* never let a sweep kill the process */ }
+    }, this.#deps.quietWindowMs ?? QUIET_WINDOW_MS);
+    timer.unref?.();
+    this.#timers.set(userSessionId, timer);
+  }
+
+  stop(): void {
+    for (const timer of this.#timers.values()) clearTimeout(timer);
+    this.#timers.clear();
+  }
+
+  /**
+   * Every clause is a fact the CONSOLE owns. Nothing here depends on a model
+   * maintaining state honestly — that is what made db-live-1's ledger-based
+   * gating unusable.
+   */
+  isComplete(userSessionId: string): boolean {
+    const { repo, interactions } = this.#deps;
+    const session = repo.getUserSession(userSessionId);
+    if (!session) return false;
+    if (session.runState !== "active" || session.status !== "open") return false;
+    // A profile-manager conversation is a tool, not a run; it never "completes".
+    if (session.purpose !== "work") return false;
+
+    const agentSessions = repo.listAgentSessions(userSessionId).filter((row) => row.status === "open");
+    // Never fire on a chat-only session that delegated nothing.
+    if (agentSessions.length === 0) return false;
+
+    const host = this.#deps.host();
+    for (const agentSession of agentSessions) {
+      if (host.statusOf(agentSession) !== "reported") return false;
+      if (repo.listActiveDeliveries(agentSession.id).length > 0) return false;
+    }
+
+    // An open question means the run is waiting on the operator, not finished.
+    if (interactions.listPending(userSessionId).length > 0) return false;
+
+    const runner = this.#deps.runner();
+    if (runner.queuedJobs(userSessionId) > 0) return false;
+    if (!runner.laneIdle(userSessionId)) return false;
+
+    // Somebody must actually have reported a final. Idle is not done.
+    return repo.listAgentSessions(userSessionId).some((agentSession) =>
+      repo.latestHandoff({
+        userSessionId, agentSessionId: agentSession.id,
+        participant: "main", excludeCheckpoints: true,
+      })?.trigger === "final");
+  }
+
+  /** Fires at most one proposal per active→awaiting_signoff transition. */
+  evaluate(userSessionId: string): boolean {
+    if (this.#armed.has(userSessionId)) return false;
+    if (!this.isComplete(userSessionId)) return false;
+    this.#armed.add(userSessionId);
+    this.#propose(userSessionId);
+    return true;
+  }
+
+  #propose(userSessionId: string): void {
+    const { db, repo, bus } = this.#deps;
+    const session = repo.getUserSession(userSessionId);
+    if (!session) return;
+
+    // Reap BEFORE building the summary so the counts are real, and so a
+    // proposal never leaves a dev server running while the operator reads it.
+    const reaped = this.#deps.host().reapForUserSession(userSessionId);
+
+    const previous = db.select().from(runSummaries)
+      .where(eq(runSummaries.userSessionId, userSessionId))
+      .orderBy(desc(runSummaries.createdAt)).get();
+    const seqFrom = previous ? previous.seqTo + 1 : 0;
+    const document = buildRunSummary({
+      db, repo, bus, userSessionId, seqFrom, reaped,
+      interactions: this.#deps.interactions,
+      ...(this.#deps.getWorkspaceRoot ? { getWorkspaceRoot: this.#deps.getWorkspaceRoot } : {}),
+    });
+
+    const id = newId("decision").replace("decision_", "run_");
+    db.insert(runSummaries).values({
+      id, userSessionId, seqFrom, seqTo: document.seqTo, verdict: document.verdict,
+      document: document as unknown as Record<string, unknown>,
+      status: "proposed", note: null, createdAt: nowIso(), resolvedAt: null,
+    }).run();
+    repo.patchUserSession(userSessionId, { runState: "awaiting_signoff", latestRunSummaryId: id });
+
+    bus.append({
+      type: "run.completion.proposed",
+      userSessionId,
+      payload: {
+        sessionId: userSessionId, runId: id, summaryId: id,
+        headline: document.headline, verdict: document.verdict,
+        filesChanged: document.build.filesChanged,
+        tasks: document.tasks,
+        durationMs: document.durationMs,
+        deadAirMs: document.deadAirMs,
+        costUsd: document.cost.usd,
+        costCoverage: document.cost.coverage,
+        openUncertainty: document.uncertainty.length,
+        reaped: { processes: reaped.processes.length, browsers: reaped.browsers, leakedBefore: reaped.leakedBefore },
+      },
+    });
+    bus.append({
+      type: "user_session.updated",
+      userSessionId,
+      payload: { sessionId: userSessionId, patch: { runState: "awaiting_signoff" } },
+    });
+  }
+
+  /**
+   * The operator's verdict.
+   *
+   * Accept ends the run; request-changes reopens it. `status` stays `open`
+   * either way — completion is not archival, and a completed run in the
+   * sidebar should read "done", not "hidden".
+   */
+  resolve(userSessionId: string, decision: "accept" | "changes", note?: string): void {
+    const { db, repo, bus } = this.#deps;
+    const session = repo.getUserSession(userSessionId);
+    if (!session) throw notFound(`no user session ${userSessionId}`);
+    if (session.runState !== "awaiting_signoff") {
+      throw conflict(`run is ${session.runState}, not awaiting sign-off`);
+    }
+    const summary = session.latestRunSummaryId
+      ? db.select().from(runSummaries).where(eq(runSummaries.id, session.latestRunSummaryId)).get()
+      : db.select().from(runSummaries)
+          .where(and(eq(runSummaries.userSessionId, userSessionId), eq(runSummaries.status, "proposed")))
+          .orderBy(desc(runSummaries.createdAt)).get();
+    const now = nowIso();
+    if (summary) {
+      db.update(runSummaries)
+        .set({ status: decision === "accept" ? "accepted" : "changes_requested", ...(note === undefined ? {} : { note }), resolvedAt: now })
+        .where(eq(runSummaries.id, summary.id)).run();
+    }
+
+    if (decision === "accept") {
+      repo.patchUserSession(userSessionId, { runState: "completed" });
+      bus.append({ type: "run.signoff.resolved", userSessionId,
+        payload: { sessionId: userSessionId, runId: summary?.id ?? "", decision: "accept", ...(note === undefined ? {} : { note }) } });
+      bus.append({ type: "user_session.updated", userSessionId,
+        payload: { sessionId: userSessionId, patch: { runState: "completed" } } });
+      // The agent sessions are done; their rows say so, and the lane stops
+      // holding a CLI subprocess for a run nobody is working on.
+      this.#deps.host().archiveForUserSession(userSessionId);
+      void this.#deps.runner().closeSession(userSessionId).catch(() => undefined);
+      return;
+    }
+
+    // Reopened. The seats respawn lazily over their retained provider sessions;
+    // any killed dev server is genuinely gone, which is correct — an agent that
+    // must restart its server on a change request is honest, and a survivor is
+    // exactly the trap db-live-2 left for the next run.
+    repo.patchUserSession(userSessionId, { runState: "active" });
+    this.#armed.delete(userSessionId);
+    bus.append({ type: "run.signoff.resolved", userSessionId,
+      payload: { sessionId: userSessionId, runId: summary?.id ?? "", decision: "changes", ...(note === undefined ? {} : { note }) } });
+    bus.append({ type: "run.reopened", userSessionId,
+      payload: { sessionId: userSessionId, runId: summary?.id ?? "", reason: "changes_requested" } });
+    bus.append({ type: "user_session.updated", userSessionId,
+      payload: { sessionId: userSessionId, patch: { runState: "active" } } });
+    // A note is a real operator message: it steers a live lane and reaches the
+    // orchestrator the same way anything else the operator types does. An empty
+    // note synthesizes nothing — the UI focuses the composer instead.
+    if (note !== undefined && note.trim() !== "") {
+      this.#deps.runner().postOperatorMessage(userSessionId, note.trim());
+    }
+  }
+
+  /**
+   * Chat while a sign-off card is open IS a change request. Without this the
+   * operator types "actually add X", the orchestrator answers, and the card
+   * sits there still claiming the run is done.
+   */
+  noteOperatorMessage(userSessionId: string): boolean {
+    const session = this.#deps.repo.getUserSession(userSessionId);
+    if (session?.runState !== "awaiting_signoff") return false;
+    this.resolve(userSessionId, "changes");
+    return true;
+  }
+
+  latestSummary(userSessionId: string): { id: string; document: RunSummaryDocument; status: string; note: string | null } | undefined {
+    const row = this.#deps.db.select().from(runSummaries)
+      .where(eq(runSummaries.userSessionId, userSessionId))
+      .orderBy(desc(runSummaries.createdAt)).get();
+    if (!row) return undefined;
+    return { id: row.id, document: row.document as unknown as RunSummaryDocument, status: row.status, note: row.note };
+  }
+}

@@ -5,6 +5,10 @@ import type { AppContext } from "./context.ts";
 import { openDb } from "./db/client.ts";
 import { Repo } from "./db/repo.ts";
 import { EventBus } from "./events/bus.ts";
+import { reapOrphanedProcesses } from "./completion/orphans.ts";
+import { RunCompletionService } from "./completion/service.ts";
+import { ContractService } from "./contracts/service.ts";
+import { DecisionLedger } from "./orchestrator/decisions.ts";
 import { InteractionService } from "./orchestrator/interactions.ts";
 import { OrchestratorRunner } from "./orchestrator/runner.ts";
 import { buildConsoleMcpServer } from "./orchestrator/tools.ts";
@@ -32,7 +36,9 @@ const workspaces = new WorkspaceService(
   bus,
   config.fsRoots.map((r) => r.path),
 );
-const interactions = new InteractionService(db, bus);
+const decisions = new DecisionLedger(db, bus);
+const contracts = new ContractService(db, bus);
+const interactions = new InteractionService(db, bus, decisions);
 const tasks = new TaskService(db, bus);
 const timeline = new TimelineService(repo, bus);
 const getWorkspaceRoot = (workspaceId: string): string =>
@@ -47,7 +53,7 @@ const worktrees = new WorktreeManager({ dataDir: config.dataDir });
 let runner!: OrchestratorRunner;
 const manager = new ManagerService({ repo, workspaces, profiles, config, bus, runner: () => runner });
 const host = new AgentSessionHost({
-  repo, bus, config, profiles, sdk: () => resolveSdk(), sessionStore, getWorkspaceRoot, processes, browsers, interactions, tasks, handoffs, worktrees,
+  repo, bus, config, profiles, sdk: () => resolveSdk(), sessionStore, getWorkspaceRoot, processes, browsers, interactions, decisions, contracts, tasks, handoffs, worktrees,
   wake: (userSessionId, agentSessionId, category, text) =>
     runner.enqueueAgentMilestone(userSessionId, agentSessionId, category, text),
 });
@@ -67,6 +73,17 @@ runner = new OrchestratorRunner({
       ? buildManagerMcpServer(sdk, manager, userSessionId)
       : buildConsoleMcpServer({ sdk, host, repo, bus, userSessionId, tasks, handoffs }),
 });
+const completion = new RunCompletionService({
+  db, repo, bus, interactions, getWorkspaceRoot,
+  host: () => host,
+  runner: () => runner,
+});
+tasks.onChange(() => host.releaseBlockedAssignments());
+runner.onSettled((userSessionId) => completion.schedule(userSessionId));
+runner.onOperatorMessage((userSessionId) => completion.noteOperatorMessage(userSessionId));
+host.onStatusChanged((userSessionId) => completion.schedule(userSessionId));
+interactions.onResolved((userSessionId) => completion.schedule(userSessionId));
+
 const userSessions = new UserSessionService({
   repo,
   bus,
@@ -74,6 +91,7 @@ const userSessions = new UserSessionService({
   interactions,
   workspaces,
   archiveAgentSessions: (userSessionId) => host.archiveForUserSession(userSessionId),
+  completion,
 });
 
 // In-flight promises died with the previous process; their rows go stale so
@@ -111,8 +129,26 @@ const orphaned = worktrees.recoverOrphans(
   },
 );
 if (orphaned > 0) console.log(`removed ${orphaned} orphaned worktree(s)`);
+// Managed children of a PREVIOUS process are unreachable by id but still hold
+// their ports. db-live-2 leaked `node serve.mjs` on :8173 and the next run
+// inherited it as a foreign app squatting the port it wanted.
+const orphanProcesses = reapOrphanedProcesses({ repo, bus });
+if (orphanProcesses > 0) console.log(`reaped ${orphanProcesses} orphaned process(es) from a previous run`);
 host.boot();
 runner.startCronFallback();
+// A run that finished while the process was down still deserves its card.
+for (const session of repo.listOpenWorkSessions()) completion.schedule(session.id);
+// Operator-facing timers: expire TTL cards with their stated default, and
+// release `ask_operator` waits the operator has not come back to. Both leave
+// the question answerable; they only stop a human's absence from pinning a
+// process indefinitely.
+interactions.startTtlSweep();
+host.startOperatorAskSweep();
+// A withheld final must not become a silence: when a session's last blocking
+// question clears, the coordinator is told it may report and main is told why
+// the report was late.
+interactions.onBlockingCleared((userSessionId, agentSessionId) =>
+  host.onBlockingQuestionsCleared(userSessionId, agentSessionId));
 
 const ctx: AppContext = {
   config,
@@ -128,6 +164,7 @@ const ctx: AppContext = {
   tasks,
   handoffs,
   timeline,
+  completion,
   profiles,
   manager,
   sdk: () => resolveSdk(),
@@ -140,6 +177,9 @@ async function shutdown(): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
   bus.closeSubscriptions();
+  interactions.stopTtlSweep();
+  completion.stop();
+  host.stopOperatorAskSweep();
   // Persistent lanes are CLI subprocesses — none may outlive the server.
   await runner.closeAll().catch(() => undefined);
   await host.closeAll().catch(() => undefined);

@@ -19,7 +19,9 @@ import {
   crons,
   eventArtifacts,
   handoffRecords,
+  interactions,
   mailboxDeliveries,
+  events,
   messages,
   participants,
   providerEntries,
@@ -88,6 +90,7 @@ export function toWireUserSession(row: UserSessionRow): UserSession {
     mode: row.mode,
     phase: row.phase,
     status: row.status,
+    runState: row.runState,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -261,6 +264,66 @@ export class Repo {
         : and(eq(mailboxDeliveries.agentSessionId, agentSessionId), eq(mailboxDeliveries.status, "queued")))
       .orderBy(asc(mailboxDeliveries.createdAt)).all();
   }
+  /**
+   * Process start/exit rows for a run, oldest first. The ledger's own record of
+   * what is still running — which is how a leak becomes visible at all.
+   */
+  /** Open, non-manager sessions — the ones a run can complete in. */
+  listOpenWorkSessions(): UserSessionRow[] {
+    return this.#db.select().from(userSessions)
+      .where(and(eq(userSessions.status, "open"), eq(userSessions.purpose, "work"))).all();
+  }
+
+  /**
+   * Processes the journal shows as started with no matching exit, across every
+   * session. The boot-time leak scan; carries the recorded argv so the caller
+   * can guard against pid reuse before killing anything.
+   */
+  /** userSessionId -> open card count, for the sidebar's attention dots. */
+  countPendingInteractions(workspaceId: string): Map<string, number> {
+    const rows = this.#db.select({ id: interactions.userSessionId })
+      .from(interactions)
+      .innerJoin(userSessions, eq(interactions.userSessionId, userSessions.id))
+      .where(and(eq(userSessions.workspaceId, workspaceId), inArray(interactions.status, ["pending", "stale"])))
+      .all();
+    const counts = new Map<string, number>();
+    for (const row of rows) counts.set(row.id, (counts.get(row.id) ?? 0) + 1);
+    return counts;
+  }
+
+  listOrphanedProcesses(): { processId: string; pid: number | null; command: string; args: string[]; userSessionId: string; agentSessionId: string; participant: string }[] {
+    const rows = this.#db.select({ type: events.type, userSessionId: events.userSessionId, agentSessionId: events.agentSessionId, payload: events.payload })
+      .from(events)
+      .where(inArray(events.type, ["agent_session.process.started", "agent_session.process.exited"]))
+      .orderBy(asc(events.seq)).all();
+    const open = new Map<string, { processId: string; pid: number | null; command: string; args: string[]; userSessionId: string; agentSessionId: string; participant: string }>();
+    for (const row of rows) {
+      const payload = row.payload as { processId?: string; pid?: number; command?: string; args?: string[]; participant?: string };
+      const processId = payload.processId;
+      if (processId === undefined) continue;
+      if (row.type === "agent_session.process.exited") { open.delete(processId); continue; }
+      open.set(processId, {
+        processId, pid: payload.pid ?? null,
+        command: payload.command ?? "", args: payload.args ?? [],
+        userSessionId: row.userSessionId ?? "", agentSessionId: row.agentSessionId ?? "",
+        participant: payload.participant ?? "",
+      });
+    }
+    return [...open.values()];
+  }
+
+  listProcessEvents(userSessionId: string): { type: string; processId: string }[] {
+    return this.#db.select({ type: events.type, payload: events.payload }).from(events)
+      .where(and(
+        eq(events.userSessionId, userSessionId),
+        inArray(events.type, ["agent_session.process.started", "agent_session.process.exited"]),
+      ))
+      .orderBy(asc(events.seq))
+      .all()
+      .map((row) => ({ type: row.type, processId: String((row.payload as { processId?: string }).processId ?? "") }))
+      .filter((row) => row.processId !== "");
+  }
+
   listActiveDeliveries(agentSessionId: string): MailboxDeliveryRow[] {
     return this.#db.select().from(mailboxDeliveries).where(and(eq(mailboxDeliveries.agentSessionId, agentSessionId), inArray(mailboxDeliveries.status, ["queued", "delivered"]))).orderBy(asc(mailboxDeliveries.createdAt)).all();
   }
@@ -272,8 +335,27 @@ export class Repo {
     return this.#db.select().from(messages).where(eq(messages.id, id)).get();
   }
 
+  /**
+   * `deliveredAt` is write-once per delivery attempt, enforced HERE rather than
+   * by callers. `#deliverConsole` reads rows while they are still `queued`,
+   * patches them to `delivered`, and hands the SAME stale objects to
+   * `#mintTurn`; at settle, `delivery.deliveredAt ?? now` then read the stale
+   * NULL and overwrote the real timestamp with the settle time. Six of
+   * db-live-2's twelve rows reported fabricated ~400s "delivery latencies" for
+   * messages the seat had within a second — and `report-run.ts` prints those as
+   * mesh health.
+   *
+   * Making it a property of the store means no future caller can reintroduce
+   * it. The one legitimate reset — rotation requeueing a delivery — passes
+   * `deliveredAt: null` explicitly and is honoured.
+   */
   patchDelivery(id: string, patch: Partial<Pick<MailboxDeliveryRow, "status" | "transport" | "deliveredAt" | "acknowledgedAt">>): void {
-    this.#db.update(mailboxDeliveries).set(patch).where(eq(mailboxDeliveries.id, id)).run();
+    const preserveDelivered = patch.deliveredAt !== undefined && patch.deliveredAt !== null;
+    this.#db.update(mailboxDeliveries)
+      .set(preserveDelivered
+        ? { ...patch, deliveredAt: sql`coalesce(${mailboxDeliveries.deliveredAt}, ${patch.deliveredAt})` }
+        : patch)
+      .where(eq(mailboxDeliveries.id, id)).run();
   }
 
   getDeliveryById(id: string): MailboxDeliveryRow | undefined {
@@ -299,6 +381,14 @@ export class Repo {
       .where(and(eq(crons.userSessionId, userSessionId), eq(crons.status, "active")))
       .orderBy(asc(crons.createdAt)).all();
   }
+  /** Console-owned one-shot deadlines whose absolute time has arrived. */
+  listDueDeadlines(userSessionId: string, nowIsoTime: string): CronRow[] {
+    return this.#db.select().from(crons)
+      .where(and(eq(crons.userSessionId, userSessionId), eq(crons.status, "active"), isNotNull(crons.dueAt)))
+      .all()
+      .filter((row) => row.dueAt !== null && row.dueAt <= nowIsoTime);
+  }
+
   patchCron(id: string, patch: Partial<Pick<CronRow, "schedule" | "prompt" | "status">>): void {
     this.#db.update(crons).set({ ...patch, updatedAt: nowIso() }).where(eq(crons.id, id)).run();
   }
@@ -383,7 +473,7 @@ export class Repo {
   patchUserSession(
     id: string,
     patch: Partial<
-      Pick<UserSessionRow, "title" | "mode" | "phase" | "status" | "subjectKey" | "sdkSessionId" | "sdkGeneration" | "sdkTurnCount" | "contextTokens" | "memory" | "latestHandoffId">
+      Pick<UserSessionRow, "title" | "mode" | "phase" | "status" | "subjectKey" | "sdkSessionId" | "sdkGeneration" | "sdkTurnCount" | "contextTokens" | "memory" | "latestHandoffId" | "cumulativeCostUsd" | "cumulativeApiDurationMs" | "runState" | "runBaseCommit" | "latestRunSummaryId">
     >,
   ): void {
     this.#db
@@ -529,7 +619,7 @@ export class Repo {
       "turnCount" | "contextTokens" | "profileSnapshot" | "profileId"
       | "memory" | "latestHandoffId" | "checkpointReady"
       | "worktreePath" | "worktreeBaseCommit" | "worktreeBranch" | "attemptGroupId" | "attemptRole"
-      | "peerName" | "lastActiveAt"
+      | "peerName" | "lastActiveAt" | "cumulativeCostUsd" | "cumulativeApiDurationMs" | "lastDecisionAt"
     >>,
   ): void {
     this.#db

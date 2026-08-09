@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { ConsoleEvent } from "@agentique-console/shared";
 
-import { foldBusy, foldUserItems } from "./user-fold";
+import { foldBusy, foldPosture, foldUserItems } from "./user-fold";
 
 let seq = 0;
 function ev(
@@ -409,5 +409,91 @@ describe("foldBusy", () => {
         }),
       ]),
     ).toBe(true);
+  });
+});
+
+/**
+ * The run's own ending, as the transcript sees it. db-live-2 had no card here
+ * at all — the run stopped and the operator was left reading a spinner that had
+ * quietly gone still.
+ */
+describe("run summary fold", () => {
+  // Distinct seqs: the fold dedupes by event id, so two proposals sharing one
+  // seq would collapse into a single card.
+  const proposed = (runId: string, seq = 90): ConsoleEvent =>
+    ({
+      type: "run.completion.proposed", seq, ts: "2026-08-09T10:00:00.000Z",
+      userSessionId: "us_1",
+      payload: {
+        sessionId: "us_1", runId, summaryId: runId,
+        headline: "Lane Runner is done and verified.",
+        verdict: "completed_with_caveats",
+        filesChanged: 4, tasks: { completed: 4, total: 4 },
+        durationMs: 1_974_000, deadAirMs: 949_000,
+        costUsd: 10.38, costCoverage: 0.79, openUncertainty: 2,
+        reaped: { processes: 1, browsers: 1, leakedBefore: 1 },
+      },
+    }) as unknown as ConsoleEvent;
+
+  it("pushes one card and rewrites it in place on sign-off", () => {
+    const items = foldUserItems([
+      proposed("run_1"),
+      {
+        type: "run.signoff.resolved", seq: 91, ts: "2026-08-09T10:01:00.000Z",
+        userSessionId: "us_1",
+        payload: { sessionId: "us_1", runId: "run_1", decision: "accept" },
+      } as unknown as ConsoleEvent,
+    ]);
+    const cards = items.filter((item) => item.type === "run_summary");
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toMatchObject({
+      headline: "Lane Runner is done and verified.",
+      verdict: "completed_with_caveats",
+      resolution: { decision: "accept" },
+    });
+  });
+
+  it("keeps a resolved card and appends a second one after a reopen", () => {
+    // The resolved card stays as a record of what was proposed and what the
+    // operator said; the next proposal is a NEW card below it.
+    const items = foldUserItems([
+      proposed("run_1"),
+      {
+        type: "run.signoff.resolved", seq: 91, ts: "t",
+        userSessionId: "us_1",
+        payload: { sessionId: "us_1", runId: "run_1", decision: "changes", note: "HUD is off" },
+      } as unknown as ConsoleEvent,
+      { type: "run.reopened", seq: 92, ts: "t", userSessionId: "us_1",
+        payload: { sessionId: "us_1", runId: "run_1", reason: "changes_requested" } } as unknown as ConsoleEvent,
+      proposed("run_2", 93),
+    ]);
+    const cards = items.filter((item) => item.type === "run_summary");
+    expect(cards).toHaveLength(2);
+    expect(cards[0]).toMatchObject({ resolution: { decision: "changes", note: "HUD is off" } });
+    expect(cards[1]?.resolution).toBeUndefined();
+  });
+});
+
+describe("foldPosture", () => {
+  const started = { type: "user_session.turn.started", seq: 1, ts: "t", userSessionId: "us_1",
+    payload: { sessionId: "us_1", turnId: "t1", trigger: "operator" } } as unknown as ConsoleEvent;
+  const asked = { type: "user_session.question.asked", seq: 2, ts: "t", userSessionId: "us_1",
+    payload: { sessionId: "us_1", interactionId: "int_1", questions: [], urgency: "blocking", source: "agent", allowFreeText: true } } as unknown as ConsoleEvent;
+  const answered = { type: "user_session.question.answered", seq: 3, ts: "t", userSessionId: "us_1",
+    payload: { sessionId: "us_1", interactionId: "int_1", answers: {} } } as unknown as ConsoleEvent;
+
+  it("reports a running turn as busy", () => {
+    expect(foldPosture([started])).toEqual({ busy: true, blocked: false });
+  });
+
+  it("reports a turn parked on a card as BLOCKED, not busy", () => {
+    // The db-live-2 state exactly: the turn never settles because the tool
+    // awaits the operator. Calling that "busy" is what made "done" and
+    // "waiting on you" render identically.
+    expect(foldPosture([started, asked])).toEqual({ busy: false, blocked: true });
+  });
+
+  it("returns to busy once the card is answered", () => {
+    expect(foldPosture([started, asked, answered])).toEqual({ busy: true, blocked: false });
   });
 });

@@ -248,6 +248,9 @@ describe("liveness notices", () => {
     ).toEqual([]);
   });
 
+  // Each retry now yields TWO events: the human-readable notice and the
+  // structured numbers the console budgets on. Throwing the numbers away is
+  // why nothing could notice a retry storm consuming 55% of a run.
   it("spells out rate-limit retries with the delay", () => {
     expect(
       mapSdkMessage({
@@ -258,7 +261,10 @@ describe("liveness notices", () => {
         retry_delay_ms: 90_000,
         error_status: 429,
       }),
-    ).toEqual([{ kind: "notice", text: "rate limited · retry 2/5 · in 1m 30s" }]);
+    ).toEqual([
+      { kind: "notice", text: "rate limited · retry 2/5 · in 1m 30s" },
+      { kind: "retry", attempt: 2, maxRetries: 5, delayMs: 90_000, status: 429 },
+    ]);
   });
 
   it("names non-429 API errors by status", () => {
@@ -271,7 +277,10 @@ describe("liveness notices", () => {
         retry_delay_ms: 2_000,
         error_status: 529,
       }),
-    ).toEqual([{ kind: "notice", text: "API error 529 · retry 1/3 · in 2s" }]);
+    ).toEqual([
+      { kind: "notice", text: "API error 529 · retry 1/3 · in 2s" },
+      { kind: "retry", attempt: 1, maxRetries: 3, delayMs: 2_000, status: 529 },
+    ]);
   });
 
   it("reports rate-limit events", () => {

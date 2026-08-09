@@ -12,7 +12,9 @@ import {
   HANDOFF_CHECKPOINT_SOFT_TARGET_BYTES,
   HANDOFF_READ_DEFAULT_BYTES,
   HANDOFF_READ_MAX_BYTES,
+  HANDOFF_REPORT_SOFT_TARGET_BYTES,
   HANDOFF_SOFT_TARGET_BYTES,
+  REPORT_TRIGGERS,
   handoffExtensionKindForProfile,
 } from "@agentique-console/shared";
 import { badRequest, notFound } from "../api/errors.ts";
@@ -35,6 +37,12 @@ export interface PrepareHandoffInput {
   parentHandoffId?: string | null;
   checkpoint?: boolean;
   extensionKind?: HandoffExtensionKind;
+  /**
+   * Console-owned extension fields, merged UNDER the model's own data. For
+   * facts the console knows and the model should not have to restate — today,
+   * the operator decisions carried on a coordination handoff.
+   */
+  extensionDefaults?: Record<string, unknown>;
   /** Root for file-ref validation; a worktree'd seat's refs resolve there. */
   resolveRoot?: string;
 }
@@ -45,7 +53,15 @@ export class HandoffService {
   prepare(input: PrepareHandoffInput): { row: HandoffRecordRow; record: HandoffRecord; summary: HandoffSummary; text: string } {
     const parsed = HandoffDraftSchema.parse(input.draft);
     const extensionKind = input.extensionKind ?? handoffExtensionKindForProfile(input.profileId);
-    const extension = { kind: extensionKind, data: parsed.extension?.data ?? {} };
+    // Console-authored defaults sit UNDER the model's own data, so a seat that
+    // filled a field keeps its value and never has it silently overwritten.
+    // This is how `CoordinationHandoffData.operatorDecisions` finally gets
+    // written — it has been declared in the shared types and populated by
+    // nothing at all.
+    const extension = {
+      kind: extensionKind,
+      data: { ...(input.extensionDefaults ?? {}), ...(parsed.extension?.data ?? {}) },
+    };
     const referenceWarnings = this.referenceWarnings(input.userSessionId, [...parsed.core.state.evidence, ...parsed.core.result.artifacts], input.resolveRoot);
     const core = referenceWarnings.length > 0 && parsed.core.risk === "low" ? { ...parsed.core, risk: "medium" as const } : parsed.core;
     const id = newId("handoff");
@@ -54,7 +70,9 @@ export class HandoffService {
     const adjustedCore = referenceWarnings.length > 0 && core.risk === "low" ? { ...core, risk: "medium" as const } : core;
     const rootHandoffId = parent?.rootHandoffId ?? id;
     const bytes = Buffer.byteLength(JSON.stringify({ core: adjustedCore, extension }), "utf8");
-    const softTargetBytes = input.checkpoint ? HANDOFF_CHECKPOINT_SOFT_TARGET_BYTES : HANDOFF_SOFT_TARGET_BYTES;
+    const softTargetBytes = input.checkpoint
+      ? HANDOFF_CHECKPOINT_SOFT_TARGET_BYTES
+      : REPORT_TRIGGERS.includes(input.trigger) ? HANDOFF_REPORT_SOFT_TARGET_BYTES : HANDOFF_SOFT_TARGET_BYTES;
     const createdAt = nowIso();
     const row: HandoffRecordRow = {
       id, userSessionId: input.userSessionId, agentSessionId: input.agentSessionId, messageId: null,
@@ -124,7 +142,7 @@ export class HandoffService {
     const lines = [`[Handoff ${s.id}] ${s.action}`, `Status: ${s.status} · Risk: ${s.risk}`, s.stateSummary];
     if (s.resultSummary) lines.push(`Result: ${s.resultSummary}`);
     if (s.nextAction) lines.push(`Next: ${s.nextAction}`);
-    lines.push(`Evidence: ${s.evidenceCount} · Artifacts: ${s.artifactCount}${s.overflow ? " · full record available by id" : ""}`);
+    lines.push(`Evidence: ${s.evidenceCount} · Artifacts: ${s.artifactCount}${s.overflow ? " · full record available with read_handoff" : ""}`);
     if (s.referenceWarnings.length) lines.push(`Reference warnings: ${s.referenceWarnings.join("; ")}`);
     return lines.join("\n");
   }
