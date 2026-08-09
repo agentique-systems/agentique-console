@@ -345,7 +345,10 @@ export class TaskService {
    * consumer — releasing assignments whose blocker just completed — has to run
    * before anything else observes the new state.
    */
-  onChange(handler: (task: Task) => void): void { this.#onChange = handler; }
+  onChange(handler: (task: Task) => void): void {
+    if (this.#onChange) throw new Error("onChange is already registered — wire callbacks once, in createApp");
+    this.#onChange = handler;
+  }
 
   #emit(type: "task.created" | "task.updated", row: TaskRow, changed?: string[]): void {
     const task = toWire(row, this.#db.select().from(taskDependencies).all(), this.#db.select().from(tasks).all());

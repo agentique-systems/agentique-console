@@ -138,8 +138,11 @@ export interface OrchestratorDeps {
   /**
    * Operator decisions, injected into the lane's system prompt so main never
    * contradicts a call the operator already made — and never has to relay one.
+   * Required: as an optional dep it was once wired in tests and forgotten in
+   * main.ts, which switched the ledger off in production while every test
+   * passed.
    */
-  decisions?: DecisionLedger;
+  decisions: DecisionLedger;
   /** Lazy — the host is constructed after the runner; it backs the lane's
    * SendMessage middleware (main identity) and peer-inbound resolution. */
   host?: () => AgentSessionHost;
@@ -321,9 +324,15 @@ export class OrchestratorRunner {
   }
 
   /** True while a turn is in flight or queued. */
-  onSettled(handler: (userSessionId: string) => void): void { this.#onSettled = handler; }
+  onSettled(handler: (userSessionId: string) => void): void {
+    if (this.#onSettled) throw new Error("onSettled is already registered — wire callbacks once, in createApp");
+    this.#onSettled = handler;
+  }
 
-  onOperatorMessage(handler: (userSessionId: string) => void): void { this.#onOperatorMessage = handler; }
+  onOperatorMessage(handler: (userSessionId: string) => void): void {
+    if (this.#onOperatorMessage) throw new Error("onOperatorMessage is already registered — wire callbacks once, in createApp");
+    this.#onOperatorMessage = handler;
+  }
 
   busy(sessionId: string): boolean {
     // activeTurn covers the steer-minted follow-up turn no drain job owns.
@@ -520,7 +529,7 @@ export class OrchestratorRunner {
       contextMemory: session.latestHandoffId
         ? JSON.stringify(this.#deps.handoffs.get(session.latestHandoffId), null, 2)
         : session.memory,
-      decisionDigest: this.#deps.decisions?.digest(sessionId) ?? "",
+      decisionDigest: this.#deps.decisions.digest(sessionId),
       purpose: session.purpose,
       peerName: mainPeerName(config.peerNamePrefix, sessionId),
       ...(fragments.length > 0 ? { hooks: mergeHooks(fragments) as SdkOptions["hooks"] } : {}),
@@ -974,7 +983,7 @@ export class OrchestratorRunner {
     // Operator decisions ride the checkpoint into the successor generation.
     // Without this a rotation silently forgets what the operator decided, and
     // the next generation is free to contradict them.
-    const decisionLines = this.#deps.decisions?.lines(sessionId, { max: 12 }) ?? [];
+    const decisionLines = this.#deps.decisions.lines(sessionId, { max: 12 });
     const prepared = this.#deps.handoffs.prepare({ draft, userSessionId: sessionId, agentSessionId: null,
       sender: "orchestrator", recipient: "orchestrator", profileId: "main", generation: session.sdkGeneration,
       trigger: degraded ? "recovery" : "rotation", parentHandoffId: session.latestHandoffId, checkpoint: true,

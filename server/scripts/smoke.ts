@@ -12,21 +12,18 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { AgentSessionHost } from "../src/agent-sessions/host.ts";
 import { AgentProfileRegistry } from "../src/agent-profiles/registry.ts";
+import { createApp } from "../src/app.ts";
 import { loadConfig } from "../src/config.ts";
 import { openDb } from "../src/db/client.ts";
 import { Repo } from "../src/db/repo.ts";
 import { EventBus } from "../src/events/bus.ts";
-import { InteractionService } from "../src/orchestrator/interactions.ts";
-import { OrchestratorRunner } from "../src/orchestrator/runner.ts";
-import { buildConsoleMcpServer } from "../src/orchestrator/tools.ts";
 import { resolveSdk } from "../src/sdk/client.ts";
-import { SqliteSessionStore } from "../src/sdk/session-store.ts";
+import { BrowserManager } from "../src/runtime/browser-manager.ts";
+import { ProcessManager } from "../src/runtime/process-manager.ts";
+import { WorktreeManager } from "../src/runtime/worktree-manager.ts";
 import { UserSessionService } from "../src/sessions/service.ts";
-import { TaskService } from "../src/tasks/service.ts";
 import { WorkspaceService } from "../src/workspaces/service.ts";
-import { HandoffService } from "../src/handoffs/service.ts";
 
 const config = loadConfig();
 
@@ -42,29 +39,17 @@ const { db, sqlite } = openDb(config.dbFile);
 const bus = new EventBus(db);
 const repo = new Repo(db, sqlite);
 const workspaces = new WorkspaceService(db, bus, [os.tmpdir()]);
-const interactions = new InteractionService(db, bus);
-const tasks = new TaskService(db, bus);
 const getWorkspaceRoot = (id: string) => workspaces.get(id).rootPath;
-const handoffs = new HandoffService({ repo, bus, getWorkspaceRoot });
 
-const sessionStore = new SqliteSessionStore(db);
-let runner!: OrchestratorRunner;
-const host = new AgentSessionHost({
-  repo, bus, config, profiles: new AgentProfileRegistry(config.profilesFile),
-  sdk: () => resolveSdk(), sessionStore, getWorkspaceRoot, interactions, tasks, handoffs,
-  wake: (userSessionId, agentSessionId, category, text) => runner.enqueueAgentMilestone(userSessionId, agentSessionId, category, text),
-});
-runner = new OrchestratorRunner({
-  repo,
-  bus,
-  config,
+// The real composition root — the smoke exercises exactly what production runs.
+const { interactions, tasks, host, runner } = createApp({
+  config, db, bus, repo,
   sdk: () => resolveSdk(),
-  interactions,
-  handoffs,
   getWorkspaceRoot,
-  sessionStore,
-  buildMcpServer: (userSessionId, sdk) =>
-    buildConsoleMcpServer({ sdk, host, repo, bus, userSessionId, tasks, handoffs }),
+  profiles: new AgentProfileRegistry(config.profilesFile),
+  processes: new ProcessManager(bus),
+  browsers: new BrowserManager(bus),
+  worktrees: new WorktreeManager({ dataDir: config.dataDir }),
 });
 const userSessions = new UserSessionService({
   repo,
@@ -160,7 +145,8 @@ for (const task of tasks.listForUserSession(session.id)) {
 }
 console.log(`\nevents total: ${bus.headSeq()}`);
 bus.closeSubscriptions();
-// The persistent lane is a live CLI subprocess — close it or the script hangs.
+// The persistent lanes are live CLI subprocesses — close them or the script hangs.
 await runner.closeAll();
+await host.closeAll().catch(() => undefined);
 sqlite.close();
 process.exit(0);

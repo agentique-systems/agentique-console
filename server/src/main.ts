@@ -1,26 +1,17 @@
-import { AgentSessionHost } from "./agent-sessions/host.ts";
 import { AgentProfileRegistry } from "./agent-profiles/registry.ts";
+import { createApp, type App } from "./app.ts";
 import { loadConfig } from "./config.ts";
 import type { AppContext } from "./context.ts";
 import { openDb } from "./db/client.ts";
 import { Repo } from "./db/repo.ts";
 import { EventBus } from "./events/bus.ts";
 import { reapOrphanedProcesses } from "./completion/orphans.ts";
-import { RunCompletionService } from "./completion/service.ts";
-import { ContractService } from "./contracts/service.ts";
-import { DecisionLedger } from "./orchestrator/decisions.ts";
-import { InteractionService } from "./orchestrator/interactions.ts";
-import { OrchestratorRunner } from "./orchestrator/runner.ts";
-import { buildConsoleMcpServer } from "./orchestrator/tools.ts";
 import { reconcileDurableCommunication, recoverInterruptedTurns } from "./recovery.ts";
 import { resolveSdk } from "./sdk/client.ts";
-import { SqliteSessionStore } from "./sdk/session-store.ts";
 import { ProcessManager } from "./runtime/process-manager.ts";
 import { BrowserManager } from "./runtime/browser-manager.ts";
 import { WorktreeManager } from "./runtime/worktree-manager.ts";
 import { UserSessionService } from "./sessions/service.ts";
-import { TaskService } from "./tasks/service.ts";
-import { HandoffService } from "./handoffs/service.ts";
 import { WorkspaceService } from "./workspaces/service.ts";
 import { buildServer } from "./api/server.ts";
 import { TimelineService } from "./timeline/service.ts";
@@ -36,53 +27,28 @@ const workspaces = new WorkspaceService(
   bus,
   config.fsRoots.map((r) => r.path),
 );
-const decisions = new DecisionLedger(db, bus);
-const contracts = new ContractService(db, bus);
-const interactions = new InteractionService(db, bus, decisions);
-const tasks = new TaskService(db, bus);
 const timeline = new TimelineService(repo, bus);
 const getWorkspaceRoot = (workspaceId: string): string =>
   workspaces.get(workspaceId).rootPath;
-const handoffs = new HandoffService({ repo, bus, getWorkspaceRoot });
-
 const profiles = new AgentProfileRegistry(undefined, { getWorkspaceRoot, db, bus });
-const sessionStore = new SqliteSessionStore(db);
 const processes = new ProcessManager(bus);
 const browsers = new BrowserManager(bus);
 const worktrees = new WorktreeManager({ dataDir: config.dataDir });
-let runner!: OrchestratorRunner;
-const manager = new ManagerService({ repo, workspaces, profiles, config, bus, runner: () => runner });
-const host = new AgentSessionHost({
-  repo, bus, config, profiles, sdk: () => resolveSdk(), sessionStore, getWorkspaceRoot, processes, browsers, interactions, decisions, contracts, tasks, handoffs, worktrees,
-  wake: (userSessionId, agentSessionId, category, text) =>
-    runner.enqueueAgentMilestone(userSessionId, agentSessionId, category, text),
-});
-runner = new OrchestratorRunner({
-  repo,
-  bus,
-  config,
+
+let app!: App;
+const manager = new ManagerService({ repo, workspaces, profiles, config, bus, runner: () => app.runner });
+app = createApp({
+  config, db, bus, repo,
   sdk: () => resolveSdk(),
-  interactions,
-  handoffs,
-  sessionStore,
   getWorkspaceRoot,
-  host: () => host,
-  tasks,
-  buildMcpServer: (userSessionId, sdk) =>
+  profiles,
+  processes, browsers, worktrees,
+  buildAlternateMcpServer: (userSessionId, sdk) =>
     repo.getUserSession(userSessionId)?.purpose === "profile_manager"
       ? buildManagerMcpServer(sdk, manager, userSessionId)
-      : buildConsoleMcpServer({ sdk, host, repo, bus, userSessionId, tasks, handoffs }),
+      : undefined,
 });
-const completion = new RunCompletionService({
-  db, repo, bus, interactions, getWorkspaceRoot,
-  host: () => host,
-  runner: () => runner,
-});
-tasks.onChange(() => host.releaseBlockedAssignments());
-runner.onSettled((userSessionId) => completion.schedule(userSessionId));
-runner.onOperatorMessage((userSessionId) => completion.noteOperatorMessage(userSessionId));
-host.onStatusChanged((userSessionId) => completion.schedule(userSessionId));
-interactions.onResolved((userSessionId) => completion.schedule(userSessionId));
+const { interactions, host, runner, tasks, handoffs, completion } = app;
 
 const userSessions = new UserSessionService({
   repo,
@@ -144,11 +110,6 @@ for (const session of repo.listOpenWorkSessions()) completion.schedule(session.i
 // process indefinitely.
 interactions.startTtlSweep();
 host.startOperatorAskSweep();
-// A withheld final must not become a silence: when a session's last blocking
-// question clears, the coordinator is told it may report and main is told why
-// the report was late.
-interactions.onBlockingCleared((userSessionId, agentSessionId) =>
-  host.onBlockingQuestionsCleared(userSessionId, agentSessionId));
 
 const ctx: AppContext = {
   config,
@@ -170,7 +131,7 @@ const ctx: AppContext = {
   sdk: () => resolveSdk(),
 };
 
-const app = buildServer(ctx);
+const httpServer = buildServer(ctx);
 
 let shuttingDown = false;
 async function shutdown(): Promise<void> {
@@ -185,14 +146,14 @@ async function shutdown(): Promise<void> {
   await host.closeAll().catch(() => undefined);
   processes.closeAll();
   await browsers.closeAll().catch(() => undefined);
-  await app.close().catch(() => undefined);
+  await httpServer.close().catch(() => undefined);
   sqlite.close();
   process.exit(0);
 }
 process.on("SIGINT", () => void shutdown());
 process.on("SIGTERM", () => void shutdown());
 
-app
+httpServer
   .listen({ port: config.port, host: config.host })
   .then(() => {
     console.log(

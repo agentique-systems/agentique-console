@@ -344,15 +344,17 @@ export interface AgentSessionHostDeps {
   wake?: (userSessionId: string, agentSessionId: string, category: Category, text: string) => void;
   processes?: ProcessManager;
   browsers?: BrowserManager;
-  interactions?: InteractionService;
+  interactions: InteractionService;
   /**
    * What the operator has decided. Read into every seat's prompt and into
    * checkpoint reconstruction, so a decision made once is known by every seat
-   * and every later generation.
+   * and every later generation. Required, like `interactions` and `contracts`:
+   * optional feature deps let a missing wire typecheck, which is how the
+   * decision ledger shipped dark in production.
    */
-  decisions?: DecisionLedger;
+  decisions: DecisionLedger;
   /** Shared-interface contracts; writes to their scopes gate on acceptance. */
-  contracts?: ContractService;
+  contracts: ContractService;
   tasks?: TaskService;
   handoffs?: HandoffService;
   worktrees?: WorktreeManager;
@@ -678,7 +680,7 @@ export class AgentSessionHost {
     // the precise shape of db-live-2's ending: a question the coordinator
     // thought was minor, asked eleven seconds after it declared the run done.
     const promoted = this.#isFinalToMain(input.speaker.name, input.to, category)
-      ? this.#deps.interactions?.promoteDeferredToBlocking(session.id) ?? 0
+      ? this.#deps.interactions.promoteDeferredToBlocking(session.id)
       : 0;
     const blockers = this.#finalReportBlockers(session, input.speaker.name, input.to, category);
     if (blockers.length > 0) {
@@ -725,11 +727,11 @@ export class AgentSessionHost {
         // The rows are durable now, so the worst case is a late telling rather
         // than none. Not marked flushed here: `flushed_at` means the ASKING
         // SEAT has been told, and main is not the asker.
-        const answered = this.#deps.interactions?.listAnsweredUnflushed(session.id) ?? [];
+        const answered = this.#deps.interactions.listAnsweredUnflushed(session.id);
         const decisions = answered.map((row) => summarizeAnswer(row)).filter((line) => line !== "");
         const wakeText = decisions.length === 0 ? text
           : `${text}\n\nOperator decisions answered since your last update:\n${decisions.map((line, index) => `${index + 1}. ${line}`).join("\n")}`;
-        const openAsks = (this.#deps.interactions?.listUnresolvedForAgentSession(session.id) ?? [])
+        const openAsks = this.#deps.interactions.listUnresolvedForAgentSession(session.id)
           .filter((row) => row.participant !== null);
         const withAsks = openAsks.length === 0 ? wakeText
           : `${wakeText}\n\nStill waiting on the operator (you cannot answer these; only they can):\n${openAsks.map((row) => `- ${row.participant}: ${questionTextOf(row)}`).join("\n")}`;
@@ -854,7 +856,7 @@ export class AgentSessionHost {
 
   #finalReportBlockers(session: AgentSessionRow, sender: string, to: string, category: Category): Interaction[] {
     if (!this.#isFinalToMain(sender, to, category)) return [];
-    return (this.#deps.interactions?.listUnresolvedForAgentSession(session.id) ?? [])
+    return this.#deps.interactions.listUnresolvedForAgentSession(session.id)
       .filter((row) => row.urgency === "blocking");
   }
 
@@ -915,8 +917,8 @@ export class AgentSessionHost {
     const profile = senderSeat?.profileSnapshot as AgentProfile | undefined;
     const items = classifyUncertainty(handoff.core, {
       trigger: category as HandoffTrigger,
-      operatorPins: this.#deps.decisions?.pins(session.userSessionId) ?? new Map(),
-      operatorConstraints: this.#deps.decisions?.constraints(session.userSessionId) ?? [],
+      operatorPins: this.#deps.decisions.pins(session.userSessionId),
+      operatorConstraints: this.#deps.decisions.constraints(session.userSessionId),
       capabilities: {
         shell: profile?.runtime.shell ?? false,
         browser: profile?.runtime.browser ?? false,
@@ -972,7 +974,7 @@ export class AgentSessionHost {
       ? "coordination"
       : (senderSeat?.profileSnapshot as AgentProfile | undefined)?.handoffExtension;
     if (kind !== "coordination") return {};
-    const lines = this.#deps.decisions?.lines(session.userSessionId, { max: 12 }) ?? [];
+    const lines = this.#deps.decisions.lines(session.userSessionId, { max: 12 });
     if (lines.length === 0) return {};
     return { extensionDefaults: { operatorDecisions: lines } };
   }
@@ -1152,7 +1154,10 @@ export class AgentSessionHost {
    * concurrent-card cap and the capacity-eviction second pass — this is the one
    * that fires when nothing else needs the slot and the human is simply away.
    */
-  onStatusChanged(handler: (userSessionId: string) => void): void { this.#onStatusChanged = handler; }
+  onStatusChanged(handler: (userSessionId: string) => void): void {
+    if (this.#onStatusChanged) throw new Error("onStatusChanged is already registered — wire callbacks once, in createApp");
+    this.#onStatusChanged = handler;
+  }
 
   startOperatorAskSweep(intervalMs = 30_000): void {
     if (this.#askSweep) return;
@@ -1579,7 +1584,7 @@ export class AgentSessionHost {
   #detachOperatorAsk(lane: SeatLane, reason: string): void {
     const asking = lane.activeTurn?.awaitingOperator;
     if (!asking) return;
-    this.#deps.interactions?.detach(asking.interactionId, reason);
+    this.#deps.interactions.detach(asking.interactionId, reason);
     asking.abort.abort();
   }
 
@@ -1810,7 +1815,7 @@ export class AgentSessionHost {
     }
     // Writes gate on agreement, and (opt-in) on declared ownership.
     fragments.push(buildContractHooks({
-      ...(this.#deps.contracts ? { contracts: this.#deps.contracts } : {}),
+      contracts: this.#deps.contracts,
       bus: this.#deps.bus,
       userSessionId: session.userSessionId,
       agentSessionId: session.id,
@@ -2399,7 +2404,7 @@ export class AgentSessionHost {
     // "Leave game.js as-is… do not report it as a bug," and the operator never
     // learned the option existed. Two tools doing the same job is also how you
     // get a model calling neither, so this replaces it outright.
-    if (this.#deps.interactions) {
+    {
       tools.push(sdk.tool("ask_operator",
         "Ask the Human Operator a question only they can answer. This reaches them DIRECTLY — do not route it through your coordinator. " +
         "Use urgency:'blocking' when continuing would waste the work, or when you would otherwise substitute your own judgement for theirs: a version, a scope cut, a deviation from the brief. " +
@@ -2479,7 +2484,7 @@ export class AgentSessionHost {
         }));
     }
 
-    if (this.#deps.contracts) {
+    {
       const contracts = this.#deps.contracts;
       if (seat.name === ORCHESTRATOR_SEAT) {
         tools.push(sdk.tool("declare_contract",
@@ -2617,14 +2622,14 @@ export class AgentSessionHost {
     return ["mcp__console_agent__send_handoff", "mcp__console_agent__read_handoff", "mcp__console_agent__report_handoff_discrepancy",
       "mcp__console_agent__task_list", "mcp__console_agent__read_artifact", "mcp__console_agent__write_note", "mcp__console_agent__roster_status",
       ...(profile.runtime.shell ? ["mcp__console_agent__http_probe"] : []),
-      ...(this.#deps.contracts ? ["mcp__console_agent__read_contract", "mcp__console_agent__accept_contract", "mcp__console_agent__propose_contract_amendment", "mcp__console_agent__object_to_contract"] : []),
+      "mcp__console_agent__read_contract", "mcp__console_agent__accept_contract", "mcp__console_agent__propose_contract_amendment", "mcp__console_agent__object_to_contract",
       ...(this.#deps.contracts && participant === ORCHESTRATOR_SEAT ? ["mcp__console_agent__declare_contract", "mcp__console_agent__supersede_contract"] : []),
       ...(participant === ORCHESTRATOR_SEAT ? ["mcp__console_agent__task_create", "mcp__console_agent__task_update"] : []),
       ...(profile.runtime.shell ? ["mcp__console_agent__process_start", "mcp__console_agent__process_read", "mcp__console_agent__process_stop"] : []),
       ...(profile.runtime.browser ? ["mcp__console_agent__browser_open", "mcp__console_agent__browser_snapshot", "mcp__console_agent__browser_click", "mcp__console_agent__browser_fill", "mcp__console_agent__browser_console", "mcp__console_agent__browser_press", "mcp__console_agent__browser_evaluate"] : []),
       ...(profile.runtime.browser && profile.runtime.screenshots ? ["mcp__console_agent__browser_screenshot"] : []),
       // Every seat can reach the operator, so this is unconditional.
-      ...(this.#deps.interactions ? ["mcp__console_agent__ask_operator"] : []),
+      "mcp__console_agent__ask_operator",
       ...(participant === ORCHESTRATOR_SEAT && this.#deps.worktrees ? ["mcp__console_agent__start_attempts"] : []),
       ...(attemptRole === "reviewer" ? ["mcp__console_agent__select_attempt_winner", "mcp__console_agent__read_attempt_diff"] : []),
     ];
@@ -2670,9 +2675,9 @@ export class AgentSessionHost {
     // "their answer will reach you" and then nothing ever did. Rendered before
     // the handoffs because it outranks them — an operator decision is not a
     // claim to be verified.
-    const answered = this.#deps.interactions?.listAnsweredUnflushed(session.id, seat.name) ?? [];
+    const answered = this.#deps.interactions.listAnsweredUnflushed(session.id, seat.name);
     const decisions = answered.map((row) => summarizeAnswer(row)).filter((line) => line !== "");
-    if (decisions.length > 0) this.#deps.interactions?.markFlushed(answered.map((row) => row.id));
+    if (decisions.length > 0) this.#deps.interactions.markFlushed(answered.map((row) => row.id));
     const answersBlock = decisions.length === 0 ? ""
       : `## The operator answered your question(s)\nAuthoritative — act on these and do not ask again.\n${decisions.map((line) => `- ${line}`).join("\n")}\n\n`;
     // Decisions made since this seat's last delivery — including ones it never
@@ -2685,7 +2690,7 @@ export class AgentSessionHost {
     // before this feature existed — asserted in decision-ledger.e2e.test.ts,
     // because a block that renders empty would change every prompt in every
     // session and silently destroy prompt caching.
-    const fresh = this.#deps.decisions?.since(session.userSessionId, seat.lastDecisionAt) ?? [];
+    const fresh = this.#deps.decisions.since(session.userSessionId, seat.lastDecisionAt);
     const unseen = fresh.filter((row) => row.askedBy !== seat.name);
     if (fresh.length > 0) {
       this.#deps.repo.patchParticipant(session.id, seat.name, { lastDecisionAt: fresh[fresh.length - 1]!.createdAt });
@@ -2718,7 +2723,7 @@ export class AgentSessionHost {
     // Before the task ledger, deliberately: an operator decision outranks
     // model-maintained state, and rotation is exactly where db-live-1's
     // "DODGE" would have died even if it HAD reached the seats.
-    const decisions = this.#deps.decisions?.lines(session.userSessionId, { max: 12 }) ?? [];
+    const decisions = this.#deps.decisions.lines(session.userSessionId, { max: 12 });
     if (decisions.length > 0) facts.push(`Operator decisions (Console-recorded, authoritative — do not contradict):\n${decisions.map((line) => `- ${line}`).join("\n")}`);
     const taskLines = this.#deps.tasks?.linesForAgentSession(session.id) ?? [];
     if (taskLines.length > 0) facts.push(`Task ledger:\n${taskLines.join("\n")}`);
@@ -2976,7 +2981,7 @@ export class AgentSessionHost {
    * being rebuilt.
    */
   #decisionContext(session: AgentSessionRow): string {
-    const digest = this.#deps.decisions?.digest(session.userSessionId) ?? "";
+    const digest = this.#deps.decisions.digest(session.userSessionId);
     if (digest === "") return "";
     return `\n\n## Operator decisions (authoritative)\nThe operator made these. Do not re-litigate them, do not contradict them, and do not ask again.\n${digest}`;
   }

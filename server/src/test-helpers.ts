@@ -1,16 +1,17 @@
 /** Shared test harness: in-memory DB + bus + runner over a scripted fake SDK. */
 import type { ConsoleEvent } from "@agentique-console/shared";
-import {
+import type {
   AgentSessionHost,
-  type AgentSessionHostDeps,
+  AgentSessionHostDeps,
 } from "./agent-sessions/host.ts";
+import { createApp, type App } from "./app.ts";
 import { loadConfig, type Config } from "./config.ts";
 import { openDb } from "./db/client.ts";
 import { Repo, type UserSessionRow } from "./db/repo.ts";
 import { workspaces } from "./db/schema.ts";
 import { EventBus } from "./events/bus.ts";
 import { newId, nowIso } from "./ids.ts";
-import { RunCompletionService } from "./completion/service.ts";
+import type { RunCompletionService } from "./completion/service.ts";
 import { ContractService } from "./contracts/service.ts";
 import { DecisionLedger } from "./orchestrator/decisions.ts";
 import { InteractionService } from "./orchestrator/interactions.ts";
@@ -18,11 +19,8 @@ import {
   OrchestratorRunner,
   type OrchestratorDeps,
 } from "./orchestrator/runner.ts";
-import { buildConsoleMcpServer } from "./orchestrator/tools.ts";
 import { fakeSdk, type FakeProgram, type FakeSdk } from "./sdk/fake.ts";
-import { TaskService } from "./tasks/service.ts";
 import { AgentProfileRegistry } from "./agent-profiles/registry.ts";
-import { SqliteSessionStore } from "./sdk/session-store.ts";
 import { HandoffService } from "./handoffs/service.ts";
 
 export interface Harness {
@@ -152,71 +150,27 @@ export function restartHarness(
   return { ...harness, ...wire(harness, options) };
 }
 
+/**
+ * The REAL composition root over the test doubles: a fresh call is a process
+ * restart (in-memory pending state is lost, exactly as in production), and any
+ * service wired in `createApp` is wired here by construction.
+ */
 function wire(
   base: Harness,
   options: { hostOverrides?: Partial<AgentSessionHostDeps> },
-): { host: AgentSessionHost; runner: OrchestratorRunner; completion: RunCompletionService } {
-  const tasks = new TaskService(base.db, base.bus);
-  const sessionStore = new SqliteSessionStore(base.db);
-  const handoffs = new HandoffService({ repo: base.repo, bus: base.bus, getWorkspaceRoot: () => "/tmp/test-workspace" });
-  let runner!: OrchestratorRunner;
-  const host = new AgentSessionHost({
-    repo: base.repo,
-    bus: base.bus,
+): App {
+  return createApp({
     config: base.config,
+    db: base.db,
+    bus: base.bus,
+    repo: base.repo,
+    sdk: async () => base.fake.sdk,
+    getWorkspaceRoot: () => "/tmp/test-workspace",
     profiles: new AgentProfileRegistry("/tmp/agentique-console-test-profiles-missing.json"),
-    sdk: async () => base.fake.sdk,
-    sessionStore,
-    getWorkspaceRoot: () => "/tmp/test-workspace",
-    interactions: base.interactions,
-    decisions: base.decisions,
-    contracts: base.contracts,
-    handoffs,
-    tasks,
-    wake: (userSessionId, agentSessionId, category, text) => runner.enqueueAgentMilestone(userSessionId, agentSessionId, category, text),
-    ...options.hostOverrides,
-  });
-  // Same wiring as main.ts: a withheld final must not become a silence.
-  base.interactions.onBlockingCleared((userSessionId, agentSessionId) =>
-    host.onBlockingQuestionsCleared(userSessionId, agentSessionId));
-  runner = new OrchestratorRunner({
-    repo: base.repo,
-    bus: base.bus,
-    config: base.config,
-    sdk: async () => base.fake.sdk,
-    interactions: base.interactions,
-    decisions: base.decisions,
-    handoffs,
-    getWorkspaceRoot: () => "/tmp/test-workspace",
-    sessionStore,
-    host: () => host,
-    tasks,
-    buildMcpServer: (userSessionId, sdk) =>
-      buildConsoleMcpServer({
-        sdk,
-        host,
-        repo: base.repo,
-        bus: base.bus,
-        userSessionId,
-        tasks,
-        handoffs,
-      }),
-  });
-  // main.ts in miniature: the completion predicate re-evaluates on every
-  // settle, status change and answered card.
-  const completion = new RunCompletionService({
-    db: base.db, repo: base.repo, bus: base.bus, interactions: base.interactions,
-    host: () => host, runner: () => runner,
-    getWorkspaceRoot: () => "/tmp/test-workspace",
     // The real window is 2s; tests would otherwise pay it on every case.
     quietWindowMs: 25,
+    ...(options.hostOverrides ? { hostOverrides: options.hostOverrides } : {}),
   });
-  tasks.onChange(() => host.releaseBlockedAssignments());
-  runner.onSettled((userSessionId) => completion.schedule(userSessionId));
-  runner.onOperatorMessage((userSessionId) => completion.noteOperatorMessage(userSessionId));
-  host.onStatusChanged((userSessionId) => completion.schedule(userSessionId));
-  base.interactions.onResolved((userSessionId) => completion.schedule(userSessionId));
-  return { host, runner, completion };
 }
 
 /**

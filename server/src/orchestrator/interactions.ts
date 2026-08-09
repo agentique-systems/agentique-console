@@ -160,10 +160,14 @@ export class InteractionService {
    * report.
    */
   onBlockingCleared(handler: (userSessionId: string, agentSessionId: string) => void): void {
+    if (this.#onBlockingCleared) throw new Error("onBlockingCleared is already registered — wire callbacks once, in createApp");
     this.#onBlockingCleared = handler;
   }
 
-  onResolved(handler: (userSessionId: string) => void): void { this.#onResolved = handler; }
+  onResolved(handler: (userSessionId: string) => void): void {
+    if (this.#onResolved) throw new Error("onResolved is already registered — wire callbacks once, in createApp");
+    this.#onResolved = handler;
+  }
 
   /** Creates a pending question card and parks its resolution promise. */
   createQuestion(
