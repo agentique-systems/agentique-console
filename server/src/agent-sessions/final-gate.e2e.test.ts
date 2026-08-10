@@ -129,32 +129,6 @@ describe("final report gate", () => {
     expect(record?.core.status).toBe("completed");
   });
 
-  it("promotes a DEFERRED question to blocking when a final is attempted", async () => {
-    const h = makeDelegationHarness(async function* () {
-      yield initMessage();
-      yield successMessage();
-    });
-    const userSessionId = h.addUserSession();
-    h.host.createSession({
-      userSessionId, title: "lane runner", agents: [{ name: "check", profileId: "visual-reviewer", owns: [] }],
-      briefing: handoff("verify"),
-    });
-    await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled", 10_000);
-    const ask = h.fake.captured.tools.find((t) => t.name === "ask_operator")!;
-    await ask.handler({ ...ASK, urgency: "deferred" }, {});
-
-    const send = h.fake.captured.tools.find((t) => t.name === "send_handoff")!;
-    const result = await send.handler(finalArgs, {});
-    // "Deferred" was a judgement that the answer could wait until later. A
-    // final says there is no later. So the attempt promotes it and is
-    // withheld — which is exactly the moment db-live-2 skipped past.
-    expect(result.isError).not.toBe(true);
-    const hold = JSON.parse((result.content[0] as { text: string }).text) as { withheld: boolean; guidance: string };
-    expect(hold.withheld).toBe(true);
-    expect(hold.guidance).toMatch(/no "later" left/);
-    expect(h.db.select().from(interactionRows).all()[0]?.urgency).toBe("blocking");
-  });
-
   it("leaves an open ledger task as a caveat, never a blocker", async () => {
     // The deliberate non-change. db-live-1's ledger orphaned at rotation, so a
     // blocking rule on ledger state made `final` structurally impossible and

@@ -44,8 +44,13 @@ export interface QuestionItem {
   readonly type: "question";
   readonly interactionId: string;
   readonly questions: readonly InteractionQuestion[];
+  /** The asking seat; absent = the main lane. */
+  readonly askedBy?: string;
+  /** The card accepts a typed answer alongside (or instead of) the options. */
+  readonly allowFreeText?: boolean;
   readonly answer?: {
     readonly answers?: Record<string, string[]>;
+    readonly freeText?: Record<string, string>;
     readonly dismissed?: boolean;
   };
 }
@@ -189,6 +194,8 @@ export function foldUserItems(events: readonly ConsoleEvent[]): UserItem[] {
           type: "question",
           interactionId: event.payload.interactionId,
           questions: event.payload.questions,
+          ...(event.payload.participant === undefined ? {} : { askedBy: event.payload.participant }),
+          ...(event.payload.allowFreeText === true ? { allowFreeText: true } : {}),
         });
         break;
       }
@@ -204,6 +211,9 @@ export function foldUserItems(events: readonly ConsoleEvent[]): UserItem[] {
             ...(event.payload.answers === undefined
               ? {}
               : { answers: event.payload.answers }),
+            ...(event.payload.freeText === undefined
+              ? {}
+              : { freeText: event.payload.freeText }),
             ...(event.payload.dismissed === true ? { dismissed: true } : {}),
           },
         };

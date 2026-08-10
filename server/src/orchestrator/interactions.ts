@@ -557,24 +557,6 @@ export class InteractionService {
     resolve?.({ kind: "dismissed", reason });
   }
 
-  /** A `final` was attempted; every deferred question in that session becomes blocking. */
-  promoteDeferredToBlocking(agentSessionId: string): number {
-    const rows = this.#db
-      .select()
-      .from(interactions)
-      .where(
-        and(
-          eq(interactions.agentSessionId, agentSessionId),
-          eq(interactions.status, "pending"),
-          eq(interactions.urgency, "deferred"),
-        ),
-      )
-      .all();
-    for (const row of rows) {
-      this.#db.update(interactions).set({ urgency: "blocking" }).where(eq(interactions.id, row.id)).run();
-    }
-    return rows.length;
-  }
 
   get(id: string): Interaction {
     const row = this.#db

@@ -113,20 +113,6 @@ describe("ask_operator", () => {
     expect(again.resolved).toBeUndefined();
   });
 
-  it("downgrades to deferred rather than piling up unanswerable blocking cards", async () => {
-    const { h } = await session();
-    const tool = h.fake.captured.tools.find((t) => t.name === "ask_operator")!;
-    for (let i = 0; i < 3; i += 1) {
-      const asked = collectUntil(h.bus, (event) => event.type === "user_session.question.asked", 10_000);
-      void tool.handler({ ...ASK, question: `blocking question ${i}` }, {});
-      await asked;
-    }
-    const fourth = parse(await tool.handler({ ...ASK, question: "one question too many" }, {}));
-    expect(fourth.urgency).toBe("deferred");
-    expect(fourth.downgraded).toBe(true);
-    expect(fourth.queued).toBe(true);
-  });
-
   it("a deferred ask returns immediately and does not park the seat", async () => {
     const { h } = await session();
     const tool = h.fake.captured.tools.find((t) => t.name === "ask_operator")!;

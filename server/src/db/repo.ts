@@ -354,6 +354,13 @@ export class Repo {
       .where(eq(mailboxDeliveries.id, id)).run();
   }
 
+  /** A durable event of `type` exists for this agent session. */
+  hasEvent(type: string, agentSessionId: string): boolean {
+    return this.#db.select({ seq: events.seq }).from(events)
+      .where(and(eq(events.type, type), eq(events.agentSessionId, agentSessionId)))
+      .limit(1).get() !== undefined;
+  }
+
   getDeliveryById(id: string): MailboxDeliveryRow | undefined {
     return this.#db.select().from(mailboxDeliveries).where(eq(mailboxDeliveries.id, id)).get();
   }

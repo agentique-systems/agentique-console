@@ -39,7 +39,6 @@ export interface GovernanceDeps {
 export class WithheldFinalError extends Error {
   constructor(
     readonly blockers: { id: string; question: string; asker: string; ageMinutes: number }[],
-    readonly promoted: number,
     guidance: string,
   ) {
     super(guidance);

@@ -69,7 +69,6 @@ const CHECKPOINT_TIMEOUT_MS = 90_000;
  * are downgraded to deferred. A wall of simultaneous cards is unanswerable, and
  * each blocking ask pins one of `seatMaxResidentPerTree` (4) processes.
  */
-const MAX_CONCURRENT_BLOCKING_ASKS = 3;
 
 /** Failed-turn redeliveries per delivery row before the console gives up. */
 const MAX_REDELIVERY_ATTEMPTS = 2;
@@ -345,7 +344,6 @@ export class AgentSessionHost {
   /** Notified when a session's derived status changes; completion re-evaluates. */
   #onStatusChanged: ((userSessionId: string) => void) | undefined;
   /** Sessions whose `final` the gate withheld, so clearing it can say so. */
-  readonly #withheldFinals = new Set<string>();
   /** Roster work-state diff lines, memoized 15s — see `#seatWorkState`. */
   readonly #workStateDiffCache = new Map<string, { at: number; line: string }>();
   #sessionStatus = new Map<string, AgentSessionStatus | null>();
@@ -505,18 +503,8 @@ export class AgentSessionHost {
       if (priorMessage) return priorMessage;
     }
     // Withheld BEFORE journalling, so a blocked final leaves no half-record.
-    //
-    // A `final` attempt promotes every DEFERRED question first. Deferred means
-    // "I can keep working while this is open" — and at final time there is no
-    // more work, so the judgement that made it non-gating has expired. This is
-    // the precise shape of db-live-2's ending: a question the coordinator
-    // thought was minor, asked eleven seconds after it declared the run done.
-    const promoted = isFinalToMain(finalSeat, input.speaker.name, input.to, category)
-      ? this.#deps.interactions.promoteDeferredToBlocking(session.id)
-      : 0;
     const blockers = finalReportBlockers(this.#deps, session, finalSeat, input.speaker.name, input.to, category);
     if (blockers.length > 0) {
-      this.#withheldFinals.add(session.id);
       this.#deps.bus.append({ type: "handoff.final.blocked", userSessionId: session.userSessionId, agentSessionId: session.id,
         payload: { agentSessionId: session.id, sender: input.speaker.name, interactionIds: blockers.map((row) => row.id) } });
       const now = Date.now();
@@ -529,9 +517,8 @@ export class AgentSessionHost {
       const listed = structured
         .map((b) => `[${b.id}] "${b.question}" (asked ${b.ageMinutes}m ago by ${b.asker})`)
         .join("; ");
-      throw new WithheldFinalError(structured, promoted,
+      throw new WithheldFinalError(structured,
         `final report withheld: ${blockers.length} question(s) this session put to the operator ${blockers.length === 1 ? "is" : "are"} still unanswered — ${listed}. ` +
-        `${promoted > 0 ? `${promoted} question(s) you had marked deferred are now blocking: at final time there is no "later" left to answer them in. ` : ""}` +
         `Those cards are on the operator's screen now; you cannot answer them and neither can main. ` +
         `This is a hold, not a failure — do not re-send the same final. ` +
         `Either continue other work, or send category:"milestone" with what you have. ` +
@@ -545,8 +532,9 @@ export class AgentSessionHost {
     if (isFinalToMain(finalSeat, input.speaker.name, input.to, category)) {
       const unsettled = repo.listChildSessions(session.id).filter((child) => child.status === "open" && this.#statusOf(child) !== "reported");
       if (unsettled.length > 0) {
-        this.#withheldFinals.add(session.id);
-        throw new WithheldFinalError([], promoted,
+        this.#deps.bus.append({ type: "handoff.final.blocked", userSessionId: session.userSessionId, agentSessionId: session.id,
+          payload: { agentSessionId: session.id, sender: input.speaker.name, interactionIds: [] } });
+        throw new WithheldFinalError([],
           `final report withheld: ${unsettled.length} child session(s) of this session have not reported — ${unsettled.map((child) => `"${child.title}" (${child.id})`).join("; ")}. ` +
           `Their finals arrive to you as milestones; wait for them, or abandon_child_session the ones that no longer matter. ` +
           `This is a hold, not a failure — do not re-send the same final.`);
@@ -827,7 +815,6 @@ export class AgentSessionHost {
   /** The ONE cleanup point for every per-session in-memory structure. */
   #forget(agentSessionId: string): void {
     this.#seats.delete(agentSessionId);
-    this.#withheldFinals.delete(agentSessionId);
     this.#sessionStatus.delete(agentSessionId);
     this.#operatorDebtSettled.delete(agentSessionId);
     this.#contracts.delete(agentSessionId);
@@ -992,8 +979,11 @@ export class AgentSessionHost {
     const finalSeat = this.#completionSeat(session, "finalFrom");
     const voiceSeat = this.#completionSeat(session, "voice");
     const lane = this.#seats.get(agentSessionId)?.get(finalSeat);
-    // Only meaningful if a final was actually withheld from this session.
-    if (!this.#withheldFinals.delete(agentSessionId)) return;
+    // Only meaningful if a final was actually withheld from this session —
+    // derived from the durable handoff.final.blocked event, not an in-memory
+    // set a restart wipes (the wiped set was how the release notice could
+    // silently never fire after a reboot).
+    if (!this.#finalWithheld(session)) return;
     try {
       this.post({
         agentSessionId,
@@ -1042,13 +1032,21 @@ export class AgentSessionHost {
     } catch (error) { this.#recordHostFailure(child.id, error); }
   }
 
+  /**
+   * A final from this session was withheld and its real final has not landed
+   * since — derived from the durable `handoff.final.blocked` event plus the
+   * session's own status, so it survives restarts.
+   */
+  #finalWithheld(session: AgentSessionRow): boolean {
+    return this.#statusOf(session) !== "reported" && this.#deps.repo.hasEvent("handoff.final.blocked", session.id);
+  }
+
   /** The child-hold counterpart of onBlockingQuestionsCleared. */
   #maybeReleaseParentFinal(parent: AgentSessionRow): void {
-    if (!this.#withheldFinals.has(parent.id)) return;
+    if (!this.#finalWithheld(parent)) return;
     const unsettled = this.#deps.repo.listChildSessions(parent.id)
       .filter((child) => child.status === "open" && this.#statusOf(child) !== "reported");
     if (unsettled.length > 0) return;
-    this.#withheldFinals.delete(parent.id);
     const finalSeat = this.#completionSeat(parent, "finalFrom");
     try {
       this.post({ agentSessionId: parent.id, speaker: { kind: "system", name: CONSOLE_SENDER }, to: finalSeat,
@@ -1404,12 +1402,6 @@ export class AgentSessionHost {
       const scope = globalFull ? undefined : tree;
       if (scope === undefined && this.#parkLeastRecentIdle(tree)) continue;
       if (this.#parkLeastRecentIdle(scope)) continue;
-      // Nothing idle: cut loose the oldest operator wait — a seat blocked on
-      // the operator is not WORKING, it is pinned by a human who may be away
-      // for hours. A detach frees the slot only when the released turn settles,
-      // asynchronously, so fall through to the timed wait rather than assuming
-      // the slot is already free; #signalCapacity resolves it early.
-      this.#detachOldestOperatorWait(scope);
       if (Date.now() >= until) throw new Error("no resident seat capacity");
       await new Promise<void>((resolve) => {
         const timer = setTimeout(resolve, Math.min(1_000, Math.max(50, until - Date.now())));
@@ -1435,24 +1427,6 @@ export class AgentSessionHost {
   }
 
   /**
-   * Detaching the oldest `ask_operator` wait frees its process without losing
-   * the question: the row stays open and the answer arrives later as a
-   * delivery.
-   */
-  #detachOldestOperatorWait(within?: ReadonlySet<string>): void {
-    let waiting: { lane: SeatLane; since: number } | null = null;
-    for (const [sessionId, lanes] of this.#seats) {
-      if (within !== undefined && !within.has(sessionId)) continue;
-      for (const [, lane] of lanes) {
-        const asking = lane.activeTurn?.awaitingOperator;
-        if (!asking) continue;
-        if (!waiting || asking.since < waiting.since) waiting = { lane, since: asking.since };
-      }
-    }
-    if (waiting) this.#detachOperatorAsk(waiting.lane, "another seat needed this process while you waited on the operator");
-  }
-
-  /**
    * Cut a blocking `ask_operator` loose. The tool call returns, the turn ends,
    * and the question stays open — the answer will arrive as a delivery.
    */
@@ -1470,9 +1444,8 @@ export class AgentSessionHost {
    *  - a duplicate returns the OPEN card rather than minting a second one, so a
    *    seat that re-asks does not feed WATCHDOG_IDENTICAL_CALLS (5) or hand the
    *    operator the same question twice;
-   *  - past three unresolved blocking cards in one session, further asks are
-   *    downgraded to deferred — a card avalanche is unanswerable, and every
-   *    blocking ask pins a resident process;
+   *  - a blocking wait is bounded by ONE mechanism, the operatorAskDetachMs
+   *    timer: the seat's process frees up, the card stays open and blocking;
    *  - nothing here EVER returns `isError`. A dismissal, a detach or an expiry
    *    is not the seat's mistake, and ten consecutive error results trip
    *    WATCHDOG_ERROR_STREAK and kill its turn. Punishing a seat for the
@@ -1487,9 +1460,7 @@ export class AgentSessionHost {
       return ok({ queued: true, interactionId: open.id, deduped: true,
         note: "You already asked this and the card is still open on the operator's screen. Do not ask again; keep working or stop." });
     }
-    const blocking = interactions.listUnresolvedForAgentSession(session.id).filter((row) => row.urgency === "blocking");
-    const urgency: InteractionUrgency = args.urgency === "blocking" && blocking.length >= MAX_CONCURRENT_BLOCKING_ASKS ? "deferred" : args.urgency;
-    const downgraded = urgency !== args.urgency;
+    const urgency: InteractionUrgency = args.urgency;
 
     const question: InteractionQuestion = {
       question: args.question,
@@ -1516,7 +1487,6 @@ export class AgentSessionHost {
 
     if (urgency === "deferred") {
       return ok({ queued: true, interactionId: pending.id, urgency: "deferred",
-        ...(downgraded ? { downgraded: true, reason: `${blocking.length} blocking question(s) are already open in this session` } : {}),
         note: "The operator can see this now. Their answer will be handed to you at your next delivery — keep working; do not poll." });
     }
 
@@ -1530,7 +1500,6 @@ export class AgentSessionHost {
         return ok({ resolved: true, interactionId: pending.id, answers: resolved.answers,
           ...(resolved.freeText === undefined ? {} : { freeText: resolved.freeText }),
           ...(resolved.note === undefined ? {} : { note: resolved.note }),
-          ...(resolved.autoTaken === true ? { autoTaken: true } : {}),
           ledger: "Recorded as an operator decision; every seat in this session now sees it, so do not relay it." });
       }
       return ok({ resolved: false, interactionId: pending.id,
