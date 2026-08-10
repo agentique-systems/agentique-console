@@ -237,6 +237,38 @@ describe("debate e2e (fake SDK)", () => {
   });
 });
 
+describe("silent-seat carry e2e (fake SDK)", () => {
+  it("carries a hub specialist's plain-text findings to its coordinator", async () => {
+    // db-live-2's renderer class: the specialist does the work, types the
+    // findings as plain text, never calls send_handoff, and goes idle. The
+    // Console now carries that text to the coordinator as its report.
+    let coordinatorTurns = 0;
+    const h = makeDelegationHarness(async function* (options) {
+      const identity = seatRoleOf(options);
+      yield initMessage();
+      if (identity.role === "coordinator") {
+        coordinatorTurns += 1;
+        yield coordinatorTurns === 1
+          ? sendHandoffUse("assign", "scout", { action: "map the codebase", status: "pending", category: "assignment" })
+          : sendHandoffUse("wrap", "main", { action: "done", stateSummary: "scout's findings relayed", status: "completed", category: "final" });
+      } else if (identity.role === "specialist") {
+        yield textMessage("Findings: the entry point is src/main.ts; three load-bearing seams.");
+      }
+      yield successMessage();
+    });
+    const userSessionId = h.addUserSession();
+    const done = collectUntil(h.bus, (event) => event.type === "flow.result", 15_000);
+    const created = h.host.createSession({ userSessionId, title: "silent scout",
+      agents: [{ name: "scout", profileId: "explorer" }], briefing: briefing("map it") });
+    await done;
+    const rows = h.repo.listMessages("agent", created.agentSessionId).filter((row) => row.kind === "message");
+    const carried = rows.find((row) => row.speakerName === "scout" && row.toName === "orchestrator");
+    expect(carried?.text).toContain("Findings: the entry point is src/main.ts");
+    const row = h.repo.getAgentSession(created.agentSessionId);
+    expect(row && h.host.statusOf(row)).toBe("reported");
+  });
+});
+
 describe("peer_to_peer e2e (fake SDK)", () => {
   it("trips oscillation on sustained ping-pong between two peers", async () => {
     const sends = new Map<string, number>();

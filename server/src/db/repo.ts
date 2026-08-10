@@ -358,6 +358,19 @@ export class Repo {
     return this.#db.select().from(mailboxDeliveries).where(eq(mailboxDeliveries.id, id)).get();
   }
 
+  /** The seat's most recent inbound assignment, if it was ever assigned anything. */
+  latestAssignmentDelivery(agentSessionId: string, recipient: string): MailboxDeliveryRow | undefined {
+    return this.#db.select().from(mailboxDeliveries)
+      .where(and(
+        eq(mailboxDeliveries.agentSessionId, agentSessionId),
+        eq(mailboxDeliveries.recipient, recipient),
+        eq(mailboxDeliveries.category, "assignment"),
+      ))
+      .orderBy(desc(mailboxDeliveries.createdAt))
+      .limit(1)
+      .get();
+  }
+
   /** Journal rows a (re)spawning recipient must be handed again: not yet consumed. */
   listUnackedDeliveries(agentSessionId: string, recipient: string): MailboxDeliveryRow[] {
     return this.#db.select().from(mailboxDeliveries)
