@@ -25,7 +25,7 @@ import type { InteractionQuestion } from "@agentique-console/shared";
 
 type InteractionRow = typeof interactions.$inferSelect;
 
-export type DecisionSource = "interaction" | "plan_approval" | "ttl_default";
+export type DecisionSource = "interaction" | "plan_approval";
 
 export interface OperatorDecision {
   id: string;
@@ -37,7 +37,6 @@ export interface OperatorDecision {
   question: string;
   answer: string;
   note: string | null;
-  autoTaken: boolean;
   /** When the operator decided — the interaction's resolution time. */
   createdAt: string;
 }
@@ -52,7 +51,6 @@ export interface DecisionSourceRow {
   status: string;
   payload: unknown;
   response: unknown;
-  autoTaken?: boolean | null;
   resolvedAt?: string | null;
   createdAt: string;
 }
@@ -86,7 +84,7 @@ export function decisionOf(row: DecisionSourceRow): OperatorDecision | null {
   if (row.status !== "answered" && !(isPlan && row.status === "rejected")) return null;
   const response = (row.response ?? {}) as {
     answers?: Record<string, string[]>; freeText?: Record<string, string>;
-    note?: string; decision?: string; autoTaken?: boolean;
+    note?: string; decision?: string;
   };
   const question = isPlan
     ? "Plan approval"
@@ -95,7 +93,6 @@ export function decisionOf(row: DecisionSourceRow): OperatorDecision | null {
     ? `${response.decision === "approve" ? "Approved the plan" : "Requested changes to the plan"}${response.note === undefined ? "" : `: ${response.note}`}`
     : renderAnswer(response.answers ?? {}, response.freeText);
   if (question === "" && answer === "") return null;
-  const autoTaken = row.autoTaken === true || response.autoTaken === true;
   return {
     id: row.id,
     userSessionId: row.userSessionId,
@@ -104,11 +101,10 @@ export function decisionOf(row: DecisionSourceRow): OperatorDecision | null {
     // Attribution matters: "renderer asked this" reads very differently from
     // "the console asked this" when the operator reviews the run.
     askedBy: row.participant ?? "main",
-    source: isPlan ? "plan_approval" : autoTaken ? "ttl_default" : "interaction",
+    source: isPlan ? "plan_approval" : "interaction",
     question,
     answer,
     note: isPlan ? null : (response.note ?? null),
-    autoTaken,
     createdAt: row.resolvedAt ?? row.createdAt,
   };
 }
@@ -204,6 +200,5 @@ export class DecisionLedger {
 /** One canonical rendering, so every consumer says the same thing. */
 export function renderDecision(row: OperatorDecision): string {
   const note = row.note === null || row.note === "" ? "" : ` (${row.note})`;
-  const auto = row.autoTaken ? " [auto-taken on timeout, NOT chosen by the operator]" : "";
-  return `${row.question} → ${row.answer}${note}${auto}`;
+  return `${row.question} → ${row.answer}${note}`;
 }

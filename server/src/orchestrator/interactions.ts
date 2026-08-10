@@ -58,9 +58,6 @@ function toWire(row: InteractionRow): Interaction {
     recommendation: row.recommendation,
     allowFreeText: row.allowFreeText,
     detached: row.detached,
-    expiresAt: row.expiresAt,
-    defaultOption: row.defaultOption,
-    autoTaken: row.autoTaken,
     payload: row.payload as Interaction["payload"],
     response: row.response ?? null,
     createdAt: row.createdAt,
@@ -112,9 +109,6 @@ export interface CreateOperatorQuestionInput {
   recommendation?: string;
   allowFreeText?: boolean;
   dedupeKey?: string;
-  /** Requires `defaultOption`; on expiry the default is taken and flagged. */
-  ttlMs?: number;
-  defaultOption?: string;
   toolUseId?: string;
   signal?: AbortSignal;
 }
@@ -127,7 +121,6 @@ export class InteractionService {
   #onBlockingCleared: ((userSessionId: string, agentSessionId: string) => void) | undefined;
   /** Notified whenever any card resolves; the completion predicate re-evaluates. */
   #onResolved: ((userSessionId: string) => void) | undefined;
-  #sweep: ReturnType<typeof setInterval> | null = null;
 
   constructor(db: Db, bus: EventBus) {
     this.#db = db;
@@ -169,10 +162,6 @@ export class InteractionService {
   ): { id: string; resolution: Promise<InteractionResolution> } {
     const urgency = input.urgency ?? "blocking";
     const source = input.source ?? "agent";
-    const expiresAt =
-      input.ttlMs !== undefined && input.defaultOption !== undefined
-        ? new Date(Date.now() + input.ttlMs).toISOString()
-        : null;
     return this.#create(
       input.userSessionId,
       "question",
@@ -187,8 +176,6 @@ export class InteractionService {
         recommendation: input.recommendation ?? null,
         dedupeKey: input.dedupeKey ?? null,
         allowFreeText: input.allowFreeText ?? false,
-        expiresAt,
-        defaultOption: input.defaultOption ?? null,
       },
       (id) => {
         this.#bus.append({
@@ -205,7 +192,6 @@ export class InteractionService {
             source,
             ...(input.recommendation === undefined ? {} : { recommendation: input.recommendation }),
             allowFreeText: input.allowFreeText ?? false,
-            ...(expiresAt === null ? {} : { expiresAt }),
           },
         });
       },
@@ -623,65 +609,6 @@ export class InteractionService {
       .run();
   }
 
-  /**
-   * Resolves rows past their TTL with their stated default, flagged
-   * `autoTaken` so the Run Summary can say a decision was made without the
-   * operator. Only ever armed for cards that carry a default.
-   */
-  startTtlSweep(intervalMs = 15_000): void {
-    if (this.#sweep) return;
-    this.#sweep = setInterval(() => {
-      try { this.sweepExpired(); } catch { /* a sweep failure must not kill the process */ }
-    }, intervalMs);
-    this.#sweep.unref?.();
-  }
-
-  stopTtlSweep(): void {
-    if (this.#sweep) clearInterval(this.#sweep);
-    this.#sweep = null;
-  }
-
-  sweepExpired(now = nowIso()): number {
-    const due = this.#db
-      .select()
-      .from(interactions)
-      .where(
-        and(
-          eq(interactions.status, "pending"),
-          isNotNull(interactions.expiresAt),
-          lt(interactions.expiresAt, now),
-        ),
-      )
-      .all()
-      .filter((row) => row.defaultOption !== null);
-    for (const row of due) {
-      const questions = (row.payload as { questions?: InteractionQuestion[] }).questions ?? [];
-      const answers: Record<string, string[]> = {};
-      for (const question of questions) answers[question.question] = [row.defaultOption as string];
-      // Through #markResolved, not a raw update: resolving a row must fire
-      // #onResolved, or a run whose LAST blocker was TTL-answered never
-      // re-evaluates completion and the sign-off card silently fails to appear.
-      this.#markResolved(row.id, "answered", { answers, autoTaken: true }, { autoTaken: true });
-      this.#bus.append({
-        type: "user_session.question.answered",
-        userSessionId: row.userSessionId,
-        ...(row.agentSessionId ? { agentSessionId: row.agentSessionId } : {}),
-        payload: { sessionId: row.userSessionId, interactionId: row.id, answers, autoTaken: true },
-      });
-      // Recorded like any other decision, but flagged: the Run Summary has to
-      // be able to tell the operator which calls were made in their absence.
-      this.#recordDecision(row, {
-        answer: row.defaultOption as string,
-        source: "ttl_default",
-        autoTaken: true,
-      });
-      this.#pending.get(row.id)?.({ kind: "answers", answers, autoTaken: true });
-      this.#pending.delete(row.id);
-      this.#notifyIfBlockingCleared(row);
-    }
-    return due.length;
-  }
-
   /** The single write point into the decision ledger. */
   /**
    * A resolved interaction IS the decision record — the `DecisionLedger` is a
@@ -691,7 +618,7 @@ export class InteractionService {
    */
   #recordDecision(
     row: InteractionRow,
-    input: { answer: string; note?: string; source: "interaction" | "plan_approval" | "ttl_default"; autoTaken?: boolean },
+    input: { answer: string; note?: string; source: "interaction" | "plan_approval" },
   ): void {
     const question = row.kind === "plan_approval"
       ? "Plan approval"
@@ -712,7 +639,6 @@ export class InteractionService {
         source: input.source,
         question,
         answer: input.answer,
-        ...(input.autoTaken === true ? { autoTaken: true } : {}),
       },
     });
   }

@@ -43,7 +43,6 @@ import { sdkEnv } from "../sdk/env.ts";
 import type { AgentSessionHost } from "../agent-sessions/host.ts";
 import { mainPeerName } from "../agent-sessions/peer-names.ts";
 import { mergeHooks } from "../sdk/hooks.ts";
-import { buildCronHooks, cronDue } from "./cron-hooks.ts";
 import type { TaskService } from "../tasks/service.ts";
 import type { SdkHooksFragment } from "../sdk/types.ts";
 
@@ -221,13 +220,12 @@ export class OrchestratorRunner {
   }
 
   /**
-   * Fallback scheduler for mirrored crons. The CLI fires its own jobs while
-   * the lane process lives; a closed lane (parked, recycled, restarted) has
-   * no scheduler, so the console re-fires due crons from the mirror — only
-   * when the lane is closed, which is what prevents double-firing.
+   * Console-owned deadlines (`set_deadline`) fire on absolute time, whether
+   * or not the lane is live — one scheduler, no parser, no liveness
+   * condition. The native-cron mirror that used to share this table fired on
+   * the OPPOSITE rule (only when the lane was dead) and is gone.
    */
   #cronTimer: NodeJS.Timeout | null = null;
-  #cronFired = new Map<string, string>();
   startCronFallback(): void {
     if (this.#cronTimer) return;
     this.#cronTimer = setInterval(() => this.#cronTick(new Date()), 30_000);
@@ -237,29 +235,14 @@ export class OrchestratorRunner {
     if (this.#cronTimer) { clearInterval(this.#cronTimer); this.#cronTimer = null; }
   }
   #cronTick(now: Date): void {
-    const minute = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}T${now.getHours()}:${now.getMinutes()}`;
     for (const session of this.#deps.repo.listOpenUserSessions()) {
-      // Console-owned deadlines fire whether or not the lane is live — that is
-      // the whole reason for owning them, and the minute-resolution cron
-      // matcher below is too coarse for a check-in timer anyway.
       for (const deadline of this.#deps.repo.listDueDeadlines(session.id, now.toISOString())) {
         this.#deps.repo.patchCron(deadline.id, { status: "deleted" });
         this.#deps.bus.append({ type: "user_session.runtime", userSessionId: session.id,
           payload: { sessionId: session.id, detail: `deadline fired: ${deadline.prompt}` } });
         this.#enqueue(session.id, { kind: "cron", text: `[Deadline you set has arrived]\n${deadline.prompt}` });
       }
-      const lane = this.#lanes.get(session.id);
-      if (lane?.query) continue; // the CLI's own scheduler owns a live lane
-      for (const cron of this.#deps.repo.listCrons(session.id)) {
-        if (this.#cronFired.get(cron.id) === minute || !cronDue(cron.schedule, now)) continue;
-        this.#cronFired.set(cron.id, minute);
-        this.#deps.bus.append({ type: "user_session.runtime", userSessionId: session.id,
-          payload: { sessionId: session.id, detail: `cron fallback fired ${cron.sdkCronId} (${cron.schedule})` } });
-        this.#enqueue(session.id, { kind: "cron", text: `[Scheduled task ${cron.sdkCronId} fired (${cron.schedule})]\n${cron.prompt}` });
-        if (cron.oneShot) this.#deps.repo.patchCron(cron.id, { status: "deleted" });
-      }
     }
-    if (this.#cronFired.size > 256) this.#cronFired.clear();
   }
 
   /** Material AgentSession reports only. Repeated reports coalesce per session. */
@@ -517,7 +500,6 @@ export class OrchestratorRunner {
       // surface — the same single path every seat uses. No send middleware, no
       // peer carry, and no native task mirror keyed to a provider session that
       // dies at every rotation.
-      fragments.push(buildCronHooks({ repo, bus, userSessionId: sessionId }));
     }
     const options = buildOrchestratorOptions({
       workspaceRoot: this.#deps.getWorkspaceRoot(session.workspaceId),

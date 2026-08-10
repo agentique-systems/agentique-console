@@ -15,7 +15,6 @@ import type {
 import type { Db } from "./client.ts";
 import {
   agentSessions,
-  attemptGroups,
   crons,
   eventArtifacts,
   handoffRecords,
@@ -49,7 +48,6 @@ export type ParticipantRow = typeof participants.$inferSelect;
 export type MailboxDeliveryRow = typeof mailboxDeliveries.$inferSelect;
 export type UsageSampleRow = typeof usageSamples.$inferSelect;
 export type HandoffRecordRow = typeof handoffRecords.$inferSelect;
-export type AttemptGroupRow = typeof attemptGroups.$inferSelect;
 export type CronRow = typeof crons.$inferSelect;
 export type PatternStateRow = typeof patternState.$inferSelect;
 
@@ -379,11 +377,6 @@ export class Repo {
   insertCron(row: CronRow): void {
     this.#db.insert(crons).values(row).run();
   }
-  listCrons(userSessionId: string): CronRow[] {
-    return this.#db.select().from(crons)
-      .where(and(eq(crons.userSessionId, userSessionId), eq(crons.status, "active")))
-      .orderBy(asc(crons.createdAt)).all();
-  }
   /** Console-owned one-shot deadlines whose absolute time has arrived. */
   listDueDeadlines(userSessionId: string, nowIsoTime: string): CronRow[] {
     return this.#db.select().from(crons)
@@ -661,7 +654,7 @@ export class Repo {
       "lastSeenSeq" | "pendingTurnSeq" | "sdkSessionId" | "generation" |
       "turnCount" | "contextTokens" | "profileSnapshot" | "profileId"
       | "memory" | "latestHandoffId" | "checkpointReady"
-      | "worktreePath" | "worktreeBaseCommit" | "worktreeBranch" | "attemptGroupId" | "attemptRole"
+      | "worktreePath" | "worktreeBaseCommit" | "worktreeBranch"
       | "peerName" | "lastActiveAt" | "cumulativeCostUsd" | "cumulativeApiDurationMs" | "lastDecisionAt"
     >>,
   ): void {
@@ -684,27 +677,4 @@ export class Repo {
       .map((row) => ({ ...row, worktreePath: row.worktreePath! }));
   }
 
-  insertAttemptGroup(row: AttemptGroupRow): void {
-    this.#db.insert(attemptGroups).values(row).run();
-  }
-
-  getAttemptGroup(id: string): AttemptGroupRow | undefined {
-    return this.#db.select().from(attemptGroups).where(eq(attemptGroups.id, id)).get();
-  }
-
-  /** The single non-terminal group for a session, if any. */
-  findOpenAttemptGroup(agentSessionId: string): AttemptGroupRow | undefined {
-    return this.#db.select().from(attemptGroups)
-      .where(and(eq(attemptGroups.agentSessionId, agentSessionId), inArray(attemptGroups.status, ["running", "reviewing"])))
-      .get();
-  }
-
-  listNonTerminalAttemptGroups(): AttemptGroupRow[] {
-    return this.#db.select().from(attemptGroups).where(inArray(attemptGroups.status, ["running", "reviewing"])).all();
-  }
-
-  patchAttemptGroup(id: string, patch: Partial<Pick<AttemptGroupRow,
-    "status" | "reviewerSeat" | "winnerSeat" | "mergeCommit" | "attemptsState" | "updatedAt">>): void {
-    this.#db.update(attemptGroups).set({ ...patch, updatedAt: nowIso() }).where(eq(attemptGroups.id, id)).run();
-  }
 }

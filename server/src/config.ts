@@ -62,18 +62,6 @@ export interface Config {
    */
   retryBudgetMs: number;
   /**
-   * Deny a seat's Write/Edit outside its declared ownership. Opt-in for one
-   * release: it can block a seat mid-work, and the roster's live work-state
-   * already removes most of the reason a seat strays.
-   */
-  enforceOwnership: boolean;
-  /**
-   * Hold an assignment whose blocker task is incomplete, releasing it when the
-   * blocker completes. The grace below stops a mis-declared dependency
-   * deadlocking a run.
-   */
-  assignmentBlockGraceMs: number;
-  /**
    * Persist reasoning blocks as artifacts. Off by default: it is more of data
    * the console already stores in tool inputs, but it is still more.
    */
@@ -179,8 +167,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     operatorAskDetachMs: Number(env.CONSOLE_OPERATOR_ASK_DETACH_MS ?? 300_000),
     autoInitGit: env.CONSOLE_AUTO_INIT_GIT !== "0",
     retryBudgetMs: Number(env.CONSOLE_RETRY_BUDGET_MS ?? 90_000),
-    enforceOwnership: env.CONSOLE_ENFORCE_OWNERSHIP === "1",
-    assignmentBlockGraceMs: Number(env.CONSOLE_ASSIGNMENT_BLOCK_GRACE_MS ?? 600_000),
     persistReasoning: env.CONSOLE_PERSIST_REASONING === "1",
     sendWakeTimeoutMs: Number(env.CONSOLE_SEND_WAKE_TIMEOUT_MS ?? 30_000),
     deliveryHoldLeaseMs: Number(env.CONSOLE_DELIVERY_HOLD_LEASE_MS ?? 60_000),

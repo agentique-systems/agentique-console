@@ -25,8 +25,6 @@ import type { ProcessManager } from "../runtime/process-manager.ts";
 import type { BrowserManager } from "../runtime/browser-manager.ts";
 import type { WorktreeManager } from "../runtime/worktree-manager.ts";
 import { decisionOf, renderDecision, type DecisionLedger } from "../orchestrator/decisions.ts";
-import type { ContractService } from "../contracts/service.ts";
-import { buildContractHooks } from "./contract-hook.ts";
 import { dedupeKeyFor, type InteractionService } from "../orchestrator/interactions.ts";
 import type { TaskService } from "../tasks/service.ts";
 import type { HandoffService } from "../handoffs/service.ts";
@@ -35,33 +33,17 @@ import type { ReapResult } from "../completion/summary.ts";
 import { evaluateCheckpointDraft } from "../handoffs/checkpoint-gate.ts";
 import { CHILD_SENDER_PREFIX, peerNameOf } from "./peer-names.ts";
 import {
-  assignmentBlockers,
-  deliveryTaskId,
   finalReportBlockers,
   finalReportCaveats,
   isFinalToMain,
-  promoteUncertainty,
   resolvedDomains,
   syncLedgerFromHandoff,
   WithheldFinalError,
   type Category,
 } from "./governance.ts";
 import { buildSeatTools, ok, type AskOperatorArgs } from "./seat-tools.ts";
-import {
-  closeAttemptGroup,
-  onAttemptPost,
-  RESERVED_NAMES,
-  SEAT_NAME_RE,
-  startAttempts,
-  selectAttemptWinner,
-  type AttemptsContext,
-  type SelectAttemptWinnerInput,
-  type SelectAttemptWinnerResult,
-  type StartAttemptsInput,
-  type StartAttemptsResult,
-} from "./attempts.ts";
 import { buildWorktreeHooks } from "./worktree-hook.ts";
-import { compileContract, contractOfSession, hubContract, roleOfSeat, type CompiledContract } from "./topology.ts";
+import { compileContract, contractOfSession, hubContract, roleOfSeat, RESERVED_NAMES, SEAT_NAME_RE, type CompiledContract } from "./topology.ts";
 import { grantedTools, runtimeToolNames, type SeatToolName } from "./grants.ts";
 import { dispatchWorkItems, onPatternPost, onTurnSettled, sweep as patternSweep, type DispatchWorkItemsInput, type PatternContext } from "./patterns/progression.ts";
 import { buildContract } from "./patterns/catalog.ts";
@@ -354,13 +336,11 @@ export interface AgentSessionHostDeps {
   /**
    * What the operator has decided. Read into every seat's prompt and into
    * checkpoint reconstruction, so a decision made once is known by every seat
-   * and every later generation. Required, like `interactions` and `contracts`:
-   * optional feature deps let a missing wire typecheck, which is how the
-   * decision ledger shipped dark in production.
+   * and every later generation. Required, like `interactions`: optional
+   * feature deps let a missing wire typecheck, which is how the decision
+   * ledger shipped dark in production.
    */
   decisions: DecisionLedger;
-  /** Shared-interface contracts; writes to their scopes gate on acceptance. */
-  contracts: ContractService;
   tasks?: TaskService;
   handoffs?: HandoffService;
   worktrees?: WorktreeManager;
@@ -393,7 +373,6 @@ export class AgentSessionHost {
   /** Sessions whose `final` the gate withheld, so clearing it can say so. */
   readonly #withheldFinals = new Set<string>();
   /** deliveryId → assignment held until its blocker task completes. */
-  readonly #blockedAssignments = new Map<string, { agentSessionId: string; recipient: string; since: number }>();
   /** Roster work-state diff lines, memoized 15s — see `#seatWorkState`. */
   readonly #workStateDiffCache = new Map<string, { at: number; line: string }>();
   #sessionStatus = new Map<string, AgentSessionStatus | null>();
@@ -539,37 +518,13 @@ export class AgentSessionHost {
     return this.#seatsOfRole(agentSessionId, entry.role)[0]?.name ?? ORCHESTRATOR_SEAT;
   }
 
-  /** Best-of-N fan-out; the machinery lives in attempts.ts. */
-  startAttempts(input: StartAttemptsInput): StartAttemptsResult {
-    return startAttempts(this.#attemptsContext(), input);
-  }
-
-  /** The reviewer's single selection call; the machinery lives in attempts.ts. */
-  selectAttemptWinner(input: SelectAttemptWinnerInput): SelectAttemptWinnerResult {
-    return selectAttemptWinner(this.#attemptsContext(), input);
-  }
-
-  /** Bound host-private operations the attempt machinery invokes. */
-  #attemptsContext(): AttemptsContext {
-    return {
-      deps: this.#deps,
-      post: (input) => this.post(input),
-      simpleHandoff: (action, status, summary, nextAction) => this.#simpleHandoff(action, status, summary, nextAction),
-      profile: (id, workspaceId) => this.#profile(id, workspaceId),
-      snapshotProfile: (profile) => this.#snapshotProfile(profile),
-      participant: (agentSessionId, name, role, profile, extra, model, ownership, ord, createdAt) =>
-        this.#participant(agentSessionId, name, role, profile, extra, model, ownership, ord, createdAt),
-    };
-  }
-
   /**
    * The ONE transfer path: journal, then deliver by pushing into the
    * recipient's lane input. Every hop — briefings, seat reports via the
-   * `send_handoff` tool, best-of-N fan-out, failure notices, redelivery —
-   * comes through here, which is what makes the governance gates below
-   * inescapable.
+   * `send_handoff` tool, failure notices, redelivery — comes through here,
+   * which is what makes the governance gates below inescapable.
    */
-  post(input: { agentSessionId: string; speaker: Speaker; to: string; handoff: HandoffDraft; category?: Category; dedupeKey?: string; turnId?: string }): MessageRow & { queuedBehind?: string[] } {
+  post(input: { agentSessionId: string; speaker: Speaker; to: string; handoff: HandoffDraft; category?: Category; dedupeKey?: string; turnId?: string }): MessageRow {
     const { repo } = this.#deps;
     const session = repo.getAgentSession(input.agentSessionId);
     if (!session) throw notFound(`no agent session ${input.agentSessionId}`);
@@ -582,11 +537,6 @@ export class AgentSessionHost {
       const priorMessage = prior ? repo.getMessageById(prior.messageId) : undefined;
       if (priorMessage) return priorMessage;
     }
-    // Promotion runs BEFORE the gate reads the open cards, so an uncertainty
-    // this very handoff raised can withhold this very final. That ordering is
-    // the whole point on a `final`: db-live-2's report and the question about
-    // its open items were eleven seconds apart, in the wrong order.
-    promoteUncertainty(this.#deps, session, input.speaker.name, input.handoff, category);
     // Withheld BEFORE journalling, so a blocked final leaves no half-record.
     //
     // A `final` attempt promotes every DEFERRED question first. Deferred means
@@ -693,41 +643,14 @@ export class AgentSessionHost {
       }
       }
     } else {
-      // An assignment whose blocker is open is JOURNALED AND QUEUED — not
-      // denied, and not delivered with a warning.
-      //
-      // Denying turns delivery into something the model must interpret, and it
-      // counts toward the tool-error watchdog; steering.e2e.test.ts records
-      // that this codebase already removed exactly that pattern once.
-      // Delivering with a warning is the status quo plus a sentence, and it is
-      // how db-live-2's renderer wrote game.js 61 seconds after receiving a
-      // contract it never confirmed. Queuing keeps the "a message is never
-      // lost" guarantee and lets the Console carry it the moment the blocker
-      // clears.
-      // A tripped session's fan-out is closed: NEW assignments queue behind
-      // the close-out instead of delivering. Reports and finals still flow —
-      // the trip asks for a wrap-up, it never silences one.
-      if (category === "assignment") {
-        const tripped = this.#deps.repo.getPatternState(session.id)?.tripped;
-        if (tripped) {
-          this.#deps.bus.append({ type: "governance.tool.denied", userSessionId: session.userSessionId, agentSessionId: session.id,
-            payload: { sessionId: session.userSessionId, agentSessionId: session.id, participant: input.speaker.name,
-              toolName: "send_handoff", kind: "blocked_by_dependency",
-              reason: `assignment to ${input.to} held: the session's termination policy tripped (${tripped}); close out instead of assigning new work` } });
-          return { ...message, queuedBehind: [`termination policy tripped (${tripped}) — send your final instead`] };
-        }
-      }
-      const blockers = assignmentBlockers(this.#deps, session, input.to, category, input.handoff.core.taskId);
-      if (blockers.length > 0) {
-        this.#deps.bus.append({ type: "governance.tool.denied", userSessionId: session.userSessionId, agentSessionId: session.id,
-          payload: { sessionId: session.userSessionId, agentSessionId: session.id, participant: input.speaker.name,
-            toolName: "send_handoff", kind: "blocked_by_dependency",
-            reason: `assignment to ${input.to} held: ${blockers.join("; ")}` } });
-        this.#blockedAssignments.set(delivery.id, { agentSessionId: session.id, recipient: input.to, since: Date.now() });
-        // The sender must learn it was QUEUED, not delivered — otherwise it
-        // reports "delivered" and nobody watches for the release.
-        return { ...message, queuedBehind: blockers };
-      }
+      // Assignments always deliver. The holds that used to live here (a
+      // termination-trip hold and a dependency-blocker hold) both worked by
+      // leaving the delivery row `queued` — which the next unrelated delivery
+      // to the same seat swept along anyway, while the queued row pinned
+      // `#statusOf` at "working" forever. A leaky gate that also wedges the
+      // session is worse than no gate: dependency ordering is advisory text
+      // in the assignment now, and a tripped session's close-out ask says
+      // what it needs without impounding new work.
       // A router edge delivers now; a console-advanced edge stays journaled
       // and queued for the pattern progression to carry (joins, stages).
       if (edge.advance === "router") {
@@ -743,33 +666,6 @@ export class AgentSessionHost {
         countsRound: edge.countsRound === true, advance: edge.advance });
     } catch (error) { this.#recordHostFailure(session.id, error); }
     return message;
-  }
-
-  /**
-   * A blocker completed, or the grace expired. Carries anything now unblocked.
-   *
-   * The grace is NOT optional. A mis-declared dependency must never deadlock a
-   * run — the same instinct that made `#finalReportCaveats` stop throwing.
-   */
-  releaseBlockedAssignments(): void {
-    const grace = this.#deps.config.assignmentBlockGraceMs;
-    const now = Date.now();
-    for (const [deliveryId, held] of [...this.#blockedAssignments]) {
-      const session = this.#deps.repo.getAgentSession(held.agentSessionId);
-      if (!session || session.status !== "open") { this.#blockedAssignments.delete(deliveryId); continue; }
-      const delivery = this.#deps.repo.getDeliveryById(deliveryId);
-      if (!delivery || delivery.status !== "queued") { this.#blockedAssignments.delete(deliveryId); continue; }
-      const stillBlocked = assignmentBlockers(this.#deps, session, held.recipient, "assignment", deliveryTaskId(this.#deps, delivery.messageId));
-      const expired = now - held.since >= grace;
-      if (stillBlocked.length > 0 && !expired) continue;
-      this.#blockedAssignments.delete(deliveryId);
-      if (expired && stillBlocked.length > 0) {
-        this.#deps.bus.append({ type: "agent_session.runtime", userSessionId: session.userSessionId, agentSessionId: session.id,
-          payload: { agentSessionId: session.id, participant: held.recipient,
-            detail: `held assignment released after the grace period despite ${stillBlocked.join("; ")} — a declared dependency must never deadlock a run` } });
-      }
-      void this.#deliverConsole(held.agentSessionId, held.recipient).catch(() => undefined);
-    }
   }
 
   /**
@@ -818,9 +714,7 @@ export class AgentSessionHost {
       ...(opts.turnId ? { turnId: opts.turnId } : {}), ...(opts.dedupeKey ? { dedupeKey: opts.dedupeKey } : {}),
     });
     this.#deps.handoffs.committed(prepared.record);
-    if (senderSeat?.attemptRole === "attempt" && (prepared.record.core.status === "completed" || prepared.record.core.status === "failed")) {
-      onAttemptPost(this.#attemptsContext(), session, senderSeat, prepared.record.core.status);
-    } else if (senderSeat && senderSeat.attemptRole === null && senderSeat.worktreePath && (prepared.record.core.status === "completed" || prepared.record.core.status === "failed")) {
+    if (senderSeat && senderSeat.worktreePath && (prepared.record.core.status === "completed" || prepared.record.core.status === "failed")) {
       this.#onSeatWorktreePost(session, senderSeat, prepared.record.core.status);
     }
     bus.append({ type: "agent_session.message", userSessionId: session.userSessionId, agentSessionId: session.id,
@@ -948,21 +842,16 @@ export class AgentSessionHost {
     this.interrupt(session.id);
     this.#deps.processes?.stopSession(session.id);
     void this.#deps.browsers?.closeSession(session.id);
-    const openGroup = this.#deps.repo.findOpenAttemptGroup(session.id);
-    if (openGroup) closeAttemptGroup(this.#attemptsContext(), session, openGroup, "abandoned");
     if (this.#deps.worktrees && this.#deps.getWorkspaceRoot) {
       const user = this.#deps.repo.getUserSession(session.userSessionId);
       for (const seat of this.#deps.repo.listParticipants(session.id)) {
-        if (!seat.worktreePath || seat.attemptRole !== null || !user) continue;
+        if (!seat.worktreePath || !user) continue;
         try { this.#deps.worktrees.remove(this.#deps.getWorkspaceRoot(user.workspaceId), seat.worktreePath, seat.worktreeBranch ?? "", { archiveBranch: true }); } catch { /* best effort */ }
         this.#deps.repo.patchParticipant(session.id, seat.name, { worktreePath: null, worktreeBaseCommit: null, worktreeBranch: null });
       }
     }
     for (const delivery of this.#deps.repo.listActiveDeliveries(session.id)) this.#patchDelivery(session, delivery, "cancelled");
     this.#withheldFinals.delete(session.id);
-    for (const [deliveryId, held] of this.#blockedAssignments) {
-      if (held.agentSessionId === session.id) this.#blockedAssignments.delete(deliveryId);
-    }
     this.#deps.repo.patchAgentSession(session.id, { status: "archived" });
     this.#contracts.delete(session.id);
     this.#deps.bus.append({ type: "agent_session.status", userSessionId: session.userSessionId, agentSessionId: session.id,
@@ -1017,21 +906,13 @@ export class AgentSessionHost {
   }
 
   /**
-   * The governance clock. Two time-bounded holds expire here:
-   *
-   * - any `ask_operator` wait older than `operatorAskDetachMs` is detached —
-   *   the third of three mechanisms bounding a blocking ask, alongside the
-   *   concurrent-card cap and the capacity-eviction second pass; this is the
-   *   one that fires when nothing else needs the slot and the human is away.
-   * - held assignments past `assignmentBlockGraceMs` are released. Without a
-   *   clock of its own the grace could only ever be OBSERVED from a task
-   *   change — a blocker nobody touched again would hold its assignment
-   *   forever, the exact deadlock the grace exists to rule out.
+   * The governance clock: any `ask_operator` wait older than
+   * `operatorAskDetachMs` is detached — the seat's process frees up while the
+   * card stays open on the operator's screen.
    */
   startGovernanceSweep(intervalMs = 30_000): void {
     if (this.#askSweep) return;
     this.#askSweep = setInterval(() => {
-      this.releaseBlockedAssignments();
       const limit = this.#deps.config.operatorAskDetachMs;
       const cutoff = Date.now() - limit;
       for (const lanes of this.#seats.values()) for (const lane of lanes.values()) {
@@ -1245,18 +1126,6 @@ export class AgentSessionHost {
         if (session && session.status === "open" && session.parentAgentSessionId !== null) this.#redriveChildBoundary(session, delivery);
         continue;
       }
-      // Holds are recomputed from durable truth (the task rows), never trusted
-      // to the in-memory map a restart wipes: a queued assignment whose
-      // declared blocker is still open goes back on hold instead of leaking
-      // out with the reboot. The grace clock restarts — later than deadlock.
-      if (delivery.category === "assignment") {
-        const session = this.#deps.repo.getAgentSession(delivery.agentSessionId);
-        if (session?.status === "open"
-          && assignmentBlockers(this.#deps, session, delivery.recipient, "assignment", deliveryTaskId(this.#deps, delivery.messageId)).length > 0) {
-          this.#blockedAssignments.set(delivery.id, { agentSessionId: delivery.agentSessionId, recipient: delivery.recipient, since: Date.now() });
-          continue;
-        }
-      }
       wakes.add(`${delivery.agentSessionId} ${delivery.recipient}`);
     }
     for (const key of wakes) {
@@ -1288,7 +1157,7 @@ export class AgentSessionHost {
     // check verified a tree that renderer was still editing. Its worktree is
     // discarded rather than merged — `#onSeatWorktreePost` only merges a seat
     // whose profile can write.
-    if (!worktrees || this.#deps.config.seatWorktrees === false || seat.role !== "agent" || seat.attemptRole !== null
+    if (!worktrees || this.#deps.config.seatWorktrees === false || seat.role !== "agent"
       || seat.worktreePath !== null || !worktrees.isGitRepo(workspaceRoot)) return seat;
     try {
       const dirName = `seat-${branchSafe(seat.name)}-${seat.generation}-${newId("turn").slice(-6)}`;
@@ -1371,7 +1240,7 @@ export class AgentSessionHost {
       generation: 0, turnCount: 0,
       contextTokens: 0, memory: "", latestHandoffId: null, checkpointReady: true, pendingTurnSeq: 0, lastSeenSeq: 0,
       cumulativeCostUsd: 0, cumulativeApiDurationMs: 0, lastDecisionAt: null,
-      worktreePath: null, worktreeBaseCommit: null, worktreeBranch: null, attemptGroupId: null, attemptRole: null,
+      worktreePath: null, worktreeBaseCommit: null, worktreeBranch: null,
       patternRole: patternRole ?? null, ord, createdAt };
   }
 
@@ -1735,10 +1604,10 @@ export class AgentSessionHost {
       // Builders must supply a prompt for every role; the hub specialist pack
       // is the conservative fallback for a snapshot that somehow lacks one.
       const rolePrompt = contract.prompt(seatRole) ?? hubContract().promptPack.specialist!;
-      const granted = grantedTools(contract.role(seatRole), profile, latestSeat, {
+      const granted = grantedTools(contract.role(seatRole), profile, {
         tasks: Boolean(this.#deps.tasks), handoffs: Boolean(this.#deps.handoffs),
         processes: Boolean(this.#deps.processes), browsers: Boolean(this.#deps.browsers),
-        contracts: Boolean(this.#deps.contracts), worktrees: Boolean(this.#deps.worktrees), user: Boolean(user),
+        worktrees: Boolean(this.#deps.worktrees), user: Boolean(user),
         childSessions: this.#deps.config.enableChildSessions !== false && session.parentAgentSessionId === null,
       });
       const mcp = this.#buildParticipantMcp(sdk, session, latestSeat, lane, granted);
@@ -1747,7 +1616,7 @@ export class AgentSessionHost {
         // Order matters for prompt caching: the invariant part (instructions,
         // capabilities, messaging brief) comes first and is byte-identical
         // across generations; the volatile checkpoint goes last.
-        systemPrompt: { type: "preset", preset: "claude_code", append: `${latestSeat.instructions}\n\n${capabilityBrief(profile, latestSeat.worktreePath !== null && !latestSeat.attemptRole, this.#deps.config.allowedDomains ?? [])}${latestSeat.worktreePath && !latestSeat.attemptRole ? "\nNever run git commit — the Console lands your work when you report completed. Install dependencies only if you must run validation." : ""}\n\n${seatMessagingBrief(this.#roster(session), rolePrompt.addressing)}\n${rolePrompt.protocol}${this.#decisionContext(session)}${this.#checkpointContext(latestSeat)}` },
+        systemPrompt: { type: "preset", preset: "claude_code", append: `${latestSeat.instructions}\n\n${capabilityBrief(profile, latestSeat.worktreePath !== null, this.#deps.config.allowedDomains ?? [])}${latestSeat.worktreePath ? "\nNever run git commit — the Console lands your work when you report completed. Install dependencies only if you must run validation." : ""}\n\n${seatMessagingBrief(this.#roster(session), rolePrompt.addressing)}\n${rolePrompt.protocol}${this.#decisionContext(session)}${this.#checkpointContext(latestSeat)}` },
         settingSources: [], includePartialMessages: true,
         permissionMode: profile.permissionMode,
         ...(profile.permissionMode === "bypassPermissions" ? { allowDangerouslySkipPermissions: true } : {}),
@@ -1870,18 +1739,6 @@ export class AgentSessionHost {
         userSessionId: session.userSessionId, agentSessionId: session.id, seat: seat.name,
       }));
     }
-    // Writes gate on agreement, and (opt-in) on declared ownership.
-    fragments.push(buildContractHooks({
-      contracts: this.#deps.contracts,
-      bus: this.#deps.bus,
-      userSessionId: session.userSessionId,
-      agentSessionId: session.id,
-      seat: seat.name,
-      seatRoot: seat.worktreePath ?? workspaceRoot,
-      workspaceRoot,
-      ownership: seat.ownership,
-      enforceOwnership: this.#deps.config.enforceOwnership === true,
-    }));
     return mergeHooks(fragments);
   }
 
@@ -2272,8 +2129,6 @@ export class AgentSessionHost {
       markSawSend: () => { const current = this.#laneOf(session.id, seat.name); if (current.activeTurn) current.activeTurn.sawSend = true; },
       seatWorkState: (row) => this.#seatWorkState(row),
       simpleHandoff: (action, status, summary, nextAction) => this.#simpleHandoff(action, status, summary, nextAction),
-      startAttempts: (input) => this.startAttempts(input),
-      selectAttemptWinner: (input) => this.selectAttemptWinner(input),
       dispatchWorkItems: (input) => this.dispatchWorkItems(seat.name, input),
       createChildSession: (input) => this.createSession({
         userSessionId: session.userSessionId, title: input.title, mode: "execute",

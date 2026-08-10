@@ -265,23 +265,6 @@ export interface AgentMailboxPayload {
   category: "assignment" | "update" | "milestone" | "failure" | "final" | "decision";
   status: "queued" | "delivered" | "acknowledged" | "cancelled";
 }
-/**
- * A shared-interface contract changed state. The mechanism that makes "agree
- * before either writes code" enforceable rather than aspirational.
- */
-export interface AgentContractPayload {
-  agentSessionId: string;
-  contractId: string;
-  name: string;
-  event: string;
-  status: "proposed" | "accepted" | "superseded";
-  revision: number;
-  parties: { participant: string; state: "pending" | "accepted" | "objected" }[];
-  participant?: string;
-  reason?: string;
-  rationale?: string;
-  by?: string;
-}
 export interface AgentRuntimePayload {
   agentSessionId: string;
   participant: string;
@@ -422,64 +405,6 @@ export interface SeatWorktreeDiscardedPayload {
   artifactId: string | null;
 }
 
-/** Best-of-N: N attempt seats racing one assignment in isolated worktrees. */
-export interface AttemptGroupStartedPayload {
-  agentSessionId: string;
-  groupId: string;
-  seats: string[];
-  profileId: string;
-  attempts: number;
-  baseCommit: string;
-  dirtyWorkspace: boolean;
-}
-
-export interface AttemptCompletedPayload {
-  agentSessionId: string;
-  groupId: string;
-  seat: string;
-  status: "completed" | "failed";
-  branch: string;
-  commit: string | null;
-  artifactId: string | null;
-  diffBytes: number;
-  filesChanged: number;
-}
-
-export interface AttemptGroupReviewStartedPayload {
-  agentSessionId: string;
-  groupId: string;
-  reviewer: string;
-}
-
-export interface AttemptGroupSelectedPayload {
-  agentSessionId: string;
-  groupId: string;
-  winner: string | null;
-  rejectedAll: boolean;
-  reason: string;
-}
-
-export interface AttemptGroupMergedPayload {
-  agentSessionId: string;
-  groupId: string;
-  winner: string;
-  mergeCommit: string;
-}
-
-export interface AttemptGroupMergeFailedPayload {
-  agentSessionId: string;
-  groupId: string;
-  winner: string;
-  conflicts: string[];
-  detail: string;
-}
-
-export interface AttemptGroupClosedPayload {
-  agentSessionId: string;
-  groupId: string;
-  status: "merged" | "rejected" | "failed" | "abandoned";
-}
-
 /** A checkpoint draft failed the deterministic quality gate; journal of the retry decision. */
 export interface HandoffCheckpointRetriedPayload {
   participant: string;
@@ -587,7 +512,6 @@ export type ConsoleEvent = Base &
     | { type: "agent_session.status"; payload: AgentSessionStatusPayload }
     | { type: "agent_session.mailbox"; payload: AgentMailboxPayload }
     | { type: "agent_session.runtime"; payload: AgentRuntimePayload }
-    | { type: "agent_session.contract"; payload: AgentContractPayload }
     | { type: "agent_session.context.rotated"; payload: AgentContextRotatedPayload }
     | { type: "agent_session.process.started"; payload: AgentProcessStartedPayload }
     | { type: "agent_session.process.output"; payload: AgentProcessOutputPayload }
@@ -615,13 +539,6 @@ export type ConsoleEvent = Base &
     | { type: "handoff.checkpoint.retried"; payload: HandoffCheckpointRetriedPayload }
     | { type: "agent_session.watchdog"; payload: AgentWatchdogPayload }
     | { type: "governance.tool.denied"; payload: ToolDeniedPayload }
-    | { type: "agent_session.attempt_group.started"; payload: AttemptGroupStartedPayload }
-    | { type: "agent_session.attempt.completed"; payload: AttemptCompletedPayload }
-    | { type: "agent_session.attempt_group.review_started"; payload: AttemptGroupReviewStartedPayload }
-    | { type: "agent_session.attempt_group.selected"; payload: AttemptGroupSelectedPayload }
-    | { type: "agent_session.attempt_group.merged"; payload: AttemptGroupMergedPayload }
-    | { type: "agent_session.attempt_group.merge_failed"; payload: AttemptGroupMergeFailedPayload }
-    | { type: "agent_session.attempt_group.closed"; payload: AttemptGroupClosedPayload }
     | { type: "agent_session.worktree.created"; payload: SeatWorktreeCreatedPayload }
     | { type: "agent_session.worktree.merged"; payload: SeatWorktreeMergedPayload }
     | { type: "agent_session.worktree.merge_failed"; payload: SeatWorktreeMergeFailedPayload }

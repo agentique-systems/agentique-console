@@ -37,9 +37,7 @@ export const CONSOLE_TOOL_NAMES = [
  * traffic goes through the console-owned `send_to_coordinator`, which is
  * route-checked and journaled.
  */
-const MAIN_NATIVE_TOOLS = [
-  "CronCreate", "CronList", "CronDelete",
-];
+const MAIN_NATIVE_TOOLS: string[] = [];
 
 /**
  * Never available to main, in any configuration. `SendMessage` bypasses the
@@ -133,8 +131,7 @@ export function buildOrchestratorOptions(
           : [...CONSOLE_TOOL_NAMES.map((name) => `mcp__console__${name}`), ...MAIN_NATIVE_TOOLS]
         : []),
     ],
-    disallowedTools: [...MAIN_DENIED_TOOLS,
-      ...(withDelegation && !manager ? [] : ["CronCreate", "CronList", "CronDelete"])],
+    disallowedTools: [...MAIN_DENIED_TOOLS, "CronCreate", "CronList", "CronDelete"],
     ...(input.hooks === undefined ? {} : { hooks: input.hooks }),
     settings: { crossSessionInbound: "accept" } as unknown as SdkOptions["settings"],
     // In streaming mode maxTurns counts cumulatively over the whole session

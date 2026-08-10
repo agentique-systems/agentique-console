@@ -23,8 +23,7 @@ import type { AgentSessionRow, MessageRow, ParticipantRow, Repo } from "../../db
 import type { EventBus } from "../../events/bus.ts";
 import { nowIso } from "../../ids.ts";
 import type { Category } from "../governance.ts";
-import { SEAT_NAME_RE } from "../attempts.ts";
-import { roleOfSeat } from "../topology.ts";
+import { SEAT_NAME_RE, roleOfSeat } from "../topology.ts";
 
 export interface PatternContext {
   deps: { repo: Repo; bus: EventBus; config: Config };
@@ -33,7 +32,7 @@ export interface PatternContext {
   completionSeat(session: AgentSessionRow, which: "finalFrom" | "voice"): string;
   /** A speaker with a legal edge to `recipient` — console-voice resolution. */
   answerSpeaker(session: AgentSessionRow, recipient: string): Speaker;
-  post(input: { agentSessionId: string; speaker: Speaker; to: string; handoff: HandoffDraft; category?: Category; dedupeKey?: string }): MessageRow & { queuedBehind?: string[] };
+  post(input: { agentSessionId: string; speaker: Speaker; to: string; handoff: HandoffDraft; category?: Category; dedupeKey?: string }): MessageRow;
   simpleHandoff(action: string, status: HandoffDraft["core"]["status"], summary: string, nextAction: string | null): HandoffDraft;
   /** Deliver every queued row for `recipient` in one minted turn (#deliverConsole). */
   deliverNow(agentSessionId: string, recipient: string): void;

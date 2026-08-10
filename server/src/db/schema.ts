@@ -169,8 +169,6 @@ export const participants = sqliteTable(
     /** The worktree's branch ref (merge target on completion). */
     worktreeBranch: text("worktree_branch"),
     /** Best-of-N group membership; NULL for ordinary seats. */
-    attemptGroupId: text("attempt_group_id"),
-    attemptRole: text("attempt_role", { enum: ["attempt", "reviewer"] }),
     /** Contract role binding; NULL derives from `role` (orchestrator→coordinator, agent→specialist). */
     patternRole: text("pattern_role"),
     /** Seating order for accents and prompt listings. */
@@ -180,41 +178,10 @@ export const participants = sqliteTable(
   (t) => [primaryKey({ columns: [t.agentSessionId, t.name] })],
 );
 
-/** One best-of-N run: N attempt seats racing the same assignment. */
-export const attemptGroups = sqliteTable(
-  "attempt_groups",
-  {
-    id: text("id").primaryKey(),
-    agentSessionId: text("agent_session_id")
-      .notNull()
-      .references(() => agentSessions.id),
-    userSessionId: text("user_session_id").notNull(),
-    profileId: text("profile_id").notNull(),
-    baseSeat: text("base_seat").notNull(),
-    attempts: integer("attempts").notNull(),
-    baseCommit: text("base_commit").notNull(),
-    status: text("status", { enum: ["running", "reviewing", "merged", "rejected", "failed", "abandoned"] })
-      .notNull()
-      .default("running"),
-    reviewerSeat: text("reviewer_seat"),
-    winnerSeat: text("winner_seat"),
-    mergeCommit: text("merge_commit"),
-    dirtyWorkspace: integer("dirty_workspace", { mode: "boolean" }).notNull().default(false),
-    /** seat -> {branch, worktreePath, commit, artifactId, status}. */
-    attemptsState: text("attempts_state", { mode: "json" })
-      .$type<Record<string, { branch: string; worktreePath: string; commit: string | null; artifactId: string | null; status: "running" | "completed" | "failed" }>>()
-      .notNull()
-      .default({}),
-    createdAt: text("created_at").notNull(),
-    updatedAt: text("updated_at").notNull(),
-  },
-  (t) => [index("attempt_groups_session").on(t.agentSessionId, t.status)],
-);
 
 /**
  * Per-session pattern progression: counters, join arrivals, cursor. Written
- * only by the pattern-progression module (the attempt_groups precedent for
- * pattern-scoped state that does not belong on the session row).
+ * only by the pattern-progression module.
  */
 export const patternState = sqliteTable("pattern_state", {
   agentSessionId: text("agent_session_id")
@@ -290,9 +257,6 @@ export const interactions = sqliteTable("interactions", {
   allowFreeText: integer("allow_free_text", { mode: "boolean" }).notNull().default(false),
   /** The asker's promise died; the answer will arrive by mailbox, not by return. */
   detached: integer("detached", { mode: "boolean" }).notNull().default(false),
-  expiresAt: text("expires_at"),
-  defaultOption: text("default_option"),
-  autoTaken: integer("auto_taken", { mode: "boolean" }).notNull().default(false),
   /** When the ASKING SEAT was told — distinct from resolvedAt (when the operator answered). */
   flushedAt: text("flushed_at"),
   payload: text("payload", { mode: "json" })
@@ -308,48 +272,6 @@ export const interactions = sqliteTable("interactions", {
 // row, and `orchestrator/decisions.ts` is a read-model over them. (A legacy
 // `operator_decisions` table may exist in older databases; it is simply
 // unused.)
-
-/**
- * A shared interface the parties must agree before any of them writes to its
- * scopes. Four statuses plus a revision counter: amending is revision+1 with
- * every acceptance reset, because an amendment that leaves prior acceptances
- * standing is a contract nobody agreed to.
- */
-export const contracts = sqliteTable(
-  "contracts",
-  {
-    id: text("id").primaryKey(),
-    agentSessionId: text("agent_session_id").notNull().references(() => agentSessions.id),
-    userSessionId: text("user_session_id").notNull(),
-    name: text("name").notNull(),
-    declaredBy: text("declared_by").notNull(),
-    status: text("status", { enum: ["proposed", "accepted", "superseded"] })
-      .notNull()
-      .default("proposed"),
-    revision: integer("revision").notNull().default(1),
-    body: text("body").notNull(),
-    /** Paths this contract governs; writes to them are gated on acceptance. */
-    scopes: text("scopes", { mode: "json" }).$type<string[]>().notNull().default([]),
-    supersedes: text("supersedes"),
-    createdAt: text("created_at").notNull(),
-    updatedAt: text("updated_at").notNull(),
-  },
-  (table) => [index("contracts_session").on(table.agentSessionId, table.status)],
-);
-
-export const contractParties = sqliteTable(
-  "contract_parties",
-  {
-    contractId: text("contract_id").notNull().references(() => contracts.id),
-    participant: text("participant").notNull(),
-    state: text("state", { enum: ["pending", "accepted", "objected"] }).notNull().default("pending"),
-    /** Which revision this party accepted; an amendment bumps past it. */
-    revision: integer("revision").notNull().default(0),
-    comment: text("comment"),
-    updatedAt: text("updated_at").notNull(),
-  },
-  (table) => [primaryKey({ columns: [table.contractId, table.participant] })],
-);
 
 /** Mirror of native CronCreate jobs; the CLI's schedule is authoritative. */
 export const crons = sqliteTable(

@@ -74,11 +74,8 @@ if (recovered > 0) {
 if (requeued > 0) console.log(`requeued ${requeued} unacknowledged mailbox delivery(s)`);
 if (reconciled > 0) console.log(`reconciled ${reconciled} durable communication event(s)`);
 // Worktrees intentionally survive restarts (their seats resume in place);
-// only directories whose session is gone/archived or whose group is terminal
-// are orphans.
+// only directories whose session is gone/archived are orphans.
 const liveWorktrees = new Set([
-  ...repo.listNonTerminalAttemptGroups().flatMap((group) =>
-    Object.values(group.attemptsState).map((attempt) => attempt.worktreePath)),
   ...repo.listWorktreeSeats().map((seat) => seat.worktreePath),
 ]);
 const orphaned = worktrees.recoverOrphans(
@@ -108,11 +105,9 @@ if (orphanChildren > 0) console.log(`archived ${orphanChildren} orphaned child s
 runner.startCronFallback();
 // A run that finished while the process was down still deserves its card.
 for (const session of repo.listOpenWorkSessions()) completion.schedule(session.id);
-// Operator-facing timers: expire TTL cards with their stated default, and
-// release `ask_operator` waits the operator has not come back to. Both leave
-// the question answerable; they only stop a human's absence from pinning a
-// process indefinitely.
-interactions.startTtlSweep();
+// Release `ask_operator` waits the operator has not come back to — the card
+// stays answerable; the timer only stops a human's absence from pinning a
+// seat process indefinitely.
 host.startGovernanceSweep();
 
 const ctx: AppContext = {
@@ -142,7 +137,6 @@ async function shutdown(): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
   bus.closeSubscriptions();
-  interactions.stopTtlSweep();
   completion.stop();
   host.stopGovernanceSweep();
   // Persistent lanes are CLI subprocesses — none may outlive the server.

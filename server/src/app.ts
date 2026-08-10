@@ -20,7 +20,6 @@ import type { Db } from "./db/client.ts";
 import type { Repo } from "./db/repo.ts";
 import type { EventBus } from "./events/bus.ts";
 import { RunCompletionService } from "./completion/service.ts";
-import { ContractService } from "./contracts/service.ts";
 import { DecisionLedger } from "./orchestrator/decisions.ts";
 import { InteractionService } from "./orchestrator/interactions.ts";
 import { OrchestratorRunner } from "./orchestrator/runner.ts";
@@ -58,7 +57,6 @@ export interface CreateAppOptions {
 
 export interface App {
   decisions: DecisionLedger;
-  contracts: ContractService;
   interactions: InteractionService;
   tasks: TaskService;
   handoffs: HandoffService;
@@ -71,7 +69,6 @@ export interface App {
 export function createApp(options: CreateAppOptions): App {
   const { config, db, bus, repo, sdk, getWorkspaceRoot, profiles } = options;
   const decisions = new DecisionLedger(db);
-  const contracts = new ContractService(db, bus);
   const interactions = new InteractionService(db, bus);
   const tasks = new TaskService(db, bus);
   const handoffs = new HandoffService({ repo, bus, getWorkspaceRoot });
@@ -81,7 +78,7 @@ export function createApp(options: CreateAppOptions): App {
   const host = new AgentSessionHost({
     repo, bus, config, profiles, sdk, sessionStore, getWorkspaceRoot,
     processes: options.processes, browsers: options.browsers, worktrees: options.worktrees,
-    interactions, decisions, contracts, tasks, handoffs,
+    interactions, decisions, tasks, handoffs,
     wake: (userSessionId, agentSessionId, category, text) =>
       runner.enqueueAgentMilestone(userSessionId, agentSessionId, category, text),
     ...options.hostOverrides,
@@ -104,7 +101,6 @@ export function createApp(options: CreateAppOptions): App {
   // Every cross-service callback, registered once. Held assignments release on
   // task changes; the completion predicate re-evaluates on every settle, status
   // change and answered card; a withheld final must not become a silence.
-  tasks.onChange(() => host.releaseBlockedAssignments());
   runner.onSettled((userSessionId) => completion.schedule(userSessionId));
   runner.onOperatorMessage((userSessionId) => completion.noteOperatorMessage(userSessionId));
   host.onStatusChanged((userSessionId) => completion.schedule(userSessionId));
@@ -112,5 +108,5 @@ export function createApp(options: CreateAppOptions): App {
   interactions.onBlockingCleared((userSessionId, agentSessionId) =>
     host.onBlockingQuestionsCleared(userSessionId, agentSessionId));
 
-  return { decisions, contracts, interactions, tasks, handoffs, sessionStore, host, runner, completion };
+  return { decisions, interactions, tasks, handoffs, sessionStore, host, runner, completion };
 }

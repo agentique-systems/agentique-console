@@ -18,12 +18,9 @@ export type SeatToolName =
   | "send_handoff" | "read_artifact" | "write_note" | "ask_operator" | "roster_status"
   | "read_handoff" | "report_handoff_discrepancy" | "forward_message"
   | "task_list" | "task_create" | "task_update"
-  | "read_contract" | "accept_contract" | "propose_contract_amendment" | "object_to_contract"
-  | "declare_contract" | "supersede_contract"
   | "http_probe" | "process_start" | "process_read" | "process_stop"
   | "browser_open" | "browser_snapshot" | "browser_click" | "browser_fill"
   | "browser_console" | "browser_press" | "browser_evaluate" | "browser_screenshot"
-  | "start_attempts" | "read_attempt_diff" | "select_attempt_winner"
   | "dispatch_work_items" | "create_child_session" | "abandon_child_session";
 
 /** Which host services exist — availability, not permission. */
@@ -32,7 +29,6 @@ export interface SeatGrantDeps {
   handoffs: boolean;
   processes: boolean;
   browsers: boolean;
-  contracts: boolean;
   worktrees: boolean;
   user: boolean;
   /**
@@ -46,7 +42,6 @@ export interface SeatGrantDeps {
 export function grantedTools(
   role: Pick<RoleSpec, "grants"> | undefined,
   profile: AgentProfile,
-  seat: Pick<ParticipantRow, "attemptRole" | "attemptGroupId">,
   deps: SeatGrantDeps,
 ): Set<SeatToolName> {
   const grants = new Set(role?.grants ?? []);
@@ -59,11 +54,6 @@ export function grantedTools(
     tools.add("task_list");
     if (grants.has("tasks_write")) { tools.add("task_create"); tools.add("task_update"); }
   }
-  if (deps.contracts) {
-    tools.add("read_contract"); tools.add("accept_contract");
-    tools.add("propose_contract_amendment"); tools.add("object_to_contract");
-    if (grants.has("contracts_admin")) { tools.add("declare_contract"); tools.add("supersede_contract"); }
-  }
   if (profile.runtime.shell) {
     tools.add("http_probe");
     if (deps.processes) { tools.add("process_start"); tools.add("process_read"); tools.add("process_stop"); }
@@ -73,13 +63,9 @@ export function grantedTools(
     tools.add("browser_console"); tools.add("browser_press"); tools.add("browser_evaluate");
     if (profile.runtime.screenshots) tools.add("browser_screenshot");
   }
-  if (grants.has("attempts_start") && deps.worktrees) tools.add("start_attempts");
   if (grants.has("map_dispatch")) tools.add("dispatch_work_items");
   if (grants.has("child_sessions") && deps.childSessions) {
     tools.add("create_child_session"); tools.add("abandon_child_session");
-  }
-  if (seat.attemptRole === "reviewer" && seat.attemptGroupId && deps.worktrees) {
-    tools.add("read_attempt_diff"); tools.add("select_attempt_winner");
   }
   return tools;
 }

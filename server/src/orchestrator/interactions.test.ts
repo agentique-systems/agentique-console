@@ -160,22 +160,3 @@ describe("free text", () => {
   });
 });
 
-describe("TTL sweep", () => {
-  it("takes the stated default and flags it as not the operator's choice", () => {
-    const { db, service, userSessionId } = harness();
-    const card = service.createOperatorQuestion({
-      userSessionId, questions: QUESTION, ttlMs: -1, defaultOption: "Ship",
-    });
-    expect(service.sweepExpired()).toBe(1);
-    const row = db.select().from(rows).all().find((entry) => entry.id === card.id)!;
-    expect(row.status).toBe("answered");
-    expect(row.autoTaken).toBe(true);
-    expect((row.response as { answers: Record<string, string[]> }).answers).toEqual({ [QUESTION[0]!.question]: ["Ship"] });
-  });
-
-  it("never auto-takes a card with no default", () => {
-    const { service, userSessionId } = harness();
-    service.createOperatorQuestion({ userSessionId, questions: QUESTION, ttlMs: -1 });
-    expect(service.sweepExpired()).toBe(0);
-  });
-});

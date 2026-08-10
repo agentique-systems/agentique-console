@@ -39,8 +39,6 @@ export type DeliveryCategory = "assignment" | "update" | "milestone" | "failure"
  */
 export type ConsoleToolGrant =
   | "tasks_write"      // task_create / task_update
-  | "contracts_admin"  // declare_contract / supersede_contract
-  | "attempts_start"   // start_attempts (best-of-N)
   | "forward_message"  // verbatim passthrough of a seat report to main
   | "map_dispatch"     // dispatch_work_items (map_reduce fan-out)
   | "child_sessions";  // create_child_session / abandon_child_session (depth 0 only)

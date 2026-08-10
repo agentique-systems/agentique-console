@@ -14,7 +14,11 @@ import type {
   TopologyContract,
 } from "@agentique-console/shared";
 import type { AgentSessionRow, ParticipantRow } from "../db/repo.ts";
+import { MAIN_RECIPIENT, ORCHESTRATOR_SEAT } from "./peer-names.ts";
 import { SESSION_PROTOCOL } from "./presets.ts";
+
+export const SEAT_NAME_RE = /^[A-Za-z0-9_.:-]+$/;
+export const RESERVED_NAMES = new Set([ORCHESTRATOR_SEAT, "operator", "system", MAIN_RECIPIENT, "coordinator"]);
 
 export interface CompiledContract {
   contract: TopologyContract;
@@ -59,7 +63,7 @@ const HUB_CONTRACT: TopologyContract = {
   roles: {
     coordinator: {
       replicable: false, min: 1, max: 1,
-      grants: ["tasks_write", "contracts_admin", "attempts_start", "forward_message", "child_sessions"],
+      grants: ["tasks_write", "forward_message", "child_sessions"],
       escalateTo: "main",
     },
     specialist: { replicable: false, min: 1, max: 20, grants: [], escalateTo: "coordinator" },

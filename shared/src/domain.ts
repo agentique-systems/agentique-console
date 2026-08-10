@@ -298,10 +298,6 @@ export interface Interaction {
    * returned from the tool call.
    */
   detached: boolean;
-  expiresAt: string | null;
-  defaultOption: string | null;
-  /** Resolved by TTL expiry using `defaultOption`, not by the operator. */
-  autoTaken: boolean;
   payload:
     | { questions: InteractionQuestion[] }
     | { plan: string };

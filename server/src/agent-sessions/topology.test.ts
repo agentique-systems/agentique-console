@@ -31,7 +31,7 @@ describe("topology contracts", () => {
   it("hub roles carry the coordinator-only grants and escalation targets", () => {
     const hub = compileContract(hubContract());
     expect(hub.role("coordinator")?.grants).toContain("tasks_write");
-    expect(hub.role("coordinator")?.grants).toContain("attempts_start");
+    expect(hub.role("coordinator")?.grants).toContain("forward_message");
     expect(hub.role("specialist")?.grants).toEqual([]);
     expect(hub.role("coordinator")?.escalateTo).toBe("main");
     expect(hub.role("specialist")?.escalateTo).toBe("coordinator");

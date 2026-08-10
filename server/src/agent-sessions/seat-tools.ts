@@ -14,7 +14,6 @@ import type { ConsoleSdk, SdkToolResult } from "../sdk/types.ts";
 import type { ProcessManager } from "../runtime/process-manager.ts";
 import type { BrowserManager } from "../runtime/browser-manager.ts";
 import type { WorktreeManager } from "../runtime/worktree-manager.ts";
-import type { ContractService } from "../contracts/service.ts";
 import type { TaskService } from "../tasks/service.ts";
 import type { HandoffService } from "../handoffs/service.ts";
 import { EvidenceRefSchema, HandoffCoreSchema, HandoffDraftSchema } from "../handoffs/schema.ts";
@@ -84,8 +83,6 @@ export interface SeatToolsDeps {
   handoffs?: HandoffService;
   processes?: ProcessManager;
   browsers?: BrowserManager;
-  /** Shared-interface contracts; writes to their scopes gate on acceptance. */
-  contracts: ContractService;
   worktrees?: WorktreeManager;
 }
 
@@ -102,7 +99,7 @@ export interface SeatToolsContext {
   /** `candidate` if the contract has an edge to it, else this seat's escalation target. */
   legalRecipient(candidate: string): string;
   // Host-private operations, bound as closures so nothing becomes public.
-  post(input: { agentSessionId: string; speaker: Speaker; to: string; handoff: HandoffDraft; category?: Category; dedupeKey?: string; turnId?: string }): MessageRow & { queuedBehind?: string[] };
+  post(input: { agentSessionId: string; speaker: Speaker; to: string; handoff: HandoffDraft; category?: Category; dedupeKey?: string; turnId?: string }): MessageRow;
   askOperator(args: AskOperatorArgs): Promise<SdkToolResult>;
   /** The seat's in-flight turn id, if a turn is open right now. */
   currentTurnId(): string | undefined;
@@ -110,12 +107,9 @@ export interface SeatToolsContext {
   markSawSend(): void;
   seatWorkState(seat: ParticipantRow): string;
   simpleHandoff(action: string, status: HandoffDraft["core"]["status"], summary: string, nextAction: string | null): HandoffDraft;
-  startAttempts(input: { agentSessionId: string; assignment: HandoffDraft; profileId?: string; attempts?: number; baseSeatName?: string; owns: string[]; instructions?: string; model?: string; turnId?: string }): { groupId: string; seats: string[]; branches: string[]; baseCommit: string; dirtyWorkspace: boolean };
   dispatchWorkItems(input: { agentSessionId: string; items: { assignment: string; name?: string; owns?: string[] }[]; profileId?: string; instructions?: string; model?: string }): { joinId: string; seats: string[] };
   createChildSession(input: { pattern: string; title: string; patternConfig?: Record<string, unknown>; agents: { name: string; profileId: string; instructions?: string; model?: string; owns: string[] }[]; briefing: HandoffDraft }): { agentSessionId: string; participants: string[]; entrySeat: string };
   abandonChildSession(childAgentSessionId: string, reason: string): void;
-  selectAttemptWinner(input: { agentSessionId: string; groupId: string; reviewer: string; winner?: string; rejectAll?: boolean; reason: string }):
-    { merged: true; commit: string; winner: string } | { merged: false; conflicts: string[]; detail: string; winner: string } | { rejected: true };
 }
 
 // Messaging IS this server: `send_handoff` is the one transfer path (there is
@@ -160,7 +154,7 @@ export function buildSeatTools(ctx: SeatToolsContext): unknown[] {
       // isError: error results feed the error-streak watchdog and retries
       // feed the identical-call watchdog, and punishing a seat for a hold the
       // Console imposed kills the turn that must stay alive for the release).
-      let message: MessageRow & { queuedBehind?: string[] };
+      let message: MessageRow;
       try {
         const turnId = ctx.currentTurnId();
         message = ctx.post({ agentSessionId: session.id, speaker: { kind: seat.role === "orchestrator" ? "orchestrator" : "agent", name: seat.name },
@@ -173,10 +167,6 @@ export function buildSeatTools(ctx: SeatToolsContext): unknown[] {
         return fail(error);
       }
       ctx.markSawSend();
-      if (message.queuedBehind) {
-        return ok({ delivered: false, queued: true, blockedBy: message.queuedBehind,
-          note: "Journaled and held: the Console delivers it the moment the blocking task(s) complete. Do not re-send." });
-      }
       return ok({ delivered: true, messageSeq: message.seq, to: args.to, category: args.category });
     }));
   // Console-owned ledger. Keyed on a synthetic id derived from the agent
@@ -451,94 +441,6 @@ export function buildSeatTools(ctx: SeatToolsContext): unknown[] {
       }));
   }
 
-  {
-    const contracts = deps.contracts;
-    if (ctx.granted.has("declare_contract")) {
-      tools.push(sdk.tool("declare_contract",
-        "Declare a shared interface two or more seats must agree BEFORE any of them writes to it — a module signature, a data shape, a file format. The Console denies writes to the declared scopes until every party accepts. Use this whenever two seats' work has to fit together.",
-        {
-          name: z.string().min(1).max(60).describe("Short stable name, e.g. \"game-module\"."),
-          body: z.string().min(1).describe("The interface itself: signatures, params, return shapes, shared constants. Concrete enough that a party could implement against it without asking you anything."),
-          parties: z.array(z.string().min(1)).min(2).describe("Seat names that must agree. At least two — a contract with one party is a note."),
-          scopes: z.array(z.string().min(1)).min(1).describe("Files or directories this governs; writes to them are gated on acceptance."),
-        },
-        async (args: { name: string; body: string; parties: string[]; scopes: string[] }) => {
-          try {
-            const contract = contracts.declare({
-              agentSessionId: session.id, userSessionId: session.userSessionId,
-              declaredBy: seat.name, name: args.name, body: args.body,
-              parties: args.parties, scopes: args.scopes,
-            });
-            // The parties learn about it the same way they learn about
-            // everything else — a journaled handoff through the star.
-            for (const party of args.parties) {
-              try {
-                ctx.post({ agentSessionId: session.id, speaker: { kind: "orchestrator", name: seat.name }, to: party,
-                  handoff: ctx.simpleHandoff(`Contract "${args.name}" needs your agreement`, "pending",
-                    `${args.body}\n\nGoverns: ${args.scopes.join(", ")}. Parties: ${args.parties.join(", ")}.`,
-                    `Read it with read_contract("${contract.id}") and accept_contract({contractId:"${contract.id}", revision:${contract.revision}}) — or propose_contract_amendment if it is wrong. You cannot write to the governed paths until you do.`),
-                  category: "decision", dedupeKey: `contract:${contract.id}:${contract.revision}` });
-              } catch { /* one unreachable party must not fail the declaration */ }
-            }
-            return ok(contract);
-          } catch (error) {
-            return fail(error);
-          }
-        }));
-      tools.push(sdk.tool("supersede_contract", "Retire a contract that no longer describes the work.", {
-        contractId: z.string().min(1), reason: z.string().min(1),
-      }, async (args: { contractId: string; reason: string }) => {
-        try { return ok(contracts.supersede(args.contractId, args.reason)); }
-        catch (error) { return fail(error); }
-      }));
-    }
-    tools.push(sdk.tool("read_contract", "Read a shared-interface contract: its body, revision, and where each party stands.", {
-      contractId: z.string().optional(), name: z.string().optional(),
-    }, async (args: { contractId?: string; name?: string }) => {
-      try {
-        if (args.contractId) return ok(contracts.get(args.contractId));
-        if (args.name) {
-          const found = contracts.findByName(session.id, args.name);
-          return ok(found ?? { error: `no open contract named ${args.name}` });
-        }
-        return ok({ contracts: contracts.listForSession(session.id) });
-      } catch (error) { return fail(error); }
-    }));
-    tools.push(sdk.tool("accept_contract",
-      "Accept a contract's CURRENT revision. Do this only once you have read it and can implement against it — accepting unblocks your writes to its scopes and tells the other parties you are building to this shape.",
-      { contractId: z.string().min(1), revision: z.number().int().min(1) },
-      async (args: { contractId: string; revision: number }) => {
-        try { return ok(contracts.accept(args.contractId, seat.name, args.revision)); }
-        catch (error) { return fail(error); }
-      }));
-    tools.push(sdk.tool("propose_contract_amendment",
-      "Change a contract you are party to. This bumps the revision and RESETS every acceptance, including your own — an amendment nobody re-agreed to would be a contract nobody agreed to. Use it when the shape is wrong, not to record a preference.",
-      { contractId: z.string().min(1), body: z.string().min(1), rationale: z.string().min(1) },
-      async (args: { contractId: string; body: string; rationale: string }) => {
-        try {
-          const contract = contracts.amend(args.contractId, seat.name, args.body, args.rationale);
-          for (const party of contract.parties.map((entry) => entry.participant)) {
-            if (party === seat.name) continue;
-            try {
-              ctx.post({ agentSessionId: session.id, speaker: { kind: seat.role === "orchestrator" ? "orchestrator" : "agent", name: seat.name },
-                to: ctx.legalRecipient(party),
-                handoff: ctx.simpleHandoff(`Contract "${contract.name}" amended to revision ${contract.revision}`, "pending",
-                  `${args.rationale}\n\n${contract.body}`,
-                  `Re-read and accept revision ${contract.revision}; your earlier acceptance no longer applies.`),
-                category: "decision", dedupeKey: `contract:${contract.id}:${contract.revision}` });
-            } catch { /* notification is best effort */ }
-          }
-          return ok(contract);
-        } catch (error) { return fail(error); }
-      }));
-    tools.push(sdk.tool("object_to_contract",
-      "Say a contract is wrong without proposing the fix yourself. Reopens it for amendment and tells the coordinator why.",
-      { contractId: z.string().min(1), reason: z.string().min(1) },
-      async (args: { contractId: string; reason: string }) => {
-        try { return ok(contracts.object(args.contractId, seat.name, args.reason)); }
-        catch (error) { return fail(error); }
-      }));
-  }
   // One level of nesting: a controller may spawn a CHILD AgentSession running
   // any pattern. The child's "main" resolves to THIS seat — its finals arrive
   // here as milestones — and child seats never receive these tools, so the
@@ -599,45 +501,6 @@ export function buildSeatTools(ctx: SeatToolsContext): unknown[] {
           return fail(error);
         }
       }));
-  }
-  if (ctx.granted.has("start_attempts")) {
-    tools.push(sdk.tool("start_attempts", "Run best-of-N parallel attempts at one high-stakes assignment: N isolated worktree seats race the same work, a fresh reviewer picks the winner, and only the winner's changes merge into the workspace. Requires the workspace to be a git repository. One active group at a time.", {
-      assignment: HandoffDraftSchema, profileId: z.string().default("implementer"), attempts: z.number().int().min(2).max(3).default(2),
-      baseSeatName: z.string().optional(), owns: z.array(z.string()).min(1), instructions: z.string().optional(), model: z.string().optional(),
-    }, async (args: { assignment: HandoffDraft; profileId: string; attempts: number; baseSeatName?: string; owns: string[]; instructions?: string; model?: string }) => {
-      try {
-        return ok(ctx.startAttempts({ agentSessionId: session.id, assignment: args.assignment, profileId: args.profileId,
-          attempts: args.attempts, ...(args.baseSeatName ? { baseSeatName: args.baseSeatName } : {}), owns: args.owns,
-          ...(args.instructions ? { instructions: args.instructions } : {}), ...(args.model ? { model: args.model } : {}) }));
-      } catch (error) {
-        return fail(error);
-      }
-    }));
-  }
-  if (ctx.granted.has("select_attempt_winner") && seat.attemptGroupId) {
-    const groupId = seat.attemptGroupId;
-    tools.push(
-      sdk.tool("read_attempt_diff", "Read one attempt's captured diff (paged tail-first; cursors continue).", {
-        seat: z.string(), cursor: z.string().optional(), maxBytes: z.number().int().min(1).max(32 * 1024).default(8 * 1024),
-      }, async (args: { seat: string; cursor?: string; maxBytes: number }) => {
-        const group = deps.repo.getAttemptGroup(groupId);
-        const artifactId = group?.attemptsState[args.seat]?.artifactId;
-        if (!artifactId) return fail(`no captured diff for attempt seat "${args.seat}"`);
-        const artifact = deps.bus.getArtifact(artifactId);
-        if (!artifact) return fail(`diff artifact ${artifactId} is missing`);
-        return ok({ seat: args.seat, artifactId, diff: pageTail(artifact.content, args.cursor, args.maxBytes) });
-      }),
-      sdk.tool("select_attempt_winner", "Declare the winning attempt (merged into the workspace immediately) or reject all. Exactly one call; the structured result reports the real merge outcome.", {
-        winner: z.string().optional(), rejectAll: z.boolean().default(false), reason: z.string().min(1),
-      }, async (args: { winner?: string; rejectAll: boolean; reason: string }) => {
-        try {
-          return ok(ctx.selectAttemptWinner({ agentSessionId: session.id, groupId, reviewer: seat.name,
-            ...(args.winner ? { winner: args.winner } : {}), rejectAll: args.rejectAll, reason: args.reason }));
-        } catch (error) {
-          return fail(error);
-        }
-      }),
-    );
   }
   return tools;
 }

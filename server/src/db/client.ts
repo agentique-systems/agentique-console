@@ -82,9 +82,6 @@ function migrateAdditiveColumns(sqlite: Database.Database): void {
     ["dedupe_key", "TEXT"],
     ["allow_free_text", "INTEGER NOT NULL DEFAULT 0"],
     ["detached", "INTEGER NOT NULL DEFAULT 0"],
-    ["expires_at", "TEXT"],
-    ["default_option", "TEXT"],
-    ["auto_taken", "INTEGER NOT NULL DEFAULT 0"],
     ["flushed_at", "TEXT"],
   ] as const) {
     if (!interactionColumns.has(name)) sqlite.exec(`ALTER TABLE interactions ADD COLUMN ${name} ${ddl}`);

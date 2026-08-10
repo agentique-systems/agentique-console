@@ -12,7 +12,6 @@ import { workspaces } from "./db/schema.ts";
 import { EventBus } from "./events/bus.ts";
 import { newId, nowIso } from "./ids.ts";
 import type { RunCompletionService } from "./completion/service.ts";
-import { ContractService } from "./contracts/service.ts";
 import { DecisionLedger } from "./orchestrator/decisions.ts";
 import { InteractionService } from "./orchestrator/interactions.ts";
 import {
@@ -31,7 +30,6 @@ export interface Harness {
   repo: Repo;
   interactions: InteractionService;
   decisions: DecisionLedger;
-  contracts: ContractService;
   runner: OrchestratorRunner;
   fake: FakeSdk;
   config: Config;
@@ -48,7 +46,6 @@ export function makeHarness(
   const bus = new EventBus(db);
   const repo = new Repo(db, sqlite);
   const decisions = new DecisionLedger(db);
-  const contracts = new ContractService(db, bus);
   const interactions = new InteractionService(db, bus);
   const fake = fakeSdk(program);
   const config = loadConfig({});
@@ -85,7 +82,6 @@ export function makeHarness(
     repo,
     interactions,
     decisions,
-    contracts,
     runner,
     fake,
     config,

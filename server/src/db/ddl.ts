@@ -129,8 +129,6 @@ CREATE TABLE IF NOT EXISTS participants (
   worktree_path TEXT,
   worktree_base_commit TEXT,
   worktree_branch TEXT,
-  attempt_group_id TEXT,
-  attempt_role TEXT,
   -- Contract role binding; NULL derives from role (orchestrator→coordinator).
   pattern_role TEXT,
   ord INTEGER NOT NULL,
@@ -138,28 +136,8 @@ CREATE TABLE IF NOT EXISTS participants (
   PRIMARY KEY (agent_session_id, name)
 );
 
-CREATE TABLE IF NOT EXISTS attempt_groups (
-  id TEXT PRIMARY KEY,
-  agent_session_id TEXT NOT NULL REFERENCES agent_sessions(id),
-  user_session_id TEXT NOT NULL,
-  profile_id TEXT NOT NULL,
-  base_seat TEXT NOT NULL,
-  attempts INTEGER NOT NULL,
-  base_commit TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'running'
-    CHECK (status IN ('running','reviewing','merged','rejected','failed','abandoned')),
-  reviewer_seat TEXT,
-  winner_seat TEXT,
-  merge_commit TEXT,
-  dirty_workspace INTEGER NOT NULL DEFAULT 0,
-  attempts_state TEXT NOT NULL DEFAULT '{}',
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS attempt_groups_session ON attempt_groups(agent_session_id, status);
-
 -- Per-session pattern progression: counters, join arrivals, cursor. Written
--- only by the pattern-progression module (the attempt_groups precedent).
+-- only by the pattern-progression module.
 CREATE TABLE IF NOT EXISTS pattern_state (
   agent_session_id TEXT PRIMARY KEY REFERENCES agent_sessions(id),
   rounds INTEGER NOT NULL DEFAULT 0,
@@ -218,9 +196,6 @@ CREATE TABLE IF NOT EXISTS interactions (
   -- The asker's parked promise died (park, rotation, watchdog, restart). The
   -- row stays answerable; the answer arrives by mailbox instead of by return.
   detached INTEGER NOT NULL DEFAULT 0,
-  expires_at TEXT,
-  default_option TEXT,
-  auto_taken INTEGER NOT NULL DEFAULT 0,
   -- When the ASKING SEAT was told the answer. Distinct from resolved_at, which
   -- is when the operator answered.
   flushed_at TEXT,
@@ -236,56 +211,9 @@ CREATE TABLE IF NOT EXISTS interactions (
 -- index naming a column the old table lacks fails the whole boot.
 
 -- Operator decisions are not a table: a decision IS a resolved interactions
--- row (answers, asker, note and auto_taken all live there), and
+-- row (answers, asker and note all live there), and
 -- orchestrator/decisions.ts reads them back into every prompt. An older
 -- database may carry a legacy operator_decisions table; it is unused.
-
--- A shared interface two or more seats must agree BEFORE either writes code.
---
--- The operator's instruction in db-live-2 was explicit: "renderer and page must
--- agree the exact module interface BEFORE either writes code -- that contract
--- is the handoff, and neither should guess the other's shape." What happened:
--- the two seats exchanged ZERO messages all run, the coordinator authored the
--- contract alone and told both to "proceed straight to implementation once they
--- confirm", renderer wrote game.js 61 seconds later without confirming, and
--- page confirmed 5m50s AFTER it had written all three of its files -- having
--- verified the contract by grepping renderer's file off disk. It worked only
--- because they happened to share a directory.
---
--- Four statuses plus a revision counter, not five. Declaring IS proposing
--- revision 1, and amending is revision+1 with every acceptance reset -- an
--- amendment that leaves prior acceptances standing is a contract nobody agreed
--- to, and modelling "amended" as a status would allow exactly that.
-CREATE TABLE IF NOT EXISTS contracts (
-  id TEXT PRIMARY KEY,
-  agent_session_id TEXT NOT NULL REFERENCES agent_sessions(id),
-  user_session_id TEXT NOT NULL,
-  name TEXT NOT NULL,
-  declared_by TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'proposed'
-    CHECK (status IN ('proposed','accepted','superseded')),
-  revision INTEGER NOT NULL DEFAULT 1,
-  body TEXT NOT NULL,
-  -- Paths this contract governs. Writes to them are denied until every party
-  -- has accepted the current revision.
-  scopes TEXT NOT NULL DEFAULT '[]',
-  supersedes TEXT,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS contracts_session ON contracts(agent_session_id, status);
-
-CREATE TABLE IF NOT EXISTS contract_parties (
-  contract_id TEXT NOT NULL REFERENCES contracts(id),
-  participant TEXT NOT NULL,
-  state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','accepted','objected')),
-  -- The revision this party accepted. An amendment bumps the contract past it,
-  -- which is what makes a stale acceptance visible rather than silent.
-  revision INTEGER NOT NULL DEFAULT 0,
-  comment TEXT,
-  updated_at TEXT NOT NULL,
-  PRIMARY KEY (contract_id, participant)
-);
 
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT NOT NULL,

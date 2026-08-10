@@ -44,7 +44,7 @@ describe("orchestrator options", () => {
     // spared. Main uses the console-owned task tools.
     expect(disallowed).toContain("TaskCreate");
     const allowed = options().allowedTools ?? [];
-    expect(allowed).toEqual(expect.arrayContaining(["CronCreate", "CronList", "CronDelete"]));
+    expect(disallowed).toEqual(expect.arrayContaining(["CronCreate", "CronList", "CronDelete"]));
     expect(allowed).toEqual(expect.arrayContaining([
       "mcp__console__task_create", "mcp__console__task_update", "mcp__console__task_list",
     ]));

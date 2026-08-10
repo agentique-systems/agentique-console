@@ -141,6 +141,10 @@ export class HandoffService {
     const s = this.summary(record);
     const lines = [`[Handoff ${s.id}] ${s.action}`, `Status: ${s.status} · Risk: ${s.risk}`, s.stateSummary];
     if (s.resultSummary) lines.push(`Result: ${s.resultSummary}`);
+    // Verbatim, always: the classifier that used to decide which of these
+    // deserved the operator's attention guessed from 53 regexes tuned to one
+    // historical run. The reader judges; the console just refuses to hide it.
+    if (record.core.uncertainty.length > 0) lines.push(`Unverified: ${record.core.uncertainty.join("; ")}`);
     if (s.nextAction) lines.push(`Next: ${s.nextAction}`);
     lines.push(`Evidence: ${s.evidenceCount} · Artifacts: ${s.artifactCount}${s.overflow ? " · full record available with read_handoff" : ""}`);
     if (s.referenceWarnings.length) lines.push(`Reference warnings: ${s.referenceWarnings.join("; ")}`);

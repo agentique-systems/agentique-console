@@ -79,7 +79,6 @@ describe("decision ledger", () => {
       askedBy: "orchestrator",
       source: "interaction",
       agentSessionId,
-      autoTaken: false,
     });
   });
 
@@ -222,21 +221,6 @@ describe("decision ledger", () => {
     expect(append.indexOf("## Session protocol")).toBeLessThan(append.indexOf("## Operator decisions"));
   });
 
-  it("flags an auto-taken decision as not the operator's choice", async () => {
-    const { h, userSessionId } = await twoSeats();
-    h.interactions.createOperatorQuestion({
-      userSessionId, questions: [{ question: "Ship now?", options: [{ label: "Ship" }, { label: "Hold" }] }],
-      ttlMs: -1, defaultOption: "Ship",
-    });
-    h.interactions.sweepExpired();
-
-    const decision = h.decisions.list(userSessionId)[0]!;
-    expect(decision.autoTaken).toBe(true);
-    expect(decision.source).toBe("ttl_default");
-    // The rendering must SAY so — a timeout is much weaker evidence of intent
-    // than a click, and the Run Summary has to be able to tell them apart.
-    expect(h.decisions.lines(userSessionId).join(" ")).toMatch(/auto-taken on timeout, NOT chosen by the operator/);
-  });
 
   it("parses version pins the operator named, for the deviation classifier", async () => {
     const { h, userSessionId } = await twoSeats();

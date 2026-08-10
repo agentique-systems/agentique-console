@@ -12,7 +12,6 @@ import type { DecisionLedger } from "../orchestrator/decisions.ts";
 import type { InteractionService } from "../orchestrator/interactions.ts";
 import type { TaskService } from "../tasks/service.ts";
 import type { HandoffService } from "../handoffs/service.ts";
-import { classifyUncertainty, type EscalationCategory, type EscalationItem } from "../handoffs/escalation.ts";
 import { consoleTaskListId } from "../orchestrator/tools.ts";
 import { MAIN_RECIPIENT } from "./peer-names.ts";
 
@@ -52,66 +51,6 @@ export function resolvedDomains(profile: AgentProfile, workspaceDomains: string[
   return profile.runtime.network === "default" ? workspaceDomains : profile.runtime.network;
 }
 
-/** Questions on one auto-promoted card before the rest spill into context. */
-const MAX_QUESTIONS_PER_CARD = 4;
-
-/** Capability shape for a sender the console has no profile for (main). */
-const FALLBACK_PROFILE_RUNTIME = { runtime: { shell: false, browser: false, screenshots: false, network: [] as string[] } } as AgentProfile;
-
-const ESCALATION_HEADER: Record<EscalationCategory, string> = {
-  version_substitution: "Version",
-  spec_deviation: "Deviation",
-  capability_gap: "Blocked",
-  unverifiable_claim: "Unverified",
-  ambiguity: "Ambiguous",
-  volume: "Open items",
-};
-
-/** Stable question text, so a re-reported uncertainty is recognisably the same. */
-function uncertaintyQuestion(item: EscalationItem): string {
-  if (item.category === "version_substitution" && item.versions) {
-    return `${item.versions.dependency}: ship ${item.versions.shipped}, or hold for ${item.versions.expected}?`;
-  }
-  return item.text;
-}
-
-/**
- * The card block for one escalated uncertainty.
- *
- * For `version_substitution` the console genuinely knows both versions, so it
- * offers REAL choices. For every other category it does not know the domain,
- * so it poses the meta-decision it CAN pose correctly and puts the seat's own
- * words in `context` verbatim.
- *
- * Deliberately never fabricates domain-specific labels. It would be wrong often
- * enough that the operator would click through them, and a wrong answer
- * laundered through the decision ledger is worse than no card at all.
- */
-function uncertaintyBlock(item: EscalationItem, spilled: readonly EscalationItem[] = []): InteractionQuestion {
-  const extra = spilled.length === 0 ? "" : `\n\nAlso open from this seat:\n${spilled.map((other) => `- ${other.text}`).join("\n")}`;
-  if (item.category === "version_substitution" && item.versions) {
-    const { dependency, shipped, expected } = item.versions;
-    return {
-      question: uncertaintyQuestion(item),
-      header: ESCALATION_HEADER[item.category],
-      context: `${item.text}${extra}`,
-      options: [
-        { label: `Ship ${shipped}`, description: `Keep what is built. ${dependency} stays at ${shipped}.` },
-        { label: `Hold for ${expected}`, description: `The version named earlier. May not be reachable right now.` },
-      ],
-    };
-  }
-  return {
-    question: uncertaintyQuestion(item),
-    header: ESCALATION_HEADER[item.category],
-    context: `Raised as an uncertainty by the agent that reported it:\n${item.text}${extra}`,
-    options: [
-      { label: "Proceed anyway", description: "Accept this and keep going." },
-      { label: "Stop and fix this first", description: "Treat it as blocking; the work is not done until it is resolved." },
-      { label: "I'll answer in chat", description: "Neither option fits — say what you want in your own words." },
-    ],
-  };
-}
 
 /**
  * An assignment carrying a taskId starts that unit; a terminal-status report
@@ -135,40 +74,6 @@ export function syncLedgerFromHandoff(deps: GovernanceDeps, session: AgentSessio
   } catch { /* a ledger write must never fail a transfer */ }
 }
 
-/**
- * The task a journaled delivery's handoff was about. The message payload
- * carries only a HandoffSummary (no taskId); the full core lives in
- * handoff_records — read it from there, or the release path would derive
- * `null`, find no blockers, and free every hold on the first task change.
- */
-export function deliveryTaskId(deps: GovernanceDeps, messageId: string): string | null {
-  const message = deps.repo.getMessageById(messageId);
-  const summary = message?.payload?.handoff as { id?: string } | undefined;
-  if (!summary?.id || !deps.handoffs) return null;
-  try { return deps.handoffs.get(summary.id).core.taskId; } catch { return null; }
-}
-
-/**
- * Incomplete blockers of the task this assignment carries. Advisory
- * `blocked_by` edges become a real gate here — before this, `task_dependencies`
- * had eight rows in db-live-2 and nothing ever consulted them.
- */
-export function assignmentBlockers(deps: GovernanceDeps, session: AgentSessionRow, to: string, category: Category, taskId: string | null): string[] {
-  if (category !== "assignment" || taskId === null || !deps.tasks) return [];
-  void to;
-  const all = deps.tasks.listForUserSession(session.userSessionId)
-    .filter((task) => task.agentSessionId === session.id);
-  const target = all.find((task) => task.sdkTaskId === taskId || task.id === taskId);
-  if (!target) return [];
-  const open: string[] = [];
-  for (const blockerId of target.dependencyIds) {
-    const blocker = all.find((task) => task.id === blockerId);
-    if (blocker && blocker.status !== "completed" && blocker.status !== "deleted") {
-      open.push(`"${target.subject}" is blocked_by "${blocker.subject}" (${blocker.status})`);
-    }
-  }
-  return open;
-}
 
 /**
  * Conditions that make a `final` a lie the Console can PROVE.
@@ -225,75 +130,3 @@ export function finalReportCaveats(deps: GovernanceDeps, session: AgentSessionRo
   return caveats;
 }
 
-/**
- * Read `core.uncertainty[]` and put what belongs to the operator in front of
- * them.
- *
- * Hooked here in `post()` rather than in `HandoffService.prepare` for two
- * reasons. `prepare` is also the ROTATION CHECKPOINT path, and a checkpoint's
- * uncertainty is a seat's private note to its own successor — the wrong
- * audience entirely — and it runs inside `#maybeRotate`'s gate, which blocks
- * every sender to that seat and is the last place to do anything that can
- * wait. `post()` also has what the classifier needs: the interaction service,
- * the decision ledger, and the sender's real profile capabilities.
- *
- * CONSEQUENCE, stated plainly: `post()` is synchronous, so this is
- * fire-and-forget card creation. An auto-promoted BLOCKING item does not stop
- * the seat mid-turn — you cannot retroactively block a tool call that has
- * already returned. It stops the next `final`. The only thing that stops a
- * seat immediately is its own `ask_operator(urgency:'blocking')`. That is
- * precisely why both paths exist.
- */
-export function promoteUncertainty(deps: GovernanceDeps, session: AgentSessionRow, sender: string, handoff: HandoffDraft, category: Category): void {
-  const interactions = deps.interactions;
-  if (!interactions || handoff.core.uncertainty.length === 0) return;
-  const senderSeat = sender === MAIN_RECIPIENT ? undefined : deps.repo.getParticipant(session.id, sender);
-  const profile = senderSeat?.profileSnapshot as AgentProfile | undefined;
-  const items = classifyUncertainty(handoff.core, {
-    trigger: category as HandoffTrigger,
-    operatorPins: deps.decisions.pins(session.userSessionId),
-    operatorConstraints: deps.decisions.constraints(session.userSessionId),
-    capabilities: {
-      shell: profile?.runtime.shell ?? false,
-      browser: profile?.runtime.browser ?? false,
-      screenshots: profile?.runtime.screenshots ?? false,
-      network: resolvedDomains(profile ?? FALLBACK_PROFILE_RUNTIME, deps.config?.allowedDomains ?? []),
-    },
-  });
-  if (items.length === 0) return;
-
-  // One card per (session, sender). A wall of simultaneous cards is
-  // unanswerable, and re-reporting the same uncertainty on every update
-  // would otherwise mint one each time.
-  const existing = interactions.listUnresolvedForAgentSession(session.id)
-    .find((row) => row.source === "uncertainty" && row.participant === sender);
-  const already = new Set(
-    (existing ? ((existing.payload as { questions?: InteractionQuestion[] }).questions ?? []) : [])
-      .map((question) => question.question),
-  );
-  const fresh = items.filter((item) => !already.has(uncertaintyQuestion(item)));
-  if (fresh.length === 0) return;
-  if (existing) {
-    // Merging into an open card rather than opening a second one keeps the
-    // operator's screen honest: one seat, one outstanding ask.
-    interactions.mergeQuestions(
-      existing.id,
-      fresh.slice(0, MAX_QUESTIONS_PER_CARD).map((item) => uncertaintyBlock(item)),
-      fresh.some((item) => item.urgency === "blocking") ? "blocking" : undefined,
-    );
-    return;
-  }
-  const shown = fresh.slice(0, MAX_QUESTIONS_PER_CARD);
-  const spilled = fresh.slice(MAX_QUESTIONS_PER_CARD);
-  const blocks = shown.map((item) => uncertaintyBlock(item, spilled));
-  interactions.createOperatorQuestion({
-    userSessionId: session.userSessionId,
-    agentSessionId: session.id,
-    participant: sender,
-    questions: blocks,
-    urgency: fresh.some((item) => item.urgency === "blocking") ? "blocking" : "deferred",
-    source: "uncertainty",
-    allowFreeText: true,
-    dedupeKey: `uncertainty:${sender}`,
-  });
-}
