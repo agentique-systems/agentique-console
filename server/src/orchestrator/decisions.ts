@@ -61,7 +61,7 @@ const DIGEST_MAX_BYTES = 4 * 1024;
 
 /**
  * `name@1.2.3` and three.js-style `r160` pins inside an answer. Deliberately
- * syntax-agnostic, matching `dependencyPinsInPatch`'s approach: the point is to
+ * syntax-agnostic, deliberately: the point is to
  * recognise that the operator NAMED a version, so a later substitution can be
  * detected, not to parse a package manifest.
  */

@@ -29,8 +29,7 @@ describe("console-owned task ledger (fake SDK)", () => {
       yield successMessage();
     });
     const userSessionId = h.addUserSession();
-    const created = h.host.createSession({ userSessionId, title: "ledger", mode: "execute",
-      agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("investigate", "pending") });
+    const created = h.host.createSession({ userSessionId, title: "ledger", agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("investigate", "pending") });
     await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled", 10_000);
 
     const create = h.fake.captured.tools.find((t) => t.name === "task_create");

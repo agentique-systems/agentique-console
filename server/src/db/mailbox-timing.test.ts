@@ -33,7 +33,7 @@ function seedDelivery(repo: Repo, db: ReturnType<typeof openDb>["db"]): string {
   db.insert(mailboxDeliveries).values({
     id, messageId: message.id, userSessionId: "us_1", agentSessionId: "as_1",
     sender: "orchestrator", recipient: "page", category: "assignment",
-    status: "queued", transport: "console", dedupeKey: null,
+    status: "queued", dedupeKey: null,
     deliveredAt: null, acknowledgedAt: null, createdAt: nowIso(),
   }).run();
   return id;

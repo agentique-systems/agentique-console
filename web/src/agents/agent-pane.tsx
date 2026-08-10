@@ -59,22 +59,6 @@ function PaneBody({ session, runs }: { session: AgentSession; runs: AgentRunSumm
           <span className="min-w-0 flex-1 truncate text-sm font-medium">
             {session.title}
           </span>
-          <Badge variant="outline" className="text-3xs uppercase">
-            {session.mode === "plan_execute" ? "plan + execute" : "execute"}
-          </Badge>
-          {session.mode === "plan_execute" && (
-            <Badge
-              variant="outline"
-              className={cn(
-                "text-3xs uppercase",
-                session.phase === "planning"
-                  ? "text-status-waiting"
-                  : "text-status-running",
-              )}
-            >
-              {session.phase}
-            </Badge>
-          )}
         </div>
         <div className="mt-1 flex flex-wrap items-center gap-2">
           {session.participants.map((name) => (

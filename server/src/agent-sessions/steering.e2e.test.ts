@@ -40,8 +40,7 @@ describe("peer-lane delivery semantics (fake SDK)", () => {
     });
     const userSessionId = h.addUserSession();
     const midTurn = collectUntil(h.bus, (event) => event.type === "agent_session.tool.result" && event.payload.participant === "scout", 10_000);
-    const created = h.host.createSession({ userSessionId, title: "steer", mode: "execute",
-      agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("go", "pending") });
+    const created = h.host.createSession({ userSessionId, title: "steer", agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("go", "pending") });
     await midTurn;
     const steered = collectUntil(h.bus, (event) => event.type === "agent_session.runtime" && String(event.payload.detail).includes("steered mid-turn"), 10_000);
     h.host.post({ agentSessionId: created.agentSessionId, speaker: { kind: "orchestrator", name: "orchestrator" }, to: "scout",
@@ -73,8 +72,7 @@ describe("peer-lane delivery semantics (fake SDK)", () => {
     const parked = collectUntil(h.bus, (event) => event.type === "agent_session.runtime"
       && (event.payload as { participant?: string }).participant === "scout"
       && String(event.payload.detail).includes("seat parked (idle)"), 10_000);
-    const created = h.host.createSession({ userSessionId, title: "reap", mode: "execute",
-      agents: [{ name: "scout", profileId: "explorer" }] });
+    const created = h.host.createSession({ userSessionId, title: "reap", agents: [{ name: "scout", profileId: "explorer" }] });
     h.host.post({ agentSessionId: created.agentSessionId, speaker: { kind: "orchestrator", name: "main" }, to: "orchestrator",
       handoff: handoff("brief", "pending"), category: "assignment" });
     h.host.post({ agentSessionId: created.agentSessionId, speaker: { kind: "orchestrator", name: "orchestrator" }, to: "scout",
@@ -116,11 +114,10 @@ describe("peer-lane delivery semantics (fake SDK)", () => {
       yield sendHandoffUse("scout-close", "orchestrator", { action: "made it", status: "completed", category: "milestone" });
       yield successMessage();
     });
-    (h.config as { seatMaxResidentPerSession: number }).seatMaxResidentPerSession = 1;
-    (h.config as { sendWakeTimeoutMs: number }).sendWakeTimeoutMs = 150;
+    (h.config as { seatMaxResidentPerTree: number }).seatMaxResidentPerTree = 1;
+    (h.config as { seatSpawnTimeoutMs: number }).seatSpawnTimeoutMs = 150;
     const userSessionId = h.addUserSession();
-    const created = h.host.createSession({ userSessionId, title: "capacity", mode: "execute",
-      agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("go", "pending") });
+    const created = h.host.createSession({ userSessionId, title: "capacity", agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("go", "pending") });
 
     // One console-carried path means capacity is not a delivery outcome. The
     // row is journaled and waits; the sender is never handed a receipt to

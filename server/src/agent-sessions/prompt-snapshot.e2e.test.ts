@@ -23,8 +23,7 @@ describe("hub prompt byte-identity", () => {
     const userSessionId = h.addUserSession();
     const done = collectUntil(h.bus, (event) =>
       event.type === "agent_session.turn.settled" && JSON.stringify(event.payload).includes("scout"), 10_000);
-    h.host.createSession({ userSessionId, title: "snapshot", mode: "execute",
-      agents: [{ name: "scout", profileId: "explorer" }],
+    h.host.createSession({ userSessionId, title: "snapshot", agents: [{ name: "scout", profileId: "explorer" }],
       briefing: { core: { schemaVersion: 1, taskId: null, status: "pending", risk: "low",
         action: "look around", state: { summary: "look around", evidence: [] }, result: { summary: null, artifacts: [] },
         uncertainty: [], nextAction: "look around", requestExpandedContext: false }, extension: { kind: "generic", data: {} } } });

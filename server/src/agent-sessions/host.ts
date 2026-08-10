@@ -31,7 +31,7 @@ import type { HandoffService } from "../handoffs/service.ts";
 import { HANDOFF_DRAFT_JSON_SCHEMA, HandoffDraftSchema } from "../handoffs/schema.ts";
 import type { ReapResult } from "../completion/summary.ts";
 import { evaluateCheckpointDraft } from "../handoffs/checkpoint-gate.ts";
-import { CHILD_SENDER_PREFIX, peerNameOf } from "./peer-names.ts";
+import { CHILD_SENDER_PREFIX, CONSOLE_SENDER } from "./peer-names.ts";
 import {
   finalReportBlockers,
   finalReportCaveats,
@@ -42,7 +42,6 @@ import {
   type Category,
 } from "./governance.ts";
 import { buildSeatTools, ok, type AskOperatorArgs } from "./seat-tools.ts";
-import { buildWorktreeHooks } from "./worktree-hook.ts";
 import { compileContract, contractOfSession, hubContract, roleOfSeat, RESERVED_NAMES, SEAT_NAME_RE, type CompiledContract } from "./topology.ts";
 import { grantedTools, runtimeToolNames, type SeatToolName } from "./grants.ts";
 import { dispatchWorkItems, onPatternPost, onTurnSettled, sweep as patternSweep, type DispatchWorkItemsInput, type PatternContext } from "./patterns/progression.ts";
@@ -69,12 +68,9 @@ const CHECKPOINT_TIMEOUT_MS = 90_000;
 /**
  * Unresolved blocking questions allowed per AgentSession before further asks
  * are downgraded to deferred. A wall of simultaneous cards is unanswerable, and
- * each blocking ask pins one of `seatMaxResidentPerSession` (4) processes.
+ * each blocking ask pins one of `seatMaxResidentPerTree` (4) processes.
  */
 const MAX_CONCURRENT_BLOCKING_ASKS = 3;
-
-/** Per-turn cap on stored reasoning; it is forensics, not an archive. */
-const MAX_REASONING_CHARS = 64 * 1024;
 
 /** Failed-turn redeliveries per delivery row before the console gives up. */
 const MAX_REDELIVERY_ATTEMPTS = 2;
@@ -184,23 +180,6 @@ function capabilityBrief(profile: AgentProfile, hasWorktree: boolean, workspaceD
     `If an assignment needs something in the "cannot" list, say so immediately in a handoff rather than working around it — the limit is real and will not change mid-run.`;
 }
 
-/**
- * `name@semver` pins introduced by a diff's added lines. Deliberately
- * syntax-agnostic: one pattern covers npm specifiers, CDN URLs and import-map
- * entries without parsing any of them. It does not see `"pkg": "1.2.3"`
- * object form — two seats editing the same manifest collide in git anyway.
- */
-export function dependencyPinsInPatch(patch: string): { name: string; version: string }[] {
-  const pins: { name: string; version: string }[] = [];
-  for (const line of patch.split("\n")) {
-    if (!line.startsWith("+") || line.startsWith("+++")) continue;
-    for (const match of line.matchAll(/(?:^|[/"'\s@])([a-z][a-z0-9._-]{1,40})@(\d+\.\d+\.\d+)/gi)) {
-      pins.push({ name: (match[1] as string).toLowerCase(), version: match[2] as string });
-    }
-  }
-  return pins;
-}
-
 /** Compact capability tag for roster lines — what this seat can be asked to do. */
 function capabilityTag(profile: AgentProfile): string {
   const caps = [
@@ -271,7 +250,6 @@ interface SeatLane {
     /** Cumulative provider back-off this turn; the budget is wall clock, not attempts. */
     retryMs: number;
     /** Reasoning text, accumulated only when persistence is enabled. */
-    reasoning: string;
   } | null;
   /** Console pushes awaiting attribution to the next minted turn. */
   pendingDeliveries: MailboxDeliveryRow[];
@@ -300,13 +278,10 @@ export interface CreateAgentSessionInput {
   userSessionId: string;
   title: string;
   /**
-   * Only "execute". The `plan_execute` seat mode was removed: nothing ever
-   * transitioned an agent session's phase to executing, so every seat spawned
-   * permissionMode:"plan" forever — implementers included. Operator-level plan
-   * mode on the USER session is a separate, fully implemented thing.
+   * Orchestration pattern; omitted = hub_and_spoke (the historical default).
+   * (Agent sessions have no mode/phase of their own: seats always execute;
+   * operator-level plan mode lives on the USER session.)
    */
-  mode: "execute";
-  /** Orchestration pattern; omitted = hub_and_spoke (the historical default). */
   pattern?: PatternId;
   /** Pattern-specific config, validated by the pattern's builder. */
   patternConfig?: Record<string, unknown>;
@@ -316,7 +291,7 @@ export interface CreateAgentSessionInput {
    * waking the runner. One level only — children never get the spawn grant.
    */
   parent?: { agentSessionId: string; controllerSeat: string };
-  agents: { name: string; profileId?: string; preset?: string; instructions?: string; model?: string; owns?: string[] }[];
+  agents: { name: string; profileId?: string; instructions?: string; model?: string; owns?: string[] }[];
   briefing?: HandoffDraft;
 }
 
@@ -372,14 +347,11 @@ export class AgentSessionHost {
   #onStatusChanged: ((userSessionId: string) => void) | undefined;
   /** Sessions whose `final` the gate withheld, so clearing it can say so. */
   readonly #withheldFinals = new Set<string>();
-  /** deliveryId → assignment held until its blocker task completes. */
   /** Roster work-state diff lines, memoized 15s — see `#seatWorkState`. */
   readonly #workStateDiffCache = new Map<string, { at: number; line: string }>();
   #sessionStatus = new Map<string, AgentSessionStatus | null>();
   /** Sessions whose operator obligation is closed — reported, or discharged. */
   readonly #operatorDebtSettled = new Set<string>();
-  /** agentSessionId → dependency name → the version last merged, and by whom. */
-  readonly #dependencyPins = new Map<string, Map<string, { version: string; seat: string }>>();
 
   constructor(deps: AgentSessionHostDeps) { this.#deps = deps; }
 
@@ -422,7 +394,7 @@ export class AgentSessionHost {
     // never write. Forbidding that would break a legitimate use to fix a
     // problem nobody had.
     for (const agent of input.agents) {
-      const profile = this.#profile(agent.profileId ?? agent.preset ?? "explorer", user.workspaceId);
+      const profile = this.#profile(agent.profileId ?? "explorer", user.workspaceId);
       const writes = profile.tools.includes("Edit") || profile.tools.includes("Write");
       if (writes && (agent.owns ?? []).filter((scope) => scope.trim() !== "").length === 0) {
         throw badRequest(`seat "${agent.name}" (${profile.id}) writes files, so it must declare what it owns`);
@@ -445,7 +417,7 @@ export class AgentSessionHost {
       }
     }
     for (const agent of input.agents) {
-      const profileId = agent.profileId ?? agent.preset ?? "explorer";
+      const profileId = agent.profileId ?? "explorer";
       if (profileId.includes("reviewer")) continue;
       for (const scope of agent.owns ?? []) {
         const normalized = scope.trim(); if (!normalized) continue;
@@ -474,8 +446,8 @@ export class AgentSessionHost {
     const now = nowIso();
     const contract = build.contract;
     const row: AgentSessionRow = {
-      id: newId("as"), userSessionId: input.userSessionId, title, mode: input.mode,
-      phase: "executing", status: "open", createdAt: now, updatedAt: now,
+      id: newId("as"), userSessionId: input.userSessionId, title,
+      status: "open", createdAt: now, updatedAt: now,
       pattern: contract.pattern, topology: contract as unknown as Record<string, unknown>,
       parentAgentSessionId: parentRow?.id ?? null,
       parentControllerSeat: parentRow ? input.parent!.controllerSeat : null,
@@ -494,10 +466,6 @@ export class AgentSessionHost {
     const specialists = input.agents.map((agent) => agent.name);
     bus.append({ type: "agent_session.created", userSessionId: row.userSessionId, agentSessionId: row.id,
       payload: { session: toWireAgentSession(row, specialists, false), participants: specialists } });
-    bus.append({ type: "agent_session.pattern.selected", userSessionId: row.userSessionId, agentSessionId: row.id,
-      payload: { agentSessionId: row.id, pattern: row.pattern,
-        roles: repo.listParticipants(row.id).map((seat) => ({ seat: seat.name, role: roleOfSeat(seat) })),
-        parentAgentSessionId: row.parentAgentSessionId, depth: row.depth } });
     bus.append({ type: "flow.delegation", userSessionId: row.userSessionId, agentSessionId: row.id,
       payload: { userSessionId: row.userSessionId, agentSessionId: row.id, kind: "created", preview: title } });
     const entry = this.#contractOf(row).contract.entry;
@@ -602,7 +570,7 @@ export class AgentSessionHost {
     // exactly onto coordinator turns that were dead or asleep.
     syncLedgerFromHandoff(this.#deps, session, input.to, input.handoff, category);
     const { message, delivery, text } = this.#journal(session, input.speaker, input.to, input.handoff, category, {
-      transport: "console", ...(input.dedupeKey ? { dedupeKey: input.dedupeKey } : {}), ...(input.turnId ? { turnId: input.turnId } : {}),
+      ...(input.dedupeKey ? { dedupeKey: input.dedupeKey } : {}), ...(input.turnId ? { turnId: input.turnId } : {}),
     });
     if (input.to === MAIN_RECIPIENT) {
       if (session.parentAgentSessionId !== null) {
@@ -685,7 +653,7 @@ export class AgentSessionHost {
 
   /** Journal core: persist the handoff and mint its mailbox delivery. */
   #journal(session: AgentSessionRow, speaker: Speaker, to: string, handoff: HandoffDraft, category: Category, opts: {
-    transport: MailboxDeliveryRow["transport"]; dedupeKey?: string; turnId?: string;
+    dedupeKey?: string; turnId?: string;
   }): { message: MessageRow; delivery: MailboxDeliveryRow; text: string; handoffId: string } {
     const { repo, bus } = this.#deps;
     if (!this.#deps.handoffs) throw new Error("handoff service unavailable");
@@ -710,7 +678,7 @@ export class AgentSessionHost {
       sessionKind: "agent", sessionId: session.id, userSessionId: session.userSessionId,
       agentSessionId: session.id, speaker, to, recipient: to,
       kind: "message" as const,
-      text, category, transport: opts.transport, handoff: prepared.row, summary: prepared.summary,
+      text, category, handoff: prepared.row, summary: prepared.summary,
       ...(opts.turnId ? { turnId: opts.turnId } : {}), ...(opts.dedupeKey ? { dedupeKey: opts.dedupeKey } : {}),
     });
     this.#deps.handoffs.committed(prepared.record);
@@ -729,14 +697,14 @@ export class AgentSessionHost {
     if (!session) throw notFound(`no agent session ${input.agentSessionId}`);
     let rows = this.#deps.repo.listMessages("agent", session.id, input.afterSeq ?? 0);
     if (input.limit !== undefined) rows = rows.slice(-input.limit);
-    return { status: this.#statusOf(session), phase: session.phase,
-      participants: this.#specialists(session.id).map((p) => ({ name: p.name, preset: p.profileId, profileId: p.profileId, model: p.model })),
+    return { status: this.#statusOf(session),
+      participants: this.#specialists(session.id).map((p) => ({ name: p.name, profileId: p.profileId, model: p.model })),
       messages: rows.map(toWireMessage) };
   }
 
   listForUserSession(userSessionId: string) {
     return this.#deps.repo.listAgentSessions(userSessionId).map((row) => ({
-      id: row.id, title: row.title, mode: row.mode, phase: row.phase, status: this.#statusOf(row),
+      id: row.id, title: row.title, status: this.#statusOf(row),
       participants: this.#specialists(row.id).map((p) => p.name),
       unseenCount: this.#deps.repo.listQueuedDeliveries(row.id).filter((d) => d.recipient === MAIN_RECIPIENT).length,
       updatedAt: row.updatedAt,
@@ -851,11 +819,19 @@ export class AgentSessionHost {
       }
     }
     for (const delivery of this.#deps.repo.listActiveDeliveries(session.id)) this.#patchDelivery(session, delivery, "cancelled");
-    this.#withheldFinals.delete(session.id);
     this.#deps.repo.patchAgentSession(session.id, { status: "archived" });
-    this.#contracts.delete(session.id);
+    this.#forget(session.id);
     this.#deps.bus.append({ type: "agent_session.status", userSessionId: session.userSessionId, agentSessionId: session.id,
       payload: { agentSessionId: session.id, status: "archived" } });
+  }
+
+  /** The ONE cleanup point for every per-session in-memory structure. */
+  #forget(agentSessionId: string): void {
+    this.#seats.delete(agentSessionId);
+    this.#withheldFinals.delete(agentSessionId);
+    this.#sessionStatus.delete(agentSessionId);
+    this.#operatorDebtSettled.delete(agentSessionId);
+    this.#contracts.delete(agentSessionId);
   }
 
   /**
@@ -955,10 +931,9 @@ export class AgentSessionHost {
     const answer = decision === null ? `${asked} → (no answer recorded)` : renderDecision(decision);
     const session = this.#deps.repo.getAgentSession(interaction.agentSessionId);
     if (!session) return;
-    const speaker = this.#answerSpeaker(session, interaction.participant);
     this.post({
       agentSessionId: interaction.agentSessionId,
-      speaker,
+      speaker: { kind: "system", name: CONSOLE_SENDER },
       to: interaction.participant,
       handoff: this.#simpleHandoff(
         `Operator answered: ${asked}`,
@@ -971,27 +946,6 @@ export class AgentSessionHost {
     });
   }
 
-  /**
-   * The console voice for a delivery TO `recipient`: the completion voice
-   * when it has a legal edge there, else any seat whose role does. A recipient
-   * nothing can reach keeps the voice seat, and `post()` throws exactly as it
-   * always has — a self-send was never legal.
-   */
-  #answerSpeaker(session: AgentSessionRow, recipient: string): Speaker {
-    const contract = this.#contractOf(session);
-    const toRole = this.#roleOf(session.id, recipient);
-    const voice = this.#completionSeat(session, "voice");
-    const speakerOf = (name: string): Speaker => {
-      const row = this.#deps.repo.getParticipant(session.id, name);
-      return { kind: row?.role === "orchestrator" ? "orchestrator" : "agent", name };
-    };
-    if (voice !== recipient && contract.edge(this.#roleOf(session.id, voice), toRole)) return speakerOf(voice);
-    if (contract.edge("main", toRole)) return { kind: "orchestrator", name: MAIN_RECIPIENT };
-    for (const seat of this.#deps.repo.listParticipants(session.id)) {
-      if (seat.name !== recipient && contract.edge(roleOfSeat(seat), toRole)) return speakerOf(seat.name);
-    }
-    return speakerOf(voice);
-  }
 
   /** The bound context patterns/progression.ts runs over. */
   #patternCtx(): PatternContext {
@@ -999,7 +953,6 @@ export class AgentSessionHost {
       deps: { repo: this.#deps.repo, bus: this.#deps.bus, config: this.#deps.config },
       contract: (session) => this.#contractOf(session).contract,
       completionSeat: (session, which) => this.#completionSeat(session, which),
-      answerSpeaker: (session, recipient) => this.#answerSpeaker(session, recipient),
       post: (input) => this.post(input),
       simpleHandoff: (action, status, summary, nextAction) => this.#simpleHandoff(action, status, summary, nextAction),
       deliverNow: (agentSessionId, recipient) => void this.#deliverConsole(agentSessionId, recipient).catch((error) => this.#recordHostFailure(agentSessionId, error)),
@@ -1094,7 +1047,7 @@ export class AgentSessionHost {
     this.#withheldFinals.delete(parent.id);
     const finalSeat = this.#completionSeat(parent, "finalFrom");
     try {
-      this.post({ agentSessionId: parent.id, speaker: this.#answerSpeaker(parent, finalSeat), to: finalSeat,
+      this.post({ agentSessionId: parent.id, speaker: { kind: "system", name: CONSOLE_SENDER }, to: finalSeat,
         handoff: this.#simpleHandoff("All child sessions have reported", "in_progress",
           "Every child session's final has crossed into this session. The withheld final may be sent now.",
           "Compile and send your final report."),
@@ -1138,7 +1091,6 @@ export class AgentSessionHost {
   runtimeAvailability(): { sandbox: boolean; chrome: boolean } {
     return { sandbox: fs.existsSync("/usr/bin/bwrap") || fs.existsSync("/usr/local/bin/bwrap"), chrome: fs.existsSync("/usr/bin/google-chrome") };
   }
-
 
   /**
    * Default-on isolation for EVERY seat in a git workspace: a lazy worktree
@@ -1217,7 +1169,6 @@ export class AgentSessionHost {
       if (outcome.merged) {
         bus.append({ type: "agent_session.worktree.merged", userSessionId: session.userSessionId, agentSessionId: session.id,
           payload: { agentSessionId: session.id, seat: seat.name, mergeCommit: outcome.commit, filesChanged: diff.filesChanged, artifactId } });
-        this.#checkDependencyDrift(session, seat, diff.patch);
         return;
       }
       bus.append({ type: "agent_session.worktree.merge_failed", userSessionId: session.userSessionId, agentSessionId: session.id,
@@ -1234,11 +1185,10 @@ export class AgentSessionHost {
 
   #participant(agentSessionId: string, name: string, role: "orchestrator" | "agent", profile: AgentProfile, extra: string, model: string | undefined, ownership: string[], ord: number, createdAt: string, patternRole?: string): ParticipantRow {
     const instructions = [profile.instructions, extra.trim()].filter(Boolean).join("\n\nAssigned role context:\n");
-    return { agentSessionId, name, role, preset: profile.id, instructions, model: model ?? profile.model ?? null,
-      profileId: profile.id, profileSnapshot: profile, ownership, sdkSessionId: null,
-      peerName: peerNameOf(this.#deps.config.peerNamePrefix ?? "console-", agentSessionId, name), lastActiveAt: null,
+    return { agentSessionId, name, role, instructions, model: model ?? profile.model ?? null,
+      profileId: profile.id, profileSnapshot: profile, ownership, sdkSessionId: null, lastActiveAt: null,
       generation: 0, turnCount: 0,
-      contextTokens: 0, memory: "", latestHandoffId: null, checkpointReady: true, pendingTurnSeq: 0, lastSeenSeq: 0,
+      contextTokens: 0, latestHandoffId: null, checkpointReady: true,
       cumulativeCostUsd: 0, cumulativeApiDurationMs: 0, lastDecisionAt: null,
       worktreePath: null, worktreeBaseCommit: null, worktreeBranch: null,
       patternRole: patternRole ?? null, ord, createdAt };
@@ -1327,6 +1277,10 @@ export class AgentSessionHost {
   }
 
   #assertRoute(session: AgentSessionRow, sender: string, recipient: string, category: Category): EdgeSpec {
+    // Console-authored deliveries (operator answers, close-out asks, release
+    // notices) are legal toward any seat — the console is the transport, not
+    // a participant, so it needs no edge of its own.
+    if (sender === CONSOLE_SENDER) return { from: "console", to: this.#roleOf(session.id, recipient), advance: "router" };
     // Boundary hops: a child session's report enters its parent under the
     // reserved `child:<id>` sender, valid only toward that child's controller.
     if (sender.startsWith(CHILD_SENDER_PREFIX)) {
@@ -1366,7 +1320,7 @@ export class AgentSessionHost {
   /** Spawn or unpark a seat so its peer session is registered and accepting input. */
   async ensureSeatLive(agentSessionId: string, seat: string, deadline?: number): Promise<void> {
     const { repo } = this.#deps;
-    const until = deadline ?? Date.now() + (this.#deps.config.sendWakeTimeoutMs ?? 30_000);
+    const until = deadline ?? Date.now() + (this.#deps.config.seatSpawnTimeoutMs ?? 30_000);
     const lane = this.#laneOf(agentSessionId, seat);
     while (lane.rotationGate) await lane.rotationGate;
     if (lane.state === "live" || lane.state === "waking") { await lane.ready; return; }
@@ -1381,14 +1335,13 @@ export class AgentSessionHost {
     await lane.ready;
     // A respawn may inherit rows the previous process took delivery of but
     // never consumed; requeue them so the console path re-carries exactly once.
-    const stale = repo.listUnackedDeliveries(agentSessionId, seat).filter((row) => row.status === "delivered" && row.transport === "console");
+    const stale = repo.listUnackedDeliveries(agentSessionId, seat).filter((row) => row.status === "delivered");
     for (const row of stale) repo.patchDelivery(row.id, { status: "queued", deliveredAt: null });
   }
 
-  #resident(agentSessionId?: string): number {
+  #resident(): number {
     let count = 0;
-    for (const [sessionId, lanes] of this.#seats) {
-      if (agentSessionId !== undefined && sessionId !== agentSessionId) continue;
+    for (const lanes of this.#seats.values()) {
       for (const lane of lanes.values()) if (lane.state === "live" || lane.state === "waking" || lane.state === "rotating") count += 1;
     }
     return count;
@@ -1419,15 +1372,13 @@ export class AgentSessionHost {
     for (;;) {
       const tree = this.#treeSessionIds(agentSessionId);
       const globalFull = this.#resident() >= config.seatMaxResident;
-      const sessionFull = this.#resident(agentSessionId) >= config.seatMaxResidentPerSession;
       // A parent and its children SHARE a budget: nesting must not multiply
       // the footprint, and a tree self-throttles before it thrashes strangers.
       const treeFull = this.#residentIn(tree) >= config.seatMaxResidentPerTree;
-      if (!globalFull && !sessionFull && !treeFull) return;
-      // Evict only where it frees the BINDING constraint: when the session cap
-      // is what blocks us, a victim in another session gives up its process
-      // for nothing. When the global cap binds, try our own tree first.
-      const scope = globalFull ? undefined : sessionFull ? new Set([agentSessionId]) : tree;
+      if (!globalFull && !treeFull) return;
+      // Evict only where it frees the BINDING constraint: when the global cap
+      // binds, try our own tree first.
+      const scope = globalFull ? undefined : tree;
       if (scope === undefined && this.#parkLeastRecentIdle(tree)) continue;
       if (this.#parkLeastRecentIdle(scope)) continue;
       // Nothing idle: cut loose the oldest operator wait — a seat blocked on
@@ -1732,13 +1683,6 @@ export class AgentSessionHost {
     // No native task mirror: all four Task* tools are in every seat's
     // `disallowedTools`, so this fragment could never have fired. Seats use the
     // console-owned task_list/task_create/task_update.
-    if (this.#deps.worktrees && workspaceRoot !== "") {
-      fragments.push(buildWorktreeHooks({
-        repo: this.#deps.repo, bus: this.#deps.bus, worktrees: this.#deps.worktrees,
-        workspaceRoot,
-        userSessionId: session.userSessionId, agentSessionId: session.id, seat: seat.name,
-      }));
-    }
     return mergeHooks(fragments);
   }
 
@@ -1780,16 +1724,13 @@ export class AgentSessionHost {
             // console already persists (tool inputs and results carry the same
             // workspace content), but it is still more, and that should be the
             // operator's call.
-            if (turn && this.#deps.config.persistReasoning === true && turn.reasoning.length < MAX_REASONING_CHARS) {
-              turn.reasoning += event.text;
-            }
           } else if (event.kind === "message") {
             if (turn) turn.lastNarration = event.text;
             this.#recordNarration(session, seatName, event.text, turnId);
           } else if (event.kind === "tool.call") {
             turn?.toolStarts.set(event.callId, Date.now());
             runtime.set("tool", event.name);
-            bus.append({ type: "agent_session.tool.call", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { sessionId: session.id, participant: seatName, turnId, callId: event.callId, name: event.name, input: bus.capture(event.input, { userSessionId: session.userSessionId, agentSessionId: session.id }) } });
+            bus.append({ type: "agent_session.tool.call", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { sessionId: session.id, participant: seatName, turnId, callId: event.callId, name: event.name, input: bus.captureSized(event.input, { userSessionId: session.userSessionId, agentSessionId: session.id }).value } });
             if (turn) {
               const key = `${event.name} ${stableStringify(event.input)}`;
               turn.watchdog.identical = key === turn.watchdog.lastKey ? turn.watchdog.identical + 1 : 1;
@@ -1867,7 +1808,7 @@ export class AgentSessionHost {
     const attributed = deliveries.length > 0 ? deliveries
       : this.#deps.repo.listUnackedDeliveries(session.id, seatName).filter((row) => row.status === "delivered");
     lane.activeTurn = { turnId: newId("turn"), startedAt: Date.now(), deliveries: attributed, sawSend: false,
-      toolStarts: new Map(), lastNarration: "", watchdog: { lastKey: "", identical: 0, errorStreak: 0, tripped: null }, awaitingOperator: null, retryMs: 0, reasoning: "" };
+      toolStarts: new Map(), lastNarration: "", watchdog: { lastKey: "", identical: 0, errorStreak: 0, tripped: null }, awaitingOperator: null, retryMs: 0 };
     lane.lastActiveAt = Date.now();
     if (lane.idleTimer) { clearTimeout(lane.idleTimer); lane.idleTimer = null; }
     this.#deps.bus.append({ type: "agent_session.turn.started", userSessionId: session.userSessionId, agentSessionId: session.id,
@@ -1909,14 +1850,6 @@ export class AgentSessionHost {
         this.#patchDelivery(session, delivery, "queued");
         requeued = true;
       }
-    }
-    if (turn.reasoning !== "") {
-      // An artifact, never a message: it must not re-enter any prompt.
-      const stored = this.#deps.bus.storeArtifact(turn.reasoning.slice(0, MAX_REASONING_CHARS), "text/plain",
-        { userSessionId: session.userSessionId, agentSessionId: session.id });
-      this.#deps.bus.append({ type: "agent_session.runtime", userSessionId: session.userSessionId, agentSessionId: session.id,
-        payload: { agentSessionId: session.id, participant: seatName, turnId: turn.turnId,
-          detail: `reasoning captured as ${stored.artifactId} (${stored.bytes}B)` } });
     }
     const seat = repo.getParticipant(session.id, seatName);
     if (seat) {
@@ -2015,7 +1948,6 @@ export class AgentSessionHost {
       this.#mintTurn(session, recipient, lane, rows);
       lane.input.push(seatUserMessage(prompt));
     }
-    if (messages.length > 0) repo.patchParticipant(agentSessionId, recipient, { pendingTurnSeq: messages[messages.length - 1]!.seq });
   }
 
   #armIdleTimer(agentSessionId: string, seatName: string, lane: SeatLane): void {
@@ -2131,7 +2063,7 @@ export class AgentSessionHost {
       simpleHandoff: (action, status, summary, nextAction) => this.#simpleHandoff(action, status, summary, nextAction),
       dispatchWorkItems: (input) => this.dispatchWorkItems(seat.name, input),
       createChildSession: (input) => this.createSession({
-        userSessionId: session.userSessionId, title: input.title, mode: "execute",
+        userSessionId: session.userSessionId, title: input.title,
         pattern: input.pattern as PatternId,
         ...(input.patternConfig ? { patternConfig: input.patternConfig } : {}),
         parent: { agentSessionId: session.id, controllerSeat: seat.name },
@@ -2145,7 +2077,6 @@ export class AgentSessionHost {
     // wrongly concluded it lacked a capability it had.
     return sdk.createSdkMcpServer({ name: "console_agent", version: "2", tools, alwaysLoad: true });
   }
-
 
   #snapshotProfile(profile: AgentProfile): AgentProfile {
     if (profile.source !== "workspace" || !profile.pluginPath || !profile.revision || !this.#deps.config) return profile;
@@ -2270,33 +2201,6 @@ export class AgentSessionHost {
     };
   }
 
-  /**
-   * Cross-seat dependency drift, read from the merged diff rather than from
-   * anything a seat declared.
-   *
-   * Disjoint file ownership stops seats from colliding on files, but not on
-   * facts: in db-live-1 `page` pinned three@0.169.0 in an import map while
-   * `renderer` imported 0.160.0 by URL — the version the operator specified.
-   * Three agents examined that graph and all three called it fine. The
-   * evidence was in the diffs all along.
-   */
-  #checkDependencyDrift(session: AgentSessionRow, seat: ParticipantRow, patch: string): void {
-    const seen = this.#dependencyPins.get(session.id) ?? new Map<string, { version: string; seat: string }>();
-    this.#dependencyPins.set(session.id, seen);
-    for (const { name, version } of dependencyPinsInPatch(patch)) {
-      const prior = seen.get(name);
-      if (!prior) { seen.set(name, { version, seat: seat.name }); continue; }
-      if (prior.version === version || prior.seat === seat.name) continue;
-      this.#deps.bus.append({ type: "agent_session.dependency_drift", userSessionId: session.userSessionId, agentSessionId: session.id,
-        payload: { agentSessionId: session.id, dependency: name, versions: [{ seat: prior.seat, version: prior.version }, { seat: seat.name, version }] } });
-      this.post({ agentSessionId: session.id, speaker: { kind: "agent", name: seat.name }, to: this.#escalationTarget(session, seat.name),
-        handoff: this.#simpleHandoff(`Dependency drift on ${name}`, "needs_verification",
-          `${prior.seat} landed ${name}@${prior.version} and ${seat.name} landed ${name}@${version}. Two versions of one dependency in a single build load twice and fail cross-module identity checks. Neither seat can see this — their files are disjoint.`,
-          `Decide the single version for ${name} and have the owning seat align.`), category: "failure" });
-      seen.set(name, { version, seat: seat.name });
-    }
-  }
-
   /** One-line, always-true summary of a seat's unmerged work. */
   /**
    * What this seat is doing right now, in one clause, from facts the console
@@ -2341,6 +2245,8 @@ export class AgentSessionHost {
             : `unmerged worktree: ${diff.filesChanged} file(s) +${diff.insertions}/-${diff.deletions}, not visible in the workspace until they report completed`;
         } catch { line = "unmerged worktree (state unavailable)"; }
         this.#workStateDiffCache.set(key, { at: Date.now(), line });
+        // Evict on write: entries outlive their worktrees otherwise.
+        for (const [k, v] of this.#workStateDiffCache) if (Date.now() - v.at >= 15_000) this.#workStateDiffCache.delete(k);
         facts.push(line);
       }
     }
@@ -2436,7 +2342,7 @@ export class AgentSessionHost {
     const fresh = this.#deps.repo.getParticipant(session.id, seat.name) ?? seat;
     this.#deps.bus.append({ type: "agent_session.context.rotated", userSessionId: session.userSessionId, agentSessionId: session.id,
       payload: { agentSessionId: session.id, participant: seat.name, generation: seat.generation + 1,
-        reason: seat.contextTokens >= Math.ceil(tokenLimit * 0.75) ? "token_limit" : "turn_limit", memoryChars: 0,
+        reason: seat.contextTokens >= Math.ceil(tokenLimit * 0.75) ? "token_limit" : "turn_limit",
         handoffId: prepared.row.id, threshold, checkpointBytes: prepared.row.bytes, degraded } });
     this.#deps.bus.append({ type: "agent_session.runtime", userSessionId: session.userSessionId, agentSessionId: session.id,
       payload: { agentSessionId: session.id, participant: seat.name, detail: `checkpoint ${prepared.row.id} completed in ${Date.now() - started}ms` } });
@@ -2520,7 +2426,7 @@ export class AgentSessionHost {
       const handoff = this.#deps.handoffs.get(seat.latestHandoffId);
       return `\n\n## Rotation checkpoint ${handoff.metadata.id}\n${JSON.stringify({ core: handoff.core, extension: handoff.extension }, null, 2)}`;
     }
-    return seat.memory ? `\n\n## Read-only legacy context memory\n${seat.memory}` : "";
+    return "";
   }
 
   #recordNarration(session: AgentSessionRow, participant: string, text: string, turnId: string): void {

@@ -99,8 +99,6 @@ export interface HandoffMetadata {
   rootHandoffId: string;
   checkpoint: boolean;
   bytes: number;
-  softTargetBytes: number;
-  overflow: boolean;
   referenceWarnings: string[];
   createdAt: string;
 }
@@ -124,7 +122,6 @@ export interface HandoffSummary {
   evidenceCount: number;
   artifactCount: number;
   extensionKind: HandoffExtensionKind;
-  overflow: boolean;
   referenceWarnings: string[];
 }
 
@@ -135,23 +132,6 @@ export interface HandoffPage {
   nextCursor: string | null;
 }
 
-/**
- * Advisory size targets, per category. The flag was never a truncation, but it
- * shaped behaviour anyway: db-live-2's `page` milestone ran 6901 bytes and
- * `check`'s final 7439 against a 4KiB target, and `renderer` — after two
- * `send_handoff` parse failures — announced "the handoff payload is getting
- * truncated, sending a more compact version" and shipped a shortened report.
- * The ceiling was editing the findings.
- *
- * A report is where the substance lives, so it gets room; an assignment is a
- * request, so it does not need as much.
- */
-export const HANDOFF_SOFT_TARGET_BYTES = 6 * 1024;
-export const HANDOFF_REPORT_SOFT_TARGET_BYTES = 12 * 1024;
-export const HANDOFF_CHECKPOINT_SOFT_TARGET_BYTES = 12 * 1024;
-
-/** Categories whose whole purpose is to carry findings. */
-export const REPORT_TRIGGERS: readonly HandoffTrigger[] = ["milestone", "final", "decision", "failure"];
 export const HANDOFF_READ_DEFAULT_BYTES = 8 * 1024;
 export const HANDOFF_READ_MAX_BYTES = 32 * 1024;
 

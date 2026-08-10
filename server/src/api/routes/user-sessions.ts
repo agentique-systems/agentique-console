@@ -80,20 +80,6 @@ export function registerUserSessionRoutes(
     async (request) => sessions.get(request.params.id),
   );
 
-  app.get<{ Params: { id: string } }>("/api/user-sessions/:id/telemetry", async (request) => {
-    sessions.get(request.params.id);
-    const samples = ctx.repo.listUsage(request.params.id);
-    return {
-      totals: samples.reduce((total, sample) => ({ inputTokens: total.inputTokens + sample.inputTokens,
-        uncachedInputTokens: total.uncachedInputTokens + sample.uncachedInputTokens,
-        cacheCreationInputTokens: total.cacheCreationInputTokens + sample.cacheCreationInputTokens,
-        cacheReadInputTokens: total.cacheReadInputTokens + sample.cacheReadInputTokens,
-        outputTokens: total.outputTokens + sample.outputTokens, costUsd: total.costUsd + (sample.costUsd ?? 0) }),
-      { inputTokens: 0, uncachedInputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0, outputTokens: 0, costUsd: 0 }),
-      samples,
-    };
-  });
-
   app.patch<{ Params: { id: string } }>(
     "/api/user-sessions/:id",
     async (request) => {

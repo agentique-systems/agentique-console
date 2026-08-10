@@ -44,7 +44,6 @@ export const keys = {
   profiles: { all: ["agent-profiles"] as const, list: (workspaceId: string) => ["agent-profiles", workspaceId] as const, detail: (workspaceId: string, id: string) => ["agent-profiles", workspaceId, id] as const },
   managerSessions: (workspaceId: string) => ["manager-sessions", workspaceId] as const,
   managerSession: (id: string) => ["manager-session", id] as const,
-  managerTranscript: (id: string) => ["manager-transcript", id] as const,
   timeline: (id: string, beforeSeq?: number) => ["timeline", id, beforeSeq ?? "latest"] as const,
   timelineAll: ["timeline"] as const,
   /**

@@ -53,13 +53,11 @@ function migrateAdditiveColumns(sqlite: Database.Database): void {
     ["memory", "TEXT NOT NULL DEFAULT ''"],
     ["latest_handoff_id", "TEXT"],
     ["checkpoint_ready", "INTEGER NOT NULL DEFAULT 1"],
-    ["pending_turn_seq", "INTEGER NOT NULL DEFAULT 0"],
     ["worktree_path", "TEXT"],
     ["worktree_base_commit", "TEXT"],
     ["worktree_branch", "TEXT"],
     ["attempt_group_id", "TEXT"],
     ["attempt_role", "TEXT"],
-    ["peer_name", "TEXT NOT NULL DEFAULT ''"],
     ["last_active_at", "TEXT"],
     ["cumulative_cost_usd", "REAL NOT NULL DEFAULT 0"],
     ["cumulative_api_duration_ms", "INTEGER NOT NULL DEFAULT 0"],
@@ -90,8 +88,6 @@ function migrateAdditiveColumns(sqlite: Database.Database): void {
   sqlite.exec("CREATE INDEX IF NOT EXISTS interactions_agent_open ON interactions(agent_session_id, status, urgency)");
   const cronColumns = new Set(sqlite.prepare("pragma table_info(crons)").all().map((row) => (row as { name: string }).name));
   if (!cronColumns.has("due_at")) sqlite.exec("ALTER TABLE crons ADD COLUMN due_at TEXT");
-  const mailboxColumns = new Set(sqlite.prepare("pragma table_info(mailbox_deliveries)").all().map((row) => (row as { name: string }).name));
-  if (!mailboxColumns.has("transport")) sqlite.exec("ALTER TABLE mailbox_deliveries ADD COLUMN transport TEXT NOT NULL DEFAULT 'console'");
   const usageColumns = new Set(sqlite.prepare("pragma table_info(usage_samples)").all().map((row) => (row as { name: string }).name));
   for (const name of ["uncached_input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"]) {
     if (!usageColumns.has(name)) sqlite.exec(`ALTER TABLE usage_samples ADD COLUMN ${name} INTEGER NOT NULL DEFAULT 0`);
@@ -105,4 +101,20 @@ function migrateAdditiveColumns(sqlite: Database.Database): void {
   const updateTaskId = sqlite.prepare("UPDATE tasks SET id = ? WHERE sdk_session_id = ? AND sdk_task_id = ?");
   for (const row of missing) updateTaskId.run(`task_${Buffer.from(`${row.sdk_session_id}\0${row.sdk_task_id}`).toString("base64url")}`, row.sdk_session_id, row.sdk_task_id);
   sqlite.exec("CREATE UNIQUE INDEX IF NOT EXISTS tasks_console_id ON tasks(id)");
+
+  // Legacy cleanup for subsystems removed in the 2026-08-10 simplification.
+  // agent_sessions.mode was NOT NULL without a default, so inserts on an old
+  // database would fail once the code stopped writing it — the DROPs are the
+  // migration, not cosmetics. Best-effort: a statement that cannot apply
+  // (already gone, or DROP COLUMN unsupported) must never block boot.
+  for (const statement of [
+    "DROP TABLE IF EXISTS sdk_session_entries",
+    "DROP TABLE IF EXISTS contract_parties",
+    "DROP TABLE IF EXISTS contracts",
+    "DROP TABLE IF EXISTS attempt_groups",
+    "ALTER TABLE agent_sessions DROP COLUMN mode",
+    "ALTER TABLE agent_sessions DROP COLUMN phase",
+  ]) {
+    try { sqlite.exec(statement); } catch { /* already applied, or unsupported */ }
+  }
 }

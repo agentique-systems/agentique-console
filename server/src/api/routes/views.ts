@@ -43,9 +43,6 @@ export function registerViewRoutes(app: FastifyInstance, ctx: AppContext): void 
   app.post<{ Params: { id: string; profileId: string }; Body: { revision?: string } }>("/api/workspaces/:id/agent-profiles/:profileId/trust", async (request) => {
     if (!request.body?.revision) throw badRequest("revision is required"); ctx.profiles.trust(request.params.id, request.params.profileId, request.body.revision); return { ok: true };
   });
-  app.delete<{ Params: { id: string; profileId: string } }>("/api/workspaces/:id/agent-profiles/:profileId/trust", async (request) => {
-    ctx.profiles.untrust(request.params.id, request.params.profileId); return { ok: true };
-  });
 
   app.get<{ Params: { id: string } }>("/api/workspaces/:id/manager-sessions", async (request) => ctx.manager.list(request.params.id));
   app.post<{ Params: { id: string }; Body: { profileId?: string; sourceProfileId?: string } }>("/api/workspaces/:id/manager-sessions", async (request, reply) =>
@@ -54,5 +51,4 @@ export function registerViewRoutes(app: FastifyInstance, ctx: AppContext): void 
   app.post<{ Params: { id: string }; Body: { text?: string } }>("/api/manager-sessions/:id/messages", async (request, reply) => {
     if (!request.body?.text?.trim()) throw badRequest("text is required"); return reply.status(202).send(ctx.manager.postMessage(request.params.id, request.body.text));
   });
-  app.get<{ Params: { id: string } }>("/api/manager-sessions/:id/transcript", async (request) => ctx.userSessions.transcript(request.params.id));
 }

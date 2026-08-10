@@ -11,13 +11,13 @@ function draft(overrides: Partial<HandoffDraft["core"]> = {}): HandoffDraft {
 }
 
 describe("HandoffService", () => {
-  it("elevates risk for unresolved references and enforces the profile extension kind", () => {
+  it("records reference warnings as advisory metadata and enforces the profile extension kind", () => {
     const h = makeHarness(async function* () {});
     const userSessionId = h.addUserSession();
     const service = new HandoffService({ repo: h.repo, bus: h.bus, getWorkspaceRoot: () => "/tmp/test-workspace" });
     const prepared = service.prepare({ draft: draft(), userSessionId, agentSessionId: null, sender: "coder", recipient: "main",
       profileId: "implementer", generation: 2, trigger: "milestone" });
-    expect(prepared.record.core.risk).toBe("medium");
+    expect(prepared.record.core.risk).toBe("low");
     expect(prepared.record.extension.kind).toBe("implementation");
     expect(prepared.record.metadata.referenceWarnings[0]).toContain("does not exist");
   });
@@ -54,7 +54,7 @@ describe("HandoffService", () => {
     expect(recovered?.core.action.startsWith("Recovery checkpoint: ")).toBe(false);
   });
 
-  it("persists overflow losslessly and pages retrieval at a bounded cursor", () => {
+  it("persists large handoffs losslessly and pages retrieval at a bounded cursor", () => {
     const h = makeHarness(async function* () {});
     const userSessionId = h.addUserSession();
     const service = new HandoffService({ repo: h.repo, bus: h.bus, getWorkspaceRoot: () => "/tmp/test-workspace" });
@@ -62,7 +62,6 @@ describe("HandoffService", () => {
     const prepared = service.prepare({ draft: draft({ state: { summary: large, evidence: [] } }), userSessionId, agentSessionId: null,
       sender: "orchestrator", recipient: "orchestrator", profileId: "main", generation: 0, trigger: "rotation", checkpoint: false });
     h.repo.insertCheckpointHandoff(prepared.row);
-    expect(prepared.row.overflow).toBe(true);
     const first = service.read(prepared.row.id, "core", undefined, 512);
     expect(Buffer.byteLength(first.content)).toBeLessThanOrEqual(512);
     expect(first.nextCursor).not.toBeNull();

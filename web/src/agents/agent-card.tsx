@@ -86,14 +86,6 @@ export function AgentCard({
         <span>
           {taskCount} task{taskCount === 1 ? "" : "s"}
         </span>
-        {session.phase === "planning" && (
-          <Badge
-            variant="outline"
-            className="px-1 py-0 text-3xs uppercase text-status-waiting"
-          >
-            planning
-          </Badge>
-        )}
         {/* The overwhelmingly common case (a top-level hub) stays unbadged. */}
         {(session.pattern !== "hub_and_spoke" || session.parentAgentSessionId !== null) && (
           <Badge variant="outline" className="px-1 py-0 font-mono text-3xs lowercase">

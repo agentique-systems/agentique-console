@@ -36,8 +36,7 @@ describe("termination policy e2e (fake SDK)", () => {
     h.config.patternHandoffCap = 3;
     const userSessionId = h.addUserSession();
     const tripped = collectUntil(h.bus, (event) => event.type === "agent_session.termination.tripped", 10_000);
-    const created = h.host.createSession({ userSessionId, title: "budget", mode: "execute",
-      agents: [{ name: "scout", profileId: "explorer" }], briefing });
+    const created = h.host.createSession({ userSessionId, title: "budget", agents: [{ name: "scout", profileId: "explorer" }], briefing });
     const events = await tripped;
     const trip = events.at(-1);
     expect(trip?.payload).toMatchObject({ agentSessionId: created.agentSessionId, pattern: "hub_and_spoke", rule: "max_handoffs" });
@@ -60,8 +59,7 @@ describe("termination policy e2e (fake SDK)", () => {
     h.config.patternStallTurns = 1;
     const userSessionId = h.addUserSession();
     const tripped = collectUntil(h.bus, (event) => event.type === "agent_session.termination.tripped", 10_000);
-    const created = h.host.createSession({ userSessionId, title: "stall", mode: "execute",
-      agents: [{ name: "scout", profileId: "explorer" }], briefing });
+    const created = h.host.createSession({ userSessionId, title: "stall", agents: [{ name: "scout", profileId: "explorer" }], briefing });
     const events = await tripped;
     expect(events.at(-1)?.payload).toMatchObject({ agentSessionId: created.agentSessionId, rule: "stall" });
   });

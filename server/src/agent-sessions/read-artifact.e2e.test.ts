@@ -43,8 +43,7 @@ async function seatWithArtifacts() {
   });
   const userSessionId = h.addUserSession();
   const created = h.host.createSession({
-    userSessionId, title: "artifacts", mode: "execute",
-    agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("observe"),
+    userSessionId, title: "artifacts", agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("observe"),
   });
   await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled", 10_000);
   const tool = h.fake.captured.tools.find((t) => t.name === "read_artifact");

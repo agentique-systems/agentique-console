@@ -43,8 +43,7 @@ describe("retry budget", () => {
     );
     const userSessionId = h.addUserSession();
     h.host.createSession({
-      userSessionId, title: "retry", mode: "execute",
-      agents: [{ name: "scout", profileId: "explorer" }], briefing: briefing("observe"),
+      userSessionId, title: "retry", agents: [{ name: "scout", profileId: "explorer" }], briefing: briefing("observe"),
     });
 
     const events = await collectUntil(h.bus, (event) => event.type === "agent_session.watchdog", 10_000);
@@ -65,8 +64,7 @@ describe("retry budget", () => {
     );
     const userSessionId = h.addUserSession();
     h.host.createSession({
-      userSessionId, title: "retry", mode: "execute",
-      agents: [{ name: "scout", profileId: "explorer" }], briefing: briefing("observe"),
+      userSessionId, title: "retry", agents: [{ name: "scout", profileId: "explorer" }], briefing: briefing("observe"),
     });
     const events = await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled", 10_000);
     expect(events.some((event) => event.type === "agent_session.watchdog")).toBe(false);

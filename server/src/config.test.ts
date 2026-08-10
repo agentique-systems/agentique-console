@@ -7,9 +7,8 @@ describe("loadConfig peer-mesh knobs", () => {
     const config = loadConfig({});
     expect(config.seatIdleReapMs).toBe(300_000);
     expect(config.seatMaxResident).toBe(8);
-    expect(config.seatMaxResidentPerSession).toBe(4);
-    expect(config.sendWakeTimeoutMs).toBe(30_000);
-    expect(config.deliveryHoldLeaseMs).toBe(60_000);
+    expect(config.seatMaxResidentPerTree).toBe(4);
+    expect(config.seatSpawnTimeoutMs).toBe(30_000);
     expect(config.peerNamePrefix).toBe("console-");
   });
 
@@ -17,16 +16,14 @@ describe("loadConfig peer-mesh knobs", () => {
     const config = loadConfig({
       CONSOLE_SEAT_IDLE_REAP_MS: "1000",
       CONSOLE_MAX_RESIDENT_SEATS: "2",
-      CONSOLE_MAX_RESIDENT_SEATS_PER_SESSION: "1",
-      CONSOLE_SEND_WAKE_TIMEOUT_MS: "500",
-      CONSOLE_DELIVERY_HOLD_LEASE_MS: "2000",
-      CONSOLE_PEER_NAME_PREFIX: "lab-",
+      CONSOLE_MAX_RESIDENT_SEATS_PER_TREE: "1",
+      CONSOLE_SEAT_SPAWN_TIMEOUT_MS: "500",
+            CONSOLE_PEER_NAME_PREFIX: "lab-",
     });
     expect(config.seatIdleReapMs).toBe(1000);
     expect(config.seatMaxResident).toBe(2);
-    expect(config.seatMaxResidentPerSession).toBe(1);
-    expect(config.sendWakeTimeoutMs).toBe(500);
-    expect(config.deliveryHoldLeaseMs).toBe(2000);
+    expect(config.seatMaxResidentPerTree).toBe(1);
+    expect(config.seatSpawnTimeoutMs).toBe(500);
     expect(config.peerNamePrefix).toBe("lab-");
   });
 });

@@ -68,8 +68,7 @@ describe("cumulative usage baseline", () => {
     );
     const userSessionId = h.addUserSession();
     const created = h.host.createSession({
-      userSessionId, title: "usage", mode: "execute",
-      agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("observe"),
+      userSessionId, title: "usage", agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("observe"),
     });
     await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled", 10_000);
 
@@ -129,8 +128,7 @@ describe("cumulative usage baseline", () => {
     );
     const userSessionId = h.addUserSession();
     const created = h.host.createSession({
-      userSessionId, title: "usage", mode: "execute",
-      agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("observe"),
+      userSessionId, title: "usage", agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("observe"),
     });
     await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled", 10_000);
     await collectUntil(h.bus, PARKED, 10_000);
@@ -165,8 +163,7 @@ describe("cumulative usage baseline", () => {
     });
     const userSessionId = h.addUserSession();
     const created = h.host.createSession({
-      userSessionId, title: "usage", mode: "execute",
-      agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("observe"),
+      userSessionId, title: "usage", agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("observe"),
     });
     await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled", 10_000);
 

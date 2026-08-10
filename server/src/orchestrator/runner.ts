@@ -457,21 +457,6 @@ export class OrchestratorRunner {
     }
   }
 
-  /**
-   * A turn the CLI started on its own (a peer message draining into the idle
-   * lane): give it console bookends so the timeline pairs started/settled.
-   * Nobody awaits its settle — result/turn-idle events close it normally.
-   */
-  #mintExogenousTurn(sessionId: string, lane: Lane): void {
-    const turnId = newId("turn");
-    this.#deps.bus.append({ type: "user_session.turn.started", userSessionId: sessionId,
-      payload: { sessionId, turnId, trigger: "wake" } });
-    let resolveSettled: () => void = () => undefined;
-    const settled = new Promise<void>((resolve) => { resolveSettled = resolve; });
-    lane.activeTurn = { turnId, trigger: "wake", startedAt: Date.now(), settled, resolve: resolveSettled,
-      outcome: { status: "completed", errorMessage: undefined } };
-    lane.runtime.set("thinking");
-  }
 
   /**
    * The model this session's orchestrator lane runs on. The session's own
@@ -799,7 +784,7 @@ export class OrchestratorRunner {
             turnId: active?.turnId ?? "unattributed",
             callId: event.callId,
             name: event.name,
-            input: bus.capture(event.input, { userSessionId: sessionId }),
+            input: bus.captureSized(event.input, { userSessionId: sessionId }).value,
           },
         });
         return;
@@ -989,7 +974,7 @@ export class OrchestratorRunner {
     this.#deps.repo.patchUserSession(sessionId, { sdkSessionId: null, sdkGeneration: session.sdkGeneration + 1, sdkTurnCount: 0, contextTokens: 0, latestHandoffId: prepared.row.id, cumulativeCostUsd: 0, cumulativeApiDurationMs: 0 });
     this.#deps.bus.append({ type: "user_session.context.rotated", userSessionId: sessionId,
       payload: { sessionId, generation: session.sdkGeneration + 1,
-        reason: session.contextTokens >= Math.ceil(tokenLimit * 0.75) ? "token_limit" : "turn_limit", memoryChars: 0,
+        reason: session.contextTokens >= Math.ceil(tokenLimit * 0.75) ? "token_limit" : "turn_limit",
         handoffId: prepared.row.id, threshold, checkpointBytes: prepared.row.bytes, degraded } });
     this.#deps.bus.append({ type: "user_session.runtime", userSessionId: sessionId,
       payload: { sessionId, detail: `checkpoint ${prepared.row.id} completed in ${Date.now() - started}ms` } });

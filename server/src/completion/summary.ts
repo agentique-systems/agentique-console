@@ -202,9 +202,6 @@ function collectDeviations(window: readonly (typeof events.$inferSelect)[], open
     if (row.type === "agent_session.unreported") {
       out.push("A coordinator went idle without reporting; the Console closed the loop from the journal.");
     }
-    if (row.type === "agent_session.dependency_drift") {
-      out.push("Two seats landed different versions of one dependency.");
-    }
     if (row.type === "handoff.final.blocked") {
       out.push("A final report was withheld while operator questions were open.");
     }

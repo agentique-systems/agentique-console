@@ -18,7 +18,6 @@ export function HandoffCard({ handoff, sender, recipient }: { handoff: HandoffSu
       {handoff.nextAction && <div className="mt-2 text-xs"><ArrowRightIcon className="mr-1 inline size-3.5" />{handoff.nextAction}</div>}
       <div className="mt-2 font-mono text-3xs text-muted-foreground">
         {handoff.evidenceCount} evidence · {handoff.artifactCount} artifacts · {handoff.extensionKind}
-        {handoff.overflow && " · lossless overflow available"}
       </div>
       {handoff.referenceWarnings.length > 0 && (
         <div className="mt-2 text-xs text-status-failed"><CircleAlertIcon className="mr-1 inline size-3.5" />{handoff.referenceWarnings.join("; ")}</div>

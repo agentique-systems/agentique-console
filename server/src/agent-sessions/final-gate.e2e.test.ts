@@ -56,8 +56,7 @@ async function sessionWithOpenQuestion() {
   });
   const userSessionId = h.addUserSession();
   const created = h.host.createSession({
-    userSessionId, title: "lane runner", mode: "execute",
-    agents: [{ name: "check", profileId: "visual-reviewer", owns: [] }],
+    userSessionId, title: "lane runner", agents: [{ name: "check", profileId: "visual-reviewer", owns: [] }],
     briefing: handoff("verify the page"),
   });
   await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled", 10_000);
@@ -137,8 +136,7 @@ describe("final report gate", () => {
     });
     const userSessionId = h.addUserSession();
     h.host.createSession({
-      userSessionId, title: "lane runner", mode: "execute",
-      agents: [{ name: "check", profileId: "visual-reviewer", owns: [] }],
+      userSessionId, title: "lane runner", agents: [{ name: "check", profileId: "visual-reviewer", owns: [] }],
       briefing: handoff("verify"),
     });
     await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled", 10_000);
@@ -168,8 +166,7 @@ describe("final report gate", () => {
     });
     const userSessionId = h.addUserSession();
     h.host.createSession({
-      userSessionId, title: "lane runner", mode: "execute",
-      agents: [{ name: "dev", profileId: "implementer", owns: ["src/a.ts"] }],
+      userSessionId, title: "lane runner", agents: [{ name: "dev", profileId: "implementer", owns: ["src/a.ts"] }],
       briefing: handoff("build"),
     });
     await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled", 10_000);

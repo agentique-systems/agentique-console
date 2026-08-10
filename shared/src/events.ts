@@ -63,7 +63,7 @@ export interface UserTurnSettledPayload {
   durationMs?: number;
 }
 export interface UserContextRotatedPayload {
-  sessionId: string; generation: number; reason: "token_limit" | "turn_limit"; memoryChars: number;
+  sessionId: string; generation: number; reason: "token_limit" | "turn_limit";
   handoffId?: string; threshold?: "soft" | "hard"; checkpointBytes?: number; degraded?: boolean;
 }
 export interface UserRuntimePayload { sessionId: string; detail: string; }
@@ -96,7 +96,6 @@ export interface QuestionAskedPayload {
   source: InteractionSource;
   recommendation?: string;
   allowFreeText: boolean;
-  expiresAt?: string;
 }
 export interface QuestionAnsweredPayload {
   sessionId: string;
@@ -105,8 +104,6 @@ export interface QuestionAnsweredPayload {
   freeText?: Record<string, string>;
   note?: string;
   dismissed?: boolean;
-  /** Resolved by TTL expiry rather than by the operator. */
-  autoTaken?: boolean;
 }
 /**
  * A `final` report was withheld because questions this session put to the
@@ -156,11 +153,9 @@ export interface OperatorDecisionRecordedPayload {
   interactionId?: string;
   /** Seat name, "orchestrator", "main", or "console". */
   askedBy: string;
-  source: "interaction" | "plan_approval" | "ttl_default";
+  source: "interaction" | "plan_approval";
   question: string;
   answer: string;
-  /** Taken on TTL expiry rather than chosen by the operator. */
-  autoTaken?: boolean;
 }
 export interface PlanProposedPayload {
   sessionId: string;
@@ -205,14 +200,6 @@ export interface AgentSessionStatusPayload {
   agentSessionId: string;
   status: AgentSessionStatus;
 }
-/** A session's orchestration pattern, fixed at creation. */
-export interface AgentSessionPatternSelectedPayload {
-  agentSessionId: string;
-  pattern: string;
-  roles: { seat: string; role: string }[];
-  parentAgentSessionId: string | null;
-  depth: number;
-}
 /** A session-level TerminationPolicy bound was hit; the console asks for close-out. */
 export interface AgentSessionTerminationTrippedPayload {
   agentSessionId: string;
@@ -220,17 +207,10 @@ export interface AgentSessionTerminationTrippedPayload {
   rule: string;
   detail: string;
 }
-/** A seat re-posted a received handoff to main verbatim (forward_message). */
-export interface HandoffForwardedPayload {
-  agentSessionId: string;
-  originalId: string;
-  sender: string;
-}
 /** A fan-in met its mode; the held reports flushed to the collector in one turn. */
 export interface AgentSessionJoinCompletedPayload {
   agentSessionId: string;
   joinId: string;
-  mode: string;
   arrived: string[];
   of: number;
   failed: number;
@@ -276,7 +256,6 @@ export interface AgentContextRotatedPayload {
   participant: string;
   generation: number;
   reason: "token_limit" | "turn_limit";
-  memoryChars: number;
   handoffId?: string; threshold?: "soft" | "hard"; checkpointBytes?: number; degraded?: boolean;
 }
 export interface AgentProcessStartedPayload {
@@ -309,10 +288,9 @@ export interface TaskDependencyPayload {
 
 export interface HandoffCreatedPayload {
   handoff: HandoffSummary; sender: string; recipient: string; checkpoint: boolean;
-  bytes: number; softTargetBytes: number;
+  bytes: number;
 }
 export interface HandoffConsumedPayload { handoffId: string; participant: string; mode: "compact" | "expanded"; }
-export interface HandoffRetrievedPayload { handoffId: string; section: "core" | "extension"; bytes: number; nextCursor: string | null; }
 export interface HandoffDiscrepancyPayload { handoffId: string; reporter: string; claim: string; evidence: string; }
 export interface HandoffCheckpointFailedPayload { participant: string; reason: string; threshold: "soft" | "hard"; degraded: boolean; checkFailures?: string[]; }
 /**
@@ -337,19 +315,11 @@ export interface HandoffFinalCaveatsPayload { agentSessionId: string; sender: st
  */
 export interface AgentSessionUnreportedPayload { agentSessionId: string; seatReports: number; hadCoordinatorReport: boolean; }
 
-/**
- * Two seats landed different versions of one dependency. Disjoint file
- * ownership prevents collisions on files, not on shared facts — and neither
- * seat can see the other's diff.
- */
-export interface DependencyDriftPayload { agentSessionId: string; dependency: string; versions: { seat: string; version: string }[]; }
-
 /** The host interrupted a seat turn that was repeating itself without progress. */
 export interface AgentWatchdogPayload {
   agentSessionId: string;
   participant: string;
   turnId: string;
-  /** `retry_budget`: provider back-off consumed the turn's wall-clock budget. */
   kind: "repeat_tool_calls" | "tool_error_streak" | "retry_budget";
   toolName?: string;
   count: number;
@@ -498,12 +468,10 @@ export type ConsoleEvent = Base &
     | { type: "user_session.plan.proposed"; payload: PlanProposedPayload }
     | { type: "user_session.plan.resolved"; payload: PlanResolvedPayload }
     | { type: "agent_session.created"; payload: AgentSessionCreatedPayload }
-    | { type: "agent_session.pattern.selected"; payload: AgentSessionPatternSelectedPayload }
     | { type: "agent_session.termination.tripped"; payload: AgentSessionTerminationTrippedPayload }
     | { type: "agent_session.join.completed"; payload: AgentSessionJoinCompletedPayload }
     | { type: "agent_session.child.spawned"; payload: AgentSessionChildSpawnedPayload }
     | { type: "agent_session.child.reported"; payload: AgentSessionChildReportedPayload }
-    | { type: "handoff.forwarded"; payload: HandoffForwardedPayload }
     | { type: "agent_session.message"; payload: AgentSessionMessagePayload }
     | { type: "agent_session.turn.started"; payload: AgentTurnStartedPayload }
     | { type: "agent_session.turn.settled"; payload: AgentTurnSettledPayload }
@@ -524,7 +492,6 @@ export type ConsoleEvent = Base &
     | { type: "usage.recorded"; payload: UsageRecordedPayload }
     | { type: "handoff.created"; payload: HandoffCreatedPayload }
     | { type: "handoff.consumed"; payload: HandoffConsumedPayload }
-    | { type: "handoff.retrieved"; payload: HandoffRetrievedPayload }
     | { type: "handoff.discrepancy"; payload: HandoffDiscrepancyPayload }
     | { type: "handoff.checkpoint.failed"; payload: HandoffCheckpointFailedPayload }
     | { type: "handoff.checkpoint.transport_failed"; payload: HandoffCheckpointTransportFailedPayload }
@@ -535,7 +502,6 @@ export type ConsoleEvent = Base &
     | { type: "run.signoff.resolved"; payload: RunSignoffResolvedPayload }
     | { type: "run.reopened"; payload: RunReopenedPayload }
     | { type: "agent_session.unreported"; payload: AgentSessionUnreportedPayload }
-    | { type: "agent_session.dependency_drift"; payload: DependencyDriftPayload }
     | { type: "handoff.checkpoint.retried"; payload: HandoffCheckpointRetriedPayload }
     | { type: "agent_session.watchdog"; payload: AgentWatchdogPayload }
     | { type: "governance.tool.denied"; payload: ToolDeniedPayload }

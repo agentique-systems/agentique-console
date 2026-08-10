@@ -72,16 +72,11 @@ export interface EdgeSpec {
   countsRound?: boolean;
 }
 
-export type JoinMode = "all" | "any" | { quorum: number };
-
 export interface JoinSpec {
   id: string;
   /** Role whose terminal reports are collected. */
   over: string;
-  mode: JoinMode;
-  /** What a failed branch does to the join once the mode can no longer be met. */
-  onPartialFailure: "proceed" | "halt_escalate" | "retry_once";
-  /** Role whose held deliveries flush when the join settles. */
+  /** Role whose held deliveries flush when every expected seat has reported. */
   deliverTo: string;
 }
 

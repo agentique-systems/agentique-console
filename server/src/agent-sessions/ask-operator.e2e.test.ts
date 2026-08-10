@@ -51,8 +51,7 @@ async function session() {
   });
   const userSessionId = h.addUserSession();
   const created = h.host.createSession({
-    userSessionId, title: "lane runner", mode: "execute",
-    agents: [{ name: "renderer", profileId: "implementer", owns: ["src/game.js"] }],
+    userSessionId, title: "lane runner", agents: [{ name: "renderer", profileId: "implementer", owns: ["src/game.js"] }],
     briefing: handoff("build the game"),
   });
   await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled", 10_000);

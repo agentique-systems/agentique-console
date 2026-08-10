@@ -28,7 +28,7 @@ describe("pipeline e2e (fake SDK)", () => {
     });
     const userSessionId = h.addUserSession();
     const done = collectUntil(h.bus, (event) => event.type === "flow.result", 15_000);
-    const created = h.host.createSession({ userSessionId, title: "essay", mode: "execute", pattern: "pipeline",
+    const created = h.host.createSession({ userSessionId, title: "essay", pattern: "pipeline",
       agents: [{ name: "draft", profileId: "explorer" }, { name: "edit", profileId: "explorer" }, { name: "polish", profileId: "explorer" }],
       briefing: briefing("write the essay") });
     expect(created.entrySeat).toBe("draft");
@@ -38,9 +38,8 @@ describe("pipeline e2e (fake SDK)", () => {
       "main→draft", "draft→edit", "edit→polish", "polish→main",
     ]);
     expect(events.filter((event) => event.type === "flow.result")).toHaveLength(1);
-    const selected = events.find((event) => event.type === "agent_session.pattern.selected");
-    expect(selected?.payload).toMatchObject({ pattern: "pipeline",
-      roles: [{ seat: "draft", role: "stage.1" }, { seat: "edit", role: "stage.2" }, { seat: "polish", role: "stage.3" }] });
+    expect(h.repo.listParticipants(created.agentSessionId).map((p) => ({ seat: p.name, role: p.patternRole }))).toEqual([
+      { seat: "draft", role: "stage.1" }, { seat: "edit", role: "stage.2" }, { seat: "polish", role: "stage.3" }]);
     const row = h.repo.getAgentSession(created.agentSessionId);
     expect(row && h.host.statusOf(row)).toBe("reported");
   });
@@ -56,7 +55,7 @@ describe("pipeline e2e (fake SDK)", () => {
     const userSessionId = h.addUserSession();
     const denied = collectUntil(h.bus, (event) =>
       event.type === "agent_session.tool.result" && JSON.stringify(event.payload).includes("not allowed"), 15_000);
-    h.host.createSession({ userSessionId, title: "skip", mode: "execute", pattern: "pipeline",
+    h.host.createSession({ userSessionId, title: "skip", pattern: "pipeline",
       agents: [{ name: "draft", profileId: "explorer" }, { name: "edit", profileId: "explorer" }, { name: "polish", profileId: "explorer" }],
       briefing: briefing("go") });
     const events = await denied;
@@ -85,7 +84,7 @@ describe("evaluator_optimizer e2e (fake SDK)", () => {
     });
     const userSessionId = h.addUserSession();
     const done = collectUntil(h.bus, (event) => event.type === "flow.result", 15_000);
-    const created = h.host.createSession({ userSessionId, title: "loop", mode: "execute", pattern: "evaluator_optimizer",
+    const created = h.host.createSession({ userSessionId, title: "loop", pattern: "evaluator_optimizer",
       agents: [{ name: "writer", profileId: "explorer", model: "model-a" }, { name: "critic", profileId: "explorer", model: "model-b" }],
       patternConfig: { rubric: "lead with the finding" },
       briefing: briefing("write it") });
@@ -115,7 +114,7 @@ describe("evaluator_optimizer e2e (fake SDK)", () => {
     });
     const userSessionId = h.addUserSession();
     const tripped = collectUntil(h.bus, (event) => event.type === "agent_session.termination.tripped", 15_000);
-    const created = h.host.createSession({ userSessionId, title: "cap", mode: "execute", pattern: "evaluator_optimizer",
+    const created = h.host.createSession({ userSessionId, title: "cap", pattern: "evaluator_optimizer",
       agents: [{ name: "writer", profileId: "explorer", model: "model-a" }, { name: "critic", profileId: "explorer", model: "model-b" }],
       patternConfig: { maxRounds: 1 },
       briefing: briefing("write it") });
@@ -127,10 +126,8 @@ describe("evaluator_optimizer e2e (fake SDK)", () => {
     const h = makeDelegationHarness(async function* () { yield initMessage(); yield successMessage(); });
     const userSessionId = h.addUserSession();
     const agents = [{ name: "writer", profileId: "explorer", model: "same" }, { name: "critic", profileId: "explorer", model: "same" }];
-    expect(() => h.host.createSession({ userSessionId, title: "collusion", mode: "execute",
-      pattern: "evaluator_optimizer", agents, briefing: briefing("go") })).toThrow(/collude/);
-    const created = h.host.createSession({ userSessionId, title: "allowed", mode: "execute",
-      pattern: "evaluator_optimizer", agents, patternConfig: { requireDistinctModels: false }, briefing: briefing("go") });
+    expect(() => h.host.createSession({ userSessionId, title: "collusion", pattern: "evaluator_optimizer", agents, briefing: briefing("go") })).toThrow(/collude/);
+    const created = h.host.createSession({ userSessionId, title: "allowed", pattern: "evaluator_optimizer", agents, patternConfig: { requireDistinctModels: false }, briefing: briefing("go") });
     expect(created.entrySeat).toBe("writer");
   });
 });
@@ -157,11 +154,11 @@ describe("map_reduce e2e (fake SDK)", () => {
     });
     const userSessionId = h.addUserSession();
     const done = collectUntil(h.bus, (event) => event.type === "flow.result", 15_000);
-    const created = h.host.createSession({ userSessionId, title: "census", mode: "execute", pattern: "map_reduce",
+    const created = h.host.createSession({ userSessionId, title: "census", pattern: "map_reduce",
       agents: [{ name: "collect", profileId: "explorer" }], briefing: briefing("count the birds") });
     const events = await done;
     const join = events.find((event) => event.type === "agent_session.join.completed");
-    expect(join?.payload).toMatchObject({ agentSessionId: created.agentSessionId, mode: "all", of: 2, failed: 0 });
+    expect(join?.payload).toMatchObject({ agentSessionId: created.agentSessionId, of: 2, failed: 0 });
     const rows = h.repo.listMessages("agent", created.agentSessionId).filter((row) => row.kind === "message");
     expect(rows.map((row) => `${row.speakerName}→${row.toName}`)).toEqual([
       "main→collect", "collect→map.1.1", "collect→map.1.2", "map.1.1→collect", "map.1.2→collect", "collect→main",
@@ -188,7 +185,7 @@ describe("debate e2e (fake SDK)", () => {
     });
     const userSessionId = h.addUserSession();
     const done = collectUntil(h.bus, (event) => event.type === "flow.result", 15_000);
-    const created = h.host.createSession({ userSessionId, title: "ship or hold", mode: "execute", pattern: "debate",
+    const created = h.host.createSession({ userSessionId, title: "ship or hold", pattern: "debate",
       agents: [{ name: "optimist", profileId: "explorer" }, { name: "pessimist", profileId: "explorer" }],
       briefing: briefing("should we ship?") });
     const events = await done;
@@ -223,7 +220,7 @@ describe("debate e2e (fake SDK)", () => {
     });
     const userSessionId = h.addUserSession();
     const done = collectUntil(h.bus, (event) => event.type === "flow.result", 15_000);
-    const created = h.host.createSession({ userSessionId, title: "ship or hold", mode: "execute", pattern: "debate",
+    const created = h.host.createSession({ userSessionId, title: "ship or hold", pattern: "debate",
       agents: [{ name: "optimist", profileId: "explorer" }, { name: "pessimist", profileId: "explorer" }],
       briefing: briefing("should we ship?") });
     const events = await done;
@@ -260,7 +257,7 @@ describe("peer_to_peer e2e (fake SDK)", () => {
     });
     const userSessionId = h.addUserSession();
     const tripped = collectUntil(h.bus, (event) => event.type === "agent_session.termination.tripped", 15_000);
-    const created = h.host.createSession({ userSessionId, title: "mesh", mode: "execute", pattern: "peer_to_peer",
+    const created = h.host.createSession({ userSessionId, title: "mesh", pattern: "peer_to_peer",
       agents: [{ name: "lead", profileId: "explorer" }, { name: "alice", profileId: "explorer" }, { name: "bob", profileId: "explorer" }],
       briefing: briefing("figure it out together") });
     const events = await tripped;
@@ -286,7 +283,7 @@ describe("plan_execute e2e (fake SDK)", () => {
     });
     const userSessionId = h.addUserSession();
     const done = collectUntil(h.bus, (event) => event.type === "flow.result", 15_000);
-    const created = h.host.createSession({ userSessionId, title: "widget", mode: "execute", pattern: "plan_execute",
+    const created = h.host.createSession({ userSessionId, title: "widget", pattern: "plan_execute",
       agents: [{ name: "architect", profileId: "explorer" }, { name: "builder", profileId: "explorer" }],
       briefing: briefing("build the widget") });
     await done;

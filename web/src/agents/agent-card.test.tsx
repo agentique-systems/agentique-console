@@ -14,8 +14,6 @@ const SESSION: AgentSession = {
   id: "as_1",
   userSessionId: "us_1",
   title: "wire the strip",
-  mode: "execute",
-  phase: "executing",
   status: "idle",
   pattern: "hub_and_spoke",
   parentAgentSessionId: null,

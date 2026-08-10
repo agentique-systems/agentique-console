@@ -15,7 +15,7 @@
  * MAST puts termination failures at a third of all multi-agent failures;
  * this is deliberately the most over-engineered corner of the pattern work.
  */
-import type { HandoffDraft, JoinMode, Speaker, TerminationPolicy, TopologyContract } from "@agentique-console/shared";
+import type { HandoffDraft, Speaker, TerminationPolicy, TopologyContract } from "@agentique-console/shared";
 import type { AgentProfile } from "../../agent-profiles/registry.ts";
 import { badRequest } from "../../api/errors.ts";
 import type { Config } from "../../config.ts";
@@ -23,6 +23,7 @@ import type { AgentSessionRow, MessageRow, ParticipantRow, Repo } from "../../db
 import type { EventBus } from "../../events/bus.ts";
 import { nowIso } from "../../ids.ts";
 import type { Category } from "../governance.ts";
+import { CONSOLE_SENDER } from "../peer-names.ts";
 import { SEAT_NAME_RE, roleOfSeat } from "../topology.ts";
 
 export interface PatternContext {
@@ -30,8 +31,6 @@ export interface PatternContext {
   // Host-private operations, bound as closures so nothing becomes public.
   contract(session: AgentSessionRow): TopologyContract;
   completionSeat(session: AgentSessionRow, which: "finalFrom" | "voice"): string;
-  /** A speaker with a legal edge to `recipient` — console-voice resolution. */
-  answerSpeaker(session: AgentSessionRow, recipient: string): Speaker;
   post(input: { agentSessionId: string; speaker: Speaker; to: string; handoff: HandoffDraft; category?: Category; dedupeKey?: string }): MessageRow;
   simpleHandoff(action: string, status: HandoffDraft["core"]["status"], summary: string, nextAction: string | null): HandoffDraft;
   /** Deliver every queued row for `recipient` in one minted turn (#deliverConsole). */
@@ -59,8 +58,6 @@ export interface PatternHop {
 /** Runtime state of one fan-in, stored in pattern_state.joins. */
 interface JoinState {
   over: string;
-  mode: JoinMode;
-  onPartialFailure: "proceed" | "halt_escalate" | "retry_once";
   /** Seat name (contract deliverTo roles are single-seat). */
   deliverTo: string;
   expected: string[];
@@ -133,10 +130,11 @@ export function onPatternPost(ctx: PatternContext, session: AgentSessionRow, hop
 }
 
 /**
- * A console-advanced hop: joined fan-in waits for its mode to be met, then
- * one flush delivers every held report in a single minted turn; an unjoined
- * console edge just advances. Late arrivals after settle deliver immediately
- * — stragglers reach the collector, they just don't reopen the join.
+ * A console-advanced hop: a joined fan-in waits until every expected seat has
+ * reported (completed or failed), then one flush delivers every held report
+ * in a single minted turn; an unjoined console edge just advances. Late
+ * arrivals after settle deliver immediately — stragglers reach the collector,
+ * they just don't reopen the join.
  */
 function advanceConsoleHop(ctx: PatternContext, session: AgentSessionRow, hop: PatternHop): void {
   const { repo, bus } = ctx.deps;
@@ -157,27 +155,20 @@ function advanceConsoleHop(ctx: PatternContext, session: AgentSessionRow, hop: P
     // First arrival with no dispatch-registered join (debate): expect every
     // seat the over-role has right now.
     joinId = `${senderRole}#1`;
-    joins[joinId] = { over: senderRole, mode: spec.mode, onPartialFailure: spec.onPartialFailure, deliverTo: hop.recipient,
+    joins[joinId] = { over: senderRole, deliverTo: hop.recipient,
       expected: repo.listParticipants(session.id).filter((seat) => roleOfSeat(seat) === senderRole).map((seat) => seat.name),
       reports: {}, settled: false };
   }
   const join = joins[joinId]!;
   if (hop.status === "completed") join.reports[hop.sender] = "completed";
   else if (hop.status === "failed") join.reports[hop.sender] = "failed";
-  const completed = Object.values(join.reports).filter((status) => status === "completed").length;
   const failed = Object.values(join.reports).filter((status) => status === "failed").length;
-  const allTerminal = join.expected.every((seat) => join.reports[seat] !== undefined);
-  const met = join.mode === "all"
-    ? allTerminal || (failed > 0 && join.onPartialFailure === "halt_escalate")
-    : join.mode === "any"
-      ? completed >= 1 || allTerminal
-      : completed >= join.mode.quorum || allTerminal;
+  const met = join.expected.every((seat) => join.reports[seat] !== undefined);
   if (met) join.settled = true;
   repo.upsertPatternState(session.id, { joins: joins as unknown as Record<string, unknown> });
   if (met) {
     bus.append({ type: "agent_session.join.completed", userSessionId: session.userSessionId, agentSessionId: session.id,
-      payload: { agentSessionId: session.id, joinId, mode: typeof join.mode === "string" ? join.mode : `quorum:${join.mode.quorum}`,
-        arrived: Object.keys(join.reports), of: join.expected.length, failed } });
+      payload: { agentSessionId: session.id, joinId, arrived: Object.keys(join.reports), of: join.expected.length, failed } });
     ctx.deliverNow(session.id, join.deliverTo);
   }
 }
@@ -197,10 +188,10 @@ export interface DispatchWorkItemsInput {
 }
 
 /**
- * Fan-out for a replicable role: mint one seat per work item (the attempts.ts
- * minting shape), register the join so the collector's flush waits for the
- * contract's mode, then post each item as its own assignment. One unsettled
- * dispatch at a time — the join IS the dispatch's lifecycle.
+ * Fan-out for a replicable role: mint one seat per work item, register the
+ * join so the collector's flush waits for every item, then post each item as
+ * its own assignment. One unsettled dispatch at a time — the join IS the
+ * dispatch's lifecycle.
  */
 export function dispatchWorkItems(ctx: PatternContext, session: AgentSessionRow, dispatcher: ParticipantRow, input: DispatchWorkItemsInput): { joinId: string; seats: string[] } {
   const { repo } = ctx.deps;
@@ -235,7 +226,7 @@ export function dispatchWorkItems(ctx: PatternContext, session: AgentSessionRow,
       input.instructions ?? "", input.model, seat.item.owns ?? [], baseOrd + index, now, mapperRole));
   }
   const joinId = `${mapperRole}#${dispatchOrdinal}`;
-  joins[joinId] = { over: mapperRole, mode: spec.mode, onPartialFailure: spec.onPartialFailure,
+  joins[joinId] = { over: mapperRole,
     deliverTo: dispatcher.name, expected: seats.map((seat) => seat.name), reports: {}, settled: false };
   repo.upsertPatternState(session.id, { joins: joins as unknown as Record<string, unknown> });
   for (const seat of seats) {
@@ -293,7 +284,7 @@ export function trip(ctx: PatternContext, session: AgentSessionRow, rule: string
   queueMicrotask(() => {
     try {
       const finalSeat = ctx.completionSeat(session, "finalFrom");
-      ctx.post({ agentSessionId: session.id, speaker: ctx.answerSpeaker(session, finalSeat), to: finalSeat,
+      ctx.post({ agentSessionId: session.id, speaker: { kind: "system", name: CONSOLE_SENDER }, to: finalSeat,
         handoff: ctx.simpleHandoff(`Termination policy tripped: ${rule}`, "blocked",
           `${detail}. This is a Console-imposed bound, not a judgement on the work.`,
           "Compile and send your final report now from what exists; include what is unverified rather than continuing."),

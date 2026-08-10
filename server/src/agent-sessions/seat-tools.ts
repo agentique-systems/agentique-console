@@ -5,7 +5,7 @@
  * callback, so nothing here reaches back into the host.
  */
 import { z } from "zod";
-import type { HandoffDraft, InteractionUrgency, Speaker } from "@agentique-console/shared";
+import { PATTERN_IDS, type HandoffDraft, type InteractionUrgency, type Speaker } from "@agentique-console/shared";
 import type { AgentProfile } from "../agent-profiles/registry.ts";
 import type { Config } from "../config.ts";
 import type { AgentSessionRow, MessageRow, ParticipantRow, Repo, UserSessionRow } from "../db/repo.ts";
@@ -282,8 +282,6 @@ export function buildSeatTools(ctx: SeatToolsContext): unknown[] {
             speaker: { kind: seat.role === "orchestrator" ? "orchestrator" : "agent", name: seat.name },
             to: MAIN_RECIPIENT, handoff: { core: record.core, extension: record.extension },
             category: args.category, dedupeKey: `fwd:${record.metadata.id}` });
-          deps.bus.append({ type: "handoff.forwarded", userSessionId: session.userSessionId, agentSessionId: session.id,
-            payload: { agentSessionId: session.id, originalId: record.metadata.id, sender: seat.name } });
           return ok({ forwarded: true, messageSeq: message.seq, originalId: record.metadata.id, originalSender: record.metadata.sender });
         } catch (error) {
           if (error instanceof WithheldFinalError) {
@@ -449,7 +447,7 @@ export function buildSeatTools(ctx: SeatToolsContext): unknown[] {
     tools.push(sdk.tool("create_child_session",
       "Spawn a child AgentSession running its own orchestration pattern, briefed by you and reporting to you. Its final arrives to you as a milestone; your own final is withheld until every child has reported (or you abandon it). Use a child session when a sub-problem deserves its own topology — a pipeline inside your hub, a debate inside your plan.",
       {
-        pattern: z.enum(["hub_and_spoke", "pipeline", "evaluator_optimizer", "map_reduce", "debate", "peer_to_peer", "plan_execute"]),
+        pattern: z.enum(PATTERN_IDS),
         title: z.string().min(1).describe("Short working title for the child session"),
         patternConfig: z.record(z.string(), z.unknown()).optional(),
         agents: z.array(z.object({

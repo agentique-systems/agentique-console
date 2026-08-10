@@ -45,8 +45,7 @@ async function session() {
   });
   const userSessionId = h.addUserSession();
   const created = h.host.createSession({
-    userSessionId, title: "lane runner", mode: "execute",
-    agents: [{ name: "renderer", profileId: "implementer", owns: ["src/game.js"] }],
+    userSessionId, title: "lane runner", agents: [{ name: "renderer", profileId: "implementer", owns: ["src/game.js"] }],
     briefing: briefing("build the game"),
   });
   await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled", 10_000);
@@ -93,8 +92,7 @@ describe("send_to_coordinator", () => {
     const { h, tool } = await session();
     const other = h.addUserSession();
     const foreign = h.host.createSession({
-      userSessionId: other, title: "elsewhere", mode: "execute",
-      agents: [{ name: "scout", profileId: "explorer" }], briefing: briefing("look"),
+      userSessionId: other, title: "elsewhere", agents: [{ name: "scout", profileId: "explorer" }], briefing: briefing("look"),
     });
 
     const result = await tool!.handler({ agentSessionId: foreign.agentSessionId, ...STEER }, {});

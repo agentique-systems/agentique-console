@@ -38,8 +38,7 @@ function makeWatchdogHarness(scoutTurn: ScoutTurn) {
 async function runFlow(h: ReturnType<typeof makeWatchdogHarness>) {
   const userSessionId = h.addUserSession();
   const done = collectUntil(h.bus, (event) => event.type === "flow.result", 10_000);
-  const created = h.host.createSession({ userSessionId, title: "watchdog", mode: "execute",
-    agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("go", "pending") });
+  const created = h.host.createSession({ userSessionId, title: "watchdog", agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("go", "pending") });
   return { created, events: await done };
 }
 

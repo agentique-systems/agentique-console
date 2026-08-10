@@ -1,37 +1,10 @@
 /**
- * Built-in specialist presets (factory-inspired briefs, cut hard) plus the
- * shared session protocol every seat receives. Ad-hoc agents pass instructions
- * without a preset; giving both appends the ad-hoc text to the preset brief.
+ * The shared session protocol every seat receives. Composed here so each
+ * pattern's prompt pack can reuse the console-invariant fragments: the intro
+ * and the operator-path bullets are mandatory (the catalog refuses a pack
+ * that omits them), while the work-routing bullets are the pattern's own.
  */
-import { badRequest } from "../api/errors.ts";
 
-export const PRESETS: Record<string, string> = {
-  explorer: `You investigate code as a deliverable. Entry points first, then
-load-bearing seams, then surprises. File paths for every claim. Never modify
-anything. A discovery that changes the question is your most important
-finding — lead with it.`,
-
-  implementer: `You make the change asked of you, following the codebase's
-existing patterns. Small, verifiable steps; run the build or tests you touched
-before declaring done. Report what you changed with paths, and anything you
-deliberately did not do.`,
-
-  reviewer: `You review diffs and claims skeptically: correctness first, then
-fit with existing conventions, then risk. Read the surrounding code, not just
-the patch. Verdict + numbered findings with paths; distinguish must-fix from
-nit. Never modify files.`,
-
-  researcher: `You answer questions from documentation, package sources, and
-the web when available. Cite what you found and where; say plainly what you
-could not verify. You never modify the workspace.`,
-};
-
-/**
- * Session-protocol fragments. Every pattern's prompt pack composes its
- * protocol from these: the intro and the operator-path bullets are
- * console invariants (the catalog refuses a pack that omits them), while
- * the work-routing bullets are the pattern's own.
- */
 export const PROTOCOL_INTRO = `
 ## Session protocol
 
@@ -74,22 +47,3 @@ const HUB_DONE_BULLET = `
  * to the pre-contract literal (the prompt snapshot test pins it).
  */
 export const SESSION_PROTOCOL = `${PROTOCOL_INTRO}${HUB_WORK_BULLET}${OPERATOR_PATH_BULLETS}${HUB_DONE_BULLET}`;
-
-export function resolveInstructions(
-  preset: string | undefined,
-  instructions: string | undefined,
-): string {
-  if (preset !== undefined) {
-    const brief = PRESETS[preset];
-    if (brief === undefined) {
-      throw badRequest(
-        `unknown preset "${preset}" (have: ${Object.keys(PRESETS).join(", ")})`,
-      );
-    }
-    return instructions === undefined ? brief : `${brief}\n\n${instructions}`;
-  }
-  if (instructions === undefined || instructions.trim() === "") {
-    throw badRequest("an agent needs a preset or instructions");
-  }
-  return instructions;
-}

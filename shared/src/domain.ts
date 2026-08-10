@@ -74,8 +74,6 @@ export interface AgentSession {
   id: string;
   userSessionId: string;
   title: string;
-  mode: SessionMode;
-  phase: SessionPhase;
   status: AgentSessionStatus;
   /** Orchestration-pattern catalog id (hub_and_spoke, pipeline, …). */
   pattern: string;

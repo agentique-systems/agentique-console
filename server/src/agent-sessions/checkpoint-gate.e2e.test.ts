@@ -57,8 +57,7 @@ async function runToResult(h: ReturnType<typeof makeGateHarness>["h"], contextTo
   until: (event: { type: string }) => boolean) {
   const userSessionId = h.addUserSession();
   const done = collectUntil(h.bus, (event) => until(event), 10_000);
-  const created = h.host.createSession({ userSessionId, title: "gate", mode: "execute",
-    agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("go", "pending") });
+  const created = h.host.createSession({ userSessionId, title: "gate", agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("go", "pending") });
   h.repo.patchParticipant(created.agentSessionId, "scout", { contextTokens, sdkSessionId: "seed" });
   return { created, events: await done };
 }

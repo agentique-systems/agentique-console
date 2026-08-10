@@ -183,7 +183,7 @@ export function foldAgentItems(events: readonly ConsoleEvent[]): AgentItem[] {
 
       case "agent_session.context.rotated":
         items.push({ type: "trace", uid: `context:${event.seq ?? event.payload.generation}`, participant: event.payload.participant,
-          label: "context rotated", detail: `generation ${event.payload.generation} · ${event.payload.reason} · ${event.payload.memoryChars} memory chars` });
+          label: "context rotated", detail: `generation ${event.payload.generation} · ${event.payload.reason}` });
         break;
 
       case "agent_session.process.started":

@@ -33,13 +33,16 @@ function sanitize(part: string): string {
 }
 
 /** Six id chars past the `as_`/`us_` prefix — enough to disambiguate sessions. */
+/**
+ * The Console's own sending identity: console-authored deliveries (operator
+ * answers, close-out asks, parent-final releases) post under this name, which
+ * `#assertRoute` accepts toward any seat. Replaces the old #answerSpeaker
+ * search that impersonated whichever seat happened to have a legal edge.
+ */
+export const CONSOLE_SENDER = "console";
+
 export function sessionSuffix(sessionId: string): string {
   return sessionId.slice(3, 9);
-}
-
-/** The peer name a seat's session process registers under. */
-export function peerNameOf(prefix: string, agentSessionId: string, seat: string): string {
-  return `${sanitize(prefix + seat)}-${sessionSuffix(agentSessionId)}`.slice(0, 64);
 }
 
 /** The peer name of the user session's orchestrator lane. */
@@ -48,15 +51,3 @@ export function mainPeerName(prefix: string, userSessionId: string): string {
 }
 
 
-/** Reverses peerNameOf against a seat list; null if the name is not ours. */
-export function seatOfPeerName(
-  prefix: string,
-  peerName: string,
-  agentSessionId: string,
-  seats: readonly string[],
-): string | null {
-  for (const seat of [...seats, ORCHESTRATOR_SEAT]) {
-    if (peerNameOf(prefix, agentSessionId, seat) === peerName) return seat;
-  }
-  return null;
-}

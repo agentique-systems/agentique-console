@@ -77,8 +77,7 @@ function makeWorld(devStatus: "completed" | "failed", options: { conflict?: bool
 async function runFlow(h: DelegationHarness) {
   const userSessionId = h.addUserSession();
   const done = collectUntil(h.bus, (event) => event.type === "flow.result", 20_000);
-  const created = h.host.createSession({ userSessionId, title: "swt", mode: "execute",
-    agents: [{ name: "dev", profileId: "implementer", owns: ["widget"] }], briefing: handoff("build widget", "pending") });
+  const created = h.host.createSession({ userSessionId, title: "swt", agents: [{ name: "dev", profileId: "implementer", owns: ["widget"] }], briefing: handoff("build widget", "pending") });
   return { created, events: await done };
 }
 
@@ -156,8 +155,7 @@ describe("seat worktree isolation (fake SDK + real git)", () => {
       config: { ...loadConfig({}), autoInitGit: false } } });
     const userSessionId = h.addUserSession();
     const done = collectUntil(h.bus, (event) => event.type === "flow.result", 20_000);
-    h.host.createSession({ userSessionId, title: "plain", mode: "execute",
-      agents: [{ name: "dev", profileId: "implementer", owns: ["src/widget.ts"] }, { name: "scout", profileId: "explorer" }], briefing: handoff("go", "pending") });
+    h.host.createSession({ userSessionId, title: "plain", agents: [{ name: "dev", profileId: "implementer", owns: ["src/widget.ts"] }, { name: "scout", profileId: "explorer" }], briefing: handoff("go", "pending") });
     const events = await done;
     expect(events.some((event) => event.type === "agent_session.worktree.created")).toBe(false);
     const seatOptions = h.fake.captured.options.filter((opts) => {
@@ -181,8 +179,7 @@ describe("seat worktree isolation (fake SDK + real git)", () => {
     (h.config as { seatWorktrees: boolean }).seatWorktrees = false;
     const userSessionId = h.addUserSession();
     const done = collectUntil(h.bus, (event) => event.type === "flow.result", 20_000);
-    h.host.createSession({ userSessionId, title: "off", mode: "execute",
-      agents: [{ name: "dev", profileId: "implementer", owns: ["src/widget.ts"] }], briefing: handoff("go", "pending") });
+    h.host.createSession({ userSessionId, title: "off", agents: [{ name: "dev", profileId: "implementer", owns: ["src/widget.ts"] }], briefing: handoff("go", "pending") });
     const events = await done;
     expect(events.some((event) => event.type === "agent_session.worktree.created")).toBe(false);
   });

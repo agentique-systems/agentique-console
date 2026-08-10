@@ -84,7 +84,7 @@ export const runSummaries = sqliteTable(
     seqTo: integer("seq_to").notNull(),
     verdict: text("verdict", { enum: ["completed", "completed_with_caveats", "failed"] }).notNull(),
     document: text("document", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
-    status: text("status", { enum: ["proposed", "accepted", "changes_requested", "superseded"] })
+    status: text("status", { enum: ["proposed", "accepted", "changes_requested"] })
       .notNull()
       .default("proposed"),
     note: text("note"),
@@ -100,10 +100,6 @@ export const agentSessions = sqliteTable("agent_sessions", {
     .notNull()
     .references(() => userSessions.id),
   title: text("title").notNull(),
-  mode: text("mode", { enum: ["execute", "plan_execute"] }).notNull(),
-  phase: text("phase", { enum: ["planning", "executing"] })
-    .notNull()
-    .default("executing"),
   status: text("status", { enum: ["open", "archived"] })
     .notNull()
     .default("open"),
@@ -133,7 +129,6 @@ export const participants = sqliteTable(
     name: text("name").notNull(),
     role: text("role", { enum: ["orchestrator", "agent"] }).notNull(),
     /** Preset registry key; NULL for ad-hoc agents. */
-    preset: text("preset"),
     /** Resolved brief (preset + ad-hoc extension), verbatim. */
     instructions: text("instructions").notNull(),
     model: text("model"),
@@ -145,18 +140,14 @@ export const participants = sqliteTable(
     ownership: text("ownership", { mode: "json" }).$type<string[]>().notNull().default([]),
     sdkSessionId: text("sdk_session_id"),
     /** Machine-registry address (CLAUDE_CODE_SESSION_NAME); stable across rotations. */
-    peerName: text("peer_name").notNull().default(""),
     /** Last turn activity; park/reap bookkeeping that survives restarts. */
     lastActiveAt: text("last_active_at"),
     generation: integer("generation").notNull().default(0),
     turnCount: integer("turn_count").notNull().default(0),
     contextTokens: integer("context_tokens").notNull().default(0),
-    memory: text("memory").notNull().default(""),
     latestHandoffId: text("latest_handoff_id"),
     checkpointReady: integer("checkpoint_ready", { mode: "boolean" }).notNull().default(true),
-    pendingTurnSeq: integer("pending_turn_seq").notNull().default(0),
     /** Transcript watermark: highest message seq this seat has been shown. */
-    lastSeenSeq: integer("last_seen_seq").notNull().default(0),
     /** See userSessions: the cumulative baseline outlives the lane process. */
     cumulativeCostUsd: real("cumulative_cost_usd").notNull().default(0),
     cumulativeApiDurationMs: integer("cumulative_api_duration_ms").notNull().default(0),
@@ -180,7 +171,7 @@ export const participants = sqliteTable(
 
 
 /**
- * Per-session pattern progression: counters, join arrivals, cursor. Written
+ * Per-session pattern progression: counters and join arrivals. Written
  * only by the pattern-progression module.
  */
 export const patternState = sqliteTable("pattern_state", {
@@ -195,8 +186,6 @@ export const patternState = sqliteTable("pattern_state", {
   lastProgressAt: text("last_progress_at"),
   /** Ring buffer of recent "sender>recipient" hops — oscillation detection. */
   recentEdges: text("recent_edges", { mode: "json" }).$type<string[]>().notNull().default([]),
-  /** Pattern cursor (pipeline stage index, phase marker) — progression-defined. */
-  cursor: text("cursor", { mode: "json" }).$type<Record<string, unknown>>(),
   /** joinId → { expected: seats[], reports: seat → {handoffId, status} }. */
   joins: text("joins", { mode: "json" }).$type<Record<string, unknown>>().notNull().default({}),
   /** Termination reason once tripped; NULL = live. */
@@ -389,7 +378,6 @@ export const mailboxDeliveries = sqliteTable(
       enum: ["queued", "delivered", "acknowledged", "cancelled"],
     }).notNull().default("queued"),
     /** Which carrier moved it: native peer socket, or a console input push. */
-    transport: text("transport", { enum: ["console", "peer"] }).notNull().default("console"),
     dedupeKey: text("dedupe_key"),
     deliveredAt: text("delivered_at"),
     acknowledgedAt: text("acknowledged_at"),
@@ -404,7 +392,6 @@ export const mailboxDeliveries = sqliteTable(
 /** Full payloads live here; event rows contain only a bounded preview + id. */
 export const eventArtifacts = sqliteTable("event_artifacts", {
   id: text("id").primaryKey(),
-  eventSeq: integer("event_seq"),
   workspaceId: text("workspace_id"),
   userSessionId: text("user_session_id"),
   agentSessionId: text("agent_session_id"),
@@ -478,8 +465,6 @@ export const handoffRecords = sqliteTable(
     core: text("core", { mode: "json" }).$type<import("@agentique-console/shared").HandoffCore>().notNull(),
     extension: text("extension", { mode: "json" }).$type<import("@agentique-console/shared").HandoffExtension>().notNull(),
     bytes: integer("bytes").notNull(),
-    softTargetBytes: integer("soft_target_bytes").notNull(),
-    overflow: integer("overflow", { mode: "boolean" }).notNull().default(false),
     referenceWarnings: text("reference_warnings", { mode: "json" }).$type<string[]>().notNull().default([]),
     createdAt: text("created_at").notNull(),
   },

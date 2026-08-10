@@ -13,7 +13,7 @@ import { newId } from "../ids.ts";
 import { pageTail } from "../paging.ts";
 import type { ConsoleSdk, SdkToolResult } from "../sdk/types.ts";
 import type { TaskService } from "../tasks/service.ts";
-import type { HandoffDraft } from "@agentique-console/shared";
+import { PATTERN_IDS, type HandoffDraft, type PatternId } from "@agentique-console/shared";
 import type { HandoffService } from "../handoffs/service.ts";
 import { EvidenceRefSchema, HandoffCoreSchema, HandoffDraftSchema } from "../handoffs/schema.ts";
 
@@ -78,17 +78,10 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
       "Create and immediately launch a Console-managed AgentSession running an orchestration pattern over profile-bound seats. Default pattern hub_and_spoke = one coordinator + 1-20 specialists; pipeline = the agents ARE the stages in order; evaluator_optimizer = exactly 2 agents (generator, evaluator) cycling until accept or the round cap. The Console owns every provider session, mailbox delivery, retry, and event; never call Agent yourself.",
       {
         title: z.string().describe("Short working title for the session"),
-        pattern: z.enum(["hub_and_spoke", "pipeline", "evaluator_optimizer", "map_reduce", "debate", "peer_to_peer", "plan_execute"]).default("hub_and_spoke")
+        pattern: z.enum(PATTERN_IDS).default("hub_and_spoke")
           .describe("Orchestration pattern; the delegation brief's decision tree says when each fits. hub_and_spoke: coordinator + specialists. pipeline: agents ARE the stages in order. evaluator_optimizer: exactly 2 (generator, evaluator). map_reduce: seat ONLY the reducer. debate: 2-8 debaters, judge auto-seated — a single BLIND round: each debater argues once and never sees the others, so seat instructions must not promise rebuttals or exchanges. peer_to_peer: bounded mesh, use rarely. plan_execute: planner + executors over a task DAG."),
         patternConfig: z.record(z.string(), z.unknown()).optional()
-          .describe("Pattern-specific config. evaluator_optimizer: {rubric, maxRounds?, generatorSeat?, requireDistinctModels?}. map_reduce: {join?: \"all\"|\"any\"|{quorum:n}, onPartialFailure?, maxMappers?}. debate: {rubric?, judgeProfileId?, judgeModel?}. peer_to_peer: {closerSeat?, maxHandoffs?, oscillationWindow?}. plan_execute: {plannerSeat?}."),
-        // `plan_execute` is deliberately not offered. Nothing anywhere moved an
-        // AgentSession's phase to `executing`, so every seat in such a session
-        // spawned permissionMode:"plan" forever and implementers never got
-        // write access — a mode the brief recommended and the runtime could not
-        // honour. Planning belongs on the UserSession lane, where the operator
-        // actually is.
-        mode: z.literal("execute").default("execute"),
+          .describe("Pattern-specific config. evaluator_optimizer: {rubric, maxRounds?, generatorSeat?, requireDistinctModels?}. map_reduce: {maxMappers?}. debate: {rubric?, judgeProfileId?, judgeModel?}. peer_to_peer: {closerSeat?, maxHandoffs?, oscillationWindow?}. plan_execute: {plannerSeat?}."),
         agents: z
           .array(
             z.object({
@@ -100,7 +93,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
                 .string()
                 .optional()
                 .describe(
-                  "Ad-hoc brief (required when no preset; appended to the preset otherwise)",
+                  "Seat brief appended to the profile instructions",
                 ),
               model: z.string().optional().describe("Model override"),
               owns: z.array(z.string()).default([]).describe("Files or directories this seat exclusively owns. Required for a seat that writes; leave empty for a read-only seat such as a reviewer — it owns no files."),
@@ -115,8 +108,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
       },
       async (args: {
         title: string;
-        mode: "execute";
-        pattern: "hub_and_spoke" | "pipeline" | "evaluator_optimizer" | "map_reduce" | "debate" | "peer_to_peer" | "plan_execute";
+        pattern: PatternId;
         patternConfig?: Record<string, unknown>;
         agents: {
           name: string;
@@ -131,7 +123,6 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           const { agentSessionId, participants, entrySeat } = host.createSession({
             userSessionId,
             title: args.title,
-            mode: args.mode,
             pattern: args.pattern,
             ...(args.patternConfig ? { patternConfig: args.patternConfig } : {}),
             agents: args.agents,

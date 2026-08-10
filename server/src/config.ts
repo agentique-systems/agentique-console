@@ -41,7 +41,6 @@ export interface Config {
   seatIdleReapMs: number;
   /** Max resident seat processes machine-wide / per agent session. */
   seatMaxResident: number;
-  seatMaxResidentPerSession: number;
   /**
    * How long a seat may sit parked inside `ask_operator` before the Console
    * detaches the wait. The question stays open and answerable; only the held
@@ -61,15 +60,8 @@ export interface Config {
    * stopped growing.
    */
   retryBudgetMs: number;
-  /**
-   * Persist reasoning blocks as artifacts. Off by default: it is more of data
-   * the console already stores in tool inputs, but it is still more.
-   */
-  persistReasoning: boolean;
-  /** How long a SendMessage waits for its recipient to spawn or unpark. */
-  sendWakeTimeoutMs: number;
-  /** Lease on a delivery hold (recipient pinned live) before it self-releases. */
-  deliveryHoldLeaseMs: number;
+  /** How long a delivery waits for its recipient seat to spawn or unpark. */
+  seatSpawnTimeoutMs: number;
   /** Registry namespace for console session names ("console-scout-8fbb2c"). */
   peerNamePrefix: string;
   /** Rotate a participant onto a fresh provider session before the next turn. */
@@ -163,13 +155,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       env.CONSOLE_PROFILES_FILE ?? path.join(dataDir, "profiles.json"),
     seatIdleReapMs: Number(env.CONSOLE_SEAT_IDLE_REAP_MS ?? 300_000),
     seatMaxResident: Number(env.CONSOLE_MAX_RESIDENT_SEATS ?? 8),
-    seatMaxResidentPerSession: Number(env.CONSOLE_MAX_RESIDENT_SEATS_PER_SESSION ?? 4),
     operatorAskDetachMs: Number(env.CONSOLE_OPERATOR_ASK_DETACH_MS ?? 300_000),
     autoInitGit: env.CONSOLE_AUTO_INIT_GIT !== "0",
     retryBudgetMs: Number(env.CONSOLE_RETRY_BUDGET_MS ?? 90_000),
-    persistReasoning: env.CONSOLE_PERSIST_REASONING === "1",
-    sendWakeTimeoutMs: Number(env.CONSOLE_SEND_WAKE_TIMEOUT_MS ?? 30_000),
-    deliveryHoldLeaseMs: Number(env.CONSOLE_DELIVERY_HOLD_LEASE_MS ?? 60_000),
+    seatSpawnTimeoutMs: Number(env.CONSOLE_SEAT_SPAWN_TIMEOUT_MS ?? 30_000),
     peerNamePrefix: env.CONSOLE_PEER_NAME_PREFIX ?? "console-",
     contextTokenLimit: Number(env.CONSOLE_CONTEXT_TOKEN_LIMIT ?? 120_000),
     contextTurnLimit: Number(env.CONSOLE_CONTEXT_TURN_LIMIT ?? 30),
@@ -179,7 +168,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     patternWallClockMs: Number(env.CONSOLE_PATTERN_WALL_CLOCK_MS ?? 0),
     enableChildSessions: env.CONSOLE_CHILD_SESSIONS !== "0",
     maxChildSessionsPerParent: Number(env.CONSOLE_MAX_CHILD_SESSIONS ?? 3),
-    seatMaxResidentPerTree: Number(env.CONSOLE_MAX_RESIDENT_SEATS_PER_TREE ?? env.CONSOLE_MAX_RESIDENT_SEATS_PER_SESSION ?? 4),
+    seatMaxResidentPerTree: Number(env.CONSOLE_MAX_RESIDENT_SEATS_PER_TREE ?? 4),
     allowedDomains: env.CONSOLE_ALLOWED_DOMAINS === undefined
       ? DEFAULT_ALLOWED_DOMAINS
       : env.CONSOLE_ALLOWED_DOMAINS.split(",").map((entry) => entry.trim()).filter((entry) => entry !== ""),

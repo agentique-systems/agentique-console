@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS run_summaries (
   verdict TEXT NOT NULL,
   document TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'proposed'
-    CHECK (status IN ('proposed','accepted','changes_requested','superseded')),
+    CHECK (status IN ('proposed','accepted','changes_requested')),
   note TEXT,
   created_at TEXT NOT NULL,
   resolved_at TEXT
@@ -83,8 +83,6 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
   id TEXT PRIMARY KEY,
   user_session_id TEXT NOT NULL REFERENCES user_sessions(id),
   title TEXT NOT NULL,
-  mode TEXT NOT NULL CHECK (mode IN ('execute','plan_execute')),
-  phase TEXT NOT NULL DEFAULT 'executing' CHECK (phase IN ('planning','executing')),
   status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','archived')),
   -- No CHECK on pattern: the catalog grows, and a table's CHECK cannot widen.
   pattern TEXT NOT NULL DEFAULT 'hub_and_spoke',
@@ -102,23 +100,18 @@ CREATE TABLE IF NOT EXISTS participants (
   agent_session_id TEXT NOT NULL REFERENCES agent_sessions(id),
   name TEXT NOT NULL,
   role TEXT NOT NULL CHECK (role IN ('orchestrator','agent')),
-  preset TEXT,
   instructions TEXT NOT NULL,
   model TEXT,
   profile_id TEXT NOT NULL DEFAULT 'explorer',
   profile_snapshot TEXT NOT NULL DEFAULT '{}',
   ownership TEXT NOT NULL DEFAULT '[]',
   sdk_session_id TEXT,
-  peer_name TEXT NOT NULL DEFAULT '',
   last_active_at TEXT,
   generation INTEGER NOT NULL DEFAULT 0,
   turn_count INTEGER NOT NULL DEFAULT 0,
   context_tokens INTEGER NOT NULL DEFAULT 0,
-  memory TEXT NOT NULL DEFAULT '',
   latest_handoff_id TEXT,
   checkpoint_ready INTEGER NOT NULL DEFAULT 1,
-  pending_turn_seq INTEGER NOT NULL DEFAULT 0,
-  last_seen_seq INTEGER NOT NULL DEFAULT 0,
   -- See user_sessions: the cumulative baseline must outlive the lane process,
   -- because the provider session it belongs to does.
   cumulative_cost_usd REAL NOT NULL DEFAULT 0,
@@ -145,7 +138,6 @@ CREATE TABLE IF NOT EXISTS pattern_state (
   stall_turns INTEGER NOT NULL DEFAULT 0,
   last_progress_at TEXT,
   recent_edges TEXT NOT NULL DEFAULT '[]',
-  cursor TEXT,
   joins TEXT NOT NULL DEFAULT '{}',
   tripped TEXT,
   created_at TEXT NOT NULL,
@@ -274,7 +266,6 @@ CREATE TABLE IF NOT EXISTS mailbox_deliveries (
   recipient TEXT NOT NULL,
   category TEXT NOT NULL CHECK (category IN ('assignment','update','milestone','failure','final','decision')),
   status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued','delivered','acknowledged','cancelled')),
-  transport TEXT NOT NULL DEFAULT 'console' CHECK (transport IN ('console','peer')),
   dedupe_key TEXT,
   delivered_at TEXT,
   acknowledged_at TEXT,
@@ -303,7 +294,6 @@ CREATE INDEX IF NOT EXISTS crons_session ON crons(user_session_id, status);
 
 CREATE TABLE IF NOT EXISTS event_artifacts (
   id TEXT PRIMARY KEY,
-  event_seq INTEGER,
   workspace_id TEXT,
   user_session_id TEXT,
   agent_session_id TEXT,
@@ -369,8 +359,6 @@ CREATE TABLE IF NOT EXISTS handoff_records (
   core TEXT NOT NULL,
   extension TEXT NOT NULL,
   bytes INTEGER NOT NULL,
-  soft_target_bytes INTEGER NOT NULL,
-  overflow INTEGER NOT NULL DEFAULT 0,
   reference_warnings TEXT NOT NULL DEFAULT '[]',
   created_at TEXT NOT NULL
 );

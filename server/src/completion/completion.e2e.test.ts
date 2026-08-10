@@ -52,8 +52,7 @@ function harness() {
 async function runToFinal(h: ReturnType<typeof harness>["h"]) {
   const userSessionId = h.addUserSession();
   const created = h.host.createSession({
-    userSessionId, title: "lane runner", mode: "execute",
-    agents: [{ name: "check", profileId: "visual-reviewer", owns: [] }],
+    userSessionId, title: "lane runner", agents: [{ name: "check", profileId: "visual-reviewer", owns: [] }],
     briefing: draft("verify the page"),
   });
   await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled", 10_000);

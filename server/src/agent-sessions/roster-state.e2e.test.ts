@@ -40,8 +40,7 @@ describe("roster work state (no worktrees)", () => {
     });
     const userSessionId = h.addUserSession();
     const created = h.host.createSession({
-      userSessionId, title: "lane runner", mode: "execute",
-      agents: [
+      userSessionId, title: "lane runner", agents: [
         { name: "renderer", profileId: "implementer", owns: ["src/game.js"] },
         { name: "page", profileId: "implementer", owns: ["index.html", "serve.mjs"] },
       ],
@@ -91,8 +90,7 @@ describe("roster work state (no worktrees)", () => {
     });
     const userSessionId = h.addUserSession();
     const created = h.host.createSession({
-      userSessionId, title: "gated", mode: "execute",
-      agents: [
+      userSessionId, title: "gated", agents: [
         { name: "dev", profileId: "implementer", owns: ["src/app.ts"] },
         { name: "check", profileId: "visual-reviewer", owns: [] },
       ],

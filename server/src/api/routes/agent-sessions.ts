@@ -16,17 +16,6 @@ export function registerAgentSessionRoutes(
         .map((row) => ctx.host.wireSession(row)),
   );
 
-  app.post<{ Params: { id: string; participant: string }; Body: { reason?: string } }>(
-    "/api/agent-sessions/:id/participants/:participant/interrupt",
-    async (request) => {
-      const row = ctx.repo.getAgentSession(request.params.id);
-      if (!row) throw notFound(`no agent session ${request.params.id}`);
-      ctx.host.interruptParticipant(request.params.id, request.params.participant,
-        request.body?.reason?.trim() || "operator interrupt");
-      return { interrupted: request.params.participant };
-    },
-  );
-
   app.get<{ Params: { id: string } }>(
     "/api/agent-sessions/:id",
     async (request) => {
@@ -50,11 +39,6 @@ export function registerAgentSessionRoutes(
       };
     },
   );
-
-  app.get<{ Querystring: { workspaceId?: string } }>("/api/agent-profiles", async (request) => ({
-    availability: ctx.host.runtimeAvailability(),
-    profiles: ctx.host.profiles(request.query.workspaceId).map(({ id, title, purpose, tools, runtime, sandboxRequired }) => ({ id, title, purpose, tools, runtime, sandboxRequired })),
-  }));
 
   app.get<{ Params: { id: string } }>(
     "/api/agent-sessions/:id/transcript",

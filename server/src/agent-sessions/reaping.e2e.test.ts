@@ -61,8 +61,7 @@ describe("seat park reaps the seat's runtime", () => {
     );
     const userSessionId = h.addUserSession();
     const created = h.host.createSession({
-      userSessionId, title: "reaping", mode: "execute",
-      agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("observe"),
+      userSessionId, title: "reaping", agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("observe"),
     });
 
     await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled", 10_000);
@@ -103,8 +102,7 @@ describe("seat park reaps the seat's runtime", () => {
     );
     const userSessionId = h.addUserSession();
     h.host.createSession({
-      userSessionId, title: "reaping", mode: "execute",
-      agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("observe"),
+      userSessionId, title: "reaping", agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("observe"),
     });
     await collectUntil(
       h.bus,

@@ -18,7 +18,7 @@ import { OPERATOR_PATH_BULLETS, PROTOCOL_INTRO } from "../presets.ts";
 import { hubContract } from "../topology.ts";
 
 export interface BuildAgent {
-  name: string; profileId?: string; preset?: string; instructions?: string; model?: string; owns?: string[];
+  name: string; profileId?: string; instructions?: string; model?: string; owns?: string[];
 }
 export interface BuildInput {
   agents: BuildAgent[];
@@ -39,10 +39,6 @@ export interface BuildResult {
   contract: TopologyContract;
   seats: SeatPlan[];
 }
-
-export const AVAILABLE_PATTERNS = [
-  "hub_and_spoke", "pipeline", "evaluator_optimizer", "map_reduce", "debate", "peer_to_peer", "plan_execute",
-] as const satisfies readonly PatternId[];
 
 export function buildContract(pattern: PatternId, input: BuildInput): BuildResult {
   const result = builderOf(pattern)(input);
@@ -69,15 +65,13 @@ function builderOf(pattern: PatternId): (input: BuildInput) => BuildResult {
     case "debate": return buildDebate;
     case "peer_to_peer": return buildPeerToPeer;
     case "plan_execute": return buildPlanExecute;
-    default:
-      throw badRequest(`pattern "${pattern}" is not in this console's catalog (available: ${AVAILABLE_PATTERNS.join(", ")})`);
   }
 }
 
 function agentSeats(agents: BuildAgent[], patternRole: (index: number) => string, firstOrd: number): SeatPlan[] {
   return agents.map((agent, index) => ({
     name: agent.name, dbRole: "agent" as const, patternRole: patternRole(index),
-    profileId: agent.profileId ?? agent.preset ?? "explorer",
+    profileId: agent.profileId ?? "explorer",
     ...(agent.instructions !== undefined ? { instructions: agent.instructions } : {}),
     ...(agent.model !== undefined ? { model: agent.model } : {}),
     owns: agent.owns ?? [], ord: firstOrd + index,
@@ -188,7 +182,7 @@ function buildEvaluatorOptimizer(input: BuildInput): BuildResult {
   const evaluator = input.agents.find((agent) => agent.name !== generator.name)!;
   if (config.requireDistinctModels) {
     const modelOf = (agent: BuildAgent): string | undefined =>
-      agent.model ?? input.resolveProfile(agent.profileId ?? agent.preset ?? "explorer").model;
+      agent.model ?? input.resolveProfile(agent.profileId ?? "explorer").model;
     const generatorModel = modelOf(generator);
     const evaluatorModel = modelOf(evaluator);
     if (generatorModel !== undefined && generatorModel === evaluatorModel) {
@@ -246,8 +240,6 @@ function buildEvaluatorContract(input: BuildInput, generator: BuildAgent, evalua
 // ── map_reduce ─────────────────────────────────────────────────────────────
 
 const MAP_REDUCE_CONFIG = z.object({
-  join: z.union([z.literal("all"), z.literal("any"), z.object({ quorum: z.number().int().min(1) })]).default("all"),
-  onPartialFailure: z.enum(["proceed", "halt_escalate"]).default("proceed"),
   maxMappers: z.number().int().min(1).max(8).default(8),
 });
 
@@ -281,7 +273,7 @@ function buildMapReduce(input: BuildInput): BuildResult {
         { from: "mapper", to: "reducer", advance: "console", categories: ["update", "milestone", "failure", "decision"] },
         { from: "reducer", to: "main", advance: "router", categories: ["update", "milestone", "failure", "final"] },
       ],
-      joins: [{ id: "map", over: "mapper", mode: config.join, onPartialFailure: config.onPartialFailure, deliverTo: "reducer" }],
+      joins: [{ id: "map", over: "mapper", deliverTo: "reducer" }],
       entry: { role: "reducer", broadcast: false },
       termination: {},
       completion: { finalFrom: "reducer", voice: "reducer" },
@@ -289,7 +281,7 @@ function buildMapReduce(input: BuildInput): BuildResult {
         reducer: {
           addressing: `Address participants by bare name; "main" reaches the Orchestrator. You may address your mappers and "main".`,
           protocol,
-          brief: `You are the REDUCER. Split the briefing into independent work items and fan them out with dispatch_work_items — one item per mapper, runtime-decided width. The Console delivers every mapper report to you in one turn once the join (${typeof config.join === "string" ? config.join : `quorum ${config.join.quorum}`}) is met; synthesize them and report the combined result to "main" with category "final". Do not do the items yourself.`,
+          brief: `You are the REDUCER. Split the briefing into independent work items and fan them out with dispatch_work_items — one item per mapper, runtime-decided width. The Console delivers every mapper report to you in one turn once all have reported; synthesize them and report the combined result to "main" with category "final". Do not do the items yourself.`,
         },
         mapper: {
           addressing: `Address participants by bare name. You may address only your reducer — the seat that dispatched your item.`,
@@ -298,7 +290,7 @@ function buildMapReduce(input: BuildInput): BuildResult {
       },
       routeSummary: `main → ${reducer.name} → mappers → ${reducer.name} → main`,
       limits: { minSeats: 1, maxSeats: 1 },
-      config: { reducerSeat: reducer.name, join: config.join, onPartialFailure: config.onPartialFailure, maxMappers: config.maxMappers },
+      config: { reducerSeat: reducer.name, maxMappers: config.maxMappers },
     },
     seats: agentSeats([reducer], () => "reducer", 0),
   };
@@ -344,7 +336,7 @@ function buildDebate(input: BuildInput): BuildResult {
         { from: "debater", to: "judge", advance: "console", categories: ["update", "milestone", "failure", "decision"] },
         { from: "judge", to: "main", advance: "router", categories: ["update", "milestone", "failure", "final"] },
       ],
-      joins: [{ id: "positions", over: "debater", mode: "all", onPartialFailure: "proceed", deliverTo: "judge" }],
+      joins: [{ id: "positions", over: "debater", deliverTo: "judge" }],
       entry: { role: "debater", broadcast: true },
       termination: {},
       completion: { finalFrom: "judge", voice: "judge" },

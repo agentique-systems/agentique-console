@@ -23,8 +23,7 @@ describe("operator debt (fake SDK)", () => {
       yield successMessage();
     });
     const userSessionId = h.addUserSession();
-    const created = h.host.createSession({ userSessionId, title: "silent", mode: "execute",
-      agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("investigate", "pending") });
+    const created = h.host.createSession({ userSessionId, title: "silent", agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("investigate", "pending") });
     await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled", 10_000);
 
     // A specialist's finding exists in the journal but was never relayed up —
@@ -57,8 +56,7 @@ describe("operator debt (fake SDK)", () => {
       yield successMessage();
     });
     const userSessionId = h.addUserSession();
-    const created = h.host.createSession({ userSessionId, title: "caveats", mode: "execute",
-      agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("investigate", "pending") });
+    const created = h.host.createSession({ userSessionId, title: "caveats", agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("investigate", "pending") });
     await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled", 10_000);
 
     // An assignment nobody has acknowledged: the old gate threw here, which is

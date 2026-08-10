@@ -29,8 +29,7 @@ async function runFlow() {
   });
   const userSessionId = h.addUserSession();
   const done = collectUntil(h.bus, (event) => event.type === "flow.result", 10_000);
-  const created = h.host.createSession({ userSessionId, title: "paging", mode: "execute",
-    agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("observe", "pending") });
+  const created = h.host.createSession({ userSessionId, title: "paging", agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("observe", "pending") });
   await done;
   return { h, created, userSessionId };
 }

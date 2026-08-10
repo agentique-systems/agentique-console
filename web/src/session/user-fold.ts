@@ -293,7 +293,7 @@ export function foldUserItems(events: readonly ConsoleEvent[]): UserItem[] {
         break;
 
       case "user_session.context.rotated":
-        items.push({ type: "runtime", uid: `context:${event.seq ?? event.payload.generation}`, label: "context rotated", detail: `generation ${event.payload.generation} · ${event.payload.reason} · ${event.payload.memoryChars} memory chars` });
+        items.push({ type: "runtime", uid: `context:${event.seq ?? event.payload.generation}`, label: "context rotated", detail: `generation ${event.payload.generation} · ${event.payload.reason}` });
         break;
 
       case "usage.recorded":

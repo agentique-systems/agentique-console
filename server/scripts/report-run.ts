@@ -116,6 +116,17 @@ table(all(
    from events where type in ('user_session.turn.settled', 'agent_session.turn.settled')
    group by 1, 2 order by type, count desc`), ["type", "status", "count"]);
 
+// ── Pattern progression forensics ────────────────────────────────────────────
+heading("Termination trips (agent_session.termination.tripped)");
+table(all(
+  `select json_extract(payload, '$.rule') as rule, json_extract(payload, '$.detail') as detail, count(*) as count
+   from events where type = 'agent_session.termination.tripped' group by 1, 2 order by count desc`), ["rule", "detail", "count"]);
+heading("Joins completed (agent_session.join.completed)");
+table(all(
+  `select json_extract(payload, '$.joinId') as joinId, json_extract(payload, '$.of') as expected,
+     json_extract(payload, '$.failed') as failed, count(*) as count
+   from events where type = 'agent_session.join.completed' group by 1, 2, 3`), ["joinId", "expected", "failed", "count"]);
+
 // ── Rotation + checkpoint gate ───────────────────────────────────────────────
 heading("Context rotations");
 table(all(
@@ -178,7 +189,6 @@ const cpFailed = one(`select count(*) as n from events where type = 'handoff.che
 const cpTransport = one(`select count(*) as n from events where type = 'handoff.checkpoint.transport_failed'`);
 const toMain = one(`select count(*) as n from mailbox_deliveries where recipient = 'main'`);
 const unreported = one(`select count(*) as n from events where type = 'agent_session.unreported'`);
-const drift = one(`select count(*) as n from events where type = 'agent_session.dependency_drift'`);
 const toolSearch = one(`select count(*) as n from events where type in ('agent_session.tool.call','user_session.tool.call')
   and json_extract(payload, '$.name') = 'ToolSearch'`);
 const cliSessions = one(`select count(distinct session_id) as n from provider_entries_v2`);
@@ -194,7 +204,6 @@ table([
   { metric: "checkpoint transport failures", value: num(cpTransport), note: "NON-ZERO MEANS A CONSOLE BUG — the request never reached the model" },
   { metric: "reports to operator", value: num(toMain), note: "zero means the run finished in silence" },
   { metric: "operator debts discharged", value: num(unreported), note: "non-zero means a coordinator left the operator uninformed" },
-  { metric: "dependency drift", value: num(drift), note: "two seats landed different versions of one dependency" },
   { metric: "ToolSearch calls", value: num(toolSearch), note: "tool rediscovery; should be ~0 with alwaysLoad" },
   { metric: "CLI sessions", value: num(cliSessions), note: "cold prompt-cache starts — one per participant is ideal" },
 ], ["metric", "value", "note"]);

@@ -28,8 +28,7 @@ describe("send_handoff (fake SDK)", () => {
       yield successMessage();
     });
     const userSessionId = h.addUserSession();
-    const created = h.host.createSession({ userSessionId, title: "typed", mode: "execute",
-      agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("observe", "pending") });
+    const created = h.host.createSession({ userSessionId, title: "typed", agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("observe", "pending") });
     await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled", 10_000);
 
     // The fake flattens every seat's MCP tools into one list; the coordinator
@@ -68,8 +67,7 @@ describe("send_handoff (fake SDK)", () => {
       yield successMessage();
     });
     const userSessionId = h.addUserSession();
-    h.host.createSession({ userSessionId, title: "typed", mode: "execute",
-      agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("observe", "pending") });
+    h.host.createSession({ userSessionId, title: "typed", agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("observe", "pending") });
     await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled", 10_000);
 
     const tool = h.fake.captured.tools.find((t) => t.name === "send_handoff");

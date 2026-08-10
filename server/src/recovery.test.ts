@@ -33,8 +33,7 @@ describe("recoverInterruptedTurns", () => {
     const { agentSessionId } = h.host.createSession({
       userSessionId,
       title: "Interrupted work",
-      mode: "execute",
-      agents: [{ name: "web", preset: "implementer", owns: ["src/web.ts"] }],
+      agents: [{ name: "web", owns: ["src/web.ts"] }],
     });
     // A live seat (turn.started emitted), then the process dies before the
     // settle — the in-memory lane state vanishes with it.

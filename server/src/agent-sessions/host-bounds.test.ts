@@ -13,9 +13,9 @@ describe("createSession seat bounds", () => {
       yield successMessage({});
     });
     const userSessionId = h.addUserSession();
-    const created = h.host.createSession({ userSessionId, title: "wide bench", mode: "execute", agents: agents(20) });
+    const created = h.host.createSession({ userSessionId, title: "wide bench", agents: agents(20) });
     expect(created.participants).toHaveLength(20);
-    expect(() => h.host.createSession({ userSessionId, title: "too wide", mode: "execute", agents: agents(21) }))
+    expect(() => h.host.createSession({ userSessionId, title: "too wide", agents: agents(21) }))
       .toThrow(/1 to 20/);
   });
 });
@@ -37,8 +37,7 @@ describe("createSession ownership invariant", () => {
     const h = harness();
     const userSessionId = h.addUserSession();
     expect(() => h.host.createSession({
-      userSessionId, title: "unbounded writer", mode: "execute",
-      agents: [{ name: "dev", profileId: "implementer", owns: [] }],
+      userSessionId, title: "unbounded writer", agents: [{ name: "dev", profileId: "implementer", owns: [] }],
     })).toThrow(/writes files, so it must declare what it owns/);
   });
 
@@ -46,8 +45,7 @@ describe("createSession ownership invariant", () => {
     const h = harness();
     const userSessionId = h.addUserSession();
     const created = h.host.createSession({
-      userSessionId, title: "reviewer", mode: "execute",
-      agents: [
+      userSessionId, title: "reviewer", agents: [
         { name: "dev", profileId: "implementer", owns: ["src/game.js"] },
         { name: "check", profileId: "visual-reviewer", owns: [] },
       ],
@@ -61,8 +59,7 @@ describe("createSession ownership invariant", () => {
     const h = harness();
     const userSessionId = h.addUserSession();
     const created = h.host.createSession({
-      userSessionId, title: "scoped reviewer", mode: "execute",
-      agents: [{ name: "scout", profileId: "explorer", owns: ["docs/"] }],
+      userSessionId, title: "scoped reviewer", agents: [{ name: "scout", profileId: "explorer", owns: ["docs/"] }],
     });
     expect(created.participants).toContain("scout");
   });

@@ -51,11 +51,9 @@ describe("forward_message e2e (fake SDK)", () => {
         }
       }
     })();
-    const forwarded = collectUntil(h.bus, (event) => event.type === "handoff.forwarded", 10_000);
-    const created = h.host.createSession({ userSessionId, title: "forward", mode: "execute",
-      agents: [{ name: "scout", profileId: "explorer" }], briefing });
-    const events = await forwarded;
-    expect(events.at(-1)?.payload).toMatchObject({ agentSessionId: created.agentSessionId, sender: "orchestrator", originalId: reportId });
+    const forwarded = collectUntil(h.bus, (event) => event.type === "flow.result", 10_000);
+    const created = h.host.createSession({ userSessionId, title: "forward", agents: [{ name: "scout", profileId: "explorer" }], briefing });
+    await forwarded;
 
     await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled"
       && JSON.stringify(event.payload).includes("orchestrator"), 10_000);

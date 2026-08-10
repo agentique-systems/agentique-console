@@ -46,8 +46,7 @@ describe("nesting e2e (fake SDK)", () => {
     });
     const userSessionId = h.addUserSession();
     const done = collectUntil(h.bus, (event) => event.type === "run.completion.proposed", 20_000);
-    const created = h.host.createSession({ userSessionId, title: "mission", mode: "execute",
-      agents: [{ name: "aux", profileId: "explorer" }], briefing: briefing("run the mission") });
+    const created = h.host.createSession({ userSessionId, title: "mission", agents: [{ name: "aux", profileId: "explorer" }], briefing: briefing("run the mission") });
     const events = await done;
 
     // Parentage and depth are rows, not inference.
@@ -128,8 +127,7 @@ describe("nesting e2e (fake SDK)", () => {
     })();
     const done = collectUntil(h.bus, (event) => event.type === "agent_session.child.reported"
       && (event.payload as { status?: string }).status === "failed", 15_000);
-    const created = h.host.createSession({ userSessionId, title: "mission", mode: "execute",
-      agents: [{ name: "aux", profileId: "explorer" }], briefing: briefing("go") });
+    const created = h.host.createSession({ userSessionId, title: "mission", agents: [{ name: "aux", profileId: "explorer" }], briefing: briefing("go") });
     await done;
     expect(h.repo.getAgentSession(childIdSeen!)?.status).toBe("archived");
     const parentRows = h.repo.listMessages("agent", created.agentSessionId).filter((row) => row.kind === "message");
@@ -153,8 +151,7 @@ describe("nesting e2e (fake SDK)", () => {
     });
     const userSessionId = h.addUserSession();
     const spawned = collectUntil(h.bus, (event) => event.type === "agent_session.child.spawned", 15_000);
-    const created = h.host.createSession({ userSessionId, title: "mission", mode: "execute",
-      agents: [{ name: "aux", profileId: "explorer" }], briefing: briefing("go") });
+    const created = h.host.createSession({ userSessionId, title: "mission", agents: [{ name: "aux", profileId: "explorer" }], briefing: briefing("go") });
     const events = await spawned;
     const childId = (events.at(-1)?.payload as { childAgentSessionId: string }).childAgentSessionId;
     // The parent vanishes across a "restart"; the sweep reaps the stray child.

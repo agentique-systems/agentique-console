@@ -38,8 +38,7 @@ describe("catalog-derived rotation limits", () => {
     const h = makeFlowHarness();
     const userSessionId = h.addUserSession();
     const done = collectUntil(h.bus, (event) => event.type === "agent_session.context.rotated", 10_000);
-    const created = h.host.createSession({ userSessionId, title: "rotate", mode: "execute",
-      agents: [{ name: "scout", profileId: "explorer", model: "mystery-model" }], briefing: handoff("go", "pending") });
+    const created = h.host.createSession({ userSessionId, title: "rotate", agents: [{ name: "scout", profileId: "explorer", model: "mystery-model" }], briefing: handoff("go", "pending") });
     h.repo.patchParticipant(created.agentSessionId, "scout", { contextTokens: 70_000 });
     const events = await done;
     const rotated = events.filter((event) => event.type === "agent_session.context.rotated");
@@ -51,8 +50,7 @@ describe("catalog-derived rotation limits", () => {
     const h = makeFlowHarness();
     const userSessionId = h.addUserSession();
     const done = collectUntil(h.bus, (event) => event.type === "flow.result", 10_000);
-    const created = h.host.createSession({ userSessionId, title: "no-rotate", mode: "execute",
-      agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("go", "pending") });
+    const created = h.host.createSession({ userSessionId, title: "no-rotate", agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("go", "pending") });
     h.repo.patchParticipant(created.agentSessionId, "scout", { contextTokens: 70_000 });
     const events = await done;
     expect(events.some((event) => event.type === "agent_session.context.rotated")).toBe(false);

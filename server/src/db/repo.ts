@@ -60,8 +60,6 @@ export function toWireAgentSession(
     id: row.id,
     userSessionId: row.userSessionId,
     title: row.title,
-    mode: row.mode,
-    phase: row.phase,
     status: row.status === "archived" ? "archived" : working ? "working" : "idle",
     pattern: row.pattern,
     parentAgentSessionId: row.parentAgentSessionId,
@@ -158,7 +156,6 @@ export class Repo {
     agentSessionId: string;
     recipient: string;
     category: MailboxDeliveryRow["category"];
-    transport?: MailboxDeliveryRow["transport"];
     dedupeKey?: string;
   }): { message: MessageRow; delivery: MailboxDeliveryRow } {
     const run = this.#sqlite.transaction(() => {
@@ -172,7 +169,6 @@ export class Repo {
         recipient: input.recipient,
         category: input.category,
         status: "queued",
-        transport: input.transport ?? "console",
         dedupeKey: input.dedupeKey ?? null,
         deliveredAt: null,
         acknowledgedAt: null,
@@ -190,7 +186,6 @@ export class Repo {
     agentSessionId: string;
     recipient: string;
     category: MailboxDeliveryRow["category"];
-    transport?: MailboxDeliveryRow["transport"];
     handoff: HandoffRecordRow;
     summary: HandoffSummary;
     dedupeKey?: string;
@@ -350,7 +345,7 @@ export class Repo {
    * it. The one legitimate reset — rotation requeueing a delivery — passes
    * `deliveredAt: null` explicitly and is honoured.
    */
-  patchDelivery(id: string, patch: Partial<Pick<MailboxDeliveryRow, "status" | "transport" | "deliveredAt" | "acknowledgedAt">>): void {
+  patchDelivery(id: string, patch: Partial<Pick<MailboxDeliveryRow, "status" | "deliveredAt" | "acknowledgedAt">>): void {
     const preserveDelivered = patch.deliveredAt !== undefined && patch.deliveredAt !== null;
     this.#db.update(mailboxDeliveries)
       .set(preserveDelivered
@@ -469,7 +464,7 @@ export class Repo {
   patchUserSession(
     id: string,
     patch: Partial<
-      Pick<UserSessionRow, "title" | "mode" | "phase" | "status" | "subjectKey" | "sdkSessionId" | "sdkGeneration" | "sdkTurnCount" | "contextTokens" | "memory" | "latestHandoffId" | "cumulativeCostUsd" | "cumulativeApiDurationMs" | "runState" | "runBaseCommit" | "model">
+      Pick<UserSessionRow, "title" | "mode" | "phase" | "status" | "subjectKey" | "sdkSessionId" | "sdkGeneration" | "sdkTurnCount" | "contextTokens" | "memory" |  "latestHandoffId" | "cumulativeCostUsd" | "cumulativeApiDurationMs" | "runState" | "runBaseCommit" | "model">
     >,
   ): void {
     this.#db
@@ -540,7 +535,7 @@ export class Repo {
     if (!existing) {
       const row: PatternStateRow = {
         agentSessionId, rounds: 0, handoffCount: 0, stallTurns: 0, lastProgressAt: null,
-        recentEdges: [], cursor: null, joins: {}, tripped: null, createdAt: now, updatedAt: now,
+        recentEdges: [], joins: {}, tripped: null, createdAt: now, updatedAt: now,
         ...patch,
       };
       this.#db.insert(patternState).values(row).run();
@@ -607,7 +602,7 @@ export class Repo {
   patchAgentSession(
     id: string,
     patch: Partial<
-      Pick<AgentSessionRow, "phase" | "status">
+      Pick<AgentSessionRow, "status">
     >,
   ): void {
     this.#db
@@ -651,11 +646,11 @@ export class Repo {
     agentSessionId: string,
     name: string,
     patch: Partial<Pick<ParticipantRow,
-      "lastSeenSeq" | "pendingTurnSeq" | "sdkSessionId" | "generation" |
+      "sdkSessionId" | "generation" |
       "turnCount" | "contextTokens" | "profileSnapshot" | "profileId"
-      | "memory" | "latestHandoffId" | "checkpointReady"
+      |  "latestHandoffId" | "checkpointReady"
       | "worktreePath" | "worktreeBaseCommit" | "worktreeBranch"
-      | "peerName" | "lastActiveAt" | "cumulativeCostUsd" | "cumulativeApiDurationMs" | "lastDecisionAt"
+      | "lastActiveAt" | "cumulativeCostUsd" | "cumulativeApiDurationMs" | "lastDecisionAt"
     >>,
   ): void {
     this.#db

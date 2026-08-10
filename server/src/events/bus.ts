@@ -68,10 +68,6 @@ export class EventBus {
   }
 
   /** Keep event rows bounded without losing the authoritative payload. */
-  capture(value: unknown, scope: { workspaceId?: string; userSessionId?: string; agentSessionId?: string } = {}): unknown {
-    return this.captureSized(value, scope).value;
-  }
-
   captureSized(value: unknown, scope: { workspaceId?: string; userSessionId?: string; agentSessionId?: string } = {}): { value: unknown; bytes: number } {
     let serialized: string;
     try { serialized = JSON.stringify(value) ?? "null"; } catch { serialized = JSON.stringify({ unserializable: true }); }
@@ -84,7 +80,7 @@ export class EventBus {
   storeArtifact(content: string, mediaType: string, scope: { workspaceId?: string; userSessionId?: string; agentSessionId?: string } = {}): { artifactId: string; bytes: number } {
     const artifactId = newId("artifact");
     const bytes = mediaType.endsWith(";base64") ? Buffer.from(content, "base64").byteLength : Buffer.byteLength(content);
-    this.#db.insert(eventArtifacts).values({ id: artifactId, eventSeq: null, workspaceId: scope.workspaceId ?? null,
+    this.#db.insert(eventArtifacts).values({ id: artifactId, workspaceId: scope.workspaceId ?? null,
       userSessionId: scope.userSessionId ?? null, agentSessionId: scope.agentSessionId ?? null,
       mediaType, bytes, content, createdAt: nowIso() }).run();
     return { artifactId, bytes };
