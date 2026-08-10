@@ -64,7 +64,7 @@ export interface UserTurnSettledPayload {
 }
 export interface UserContextRotatedPayload {
   sessionId: string; generation: number; reason: "token_limit" | "turn_limit";
-  handoffId?: string; threshold?: "soft" | "hard"; checkpointBytes?: number; degraded?: boolean;
+  handoffId?: string; checkpointBytes?: number; degraded?: boolean;
 }
 export interface UserRuntimePayload { sessionId: string; detail: string; }
 export interface ToolCallPayload {
@@ -256,7 +256,7 @@ export interface AgentContextRotatedPayload {
   participant: string;
   generation: number;
   reason: "token_limit" | "turn_limit";
-  handoffId?: string; threshold?: "soft" | "hard"; checkpointBytes?: number; degraded?: boolean;
+  handoffId?: string; checkpointBytes?: number; degraded?: boolean;
 }
 export interface AgentProcessStartedPayload {
   agentSessionId: string; participant: string; processId: string;
@@ -292,15 +292,7 @@ export interface HandoffCreatedPayload {
 }
 export interface HandoffConsumedPayload { handoffId: string; participant: string; mode: "compact" | "expanded"; }
 export interface HandoffDiscrepancyPayload { handoffId: string; reporter: string; claim: string; evidence: string; }
-export interface HandoffCheckpointFailedPayload { participant: string; reason: string; threshold: "soft" | "hard"; degraded: boolean; checkFailures?: string[]; }
-/**
- * The checkpoint request never reached the model (a provider 4xx = a console
- * bug). Distinct from `failed` because the response differs: rotation is
- * abandoned and the seat keeps its working context rather than inheriting a
- * reconstruction. A run with any of these has a console defect, not a weak model.
- */
-export interface HandoffCheckpointTransportFailedPayload { participant: string; reason: string; threshold: "soft" | "hard"; }
-
+export interface HandoffCheckpointFailedPayload { participant: string; reason: string; degraded: boolean; }
 /**
  * A `final` reached the operator with work still outstanding. The conditions
  * ride along with the report rather than suppressing it — the operator can
@@ -320,7 +312,7 @@ export interface AgentWatchdogPayload {
   agentSessionId: string;
   participant: string;
   turnId: string;
-  kind: "repeat_tool_calls" | "tool_error_streak" | "retry_budget";
+  kind: "repeat_tool_calls" | "tool_error_streak";
   toolName?: string;
   count: number;
   detail: string;
@@ -373,16 +365,6 @@ export interface SeatWorktreeDiscardedPayload {
   seat: string;
   reason: string;
   artifactId: string | null;
-}
-
-/** A checkpoint draft failed the deterministic quality gate; journal of the retry decision. */
-export interface HandoffCheckpointRetriedPayload {
-  participant: string;
-  threshold: "soft" | "hard";
-  /** The gate failures that triggered (or survived) the retry. */
-  failures: string[];
-  /** "none" while the retry is being issued; the final event records the winner. */
-  accepted: "initial" | "retry" | "none";
 }
 
 export interface TaskCreatedPayload {
@@ -494,7 +476,6 @@ export type ConsoleEvent = Base &
     | { type: "handoff.consumed"; payload: HandoffConsumedPayload }
     | { type: "handoff.discrepancy"; payload: HandoffDiscrepancyPayload }
     | { type: "handoff.checkpoint.failed"; payload: HandoffCheckpointFailedPayload }
-    | { type: "handoff.checkpoint.transport_failed"; payload: HandoffCheckpointTransportFailedPayload }
     | { type: "handoff.final.caveats"; payload: HandoffFinalCaveatsPayload }
     | { type: "handoff.final.blocked"; payload: FinalBlockedPayload }
     | { type: "operator.decision.recorded"; payload: OperatorDecisionRecordedPayload }
@@ -502,7 +483,6 @@ export type ConsoleEvent = Base &
     | { type: "run.signoff.resolved"; payload: RunSignoffResolvedPayload }
     | { type: "run.reopened"; payload: RunReopenedPayload }
     | { type: "agent_session.unreported"; payload: AgentSessionUnreportedPayload }
-    | { type: "handoff.checkpoint.retried"; payload: HandoffCheckpointRetriedPayload }
     | { type: "agent_session.watchdog"; payload: AgentWatchdogPayload }
     | { type: "governance.tool.denied"; payload: ToolDeniedPayload }
     | { type: "agent_session.worktree.created"; payload: SeatWorktreeCreatedPayload }

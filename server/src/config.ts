@@ -54,12 +54,6 @@ export interface Config {
    * in one shared tree.
    */
   autoInitGit: boolean;
-  /**
-   * Wall-clock budget for provider retries within one turn. Past it the Console
-   * interrupts the turn deliberately instead of waiting out a schedule that has
-   * stopped growing.
-   */
-  retryBudgetMs: number;
   /** How long a delivery waits for its recipient seat to spawn or unpark. */
   seatSpawnTimeoutMs: number;
   /** Registry namespace for console session names ("console-scout-8fbb2c"). */
@@ -78,10 +72,8 @@ export interface Config {
    */
   /** Agent-authored handoffs per session before the console asks for a close-out. */
   patternHandoffCap: number;
-  /** Settled turns in a row without a handoff before the stall trip. */
-  patternStallTurns: number;
-  /** Session wall-clock bound in ms; 0 = off. */
-  patternWallClockMs: number;
+  /** Quiet-time stall: unreported session with no hop for this long trips. 0 = off. */
+  patternStallMs: number;
   /** Kill switch for nesting: gates only the create_child_session grant. */
   enableChildSessions: boolean;
   /** Open child sessions one parent may have at a time. */
@@ -157,15 +149,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     seatMaxResident: Number(env.CONSOLE_MAX_RESIDENT_SEATS ?? 8),
     operatorAskDetachMs: Number(env.CONSOLE_OPERATOR_ASK_DETACH_MS ?? 300_000),
     autoInitGit: env.CONSOLE_AUTO_INIT_GIT !== "0",
-    retryBudgetMs: Number(env.CONSOLE_RETRY_BUDGET_MS ?? 90_000),
     seatSpawnTimeoutMs: Number(env.CONSOLE_SEAT_SPAWN_TIMEOUT_MS ?? 30_000),
     peerNamePrefix: env.CONSOLE_PEER_NAME_PREFIX ?? "console-",
     contextTokenLimit: Number(env.CONSOLE_CONTEXT_TOKEN_LIMIT ?? 120_000),
     contextTurnLimit: Number(env.CONSOLE_CONTEXT_TURN_LIMIT ?? 30),
     seatWorktrees: env.CONSOLE_SEAT_WORKTREES !== "0",
     patternHandoffCap: Number(env.CONSOLE_PATTERN_HANDOFF_CAP ?? 40),
-    patternStallTurns: Number(env.CONSOLE_PATTERN_STALL_TURNS ?? 8),
-    patternWallClockMs: Number(env.CONSOLE_PATTERN_WALL_CLOCK_MS ?? 0),
+    patternStallMs: Number(env.CONSOLE_PATTERN_STALL_MS ?? 600_000),
     enableChildSessions: env.CONSOLE_CHILD_SESSIONS !== "0",
     maxChildSessionsPerParent: Number(env.CONSOLE_MAX_CHILD_SESSIONS ?? 3),
     seatMaxResidentPerTree: Number(env.CONSOLE_MAX_RESIDENT_SEATS_PER_TREE ?? 4),

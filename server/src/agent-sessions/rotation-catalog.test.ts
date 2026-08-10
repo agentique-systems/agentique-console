@@ -43,7 +43,7 @@ describe("catalog-derived rotation limits", () => {
     const events = await done;
     const rotated = events.filter((event) => event.type === "agent_session.context.rotated");
     expect(rotated).toHaveLength(1);
-    expect(rotated[0]?.payload).toMatchObject({ participant: "scout", threshold: "hard", reason: "token_limit" });
+    expect(rotated[0]?.payload).toMatchObject({ participant: "scout", reason: "token_limit" });
   });
 
   it("a known seat model keeps the configured 120K limit binding at 70K tokens", async () => {

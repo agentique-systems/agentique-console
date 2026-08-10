@@ -18,12 +18,9 @@ describe("termination engine primitives", () => {
     const config = loadConfig({});
     const hub = effectivePolicy(hubContract(), config);
     expect(hub.maxHandoffs).toBe(config.patternHandoffCap);
-    expect(hub.stallTurns).toBe(config.patternStallTurns);
-    expect(hub.wallClockMs).toBeUndefined(); // default ceiling 0 = off
     expect(hub.oscillationWindow).toBeUndefined();
 
-    const strict = effectivePolicy({ ...hubContract(), termination: { maxHandoffs: 5, wallClockMs: 60_000 } }, config);
+    const strict = effectivePolicy({ ...hubContract(), termination: { maxHandoffs: 5 } }, config);
     expect(strict.maxHandoffs).toBe(5);
-    expect(strict.wallClockMs).toBe(60_000);
   });
 });

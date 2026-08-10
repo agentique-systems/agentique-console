@@ -24,7 +24,6 @@ import type { EventBus } from "../events/bus.ts";
 import { RuntimeBroadcaster } from "../events/runtime.ts";
 import { newId, nowIso } from "../ids.ts";
 import { rotationTokenLimit } from "../model-catalog.ts";
-import { evaluateCheckpointDraft } from "../handoffs/checkpoint-gate.ts";
 import { badRequest, conflict, notFound } from "../api/errors.ts";
 import { mapSdkMessage } from "../sdk/mapping.ts";
 import type {
@@ -904,52 +903,16 @@ export class OrchestratorRunner {
     const session = this.#deps.repo.getUserSession(sessionId);
     if (!session) return;
     const tokenLimit = rotationTokenLimit(this.#deps.config.contextTokenLimit, this.#modelFor(session));
-    const hard = session.sdkTurnCount >= this.#deps.config.contextTurnLimit || session.contextTokens >= tokenLimit;
-    const soft = session.sdkTurnCount >= Math.ceil(this.#deps.config.contextTurnLimit * 0.8) || session.contextTokens >= Math.ceil(tokenLimit * 0.75);
-    if (!soft) return;
-    const threshold = hard ? "hard" as const : "soft" as const;
+    if (session.sdkTurnCount < this.#deps.config.contextTurnLimit && session.contextTokens < tokenLimit) return;
     if (lane.query) await this.#closeLane(lane, { interrupt: false });
     const started = Date.now();
-    let { draft, failure } = await this.#checkpointQuery(session, "");
-    // Deterministic quality gate with one feedback retry (mirrors the seat
-    // rotation path): soft thresholds defer on a gate-failing pair, hard
-    // thresholds accept the better draft and journal it.
-    if (draft) {
-      const gate = (candidate: HandoffDraft) => evaluateCheckpointDraft({ draft: candidate,
-        referenceWarnings: this.#deps.handoffs.referenceWarnings(sessionId, [...candidate.core.state.evidence, ...candidate.core.result.artifacts]),
-        taskResolves: candidate.core.taskId == null ? null : this.#deps.repo.hasDurableReference("task", candidate.core.taskId) });
-      const initialFailures = gate(draft);
-      if (initialFailures.length > 0) {
-        this.#deps.bus.append({ type: "handoff.checkpoint.retried", userSessionId: sessionId,
-          payload: { participant: "orchestrator", threshold, failures: initialFailures, accepted: "none" } });
-        const retry = await this.#checkpointQuery(session,
-          `\n\nA previous checkpoint attempt failed these deterministic checks — fix each one:\n- ${initialFailures.join("\n- ")}`);
-        const retryFailures = retry.draft ? gate(retry.draft) : null;
-        if (retry.draft && retryFailures !== null && retryFailures.length === 0) {
-          draft = retry.draft;
-          this.#deps.bus.append({ type: "handoff.checkpoint.retried", userSessionId: sessionId,
-            payload: { participant: "orchestrator", threshold, failures: [], accepted: "retry" } });
-        } else if (!hard) {
-          this.#deps.bus.append({ type: "handoff.checkpoint.failed", userSessionId: sessionId,
-            payload: { participant: "orchestrator", reason: "checkpoint failed the quality gate", threshold, degraded: false,
-              checkFailures: retryFailures ?? initialFailures } });
-          return;
-        } else {
-          const useRetry = retry.draft !== null && retryFailures !== null && retryFailures.length <= initialFailures.length;
-          draft = useRetry ? retry.draft : draft;
-          this.#deps.bus.append({ type: "handoff.checkpoint.retried", userSessionId: sessionId,
-            payload: { participant: "orchestrator", threshold, failures: useRetry ? retryFailures ?? [] : initialFailures, accepted: useRetry ? "retry" : "initial" } });
-        }
-      }
-    }
-    let degraded = false;
+    // One ungated model attempt over an always-available floor (mirrors the
+    // seat rotation path): a clean checkpoint upgrades the recovery draft, a
+    // bad or failed one costs nothing beyond the degraded marker.
+    const { draft: attempted, failure } = await this.#checkpointQuery(session, "");
+    const degraded = attempted === null;
+    let draft = attempted;
     if (!draft) {
-      if (!hard) {
-        this.#deps.bus.append({ type: "handoff.checkpoint.failed", userSessionId: sessionId,
-          payload: { participant: "orchestrator", reason: failure ?? "checkpoint produced no valid handoff", threshold, degraded: false } });
-        return;
-      }
-      degraded = true;
       const latest = this.#deps.repo.latestHandoff({ userSessionId: sessionId });
       draft = latest ? { core: { ...latest.core, action: `Recovery checkpoint: ${latest.core.action}`, status: "needs_verification", risk: "high", requestExpandedContext: true }, extension: latest.extension }
         : { core: { schemaVersion: 1, taskId: null, status: "needs_verification", risk: "high", action: "Recover orchestrator context",
@@ -957,7 +920,7 @@ export class OrchestratorRunner {
           result: { summary: null, artifacts: [] }, uncertainty: [failure ?? "no valid checkpoint output"], nextAction: "Verify authoritative state before acting.", requestExpandedContext: true },
           extension: { kind: "coordination", data: {} } };
       this.#deps.bus.append({ type: "handoff.checkpoint.failed", userSessionId: sessionId,
-        payload: { participant: "orchestrator", reason: failure ?? "checkpoint produced no valid handoff", threshold, degraded: true } });
+        payload: { participant: "orchestrator", reason: failure ?? "checkpoint produced no valid handoff", degraded: true } });
     }
     // Operator decisions ride the checkpoint into the successor generation.
     // Without this a rotation silently forgets what the operator decided, and
@@ -975,7 +938,7 @@ export class OrchestratorRunner {
     this.#deps.bus.append({ type: "user_session.context.rotated", userSessionId: sessionId,
       payload: { sessionId, generation: session.sdkGeneration + 1,
         reason: session.contextTokens >= Math.ceil(tokenLimit * 0.75) ? "token_limit" : "turn_limit",
-        handoffId: prepared.row.id, threshold, checkpointBytes: prepared.row.bytes, degraded } });
+        handoffId: prepared.row.id, checkpointBytes: prepared.row.bytes, degraded } });
     this.#deps.bus.append({ type: "user_session.runtime", userSessionId: sessionId,
       payload: { sessionId, detail: `checkpoint ${prepared.row.id} completed in ${Date.now() - started}ms` } });
   }

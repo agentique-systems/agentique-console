@@ -90,14 +90,8 @@ export interface TerminationPolicy {
   maxHandoffs?: number;
   /** Pattern rounds: evaluator cycles, debate critique rounds. */
   maxRounds?: number;
-  wallClockMs?: number;
-  costBudgetUsd?: number;
-  /** Settled turns in a row that journaled no terminal report. */
-  stallTurns?: number;
   /** A→B→A→B repeats between one sender/recipient pair before tripping. */
   oscillationWindow?: number;
-  /** Semantic stop: a review-extension verdict of "approved" from this role. */
-  qualityPredicate?: { kind: "review_accept"; role: string };
 }
 
 export interface CompletionSpec {

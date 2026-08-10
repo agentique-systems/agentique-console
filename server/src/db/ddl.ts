@@ -111,7 +111,6 @@ CREATE TABLE IF NOT EXISTS participants (
   turn_count INTEGER NOT NULL DEFAULT 0,
   context_tokens INTEGER NOT NULL DEFAULT 0,
   latest_handoff_id TEXT,
-  checkpoint_ready INTEGER NOT NULL DEFAULT 1,
   -- See user_sessions: the cumulative baseline must outlive the lane process,
   -- because the provider session it belongs to does.
   cumulative_cost_usd REAL NOT NULL DEFAULT 0,
@@ -135,7 +134,6 @@ CREATE TABLE IF NOT EXISTS pattern_state (
   agent_session_id TEXT PRIMARY KEY REFERENCES agent_sessions(id),
   rounds INTEGER NOT NULL DEFAULT 0,
   handoff_count INTEGER NOT NULL DEFAULT 0,
-  stall_turns INTEGER NOT NULL DEFAULT 0,
   last_progress_at TEXT,
   recent_edges TEXT NOT NULL DEFAULT '[]',
   joins TEXT NOT NULL DEFAULT '{}',

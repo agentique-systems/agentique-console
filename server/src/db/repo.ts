@@ -534,7 +534,7 @@ export class Repo {
     const existing = this.getPatternState(agentSessionId);
     if (!existing) {
       const row: PatternStateRow = {
-        agentSessionId, rounds: 0, handoffCount: 0, stallTurns: 0, lastProgressAt: null,
+        agentSessionId, rounds: 0, handoffCount: 0, lastProgressAt: null,
         recentEdges: [], joins: {}, tripped: null, createdAt: now, updatedAt: now,
         ...patch,
       };
@@ -648,7 +648,7 @@ export class Repo {
     patch: Partial<Pick<ParticipantRow,
       "sdkSessionId" | "generation" |
       "turnCount" | "contextTokens" | "profileSnapshot" | "profileId"
-      |  "latestHandoffId" | "checkpointReady"
+      |  "latestHandoffId"
       | "worktreePath" | "worktreeBaseCommit" | "worktreeBranch"
       | "lastActiveAt" | "cumulativeCostUsd" | "cumulativeApiDurationMs" | "lastDecisionAt"
     >>,

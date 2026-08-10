@@ -9,11 +9,10 @@
  *   and oscillation. A trip's ACTION defers a microtask so the in-flight
  *   `post()` returns success first — a trip is never an error and never an
  *   interrupt; running turns finish and the console asks for the close-out.
- * - `onTurnSettled` — the stall counter: settled turns that sent nothing.
- * - `sweep` — the 30s governance sweep: wall-clock and cost bounds.
- *
- * MAST puts termination failures at a third of all multi-agent failures;
- * this is deliberately the most over-engineered corner of the pattern work.
+ * - `sweep` — the 30s governance sweep: the quiet-time stall. Wall-clock time
+ *   since the last hop, not settled-turn counting — a counter that advanced
+ *   only on turn settles froze forever on a fully quiet session, which was
+ *   exactly the failure mode it existed to catch (live run 3's debate).
  */
 import type { HandoffDraft, Speaker, TerminationPolicy, TopologyContract } from "@agentique-console/shared";
 import type { AgentProfile } from "../../agent-profiles/registry.ts";
@@ -35,6 +34,10 @@ export interface PatternContext {
   simpleHandoff(action: string, status: HandoffDraft["core"]["status"], summary: string, nextAction: string | null): HandoffDraft;
   /** Deliver every queued row for `recipient` in one minted turn (#deliverConsole). */
   deliverNow(agentSessionId: string, recipient: string): void;
+  /** Any lane of this session has a turn in flight right now. */
+  hasActivity(agentSessionId: string): boolean;
+  /** The session already delivered its report to main (#statusOf === "reported"). */
+  sessionReported(session: AgentSessionRow): boolean;
   // Seat minting, for replicable roles — the attempts.ts precedent.
   profile(id: string, workspaceId?: string): AgentProfile;
   snapshotProfile(profile: AgentProfile): AgentProfile;
@@ -73,11 +76,7 @@ export function effectivePolicy(contract: TopologyContract, config: Config): Ter
   return {
     ...(fallback(termination.maxHandoffs, config.patternHandoffCap) !== undefined ? { maxHandoffs: fallback(termination.maxHandoffs, config.patternHandoffCap) } : {}),
     ...(termination.maxRounds !== undefined ? { maxRounds: termination.maxRounds } : {}),
-    ...(fallback(termination.wallClockMs, config.patternWallClockMs) !== undefined ? { wallClockMs: fallback(termination.wallClockMs, config.patternWallClockMs) } : {}),
-    ...(termination.costBudgetUsd !== undefined ? { costBudgetUsd: termination.costBudgetUsd } : {}),
-    ...(fallback(termination.stallTurns, config.patternStallTurns) !== undefined ? { stallTurns: fallback(termination.stallTurns, config.patternStallTurns) } : {}),
     ...(termination.oscillationWindow !== undefined ? { oscillationWindow: termination.oscillationWindow } : {}),
-    ...(termination.qualityPredicate !== undefined ? { qualityPredicate: termination.qualityPredicate } : {}),
   };
 }
 
@@ -111,7 +110,7 @@ export function onPatternPost(ctx: PatternContext, session: AgentSessionRow, hop
     recentEdges,
     lastProgressAt: nowIso(),
     ...(countsRound ? { rounds: (state?.rounds ?? 0) + 1 } : {}),
-    ...(hop.consoleSynthesized ? {} : { handoffCount: (state?.handoffCount ?? 0) + 1, stallTurns: 0 }),
+    ...(hop.consoleSynthesized ? {} : { handoffCount: (state?.handoffCount ?? 0) + 1 }),
   });
   const policy = effectivePolicy(ctx.contract(session), ctx.deps.config);
   if (policy.maxHandoffs !== undefined && next.handoffCount >= policy.maxHandoffs) {
@@ -238,36 +237,24 @@ export function dispatchWorkItems(ctx: PatternContext, session: AgentSessionRow,
   return { joinId, seats: seats.map((seat) => seat.name) };
 }
 
-export function onTurnSettled(ctx: PatternContext, session: AgentSessionRow, sawSend: boolean): void {
-  if (sawSend) return; // the handoff itself reset the counter in onPatternPost
-  const { repo } = ctx.deps;
-  const state = repo.getPatternState(session.id);
-  if (state?.tripped) return;
-  const next = repo.upsertPatternState(session.id, { stallTurns: (state?.stallTurns ?? 0) + 1 });
-  const policy = effectivePolicy(ctx.contract(session), ctx.deps.config);
-  if (policy.stallTurns !== undefined && next.stallTurns >= policy.stallTurns) {
-    trip(ctx, session, "stall", `${next.stallTurns} turns have settled without any seat sending a handoff`);
-  }
-}
 
+/**
+ * The 30s quiet-time stall check. An open, unreported session with no hop for
+ * `patternStallMs` and no turn in flight is stalled — every seat has gone
+ * quiet without anyone delivering a result. Trips the same close-out ask as
+ * every other bound. `lastProgressAt` starts at session creation (the first
+ * assignment hop sets it), so a session that never moves at all still trips.
+ */
 export function sweep(ctx: PatternContext, session: AgentSessionRow): void {
-  const { repo } = ctx.deps;
+  const { repo, config } = { repo: ctx.deps.repo, config: ctx.deps.config };
+  if (config.patternStallMs <= 0) return;
   const state = repo.getPatternState(session.id);
   if (state?.tripped) return;
-  const policy = effectivePolicy(ctx.contract(session), ctx.deps.config);
-  if (policy.wallClockMs !== undefined) {
-    const startedAt = Date.parse(session.createdAt);
-    if (Number.isFinite(startedAt) && Date.now() - startedAt >= policy.wallClockMs) {
-      trip(ctx, session, "wall_clock", `the session has run ${Math.round((Date.now() - startedAt) / 60_000)} minutes; the bound is ${Math.round(policy.wallClockMs / 60_000)} minutes`);
-      return;
-    }
-  }
-  if (policy.costBudgetUsd !== undefined) {
-    const spent = repo.listParticipants(session.id).reduce((sum, seat) => sum + seat.cumulativeCostUsd, 0);
-    if (spent >= policy.costBudgetUsd) {
-      trip(ctx, session, "cost_budget", `the session has spent $${spent.toFixed(2)}; the budget is $${policy.costBudgetUsd.toFixed(2)}`);
-    }
-  }
+  if (ctx.sessionReported(session) || ctx.hasActivity(session.id)) return;
+  const last = Date.parse(state?.lastProgressAt ?? session.createdAt);
+  if (!Number.isFinite(last) || Date.now() - last < config.patternStallMs) return;
+  trip(ctx, session, "stall",
+    `no participant has sent a handoff for ${Math.round((Date.now() - last) / 60_000)} minutes and no turn is in flight`);
 }
 
 /**

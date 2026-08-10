@@ -22,7 +22,7 @@ function makeProfile(runtime: Partial<AgentProfile["runtime"]> = {}): AgentProfi
 function makeSeat(over: Partial<ParticipantRow>): ParticipantRow {
   return { agentSessionId: "as1", name: "seat", role: "agent", instructions: "", model: null,
     profileId: "p", profileSnapshot: {}, ownership: [], sdkSessionId: null, lastActiveAt: null,
-    generation: 0, turnCount: 0, contextTokens: 0, latestHandoffId: null, checkpointReady: true,
+    generation: 0, turnCount: 0, contextTokens: 0, latestHandoffId: null,
     cumulativeCostUsd: 0, cumulativeApiDurationMs: 0, lastDecisionAt: null,
     worktreePath: null, worktreeBaseCommit: null, worktreeBranch: null,
     patternRole: null, ord: 1, createdAt: "2026-01-01", ...over };

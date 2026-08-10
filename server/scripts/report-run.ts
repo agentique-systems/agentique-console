@@ -130,10 +130,10 @@ table(all(
 // ── Rotation + checkpoint gate ───────────────────────────────────────────────
 heading("Context rotations");
 table(all(
-  `select type, json_extract(payload, '$.participant') as participant, json_extract(payload, '$.threshold') as threshold,
+  `select type, json_extract(payload, '$.participant') as participant,
      json_extract(payload, '$.degraded') as degraded, count(*) as count
    from events where type in ('user_session.context.rotated', 'agent_session.context.rotated')
-   group by 1, 2, 3, 4`), ["type", "participant", "threshold", "degraded", "count"]);
+   group by 1, 2, 3`), ["type", "participant", "degraded", "count"]);
 heading("Checkpoint gate (handoff.checkpoint.*)");
 table(all(
   `select type, json_extract(payload, '$.participant') as participant, json_extract(payload, '$.accepted') as accepted,
@@ -186,7 +186,6 @@ const sends = one(`select count(*) as n from events where type = 'agent_session.
   and json_extract(payload, '$.name') in ('SendMessage', 'mcp__console_agent__send_handoff')`);
 const rotations = one(`select count(*) as n from events where type = 'agent_session.context.rotated'`);
 const cpFailed = one(`select count(*) as n from events where type = 'handoff.checkpoint.failed'`);
-const cpTransport = one(`select count(*) as n from events where type = 'handoff.checkpoint.transport_failed'`);
 const toMain = one(`select count(*) as n from mailbox_deliveries where recipient = 'main'`);
 const unreported = one(`select count(*) as n from events where type = 'agent_session.unreported'`);
 const toolSearch = one(`select count(*) as n from events where type in ('agent_session.tool.call','user_session.tool.call')
@@ -201,7 +200,6 @@ table([
   // value is that every row means something cannot afford rows that never do.
   { metric: "context rotations", value: num(rotations), note: "spurious rotation is the usual cause of repeated work" },
   { metric: "checkpoints failed", value: num(cpFailed), note: "successor inherited a reconstruction, not its own state" },
-  { metric: "checkpoint transport failures", value: num(cpTransport), note: "NON-ZERO MEANS A CONSOLE BUG — the request never reached the model" },
   { metric: "reports to operator", value: num(toMain), note: "zero means the run finished in silence" },
   { metric: "operator debts discharged", value: num(unreported), note: "non-zero means a coordinator left the operator uninformed" },
   { metric: "ToolSearch calls", value: num(toolSearch), note: "tool rediscovery; should be ~0 with alwaysLoad" },

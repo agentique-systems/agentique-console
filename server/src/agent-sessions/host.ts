@@ -30,7 +30,6 @@ import type { TaskService } from "../tasks/service.ts";
 import type { HandoffService } from "../handoffs/service.ts";
 import { HANDOFF_DRAFT_JSON_SCHEMA, HandoffDraftSchema } from "../handoffs/schema.ts";
 import type { ReapResult } from "../completion/summary.ts";
-import { evaluateCheckpointDraft } from "../handoffs/checkpoint-gate.ts";
 import { CHILD_SENDER_PREFIX, CONSOLE_SENDER } from "./peer-names.ts";
 import {
   finalReportBlockers,
@@ -44,7 +43,7 @@ import {
 import { buildSeatTools, ok, type AskOperatorArgs } from "./seat-tools.ts";
 import { compileContract, contractOfSession, hubContract, roleOfSeat, RESERVED_NAMES, SEAT_NAME_RE, type CompiledContract } from "./topology.ts";
 import { grantedTools, runtimeToolNames, type SeatToolName } from "./grants.ts";
-import { dispatchWorkItems, onPatternPost, onTurnSettled, sweep as patternSweep, type DispatchWorkItemsInput, type PatternContext } from "./patterns/progression.ts";
+import { dispatchWorkItems, onPatternPost, sweep as patternSweep, type DispatchWorkItemsInput, type PatternContext } from "./patterns/progression.ts";
 import { buildContract } from "./patterns/catalog.ts";
 import { mergeHooks } from "../sdk/hooks.ts";
 import { AsyncQueue } from "../async-queue.ts";
@@ -247,8 +246,6 @@ interface SeatLane {
      * Its own controller, so the wait can be cut without killing the lane.
      */
     awaitingOperator: { interactionId: string; since: number; abort: AbortController } | null;
-    /** Cumulative provider back-off this turn; the budget is wall clock, not attempts. */
-    retryMs: number;
     /** Reasoning text, accumulated only when persistence is enabled. */
   } | null;
   /** Console pushes awaiting attribution to the next minted turn. */
@@ -270,6 +267,8 @@ interface SeatLane {
   idleTimer: NodeJS.Timeout | null;
   /** Cumulative settled turns since the last assignment delivery. */
   assignmentTurns: number;
+  /** The turn-budget notice fired for the current assignment (latch). */
+  turnBudgetNotified: boolean;
   lastActiveAt: number;
   lastStatus: "working" | "idle" | null;
 }
@@ -897,8 +896,8 @@ export class AgentSessionHost {
           this.#detachOperatorAsk(lane, `no answer within ${Math.round(limit / 60_000)} minutes; the question stays open`);
         }
       }
-      // Time-based termination bounds (wall clock, cost) live here — they can
-      // trip while every lane is quiet, which is exactly when they matter.
+      // The quiet-time stall lives here — it can trip while every lane is
+      // quiet, which is exactly when it matters.
       for (const session of this.#deps.repo.listOpenAgentSessions()) {
         try { patternSweep(this.#patternCtx(), session); } catch (error) { this.#recordHostFailure(session.id, error); }
       }
@@ -956,6 +955,11 @@ export class AgentSessionHost {
       post: (input) => this.post(input),
       simpleHandoff: (action, status, summary, nextAction) => this.#simpleHandoff(action, status, summary, nextAction),
       deliverNow: (agentSessionId, recipient) => void this.#deliverConsole(agentSessionId, recipient).catch((error) => this.#recordHostFailure(agentSessionId, error)),
+      hasActivity: (agentSessionId) => {
+        for (const lane of this.#seats.get(agentSessionId)?.values() ?? []) if (lane.activeTurn !== null) return true;
+        return false;
+      },
+      sessionReported: (session) => this.#statusOf(session) === "reported",
       profile: (id, workspaceId) => this.#profile(id, workspaceId),
       snapshotProfile: (profile) => this.#snapshotProfile(profile),
       participant: (agentSessionId, name, role, profile, extra, model, ownership, ord, createdAt, patternRole) =>
@@ -1188,7 +1192,7 @@ export class AgentSessionHost {
     return { agentSessionId, name, role, instructions, model: model ?? profile.model ?? null,
       profileId: profile.id, profileSnapshot: profile, ownership, sdkSessionId: null, lastActiveAt: null,
       generation: 0, turnCount: 0,
-      contextTokens: 0, latestHandoffId: null, checkpointReady: true,
+      contextTokens: 0, latestHandoffId: null,
       cumulativeCostUsd: 0, cumulativeApiDurationMs: 0, lastDecisionAt: null,
       worktreePath: null, worktreeBaseCommit: null, worktreeBranch: null,
       patternRole: patternRole ?? null, ord, createdAt };
@@ -1311,7 +1315,7 @@ export class AgentSessionHost {
       lane = { state: "unspawned", input: null, query: null, abort: null, pump: null, ready: null,
         activeTurn: null, pendingDeliveries: [], redeliveryAttempts: new Map(), contextTokens: 0,
         lastCumulative: { costUsd: 0, apiDurationMs: 0 }, rotationGate: null, releaseRotation: null,
-        idleTimer: null, assignmentTurns: 0, lastActiveAt: 0, lastStatus: null };
+        idleTimer: null, assignmentTurns: 0, turnBudgetNotified: false, lastActiveAt: 0, lastStatus: null };
       lanes.set(seat, lane);
     }
     return lane;
@@ -1752,21 +1756,6 @@ export class AgentSessionHost {
                   detail: `watchdog: ${turn.watchdog.errorStreak} consecutive tool errors` });
               }
             }
-          } else if (event.kind === "retry") {
-            // Budget on wall clock. In db-live-2 three bursts each ran to
-            // 10/10 and destroyed their turns after 181s, 173s and 172s of
-            // pure back-off; interrupting at the budget turns those into ~90s
-            // and hands the successor real state instead of an error string.
-            if (turn) {
-              turn.retryMs += event.delayMs;
-              const budget = this.#deps.config.retryBudgetMs;
-              if (turn.retryMs >= budget && turn.watchdog.tripped === null) {
-                this.#tripWatchdog(session, seatName, lane, {
-                  kind: "retry_budget", count: Math.round(turn.retryMs / 1000),
-                  detail: `provider retries consumed ${Math.round(turn.retryMs / 1000)}s of back-off; interrupting rather than waiting out the schedule`,
-                });
-              }
-            }
           } else if (event.kind === "context") {
             lane.contextTokens = Math.max(lane.contextTokens, event.occupancyTokens);
           } else if (event.kind === "result") {
@@ -1793,7 +1782,7 @@ export class AgentSessionHost {
     }
   }
 
-  #tripWatchdog(session: AgentSessionRow, seatName: string, lane: SeatLane, tripped: { kind: "repeat_tool_calls" | "tool_error_streak" | "retry_budget"; detail: string; toolName?: string; count: number }): void {
+  #tripWatchdog(session: AgentSessionRow, seatName: string, lane: SeatLane, tripped: { kind: "repeat_tool_calls" | "tool_error_streak"; detail: string; toolName?: string; count: number }): void {
     const turn = lane.activeTurn;
     if (!turn || turn.watchdog.tripped) return;
     turn.watchdog.tripped = tripped.detail;
@@ -1808,7 +1797,7 @@ export class AgentSessionHost {
     const attributed = deliveries.length > 0 ? deliveries
       : this.#deps.repo.listUnackedDeliveries(session.id, seatName).filter((row) => row.status === "delivered");
     lane.activeTurn = { turnId: newId("turn"), startedAt: Date.now(), deliveries: attributed, sawSend: false,
-      toolStarts: new Map(), lastNarration: "", watchdog: { lastKey: "", identical: 0, errorStreak: 0, tripped: null }, awaitingOperator: null, retryMs: 0 };
+      toolStarts: new Map(), lastNarration: "", watchdog: { lastKey: "", identical: 0, errorStreak: 0, tripped: null }, awaitingOperator: null };
     lane.lastActiveAt = Date.now();
     if (lane.idleTimer) { clearTimeout(lane.idleTimer); lane.idleTimer = null; }
     this.#deps.bus.append({ type: "agent_session.turn.started", userSessionId: session.userSessionId, agentSessionId: session.id,
@@ -1853,14 +1842,10 @@ export class AgentSessionHost {
     }
     const seat = repo.getParticipant(session.id, seatName);
     if (seat) {
-      repo.patchParticipant(session.id, seatName, { turnCount: seat.turnCount + 1, lastActiveAt: nowIso(),
-        ...(turn.sawSend ? {} : { checkpointReady: false }) });
+      repo.patchParticipant(session.id, seatName, { turnCount: seat.turnCount + 1, lastActiveAt: nowIso() });
     }
     lane.assignmentTurns += 1;
     lane.lastActiveAt = Date.now();
-    if (repo.getAgentSession(session.id)?.status === "open") {
-      try { onTurnSettled(this.#patternCtx(), session, turn.sawSend); } catch (error) { this.#recordHostFailure(session.id, error); }
-    }
     if (status === "error" && repo.getAgentSession(session.id)?.status === "open") {
       const target = this.#escalationTarget(session, seatName);
       // A dead turn must hand its successor real state.
@@ -1901,7 +1886,8 @@ export class AgentSessionHost {
       try { this.#carryFanInReport(session, seatName, turn); } catch (error) { this.#recordHostFailure(session.id, error); }
     }
     const profile = seat?.profileSnapshot as AgentProfile | undefined;
-    if (status === "completed" && profile && lane.assignmentTurns === profile.maxTurns + 1 && repo.getAgentSession(session.id)?.status === "open") {
+    if (status === "completed" && profile && lane.assignmentTurns >= profile.maxTurns + 1 && !lane.turnBudgetNotified && repo.getAgentSession(session.id)?.status === "open") {
+      lane.turnBudgetNotified = true;
       const target = this.#escalationTarget(session, seatName);
       this.post({ agentSessionId: session.id, speaker: { kind: seat?.role === "orchestrator" ? "orchestrator" : "agent", name: seatName }, to: target,
         handoff: this.#simpleHandoff("Turn budget exhausted", "blocked",
@@ -1937,7 +1923,7 @@ export class AgentSessionHost {
     if (rows.length === 0) return;
     const messages = rows.map((row) => repo.getMessageById(row.messageId)).filter((row): row is MessageRow => row !== undefined);
     for (const row of rows) this.#patchDelivery(session, row, "delivered");
-    if (rows.some((row) => row.category === "assignment")) lane.assignmentTurns = 0;
+    if (rows.some((row) => row.category === "assignment")) { lane.assignmentTurns = 0; lane.turnBudgetNotified = false; }
     const prompt = this.#composePrompt(session, seatRow, messages);
     if (lane.activeTurn) {
       lane.activeTurn.deliveries.push(...rows);
@@ -2007,9 +1993,7 @@ export class AgentSessionHost {
     const seat = repo.getParticipant(agentSessionId, seatName);
     if (!session || session.status !== "open" || !seat) return;
     const tokenLimit = rotationTokenLimit(config.contextTokenLimit, seat.model ?? config.model);
-    const hard = seat.turnCount >= config.contextTurnLimit || seat.contextTokens >= tokenLimit;
-    const soft = seat.turnCount >= Math.ceil(config.contextTurnLimit * 0.8) || seat.contextTokens >= Math.ceil(tokenLimit * 0.75);
-    if (!soft || (!hard && !seat.checkpointReady)) return;
+    if (seat.turnCount < config.contextTurnLimit && seat.contextTokens < tokenLimit) return;
     lane.state = "rotating";
     lane.rotationGate = new Promise((resolve) => { lane.releaseRotation = resolve; });
     try {
@@ -2018,7 +2002,7 @@ export class AgentSessionHost {
       lane.query?.close?.(); lane.query = null;
       await closing?.catch(() => undefined);
       const sdk = await this.#deps.sdk();
-      const rotated = await this.#rotateNow(session, repo.getParticipant(agentSessionId, seatName) ?? seat, sdk, hard, tokenLimit);
+      const rotated = await this.#rotateNow(session, repo.getParticipant(agentSessionId, seatName) ?? seat, sdk, tokenLimit);
       this.#spawnSeat(session, rotated, lane);
       await lane.ready;
     } finally {
@@ -2135,7 +2119,7 @@ export class AgentSessionHost {
     }
     const freshBlock = unseen.length === 0 ? ""
       : `## New operator decisions since your last delivery\nAuthoritative — these were decided for this whole session, not just for the seat that asked.\n${unseen.map((row) => `- ${renderDecision(row)}`).join("\n")}\n\n`;
-    return `AgentSession ${session.id}: ${session.title}\nYou are ${seat.name}. Participants: ${roster}.\n\n${answersBlock}${freshBlock}Only the following addressed handoffs are new:\n${messages}\n\nTreat handoff claims as historical context; verify risky claims against repository/task/journal evidence during normal work. Act without restating the envelope. Set checkpointReadiness=defer only while state is genuinely unstable.`;
+    return `AgentSession ${session.id}: ${session.title}\nYou are ${seat.name}. Participants: ${roster}.\n\n${answersBlock}${freshBlock}Only the following addressed handoffs are new:\n${messages}\n\nTreat handoff claims as historical context; verify risky claims against repository/task/journal evidence during normal work. Act without restating the envelope.`;
   }
 
   /**
@@ -2270,65 +2254,26 @@ export class AgentSessionHost {
   /**
    * The checkpoint-and-rotate body, run by #maybeRotate under its gate after
    * the seat's process has closed. Returns the successor participant row.
+   *
+   * One ungated model attempt over an always-available floor: the Console's
+   * reconstruction (ownership, ledger, worktree diff, current assignment) is
+   * true by construction, so a clean model checkpoint upgrades it and a bad
+   * or failed one costs nothing. The four-layer gate/retry/threshold
+   * arbitration that used to live here defended against a failure mode
+   * (db-live-1's 13/13 checkpoint 400s) that was a schema bug, fixed and
+   * pinned by assertProviderToolSchema — and it never fired live.
    */
-  async #rotateNow(session: AgentSessionRow, seat: ParticipantRow, sdk: ConsoleSdk, hard: boolean, tokenLimit: number): Promise<ParticipantRow> {
+  async #rotateNow(session: AgentSessionRow, seat: ParticipantRow, sdk: ConsoleSdk, tokenLimit: number): Promise<ParticipantRow> {
     const config = this.#deps.config;
     if (!config || !this.#deps.handoffs) return seat;
-    const threshold = hard ? "hard" as const : "soft" as const;
     const started = Date.now();
     const holder: { query: QueryHandle | null } = { query: null };
-    let { draft, failure } = await this.#checkpointQuery(session, seat, sdk, holder, "");
-    // Deterministic quality gate with one feedback retry: the checkpoint is
-    // the successor's only inheritance, so a structurally weak draft gets one
-    // chance to fix the named failures before the threshold rules decide.
-    if (draft && this.#deps.handoffs) {
-      const gate = (candidate: HandoffDraft) => evaluateCheckpointDraft({ draft: candidate,
-        referenceWarnings: this.#deps.handoffs!.referenceWarnings(session.userSessionId, [...candidate.core.state.evidence, ...candidate.core.result.artifacts]),
-        taskResolves: candidate.core.taskId == null ? null : this.#deps.repo.hasDurableReference("task", candidate.core.taskId) });
-      const initialFailures = gate(draft);
-      if (initialFailures.length > 0) {
-        this.#deps.bus.append({ type: "handoff.checkpoint.retried", userSessionId: session.userSessionId, agentSessionId: session.id,
-          payload: { participant: seat.name, threshold, failures: initialFailures, accepted: "none" } });
-        const retry = await this.#checkpointQuery(session, seat, sdk, holder,
-          `\n\nA previous checkpoint attempt failed these deterministic checks — fix each one:\n- ${initialFailures.join("\n- ")}`);
-        const retryFailures = retry.draft ? gate(retry.draft) : null;
-        if (retry.draft && retryFailures !== null && retryFailures.length === 0) {
-          draft = retry.draft;
-          this.#deps.bus.append({ type: "handoff.checkpoint.retried", userSessionId: session.userSessionId, agentSessionId: session.id,
-            payload: { participant: seat.name, threshold, failures: [], accepted: "retry" } });
-        } else if (!hard) {
-          this.#deps.bus.append({ type: "handoff.checkpoint.failed", userSessionId: session.userSessionId, agentSessionId: session.id,
-            payload: { participant: seat.name, reason: "checkpoint failed the quality gate", threshold, degraded: false,
-              checkFailures: retryFailures ?? initialFailures } });
-          return seat;
-        } else {
-          // Hard threshold: rotation cannot wait — accept the better draft.
-          const useRetry = retry.draft !== null && retryFailures !== null && retryFailures.length <= initialFailures.length;
-          draft = useRetry ? retry.draft : draft;
-          this.#deps.bus.append({ type: "handoff.checkpoint.retried", userSessionId: session.userSessionId, agentSessionId: session.id,
-            payload: { participant: seat.name, threshold, failures: useRetry ? retryFailures ?? [] : initialFailures, accepted: useRetry ? "retry" : "initial" } });
-        }
-      }
-    }
-    let degraded = false;
-    if (!draft) {
-      // A 4xx means the request never reached the model — that is a console
-      // bug, not a model failure, and a fabricated checkpoint would be strictly
-      // worse than the working context we already have. Keep the context.
-      if (isTransportFailure(failure)) {
-        this.#deps.bus.append({ type: "handoff.checkpoint.transport_failed", userSessionId: session.userSessionId, agentSessionId: session.id,
-          payload: { participant: seat.name, reason: failure ?? "checkpoint request failed", threshold } });
-        return seat;
-      }
-      if (!hard) {
-        this.#deps.bus.append({ type: "handoff.checkpoint.failed", userSessionId: session.userSessionId, agentSessionId: session.id,
-          payload: { participant: seat.name, reason: failure ?? "checkpoint produced no valid handoff", threshold, degraded: false } });
-        return seat;
-      }
-      degraded = true;
-      draft = this.#reconstructCheckpoint(session, seat);
+    const { draft: attempted, failure } = await this.#checkpointQuery(session, seat, sdk, holder, "");
+    const degraded = attempted === null;
+    const draft = attempted ?? this.#reconstructCheckpoint(session, seat);
+    if (degraded) {
       this.#deps.bus.append({ type: "handoff.checkpoint.failed", userSessionId: session.userSessionId, agentSessionId: session.id,
-        payload: { participant: seat.name, reason: failure ?? "checkpoint produced no valid handoff", threshold, degraded: true } });
+        payload: { participant: seat.name, reason: failure ?? "checkpoint produced no valid handoff", degraded: true } });
     }
     const prepared = this.#deps.handoffs.prepare({ draft, userSessionId: session.userSessionId, agentSessionId: session.id,
       sender: seat.name, recipient: seat.name, profileId: seat.profileId, generation: seat.generation,
@@ -2338,12 +2283,12 @@ export class AgentSessionHost {
     this.#deps.handoffs.committed(prepared.record);
     // Rotation retires the provider session, so its cumulative baseline retires
     // with it — the successor genuinely starts from zero.
-    this.#deps.repo.patchParticipant(session.id, seat.name, { sdkSessionId: null, generation: seat.generation + 1, turnCount: 0, contextTokens: 0, latestHandoffId: prepared.row.id, checkpointReady: true, cumulativeCostUsd: 0, cumulativeApiDurationMs: 0 });
+    this.#deps.repo.patchParticipant(session.id, seat.name, { sdkSessionId: null, generation: seat.generation + 1, turnCount: 0, contextTokens: 0, latestHandoffId: prepared.row.id, cumulativeCostUsd: 0, cumulativeApiDurationMs: 0 });
     const fresh = this.#deps.repo.getParticipant(session.id, seat.name) ?? seat;
     this.#deps.bus.append({ type: "agent_session.context.rotated", userSessionId: session.userSessionId, agentSessionId: session.id,
       payload: { agentSessionId: session.id, participant: seat.name, generation: seat.generation + 1,
         reason: seat.contextTokens >= Math.ceil(tokenLimit * 0.75) ? "token_limit" : "turn_limit",
-        handoffId: prepared.row.id, threshold, checkpointBytes: prepared.row.bytes, degraded } });
+        handoffId: prepared.row.id, checkpointBytes: prepared.row.bytes, degraded } });
     this.#deps.bus.append({ type: "agent_session.runtime", userSessionId: session.userSessionId, agentSessionId: session.id,
       payload: { agentSessionId: session.id, participant: seat.name, detail: `checkpoint ${prepared.row.id} completed in ${Date.now() - started}ms` } });
     return fresh;

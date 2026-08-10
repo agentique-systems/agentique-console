@@ -146,7 +146,6 @@ export const participants = sqliteTable(
     turnCount: integer("turn_count").notNull().default(0),
     contextTokens: integer("context_tokens").notNull().default(0),
     latestHandoffId: text("latest_handoff_id"),
-    checkpointReady: integer("checkpoint_ready", { mode: "boolean" }).notNull().default(true),
     /** Transcript watermark: highest message seq this seat has been shown. */
     /** See userSessions: the cumulative baseline outlives the lane process. */
     cumulativeCostUsd: real("cumulative_cost_usd").notNull().default(0),
@@ -181,8 +180,6 @@ export const patternState = sqliteTable("pattern_state", {
   rounds: integer("rounds").notNull().default(0),
   /** Non-checkpoint handoffs journaled, session-wide. */
   handoffCount: integer("handoff_count").notNull().default(0),
-  /** Settled turns in a row that journaled no terminal report. */
-  stallTurns: integer("stall_turns").notNull().default(0),
   lastProgressAt: text("last_progress_at"),
   /** Ring buffer of recent "sender>recipient" hops — oscillation detection. */
   recentEdges: text("recent_edges", { mode: "json" }).$type<string[]>().notNull().default([]),

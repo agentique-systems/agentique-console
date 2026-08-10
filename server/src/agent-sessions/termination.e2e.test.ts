@@ -50,17 +50,23 @@ describe("termination policy e2e (fake SDK)", () => {
     expect(h.repo.getPatternState(created.agentSessionId)?.tripped).toBe("max_handoffs");
   });
 
-  it("stalled turns trip after the configured count", async () => {
+  it("a quiet unreported session trips the stall on the sweep", async () => {
     const h = makeDelegationHarness(async function* () {
-      // Every turn settles without sending anything — the definition of stall.
+      // The seat settles its turn without sending anything, then everything
+      // goes quiet — the wedge shape the settle-counting stall could not see.
       yield initMessage();
       yield successMessage();
     });
-    h.config.patternStallTurns = 1;
+    h.config.patternStallMs = 1;
     const userSessionId = h.addUserSession();
     const tripped = collectUntil(h.bus, (event) => event.type === "agent_session.termination.tripped", 10_000);
     const created = h.host.createSession({ userSessionId, title: "stall", agents: [{ name: "scout", profileId: "explorer" }], briefing });
-    const events = await tripped;
-    expect(events.at(-1)?.payload).toMatchObject({ agentSessionId: created.agentSessionId, rule: "stall" });
+    h.host.startGovernanceSweep(10);
+    try {
+      const events = await tripped;
+      expect(events.at(-1)?.payload).toMatchObject({ agentSessionId: created.agentSessionId, rule: "stall" });
+    } finally {
+      h.host.stopGovernanceSweep();
+    }
   });
 });
