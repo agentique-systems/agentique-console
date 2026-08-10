@@ -1,31 +1,25 @@
 /**
  * The one orchestrator-model picker, shared by the composer and the draft view
- * exactly as ModeToggle is. It owns no mutation: the composer patches a live
- * session, the draft view holds the choice in local state until the send that
- * creates the session.
+ * exactly as ModeToggle is — and shaped like it too: three inline chips, no
+ * dialog, no search, no global hotkey. The list is three compile-time
+ * constants; a command palette over it was scaffolding, not affordance.
  *
+ * It owns no mutation: the composer patches a live session, the draft view
+ * holds the choice in local state until the send that creates the session.
  * Seats are not selectable here and never will be — their models come from
  * profiles, which the Agents view owns.
  */
-import { CheckIcon, CpuIcon } from "lucide-react";
-import { useEffect, useState } from "react";
+import { CpuIcon } from "lucide-react";
 
 import {
   ORCHESTRATOR_MODELS,
   orchestratorModelLabel,
 } from "@agentique-console/shared";
-import { PromptInputButton } from "@/components/ai-elements/prompt-input";
 import {
-  ModelSelector,
-  ModelSelectorContent,
-  ModelSelectorEmpty,
-  ModelSelectorGroup,
-  ModelSelectorInput,
-  ModelSelectorItem,
-  ModelSelectorList,
-  ModelSelectorName,
-  ModelSelectorTrigger,
-} from "@/components/ai-elements/model-selector";
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
 export function ModelPicker({
@@ -37,72 +31,42 @@ export function ModelPicker({
   disabled?: boolean;
   onChange: (model: string) => void;
 }) {
-  const [open, setOpen] = useState(false);
-
-  // ⌘K / Ctrl+K opens it from anywhere in the composer, the way the palette
-  // gesture is spelled everywhere else.
-  useEffect(() => {
-    if (disabled) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "k" || !(event.metaKey || event.ctrlKey)) return;
-      event.preventDefault();
-      setOpen((current) => !current);
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [disabled]);
+  const group = (
+    <div
+      role="radiogroup"
+      aria-label={`orchestrator model: ${orchestratorModelLabel(model)}`}
+      className="flex items-center gap-0.5 rounded-md border border-border p-0.5"
+    >
+      <CpuIcon className="ml-1 size-3 shrink-0 text-muted-foreground" aria-hidden />
+      {ORCHESTRATOR_MODELS.map((candidate) => (
+        <button
+          key={candidate.id}
+          type="button"
+          role="radio"
+          aria-checked={candidate.id === model}
+          disabled={disabled}
+          title={candidate.blurb}
+          className={cn(
+            "rounded-sm px-1.5 py-0.5 text-3xs lowercase tracking-wide transition-colors",
+            candidate.id === model
+              ? "bg-accent text-foreground"
+              : "text-muted-foreground hover:text-foreground",
+            disabled && "cursor-not-allowed opacity-50",
+          )}
+          onClick={() => {
+            if (candidate.id !== model) onChange(candidate.id);
+          }}
+        >
+          {candidate.label}
+        </button>
+      ))}
+    </div>
+  );
 
   return (
-    <ModelSelector open={open} onOpenChange={setOpen}>
-      {/*
-        asChild is load-bearing: PromptInput is a <form>, and a bare
-        DialogTrigger renders a submit-type button — clicking the chip would
-        send the message instead of opening the picker. PromptInputButton's
-        type="button" wins here. The content portals to body, outside the
-        form, so Enter inside the search input cannot submit either.
-      */}
-      <ModelSelectorTrigger asChild>
-        <PromptInputButton
-          aria-label={`orchestrator model: ${orchestratorModelLabel(model)}`}
-          tooltip={{ content: "orchestrator model", shortcut: "⌘K" }}
-          disabled={disabled}
-        >
-          <CpuIcon className="size-3" />
-          <span className="truncate">{orchestratorModelLabel(model)}</span>
-        </PromptInputButton>
-      </ModelSelectorTrigger>
-
-      <ModelSelectorContent title="Orchestrator model">
-        <ModelSelectorInput placeholder="search models…" />
-        <ModelSelectorList>
-          <ModelSelectorEmpty>No matching model.</ModelSelectorEmpty>
-          <ModelSelectorGroup heading="Anthropic">
-            {ORCHESTRATOR_MODELS.map((candidate) => (
-              <ModelSelectorItem
-                key={candidate.id}
-                value={`${candidate.label} ${candidate.id} ${candidate.blurb}`}
-                onSelect={() => {
-                  setOpen(false);
-                  if (candidate.id !== model) onChange(candidate.id);
-                }}
-              >
-                <CheckIcon
-                  className={cn(
-                    "size-3",
-                    candidate.id === model ? "opacity-100" : "opacity-0",
-                  )}
-                />
-                <ModelSelectorName>
-                  <span className="font-medium">{candidate.id}</span>
-                  <span className="ml-2 text-2xs text-muted-foreground">
-                    {candidate.blurb}
-                  </span>
-                </ModelSelectorName>
-              </ModelSelectorItem>
-            ))}
-          </ModelSelectorGroup>
-        </ModelSelectorList>
-      </ModelSelectorContent>
-    </ModelSelector>
+    <Tooltip>
+      <TooltipTrigger asChild>{group}</TooltipTrigger>
+      <TooltipContent>orchestrator model</TooltipContent>
+    </Tooltip>
   );
 }

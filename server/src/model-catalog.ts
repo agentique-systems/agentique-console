@@ -1,47 +1,33 @@
 /**
- * Per-model context catalog. Windows are DELIBERATE under-estimates: an
+ * Per-model context ceilings. Windows are DELIBERATE under-estimates: an
  * under-estimated window only makes rotation trigger a little earlier, which
  * is safe; an over-estimate risks a hard context-overflow error, which is
- * not. The fable-5/opus-5/sonnet-5 tiers advertise 1M-token windows; the
- * catalog records the historically guaranteed 200K so the configured limit
- * stays binding for known models. `source` records which cascade step matched
- * so a surprising rotation threshold is traceable.
+ * not. The fable/opus/sonnet tiers advertise 1M-token windows; the catalog
+ * records the historically guaranteed 200K so the configured limit stays
+ * binding for known models. Unknown ids fall to a conservative floor.
  */
 
-export interface ModelContextInfo {
+interface ModelContext {
   contextWindow: number;
   maxOutput: number;
-  source: "exact" | "family" | "default";
 }
 
-const EXACT: Record<string, Omit<ModelContextInfo, "source">> = {
-  "claude-sonnet-5": { contextWindow: 200_000, maxOutput: 64_000 },
-  "claude-opus-5": { contextWindow: 200_000, maxOutput: 64_000 },
-  "claude-fable-5": { contextWindow: 200_000, maxOutput: 64_000 },
-};
-
-/** Longest-prefix families, matched after exact ids. */
-const FAMILIES: Record<string, Omit<ModelContextInfo, "source">> = {
+/** Longest-prefix families; every dated variant of a family matches. */
+const FAMILIES: Record<string, ModelContext> = {
   "claude-opus-": { contextWindow: 200_000, maxOutput: 64_000 },
   "claude-sonnet-": { contextWindow: 200_000, maxOutput: 64_000 },
-  // Without this a dated fable variant falls to DEFAULT and halves its ceiling.
   "claude-fable-": { contextWindow: 200_000, maxOutput: 64_000 },
   "claude-haiku-": { contextWindow: 180_000, maxOutput: 64_000 },
 };
 
-const DEFAULT: Omit<ModelContextInfo, "source"> = { contextWindow: 100_000, maxOutput: 32_000 };
+const DEFAULT: ModelContext = { contextWindow: 100_000, maxOutput: 32_000 };
 
-export function resolveModelContext(modelId: string | null | undefined): ModelContextInfo {
+export function resolveModelContext(modelId: string | null | undefined): ModelContext {
   const normalized = (modelId ?? "").trim().toLowerCase();
-  if (normalized !== "") {
-    const exact = EXACT[normalized];
-    if (exact) return { ...exact, source: "exact" };
-    const family = Object.keys(FAMILIES)
-      .filter((prefix) => normalized.startsWith(prefix))
-      .sort((a, b) => b.length - a.length)[0];
-    if (family) return { ...FAMILIES[family]!, source: "family" };
-  }
-  return { ...DEFAULT, source: "default" };
+  const family = Object.keys(FAMILIES)
+    .filter((prefix) => normalized.startsWith(prefix))
+    .sort((a, b) => b.length - a.length)[0];
+  return family ? FAMILIES[family]! : DEFAULT;
 }
 
 /**

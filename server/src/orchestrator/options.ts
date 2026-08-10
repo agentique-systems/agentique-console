@@ -146,8 +146,9 @@ export function buildOrchestratorOptions(
     ...(input.model === undefined ? {} : { model: input.model }),
     ...(input.resume === null ? {} : { resume: input.resume }),
     // persistSession defaults true: transcripts live in ~/.claude/projects/…
-    // exactly like the CLI, and `resume` reads them natively (B1 dropped the
-    // SQLite mirror — it was always a second copy).
+    // exactly like the CLI, and `resume` reads them natively. The SQLite
+    // mirror below (provider_entries_v2, eager flush) is a deliberate second
+    // copy: it backs journal-kind evidence verification and run forensics.
     abortController: input.abortController,
     ...(input.sessionStore === undefined ? {} : {
       persistSession: true,

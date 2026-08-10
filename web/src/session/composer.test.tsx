@@ -179,19 +179,17 @@ describe("Composer", () => {
   });
 
   /**
-   * The chip lives inside PromptInput's <form>. A DialogTrigger defaults to a
-   * submit button, so without asChild onto PromptInputButton this click would
-   * send the message instead of opening the picker.
+   * The chips live inside PromptInput's <form>; type="button" is what keeps a
+   * click from submitting the draft as a message.
    */
-  it("clicking the model chip opens the picker without sending the draft", async () => {
-    const spy = stubFetch();
+  it("clicking a model chip never sends the draft", async () => {
+    const spy = stubFetch(SESSION);
     const user = userEvent.setup();
     mount();
 
     await user.type(screen.getByRole("textbox"), "do not send me");
-    await user.click(await screen.findByLabelText("orchestrator model: opus-5"));
+    await user.click(await screen.findByRole("radio", { name: "fable-5" }));
 
-    await screen.findByPlaceholderText("search models…");
     expect(
       spy.mock.calls.some(([url]) =>
         String(url).endsWith("/api/user-sessions/us_1/messages"),
@@ -204,8 +202,7 @@ describe("Composer", () => {
     const user = userEvent.setup();
     mount();
 
-    await user.click(await screen.findByLabelText("orchestrator model: opus-5"));
-    await user.click(await screen.findByText("claude-fable-5"));
+    await user.click(await screen.findByRole("radio", { name: "fable-5" }));
 
     await waitFor(() => {
       const patch = spy.mock.calls.find(([, init]) => init?.method === "PATCH");

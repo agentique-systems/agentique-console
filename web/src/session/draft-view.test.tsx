@@ -109,8 +109,7 @@ describe("DraftView", () => {
     const user = userEvent.setup();
     mount();
 
-    await user.click(await screen.findByLabelText("orchestrator model: opus-5"));
-    await user.click(await screen.findByText("claude-fable-5"));
+    await user.click(await screen.findByRole("radio", { name: "fable-5" }));
 
     await user.type(screen.getByRole("textbox"), "do the thing");
     await user.keyboard("{Enter}");

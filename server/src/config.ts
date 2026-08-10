@@ -1,7 +1,7 @@
 import os from "node:os";
 import path from "node:path";
 
-import { DEFAULT_ORCHESTRATOR_MODEL } from "@agentique-console/shared";
+import { DEFAULT_ORCHESTRATOR_MODEL, isOrchestratorModel } from "@agentique-console/shared";
 
 export interface Config {
   dataDir: string;
@@ -129,6 +129,19 @@ function parseRoots(
   ];
 }
 
+/**
+ * CONSOLE_MODEL goes through the same validation the API route enforces: a
+ * typo'd id used to be accepted at boot and silently dropped every session's
+ * rotation ceiling to the conservative 68K default.
+ */
+function validatedModel(id: string | undefined): string {
+  if (id === undefined) return DEFAULT_ORCHESTRATOR_MODEL;
+  if (!isOrchestratorModel(id)) {
+    throw new Error(`CONSOLE_MODEL "${id}" is not an orchestrator model (expected one of the ids in shared/models.ts)`);
+  }
+  return id;
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const dataDir =
     env.CONSOLE_DATA_DIR ?? path.join(os.homedir(), ".agentique-console");
@@ -140,7 +153,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     host: env.CONSOLE_HOST ?? "127.0.0.1",
     webDir: path.resolve(import.meta.dirname, "../../web/dist"),
     fsRoots: parseRoots(env.CONSOLE_FS_ROOTS, home),
-    model: env.CONSOLE_MODEL ?? DEFAULT_ORCHESTRATOR_MODEL,
+    model: validatedModel(env.CONSOLE_MODEL),
     improveModel: env.CONSOLE_IMPROVE_MODEL ?? "claude-sonnet-5",
     effort: env.CONSOLE_EFFORT,
     profilesFile:
