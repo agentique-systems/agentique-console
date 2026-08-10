@@ -10,6 +10,8 @@ export const keys = {
   stats: {
     all: ["stats"] as const,
   },
+  /** Server-resolved defaults. Fixed for the life of the process. */
+  config: ["config"] as const,
   workspaces: ["workspaces"] as const,
   userSessions: {
     all: ["user-sessions"] as const,

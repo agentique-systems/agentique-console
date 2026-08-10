@@ -1,19 +1,32 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
+import { isOrchestratorModel } from "@agentique-console/shared";
 import type { AppContext } from "../../context.ts";
 import { revivalPrompt } from "../../orchestrator/interactions.ts";
 import { badRequest, notFound } from "../errors.ts";
+
+/**
+ * Constrained to the offered list rather than accepting any string: an id with
+ * no `model-catalog.ts` entry silently drops the session's rotation ceiling to
+ * 68K, and a rejected request is a far better failure than a session that
+ * quietly rotates twice as often.
+ */
+const Model = z
+  .string()
+  .refine(isOrchestratorModel, { message: "unknown orchestrator model" });
 
 const CreateBody = z.object({
   workspaceId: z.string(),
   mode: z.enum(["execute", "plan_execute"]),
   message: z.string(),
+  model: Model.optional(),
 });
 
 const PatchBody = z.object({
   mode: z.enum(["execute", "plan_execute"]).optional(),
   title: z.string().optional(),
   status: z.enum(["open", "archived"]).optional(),
+  model: Model.optional(),
 });
 
 const MessageBody = z.object({ text: z.string() });

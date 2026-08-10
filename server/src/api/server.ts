@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance } from "fastify";
+import type { ConfigResponse } from "@agentique-console/shared";
 import type { AppContext } from "../context.ts";
 import { ApiError } from "./errors.ts";
 import { registerAgentSessionRoutes } from "./routes/agent-sessions.ts";
@@ -46,6 +47,14 @@ export function buildServer(ctx: AppContext): FastifyInstance {
   });
 
   app.get("/api/health", async () => ({ ok: true }));
+
+  // Server-resolved defaults the client cannot derive. Only the server knows
+  // whether CONSOLE_MODEL moved the orchestrator default, and the draft view
+  // has to preselect the right chip before a session exists to read it from.
+  app.get(
+    "/api/config",
+    async (): Promise<ConfigResponse> => ({ defaultModel: ctx.config.model }),
+  );
 
   registerEventRoutes(app, ctx);
   registerFsRoutes(app, ctx);

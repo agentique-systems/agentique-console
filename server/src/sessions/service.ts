@@ -71,6 +71,9 @@ export class UserSessionService {
       cumulativeApiDurationMs: 0,
       runState: "active",
       runBaseCommit: null,
+      // Null is a real value here, not a placeholder: it means "track the
+      // configured default", which is what the profile-manager session wants.
+      model: body.model ?? null,
       createdAt: now,
       updatedAt: now,
     };
@@ -109,7 +112,7 @@ export class UserSessionService {
     if (!row) throw notFound(`no user session ${id}`);
 
     const changes: Partial<
-      Pick<UserSessionRow, "title" | "mode" | "phase" | "status">
+      Pick<UserSessionRow, "title" | "mode" | "phase" | "status" | "model">
     > = {};
     if (patch.title !== undefined) {
       const title = patch.title.trim();
@@ -125,6 +128,9 @@ export class UserSessionService {
       // Entering plan_execute re-arms planning; leaving it ends the gate.
       changes.phase = patch.mode === "plan_execute" ? "planning" : "executing";
     }
+    if (patch.model !== undefined && patch.model !== row.model) {
+      changes.model = patch.model;
+    }
     if (Object.keys(changes).length === 0) return toWireUserSession(row);
 
     this.#repo.patchUserSession(id, changes);
@@ -133,13 +139,14 @@ export class UserSessionService {
       userSessionId: id,
       payload: { sessionId: id, patch: changes },
     });
-    // The lane's options are frozen at spawn: archiving shuts it down, a mode
-    // change recycles it so the next message respawns with fresh options.
+    // The lane's options are frozen at spawn: archiving shuts it down, and a
+    // mode or model change recycles it so the next message respawns with fresh
+    // options. A turn already in flight finishes on what it started with.
     if (changes.status === "archived") {
       this.#completion?.schedule(id);
       this.#archiveAgentSessions?.(id);
       void this.#runner.closeSession(id);
-    } else if (changes.mode !== undefined) {
+    } else if (changes.mode !== undefined || changes.model !== undefined) {
       this.#runner.recycleSession(id);
     }
     const updated = this.#repo.getUserSession(id);

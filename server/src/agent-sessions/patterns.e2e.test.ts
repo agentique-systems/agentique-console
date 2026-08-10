@@ -6,7 +6,7 @@
  * prompt text.
  */
 import { describe, expect, it } from "vitest";
-import { initMessage, sendHandoffUse, successMessage, toolUseMessage } from "../sdk/fake.ts";
+import { initMessage, sendHandoffUse, successMessage, textMessage, toolUseMessage } from "../sdk/fake.ts";
 import { collectUntil, makeDelegationHarness, seatRoleOf } from "../test-helpers.ts";
 
 const briefing = (action: string) => ({
@@ -197,6 +197,42 @@ describe("debate e2e (fake SDK)", () => {
     const rows = h.repo.listMessages("agent", created.agentSessionId).filter((row) => row.kind === "message");
     // The briefing broadcast to BOTH debaters; the judge speaks last.
     expect(rows.slice(0, 2).map((row) => `${row.speakerName}→${row.toName}`)).toEqual(["main→optimist", "main→pessimist"]);
+    expect(rows.at(-1)?.speakerName).toBe("judge");
+    expect(rows.at(-1)?.toName).toBe("main");
+    const row = h.repo.getAgentSession(created.agentSessionId);
+    expect(row && h.host.statusOf(row)).toBe("reported");
+  });
+
+  it("carries a debater's plain-text position to the judge when it never sends", async () => {
+    // Live run 3's failure shape: both debaters argued in plain final text —
+    // expecting a rebuttal round the topology does not have — and ended their
+    // turns without send_handoff. The positions join never armed and the judge
+    // never ran. The Console now carries the settled turn's text as the report.
+    const h = makeDelegationHarness(async function* (options) {
+      const identity = seatRoleOf(options);
+      yield initMessage();
+      if (identity.role === "debater") {
+        yield textMessage(identity.seat === "optimist"
+          ? "Opening case: ship it. I'll rebut once I see the other proposal."
+          : "Opening case: hold it. Awaiting rebuttal.");
+      } else if (identity.role === "judge") {
+        yield sendHandoffUse("verdict", "main", { action: "verdict",
+          stateSummary: "ship it — the hold case is thinner", status: "completed", category: "final" });
+      }
+      yield successMessage();
+    });
+    const userSessionId = h.addUserSession();
+    const done = collectUntil(h.bus, (event) => event.type === "flow.result", 15_000);
+    const created = h.host.createSession({ userSessionId, title: "ship or hold", mode: "execute", pattern: "debate",
+      agents: [{ name: "optimist", profileId: "explorer" }, { name: "pessimist", profileId: "explorer" }],
+      briefing: briefing("should we ship?") });
+    const events = await done;
+    const join = events.find((event) => event.type === "agent_session.join.completed");
+    expect(join?.payload).toMatchObject({ of: 2, failed: 0 });
+    const rows = h.repo.listMessages("agent", created.agentSessionId).filter((row) => row.kind === "message");
+    const carried = rows.filter((row) => row.toName === "judge");
+    expect(carried.map((row) => row.speakerName).sort()).toEqual(["optimist", "pessimist"]);
+    expect(carried.map((row) => row.text).join("\n")).toContain("Opening case: ship it.");
     expect(rows.at(-1)?.speakerName).toBe("judge");
     expect(rows.at(-1)?.toName).toBe("main");
     const row = h.repo.getAgentSession(created.agentSessionId);

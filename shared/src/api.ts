@@ -36,6 +36,16 @@ export interface StatsResponse {
   lastEventSeq: number;
 }
 
+// GET /api/config
+/**
+ * Server-resolved defaults the client cannot derive. Only the server knows
+ * whether `CONSOLE_MODEL` moved the orchestrator default, and the draft view
+ * has to preselect the right chip before a session exists.
+ */
+export interface ConfigResponse {
+  defaultModel: string;
+}
+
 // GET /api/fs/roots
 export interface FsRootsResponse {
   roots: { path: string; label: string }[];
@@ -76,6 +86,8 @@ export interface CreateUserSessionBody {
   workspaceId: string;
   mode: SessionMode;
   message: string;
+  /** Orchestrator model; omitted means the server's configured default. */
+  model?: string;
 }
 export interface CreateUserSessionResponse {
   session: UserSession;
@@ -92,6 +104,8 @@ export interface PatchUserSessionBody {
   mode?: SessionMode;
   title?: string;
   status?: "open" | "archived";
+  /** Takes effect on the next turn: the change recycles the lane. */
+  model?: string;
 }
 
 // POST /api/user-sessions/:id/messages → 202

@@ -19,7 +19,7 @@
 import type { HandoffDraft, PostMessageResponse } from "@agentique-console/shared";
 import { AsyncQueue } from "../async-queue.ts";
 import type { Config } from "../config.ts";
-import { Repo, toWireMessage } from "../db/repo.ts";
+import { Repo, toWireMessage, type UserSessionRow } from "../db/repo.ts";
 import type { EventBus } from "../events/bus.ts";
 import { RuntimeBroadcaster } from "../events/runtime.ts";
 import { newId, nowIso } from "../ids.ts";
@@ -490,6 +490,16 @@ export class OrchestratorRunner {
     lane.runtime.set("thinking");
   }
 
+  /**
+   * The model this session's orchestrator lane runs on. The session's own
+   * choice wins; a session that recorded none (the profile manager, and every
+   * row written before the column existed) tracks the configured default.
+   * Seats do not read this — they resolve their model from their profile.
+   */
+  #modelFor(session: Pick<UserSessionRow, "model">): string {
+    return session.model ?? this.#deps.config.model;
+  }
+
   /** Spawns the persistent query if the lane has none (lazy + post-death). */
   async #ensureLaneQuery(sessionId: string, lane: Lane): Promise<void> {
     if (lane.query) return;
@@ -514,7 +524,7 @@ export class OrchestratorRunner {
       resume: session.sdkSessionId,
       mode: session.mode,
       phase: session.phase,
-      model: config.model,
+      model: this.#modelFor(session),
       effort: config.effort,
       abortController: abort,
       canUseTool: buildOrchestratorCanUseTool({
@@ -847,7 +857,7 @@ export class OrchestratorRunner {
         }
         if (session) {
           const contextTokens = Math.max(session.contextTokens, lane.contextTokens);
-          if (session.sdkTurnCount + 1 >= this.#deps.config.contextTurnLimit || contextTokens >= rotationTokenLimit(this.#deps.config.contextTokenLimit, this.#deps.config.model)) lane.recycleAfterTurn = true;
+          if (session.sdkTurnCount + 1 >= this.#deps.config.contextTurnLimit || contextTokens >= rotationTokenLimit(this.#deps.config.contextTokenLimit, this.#modelFor(session))) lane.recycleAfterTurn = true;
           const { costUsd, apiDurationMs } = laneUsageDeltas(lane, event);
           // One patch: turn count, context, and the advanced cumulative
           // baseline (persisted with the provider session it belongs to, so
@@ -857,7 +867,7 @@ export class OrchestratorRunner {
           const usage = { id: newId("usage"), userSessionId: sessionId, agentSessionId: null, participant: "orchestrator", profileId: null,
             generation: session.sdkGeneration, turnId: turn?.turnId ?? "unattributed", inputTokens: event.inputTokens ?? 0,
             uncachedInputTokens: event.uncachedInputTokens ?? 0, cacheCreationInputTokens: event.cacheCreationInputTokens ?? 0, cacheReadInputTokens: event.cacheReadInputTokens ?? 0, outputTokens: event.outputTokens ?? 0,
-            costUsd, model: event.modelId ?? this.#deps.config.model ?? null, effort: this.#deps.config.effort ?? null,
+            costUsd, model: event.modelId ?? this.#modelFor(session), effort: this.#deps.config.effort ?? null,
             trigger: turn?.trigger ?? null, durationMs: turn ? Date.now() - turn.startedAt : null, apiDurationMs, sdkDurationMs: event.sdkDurationMs ?? null, status: "completed", stopReason: event.stopReason ?? null, createdAt: nowIso() };
           repo.insertUsage(usage);
           bus.append({ type: "usage.recorded", userSessionId: sessionId, payload: { sessionId, participant: "orchestrator", generation: session.sdkGeneration,
@@ -886,7 +896,7 @@ export class OrchestratorRunner {
           const usage = { id: newId("usage"), userSessionId: sessionId, agentSessionId: null, participant: "orchestrator", profileId: null,
             generation: session.sdkGeneration, turnId: turn?.turnId ?? "unattributed", inputTokens: event.inputTokens ?? 0,
             uncachedInputTokens: event.uncachedInputTokens ?? 0, cacheCreationInputTokens: event.cacheCreationInputTokens ?? 0, cacheReadInputTokens: event.cacheReadInputTokens ?? 0, outputTokens: event.outputTokens ?? 0,
-            costUsd, model: event.modelId ?? this.#deps.config.model ?? null, effort: this.#deps.config.effort ?? null,
+            costUsd, model: event.modelId ?? this.#modelFor(session), effort: this.#deps.config.effort ?? null,
             trigger: turn?.trigger ?? null, durationMs: turn ? Date.now() - turn.startedAt : null, apiDurationMs, sdkDurationMs: event.sdkDurationMs ?? null, status: event.aborted ? "aborted" : "error", stopReason: event.stopReason ?? null, createdAt: nowIso() };
           repo.insertUsage(usage);
           bus.append({ type: "usage.recorded", userSessionId: sessionId, payload: { sessionId, participant: "orchestrator", generation: session.sdkGeneration,
@@ -894,7 +904,7 @@ export class OrchestratorRunner {
             outputTokens: usage.outputTokens, ...(costUsd === null ? {} : { costUsd }), model: usage.model ?? undefined, effort: usage.effort ?? undefined,
             trigger: turn?.trigger, durationMs: usage.durationMs ?? undefined, apiDurationMs: usage.apiDurationMs ?? undefined, sdkDurationMs: usage.sdkDurationMs ?? undefined,
             status: event.aborted ? "aborted" : "error", stopReason: usage.stopReason ?? undefined } });
-          if (session.sdkTurnCount + 1 >= this.#deps.config.contextTurnLimit || contextTokens >= rotationTokenLimit(this.#deps.config.contextTokenLimit, this.#deps.config.model)) lane.recycleAfterTurn = true;
+          if (session.sdkTurnCount + 1 >= this.#deps.config.contextTurnLimit || contextTokens >= rotationTokenLimit(this.#deps.config.contextTokenLimit, this.#modelFor(session))) lane.recycleAfterTurn = true;
         }
         this.#settleTurn(sessionId, lane);
         return;
@@ -926,7 +936,7 @@ export class OrchestratorRunner {
   async #rotateContextIfNeeded(sessionId: string, lane: Lane): Promise<void> {
     const session = this.#deps.repo.getUserSession(sessionId);
     if (!session) return;
-    const tokenLimit = rotationTokenLimit(this.#deps.config.contextTokenLimit, this.#deps.config.model);
+    const tokenLimit = rotationTokenLimit(this.#deps.config.contextTokenLimit, this.#modelFor(session));
     const hard = session.sdkTurnCount >= this.#deps.config.contextTurnLimit || session.contextTokens >= tokenLimit;
     const soft = session.sdkTurnCount >= Math.ceil(this.#deps.config.contextTurnLimit * 0.8) || session.contextTokens >= Math.ceil(tokenLimit * 0.75);
     if (!soft) return;
@@ -1004,12 +1014,14 @@ export class OrchestratorRunner {
   }
 
   /** One tool-free checkpoint query against the lane's current context. */
-  async #checkpointQuery(session: { sdkSessionId: string | null; workspaceId: string }, promptSuffix: string): Promise<{ draft: HandoffDraft | null; failure: string | null }> {
+  async #checkpointQuery(session: { sdkSessionId: string | null; workspaceId: string; model: string | null }, promptSuffix: string): Promise<{ draft: HandoffDraft | null; failure: string | null }> {
     let draft: HandoffDraft | null = null;
     let failure: string | null = null;
     if (!session.sdkSessionId) return { draft, failure };
     const sdk = await this.#deps.sdk();
     const abort = new AbortController();
+    // The checkpoint runs on the same model as the lane it is checkpointing.
+    const model = this.#modelFor(session);
     const query = sdk.query({ prompt: `Create a lossless rotation checkpoint for the next orchestrator context. Preserve operator intent, decisions, delegated work, verified evidence pointers, uncertainty, and exact next actions. Do not perform work or call tools.${promptSuffix}`, options: {
       cwd: this.#deps.getWorkspaceRoot(session.workspaceId), systemPrompt: { type: "preset", preset: "claude_code", append: "Checkpoint faithfully. Repository files, task ledger, artifacts, and provider journal are authoritative; do not invent corrections." },
       settingSources: [], includePartialMessages: false, permissionMode: "plan", allowedTools: [],
@@ -1019,7 +1031,7 @@ export class OrchestratorRunner {
         filesystem: { allowManagedReadPathsOnly: true, allowRead: [this.#deps.getWorkspaceRoot(session.workspaceId)], allowWrite: [] } },
       env: sdkEnv(), abortController: abort, persistSession: true,
       ...(this.#deps.sessionStore === undefined ? {} : { sessionStore: this.#deps.sessionStore as SdkOptions["sessionStore"], sessionStoreFlush: "eager" as const }),
-      resume: session.sdkSessionId, ...(this.#deps.config.model ? { model: this.#deps.config.model } : {}),
+      resume: session.sdkSessionId, ...(model ? { model } : {}),
       ...(this.#deps.config.effort ? { effort: this.#deps.config.effort as SdkOptions["effort"] } : {}),
     } });
     try {

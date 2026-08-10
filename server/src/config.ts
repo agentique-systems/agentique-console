@@ -1,6 +1,8 @@
 import os from "node:os";
 import path from "node:path";
 
+import { DEFAULT_ORCHESTRATOR_MODEL } from "@agentique-console/shared";
+
 export interface Config {
   dataDir: string;
   dbFile: string;
@@ -15,9 +17,11 @@ export interface Config {
    */
   fsRoots: { path: string; label: string }[];
   /**
-   * Orchestrator-lane model (also the profile-manager lane and the lane's
-   * rotation checkpoint). Seats carry their own profile models; they never
-   * read this. CONSOLE_MODEL overrides.
+   * Default orchestrator-lane model (also the profile-manager lane and the
+   * lane's rotation checkpoint). A session that records its own `model` wins
+   * over this; sessions created internally record none and land here. Seats
+   * carry their own profile models; they never read this. CONSOLE_MODEL
+   * overrides the default for new sessions.
    */
   model: string;
   /**
@@ -164,7 +168,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     host: env.CONSOLE_HOST ?? "127.0.0.1",
     webDir: path.resolve(import.meta.dirname, "../../web/dist"),
     fsRoots: parseRoots(env.CONSOLE_FS_ROOTS, home),
-    model: env.CONSOLE_MODEL ?? "claude-sonnet-5",
+    model: env.CONSOLE_MODEL ?? DEFAULT_ORCHESTRATOR_MODEL,
     improveModel: env.CONSOLE_IMPROVE_MODEL ?? "claude-sonnet-5",
     effort: env.CONSOLE_EFFORT,
     profilesFile:

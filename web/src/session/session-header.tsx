@@ -44,7 +44,12 @@ export function nextMode(mode: SessionMode): SessionMode {
   return MODES[(MODES.indexOf(mode) + 1) % MODES.length] as SessionMode;
 }
 
-/** Shared by the composer and the draft view — the one mode picker. */
+/**
+ * Shared by the composer and the draft view — the one mode picker. The
+ * Shift+Tab gesture is taught by the tooltip rather than a line of text beside
+ * it: the footer now carries a model chip too, and two chips plus a sentence
+ * wrap at the panel widths the operator actually uses.
+ */
 export function ModeToggle({
   mode,
   disabled = false,
@@ -54,7 +59,7 @@ export function ModeToggle({
   disabled?: boolean;
   onChange: (mode: SessionMode) => void;
 }) {
-  return (
+  const group = (
     <div
       role="radiogroup"
       aria-label="session mode"
@@ -82,6 +87,16 @@ export function ModeToggle({
         </button>
       ))}
     </div>
+  );
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{group}</TooltipTrigger>
+      <TooltipContent>
+        session mode
+        <span className="ml-2 font-mono text-muted-foreground">shift+tab</span>
+      </TooltipContent>
+    </Tooltip>
   );
 }
 

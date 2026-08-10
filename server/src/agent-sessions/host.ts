@@ -1421,6 +1421,42 @@ export class AgentSessionHost {
     return this.#seatsOfRole(session.id, target).filter((row) => row.name !== seatName)[0]?.name ?? MAIN_RECIPIENT;
   }
 
+  /**
+   * A fan-in seat's whole job is one report, and on a console-advanced edge
+   * (debater→judge, mapper→reducer) the Console is already the transport that
+   * holds it. Requiring the seat to ALSO duplicate its final text through
+   * `send_handoff` is what wedged live run 3's debate: both debaters ended
+   * their turns with plain text, the positions join never armed, the judge
+   * never ran — and every termination bound watches activity, so a fully
+   * quiet session tripped nothing. So: when a fan-in seat completes a turn
+   * that a join still awaits, the Console carries the turn's final text as
+   * the seat's completed report. An explicit send supersedes this by
+   * construction (`sawSend`); a seat with an open operator question keeps its
+   * silence — the answer's delivery gives it another turn to report from.
+   */
+  #carryFanInReport(session: AgentSessionRow, seatName: string, turn: NonNullable<SeatLane["activeTurn"]>): void {
+    const seat = this.#deps.repo.getParticipant(session.id, seatName);
+    if (!seat || seat.role === "orchestrator") return;
+    const text = turn.lastNarration.trim();
+    if (text === "") return;
+    const role = roleOfSeat(seat);
+    const edge = this.#contractOf(session).contract.edges.find((row) => row.from === role && row.advance === "console");
+    if (!edge) return;
+    const collector = this.#seatsOfRole(session.id, edge.to).filter((row) => row.name !== seatName)[0]?.name;
+    if (collector === undefined) return;
+    const joins = Object.values((this.#deps.repo.getPatternState(session.id)?.joins ?? {}) as Record<string, { over: string; expected: string[]; reports: Record<string, string>; settled: boolean }>)
+      .filter((join) => join.over === role);
+    // No join yet means no seat of this role has reported (debate arms on
+    // first arrival); an armed join must still expect this seat, unreported.
+    const awaited = joins.length === 0
+      || joins.some((join) => !join.settled && join.expected.includes(seatName) && join.reports[seatName] === undefined);
+    if (!awaited) return;
+    if (this.#deps.interactions.listUnresolvedForAgentSession(session.id).some((row) => row.participant === seatName)) return;
+    this.post({ agentSessionId: session.id, speaker: { kind: "agent", name: seatName }, to: collector,
+      handoff: this.#simpleHandoff(`Report carried by the Console from ${seatName}'s settled turn (the seat ended it without send_handoff)`, "completed", text, null),
+      category: "update", turnId: turn.turnId });
+  }
+
   #assertRoute(session: AgentSessionRow, sender: string, recipient: string, category: Category): EdgeSpec {
     // Boundary hops: a child session's report enters its parent under the
     // reserved `child:<id>` sender, valid only toward that child's controller.
@@ -2067,6 +2103,12 @@ export class AgentSessionHost {
       }
       this.post({ agentSessionId: session.id, speaker: { kind: seat?.role === "orchestrator" ? "orchestrator" : "agent", name: seatName }, to: target,
         handoff: draft, category: "failure", turnId: turn.turnId });
+    }
+    // Error settles already reached the collector above (escalateTo IS the
+    // fan-in collector); aborted settles are teardown paths that must not
+    // post. Only a clean completion can leave a join waiting.
+    if (status === "completed" && !turn.sawSend && repo.getAgentSession(session.id)?.status === "open") {
+      try { this.#carryFanInReport(session, seatName, turn); } catch (error) { this.#recordHostFailure(session.id, error); }
     }
     const profile = seat?.profileSnapshot as AgentProfile | undefined;
     if (status === "completed" && profile && lane.assignmentTurns === profile.maxTurns + 1 && repo.getAgentSession(session.id)?.status === "open") {

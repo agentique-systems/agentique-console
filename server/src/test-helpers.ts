@@ -110,6 +110,7 @@ export function makeHarness(
         cumulativeApiDurationMs: 0,
         runState: "active",
         runBaseCommit: null,
+        model: null,
         createdAt: nowIso(),
         updatedAt: nowIso(),
       };

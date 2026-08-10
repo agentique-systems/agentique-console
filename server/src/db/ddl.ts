@@ -49,6 +49,11 @@ CREATE TABLE IF NOT EXISTS user_sessions (
   -- HEAD when the first agent session was created; the diff base for
   -- "what was built".
   run_base_commit TEXT,
+  -- The orchestrator lane's model for THIS session. NULL means "whatever
+  -- config.model is now", which is what internally-created sessions (the
+  -- profile manager) carry. No CHECK: the selectable list lives in
+  -- shared/models.ts and a CHECK cannot widen.
+  model TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );

@@ -1,6 +1,7 @@
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 
 import type {
+  ConfigResponse,
   FsDirsResponse,
   FsRootsResponse,
   GetAgentSessionResponse,
@@ -34,6 +35,19 @@ export function useStats() {
     queryKey: keys.stats.all,
     queryFn: () => apiFetch<StatsResponse>("/api/stats"),
     ...LIVE,
+  });
+}
+
+/**
+ * The server's defaults — currently just the orchestrator model the operator's
+ * `CONSOLE_MODEL` resolves to. It cannot change without a server restart, so
+ * this is fetched once and never revalidated.
+ */
+export function useConfig() {
+  return useQuery({
+    queryKey: keys.config,
+    queryFn: () => apiFetch<ConfigResponse>("/api/config"),
+    staleTime: Infinity,
   });
 }
 

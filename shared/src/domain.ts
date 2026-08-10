@@ -30,6 +30,12 @@ export interface UserSession {
    * work-in-progress.
    */
   runState: RunState;
+  /**
+   * The orchestrator model this session runs on. `null` means the server's
+   * configured default — the client renders that default rather than the word
+   * "null", so it reads `/api/config` for it.
+   */
+  model: string | null;
   createdAt: string;
   updatedAt: string;
 }

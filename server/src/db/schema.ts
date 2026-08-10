@@ -61,6 +61,12 @@ export const userSessions = sqliteTable("user_sessions", {
     .default("active"),
   /** HEAD when the first agent session was created; diff base for the summary. */
   runBaseCommit: text("run_base_commit"),
+  /**
+   * This session's orchestrator model. NULL falls back to `config.model`, which
+   * is what internally-created sessions (the profile manager) carry. Seats are
+   * unaffected — they resolve their own model from the profile.
+   */
+  model: text("model"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });

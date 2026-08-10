@@ -147,6 +147,11 @@ somewhere fresh to make a run's database a self-contained artifact, then
 summarize it afterwards with
 `npx tsx server/scripts/report-run.ts [path/to/console.db]`.
 
+The orchestrator runs on `claude-opus-5` by default. `CONSOLE_MODEL` moves that
+default, and the composer's model chip overrides it per session (opus-5,
+fable-5, sonnet-5) — a change recycles the lane, so it takes effect on the next
+turn rather than mid-turn. Seat models come from profiles and are unaffected.
+
 Settings: `CONSOLE_PORT`, `CONSOLE_HOST`, `CONSOLE_MODEL`,
 `CONSOLE_IMPROVE_MODEL`, `CONSOLE_EFFORT`, `CONSOLE_FS_ROOTS`,
 `CONSOLE_ALLOWED_DOMAINS` (comma-separated; empty string is fully offline).

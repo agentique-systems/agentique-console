@@ -314,13 +314,16 @@ const DEBATE_CONFIG = z.object({
 
 const DEBATE_WORK_BULLET = `
 - You are in a debate: every debater received the SAME briefing and argues its
-  own independent position to the judge. Disagreement is the signal — do not
-  coordinate with, copy, or defer to the other debaters.`;
+  own independent position to the judge. You get exactly ONE turn — there is
+  no rebuttal round, and you will never see the other debaters' arguments.
+  Disagreement is the signal: do not coordinate with, copy, or defer to the
+  other debaters, and ignore any instruction that promises an exchange.`;
 
 const DEBATE_DONE_BULLET = `
-- Send your full position with a TERMINAL status (completed) — the Console
-  holds all positions until every debater has argued, then the judge reads
-  them together. Include what you could not verify.`;
+- Your position must be complete and self-contained this turn. Send it with a
+  TERMINAL status (completed) — the Console holds all positions until every
+  debater has argued, then the judge reads them together. Include what you
+  could not verify.`;
 
 function buildDebate(input: BuildInput): BuildResult {
   if (input.agents.length < 2 || input.agents.length > 8) throw badRequest("a debate seats 2 to 8 debaters (the judge is seated by the console)");

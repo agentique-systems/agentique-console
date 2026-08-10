@@ -6,11 +6,14 @@
  * activeUserSessionId keeps following "most recent" until the operator
  * chooses one.
  */
-import { useRef } from "react";
+import { useMemo, useRef } from "react";
 
 import { FlowEdgeTick } from "@/agents/flow-stem";
 import { useUserSessions } from "@/api/queries";
-import type { UserSessionListItem } from "@agentique-console/shared";
+import type {
+  ConsoleEvent,
+  UserSessionListItem,
+} from "@agentique-console/shared";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { deriveSessionState } from "@/lib/session-state";
@@ -67,13 +70,22 @@ export function ConversationRegion() {
   return <ActiveSession session={session} />;
 }
 
+/** Shared empty tail so a stream that has not hydrated yet keeps one identity. */
+const NO_EVENTS: readonly ConsoleEvent[] = [];
+
 function ActiveSession({ session }: { session: UserSessionListItem }) {
   const composerRef = useRef<ComposerHandle>(null);
   // Posture is fold-derived from the live stream's turn events; the rest of
   // the state inputs are server-authoritative fields off the list row.
-  const posture = useUserSessionStreamsStore((s) =>
-    foldPosture(s.streams[userStreamKey(session.id)]?.items ?? []),
+  //
+  // The selector MUST return the stored reference, never the fold: zustand v5
+  // reads it through useSyncExternalStore with no equality check, so a selector
+  // that allocates (a fresh posture object, or a `?? []` tail) never settles and
+  // React unmounts the tree with "maximum update depth exceeded". Fold outside.
+  const events = useUserSessionStreamsStore(
+    (s) => s.streams[userStreamKey(session.id)]?.items,
   );
+  const posture = useMemo(() => foldPosture(events ?? NO_EVENTS), [events]);
   const overlay = useUiStore((s) => s.awaitingInput.has(session.id));
   const state = deriveSessionState({
     runState: session.runState,

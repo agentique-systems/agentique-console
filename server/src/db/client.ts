@@ -22,7 +22,7 @@ export function openDb(dbFile: string) {
 
 function migrateAdditiveColumns(sqlite: Database.Database): void {
   const userColumns = new Set(sqlite.prepare("pragma table_info(user_sessions)").all().map((row) => (row as { name: string }).name));
-  for (const [name, ddl] of [["sdk_generation", "INTEGER NOT NULL DEFAULT 0"], ["sdk_turn_count", "INTEGER NOT NULL DEFAULT 0"], ["context_tokens", "INTEGER NOT NULL DEFAULT 0"], ["memory", "TEXT NOT NULL DEFAULT ''"], ["latest_handoff_id", "TEXT"], ["purpose", "TEXT NOT NULL DEFAULT 'work'"], ["subject_key", "TEXT"], ["cumulative_cost_usd", "REAL NOT NULL DEFAULT 0"], ["cumulative_api_duration_ms", "INTEGER NOT NULL DEFAULT 0"], ["run_state", "TEXT NOT NULL DEFAULT 'active' CHECK (run_state IN ('active','awaiting_signoff','completed'))"], ["run_base_commit", "TEXT"]] as const) {
+  for (const [name, ddl] of [["sdk_generation", "INTEGER NOT NULL DEFAULT 0"], ["sdk_turn_count", "INTEGER NOT NULL DEFAULT 0"], ["context_tokens", "INTEGER NOT NULL DEFAULT 0"], ["memory", "TEXT NOT NULL DEFAULT ''"], ["latest_handoff_id", "TEXT"], ["purpose", "TEXT NOT NULL DEFAULT 'work'"], ["subject_key", "TEXT"], ["cumulative_cost_usd", "REAL NOT NULL DEFAULT 0"], ["cumulative_api_duration_ms", "INTEGER NOT NULL DEFAULT 0"], ["run_state", "TEXT NOT NULL DEFAULT 'active' CHECK (run_state IN ('active','awaiting_signoff','completed'))"], ["run_base_commit", "TEXT"], ["model", "TEXT"]] as const) {
     if (!userColumns.has(name)) sqlite.exec(`ALTER TABLE user_sessions ADD COLUMN ${name} ${ddl}`);
   }
   const agentSessionColumns = new Set(sqlite.prepare("pragma table_info(agent_sessions)").all().map((row) => (row as { name: string }).name));

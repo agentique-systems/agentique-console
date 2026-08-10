@@ -95,6 +95,7 @@ export function toWireUserSession(row: UserSessionRow): UserSession {
     phase: row.phase,
     status: row.status,
     runState: row.runState,
+    model: row.model,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -475,7 +476,7 @@ export class Repo {
   patchUserSession(
     id: string,
     patch: Partial<
-      Pick<UserSessionRow, "title" | "mode" | "phase" | "status" | "subjectKey" | "sdkSessionId" | "sdkGeneration" | "sdkTurnCount" | "contextTokens" | "memory" | "latestHandoffId" | "cumulativeCostUsd" | "cumulativeApiDurationMs" | "runState" | "runBaseCommit">
+      Pick<UserSessionRow, "title" | "mode" | "phase" | "status" | "subjectKey" | "sdkSessionId" | "sdkGeneration" | "sdkTurnCount" | "contextTokens" | "memory" | "latestHandoffId" | "cumulativeCostUsd" | "cumulativeApiDurationMs" | "runState" | "runBaseCommit" | "model">
     >,
   ): void {
     this.#db
