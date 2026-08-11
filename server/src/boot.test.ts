@@ -22,7 +22,7 @@ describe("bootApp", () => {
     h.bus.append({
       type: "user_session.turn.started",
       userSessionId,
-      payload: { sessionId: userSessionId, turnId: "tu_dead", trigger: "operator" },
+      payload: { userSessionId, turnId: "tu_dead", trigger: "operator" },
     });
     const report = await bootHarness(h);
     expect(report.recoveredTurns).toBe(1);

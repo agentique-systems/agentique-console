@@ -145,7 +145,7 @@ export function registerUserSessionRoutes(
             type: "user_session.updated",
             userSessionId: request.params.id,
             payload: {
-              sessionId: request.params.id,
+              userSessionId: request.params.id,
               patch: { phase: "executing" },
             },
           });

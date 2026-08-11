@@ -224,7 +224,7 @@ export function foldUserItems(events: readonly ConsoleEvent[]): UserItem[] {
         runSummaryIndex.set(event.payload.runId, items.length);
         // The payload IS `{ sessionId, runId, summaryId } & RunSummaryStats`,
         // so the rest-spread is exactly the shared projection.
-        const { sessionId: _sessionId, runId, summaryId, ...stats } = event.payload;
+        const { userSessionId: _userSessionId, runId, summaryId, ...stats } = event.payload;
         items.push({ type: "run_summary", runId, summaryId, stats });
         break;
       }

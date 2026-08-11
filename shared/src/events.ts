@@ -38,23 +38,23 @@ export interface UserSessionCreatedPayload {
   session: UserSession;
 }
 export interface UserSessionUpdatedPayload {
-  sessionId: string;
+  userSessionId: string;
   patch: Partial<
     Pick<UserSession, "title" | "mode" | "phase" | "status" | "runState">
   >;
 }
 export interface UserSessionMessagePayload {
-  sessionId: string;
+  userSessionId: string;
   message: SessionMessage;
 }
 export type TurnTrigger = "operator" | "wake" | "answer";
 export interface UserTurnStartedPayload {
-  sessionId: string;
+  userSessionId: string;
   turnId: string;
   trigger: TurnTrigger;
 }
 export interface UserTurnSettledPayload {
-  sessionId: string;
+  userSessionId: string;
   turnId: string;
   status: "completed" | "error" | "aborted";
   errorMessage?: string;
@@ -63,20 +63,18 @@ export interface UserTurnSettledPayload {
   durationMs?: number;
 }
 export interface UserContextRotatedPayload {
-  sessionId: string; generation: number; reason: "token_limit" | "turn_limit";
+  userSessionId: string; generation: number; reason: "token_limit" | "turn_limit";
   handoffId?: string; checkpointBytes?: number; degraded?: boolean;
 }
-export interface UserRuntimePayload { sessionId: string; detail: string; }
-export interface ToolCallPayload {
-  sessionId: string;
+export interface UserRuntimePayload { userSessionId: string; detail: string; }
+interface ToolCallCore {
   turnId: string;
   callId: string;
   name: string;
   /** Size-capped JSON value (~16KB serialized). */
   input: unknown;
 }
-export interface ToolResultPayload {
-  sessionId: string;
+interface ToolResultCore {
   callId: string;
   turnId?: string;
   /** Size-capped JSON value (~16KB serialized). */
@@ -85,8 +83,14 @@ export interface ToolResultPayload {
   durationMs?: number;
   bytes?: number;
 }
+export interface ToolCallPayload extends ToolCallCore {
+  userSessionId: string;
+}
+export interface ToolResultPayload extends ToolResultCore {
+  userSessionId: string;
+}
 export interface QuestionAskedPayload {
-  sessionId: string;
+  userSessionId: string;
   interactionId: string;
   questions: InteractionQuestion[];
   /** The asking seat, so the card can name it. Absent = the main lane. */
@@ -98,7 +102,7 @@ export interface QuestionAskedPayload {
   allowFreeText: boolean;
 }
 export interface QuestionAnsweredPayload {
-  sessionId: string;
+  userSessionId: string;
   interactionId: string;
   answers?: Record<string, string[]>;
   freeText?: Record<string, string>;
@@ -121,7 +125,7 @@ export interface FinalBlockedPayload {
  * to be useful; the expanded view fetches the full document.
  */
 export interface RunCompletionProposedPayload extends RunSummaryStats {
-  sessionId: string;
+  userSessionId: string;
   runId: string;
   summaryId: string;
 }
@@ -130,13 +134,13 @@ export interface RunCompletionProposedPayload extends RunSummaryStats {
  * `decision:"accept"` IS completion, and a second event could disagree with it.
  */
 export interface RunSignoffResolvedPayload {
-  sessionId: string;
+  userSessionId: string;
   runId: string;
   decision: "accept" | "changes";
   note?: string;
 }
 export interface RunReopenedPayload {
-  sessionId: string;
+  userSessionId: string;
   runId: string;
   reason: "changes_requested" | "operator_message";
 }
@@ -147,7 +151,7 @@ export interface RunReopenedPayload {
  * to be relayed or re-derived.
  */
 export interface OperatorDecisionRecordedPayload {
-  sessionId: string;
+  userSessionId: string;
   decisionId: string;
   agentSessionId?: string;
   interactionId?: string;
@@ -158,12 +162,12 @@ export interface OperatorDecisionRecordedPayload {
   answer: string;
 }
 export interface PlanProposedPayload {
-  sessionId: string;
+  userSessionId: string;
   interactionId: string;
   plan: string;
 }
 export interface PlanResolvedPayload {
-  sessionId: string;
+  userSessionId: string;
   interactionId: string;
   approved: boolean;
   note?: string;
@@ -190,10 +194,12 @@ export interface AgentTurnSettledPayload {
   errorMessage?: string;
   durationMs?: number;
 }
-export interface AgentToolCallPayload extends ToolCallPayload {
+export interface AgentToolCallPayload extends ToolCallCore {
+  agentSessionId: string;
   participant: string;
 }
-export interface AgentToolResultPayload extends ToolResultPayload {
+export interface AgentToolResultPayload extends ToolResultCore {
+  agentSessionId: string;
   participant: string;
 }
 export interface AgentSessionStatusPayload {
@@ -271,12 +277,31 @@ export interface AgentProcessExitedPayload {
   code: number | null; signal: string | null;
 }
 export interface UsageRecordedPayload {
-  sessionId: string; participant: string; profileId?: string; generation: number;
+  userSessionId: string;
+  /** Present when the sample belongs to a seat rather than the main lane. */
+  agentSessionId?: string;
+  participant: string; profileId?: string; generation: number;
   turnId: string; inputTokens: number; outputTokens: number; costUsd?: number;
   uncachedInputTokens?: number; cacheCreationInputTokens?: number; cacheReadInputTokens?: number;
   model?: string; effort?: string; trigger?: string; durationMs?: number;
   apiDurationMs?: number; sdkDurationMs?: number;
   status?: "completed" | "error" | "aborted"; stopReason?: string;
+}
+
+/**
+ * A provider retry, recorded with its numbers instead of as prose. The
+ * transcript keeps the human-readable runtime notice; THIS is what counters
+ * and budgets read.
+ */
+export interface RetryRecordedPayload {
+  userSessionId: string;
+  /** Present when the retrying lane is a seat rather than the main lane. */
+  agentSessionId?: string;
+  participant?: string;
+  kind: "api_error" | "rate_limited";
+  attempt?: number;
+  retryInMs?: number;
+  detail: string;
 }
 
 export interface AgentProfileChangedPayload {
@@ -320,7 +345,7 @@ export interface AgentWatchdogPayload {
 
 /** Governance: the orchestrator lane's canUseTool denied a tool call. */
 export interface ToolDeniedPayload {
-  sessionId: string;
+  userSessionId: string;
   /** Present for a seat-level denial; absent for the main lane's. */
   agentSessionId?: string;
   participant?: string;
@@ -436,6 +461,7 @@ export type ConsoleEvent = Base &
     | { type: "user_session.turn.settled"; payload: UserTurnSettledPayload }
     | { type: "user_session.context.rotated"; payload: UserContextRotatedPayload }
     | { type: "user_session.runtime"; payload: UserRuntimePayload }
+    | { type: "user_session.retry.recorded"; payload: RetryRecordedPayload }
     | { type: "user_session.tool.call"; payload: ToolCallPayload }
     | { type: "user_session.tool.result"; payload: ToolResultPayload }
     | { type: "user_session.question.asked"; payload: QuestionAskedPayload }
@@ -455,6 +481,7 @@ export type ConsoleEvent = Base &
     | { type: "agent_session.status"; payload: AgentSessionStatusPayload }
     | { type: "agent_session.mailbox"; payload: AgentMailboxPayload }
     | { type: "agent_session.runtime"; payload: AgentRuntimePayload }
+    | { type: "agent_session.retry.recorded"; payload: RetryRecordedPayload }
     | { type: "agent_session.context.rotated"; payload: AgentContextRotatedPayload }
     | { type: "agent_session.process.started"; payload: AgentProcessStartedPayload }
     | { type: "agent_session.process.output"; payload: AgentProcessOutputPayload }

@@ -197,7 +197,7 @@ export class OrchestratorRunner {
     bus.append({
       type: "user_session.message",
       userSessionId: sessionId,
-      payload: { sessionId, message: toWireMessage(row) },
+      payload: { userSessionId: sessionId, message: toWireMessage(row) },
     });
     repo.touchUserSession(sessionId);
     // A5: a message landing mid-turn steers the live turn instead of queueing
@@ -238,7 +238,7 @@ export class OrchestratorRunner {
       for (const deadline of this.#deps.repo.listDueDeadlines(session.id, now.toISOString())) {
         this.#deps.repo.patchCron(deadline.id, { status: "deleted" });
         this.#deps.bus.append({ type: "user_session.runtime", userSessionId: session.id,
-          payload: { sessionId: session.id, detail: `deadline fired: ${deadline.prompt}` } });
+          payload: { userSessionId: session.id, detail: `deadline fired: ${deadline.prompt}` } });
         this.#enqueue(session.id, { kind: "cron", text: `[Deadline you set has arrived]\n${deadline.prompt}` });
       }
     }
@@ -408,7 +408,7 @@ export class OrchestratorRunner {
     bus.append({
       type: "user_session.turn.started",
       userSessionId: sessionId,
-      payload: { sessionId, turnId, trigger },
+      payload: { userSessionId: sessionId, turnId, trigger },
     });
 
     lane.state.lastAssistantText = "";
@@ -624,7 +624,7 @@ export class OrchestratorRunner {
       type: "user_session.turn.settled",
       userSessionId: sessionId,
       payload: {
-        sessionId,
+        userSessionId: sessionId,
         turnId: turn.turnId,
         status: turn.outcome.status,
         durationMs: Date.now() - turn.startedAt,
@@ -648,7 +648,7 @@ export class OrchestratorRunner {
       bus.append({
         type: "user_session.turn.started",
         userSessionId: sessionId,
-        payload: { sessionId, turnId: followId, trigger: "operator" },
+        payload: { userSessionId: sessionId, turnId: followId, trigger: "operator" },
       });
       let resolveFollow: () => void = () => undefined;
       const settled = new Promise<void>((resolve) => {
@@ -678,7 +678,7 @@ export class OrchestratorRunner {
     bus.append({
       type: "user_session.message",
       userSessionId: sessionId,
-      payload: { sessionId, message: toWireMessage(row) },
+      payload: { userSessionId: sessionId, message: toWireMessage(row) },
     });
   }
 
@@ -689,7 +689,7 @@ export class OrchestratorRunner {
   ): void {
     const { repo, bus } = this.#deps;
     if ("parentCallId" in event && event.parentCallId !== undefined) {
-      bus.append({ type: "user_session.runtime", userSessionId: sessionId, payload: { sessionId, detail: `blocked unowned native subagent event (${event.kind})` } });
+      bus.append({ type: "user_session.runtime", userSessionId: sessionId, payload: { userSessionId: sessionId, detail: `blocked unowned native subagent event (${event.kind})` } });
       return;
     }
     const turn = lane.activeTurn;
@@ -702,7 +702,7 @@ export class OrchestratorRunner {
         return;
       }
       case "delta": {
-        if (!turn) { bus.append({ type: "user_session.runtime", userSessionId: sessionId, payload: { sessionId, detail: "ignored late stream delta after turn settlement" } }); return; }
+        if (!turn) { bus.append({ type: "user_session.runtime", userSessionId: sessionId, payload: { userSessionId: sessionId, detail: "ignored late stream delta after turn settlement" } }); return; }
         const active = turn;
         lane.runtime.set("responding");
         bus.broadcast({
@@ -718,7 +718,7 @@ export class OrchestratorRunner {
         return;
       }
       case "reasoning-delta": {
-        if (!turn) { bus.append({ type: "user_session.runtime", userSessionId: sessionId, payload: { sessionId, detail: "ignored late reasoning delta after turn settlement" } }); return; }
+        if (!turn) { bus.append({ type: "user_session.runtime", userSessionId: sessionId, payload: { userSessionId: sessionId, detail: "ignored late reasoning delta after turn settlement" } }); return; }
         const active = turn;
         lane.runtime.set("thinking");
         bus.broadcast({
@@ -735,7 +735,15 @@ export class OrchestratorRunner {
       }
       case "notice": {
         lane.runtime.note(event.text);
-        bus.append({ type: "user_session.runtime", userSessionId: sessionId, payload: { sessionId, detail: event.text } });
+        bus.append({ type: "user_session.runtime", userSessionId: sessionId, payload: { userSessionId: sessionId, detail: event.text } });
+        return;
+      }
+      case "retry": {
+        // Alongside the notice prose, never instead of it: the transcript keeps
+        // the human-readable line, counters read this one.
+        bus.append({ type: "user_session.retry.recorded", userSessionId: sessionId,
+          payload: { userSessionId: sessionId, participant: "orchestrator", kind: event.classification,
+            ...(event.attempt === undefined ? {} : { attempt: event.attempt }), retryInMs: event.delayMs, detail: event.detail } });
         return;
       }
       case "message": {
@@ -743,7 +751,7 @@ export class OrchestratorRunner {
         lane.state.lastAssistantText = event.text;
         const normalized = event.text.trim().replace(/\s+/g, " ");
         if (active?.trigger === "wake" && normalized !== "" && normalized === lane.lastOperatorFacingText) {
-          bus.append({ type: "user_session.runtime", userSessionId: sessionId, payload: { sessionId, detail: "suppressed an exact duplicate orchestrator message" } });
+          bus.append({ type: "user_session.runtime", userSessionId: sessionId, payload: { userSessionId: sessionId, detail: "suppressed an exact duplicate orchestrator message" } });
           return;
         }
         lane.lastOperatorFacingText = normalized;
@@ -758,7 +766,7 @@ export class OrchestratorRunner {
         bus.append({
           type: "user_session.message",
           userSessionId: sessionId,
-          payload: { sessionId, message: toWireMessage(row) },
+          payload: { userSessionId: sessionId, message: toWireMessage(row) },
         });
         return;
       }
@@ -770,7 +778,7 @@ export class OrchestratorRunner {
           type: "user_session.tool.call",
           userSessionId: sessionId,
           payload: {
-            sessionId,
+            userSessionId: sessionId,
             turnId: active?.turnId ?? "unattributed",
             callId: event.callId,
             name: event.name,
@@ -788,7 +796,7 @@ export class OrchestratorRunner {
           type: "user_session.tool.result",
           userSessionId: sessionId,
           payload: {
-            sessionId,
+            userSessionId: sessionId,
             callId: event.callId,
             turnId: turn?.turnId,
             output: captured.value,
@@ -827,7 +835,7 @@ export class OrchestratorRunner {
             costUsd, model: event.modelId ?? this.#modelFor(session), effort: this.#deps.config.effort ?? null,
             trigger: turn?.trigger ?? null, durationMs: turn ? Date.now() - turn.startedAt : null, apiDurationMs, sdkDurationMs: event.sdkDurationMs ?? null, status: "completed", stopReason: event.stopReason ?? null, createdAt: nowIso() };
           repo.insertUsage(usage);
-          bus.append({ type: "usage.recorded", userSessionId: sessionId, payload: { sessionId, participant: "orchestrator", generation: session.sdkGeneration,
+          bus.append({ type: "usage.recorded", userSessionId: sessionId, payload: { userSessionId: sessionId, participant: "orchestrator", generation: session.sdkGeneration,
             turnId: usage.turnId, inputTokens: usage.inputTokens, uncachedInputTokens: usage.uncachedInputTokens, cacheCreationInputTokens: usage.cacheCreationInputTokens, cacheReadInputTokens: usage.cacheReadInputTokens,
             outputTokens: usage.outputTokens, ...(costUsd === null ? {} : { costUsd }), model: usage.model ?? undefined, effort: usage.effort ?? undefined,
             trigger: turn?.trigger, durationMs: usage.durationMs ?? undefined, apiDurationMs: usage.apiDurationMs ?? undefined, sdkDurationMs: usage.sdkDurationMs ?? undefined,
@@ -856,7 +864,7 @@ export class OrchestratorRunner {
             costUsd, model: event.modelId ?? this.#modelFor(session), effort: this.#deps.config.effort ?? null,
             trigger: turn?.trigger ?? null, durationMs: turn ? Date.now() - turn.startedAt : null, apiDurationMs, sdkDurationMs: event.sdkDurationMs ?? null, status: event.aborted ? "aborted" : "error", stopReason: event.stopReason ?? null, createdAt: nowIso() };
           repo.insertUsage(usage);
-          bus.append({ type: "usage.recorded", userSessionId: sessionId, payload: { sessionId, participant: "orchestrator", generation: session.sdkGeneration,
+          bus.append({ type: "usage.recorded", userSessionId: sessionId, payload: { userSessionId: sessionId, participant: "orchestrator", generation: session.sdkGeneration,
             turnId: usage.turnId, inputTokens: usage.inputTokens, uncachedInputTokens: usage.uncachedInputTokens, cacheCreationInputTokens: usage.cacheCreationInputTokens, cacheReadInputTokens: usage.cacheReadInputTokens,
             outputTokens: usage.outputTokens, ...(costUsd === null ? {} : { costUsd }), model: usage.model ?? undefined, effort: usage.effort ?? undefined,
             trigger: turn?.trigger, durationMs: usage.durationMs ?? undefined, apiDurationMs: usage.apiDurationMs ?? undefined, sdkDurationMs: usage.sdkDurationMs ?? undefined,
@@ -925,11 +933,11 @@ export class OrchestratorRunner {
     // with it — the successor genuinely starts from zero.
     this.#deps.repo.patchUserSession(sessionId, { sdkSessionId: null, sdkGeneration: session.sdkGeneration + 1, sdkTurnCount: 0, contextTokens: 0, latestHandoffId: prepared.row.id, cumulativeCostUsd: 0, cumulativeApiDurationMs: 0 });
     this.#deps.bus.append({ type: "user_session.context.rotated", userSessionId: sessionId,
-      payload: { sessionId, generation: session.sdkGeneration + 1,
+      payload: { userSessionId: sessionId, generation: session.sdkGeneration + 1,
         reason: due.reason,
         handoffId: prepared.row.id, checkpointBytes: prepared.row.bytes, degraded } });
     this.#deps.bus.append({ type: "user_session.runtime", userSessionId: sessionId,
-      payload: { sessionId, detail: `checkpoint ${prepared.row.id} completed in ${Date.now() - started}ms` } });
+      payload: { userSessionId: sessionId, detail: `checkpoint ${prepared.row.id} completed in ${Date.now() - started}ms` } });
   }
 
   /** One tool-free checkpoint query against the lane's current context. */

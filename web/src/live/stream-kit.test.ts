@@ -26,7 +26,7 @@ function ev(
 
 function operatorMessage(text: string): ConsoleEvent {
   return ev("user_session.message", {
-    sessionId: "us_1",
+    userSessionId: "us_1",
     message: {
       seq: seq + 1,
       speaker: { kind: "operator", name: "operator" },
@@ -39,7 +39,7 @@ function operatorMessage(text: string): ConsoleEvent {
 
 function orchestratorMessage(text: string): ConsoleEvent {
   return ev("user_session.message", {
-    sessionId: "us_1",
+    userSessionId: "us_1",
     message: {
       seq: seq + 1,
       speaker: { kind: "orchestrator", name: "orchestrator" },
@@ -131,7 +131,7 @@ describe("user stream kit", () => {
     stream = userStreamKit.append(
       stream,
       ev("user_session.turn.settled", {
-        sessionId: "us_1",
+        userSessionId: "us_1",
         turnId: "turn_1",
         status: "aborted",
         queuedJobs: 0,

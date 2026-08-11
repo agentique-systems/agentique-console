@@ -14,6 +14,7 @@ import {
   type MessageRow,
   type ParticipantRow,
 } from "../db/repo.ts";
+import type { ArtifactStore } from "../events/artifact-store.ts";
 import type { EventBus } from "../events/bus.ts";
 import { RuntimeBroadcaster } from "../events/runtime.ts";
 import { newId, nowIso } from "../ids.ts";
@@ -268,6 +269,7 @@ export interface CreateAgentSessionInput {
 export interface AgentSessionHostDeps {
   repo: Repo;
   bus: EventBus;
+  artifacts: ArtifactStore;
   /** Required — every knob's default lives in `loadConfig`, nowhere else. */
   config: Config;
   profiles: AgentProfileRegistry;
@@ -1129,7 +1131,7 @@ export class AgentSessionHost {
       worktrees.commitAll(seat.worktreePath, `seat ${seat.name}: reported ${status}`, seat.ownership);
       const diff = worktrees.captureDiff(workspaceRoot, seat.worktreeBaseCommit, seat.worktreeBranch);
       const artifactId = diff.filesChanged === 0 ? null
-        : bus.storeArtifact(`${diff.stat}\n\n${diff.patch}`, "text/x-patch", { userSessionId: session.userSessionId, agentSessionId: session.id }).artifactId;
+        : this.#deps.artifacts.store(`${diff.stat}\n\n${diff.patch}`, "text/x-patch", { userSessionId: session.userSessionId, agentSessionId: session.id }).artifactId;
       if (status === "failed" || diff.filesChanged === 0) {
         worktrees.remove(workspaceRoot, seat.worktreePath, seat.worktreeBranch);
         release();
@@ -1610,7 +1612,7 @@ export class AgentSessionHost {
     this.#deps.bus.append({
       type: "user_session.runtime", userSessionId,
       payload: {
-        sessionId: userSessionId,
+        userSessionId,
         detail: outcome.initialized
           ? `workspace initialised as a git repository so each seat gets an isolated worktree (${outcome.reason})`
           : `seats will share the workspace directory — no isolation: ${outcome.reason}`,
@@ -1652,6 +1654,14 @@ export class AgentSessionHost {
               payload: { agentSessionId: session.id, participant: seatName, ...(lane.activeTurn ? { turnId: lane.activeTurn.turnId } : {}), detail: event.text } });
             continue;
           }
+          if (event.kind === "retry") {
+            // Alongside the notice prose, never instead of it: the transcript
+            // keeps the human-readable line, counters read this one.
+            bus.append({ type: "agent_session.retry.recorded", userSessionId: session.userSessionId, agentSessionId: session.id,
+              payload: { userSessionId: session.userSessionId, agentSessionId: session.id, participant: seatName, kind: event.classification,
+                ...(event.attempt === undefined ? {} : { attempt: event.attempt }), retryInMs: event.delayMs, detail: event.detail } });
+            continue;
+          }
           // Output with no open turn: the CLI resumed work on its own (e.g.
           // after an interrupt landed mid-stream). Mint a turn so the work is
           // attributed rather than orphaned.
@@ -1679,7 +1689,7 @@ export class AgentSessionHost {
           } else if (event.kind === "tool.call") {
             turn?.toolStarts.set(event.callId, Date.now());
             runtime.set("tool", event.name);
-            bus.append({ type: "agent_session.tool.call", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { sessionId: session.id, participant: seatName, turnId, callId: event.callId, name: event.name, input: bus.captureSized(event.input, { userSessionId: session.userSessionId, agentSessionId: session.id }).value } });
+            bus.append({ type: "agent_session.tool.call", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { agentSessionId: session.id, participant: seatName, turnId, callId: event.callId, name: event.name, input: bus.captureSized(event.input, { userSessionId: session.userSessionId, agentSessionId: session.id }).value } });
             if (turn) {
               const key = `${event.name} ${stableStringify(event.input)}`;
               turn.watchdog.identical = key === turn.watchdog.lastKey ? turn.watchdog.identical + 1 : 1;
@@ -1693,7 +1703,7 @@ export class AgentSessionHost {
             const captured = bus.captureSized(event.output, { userSessionId: session.userSessionId, agentSessionId: session.id });
             const startedAt = turn?.toolStarts.get(event.callId); turn?.toolStarts.delete(event.callId);
             runtime.set("thinking");
-            bus.append({ type: "agent_session.tool.result", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { sessionId: session.id, participant: seatName, turnId, callId: event.callId, output: captured.value, bytes: captured.bytes, ...(startedAt === undefined ? {} : { durationMs: Date.now() - startedAt }), ...(event.isError ? { isError: true } : {}) } });
+            bus.append({ type: "agent_session.tool.result", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { agentSessionId: session.id, participant: seatName, turnId, callId: event.callId, output: captured.value, bytes: captured.bytes, ...(startedAt === undefined ? {} : { durationMs: Date.now() - startedAt }), ...(event.isError ? { isError: true } : {}) } });
             if (turn) {
               turn.watchdog.errorStreak = event.isError ? turn.watchdog.errorStreak + 1 : 0;
               if (turn.watchdog.errorStreak >= this.#deps.config.watchdogErrorStreak) {
@@ -2371,7 +2381,7 @@ export class AgentSessionHost {
       trigger, durationMs: durationMs ?? null, apiDurationMs, sdkDurationMs: usageEvent.sdkDurationMs ?? null, status, stopReason: usageEvent.stopReason ?? null, createdAt: nowIso() };
     this.#deps.repo.insertUsage(usage);
     this.#deps.bus.append({ type: "usage.recorded", userSessionId: session.userSessionId, agentSessionId: session.id,
-      payload: { sessionId: session.id, participant: seat.name, profileId: seat.profileId, generation: seat.generation, turnId,
+      payload: { userSessionId: session.userSessionId, agentSessionId: session.id, participant: seat.name, profileId: seat.profileId, generation: seat.generation, turnId,
         inputTokens: usage.inputTokens, uncachedInputTokens: usage.uncachedInputTokens, cacheCreationInputTokens: usage.cacheCreationInputTokens,
         cacheReadInputTokens: usage.cacheReadInputTokens, outputTokens: usage.outputTokens, ...(costUsd === null ? {} : { costUsd }),
         model: usage.model ?? undefined, effort: usage.effort ?? undefined, trigger, durationMs: usage.durationMs ?? undefined,

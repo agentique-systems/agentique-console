@@ -54,7 +54,7 @@ async function seatWithArtifacts() {
 describe("read_artifact (fake SDK)", () => {
   it("returns an image as MCP image content, not the Messages API shape", async () => {
     const { h, userSessionId, agentSessionId, tool } = await seatWithArtifacts();
-    const { artifactId } = h.bus.storeArtifact(PNG_BASE64, "image/png;base64", { userSessionId, agentSessionId });
+    const { artifactId } = h.app.artifacts.store(PNG_BASE64, "image/png;base64", { userSessionId, agentSessionId });
 
     const result = await tool.handler({ artifactId, maxBytes: 8 * 1024 }, {});
 
@@ -68,9 +68,9 @@ describe("read_artifact (fake SDK)", () => {
 
   it("strips the console's `;base64` storage suffix at the tool boundary", async () => {
     const { h, userSessionId, agentSessionId, tool } = await seatWithArtifacts();
-    // `bus.storeArtifact` branches on the suffix to compute decoded byte
+    // the artifact store branches on the suffix to compute decoded byte
     // counts, so the convention stays in storage and is normalized only here.
-    const { artifactId, bytes } = h.bus.storeArtifact(PNG_BASE64, "image/png;base64", { userSessionId, agentSessionId });
+    const { artifactId, bytes } = h.app.artifacts.store(PNG_BASE64, "image/png;base64", { userSessionId, agentSessionId });
     expect(bytes).toBe(Buffer.from(PNG_BASE64, "base64").byteLength);
 
     const result = await tool.handler({ artifactId, maxBytes: 8 * 1024 }, {});
@@ -85,7 +85,7 @@ describe("read_artifact (fake SDK)", () => {
     // at a large viewport can reach this, and an oversize image fails the
     // entire tool result rather than degrading.
     const oversize = "A".repeat(5 * 1024 * 1024 + 4);
-    const { artifactId } = h.bus.storeArtifact(oversize, "image/png;base64", { userSessionId, agentSessionId });
+    const { artifactId } = h.app.artifacts.store(oversize, "image/png;base64", { userSessionId, agentSessionId });
 
     const result = await tool.handler({ artifactId, maxBytes: 8 * 1024 }, {});
 
@@ -97,7 +97,7 @@ describe("read_artifact (fake SDK)", () => {
 
   it("still pages non-image artifacts as text", async () => {
     const { h, userSessionId, agentSessionId, tool } = await seatWithArtifacts();
-    const { artifactId } = h.bus.storeArtifact(JSON.stringify({ hello: "world" }), "application/json", { userSessionId, agentSessionId });
+    const { artifactId } = h.app.artifacts.store(JSON.stringify({ hello: "world" }), "application/json", { userSessionId, agentSessionId });
 
     const result = await tool.handler({ artifactId, maxBytes: 8 * 1024 }, {});
 

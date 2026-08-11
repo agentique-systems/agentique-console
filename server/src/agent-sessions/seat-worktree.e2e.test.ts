@@ -99,7 +99,7 @@ describe("seat worktree isolation (fake SDK + real git)", () => {
     expect(merged[0]?.payload).toMatchObject({ seat: "dev", filesChanged: 1 });
     expect(fs.readFileSync(path.join(repo, "widget.txt"), "utf8")).toBe("implemented\n");
     expect(git(repo, "status", "--porcelain").trim()).toBe("");
-    const artifact = h.bus.getArtifact((merged[0]?.payload as { artifactId: string }).artifactId);
+    const artifact = h.app.artifacts.get((merged[0]?.payload as { artifactId: string }).artifactId);
     expect(artifact?.content).toContain("widget.txt");
     // The merge commit's parent chain includes the turn-snapshot/report commits.
     expect(git(repo, "log", "--oneline")).toContain("Merge seat dev");
@@ -114,7 +114,7 @@ describe("seat worktree isolation (fake SDK + real git)", () => {
     expect(discarded).toHaveLength(1);
     expect(discarded[0]?.payload).toMatchObject({ seat: "dev", reason: "seat reported failed" });
     expect(fs.existsSync(path.join(repo, "widget.txt"))).toBe(false);
-    const artifact = h.bus.getArtifact((discarded[0]?.payload as { artifactId: string }).artifactId);
+    const artifact = h.app.artifacts.get((discarded[0]?.payload as { artifactId: string }).artifactId);
     expect(artifact?.content).toContain("widget.txt");
   });
 

@@ -14,6 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { openDb } from "../db/client.ts";
+import { ArtifactStore } from "../events/artifact-store.ts";
 import { EventBus } from "../events/bus.ts";
 import { ProcessManager, childEnv, sandboxArgv } from "./process-manager.ts";
 
@@ -75,7 +76,7 @@ describe("child environment", () => {
 describe.skipIf(!hasBwrap)("a real sandboxed child", () => {
   const run = async (command: string, args: string[]) => {
     const { db } = openDb(":memory:");
-    const manager = new ProcessManager(new EventBus(db));
+    const manager = new ProcessManager(new EventBus(db, new ArtifactStore(db)));
     const root = workspace();
     fs.writeFileSync(path.join(root, "hello.txt"), "in the workspace");
     const { processId } = manager.start(

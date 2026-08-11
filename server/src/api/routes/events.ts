@@ -10,7 +10,7 @@ export function registerEventRoutes(app: FastifyInstance, ctx: AppContext): void
   });
 
   app.get<{ Params: { id: string } }>("/api/artifacts/:id", async (request, reply) => {
-    const artifact = ctx.app.bus.getArtifact(request.params.id);
+    const artifact = ctx.app.artifacts.get(request.params.id);
     if (!artifact) throw new NotFoundError(`no artifact ${request.params.id}`);
     if (artifact.mediaType.endsWith(";base64")) {
       reply.header("content-type", artifact.mediaType.slice(0, -7));

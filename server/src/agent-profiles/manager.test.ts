@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { openDb } from "../db/client.ts";
 import { Repo } from "../db/repo.ts";
 import { workspaces } from "../db/schema.ts";
+import { ArtifactStore } from "../events/artifact-store.ts";
 import { EventBus } from "../events/bus.ts";
 import { nowIso } from "../ids.ts";
 import { loadConfig } from "../config.ts";
@@ -20,7 +21,7 @@ describe("ManagerService", () => {
   it("stages, atomically applies, and leaves a new revision disabled", () => {
     const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentique-manager-workspace-")); dirs.push(workspaceRoot);
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "agentique-manager-data-")); dirs.push(dataDir);
-    const { db, sqlite } = openDb(":memory:"); const bus = new EventBus(db); const repo = new Repo(db, sqlite); const now = nowIso();
+    const { db, sqlite } = openDb(":memory:"); const bus = new EventBus(db, new ArtifactStore(db)); const repo = new Repo(db, sqlite); const now = nowIso();
     db.insert(workspaces).values({ id: "ws_1", name: "test", rootPath: workspaceRoot, metadata: {}, createdAt: now, updatedAt: now }).run();
     const workspaceService = new WorkspaceService(db, bus, [workspaceRoot]);
     const profiles = new AgentProfileRegistry({ getWorkspaceRoot: () => workspaceRoot, db, bus });

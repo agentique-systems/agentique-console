@@ -16,6 +16,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { openDb } from "../db/client.ts";
+import { ArtifactStore } from "../events/artifact-store.ts";
 import { EventBus } from "../events/bus.ts";
 import { InteractionService } from "./interactions.ts";
 import { events, interactions as rows } from "../db/schema.ts";
@@ -24,7 +25,7 @@ import { newId, nowIso } from "../ids.ts";
 
 function harness() {
   const { db, sqlite } = openDb(":memory:");
-  const bus = new EventBus(db);
+  const bus = new EventBus(db, new ArtifactStore(db));
   const service = new InteractionService(db, bus);
   const workspaceId = newId("ws");
   db.insert(workspaces).values({ id: workspaceId, name: "w", rootPath: `/tmp/${workspaceId}`, metadata: {}, createdAt: nowIso(), updatedAt: nowIso() }).run();

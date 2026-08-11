@@ -11,10 +11,16 @@
  */
 import { execFileSync } from "node:child_process";
 import { and, asc, eq, gte, inArray } from "drizzle-orm";
+import type { ConsoleEvent } from "@agentique-console/shared";
 import type { Db } from "../db/client.ts";
 import type { Repo } from "../db/repo.ts";
 import type { InteractionService } from "../orchestrator/interactions.ts";
 import { events, handoffRecords, tasks, usageSamples } from "../db/schema.ts";
+
+/** The one row→union cast; every read below narrows on `type` from here. */
+function typed(row: Pick<typeof events.$inferSelect, "type" | "payload">): ConsoleEvent {
+  return { type: row.type, payload: row.payload } as ConsoleEvent;
+}
 
 export interface ReapResult {
   processes: { agentSessionId: string; participant: string; processId: string; pid: number | undefined }[];
@@ -100,11 +106,12 @@ export function buildRunSummary(input: BuildRunSummaryInput): RunSummaryDocument
   const intervals: { start: number; end: number }[] = [];
   for (const row of window) {
     const at = Date.parse(row.createdAt);
-    const payload = row.payload as { turnId?: string };
-    if (row.type.endsWith("turn.started") && payload.turnId) turnStarts.set(payload.turnId, at);
-    if (row.type.endsWith("turn.settled") && payload.turnId) {
-      const start = turnStarts.get(payload.turnId);
-      if (start !== undefined) { intervals.push({ start, end: at }); turnStarts.delete(payload.turnId); }
+    const event = typed(row);
+    if (event.type === "user_session.turn.started" || event.type === "agent_session.turn.started") {
+      turnStarts.set(event.payload.turnId, at);
+    } else if (event.type === "user_session.turn.settled" || event.type === "agent_session.turn.settled") {
+      const start = turnStarts.get(event.payload.turnId);
+      if (start !== undefined) { intervals.push({ start, end: at }); turnStarts.delete(event.payload.turnId); }
     }
   }
   const deadAirMs = Math.max(0, durationMs - unionDuration(intervals));
@@ -125,7 +132,7 @@ export function buildRunSummary(input: BuildRunSummaryInput): RunSummaryDocument
   // was missing three of fourteen turns and said nothing about it.
   const usage = db.select().from(usageSamples).where(eq(usageSamples.userSessionId, userSessionId)).all()
     .filter((row) => !row.turnId.startsWith("checkpoint:"));
-  const observedTurns = window.filter((row) => row.type.endsWith("turn.settled")).length;
+  const observedTurns = window.filter((row) => row.type === "user_session.turn.settled" || row.type === "agent_session.turn.settled").length;
   const recordedTurns = usage.length;
   const costed = usage.filter((row) => row.costUsd !== null);
   const byParticipant = [...new Set(usage.map((row) => row.participant))].map((participant) => {
@@ -141,8 +148,10 @@ export function buildRunSummary(input: BuildRunSummaryInput): RunSummaryDocument
   const decisions = db.select().from(events)
     .where(and(eq(events.userSessionId, userSessionId), eq(events.type, "operator.decision.recorded"), gte(events.seq, seqFrom)))
     .all()
-    .map((row) => row.payload as { question: string; answer: string; askedBy: string })
-    .map((payload) => ({ question: payload.question, answer: payload.answer, askedBy: payload.askedBy }));
+    .map(typed)
+    .flatMap((event) => event.type === "operator.decision.recorded"
+      ? [{ question: event.payload.question, answer: event.payload.answer, askedBy: event.payload.askedBy }]
+      : []);
 
   const deviations = collectDeviations(window, open.map((task) => task.subject));
   const uncertainty = [...new Set([
@@ -151,10 +160,16 @@ export function buildRunSummary(input: BuildRunSummaryInput): RunSummaryDocument
       ((row.payload as { questions?: { question: string }[] }).questions ?? []).map((q) => q.question).join(" | ")),
   ])].filter((line) => line.trim() !== "");
 
+  // Retries are counted from the structured `*.retry.recorded` events the SDK
+  // adapters emit, never by pattern-matching runtime prose.
+  const retries = window.map(typed).filter(
+    (event): event is Extract<ConsoleEvent, { type: "user_session.retry.recorded" | "agent_session.retry.recorded" }> =>
+      event.type === "user_session.retry.recorded" || event.type === "agent_session.retry.recorded");
   const friction = {
-    apiRetries: window.filter((row) => row.type.endsWith("runtime") && /api error/i.test(String((row.payload as { detail?: string }).detail ?? ""))).length,
-    rateLimited: window.filter((row) => row.type.endsWith("runtime") && /rate limit/i.test(String((row.payload as { detail?: string }).detail ?? ""))).length,
-    failedTurns: window.filter((row) => row.type.endsWith("turn.settled") && (row.payload as { status?: string }).status === "error").length,
+    apiRetries: retries.filter((event) => event.payload.kind === "api_error").length,
+    rateLimited: retries.filter((event) => event.payload.kind === "rate_limited").length,
+    failedTurns: window.map(typed).filter((event) =>
+      (event.type === "user_session.turn.settled" || event.type === "agent_session.turn.settled") && event.payload.status === "error").length,
     watchdogTrips: window.filter((row) => row.type === "agent_session.watchdog").length,
   };
 
@@ -196,13 +211,14 @@ export function buildRunSummary(input: BuildRunSummaryInput): RunSummaryDocument
 function collectDeviations(window: readonly (typeof events.$inferSelect)[], openTasks: readonly string[]): string[] {
   const out: string[] = [];
   for (const row of window) {
-    if (row.type === "handoff.final.caveats") {
-      for (const caveat of (row.payload as { caveats?: string[] }).caveats ?? []) out.push(caveat);
+    const event = typed(row);
+    if (event.type === "handoff.final.caveats") {
+      for (const caveat of event.payload.caveats) out.push(caveat);
     }
-    if (row.type === "agent_session.unreported") {
+    if (event.type === "agent_session.unreported") {
       out.push("A coordinator went idle without reporting; the Console closed the loop from the journal.");
     }
-    if (row.type === "handoff.final.blocked") {
+    if (event.type === "handoff.final.blocked") {
       out.push("A final report was withheld while operator questions were open.");
     }
   }

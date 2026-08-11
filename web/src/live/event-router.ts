@@ -34,39 +34,73 @@ export interface RouterDeps {
 }
 
 /**
+ * Replayed pre-rename history: persisted rows written before the payload id
+ * rule still carry a bare `sessionId`. A8's data migration rewrites those
+ * rows; this fallback is deleted with it. The legacy `sessionId` must beat
+ * `agentSessionId` — user-scoped payloads can carry an auxiliary
+ * `agentSessionId` (the asking seat) that never names the owning stream.
+ */
+function idOf(payload: { userSessionId: string } | { agentSessionId: string }): string {
+  const loose = payload as { userSessionId?: string; agentSessionId?: string; sessionId?: string };
+  return loose.userSessionId ?? loose.sessionId ?? loose.agentSessionId ?? "";
+}
+
+/**
  * One dispatch point for every spine event. Three independent concerns:
  *  1. cache invalidation for list/detail queries (coarse, coalesced)
  *  2. stream append for the owning session's live transcript
  *  3. the runtime + attention side-tables
  */
 export function routeEvent(event: ConsoleEvent, deps: RouterDeps): void {
-  const type = event.type;
   if (event.userSessionId && event.seq !== undefined) deps.invalidate(keys.timelineAll);
 
-  // 1. Cache invalidation, by topic prefix. Agent-session invalidation is the
+  // 1. Cache invalidation, by exact type. Agent-session invalidation is the
   // LIFECYCLE subset on purpose: message/tool events arrive in storms
   // and already reach the strip via the stream store — refetching the list
   // for each would be waste.
-  if (type.startsWith("user_session.")) {
-    deps.invalidate(keys.userSessions.all);
-    deps.invalidate(keys.sessionTreeAll);
-  } else if (type.startsWith("workspace.")) {
-    deps.invalidate(keys.workspaces);
-  } else if (
-    type === "agent_session.created" ||
-    type === "agent_session.status" ||
-    type === "agent_session.turn.started" ||
-    type === "agent_session.turn.settled"
-  ) {
-    deps.invalidate(keys.agentSessions.all);
-    deps.invalidate(keys.sessionTreeAll);
-  } else if (type.startsWith("task.")) {
-    deps.invalidate(keys.tasks.all);
-    deps.invalidate(keys.workspaceTasksAll);
-  } else if (type.startsWith("task_dependency.")) {
-    deps.invalidate(keys.workspaceTasksAll);
-  } else if (type.startsWith("agent_profile.")) {
-    deps.invalidate(keys.profiles.all);
+  switch (event.type) {
+    case "user_session.created":
+    case "user_session.updated":
+    case "user_session.message":
+    case "user_session.turn.started":
+    case "user_session.turn.settled":
+    case "user_session.context.rotated":
+    case "user_session.runtime":
+    case "user_session.retry.recorded":
+    case "user_session.tool.call":
+    case "user_session.tool.result":
+    case "user_session.question.asked":
+    case "user_session.question.answered":
+    case "user_session.plan.proposed":
+    case "user_session.plan.resolved":
+      deps.invalidate(keys.userSessions.all);
+      deps.invalidate(keys.sessionTreeAll);
+      break;
+    case "workspace.created":
+    case "workspace.updated":
+      deps.invalidate(keys.workspaces);
+      break;
+    case "agent_session.created":
+    case "agent_session.status":
+    case "agent_session.turn.started":
+    case "agent_session.turn.settled":
+      deps.invalidate(keys.agentSessions.all);
+      deps.invalidate(keys.sessionTreeAll);
+      break;
+    case "task.created":
+    case "task.updated":
+      deps.invalidate(keys.tasks.all);
+      deps.invalidate(keys.workspaceTasksAll);
+      break;
+    case "task_dependency.created":
+    case "task_dependency.deleted":
+      deps.invalidate(keys.workspaceTasksAll);
+      break;
+    case "agent_profile.changed":
+      deps.invalidate(keys.profiles.all);
+      break;
+    default:
+      break;
   }
 
   switch (event.type) {
@@ -96,7 +130,7 @@ export function routeEvent(event: ConsoleEvent, deps: RouterDeps): void {
     // no stream for, and a LINGERING (recently unwatched) stream must keep
     // receiving persisted rows or a quick re-watch would show a gapped view.
     case "user_session.message":
-      deps.appendUserStreamEvent(event.payload.sessionId, event);
+      deps.appendUserStreamEvent(idOf(event.payload), event);
       // OPERATOR chat while a card is pending dismisses it server-side
       // (runner.postOperatorMessage → interactions.dismissPendingForChat), so
       // clearing here keeps the dot honest before those resolution events land.
@@ -107,14 +141,14 @@ export function routeEvent(event: ConsoleEvent, deps: RouterDeps): void {
       // still pending — the one signal the operator has that a run is waiting
       // on them, switched off by the run talking to them.
       if (event.payload.message.speaker.kind === "operator") {
-        deps.setAwaitingInput(event.payload.sessionId, false);
+        deps.setAwaitingInput(idOf(event.payload), false);
       }
       return;
     case "user_session.tool.call":
     case "user_session.tool.result":
     case "user_session.turn.started":
     case "user_session.turn.settled":
-      deps.appendUserStreamEvent(event.payload.sessionId, event);
+      deps.appendUserStreamEvent(idOf(event.payload), event);
       return;
 
     // 2c. Persisted transcript-shaped agent_session events — same ungated
@@ -125,11 +159,9 @@ export function routeEvent(event: ConsoleEvent, deps: RouterDeps): void {
     case "agent_session.turn.settled":
       deps.appendAgentStreamEvent(event.payload.agentSessionId, event);
       return;
-    // Tool payloads inherit the user-lane shape: `sessionId` IS the agent
-    // session id there (the envelope's agentSessionId agrees).
     case "agent_session.tool.call":
     case "agent_session.tool.result":
-      deps.appendAgentStreamEvent(event.payload.sessionId, event);
+      deps.appendAgentStreamEvent(idOf(event.payload), event);
       return;
 
     // 3c. Flow pulses — the store's freshness guard (via eventTs) keeps a
@@ -152,13 +184,13 @@ export function routeEvent(event: ConsoleEvent, deps: RouterDeps): void {
     // 3b. Question/plan events both append AND flip the attention map.
     case "user_session.question.asked":
     case "user_session.plan.proposed":
-      deps.appendUserStreamEvent(event.payload.sessionId, event);
-      deps.setAwaitingInput(event.payload.sessionId, true);
+      deps.appendUserStreamEvent(idOf(event.payload), event);
+      deps.setAwaitingInput(idOf(event.payload), true);
       return;
     case "user_session.question.answered":
     case "user_session.plan.resolved":
-      deps.appendUserStreamEvent(event.payload.sessionId, event);
-      deps.setAwaitingInput(event.payload.sessionId, false);
+      deps.appendUserStreamEvent(idOf(event.payload), event);
+      deps.setAwaitingInput(idOf(event.payload), false);
       return;
 
     default:

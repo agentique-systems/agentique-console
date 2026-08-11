@@ -9,13 +9,14 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import { openDb } from "../db/client.ts";
+import { ArtifactStore } from "../events/artifact-store.ts";
 import { EventBus } from "../events/bus.ts";
 import { Repo } from "../db/repo.ts";
 import { reapOrphanedProcesses } from "./orphans.ts";
 
 function harness() {
   const { db, sqlite } = openDb(":memory:");
-  const bus = new EventBus(db);
+  const bus = new EventBus(db, new ArtifactStore(db));
   const repo = new Repo(db, sqlite);
   const started = (processId: string, pid: number, command: string, args: string[]) =>
     bus.append({

@@ -41,7 +41,7 @@ function message(
   kind: "message" | "notice" | "plan" = "message",
 ): ConsoleEvent {
   return ev("user_session.message", {
-    sessionId: "us_1",
+    userSessionId: "us_1",
     message: {
       seq: seq + 1,
       speaker,
@@ -96,14 +96,14 @@ describe("foldUserItems", () => {
   it("tool call and result pair by EXACT callId into one card", () => {
     const items = foldUserItems([
       ev("user_session.tool.call", {
-        sessionId: "us_1",
+        userSessionId: "us_1",
         turnId: "turn_1",
         callId: "call_1",
         name: "Read",
         input: { file_path: "/tmp/a" },
       }),
       ev("user_session.tool.result", {
-        sessionId: "us_1",
+        userSessionId: "us_1",
         callId: "call_1",
         output: { ok: true },
       }),
@@ -121,14 +121,14 @@ describe("foldUserItems", () => {
   it("error results carry isError onto the paired card", () => {
     const items = foldUserItems([
       ev("user_session.tool.call", {
-        sessionId: "us_1",
+        userSessionId: "us_1",
         turnId: "turn_1",
         callId: "call_2",
         name: "Bash",
         input: { command: "false" },
       }),
       ev("user_session.tool.result", {
-        sessionId: "us_1",
+        userSessionId: "us_1",
         callId: "call_2",
         output: "exit 1",
         isError: true,
@@ -144,7 +144,7 @@ describe("foldUserItems", () => {
   it("an orphan tool.result (its call outside the record) folds to nothing", () => {
     const items = foldUserItems([
       ev("user_session.tool.result", {
-        sessionId: "us_1",
+        userSessionId: "us_1",
         callId: "call_gone",
         output: null,
       }),
@@ -154,7 +154,7 @@ describe("foldUserItems", () => {
 
   it("question.asked folds to a card; answered attaches the answers", () => {
     const asked = ev("user_session.question.asked", {
-      sessionId: "us_1",
+      userSessionId: "us_1",
       interactionId: "int_1",
       questions: [
         {
@@ -172,7 +172,7 @@ describe("foldUserItems", () => {
     const items = foldUserItems([
       asked,
       ev("user_session.question.answered", {
-        sessionId: "us_1",
+        userSessionId: "us_1",
         interactionId: "int_1",
         answers: { "Deploy?": ["Yes"] },
       }),
@@ -187,12 +187,12 @@ describe("foldUserItems", () => {
   it("a chat-dismissed question carries the dismissed flag", () => {
     const items = foldUserItems([
       ev("user_session.question.asked", {
-        sessionId: "us_1",
+        userSessionId: "us_1",
         interactionId: "int_2",
         questions: [{ question: "Which?", options: [{ label: "A" }] }],
       }),
       ev("user_session.question.answered", {
-        sessionId: "us_1",
+        userSessionId: "us_1",
         interactionId: "int_2",
         dismissed: true,
       }),
@@ -205,7 +205,7 @@ describe("foldUserItems", () => {
 
   it("plan.proposed folds to a card; resolved attaches the decision", () => {
     const proposed = ev("user_session.plan.proposed", {
-      sessionId: "us_1",
+      userSessionId: "us_1",
       interactionId: "int_3",
       plan: "# Plan\n1. do it",
     });
@@ -217,7 +217,7 @@ describe("foldUserItems", () => {
     const approved = foldUserItems([
       proposed,
       ev("user_session.plan.resolved", {
-        sessionId: "us_1",
+        userSessionId: "us_1",
         interactionId: "int_3",
         approved: true,
       }),
@@ -231,7 +231,7 @@ describe("foldUserItems", () => {
     const rejected = foldUserItems([
       proposed,
       ev("user_session.plan.resolved", {
-        sessionId: "us_1",
+        userSessionId: "us_1",
         interactionId: "int_3",
         approved: false,
         note: "smaller scope please",
@@ -246,7 +246,7 @@ describe("foldUserItems", () => {
   it("turn.started folds to a hairline with its trigger", () => {
     const items = foldUserItems([
       ev("user_session.turn.started", {
-        sessionId: "us_1",
+        userSessionId: "us_1",
         turnId: "turn_9",
         trigger: "operator",
       }),
@@ -262,7 +262,7 @@ describe("foldUserItems", () => {
     expect(
       foldUserItems([
         ev("user_session.turn.settled", {
-          sessionId: "us_1",
+          userSessionId: "us_1",
           turnId: "turn_9",
           status: "completed",
           queuedJobs: 0,
@@ -272,7 +272,7 @@ describe("foldUserItems", () => {
 
     const failed = foldUserItems([
       ev("user_session.turn.settled", {
-        sessionId: "us_1",
+        userSessionId: "us_1",
         turnId: "turn_9",
         status: "error",
         errorMessage: "model blew up",
@@ -286,7 +286,7 @@ describe("foldUserItems", () => {
 
     const aborted = foldUserItems([
       ev("user_session.turn.settled", {
-        sessionId: "us_1",
+        userSessionId: "us_1",
         turnId: "turn_10",
         status: "aborted",
         queuedJobs: 0,
@@ -304,7 +304,7 @@ describe("foldUserItems", () => {
         session: { id: "us_1" },
       }),
       ev("user_session.updated", {
-        sessionId: "us_1",
+        userSessionId: "us_1",
         patch: { mode: "plan_execute" },
       }),
       ev("workspace.created", { workspace: { id: "ws_1" } }),
@@ -353,14 +353,14 @@ describe("foldUserItems", () => {
     const events = [
       row,
       ev("user_session.tool.call", {
-        sessionId: "us_1",
+        userSessionId: "us_1",
         turnId: "turn_1",
         callId: "call_9",
         name: "Read",
         input: {},
       }),
       ev("user_session.tool.result", {
-        sessionId: "us_1",
+        userSessionId: "us_1",
         callId: "call_9",
         output: null,
       }),
@@ -375,7 +375,7 @@ describe("foldUserItems", () => {
 describe("foldBusy", () => {
   it("an unsettled turn is busy; a clean settle is not", () => {
     const started = ev("user_session.turn.started", {
-      sessionId: "us_1",
+      userSessionId: "us_1",
       turnId: "turn_1",
       trigger: "operator",
     });
@@ -384,7 +384,7 @@ describe("foldBusy", () => {
       foldBusy([
         started,
         ev("user_session.turn.settled", {
-          sessionId: "us_1",
+          userSessionId: "us_1",
           turnId: "turn_1",
           status: "completed",
           queuedJobs: 0,
@@ -397,12 +397,12 @@ describe("foldBusy", () => {
     expect(
       foldBusy([
         ev("user_session.turn.started", {
-          sessionId: "us_1",
+          userSessionId: "us_1",
           turnId: "turn_1",
           trigger: "operator",
         }),
         ev("user_session.turn.settled", {
-          sessionId: "us_1",
+          userSessionId: "us_1",
           turnId: "turn_1",
           status: "completed",
           queuedJobs: 2,
@@ -425,7 +425,7 @@ describe("run summary fold", () => {
       type: "run.completion.proposed", seq, ts: "2026-08-09T10:00:00.000Z",
       userSessionId: "us_1",
       payload: {
-        sessionId: "us_1", runId, summaryId: runId,
+        userSessionId: "us_1", runId, summaryId: runId,
         headline: "Lane Runner is done and verified.",
         verdict: "completed_with_caveats",
         filesChanged: 4, tasks: { completed: 4, total: 4 },
@@ -441,7 +441,7 @@ describe("run summary fold", () => {
       {
         type: "run.signoff.resolved", seq: 91, ts: "2026-08-09T10:01:00.000Z",
         userSessionId: "us_1",
-        payload: { sessionId: "us_1", runId: "run_1", decision: "accept" },
+        payload: { userSessionId: "us_1", runId: "run_1", decision: "accept" },
       } as unknown as ConsoleEvent,
     ]);
     const cards = items.filter((item) => item.type === "run_summary");
@@ -463,10 +463,10 @@ describe("run summary fold", () => {
       {
         type: "run.signoff.resolved", seq: 91, ts: "t",
         userSessionId: "us_1",
-        payload: { sessionId: "us_1", runId: "run_1", decision: "changes", note: "HUD is off" },
+        payload: { userSessionId: "us_1", runId: "run_1", decision: "changes", note: "HUD is off" },
       } as unknown as ConsoleEvent,
       { type: "run.reopened", seq: 92, ts: "t", userSessionId: "us_1",
-        payload: { sessionId: "us_1", runId: "run_1", reason: "changes_requested" } } as unknown as ConsoleEvent,
+        payload: { userSessionId: "us_1", runId: "run_1", reason: "changes_requested" } } as unknown as ConsoleEvent,
       proposed("run_2", 93),
     ]);
     const cards = items.filter((item) => item.type === "run_summary");
@@ -478,11 +478,11 @@ describe("run summary fold", () => {
 
 describe("foldPosture", () => {
   const started = { type: "user_session.turn.started", seq: 1, ts: "t", userSessionId: "us_1",
-    payload: { sessionId: "us_1", turnId: "t1", trigger: "operator" } } as unknown as ConsoleEvent;
+    payload: { userSessionId: "us_1", turnId: "t1", trigger: "operator" } } as unknown as ConsoleEvent;
   const asked = { type: "user_session.question.asked", seq: 2, ts: "t", userSessionId: "us_1",
-    payload: { sessionId: "us_1", interactionId: "int_1", questions: [], urgency: "blocking", source: "agent", allowFreeText: true } } as unknown as ConsoleEvent;
+    payload: { userSessionId: "us_1", interactionId: "int_1", questions: [], urgency: "blocking", source: "agent", allowFreeText: true } } as unknown as ConsoleEvent;
   const answered = { type: "user_session.question.answered", seq: 3, ts: "t", userSessionId: "us_1",
-    payload: { sessionId: "us_1", interactionId: "int_1", answers: {} } } as unknown as ConsoleEvent;
+    payload: { userSessionId: "us_1", interactionId: "int_1", answers: {} } } as unknown as ConsoleEvent;
 
   it("reports a running turn as busy", () => {
     expect(foldPosture([started])).toEqual({ busy: true, blocked: false, lastTurnErrored: false });
@@ -504,14 +504,14 @@ describe("foldPosture", () => {
     // stop the main lane's spinner or swap the interrupt affordance: main is
     // genuinely running. Deferred seat cards doubly so.
     const seatAsked = { type: "user_session.question.asked", seq: 4, ts: "t", userSessionId: "us_1",
-      payload: { sessionId: "us_1", interactionId: "int_2", questions: [], agentSessionId: "agsess_1",
+      payload: { userSessionId: "us_1", interactionId: "int_2", questions: [], agentSessionId: "agsess_1",
         participant: "renderer", urgency: "blocking", source: "agent", allowFreeText: true } } as unknown as ConsoleEvent;
     expect(foldPosture([started, seatAsked])).toEqual({ busy: true, blocked: false, lastTurnErrored: false });
   });
 
   it("surfaces an errored last turn for the blocked session state", () => {
     const settledError = { type: "user_session.turn.settled", seq: 5, ts: "t", userSessionId: "us_1",
-      payload: { sessionId: "us_1", turnId: "t1", status: "error", queuedJobs: 0 } } as unknown as ConsoleEvent;
+      payload: { userSessionId: "us_1", turnId: "t1", status: "error", queuedJobs: 0 } } as unknown as ConsoleEvent;
     expect(foldPosture([started, settledError])).toEqual({ busy: false, blocked: false, lastTurnErrored: true });
   });
 });

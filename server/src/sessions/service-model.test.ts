@@ -6,6 +6,7 @@
  * the operator can observe.
  */
 import { describe, expect, it, vi } from "vitest";
+import { ArtifactStore } from "../events/artifact-store.ts";
 import { EventBus } from "../events/bus.ts";
 import { InteractionService } from "../orchestrator/interactions.ts";
 import type { OrchestratorRunner } from "../orchestrator/runner.ts";
@@ -17,7 +18,7 @@ import { UserSessionService } from "./service.ts";
 
 function makeService() {
   const { db, sqlite } = openDb(":memory:");
-  const bus = new EventBus(db);
+  const bus = new EventBus(db, new ArtifactStore(db));
   const repo = new Repo(db, sqlite);
   const interactions = new InteractionService(db, bus);
 

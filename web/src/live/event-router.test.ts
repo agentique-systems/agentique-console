@@ -36,7 +36,7 @@ const messageEvent = (speakerKind: "operator" | "orchestrator" | "agent" | "syst
     ts: "2026-08-09T10:00:00.000Z",
     userSessionId: "us_1",
     payload: {
-      sessionId: "us_1",
+      userSessionId: "us_1",
       message: {
         id: "msg_1", seq: 1, kind: "message", text: "…",
         speaker: { kind: speakerKind, name: speakerKind },
@@ -51,7 +51,7 @@ const questionAsked = (): ConsoleEvent =>
     seq: 9,
     ts: "2026-08-09T09:59:00.000Z",
     userSessionId: "us_1",
-    payload: { sessionId: "us_1", interactionId: "int_1", questions: [] },
+    payload: { userSessionId: "us_1", interactionId: "int_1", questions: [] },
   }) as unknown as ConsoleEvent;
 
 describe("routeEvent — attention", () => {
@@ -83,7 +83,7 @@ describe("routeEvent — attention", () => {
     const d = deps();
     routeEvent({
       type: "user_session.question.answered", seq: 11, ts: "2026-08-09T10:01:00.000Z",
-      userSessionId: "us_1", payload: { sessionId: "us_1", interactionId: "int_1", answers: {} },
+      userSessionId: "us_1", payload: { userSessionId: "us_1", interactionId: "int_1", answers: {} },
     } as unknown as ConsoleEvent, d);
     expect(d.setAwaitingInput).toHaveBeenCalledWith("us_1", false);
   });
@@ -96,9 +96,23 @@ describe("routeEvent — attention", () => {
     routeEvent({
       type: "user_session.question.asked", seq: 12, ts: "2026-08-09T10:02:00.000Z",
       userSessionId: "us_1",
-      payload: { sessionId: "us_1", interactionId: "int_2", agentSessionId: "as_child", participant: "scout", questions: [] },
+      payload: { userSessionId: "us_1", interactionId: "int_2", agentSessionId: "as_child", participant: "scout", questions: [] },
     } as unknown as ConsoleEvent, d);
     expect(d.setAwaitingInput).toHaveBeenCalledWith("us_1", true);
+  });
+
+  it("routes replayed pre-rename history by its legacy sessionId", () => {
+    // Rows persisted before the payload id rule carry a bare `sessionId`, and
+    // the auxiliary agentSessionId (the asking seat) must not capture the
+    // stream. This pin dies with A8's data migration, together with idOf.
+    const d = deps();
+    routeEvent({
+      type: "user_session.question.asked", seq: 13, ts: "2026-08-09T10:05:00.000Z",
+      userSessionId: "us_1",
+      payload: { sessionId: "us_1", interactionId: "int_3", agentSessionId: "as_child", participant: "scout", questions: [] },
+    } as unknown as ConsoleEvent, d);
+    expect(d.setAwaitingInput).toHaveBeenCalledWith("us_1", true);
+    expect(d.appendUserStreamEvent).toHaveBeenCalledWith("us_1", expect.anything());
   });
 });
 

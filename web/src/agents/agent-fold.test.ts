@@ -113,7 +113,7 @@ describe("foldAgentItems", () => {
   it("tool call and result pair by EXACT callId, participant carried", () => {
     const items = foldAgentItems([
       ev("agent_session.tool.call", {
-        sessionId: "as_1",
+        agentSessionId: "as_1",
         turnId: "turn_1",
         callId: "call_1",
         name: "Read",
@@ -121,7 +121,7 @@ describe("foldAgentItems", () => {
         input: { file_path: "/tmp/a" },
       }),
       ev("agent_session.tool.result", {
-        sessionId: "as_1",
+        agentSessionId: "as_1",
         callId: "call_1",
         participant: "scout",
         output: { ok: true },
@@ -141,7 +141,7 @@ describe("foldAgentItems", () => {
   it("error results carry isError onto the paired card", () => {
     const items = foldAgentItems([
       ev("agent_session.tool.call", {
-        sessionId: "as_1",
+        agentSessionId: "as_1",
         turnId: "turn_1",
         callId: "call_2",
         name: "Bash",
@@ -149,7 +149,7 @@ describe("foldAgentItems", () => {
         input: { command: "false" },
       }),
       ev("agent_session.tool.result", {
-        sessionId: "as_1",
+        agentSessionId: "as_1",
         callId: "call_2",
         participant: "coder",
         output: "exit 1",
@@ -166,7 +166,7 @@ describe("foldAgentItems", () => {
   it("an orphan tool.result (its call outside the record) folds to nothing", () => {
     const items = foldAgentItems([
       ev("agent_session.tool.result", {
-        sessionId: "as_1",
+        agentSessionId: "as_1",
         callId: "call_gone",
         participant: "scout",
         output: null,
@@ -243,7 +243,7 @@ describe("foldAgentItems", () => {
         status: "idle",
       }),
       ev("user_session.message", {
-        sessionId: "us_1",
+        userSessionId: "us_1",
         message: {
           seq: 1,
           speaker: { kind: "operator", name: "operator" },
@@ -300,7 +300,7 @@ describe("foldAgentItems", () => {
     const events = [
       row,
       ev("agent_session.tool.call", {
-        sessionId: "as_1",
+        agentSessionId: "as_1",
         turnId: "turn_1",
         callId: "call_9",
         name: "Read",
@@ -308,7 +308,7 @@ describe("foldAgentItems", () => {
         input: {},
       }),
       ev("agent_session.tool.result", {
-        sessionId: "as_1",
+        agentSessionId: "as_1",
         callId: "call_9",
         participant: "scout",
         output: null,

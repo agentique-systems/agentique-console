@@ -9,6 +9,7 @@ import { PATTERN_IDS, type HandoffDraft, type InteractionUrgency, type Speaker }
 import type { AgentProfile } from "../agent-profiles/registry.ts";
 import type { Config } from "../config.ts";
 import type { AgentSessionRow, MessageRow, ParticipantRow, Repo, UserSessionRow } from "../db/repo.ts";
+import type { ArtifactStore } from "../events/artifact-store.ts";
 import type { EventBus } from "../events/bus.ts";
 import type { ConsoleSdk, SdkToolResult } from "../sdk/types.ts";
 import type { ProcessManager } from "../runtime/process-manager.ts";
@@ -66,6 +67,7 @@ import { fail, ok } from "../sdk/tool-result.ts";
 export interface SeatToolsDeps {
   repo: Repo;
   bus: EventBus;
+  artifacts: ArtifactStore;
   config?: Config;
   tasks?: TaskService;
   handoffs?: HandoffService;
@@ -202,7 +204,7 @@ export function buildSeatTools(ctx: SeatToolsContext): unknown[] {
     "Read back an artifact you or a teammate produced (screenshot, diff, captured payload) by its artifact id. Images return as viewable content.",
     { artifactId: z.string().min(1), cursor: z.string().optional(), maxBytes: z.number().int().min(1).max(PAGE_MAX_BYTES).default(PAGE_DEFAULT_BYTES) },
     async (args: { artifactId: string; cursor?: string; maxBytes: number }) => {
-      const artifact = deps.bus.getArtifact(args.artifactId);
+      const artifact = deps.artifacts.get(args.artifactId);
       if (!artifact) return fail(`no artifact ${args.artifactId}`);
       if (artifact.mediaType.startsWith("image/")) {
         // MCP's ImageContent is {type,data,mimeType} — NOT the Messages API's
@@ -210,7 +212,7 @@ export function buildSeatTools(ctx: SeatToolsContext): unknown[] {
         // call, so db-live-2 captured three valid screenshots that no agent
         // could open and `check` reimplemented visual verification in
         // gl.readPixels instead. The `;base64` suffix is the storage
-        // convention (bus.storeArtifact branches on it for byte accounting);
+        // convention (the artifact store branches on it for byte accounting);
         // strip it only here, at the boundary.
         const mimeType = artifact.mediaType.replace(/;base64$/, "");
         if (artifact.content.length > MAX_IMAGE_BASE64_CHARS) {
@@ -238,7 +240,7 @@ export function buildSeatTools(ctx: SeatToolsContext): unknown[] {
     "Store a long body — a verification report, a full log, an analysis — as a durable artifact and get its id back. Reference that id from send_handoff's evidence instead of pasting the body into a field. Never shorten a finding to make it fit a parameter.",
     { title: z.string().min(1).max(200), body: z.string().min(1) },
     async (args: { title: string; body: string }) => {
-      const stored = deps.bus.storeArtifact(
+      const stored = deps.artifacts.store(
         `# ${args.title}\n\n${args.body}`,
         "text/markdown",
         { userSessionId: session.userSessionId, agentSessionId: session.id },

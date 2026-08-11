@@ -40,7 +40,7 @@ export class ManagerService {
   get(id: string): ManagerSession { const row = this.#row(id); return this.#wire(row); }
   postMessage(id: string, text: string) { const row = this.#row(id); if (row.phase === "executing") {
     this.deps.repo.patchUserSession(id, { phase: "planning" });
-    this.deps.bus.append({ type: "user_session.updated", userSessionId: id, payload: { sessionId: id, patch: { phase: "planning" } } });
+    this.deps.bus.append({ type: "user_session.updated", userSessionId: id, payload: { userSessionId: id, patch: { phase: "planning" } } });
     this.deps.runner().recycleSession(id);
   } return this.deps.runner().postOperatorMessage(id, text); }
 

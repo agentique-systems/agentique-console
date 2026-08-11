@@ -20,6 +20,7 @@ import { buildManagerMcpServer } from "./agent-profiles/tools.ts";
 import type { Config } from "./config.ts";
 import type { Db } from "./db/client.ts";
 import { Repo } from "./db/repo.ts";
+import { ArtifactStore } from "./events/artifact-store.ts";
 import { EventBus } from "./events/bus.ts";
 import { late } from "./late.ts";
 import { RunCompletionService } from "./completion/service.ts";
@@ -61,6 +62,7 @@ export interface App {
   db: Db;
   sqlite: Database.Database;
   bus: EventBus;
+  artifacts: ArtifactStore;
   repo: Repo;
   sdk: () => Promise<ConsoleSdk>;
   getWorkspaceRoot: (workspaceId: string) => string;
@@ -84,14 +86,15 @@ export interface App {
 
 export function createApp(options: CreateAppOptions): App {
   const { config, db, sqlite, sdk } = options;
-  const bus = new EventBus(db);
+  const artifacts = new ArtifactStore(db);
+  const bus = new EventBus(db, artifacts);
   const repo = new Repo(db, sqlite);
   const workspaces = new WorkspaceService(db, bus, config.fsRoots.map((root) => root.path));
   const getWorkspaceRoot = (workspaceId: string): string => workspaces.get(workspaceId).rootPath;
   const timeline = new TimelineService(repo, bus);
   const profiles = new AgentProfileRegistry({ getWorkspaceRoot, db, bus });
   const processes = options.runtime?.processes === undefined ? new ProcessManager(bus) : options.runtime.processes;
-  const browsers = options.runtime?.browsers === undefined ? new BrowserManager(bus) : options.runtime.browsers;
+  const browsers = options.runtime?.browsers === undefined ? new BrowserManager(artifacts) : options.runtime.browsers;
   const worktrees = options.runtime?.worktrees === undefined ? new WorktreeManager({ dataDir: config.dataDir }) : options.runtime.worktrees;
 
   const decisions = new DecisionLedger(db);
@@ -103,7 +106,7 @@ export function createApp(options: CreateAppOptions): App {
   const lateRunner = late<OrchestratorRunner>("runner");
   const lateManager = late<ManagerService>("manager");
   const host = new AgentSessionHost({
-    repo, bus, config, profiles, sdk, sessionStore, getWorkspaceRoot,
+    repo, bus, artifacts, config, profiles, sdk, sessionStore, getWorkspaceRoot,
     processes, browsers, worktrees,
     interactions, decisions, tasks, handoffs,
     wake: (userSessionId, agentSessionId, category, text) =>
@@ -144,7 +147,7 @@ export function createApp(options: CreateAppOptions): App {
     host.onBlockingQuestionsCleared(userSessionId, agentSessionId));
 
   return {
-    config, db, sqlite, bus, repo, sdk, getWorkspaceRoot,
+    config, db, sqlite, bus, artifacts, repo, sdk, getWorkspaceRoot,
     workspaces, timeline, profiles, processes, browsers, worktrees,
     decisions, interactions, tasks, handoffs, sessionStore,
     host, runner, completion, userSessions, manager,

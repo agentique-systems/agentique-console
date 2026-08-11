@@ -39,7 +39,7 @@ export function buildOrchestratorCanUseTool(input: CanUseToolInput): CanUseTool 
     message: string,
   ): { behavior: "deny"; message: string } => {
     bus.append({ type: "governance.tool.denied", userSessionId,
-      payload: { sessionId: userSessionId, toolName, kind, reason: message.slice(0, 500) } });
+      payload: { userSessionId, toolName, kind, reason: message.slice(0, 500) } });
     return { behavior: "deny", message };
   };
 
@@ -113,7 +113,7 @@ export function buildOrchestratorCanUseTool(input: CanUseToolInput): CanUseTool 
           type: "user_session.updated",
           userSessionId,
           payload: {
-            sessionId: userSessionId,
+            userSessionId,
             patch: { phase: "executing" },
           },
         });

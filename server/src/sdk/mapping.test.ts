@@ -263,7 +263,7 @@ describe("liveness notices", () => {
       }),
     ).toEqual([
       { kind: "notice", text: "rate limited · retry 2/5 · in 1m 30s" },
-      { kind: "retry", attempt: 2, maxRetries: 5, delayMs: 90_000, status: 429 },
+      { kind: "retry", classification: "rate_limited", attempt: 2, maxRetries: 5, delayMs: 90_000, status: 429, detail: "rate limited · retry 2/5 · in 1m 30s" },
     ]);
   });
 
@@ -279,7 +279,7 @@ describe("liveness notices", () => {
       }),
     ).toEqual([
       { kind: "notice", text: "API error 529 · retry 1/3 · in 2s" },
-      { kind: "retry", attempt: 1, maxRetries: 3, delayMs: 2_000, status: 529 },
+      { kind: "retry", classification: "api_error", attempt: 1, maxRetries: 3, delayMs: 2_000, status: 529, detail: "API error 529 · retry 1/3 · in 2s" },
     ]);
   });
 

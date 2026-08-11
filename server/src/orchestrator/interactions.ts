@@ -182,7 +182,7 @@ export class InteractionService {
           userSessionId: input.userSessionId,
           ...(input.agentSessionId ? { agentSessionId: input.agentSessionId } : {}),
           payload: {
-            sessionId: input.userSessionId,
+            userSessionId: input.userSessionId,
             interactionId: id,
             questions: input.questions,
             ...(input.agentSessionId ? { agentSessionId: input.agentSessionId } : {}),
@@ -215,7 +215,7 @@ export class InteractionService {
         this.#bus.append({
           type: "user_session.plan.proposed",
           userSessionId,
-          payload: { sessionId: userSessionId, interactionId: id, plan },
+          payload: { userSessionId, interactionId: id, plan },
         });
       },
     );
@@ -309,7 +309,7 @@ export class InteractionService {
         userSessionId,
         ...(row.agentSessionId ? { agentSessionId: row.agentSessionId } : {}),
         payload: {
-          sessionId: userSessionId,
+          userSessionId,
           interactionId,
           answers: body.answers,
           ...(body.freeText === undefined ? {} : { freeText: body.freeText }),
@@ -342,7 +342,7 @@ export class InteractionService {
         type: "user_session.plan.resolved",
         userSessionId,
         payload: {
-          sessionId: userSessionId,
+          userSessionId,
           interactionId,
           approved,
           ...(body.note === undefined ? {} : { note: body.note }),
@@ -391,7 +391,7 @@ export class InteractionService {
           type: "user_session.plan.resolved",
           userSessionId,
           payload: {
-            sessionId: userSessionId,
+            userSessionId,
             interactionId: row.id,
             approved: false,
             note: chatText,
@@ -408,7 +408,7 @@ export class InteractionService {
           type: "user_session.question.answered",
           userSessionId,
           payload: {
-            sessionId: userSessionId,
+            userSessionId,
             interactionId: row.id,
             dismissed: true,
           },
@@ -426,7 +426,7 @@ export class InteractionService {
         type: "user_session.runtime",
         userSessionId,
         payload: {
-          sessionId: userSessionId,
+          userSessionId,
           detail: `${held} question(s) raised by agent seats stay open — chatting does not answer them; use their cards.`,
         },
       });
@@ -568,7 +568,7 @@ export class InteractionService {
       userSessionId: row.userSessionId,
       ...(row.agentSessionId ? { agentSessionId: row.agentSessionId } : {}),
       payload: {
-        sessionId: row.userSessionId,
+        userSessionId: row.userSessionId,
         decisionId: row.id,
         ...(row.agentSessionId ? { agentSessionId: row.agentSessionId } : {}),
         interactionId: row.id,

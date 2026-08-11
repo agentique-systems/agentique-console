@@ -19,9 +19,10 @@ export type TurnEvent =
    * A provider retry, with its numbers intact. The console budgets on wall
    * clock rather than waiting for the CLI's own attempt count to run out —
    * db-live-2's observed schedule stopped growing after attempt 7, so attempts
-   * 7-10 were ~34s each and bought nothing.
+   * 7-10 were ~34s each and bought nothing. `detail` restates the same fact as
+   * the accompanying notice; consumers persist THIS one.
    */
-  | { kind: "retry"; attempt?: number; maxRetries?: number; delayMs: number; status?: number }
+  | { kind: "retry"; classification: "api_error" | "rate_limited"; attempt?: number; maxRetries?: number; delayMs: number; status?: number; detail: string }
   | {
       kind: "tool.call";
       callId: string;
@@ -301,18 +302,21 @@ function systemNotice(message: SdkMessage): TurnEvent[] {
           : `retry ${attempt}/${max}`,
         delay === undefined ? undefined : `in ${formatSeconds(delay / 1000)}`,
       ].filter((part): part is string => part !== undefined);
+      const detail = parts.join(" · ");
       // The STRUCTURE as well as the prose. Throwing the numbers away into a
       // string is why nothing could act on a retry storm: db-live-2 spent
       // 18m14s — 55% of the run — inside three bursts that each exhausted
       // 10/10 attempts, and the console had no way to notice or stop it.
       return [
-        { kind: "notice", text: parts.join(" · ") },
+        { kind: "notice", text: detail },
         {
           kind: "retry",
+          classification: status === 429 ? "rate_limited" : "api_error",
           ...(attempt === undefined ? {} : { attempt }),
           ...(max === undefined ? {} : { maxRetries: max }),
           delayMs: delay ?? 0,
           ...(status === undefined ? {} : { status }),
+          detail,
         },
       ];
     }

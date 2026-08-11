@@ -1,5 +1,5 @@
 import { chromium, type Browser, type Page } from "playwright-core";
-import type { EventBus } from "../events/bus.ts";
+import type { ArtifactStore } from "../events/artifact-store.ts";
 
 interface BrowserSeat { browser: Browser; page: Page; console: string[]; }
 
@@ -69,7 +69,7 @@ export async function runInPage(source: string): Promise<EvaluateOutcome> {
 /** Profile-gated local Chrome automation; screenshots are durable artifacts. */
 export class BrowserManager {
   readonly #seats = new Map<string, BrowserSeat>();
-  constructor(readonly bus: EventBus) {}
+  constructor(readonly artifacts: ArtifactStore) {}
 
   async open(key: string, url: string): Promise<{ url: string; title: string }> {
     const protocol = new URL(url).protocol;
@@ -131,7 +131,7 @@ export class BrowserManager {
   }
   async screenshot(key: string, scope: { userSessionId: string; agentSessionId: string }): Promise<{ artifactId: string; bytes: number }> {
     const buffer = await (await this.#seat(key)).page.screenshot({ fullPage: true, type: "png" });
-    return this.bus.storeArtifact(buffer.toString("base64"), "image/png;base64", scope);
+    return this.artifacts.store(buffer.toString("base64"), "image/png;base64", scope);
   }
   async consoleMessages(key: string): Promise<string[]> { return [...(await this.#seat(key)).console]; }
   async closeAll(): Promise<void> { await Promise.all([...this.#seats.values()].map((seat) => seat.browser.close().catch(() => undefined))); this.#seats.clear(); }

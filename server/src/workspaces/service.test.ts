@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { openDb } from "../db/client.ts";
+import { ArtifactStore } from "../events/artifact-store.ts";
 import { EventBus } from "../events/bus.ts";
 import { ConflictError, InvalidInputError } from "../errors.ts";
 import { WorkspaceService } from "./service.ts";
@@ -14,7 +15,7 @@ let bus: EventBus;
 beforeEach(() => {
   tmp = mkdtempSync(path.join(os.tmpdir(), "console-ws-"));
   const { db } = openDb(":memory:");
-  bus = new EventBus(db);
+  bus = new EventBus(db, new ArtifactStore(db));
   service = new WorkspaceService(db, bus, [tmp]);
 });
 

@@ -8,6 +8,45 @@ type Payload = Record<string, unknown>;
 function payload(event: ConsoleEvent): Payload { return event.payload as unknown as Payload; }
 function str(value: unknown, fallback = ""): string { return typeof value === "string" ? value : fallback; }
 
+/**
+ * Lane-item kind for annotation events the page loop builds no span from.
+ * `*.retry.recorded` stays unmapped: its runtime prose twin already renders,
+ * and two rows per retry would double every storm.
+ */
+function classify(type: ConsoleEvent["type"]): "task" | "handoff" | "decision" | "rotation" | "usage" | "runtime" | null {
+  switch (type) {
+    case "task.created":
+    case "task.updated":
+    case "task_dependency.created":
+    case "task_dependency.deleted":
+      return "task";
+    case "handoff.created":
+    case "handoff.consumed":
+    case "handoff.discrepancy":
+    case "handoff.checkpoint.failed":
+    case "handoff.final.caveats":
+    case "handoff.final.blocked":
+    case "flow.delegation":
+    case "flow.result":
+      return "handoff";
+    case "user_session.question.asked":
+    case "user_session.question.answered":
+    case "user_session.plan.proposed":
+    case "user_session.plan.resolved":
+      return "decision";
+    case "user_session.context.rotated":
+    case "agent_session.context.rotated":
+      return "rotation";
+    case "usage.recorded":
+      return "usage";
+    case "user_session.runtime":
+    case "agent_session.runtime":
+      return "runtime";
+    default:
+      return null;
+  }
+}
+
 export class TimelineService {
   constructor(private readonly repo: Repo, private readonly bus: EventBus) {}
 
@@ -55,7 +94,7 @@ export class TimelineService {
       }
       if (event.type === "agent_session.turn.settled") { finish(`agent-turn:${str(p.turnId)}`, event, str(p.status)); continue; }
       if (event.type === "user_session.tool.call" || event.type === "agent_session.tool.call") {
-        const lane = event.type.startsWith("agent_") ? `agent:${event.agentSessionId ?? ""}:${str(p.participant)}` : "orchestrator";
+        const lane = event.type === "agent_session.tool.call" ? `agent:${event.agentSessionId ?? ""}:${str(p.participant)}` : "orchestrator";
         const item: TimelineItem = { id: `tool:${str(p.callId)}`, laneId: lane, kind: "tool", label: str(p.name, "tool"), start: event.ts, end: null, status: "running", eventSeqs: seqs, detail: p };
         starts.set(item.id, item); items.push(item); continue;
       }
@@ -75,7 +114,7 @@ export class TimelineService {
         const speaker = message.speaker as Record<string, unknown> | undefined;
         items.push({ id: `event:${event.seq}`, laneId: `agent:${event.agentSessionId ?? ""}:${str(speaker?.name)}`, kind: "message", label: str(message.text, "message").slice(0, 80), start: event.ts, end: null, status: null, eventSeqs: seqs, detail: p }); continue;
       }
-      const mapped = event.type.startsWith("task") ? "task" : event.type.startsWith("handoff") || event.type.startsWith("flow") ? "handoff" : event.type.includes("question") || event.type.includes("plan") ? "decision" : event.type.includes("context.rotated") ? "rotation" : event.type === "usage.recorded" ? "usage" : event.type.includes("runtime") ? "runtime" : null;
+      const mapped = classify(event.type);
       if (mapped) {
         const lane = event.agentSessionId ? `agent:${event.agentSessionId}:${str(p.participant, "orchestrator")}` : "orchestrator";
         items.push({ id: `event:${event.seq}`, laneId: lane, kind: mapped, label: event.type.replaceAll("_", " "), start: event.ts, end: null, status: null, eventSeqs: seqs, detail: p });

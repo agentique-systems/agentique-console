@@ -73,7 +73,7 @@ describe("run completion", () => {
 
     const proposed = await collectUntil(h.bus, (event) => event.type === "run.completion.proposed", 10_000);
     const event = proposed.find((row) => row.type === "run.completion.proposed")!;
-    expect((event.payload as { sessionId: string }).sessionId).toBe(userSessionId);
+    expect((event.payload as { userSessionId: string }).userSessionId).toBe(userSessionId);
 
     // The state the operator can actually see, and the one db-live-2 could not
     // express: the Console believes this is done and is waiting on them.

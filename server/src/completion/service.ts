@@ -150,7 +150,7 @@ export class RunCompletionService {
       type: "run.completion.proposed",
       userSessionId,
       payload: {
-        sessionId: userSessionId, runId: id, summaryId: id,
+        userSessionId, runId: id, summaryId: id,
         headline: document.headline, verdict: document.verdict,
         filesChanged: document.build.filesChanged,
         tasks: { completed: document.tasks.completed, total: document.tasks.total },
@@ -165,7 +165,7 @@ export class RunCompletionService {
     bus.append({
       type: "user_session.updated",
       userSessionId,
-      payload: { sessionId: userSessionId, patch: { runState: "awaiting_signoff" } },
+      payload: { userSessionId, patch: { runState: "awaiting_signoff" } },
     });
   }
 
@@ -196,9 +196,9 @@ export class RunCompletionService {
     if (decision === "accept") {
       repo.patchUserSession(userSessionId, { runState: "completed" });
       bus.append({ type: "run.signoff.resolved", userSessionId,
-        payload: { sessionId: userSessionId, runId: summary?.id ?? "", decision: "accept", ...(note === undefined ? {} : { note }) } });
+        payload: { userSessionId, runId: summary?.id ?? "", decision: "accept", ...(note === undefined ? {} : { note }) } });
       bus.append({ type: "user_session.updated", userSessionId,
-        payload: { sessionId: userSessionId, patch: { runState: "completed" } } });
+        payload: { userSessionId, patch: { runState: "completed" } } });
       // The agent sessions are done; their rows say so, and the lane stops
       // holding a CLI subprocess for a run nobody is working on.
       this.#deps.host().archiveForUserSession(userSessionId);
@@ -212,11 +212,11 @@ export class RunCompletionService {
     // exactly the trap db-live-2 left for the next run.
     repo.patchUserSession(userSessionId, { runState: "active" });
     bus.append({ type: "run.signoff.resolved", userSessionId,
-      payload: { sessionId: userSessionId, runId: summary?.id ?? "", decision: "changes", ...(note === undefined ? {} : { note }) } });
+      payload: { userSessionId, runId: summary?.id ?? "", decision: "changes", ...(note === undefined ? {} : { note }) } });
     bus.append({ type: "run.reopened", userSessionId,
-      payload: { sessionId: userSessionId, runId: summary?.id ?? "", reason: "changes_requested" } });
+      payload: { userSessionId, runId: summary?.id ?? "", reason: "changes_requested" } });
     bus.append({ type: "user_session.updated", userSessionId,
-      payload: { sessionId: userSessionId, patch: { runState: "active" } } });
+      payload: { userSessionId, patch: { runState: "active" } } });
     // A note is a real operator message: it steers a live lane and reaches the
     // orchestrator the same way anything else the operator types does. An empty
     // note synthesizes nothing — the UI focuses the composer instead.

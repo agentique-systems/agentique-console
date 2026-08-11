@@ -39,7 +39,7 @@ export function recoverInterruptedTurns(deps: {
         type: "user_session.turn.settled",
         userSessionId: turn.userSessionId,
         payload: {
-          sessionId: turn.userSessionId,
+          userSessionId: turn.userSessionId,
           turnId: turn.turnId,
           status: "aborted",
           errorMessage: RESTART_NOTE,
@@ -57,7 +57,7 @@ export function recoverInterruptedTurns(deps: {
         type: "user_session.message",
         userSessionId: turn.userSessionId,
         payload: {
-          sessionId: turn.userSessionId,
+          userSessionId: turn.userSessionId,
           message: toWireMessage(row),
         },
       });
@@ -87,15 +87,17 @@ export function recoverInterruptedTurns(deps: {
 export async function reconcileDurableCommunication(deps: { repo: Repo; bus: EventBus }): Promise<number> {
   const existing = new Set<string>();
   for await (const event of deps.bus.readWithSeq({})) {
-    if (event.type === "user_session.message") existing.add(`message:user:${event.payload.sessionId}:${event.payload.message.seq}`);
-    else if (event.type === "agent_session.message") existing.add(`message:agent:${event.payload.agentSessionId}:${event.payload.message.seq}`);
+    // Envelope ids, not payload ids: the keys must match rows appended by any
+    // earlier version of the emitters, and the envelope names never moved.
+    if (event.type === "user_session.message") existing.add(`message:user:${event.userSessionId}:${event.payload.message.seq}`);
+    else if (event.type === "agent_session.message") existing.add(`message:agent:${event.agentSessionId}:${event.payload.message.seq}`);
     else if (event.type === "agent_session.mailbox") existing.add(`delivery:${event.payload.deliveryId}:${event.payload.status}`);
   }
   let recovered = 0;
   for (const row of deps.repo.listAllMessages()) {
     const key = `message:${row.sessionKind}:${row.sessionId}:${row.seq}`;
     if (existing.has(key)) continue;
-    if (row.sessionKind === "user") deps.bus.append({ type: "user_session.message", userSessionId: row.sessionId, payload: { sessionId: row.sessionId, message: toWireMessage(row) } });
+    if (row.sessionKind === "user") deps.bus.append({ type: "user_session.message", userSessionId: row.sessionId, payload: { userSessionId: row.sessionId, message: toWireMessage(row) } });
     else {
       const session = deps.repo.getAgentSession(row.sessionId); if (!session) continue;
       deps.bus.append({ type: "agent_session.message", userSessionId: session.userSessionId, agentSessionId: row.sessionId, payload: { agentSessionId: row.sessionId, message: toWireMessage(row) } });

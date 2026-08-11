@@ -137,7 +137,7 @@ export class UserSessionService {
     this.#bus.append({
       type: "user_session.updated",
       userSessionId: id,
-      payload: { sessionId: id, patch: changes },
+      payload: { userSessionId: id, patch: changes },
     });
     // The lane's options are frozen at spawn: archiving shuts it down, and a
     // mode or model change recycles it so the next message respawns with fresh
