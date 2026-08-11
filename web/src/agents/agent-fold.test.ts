@@ -44,7 +44,7 @@ function message(
   kind: "message" | "notice" | "plan" = "message",
   to?: string,
 ): ConsoleEvent {
-  return ev("agent_session.message", {
+  return ev("agent_session.message.appended", {
     agentSessionId: "as_1",
     message: {
       seq: seq + 1,
@@ -67,7 +67,7 @@ describe("foldAgentItems", () => {
     const handoff = { id: "handoff_1", trigger: "milestone" as const, status: "in_progress" as const, risk: "medium" as const,
       action: "Report state", stateSummary: "Parser is updated", resultSummary: null, nextAction: "Run tests",
       evidenceCount: 1, artifactCount: 0, extensionKind: "implementation" as const, overflow: false, referenceWarnings: [] };
-    const items = foldAgentItems([ev("agent_session.message", { agentSessionId: "as_1", message: { seq: 1, speaker: SCOUT,
+    const items = foldAgentItems([ev("agent_session.message.appended", { agentSessionId: "as_1", message: { seq: 1, speaker: SCOUT,
       to: "orchestrator", kind: "message", text: "compact projection", handoff, createdAt: "2026-08-03T12:00:00.000Z" } })]);
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({ type: "message", handoff });
@@ -110,20 +110,20 @@ describe("foldAgentItems", () => {
     });
   });
 
-  it("tool call and result pair by EXACT callId, participant carried", () => {
+  it("tool call and result pair by EXACT callId, agent carried", () => {
     const items = foldAgentItems([
-      ev("agent_session.tool.call", {
+      ev("agent_session.tool.called", {
         agentSessionId: "as_1",
         turnId: "turn_1",
         callId: "call_1",
         name: "Read",
-        participant: "scout",
+        agent: "scout",
         input: { file_path: "/tmp/a" },
       }),
-      ev("agent_session.tool.result", {
+      ev("agent_session.tool.completed", {
         agentSessionId: "as_1",
         callId: "call_1",
-        participant: "scout",
+        agent: "scout",
         output: { ok: true },
       }),
     ]);
@@ -132,7 +132,7 @@ describe("foldAgentItems", () => {
       type: "tool",
       callId: "call_1",
       name: "Read",
-      participant: "scout",
+      agent: "scout",
       input: { file_path: "/tmp/a" },
       output: { ok: true },
     });
@@ -140,18 +140,18 @@ describe("foldAgentItems", () => {
 
   it("error results carry isError onto the paired card", () => {
     const items = foldAgentItems([
-      ev("agent_session.tool.call", {
+      ev("agent_session.tool.called", {
         agentSessionId: "as_1",
         turnId: "turn_1",
         callId: "call_2",
         name: "Bash",
-        participant: "coder",
+        agent: "coder",
         input: { command: "false" },
       }),
-      ev("agent_session.tool.result", {
+      ev("agent_session.tool.completed", {
         agentSessionId: "as_1",
         callId: "call_2",
-        participant: "coder",
+        agent: "coder",
         output: "exit 1",
         isError: true,
       }),
@@ -165,28 +165,28 @@ describe("foldAgentItems", () => {
 
   it("an orphan tool.result (its call outside the record) folds to nothing", () => {
     const items = foldAgentItems([
-      ev("agent_session.tool.result", {
+      ev("agent_session.tool.completed", {
         agentSessionId: "as_1",
         callId: "call_gone",
-        participant: "scout",
+        agent: "scout",
         output: null,
       }),
     ]);
     expect(items).toHaveLength(0);
   });
 
-  it("turn.started folds to a marker with its participant", () => {
+  it("turn.started folds to a marker with its agent", () => {
     const items = foldAgentItems([
       ev("agent_session.turn.started", {
         agentSessionId: "as_1",
-        participant: "scout",
+        agent: "scout",
         turnId: "turn_9",
       }),
     ]);
     expect(items[0]).toMatchObject({
       type: "turn",
       turnId: "turn_9",
-      participant: "scout",
+      agent: "scout",
     });
   });
 
@@ -195,7 +195,7 @@ describe("foldAgentItems", () => {
       foldAgentItems([
         ev("agent_session.turn.settled", {
           agentSessionId: "as_1",
-          participant: "scout",
+          agent: "scout",
           turnId: "turn_9",
           status: "completed",
         }),
@@ -205,7 +205,7 @@ describe("foldAgentItems", () => {
     const failed = foldAgentItems([
       ev("agent_session.turn.settled", {
         agentSessionId: "as_1",
-        participant: "scout",
+        agent: "scout",
         turnId: "turn_9",
         status: "error",
         errorMessage: "model blew up",
@@ -213,14 +213,14 @@ describe("foldAgentItems", () => {
     ]);
     expect(failed[0]).toMatchObject({
       type: "turn_error",
-      participant: "scout",
+      agent: "scout",
       errorMessage: "model blew up",
     });
 
     const aborted = foldAgentItems([
       ev("agent_session.turn.settled", {
         agentSessionId: "as_1",
-        participant: "coder",
+        agent: "coder",
         turnId: "turn_10",
         status: "aborted",
       }),
@@ -235,14 +235,14 @@ describe("foldAgentItems", () => {
     for (const event of [
       ev("agent_session.created", {
         session: { id: "as_1" },
-        participants: ["scout"],
+        agents: ["scout"],
       }),
       // Status is a strip-card concern, never a transcript row.
-      ev("agent_session.status", {
+      ev("agent_session.status.changed", {
         agentSessionId: "as_1",
         status: "idle",
       }),
-      ev("user_session.message", {
+      ev("user_session.message.appended", {
         userSessionId: "us_1",
         message: {
           seq: 1,
@@ -254,32 +254,32 @@ describe("foldAgentItems", () => {
       }),
       ev("task.created", { task: {} }),
       ev("task.updated", { task: {}, changed: [] }),
-      ev("flow.delegation", {
+      ev("agent_session.delegation.sent", {
         userSessionId: "us_1",
         agentSessionId: "as_1",
         kind: "created",
         preview: "x",
       }),
-      ev("flow.result", {
+      ev("agent_session.result.returned", {
         userSessionId: "us_1",
         agentSessionId: "as_1",
         digestPreview: "y",
       }),
       transient("stream.delta", {
-        scope: { kind: "agent", sessionId: "as_1" },
+        scope: { kind: "agent", agentSessionId: "as_1" },
         speaker: "scout",
         turnId: "turn_1",
         text: "streaming…",
       }),
       transient("stream.reasoning", {
-        scope: { kind: "agent", sessionId: "as_1" },
+        scope: { kind: "agent", agentSessionId: "as_1" },
         speaker: "scout",
         turnId: "turn_1",
         text: "hmm",
       }),
-      transient("agent.state", {
-        scope: { kind: "agent", sessionId: "as_1" },
-        participant: "scout",
+      transient("agent_session.activity.changed", {
+        scope: { kind: "agent", agentSessionId: "as_1" },
+        agent: "scout",
         state: "thinking",
       }),
     ]) {
@@ -299,18 +299,18 @@ describe("foldAgentItems", () => {
     // Pure: same array in, same items out, input untouched.
     const events = [
       row,
-      ev("agent_session.tool.call", {
+      ev("agent_session.tool.called", {
         agentSessionId: "as_1",
         turnId: "turn_1",
         callId: "call_9",
         name: "Read",
-        participant: "scout",
+        agent: "scout",
         input: {},
       }),
-      ev("agent_session.tool.result", {
+      ev("agent_session.tool.completed", {
         agentSessionId: "as_1",
         callId: "call_9",
-        participant: "scout",
+        agent: "scout",
         output: null,
       }),
     ];

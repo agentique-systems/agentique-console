@@ -37,11 +37,11 @@ export function AgentCard({
   const seats = useRuntimeStore((s) => s.bySession[session.id]);
   const selectAgentSession = useUiStore((s) => s.selectAgentSession);
 
-  const runtimes = session.participants.map((name) => seats?.[name]);
+  const runtimes = session.agents.map((name) => seats?.[name]);
   const anySeatBusy = runtimes.some(
     (runtime) => runtime !== undefined && BUSY_STATES.has(runtime.state),
   );
-  const running = anySeatBusy || session.status === "working";
+  const running = anySeatBusy || session.activity === "working";
   const toolSeat = runtimes.find((runtime) => runtime?.state === "tool");
 
   return (
@@ -54,14 +54,14 @@ export function AgentCard({
         // crisp selection edge. --ring is mid-grey and reads as unselected.
         selected && "border-primary bg-accent",
         running && "console-running-ring",
-        session.status === "archived" && "opacity-60",
+        session.lifecycle === "archived" && "opacity-60",
       )}
       onClick={() => selectAgentSession(session.userSessionId, session.id)}
     >
       <div className="truncate text-xs font-medium">{session.title}</div>
 
       <div className="flex flex-wrap items-center gap-1">
-        {session.participants.map((name) => (
+        {session.agents.map((name) => (
           <span
             key={name}
             className="flex items-center gap-1 rounded-full border border-border/60 px-1.5 py-0.5"

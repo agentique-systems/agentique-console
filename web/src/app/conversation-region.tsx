@@ -89,7 +89,7 @@ function ActiveSession({ session }: { session: UserSessionListItem }) {
   const overlay = useUiStore((s) => s.awaitingInput.has(session.id));
   const state = deriveSessionState({
     runState: session.runState,
-    archived: session.status === "archived",
+    archived: session.lifecycle === "archived",
     needsYou: session.pendingInteractions > 0 || overlay,
     posture,
     lastTurnErrored: posture.lastTurnErrored,

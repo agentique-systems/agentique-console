@@ -25,7 +25,7 @@ function ev(
 }
 
 function operatorMessage(text: string): ConsoleEvent {
-  return ev("user_session.message", {
+  return ev("user_session.message.appended", {
     userSessionId: "us_1",
     message: {
       seq: seq + 1,
@@ -38,7 +38,7 @@ function operatorMessage(text: string): ConsoleEvent {
 }
 
 function orchestratorMessage(text: string): ConsoleEvent {
-  return ev("user_session.message", {
+  return ev("user_session.message.appended", {
     userSessionId: "us_1",
     message: {
       seq: seq + 1,
@@ -61,7 +61,7 @@ function delta(
     transient: true,
     userSessionId: "us_1",
     payload: {
-      scope: { kind: "user", sessionId: "us_1" },
+      scope: { kind: "user", userSessionId: "us_1" },
       speaker,
       turnId: "turn_1",
       text,

@@ -91,7 +91,7 @@ function SessionRow({
   // lossy on cold boot — which is exactly when the operator most needs to know
   // a run is waiting on them.
   const overlay = useUiStore((s) => s.awaitingInput.has(session.id));
-  const archived = session.status === "archived";
+  const archived = session.lifecycle === "archived";
   // The shared five-state model; list rows carry no stream fold, so the
   // posture inputs are neutral and only the server-derived states can fire.
   const state = deriveSessionState({

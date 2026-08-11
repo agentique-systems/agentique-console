@@ -1,5 +1,5 @@
 /**
- * The "still working" row for a participant that is busy but silent.
+ * The "still working" row for an agent that is busy but silent.
  *
  * A turn can spend minutes inside one provider call (retry backoff, rate
  * limits, a long tool), and a bare shimmer makes that indistinguishable from a

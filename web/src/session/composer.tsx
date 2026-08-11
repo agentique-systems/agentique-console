@@ -75,7 +75,7 @@ export const Composer = forwardRef<
     focus: () => textareaRef.current?.focus(),
   }));
 
-  const archived = session.status === "archived";
+  const archived = session.lifecycle === "archived";
   const empty = draft.trim() === "";
   /**
    * A session with no recorded model tracks the server's default, so the chip

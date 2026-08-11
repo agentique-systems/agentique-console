@@ -1,7 +1,7 @@
 /**
  * Seat accents, ported from v1's session-parts (buildAccents/accentOf):
  * seating-order accent assignment, status-token vocabulary only — no new
- * hues. Deterministic because seating order is server data (participants[]).
+ * hues. Deterministic because seating order is server data (agents[]).
  */
 import type { Speaker } from "@agentique-console/shared";
 

@@ -253,7 +253,7 @@ export function SessionHeader({
           <TooltipContent>export transcript as markdown</TooltipContent>
         </Tooltip>
 
-        {session.status === "open" && (
+        {session.lifecycle === "open" && (
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
@@ -270,7 +270,7 @@ export function SessionHeader({
                 onClick={() => {
                   if (!window.confirm("Archive this session? Its agents stop and any servers they started are shut down.")) return;
                   patch.mutate(
-                    { id: session.id, status: "archived" },
+                    { id: session.id, lifecycle: "archived" },
                     {
                       onSuccess: () => toast.success("Session archived."),
                       onError: () => toast.error("Could not archive the session."),

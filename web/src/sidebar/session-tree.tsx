@@ -36,8 +36,8 @@ export function SessionTree({ showAll = false, allSelected = false, onSelectAll,
         </button>
         <div role="group" className="border-b border-border/50 bg-background/20 py-1">
           {orderTree(agentSessions).map((agent) => <button key={agent.id} role="treeitem" aria-selected={!allSelected && agent.id === activeAgent} className={cn("flex w-full items-center gap-2 border-l pr-3 py-1.5 text-left hover:bg-accent", agent.parentAgentSessionId === null ? "pl-6" : "pl-9", !allSelected && agent.id === activeAgent && "border-l-primary bg-accent")} onClick={() => onSelectAgent ? onSelectAgent(agent) : openAgent(agent.userSessionId, agent.id)}>
-            <Bot className={cn("size-3 shrink-0", agent.status === "working" ? "text-status-running" : "text-muted-foreground")} />
-            <span className="min-w-0 flex-1 truncate text-2xs">{agent.title}</span><span className="text-3xs text-muted-foreground">{agent.participants.length}</span>
+            <Bot className={cn("size-3 shrink-0", agent.activity === "working" ? "text-status-running" : "text-muted-foreground")} />
+            <span className="min-w-0 flex-1 truncate text-2xs">{agent.title}</span><span className="text-3xs text-muted-foreground">{agent.agents.length}</span>
           </button>)}
         </div>
       </div>)}

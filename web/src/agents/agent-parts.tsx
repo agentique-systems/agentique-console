@@ -2,7 +2,7 @@
  * Rendering for agent-session transcript items — the single dispatch point;
  * new item types land here. The v1 session-parts shape with v2's items:
  * speaker-accented bubbles (seating-order accents), PLAN blocks,
- * per-participant turn hairlines.
+ * per-agent turn hairlines.
  *
  * Input is an AgentGroup, not a raw AgentItem: a seat's consecutive tool calls
  * arrive pre-collapsed into one run (agent-groups.ts) and render as a single
@@ -118,10 +118,10 @@ function ToolRun({ item, accents }: { item: ToolRunItem; accents: AccentMap }) {
       <div
         className={cn(
           "mb-1 text-3xs uppercase tracking-wide opacity-80",
-          accentOfName(accents, item.participant),
+          accentOfName(accents, item.agent),
         )}
       >
-        {item.participant}
+        {item.agent}
       </div>
       <Task>
         <TaskTrigger
@@ -197,10 +197,10 @@ export function AgentPart({
           <span
             className={cn(
               "font-mono text-3xs uppercase tracking-wider",
-              accentOfName(accents, item.participant),
+              accentOfName(accents, item.agent),
             )}
           >
-            {item.participant}
+            {item.agent}
           </span>
           <div className="h-px flex-1 bg-border-subtle" />
         </div>
@@ -211,7 +211,7 @@ export function AgentPart({
         <div className="my-1 flex items-center gap-2 px-1 text-xs text-status-failed">
           <OctagonXIcon className="size-3.5 shrink-0" />
           <span className="min-w-0 break-words">
-            {item.participant}: {item.errorMessage}
+            {item.agent}: {item.errorMessage}
           </span>
         </div>
       );
@@ -219,7 +219,7 @@ export function AgentPart({
     case "trace":
       return (
         <div className={cn("my-1 rounded border border-border-subtle bg-muted/20 px-2 py-1 font-mono text-3xs text-muted-foreground", item.tone === "error" && "border-status-failed/40 text-status-failed")}>
-          <div className="mb-0.5 uppercase tracking-wide">{item.participant} · {item.label}</div>
+          <div className="mb-0.5 uppercase tracking-wide">{item.agent} · {item.label}</div>
           <div className="whitespace-pre-wrap break-words">{item.detail}</div>
         </div>
       );

@@ -40,7 +40,7 @@ function message(
   speaker: typeof OPERATOR | typeof ORCHESTRATOR = OPERATOR,
   kind: "message" | "notice" | "plan" = "message",
 ): ConsoleEvent {
-  return ev("user_session.message", {
+  return ev("user_session.message.appended", {
     userSessionId: "us_1",
     message: {
       seq: seq + 1,
@@ -95,14 +95,14 @@ describe("foldUserItems", () => {
 
   it("tool call and result pair by EXACT callId into one card", () => {
     const items = foldUserItems([
-      ev("user_session.tool.call", {
+      ev("user_session.tool.called", {
         userSessionId: "us_1",
         turnId: "turn_1",
         callId: "call_1",
         name: "Read",
         input: { file_path: "/tmp/a" },
       }),
-      ev("user_session.tool.result", {
+      ev("user_session.tool.completed", {
         userSessionId: "us_1",
         callId: "call_1",
         output: { ok: true },
@@ -120,14 +120,14 @@ describe("foldUserItems", () => {
 
   it("error results carry isError onto the paired card", () => {
     const items = foldUserItems([
-      ev("user_session.tool.call", {
+      ev("user_session.tool.called", {
         userSessionId: "us_1",
         turnId: "turn_1",
         callId: "call_2",
         name: "Bash",
         input: { command: "false" },
       }),
-      ev("user_session.tool.result", {
+      ev("user_session.tool.completed", {
         userSessionId: "us_1",
         callId: "call_2",
         output: "exit 1",
@@ -143,7 +143,7 @@ describe("foldUserItems", () => {
 
   it("an orphan tool.result (its call outside the record) folds to nothing", () => {
     const items = foldUserItems([
-      ev("user_session.tool.result", {
+      ev("user_session.tool.completed", {
         userSessionId: "us_1",
         callId: "call_gone",
         output: null,
@@ -309,30 +309,30 @@ describe("foldUserItems", () => {
       }),
       ev("workspace.created", { workspace: { id: "ws_1" } }),
       ev("workspace.updated", { workspaceId: "ws_1", patch: {} }),
-      ev("agent_session.message", { agentSessionId: "as_1", message: {} }),
+      ev("agent_session.message.appended", { agentSessionId: "as_1", message: {} }),
       ev("task.created", { task: {} }),
       ev("task.updated", { task: {}, changed: [] }),
-      ev("flow.delegation", {
+      ev("agent_session.delegation.sent", {
         userSessionId: "us_1",
         agentSessionId: "as_1",
         kind: "created",
         preview: "x",
       }),
       transient("stream.delta", {
-        scope: { kind: "user", sessionId: "us_1" },
+        scope: { kind: "user", userSessionId: "us_1" },
         speaker: "orchestrator",
         turnId: "turn_1",
         text: "streaming…",
       }),
       transient("stream.reasoning", {
-        scope: { kind: "user", sessionId: "us_1" },
+        scope: { kind: "user", userSessionId: "us_1" },
         speaker: "orchestrator",
         turnId: "turn_1",
         text: "hmm",
       }),
-      transient("agent.state", {
-        scope: { kind: "user", sessionId: "us_1" },
-        participant: "orchestrator",
+      transient("agent_session.activity.changed", {
+        scope: { kind: "user", userSessionId: "us_1" },
+        agent: "orchestrator",
         state: "thinking",
       }),
     ]) {
@@ -352,14 +352,14 @@ describe("foldUserItems", () => {
     // Pure: same array in, same items out, input untouched.
     const events = [
       row,
-      ev("user_session.tool.call", {
+      ev("user_session.tool.called", {
         userSessionId: "us_1",
         turnId: "turn_1",
         callId: "call_9",
         name: "Read",
         input: {},
       }),
-      ev("user_session.tool.result", {
+      ev("user_session.tool.completed", {
         userSessionId: "us_1",
         callId: "call_9",
         output: null,
@@ -500,12 +500,12 @@ describe("foldPosture", () => {
   });
 
   it("ignores a SEAT's card — it parks the seat's turn, not the main lane", () => {
-    // A seat-raised ask_operator (participant set, even blocking) must not
+    // A seat-raised ask_operator (agent set, even blocking) must not
     // stop the main lane's spinner or swap the interrupt affordance: main is
     // genuinely running. Deferred seat cards doubly so.
     const seatAsked = { type: "user_session.question.asked", seq: 4, ts: "t", userSessionId: "us_1",
       payload: { userSessionId: "us_1", interactionId: "int_2", questions: [], agentSessionId: "agsess_1",
-        participant: "renderer", urgency: "blocking", source: "agent", allowFreeText: true } } as unknown as ConsoleEvent;
+        agent: "renderer", urgency: "blocking", source: "agent", allowFreeText: true } } as unknown as ConsoleEvent;
     expect(foldPosture([started, seatAsked])).toEqual({ busy: true, blocked: false, lastTurnErrored: false });
   });
 

@@ -44,7 +44,7 @@ const SESSION: UserSession = {
   title: "test",
   mode: "execute",
   phase: "executing",
-  status: "open",
+  lifecycle: "open",
   runState: "active",
   model: null,
   createdAt: "2026-01-01T00:00:00.000Z",
@@ -119,7 +119,7 @@ describe("Composer", () => {
 
   it("an archived session never offers interrupt, even mid-turn", () => {
     stubFetch();
-    mount({ session: { ...SESSION, status: "archived" }, busy: true });
+    mount({ session: { ...SESSION, lifecycle: "archived" }, busy: true });
     expect(screen.getByLabelText("send message")).toBeDisabled();
   });
 

@@ -44,7 +44,7 @@ export function AttentionBridge(): null {
   const needsYou = useMemo(
     () => (sessions.data ?? []).filter(
       (session) =>
-        session.status === "open" &&
+        session.lifecycle === "open" &&
         (session.pendingInteractions > 0 || session.runState === "awaiting_signoff" || awaiting.has(session.id)),
     ),
     [sessions.data, awaiting],

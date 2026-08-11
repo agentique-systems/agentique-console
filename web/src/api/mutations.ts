@@ -136,7 +136,7 @@ export function useInterruptUserSession() {
 
 export function useCreateManagerSession() {
   const queryClient = useQueryClient();
-  return useMutation({ mutationFn: ({ workspaceId, profileId, sourceProfileId }: { workspaceId: string; profileId?: string; sourceProfileId?: string }) => apiFetch<ManagerSession>(`/api/workspaces/${workspaceId}/manager-sessions`, { method: "POST", body: JSON.stringify({ profileId, sourceProfileId }) }), onSuccess: (_data, vars) => void queryClient.invalidateQueries({ queryKey: keys.managerSessions(vars.workspaceId) }) });
+  return useMutation({ mutationFn: ({ workspaceId, profileId, sourceProfileId }: { workspaceId: string; profileId?: string; sourceProfileId?: string }) => apiFetch<ManagerSession>(`/api/workspaces/${workspaceId}/profile-manager-sessions`, { method: "POST", body: JSON.stringify({ profileId, sourceProfileId }) }), onSuccess: (_data, vars) => void queryClient.invalidateQueries({ queryKey: keys.managerSessions(vars.workspaceId) }) });
 }
 export function useTrustProfile() {
   const queryClient = useQueryClient();

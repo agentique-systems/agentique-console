@@ -42,8 +42,8 @@ export const keys = {
   workspaceTasksAll: ["workspace-tasks"] as const,
   workspaceTasks: (workspaceId: string, userSessionId?: string, agentSessionId?: string) => ["workspace-tasks", workspaceId, userSessionId ?? "", agentSessionId ?? ""] as const,
   profiles: { all: ["agent-profiles"] as const, list: (workspaceId: string) => ["agent-profiles", workspaceId] as const, detail: (workspaceId: string, id: string) => ["agent-profiles", workspaceId, id] as const },
-  managerSessions: (workspaceId: string) => ["manager-sessions", workspaceId] as const,
-  managerSession: (id: string) => ["manager-session", id] as const,
+  managerSessions: (workspaceId: string) => ["profile-manager-sessions", workspaceId] as const,
+  managerSession: (id: string) => ["profile-manager-session", id] as const,
   timeline: (id: string, beforeSeq?: number) => ["timeline", id, beforeSeq ?? "latest"] as const,
   timelineAll: ["timeline"] as const,
   /**

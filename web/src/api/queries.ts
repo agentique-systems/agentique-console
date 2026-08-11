@@ -163,10 +163,10 @@ export function useAgentProfile(workspaceId: string | null, id: string | null) {
   return useQuery({ queryKey: keys.profiles.detail(workspaceId ?? "", id ?? ""), queryFn: () => apiFetch<GetAgentProfileResponse>(`/api/workspaces/${workspaceId}/agent-profiles/${id}`), enabled: workspaceId !== null && id !== null });
 }
 export function useManagerSessions(workspaceId: string | null) {
-  return useQuery({ queryKey: keys.managerSessions(workspaceId ?? ""), queryFn: () => apiFetch<ManagerSession[]>(`/api/workspaces/${workspaceId}/manager-sessions`), enabled: workspaceId !== null });
+  return useQuery({ queryKey: keys.managerSessions(workspaceId ?? ""), queryFn: () => apiFetch<ManagerSession[]>(`/api/workspaces/${workspaceId}/profile-manager-sessions`), enabled: workspaceId !== null });
 }
 export function useManagerSession(id: string | null) {
-  return useQuery({ queryKey: keys.managerSession(id ?? ""), queryFn: () => apiFetch<ManagerSessionResponse>(`/api/manager-sessions/${id}`), enabled: id !== null, refetchInterval: id ? 4_000 : false });
+  return useQuery({ queryKey: keys.managerSession(id ?? ""), queryFn: () => apiFetch<ManagerSessionResponse>(`/api/profile-manager-sessions/${id}`), enabled: id !== null, refetchInterval: id ? 4_000 : false });
 }
 export function useTimeline(id: string | null) {
   return useInfiniteQuery({ queryKey: keys.timeline(id ?? ""), initialPageParam: undefined as number | undefined,

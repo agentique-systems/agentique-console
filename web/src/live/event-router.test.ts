@@ -3,7 +3,7 @@
  * them — a 1.5px dot in the sidebar, and (once the attention layer lands) the
  * title/favicon/toast that hang off the same state.
  *
- * It was cleared by ANY `user_session.message`. The server rule it mirrors
+ * It was cleared by ANY appended message. The server rule it mirrors
  * (`interactions.dismissPendingForChat`) fires only from
  * `runner.postOperatorMessage`, i.e. only for operator speech — so an
  * orchestrator reply, a system notice, or the post-restart recovery notice all
@@ -22,7 +22,7 @@ function deps(): RouterDeps & { setAwaitingInput: ReturnType<typeof vi.fn> } {
     invalidate: vi.fn(),
     appendUserStreamEvent: vi.fn(),
     appendAgentStreamEvent: vi.fn(),
-    ingestAgentState: vi.fn(),
+    ingestAgentActivity: vi.fn(),
     setAwaitingInput: vi.fn(),
     pulseFlow: vi.fn(),
     isWatched: () => true,
@@ -31,7 +31,7 @@ function deps(): RouterDeps & { setAwaitingInput: ReturnType<typeof vi.fn> } {
 
 const messageEvent = (speakerKind: "operator" | "orchestrator" | "agent" | "system"): ConsoleEvent =>
   ({
-    type: "user_session.message",
+    type: "user_session.message.appended",
     seq: 10,
     ts: "2026-08-09T10:00:00.000Z",
     userSessionId: "us_1",
@@ -96,23 +96,9 @@ describe("routeEvent — attention", () => {
     routeEvent({
       type: "user_session.question.asked", seq: 12, ts: "2026-08-09T10:02:00.000Z",
       userSessionId: "us_1",
-      payload: { userSessionId: "us_1", interactionId: "int_2", agentSessionId: "as_child", participant: "scout", questions: [] },
+      payload: { userSessionId: "us_1", interactionId: "int_2", agentSessionId: "as_child", agent: "scout", questions: [] },
     } as unknown as ConsoleEvent, d);
     expect(d.setAwaitingInput).toHaveBeenCalledWith("us_1", true);
-  });
-
-  it("routes replayed pre-rename history by its legacy sessionId", () => {
-    // Rows persisted before the payload id rule carry a bare `sessionId`, and
-    // the auxiliary agentSessionId (the asking seat) must not capture the
-    // stream. This pin dies with A8's data migration, together with idOf.
-    const d = deps();
-    routeEvent({
-      type: "user_session.question.asked", seq: 13, ts: "2026-08-09T10:05:00.000Z",
-      userSessionId: "us_1",
-      payload: { sessionId: "us_1", interactionId: "int_3", agentSessionId: "as_child", participant: "scout", questions: [] },
-    } as unknown as ConsoleEvent, d);
-    expect(d.setAwaitingInput).toHaveBeenCalledWith("us_1", true);
-    expect(d.appendUserStreamEvent).toHaveBeenCalledWith("us_1", expect.anything());
   });
 });
 
@@ -121,7 +107,7 @@ describe("routeEvent — boundary flow pulses", () => {
     const d = deps();
     routeEvent({
       type: "agent_session.child.spawned", seq: 20, ts: "2026-08-09T10:03:00.000Z", userSessionId: "us_1",
-      payload: { agentSessionId: "as_parent", childAgentSessionId: "as_child", pattern: "pipeline", byParticipant: "orchestrator", title: "sub" },
+      payload: { agentSessionId: "as_parent", childAgentSessionId: "as_child", pattern: "pipeline", byAgent: "coordinator", title: "sub" },
     } as unknown as ConsoleEvent, d);
     expect(d.pulseFlow).toHaveBeenCalledWith("as_parent", "delegation", "2026-08-09T10:03:00.000Z");
     routeEvent({

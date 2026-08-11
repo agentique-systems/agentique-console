@@ -4,7 +4,7 @@
  * shape, those cases must be re-checked against the server's emission.
  *
  * THE load-bearing rule (the one-chat-lane rule): chat rows come ONLY from
- * persisted `user_session.message` events. Stream deltas are overlays owned by
+ * persisted `user_session.message.appended` events. Stream deltas are overlays owned by
  * the stream kit, retired by that speaker's persisted message; they never fold.
  *
  * Pure and idempotent: same array in, same items out — duplicate events (a
@@ -145,7 +145,7 @@ export function foldUserItems(events: readonly ConsoleEvent[]): UserItem[] {
     }
 
     switch (event.type) {
-      case "user_session.message": {
+      case "user_session.message.appended": {
         const { message } = event.payload;
         items.push({
           type: "message",
@@ -158,7 +158,7 @@ export function foldUserItems(events: readonly ConsoleEvent[]): UserItem[] {
         break;
       }
 
-      case "user_session.tool.call": {
+      case "user_session.tool.called": {
         const { callId } = event.payload;
         const occurrence = (toolCounts.get(callId) ?? 0) + 1;
         toolCounts.set(callId, occurrence);
@@ -175,7 +175,7 @@ export function foldUserItems(events: readonly ConsoleEvent[]): UserItem[] {
 
       // Results pair with their call by EXACT callId. An orphan result (its
       // call fell outside the record) has no card to complete — dropped.
-      case "user_session.tool.result": {
+      case "user_session.tool.completed": {
         const index = toolIndex.get(event.payload.callId);
         if (index === undefined) break;
         const call = items[index];
@@ -194,7 +194,7 @@ export function foldUserItems(events: readonly ConsoleEvent[]): UserItem[] {
           type: "question",
           interactionId: event.payload.interactionId,
           questions: event.payload.questions,
-          ...(event.payload.participant === undefined ? {} : { askedBy: event.payload.participant }),
+          ...(event.payload.agent === undefined ? {} : { askedBy: event.payload.agent }),
           ...(event.payload.allowFreeText === true ? { allowFreeText: true } : {}),
         });
         break;
@@ -298,7 +298,7 @@ export function foldUserItems(events: readonly ConsoleEvent[]): UserItem[] {
         break;
       }
 
-      case "user_session.runtime":
+      case "user_session.runtime.noted":
         items.push({ type: "runtime", uid: `runtime:${event.seq ?? items.length}`, label: "runtime", detail: event.payload.detail });
         break;
 
@@ -368,9 +368,9 @@ export function foldPosture(events: readonly ConsoleEvent[]): SessionPosture {
       lastTurnErrored = (event.payload as { status?: string }).status === "error";
     } else if (event.type === "user_session.question.asked") {
       // Only MAIN-LANE cards park the lane this posture describes. A seat's
-      // card (participant set) parks that seat's turn — main keeps running,
+      // card (agent set) parks that agent's turn — main keeps running,
       // and stopping the spinner for it would misreport a live lane as idle.
-      if (event.payload.participant === undefined) pending.add(event.payload.interactionId);
+      if (event.payload.agent === undefined) pending.add(event.payload.interactionId);
     } else if (event.type === "user_session.plan.proposed") {
       pending.add(event.payload.interactionId);
     } else if (event.type === "user_session.question.answered" || event.type === "user_session.plan.resolved") {

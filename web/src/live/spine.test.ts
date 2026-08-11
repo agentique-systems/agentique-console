@@ -113,11 +113,11 @@ describe("spine", () => {
     await vi.runOnlyPendingTimersAsync();
     const source = FakeEventSource.instances[0]!;
     source.open();
-    source.emit({ type: "user_session.message" }, 42);
+    source.emit({ type: "user_session.message.appended" }, 42);
     source.emit({ type: "stream.delta", transient: true }, undefined);
     expect(useConnectionStore.getState().lastSeq).toBe(42);
     expect(routed).toEqual([
-      { type: "user_session.message", seq: 42 },
+      { type: "user_session.message.appended", seq: 42 },
       { type: "stream.delta", seq: undefined },
     ]);
     spine.stop();
@@ -131,7 +131,7 @@ describe("spine", () => {
     await vi.runOnlyPendingTimersAsync();
     const first = FakeEventSource.instances[0]!;
     first.open();
-    first.emit({ type: "user_session.message" }, 50);
+    first.emit({ type: "user_session.message.appended" }, 50);
     first.fail(true); // native retry gave up
     expect(useConnectionStore.getState().status).toBe("closed");
     await vi.advanceTimersByTimeAsync(100); // backoff

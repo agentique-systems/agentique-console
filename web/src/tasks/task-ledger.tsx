@@ -73,11 +73,11 @@ function TaskRow({ task }: { task: Task }) {
           {titleOf(task)}
         </QueueItemContent>
       </button>
-      {(task.participant !== null || blocked) && (
+      {(task.agent !== null || blocked) && (
         <QueueItemDescription completed={completed}>
           <span className="flex flex-wrap items-center gap-1.5">
-            {task.participant !== null && (
-              <span className="font-mono">{task.participant}</span>
+            {task.agent !== null && (
+              <span className="font-mono">{task.agent}</span>
             )}
             {blocked && (
               <span className="text-status-waiting">

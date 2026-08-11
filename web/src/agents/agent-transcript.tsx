@@ -74,8 +74,8 @@ export function AgentTranscript({ session }: { session: AgentSession }) {
   const visible = showAll ? items : items.slice(-TAIL_LIMIT);
 
   const accents = useMemo(
-    () => buildAccents(session.participants),
-    [session.participants],
+    () => buildAccents(session.agents),
+    [session.agents],
   );
 
   // Streaming overlays, one per speaker key with any text.
@@ -97,7 +97,7 @@ export function AgentTranscript({ session }: { session: AgentSession }) {
   // Silent workers: seats the runtime store says are busy without any overlay
   // text yet — a shimmer row per seat keeps the silence honest.
   const seats = useRuntimeStore((s) => s.bySession[id]);
-  const silentWorkers = session.participants.flatMap((name) => {
+  const silentWorkers = session.agents.flatMap((name) => {
     const runtime = seats?.[name];
     if (runtime === undefined) return [];
     if (runtime.state !== "thinking" && runtime.state !== "tool") return [];

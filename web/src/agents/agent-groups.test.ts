@@ -13,7 +13,7 @@ import {
 function tool(
   name: string,
   uid: string,
-  participant = "scout",
+  agent = "scout",
   output?: unknown,
 ): AgentToolItem {
   return {
@@ -21,7 +21,7 @@ function tool(
     uid,
     callId: uid,
     name,
-    participant,
+    agent,
     input: {},
     ...(output === undefined ? {} : { output }),
   };
@@ -50,7 +50,7 @@ describe("groupAgentItems", () => {
     ]);
 
     expect(groups).toHaveLength(1);
-    expect((groups[0] as ToolRunItem).participant).toBe("scout");
+    expect((groups[0] as ToolRunItem).agent).toBe("scout");
     expect((groups[0] as ToolRunItem).tools).toHaveLength(2);
   });
 
@@ -60,7 +60,7 @@ describe("groupAgentItems", () => {
       tool("Edit", "b", "coder", "y"),
     ]);
 
-    expect(groups.map((g) => (g as ToolRunItem).participant)).toEqual([
+    expect(groups.map((g) => (g as ToolRunItem).agent)).toEqual([
       "scout",
       "coder",
     ]);

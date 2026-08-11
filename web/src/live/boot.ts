@@ -29,7 +29,7 @@ export function bootSpine(queryClient: QueryClient): Spine {
           useAgentSessionStreamsStore
             .getState()
             .appendEvent(agentStreamKey(sessionId), streamEvent),
-        ingestAgentState: (payload) =>
+        ingestAgentActivity: (payload) =>
           useRuntimeStore.getState().ingest(payload),
         setAwaitingInput: (sessionId, awaiting) =>
           useUiStore.getState().setAwaitingInput(sessionId, awaiting),

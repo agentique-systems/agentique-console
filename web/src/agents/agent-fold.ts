@@ -4,7 +4,7 @@
  * shape, those cases must be re-checked against the server's emission.
  *
  * THE load-bearing rule (the one-chat-lane rule): chat rows come ONLY from
- * persisted `agent_session.message` events. Stream deltas are overlays owned
+ * persisted `agent_session.message.appended` events. Stream deltas are overlays owned
  * by the stream kit, retired by that speaker's persisted message; they never
  * fold. The plan arrives as a kind:'plan' message; `status` is a card
  * concern (the strip), not a transcript row.
@@ -37,7 +37,7 @@ export interface AgentToolItem {
   readonly uid: string;
   readonly callId: string;
   readonly name: string;
-  readonly participant: string;
+  readonly agent: string;
   readonly input: unknown;
   readonly output?: unknown;
   readonly isError?: boolean;
@@ -45,18 +45,18 @@ export interface AgentToolItem {
 export interface AgentTurnItem {
   readonly type: "turn";
   readonly turnId: string;
-  readonly participant: string;
+  readonly agent: string;
 }
 export interface AgentTurnErrorItem {
   readonly type: "turn_error";
   readonly turnId: string;
-  readonly participant: string;
+  readonly agent: string;
   readonly errorMessage: string;
 }
 export interface AgentTraceItem {
   readonly type: "trace";
   readonly uid: string;
-  readonly participant: string;
+  readonly agent: string;
   readonly label: string;
   readonly detail: string;
   readonly tone?: "error" | "muted";
@@ -99,7 +99,7 @@ export function foldAgentItems(events: readonly ConsoleEvent[]): AgentItem[] {
     }
 
     switch (event.type) {
-      case "agent_session.message": {
+      case "agent_session.message.appended": {
         const { message } = event.payload;
         items.push({
           type: "message",
@@ -114,7 +114,7 @@ export function foldAgentItems(events: readonly ConsoleEvent[]): AgentItem[] {
         break;
       }
 
-      case "agent_session.tool.call": {
+      case "agent_session.tool.called": {
         const { callId } = event.payload;
         const occurrence = (toolCounts.get(callId) ?? 0) + 1;
         toolCounts.set(callId, occurrence);
@@ -124,7 +124,7 @@ export function foldAgentItems(events: readonly ConsoleEvent[]): AgentItem[] {
           uid: occurrence === 1 ? callId : `${callId}#${occurrence}`,
           callId: event.payload.callId,
           name: event.payload.name,
-          participant: event.payload.participant,
+          agent: event.payload.agent,
           input: event.payload.input,
         });
         break;
@@ -132,7 +132,7 @@ export function foldAgentItems(events: readonly ConsoleEvent[]): AgentItem[] {
 
       // Results pair with their call by EXACT callId. An orphan result (its
       // call fell outside the record) has no card to complete — dropped.
-      case "agent_session.tool.result": {
+      case "agent_session.tool.completed": {
         const index = toolIndex.get(event.payload.callId);
         if (index === undefined) break;
         const call = items[index];
@@ -149,7 +149,7 @@ export function foldAgentItems(events: readonly ConsoleEvent[]): AgentItem[] {
         items.push({
           type: "turn",
           turnId: event.payload.turnId,
-          participant: event.payload.participant,
+          agent: event.payload.agent,
         });
         break;
 
@@ -159,7 +159,7 @@ export function foldAgentItems(events: readonly ConsoleEvent[]): AgentItem[] {
         items.push({
           type: "turn_error",
           turnId: event.payload.turnId,
-          participant: event.payload.participant,
+          agent: event.payload.agent,
           errorMessage:
             event.payload.errorMessage ??
             (event.payload.status === "aborted"
@@ -169,42 +169,42 @@ export function foldAgentItems(events: readonly ConsoleEvent[]): AgentItem[] {
         break;
       }
 
-      case "agent_session.mailbox":
+      case "agent_session.delivery.updated":
         items.push({ type: "trace", uid: `mailbox:${event.seq ?? event.payload.deliveryId}:${event.payload.status}`,
-          participant: event.payload.sender, label: `mailbox ${event.payload.status}`,
+          agent: event.payload.sender, label: `mailbox ${event.payload.status}`,
           detail: `${event.payload.sender} → ${event.payload.recipient} · ${event.payload.category}` });
         break;
 
-      case "agent_session.runtime":
+      case "agent_session.runtime.noted":
         items.push({ type: "trace", uid: `runtime:${event.seq ?? event.payload.turnId ?? "unknown"}`,
-          participant: event.payload.participant, label: "runtime", detail: event.payload.detail,
+          agent: event.payload.agent, label: "runtime", detail: event.payload.detail,
           ...(event.payload.detail.includes("failure") ? { tone: "error" as const } : { tone: "muted" as const }) });
         break;
 
       case "agent_session.context.rotated":
-        items.push({ type: "trace", uid: `context:${event.seq ?? event.payload.generation}`, participant: event.payload.participant,
+        items.push({ type: "trace", uid: `context:${event.seq ?? event.payload.generation}`, agent: event.payload.agent,
           label: "context rotated", detail: `generation ${event.payload.generation} · ${event.payload.reason}` });
         break;
 
       case "agent_session.process.started":
-        items.push({ type: "trace", uid: `process-start:${event.payload.processId}`, participant: event.payload.participant,
+        items.push({ type: "trace", uid: `process-start:${event.payload.processId}`, agent: event.payload.agent,
           label: "process started", detail: `${event.payload.command} ${event.payload.args.join(" ")} · pid ${event.payload.pid ?? "?"}` });
         break;
 
       case "agent_session.process.output":
-        items.push({ type: "trace", uid: `process-output:${event.payload.processId}:${event.payload.seq}`, participant: event.payload.participant,
+        items.push({ type: "trace", uid: `process-output:${event.payload.processId}:${event.payload.seq}`, agent: event.payload.agent,
           label: `${event.payload.stream} · ${event.payload.processId}`, detail: event.payload.text,
           ...(event.payload.stream === "stderr" ? { tone: "error" as const } : { tone: "muted" as const }) });
         break;
 
       case "agent_session.process.exited":
-        items.push({ type: "trace", uid: `process-exit:${event.payload.processId}`, participant: event.payload.participant,
+        items.push({ type: "trace", uid: `process-exit:${event.payload.processId}`, agent: event.payload.agent,
           label: "process exited", detail: `code ${event.payload.code ?? "null"}${event.payload.signal ? ` · ${event.payload.signal}` : ""}`,
           ...(event.payload.code && event.payload.code !== 0 ? { tone: "error" as const } : {}) });
         break;
 
       case "usage.recorded":
-        items.push({ type: "trace", uid: `usage:${event.seq ?? event.payload.turnId}`, participant: event.payload.participant,
+        items.push({ type: "trace", uid: `usage:${event.seq ?? event.payload.turnId}`, agent: event.payload.agent,
           label: "usage", detail: `${event.payload.inputTokens.toLocaleString()} input · ${event.payload.outputTokens.toLocaleString()} output${event.payload.costUsd === undefined ? "" : ` · $${event.payload.costUsd.toFixed(4)}`} · generation ${event.payload.generation}` });
         break;
 
