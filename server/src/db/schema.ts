@@ -339,6 +339,50 @@ export const tasks = sqliteTable(
   ],
 );
 
+/**
+ * Assignments recorded durably while their task's dependencies are incomplete;
+ * the scheduler posts them at readiness. Terminal rows are tombstones (audit +
+ * dedupe substrate) — never deleted.
+ */
+export const scheduledAssignments = sqliteTable(
+  "scheduled_assignments",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id").notNull(),
+    userSessionId: text("user_session_id").notNull(),
+    agentSessionId: text("agent_session_id").notNull(),
+    /** Console task id (`tasks.id`), never a provider task id. */
+    taskId: text("task_id").notNull(),
+    /** The original assigner; dispatch posts under this name. */
+    sender: text("sender").notNull(),
+    recipient: text("recipient").notNull(),
+    category: text("category", {
+      enum: ["assignment", "update", "milestone", "failure", "final", "decision"],
+    }).notNull().default("assignment"),
+    /** Full draft, posted verbatim at dispatch. */
+    handoff: text("handoff", { mode: "json" })
+      .$type<import("@agentique-console/shared").HandoffDraft>()
+      .notNull(),
+    status: text("status", { enum: ["scheduled", "dispatched", "canceled"] })
+      .notNull()
+      .default("scheduled"),
+    statusReason: text("status_reason", {
+      enum: ["replaced", "task_deleted", "task_completed", "session_archived", "canceled"],
+    }),
+    dispatchedMessageId: text("dispatched_message_id"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (t) => [
+    uniqueIndex("scheduled_assignments_live_task").on(t.taskId).where(sql`status = 'scheduled'`),
+    index("scheduled_assignments_session").on(t.userSessionId, t.status),
+    index("scheduled_assignments_agent_session").on(t.agentSessionId, t.status),
+    check("scheduled_assignments_category", sql`${t.category} IN ('assignment','update','milestone','failure','final','decision')`),
+    check("scheduled_assignments_status", sql`${t.status} IN ('scheduled','dispatched','canceled')`),
+    check("scheduled_assignments_status_reason", sql`${t.statusReason} IS NULL OR ${t.statusReason} IN ('replaced','task_deleted','task_completed','session_archived','canceled')`),
+  ],
+);
+
 export const taskDependencies = sqliteTable(
   "task_dependencies",
   {

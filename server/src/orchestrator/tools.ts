@@ -13,6 +13,7 @@ import { NotFoundError } from "../errors.ts";
 import { newId } from "../ids.ts";
 import { PAGE_DEFAULT_BYTES, PAGE_MAX_BYTES, pageTail } from "../paging.ts";
 import type { ConsoleSdk, SdkToolResult } from "../sdk/types.ts";
+import type { AssignmentScheduler } from "../tasks/scheduler.ts";
 import type { TaskService } from "../tasks/service.ts";
 import { PATTERN_IDS, type HandoffDraft, type PatternId } from "@agentique-console/shared";
 import type { HandoffService } from "../handoffs/service.ts";
@@ -28,11 +29,12 @@ export interface ConsoleToolsInput {
   bus: EventBus;
   userSessionId: string;
   tasks: TaskService;
+  scheduler: AssignmentScheduler;
   handoffs: HandoffService;
 }
 
 export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
-  const { sdk, host, repo, bus, userSessionId, tasks, handoffs } = input;
+  const { sdk, host, repo, bus, userSessionId, tasks, scheduler, handoffs } = input;
 
   /** Tools operate only on this UserSession's agent sessions. */
   const owned = (agentSessionId: string) => {
@@ -50,7 +52,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
       {
         title: z.string().describe("Short working title for the session"),
         pattern: z.enum(PATTERN_IDS).default("hub_and_spoke")
-          .describe("Orchestration pattern; the delegation brief's decision tree says when each fits. hub_and_spoke: coordinator + specialists. pipeline: agents ARE the stages in order. evaluator_optimizer: exactly 2 (generator, evaluator). map_reduce: seat ONLY the reducer. debate: 2-8 debaters, judge auto-seated — a single BLIND round: each debater argues once and never sees the others, so agent instructions must not promise rebuttals or exchanges. peer_to_peer: bounded mesh, use rarely. plan_execute: planner + executors over a task DAG."),
+          .describe("Orchestration pattern; the delegation brief's decision tree says when each fits. hub_and_spoke: coordinator + specialists. pipeline: agents ARE the stages in order. evaluator_optimizer: exactly 2 (generator, evaluator). map_reduce: seat ONLY the reducer. debate: 2-8 debaters, judge auto-seated — a single BLIND round: each debater argues once and never sees the others, so agent instructions must not promise rebuttals or exchanges. peer_to_peer: bounded mesh, use rarely. plan_execute: planner + executors over a task DAG the Console dispatches on."),
         patternConfig: z.record(z.string(), z.unknown()).optional()
           .describe("Pattern-specific config. evaluator_optimizer: {rubric, maxRounds?, generatorAgent?, requireDistinctModels?}. map_reduce: {maxMappers?}. debate: {rubric?, judgeProfileId?, judgeModel?}. peer_to_peer: {closerAgent?, maxHandoffs?, oscillationWindow?}. plan_execute: {plannerAgent?}."),
         agents: z
@@ -122,7 +124,8 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
      */
     sdk.tool(
       "send_to_coordinator",
-      "Send a typed handoff to an AgentSession's entry agent — its coordinator in a hub session, the first stage of a pipeline, the generator of an evaluator loop. This is how you steer a running session after its briefing: assign more work, redirect, or relay an operator decision. The fields ARE the handoff; the Console builds, journals and carries the envelope.",
+      "Send a typed handoff to an AgentSession's entry agent — its coordinator in a hub session, the first stage of a pipeline, the generator of an evaluator loop. This is how you steer a running session after its briefing: assign more work, redirect, or relay an operator decision. The fields ARE the handoff; the Console builds, journals and carries the envelope. " +
+      "An assignment whose taskId still has incomplete dependencies is SCHEDULED, not delivered — {scheduled:true} comes back and the Console dispatches it when the dependencies complete; never re-send it.",
       {
         agentSessionId: z.string().min(1),
         category: z.enum(["assignment", "update"]).default("update"),
@@ -145,22 +148,35 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         resultSummary: string | null; artifacts: HandoffDraft["core"]["result"]["artifacts"];
         uncertainty: string[]; nextAction: string | null; taskId: string | null; requestExpandedContext: boolean;
       }) => guarded(() => {
-        owned(args.agentSessionId);
+        const session = owned(args.agentSessionId);
         const entryAgent = host.entryAgent(args.agentSessionId);
+        const handoff: HandoffDraft = {
+          core: {
+            schemaVersion: 1, taskId: args.taskId, status: args.status, risk: args.risk, action: args.action,
+            state: { summary: args.stateSummary, evidence: args.evidence },
+            result: { summary: args.resultSummary, artifacts: args.artifacts },
+            uncertainty: args.uncertainty, nextAction: args.nextAction,
+            requestExpandedContext: args.requestExpandedContext,
+          },
+          extension: { kind: "coordination", data: {} },
+        };
+        // An archived session skips the intercept so post() raises its
+        // Conflict instead of recording a schedule nobody can dispatch.
+        if (session.lifecycle === "open") {
+          const scheduled = scheduler.intercept({
+            agentSessionId: args.agentSessionId, sender: MAIN_RECIPIENT, recipient: entryAgent,
+            category: args.category, handoff,
+          });
+          if (scheduled) {
+            return { delivered: false, scheduled: true, assignmentId: scheduled.assignmentId, awaiting: scheduled.awaiting,
+              note: "This assignment is recorded and will dispatch the moment its dependencies complete. Do not re-send it; re-sending the same taskId only re-targets the recipient." };
+          }
+        }
         const message = host.post({
           agentSessionId: args.agentSessionId,
           speaker: { kind: "orchestrator", name: "main" },
           to: entryAgent,
-          handoff: {
-            core: {
-              schemaVersion: 1, taskId: args.taskId, status: args.status, risk: args.risk, action: args.action,
-              state: { summary: args.stateSummary, evidence: args.evidence },
-              result: { summary: args.resultSummary, artifacts: args.artifacts },
-              uncertainty: args.uncertainty, nextAction: args.nextAction,
-              requestExpandedContext: args.requestExpandedContext,
-            },
-            extension: { kind: "coordination", data: {} },
-          },
+          handoff,
           category: args.category,
         });
         return { delivered: true, messageSeq: message.seq, to: entryAgent, category: args.category };
@@ -173,20 +189,21 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
      */
     sdk.tool(
       "task_create",
-      "Add a unit of work to the ledger. Track every unit you delegate; the Console reports open units to the operator alongside any final report.",
+      "Add a unit of work to the ledger. Track every unit you delegate; the Console reports open units to the operator alongside any final report. Declare dependencies as blockedBy here — the Console dispatches assignments on that DAG.",
       {
         agentSessionId: z.string().min(1).describe("The session that will do the work."),
         taskId: z.string().min(1).describe("Short stable id you choose, e.g. \"1\" or \"interface\"."),
         subject: z.string().min(1),
         description: z.string().default(""),
         owner: z.string().min(1).describe("The agent that will DO this work — not you."),
+        blockedBy: z.array(z.string()).default([]).describe("taskIds this task depends on. Forward references are fine — the edge attaches when the blocker is created."),
       },
-      async (args: { agentSessionId: string; taskId: string; subject: string; description: string; owner: string }) =>
+      async (args: { agentSessionId: string; taskId: string; subject: string; description: string; owner: string; blockedBy: string[] }) =>
         guarded(() => {
           const session = owned(args.agentSessionId);
           tasks?.upsertFromCreate({
             sdkSessionId: consoleTaskListId(args.agentSessionId), sdkTaskId: args.taskId,
-            subject: args.subject, description: args.description, owner: args.owner,
+            subject: args.subject, description: args.description, owner: args.owner, blockedBy: args.blockedBy,
             attribution: { workspaceId: repo.getUserSession(userSessionId)?.workspaceId ?? "", userSessionId, agentSessionId: session.id, agent: null },
           });
           return { taskId: args.taskId, created: true, owner: args.owner };
@@ -195,7 +212,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
 
     sdk.tool(
       "task_update",
-      "Update a ledger entry. Keep statuses honest: in_progress when started, completed only when verified.",
+      "Update a ledger entry. Keep statuses honest: in_progress when started, completed only when verified — completing a task dispatches any assignments scheduled behind it. removeBlockedBy drops a dependency that no longer holds.",
       {
         agentSessionId: z.string().min(1),
         taskId: z.string().min(1),
@@ -204,8 +221,9 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         subject: z.string().optional(),
         description: z.string().optional(),
         addBlockedBy: z.array(z.string()).optional(),
+        removeBlockedBy: z.array(z.string()).optional(),
       },
-      async (args: { agentSessionId: string; taskId: string; status?: "pending" | "in_progress" | "completed" | "deleted"; owner?: string; subject?: string; description?: string; addBlockedBy?: string[] }) =>
+      async (args: { agentSessionId: string; taskId: string; status?: "pending" | "in_progress" | "completed" | "deleted"; owner?: string; subject?: string; description?: string; addBlockedBy?: string[]; removeBlockedBy?: string[] }) =>
         guarded(() => {
           owned(args.agentSessionId);
           const { agentSessionId, taskId, ...patch } = args;

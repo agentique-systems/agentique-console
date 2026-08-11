@@ -142,8 +142,42 @@ export interface Task {
   blockedBy: string[];
   dependencyIds: string[];
   dependentIds: string[];
-  unresolvedDependencies: string[];
+  /** `pending` with every dependency completed — the scheduler's dispatch predicate. */
+  ready: boolean;
+  /** The live scheduled assignment awaiting this task's dependencies, if any. */
+  scheduledAssignment: {
+    id: string;
+    sender: string;
+    recipient: string;
+    createdAt: string;
+  } | null;
   metadata: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type ScheduledAssignmentStatus = "scheduled" | "dispatched" | "canceled";
+
+export type ScheduledAssignmentStatusReason =
+  | "replaced"
+  | "task_deleted"
+  | "task_completed"
+  | "session_archived"
+  | "canceled";
+
+/** A durable assignment awaiting its task's dependencies; no handoff body on the wire. */
+export interface ScheduledAssignment {
+  id: string;
+  workspaceId: string;
+  userSessionId: string;
+  agentSessionId: string;
+  taskId: string;
+  sender: string;
+  recipient: string;
+  category: string;
+  status: ScheduledAssignmentStatus;
+  statusReason: ScheduledAssignmentStatusReason | null;
+  dispatchedMessageId: string | null;
   createdAt: string;
   updatedAt: string;
 }

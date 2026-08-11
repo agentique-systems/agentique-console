@@ -19,6 +19,9 @@ function classify(type: ConsoleEvent["type"]): "task" | "handoff" | "decision" |
     case "task.updated":
     case "task.dependency.created":
     case "task.dependency.deleted":
+    case "task.assignment.scheduled":
+    case "task.assignment.dispatched":
+    case "task.assignment.canceled":
       return "task";
     case "handoff.created":
     case "handoff.consumed":

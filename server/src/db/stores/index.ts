@@ -11,6 +11,7 @@
  *   crons                                 CronStore
  *   pattern_state                         PatternStateStore
  *   tasks, task_dependencies              TaskStore
+ *   scheduled_assignments                 AssignmentStore
  *   workspaces                            WorkspaceStore
  *   interactions                          InteractionStore
  *   event_artifacts                       ArtifactStore (events/artifact-store.ts)
@@ -32,6 +33,7 @@
 import type { Db } from "../client.ts";
 import { ArtifactStore } from "../../events/artifact-store.ts";
 import { SqliteSessionStore } from "../../sdk/session-store.ts";
+import { AssignmentStore } from "./assignment-store.ts";
 import { CronStore } from "./cron-store.ts";
 import { HandoffStore } from "./handoff-store.ts";
 import { InteractionStore } from "./interaction-store.ts";
@@ -42,6 +44,7 @@ import { TaskStore } from "./task-store.ts";
 import { UsageStore } from "./usage-store.ts";
 import { WorkspaceStore } from "./workspace-store.ts";
 
+export { AssignmentStore } from "./assignment-store.ts";
 export { CronStore } from "./cron-store.ts";
 export { HandoffStore } from "./handoff-store.ts";
 export { InteractionStore } from "./interaction-store.ts";
@@ -65,6 +68,7 @@ export interface Stores {
   crons: CronStore;
   patternState: PatternStateStore;
   tasks: TaskStore;
+  assignments: AssignmentStore;
   workspaces: WorkspaceStore;
   interactions: InteractionStore;
   artifacts: ArtifactStore;
@@ -81,6 +85,7 @@ export function createStores(db: Db, sqlite: SqliteTransactor): Stores {
     crons: new CronStore(db),
     patternState: new PatternStateStore(db),
     tasks: new TaskStore(db),
+    assignments: new AssignmentStore(db),
     workspaces: new WorkspaceStore(db),
     interactions: new InteractionStore(db),
     artifacts: new ArtifactStore(db),

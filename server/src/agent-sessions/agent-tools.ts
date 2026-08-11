@@ -90,6 +90,15 @@ export interface AgentToolsContext {
   legalRecipient(candidate: string): string;
   // Service-private operations, bound as closures so nothing becomes public.
   post(input: { agentSessionId: string; speaker: Speaker; to: string; handoff: HandoffDraft; category?: Category; dedupeKey?: string; turnId?: string }): MessageRow;
+  /**
+   * The scheduler's intercept, route-checked: a blocked assignment becomes a
+   * durable scheduled row instead of a delivery. null = deliver normally.
+   */
+  interceptAssignment(input: { to: string; category: Category; handoff: HandoffDraft }): {
+    assignmentId: string;
+    awaiting: { taskId: string; subject: string; status: string }[];
+  } | null;
+  cancelAssignment(assignmentId: string): unknown;
   askOperator(args: AskOperatorArgs): Promise<SdkToolResult>;
   /** The agent's in-flight turn id, if a turn is open right now. */
   currentTurnId(): string | undefined;
@@ -112,7 +121,8 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
   // the provider enforces the shape and there is nothing to hand-serialize.
   // Console-carried, so there is no peer ref handshake to lose.
   tools.push(sdk.tool("send_handoff",
-    "Send a typed handoff to another participant. This is the preferred way to transfer anything — assignments, progress, findings, failures, final results. Fill the fields; the console builds and journals the envelope. Your plain text output reaches no one.",
+    "Send a typed handoff to another participant. This is the preferred way to transfer anything — assignments, progress, findings, failures, final results. Fill the fields; the console builds and journals the envelope. Your plain text output reaches no one. " +
+    "An assignment whose taskId still has incomplete dependencies is SCHEDULED, not delivered: you get {scheduled:true} back and the Console dispatches it the moment the dependencies complete — never re-send it.",
     {
       to: z.string().min(1).describe("Recipient's bare agent name, or \"main\" to reach the Orchestrator."),
       category: z.enum(["assignment", "update", "milestone", "failure", "final", "decision"]).default("update"),
@@ -139,9 +149,16 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
       // `post()` throws for a forbidden route (a genuine agent mistake → tool
       // error) and for a withheld final (a Console-imposed HOLD → a structured
       // NON-error: error results feed the error-streak watchdog, and the turn
-      // must stay alive for the release).
+      // must stay alive for the release). A scheduled assignment is the same
+      // kind of structured non-error: the Console accepted the transfer.
       let message: MessageRow;
       try {
+        const scheduled = ctx.interceptAssignment({ to: args.to, category: args.category, handoff: draft });
+        if (scheduled) {
+          ctx.markSawSend();
+          return ok({ delivered: false, scheduled: true, assignmentId: scheduled.assignmentId, awaiting: scheduled.awaiting,
+            note: "This assignment is recorded and will dispatch the moment its dependencies complete. Do not re-send it; re-sending the same taskId only re-targets the recipient." });
+        }
         const turnId = ctx.currentTurnId();
         message = ctx.post({ agentSessionId: session.id, speaker: { kind: speakerKindOf(agent), name: agent.name },
           to: args.to, handoff: draft, category: args.category, ...(args.dedupeKey ? { dedupeKey: args.dedupeKey } : {}),
@@ -165,29 +182,43 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
       async () => ok({ tasks: deps.tasks?.listForUserSession(session.userSessionId).filter((task) => task.agentSessionId === session.id) ?? [] })));
     if (ctx.granted.has("task_create")) {
       tools.push(
-        sdk.tool("task_create", "Add a unit of work to the ledger. Track every unit you delegate.", {
+        sdk.tool("task_create", "Add a unit of work to the ledger. Track every unit you delegate. Declare its dependencies as blockedBy HERE, at creation — the Console dispatches assignments on that DAG.", {
           taskId: z.string().min(1).describe("Short stable id you choose, e.g. \"1\" or \"interface\"."),
           subject: z.string().min(1), description: z.string().default(""),
           owner: z.string().min(1).describe("The agent that will DO this work — not you. The roster, the final caveats and the operator's run summary all read this."),
-        }, async (args: { taskId: string; subject: string; description: string; owner: string }) => {
+          blockedBy: z.array(z.string()).default([]).describe("taskIds this task depends on. Forward references are fine — the edge attaches when the blocker is created."),
+        }, async (args: { taskId: string; subject: string; description: string; owner: string; blockedBy: string[] }) => {
           const names = new Set(deps.repo.listAgents(session.id).map((row) => row.name));
           if (!names.has(args.owner)) {
             return fail(`no agent named "${args.owner}" in this session; owners are one of: ${[...names].join(", ")}`);
           }
-          deps.tasks?.upsertFromCreate({ sdkSessionId: listId, sdkTaskId: args.taskId, subject: args.subject, description: args.description, owner: args.owner, attribution });
+          deps.tasks?.upsertFromCreate({ sdkSessionId: listId, sdkTaskId: args.taskId, subject: args.subject, description: args.description, owner: args.owner, blockedBy: args.blockedBy, attribution });
           return ok({ taskId: args.taskId, created: true, owner: args.owner });
         }),
-        sdk.tool("task_update", "Update a ledger entry. Keep status honest as work progresses — the Console reports open tasks to the operator alongside your final.", {
+        sdk.tool("task_update", "Update a ledger entry. Keep status honest as work progresses — the Console reports open tasks to the operator alongside your final, and completing a task dispatches any assignments scheduled behind it. removeBlockedBy drops a dependency that no longer holds (e.g. a deleted blocker), releasing whatever it was blocking.", {
           taskId: z.string().min(1),
           status: z.enum(["pending", "in_progress", "completed", "deleted"]).optional(),
           owner: z.string().optional(), subject: z.string().optional(), description: z.string().optional(),
           addBlockedBy: z.array(z.string()).optional(),
-        }, async (args: { taskId: string; status?: "pending" | "in_progress" | "completed" | "deleted"; owner?: string; subject?: string; description?: string; addBlockedBy?: string[] }) => {
+          removeBlockedBy: z.array(z.string()).optional(),
+        }, async (args: { taskId: string; status?: "pending" | "in_progress" | "completed" | "deleted"; owner?: string; subject?: string; description?: string; addBlockedBy?: string[]; removeBlockedBy?: string[] }) => {
           const { taskId, ...patch } = args;
           deps.tasks?.applyUpdate({ sdkSessionId: listId, sdkTaskId: taskId, patch });
           return ok({ taskId, updated: true });
         }),
       );
+    }
+    if (ctx.granted.has("assignment_cancel")) {
+      tools.push(sdk.tool("assignment_cancel",
+        "Withdraw a scheduled assignment by the assignmentId a scheduled send returned. The task and its dependencies stay; only the pending dispatch is withdrawn.",
+        { assignmentId: z.string().min(1) },
+        async (args: { assignmentId: string }) => {
+          try {
+            return ok({ canceled: true, assignment: ctx.cancelAssignment(args.assignmentId) });
+          } catch (error) {
+            return fail(error);
+          }
+        }));
     }
   }
   // Artifacts live in SQLite, outside every agent's read scope, and

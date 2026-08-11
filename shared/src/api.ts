@@ -5,6 +5,7 @@ import type {
   AgentSession,
   AgentRunSummary,
   Interaction,
+  ScheduledAssignment,
   SessionMessage,
   SessionMode,
   Task,
@@ -163,6 +164,8 @@ export type SessionTreeResponse = SessionTreeBranch[];
 export interface WorkspaceTasksResponse {
   tasks: Task[];
   dependencies: TaskDependency[];
+  /** Live (`scheduled`) assignments only; tombstones stay server-side. */
+  scheduledAssignments: ScheduledAssignment[];
 }
 
 // GET /api/workspaces/:id/agent-profiles

@@ -11,6 +11,7 @@ import type {
   RunSignoffBody,
   PostMessageResponse,
   ResolveInteractionBody,
+  ScheduledAssignment,
   UserSession,
   Workspace,
   ManagerSession,
@@ -111,6 +112,19 @@ export function useResolveInteraction() {
       void queryClient.invalidateQueries({
         queryKey: keys.userSessions.detail(sessionId),
       }),
+  });
+}
+
+/** Withdraw a scheduled assignment before dispatch. 409 = already settled. */
+export function useCancelAssignment() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (assignmentId: string) =>
+      apiFetch<ScheduledAssignment>(`/api/scheduled-assignments/${assignmentId}/cancel`, { method: "POST" }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: keys.tasks.all });
+      void queryClient.invalidateQueries({ queryKey: keys.workspaceTasksAll });
+    },
   });
 }
 

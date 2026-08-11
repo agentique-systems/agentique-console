@@ -2,9 +2,11 @@
 import type {
   AgentSession,
   HandoffSummary,
+  ScheduledAssignment,
   SessionMessage,
   UserSession,
 } from "@agentique-console/shared";
+import type { ScheduledAssignmentRow } from "../db/stores/assignment-store.ts";
 import type { MessageRow } from "../db/stores/message-store.ts";
 import type { AgentSessionRow, UserSessionRow } from "../db/stores/session-store.ts";
 
@@ -37,6 +39,25 @@ export function toWireMessage(row: MessageRow): SessionMessage {
     text: row.text,
     ...(handoff === undefined ? {} : { handoff }),
     createdAt: row.createdAt,
+  };
+}
+
+/** The handoff blob stays server-side; the wire carries routing and state only. */
+export function toWireScheduledAssignment(row: ScheduledAssignmentRow): ScheduledAssignment {
+  return {
+    id: row.id,
+    workspaceId: row.workspaceId,
+    userSessionId: row.userSessionId,
+    agentSessionId: row.agentSessionId,
+    taskId: row.taskId,
+    sender: row.sender,
+    recipient: row.recipient,
+    category: row.category,
+    status: row.status,
+    statusReason: row.statusReason,
+    dispatchedMessageId: row.dispatchedMessageId,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
   };
 }
 

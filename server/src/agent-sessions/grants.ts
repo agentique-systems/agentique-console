@@ -14,7 +14,7 @@ import type { AgentProfile } from "../agent-profiles/registry.ts";
 export type AgentToolName =
   | "send_handoff" | "read_artifact" | "write_note" | "ask_operator" | "roster_status"
   | "read_handoff" | "report_handoff_discrepancy" | "forward_message"
-  | "task_list" | "task_create" | "task_update"
+  | "task_list" | "task_create" | "task_update" | "assignment_cancel"
   | "http_probe" | "process_start" | "process_read" | "process_stop"
   | "browser_open" | "browser_snapshot" | "browser_click" | "browser_fill"
   | "browser_console" | "browser_press" | "browser_evaluate" | "browser_screenshot"
@@ -49,7 +49,7 @@ export function grantedTools(
   }
   if (deps.tasks && deps.user) {
     tools.add("task_list");
-    if (grants.has("tasks_write")) { tools.add("task_create"); tools.add("task_update"); }
+    if (grants.has("tasks_write")) { tools.add("task_create"); tools.add("task_update"); tools.add("assignment_cancel"); }
   }
   if (profile.runtime.shell) {
     tools.add("http_probe");

@@ -445,9 +445,11 @@ const PLAN_EXECUTE_CONFIG = z.object({
 
 const PLAN_WORK_BULLET = `
 - You are in a plan-and-execute session: the planner decomposes the objective
-  into ledger tasks with explicit blocked_by edges. The edges are the plan's
-  stated order — sequence your assignments by them, and keep the ledger true
-  as reality diverges.`;
+  into ledger tasks, declaring dependencies as blockedBy at task_create, and
+  assigns every task by taskId immediately. The Console dispatches on the DAG:
+  an assignment for a blocked task returns {scheduled: true} and is delivered
+  the moment its dependencies complete — never re-send one. Keep the ledger
+  true as reality diverges.`;
 
 const PLAN_DONE_BULLET = `
 - Executors: finish your task with a terminal report to the planner — the
@@ -486,7 +488,7 @@ function buildPlanExecute(input: BuildInput): BuildResult {
         planner: {
           addressing: `Address participants by bare name; "main" reaches the Orchestrator. You may address your executors and "main".`,
           protocol,
-          brief: `You are the PLANNER. FIRST decompose the objective into task_create entries — every unit gets a taskId, an owner, and blocked_by edges for real dependencies — then assign each task by taskId, in dependency order: assign a task only when its blockers are complete. Re-plan when reality diverges: update the ledger, do not push a stale plan.`,
+          brief: `You are the PLANNER. FIRST decompose the objective into task_create entries — every unit gets a taskId, an owner, and blockedBy naming its real dependencies (forward references are fine) — then assign EVERY task by taskId immediately with send_handoff category "assignment". The Console holds an assignment whose dependencies are incomplete ({scheduled: true} comes back) and dispatches it the moment they complete: do not wait to assign, and never re-send a scheduled one. You will be told if a dependency is deleted — deletion does not satisfy it; remove the edge with task_update removeBlockedBy or cancel the assignment. Re-plan when reality diverges: update the ledger, do not push a stale plan.`,
         },
         executor: {
           addressing: `Address participants by bare name. You may address only your planner.`,

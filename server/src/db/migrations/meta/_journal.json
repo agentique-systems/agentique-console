@@ -29,6 +29,13 @@
       "when": 1786477565017,
       "tag": "0003_glossary",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1786484053175,
+      "tag": "0004_scheduled_assignments",
+      "breakpoints": true
     }
   ]
 }

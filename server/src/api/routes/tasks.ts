@@ -14,4 +14,9 @@ export function registerTaskRoutes(app: FastifyInstance, ctx: AppContext): void 
     "/api/workspaces/:id/tasks",
     async (request) => ctx.app.tasks.workspaceView(request.params.id, request.query),
   );
+
+  app.post<{ Params: { id: string } }>(
+    "/api/scheduled-assignments/:id/cancel",
+    async (request) => ctx.app.scheduler.cancel(request.params.id, { actor: "operator" }),
+  );
 }

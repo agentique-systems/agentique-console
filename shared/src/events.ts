@@ -14,6 +14,7 @@ import type {
   InteractionSource,
   InteractionUrgency,
   RunSummaryStats,
+  ScheduledAssignment,
   SessionMessage,
   Task,
   UserSession,
@@ -397,6 +398,10 @@ export interface TaskUpdatedPayload {
   task: Task;
   changed: string[];
 }
+/** One shape for all three `task.assignment.*` lifecycle events. */
+export interface TaskAssignmentPayload {
+  assignment: ScheduledAssignment;
+}
 
 export interface DelegationSentPayload {
   userSessionId: string;
@@ -495,6 +500,9 @@ export type ConsoleEvent = Base &
     | { type: "task.updated"; payload: TaskUpdatedPayload }
     | { type: "task.dependency.created"; payload: TaskDependencyPayload }
     | { type: "task.dependency.deleted"; payload: TaskDependencyPayload }
+    | { type: "task.assignment.scheduled"; payload: TaskAssignmentPayload }
+    | { type: "task.assignment.dispatched"; payload: TaskAssignmentPayload }
+    | { type: "task.assignment.canceled"; payload: TaskAssignmentPayload }
     | { type: "agent_profile.changed"; payload: AgentProfileChangedPayload }
     | { type: "usage.recorded"; payload: UsageRecordedPayload }
     | { type: "handoff.created"; payload: HandoffCreatedPayload }

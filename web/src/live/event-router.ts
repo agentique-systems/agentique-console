@@ -89,6 +89,12 @@ export function routeEvent(event: ConsoleEvent, deps: RouterDeps): void {
     case "task.dependency.deleted":
       deps.invalidate(keys.workspaceTasksAll);
       break;
+    case "task.assignment.scheduled":
+    case "task.assignment.dispatched":
+    case "task.assignment.canceled":
+      deps.invalidate(keys.tasks.all);
+      deps.invalidate(keys.workspaceTasksAll);
+      break;
     case "agent_profile.changed":
       deps.invalidate(keys.profiles.all);
       break;

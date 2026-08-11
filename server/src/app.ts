@@ -30,6 +30,7 @@ import { ProcessManager } from "./runtime/process-manager.ts";
 import { BrowserManager } from "./runtime/browser-manager.ts";
 import { WorktreeManager } from "./runtime/worktree-manager.ts";
 import { UserSessionService } from "./sessions/service.ts";
+import { AssignmentScheduler } from "./tasks/scheduler.ts";
 import { TaskService } from "./tasks/service.ts";
 import { TimelineService } from "./timeline/service.ts";
 import { HandoffService } from "./handoffs/service.ts";
@@ -71,6 +72,7 @@ export interface App {
   decisions: DecisionLedger;
   interactions: InteractionService;
   tasks: TaskService;
+  scheduler: AssignmentScheduler;
   handoffs: HandoffService;
   sessionStore: SqliteSessionStore;
   host: AgentSessionService;
@@ -98,19 +100,26 @@ export function createApp(options: CreateAppOptions): App {
 
   const decisions = new DecisionLedger(stores.interactions);
   const interactions = new InteractionService(stores.interactions, bus);
-  const tasks = new TaskService(stores.tasks, bus, (workspaceId) => void workspaces.get(workspaceId));
+  const tasks = new TaskService(stores.tasks, stores.assignments, bus, (workspaceId) => void workspaces.get(workspaceId));
   const handoffs = new HandoffService({ repo, bus, getWorkspaceRoot });
   const sessionStore = stores.providerEntries;
 
   const lateRunner = late<OrchestratorRunner>("runner");
   const lateManager = late<ProfileManagerService>("manager");
+  const lateScheduler = late<AssignmentScheduler>("scheduler");
   const host = new AgentSessionService({
     repo, bus, artifacts, config, profiles, sdk, sessionStore, getWorkspaceRoot,
     processes, browsers, worktrees,
     interactions, decisions, tasks, handoffs,
+    scheduler: () => lateScheduler.get(),
     wake: (userSessionId, agentSessionId, category, text) =>
       lateRunner.get().enqueueAgentMilestone(userSessionId, agentSessionId, category, text),
   });
+  const scheduler = new AssignmentScheduler({
+    store: stores.assignments, tasks, sessions: stores.sessions, messages: stores.messages, bus,
+    post: (input) => host.post(input),
+  });
+  lateScheduler.set(scheduler);
   const runner = new OrchestratorRunner({
     repo, bus, config, sdk, interactions, decisions, handoffs, sessionStore, getWorkspaceRoot,
     host: () => host,
@@ -118,13 +127,13 @@ export function createApp(options: CreateAppOptions): App {
     buildMcpServer: (userSessionId, sdkInstance) =>
       repo.getUserSession(userSessionId)?.purpose === "profile_manager"
         ? buildManagerMcpServer(sdkInstance, lateManager.get(), userSessionId)
-        : buildConsoleMcpServer({ sdk: sdkInstance, host, repo, bus, userSessionId, tasks, handoffs }),
+        : buildConsoleMcpServer({ sdk: sdkInstance, host, repo, bus, userSessionId, tasks, scheduler, handoffs }),
   });
   lateRunner.set(runner);
   const manager = new ProfileManagerService({ repo, workspaces, profiles, config, bus, runner: () => runner });
   lateManager.set(manager);
   const completion = new RunCompletionService({
-    db, repo, bus, interactions, getWorkspaceRoot,
+    db, repo, bus, interactions, scheduler, getWorkspaceRoot,
     host: () => host,
     runner: () => runner,
     quietWindowMs: config.policy.completionQuietWindowMs,
@@ -139,7 +148,9 @@ export function createApp(options: CreateAppOptions): App {
 
   // Every cross-service callback, registered once. The completion predicate
   // re-evaluates on every settle, status change and answered card; a withheld
-  // final must not become a silence.
+  // final must not become a silence. The task hook is the scheduler's release
+  // path: every ledger transition flows through it, and dispatch rides it.
+  tasks.onChange(scheduler.onTaskChanged);
   runner.onSettled((userSessionId) => completion.schedule(userSessionId));
   runner.onOperatorMessage((userSessionId) => completion.noteOperatorMessage(userSessionId));
   host.onStatusChanged((userSessionId) => completion.schedule(userSessionId));
@@ -155,7 +166,7 @@ export function createApp(options: CreateAppOptions): App {
   return {
     config, db, sqlite, bus, artifacts, repo, sdk, getWorkspaceRoot,
     workspaces, timeline, profiles, processes, browsers, worktrees,
-    decisions, interactions, tasks, handoffs, sessionStore,
+    decisions, interactions, tasks, scheduler, handoffs, sessionStore,
     host, runner, completion, userSessions, manager,
   };
 }

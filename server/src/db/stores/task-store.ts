@@ -38,6 +38,10 @@ export class TaskStore {
       .run();
   }
 
+  patchById(id: string, patch: Partial<TaskRow>): void {
+    this.#db.update(tasks).set(patch).where(eq(tasks.id, id)).run();
+  }
+
   listByUserSession(userSessionId: string): TaskRow[] {
     return this.#db
       .select()
@@ -76,6 +80,10 @@ export class TaskStore {
 
   findDependency(blockerTaskId: string, blockedTaskId: string): TaskDependencyRow | undefined {
     return this.#db.select().from(taskDependencies).where(and(eq(taskDependencies.blockerTaskId, blockerTaskId), eq(taskDependencies.blockedTaskId, blockedTaskId))).get();
+  }
+
+  deleteDependency(blockerTaskId: string, blockedTaskId: string): void {
+    this.#db.delete(taskDependencies).where(and(eq(taskDependencies.blockerTaskId, blockerTaskId), eq(taskDependencies.blockedTaskId, blockedTaskId))).run();
   }
 
   /** A durable-reference probe: some task row carries this provider task id. */

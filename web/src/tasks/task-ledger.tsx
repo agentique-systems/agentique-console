@@ -48,10 +48,15 @@ function sortTasks(tasks: readonly Task[]): Task[] {
   );
 }
 
-function TaskRow({ task }: { task: Task }) {
+function TaskRow({ task, byId }: { task: Task; byId: ReadonlyMap<string, Task> }) {
   const openAgentSession = useUiStore((s) => s.openAgentSession);
   const completed = task.status === "completed";
-  const blocked = task.blockedBy.length > 0 && task.status === "pending";
+  // Real, incomplete dependency EDGES only — raw blockedBy refs may name
+  // completed blockers or provider-local ids.
+  const waitingOn = task.dependencyIds.filter(
+    (id) => byId.get(id)?.status !== "completed",
+  ).length;
+  const blocked = !task.ready && task.status === "pending" && waitingOn > 0;
   // Orchestrator-owned tasks (agentSessionId null) have no pane to open.
   const target = task.agentSessionId;
 
@@ -73,7 +78,7 @@ function TaskRow({ task }: { task: Task }) {
           {titleOf(task)}
         </QueueItemContent>
       </button>
-      {(task.agent !== null || blocked) && (
+      {(task.agent !== null || blocked || task.scheduledAssignment !== null) && (
         <QueueItemDescription completed={completed}>
           <span className="flex flex-wrap items-center gap-1.5">
             {task.agent !== null && (
@@ -81,7 +86,12 @@ function TaskRow({ task }: { task: Task }) {
             )}
             {blocked && (
               <span className="text-status-waiting">
-                blocked by {task.blockedBy.length}
+                waiting on {waitingOn}
+              </span>
+            )}
+            {task.scheduledAssignment !== null && (
+              <span className="text-status-waiting">
+                scheduled → {task.scheduledAssignment.recipient}
               </span>
             )}
           </span>
@@ -103,6 +113,12 @@ const SECTIONS: readonly {
 
 export function TaskLedger({ userSessionId, agentSessionId }: { userSessionId: string | null; agentSessionId?: string | null }) {
   const tasks = useTasks(userSessionId);
+
+  // Unfiltered on purpose: a dependency may live outside the filtered view.
+  const byId = useMemo(
+    () => new Map((tasks.data ?? []).map((task) => [task.id, task])),
+    [tasks.data],
+  );
 
   const byStatus = useMemo(() => {
     const groups = new Map<TaskStatus, Task[]>();
@@ -161,6 +177,7 @@ export function TaskLedger({ userSessionId, agentSessionId }: { userSessionId: s
                       <TaskRow
                         key={`${task.sdkSessionId}:${task.sdkTaskId}`}
                         task={task}
+                        byId={byId}
                       />
                     ))}
                   </QueueList>

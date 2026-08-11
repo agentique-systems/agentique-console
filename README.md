@@ -23,7 +23,7 @@ single npm-workspaces application backed by SQLite and the Claude Agent SDK.
   `dispatch_work_items`; the join delivers all reports in one turn), `debate`
   (independent positions, console-seated judge), `peer_to_peer` (a bounded
   mesh: hard handoff cap, oscillation detection, a designated closer), and
-  `plan_execute` (a planner assigning tasks in dependency order over the ledger).
+  `plan_execute` (a planner over the task DAG the Console dispatches on).
 - **One level of nesting.** A controller seat (hub coordinator, planner) may
   spawn a child AgentSession running any pattern with
   `create_child_session`. The child's `main` resolves to that controller — its

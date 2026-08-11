@@ -15,6 +15,7 @@ import { InteractionService } from "./orchestrator/interactions.ts";
 import { OrchestratorRunner } from "./orchestrator/runner.ts";
 import { fakeSdk, type FakeProgram, type FakeSdk } from "./sdk/fake.ts";
 import { HandoffService } from "./handoffs/service.ts";
+import type { AssignmentScheduler } from "./tasks/scheduler.ts";
 import type { TaskService } from "./tasks/service.ts";
 
 export interface HarnessOptions {
@@ -38,6 +39,7 @@ export interface Harness {
   host: AgentSessionService;
   completion: RunCompletionService;
   tasks: TaskService;
+  scheduler: AssignmentScheduler;
   handoffs: HandoffService;
   fake: FakeSdk;
   config: Config;
@@ -91,6 +93,7 @@ export function makeHarness(program: FakeProgram, options: HarnessOptions = {}):
     host: app.host,
     completion: app.completion,
     tasks: app.tasks,
+    scheduler: app.scheduler,
     handoffs: app.handoffs,
     fake,
     config,
@@ -162,6 +165,7 @@ export async function restartHarness(
     host: app.host,
     completion: app.completion,
     tasks: app.tasks,
+    scheduler: app.scheduler,
     handoffs: app.handoffs,
     bootReport,
   };

@@ -27,6 +27,7 @@ import type { BrowserManager } from "../runtime/browser-manager.ts";
 import type { WorktreeManager } from "../runtime/worktree-manager.ts";
 import { decisionOf, renderDecision, type DecisionLedger } from "../orchestrator/decisions.ts";
 import { dedupeKeyFor, type InteractionService } from "../orchestrator/interactions.ts";
+import type { AssignmentScheduler } from "../tasks/scheduler.ts";
 import type { TaskService } from "../tasks/service.ts";
 import type { HandoffService } from "../handoffs/service.ts";
 import { HANDOFF_DRAFT_JSON_SCHEMA, HandoffDraftSchema } from "../handoffs/schema.ts";
@@ -257,6 +258,8 @@ export interface AgentSessionServiceDeps {
   decisions: DecisionLedger;
   tasks: TaskService;
   handoffs: HandoffService;
+  /** Lazy — the scheduler posts through this host, so it is composed after it. */
+  scheduler: () => AssignmentScheduler;
   worktrees: WorktreeManager | null;
 }
 
@@ -1902,6 +1905,19 @@ export class AgentSessionService {
         return this.#escalationTarget(fresh, seat.name);
       },
       post: (input) => this.post(input),
+      interceptAssignment: (input) => {
+        // Route legality first, exactly as post would assert it — an illegal
+        // recipient must fail NOW, not at dispatch.
+        const fresh = this.#deps.repo.getAgentSession(session.id);
+        if (!fresh || fresh.lifecycle !== "open") throw new ConflictError(`agent session ${session.id} is not open`);
+        this.#assertRoute(fresh, seat.name, input.to, input.category);
+        return this.#deps.scheduler().intercept({
+          agentSessionId: session.id, sender: seat.name, recipient: input.to,
+          category: input.category, handoff: input.handoff,
+        });
+      },
+      cancelAssignment: (assignmentId) =>
+        this.#deps.scheduler().cancel(assignmentId, { actor: seat.name, agentSessionId: session.id }),
       askOperator: (args) => this.#askOperator(session, seat, lane, args),
       currentTurnId: () => this.#laneOf(session.id, seat.name).activeTurn?.turnId,
       markSawSend: () => { const current = this.#laneOf(session.id, seat.name); if (current.activeTurn) current.activeTurn.sawSend = true; },

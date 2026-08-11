@@ -11,6 +11,7 @@ import type { Repo } from "../db/repo.ts";
 import type { AgentSessionService } from "../agent-sessions/host.ts";
 import type { OrchestratorRunner } from "../orchestrator/runner.ts";
 import type { InteractionService } from "../orchestrator/interactions.ts";
+import type { AssignmentScheduler } from "../tasks/scheduler.ts";
 import { newId, nowIso } from "../ids.ts";
 import { buildRunSummary, type RunSummaryDocument } from "./summary.ts";
 import { runSummaries } from "../db/schema.ts";
@@ -23,6 +24,7 @@ export interface RunCompletionDeps {
   repo: Repo;
   bus: EventBus;
   interactions: InteractionService;
+  scheduler: AssignmentScheduler;
   host: () => AgentSessionService;
   runner: () => OrchestratorRunner;
   getWorkspaceRoot: (workspaceId: string) => string;
@@ -83,6 +85,10 @@ export class RunCompletionService {
 
     // An open question means the run is waiting on the operator, not finished.
     if (interactions.listPending(userSessionId).length > 0) return false;
+
+    // A scheduled assignment is committed future work: the run is not done
+    // while any wait behind incomplete dependencies in an open session.
+    if (this.#deps.scheduler.countScheduled(userSessionId) > 0) return false;
 
     const runner = this.#deps.runner();
     if (runner.queuedJobs(userSessionId) > 0) return false;

@@ -9,6 +9,7 @@ import type { Config } from "../config.ts";
 import type { AgentSessionRow, MailboxDeliveryRow, Repo } from "../db/repo.ts";
 import type { DecisionLedger } from "../orchestrator/decisions.ts";
 import type { InteractionService } from "../orchestrator/interactions.ts";
+import type { AssignmentScheduler } from "../tasks/scheduler.ts";
 import type { TaskService } from "../tasks/service.ts";
 import type { HandoffService } from "../handoffs/service.ts";
 import { MAIN_RECIPIENT } from "./names.ts";
@@ -23,13 +24,15 @@ export interface FinalGateDeps {
   decisions: DecisionLedger;
   tasks?: TaskService;
   handoffs?: HandoffService;
+  /** Lazy: the scheduler is composed after the host in createApp. */
+  scheduler: () => AssignmentScheduler;
 }
 
 /**
  * A `final` withheld by the gate. Deliberately NOT an ApiError: the
  * `send_handoff` handler catches this and answers with a structured non-error
  * hold — `ask_operator` never returns `isError` for the operator's silence, and
- * blocked assignments answer `{queued:true}`, for the same reason: an error
+ * scheduled assignments answer `{scheduled:true}`, for the same reason: an error
  * result feeds the error-streak watchdog, and a model retrying a refusal feeds
  * the identical-call watchdog. Punishing an agent for a hold the Console
  * imposed kills the very turn that must stay alive to react when the hold
@@ -91,5 +94,9 @@ export function finalReportCaveats(deps: FinalGateDeps, session: AgentSessionRow
   const pendingInternal = deps.repo.listActiveDeliveries(session.id).filter((delivery) => delivery.recipient !== MAIN_RECIPIENT && delivery.recipient !== sender);
   if (running.length > 0) caveats.push(`still running: ${running.join(", ")}`);
   if (pendingInternal.length > 0) caveats.push(`${pendingInternal.length} delivery(ies) to specialists not yet acknowledged`);
+  // A caveat, deliberately not a blocker: the final-blocker set stays "facts
+  // only the operator can resolve", and a scheduled assignment is not one.
+  const scheduled = deps.scheduler().countScheduledForAgentSession(session.id);
+  if (scheduled > 0) caveats.push(`${scheduled} assignment(s) still scheduled behind incomplete dependencies`);
   return caveats;
 }

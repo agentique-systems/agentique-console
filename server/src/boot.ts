@@ -24,6 +24,8 @@ export interface BootReport {
   reapedProcesses: number;
   /** Child sessions whose parent archived or vanished across the restart. */
   archivedOrphanChildren: number;
+  /** Scheduled assignments found ready at boot and dispatched. */
+  scheduledAssignmentsRedriven: number;
 }
 
 export async function bootApp(app: App): Promise<BootReport> {
@@ -63,6 +65,9 @@ export async function bootApp(app: App): Promise<BootReport> {
   // Children whose parent archived or vanished across the restart can never
   // report to anyone.
   const archivedOrphanChildren = app.host.archiveOrphanChildren();
+  // After host.boot(): a redriven dispatch posts through the live transfer
+  // path, and the post-level dedupe absorbs a crash between post and mark.
+  const scheduledAssignmentsRedriven = app.scheduler.boot();
 
   app.runner.startCronFallback();
   for (const session of app.repo.listOpenWorkSessions()) app.completion.schedule(session.id);
@@ -78,6 +83,7 @@ export async function bootApp(app: App): Promise<BootReport> {
     orphanedWorktrees,
     reapedProcesses,
     archivedOrphanChildren,
+    scheduledAssignmentsRedriven,
   };
 }
 
