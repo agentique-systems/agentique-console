@@ -49,6 +49,8 @@ import { buildAgentTools, type AskOperatorArgs } from "./agent-tools.ts";
 import { ok } from "../sdk/tool-result.ts";
 import { hubContract, roleOfAgent, speakerKindOf, RESERVED_NAMES, AGENT_NAME_RE } from "./topology.ts";
 import { SessionRouting } from "./routing.ts";
+import { WorktreeBinding } from "./worktree-binding.ts";
+import type { TransferInput } from "./seams.ts";
 import { grantedTools, runtimeToolNames, type AgentToolName } from "./grants.ts";
 import { dispatchWorkItems, onPatternPost, sweep as patternSweep, type DispatchWorkItemsInput, type PatternContext } from "./patterns/engine.ts";
 import { buildContract } from "./patterns/catalog.ts";
@@ -69,11 +71,6 @@ const GOVERNED_BUILTIN_TOOLS = [
   "WebFetch", "WebSearch",
 ] as const;
 
-
-/** Agent names may contain chars git refs forbid; branch components drop them. */
-function branchSafe(name: string): string {
-  return name.replace(/[^A-Za-z0-9_-]/g, "-");
-}
 
 /** JSON with recursively sorted object keys — a stable identity for tool inputs. */
 function stableStringify(value: unknown): string {
@@ -197,6 +194,7 @@ export class AgentSessionService {
   readonly #deps: AgentSessionServiceDeps;
   readonly #composer: PromptComposer;
   readonly #routing: SessionRouting;
+  readonly #worktreeBinding: WorktreeBinding;
   /** agentSessionId → agent name → its persistent lane. */
   readonly #seats = new Map<string, Map<string, AgentLane>>();
   /** Waiters for a resident-capacity slot, resolved oldest-first on park/close. */
@@ -212,6 +210,13 @@ export class AgentSessionService {
   constructor(deps: AgentSessionServiceDeps) {
     this.#deps = deps;
     this.#routing = new SessionRouting({ repo: deps.repo });
+    this.#worktreeBinding = new WorktreeBinding({
+      repo: deps.repo, bus: deps.bus, artifacts: deps.artifacts, config: deps.config,
+      worktrees: deps.worktrees, getWorkspaceRoot: deps.getWorkspaceRoot,
+      escalationTarget: (session, agentName) => this.#routing.escalationTarget(session, agentName),
+      transfer: (input) => this.post(input),
+      simpleHandoff: (action, status, summary, nextAction) => this.#simpleHandoff(action, status, summary, nextAction),
+    });
     this.#composer = new PromptComposer({
       repo: deps.repo, bus: deps.bus, config: deps.config, handoffs: deps.handoffs,
       decisions: deps.decisions, tasks: deps.tasks, interactions: deps.interactions,
@@ -288,7 +293,7 @@ export class AgentSessionService {
     }
     // Worktree isolation needs a repository; ensured at session creation, not
     // lazily at agent spawn.
-    this.#ensureWorkspaceRepo(user.workspaceId, input.userSessionId);
+    this.#worktreeBinding.ensureWorkspaceRepo(user.workspaceId, input.userSessionId);
     const title = input.title.trim();
     if (!title) throw new InvalidInputError("a session title is required");
     const parent = repo.getUserSession(input.userSessionId);
@@ -351,7 +356,7 @@ export class AgentSessionService {
    * `send_handoff` tool, failure notices, redelivery — comes through here,
    * which is what makes the governance gates below inescapable.
    */
-  post(input: { agentSessionId: string; speaker: Speaker; to: string; handoff: HandoffDraft; category?: Category; dedupeKey?: string; turnId?: string }): MessageRow {
+  post(input: TransferInput): MessageRow {
     const { repo } = this.#deps;
     const session = repo.getAgentSession(input.agentSessionId);
     if (!session) throw new NotFoundError(`no agent session ${input.agentSessionId}`);
@@ -519,7 +524,7 @@ export class AgentSessionService {
     }
     this.#deps.handoffs.committed(prepared.record);
     if (senderSeat && senderSeat.worktreePath && (prepared.record.core.status === "completed" || prepared.record.core.status === "failed")) {
-      this.#onSeatWorktreePost(session, senderSeat, prepared.record.core.status);
+      this.#worktreeBinding.landOnReport(session, senderSeat, prepared.record.core.status);
     }
     bus.append({ type: "agent_session.message.appended", userSessionId: session.userSessionId, agentSessionId: session.id,
       payload: { agentSessionId: session.id, message: toWireMessage(message) } });
@@ -673,14 +678,7 @@ export class AgentSessionService {
     this.interrupt(session.id);
     this.#deps.processes?.stopSession(session.id);
     void this.#deps.browsers?.closeSession(session.id);
-    if (this.#deps.worktrees && this.#deps.getWorkspaceRoot) {
-      const user = this.#deps.repo.getUserSession(session.userSessionId);
-      for (const seat of this.#deps.repo.listAgents(session.id)) {
-        if (!seat.worktreePath || !user) continue;
-        try { this.#deps.worktrees.remove(this.#deps.getWorkspaceRoot(user.workspaceId), seat.worktreePath, seat.worktreeBranch ?? "", { archiveBranch: true }); } catch { /* best effort */ }
-        this.#deps.repo.patchAgent(session.id, seat.name, { worktreePath: null, worktreeBaseCommit: null, worktreeBranch: null });
-      }
-    }
+    this.#worktreeBinding.removeForSession(session);
     for (const delivery of this.#deps.repo.listActiveDeliveries(session.id)) this.#patchDelivery(session, delivery, "cancelled");
     this.#deps.repo.patchAgentSession(session.id, { lifecycle: "archived" });
     this.#forget(session.id);
@@ -965,91 +963,6 @@ export class AgentSessionService {
     return { sandbox: fs.existsSync("/usr/bin/bwrap") || fs.existsSync("/usr/local/bin/bwrap"), chrome: fs.existsSync("/usr/bin/google-chrome") };
   }
 
-  /**
-   * Default-on isolation for EVERY agent in a git workspace: a lazy worktree
-   * per assignment, so completed work lands atomically and interrupted work
-   * leaves zero residue. Fail-open — if the worktree cannot be created the
-   * agent runs directly in the workspace, with a runtime notice.
-   */
-  #ensureSeatWorktree(session: AgentSessionRow, seat: AgentRow, workspaceRoot: string): AgentRow {
-    const { repo, bus } = this.#deps;
-    const worktrees = this.#deps.worktrees;
-    // Read-only agents get one too: a reviewer needs a STABLE SNAPSHOT of
-    // what it is reviewing. Its worktree is discarded rather than merged —
-    // `#onSeatWorktreePost` only merges an agent whose profile can write.
-    if (!worktrees || this.#deps.config.policy.agentWorktrees === false || seat.role === "coordinator"
-      || seat.worktreePath !== null || !worktrees.isGitRepo(workspaceRoot)) return seat;
-    try {
-      const dirName = `seat-${branchSafe(seat.name)}-${seat.generation}-${newId("rnd").slice(-6)}`;
-      const ref = worktrees.addWorktree(workspaceRoot, session.id, dirName, `seat/${session.id}/${branchSafe(seat.name)}-${seat.generation}`);
-      repo.patchAgent(session.id, seat.name, { worktreePath: ref.path, worktreeBaseCommit: ref.baseCommit, worktreeBranch: ref.branch });
-      bus.append({ type: "agent_session.worktree.created", userSessionId: session.userSessionId, agentSessionId: session.id,
-        payload: { agentSessionId: session.id, agent: seat.name, branch: ref.branch, baseCommit: ref.baseCommit } });
-      return repo.getAgent(session.id, seat.name) ?? seat;
-    } catch (error) {
-      bus.append({ type: "agent_session.runtime.noted", userSessionId: session.userSessionId, agentSessionId: session.id,
-        payload: { agentSessionId: session.id, agent: seat.name, detail: `worktree isolation unavailable (${error instanceof Error ? error.message : String(error)}); working directly in the workspace` } });
-      return seat;
-    }
-  }
-
-  /**
-   * A worktree'd write agent reported terminal status: completed work merges
-   * atomically into the workspace (conflict → failure handoff, workspace
-   * untouched); failed work is discarded with its diff retained. Fail-open on
-   * git errors — the mailbox append already happened.
-   */
-  #onSeatWorktreePost(session: AgentSessionRow, seat: AgentRow, status: "completed" | "failed"): void {
-    const { repo, bus } = this.#deps;
-    const worktrees = this.#deps.worktrees;
-    if (!worktrees || !seat.worktreePath || !seat.worktreeBranch || !seat.worktreeBaseCommit || !this.#deps.getWorkspaceRoot) return;
-    const user = repo.getUserSession(session.userSessionId);
-    if (!user) return;
-    const workspaceRoot = this.#deps.getWorkspaceRoot(user.workspaceId);
-    const release = () => repo.patchAgent(session.id, seat.name, { worktreePath: null, worktreeBaseCommit: null, worktreeBranch: null });
-    // A read-only agent's worktree exists to give it a stable snapshot;
-    // discard it rather than merging incidental scratch files.
-    const profile = seat.profileSnapshot as AgentProfile;
-    if (!profile.tools.includes("Edit") && !profile.tools.includes("Write")) {
-      try { worktrees.remove(workspaceRoot, seat.worktreePath, seat.worktreeBranch, { archiveBranch: false }); } catch { /* best effort */ }
-      release();
-      bus.append({ type: "agent_session.worktree.discarded", userSessionId: session.userSessionId, agentSessionId: session.id,
-        payload: { agentSessionId: session.id, agent: seat.name, reason: "read-only seat: snapshot discarded, nothing to land", artifactId: null } });
-      return;
-    }
-    try {
-      worktrees.commitAll(seat.worktreePath, `seat ${seat.name}: reported ${status}`, seat.ownership);
-      const diff = worktrees.captureDiff(workspaceRoot, seat.worktreeBaseCommit, seat.worktreeBranch);
-      const artifactId = diff.filesChanged === 0 ? null
-        : this.#deps.artifacts.store(`${diff.stat}\n\n${diff.patch}`, "text/x-patch", { userSessionId: session.userSessionId, agentSessionId: session.id }).artifactId;
-      if (status === "failed" || diff.filesChanged === 0) {
-        worktrees.remove(workspaceRoot, seat.worktreePath, seat.worktreeBranch);
-        release();
-        bus.append({ type: "agent_session.worktree.discarded", userSessionId: session.userSessionId, agentSessionId: session.id,
-          payload: { agentSessionId: session.id, agent: seat.name, reason: status === "failed" ? "seat reported failed" : "no changes to land", artifactId } });
-        return;
-      }
-      const outcome = worktrees.mergeBranch(workspaceRoot, seat.worktreeBranch,
-        `Merge seat ${seat.name} (session ${session.id})\n\nSeat-Worktree: ${seat.worktreeBranch}`);
-      worktrees.remove(workspaceRoot, seat.worktreePath, seat.worktreeBranch, { archiveBranch: !outcome.merged });
-      release();
-      if (outcome.merged) {
-        bus.append({ type: "agent_session.worktree.merged", userSessionId: session.userSessionId, agentSessionId: session.id,
-          payload: { agentSessionId: session.id, agent: seat.name, mergeCommit: outcome.commit, filesChanged: diff.filesChanged, artifactId } });
-        return;
-      }
-      bus.append({ type: "agent_session.worktree.merge_failed", userSessionId: session.userSessionId, agentSessionId: session.id,
-        payload: { agentSessionId: session.id, agent: seat.name, conflicts: outcome.conflicts, detail: outcome.detail, artifactId } });
-      this.post({ agentSessionId: session.id, speaker: { kind: "agent", name: seat.name }, to: this.#routing.escalationTarget(session, seat.name),
-        handoff: this.#simpleHandoff("Completed work failed to merge", "failed",
-          `The workspace advanced past this seat's base; merging its changes conflicts in: ${outcome.conflicts.join(", ") || "unknown files"}. The diff is retained as artifact ${artifactId ?? "n/a"}.`,
-          "Reassign the unit against the current HEAD."), category: "failure" });
-    } catch (error) {
-      bus.append({ type: "agent_session.runtime.noted", userSessionId: session.userSessionId, agentSessionId: session.id,
-        payload: { agentSessionId: session.id, agent: seat.name, detail: `worktree landing failed: ${error instanceof Error ? error.message : String(error)}` } });
-    }
-  }
-
   #agentRow(agentSessionId: string, name: string, role: string, profile: AgentProfile, extra: string, model: string | undefined, ownership: string[], ord: number, createdAt: string): AgentRow {
     const instructions = [profile.instructions, extra.trim()].filter(Boolean).join("\n\nAssigned role context:\n");
     return { agentSessionId, name, role, instructions, model: model ?? profile.model ?? null,
@@ -1305,7 +1218,7 @@ export class AgentSessionService {
       const user = this.#deps.repo.getUserSession(session.userSessionId);
       if (!user) throw new Error("workspace unavailable");
       const workspaceRoot = this.#deps.getWorkspaceRoot!(user.workspaceId);
-      const latestSeat = this.#ensureSeatWorktree(session, this.#deps.repo.getAgent(session.id, seatRow.name) ?? seatRow, workspaceRoot);
+      const latestSeat = this.#worktreeBinding.ensureAgentWorktree(session, this.#deps.repo.getAgent(session.id, seatRow.name) ?? seatRow, workspaceRoot);
       const profile = latestSeat.profileSnapshot as AgentProfile;
       const seatRoot = latestSeat.worktreePath ?? workspaceRoot;
       const contract = this.#routing.contractOf(session);
@@ -1373,31 +1286,6 @@ export class AgentSessionService {
       lane.input?.close(); lane.input = null;
       this.#signalCapacity();
       throw error;
-    });
-  }
-
-  /**
-   * Fail-open, exactly like `#ensureSeatWorktree`: if the workspace cannot
-   * become a repository the run proceeds without isolation and says so, rather
-   * than refusing to start.
-   */
-  #ensureWorkspaceRepo(workspaceId: string, userSessionId: string): void {
-    const worktrees = this.#deps.worktrees;
-    if (!worktrees || !this.#deps.getWorkspaceRoot || this.#deps.config.infra.autoInitGit === false) return;
-    if (this.#deps.config.policy.agentWorktrees === false) return;
-    let root: string;
-    try { root = this.#deps.getWorkspaceRoot(workspaceId); } catch { return; }
-    if (worktrees.isGitRepo(root)) return;
-    const forbidden = (this.#deps.config.infra.fsRoots ?? []).map((entry) => entry.path);
-    const outcome = worktrees.initRepo(root, { forbiddenRoots: forbidden });
-    this.#deps.bus.append({
-      type: "user_session.runtime.noted", userSessionId,
-      payload: {
-        userSessionId,
-        detail: outcome.initialized
-          ? `workspace initialised as a git repository so each seat gets an isolated worktree (${outcome.reason})`
-          : `seats will share the workspace directory — no isolation: ${outcome.reason}`,
-      },
     });
   }
 
@@ -1596,12 +1484,7 @@ export class AgentSessionService {
     }
     bus.append({ type: "agent_session.turn.settled", userSessionId: session.userSessionId, agentSessionId: session.id,
       payload: { agentSessionId: session.id, agent: seatName, turnId: turn.turnId, status, durationMs: Date.now() - turn.startedAt, ...(errorMessage ? { errorMessage } : {}) } });
-    // File-state snapshot per settled turn: mid-assignment crash recovery is
-    // lossless, and the completion diff (base..branch) is unaffected.
-    const current = repo.getAgent(session.id, seatName);
-    if (current?.worktreePath && this.#deps.worktrees && fs.existsSync(current.worktreePath)) {
-      try { this.#deps.worktrees.commitAll(current.worktreePath, `turn ${turn.turnId}`, current.ownership); } catch { /* snapshot is best-effort */ }
-    }
+    this.#worktreeBinding.snapshotTurn(session.id, seatName, turn.turnId);
     runtime.idle();
     if (requeued && repo.getAgentSession(session.id)?.lifecycle === "open") {
       void this.#deliverConsole(session.id, seatName).catch((error) => this.#recordHostFailure(session.id, error));
