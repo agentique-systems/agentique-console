@@ -27,6 +27,7 @@ import { newId, nowIso } from "../ids.ts";
 import { rotationTokenLimit } from "../model-catalog.ts";
 import { CHECKPOINT_DENIED_TOOLS, recoveryAction } from "../lane-runtime/checkpoint.ts";
 import { rotationDue } from "../lane-runtime/rotation.ts";
+import { advanceUsageWatermark } from "../lane-runtime/usage.ts";
 import { InvalidInputError, ConflictError, NotFoundError } from "../errors.ts";
 import { mapSdkMessage } from "../sdk/mapping.ts";
 import type {
@@ -99,27 +100,6 @@ interface Lane {
   contextTokens: number;
   /** Last cumulative cost/api-duration seen, for per-turn deltas. */
   lastCumulative: { costUsd: number; apiDurationMs: number };
-}
-
-/**
- * `cumulativeCostUsd`/`cumulativeApiDurationMs` restate the provider session's
- * running total on every result, so a turn's own figure is the delta since the
- * lane last saw one.
- * Mutates the lane's watermark as a side effect — call exactly once per result.
- */
-function laneUsageDeltas(lane: Lane, event: { cumulativeCostUsd?: number; cumulativeApiDurationMs?: number }): { costUsd: number | null; apiDurationMs: number | null } {
-  // A total BELOW the watermark means the counter restarted underneath us (a
-  // genuinely fresh provider session). Take the raw value rather than clamping
-  // a real turn to zero — correct under either SDK behaviour.
-  if (event.cumulativeCostUsd !== undefined && event.cumulativeCostUsd < lane.lastCumulative.costUsd) {
-    lane.lastCumulative.costUsd = 0;
-    lane.lastCumulative.apiDurationMs = 0;
-  }
-  const costUsd = event.cumulativeCostUsd === undefined ? null : Math.max(0, event.cumulativeCostUsd - lane.lastCumulative.costUsd);
-  const apiDurationMs = event.cumulativeApiDurationMs === undefined ? null : Math.max(0, event.cumulativeApiDurationMs - lane.lastCumulative.apiDurationMs);
-  if (event.cumulativeCostUsd !== undefined) lane.lastCumulative.costUsd = event.cumulativeCostUsd;
-  if (event.cumulativeApiDurationMs !== undefined) lane.lastCumulative.apiDurationMs = event.cumulativeApiDurationMs;
-  return { costUsd, apiDurationMs };
 }
 
 export interface OrchestratorDeps {
@@ -812,7 +792,7 @@ export class OrchestratorRunner {
         if (session) {
           const contextTokens = Math.max(session.contextTokens, lane.contextTokens);
           if (session.sdkTurnCount + 1 >= this.#deps.config.policy.contextTurnLimit || contextTokens >= rotationTokenLimit(this.#deps.config.policy.contextTokenLimit, this.#modelFor(session))) lane.recycleAfterTurn = true;
-          const { costUsd, apiDurationMs } = laneUsageDeltas(lane, event);
+          const { costUsd, apiDurationMs } = advanceUsageWatermark(lane.lastCumulative, event);
           // One patch: turn count, context, and the advanced cumulative
           // baseline (persisted with the provider session it belongs to, so
           // the next process to resume it inherits the watermark).
@@ -841,7 +821,7 @@ export class OrchestratorRunner {
         const session = repo.getUserSession(sessionId);
         if (session) {
           const contextTokens = Math.max(session.contextTokens, lane.contextTokens);
-          const { costUsd, apiDurationMs } = laneUsageDeltas(lane, event);
+          const { costUsd, apiDurationMs } = advanceUsageWatermark(lane.lastCumulative, event);
           // One patch: turn count, context, and the advanced cumulative
           // baseline (persisted with the provider session it belongs to, so
           // the next process to resume it inherits the watermark).
