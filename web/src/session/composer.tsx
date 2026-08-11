@@ -1,7 +1,6 @@
 /**
- * The conversation's write surface — trimmed from v1's session-composer: the
- * operator only ever talks to the Orchestrator, so there is no mention popover
- * and no addressing. Enter submits; Shift+Enter breaks a line; Shift+Tab cycles
+ * The conversation's write surface: the operator only ever talks to the
+ * Orchestrator, so there is no mention popover and no addressing. Enter submits; Shift+Enter breaks a line; Shift+Tab cycles
  * the session mode (Claude Code's gesture).
  *
  * Built on the vendored AI Elements prompt-input, which owns the shell, the

@@ -92,13 +92,10 @@ export interface SdkUserMessageLike {
 }
 
 /**
- * MCP's `ContentBlock`, not the Messages API's. The two differ exactly where it
- * matters: MCP images are `{type:"image", data, mimeType}` while the Messages
- * API nests them under `source:{type:"base64", media_type, data}`. Modelling
- * only the text arm forced a cast at the one call site that returned an image,
- * and the cast is what let `read_artifact` ship a shape the in-process MCP
- * server rejects with `invalid_union` — every screenshot in db-live-2 was
- * unreadable by every agent, including the one that took it.
+ * MCP's `ContentBlock`, not the Messages API's. The two differ exactly where
+ * it matters: MCP images are `{type:"image", data, mimeType}` while the
+ * Messages API nests them under `source:{type:"base64", media_type, data}`.
+ * The in-process MCP server rejects the wrong shape with `invalid_union`.
  */
 export type SdkToolContent =
   | { type: "text"; text: string }
@@ -158,9 +155,8 @@ export interface SdkMcpServerConfig {
   tools: unknown[];
   /**
    * Keep this server's tools in the prompt instead of deferring them behind
-   * ToolSearch. The console already decided a seat's tools via its profile;
-   * making it rediscover them costs a full API round-trip each time (21 of them
-   * in the db-live-1 run, ~10% of its input tokens).
+   * ToolSearch. The console already decided an agent's tools via its profile;
+   * making it rediscover them costs a full API round-trip each time.
    */
   alwaysLoad?: boolean;
 }

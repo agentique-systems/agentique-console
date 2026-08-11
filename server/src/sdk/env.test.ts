@@ -2,10 +2,9 @@ import { describe, expect, it } from "vitest";
 import { sdkEnv } from "./env.ts";
 
 /**
- * `CLAUDE_CODE_MAX_RETRIES` is set on every child. The CLI's own back-off
- * schedule stopped growing after attempt 7 in db-live-2, so attempts 7-10 were
- * ~34s each and bought nothing; the Console's wall-clock budget is the real
- * control and this stops the CLI burning three minutes before it can act.
+ * `CLAUDE_CODE_MAX_RETRIES` is set on every child: the Console's wall-clock
+ * budget is the real control, and the cap stops the CLI burning minutes of
+ * back-off before the Console can act.
  */
 const RETRY_CAP = { CLAUDE_CODE_MAX_RETRIES: "5" };
 

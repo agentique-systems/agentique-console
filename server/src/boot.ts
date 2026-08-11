@@ -61,14 +61,14 @@ export async function bootApp(app: App): Promise<BootReport> {
 
   app.host.boot();
   // Children whose parent archived or vanished across the restart can never
-  // report to anyone — the one genuinely new orphan class nesting introduces.
+  // report to anyone.
   const archivedOrphanChildren = app.host.archiveOrphanChildren();
 
   app.runner.startCronFallback();
   for (const session of app.repo.listOpenWorkSessions()) app.completion.schedule(session.id);
   // Release `ask_operator` waits the operator has not come back to — the card
-  // stays answerable; the timer only stops a human's absence from pinning a
-  // seat process indefinitely.
+  // stays answerable; the timer only stops a human's absence from pinning an
+  // agent process indefinitely.
   app.host.startGovernanceSweep();
 
   return {

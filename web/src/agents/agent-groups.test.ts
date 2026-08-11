@@ -43,7 +43,7 @@ function message(seq: number): AgentItem {
  * is the input contract — if agent-fold.ts grows an arm, this must stay total.
  */
 describe("groupAgentItems", () => {
-  it("collapses one seat's consecutive calls into a single run", () => {
+  it("collapses one agent's consecutive calls into a single run", () => {
     const groups = groupAgentItems([
       tool("Read", "a", "scout", "x"),
       tool("Grep", "b", "scout", "y"),
@@ -54,7 +54,7 @@ describe("groupAgentItems", () => {
     expect((groups[0] as ToolRunItem).tools).toHaveLength(2);
   });
 
-  it("splits a run when the seat changes, with nothing in between", () => {
+  it("splits a run when the agent changes, with nothing in between", () => {
     const groups = groupAgentItems([
       tool("Read", "a", "scout", "x"),
       tool("Edit", "b", "coder", "y"),

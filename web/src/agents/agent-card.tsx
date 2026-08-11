@@ -1,7 +1,7 @@
 /**
- * One agent session in the strip: title, a pill per seat with a live state
+ * One agent session in the strip: title, a pill per agent with a live state
  * dot (runtime store), and the meta row. The card breathes the running ring
- * while any seat works or the session row says "working" — liveness reads
+ * while any agent works or the session row says "working" — liveness reads
  * from across the room, detail waits for the inspector.
  */
 import type { AgentRuntimeState, AgentSession } from "@agentique-console/shared";

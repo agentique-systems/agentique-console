@@ -173,9 +173,9 @@ export async function bootHarness(harness: Harness): Promise<BootReport> {
 }
 
 /**
- * The console-owned agent identity a spawn carried in its env (host.#spawnSeat).
+ * The console-owned agent identity a spawn carries in its env (host.#spawnSeat).
  * Fake programs receive the spawn options as their first argument, so this is
- * the role discriminator — prompt-text sniffing is the legacy alternative.
+ * the role discriminator.
  */
 export function agentRoleOf(options: { env?: Record<string, string | undefined> } | undefined): {
   agentSessionId?: string; agent?: string; role?: string; pattern?: string; depth?: number;

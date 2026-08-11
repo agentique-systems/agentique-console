@@ -18,7 +18,7 @@ import {
 } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
 
-/** Inlined from the v1 `ai` dependency: the console's three tool phases. */
+/** Inlined from the `ai` dependency: the console's three tool phases. */
 export type ToolState =
   | "input-available"
   | "output-available"

@@ -2,11 +2,6 @@
  * The end-of-run card: what the Console believes it built, and the operator's
  * verdict on it.
  *
- * This is the moment db-live-2 had no way to render. That run declared itself
- * done, asked an unrelated question eleven seconds later, and then stopped —
- * and because "done", "stuck", "crashed" and "waiting on you" all looked like a
- * spinner that had stopped, the operator could not tell which had happened.
- *
  * Modelled on PlanCard deliberately: same skeleton, same two verbs, same
  * attention border while unresolved. The one that says "your call" should look
  * like the other one that says "your call".
@@ -51,8 +46,7 @@ function formatDuration(ms: number): string {
 
 /**
  * A cost figure the operator can trust, or an honest admission that it is
- * partial. `coverage` is recorded-turns over observed-turns; db-live-2's ledger
- * was missing three of fourteen and said nothing about it.
+ * partial. `coverage` is recorded-turns over observed-turns.
  */
 function formatCost(usd: number | null, coverage: number): string {
   if (usd === null) return "cost not recorded";

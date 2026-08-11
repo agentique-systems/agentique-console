@@ -28,7 +28,7 @@ function shortPath(path: string): string {
 }
 
 /**
- * Which workspace the console is looking at, ported from v1's HUD selector.
+ * Which workspace the console is looking at.
  *
  * A combobox (Popover + Command), NOT a DropdownMenu — the row count grows with
  * the operator's machine and this needs real search; DropdownMenu's typeahead is

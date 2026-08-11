@@ -1,23 +1,9 @@
 /**
- * `read_artifact` — reading back what a seat produced.
- *
- * The regression this file exists for: the tool returned the ANTHROPIC MESSAGES
- * API image shape (`{type:"image", source:{type:"base64", media_type, data}}`)
- * to an in-process MCP server that accepts only MCP `ContentBlock`s
- * (`{type:"image", data, mimeType}`). Every image call in db-live-2 failed with
- * `MCP error -32602 … invalid_union … expected "text"` — four times, across
- * three different agents. Three valid 1440x1000 PNGs sat in `event_artifacts`
- * that nobody, including the seat that captured them, could open.
- *
- * The operator's acceptance bar was "report final only when check has confirmed
- * it with a screenshot". It was met procedurally and defeated semantically:
- * `check` reimplemented visual verification in `gl.readPixels` instead, at
- * ~4 minutes and a large share of a $2.64 turn.
- *
- * The fake could not have caught it — `executeMcpTool` mapped content with
- * `part.text ?? ""`, so an invalid block became an empty string and a green
- * test. It now validates against the MCP shape, which is why these assertions
- * are worth anything.
+ * `read_artifact` — reading back what an agent produced. Images must return in
+ * the MCP `ContentBlock` shape (`{type:"image", data, mimeType}`), never the
+ * Messages-API shape (`source:{…}`), which the in-process MCP server rejects
+ * with `invalid_union`. The fake validates the MCP shape, which is what makes
+ * these assertions worth anything.
  */
 import { describe, expect, it } from "vitest";
 import { initMessage, successMessage } from "../sdk/fake.ts";
@@ -111,7 +97,7 @@ describe("read_artifact (fake SDK)", () => {
     const { tool } = await seatWithArtifacts();
     const result = await tool.handler({ artifactId: "artifact_missing", maxBytes: 8 * 1024 }, {});
     // The same convention as read_attempt_diff: a reference to something that
-    // does not exist is the seat's mistake, so it is an isError result — not
+    // does not exist is the agent's mistake, so it is an isError result — not
     // an `ok({error})` success shape the model has to notice.
     expect(result.isError).toBe(true);
     expect((result.content[0] as { text: string }).text).toContain("artifact_missing");

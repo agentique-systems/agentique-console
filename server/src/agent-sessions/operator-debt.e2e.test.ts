@@ -1,11 +1,7 @@
 /**
- * The operator obligation is the Console's, not the coordinator's.
- *
- * db-live-1 ended with an AgentSession parked idle, `owedToOrchestrator`
- * hardcoded false, zero deliveries to main, and a completed verification
- * report sitting unread in the journal. The operator's last information was 35
- * minutes stale. A coordinator that forgets, dies, or is jammed must not be
- * able to produce silence.
+ * The operator obligation is the Console's, not the coordinator's: a
+ * coordinator that forgets, dies, or is jammed must not be able to produce
+ * silence.
  */
 import { describe, expect, it } from "vitest";
 import { initMessage, successMessage } from "../sdk/fake.ts";
@@ -17,7 +13,7 @@ const handoff = (action: string, status: "pending" | "completed") => ({ core: { 
 
 describe("operator debt (fake SDK)", () => {
   it("closes the loop from the journal when the coordinator never reports", async () => {
-    // Both seats work and go quiet; nobody ever addresses main.
+    // Both agents work and go quiet; nobody ever addresses main.
     const h = makeDelegationHarness(async function* () {
       yield initMessage();
       yield successMessage();
@@ -59,8 +55,7 @@ describe("operator debt (fake SDK)", () => {
     const created = h.host.createSession({ userSessionId, title: "caveats", agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("investigate", "pending") });
     await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled", 10_000);
 
-    // An assignment nobody has acknowledged: the old gate threw here, which is
-    // how a jammed ledger silenced the run.
+    // An assignment nobody has acknowledged rides as a caveat, never a throw.
     h.host.post({ agentSessionId: created.agentSessionId, speaker: { kind: "orchestrator", name: "coordinator" }, to: "scout",
       handoff: handoff("go dig", "pending"), category: "assignment" });
 

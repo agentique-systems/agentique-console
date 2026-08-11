@@ -25,9 +25,7 @@ export interface UserSession {
   lifecycle: "open" | "archived";
   /**
    * Is the work done. `awaiting_signoff` is the Console asserting it believes
-   * the run is finished while the operator has not yet agreed — the state
-   * db-live-2 had no way to express, so its ending looked exactly like
-   * work-in-progress.
+   * the run is finished while the operator has not yet agreed.
    */
   runState: RunState;
   /**
@@ -44,8 +42,8 @@ export type RunState = "active" | "awaiting_signoff" | "completed";
 
 /**
  * The render-ready projection of a run summary — ONE shape shared by the
- * `run.completion.proposed` payload and the web fold's card, so the three
- * copies that used to exist cannot drift.
+ * `run.completion.proposed` payload and the web fold's card, so copies cannot
+ * drift.
  */
 export interface RunSummaryStats {
   headline: string;

@@ -22,12 +22,10 @@ describe("HandoffService", () => {
     expect(prepared.record.metadata.referenceWarnings[0]).toContain("does not exist");
   });
 
-  it("selects a seat's own last report for rotation recovery, not the last message sent to it", () => {
-    // The degraded-rotation fallback used to filter on RECIPIENT, so a seat
-    // inherited whatever another agent last sent it, relabelled as its own
-    // state. In db-live-1 the coordinator successively inherited page's
-    // completion report, then check's junk probe, then "Turn failed" — 395
-    // bytes as the entire context of generation 8.
+  it("selects an agent's own last report for rotation recovery, not the last message sent to it", () => {
+    // The degraded-rotation fallback filters on SENDER: filtering on recipient
+    // would hand an agent whatever another agent last sent it, relabelled as
+    // its own state.
     const h = makeHarness(async function* () {});
     const userSessionId = h.addUserSession();
     const service = new HandoffService({ repo: h.repo, bus: h.bus, getWorkspaceRoot: () => "/tmp/test-workspace" });
@@ -45,12 +43,11 @@ describe("HandoffService", () => {
 
     const recovered = h.repo.latestHandoff({ userSessionId, agentSessionId, sender: "renderer", excludeCheckpoints: true });
     expect(recovered?.core.action).toBe("renderer's own report");
-    // The recipient filter still works — it just answers a different question,
-    // and answering it here is what produced the amnesia spiral.
+    // The recipient filter still works — it just answers a different question.
     expect(h.repo.latestHandoff({ userSessionId, agentSessionId, recipient: "renderer", excludeCheckpoints: true })?.core.action)
       .toBe("orchestrator's status ping");
     // Excluding checkpoints stops the "Recovery checkpoint: " prefix accreting
-    // across generations (db-live-1 reached a double-prefixed clone at gen 4).
+    // across generations.
     expect(recovered?.core.action.startsWith("Recovery checkpoint: ")).toBe(false);
   });
 

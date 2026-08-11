@@ -7,7 +7,7 @@
  * interaction and task-mirror flows credential-free.
  *
  * Two prompt shapes, mirroring the real SDK:
- * - string prompt (specialist seats): one program run per query() call.
+ * - string prompt (specialist agents): one program run per query() call.
  * - streaming prompt (the persistent lane): ONE program invocation per pushed
  *   input message = one scripted turn. `captured.prompts[n]` is the nth turn
  *   prompt either way, so `waitForPrompt` keeps its meaning across both.
@@ -73,14 +73,9 @@ function hookMatchers(options: SdkOptions, event: string, toolName: string): Fak
 }
 
 /**
- * The other half of the same doctrine, on the way back out. `read_artifact`
- * returned Messages-API image content for an in-process MCP server that only
- * accepts MCP `ContentBlock`s, and every call failed with `invalid_union` in
- * db-live-2 — while this file happily did `part.text ?? ""`, turning an invalid
- * block into an empty string and a green test.
- *
  * Validates each block against MCP's ContentBlock shape and throws, so a wrong
- * result shape fails here the way it fails against the real server.
+ * result shape fails here the way it fails against the real in-process MCP
+ * server (`invalid_union`).
  */
 function assertMcpToolResult(name: string, result: SdkToolResult): void {
   if (result === null || typeof result !== "object" || !Array.isArray(result.content)) {
@@ -109,13 +104,9 @@ function assertMcpToolResult(name: string, result: SdkToolResult): void {
 }
 
 /**
- * The fake must fail wherever the real API would, or `npm run verify` is
- * theatre. db-live-1 ran with 13/13 context rotations failing on a provider
- * 400 while the suite stayed green, because nothing here ever looked at the
- * schemas the console hands the SDK.
- *
- * `sdk.tool` takes a zod-shape object; a plain JSON Schema handed here would be
- * compiled into an `input_schema` the API rejects.
+ * The fake must fail wherever the real API would. `sdk.tool` takes a zod-shape
+ * object; a plain JSON Schema handed here would be compiled into an
+ * `input_schema` the API rejects.
  */
 function assertToolParameterShape(name: string, schema: unknown): void {
   if (schema === null || typeof schema !== "object") {
@@ -221,13 +212,13 @@ export function fakeSdk(program: FakeProgram): FakeSdk {
   /**
    * Run a console MCP tool for real, the way the SDK does: resolve the handler
    * the console registered, invoke it, and feed the result back as a
-   * tool_result. Without this the fake could only script NATIVE tool calls, so
-   * no e2e ever exercised the seat → console-tool path that now carries every
-   * transfer — the suite would have kept passing while testing a dead route.
+   * tool_result. Without this the fake could only script NATIVE tool calls,
+   * and the agent → console-tool path that carries every transfer would go
+   * untested.
    */
   async function executeMcpTool(options: SdkOptions, callId: string, qualifiedName: string, input: unknown): Promise<SdkMessage[]> {
-    // MUST resolve from THIS query's own servers. Every seat registers its own
-    // `send_handoff` bound to its own identity, so a global lookup by name
+    // MUST resolve from THIS query's own servers. Every agent registers its
+    // own `send_handoff` bound to its own identity, so a global lookup by name
     // silently runs a specialist's call as the coordinator — which routes
     // orchestrator→orchestrator and vanishes.
     const servers = (options.mcpServers ?? {}) as Record<string, { instance?: { tools?: unknown[] } }>;
@@ -240,8 +231,7 @@ export function fakeSdk(program: FakeProgram): FakeSdk {
       const result = await tool.handler(input as never, {});
       assertMcpToolResult(tool.name, result);
       // Image blocks are rendered as a marker rather than dropped, so a test
-      // can assert the seat actually received one. Silently coercing them to
-      // "" is what hid the read_artifact defect for a whole live run.
+      // can assert the agent actually received one.
       const text = result.content
         .map((part) => (part.type === "text" ? part.text : `[image ${part.mimeType} ${part.data.length}b64]`))
         .join("");

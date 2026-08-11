@@ -1,20 +1,8 @@
 /**
  * `deliveredAt` means "when the recipient got it", not "when its turn ended".
- *
- * db-live-2 reported these created→delivered latencies:
- *
- *     coordinator→page   assignment   403.5s     (page's first entry: +1s)
- *     coordinator→renderer assignment 417.7s
- *     coordinator→check  assignment   417.6s
- *
- * All three are turn DURATIONS mislabelled as delivery latency — 6 of 12 rows.
- * The mechanism is a stale snapshot: `#deliverConsole` reads rows while they
- * are still `queued` (so `deliveredAt` is NULL in the objects it holds),
- * patches them to `delivered` in the DB without refreshing them, and hands the
- * same stale objects to `#mintTurn`. At settle, `delivery.deliveredAt ?? now`
- * saw the stale NULL and overwrote the correct earlier timestamp.
- *
- * The invariant now lives in the store, so no caller can reintroduce it.
+ * Callers hold stale row snapshots (read while `queued`, so `deliveredAt` is
+ * NULL in the objects they hold); the write-once invariant lives in the store,
+ * so no caller can overwrite the real timestamp at settle.
  */
 import { describe, expect, it } from "vitest";
 import { openDb } from "./client.ts";
@@ -47,7 +35,7 @@ describe("mailbox delivery timestamps", () => {
 
     const deliveredAt = "2026-08-09T10:00:00.000Z";
     repo.patchDelivery(id, { status: "delivered", deliveredAt });
-    // The seat works for a while, then its turn settles and acks.
+    // The agent works for a while, then its turn settles and acks.
     const ackAt = "2026-08-09T10:06:43.500Z";
     repo.patchDelivery(id, { status: "acknowledged", acknowledgedAt: ackAt, deliveredAt: ackAt });
 

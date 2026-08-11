@@ -237,11 +237,11 @@ describe("debate e2e (fake SDK)", () => {
   });
 });
 
-describe("silent-seat carry e2e (fake SDK)", () => {
+describe("silent-agent carry e2e (fake SDK)", () => {
   it("carries a hub specialist's plain-text findings to its coordinator", async () => {
-    // db-live-2's renderer class: the specialist does the work, types the
-    // findings as plain text, never calls send_handoff, and goes idle. The
-    // Console now carries that text to the coordinator as its report.
+    // The specialist does the work, types the findings as plain text, never
+    // calls send_handoff, and goes idle. The Console carries that text to the
+    // coordinator as its report.
     let coordinatorTurns = 0;
     const h = makeDelegationHarness(async function* (options) {
       const identity = agentRoleOf(options);

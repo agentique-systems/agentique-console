@@ -1,12 +1,4 @@
-/**
- * The boot-time leak scan, and the guard that makes it safe.
- *
- * db-live-2 ended with `agent_session.process.started` = 6 and `.exited` = 5:
- * `check`'s `node serve.mjs` (pid 436589) outlived the whole run. The next run
- * found a foreign app on the port it wanted, spent ~6 minutes diagnosing it,
- * propagated a 400-word contingency into another seat's assignment, and
- * produced the only `reference_warnings` entry in either database.
- */
+/** The boot-time leak scan, and the PID-reuse guard that makes it safe. */
 import { describe, expect, it, vi } from "vitest";
 import { openDb } from "../db/client.ts";
 import { ArtifactStore } from "../events/artifact-store.ts";

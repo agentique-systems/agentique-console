@@ -1,19 +1,4 @@
-/**
- * Runtime a seat holds must die with its lane.
- *
- * The db-live-2 regression this file is named for: `check` started
- * `node serve.mjs` on port 8173 at 23:47:00, its lane parked at 23:58:27, and
- * the process outlived the whole run — `agent_session.process.started` = 6 vs
- * `.exited` = 5. The consequences landed on the NEXT run, which found a foreign
- * app squatting the port it wanted, spent ~6 minutes diagnosing it, propagated
- * a 400-word contingency into another seat's assignment, and produced the only
- * `reference_warnings` entry in either database (a seat reading files out of
- * the previous run's workspace).
- *
- * `ProcessManager.stopSession` existed the whole time. Its only caller was
- * `archiveForUserSession`, reachable only from an operator archive action that
- * had no button in the UI. So the leak was structural, not accidental.
- */
+/** Runtime an agent holds must die with its lane. */
 import { describe, expect, it, vi } from "vitest";
 import { initMessage, successMessage } from "../sdk/fake.ts";
 import type { ProcessManager } from "../runtime/process-manager.ts";
@@ -41,8 +26,8 @@ function stubRuntime() {
   };
 }
 
-describe("seat park reaps the seat's runtime", () => {
-  it("stops the seat's managed processes and browser when its lane parks on idle", async () => {
+describe("agent park reaps the agent's runtime", () => {
+  it("stops the agent's managed processes and browser when its lane parks on idle", async () => {
     const runtime = stubRuntime();
     const h = makeDelegationHarness(
       async function* () {
@@ -82,7 +67,7 @@ describe("seat park reaps the seat's runtime", () => {
     expect(detail).toContain("pid 4242");
   });
 
-  it("scopes the reap to the parking seat, never the whole session", async () => {
+  it("scopes the reap to the parking agent, never the whole session", async () => {
     const runtime = stubRuntime();
     const h = makeDelegationHarness(
       async function* () {
@@ -104,7 +89,7 @@ describe("seat park reaps the seat's runtime", () => {
       10_000,
     );
 
-    // A sibling seat's server must survive its neighbour parking — that is the
+    // A sibling agent's server must survive its neighbour parking — that is the
     // difference between reaping and `stopSession`.
     const processes = runtime.processes as unknown as { stopSession: ReturnType<typeof vi.fn> };
     expect(processes.stopSession).not.toHaveBeenCalled();

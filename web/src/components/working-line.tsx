@@ -30,7 +30,7 @@ export function formatElapsed(ms: number): string {
   return `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`;
 }
 
-/** What the seat is doing, in the operator's words rather than the SDK's. */
+/** What the agent is doing, in the operator's words rather than the SDK's. */
 export function describeRuntime(name: string, runtime: SeatRuntime): string {
   if (runtime.detail !== undefined) return `${name} · ${runtime.detail}`;
   if (runtime.state === "tool") {

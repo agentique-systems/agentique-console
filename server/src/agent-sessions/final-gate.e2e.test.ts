@@ -1,24 +1,8 @@
 /**
- * A `final` report may not precede its own unanswered questions.
- *
- * db-live-2, verbatim from the journal:
- *
- *   23:58:27  handoff_9e39c4… orchestrator → main   final · completed
- *   23:58:30  "Lane Runner is done and verified."   (to the operator)
- *   23:58:38  user_session.question.asked  int_71e4b2b4…
- *             "Lane Runner is done and verified. Two low-severity items are
- *              open… Want either addressed?"
- *
- * That question is `status='pending'` in that database today, and is the last
- * row ever written to it. The run declared itself done and THEN asked whether
- * the open items mattered — a post-hoc courtesy, not a decision gate, and the
- * operator's last sight of the run was a card that looked identical to
- * work-in-progress.
- *
- * The gate enforces only what the CONSOLE owns: it knows the question was
- * asked, that nobody but the operator can answer it, and that they have not.
- * Ledger state and running specialists deliberately stay caveats — blocking on
- * model-maintained facts is what produced db-live-1's 35-minute silence.
+ * A `final` report may not precede its own unanswered questions. The gate
+ * enforces only what the CONSOLE owns: it knows the question was asked, that
+ * nobody but the operator can answer it, and that they have not. Ledger state
+ * and running specialists deliberately stay caveats, never blockers.
  */
 import { describe, expect, it } from "vitest";
 import { initMessage, successMessage } from "../sdk/fake.ts";
@@ -79,7 +63,7 @@ describe("final report gate", () => {
 
     // A hold, NOT an error: an isError result feeds WATCHDOG_ERROR_STREAK and
     // a retry feeds WATCHDOG_IDENTICAL_CALLS — the Console must not punish the
-    // seat for its own gate. Same doctrine as ask_operator and queued
+    // agent for its own gate. Same doctrine as ask_operator and queued
     // assignments.
     expect(result.isError).not.toBe(true);
     const hold = JSON.parse((result.content[0] as { text: string }).text) as {
@@ -91,7 +75,7 @@ describe("final report gate", () => {
     // It must name the question, its asker and its age — a refusal the
     // coordinator cannot act on is just a different kind of silence.
     expect(hold.blockers[0]?.question).toContain("start gate");
-    // The captured ask_operator belongs to the coordinator seat — the first
+    // The captured ask_operator belongs to the coordinator agent — the first
     // to spawn — so that is who the card is attributed to.
     expect(hold.blockers[0]?.asker).toBe("coordinator");
     expect(hold.guidance).toMatch(/final report withheld/);
@@ -130,10 +114,8 @@ describe("final report gate", () => {
   });
 
   it("leaves an open ledger task as a caveat, never a blocker", async () => {
-    // The deliberate non-change. db-live-1's ledger orphaned at rotation, so a
-    // blocking rule on ledger state made `final` structurally impossible and
-    // the operator heard nothing for 35 minutes. Only console-owned facts
-    // block.
+    // Only console-owned facts block; a blocking rule on model-maintained
+    // ledger state could make `final` structurally impossible.
     const h = makeDelegationHarness(async function* () {
       yield initMessage();
       yield successMessage();

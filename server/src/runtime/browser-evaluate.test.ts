@@ -3,21 +3,15 @@
  *
  * `runInPage` is the exact function Playwright serializes into the page, and
  * `new Function` behaves identically in Node and Chrome — so these run the real
- * code path without a browser.
- *
- * The regression: the old wrapper chose its strategy with
- * `source.includes("return")`, a substring test over the whole source. Every
- * fixture in the first describe block below is a pure expression that the old
- * rule mis-classified as a statement body, producing `{result: null}` with no
- * indication anything had gone wrong. db-live-2's renderer hit this twice and
- * concluded the evaluator "chokes on function expressions" — a reasonable but
- * wrong theory that cost it two rewrites.
+ * code path without a browser. The fixtures in the first describe block are
+ * pure expressions that a substring test over the source would mis-classify as
+ * statement bodies.
  */
 import { describe, expect, it } from "vitest";
 import { runInPage } from "./browser-manager.ts";
 
 describe("runInPage — expressions containing the word `return`", () => {
-  it("evaluates a filter with a function callback (the db-live-2 probe)", async () => {
+  it("evaluates a filter with a function callback", async () => {
     (globalThis as unknown as { __probe: () => unknown[] }).__probe = () => [
       { kind: "obstacle", z: 1 },
       { kind: "player", z: 0 },
@@ -81,7 +75,7 @@ describe("runInPage — the four outcomes stay distinguishable", () => {
     const outcome = await runInPage("(() => { throw new TypeError('canvas is not ready') })()");
     expect(outcome.result).toBeNull();
     expect(outcome.threw).toBe("TypeError: canvas is not ready");
-    // A thrown page error is a finding, not the seat's mistake.
+    // A thrown page error is a finding, not the agent's mistake.
     expect(outcome.compileError).toBeUndefined();
   });
 

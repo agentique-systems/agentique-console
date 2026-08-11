@@ -1,7 +1,7 @@
 /**
- * Per-assignment worktree isolation for write seats: default-on in git
+ * Per-assignment worktree isolation for write agents: default-on in git
  * workspaces, atomic merge-on-completion, per-turn snapshots, conflict
- * surfacing, and the CONSOLE_SEAT_WORKTREES=0 escape hatch.
+ * surfacing, and the CONSOLE_AGENT_WORKTREES=0 escape hatch.
  */
 import { loadConfig } from "../config.ts";
 import { execFileSync } from "node:child_process";
@@ -81,8 +81,8 @@ async function runFlow(h: DelegationHarness) {
   return { created, events: await done };
 }
 
-describe("seat worktree isolation (fake SDK + real git)", () => {
-  it("write seat is isolated; completed work merges atomically with a diff artifact and turn snapshot", async () => {
+describe("agent worktree isolation (fake SDK + real git)", () => {
+  it("write agent is isolated; completed work merges atomically with a diff artifact and turn snapshot", async () => {
     const { h, repo } = makeWorld("completed");
     const { created, events } = await runFlow(h);
     const createdEvents = events.filter((event) => event.type === "agent_session.worktree.created");
@@ -131,7 +131,7 @@ describe("seat worktree isolation (fake SDK + real git)", () => {
     expect(failures).toHaveLength(1);
   });
 
-  it("read-only seats never get worktrees; a workspace with isolation off runs direct", async () => {
+  it("read-only agents never get worktrees; a workspace with isolation off runs direct", async () => {
     // Auto-init would normally make this directory a repo, so isolation is
     // explicitly disabled here — the genuine no-isolation path, which a nested
     // repo or CONSOLE_AUTO_INIT_GIT=0 also produces.
@@ -166,7 +166,7 @@ describe("seat worktree isolation (fake SDK + real git)", () => {
     for (const opts of seatOptions) expect(opts.cwd).toBe(plain);
   });
 
-  it("CONSOLE_SEAT_WORKTREES=0 disables isolation in a git workspace", async () => {
+  it("CONSOLE_AGENT_WORKTREES=0 disables isolation in a git workspace", async () => {
     const { repo, dataDir } = makeRepoDir();
     const h = makeDelegationHarness(async function* (opts) {
       const append = typeof opts.systemPrompt === "object" && !Array.isArray(opts.systemPrompt) ? opts.systemPrompt.append ?? "" : "";

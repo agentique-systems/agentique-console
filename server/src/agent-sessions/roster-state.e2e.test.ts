@@ -1,22 +1,6 @@
 /**
- * Every delivery prompt carries what the other seats are doing.
- *
- * `#composePrompt` rendered per-seat work state only when `p.worktreeBranch`
- * was set. db-live-2's workspace was not a git repo, so no seat had a worktree
- * and every roster line degraded to name/profile/owns. The cost of that
- * blindness, from that run:
- *
- *   - `renderer` wrote `.renderer-dev/serve.mjs` + `harness.html` and ran a
- *     second dev server on :8199 for ~16 minutes — duplicating infrastructure
- *     `page` had already written and was serving.
- *   - `renderer` then re-ran `check`'s entire verification (browser_open,
- *     snapshots, key presses) 23:43:28–23:44:53, which `check` redid in full
- *     23:46:39–23:53:35.
- *   - `renderer` and `page` independently diagnosed the same CDN outage,
- *     ~3m20s of duplicated network probing, neither telling the other.
- *
- * The comment above the roster line already said this data exists to prevent
- * exactly that. It just wasn't rendered.
+ * Every delivery prompt carries what the other agents are doing — for every
+ * agent, worktree or not, so nobody infers a teammate's absence from `ls`.
  */
 import { describe, expect, it } from "vitest";
 import { initMessage, successMessage } from "../sdk/fake.ts";
@@ -33,7 +17,7 @@ const handoff = (action: string, status: "pending" | "completed" = "pending") =>
 });
 
 describe("roster work state (no worktrees)", () => {
-  it("tells each seat what the others are doing, with no git repo in sight", async () => {
+  it("tells each agent what the others are doing, with no git repo in sight", async () => {
     const h = makeDelegationHarness(async function* () {
       yield initMessage();
       yield successMessage();
@@ -48,8 +32,8 @@ describe("roster work state (no worktrees)", () => {
     });
     await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled", 10_000);
 
-    // Give `page` a reported milestone, then deliver to `renderer` — the exact
-    // moment db-live-2's renderer decided to build its own server.
+    // Give `page` a reported milestone, then deliver to `renderer` — the
+    // moment a blind renderer would decide to build its own server.
     h.host.post({
       agentSessionId: created.agentSessionId,
       speaker: { kind: "agent", name: "page" }, to: "coordinator",
@@ -77,13 +61,13 @@ describe("roster work state (no worktrees)", () => {
     expect(h.repo.getAgent(created.agentSessionId, "page")?.worktreePath).toBeNull();
 
     // renderer can see that page exists, what it owns, and that it has already
-    // reported. Before this change the line stopped at `owns:`.
+    // reported.
     expect(rendererPrompt).toContain("page (implementer");
     expect(rendererPrompt).toContain("index.html");
     expect(rendererPrompt).toMatch(/page \(implementer[^)]*last reported completed: serve\.mjs and index\.html are written and serving/);
   });
 
-  it("says 'not started' for a seat that has never run", async () => {
+  it("says 'not started' for an agent that has never run", async () => {
     const h = makeDelegationHarness(async function* () {
       yield initMessage();
       yield successMessage();
@@ -112,8 +96,7 @@ describe("roster work state (no worktrees)", () => {
     );
 
     const devPrompt = h.fake.captured.prompts.find((text) => text.includes("You are dev."));
-    // A seat waiting on a dependency reads as idle, not as absent — which is
-    // what `ls`-ing the workspace told db-live-1's coordinator instead.
+    // An agent waiting on a dependency reads as idle, not as absent.
     expect(devPrompt).toMatch(/check \(visual-reviewer[^)]*not started/);
   });
 });

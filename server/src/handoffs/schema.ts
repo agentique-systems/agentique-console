@@ -62,9 +62,8 @@ export const HANDOFF_DRAFT_JSON_SCHEMA = {
  * Every schema handed to `outputFormat` or `sdk.tool` becomes a provider tool's
  * `input_schema`, and the Messages API requires its root `type` to be the
  * literal string "object" — a `["object","null"]` union is legal JSON Schema,
- * passes the CLI's local Ajv check, and then 400s on the wire. That exact
- * mistake silently degraded 13/13 context rotations in the db-live-1 run, so
- * the constraint is asserted here rather than left to review.
+ * passes the CLI's local Ajv check, and then 400s on the wire. The constraint
+ * is asserted here rather than left to review.
  */
 export function assertProviderToolSchema(name: string, schema: unknown): void {
   const root = schema as { type?: unknown; $defs?: unknown; anyOf?: unknown; oneOf?: unknown };

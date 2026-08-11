@@ -1,13 +1,12 @@
 /**
  * Rendering for agent-session transcript items — the single dispatch point;
- * new item types land here. The v1 session-parts shape with v2's items:
- * speaker-accented bubbles (seating-order accents), PLAN blocks,
- * per-agent turn hairlines.
+ * new item types land here: speaker-accented bubbles (roster-order accents),
+ * PLAN blocks, per-agent turn hairlines.
  *
- * Input is an AgentGroup, not a raw AgentItem: a seat's consecutive tool calls
- * arrive pre-collapsed into one run (agent-groups.ts) and render as a single
- * Task block, because a working seat produces tool cards faster than anyone
- * can read them.
+ * Input is an AgentGroup, not a raw AgentItem: an agent's consecutive tool
+ * calls arrive pre-collapsed into one run (agent-groups.ts) and render as a
+ * single Task block, because a working agent produces tool cards faster than
+ * anyone can read them.
  */
 import { FileTextIcon, OctagonXIcon, WrenchIcon } from "lucide-react";
 

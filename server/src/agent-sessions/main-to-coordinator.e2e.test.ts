@@ -1,19 +1,7 @@
 /**
- * Main steering its own coordinator.
- *
- * After the initial briefing there was no journaled way to do this at all.
- * `prompt.ts` told main to use native `SendMessage` with a JSON handoff
- * envelope that "the Console validates, journals and rewrites" — but that
- * middleware was deleted, and db-live-2 recorded the consequence twice:
- *
- *   23:40:14  SendMessage → "console-orchestrator-a8b946"
- *             → "No agent named 'console-orchestrator-a8b946' is reachable."
- *   23:40:31  SendMessage → "coordinator"
- *             → "No agent named 'orchestrator' is reachable."
- *
- * `ListAgents` showed the renderer's peer name and not the coordinator's,
- * because a peer name exists only while that seat's CLI process does. Main then
- * rationalised the failure rather than reporting the broken channel.
+ * Main steering its own coordinator: `send_to_coordinator` is the journaled
+ * path, and it must work while the coordinator's process is parked — a peer
+ * name exists only while an agent's CLI process does.
  */
 import { describe, expect, it } from "vitest";
 import { initMessage, successMessage } from "../sdk/fake.ts";

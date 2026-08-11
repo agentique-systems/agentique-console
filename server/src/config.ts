@@ -114,8 +114,7 @@ export interface Config {
 /**
  * Package registries and the CDNs their docs point at. Deliberately not
  * "everything": egress stays enumerable, and an operator who needs more sets
- * CONSOLE_ALLOWED_DOMAINS. The db-live-1 run failed its own brief because this
- * list was effectively empty and nothing said so.
+ * CONSOLE_ALLOWED_DOMAINS.
  */
 const DEFAULT_ALLOWED_DOMAINS = [
   "registry.npmjs.org", "*.npmjs.org",
@@ -169,8 +168,8 @@ function parseRoots(
 
 /**
  * CONSOLE_MODEL goes through the same validation the API route enforces: a
- * typo'd id used to be accepted at boot and silently dropped every session's
- * rotation ceiling to the conservative 68K default.
+ * typo'd id must fail at boot, not silently drop every session's rotation
+ * ceiling to the conservative default.
  */
 function validatedModel(id: string | undefined): string {
   if (id === undefined) return DEFAULT_ORCHESTRATOR_MODEL;

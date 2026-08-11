@@ -114,7 +114,7 @@ export const ConversationScrollButton = ({
  * inlines MessageRole — the `ai` package is a type-only dependency upstream.
  */
 export interface DownloadableMessage {
-  /** The speaker label: "operator", "orchestrator", a seat name. */
+  /** The speaker label: "operator", "orchestrator", an agent name. */
   role: string;
   parts: { type: string; text?: string }[];
 }

@@ -1,7 +1,7 @@
 /**
  * Durable blob storage for content too large or too binary for an event row:
- * spilled payloads, screenshots, worktree diffs, seat notes. Content lives in
- * SQLite so it survives restarts and stays outside every seat's file scope.
+ * spilled payloads, screenshots, worktree diffs, agent notes. Content lives in
+ * SQLite so it survives restarts and stays outside every agent's file scope.
  */
 import { eq } from "drizzle-orm";
 import type { Db } from "../db/client.ts";

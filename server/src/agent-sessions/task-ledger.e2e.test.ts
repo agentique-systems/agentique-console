@@ -1,14 +1,7 @@
 /**
- * The task ledger is console-owned.
- *
- * The native Task* tools are scoped to a provider session, and `#rotateNow`
- * nulls `sdkSessionId` — so in db-live-1 the coordinator created four tasks,
- * rotated once, found its own ledger empty seven minutes later, and never
- * touched the tools again. Two forked task sets survived, neither describing
- * reality, and the stale rows then jammed the final-report gate.
- *
- * Console tasks are keyed on a synthetic id derived from the AGENT SESSION, so
- * rotation cannot orphan them and every seat reads the same list.
+ * The task ledger is console-owned: keyed on a synthetic id derived from the
+ * AGENT SESSION (never a provider session, which rotation retires), so
+ * rotation cannot orphan it and every agent reads the same list.
  */
 import { describe, expect, it } from "vitest";
 import { initMessage, successMessage } from "../sdk/fake.ts";
@@ -37,9 +30,8 @@ describe("console-owned task ledger (fake SDK)", () => {
     const list = h.fake.captured.tools.find((t) => t.name === "task_list");
     expect(create && update && list).toBeTruthy();
 
-    // `owner` is required now: it names the seat that will DO the work, not the
-    // one writing the row. Defaulting it to the writer put "coordinator" on
-    // every row of db-live-2's coordinator ledger.
+    // `owner` is required: it names the agent that will DO the work, not the
+    // one writing the row.
     await create!.handler({ taskId: "1", subject: "Agree the module interface", description: "before either writes code", owner: "scout" }, {});
     await create!.handler({ taskId: "2", subject: "Implement src/game.js", description: "", owner: "scout" }, {});
     await update!.handler({ taskId: "1", status: "completed", owner: "coordinator" }, {});
@@ -49,8 +41,8 @@ describe("console-owned task ledger (fake SDK)", () => {
     const rows = parse(await list!.handler({}, {})).tasks ?? [];
     expect(rows).toHaveLength(2);
 
-    // Simulate what used to destroy the ledger: the seat's provider session is
-    // replaced. The console rows are untouched, and the list still reads back.
+    // The agent's provider session is replaced (rotation). The console rows
+    // are untouched, and the list still reads back.
     h.repo.patchAgent(created.agentSessionId, "coordinator", { sdkSessionId: null, generation: 1 });
     const after = parse(await list!.handler({}, {}));
     expect(after.tasks).toHaveLength(2);

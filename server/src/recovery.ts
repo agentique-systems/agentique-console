@@ -14,7 +14,7 @@
  *   session survives in agents.sdk_session_id, and the journal's
  *   unacknowledged rows redeliver when the agent's lane next wakes.
  *
- * This is a boot pass only. A seat whose background task dies inside a LIVE
+ * This is a boot pass only. An agent whose background task dies inside a LIVE
  * server is settled by the task-terminal path in the runner — if that ever
  * regresses, the symptom is a pane that spins until the next restart.
  *

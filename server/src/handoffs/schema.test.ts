@@ -6,11 +6,7 @@
  * verbatim. The Messages API requires that schema's root `type` to be the
  * literal string "object" — but `["object","null"]` is legal JSON Schema and
  * passes the CLI's local Ajv validation, so the mistake only surfaces as a
- * runtime 400. That is exactly what happened in the db-live-1 run: 13 of 13
- * context rotations failed with
- *   `API Error: 400 tools.7.custom.input_schema.type: Input should be 'object'`
- * while `npm run verify` stayed green, because the fake SDK never inspects
- * outputFormat. These tests are the guard that makes green mean green.
+ * runtime 400. These tests are the guard that makes green mean green.
  */
 import { describe, expect, it } from "vitest";
 import { assertProviderToolSchema, HANDOFF_DRAFT_JSON_SCHEMA } from "./schema.ts";

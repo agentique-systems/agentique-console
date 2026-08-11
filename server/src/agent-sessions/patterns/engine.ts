@@ -10,9 +10,8 @@
  *   `post()` returns success first — a trip is never an error and never an
  *   interrupt; running turns finish and the console asks for the close-out.
  * - `sweep` — the 30s governance sweep: the quiet-time stall. Wall-clock time
- *   since the last hop, not settled-turn counting — a counter that advanced
- *   only on turn settles froze forever on a fully quiet session, which was
- *   exactly the failure mode it existed to catch (live run 3's debate).
+ *   since the last hop, not settled-turn counting — a counter that advances
+ *   only on turn settles would freeze on a fully quiet session.
  */
 import type { HandoffDraft, Speaker } from "@agentique-console/shared";
 import type { TerminationPolicy, TopologyContract } from "../topology-contract.ts";
@@ -241,7 +240,7 @@ export function dispatchWorkItems(ctx: PatternContext, session: AgentSessionRow,
 
 /**
  * The 30s quiet-time stall check. An open, unreported session with no hop for
- * `patternStallMs` and no turn in flight is stalled — every seat has gone
+ * `patternStallMs` and no turn in flight is stalled — every agent has gone
  * quiet without anyone delivering a result. Trips the same close-out ask as
  * every other bound. `lastProgressAt` starts at session creation (the first
  * assignment hop sets it), so a session that never moves at all still trips.
@@ -259,7 +258,7 @@ export function sweep(ctx: PatternContext, session: AgentSessionRow): void {
 }
 
 /**
- * Set the tripped flag, tell the bus, and — deferred — ask the reporting seat
+ * Set the tripped flag, tell the bus, and — deferred — ask the reporting agent
  * to close out. The dedupe key makes every rule's ask collapse into one.
  */
 export function trip(ctx: PatternContext, session: AgentSessionRow, rule: string, detail: string): void {

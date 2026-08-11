@@ -24,7 +24,7 @@ describe("database migrations", () => {
       expect(tables.has(table)).toBe(true);
     }
     expect(sqlite.prepare("SELECT count(*) AS n FROM __drizzle_migrations").get()).toMatchObject({ n: 4 });
-    // The two indexes that used to live only in the legacy additive migration.
+    // Indexes the baseline must create.
     expect(sqlite.prepare("PRAGMA index_list(interactions)").all()).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ name: "interactions_session_status" }),
@@ -155,7 +155,7 @@ describe("database migrations", () => {
     expect(JSON.parse(worktree.payload).agent).toBe("scout");
     const closeout = sqlite.prepare("SELECT payload FROM events WHERE type = 'agent_session.closeout.forced'").get() as { payload: string };
     expect(JSON.parse(closeout.payload).agentReports).toBe(2);
-    // The renamed seat itself, and its speaker rows.
+    // The renamed participant row itself, and its speaker rows.
     expect(sqlite.prepare("SELECT name, role FROM agents WHERE agent_session_id = 'as-1'").get()).toMatchObject({ name: "coordinator", role: "coordinator" });
     sqlite.close();
   });

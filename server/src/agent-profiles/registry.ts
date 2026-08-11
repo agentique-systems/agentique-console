@@ -21,7 +21,7 @@ export const ProfileSchema = z.object({
   effort: z.string().optional(),
   handoffExtension: z.enum(["generic", "coordination", "implementation", "investigation", "review"]).optional(),
   /**
-   * Exempts the profile's seats from write-ownership disjointness: a
+   * Exempts the profile's agents from write-ownership disjointness: a
    * read-only reviewer inspects everyone's files, so exclusive scopes do
    * not apply to it.
    */
@@ -36,8 +36,7 @@ export const ProfileSchema = z.object({
      * Outbound hosts this profile may reach from sandboxed commands.
      * `"default"` takes the workspace allowlist (CONSOLE_ALLOWED_DOMAINS);
      * `[]` means offline; an explicit list overrides. Loopback is always
-     * permitted — a seat must be able to reach a server it just started,
-     * which db-live-1 could not.
+     * permitted — an agent must be able to reach a server it just started.
      */
     network: z.union([z.literal("default"), z.array(z.string())]).default("default"),
   }),

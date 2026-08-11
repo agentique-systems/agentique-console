@@ -29,10 +29,9 @@ describe("WorktreeManager", () => {
     expect(() => manager.addWorktree(plain, "as_1", "g-1", "g/1")).toThrow(/requires the workspace to be a git repository/);
   });
 
-  it("keeps sandbox placeholder dotfiles out of the seat's commit", () => {
-    // The sandbox materializes empty stand-ins for masked host dotfiles. An
-    // unscoped `git add -A` swept 21 of them into the operator's repo in the
-    // db-live-1 run, alongside the single file the seat actually wrote.
+  it("keeps sandbox placeholder dotfiles out of the agent's commit", () => {
+    // The sandbox materializes empty stand-ins for masked host dotfiles; an
+    // unscoped `git add -A` would sweep them into the operator's repo.
     const { repo, manager } = makeRepo();
     const ref = manager.addWorktree(repo, "as_1", "g-1", "g/1");
     for (const stub of [".bashrc", ".zshrc", ".gitconfig", ".mcp.json", ".idea", ".vscode", ".ripgreprc"]) {
@@ -47,7 +46,7 @@ describe("WorktreeManager", () => {
     expect(commit).not.toBeNull();
     const tracked = git(ref.path, "ls-tree", "-r", "HEAD", "--name-only").trim().split("\n");
     expect(tracked).toContain("src/game.js");
-    // Only what the base commit already carried, plus the seat's own file.
+    // Only what the base commit already carried, plus the agent's own file.
     expect(tracked.filter((file) => file.startsWith("."))).toEqual([".gitignore"]);
     expect(tracked).toHaveLength(3);
 
@@ -56,7 +55,7 @@ describe("WorktreeManager", () => {
     expect(manager.commitAll(ref.path, "stubs only", ["src/game.js"])).toBeNull();
   });
 
-  it("still commits an excluded path when the seat explicitly owns it", () => {
+  it("still commits an excluded path when the agent explicitly owns it", () => {
     const { repo, manager } = makeRepo();
     const ref = manager.addWorktree(repo, "as_2", "g-2", "g/2");
     fs.mkdirSync(path.join(ref.path, ".claude"), { recursive: true });

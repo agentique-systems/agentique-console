@@ -1,12 +1,8 @@
 /**
  * The draft view's contract: Enter starts the session, Shift+Tab cycles the
- * mode, and the model rides along on the create call.
- *
- * The composition case is the reason this file exists. The hand-rolled
- * `event.key === "Enter"` check this view used to carry fired on the Enter that
- * COMMITS an IME candidate, so every CJK input method created a session out of
- * a half-typed word. Rebuilding on the vendored prompt-input inherits the
- * `isComposing` guard; this test is what keeps it.
+ * mode, and the model rides along on the create call. Enter must NOT fire on
+ * the keypress that COMMITS an IME candidate — the vendored prompt-input's
+ * `isComposing` guard covers it, and this test is what keeps it.
  */
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";

@@ -42,7 +42,7 @@ async function runFlow(h: ReturnType<typeof makeWatchdogHarness>) {
   return { created, events: await done };
 }
 
-describe("seat turn watchdog (fake SDK)", () => {
+describe("agent turn watchdog (fake SDK)", () => {
   it("trips on 5 identical consecutive tool calls", async () => {
     const h = makeWatchdogHarness(async function* () {
       yield initMessage("scout-1");

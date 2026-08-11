@@ -75,13 +75,9 @@ describe("managed AgentSession e2e (fake SDK)", () => {
     expect(JSON.stringify(denial?.payload)).toContain("main ↔ coordinator ↔ specialist");
   });
 
-  it("salvages a seat's unsent work when its turn dies", async () => {
-    // The guarantee that survives the transport consolidation. A typed
-    // send_handoff cannot be malformed, so "the seat could not serialize its
-    // report" is gone — but "the seat finished and then its turn died" is not.
-    // db-live-1 lost its best output exactly there: `check` completed a real
-    // review, the watchdog killed the turn, and the coordinator was handed an
-    // empty "Turn failed" with no evidence and no result.
+  it("salvages an agent's unsent work when its turn dies", async () => {
+    // "The agent finished and then its turn died" must not hand the
+    // coordinator an empty "Turn failed" with no evidence and no result.
     let coordinatorTurns = 0;
     let scoutTurns = 0;
     const h = makeDelegationHarness(async function* (options) {
@@ -90,14 +86,14 @@ describe("managed AgentSession e2e (fake SDK)", () => {
       if (append.includes("sole coordinator")) {
         coordinatorTurns += 1;
         // Assign exactly once: the failure handoff wakes the coordinator again,
-        // and re-assigning would loop the seat through the same failure.
+        // and re-assigning would loop the agent through the same failure.
         if (coordinatorTurns === 1) yield sendHandoffUse("send-1", "scout", { action: "verify the build", status: "pending", category: "assignment" });
         yield successMessage();
         return;
       }
       scoutTurns += 1;
       if (scoutTurns > 1) { yield successMessage(); return; }
-      // The seat does the work and says so — then burns its turn on failures.
+      // The agent does the work and says so — then burns its turn on failures.
       yield { type: "assistant", message: { content: [{ type: "text", text: "Collision tunneling at src/game.js:191 — obstacles step 2.4 units through a 2.0-unit window." }] } };
       for (let i = 0; i < 11; i += 1) {
         yield toolUseMessage(`probe-${i}`, "Read", { file_path: `f${i}.ts` });

@@ -1,6 +1,6 @@
 /**
  * The inline AskUserQuestion card: 1..n question blocks, each with option
- * buttons, the asking seat's own words (context) and recommendation, and —
+ * buttons, the asking agent's own words (context) and recommendation, and —
  * when the asker allowed it — a free-text answer box. A single single-select
  * question submits on option click; anything richer (multiSelect, several
  * questions, typed answers) toggles selections and submits once.

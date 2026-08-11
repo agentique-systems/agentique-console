@@ -1,8 +1,8 @@
 /**
  * A turn that dies with the process must not leave the UI spinning. A crash
- * leaves turn.started with no settle, and recovery closes it — the seat's
+ * leaves turn.started with no settle, and recovery closes it — the agent's
  * provider session survives (resume handle in participants) and the journal
- * redelivers anything unacknowledged when the seat next wakes.
+ * redelivers anything unacknowledged when the agent next wakes.
  */
 import { describe, expect, it } from "vitest";
 import { initMessage, successMessage, textMessage } from "./sdk/fake.ts";
@@ -25,7 +25,7 @@ describe("recoverInterruptedTurns", () => {
     expect(events.at(-1)?.payload).toMatchObject({ message: { text: "committed before crash" } });
     expect(await reconcileDurableCommunication({ repo: h.repo, bus: h.bus })).toBe(0);
   });
-  it("closes a seat turn orphaned by a crash", async () => {
+  it("closes an agent turn orphaned by a crash", async () => {
     const h = makeDelegationHarness(async function* () {
       yield initMessage("orch");
       yield successMessage(undefined, { session_id: "orch" });
@@ -36,7 +36,7 @@ describe("recoverInterruptedTurns", () => {
       title: "Interrupted work",
       agents: [{ name: "web", owns: ["src/web.ts"] }],
     });
-    // A live seat (turn.started emitted), then the process dies before the
+    // A live agent (turn.started emitted), then the process dies before the
     // settle — the in-memory lane state vanishes with it.
     const session = h.repo.getAgentSession(agentSessionId)!;
     h.bus.append({ type: "agent_session.turn.started", userSessionId: session.userSessionId, agentSessionId,

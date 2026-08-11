@@ -86,7 +86,7 @@ describe("orchestrator lane model", () => {
     h.repo.patchUserSession(sessionId, { model: "claude-fable-5" });
     h.runner.recycleSession(sessionId);
     // recycleSession fires the close and returns; the respawn only happens on
-    // the next message, so wait for the old query to actually be gone.
+    // the next message, so wait for the closed query to actually be gone.
     await vi.waitFor(() => expect(h.fake.captured.closed).toBe(true));
 
     h.runner.postOperatorMessage(sessionId, "second");

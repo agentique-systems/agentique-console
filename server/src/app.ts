@@ -1,13 +1,8 @@
 /**
  * The single composition root, shared by production (`main.ts`) and the test
- * harness (`test-helpers.ts`).
- *
- * It exists because wiring used to be split and hand-duplicated, and the copies
- * drifted: the runner's `decisions` dep was passed in tests and forgotten in
- * `main.ts`, so the decision ledger was silently off in the only place it
- * mattered — every test green, the feature dark in production. Every service is
- * built here, every dependency is required, and every cross-service callback is
- * registered exactly once (their setters throw on a second registration).
+ * harness (`test-helpers.ts`). Every service is built here, every dependency
+ * is required, and every cross-service callback is registered exactly once
+ * (their setters throw on a second registration).
  *
  * Boot side effects live in `boot.ts`; the HTTP server and process signals in
  * `main.ts`. This module only builds and connects the object graph.

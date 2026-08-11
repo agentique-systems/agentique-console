@@ -68,7 +68,7 @@ export function AgentTranscript({ session }: { session: AgentSession }) {
   }, [transcript.data, buffering, hydrateStream, key]);
 
   const events = stream?.items ?? EMPTY_EVENTS;
-  // Fold to items, then collapse each seat's tool run into one Task block.
+  // Fold to items, then collapse each agent's tool run into one Task block.
   // Trimming happens on the grouped list so a run is never cut in half.
   const items = useMemo(() => groupAgentItems(foldAgentItems(events)), [events]);
   const visible = showAll ? items : items.slice(-TAIL_LIMIT);
@@ -94,8 +94,8 @@ export function AgentTranscript({ session }: { session: AgentSession }) {
     return list;
   }, [deltas]);
 
-  // Silent workers: seats the runtime store says are busy without any overlay
-  // text yet — a shimmer row per seat keeps the silence honest.
+  // Silent workers: agents the runtime store says are busy without any
+  // overlay text yet — a shimmer row per agent keeps the silence honest.
   const seats = useRuntimeStore((s) => s.bySession[id]);
   const silentWorkers = session.agents.flatMap((name) => {
     const runtime = seats?.[name];

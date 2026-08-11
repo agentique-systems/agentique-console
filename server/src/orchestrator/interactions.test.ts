@@ -1,18 +1,8 @@
 /**
- * Who a card belongs to determines what may happen to it.
- *
- * Two defects motivated this file, both from the pre-release console:
- *
- *  1. `dismissPendingForChat` dismissed EVERY pending card for a user session,
- *     including ones raised inside an AgentSession, resolving them with
- *     "The operator replied in chat instead — read their next message." A seat
- *     has no access to the operator's chat lane; only main does. So the seat
- *     was handed an instruction it could not follow, and a question a
- *     specialist stopped its work to ask was silently thrown away.
- *
- *  2. `expirePendingOnBoot` marked every pending row `stale`, and the revival
- *     path replays a stale answer into MAIN's lane. A seat's question revived
- *     into main is a question answered to the wrong agent.
+ * Who a card belongs to determines what may happen to it. An agent has no
+ * access to the operator's chat lane — only main does — so chat must not
+ * dismiss agent cards, and the boot revival path (which replays a stale answer
+ * into MAIN's lane) must not swallow an agent's question.
  */
 import { describe, expect, it } from "vitest";
 import { openDb } from "../db/client.ts";
@@ -42,8 +32,8 @@ function harness() {
 
 const QUESTION = [{ question: "Ship r169 or hold for r160?", options: [{ label: "Ship" }, { label: "Hold" }] }];
 
-describe("chat does not answer a seat's question", () => {
-  it("dismisses a main-lane card but leaves a seat's card open", () => {
+describe("chat does not answer an agent's question", () => {
+  it("dismisses a main-lane card but leaves an agent's card open", () => {
     const { db, service, userSessionId } = harness();
     const main = service.createOperatorQuestion({ userSessionId, questions: QUESTION });
     const seat = service.createOperatorQuestion({
@@ -54,11 +44,11 @@ describe("chat does not answer a seat's question", () => {
 
     const all = db.select().from(rows).all();
     expect(all.find((row) => row.id === main.id)?.status).toBe("dismissed");
-    // Still open: the operator's chat went to main, and the seat cannot read it.
+    // Still open: the operator's chat went to main, and the agent cannot read it.
     expect(all.find((row) => row.id === seat.id)?.status).toBe("pending");
   });
 
-  it("tells the operator that seat questions are still waiting", () => {
+  it("tells the operator that agent questions are still waiting", () => {
     const { db, service, userSessionId } = harness();
     service.createOperatorQuestion({ userSessionId, agentSessionId: "as_1", agent: "renderer", questions: QUESTION });
     service.dismissPendingForChat(userSessionId, "hello");
@@ -71,7 +61,7 @@ describe("chat does not answer a seat's question", () => {
     expect(notices.join(" ")).toMatch(/stay open — chatting does not answer them/);
   });
 
-  it("resolves a main-lane card's parked promise but not a seat's", async () => {
+  it("resolves a main-lane card's parked promise but not an agent's", async () => {
     const { service, userSessionId } = harness();
     const main = service.createOperatorQuestion({ userSessionId, questions: QUESTION });
     const seat = service.createOperatorQuestion({
@@ -89,7 +79,7 @@ describe("chat does not answer a seat's question", () => {
 });
 
 describe("boot splits by asker", () => {
-  it("stales main-lane rows and detaches seat rows", () => {
+  it("stales main-lane rows and detaches agent rows", () => {
     const { db, service, userSessionId } = harness();
     const main = service.createOperatorQuestion({ userSessionId, questions: QUESTION });
     const seat = service.createOperatorQuestion({
@@ -103,15 +93,15 @@ describe("boot splits by asker", () => {
     const seatRow = all.find((row) => row.id === seat.id)!;
     // Main's answer replays as a resumed turn, so `stale` is right for it.
     expect(mainRow.status).toBe("stale");
-    // A seat is woken by a DELIVERY, not by lane revival — so its question is
+    // An agent is woken by a DELIVERY, not by lane revival — so its question is
     // still genuinely open, and answering it still reaches somebody.
     expect(seatRow.status).toBe("pending");
     expect(seatRow.detached).toBe(true);
   });
 });
 
-describe("answers owed to the asking seat", () => {
-  it("lists an answered question as unflushed until the seat is told", () => {
+describe("answers owed to the asking agent", () => {
+  it("lists an answered question as unflushed until the agent is told", () => {
     const { service, userSessionId } = harness();
     const seat = service.createOperatorQuestion({
       userSessionId, agentSessionId: "as_1", agent: "renderer", questions: QUESTION,
@@ -121,7 +111,7 @@ describe("answers owed to the asking seat", () => {
 
     service.resolveFromApi(userSessionId, seat.id, { answers: { [QUESTION[0]!.question]: ["Hold"] } });
 
-    // Owed to the seat: this is the delivery that did not exist at all before,
+    // Owed to the agent: this is the delivery,
     // where a deferred ask promised "their answer will reach you" and nothing
     // ever did.
     const owed = service.listAnsweredUnflushed("as_1", "renderer");
@@ -130,7 +120,7 @@ describe("answers owed to the asking seat", () => {
     expect(service.listAnsweredUnflushed("as_1", "renderer")).toHaveLength(0);
   });
 
-  it("scopes unflushed answers to the seat that asked", () => {
+  it("scopes unflushed answers to the agent that asked", () => {
     const { service, userSessionId } = harness();
     const a = service.createOperatorQuestion({ userSessionId, agentSessionId: "as_1", agent: "renderer", questions: QUESTION });
     service.createOperatorQuestion({ userSessionId, agentSessionId: "as_1", agent: "page", questions: QUESTION });

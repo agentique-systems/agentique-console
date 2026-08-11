@@ -1,6 +1,6 @@
 /**
  * The session-level TerminationPolicy: bounds trip as facts (event + tripped
- * flag) and the console ASKS the reporting seat to close out — never an error,
+ * flag) and the console ASKS the reporting agent to close out — never an error,
  * never an interrupt. MAST puts termination failures at a third of all
  * multi-agent failures; these tests are the bound-by-bound proof.
  */
@@ -16,13 +16,13 @@ const briefing = {
 };
 
 describe("termination policy e2e (fake SDK)", () => {
-  it("handoff budget trips, and the reporting seat is asked to close out", async () => {
+  it("handoff budget trips, and the reporting agent is asked to close out", async () => {
     let coordinatorTurns = 0;
     let scoutTurns = 0;
     const h = makeDelegationHarness(async function* (options) {
       const append = typeof options.systemPrompt === "object" && !Array.isArray(options.systemPrompt) ? options.systemPrompt.append ?? "" : "";
       yield initMessage();
-      // Send exactly once per seat: later wakes (the close-out ask itself)
+      // Send exactly once per agent: later wakes (the close-out ask itself)
       // settle quietly instead of looping assignment → report forever.
       if (append.includes("sole coordinator")) {
         coordinatorTurns += 1;
@@ -41,7 +41,7 @@ describe("termination policy e2e (fake SDK)", () => {
     const trip = events.at(-1);
     expect(trip?.payload).toMatchObject({ agentSessionId: created.agentSessionId, pattern: "hub_and_spoke", rule: "max_handoffs" });
     // The close-out ask lands as a journaled decision handoff to the
-    // reporting seat, spoken by a route-legal console voice (main).
+    // reporting agent, spoken by a route-legal console voice (main).
     await collectUntil(h.bus, (event) => event.type === "agent_session.message.appended"
       && JSON.stringify(event.payload).includes("Termination policy tripped"), 10_000);
     const rows = h.repo.listMessages("agent", created.agentSessionId).filter((row) => row.kind === "message");
@@ -52,7 +52,7 @@ describe("termination policy e2e (fake SDK)", () => {
 
   it("a quiet unreported session trips the stall on the sweep", async () => {
     const h = makeDelegationHarness(async function* () {
-      // The seat settles its turn without sending anything, then everything
+      // The agent settles its turn without sending anything, then everything
       // goes quiet — the wedge shape the settle-counting stall could not see.
       yield initMessage();
       yield successMessage();

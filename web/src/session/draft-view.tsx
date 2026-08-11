@@ -5,11 +5,10 @@
  * then appears in the sidebar. No name is asked for anywhere: the server titles
  * the session from the first message.
  *
- * Built on the same vendored prompt-input the composer uses. It used to be a
- * bare <Textarea> with a hand-rolled `event.key === "Enter"` check, which
- * submits mid-IME-composition and breaks every CJK input method — the exact
- * bug prompt-input.tsx was vendored to fix. One shell, one Enter contract, one
- * footer, on both write surfaces.
+ * Built on the same vendored prompt-input the composer uses: a hand-rolled
+ * `event.key === "Enter"` check submits mid-IME-composition and breaks every
+ * CJK input method. One shell, one Enter contract, one footer, on both write
+ * surfaces.
  */
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";

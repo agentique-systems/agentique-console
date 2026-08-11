@@ -2,21 +2,10 @@
  * The Decision Ledger: what the operator has actually decided, as durable
  * state every agent can read.
  *
- * Before this existed, an operator answer was a side effect of one tool call.
- * `AskUserQuestion`'s answer lived in `updatedInput.answers` inside a single
- * provider transcript and died at that session's next rotation. A coordinator's
- * escalation returned the answer to exactly one seat, and its siblings never
- * learned it. The cost, from db-live-1: the operator was asked one reserved
- * question ("dodge obstacles or collect targets?"), answered it in 11.8
- * seconds, and the word "dodge" then appeared in ZERO of the three
- * specialists' sessions.
- *
  * This is a READ-MODEL, not a table. A decision IS a resolved interaction row
  * — the answers, the asker, the note and the auto-taken flag all already live
- * there durably — so a second `operator_decisions` table was a projection of
- * facts stored one join away, with a writer to keep in sync and its own copy
- * of every rendering. One source of truth, one mapper (`decisionOf`), one
- * renderer (`renderDecision`), read back into every seat's prompt.
+ * there durably. One source of truth, one mapper (`decisionOf`), one renderer
+ * (`renderDecision`), read back into every agent's prompt.
  */
 import type { InteractionStore } from "../db/stores/interaction-store.ts";
 import type { InteractionQuestion } from "@agentique-console/shared";
@@ -125,7 +114,7 @@ export class DecisionLedger {
   }
 
   /**
-   * The bounded block injected into a seat's system prompt. Newest first so a
+   * The bounded block injected into an agent's system prompt. Newest first so a
    * truncation drops the oldest, and capped in BYTES as well as entries — a
    * long run must not silently push the checkpoint out of the prompt.
    */

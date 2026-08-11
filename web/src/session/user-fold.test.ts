@@ -412,11 +412,7 @@ describe("foldBusy", () => {
   });
 });
 
-/**
- * The run's own ending, as the transcript sees it. db-live-2 had no card here
- * at all — the run stopped and the operator was left reading a spinner that had
- * quietly gone still.
- */
+/** The run's own ending, as the transcript sees it. */
 describe("run summary fold", () => {
   // Distinct seqs: the fold dedupes by event id, so two proposals sharing one
   // seq would collapse into a single card.
@@ -489,9 +485,8 @@ describe("foldPosture", () => {
   });
 
   it("reports a turn parked on a card as BLOCKED, not busy", () => {
-    // The db-live-2 state exactly: the turn never settles because the tool
-    // awaits the operator. Calling that "busy" is what made "done" and
-    // "waiting on you" render identically.
+    // The turn never settles because the tool awaits the operator; calling
+    // that "busy" would make "done" and "waiting on you" render identically.
     expect(foldPosture([started, asked])).toEqual({ busy: false, blocked: true, lastTurnErrored: false });
   });
 
@@ -499,10 +494,10 @@ describe("foldPosture", () => {
     expect(foldPosture([started, asked, answered])).toEqual({ busy: true, blocked: false, lastTurnErrored: false });
   });
 
-  it("ignores a SEAT's card — it parks the seat's turn, not the main lane", () => {
-    // A seat-raised ask_operator (agent set, even blocking) must not
+  it("ignores an AGENT's card — it parks the agent's turn, not the main lane", () => {
+    // An agent-raised ask_operator (agent set, even blocking) must not
     // stop the main lane's spinner or swap the interrupt affordance: main is
-    // genuinely running. Deferred seat cards doubly so.
+    // genuinely running. Deferred agent cards doubly so.
     const seatAsked = { type: "user_session.question.asked", seq: 4, ts: "t", userSessionId: "us_1",
       payload: { userSessionId: "us_1", interactionId: "int_2", questions: [], agentSessionId: "agsess_1",
         agent: "renderer", urgency: "blocking", source: "agent", allowFreeText: true } } as unknown as ConsoleEvent;

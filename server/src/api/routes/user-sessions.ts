@@ -40,9 +40,8 @@ const ResolveBody = z.union([
     answers: z.record(z.string(), z.array(z.string())),
     // Free text keyed by question. The service 400s if the card was not raised
     // with `allowFreeText`. Without this the only way to say something the
-    // asker did not anticipate was to type in chat — which DISMISSES the card
-    // rather than answering it, and (before this release) silently dismissed
-    // every seat's card along with it.
+    // asker did not anticipate is to type in chat — which DISMISSES the card
+    // rather than answering it.
     freeText: z.record(z.string(), z.string()).optional(),
     note: z.string().optional(),
   }),

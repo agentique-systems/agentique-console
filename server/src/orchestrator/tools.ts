@@ -115,19 +115,10 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
 
     /**
      * Main's ONLY journaled path to a coordinator after the initial briefing.
-     *
-     * Before this there was none. `prompt.ts` still instructed main to steer
-     * with native `SendMessage` and a JSON handoff envelope that the Console
-     * "validates, journals and rewrites" — but that middleware was deleted, so
-     * both of db-live-2's attempts came back "No agent named
-     * 'console-orchestrator-a8b946' is reachable", and even had one landed it
-     * would have bypassed `post()` entirely: no handoff record, no mailbox row,
-     * no route check. The console could not steer its own coordinator.
-     *
      * Routing is free here: `#assertRoute` already permits exactly
      * main → coordinator and nothing else. Delivery goes through
      * `#deliverConsole`, which spawns a parked agent — so a coordinator whose
-     * process has died is no longer an unreachable one.
+     * process has died is not an unreachable one.
      */
     sdk.tool(
       "send_to_coordinator",
@@ -177,14 +168,8 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
     ),
 
     /**
-     * Main's ledger, console-owned and keyed to the AgentSession.
-     *
-     * It used to be the NATIVE Task* tools mirrored by `tasks/hooks.ts`, keyed
-     * on the provider `session_id` — which changes at every rotation. That is
-     * the exact orphan-on-rotation failure the README says was removed; it was
-     * removed for seats and left in place for main. db-live-2 ended with two
-     * parallel ledgers, 26 `task.updated` events for 4 real units, and the
-     * wrong owner on every row of one of them.
+     * Main's ledger, console-owned and keyed to the AgentSession — never the
+     * provider session id, which changes at every rotation.
      */
     sdk.tool(
       "task_create",
@@ -241,13 +226,8 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
     ),
 
     /**
-     * The replacement for the removed native `ScheduleWakeup`.
-     *
-     * That tool worked, but it woke a console-owned lane with no mailbox row,
-     * no handoff and no turn attribution — exactly the class of second wire the
-     * send-middleware deletion was meant to eliminate. It also failed twice in
-     * each live run because the model omitted a required field it could not
-     * discover.
+     * Console-owned wakeup: native `ScheduleWakeup` would wake a console-owned
+     * lane with no mailbox row, no handoff and no turn attribution.
      */
     sdk.tool(
       "set_deadline",

@@ -1,16 +1,9 @@
 /**
  * The attention flag is the operator's only signal that a run is waiting on
- * them — a 1.5px dot in the sidebar, and (once the attention layer lands) the
- * title/favicon/toast that hang off the same state.
- *
- * It was cleared by ANY appended message. The server rule it mirrors
- * (`interactions.dismissPendingForChat`) fires only from
- * `runner.postOperatorMessage`, i.e. only for operator speech — so an
- * orchestrator reply, a system notice, or the post-restart recovery notice all
- * silently switched off "needs you" while the question was still pending.
- *
- * In db-live-2 the run ended on an unanswered question with the orchestrator
- * talking either side of it. That is exactly this shape.
+ * them. It clears only on OPERATOR speech, mirroring the server rule
+ * (`interactions.dismissPendingForChat` fires only from
+ * `runner.postOperatorMessage`) — an orchestrator reply or a system notice
+ * must not switch off "needs you" while the question is still pending.
  */
 import { describe, expect, it, vi } from "vitest";
 import type { ConsoleEvent } from "@agentique-console/shared";

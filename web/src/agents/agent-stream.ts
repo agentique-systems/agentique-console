@@ -1,12 +1,12 @@
 /**
  * The agent-session transcript's stream spec over the shared kit
- * (`@/live/stream-kit`) — the user lane's sibling with multi-seat semantics:
+ * (`@/live/stream-kit`) — the user lane's sibling with multi-agent semantics:
  *  - items are the raw persisted transcript events; the render-side fold
  *    (agent-fold.ts) is pure over the array, so tool pairing can join later
  *    events into earlier items without incremental state
  *  - dedupe on eventId (hydration returns raw envelopes, so live and hydrate
  *    share identity)
- *  - one streaming overlay PER SPEAKER (any seat, or the orchestrator),
+ *  - one streaming overlay PER SPEAKER (any agent, or the orchestrator),
  *    retired by that speaker's persisted message.appended; turn.settled
  *    retires ALL overlays. The settle arrives BEFORE the closing persisted
  *    message by design — retire-all then append is correct and can't

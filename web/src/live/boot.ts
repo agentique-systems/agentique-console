@@ -42,7 +42,7 @@ export function bootSpine(queryClient: QueryClient): Spine {
       useUserSessionStreamsStore.getState().onReconnect();
       useAgentSessionStreamsStore.getState().onReconnect();
       // Runtime states are transient and never replayed — a reconnect must not
-      // leave a stale "thinking" seat glowing forever.
+      // leave a stale "thinking" agent glowing forever.
       useRuntimeStore.getState().clearAll();
     },
   });

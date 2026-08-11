@@ -4,11 +4,9 @@ import type { ArtifactStore } from "../events/artifact-store.ts";
 interface BrowserSeat { browser: Browser; page: Page; console: string[]; }
 
 /**
- * Why this is four fields and not a bare value: the seat has to be able to
+ * Why this is four fields and not a bare value: the agent has to be able to
  * distinguish "the page returned null", "the expression produced nothing",
- * "the page threw", and "I wrote JavaScript that will not compile". Collapsing
- * all four into `{result: null}` is what made db-live-2's evaluator failures
- * invisible to the agent using it.
+ * "the page threw", and "I wrote JavaScript that will not compile".
  */
 export interface EvaluateOutcome {
   result: unknown;
@@ -23,20 +21,10 @@ export interface EvaluateOutcome {
 }
 
 /**
- * Compile and run a seat's expression, in the page.
- *
- * Tries an EXPRESSION first and falls back to a statement body only when that
- * genuinely will not parse. The old rule was `source.includes("return")` — a
- * substring test over the whole source — so any expression whose text merely
- * mentioned `return` anywhere, including inside a callback, was spliced in as
- * a statement body with no return of its own, evaluated to `undefined`, and
- * came back as `{result: null}`.
- *
- * In db-live-2 that silently swallowed probes like
- * `window.__probe().filter(function(b){return b.kind==='obstacle'})`, which is
- * a pure expression. The seat could not distinguish "the page returned null"
- * from "the tool did not run my code", and rewrote working probes twice
- * hunting for the shape the evaluator liked.
+ * Compile and run an agent's expression, in the page. Tries an EXPRESSION
+ * first and falls back to a statement body only when that genuinely will not
+ * parse — never a substring test over the source, which would misroute pure
+ * expressions that merely mention `return`.
  *
  * MUST stay self-contained — Playwright serializes it into the page, so it can
  * close over nothing.
@@ -86,10 +74,7 @@ export class BrowserManager {
   async fill(key: string, selector: string, value: string): Promise<void> { await (await this.#seat(key)).page.locator(selector).fill(value); }
   /**
    * Keyboard input. Without it a visual reviewer cannot exercise anything
-   * driven by keys — in db-live-1 `check` was assigned "play a round using
-   * arrow keys" against a toolset that had no press primitive, searched for
-   * one, found nothing, and correctly reported the play-through as
-   * undrivable on any machine.
+   * driven by keys.
    */
   async press(key: string, keys: string, options: { selector?: string; repeat?: number; delayMs?: number } = {}): Promise<{ pressed: string; times: number }> {
     const seat = await this.#seat(key);

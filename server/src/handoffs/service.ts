@@ -60,11 +60,9 @@ export class HandoffService {
   prepare(input: PrepareHandoffInput): { row: HandoffRecordRow; record: HandoffRecord; summary: HandoffSummary; text: string } {
     const parsed = HandoffDraftSchema.parse(input.draft);
     const extensionKind = input.extensionKind ?? handoffExtensionKindForProfile(input.profileId);
-    // Console-authored defaults sit UNDER the model's own data, so a seat that
-    // filled a field keeps its value and never has it silently overwritten.
-    // This is how `CoordinationHandoffData.operatorDecisions` finally gets
-    // written — it has been declared in the shared types and populated by
-    // nothing at all.
+    // Console-authored defaults sit UNDER the model's own data, so an agent
+    // that filled a field keeps its value and never has it silently
+    // overwritten.
     const extension = {
       kind: extensionKind,
       data: { ...(input.extensionDefaults ?? {}), ...(parsed.extension?.data ?? {}) },
@@ -147,9 +145,8 @@ export class HandoffService {
     const s = this.summary(record);
     const lines = [`[Handoff ${s.id}] ${s.action}`, `Status: ${s.status} · Risk: ${s.risk}`, s.stateSummary];
     if (s.resultSummary) lines.push(`Result: ${s.resultSummary}`);
-    // Verbatim, always: the classifier that used to decide which of these
-    // deserved the operator's attention guessed from 53 regexes tuned to one
-    // historical run. The reader judges; the console just refuses to hide it.
+    // Verbatim, always: the reader judges uncertainty; the console refuses to
+    // hide it.
     if (record.core.uncertainty.length > 0) lines.push(`Unverified: ${record.core.uncertainty.join("; ")}`);
     if (s.nextAction) lines.push(`Next: ${s.nextAction}`);
     lines.push(`Evidence: ${s.evidenceCount} · Artifacts: ${s.artifactCount} · full record available with read_handoff`);

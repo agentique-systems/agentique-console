@@ -128,8 +128,7 @@ export function buildRunSummary(input: BuildRunSummaryInput): RunSummaryDocument
 
   // Cost, with its own honesty valve. `observedTurns` counts settle events;
   // `recordedTurns` counts usage rows. When they disagree the figure is
-  // labelled partial rather than reported as if complete — db-live-2's ledger
-  // was missing three of fourteen turns and said nothing about it.
+  // labelled partial rather than reported as if complete.
   const usage = db.select().from(usageSamples).where(eq(usageSamples.userSessionId, userSessionId)).all()
     .filter((row) => !row.turnId.startsWith("checkpoint:"));
   const observedTurns = window.filter((row) => row.type === "user_session.turn.settled" || row.type === "agent_session.turn.settled").length;
@@ -232,7 +231,7 @@ function collectDeviations(window: readonly (typeof events.$inferSelect)[], open
  *
  * The fact: `git diff --numstat <run_base_commit>` — the working tree against
  * the commit captured when the run's first agent session was created. Diffing
- * against the WORKING TREE (not HEAD) is deliberate: a seat running without a
+ * against the WORKING TREE (not HEAD) is deliberate: an agent running without a
  * worktree writes directly and commits nothing, and its files must still
  * count.
  */

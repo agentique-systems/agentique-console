@@ -1,26 +1,8 @@
 /**
- * An operator decision reaches every seat, and outlives the session that asked.
- *
- * The failure this exists to prevent, from db-live-1: the operator reserved one
- * decision ("does the player DODGE obstacles or COLLECT targets? Ask me before
- * anyone builds the core loop"), the orchestrator asked it 7 seconds in, and
- * the operator answered in 11.8 seconds. The word "dodge" then appeared in the
- * transcripts of:
- *
- *     6c927799 (user session)  dodge=5
- *     680cd679 (orchestrator)  dodge=1
- *     9f55b5c4 (renderer)      dodge=0   <-
- *     e65cacbd (page)          dodge=0   <-
- *     9b3b5885 (check)         dodge=0   <-
- *
- * Zero of three specialists. They built the right game only because the
- * operator's own prompt text ("obstacle cubes… a collision ends the run")
- * independently implied it. Had the answer been "COLLECT", that run builds the
- * wrong thing and nobody finds out until the end.
- *
- * The answer was dropped at the orchestrator boundary because it existed only
- * as a tool result inside one provider transcript. It is now a durable row that
- * every seat's prompt reads.
+ * An operator decision reaches every agent, and outlives the session that
+ * asked: an answer that exists only as a tool result inside one provider
+ * transcript is dropped at the orchestrator boundary — it must be a durable
+ * row that every agent's prompt reads.
  */
 import { describe, expect, it } from "vitest";
 import { initMessage, successMessage } from "../sdk/fake.ts";
@@ -61,7 +43,7 @@ async function twoSeats() {
 }
 
 describe("decision ledger", () => {
-  it("records one decision per answer, attributed to the seat that asked", async () => {
+  it("records one decision per answer, attributed to the agent that asked", async () => {
     const { h, userSessionId, agentSessionId } = await twoSeats();
     const ask = h.fake.captured.tools.find((t) => t.name === "ask_operator")!;
     await ask.handler(MECHANIC, {});
@@ -81,7 +63,7 @@ describe("decision ledger", () => {
     });
   });
 
-  it("delivers the decision to a seat that never asked it — the db-live-1 failure", async () => {
+  it("delivers the decision to an agent that never asked it", async () => {
     const { h, userSessionId, agentSessionId } = await twoSeats();
     const ask = h.fake.captured.tools.find((t) => t.name === "ask_operator")!;
     await ask.handler(MECHANIC, {});
@@ -136,7 +118,7 @@ describe("decision ledger", () => {
     expect(prompt).toMatch(/Participants: [^\n]*\.\n\nOnly the following addressed handoffs are new:/);
   });
 
-  it("does not re-send a decision the seat has already been shown", async () => {
+  it("does not re-send a decision the agent has already been shown", async () => {
     const { h, userSessionId, agentSessionId } = await twoSeats();
     const ask = h.fake.captured.tools.find((t) => t.name === "ask_operator")!;
     await ask.handler(MECHANIC, {});
@@ -184,17 +166,17 @@ describe("decision ledger", () => {
     expect(data.operatorDecisions?.join(" ")).toContain("Dodge obstacles");
   });
 
-  it("is in the system prompt of every seat spawned after it — how it survives rotation", async () => {
+  it("is in the system prompt of every agent spawned after it — how it survives rotation", async () => {
     const { h, userSessionId, agentSessionId } = await twoSeats();
     const ask = h.fake.captured.tools.find((t) => t.name === "ask_operator")!;
     await ask.handler(MECHANIC, {});
     const row = h.db.select().from(interactionRows).all()[0]!;
     h.interactions.resolveFromApi(userSessionId, row.id, { answers: { [MECHANIC.question]: ["Dodge obstacles"] } });
 
-    // A rotation retires the provider session and RESPAWNS the seat, so the
+    // A rotation retires the provider session and RESPAWNS the agent, so the
     // system prompt is rebuilt — which is exactly when the digest is read.
     // Spawning `page` for the first time after the answer is the same code
-    // path a rotated seat takes.
+    // path a rotated agent takes.
     h.host.post({
       agentSessionId,
       speaker: { kind: "orchestrator", name: "coordinator" },

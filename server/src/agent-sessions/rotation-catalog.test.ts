@@ -1,5 +1,5 @@
 /**
- * The per-model catalog gates rotation: an unknown seat model lowers the
+ * The per-model catalog gates rotation: an unknown agent model lowers the
  * token ceiling to the conservative default (68K), while known models keep
  * the configured 120K limit binding.
  */
@@ -34,7 +34,7 @@ function makeFlowHarness() {
 }
 
 describe("catalog-derived rotation limits", () => {
-  it("an unknown seat model rotates at the conservative 68K ceiling", async () => {
+  it("an unknown agent model rotates at the conservative 68K ceiling", async () => {
     const h = makeFlowHarness();
     const userSessionId = h.addUserSession();
     const done = collectUntil(h.bus, (event) => event.type === "agent_session.context.rotated", 10_000);
@@ -46,7 +46,7 @@ describe("catalog-derived rotation limits", () => {
     expect(rotated[0]?.payload).toMatchObject({ agent: "scout", reason: "token_limit" });
   });
 
-  it("a known seat model keeps the configured 120K limit binding at 70K tokens", async () => {
+  it("a known agent model keeps the configured 120K limit binding at 70K tokens", async () => {
     const h = makeFlowHarness();
     const userSessionId = h.addUserSession();
     const done = collectUntil(h.bus, (event) => event.type === "agent_session.result.returned", 10_000);

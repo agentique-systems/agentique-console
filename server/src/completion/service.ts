@@ -1,13 +1,6 @@
 /**
  * When is a run done, and who says so.
  *
- * db-live-2 had no answer to either question. There was no `completed` state,
- * no run-level terminal event, and no archive affordance — so "done", "stuck",
- * "crashed" and "waiting on a question" all rendered as a spinner that stopped.
- * The run's last act was to ask a question eleven seconds AFTER declaring
- * itself finished; that question is still `pending` in that database, and it is
- * the last row ever written to it.
- *
  * The predicate below spans both lanes plus the interactions table, which is
  * why it lives in its own service: `host.#refreshStatus` and
  * `runner.#settleTurn` are hot, single-lane, and already do enough. They call
@@ -68,8 +61,7 @@ export class RunCompletionService {
 
   /**
    * Every clause is a fact the CONSOLE owns. Nothing here depends on a model
-   * maintaining state honestly — that is what made db-live-1's ledger-based
-   * gating unusable.
+   * maintaining state honestly.
    */
   isComplete(userSessionId: string): boolean {
     const { repo, interactions } = this.#deps;
@@ -206,10 +198,9 @@ export class RunCompletionService {
       return;
     }
 
-    // Reopened. The seats respawn lazily over their retained provider sessions;
-    // any killed dev server is genuinely gone, which is correct — an agent that
-    // must restart its server on a change request is honest, and a survivor is
-    // exactly the trap db-live-2 left for the next run.
+    // Reopened. Agents respawn lazily over their retained provider sessions;
+    // any killed dev server is genuinely gone — an agent that must restart its
+    // server on a change request is honest.
     repo.patchUserSession(userSessionId, { runState: "active" });
     bus.append({ type: "run.signoff.resolved", userSessionId,
       payload: { userSessionId, runId: summary?.id ?? "", decision: "changes", ...(note === undefined ? {} : { note }) } });

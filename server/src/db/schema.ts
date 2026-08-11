@@ -65,7 +65,7 @@ export const userSessions = sqliteTable("user_sessions", {
   runBaseCommit: text("run_base_commit"),
   /**
    * This session's orchestrator model. NULL falls back to `config.model`, which
-   * is what internally-created sessions (the profile manager) carry. Seats are
+   * is what internally-created sessions (the profile manager) carry. Agents are
    * unaffected — they resolve their own model from the profile.
    */
   model: text("model"),

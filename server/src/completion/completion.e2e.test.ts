@@ -1,18 +1,4 @@
-/**
- * When a run is done, and who says so.
- *
- * The second test in this file is db-live-2 replayed exactly. That run's last
- * three events were:
- *
- *   23:58:27  final handoff → main
- *   23:58:30  "Lane Runner is done and verified."
- *   23:58:38  user_session.question.asked   ← still pending in that DB today
- *
- * and then nothing. The turn never settled, because `AskUserQuestion` awaits
- * its resolution forever; `busy()` stayed true; the spinner kept turning. The
- * run had not gone quiet, it had gone interrogative — and the operator had no
- * way to tell "done" from "still working" from "blocked on me".
- */
+/** When a run is done, and who says so. */
 import { describe, expect, it, vi } from "vitest";
 import { initMessage, successMessage } from "../sdk/fake.ts";
 import { collectUntil, makeDelegationHarness } from "../test-helpers.ts";
@@ -75,8 +61,8 @@ describe("run completion", () => {
     const event = proposed.find((row) => row.type === "run.completion.proposed")!;
     expect((event.payload as { userSessionId: string }).userSessionId).toBe(userSessionId);
 
-    // The state the operator can actually see, and the one db-live-2 could not
-    // express: the Console believes this is done and is waiting on them.
+    // The state the operator can actually see: the Console believes this is
+    // done and is waiting on them.
     expect(h.repo.getUserSession(userSessionId)?.runState).toBe("awaiting_signoff");
     // `status` is untouched — completion is not archival.
     expect(h.repo.getUserSession(userSessionId)?.lifecycle).toBe("open");
@@ -91,11 +77,11 @@ describe("run completion", () => {
     expect(h.db.select().from(runSummaries).all()).toHaveLength(1);
   });
 
-  it("does NOT propose while a question is pending — db-live-2 replayed", async () => {
+  it("does NOT propose while a question is pending", async () => {
     const { h } = harness();
     const { userSessionId } = await runToFinal(h);
 
-    // The exact db-live-2 sequence: report done, then ask.
+    // Report done, then ask.
     await send(h).handler(FINAL, {});
     const ask = h.fake.captured.tools.find((tool) => tool.name === "ask_operator")!;
     await ask.handler({
@@ -123,7 +109,7 @@ describe("run completion", () => {
     const { h } = harness();
     const { userSessionId } = await runToFinal(h);
     await settle();
-    // Idle is not done. db-live-1 went idle having reported nothing at all.
+    // Idle is not done: a run can go idle having reported nothing at all.
     expect(h.completion.isComplete(userSessionId)).toBe(false);
   });
 

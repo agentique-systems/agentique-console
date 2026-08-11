@@ -157,18 +157,10 @@ export class MessageStore {
   }
 
   /**
-   * `deliveredAt` is write-once per delivery attempt, enforced HERE rather than
-   * by callers. `#deliverConsole` reads rows while they are still `queued`,
-   * patches them to `delivered`, and hands the SAME stale objects to
-   * `#mintTurn`; at settle, `delivery.deliveredAt ?? now` then read the stale
-   * NULL and overwrote the real timestamp with the settle time. Six of
-   * db-live-2's twelve rows reported fabricated ~400s "delivery latencies" for
-   * messages the seat had within a second — and `report-run.ts` prints those as
-   * mesh health.
-   *
-   * Making it a property of the store means no future caller can reintroduce
-   * it. The one legitimate reset — rotation requeueing a delivery — passes
-   * `deliveredAt: null` explicitly and is honoured.
+   * `deliveredAt` is write-once per delivery attempt, enforced HERE rather
+   * than by callers, so no caller holding a stale row snapshot can overwrite
+   * the real timestamp. The one legitimate reset — rotation requeueing a
+   * delivery — passes `deliveredAt: null` explicitly and is honoured.
    */
   patchDelivery(id: string, patch: Partial<Pick<MailboxDeliveryRow, "status" | "deliveredAt" | "acknowledgedAt">>): void {
     const preserveDelivered = patch.deliveredAt !== undefined && patch.deliveredAt !== null;

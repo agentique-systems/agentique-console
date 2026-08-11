@@ -50,20 +50,12 @@ export function resolvedDomains(profile: AgentProfile, workspaceDomains: string[
 }
 
 /**
- * Conditions that make a `final` a lie the Console can PROVE.
- *
- * The distinction from `finalReportCaveats` below is the whole design.
- * Caveats are model-maintained facts — an open ledger task, a specialist
- * still running — and those must never block, because in db-live-1 the
- * ledger orphaned on rotation and a blocking rule made `final` structurally
- * impossible while the operator heard nothing for 35 minutes.
- *
+ * Conditions that make a `final` a lie the Console can PROVE. The distinction
+ * from `finalReportCaveats` below: caveats are model-maintained facts — an
+ * open ledger task, a specialist still running — and those must never block.
  * An unanswered operator question is different in kind: the Console owns it
- * end to end. It knows the question was asked, that nobody but the operator
- * can answer it, and that it has not been answered. db-live-2 declared a run
- * done and THEN asked whether two open items mattered — a question that is
- * still `pending` in that database, and was the last row written. A report
- * that precedes its own outstanding questions is not a report.
+ * end to end, and a report that precedes its own outstanding questions is not
+ * a report.
  */
 export function finalReportBlockers(deps: FinalGateDeps, session: AgentSessionRow, finalAgent: string, sender: string, to: string, category: Category): Interaction[] {
   if (!isFinalToMain(finalAgent, sender, to, category)) return [];
@@ -81,11 +73,8 @@ export function isFinalToMain(finalAgent: string, sender: string, to: string, ca
 }
 
 /**
- * Conditions a `final` report has not met. These used to THROW, which made
- * the operator's report conditional on model-maintained state: in db-live-1
- * the ledger orphaned on rotation, so a `final` was structurally impossible
- * and the operator heard nothing for 35 minutes. The console may enforce
- * only on facts it owns — so unmet conditions now travel WITH the report,
+ * Conditions a `final` report has not met. The console may enforce only on
+ * facts it owns — unmet model-maintained conditions travel WITH the report,
  * where the operator can weigh them, instead of suppressing it.
  */
 export function finalReportCaveats(deps: FinalGateDeps, session: AgentSessionRow, finalAgent: string, sender: string, to: string, category: Category, activeSpecialists: () => string[]): string[] {

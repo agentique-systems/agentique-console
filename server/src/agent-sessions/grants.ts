@@ -2,10 +2,8 @@
  * The single source of truth for which console tools an agent gets.
  *
  * Both consumers read THIS: `buildAgentTools` registers a tool iff its name is
- * granted, and `#spawnSeat`'s allow-list is `runtimeToolNames(granted)`.
- * Before this module they were two hand-maintained lists that had already
- * drifted (the allow-list carried task_list unconditionally and the reviewer
- * tools without the worktree manager; registration did not).
+ * granted, and `#spawnSeat`'s allow-list is `runtimeToolNames(granted)` — one
+ * list, so registration and the allow-list cannot drift.
  *
  * Pattern say ends at `RoleSpec.grants`; profile capabilities (shell, browser,
  * screenshots) and service availability stay orthogonal inputs.

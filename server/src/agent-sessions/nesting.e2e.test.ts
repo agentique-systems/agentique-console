@@ -2,7 +2,7 @@
  * One level of nesting, end to end: a hub coordinator spawns a child session,
  * the child's "main" resolves to that coordinator (never the runner), the
  * parent's final is withheld until every child reports, and the whole tree
- * settles into run completion. Depth is capped by GRANTING — a child's seats
+ * settles into run completion. Depth is capped by GRANTING — a child's agents
  * never see the spawn tools.
  */
 import { describe, expect, it } from "vitest";

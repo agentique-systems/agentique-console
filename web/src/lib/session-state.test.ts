@@ -1,7 +1,7 @@
 /**
- * The precedence IS the feature. db-live-2's final state was an orchestrator
- * mid-turn AND blocked on the operator — `needs_you` must beat `working`,
- * because the thing the operator can act on outranks the thing they cannot.
+ * The precedence IS the feature: an orchestrator can be mid-turn AND blocked
+ * on the operator — `needs_you` must beat `working`, because the thing the
+ * operator can act on outranks the thing they cannot.
  */
 import { describe, expect, it } from "vitest";
 import { deriveSessionState } from "./session-state";

@@ -4,10 +4,8 @@
  * hook middleware. The lane registers under its peer name and accepts
  * cross-session inbound.
  *
- * `SendMessage` is now denied unconditionally. The mesh it addressed is gone,
- * its envelope middleware was deleted, and both of db-live-2's sends failed
- * with "No agent named … is reachable" — so coordinator traffic goes through
- * the console-owned `send_to_coordinator` instead, which is route-checked and
+ * `SendMessage` is denied unconditionally: coordinator traffic goes through
+ * the console-owned `send_to_coordinator`, which is route-checked and
  * journaled like every other transfer.
  */
 import { describe, expect, it } from "vitest";
@@ -40,7 +38,7 @@ describe("orchestrator options", () => {
     // no handoff and no attribution.
     expect(disallowed).toEqual(expect.arrayContaining(["ScheduleWakeup", "Monitor", "TaskStop"]));
     // The native ledger is denied too: it is keyed on the provider session id,
-    // which changes at every rotation — the orphan failure seats were already
+    // which changes at every rotation — the orphan failure agents were already
     // spared. Main uses the console-owned task tools.
     expect(disallowed).toContain("TaskCreate");
     const allowed = options().allowedTools ?? [];

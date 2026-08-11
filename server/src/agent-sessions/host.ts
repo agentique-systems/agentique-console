@@ -55,19 +55,11 @@ import { AsyncQueue } from "../async-queue.ts";
 export { WithheldFinalError } from "./final-gate.ts";
 const MATERIAL_CATEGORIES = new Set(["milestone", "failure", "final", "decision"]);
 
-
-/**
- * Unresolved blocking questions allowed per AgentSession before further asks
- * are downgraded to deferred. A wall of simultaneous cards is unanswerable, and
- * each blocking ask pins one of `agentMaxResidentPerTree` (4) processes.
- */
-
-
 /**
  * Built-in tools a profile may grant. Anything here that a profile does NOT
  * list is explicitly denied, which is what makes `profile.tools` a real
  * boundary rather than an auto-approval hint. Harness conveniences a governed
- * seat should never reach (subagent spawning, scheduling, its own review
+ * agent should never reach (subagent spawning, scheduling, its own review
  * tooling) are denied unconditionally alongside these.
  */
 const GOVERNED_BUILTIN_TOOLS = [
@@ -76,7 +68,7 @@ const GOVERNED_BUILTIN_TOOLS = [
 ] as const;
 
 
-/** Seat names may contain chars git refs forbid; branch components drop them. */
+/** Agent names may contain chars git refs forbid; branch components drop them. */
 function branchSafe(name: string): string {
   return name.replace(/[^A-Za-z0-9_-]/g, "-");
 }
@@ -89,19 +81,8 @@ function stableStringify(value: unknown): string {
 }
 
 /**
- * What this seat can actually do, stated up front.
- *
- * Every capability limit in db-live-1 was discovered mid-run at high cost:
- * renderer spent a 595s turn learning the sandbox has no outbound network,
- * `check` spent four tool searches learning it had no keyboard primitive, and
- * both hunted the filesystem for artifacts that live in SQLite. None of that
- * is discoverable from inside; all of it is known here at spawn.
- */
-/**
- * Sandbox network policy for a seat. `allowLocalBinding` is unconditional: a
- * seat must be able to reach a server it started itself, and in db-live-1
- * `check` could not — it got ECONNREFUSED on its own dev server and had to
- * report the traversal and error branches as unverified.
+ * Sandbox network policy. `allowLocalBinding` is unconditional: an agent must
+ * be able to reach a server it started itself.
  */
 function sandboxNetwork(profile: AgentProfile, workspaceDomains: string[]): { allowedDomains: string[]; allowLocalBinding: true; strictAllowlist: true } {
   const configured = profile.runtime.network;
@@ -123,14 +104,9 @@ function capabilityBrief(profile: AgentProfile, hasWorktree: boolean, workspaceD
     else cannot.push("take screenshots");
   } else cannot.push("open a browser");
   const domains = resolvedDomains(profile, workspaceDomains);
-  // The truth, which the old line got backwards. Managed children run in the
-  // host network namespace; a seat's Bash runs inside the SDK sandbox's own.
-  // They share no loopback, so `curl http://localhost:PORT` from Bash cannot
-  // see a server `process_start` launched — while the browser (also host
-  // namespace) can. db-live-2's renderer burned three failed curls working
-  // this out for itself, and the same asymmetry is what made a live port look
-  // simultaneously occupied and free, which is where the whole "stale server"
-  // investigation came from.
+  // Managed children run in the host network namespace; an agent's Bash runs
+  // inside the SDK sandbox's own. They share no loopback: curl from Bash
+  // cannot see a server `process_start` launched, while the browser can.
   if (profile.runtime.shell) {
     can.push(
       "start servers with process_start and reach them from the browser tools and from other process_start children" +
@@ -150,7 +126,7 @@ function capabilityBrief(profile: AgentProfile, hasWorktree: boolean, workspaceD
     `If an assignment needs something in the "cannot" list, say so immediately in a handoff rather than working around it — the limit is real and will not change mid-run.`;
 }
 
-/** Compact capability tag for roster lines — what this seat can be asked to do. */
+/** Compact capability tag for roster lines — what this agent can be asked to do. */
 function capabilityTag(profile: AgentProfile): string {
   const caps = [
     ...(profile.tools.includes("Edit") || profile.tools.includes("Write") ? ["writes files"] : ["read-only"]),
@@ -165,12 +141,7 @@ function seatUserMessage(text: string): SdkUserMessageLike {
   return { type: "user", message: { role: "user", content: [{ type: "text", text }] }, parent_tool_use_id: null, shouldQuery: true };
 }
 
-/**
- * The seat's messaging documentation. Short by construction: there is one way
- * to transfer, its fields are typed, and nothing has to be serialized by hand.
- * The predecessor to this brief had to teach a JSON envelope by example and
- * still cost 5-9 rejections per seat before the first message landed.
- */
+/** The agent's messaging documentation. */
 function seatMessagingBrief(roster: string, addressing: string): string {
   return `Communication: your plain text output reaches no one. To transfer anything — an assignment, progress, findings, a failure, a final result — call send_handoff. Its fields are typed; there is no JSON to write or escape. Participants: ${roster}. ` +
     `${addressing} ` +
@@ -182,10 +153,11 @@ function seatMessagingBrief(roster: string, addressing: string): string {
 }
 
 /**
- * A seat's persistent peer session. One streaming-input query per live seat;
- * the process registers the seat's peer name and binds its inbox socket, so a
- * seat is natively addressable exactly while its lane is live. Parked lanes
- * keep only the resume handle — the journal owns anything undelivered.
+ * An agent's persistent peer session. One streaming-input query per live
+ * agent; the process registers the agent's peer name and binds its inbox
+ * socket, so an agent is natively addressable exactly while its lane is live.
+ * Parked lanes keep only the resume handle — the journal owns anything
+ * undelivered.
  */
 interface AgentLane {
   state: "unspawned" | "waking" | "live" | "rotating" | "parked";
@@ -203,21 +175,17 @@ interface AgentLane {
     sawSend: boolean;
     toolStarts: Map<string, number>;
     /**
-     * The seat's most recent narration. Harvested into the synthetic failure
-     * handoff when a turn dies: in db-live-1 `check` had finished its review
-     * and could only print it, so the interrupt destroyed the run's best output.
+     * The agent's most recent narration; harvested into the synthetic failure
+     * handoff when a turn dies.
      */
     lastNarration: string;
     watchdog: { lastKey: string; identical: number; errorStreak: number; tripped: string | null };
     /**
-     * Set while this turn is parked inside `ask_operator` waiting for a human.
-     * A blocking ask holds `activeTurn`, so without this the seat looks busy
-     * forever: the idle timer never arms, capacity eviction skips it, and one
-     * resident CLI process is pinned until the operator happens to answer.
-     * Its own controller, so the wait can be cut without killing the lane.
+     * Set while this turn is parked inside `ask_operator`. A blocking ask
+     * holds `activeTurn`, so without this the agent looks busy forever. Its
+     * own controller, so the wait can be cut without killing the lane.
      */
     awaitingOperator: { interactionId: string; since: number; abort: AbortController } | null;
-    /** Reasoning text, accumulated only when persistence is enabled. */
   } | null;
   /** Console pushes awaiting attribution to the next minted turn. */
   pendingDeliveries: MailboxDeliveryRow[];
@@ -248,15 +216,15 @@ export interface CreateAgentSessionInput {
   userSessionId: string;
   title: string;
   /**
-   * Orchestration pattern; omitted = hub_and_spoke (the historical default).
-   * (Agent sessions have no mode/phase of their own: seats always execute;
-   * operator-level plan mode lives on the USER session.)
+   * Orchestration pattern; omitted = hub_and_spoke. Agent sessions have no
+   * mode/phase of their own: agents always execute; operator-level plan mode
+   * lives on the USER session.
    */
   pattern?: PatternId;
   /** Pattern-specific config, validated by the pattern's builder. */
   patternConfig?: Record<string, unknown>;
   /**
-   * Set when a controller seat spawns this as a CHILD session. The child's
+   * Set when a controller agent spawns this as a CHILD session. The child's
    * "main" traffic then crosses to `controllerAgent` in the parent instead of
    * waking the runner. One level only — children never get the spawn grant.
    */
@@ -281,11 +249,10 @@ export interface AgentSessionServiceDeps {
   browsers: BrowserManager | null;
   interactions: InteractionService;
   /**
-   * What the operator has decided. Read into every seat's prompt and into
-   * checkpoint reconstruction, so a decision made once is known by every seat
-   * and every later generation. Required, like `interactions`: optional
-   * feature deps let a missing wire typecheck, which is how the decision
-   * ledger shipped dark in production.
+   * What the operator has decided. Read into every agent's prompt and into
+   * checkpoint reconstruction, so a decision made once is known by every agent
+   * and every later generation. Required: an optional dep would let a missing
+   * wire typecheck.
    */
   decisions: DecisionLedger;
   tasks: TaskService;
@@ -299,7 +266,6 @@ function questionTextOf(interaction: Interaction): string {
   return questions.map((question) => question.question).join(" | ");
 }
 
-/** "What was asked → what the operator said", rendered once for every consumer. */
 /** The one canonical decision rendering — see `orchestrator/decisions.ts`. */
 function summarizeAnswer(interaction: Interaction): string {
   const decision = decisionOf(interaction);
@@ -309,7 +275,7 @@ function summarizeAnswer(interaction: Interaction): string {
 /** Console-managed, independently resumable participant sessions and durable mailbox. */
 export class AgentSessionService {
   readonly #deps: AgentSessionServiceDeps;
-  /** agentSessionId → seat name → its persistent lane. */
+  /** agentSessionId → agent name → its persistent lane. */
   readonly #seats = new Map<string, Map<string, AgentLane>>();
   /** Waiters for a resident-capacity slot, resolved oldest-first on park/close. */
   readonly #capacityWaiters: (() => void)[] = [];
@@ -317,7 +283,6 @@ export class AgentSessionService {
   #askSweep: ReturnType<typeof setInterval> | null = null;
   /** Notified when a session's derived status changes; completion re-evaluates. */
   #onStatusChanged: ((userSessionId: string) => void) | undefined;
-  /** Sessions whose `final` the gate withheld, so clearing it can say so. */
   /** Roster work-state diff lines, memoized 15s — see `#seatWorkState`. */
   readonly #workStateDiffCache = new Map<string, { at: number; line: string }>();
   #sessionStatus = new Map<string, AgentSessionStatus | null>();
@@ -353,17 +318,10 @@ export class AgentSessionService {
       if (names.has(agent.name)) throw new InvalidInputError(`duplicate agent name \"${agent.name}\"`);
       names.add(agent.name);
     }
-    // Ownership is mandatory for a seat that WRITES, and optional for one that
-    // does not. The old `owns: min(1)` schema forced db-live-2's visual-reviewer
-    // to pass the sentence "verification report and screenshot (no source
-    // files)" as an ownership scope — a string that is not a path, in a map
-    // that holds paths, on a seat the disjointness check below then skipped
-    // anyway.
-    //
-    // Deliberately NOT symmetric: a read-only seat may still declare a scope,
-    // because `owns` doubles as the assignment/review boundary for seats that
-    // never write. Forbidding that would break a legitimate use to fix a
-    // problem nobody had.
+    // Ownership is mandatory for an agent that WRITES, and optional for one
+    // that does not. Deliberately NOT symmetric: a read-only agent may still
+    // declare a scope, because `owns` doubles as the assignment/review
+    // boundary for agents that never write.
     for (const agent of input.agents) {
       const profile = this.#profile(agent.profileId ?? "explorer", user.workspaceId);
       const writes = profile.tools.includes("Edit") || profile.tools.includes("Write");
@@ -373,9 +331,9 @@ export class AgentSessionService {
     }
     const ownedScopes = new Map<string, string>();
     if (parentRow) {
-      // Cross-tree disjointness: parent-tree seats and this child's seats all
-      // merge worktrees into ONE workspace, so their write scopes must not
-      // collide any more than sibling seats' may.
+      // Cross-tree disjointness: parent-tree agents and this child's agents
+      // all merge worktrees into ONE workspace, so their write scopes must not
+      // collide any more than sibling agents' may.
       const treeSessions = [parentRow, ...repo.listChildSessions(parentRow.id).filter((child) => child.lifecycle === "open")];
       for (const treeSession of treeSessions) {
         for (const seat of repo.listAgents(treeSession.id)) {
@@ -396,17 +354,15 @@ export class AgentSessionService {
         ownedScopes.set(normalized, agent.name);
       }
     }
-    // Isolation needs a repository. Done here, at session creation, rather
-    // than lazily at seat spawn: the operator initiated this moment and can be
-    // told about it once, instead of discovering a `.git` appearing later.
+    // Worktree isolation needs a repository; ensured at session creation, not
+    // lazily at agent spawn.
     this.#ensureWorkspaceRepo(user.workspaceId, input.userSessionId);
     const title = input.title.trim();
     if (!title) throw new InvalidInputError("a session title is required");
     const parent = repo.getUserSession(input.userSessionId);
     if (!parent) throw new InvalidInputError("unknown user session");
     // The run's baseline for "what was built": HEAD at the first delegation.
-    // The Run Summary diffs the working tree against this — a fact, where a
-    // handoff's changedPaths is a model's claim.
+    // The Run Summary diffs the working tree against this.
     if (parent.runBaseCommit === null && this.#deps.worktrees && this.#deps.getWorkspaceRoot) {
       try {
         const root = this.#deps.getWorkspaceRoot(user.workspaceId);
@@ -459,7 +415,7 @@ export class AgentSessionService {
 
   /**
    * The ONE transfer path: journal, then deliver by pushing into the
-   * recipient's lane input. Every hop — briefings, seat reports via the
+   * recipient's lane input. Every hop — briefings, agent reports via the
    * `send_handoff` tool, failure notices, redelivery — comes through here,
    * which is what makes the governance gates below inescapable.
    */
@@ -524,11 +480,7 @@ export class AgentSessionService {
       this.#deps.bus.append({ type: "handoff.final.caveats", userSessionId: session.userSessionId, agentSessionId: session.id,
         payload: { agentSessionId: session.id, sender: input.speaker.name, caveats } });
     }
-    // The ledger follows the journal, rather than waiting for a coordinator to
-    // remember. In db-live-2 every transition lagged reality by 5-11 minutes:
-    // unit 1 was marked complete 10m17s after implementation finished, unit 2
-    // went in_progress 11m16s after the file was written, and the lag mapped
-    // exactly onto coordinator turns that were dead or asleep.
+    // The ledger follows the journal, not a coordinator's memory.
     syncLedgerFromHandoff(this.#deps, session, input.to, input.handoff, category);
     const { message, delivery, text } = this.#journal(session, input.speaker, input.to, input.handoff, category, {
       ...(input.dedupeKey ? { dedupeKey: input.dedupeKey } : {}), ...(input.turnId ? { turnId: input.turnId } : {}),
@@ -552,12 +504,8 @@ export class AgentSessionService {
       this.#patchDelivery(session, delivery, "acknowledged");
       if (MATERIAL_CATEGORIES.has(category)) {
         // Answered operator questions ride along with the next material wake.
-        // This used to be an in-memory `#deferredDecisions` map, which meant a
-        // non-blocking decision was silently DROPPED whenever no further
-        // material report happened to arrive — and lost outright on restart.
-        // The rows are durable now, so the worst case is a late telling rather
-        // than none. Not marked flushed here: `flushed_at` means the ASKING
-        // SEAT has been told, and main is not the asker.
+        // Not marked flushed here: `flushed_at` means the ASKING AGENT has
+        // been told, and main is not the asker.
         const answered = this.#deps.interactions.listAnsweredUnflushed(session.id);
         const decisions = answered.map((row) => summarizeAnswer(row)).filter((line) => line !== "");
         const wakeText = decisions.length === 0 ? text
@@ -572,14 +520,6 @@ export class AgentSessionService {
       }
       }
     } else {
-      // Assignments always deliver. The holds that used to live here (a
-      // termination-trip hold and a dependency-blocker hold) both worked by
-      // leaving the delivery row `queued` — which the next unrelated delivery
-      // to the same seat swept along anyway, while the queued row pinned
-      // `#statusOf` at "working" forever. A leaky gate that also wedges the
-      // session is worse than no gate: dependency ordering is advisory text
-      // in the assignment now, and a tripped session's close-out ask says
-      // what it needs without impounding new work.
       // A router edge delivers now; a console-advanced edge stays journaled
       // and queued for the pattern progression to carry (joins, stages).
       if (edge.advance === "immediate") {
@@ -599,8 +539,7 @@ export class AgentSessionService {
 
   /**
    * `operatorDecisions` for a coordination-extension handoff, and nothing for
-   * any other kind — the field only exists on `CoordinationHandoffData`, and
-   * putting it elsewhere would be inventing schema.
+   * any other kind — the field only exists on `CoordinationHandoffData`.
    */
   #coordinationDefaults(session: AgentSessionRow, speaker: Speaker, senderSeat: AgentRow | undefined): { extensionDefaults?: Record<string, unknown> } {
     const kind = speaker.name === MAIN_RECIPIENT
@@ -628,9 +567,7 @@ export class AgentSessionService {
       turnId: opts.turnId, trigger: category as HandoffTrigger,
       parentHandoffId: category === "assignment" ? null : (senderSeat?.latestHandoffId ?? (speaker.name === MAIN_RECIPIENT ? repo.getUserSession(session.userSessionId)?.latestHandoffId : null)),
       // A coordination handoff carries the operator's decisions with it, so a
-      // recipient reading only the envelope still knows what was decided. The
-      // field is console-authored under the model's own data; this is the
-      // first thing that has ever written it.
+      // recipient reading only the envelope still knows what was decided.
       ...(this.#coordinationDefaults(session, speaker, senderSeat)),
       ...(senderSeat?.worktreePath ? { resolveRoot: senderSeat.worktreePath } : {}),
     });
@@ -759,17 +696,10 @@ export class AgentSessionService {
 
   /**
    * Release every runtime resource this run holds, WITHOUT archiving anything
-   * and WITHOUT touching worktrees.
-   *
-   * Called when the Console proposes completion, so the operator never reads a
-   * summary while a dev server the run started is still bound to a port. It
-   * stops short of archival because the operator may ask for changes: the
-   * seats respawn lazily over their retained provider sessions, and a worktree
-   * destroyed here could not be merged afterwards.
-   *
-   * Returns what it killed, so the summary can state it — the alternative is
-   * the operator wondering where their server went, which is the same class of
-   * mystery the leak itself caused.
+   * and WITHOUT touching worktrees. It stops short of archival because the
+   * operator may ask for changes: agents respawn lazily over their retained
+   * provider sessions, and a worktree destroyed here could not be merged
+   * afterwards. Returns what it killed, so the summary can state it.
    */
   reapForUserSession(userSessionId: string): ReapResult {
     const processes: ReapResult["processes"] = [];
@@ -836,7 +766,7 @@ export class AgentSessionService {
 
   /**
    * Boot sweep: children whose parent is archived or gone can never report to
-   * anyone — the only genuinely new orphan class nesting introduces.
+   * anyone.
    */
   archiveOrphanChildren(): number {
     let archived = 0;
@@ -883,7 +813,7 @@ export class AgentSessionService {
 
   /**
    * The governance clock: any `ask_operator` wait older than
-   * `operatorAskDetachMs` is detached — the seat's process frees up while the
+   * `operatorAskDetachMs` is detached — the agent's process frees up while the
    * card stays open on the operator's screen.
    */
   startGovernanceSweep(intervalMs = this.#deps.config.policy.governanceSweepIntervalMs): void {
@@ -912,9 +842,9 @@ export class AgentSessionService {
   }
 
   /**
-   * Hand a seat an answer its own tool call can no longer return.
+   * Hand an agent an answer its own tool call can no longer return.
    *
-   * A seat is not revived by a lane the way main is — it is woken by a
+   * An agent is not revived by a lane the way main is — it is woken by a
    * delivery. So when its parked promise died (park, rotation, watchdog, or a
    * server restart) the answer arrives as a journaled `decision` handoff from
    * the coordinator's address, which is a legal `#assertRoute` edge where a
@@ -925,7 +855,7 @@ export class AgentSessionService {
     if (!interaction.agentSessionId || !interaction.agent) return;
     const asked = questionTextOf(interaction);
     // The route resolved the row before calling this — render from the durable
-    // record, through the one canonical renderer, so the seat reads exactly
+    // record, through the one canonical renderer, so the agent reads exactly
     // what every later prompt will say.
     const decision = decisionOf(this.#deps.interactions.get(interaction.id));
     const answer = decision === null ? `${asked} → (no answer recorded)` : renderDecision(decision);
@@ -978,13 +908,9 @@ export class AgentSessionService {
   }
 
   /**
-   * The other half of the final gate.
-   *
-   * Withholding a report and then saying nothing is how db-live-1 produced a
-   * 35-minute silence. So when a session's LAST blocking question clears, the
-   * Console tells both ends: the coordinator learns it may report, and main
-   * learns why the report it was expecting was late.
-   *
+   * The other half of the final gate: when a session's LAST blocking question
+   * clears, the Console tells both ends — the coordinator learns it may
+   * report, and main learns why the report it was expecting was late.
    * Registered by `main.ts` on the interaction service.
    */
   onBlockingQuestionsCleared(userSessionId: string, agentSessionId: string): void {
@@ -995,8 +921,7 @@ export class AgentSessionService {
     const lane = this.#seats.get(agentSessionId)?.get(finalSeat);
     // Only meaningful if a final was actually withheld from this session —
     // derived from the durable handoff.final.blocked event, not an in-memory
-    // set a restart wipes (the wiped set was how the release notice could
-    // silently never fire after a reboot).
+    // set a restart wipes.
     if (!this.#finalWithheld(session)) return;
     try {
       this.post({
@@ -1011,7 +936,7 @@ export class AgentSessionService {
         ),
         category: "milestone",
       });
-    } catch { /* the notice is best effort; the reporting seat still gets its delivery */ }
+    } catch { /* the notice is best effort; the reporting agent still gets its delivery */ }
     if (lane) void this.#deliverConsole(agentSessionId, finalSeat).catch(() => undefined);
     void userSessionId;
   }
@@ -1109,22 +1034,17 @@ export class AgentSessionService {
   }
 
   /**
-   * Default-on isolation for EVERY seat in a git workspace: a lazy worktree
+   * Default-on isolation for EVERY agent in a git workspace: a lazy worktree
    * per assignment, so completed work lands atomically and interrupted work
    * leaves zero residue. Fail-open — if the worktree cannot be created the
-   * seat runs directly in the workspace, with a runtime notice.
+   * agent runs directly in the workspace, with a runtime notice.
    */
   #ensureSeatWorktree(session: AgentSessionRow, seat: AgentRow, workspaceRoot: string): AgentRow {
     const { repo, bus } = this.#deps;
     const worktrees = this.#deps.worktrees;
-    // Read-only seats get one too.
-    //
-    // The gate used to be `writes`, which is why `check` had no worktree in
-    // EITHER live run. A reviewer with Bash can still write, and more to the
-    // point it needs a STABLE SNAPSHOT of what it is reviewing: db-live-2's
-    // check verified a tree that renderer was still editing. Its worktree is
-    // discarded rather than merged — `#onSeatWorktreePost` only merges a seat
-    // whose profile can write.
+    // Read-only agents get one too: a reviewer needs a STABLE SNAPSHOT of
+    // what it is reviewing. Its worktree is discarded rather than merged —
+    // `#onSeatWorktreePost` only merges an agent whose profile can write.
     if (!worktrees || this.#deps.config.policy.agentWorktrees === false || seat.role === "coordinator"
       || seat.worktreePath !== null || !worktrees.isGitRepo(workspaceRoot)) return seat;
     try {
@@ -1142,7 +1062,7 @@ export class AgentSessionService {
   }
 
   /**
-   * A worktree'd write seat reported terminal status: completed work merges
+   * A worktree'd write agent reported terminal status: completed work merges
    * atomically into the workspace (conflict → failure handoff, workspace
    * untouched); failed work is discarded with its diff retained. Fail-open on
    * git errors — the mailbox append already happened.
@@ -1155,9 +1075,8 @@ export class AgentSessionService {
     if (!user) return;
     const workspaceRoot = this.#deps.getWorkspaceRoot(user.workspaceId);
     const release = () => repo.patchAgent(session.id, seat.name, { worktreePath: null, worktreeBaseCommit: null, worktreeBranch: null });
-    // A read-only seat's worktree exists to give it a stable snapshot, not to
-    // produce changes. Discard it: merging a reviewer's incidental scratch
-    // files into the workspace would be a surprise, not a result.
+    // A read-only agent's worktree exists to give it a stable snapshot;
+    // discard it rather than merging incidental scratch files.
     const profile = seat.profileSnapshot as AgentProfile;
     if (!profile.tools.includes("Edit") && !profile.tools.includes("Write")) {
       try { worktrees.remove(workspaceRoot, seat.worktreePath, seat.worktreeBranch, { archiveBranch: false }); } catch { /* best effort */ }
@@ -1239,15 +1158,15 @@ export class AgentSessionService {
   }
 
   /**
-   * The seat named by a completion-spec role. Builders guarantee `finalFrom`
-   * and `voice` are single-seat roles, so first-by-ord IS the seat.
+   * The agent named by a completion-spec role. Builders guarantee `finalFrom`
+   * and `voice` are single-agent roles, so first-by-ord IS the agent.
    */
   #completionSeat(session: AgentSessionRow, which: "finalFrom" | "voice"): string {
     const role = this.#contractOf(session).contract.completion[which];
     return this.#seatsOfRole(session.id, role)[0]?.name ?? COORDINATOR_AGENT;
   }
 
-  /** Where a seat's console-synthesized failures go (RoleSpec.escalateTo). */
+  /** Where an agent's console-synthesized failures go (RoleSpec.escalateTo). */
   #escalationTarget(session: AgentSessionRow, seatName: string): string {
     const seat = this.#deps.repo.getAgent(session.id, seatName);
     const spec = seat ? this.#contractOf(session).role(roleOfAgent(seat)) : undefined;
@@ -1257,22 +1176,15 @@ export class AgentSessionService {
   }
 
   /**
-   * A seat's whole job is to answer the assignment it holds, and the Console
-   * is already the transport. Requiring the seat to duplicate its final text
-   * through `send_handoff` is what wedged live run 3's debate: both debaters
-   * ended their turns with plain text, the positions join never armed, the
-   * judge never ran — and db-live-2's renderer worked nine minutes and
-   * reported 45 characters the same way. So: when an agent seat completes a
-   * turn without sending, while its current assignment still lacks a terminal
-   * report from it, the Console carries the turn's final text to its
-   * collector as a completed report — in EVERY pattern (specialist→
-   * coordinator, stage→next stage, debater→judge, mapper→reducer). Silent
-   * seats stop being possible. An explicit send supersedes this by
-   * construction (`sawSend`); a seat with an open operator question keeps its
-   * silence — the answer's delivery gives it another turn to report from.
-   * Coordinator-role seats are exempt: they legitimately settle many quiet
-   * turns mid-orchestration, and their own silence is the operator-debt
-   * discharge's job.
+   * When an agent completes a turn without sending, while its current
+   * assignment still lacks a terminal report from it, the Console carries the
+   * turn's final text to its collector as a completed report — in EVERY
+   * pattern (specialist→coordinator, stage→next stage, debater→judge,
+   * mapper→reducer). An explicit send supersedes this (`sawSend`); an agent
+   * with an open operator question keeps its silence — the answer's delivery
+   * gives it another turn to report from. Coordinator-role agents are exempt:
+   * they legitimately settle many quiet turns mid-orchestration, and their
+   * own silence is the operator-debt discharge's job.
    */
   #carryReport(session: AgentSessionRow, seatName: string, turn: NonNullable<AgentLane["activeTurn"]>): void {
     const seat = this.#deps.repo.getAgent(session.id, seatName);
@@ -1295,7 +1207,7 @@ export class AgentSessionService {
   }
 
   /**
-   * Where a silent seat's carried report goes: its role's outbound edge,
+   * Where a silent agent's carried report goes: its role's outbound edge,
    * preferring the escalation target, then any non-main edge, then main
    * itself (a final pipeline stage's only outlet).
    */
@@ -1313,7 +1225,7 @@ export class AgentSessionService {
 
   #assertRoute(session: AgentSessionRow, sender: string, recipient: string, category: Category): EdgeSpec {
     // Console-authored deliveries (operator answers, close-out asks, release
-    // notices) are legal toward any seat — the console is the transport, not
+    // notices) are legal toward any agent — the console is the transport, not
     // a participant, so it needs no edge of its own.
     if (sender === CONSOLE_SENDER) return { from: "console", to: this.#roleOf(session.id, recipient), advance: "immediate" };
     // Boundary hops: a child session's report enters its parent under the
@@ -1336,7 +1248,7 @@ export class AgentSessionService {
     return edge;
   }
 
-  // ── Persistent seat lanes ────────────────────────────────────────────────
+  // ── Persistent agent lanes ───────────────────────────────────────────────
 
   #laneOf(agentSessionId: string, seat: string): AgentLane {
     let lanes = this.#seats.get(agentSessionId);
@@ -1352,7 +1264,7 @@ export class AgentSessionService {
     return lane;
   }
 
-  /** Spawn or unpark a seat so its peer session is registered and accepting input. */
+  /** Spawn or unpark an agent so its peer session is registered and accepting input. */
   async ensureSeatLive(agentSessionId: string, seat: string, deadline?: number): Promise<void> {
     const { repo } = this.#deps;
     const until = deadline ?? Date.now() + (this.#deps.config.policy.agentSpawnTimeoutMs ?? 30_000);
@@ -1400,7 +1312,7 @@ export class AgentSessionService {
     return count;
   }
 
-  /** Resident CLI processes are the scarce resource now, not concurrent turns. */
+  /** Resident CLI processes are the scarce resource, not concurrent turns. */
   async #reserveCapacity(agentSessionId: string, until: number): Promise<void> {
     const config = this.#deps.config;
     if (!config) return;
@@ -1452,18 +1364,13 @@ export class AgentSessionService {
   }
 
   /**
-   * A seat putting a question to the human.
-   *
-   * The hard parts are all about not making things worse than silence:
-   *  - a duplicate returns the OPEN card rather than minting a second one, so a
-   *    seat that re-asks does not feed the identical-call watchdog or hand the
-   *    operator the same question twice;
+   * An agent putting a question to the human.
+   *  - a duplicate returns the OPEN card rather than minting a second one;
    *  - a blocking wait is bounded by ONE mechanism, the operatorAskDetachMs
-   *    timer: the seat's process frees up, the card stays open and blocking;
-   *  - nothing here EVER returns `isError`. A dismissal, a detach or an expiry
-   *    is not the seat's mistake, and ten consecutive error results trip
-   *    the error-streak watchdog and kill its turn. Punishing a seat for the
-   *    operator's silence is precisely backwards.
+   *    timer: the agent's process frees up, the card stays open and blocking;
+   *  - nothing here EVER returns `isError` — a dismissal, a detach or an
+   *    expiry is not the agent's mistake, and error results feed the
+   *    error-streak watchdog.
    */
   async #askOperator(session: AgentSessionRow, seat: AgentRow, lane: AgentLane, args: AskOperatorArgs): Promise<SdkToolResult> {
     const interactions = this.#deps.interactions;
@@ -1536,15 +1443,11 @@ export class AgentSessionService {
     // Occupancy is re-reported by the first assistant message of any new
     // process, so it always restarts at zero.
     lane.contextTokens = 0;
-    // Cost and api-duration do NOT. The SDK reports them cumulatively per
+    // Cost and api-duration do NOT: the SDK reports them cumulatively per
     // query(), and a RESUMED session continues its running total across the
-    // process boundary — so the baseline belongs to the PROVIDER SESSION, not
-    // to the lane. Zeroing it on every spawn is what made db-live-1 record
-    // $4.4875 for a 55-second turn (its api_duration_ms was 20x its own wall
-    // clock), overstating that run by 33.4%.
-    //
-    // A seat with no `sdkSessionId` is genuinely starting fresh — that is what
-    // rotation does at host.ts's #rotateNow — so its baseline is zero.
+    // process boundary — the baseline belongs to the PROVIDER SESSION, not
+    // the lane. An agent with no `sdkSessionId` is genuinely starting fresh
+    // (rotation does that in #rotateNow), so its baseline is zero.
     lane.lastCumulative = seatRow.sdkSessionId === null
       ? { costUsd: 0, apiDurationMs: 0 }
       : { costUsd: seatRow.cumulativeCostUsd, apiDurationMs: seatRow.cumulativeApiDurationMs };
@@ -1580,28 +1483,23 @@ export class AgentSessionService {
         allowedTools: [...profile.tools,
           ...(profile.tools.includes("Edit") || profile.tools.includes("Write") ? ["EnterWorktree", "ExitWorktree"] : []),
           ...runtimeToolNames(granted)],
-        // A profile's tool list must be BINDING. `allowedTools` is only an
-        // auto-approval list, so the db-live-1 coordinator — profile
-        // ["Read","Glob","Grep"], brief "your own tools are intentionally
-        // read-only" — ran Bash 20 times, including curl and `find /`.
-        // Everything the profile did not grant is denied by name.
-        //
-        // The native Task* tools are additionally scoped to the provider
-        // session, so their ledger dies at every rotation; seats use the
-        // console-owned task_list/task_create/task_update instead.
+        // A profile's tool list must be BINDING: `allowedTools` is only an
+        // auto-approval list, so everything the profile did not grant is
+        // denied by name. The native Task* tools are additionally scoped to
+        // the provider session, so their ledger dies at every rotation; agents
+        // use the console-owned task_list/task_create/task_update instead.
         disallowedTools: [...new Set([
-          // One transport. `send_handoff` is console-carried, so there is no
-          // second wire whose delivery semantics, ref handshake, or hand-
-          // written envelope can diverge from it.
+          // One transport: `send_handoff` is console-carried, so there is no
+          // second wire whose delivery semantics can diverge from it.
           "Agent", "Task", "SendMessage", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet",
           ...GOVERNED_BUILTIN_TOOLS.filter((name) => !profile.tools.includes(name)),
         ])],
         sandbox: { enabled: true, failIfUnavailable: profile.sandboxRequired, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: false,
           filesystem: { allowManagedReadPathsOnly: true, allowRead: latestSeat.worktreePath ? [seatRoot, workspaceRoot] : [workspaceRoot], allowWrite: [seatRoot] },
           network: sandboxNetwork(profile, this.#deps.config.infra.allowedDomains ?? []) },
-        // Seat identity rides the ENV, not the prompt: visible to process
-        // forensics and the test discriminator without costing prompt bytes
-        // or perturbing the cache-invariant system-prompt head above.
+        // Agent identity rides the ENV, not the prompt: visible to process
+        // forensics and the test discriminator without perturbing the
+        // cache-invariant system-prompt head above.
         env: { ...sdkEnv(),
           CONSOLE_AGENT_SESSION_ID: session.id,
           CONSOLE_AGENT_NAME: latestSeat.name,
@@ -1615,9 +1513,7 @@ export class AgentSessionService {
         ...(latestSeat.model ? { model: latestSeat.model } : {}),
         ...((profile.pluginPath && profile.source === "workspace") ? { plugins: [{ type: "local" as const, path: profile.pluginPath }] } : {}),
         // Always explicit: omitting the key lets the CLI fall back to the
-        // OPERATOR's personal skill listing, which was injected verbatim into
-        // all 14 db-live-1 sessions (~18.6K tokens of dataviz/keybindings noise
-        // in three.js seats) despite settingSources: [].
+        // OPERATOR's personal skill listing despite settingSources: [].
         skills: profile.skills ?? [],
         ...((profile.effort ?? this.#deps.config.infra.effort) ? { effort: (profile.effort ?? this.#deps.config.infra.effort) as SdkOptions["effort"] } : {}),
         ...(latestSeat.sdkSessionId ? { resume: latestSeat.sdkSessionId } : {}),
@@ -1660,12 +1556,10 @@ export class AgentSessionService {
   }
 
   /**
-   * One roster seat line. At up to 20 seats the roster header is advisory:
-   * render at most three scopes per seat; the full ownership list stays in the
-   * DB and the API. The capability tag is there so a coordinator assigns work
-   * a seat can actually do — db-live-1 assigned "play a round using arrow
-   * keys" to a seat with no keyboard primitive; nothing in the system could
-   * notice before the seat had spent twenty minutes discovering it.
+   * One roster agent line. The roster header is advisory: render at most
+   * three scopes per agent; the full ownership list stays in the DB and the
+   * API. The capability tag is there so a coordinator assigns work an agent
+   * can actually do.
    */
   #seatLine(p: AgentRow, workState?: string): string {
     const scopes = p.ownership.slice(0, 3).join(", ") + (p.ownership.length > 3 ? ` +${p.ownership.length - 3} more` : "");
@@ -1715,13 +1609,7 @@ export class AgentSessionService {
           } else if (event.kind === "reasoning-delta") {
             runtime.set("thinking");
             bus.broadcast({ type: "stream.reasoning", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { scope: { kind: "agent", agentSessionId: session.id }, speaker: seatName, turnId, text: event.text } });
-            // Reasoning was broadcast and never stored: `thinking_chars` is 0
-            // in both live databases, so every "why did it decide that"
-            // question in the post-run analyses had to be reverse-engineered
-            // from surface text. Off by default — it is more of a category the
-            // console already persists (tool inputs and results carry the same
-            // workspace content), but it is still more, and that should be the
-            // operator's call.
+            // Broadcast only — reasoning is not persisted.
           } else if (event.kind === "message") {
             if (turn) turn.lastNarration = event.text;
             this.#recordNarration(session, seatName, event.text, turnId);
@@ -1810,17 +1698,13 @@ export class AgentSessionService {
       for (const delivery of turn.deliveries) this.#patchDelivery(session, delivery, "acknowledged");
       for (const delivery of turn.deliveries) lane.redeliveryAttempts.delete(delivery.id);
     } else {
-      // A provider or transport failure is not consent to drop the work —
-      // cancelling unconditionally broke the documented "a message is never
-      // lost" guarantee. But a watchdog trip means the seat malfunctioned ON
-      // THIS INPUT and an operator abort is a deliberate stop; redelivering
-      // either just reproduces the failure. Those cancel, and the coordinator
-      // decides from the failure handoff (which now carries the seat's work).
+      // A watchdog trip means the agent malfunctioned ON THIS INPUT and an
+      // operator abort is a deliberate stop; redelivering either just
+      // reproduces the failure. Those cancel, and the coordinator decides
+      // from the failure handoff.
       const retryable = status === "error" && turn.watchdog.tripped === null;
-      // A transport failure says nothing about the delivery — the request never
-      // reached the model. Spending a redelivery slot on it means a seat can
-      // exhaust its retries on network weather and have its assignment
-      // CANCELLED, which is how db-live-2 lost turns it could have resumed.
+      // A transport failure says nothing about the delivery — the request
+      // never reached the model — so it does not spend a redelivery attempt.
       const transport = isTransportFailure(errorMessage ?? null);
       for (const delivery of turn.deliveries) {
         const attempts = (lane.redeliveryAttempts.get(delivery.id) ?? 0) + (transport ? 0 : 1);
@@ -1842,18 +1726,9 @@ export class AgentSessionService {
     lane.lastActiveAt = Date.now();
     if (status === "error" && repo.getAgentSession(session.id)?.lifecycle === "open") {
       const target = this.#escalationTarget(session, seatName);
-      // A dead turn must hand its successor real state.
-      //
-      // This used to be `#simpleHandoff` plus whatever narration happened to be
-      // buffered — 528 bytes in practice, because a seat that dies mid-tool-loop
-      // has no recent narration at all. db-live-2 represented NINE MINUTES of
-      // renderer's work to the coordinator with 45 characters of error text,
-      // and the coordinator had to reconstruct the state by inferring it from
-      // another seat's report.
-      //
-      // `#reconstructCheckpoint` already assembles what the console owns —
-      // ownership, task ledger, worktree diff, current assignment, last report
-      // — so the failure carries that, with the error and any salvaged
+      // A dead turn must hand its successor real state: `#reconstructCheckpoint`
+      // assembles what the console owns (ownership, task ledger, worktree diff,
+      // current assignment, last report), with the error and any salvaged
       // narration spliced on top.
       const salvaged = turn.lastNarration.trim();
       const reason = turn.watchdog.tripped ?? `Provider turn failed: ${errorMessage}`;
@@ -1945,13 +1820,8 @@ export class AgentSessionService {
 
   /**
    * Close the process (name and socket unregister); keep the resume handle.
-   *
-   * Runtime the seat still holds dies with the lane. A parked seat is not
-   * coming back imminently — for `idle` it has been quiet for
-   * `agentIdleReapMs`, and for `capacity` it was evicted to make room — so its
-   * dev servers and Chrome are pure leak. db-live-2 parked `check` with
-   * `node serve.mjs` still bound to :8173; the process outlived the run and
-   * the next run inherited it as a foreign app squatting the port it wanted.
+   * Runtime the agent still holds dies with the lane: a parked agent is not
+   * coming back imminently, so its dev servers and Chrome are pure leak.
    */
   #parkSeat(agentSessionId: string, seatName: string, lane: AgentLane, reason: string): void {
     lane.state = "parked";
@@ -1963,8 +1833,7 @@ export class AgentSessionService {
     void this.#deps.browsers?.closeAgent(`${agentSessionId}:${seatName}`).catch(() => undefined);
     const session = this.#deps.repo.getAgentSession(agentSessionId);
     if (session) {
-      // Name what was reaped. A silent kill turns "my server vanished" into
-      // the same six-minute forensic exercise the leak itself caused.
+      // Name what was reaped.
       const reaped = killed.length === 0 ? "" : `; reaped ${killed.length} process(es): ${killed.map((p) => `${p.processId}${p.pid === undefined ? "" : ` (pid ${p.pid})`}`).join(", ")}`;
       this.#deps.bus.append({ type: "agent_session.runtime.noted", userSessionId: session.userSessionId, agentSessionId,
         payload: { agentSessionId, agent: seatName, detail: `agent parked (${reason}); provider session retained${reaped}` } });
@@ -2015,14 +1884,9 @@ export class AgentSessionService {
   }
 
   /**
-   * Takes the LANE, not `lane.abort.signal`.
-   *
-   * Closing over the lane-wide signal meant a pending `ask_operator` could only
-   * be cut by killing the whole lane — and worse, `#parkSeat` nulls `lane.abort`
-   * WITHOUT aborting, so park, rotation and a watchdog interrupt each stranded
-   * the parked promise and left its row `pending` forever. That is the
-   * mechanical cause of db-live-2's orphan question, which is still unresolved
-   * in that database today. Each ask now mints its own controller.
+   * Takes the LANE, not `lane.abort.signal`: `#parkSeat` nulls `lane.abort`
+   * WITHOUT aborting, so a wait tied to the lane-wide signal would strand on
+   * park/rotation/watchdog. Each ask mints its own controller.
    */
   #buildParticipantMcp(sdk: ConsoleSdk, session: AgentSessionRow, seat: AgentRow, lane: AgentLane, granted: ReadonlySet<AgentToolName>): unknown {
     const user = this.#deps.repo.getUserSession(session.userSessionId);
@@ -2053,10 +1917,8 @@ export class AgentSessionService {
       }),
       abandonChildSession: (childAgentSessionId, reason) => this.abandonChildSession(session.id, seat.name, childAgentSessionId, reason),
     });
-    // alwaysLoad: the profile already decided this seat's tools. Deferring them
-    // behind ToolSearch made every seat spend a round-trip rediscovering what
-    // the console had granted it — 21 lookups in db-live-1, and a seat that
-    // wrongly concluded it lacked a capability it had.
+    // alwaysLoad: the profile already decided this agent's tools; deferring
+    // them behind ToolSearch costs a round-trip rediscovering what was granted.
     return sdk.createSdkMcpServer({ name: "console_agent", version: "2", tools, alwaysLoad: true });
   }
 
@@ -2074,9 +1936,8 @@ export class AgentSessionService {
   }
 
   #composePrompt(session: AgentSessionRow, seat: AgentRow, rows: MessageRow[]): string {
-    // Seat worktree state on every line: the coordinator otherwise has no
-    // way to see in-progress work and infers absence from `ls` on the shared
-    // workspace — which cost db-live-1 ten minutes and three generations.
+    // Agent worktree state on every line: the coordinator otherwise has no
+    // way to see in-progress work.
     const roster = this.#deps.repo.listAgents(session.id).map((p) => this.#seatLine(p, this.#seatWorkState(p))).join("; ");
     const messages = rows.map((row) => {
       const id = (row.payload?.handoff as { id?: string } | undefined)?.id;
@@ -2085,14 +1946,12 @@ export class AgentSessionService {
       const expanded = handoff.core.risk === "high" || handoff.core.status === "needs_verification" || handoff.core.requestExpandedContext;
       this.#deps.bus.append({ type: "handoff.consumed", userSessionId: session.userSessionId, agentSessionId: session.id,
         payload: { handoffId: id, agent: seat.name, mode: expanded ? "expanded" : "compact" } });
-      // Rendered in SEND shape, not as a top-level `CORE:` blob. The flat
-      // rendering was the seat's only worked example of a handoff, so it
-      // taught a shape `send_handoff` then rejected.
+      // Rendered in SEND shape, not as a top-level `CORE:` blob — the flat
+      // rendering is the agent's only worked example of a handoff, and it must
+      // not teach a shape `send_handoff` rejects.
       return `[${row.speakerName} → ${row.toName} | ${row.createdAt}] Handoff ${id}\n${JSON.stringify({ handoff: { core: handoff.core, extension: expanded ? handoff.extension : undefined } }, null, 2)}${expanded ? "" : `\nExtension ${handoff.extension.kind} is available with read_handoff.`}`;
     }).join("\n\n");
-    // The operator's answers to THIS seat's own questions. This delivery does
-    // not exist in the pre-release console at all: a deferred ask returned
-    // "their answer will reach you" and then nothing ever did. Rendered before
+    // The operator's answers to THIS agent's own questions. Rendered before
     // the handoffs because it outranks them — an operator decision is not a
     // claim to be verified.
     const answered = this.#deps.interactions.listAnsweredUnflushed(session.id, seat.name);
@@ -2100,16 +1959,12 @@ export class AgentSessionService {
     if (decisions.length > 0) this.#deps.interactions.markFlushed(answered.map((row) => row.id));
     const answersBlock = decisions.length === 0 ? ""
       : `## The operator answered your question(s)\nAuthoritative — act on these and do not ask again.\n${decisions.map((line) => `- ${line}`).join("\n")}\n\n`;
-    // Decisions made since this seat's last delivery — including ones it never
-    // asked for. A LIVE seat may not respawn for hours, so the system prompt's
-    // digest (written at spawn) is stale for exactly the seats that are busy.
-    //
-    // The DELTA only, never the whole list: a long session would otherwise
-    // re-send an ever-growing block on every delivery. And omitted entirely
-    // when empty, so the common-path prompt is byte-identical to what it was
-    // before this feature existed — asserted in decision-ledger.e2e.test.ts,
-    // because a block that renders empty would change every prompt in every
-    // session and silently destroy prompt caching.
+    // Decisions made since this agent's last delivery — including ones it
+    // never asked for; a LIVE agent may not respawn for hours, so the system
+    // prompt's spawn-time digest is stale for exactly the agents that are
+    // busy. The DELTA only, never the whole list, and omitted entirely when
+    // empty: a block that renders empty would change every prompt and destroy
+    // prompt caching (asserted in decision-ledger.e2e.test.ts).
     const fresh = this.#deps.decisions.since(session.userSessionId, seat.lastDecisionAt);
     const unseen = fresh.filter((row) => row.askedBy !== seat.name);
     if (fresh.length > 0) {
@@ -2122,14 +1977,10 @@ export class AgentSessionService {
 
   /**
    * The successor's inheritance when the model could not produce a checkpoint.
-   *
-   * Built from facts the console owns — the task ledger, the seat's declared
+   * Built from facts the console owns — the task ledger, the agent's declared
    * ownership, its worktree branch and diff, the assignment it is working, and
-   * its own last report. It therefore always exists and is always true, where
-   * the old fallback reused whatever message happened to be latest and
-   * degraded a little further each generation (db-live-1's coordinator
-   * inherited another seat's report, then a junk probe, then 395 bytes of
-   * "Turn failed"). A failed model checkpoint should cost fidelity, not truth.
+   * its own last report — so it always exists and is always true. A failed
+   * model checkpoint costs fidelity, not truth.
    */
   #reconstructCheckpoint(session: AgentSessionRow, seat: AgentRow): HandoffDraft {
     const { repo } = this.#deps;
@@ -2141,8 +1992,7 @@ export class AgentSessionService {
 
     if (seat.ownership.length > 0) facts.push(`Owns: ${seat.ownership.join(", ")}.`);
     // Before the task ledger, deliberately: an operator decision outranks
-    // model-maintained state, and rotation is exactly where db-live-1's
-    // "DODGE" would have died even if it HAD reached the seats.
+    // model-maintained state.
     const decisions = this.#deps.decisions.lines(session.userSessionId, { max: 12 });
     if (decisions.length > 0) facts.push(`Operator decisions (Console-recorded, authoritative — do not contradict):\n${decisions.map((line) => `- ${line}`).join("\n")}`);
     const taskLines = this.#deps.tasks?.linesForAgentSession(session.id) ?? [];
@@ -2183,18 +2033,10 @@ export class AgentSessionService {
     };
   }
 
-  /** One-line, always-true summary of a seat's unmerged work. */
   /**
-   * What this seat is doing right now, in one clause, from facts the console
-   * owns. Rendered for EVERY seat — the worktree diff is the richest variant,
+   * What this agent is doing right now, in one clause, from facts the console
+   * owns. Rendered for EVERY agent — the worktree diff is the richest variant,
    * not the only one.
-   *
-   * db-live-2's workspace was not a git repo, so no seat had a worktree and the
-   * roster degraded to name/profile/owns. Blind to each other, `renderer` built
-   * a private duplicate of the dev server `page` had already written (~16 min),
-   * then re-ran `check`'s entire verification job (~7 min of a $2.62 turn whose
-   * real deliverable was a one-line edit), and the two of them independently
-   * diagnosed the same CDN outage without ever telling each other.
    */
   #seatWorkState(seat: AgentRow): string {
     const facts: string[] = [];
@@ -2210,10 +2052,9 @@ export class AgentSessionService {
       } catch { /* a handoff we cannot read tells the roster nothing */ }
     }
     if (seat.worktreePath && seat.worktreeBranch && seat.worktreeBaseCommit && this.#deps.worktrees) {
-      // Memoized: `#composePrompt` renders this for EVERY seat on EVERY
-      // delivery, which at the 20-seat cap would be 20 git subprocesses per
-      // message. The diff only moves when the seat writes; a 15s-stale count
-      // in a prompt hint is invisible, 60 spawned `git diff`s are not.
+      // Memoized: `#composePrompt` renders this for EVERY agent on EVERY
+      // delivery — at the agent cap that is one git subprocess per agent per
+      // message. A 15s-stale count in a prompt hint is invisible.
       const key = `${seat.worktreePath}:${seat.worktreeBranch}`;
       const cached = this.#workStateDiffCache.get(key);
       if (cached && Date.now() - cached.at < 15_000) {
@@ -2237,11 +2078,9 @@ export class AgentSessionService {
 
   /**
    * A Console-authored notice draft. Every draft minted here is marked
-   * `consoleSynthesized`, because models never write through this path — and
-   * `#statusOf` needs to tell a report the COORDINATOR sent from a notice the
-   * Console posted in its name. Without the marker, the discharge and
-   * withheld-final-cleared notices flipped a session to `reported`, which is
-   * precisely the confusion that status was added to remove.
+   * `consoleSynthesized`: models never write through this path, and
+   * `#statusOf` must tell a report the COORDINATOR sent from a notice the
+   * Console posted in its name.
    */
   #simpleHandoff(action: string, status: HandoffDraft["core"]["status"], summary: string, nextAction: string | null): HandoffDraft {
     return { core: { schemaVersion: 1, taskId: null, status, risk: status === "failed" || status === "blocked" ? "high" : "medium",
@@ -2251,15 +2090,10 @@ export class AgentSessionService {
 
   /**
    * The checkpoint-and-rotate body, run by #maybeRotate under its gate after
-   * the seat's process has closed. Returns the successor participant row.
-   *
+   * the agent's process has closed. Returns the successor participant row.
    * One ungated model attempt over an always-available floor: the Console's
-   * reconstruction (ownership, ledger, worktree diff, current assignment) is
-   * true by construction, so a clean model checkpoint upgrades it and a bad
-   * or failed one costs nothing. The four-layer gate/retry/threshold
-   * arbitration that used to live here defended against a failure mode
-   * (db-live-1's 13/13 checkpoint 400s) that was a schema bug, fixed and
-   * pinned by assertProviderToolSchema — and it never fired live.
+   * reconstruction is true by construction, so a clean model checkpoint
+   * upgrades it and a bad or failed one costs nothing.
    */
   async #rotateNow(session: AgentSessionRow, seat: AgentRow, sdk: ConsoleSdk, reason: RotationReason): Promise<AgentRow> {
     const config = this.#deps.config;
@@ -2291,7 +2125,7 @@ export class AgentSessionService {
     return fresh;
   }
 
-  /** One tool-free checkpoint query against the seat's current context. */
+  /** One tool-free checkpoint query against the agent's current context. */
   async #checkpointQuery(session: AgentSessionRow, seat: AgentRow, sdk: ConsoleSdk): Promise<{ draft: HandoffDraft | null; failure: string | null }> {
     const config = this.#deps.config;
     let draft: HandoffDraft | null = null;
@@ -2320,12 +2154,10 @@ export class AgentSessionService {
       sessionStoreFlush: "eager", resume: seat.sdkSessionId, ...(seat.model ? { model: seat.model } : {}),
       ...((profile.effort ?? config?.infra.effort) ? { effort: (profile.effort ?? config?.infra.effort) as SdkOptions["effort"] } : {}),
     } });
-    // A separate process, but `resume: seat.sdkSessionId` above means it is the
-    // SAME provider session — so its cumulative totals continue the seat's, and
-    // its baseline is the seat's. Starting from zero here would bill the whole
-    // session-to-date to one checkpoint pseudo-turn. (This never fired in
-    // db-live-1 only because all 13 checkpoints died on a provider 400 before
-    // any result carried usage.)
+    // A separate process, but `resume: seat.sdkSessionId` means it is the SAME
+    // provider session — its cumulative totals continue the agent's, and its
+    // baseline is the agent's. Starting from zero here would bill the whole
+    // session-to-date to one checkpoint pseudo-turn.
     const cumulative = { costUsd: seat.cumulativeCostUsd, apiDurationMs: seat.cumulativeApiDurationMs };
     try {
       for await (const raw of query) for (const event of mapSdkMessage(raw)) {
@@ -2341,20 +2173,13 @@ export class AgentSessionService {
   }
 
   /**
-   * Everything the operator has decided, injected into the VOLATILE TAIL of a
-   * seat's system prompt.
-   *
-   * Placement is load-bearing. The append is ordered deliberately (`#spawnSeat`
-   * says so): instructions, capabilities and messaging brief are byte-identical
-   * across generations so they cache, and the volatile checkpoint goes last.
-   * Decisions sit between SESSION_PROTOCOL and the checkpoint — after the
-   * invariant head, so nothing that used to cache stops caching, and BEFORE the
-   * checkpoint, because an operator decision outranks a model-authored summary
-   * of state.
-   *
+   * Everything the operator has decided, injected into the VOLATILE TAIL of an
+   * agent's system prompt. Placement is load-bearing: AFTER the cache-invariant
+   * head (instructions, capabilities, messaging brief — byte-identical across
+   * generations) so it cannot break prompt caching, and BEFORE the checkpoint,
+   * because an operator decision outranks a model-authored summary of state.
    * Cache-safe because the system prompt is assembled only at spawn, never per
-   * turn. A new decision therefore invalidates nothing that was not already
-   * being rebuilt.
+   * turn.
    */
   #decisionContext(session: AgentSessionRow): string {
     const digest = this.#deps.decisions.digest(session.userSessionId);
@@ -2379,26 +2204,17 @@ export class AgentSessionService {
   /**
    * `cumulativeCostUsd`/`cumulativeApiDurationMs` restate the provider
    * session's running total on every result, so the per-turn figure is the
-   * delta against what this lane last saw. Recording them raw overstated the
-   * db-live-1 ledger by 25% and produced an api-duration 20x the wall clock.
+   * delta against what this lane last saw.
    */
   #recordUsage(session: AgentSessionRow, seat: AgentRow, cumulative: { costUsd: number; apiDurationMs: number }, turnId: string, usageEvent: { inputTokens?: number; uncachedInputTokens?: number; cacheCreationInputTokens?: number; cacheReadInputTokens?: number; outputTokens?: number; cumulativeCostUsd?: number; modelId?: string; cumulativeApiDurationMs?: number; sdkDurationMs?: number; stopReason?: string }, status: "completed" | "error" | "aborted" = "completed", durationMs?: number, trigger = "delivery"): void {
-    // Every settled turn gets a row — with ONE exception. A zero-token `error`
-    // is the MOST interesting row in the ledger (db-live-2's two DNS-dead
-    // orchestrator turns consumed 9m11s and were invisible to billing), so
-    // errors and aborts record unconditionally, like the runner always has.
-    // A zero-token COMPLETED result, by contrast, is a CLI-level artifact
-    // frame, not a turn that happened — recording those would inflate turn
-    // counts with phantoms.
+    // Errors and aborts record unconditionally — a zero-token error is still a
+    // real turn. A zero-token COMPLETED result is a CLI-level artifact frame,
+    // not a turn that happened; recording those would inflate turn counts.
     const empty = (usageEvent.inputTokens ?? 0) === 0 && (usageEvent.outputTokens ?? 0) === 0;
     if (empty && status === "completed") return;
-    // The SDK restates the provider session's running total on every result,
-    // so a turn's figure is the delta against what we last saw. If the total
-    // came back BELOW the baseline the counter restarted underneath us (a
-    // fresh session on the same seat) — take the raw value rather than
-    // clamping a real turn to zero. That makes this correct under either SDK
-    // behaviour, which matters because the documented one ("resumed sessions
-    // start fresh") is contradicted by the db-live-1 data.
+    // If the total came back BELOW the baseline the counter restarted
+    // underneath us (a fresh session on the same agent) — take the raw value
+    // rather than clamping a real turn to zero.
     const rebased = usageEvent.cumulativeCostUsd !== undefined && usageEvent.cumulativeCostUsd < cumulative.costUsd;
     if (rebased) { cumulative.costUsd = 0; cumulative.apiDurationMs = 0; }
     const costUsd = usageEvent.cumulativeCostUsd === undefined ? null
@@ -2407,7 +2223,7 @@ export class AgentSessionService {
       : Math.max(0, usageEvent.cumulativeApiDurationMs - cumulative.apiDurationMs);
     if (usageEvent.cumulativeCostUsd !== undefined) cumulative.costUsd = usageEvent.cumulativeCostUsd;
     if (usageEvent.cumulativeApiDurationMs !== undefined) cumulative.apiDurationMs = usageEvent.cumulativeApiDurationMs;
-    // Persist the new baseline with the seat, so the next process to resume
+    // Persist the new baseline with the agent, so the next process to resume
     // this provider session inherits it instead of restarting from zero.
     this.#deps.repo.patchAgent(session.id, seat.name, {
       cumulativeCostUsd: cumulative.costUsd, cumulativeApiDurationMs: cumulative.apiDurationMs,
@@ -2432,9 +2248,6 @@ export class AgentSessionService {
     // `deliveredAt: now` on the acknowledged path is a FLOOR, not an
     // overwrite: repo.patchDelivery coalesces it against whatever is already
     // stored, so an ack only fills the field in when delivery never stamped it.
-    // Reading it off the in-memory `delivery` here is what produced db-live-2's
-    // fabricated 400-second latencies — those objects are snapshots taken
-    // before the `delivered` patch.
     this.#deps.repo.patchDelivery(delivery.id, { status, ...(status === "delivered" ? { deliveredAt: now } : {}), ...(status === "acknowledged" ? { acknowledgedAt: now, deliveredAt: now } : {}) });
     const message = this.#deps.repo.getMessageById(delivery.messageId);
     this.#deps.bus.append({ type: "agent_session.delivery.updated", userSessionId: session.userSessionId, agentSessionId: session.id,
@@ -2460,13 +2273,10 @@ export class AgentSessionService {
 
   /**
    * An AgentSession that accepted an assignment owes the operator a reply. The
-   * coordinator is asked to send it, but the obligation is the CONSOLE's — in
-   * db-live-1 the session simply went idle with `owedToOrchestrator: false`
-   * hardcoded, and the operator's last information was 35 minutes stale while
-   * a finished review sat unreported in the journal.
-   *
+   * coordinator is asked to send it, but the obligation is the CONSOLE's.
    * Discharged from whatever evidence exists: the coordinator's last report,
-   * or failing that every seat's last word. An incomplete report beats silence.
+   * or failing that every agent's last word. An incomplete report beats
+   * silence.
    */
   #dischargeOperatorDebt(session: AgentSessionRow): void {
     if (this.#operatorDebtSettled.has(session.id)) return;
@@ -2497,14 +2307,8 @@ export class AgentSessionService {
     } catch (error) { this.#recordHostFailure(session.id, error); }
   }
   /**
-   * `reported` is the state a finished session was missing. Without it, a
-   * coordinator that had delivered its final and a seat that had crashed both
-   * rendered as the same grey `idle` dot, and the operator could not tell a
-   * completed run from a dead one.
-   *
-   * A turn parked in `ask_operator` does NOT count as working: the seat is
-   * waiting on a human, which is the opposite of busy, and treating it as busy
-   * is what kept db-live-2's spinner turning after the run was over.
+   * `reported` distinguishes a completed run from a dead one. A turn parked in
+   * `ask_operator` does NOT count as working: the agent is waiting on a human.
    */
   statusOf(row: AgentSessionRow): AgentSessionStatus { return this.#statusOf(row); }
 
@@ -2517,7 +2321,7 @@ export class AgentSessionService {
     const reported = this.#deps.repo.latestHandoff({
       userSessionId: row.userSessionId, agentSessionId: row.id,
       recipient: MAIN_RECIPIENT, sender: this.#completionSeat(row, "finalFrom"), excludeCheckpoints: true,
-      // Only what the reporting seat ITSELF sent counts as having reported.
+      // Only what the reporting agent ITSELF sent counts as having reported.
       excludeSynthetic: true,
     });
     if (reported && this.#deps.repo.listActiveDeliveries(row.id).length === 0) {

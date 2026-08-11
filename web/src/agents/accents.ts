@@ -1,7 +1,6 @@
 /**
- * Seat accents, ported from v1's session-parts (buildAccents/accentOf):
- * seating-order accent assignment, status-token vocabulary only — no new
- * hues. Deterministic because seating order is server data (agents[]).
+ * Agent accents: roster-order accent assignment, status-token vocabulary only
+ * — no new hues. Deterministic because roster order is server data (agents[]).
  */
 import type { Speaker } from "@agentique-console/shared";
 
@@ -16,7 +15,7 @@ const ACCENTS = [
 
 export type AccentMap = ReadonlyMap<string, string>;
 
-/** Seating order = accent order; wraps past six seats. */
+/** Roster order = accent order; wraps past six agents. */
 export function buildAccents(names: readonly string[]): AccentMap {
   return new Map(
     names.map((name, index) => [

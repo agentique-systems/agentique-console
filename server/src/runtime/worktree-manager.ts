@@ -1,7 +1,7 @@
 /**
- * Console-owned git worktrees: isolated working copies for attempt and seat
- * execution, living under the Console data dir — never inside the workspace.
- * Every path component is server-generated (seat names are user-influenced
+ * Console-owned git worktrees: isolated working copies for agent execution,
+ * living under the Console data dir — never inside the workspace.
+ * Every path component is server-generated (agent names are user-influenced
  * and may contain ".."; they must never reach the filesystem). All git
  * invocations are execFileSync with server-built argv — no shell. Commits and
  * merges carry an explicit identity so machines without a git config work.
@@ -24,8 +24,8 @@ const GIT_TIMEOUT_MS = 60_000;
 /**
  * The sandbox materializes empty placeholder files for host dotfiles it masks
  * (`.bashrc`, `.idea`, `.claude/settings.json`, …). An unscoped `git add -A`
- * swept 21 of them into the operator's repo in the db-live-1 run, so seat
- * commits exclude them unless the seat's declared ownership names them.
+ * would sweep them into the operator's repo, so agent commits exclude them
+ * unless the agent's declared ownership names them.
  */
 const SANDBOX_STUB_EXCLUDES = [
   ":(exclude,glob).claude/**", ":(exclude).claude",
@@ -76,8 +76,8 @@ export class WorktreeManager {
    *
    * `--is-inside-work-tree` is true for any subdirectory of any repo, so on its
    * own it would happily report `true` for a workspace nested in a monorepo.
-   * The seat worktrees would then branch off the PARENT repo's HEAD, and
-   * `#onSeatWorktreePost` would merge a seat's work straight into the parent —
+   * The agent worktrees would then branch off the PARENT repo's HEAD, and
+   * `#onSeatWorktreePost` would merge an agent's work straight into the parent —
    * a repository the operator never pointed the Console at.
    *
    * Requiring the toplevel to BE the workspace root is what makes isolation a
@@ -109,13 +109,7 @@ export class WorktreeManager {
   }
 
   /**
-   * Turn a plain directory into a repository so seat isolation can engage.
-   *
-   * db-live-2's workspace was not a repo, so `#ensureSeatWorktree` never fired:
-   * all four seats wrote into one directory, `page` read files out of the
-   * PREVIOUS run's workspace (the only `reference_warnings` hit in either
-   * database), and nothing could be rolled back or landed atomically.
-   *
+   * Turn a plain directory into a repository so agent isolation can engage.
    * Every refusal below is a case where initialising would be worse than doing
    * nothing. Returns what happened so the caller can say so out loud.
    */
@@ -123,7 +117,7 @@ export class WorktreeManager {
     { initialized: boolean; reason: string } {
     if (this.isGitRepo(workspaceRoot)) return { initialized: false, reason: "already a git repository" };
     // The containment hazard. Initialising here would leave a repo inside a
-    // repo; NOT initialising leaves seat work merging into somebody else's.
+    // repo; NOT initialising leaves agent work merging into somebody else's.
     // Neither is acceptable, so isolation stays off and says why.
     if (this.isInsideOtherRepo(workspaceRoot)) {
       return { initialized: false, reason: "inside another git repository; seat isolation is disabled to avoid committing into it" };
@@ -187,10 +181,10 @@ export class WorktreeManager {
   }
 
   /**
-   * Stage and commit the seat's work; null when nothing changed. Sandbox
+   * Stage and commit the agent's work; null when nothing changed. Sandbox
    * placeholder dotfiles are excluded unless `owns` explicitly names a path
-   * under them — a seat that legitimately owns `.claude/settings.json` still
-   * gets it committed, but no seat leaks the harness's scaffolding.
+   * under them — an agent that legitimately owns `.claude/settings.json` still
+   * gets it committed, but no agent leaks the harness's scaffolding.
    */
   commitAll(worktreePath: string, message: string, owns: string[] = []): string | null {
     const claimsExcluded = owns.some((scope) => SANDBOX_STUB_EXCLUDES.some((rule) => {
@@ -209,8 +203,8 @@ export class WorktreeManager {
   /**
    * Counts only, one `git diff --numstat` subprocess. The prompt hot paths
    * (roster work-state, checkpoint reconstruction) need the numbers, not the
-   * patch — `captureDiff` materializes the full `--binary` patch, which at 20
-   * seats per delivery is real money on every seat wake.
+   * patch — `captureDiff` materializes the full `--binary` patch, which is
+   * real cost on every agent wake.
    */
   captureDiffStats(workspaceRoot: string, baseCommit: string, branch: string): { filesChanged: number; insertions: number; deletions: number } {
     const numstat = this.#git(workspaceRoot, ["diff", "--numstat", `${baseCommit}..${branch}`]).trim();

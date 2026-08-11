@@ -3,8 +3,7 @@
  * (task_create/task_update) and the journal-driven auto-transitions.
  * Keyed (sdkSessionId, sdkTaskId) where the "session id" is the SYNTHETIC
  * per-agent-session list id — never a provider session id, which dies at
- * every rotation and is how db-live-1's coordinator watched its own ledger
- * vanish.
+ * every rotation.
  */
 import type { Task, TaskDependency, WorkspaceTasksResponse } from "@agentique-console/shared";
 import type { TaskDependencyRow, TaskRow, TaskStore } from "../db/stores/task-store.ts";
@@ -111,10 +110,8 @@ export class TaskService {
       description: input.description ?? "",
       activeForm: input.activeForm ?? null,
       status: "pending",
-      // NOT the writer. Defaulting to whoever called the tool meant all four
-      // orchestrator-side rows in db-live-2 said owner="orchestrator" — which
-      // is precisely the wrong information for the roster, for the final
-      // caveats, and for the operator reading the run summary.
+      // NOT the writer: the owner is who will DO the work, which is what the
+      // roster, the final caveats and the run summary read.
       owner: input.owner ?? null,
       blocks: [],
       blockedBy: [],

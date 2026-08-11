@@ -1,19 +1,6 @@
 /**
- * `ask_operator` — a seat reaching the human directly.
- *
- * The thing this makes possible was structurally impossible before. In
- * db-live-1 `renderer` diagnosed the defect that made the whole deliverable
- * non-functional and explicitly asked to escalate it:
- *
- *   "the fix is to vendor three.module.js into the repo — but with no network
- *    nobody in this session can download it… say the word and I'll switch
- *    src/game.js to a local path"
- *
- * Its coordinator replied "Leave game.js as-is… do not report it as a bug",
- * and the operator never learned the option existed. The specialist had no
- * other route: `request_decision` was coordinator-only, seats had no
- * `canUseTool`, and SESSION_PROTOCOL told them "never assume the operator sees
- * your words". Three model hops, each able to drop it, and one did.
+ * `ask_operator` — an agent reaching the human directly, with no model hop
+ * between that could judge, rewrite, or drop the question.
  */
 import { describe, expect, it } from "vitest";
 import { initMessage, successMessage } from "../sdk/fake.ts";
@@ -61,8 +48,8 @@ async function session() {
 describe("ask_operator", () => {
   it("is registered for a SPECIALIST, not just the coordinator", async () => {
     const { h } = await session();
-    // The fake flattens every seat's tools into one list; both seats' copies
-    // must be there. Before this release only the coordinator had any.
+    // The fake flattens every agent's tools into one list; both agents' copies
+    // must be there.
     const asks = h.fake.captured.tools.filter((tool) => tool.name === "ask_operator");
     expect(asks.length).toBeGreaterThanOrEqual(1);
     expect(h.fake.captured.tools.some((tool) => tool.name === "request_decision")).toBe(false);
@@ -76,8 +63,8 @@ describe("ask_operator", () => {
     const call = tool.handler(ASK, {});
     await asked;
 
-    // The card is attributed to the seat, carries its recommendation, and is
-    // blocking — all three were unavailable on the old blocking path.
+    // The card is attributed to the agent, carries its recommendation, and is
+    // blocking.
     const row = h.db.select().from(interactionRows).all()[0]!;
     expect(row.agentSessionId).toBe(agentSessionId);
     expect(row.participant).toBe("coordinator");
@@ -109,11 +96,11 @@ describe("ask_operator", () => {
     expect(again.deduped).toBe(true);
     expect(h.db.select().from(interactionRows).all()).toHaveLength(1);
     // Crucially it is NOT an error result: ten of those in a row trip
-    // WATCHDOG_ERROR_STREAK and kill the seat's turn.
+    // WATCHDOG_ERROR_STREAK and kill the agent's turn.
     expect(again.resolved).toBeUndefined();
   });
 
-  it("a deferred ask returns immediately and does not park the seat", async () => {
+  it("a deferred ask returns immediately and does not park the agent", async () => {
     const { h } = await session();
     const tool = h.fake.captured.tools.find((t) => t.name === "ask_operator")!;
     const result = parse(await tool.handler({ ...ASK, urgency: "deferred" }, {}));
@@ -122,7 +109,7 @@ describe("ask_operator", () => {
     expect(result.note).toMatch(/keep working; do not poll/);
   });
 
-  it("hands a deferred answer to the asking seat in its next prompt", async () => {
+  it("hands a deferred answer to the asking agent in its next prompt", async () => {
     const { h, userSessionId, agentSessionId } = await session();
     const tool = h.fake.captured.tools.find((t) => t.name === "ask_operator")!;
     const result = parse(await tool.handler({ ...ASK, urgency: "deferred" }, {}));
@@ -133,11 +120,9 @@ describe("ask_operator", () => {
       answers: { [ASK.question]: ["Hold for r160"] },
     });
 
-    // The next delivery to that seat must carry the answer. Before this
-    // release a deferred ask returned "their answer will be handed to you at
-    // your next delivery" and then nothing ever was — the queue was an
-    // in-memory map flushed only into MAIN's wake text, so the seat that
-    // actually asked was never told.
+    // The next delivery to that agent must carry the answer — the promise a
+    // deferred ask makes ("their answer will be handed to you at your next
+    // delivery") is only true if this path exists.
     h.host.post({
       agentSessionId,
       speaker: { kind: "orchestrator", name: "main" },
@@ -156,7 +141,7 @@ describe("ask_operator", () => {
     expect(prompt).toContain("Hold for r160");
     expect(prompt).toMatch(/Authoritative — act on these and do not ask again/);
 
-    // Flushed exactly once: the seat has been told, so the next prompt is clean.
+    // Flushed exactly once: the agent has been told, so the next prompt is clean.
     expect(h.interactions.listAnsweredUnflushed(agentSessionId, "coordinator")).toHaveLength(0);
   });
 
@@ -171,7 +156,7 @@ describe("ask_operator", () => {
     h.interactions.detach(row.id, "the operator stepped away");
 
     const settled = await call;
-    // Not `isError`. The operator's silence is not the seat's mistake, and
+    // Not `isError`. The operator's silence is not the agent's mistake, and
     // WATCHDOG_ERROR_STREAK (10) does not distinguish between the two.
     expect(settled.isError).not.toBe(true);
     const result = parse(settled);

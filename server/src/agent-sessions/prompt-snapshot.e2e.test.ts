@@ -1,9 +1,7 @@
 /**
- * Pins the hub seats' system-prompt append byte-for-byte. The topology
- * refactor moves these strings from host literals into the hub contract's
- * prompt pack; prompt caching and operator familiarity both require that the
- * move changes NOTHING. Recorded against the pre-contract code — a diff in
- * this snapshot is a regression, not an update to accept.
+ * Pins the hub agents' system-prompt append byte-for-byte. Prompt caching and
+ * operator familiarity both require these strings stable — a diff in this
+ * snapshot is a regression, not an update to accept.
  */
 import { describe, expect, it } from "vitest";
 import { initMessage, sendHandoffUse, successMessage } from "../sdk/fake.ts";

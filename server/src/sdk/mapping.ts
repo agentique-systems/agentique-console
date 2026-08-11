@@ -1,11 +1,11 @@
 /**
  * Pure SDK-message → TurnEvent mapper (port of agentique-core's mapping.ts,
  * cut to what v2 consumes). One SDK message maps to zero or more events; the
- * consumer decides persistence. Subagent-parented blocks (A4, with
+ * consumer decides persistence. Subagent-parented blocks (with
  * forwardSubagentText on) are TAGGED with their parentCallId rather than
  * dropped: the runner routes a bound coordinator's traffic into its agent
  * session's lane and drops the rest; the specialist consumer skips them all,
- * so seat transcripts still show the top-level thread only.
+ * so agent transcripts still show the top-level thread only.
  */
 import type { SdkMessage } from "./types.ts";
 import { INLINE_JSON_CAP_BYTES as JSON_CAP_BYTES } from "../events/bus.ts";
@@ -17,10 +17,9 @@ export type TurnEvent =
   | { kind: "message"; text: string; parentCallId?: string }
   /**
    * A provider retry, with its numbers intact. The console budgets on wall
-   * clock rather than waiting for the CLI's own attempt count to run out —
-   * db-live-2's observed schedule stopped growing after attempt 7, so attempts
-   * 7-10 were ~34s each and bought nothing. `detail` restates the same fact as
-   * the accompanying notice; consumers persist THIS one.
+   * clock rather than waiting for the CLI's own attempt count to run out.
+   * `detail` restates the same fact as the accompanying notice; consumers
+   * persist THIS one.
    */
   | { kind: "retry"; classification: "api_error" | "rate_limited"; attempt?: number; maxRetries?: number; delayMs: number; status?: number; detail: string }
   | {
@@ -86,7 +85,7 @@ export function mapSdkMessage(message: SdkMessage): TurnEvent[] {
       if (message.subtype === "session_state_changed") {
         return message.state === "idle" ? [{ kind: "turn-idle" }] : [];
       }
-      // A5: background-task lifecycle. Progress (with its ~30s AI summary
+      // Background-task lifecycle. Progress (with its ~30s AI summary
       // when enabled) is liveness; failures become persistent rows.
       if (message.subtype === "task_progress") {
         const summary = stringOf(message.summary);
@@ -261,7 +260,7 @@ function usageFields(message: SdkMessage): { inputTokens?: number; uncachedInput
 /**
  * `total_cost_usd` and `duration_api_ms` are CUMULATIVE per provider session —
  * each result restates the running total. The names carry that so consumers
- * are forced to delta rather than sum (summing overstated db-live-1 by 25%).
+ * are forced to delta rather than sum.
  */
 function resultTelemetry(message: SdkMessage): { modelId?: string; cumulativeApiDurationMs?: number; sdkDurationMs?: number; stopReason?: string } {
   const modelId = message.modelUsage ? Object.entries(message.modelUsage).sort((a, b) => (b[1].outputTokens ?? 0) - (a[1].outputTokens ?? 0))[0]?.[0] : message.model;
@@ -277,8 +276,8 @@ function tagged(message: SdkMessage, events: TurnEvent[]): TurnEvent[] {
 
 /**
  * System messages that carry no content but say what the provider is doing.
- * v1 called these notices; without them a turn that spends minutes in retry
- * backoff looks identical to a hung one.
+ * Without them a turn that spends minutes in retry backoff looks identical to
+ * a hung one.
  */
 function systemNotice(message: SdkMessage): TurnEvent[] {
   switch (message.subtype) {
@@ -303,10 +302,8 @@ function systemNotice(message: SdkMessage): TurnEvent[] {
         delay === undefined ? undefined : `in ${formatSeconds(delay / 1000)}`,
       ].filter((part): part is string => part !== undefined);
       const detail = parts.join(" · ");
-      // The STRUCTURE as well as the prose. Throwing the numbers away into a
-      // string is why nothing could act on a retry storm: db-live-2 spent
-      // 18m14s — 55% of the run — inside three bursts that each exhausted
-      // 10/10 attempts, and the console had no way to notice or stop it.
+      // The STRUCTURE as well as the prose: the numbers must survive so the
+      // console can act on a retry storm, not just narrate it.
       return [
         { kind: "notice", text: detail },
         {

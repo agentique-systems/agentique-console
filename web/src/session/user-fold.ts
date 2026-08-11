@@ -44,7 +44,7 @@ export interface QuestionItem {
   readonly type: "question";
   readonly interactionId: string;
   readonly questions: readonly InteractionQuestion[];
-  /** The asking seat; absent = the main lane. */
+  /** The asking agent; absent = the main lane. */
   readonly askedBy?: string;
   /** The card accepts a typed answer alongside (or instead of) the options. */
   readonly allowFreeText?: boolean;
@@ -328,16 +328,10 @@ export function foldUserItems(events: readonly ConsoleEvent[]): UserItem[] {
 }
 
 /**
- * Busy = an unsettled turn is in flight, or the last settle left jobs queued.
- * Drives the header spinner + interrupt affordance.
- */
-/**
- * What the session is actually doing.
- *
- * `busy` alone was the db-live-2 lie: `AskUserQuestion` parks its turn forever,
- * so an open turn meant busy meant a spinner — and "working", "waiting on you",
- * and "finished but nobody said so" were the same pixels. `blocked` separates
- * the middle case, which is the one the operator can act on.
+ * What the session is actually doing. `busy` alone is not enough:
+ * `AskUserQuestion` parks its turn, and "waiting on you" must not render as
+ * the same pixels as "working". `blocked` separates the case the operator can
+ * act on.
  */
 export interface SessionPosture {
   /** A turn is genuinely running. */
@@ -367,7 +361,7 @@ export function foldPosture(events: readonly ConsoleEvent[]): SessionPosture {
       queuedJobs = event.payload.queuedJobs;
       lastTurnErrored = (event.payload as { status?: string }).status === "error";
     } else if (event.type === "user_session.question.asked") {
-      // Only MAIN-LANE cards park the lane this posture describes. A seat's
+      // Only MAIN-LANE cards park the lane this posture describes. An agent's
       // card (agent set) parks that agent's turn — main keeps running,
       // and stopping the spinner for it would misreport a live lane as idle.
       if (event.payload.agent === undefined) pending.add(event.payload.interactionId);
@@ -378,8 +372,7 @@ export function foldPosture(events: readonly ConsoleEvent[]): SessionPosture {
     }
   }
   const blocked = pending.size > 0;
-  // A turn parked on a card is NOT busy. Reporting it as busy is what kept the
-  // spinner running after db-live-2's run was over.
+  // A turn parked on a card is NOT busy.
   return { busy: !blocked && (open.size > 0 || queuedJobs > 0), blocked, lastTurnErrored };
 }
 

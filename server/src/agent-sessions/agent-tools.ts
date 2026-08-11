@@ -29,7 +29,7 @@ import type { AgentToolName } from "./grants.ts";
  * Provider ceiling for an inline base64 image (~5MB). A full-page screenshot at
  * a large viewport can exceed it, and an oversize image fails the whole tool
  * result rather than degrading — so `read_artifact` returns a text explanation
- * instead, which the seat can act on.
+ * instead, which the agent can act on.
  */
 const MAX_IMAGE_BASE64_CHARS = 5 * 1024 * 1024;
 
@@ -108,11 +108,9 @@ export interface AgentToolsContext {
 export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
   const { sdk, deps, session, agent, profile, user, workspaceRoot } = ctx;
   const tools: unknown[] = [];
-  // The disciplined transfer path. Its parameters ARE the handoff core, so
-  // the provider enforces the shape and there is nothing to hand-serialize —
-  // which removes the failure that destroyed db-live-1's verification report
-  // (a 4KB body could not be escaped into a JSON string, 15 times running).
-  // It is console-carried, so it also has no peer ref handshake to lose.
+  // The disciplined transfer path: its parameters ARE the handoff core, so
+  // the provider enforces the shape and there is nothing to hand-serialize.
+  // Console-carried, so there is no peer ref handshake to lose.
   tools.push(sdk.tool("send_handoff",
     "Send a typed handoff to another participant. This is the preferred way to transfer anything — assignments, progress, findings, failures, final results. Fill the fields; the console builds and journals the envelope. Your plain text output reaches no one.",
     {
@@ -138,12 +136,10 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
         result: { summary: args.resultSummary, artifacts: args.artifacts },
         uncertainty: args.uncertainty, nextAction: args.nextAction, requestExpandedContext: args.requestExpandedContext,
       }, extension: { kind: profile.handoffExtension ?? "generic", data: {} } };
-      // `post()` throws for a forbidden route (a genuine seat mistake → tool
-      // error) and for a withheld final (a Console-imposed HOLD → a
-      // structured NON-error, for the same reason ask_operator never returns
-      // isError: error results feed the error-streak watchdog and retries
-      // feed the identical-call watchdog, and punishing a seat for a hold the
-      // Console imposed kills the turn that must stay alive for the release).
+      // `post()` throws for a forbidden route (a genuine agent mistake → tool
+      // error) and for a withheld final (a Console-imposed HOLD → a structured
+      // NON-error: error results feed the error-streak watchdog, and the turn
+      // must stay alive for the release).
       let message: MessageRow;
       try {
         const turnId = ctx.currentTurnId();
@@ -159,11 +155,9 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
       ctx.markSawSend();
       return ok({ delivered: true, messageSeq: message.seq, to: args.to, category: args.category });
     }));
-  // Console-owned ledger. Keyed on a synthetic id derived from the agent
-  // session, so it survives context rotation and is shared by every seat —
-  // the native Task* tools are per-provider-session, which meant the
-  // db-live-1 coordinator watched its own four tasks vanish at the first
-  // rotation and never touched the ledger again for 28 minutes.
+  // Console-owned ledger, keyed on a synthetic id derived from the agent
+  // session, so it survives context rotation and is shared by every agent —
+  // the native Task* tools are per-provider-session.
   if (deps.tasks && user) {
     const listId = consoleTaskListId(session.id);
     const attribution = { workspaceId: user.workspaceId, userSessionId: session.userSessionId, agentSessionId: session.id, agent: agent.name };
@@ -198,8 +192,7 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
   }
   // Artifacts live in SQLite, outside every agent's read scope, and
   // browser_screenshot hands back an opaque id. Without this an agent cannot
-  // inspect its own evidence: in db-live-1 both renderer and `check` resorted
-  // to scanning the filesystem for artifact files that were never on disk.
+  // inspect its own evidence.
   tools.push(sdk.tool("read_artifact",
     "Read back an artifact you or a teammate produced (screenshot, diff, captured payload) by its artifact id. Images return as viewable content.",
     { artifactId: z.string().min(1), cursor: z.string().optional(), maxBytes: z.number().int().min(1).max(PAGE_MAX_BYTES).default(PAGE_DEFAULT_BYTES) },
@@ -208,12 +201,9 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
       if (!artifact) return fail(`no artifact ${args.artifactId}`);
       if (artifact.mediaType.startsWith("image/")) {
         // MCP's ImageContent is {type,data,mimeType} — NOT the Messages API's
-        // nested `source`. The old shape failed schema validation on every
-        // call, so db-live-2 captured three valid screenshots that no agent
-        // could open and `check` reimplemented visual verification in
-        // gl.readPixels instead. The `;base64` suffix is the storage
-        // convention (the artifact store branches on it for byte accounting);
-        // strip it only here, at the boundary.
+        // nested `source`. The `;base64` suffix is the storage convention (the
+        // artifact store branches on it for byte accounting); strip it only
+        // here, at the boundary.
         const mimeType = artifact.mediaType.replace(/;base64$/, "");
         if (artifact.content.length > MAX_IMAGE_BASE64_CHARS) {
           return ok({ artifactId: artifact.id, mediaType: artifact.mediaType, bytes: artifact.bytes,
@@ -224,17 +214,11 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
       return ok({ artifactId: artifact.id, mediaType: artifact.mediaType, bytes: artifact.bytes, content: pageTail(artifact.content, args.cursor, args.maxBytes) });
     }));
   /**
-   * A place to put a long body that is NOT a JSON string parameter.
-   *
-   * db-live-2's `renderer` hit `InputValidationError: could not be parsed as
-   * JSON` twice on ~4.5KB `send_handoff` payloads, concluded "the handoff
-   * payload is getting truncated", and shipped a shortened report. Main hit
-   * the same failure family on its first `create_agent_session` and needed
-   * two retries. Any tool whose input embeds a long free-text body is exposed
-   * to it, and the model's own recovery strategy is self-truncation.
-   *
-   * With this, a 12KB verification report is an artifact referenced by
-   * `evidence`, and the handoff carries a short summary plus the pointer.
+   * A place to put a long body that is NOT a JSON string parameter: a long
+   * free-text tool argument is exposed to provider-side JSON parse failures,
+   * and the model's recovery strategy is self-truncation. With this, a long
+   * report is an artifact referenced by `evidence`, and the handoff carries a
+   * short summary plus the pointer.
    */
   tools.push(sdk.tool("write_note",
     "Store a long body — a verification report, a full log, an analysis — as a durable artifact and get its id back. Reference that id from send_handoff's evidence instead of pasting the body into a field. Never shorten a finding to make it fit a parameter.",
@@ -248,10 +232,8 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
       return ok({ ...stored, title: args.title,
         use: `Reference it as evidence: {"kind":"artifact","ref":"${stored.artifactId}"}` });
     }));
-  // The supervisor "translation problem", fixed at the wire: a coordinator
-  // that RETYPES a specialist's report pays a measured quality tax (LangChain
-  // recovered ~50% of supervisor underperformance with exactly this tool).
-  // The forward carries the original core+extension untouched, so a forwarded
+  // A coordinator that RETYPES a specialist's report pays a quality tax. The
+  // forward carries the original core+extension untouched, so a forwarded
   // final counts as the session's own report; commentary travels separately.
   if (ctx.granted.has("forward_message") && deps.handoffs) {
     const handoffsService = deps.handoffs;
@@ -325,7 +307,7 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
         timeoutMs: z.number().int().min(1_000).max(60_000).default(15_000),
       }, async (args: { expression: string; timeoutMs: number }) => {
         const outcome = await deps.browsers?.evaluate(key, args.expression, args.timeoutMs);
-        // Only a compile failure is the SEAT's error — that is its own
+        // Only a compile failure is the AGENT's error — that is its own
         // JavaScript failing to parse, and it is actionable. A page
         // exception or a null is data, and marking those `isError` would
         // feed the consecutive-error watchdog for legitimate probing.
@@ -339,16 +321,8 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
       tools.push(sdk.tool("browser_screenshot", "Capture a full-page screenshot as a durable Console artifact.", {}, async () => ok(await deps.browsers?.screenshot(key, { userSessionId: session.userSessionId, agentSessionId: session.id }))));
     }
   }
-  // Available to EVERY seat, not just the coordinator.
-  //
-  // `request_decision` was coordinator-only, so a specialist's question took
-  // three model hops to reach a human — specialist → coordinator judges →
-  // coordinator escalates — and every hop could drop it. In db-live-1 one
-  // did: `renderer` diagnosed the defect that made the deliverable
-  // non-functional and asked permission to fix it; the coordinator replied
-  // "Leave game.js as-is… do not report it as a bug," and the operator never
-  // learned the option existed. Two tools doing the same job is also how you
-  // get a model calling neither, so this replaces it outright.
+  // Available to EVERY agent, not just the coordinator: a specialist's
+  // question reaches the human directly, with no model hop able to drop it.
   {
     tools.push(sdk.tool("ask_operator",
       "Ask the Human Operator a question only they can answer. This reaches them DIRECTLY — do not route it through your coordinator. " +
@@ -377,8 +351,7 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
   }
   // Who is doing what, on demand. The roster carries this on every delivery
   // already; this is for the agent that is ABOUT to start something and can
-  // check first. db-live-2's renderer spent ~16 minutes building a private
-  // duplicate of a dev server `page` had already written and was serving.
+  // check first.
   tools.push(sdk.tool("roster_status",
     "See what every agent in this session is doing right now — live state, what they own, and what they last reported. Check before starting anything substantial that a teammate may already have done.",
     {},
@@ -391,14 +364,10 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
       })),
     })));
 
-  // The curl that actually works.
-  //
   // Managed children run in the HOST network namespace (`bwrap --share-net`)
-  // while an agent's Bash runs inside the SDK sandbox's own, so an agent cannot
-  // reach a server it just started. db-live-2's renderer burned three failed
-  // curls discovering this and concluded, correctly, "servers started via
-  // process_start live in a different network namespace than my Bash shell".
-  // Executed in the SERVER process, which shares the children's namespace.
+  // while an agent's Bash runs inside the SDK sandbox's own, so an agent
+  // cannot reach a server it just started. Executed in the SERVER process,
+  // which shares the children's namespace.
   if (profile.runtime.shell) {
     tools.push(sdk.tool("http_probe",
       "Make an HTTP request from the Console's own process — the only way to reach a server you started with process_start, since your Bash shell is in a different network namespace. Use this instead of curl for localhost checks.",

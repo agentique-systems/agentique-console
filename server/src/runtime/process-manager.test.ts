@@ -68,7 +68,7 @@ describe("child environment", () => {
     expect(env.GITHUB_TOKEN).toBeUndefined();
   });
 
-  it("passes the port block the seat is allowed to bind", () => {
+  it("passes the port block the agent is allowed to bind", () => {
     expect(childEnv({ PATH: "/usr/bin", CONSOLE_PORT_BASE: "8300" }).CONSOLE_PORT_BASE).toBe("8300");
   });
 });

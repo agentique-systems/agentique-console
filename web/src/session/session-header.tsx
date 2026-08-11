@@ -261,11 +261,8 @@ export function SessionHeader({
                 variant="ghost"
                 size="icon-xs"
                 aria-label="archive this session"
-                // Archiving reaps the run's seats, managed processes and
-                // browsers. It is the only operator-driven end-of-run action
-                // there is, and until now it had no affordance anywhere in the
-                // UI — so nothing ever called `stopSession`, and db-live-2
-                // leaked a dev server on :8173 into the next run.
+                // Archiving reaps the run's agents, managed processes and
+                // browsers — the only operator-driven end-of-run action.
                 disabled={busy || patch.isPending}
                 onClick={() => {
                   if (!window.confirm("Archive this session? Its agents stop and any servers they started are shut down.")) return;

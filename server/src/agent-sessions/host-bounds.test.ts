@@ -6,7 +6,7 @@ import { makeDelegationHarness } from "../test-helpers.ts";
 const agents = (count: number) =>
   Array.from({ length: count }, (_, i) => ({ name: `seat${i + 1}`, profileId: "explorer", owns: [`scope-${i + 1}`] }));
 
-describe("createSession seat bounds", () => {
+describe("createSession roster bounds", () => {
   it("seats up to 20 specialists and rejects 21", () => {
     const h = makeDelegationHarness(async function* () {
       yield initMessage("idle-1");
@@ -21,11 +21,8 @@ describe("createSession seat bounds", () => {
 });
 
 /**
- * `owns` was `min(1)` on the tool schema, which forced db-live-2's
- * visual-reviewer to declare the sentence "verification report and screenshot
- * (no source files)" as an ownership scope — a non-path in a map of paths, on
- * a seat the disjointness check skips anyway. The invariant that actually
- * matters is capability-shaped.
+ * The ownership invariant is capability-shaped: an agent that WRITES must
+ * declare scopes; a read-only one is never forced to invent a non-path scope.
  */
 describe("createSession ownership invariant", () => {
   const harness = () => makeDelegationHarness(async function* () {
@@ -33,7 +30,7 @@ describe("createSession ownership invariant", () => {
     yield successMessage({});
   });
 
-  it("requires a writing seat to declare what it owns", () => {
+  it("requires a writing agent to declare what it owns", () => {
     const h = harness();
     const userSessionId = h.addUserSession();
     expect(() => h.host.createSession({
@@ -41,7 +38,7 @@ describe("createSession ownership invariant", () => {
     })).toThrow(/writes files, so it must declare what it owns/);
   });
 
-  it("lets a read-only seat own nothing at all", () => {
+  it("lets a read-only agent own nothing at all", () => {
     const h = harness();
     const userSessionId = h.addUserSession();
     const created = h.host.createSession({
@@ -53,8 +50,8 @@ describe("createSession ownership invariant", () => {
     expect(created.agents).toContain("check");
   });
 
-  it("still lets a read-only seat carry a review scope", () => {
-    // `owns` doubles as the assignment boundary for seats that never write, so
+  it("still lets a read-only agent carry a review scope", () => {
+    // `owns` doubles as the assignment boundary for agents that never write, so
     // forbidding it outright would break a legitimate use.
     const h = harness();
     const userSessionId = h.addUserSession();

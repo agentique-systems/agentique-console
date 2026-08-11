@@ -34,7 +34,7 @@ export const CONSOLE_TOOL_NAMES = [
  */
 const MAIN_DENIED_TOOLS = ["Agent", "Task", "Bash", "Write", "Edit", "NotebookEdit", "SendMessage", "ScheduleWakeup", "Monitor", "TaskStop",
   // The native ledger is keyed on the provider session id, which changes at
-  // every rotation — the orphan-on-rotation failure seats were already spared.
+  // every rotation.
   "TaskCreate", "TaskUpdate", "TaskGet", "TaskList"];
 
 const MAIN_WORK_TOOLS = [
@@ -55,14 +55,14 @@ export interface OrchestratorOptionsInput {
   maxTurns?: number;
   abortController: AbortController;
   canUseTool: NonNullable<SdkOptions["canUseTool"]>;
-  /** The console MCP server instance (absent until M6 wires delegation). */
+  /** The console MCP server instance. */
   mcpServer?: unknown;
   sessionStore?: unknown;
   contextMemory?: string;
   /**
    * The operator's decisions, appended AFTER the rotation checkpoint. Main
    * must not contradict a call the operator already made, and must not relay
-   * one — every seat has it already.
+   * one — every agent has it already.
    */
   decisionDigest?: string;
   purpose?: "work" | "profile_manager";

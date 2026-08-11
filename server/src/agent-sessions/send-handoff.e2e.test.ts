@@ -1,14 +1,8 @@
 /**
- * `send_handoff` — the disciplined transfer path.
- *
- * Its parameters ARE the handoff core, so the provider validates the shape and
- * the seat never hand-serializes JSON. That removes the failure class that
- * destroyed the db-live-1 run's best output: `check` finished a real review,
- * could not escape a 4KB body into a JSON string parameter, retried 15 times,
- * tripped the watchdog, and its findings reached nobody.
- *
- * It is also console-carried rather than peer-carried, so it has no ref
- * handshake to lose across a rotation.
+ * `send_handoff` — the disciplined transfer path. Its parameters ARE the
+ * handoff core, so the provider validates the shape and the agent never
+ * hand-serializes JSON. Console-carried rather than peer-carried, so it has no
+ * ref handshake to lose across a rotation.
  */
 import { describe, expect, it } from "vitest";
 import { initMessage, successMessage } from "../sdk/fake.ts";
@@ -22,7 +16,7 @@ const parse = (result: { content: { type: string; text?: string }[] }) =>
   JSON.parse(result.content[0]?.text ?? "null") as Record<string, unknown>;
 
 describe("send_handoff (fake SDK)", () => {
-  it("is registered for every seat and carries a typed transfer end to end", async () => {
+  it("is registered for every agent and carries a typed transfer end to end", async () => {
     const h = makeDelegationHarness(async function* () {
       yield initMessage();
       yield successMessage();
@@ -31,8 +25,8 @@ describe("send_handoff (fake SDK)", () => {
     const created = h.host.createSession({ userSessionId, title: "typed", agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("observe", "pending") });
     await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled", 10_000);
 
-    // The fake flattens every seat's MCP tools into one list; the coordinator
-    // spawns first, so this instance is bound to that seat.
+    // The fake flattens every agent's MCP tools into one list; the coordinator
+    // spawns first, so this instance is bound to that agent.
     const tool = h.fake.captured.tools.find((t) => t.name === "send_handoff");
     expect(tool).toBeDefined();
 
@@ -71,7 +65,7 @@ describe("send_handoff (fake SDK)", () => {
     await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled", 10_000);
 
     const tool = h.fake.captured.tools.find((t) => t.name === "send_handoff");
-    // Surfaced as a tool ERROR the seat can read and act on, not as a throw
+    // Surfaced as a tool ERROR the agent can read and act on, not as a throw
     // escaping the handler. The in-process MCP server's behaviour on a
     // throwing handler is not something the route check — or the final gate,
     // which shares this path — should be betting on.

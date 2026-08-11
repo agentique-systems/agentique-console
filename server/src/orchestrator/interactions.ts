@@ -2,20 +2,10 @@
  * Human-in-the-loop interactions: every question anyone puts to the operator.
  *
  * Two askers, one table. The main lane's `AskUserQuestion`/`ExitPlanMode` park
- * inside `canUseTool`; a seat's `ask_operator` parks inside its MCP handler.
+ * inside `canUseTool`; an agent's `ask_operator` parks inside its MCP handler.
  * Rows are durable, the promise is not — so `detached` marks a row whose asker
  * has gone (park, rotation, watchdog, restart) but whose answer is still wanted
  * and is delivered by mailbox instead of by return.
- *
- * What db-live-1 and db-live-2 taught this file:
- *  - a seat could not reach the operator at all, so a specialist that KNEW the
- *    deliverable was broken had to hope its coordinator would relay it. It
- *    didn't.
- *  - chat dismissed every pending card, including ones raised inside an
- *    AgentSession, telling a seat that cannot read operator chat to "read their
- *    next message".
- *  - a non-blocking decision lived in an in-memory map and was dropped whenever
- *    no further material report happened to arrive.
  */
 import type {
   Interaction,
@@ -46,7 +36,7 @@ export type InteractionResolution =
  * this service routes without depending on any of them.
  */
 export interface StaleAnswerRouting {
-  /** A detached or stale SEAT question: the seat is woken by a mailbox delivery. */
+  /** A detached or stale AGENT question: the agent is woken by a mailbox delivery. */
   deliverToAgent(interaction: Interaction): void;
   /** A stale MAIN-LANE interaction: the answer becomes a fresh resumed turn. */
   reviveMain(userSessionId: string, prompt: string): void;
@@ -82,7 +72,7 @@ export function dedupeKeyFor(asker: string, question: string): string {
 /**
  * The prompt for an answer-revival turn: the interaction's promise died with a
  * previous process, so the answer arrives as a fresh resumed turn instead.
- * Main lane only — a seat is revived by mailbox delivery, not by lane revival.
+ * Main lane only — an agent is revived by mailbox delivery, not by lane revival.
  */
 export function revivalPrompt(
   interaction: Interaction,
@@ -161,11 +151,11 @@ export class InteractionService {
    * The REST answer endpoint's whole job: resolve the row, then route the
    * answer to wherever its asker now lives.
    *
-   * A seat's answer cannot come back through a tool call that no longer
-   * exists, and a seat is not revived by a lane — it is woken by a delivery.
-   * So a detached or stale SEAT question is answered by mailbox. A stale
+   * An agent's answer cannot come back through a tool call that no longer
+   * exists, and an agent is not revived by a lane — it is woken by a delivery.
+   * So a detached or stale AGENT question is answered by mailbox. A stale
    * MAIN-LANE interaction's parked promise died with a previous process — its
-   * answer becomes a fresh resumed turn instead (M8 revival).
+   * answer becomes a fresh resumed turn instead.
    */
   resolveAndRoute(
     userSessionId: string,
@@ -309,7 +299,7 @@ export class InteractionService {
             resolve({ kind: "dismissed", reason: "the turn was interrupted" });
             return;
           }
-          // A SEAT's question outlives its turn. Park, rotation and the
+          // An AGENT's question outlives its turn. Park, rotation and the
           // watchdog all tear the lane down; the operator has still been asked
           // and the answer still matters. Keep the row pending and mark it
           // detached so answering delivers by mailbox.
@@ -413,10 +403,10 @@ export class InteractionService {
    * MAIN-LANE cards are dismissed: the model is about to read the operator's
    * actual message, which is a better answer than the card would have been.
    *
-   * SEAT cards are NOT. A seat has no access to the operator's chat lane — only
-   * main does — so resolving one with "read their next message" hands a seat an
-   * instruction it cannot follow, and silently drops a question a specialist
-   * thought was important enough to stop for.
+   * AGENT cards are NOT. An agent has no access to the operator's chat lane —
+   * only main does — so resolving one with "read their next message" hands an
+   * agent an instruction it cannot follow, and silently drops a question a
+   * specialist thought was important enough to stop for.
    */
   dismissPendingForChat(userSessionId: string, chatText: string): void {
     const rows = this.#listByStatus(userSessionId, "pending");
@@ -496,9 +486,8 @@ export class InteractionService {
   }
 
   /**
-   * Answered questions the ASKING SEAT has not been told about yet. Replaces
-   * the in-memory deferred map — these survive a restart and are guaranteed to
-   * reach the asker at its next delivery.
+   * Answered questions the ASKING AGENT has not been told about yet — durable
+   * and guaranteed to reach the asker at its next delivery.
    */
   listAnsweredUnflushed(agentSessionId: string, agent?: string): Interaction[] {
     return this.#store.listAnsweredUnflushed(agentSessionId, agent)
@@ -536,16 +525,15 @@ export class InteractionService {
    * Main-lane rows go `stale`: their promise died with the process, and the
    * revival path replays the answer as a resumed turn.
    *
-   * Seat rows stay `pending` and become `detached`: a seat is not revived by a
-   * lane, it is woken by a delivery — so its question is still genuinely open
-   * and answering it still reaches somebody.
+   * Agent rows stay `pending` and become `detached`: an agent is not revived
+   * by a lane, it is woken by a delivery — so its question is still genuinely
+   * open and answering it still reaches somebody.
    */
   expirePendingOnBoot(): void {
     this.#store.markPendingMainStale();
     this.#store.markPendingSeatsDetached();
   }
 
-  /** The single write point into the decision ledger. */
   /**
    * A resolved interaction IS the decision record — the `DecisionLedger` is a
    * read-model over these rows, so there is nothing to write and keep in sync.

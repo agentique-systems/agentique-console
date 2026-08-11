@@ -1,12 +1,8 @@
 /**
- * Processes that outlived the server that started them.
- *
- * `ProcessManager` is purely in-memory, so after a restart the previous
- * process's children are unreachable by id — but they are still running, and
- * still holding whatever ports they bound. db-live-2 left `node serve.mjs` on
- * :8173 and the NEXT run found a foreign app squatting the port it wanted,
- * spent ~6 minutes diagnosing it, and read files out of the previous run's
- * workspace. This closes that loop at boot.
+ * Processes that outlived the server that started them. `ProcessManager` is
+ * purely in-memory, so after a restart the previous process's children are
+ * unreachable by id — but they are still running, and still holding whatever
+ * ports they bound. This closes that loop at boot.
  *
  * The PID-reuse guard is not optional. A recorded pid may belong to something
  * completely unrelated by the time we look, and killing a stranger's process

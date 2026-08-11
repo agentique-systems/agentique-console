@@ -9,12 +9,12 @@
  *
  * It is NOT the rotation catalog. `server/model-catalog.ts` maps a model id to
  * a context window, and it must cover every model that can reach a CLI —
- * profile models and per-seat overrides included — not just the three offered
+ * profile models and per-agent overrides included — not just the three offered
  * here. Adding an entry to this list means adding one there too, or the
  * session silently rotates at the conservative 68K default.
  *
- * Seats are unaffected: they carry their own profile models and never read the
- * orchestrator's.
+ * Agents are unaffected: they carry their own profile models and never read
+ * the orchestrator's.
  */
 
 export interface OrchestratorModel {

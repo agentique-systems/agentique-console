@@ -1,23 +1,8 @@
 /**
  * Per-turn cost is a DELTA against a baseline that belongs to the provider
- * session, not to the process reading it.
- *
- * The db-live-1 bug, exactly: `check`'s lane parked and respawned over
- * `resume: <sdkSessionId>`. `#spawnSeat` reset `lane.lastCumulative` to zero on
- * every spawn, but a resumed session continues the SDK's running
- * `total_cost_usd` — so the next result's whole session-to-date total was
- * recorded as one turn's delta:
- *
- *     turn_9e0921…  cache_read 2,238,037  cost $4.4875  api_duration 1,080,818ms
- *     turn_cd7102…  cache_read   176,115  cost $4.7778  api_duration 1,138,239ms  <- 55s of wall clock
- *
- * $4.4875 of phantom spend on a $13.43 run: **+33.4%**. The ledger is the only
- * thing the cost work optimizes against, so an error of that size in it is
- * worse than the spend it was measuring.
- *
- * Note this is NOT the "usage_samples under-reports by 2.2x" theory. Deduped by
- * `message.id`, db-live-1's transcript matches `usage_samples` to the token —
- * `result.usage` really is the per-turn sum. The only defect was the baseline.
+ * session, not to the process reading it: a resumed session continues the
+ * SDK's running `total_cost_usd`, so a zeroed baseline would record the whole
+ * session-to-date total as one turn's delta.
  */
 import { describe, expect, it } from "vitest";
 import { initMessage, successMessage } from "../sdk/fake.ts";
@@ -29,7 +14,7 @@ import { usageSamples } from "../db/schema.ts";
  * The bug only exists across a PROCESS boundary, so the test has to cross one.
  * The fake re-invokes its program once per pushed message inside a single
  * `query()`, which is a new turn but the SAME lane — `#spawnSeat` never runs
- * and `lane.lastCumulative` survives in memory. Parking the seat first (a 20ms
+ * and `lane.lastCumulative` survives in memory. Parking the agent first (a 20ms
  * idle window) is what forces the respawn-over-`resume` this is about.
  */
 const PARKED = (event: { type: string; payload: unknown }): boolean =>
@@ -53,7 +38,7 @@ const usageFrame = (cumulativeCost: number, cumulativeApiMs: number, tokens = 1_
   } as Record<string, unknown>);
 
 describe("cumulative usage baseline", () => {
-  it("charges the delta, not the session-to-date total, when a seat respawns over resume", async () => {
+  it("charges the delta, not the session-to-date total, when an agent respawns over resume", async () => {
     // Two turns in one provider session, the second after a respawn. The
     // second result restates the running total ($4.78), of which only $0.30 is
     // actually this turn's.
@@ -72,7 +57,7 @@ describe("cumulative usage baseline", () => {
     });
     await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled", 10_000);
 
-    // The seat's baseline must have been persisted with the provider session.
+    // The agent's baseline must have been persisted with the provider session.
     const afterFirst = h.repo.getAgent(created.agentSessionId, "coordinator");
     expect(afterFirst?.cumulativeCostUsd).toBeCloseTo(4.48, 6);
     expect(afterFirst?.cumulativeApiDurationMs).toBe(1_080_818);
@@ -101,16 +86,14 @@ describe("cumulative usage baseline", () => {
     expect(invocation).toBeGreaterThanOrEqual(2);
 
     // Asserted as properties of the set rather than by position: a 20ms idle
-    // window can park the seat mid-turn and trigger a redelivery, which
+    // window can park the agent mid-turn and trigger a redelivery, which
     // legitimately records a third row whose delta is 0 (same cumulative
     // restated). Row ORDER is therefore not deterministic; the two facts below
     // are.
     const near = (value: number | null, target: number) => value !== null && Math.abs(value - target) < 0.005;
     // The second turn is charged its own $0.30 …
     expect(rows.some((row) => near(row.costUsd, 0.3) && row.apiDurationMs === 57_421)).toBe(true);
-    // … and NO row is ever charged the session-to-date total. This clause is
-    // the regression: before the fix it was $4.78, and api_duration_ms was 20x
-    // the turn's own wall clock.
+    // … and NO row is ever charged the session-to-date total.
     expect(rows.some((row) => near(row.costUsd, 4.78))).toBe(false);
   });
 
@@ -151,8 +134,6 @@ describe("cumulative usage baseline", () => {
   });
 
   it("records a row for a zero-token errored turn instead of dropping it", async () => {
-    // db-live-2's two DNS-dead orchestrator turns burned 9m11s between them and
-    // produced no usage row at all, while renderer's errored turn DID get one.
     // A turn that spends wall clock and buys nothing is the most interesting
     // row in the ledger; it must not be the invisible one.
     const h = makeDelegationHarness(async function* () {

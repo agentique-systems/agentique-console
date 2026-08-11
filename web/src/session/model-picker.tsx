@@ -6,7 +6,7 @@
  *
  * It owns no mutation: the composer patches a live session, the draft view
  * holds the choice in local state until the send that creates the session.
- * Seats are not selectable here and never will be — their models come from
+ * Agents are not selectable here and never will be — their models come from
  * profiles, which the Agents view owns.
  */
 import { CpuIcon } from "lucide-react";

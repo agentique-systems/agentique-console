@@ -1,13 +1,8 @@
 /**
- * One state per session, so the four things that mattered stop looking alike.
- *
- * db-live-2's ending rendered as a spinner that stopped — and so did a crash,
- * a stall, and a run blocked on a question the operator never saw. Those are
- * four different situations with four different responses, and the UI drew one
- * pixel for all of them.
- *
- * `AnyStatus` in `./status.ts` stays the visual vocabulary; this is the mapping
- * onto it.
+ * One state per session: "done", "crashed", "stalled" and "blocked on the
+ * operator" are different situations with different responses and must not
+ * render alike. `AnyStatus` in `./status.ts` stays the visual vocabulary; this
+ * is the mapping onto it.
  */
 import type { RunState } from "@agentique-console/shared";
 import type { AnyStatus } from "./status";
@@ -25,11 +20,9 @@ export interface SessionStateInput {
 }
 
 /**
- * First match wins, and the order is the point.
- *
- * `needs_you` beats `working` deliberately: an orchestrator can be mid-turn AND
- * blocked on the operator — that is precisely db-live-2's final state — and the
- * thing the operator can act on outranks the thing they cannot.
+ * First match wins, and the order is the point. `needs_you` beats `working`
+ * deliberately: an orchestrator can be mid-turn AND blocked on the operator,
+ * and the thing the operator can act on outranks the thing they cannot.
  */
 export function deriveSessionState(input: SessionStateInput): SessionState {
   if (input.runState === "completed") return "done";

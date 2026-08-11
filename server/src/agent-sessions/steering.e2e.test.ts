@@ -1,5 +1,5 @@
 /**
- * Peer-lane delivery semantics: mid-turn steering into a live seat, idle
+ * Peer-lane delivery semantics: mid-turn steering into a live agent, idle
  * park + wake-on-delivery with the resume handle, and the deny-with-receipt →
  * background-retry path when resident capacity is exhausted.
  */
@@ -14,7 +14,7 @@ const envelope = (action: string, status: "pending" | "completed", category: str
   JSON.stringify({ handoff: handoff(action, status), category, checkpointReadiness: "stable" });
 
 describe("peer-lane delivery semantics (fake SDK)", () => {
-  it("steers a busy seat mid-turn instead of minting a second turn", async () => {
+  it("steers a busy agent mid-turn instead of minting a second turn", async () => {
     let releaseScout: () => void = () => undefined;
     const scoutGate = new Promise<void>((resolve) => { releaseScout = resolve; });
     let scoutTurns = 0;
@@ -55,7 +55,7 @@ describe("peer-lane delivery semantics (fake SDK)", () => {
     expect(h.repo.listUnackedDeliveries(created.agentSessionId, "scout")).toHaveLength(0);
   });
 
-  it("parks an idle seat, then wakes it with its resume handle on the next delivery", async () => {
+  it("parks an idle agent, then wakes it with its resume handle on the next delivery", async () => {
     let scoutSpawns = 0;
     const h = makeDelegationHarness(async function* (options) {
       const append = typeof options.systemPrompt === "object" && !Array.isArray(options.systemPrompt) ? options.systemPrompt.append ?? "" : "";

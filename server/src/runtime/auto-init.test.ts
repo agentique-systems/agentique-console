@@ -1,12 +1,8 @@
 /**
  * Turning a plain directory into a repository, and — more importantly —
- * knowing when not to.
- *
- * The containment hazard this guards is not hypothetical. `isGitRepo` used
- * `rev-parse --is-inside-work-tree`, which is TRUE for any subdirectory of any
- * repo. A workspace nested in a monorepo would therefore have reported "yes,
- * git repo", seat worktrees would have branched off the PARENT's HEAD, and
- * `#onSeatWorktreePost` would have merged seat work directly into a repository
+ * knowing when not to. `rev-parse --is-inside-work-tree` alone is TRUE for any
+ * subdirectory of any repo: a workspace nested in a monorepo would branch its
+ * agent worktrees off the PARENT's HEAD and merge agent work into a repository
  * the operator never pointed the Console at.
  */
 import fs from "node:fs";
@@ -41,8 +37,8 @@ describe("isGitRepo requires the workspace to BE the repository root", () => {
   });
 
   it("is FALSE for a subdirectory of a repository", () => {
-    // The whole point. Before this, seat work in `packages/app` of a monorepo
-    // would have been committed and merged into the monorepo itself.
+    // The whole point: agent work in `packages/app` of a monorepo must not be
+    // committed and merged into the monorepo itself.
     const root = tmpdir();
     git(root, ["init", "-b", "main"]);
     const nested = path.join(root, "packages", "app");

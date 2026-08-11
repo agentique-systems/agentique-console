@@ -20,17 +20,10 @@ export interface RuntimeScope { workspaceRoot: string; userSessionId: string; ag
 /** Owns long-running children so agents wait on state changes instead of polling Bash. */
 /**
  * Read-only binds a managed child genuinely needs, plus the workspace
- * read-write.
- *
- * The previous argv was `--ro-bind / /`, which handed every `process_start`
- * child read access to the entire filesystem — `~/.ssh`, `~/.claude`, the
- * operator's browser profiles, every other workspace on the machine. Combined
- * with `env: process.env` that was the widest containment gap in the codebase,
- * and nothing about running a dev server requires it.
- *
- * Deliberately conservative rather than minimal: a toolchain outside these
- * paths will fail loudly with a missing-binary error the operator can act on,
- * which is the right failure mode for a change like this.
+ * read-write. Never bind the whole filesystem — that hands a child `~/.ssh`
+ * and every other workspace. Deliberately conservative rather than minimal:
+ * a toolchain outside these paths fails loudly with a missing-binary error
+ * the operator can act on.
  */
 export function sandboxBinds(): string[] {
   const home = os.homedir();
@@ -80,7 +73,7 @@ export function childEnv(source: NodeJS.ProcessEnv = process.env): Record<string
     const value = source[key];
     if (value !== undefined) env[key] = value;
   }
-  // Ports the seat is allowed to bind, when the caller assigned a block.
+  // Ports the agent is allowed to bind, when the caller assigned a block.
   for (const [key, value] of Object.entries(source)) {
     if (key.startsWith("CONSOLE_PORT") && value !== undefined) env[key] = value;
   }
@@ -140,12 +133,8 @@ export class ProcessManager {
   stop(owner: string, processId: string): void { const process = this.#owned(owner, processId); if (process.exit === null) process.child.kill("SIGTERM"); }
 
   /**
-   * Reap everything one seat still holds. A seat that forgets to clean up
-   * survives its own lane: in db-live-2 `check` started `node serve.mjs` on
-   * :8173, parked eleven minutes later, and the server outlived the run — so
-   * the NEXT run found a foreign app on the port it wanted, spent six minutes
-   * diagnosing it, and read files out of the previous run's workspace.
-   *
+   * Reap everything one agent still holds. An agent that forgets to clean up
+   * survives its own lane; its processes hold their ports until reaped.
    * Returns what it killed so the caller can say so out loud; a silent reap
    * just moves the mystery.
    */

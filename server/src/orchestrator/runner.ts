@@ -82,7 +82,7 @@ interface Lane {
   /** Mode changed mid-turn: close after settle so fresh options apply. */
   recycleAfterTurn: boolean;
   /**
-   * A5: operator messages pushed into the live turn (true steering). The CLI
+   * Operator messages pushed into the live turn (true steering). The CLI
    * either folds them into the running turn or runs them as its own next
    * turn — the settle path mints a follow-up turn to catch that output.
    */
@@ -94,8 +94,7 @@ interface Lane {
   /**
    * Peak context-window occupancy this provider session, from per-API-call
    * usage — NOT the result message's turn-wide `inputTokens` sum, which
-   * overstates occupancy by 5-25x on a tool-heavy turn and made every seat
-   * rotate after a single turn in the db-live-1 run.
+   * overstates occupancy on a tool-heavy turn.
    */
   contextTokens: number;
   /** Last cumulative cost/api-duration seen, for per-turn deltas. */
@@ -105,7 +104,7 @@ interface Lane {
 /**
  * `cumulativeCostUsd`/`cumulativeApiDurationMs` restate the provider session's
  * running total on every result, so a turn's own figure is the delta since the
- * lane last saw one. Recording them raw overstated the db-live-1 ledger by 25%.
+ * lane last saw one.
  * Mutates the lane's watermark as a side effect — call exactly once per result.
  */
 function laneUsageDeltas(lane: Lane, event: { cumulativeCostUsd?: number; cumulativeApiDurationMs?: number }): { costUsd: number | null; apiDurationMs: number | null } {
@@ -138,9 +137,7 @@ export interface OrchestratorDeps {
   /**
    * Operator decisions, injected into the lane's system prompt so main never
    * contradicts a call the operator already made — and never has to relay one.
-   * Required: as an optional dep it was once wired in tests and forgotten in
-   * main.ts, which switched the ledger off in production while every test
-   * passed.
+   * Required: an optional dep would let a missing wire typecheck.
    */
   decisions: DecisionLedger;
   /** Lazy — host and runner construct in either order inside `createApp`. */
@@ -201,7 +198,7 @@ export class OrchestratorRunner {
       payload: { userSessionId: sessionId, message: toWireMessage(row) },
     });
     repo.touchUserSession(sessionId);
-    // A5: a message landing mid-turn steers the live turn instead of queueing
+    // A message landing mid-turn steers the live turn instead of queueing
     // behind it — pushed straight into the stream, exactly like typing into
     // the CLI while it works.
     const lane = this.#lane(sessionId);
@@ -214,16 +211,14 @@ export class OrchestratorRunner {
     return { messageId: row.id, seq: row.seq };
   }
 
-  /** M8: a stale interaction was answered after a restart. */
+  /** A stale interaction was answered after a restart. */
   enqueueRevival(userSessionId: string, text: string): void {
     this.#enqueue(userSessionId, { kind: "answer-revival", text });
   }
 
   /**
    * Console-owned deadlines (`set_deadline`) fire on absolute time, whether
-   * or not the lane is live — one scheduler, no parser, no liveness
-   * condition. The native-cron mirror that used to share this table fired on
-   * the OPPOSITE rule (only when the lane was dead) and is gone.
+   * or not the lane is live — one scheduler, no parser, no liveness condition.
    */
   #cronTimer: NodeJS.Timeout | null = null;
   startCronFallback(): void {
@@ -250,10 +245,9 @@ export class OrchestratorRunner {
     const lane = this.#lane(userSessionId);
     const prompt = `[AgentSession ${agentSessionId} ${category}]\n${text.slice(0, 8_192)}`;
     const existing = lane.queue.find((job): job is Extract<Job, { kind: "agent-milestone" }> => job.kind === "agent-milestone" && job.agentSessionId === agentSessionId);
-    // APPEND, never overwrite. `existing.text = prompt` looked like coalescing
-    // and was actually data loss: two reports arriving before the coordinator
-    // drained meant the first one silently vanished. Losing a milestone is
-    // strictly worse than a longer prompt.
+    // APPEND, never overwrite: two reports arriving before the drain would
+    // otherwise lose the first. Losing a milestone is strictly worse than a
+    // longer prompt.
     if (existing) existing.text = `${existing.text}\n\n${prompt}`;
     else lane.queue.push({ kind: "agent-milestone", agentSessionId, text: prompt });
     if (!lane.draining) void this.#drain(userSessionId);
@@ -327,12 +321,8 @@ export class OrchestratorRunner {
 
   /**
    * Like `busy()` inverted, except a turn parked inside `canUseTool` waiting on
-   * an operator card does NOT count as working.
-   *
-   * This distinction is the whole reason the method exists. db-live-2's last
-   * turn never settled because `AskUserQuestion` awaits its resolution forever
-   * — so `busy()` was true, the spinner ran, and nothing could tell "finished"
-   * from "in progress". The run had not gone quiet; it had gone interrogative.
+   * an operator card does NOT count as working — `AskUserQuestion` awaits its
+   * resolution, and waiting on a human is not "in progress".
    */
   laneIdle(sessionId: string): boolean {
     const lane = this.#lanes.get(sessionId);
@@ -460,9 +450,8 @@ export class OrchestratorRunner {
 
   /**
    * The model this session's orchestrator lane runs on. The session's own
-   * choice wins; a session that recorded none (the profile manager, and every
-   * row written before the column existed) tracks the configured default.
-   * Seats do not read this — they resolve their model from their profile.
+   * choice wins; a session that recorded none tracks the configured default.
+   * Agents do not read this — they resolve their model from their profile.
    */
   #modelFor(session: Pick<UserSessionRow, "model">): string {
     return session.model ?? this.#deps.config.infra.model;
@@ -513,8 +502,7 @@ export class OrchestratorRunner {
     // Cost and api-duration do NOT: `resume: session.sdkSessionId` above keeps
     // the same provider session, and the SDK's cumulative totals continue
     // across the process that started them. The baseline therefore belongs to
-    // the provider session and is persisted with it — zeroing it here billed a
-    // whole session-to-date to one turn (db-live-1: $4.4875 for 55 seconds).
+    // the provider session and is persisted with it.
     lane.lastCumulative = session.sdkSessionId === null
       ? { costUsd: 0, apiDurationMs: 0 }
       : { costUsd: session.cumulativeCostUsd, apiDurationMs: session.cumulativeApiDurationMs };
@@ -543,8 +531,8 @@ export class OrchestratorRunner {
         this.#settleTurn(sessionId, lane);
       }
     } catch (error) {
-      // In-process lane death — new failure mode vs. process-per-turn. The
-      // resume id survives in the DB, so the next job respawns transparently.
+      // In-process lane death. The resume id survives in the DB, so the next
+      // job respawns transparently.
       console.error(`orchestrator lane died (${sessionId}):`, error);
       if (lane.activeTurn) {
         lane.activeTurn.outcome = {
@@ -637,7 +625,7 @@ export class OrchestratorRunner {
     });
     turn.resolve();
 
-    // A5: steered input the CLI may answer as its own next turn needs a turn
+    // Steered input the CLI may answer as its own next turn needs a turn
     // to land in. If it was instead folded into the turn that just settled,
     // the session_state_changed idle backstop settles this one immediately.
     // A dead lane mints nothing — the steer died with it, and the death
@@ -905,7 +893,7 @@ export class OrchestratorRunner {
     if (lane.query) await this.#closeLane(lane, { interrupt: false });
     const started = Date.now();
     // One ungated model attempt over an always-available floor (mirrors the
-    // seat rotation path): a clean checkpoint upgrades the recovery draft, a
+    // agent rotation path): a clean checkpoint upgrades the recovery draft, a
     // bad or failed one costs nothing beyond the degraded marker.
     const { draft: attempted, failure } = await this.#checkpointQuery(session);
     const degraded = attempted === null;

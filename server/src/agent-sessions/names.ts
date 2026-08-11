@@ -32,15 +32,14 @@ function sanitize(part: string): string {
   return safe === "" ? "agent" : safe;
 }
 
-/** Six id chars past the `as_`/`us_` prefix — enough to disambiguate sessions. */
 /**
  * The Console's own sending identity: console-authored deliveries (operator
  * answers, close-out asks, parent-final releases) post under this name, which
- * `#assertRoute` accepts toward any agent. Replaces the old #answerSpeaker
- * search that impersonated whichever agent happened to have a legal edge.
+ * `#assertRoute` accepts toward any agent.
  */
 export const CONSOLE_SENDER = "console";
 
+/** Six id chars past the `as_`/`us_` prefix — enough to disambiguate sessions. */
 export function sessionSuffix(sessionId: string): string {
   const sep = sessionId.indexOf("_");
   const start = sep === -1 ? 0 : sep + 1;

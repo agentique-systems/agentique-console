@@ -129,9 +129,8 @@ export function buildOrchestratorCanUseTool(input: CanUseToolInput): CanUseTool 
     }
 
     // Everything else runs. Delegation is a matter of judgement (the brief),
-    // not of capability: the previous blanket denial here meant the
-    // Orchestrator could not even fetch a page to answer its own seats, and
-    // reported to the operator that "web tools are blocked at my level".
+    // not of capability — a blanket denial would leave the Orchestrator unable
+    // even to fetch a page to answer its own agents.
     return { behavior: "allow" as const, updatedInput: toolInput };
   }) as CanUseTool;
 }
