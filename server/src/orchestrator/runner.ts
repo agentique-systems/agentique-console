@@ -19,7 +19,8 @@
 import type { HandoffDraft, PostMessageResponse } from "@agentique-console/shared";
 import { AsyncQueue } from "../async-queue.ts";
 import type { Config } from "../config.ts";
-import { Repo, toWireMessage, type UserSessionRow } from "../db/repo.ts";
+import { Repo, type UserSessionRow } from "../db/repo.ts";
+import { toWireMessage } from "../api/wire.ts";
 import type { EventBus } from "../events/bus.ts";
 import { RuntimeBroadcaster } from "../events/runtime.ts";
 import { newId, nowIso } from "../ids.ts";

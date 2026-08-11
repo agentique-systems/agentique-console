@@ -17,7 +17,6 @@
  *  - a non-blocking decision lived in an in-memory map and was dropped whenever
  *    no further material report happened to arrive.
  */
-import { and, eq, isNotNull, isNull } from "drizzle-orm";
 import type {
   Interaction,
   InteractionQuestion,
@@ -25,8 +24,7 @@ import type {
   InteractionUrgency,
   ResolveInteractionBody,
 } from "@agentique-console/shared";
-import type { Db } from "../db/client.ts";
-import { interactions } from "../db/schema.ts";
+import type { InteractionRow, InteractionStore } from "../db/stores/interaction-store.ts";
 import { renderAnswer } from "./decisions.ts";
 import type { EventBus } from "../events/bus.ts";
 import { newId, nowIso } from "../ids.ts";
@@ -55,8 +53,6 @@ export interface StaleAnswerRouting {
   /** An approved-but-stale plan still moves the session into execution. */
   beginExecuting(userSessionId: string): void;
 }
-
-type InteractionRow = typeof interactions.$inferSelect;
 
 function toWire(row: InteractionRow): Interaction {
   return {
@@ -127,7 +123,7 @@ export interface CreateOperatorQuestionInput {
 }
 
 export class InteractionService {
-  readonly #db: Db;
+  readonly #store: InteractionStore;
   readonly #bus: EventBus;
   readonly #pending = new Map<string, (res: InteractionResolution) => void>();
   /** Fired when a session's last unresolved BLOCKING row resolves — see the final gate. */
@@ -136,8 +132,8 @@ export class InteractionService {
   #onResolved: ((userSessionId: string) => void) | undefined;
   #staleRouting: StaleAnswerRouting | undefined;
 
-  constructor(db: Db, bus: EventBus) {
-    this.#db = db;
+  constructor(store: InteractionStore, bus: EventBus) {
+    this.#store = store;
     this.#bus = bus;
   }
 
@@ -287,21 +283,18 @@ export class InteractionService {
   ): { id: string; resolution: Promise<InteractionResolution> } {
     const id = newId("int");
     const participant = extra.participant ?? null;
-    this.#db
-      .insert(interactions)
-      .values({
-        id,
-        userSessionId,
-        kind,
-        status: "pending",
-        payload,
-        response: null,
-        toolUseId: toolUseId ?? null,
-        createdAt: nowIso(),
-        resolvedAt: null,
-        ...extra,
-      })
-      .run();
+    this.#store.insert({
+      id,
+      userSessionId,
+      kind,
+      status: "pending",
+      payload,
+      response: null,
+      toolUseId: toolUseId ?? null,
+      createdAt: nowIso(),
+      resolvedAt: null,
+      ...extra,
+    });
     emit(id);
     const resolution = new Promise<InteractionResolution>((resolve) => {
       this.#pending.set(id, resolve);
@@ -335,11 +328,7 @@ export class InteractionService {
     interactionId: string,
     body: ResolveInteractionBody,
   ): Interaction {
-    const row = this.#db
-      .select()
-      .from(interactions)
-      .where(eq(interactions.id, interactionId))
-      .get();
+    const row = this.#store.get(interactionId);
     if (!row || row.userSessionId !== userSessionId) {
       throw new NotFoundError(`no interaction ${interactionId}`);
     }
@@ -497,33 +486,13 @@ export class InteractionService {
 
   /** An unresolved row with the same normalized question from the same asker. */
   findUnresolvedByDedupe(agentSessionId: string, dedupeKey: string): Interaction | undefined {
-    const row = this.#db
-      .select()
-      .from(interactions)
-      .where(
-        and(
-          eq(interactions.agentSessionId, agentSessionId),
-          eq(interactions.dedupeKey, dedupeKey),
-          eq(interactions.status, "pending"),
-        ),
-      )
-      .get();
+    const row = this.#store.findUnresolvedByDedupe(agentSessionId, dedupeKey);
     return row ? toWire(row) : undefined;
   }
 
   /** Every still-open question raised inside one AgentSession. Feeds the final gate. */
   listUnresolvedForAgentSession(agentSessionId: string): Interaction[] {
-    return this.#db
-      .select()
-      .from(interactions)
-      .where(
-        and(
-          eq(interactions.agentSessionId, agentSessionId),
-          eq(interactions.status, "pending"),
-        ),
-      )
-      .all()
-      .map(toWire);
+    return this.#store.listUnresolvedForAgentSession(agentSessionId).map(toWire);
   }
 
   /**
@@ -532,28 +501,13 @@ export class InteractionService {
    * reach the asker at its next delivery.
    */
   listAnsweredUnflushed(agentSessionId: string, agent?: string): Interaction[] {
-    return this.#db
-      .select()
-      .from(interactions)
-      .where(
-        and(
-          eq(interactions.agentSessionId, agentSessionId),
-          isNull(interactions.flushedAt),
-          isNotNull(interactions.resolvedAt),
-          ...(agent === undefined ? [] : [eq(interactions.participant, agent)]),
-        ),
-      )
-      .all()
+    return this.#store.listAnsweredUnflushed(agentSessionId, agent)
       .filter((row) => row.status === "answered" || row.status === "rejected")
       .map(toWire);
   }
 
   markFlushed(ids: readonly string[]): void {
-    if (ids.length === 0) return;
-    const now = nowIso();
-    for (const id of ids) {
-      this.#db.update(interactions).set({ flushedAt: now }).where(eq(interactions.id, id)).run();
-    }
+    this.#store.markFlushed(ids);
   }
 
   /**
@@ -571,11 +525,7 @@ export class InteractionService {
 
 
   get(id: string): Interaction {
-    const row = this.#db
-      .select()
-      .from(interactions)
-      .where(eq(interactions.id, id))
-      .get();
+    const row = this.#store.get(id);
     if (!row) throw new NotFoundError(`no interaction ${id}`);
     return toWire(row);
   }
@@ -591,16 +541,8 @@ export class InteractionService {
    * and answering it still reaches somebody.
    */
   expirePendingOnBoot(): void {
-    this.#db
-      .update(interactions)
-      .set({ status: "stale" })
-      .where(and(eq(interactions.status, "pending"), isNull(interactions.participant)))
-      .run();
-    this.#db
-      .update(interactions)
-      .set({ detached: true })
-      .where(and(eq(interactions.status, "pending"), isNotNull(interactions.participant)))
-      .run();
+    this.#store.markPendingMainStale();
+    this.#store.markPendingSeatsDetached();
   }
 
   /** The single write point into the decision ledger. */
@@ -638,9 +580,9 @@ export class InteractionService {
   }
 
   #detachRow(id: string, reason: string): void {
-    const row = this.#db.select().from(interactions).where(eq(interactions.id, id)).get();
+    const row = this.#store.get(id);
     if (!row || row.status !== "pending") return;
-    this.#db.update(interactions).set({ detached: true }).where(eq(interactions.id, id)).run();
+    this.#store.setDetached(id);
     if (row.agentSessionId === null || row.participant === null) return;
     this.#bus.append({
       type: "agent_session.runtime.noted",
@@ -657,18 +599,7 @@ export class InteractionService {
   /** Fires the host's hook when a session's LAST blocking question clears. */
   #notifyIfBlockingCleared(row: InteractionRow): void {
     if (row.agentSessionId === null || row.urgency !== "blocking") return;
-    const stillBlocking = this.#db
-      .select()
-      .from(interactions)
-      .where(
-        and(
-          eq(interactions.agentSessionId, row.agentSessionId),
-          eq(interactions.status, "pending"),
-          eq(interactions.urgency, "blocking"),
-        ),
-      )
-      .all();
-    if (stillBlocking.length === 0) {
+    if (this.#store.listPendingBlocking(row.agentSessionId).length === 0) {
       this.#onBlockingCleared?.(row.userSessionId, row.agentSessionId);
     }
   }
@@ -677,16 +608,7 @@ export class InteractionService {
     userSessionId: string,
     status: InteractionRow["status"],
   ): InteractionRow[] {
-    return this.#db
-      .select()
-      .from(interactions)
-      .where(
-        and(
-          eq(interactions.userSessionId, userSessionId),
-          eq(interactions.status, status),
-        ),
-      )
-      .all();
+    return this.#store.listByStatus(userSessionId, status);
   }
 
   #markResolved(
@@ -694,12 +616,8 @@ export class InteractionService {
     status: "answered" | "rejected" | "dismissed",
     response: Record<string, unknown>,
   ): void {
-    this.#db
-      .update(interactions)
-      .set({ status, response, resolvedAt: nowIso() })
-      .where(eq(interactions.id, id))
-      .run();
-    const row = this.#db.select().from(interactions).where(eq(interactions.id, id)).get();
+    this.#store.markResolved(id, status, response);
+    const row = this.#store.get(id);
     // A pending question is a completion blocker, so resolving one may be the
     // last thing standing between this run and its sign-off card.
     if (row) this.#onResolved?.(row.userSessionId);

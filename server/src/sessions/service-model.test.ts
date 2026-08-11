@@ -15,12 +15,13 @@ import { Repo } from "../db/repo.ts";
 import { workspaces } from "../db/schema.ts";
 import { newId, nowIso } from "../ids.ts";
 import { UserSessionService } from "./service.ts";
+import { InteractionStore } from "../db/stores/interaction-store.ts";
 
 function makeService() {
   const { db, sqlite } = openDb(":memory:");
   const bus = new EventBus(db, new ArtifactStore(db));
   const repo = new Repo(db, sqlite);
-  const interactions = new InteractionService(db, bus);
+  const interactions = new InteractionService(new InteractionStore(db), bus);
 
   const workspaceId = newId("ws");
   db.insert(workspaces)

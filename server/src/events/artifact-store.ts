@@ -43,4 +43,9 @@ export class ArtifactStore {
     return this.#db.select({ id: eventArtifacts.id, mediaType: eventArtifacts.mediaType, bytes: eventArtifacts.bytes, content: eventArtifacts.content, createdAt: eventArtifacts.createdAt })
       .from(eventArtifacts).where(eq(eventArtifacts.id, id)).get();
   }
+
+  /** A durable-reference probe: existence only, without lifting the content. */
+  has(id: string): boolean {
+    return this.#db.select({ id: eventArtifacts.id }).from(eventArtifacts).where(eq(eventArtifacts.id, id)).get() !== undefined;
+  }
 }

@@ -1,4 +1,4 @@
-import { and, asc, eq, max, ne } from "drizzle-orm";
+import { and, asc, eq, max, ne, or } from "drizzle-orm";
 import type { Db } from "../db/client.ts";
 import { providerEntries } from "../db/schema.ts";
 import { nowIso } from "../ids.ts";
@@ -52,6 +52,12 @@ export class SqliteSessionStore {
 
   async delete(key: SessionKey): Promise<void> {
     this.db.delete(providerEntries).where(this.#filter(key)).run();
+  }
+
+  /** A durable-reference probe: `ref` names a journal entry uuid or a session. */
+  hasEntryRef(ref: string): boolean {
+    return this.db.select({ id: providerEntries.ord }).from(providerEntries)
+      .where(or(eq(providerEntries.uuid, ref), eq(providerEntries.sessionId, ref))).get() !== undefined;
   }
 
   async listSubkeys(key: { projectKey: string; sessionId: string }): Promise<string[]> {

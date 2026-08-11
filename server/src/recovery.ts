@@ -21,17 +21,21 @@
  * Writing the settle is what makes this idempotent: a recovered turn can never
  * be recovered again.
  */
-import { Repo, toWireMessage } from "./db/repo.ts";
+import { toWireMessage } from "./api/wire.ts";
+import type { Db } from "./db/client.ts";
+import type { Repo } from "./db/repo.ts";
 import type { EventBus } from "./events/bus.ts";
+import { findUnsettledTurns } from "./events/projections.ts";
 
 const RESTART_NOTE = "interrupted by a server restart";
 
 export function recoverInterruptedTurns(deps: {
+  db: Db;
   repo: Repo;
   bus: EventBus;
 }): number {
   const { repo, bus } = deps;
-  const unsettled = repo.findUnsettledTurns();
+  const unsettled = findUnsettledTurns(deps.db);
 
   for (const turn of unsettled) {
     if (turn.kind === "user") {

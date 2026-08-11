@@ -7,6 +7,7 @@ import { ArtifactStore } from "../events/artifact-store.ts";
 import { EventBus } from "../events/bus.ts";
 import { ConflictError, InvalidInputError } from "../errors.ts";
 import { WorkspaceService } from "./service.ts";
+import { WorkspaceStore } from "../db/stores/workspace-store.ts";
 
 let tmp: string;
 let service: WorkspaceService;
@@ -16,7 +17,7 @@ beforeEach(() => {
   tmp = mkdtempSync(path.join(os.tmpdir(), "console-ws-"));
   const { db } = openDb(":memory:");
   bus = new EventBus(db, new ArtifactStore(db));
-  service = new WorkspaceService(db, bus, [tmp]);
+  service = new WorkspaceService(new WorkspaceStore(db), bus, [tmp]);
 });
 
 afterEach(() => {

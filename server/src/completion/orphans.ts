@@ -13,11 +13,12 @@
  * because we once used that number would be a far worse bug than the leak.
  */
 import fs from "node:fs";
-import type { Repo } from "../db/repo.ts";
+import type { Db } from "../db/client.ts";
 import type { EventBus } from "../events/bus.ts";
+import { listOrphanedProcesses } from "../events/projections.ts";
 
 export interface OrphanScanDeps {
-  repo: Repo;
+  db: Db;
   bus: EventBus;
   /** Injectable for tests; defaults to the real syscalls. */
   isAlive?: (pid: number) => boolean;
@@ -44,7 +45,7 @@ export function reapOrphanedProcesses(deps: OrphanScanDeps): number {
   const kill = deps.kill ?? ((pid: number) => { process.kill(pid, "SIGTERM"); });
 
   let killed = 0;
-  for (const orphan of deps.repo.listOrphanedProcesses()) {
+  for (const orphan of listOrphanedProcesses(deps.db)) {
     const { pid, command, args, agentSessionId, userSessionId, agent, processId } = orphan;
     let outcome = "not running";
     if (pid !== null && isAlive(pid)) {

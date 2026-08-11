@@ -15,7 +15,8 @@ import type {
   UserSessionListItem,
 } from "@agentique-console/shared";
 import { InvalidInputError, NotFoundError } from "../errors.ts";
-import { Repo, toWireUserSession, type UserSessionRow } from "../db/repo.ts";
+import { Repo, type UserSessionRow } from "../db/repo.ts";
+import { toWireUserSession } from "../api/wire.ts";
 import type { EventBus } from "../events/bus.ts";
 import { newId, nowIso } from "../ids.ts";
 import type { InteractionService } from "../orchestrator/interactions.ts";

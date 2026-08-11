@@ -30,7 +30,7 @@ export async function bootApp(app: App): Promise<BootReport> {
   // In-flight promises died with the previous process; their rows go stale so
   // the UI renders greyed cards whose answers become revival turns.
   app.interactions.expirePendingOnBoot();
-  const recoveredTurns = recoverInterruptedTurns({ repo: app.repo, bus: app.bus });
+  const recoveredTurns = recoverInterruptedTurns({ db: app.db, repo: app.repo, bus: app.bus });
   const requeuedDeliveries = app.repo.requeueUnacknowledgedDeliveries();
   const reconciledCommunications = await reconcileDurableCommunication({ repo: app.repo, bus: app.bus });
 
@@ -57,7 +57,7 @@ export async function bootApp(app: App): Promise<BootReport> {
   // Managed children of a PREVIOUS process are unreachable by id but still
   // hold their ports; the next run would inherit them squatting the ports it
   // wants.
-  const reapedProcesses = reapOrphanedProcesses({ repo: app.repo, bus: app.bus });
+  const reapedProcesses = reapOrphanedProcesses({ db: app.db, bus: app.bus });
 
   app.host.boot();
   // Children whose parent archived or vanished across the restart can never

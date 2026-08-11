@@ -12,6 +12,7 @@ import {
   restartHarness,
 } from "./test-helpers.ts";
 import { reconcileDurableCommunication, recoverInterruptedTurns } from "./recovery.ts";
+import { findUnsettledTurns } from "./events/projections.ts";
 import { COORDINATOR_AGENT } from "./agent-sessions/names.ts";
 
 describe("recoverInterruptedTurns", () => {
@@ -40,7 +41,7 @@ describe("recoverInterruptedTurns", () => {
     const session = h.repo.getAgentSession(agentSessionId)!;
     h.bus.append({ type: "agent_session.turn.started", userSessionId: session.userSessionId, agentSessionId,
       payload: { agentSessionId, agent: "web", turnId: "tu_web" } });
-    expect(h.repo.findUnsettledTurns()).toHaveLength(1);
+    expect(findUnsettledTurns(h.db)).toHaveLength(1);
 
     const rebooted = await restartHarness(h);
     expect(rebooted.bootReport.recoveredTurns).toBe(1);
@@ -56,7 +57,7 @@ describe("recoverInterruptedTurns", () => {
       errorMessage: "interrupted by a server restart",
     });
     // Recovery is one-shot: the settle it wrote clears the backlog.
-    expect(h.repo.findUnsettledTurns()).toHaveLength(0);
+    expect(findUnsettledTurns(h.db)).toHaveLength(0);
   });
 
   it("closes an interrupted operator turn with a notice instead of redoing it", async () => {
@@ -85,7 +86,7 @@ describe("recoverInterruptedTurns", () => {
     expect(rows.at(-1)?.text).toContain("Send your message again to retry");
     // The operator decides whether to retry — we never silently re-run their turn.
     expect(h.fake.captured.prompts.length).toBe(promptsBefore);
-    expect(h.repo.findUnsettledTurns()).toHaveLength(0);
+    expect(findUnsettledTurns(h.db)).toHaveLength(0);
   });
 
   it("does nothing when every turn settled cleanly", async () => {
@@ -103,8 +104,8 @@ describe("recoverInterruptedTurns", () => {
     h.runner.postOperatorMessage(userSessionId, "hi");
     await collected;
 
-    expect(h.repo.findUnsettledTurns()).toEqual([]);
-    expect(recoverInterruptedTurns({ repo: h.repo, bus: h.bus })).toBe(0);
+    expect(findUnsettledTurns(h.db)).toEqual([]);
+    expect(recoverInterruptedTurns({ db: h.db, repo: h.repo, bus: h.bus })).toBe(0);
     expect(h.repo.getAgent("nope", COORDINATOR_AGENT)).toBeUndefined();
   });
 });

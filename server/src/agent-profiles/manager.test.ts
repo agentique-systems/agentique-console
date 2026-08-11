@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { openDb } from "../db/client.ts";
 import { Repo } from "../db/repo.ts";
+import { WorkspaceStore } from "../db/stores/workspace-store.ts";
 import { workspaces } from "../db/schema.ts";
 import { ArtifactStore } from "../events/artifact-store.ts";
 import { EventBus } from "../events/bus.ts";
@@ -23,7 +24,7 @@ describe("ProfileManagerService", () => {
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "agentique-manager-data-")); dirs.push(dataDir);
     const { db, sqlite } = openDb(":memory:"); const bus = new EventBus(db, new ArtifactStore(db)); const repo = new Repo(db, sqlite); const now = nowIso();
     db.insert(workspaces).values({ id: "ws_1", name: "test", rootPath: workspaceRoot, metadata: {}, createdAt: now, updatedAt: now }).run();
-    const workspaceService = new WorkspaceService(db, bus, [workspaceRoot]);
+    const workspaceService = new WorkspaceService(new WorkspaceStore(db), bus, [workspaceRoot]);
     const profiles = new AgentProfileRegistry({ getWorkspaceRoot: () => workspaceRoot, db, bus });
     const config = loadConfig({ CONSOLE_DATA_DIR: dataDir });
     const manager = new ProfileManagerService({ repo, workspaces: workspaceService, profiles, config, bus, runner: () => ({} as OrchestratorRunner) });

@@ -7,13 +7,12 @@ import type { AgentProfile, AgentProfileRegistry } from "../agent-profiles/regis
 import type { Config } from "../config.ts";
 import {
   Repo,
-  toWireAgentSession,
-  toWireMessage,
   type AgentSessionRow,
   type MailboxDeliveryRow,
   type MessageRow,
   type AgentRow,
 } from "../db/repo.ts";
+import { toWireAgentSession, toWireMessage } from "../api/wire.ts";
 import type { ArtifactStore } from "../events/artifact-store.ts";
 import type { EventBus } from "../events/bus.ts";
 import { RuntimeBroadcaster } from "../events/runtime.ts";
@@ -643,6 +642,12 @@ export class AgentSessionService {
       text, category, handoff: prepared.row, summary: prepared.summary,
       ...(opts.turnId ? { turnId: opts.turnId } : {}), ...(opts.dedupeKey ? { dedupeKey: opts.dedupeKey } : {}),
     });
+    // Latest-handoff pointers, chosen HERE where the recipient is known — the
+    // store offers the two targets and never branches on a domain sentinel.
+    for (const agent of new Set([to, speaker.name])) {
+      if (agent === MAIN_RECIPIENT) repo.setMainLatestHandoff(session.userSessionId, prepared.row.id);
+      else repo.setAgentLatestHandoff(session.id, agent, prepared.row.id);
+    }
     this.#deps.handoffs.committed(prepared.record);
     if (senderSeat && senderSeat.worktreePath && (prepared.record.core.status === "completed" || prepared.record.core.status === "failed")) {
       this.#onSeatWorktreePost(session, senderSeat, prepared.record.core.status);

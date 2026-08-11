@@ -1,15 +1,11 @@
 import { mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { eq } from "drizzle-orm";
 import type { Workspace } from "@agentique-console/shared";
-import type { Db } from "../db/client.ts";
-import { workspaces } from "../db/schema.ts";
+import type { WorkspaceRow, WorkspaceStore } from "../db/stores/workspace-store.ts";
 import type { EventBus } from "../events/bus.ts";
 import { newId, nowIso } from "../ids.ts";
 import { InvalidInputError, ConflictError, NotFoundError } from "../errors.ts";
 import { BrowseError, resolveNewPath } from "./fs-browse.ts";
-
-type WorkspaceRow = typeof workspaces.$inferSelect;
 
 function toWire(row: WorkspaceRow): Workspace {
   return {
@@ -23,26 +19,22 @@ function toWire(row: WorkspaceRow): Workspace {
 }
 
 export class WorkspaceService {
-  readonly #db: Db;
+  readonly #store: WorkspaceStore;
   readonly #bus: EventBus;
   readonly #roots: readonly string[];
 
-  constructor(db: Db, bus: EventBus, roots: readonly string[]) {
-    this.#db = db;
+  constructor(store: WorkspaceStore, bus: EventBus, roots: readonly string[]) {
+    this.#store = store;
     this.#bus = bus;
     this.#roots = roots;
   }
 
   list(): Workspace[] {
-    return this.#db.select().from(workspaces).all().map(toWire);
+    return this.#store.list().map(toWire);
   }
 
   get(id: string): Workspace {
-    const row = this.#db
-      .select()
-      .from(workspaces)
-      .where(eq(workspaces.id, id))
-      .get();
+    const row = this.#store.get(id);
     if (!row) throw new NotFoundError(`no workspace ${id}`);
     return toWire(row);
   }
@@ -71,11 +63,7 @@ export class WorkspaceService {
       await mkdir(rootPath, { recursive: true });
     }
 
-    const existing = this.#db
-      .select({ id: workspaces.id })
-      .from(workspaces)
-      .where(eq(workspaces.rootPath, rootPath))
-      .get();
+    const existing = this.#store.findIdByRootPath(rootPath);
     if (existing) throw new ConflictError(`a workspace already uses ${rootPath}`);
 
     const now = nowIso();
@@ -87,7 +75,7 @@ export class WorkspaceService {
       createdAt: now,
       updatedAt: now,
     };
-    this.#db.insert(workspaces).values(row).run();
+    this.#store.insert(row);
     const workspace = toWire(row);
     this.#bus.append({
       type: "workspace.created",
@@ -103,11 +91,7 @@ export class WorkspaceService {
     if (name !== undefined && name === "") {
       throw new InvalidInputError("workspace name cannot be empty");
     }
-    this.#db
-      .update(workspaces)
-      .set({ ...(name !== undefined ? { name } : {}), updatedAt: nowIso() })
-      .where(eq(workspaces.id, id))
-      .run();
+    this.#store.patch(id, name !== undefined ? { name } : {});
     const updated = this.get(id);
     this.#bus.append({
       type: "workspace.updated",

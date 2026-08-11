@@ -18,12 +18,8 @@
  * of every rendering. One source of truth, one mapper (`decisionOf`), one
  * renderer (`renderDecision`), read back into every seat's prompt.
  */
-import { and, eq, inArray, or } from "drizzle-orm";
-import type { Db } from "../db/client.ts";
-import { interactions } from "../db/schema.ts";
+import type { InteractionStore } from "../db/stores/interaction-store.ts";
 import type { InteractionQuestion } from "@agentique-console/shared";
-
-type InteractionRow = typeof interactions.$inferSelect;
 
 export type DecisionSource = "interaction" | "plan_approval";
 
@@ -102,25 +98,14 @@ export function decisionOf(row: DecisionSourceRow): OperatorDecision | null {
 }
 
 export class DecisionLedger {
-  readonly #db: Db;
+  readonly #interactions: InteractionStore;
 
-  constructor(db: Db) {
-    this.#db = db;
+  constructor(interactions: InteractionStore) {
+    this.#interactions = interactions;
   }
 
   list(userSessionId: string): OperatorDecision[] {
-    const rows: InteractionRow[] = this.#db
-      .select()
-      .from(interactions)
-      .where(and(
-        eq(interactions.userSessionId, userSessionId),
-        or(
-          eq(interactions.status, "answered"),
-          and(eq(interactions.kind, "plan_approval"), inArray(interactions.status, ["answered", "rejected"])),
-        ),
-      ))
-      .all();
-    return rows
+    return this.#interactions.listDecisionSourceRows(userSessionId)
       .map((row) => decisionOf({ ...row, agent: row.participant }))
       .filter((decision): decision is OperatorDecision => decision !== null)
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt));

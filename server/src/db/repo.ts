@@ -1,696 +1,107 @@
 /**
- * Thin typed queries shared by services. Per-session message seq is assigned
- * MAX(seq)+1 inside a synchronous transaction — safe because this is a single
- * process and better-sqlite3 serializes writes.
+ * TEMPORARY façade over the per-aggregate stores in ./stores/ (see the
+ * ownership rule there), kept so host.ts/runner.ts and their tests hold one
+ * dependency until the host carve retires it. Every method is a one-line
+ * delegation — new SQL goes in a store, never here.
  */
-import { and, asc, desc, eq, inArray, isNotNull, or, sql } from "drizzle-orm";
-import type {
-  AgentSession,
-  HandoffSummary,
-  MessageKind,
-  SessionMessage,
-  Speaker,
-  UserSession,
-} from "@agentique-console/shared";
 import type { Db } from "./client.ts";
-import {
-  agentSessions,
-  agents,
-  crons,
-  eventArtifacts,
-  handoffRecords,
-  events,
-  interactions,
-  mailboxDeliveries,
-  messages,
-  patternState,
-  providerEntries,
-  tasks,
-  userSessions,
-  usageSamples,
-} from "./schema.ts";
-import { newId, nowIso } from "../ids.ts";
+import { createStores, type SqliteTransactor, type Stores } from "./stores/index.ts";
+import type { AppendMessageInput, MailboxDeliveryRow, MessageRow } from "./stores/message-store.ts";
+import type { AgentRow, AgentSessionRow, UserSessionRow } from "./stores/session-store.ts";
+import type { HandoffRecordRow } from "./stores/handoff-store.ts";
+import type { CronRow } from "./stores/cron-store.ts";
+import type { PatternStateRow } from "./stores/pattern-state-store.ts";
+import type { UsageSampleRow } from "./stores/usage-store.ts";
+import { hasEvent, listProcessEvents } from "../events/projections.ts";
 
-export type UnsettledTurn =
-  | { kind: "user"; turnId: string; userSessionId: string }
-  | {
-      kind: "agent";
-      turnId: string;
-      userSessionId: string;
-      agentSessionId: string;
-      agent: string;
-    };
-
-export type MessageRow = typeof messages.$inferSelect;
-export type UserSessionRow = typeof userSessions.$inferSelect;
-export type AgentSessionRow = typeof agentSessions.$inferSelect;
-export type AgentRow = typeof agents.$inferSelect;
-export type MailboxDeliveryRow = typeof mailboxDeliveries.$inferSelect;
-export type UsageSampleRow = typeof usageSamples.$inferSelect;
-export type HandoffRecordRow = typeof handoffRecords.$inferSelect;
-export type CronRow = typeof crons.$inferSelect;
-export type PatternStateRow = typeof patternState.$inferSelect;
-
-export function toWireAgentSession(
-  row: AgentSessionRow,
-  specialists: string[],
-  working: boolean,
-): AgentSession {
-  return {
-    id: row.id,
-    userSessionId: row.userSessionId,
-    title: row.title,
-    lifecycle: row.lifecycle,
-    activity: working ? "working" : "idle",
-    pattern: row.pattern,
-    parentAgentSessionId: row.parentAgentSessionId,
-    agents: specialists,
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
-  };
-}
-
-export function toWireMessage(row: MessageRow): SessionMessage {
-  const handoff = row.payload?.handoff as HandoffSummary | undefined;
-  return {
-    seq: row.seq,
-    speaker: { kind: row.speakerKind, name: row.speakerName },
-    ...(row.toName === null ? {} : { to: row.toName }),
-    kind: row.kind,
-    text: row.text,
-    ...(handoff === undefined ? {} : { handoff }),
-    createdAt: row.createdAt,
-  };
-}
-
-export function toWireUserSession(row: UserSessionRow): UserSession {
-  return {
-    id: row.id,
-    workspaceId: row.workspaceId,
-    title: row.title,
-    mode: row.mode,
-    phase: row.phase,
-    lifecycle: row.lifecycle,
-    runState: row.runState,
-    model: row.model,
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
-  };
-}
-
-export interface AppendMessageInput {
-  sessionKind: "user" | "agent";
-  sessionId: string;
-  speaker: Speaker;
-  to?: string;
-  kind: MessageKind;
-  text: string;
-  payload?: Record<string, unknown>;
-  turnId?: string;
-}
+export type { AppendMessageInput, MailboxDeliveryRow, MessageRow } from "./stores/message-store.ts";
+export type { AgentRow, AgentSessionRow, UserSessionRow } from "./stores/session-store.ts";
+export type { HandoffRecordRow } from "./stores/handoff-store.ts";
+export type { CronRow } from "./stores/cron-store.ts";
+export type { PatternStateRow } from "./stores/pattern-state-store.ts";
+export type { UsageSampleRow } from "./stores/usage-store.ts";
 
 export class Repo {
   readonly #db: Db;
-  readonly #sqlite: { transaction<T>(fn: () => T): () => T };
+  readonly #s: Stores;
 
-  constructor(db: Db, sqlite: { transaction<T>(fn: () => T): () => T }) {
+  constructor(db: Db, sqlite: SqliteTransactor, stores: Stores = createStores(db, sqlite)) {
     this.#db = db;
-    this.#sqlite = sqlite;
+    this.#s = stores;
   }
 
-  /** Appends a message with the next per-session seq; returns the stored row. */
-  appendMessage(input: AppendMessageInput): MessageRow {
-    const run = this.#sqlite.transaction((): MessageRow => {
-      const head = this.#db
-        .select({ seq: sql<number>`coalesce(max(${messages.seq}), 0)` })
-        .from(messages)
-        .where(
-          and(
-            eq(messages.sessionKind, input.sessionKind),
-            eq(messages.sessionId, input.sessionId),
-          ),
-        )
-        .get();
-      const row: MessageRow = {
-        id: newId("msg"),
-        sessionKind: input.sessionKind,
-        sessionId: input.sessionId,
-        seq: (head?.seq ?? 0) + 1,
-        speakerKind: input.speaker.kind,
-        speakerName: input.speaker.name,
-        toName: input.to ?? null,
-        kind: input.kind,
-        text: input.text,
-        payload: input.payload ?? null,
-        turnId: input.turnId ?? null,
-        createdAt: nowIso(),
-      };
-      this.#db.insert(messages).values(row).run();
-      return row;
-    });
-    return run();
-  }
+  // --- Messages + deliveries (MessageStore) ---------------------------------
 
-  /** Atomically persists speech and its addressed mailbox delivery. */
-  appendMailboxMessage(input: AppendMessageInput & {
-    userSessionId: string;
-    agentSessionId: string;
-    recipient: string;
-    category: MailboxDeliveryRow["category"];
-    dedupeKey?: string;
-  }): { message: MessageRow; delivery: MailboxDeliveryRow } {
-    const run = this.#sqlite.transaction(() => {
-      const message = this.appendMessage(input);
-      const delivery: MailboxDeliveryRow = {
-        id: newId("delivery"),
-        messageId: message.id,
-        userSessionId: input.userSessionId,
-        agentSessionId: input.agentSessionId,
-        sender: input.speaker.name,
-        recipient: input.recipient,
-        category: input.category,
-        status: "queued",
-        dedupeKey: input.dedupeKey ?? null,
-        deliveredAt: null,
-        acknowledgedAt: null,
-        createdAt: nowIso(),
-      };
-      this.#db.insert(mailboxDeliveries).values(delivery).run();
-      return { message, delivery };
-    });
-    return run();
-  }
+  appendMessage(input: AppendMessageInput): MessageRow { return this.#s.messages.appendMessage(input); }
+  appendHandoffMailbox(input: Parameters<Stores["messages"]["appendHandoffMailbox"]>[0]): ReturnType<Stores["messages"]["appendHandoffMailbox"]> { return this.#s.messages.appendHandoffMailbox(input); }
+  setMainLatestHandoff(userSessionId: string, handoffId: string): void { this.#s.messages.setMainLatestHandoff(userSessionId, handoffId); }
+  setAgentLatestHandoff(agentSessionId: string, agent: string, handoffId: string): void { this.#s.messages.setAgentLatestHandoff(agentSessionId, agent, handoffId); }
+  listQueuedDeliveries(agentSessionId?: string): MailboxDeliveryRow[] { return this.#s.messages.listQueuedDeliveries(agentSessionId); }
+  listActiveDeliveries(agentSessionId: string): MailboxDeliveryRow[] { return this.#s.messages.listActiveDeliveries(agentSessionId); }
+  findDeliveryByDedupe(agentSessionId: string, sender: string, recipient: string, dedupeKey: string): MailboxDeliveryRow | undefined { return this.#s.messages.findDeliveryByDedupe(agentSessionId, sender, recipient, dedupeKey); }
+  getMessageById(id: string): MessageRow | undefined { return this.#s.messages.getMessageById(id); }
+  patchDelivery(id: string, patch: Partial<Pick<MailboxDeliveryRow, "status" | "deliveredAt" | "acknowledgedAt">>): void { this.#s.messages.patchDelivery(id, patch); }
+  getDeliveryById(id: string): MailboxDeliveryRow | undefined { return this.#s.messages.getDeliveryById(id); }
+  latestAssignmentDelivery(agentSessionId: string, recipient: string): MailboxDeliveryRow | undefined { return this.#s.messages.latestAssignmentDelivery(agentSessionId, recipient); }
+  listUnackedDeliveries(agentSessionId: string, recipient: string): MailboxDeliveryRow[] { return this.#s.messages.listUnackedDeliveries(agentSessionId, recipient); }
+  requeueUnacknowledgedDeliveries(): number { return this.#s.messages.requeueUnacknowledgedDeliveries(); }
+  listMessages(sessionKind: "user" | "agent", sessionId: string, afterSeq = 0): MessageRow[] { return this.#s.messages.listMessages(sessionKind, sessionId, afterSeq); }
+  listAllMessages(): MessageRow[] { return this.#s.messages.listAllMessages(); }
+  listAllDeliveries(): MailboxDeliveryRow[] { return this.#s.messages.listAllDeliveries(); }
+  messagesHeadSeq(sessionKind: "user" | "agent", sessionId: string): number { return this.#s.messages.messagesHeadSeq(sessionKind, sessionId); }
 
-  /** Atomically stores the lossless handoff, compact message projection, and delivery. */
-  appendHandoffMailbox(input: AppendMessageInput & {
-    userSessionId: string;
-    agentSessionId: string;
-    recipient: string;
-    category: MailboxDeliveryRow["category"];
-    handoff: HandoffRecordRow;
-    summary: HandoffSummary;
-    dedupeKey?: string;
-  }): { message: MessageRow; delivery: MailboxDeliveryRow; handoff: HandoffRecordRow } {
-    return this.#sqlite.transaction(() => {
-      const { message, delivery } = this.appendMailboxMessage({
-        ...input,
-        payload: { ...(input.payload ?? {}), handoff: input.summary },
-      });
-      const handoff = { ...input.handoff, messageId: message.id };
-      this.#db.insert(handoffRecords).values(handoff).run();
-      for (const agent of new Set([input.recipient, input.speaker.name])) {
-        if (agent === "main") {
-          this.#db.update(userSessions).set({ latestHandoffId: handoff.id, updatedAt: nowIso() }).where(eq(userSessions.id, input.userSessionId)).run();
-        } else {
-          this.#db.update(agents).set({ latestHandoffId: handoff.id }).where(and(
-            eq(agents.agentSessionId, input.agentSessionId), eq(agents.name, agent),
-          )).run();
-        }
-      }
-      return { message, delivery, handoff };
-    })();
-  }
+  // --- Session tree (SessionStore) ------------------------------------------
 
-  insertCheckpointHandoff(row: HandoffRecordRow): void {
-    this.#sqlite.transaction(() => {
-      this.#db.insert(handoffRecords).values(row).run();
-      if (row.agentSessionId === null) {
-        this.#db.update(userSessions).set({ latestHandoffId: row.id, updatedAt: nowIso() }).where(eq(userSessions.id, row.userSessionId)).run();
-      } else {
-        this.#db.update(agents).set({ latestHandoffId: row.id }).where(and(
-          eq(agents.agentSessionId, row.agentSessionId),
-          eq(agents.name, row.recipient),
-        )).run();
-      }
-    })();
-  }
+  getUserSession(id: string): UserSessionRow | undefined { return this.#s.sessions.getUserSession(id); }
+  listOpenUserSessions(): UserSessionRow[] { return this.#s.sessions.listOpenUserSessions(); }
+  listOpenWorkSessions(): UserSessionRow[] { return this.#s.sessions.listOpenWorkSessions(); }
+  listUserSessions(workspaceId: string): UserSessionRow[] { return this.#s.sessions.listUserSessions(workspaceId); }
+  listManagerSessions(workspaceId: string): UserSessionRow[] { return this.#s.sessions.listManagerSessions(workspaceId); }
+  findManagerSession(workspaceId: string, subjectKey: string): UserSessionRow | undefined { return this.#s.sessions.findManagerSession(workspaceId, subjectKey); }
+  insertUserSession(row: UserSessionRow): void { this.#s.sessions.insertUserSession(row); }
+  patchUserSession(id: string, patch: Parameters<Stores["sessions"]["patchUserSession"]>[1]): void { this.#s.sessions.patchUserSession(id, patch); }
+  touchUserSession(id: string): void { this.#s.sessions.touchUserSession(id); }
+  getAgentSession(id: string): AgentSessionRow | undefined { return this.#s.sessions.getAgentSession(id); }
+  listAgentSessions(userSessionId: string): AgentSessionRow[] { return this.#s.sessions.listAgentSessions(userSessionId); }
+  insertAgentSession(row: AgentSessionRow): void { this.#s.sessions.insertAgentSession(row); }
+  listOpenAgentSessions(): AgentSessionRow[] { return this.#s.sessions.listOpenAgentSessions(); }
+  listChildSessions(parentAgentSessionId: string): AgentSessionRow[] { return this.#s.sessions.listChildSessions(parentAgentSessionId); }
+  patchAgentSession(id: string, patch: Parameters<Stores["sessions"]["patchAgentSession"]>[1]): void { this.#s.sessions.patchAgentSession(id, patch); }
+  listAgents(agentSessionId: string): AgentRow[] { return this.#s.sessions.listAgents(agentSessionId); }
+  getAgent(agentSessionId: string, name: string): AgentRow | undefined { return this.#s.sessions.getAgent(agentSessionId, name); }
+  insertAgent(row: AgentRow): void { this.#s.sessions.insertAgent(row); }
+  patchAgent(agentSessionId: string, name: string, patch: Parameters<Stores["sessions"]["patchAgent"]>[2]): void { this.#s.sessions.patchAgent(agentSessionId, name, patch); }
+  listWorktreeAgents(): { agentSessionId: string; name: string; worktreePath: string }[] { return this.#s.sessions.listWorktreeAgents(); }
 
-  getHandoff(id: string): HandoffRecordRow | undefined {
-    return this.#db.select().from(handoffRecords).where(eq(handoffRecords.id, id)).get();
-  }
+  // --- Handoffs (HandoffStore) ----------------------------------------------
 
-  /**
-   * `recipient` matches the RECIPIENT — "the last handoff addressed to X".
-   * `sender` matches the AUTHOR — "the last thing X itself reported". Rotation
-   * recovery must use `sender`: an agent's inheritance is its own last report,
-   * never the last message someone else sent it.
-   */
-  latestHandoff(input: { userSessionId: string; agentSessionId?: string | null; recipient?: string; sender?: string; excludeCheckpoints?: boolean; excludeSynthetic?: boolean }): HandoffRecordRow | undefined {
-    const filters = [eq(handoffRecords.userSessionId, input.userSessionId)];
-    if (input.agentSessionId === null) filters.push(sql`${handoffRecords.agentSessionId} is null`);
-    else if (input.agentSessionId !== undefined) filters.push(eq(handoffRecords.agentSessionId, input.agentSessionId));
-    if (input.recipient !== undefined) filters.push(eq(handoffRecords.recipient, input.recipient));
-    if (input.sender !== undefined) filters.push(eq(handoffRecords.sender, input.sender));
-    if (input.excludeCheckpoints === true) filters.push(eq(handoffRecords.checkpoint, false));
-    // Console-authored (synthetic) notices are not reports.
-    if (input.excludeSynthetic === true) filters.push(eq(handoffRecords.synthetic, false));
-    // rowid breaks createdAt ties: handoffs written in the same millisecond are
-    // ordinary (an ack and its follow-up), and "latest" must not be a coin flip
-    // when a rotation checkpoint depends on it.
-    return this.#db.select().from(handoffRecords).where(and(...filters))
-      .orderBy(desc(handoffRecords.createdAt), desc(sql`rowid`)).get();
-  }
+  insertCheckpointHandoff(row: HandoffRecordRow): void { this.#s.handoffs.insertCheckpointHandoff(row); }
+  getHandoff(id: string): HandoffRecordRow | undefined { return this.#s.handoffs.getHandoff(id); }
+  latestHandoff(input: Parameters<Stores["handoffs"]["latestHandoff"]>[0]): HandoffRecordRow | undefined { return this.#s.handoffs.latestHandoff(input); }
 
+  // --- Usage, crons, pattern state ------------------------------------------
+
+  insertUsage(row: UsageSampleRow): void { this.#s.usage.insertUsage(row); }
+  listUsage(userSessionId: string): UsageSampleRow[] { return this.#s.usage.listUsage(userSessionId); }
+  insertCron(row: CronRow): void { this.#s.crons.insertCron(row); }
+  listDueDeadlines(userSessionId: string, nowIsoTime: string): CronRow[] { return this.#s.crons.listDueDeadlines(userSessionId, nowIsoTime); }
+  patchCron(id: string, patch: Partial<Pick<CronRow, "schedule" | "prompt" | "status">>): void { this.#s.crons.patchCron(id, patch); }
+  getPatternState(agentSessionId: string): PatternStateRow | undefined { return this.#s.patternState.getPatternState(agentSessionId); }
+  upsertPatternState(agentSessionId: string, patch: Parameters<Stores["patternState"]["upsertPatternState"]>[1]): PatternStateRow { return this.#s.patternState.upsertPatternState(agentSessionId, patch); }
+
+  // --- Cross-aggregate reads ------------------------------------------------
+
+  countPendingInteractions(workspaceId: string): Map<string, number> { return this.#s.interactions.countPendingByUserSession(workspaceId); }
+
+  /** One existence probe per owning store, dispatched on the reference kind. */
   hasDurableReference(kind: "journal" | "artifact" | "task", ref: string): boolean {
-    if (kind === "artifact") return this.#db.select({ id: eventArtifacts.id }).from(eventArtifacts).where(eq(eventArtifacts.id, ref)).get() !== undefined;
-    if (kind === "task") return this.#db.select({ id: tasks.sdkTaskId }).from(tasks).where(eq(tasks.sdkTaskId, ref)).get() !== undefined;
-    return this.#db.select({ id: providerEntries.ord }).from(providerEntries)
-      .where(or(eq(providerEntries.uuid, ref), eq(providerEntries.sessionId, ref))).get() !== undefined;
+    if (kind === "artifact") return this.#s.artifacts.has(ref);
+    if (kind === "task") return this.#s.tasks.hasSdkTaskId(ref);
+    return this.#s.providerEntries.hasEntryRef(ref);
   }
 
-  listQueuedDeliveries(agentSessionId?: string): MailboxDeliveryRow[] {
-    return this.#db.select().from(mailboxDeliveries)
-      .where(agentSessionId === undefined
-        ? eq(mailboxDeliveries.status, "queued")
-        : and(eq(mailboxDeliveries.agentSessionId, agentSessionId), eq(mailboxDeliveries.status, "queued")))
-      .orderBy(asc(mailboxDeliveries.createdAt)).all();
-  }
-  /** Open, non-manager sessions — the ones a run can complete in. */
-  listOpenWorkSessions(): UserSessionRow[] {
-    return this.#db.select().from(userSessions)
-      .where(and(eq(userSessions.lifecycle, "open"), eq(userSessions.purpose, "work"))).all();
-  }
+  // --- Events read-models (SQL lives in events/projections.ts) --------------
 
-  /** userSessionId -> open card count, for the sidebar's attention dots. */
-  countPendingInteractions(workspaceId: string): Map<string, number> {
-    const rows = this.#db.select({ id: interactions.userSessionId })
-      .from(interactions)
-      .innerJoin(userSessions, eq(interactions.userSessionId, userSessions.id))
-      .where(and(eq(userSessions.workspaceId, workspaceId), inArray(interactions.status, ["pending", "stale"])))
-      .all();
-    const counts = new Map<string, number>();
-    for (const row of rows) counts.set(row.id, (counts.get(row.id) ?? 0) + 1);
-    return counts;
-  }
-
-  /**
-   * Processes the journal shows as started with no matching exit, across every
-   * session, oldest first — the boot-time leak scan. Carries the recorded argv
-   * so the caller can guard against pid reuse before killing anything.
-   */
-  listOrphanedProcesses(): { processId: string; pid: number | null; command: string; args: string[]; userSessionId: string; agentSessionId: string; agent: string }[] {
-    const rows = this.#db.select({ type: events.type, userSessionId: events.userSessionId, agentSessionId: events.agentSessionId, payload: events.payload })
-      .from(events)
-      .where(inArray(events.type, ["agent_session.process.started", "agent_session.process.exited"]))
-      .orderBy(asc(events.seq)).all();
-    const open = new Map<string, { processId: string; pid: number | null; command: string; args: string[]; userSessionId: string; agentSessionId: string; agent: string }>();
-    for (const row of rows) {
-      const payload = row.payload as { processId?: string; pid?: number; command?: string; args?: string[]; agent?: string };
-      const processId = payload.processId;
-      if (processId === undefined) continue;
-      if (row.type === "agent_session.process.exited") { open.delete(processId); continue; }
-      open.set(processId, {
-        processId, pid: payload.pid ?? null,
-        command: payload.command ?? "", args: payload.args ?? [],
-        userSessionId: row.userSessionId ?? "", agentSessionId: row.agentSessionId ?? "",
-        agent: payload.agent ?? "",
-      });
-    }
-    return [...open.values()];
-  }
-
-  listProcessEvents(userSessionId: string): { type: string; processId: string }[] {
-    return this.#db.select({ type: events.type, payload: events.payload }).from(events)
-      .where(and(
-        eq(events.userSessionId, userSessionId),
-        inArray(events.type, ["agent_session.process.started", "agent_session.process.exited"]),
-      ))
-      .orderBy(asc(events.seq))
-      .all()
-      .map((row) => ({ type: row.type, processId: String((row.payload as { processId?: string }).processId ?? "") }))
-      .filter((row) => row.processId !== "");
-  }
-
-  listActiveDeliveries(agentSessionId: string): MailboxDeliveryRow[] {
-    return this.#db.select().from(mailboxDeliveries).where(and(eq(mailboxDeliveries.agentSessionId, agentSessionId), inArray(mailboxDeliveries.status, ["queued", "delivered"]))).orderBy(asc(mailboxDeliveries.createdAt)).all();
-  }
-  findDeliveryByDedupe(agentSessionId: string, sender: string, recipient: string, dedupeKey: string): MailboxDeliveryRow | undefined {
-    return this.#db.select().from(mailboxDeliveries).where(and(eq(mailboxDeliveries.agentSessionId, agentSessionId), eq(mailboxDeliveries.sender, sender), eq(mailboxDeliveries.recipient, recipient), eq(mailboxDeliveries.dedupeKey, dedupeKey))).orderBy(desc(mailboxDeliveries.createdAt)).get();
-  }
-
-  getMessageById(id: string): MessageRow | undefined {
-    return this.#db.select().from(messages).where(eq(messages.id, id)).get();
-  }
-
-  /**
-   * `deliveredAt` is write-once per delivery attempt, enforced HERE rather than
-   * by callers. `#deliverConsole` reads rows while they are still `queued`,
-   * patches them to `delivered`, and hands the SAME stale objects to
-   * `#mintTurn`; at settle, `delivery.deliveredAt ?? now` then read the stale
-   * NULL and overwrote the real timestamp with the settle time. Six of
-   * db-live-2's twelve rows reported fabricated ~400s "delivery latencies" for
-   * messages the seat had within a second — and `report-run.ts` prints those as
-   * mesh health.
-   *
-   * Making it a property of the store means no future caller can reintroduce
-   * it. The one legitimate reset — rotation requeueing a delivery — passes
-   * `deliveredAt: null` explicitly and is honoured.
-   */
-  patchDelivery(id: string, patch: Partial<Pick<MailboxDeliveryRow, "status" | "deliveredAt" | "acknowledgedAt">>): void {
-    const preserveDelivered = patch.deliveredAt !== undefined && patch.deliveredAt !== null;
-    this.#db.update(mailboxDeliveries)
-      .set(preserveDelivered
-        ? { ...patch, deliveredAt: sql`coalesce(${mailboxDeliveries.deliveredAt}, ${patch.deliveredAt})` }
-        : patch)
-      .where(eq(mailboxDeliveries.id, id)).run();
-  }
-
-  /** A durable event of `type` exists for this agent session. */
-  hasEvent(type: string, agentSessionId: string): boolean {
-    return this.#db.select({ seq: events.seq }).from(events)
-      .where(and(eq(events.type, type), eq(events.agentSessionId, agentSessionId)))
-      .limit(1).get() !== undefined;
-  }
-
-  getDeliveryById(id: string): MailboxDeliveryRow | undefined {
-    return this.#db.select().from(mailboxDeliveries).where(eq(mailboxDeliveries.id, id)).get();
-  }
-
-  /** The agent's most recent inbound assignment, if it was ever assigned anything. */
-  latestAssignmentDelivery(agentSessionId: string, recipient: string): MailboxDeliveryRow | undefined {
-    return this.#db.select().from(mailboxDeliveries)
-      .where(and(
-        eq(mailboxDeliveries.agentSessionId, agentSessionId),
-        eq(mailboxDeliveries.recipient, recipient),
-        eq(mailboxDeliveries.category, "assignment"),
-      ))
-      .orderBy(desc(mailboxDeliveries.createdAt))
-      .limit(1)
-      .get();
-  }
-
-  /** Journal rows a (re)spawning recipient must be handed again: not yet consumed. */
-  listUnackedDeliveries(agentSessionId: string, recipient: string): MailboxDeliveryRow[] {
-    return this.#db.select().from(mailboxDeliveries)
-      .where(and(
-        eq(mailboxDeliveries.agentSessionId, agentSessionId),
-        eq(mailboxDeliveries.recipient, recipient),
-        inArray(mailboxDeliveries.status, ["queued", "delivered"]),
-      ))
-      .orderBy(asc(mailboxDeliveries.createdAt)).all();
-  }
-
-  insertCron(row: CronRow): void {
-    this.#db.insert(crons).values(row).run();
-  }
-  /** Console-owned one-shot deadlines whose absolute time has arrived. */
-  listDueDeadlines(userSessionId: string, nowIsoTime: string): CronRow[] {
-    return this.#db.select().from(crons)
-      .where(and(eq(crons.userSessionId, userSessionId), eq(crons.status, "active"), isNotNull(crons.dueAt)))
-      .all()
-      .filter((row) => row.dueAt !== null && row.dueAt <= nowIsoTime);
-  }
-
-  patchCron(id: string, patch: Partial<Pick<CronRow, "schedule" | "prompt" | "status">>): void {
-    this.#db.update(crons).set({ ...patch, updatedAt: nowIso() }).where(eq(crons.id, id)).run();
-  }
-
-  requeueUnacknowledgedDeliveries(): number {
-    return this.#db.update(mailboxDeliveries).set({ status: "queued", deliveredAt: null })
-      .where(eq(mailboxDeliveries.status, "delivered")).run().changes;
-  }
-
-  insertUsage(row: UsageSampleRow): void { this.#db.insert(usageSamples).values(row).run(); }
-  listUsage(userSessionId: string): UsageSampleRow[] { return this.#db.select().from(usageSamples).where(eq(usageSamples.userSessionId, userSessionId)).orderBy(asc(usageSamples.createdAt)).all(); }
-
-  listMessages(
-    sessionKind: "user" | "agent",
-    sessionId: string,
-    afterSeq = 0,
-  ): MessageRow[] {
-    return this.#db
-      .select()
-      .from(messages)
-      .where(
-        and(
-          eq(messages.sessionKind, sessionKind),
-          eq(messages.sessionId, sessionId),
-          sql`${messages.seq} > ${afterSeq}`,
-        ),
-      )
-      .orderBy(asc(messages.seq))
-      .all();
-  }
-
-  listAllMessages(): MessageRow[] { return this.#db.select().from(messages).orderBy(asc(messages.createdAt)).all(); }
-  listAllDeliveries(): MailboxDeliveryRow[] { return this.#db.select().from(mailboxDeliveries).orderBy(asc(mailboxDeliveries.createdAt)).all(); }
-
-  messagesHeadSeq(sessionKind: "user" | "agent", sessionId: string): number {
-    const row = this.#db
-      .select({ seq: sql<number>`coalesce(max(${messages.seq}), 0)` })
-      .from(messages)
-      .where(
-        and(
-          eq(messages.sessionKind, sessionKind),
-          eq(messages.sessionId, sessionId),
-        ),
-      )
-      .get();
-    return row?.seq ?? 0;
-  }
-
-  getUserSession(id: string): UserSessionRow | undefined {
-    return this.#db
-      .select()
-      .from(userSessions)
-      .where(eq(userSessions.id, id))
-      .get();
-  }
-
-  listOpenUserSessions(): UserSessionRow[] {
-    return this.#db.select().from(userSessions).where(eq(userSessions.lifecycle, "open")).all();
-  }
-
-  listUserSessions(workspaceId: string): UserSessionRow[] {
-    return this.#db
-      .select()
-      .from(userSessions)
-      .where(and(eq(userSessions.workspaceId, workspaceId), eq(userSessions.purpose, "work")))
-      .orderBy(desc(userSessions.updatedAt))
-      .all();
-  }
-
-  listManagerSessions(workspaceId: string): UserSessionRow[] {
-    return this.#db.select().from(userSessions).where(and(eq(userSessions.workspaceId, workspaceId), eq(userSessions.purpose, "profile_manager"))).orderBy(desc(userSessions.updatedAt)).all();
-  }
-
-  findManagerSession(workspaceId: string, subjectKey: string): UserSessionRow | undefined {
-    return this.#db.select().from(userSessions).where(and(eq(userSessions.workspaceId, workspaceId), eq(userSessions.purpose, "profile_manager"), eq(userSessions.subjectKey, subjectKey))).get();
-  }
-
-  insertUserSession(row: UserSessionRow): void {
-    this.#db.insert(userSessions).values(row).run();
-  }
-
-  patchUserSession(
-    id: string,
-    patch: Partial<
-      Pick<UserSessionRow, "title" | "mode" | "phase" | "lifecycle" | "subjectKey" | "sdkSessionId" | "sdkGeneration" | "sdkTurnCount" | "contextTokens" | "memory" |  "latestHandoffId" | "cumulativeCostUsd" | "cumulativeApiDurationMs" | "runState" | "runBaseCommit" | "model">
-    >,
-  ): void {
-    this.#db
-      .update(userSessions)
-      .set({ ...patch, updatedAt: nowIso() })
-      .where(eq(userSessions.id, id))
-      .run();
-  }
-
-  touchUserSession(id: string): void {
-    this.#db
-      .update(userSessions)
-      .set({ updatedAt: nowIso() })
-      .where(eq(userSessions.id, id))
-      .run();
-  }
-
-  // --- Agent sessions -------------------------------------------------------
-
-  getAgentSession(id: string): AgentSessionRow | undefined {
-    return this.#db
-      .select()
-      .from(agentSessions)
-      .where(eq(agentSessions.id, id))
-      .get();
-  }
-
-  listAgentSessions(userSessionId: string): AgentSessionRow[] {
-    return this.#db
-      .select()
-      .from(agentSessions)
-      .where(eq(agentSessions.userSessionId, userSessionId))
-      .orderBy(desc(agentSessions.createdAt))
-      .all();
-  }
-
-  insertAgentSession(row: AgentSessionRow): void {
-    this.#db.insert(agentSessions).values(row).run();
-  }
-
-  listOpenAgentSessions(): AgentSessionRow[] {
-    return this.#db
-      .select()
-      .from(agentSessions)
-      .where(eq(agentSessions.lifecycle, "open"))
-      .all();
-  }
-
-  listChildSessions(parentAgentSessionId: string): AgentSessionRow[] {
-    return this.#db
-      .select()
-      .from(agentSessions)
-      .where(eq(agentSessions.parentAgentSessionId, parentAgentSessionId))
-      .orderBy(asc(agentSessions.createdAt))
-      .all();
-  }
-
-  // --- Pattern state (progression-module-owned) -----------------------------
-
-  getPatternState(agentSessionId: string): PatternStateRow | undefined {
-    return this.#db.select().from(patternState).where(eq(patternState.agentSessionId, agentSessionId)).get();
-  }
-
-  /** Creates the row on first touch; merges the patch into the existing one after. */
-  upsertPatternState(agentSessionId: string, patch: Partial<Omit<PatternStateRow, "agentSessionId" | "createdAt" | "updatedAt">>): PatternStateRow {
-    const now = nowIso();
-    const existing = this.getPatternState(agentSessionId);
-    if (!existing) {
-      const row: PatternStateRow = {
-        agentSessionId, rounds: 0, handoffCount: 0, lastProgressAt: null,
-        recentEdges: [], joins: {}, tripped: null, createdAt: now, updatedAt: now,
-        ...patch,
-      };
-      this.#db.insert(patternState).values(row).run();
-      return row;
-    }
-    this.#db.update(patternState).set({ ...patch, updatedAt: now }).where(eq(patternState.agentSessionId, agentSessionId)).run();
-    return { ...existing, ...patch, updatedAt: now };
-  }
-
-  /**
-   * Turns that started but never settled — every one is a turn that died with
-   * a previous process. Derived from the spine rather than a status column, so
-   * it stays true no matter how the process ended, and recovery writing the
-   * missing settle is what stops a turn being recovered twice.
-   */
-  findUnsettledTurns(): UnsettledTurn[] {
-    return this.#db
-      .all<{
-        type: string;
-        turnId: string | null;
-        userSessionId: string | null;
-        agentSessionId: string | null;
-        agent: string | null;
-      }>(sql`
-        select
-          type,
-          json_extract(payload, '$.turnId') as turnId,
-          user_session_id as userSessionId,
-          agent_session_id as agentSessionId,
-          json_extract(payload, '$.agent') as agent
-        from events
-        where type in ('user_session.turn.started', 'agent_session.turn.started')
-          and json_extract(payload, '$.turnId') not in (
-            select json_extract(payload, '$.turnId') from events
-            where type in ('user_session.turn.settled', 'agent_session.turn.settled')
-          )
-        order by seq
-      `)
-      .flatMap((row): UnsettledTurn[] => {
-        if (row.turnId === null) return [];
-        if (row.type === "agent_session.turn.started") {
-          if (row.agentSessionId === null || row.agent === null) return [];
-          return [
-            {
-              kind: "agent" as const,
-              turnId: row.turnId,
-              userSessionId: row.userSessionId ?? "",
-              agentSessionId: row.agentSessionId,
-              agent: row.agent,
-            },
-          ];
-        }
-        if (row.userSessionId === null) return [];
-        return [
-          {
-            kind: "user" as const,
-            turnId: row.turnId,
-            userSessionId: row.userSessionId,
-          },
-        ];
-      });
-  }
-
-  patchAgentSession(
-    id: string,
-    patch: Partial<
-      Pick<AgentSessionRow, "lifecycle">
-    >,
-  ): void {
-    this.#db
-      .update(agentSessions)
-      .set({ ...patch, updatedAt: nowIso() })
-      .where(eq(agentSessions.id, id))
-      .run();
-  }
-
-  /** Agents in seating order (the coordinator is ord 0). */
-  listAgents(agentSessionId: string): AgentRow[] {
-    return this.#db
-      .select()
-      .from(agents)
-      .where(eq(agents.agentSessionId, agentSessionId))
-      .orderBy(asc(agents.ord))
-      .all();
-  }
-
-  getAgent(
-    agentSessionId: string,
-    name: string,
-  ): AgentRow | undefined {
-    return this.#db
-      .select()
-      .from(agents)
-      .where(
-        and(
-          eq(agents.agentSessionId, agentSessionId),
-          eq(agents.name, name),
-        ),
-      )
-      .get();
-  }
-
-  insertAgent(row: AgentRow): void {
-    this.#db.insert(agents).values(row).run();
-  }
-
-  patchAgent(
-    agentSessionId: string,
-    name: string,
-    patch: Partial<Pick<AgentRow,
-      "sdkSessionId" | "generation" |
-      "turnCount" | "contextTokens" | "profileSnapshot" | "profileId"
-      |  "latestHandoffId"
-      | "worktreePath" | "worktreeBaseCommit" | "worktreeBranch"
-      | "lastActiveAt" | "cumulativeCostUsd" | "cumulativeApiDurationMs" | "lastDecisionAt"
-    >>,
-  ): void {
-    this.#db
-      .update(agents)
-      .set(patch)
-      .where(
-        and(
-          eq(agents.agentSessionId, agentSessionId),
-          eq(agents.name, name),
-        ),
-      )
-      .run();
-  }
-
-  /** Every agent currently bound to a worktree (boot orphan-recovery input). */
-  listWorktreeAgents(): { agentSessionId: string; name: string; worktreePath: string }[] {
-    return this.#db.select({ agentSessionId: agents.agentSessionId, name: agents.name, worktreePath: agents.worktreePath })
-      .from(agents).where(isNotNull(agents.worktreePath)).all()
-      .map((row) => ({ ...row, worktreePath: row.worktreePath! }));
-  }
-
+  listProcessEvents(userSessionId: string): { type: string; processId: string }[] { return listProcessEvents(this.#db, userSessionId); }
+  hasEvent(type: string, agentSessionId: string): boolean { return hasEvent(this.#db, type, agentSessionId); }
 }

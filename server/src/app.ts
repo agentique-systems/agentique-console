@@ -20,7 +20,8 @@ import { buildManagerMcpServer } from "./agent-profiles/tools.ts";
 import type { Config } from "./config.ts";
 import type { Db } from "./db/client.ts";
 import { Repo } from "./db/repo.ts";
-import { ArtifactStore } from "./events/artifact-store.ts";
+import { createStores } from "./db/stores/index.ts";
+import type { ArtifactStore } from "./events/artifact-store.ts";
 import { EventBus } from "./events/bus.ts";
 import { late } from "./late.ts";
 import { RunCompletionService } from "./completion/service.ts";
@@ -29,7 +30,7 @@ import { InteractionService } from "./orchestrator/interactions.ts";
 import { OrchestratorRunner } from "./orchestrator/runner.ts";
 import { buildConsoleMcpServer } from "./orchestrator/tools.ts";
 import type { ConsoleSdk } from "./sdk/types.ts";
-import { SqliteSessionStore } from "./sdk/session-store.ts";
+import type { SqliteSessionStore } from "./sdk/session-store.ts";
 import { ProcessManager } from "./runtime/process-manager.ts";
 import { BrowserManager } from "./runtime/browser-manager.ts";
 import { WorktreeManager } from "./runtime/worktree-manager.ts";
@@ -86,10 +87,13 @@ export interface App {
 
 export function createApp(options: CreateAppOptions): App {
   const { config, db, sqlite, sdk } = options;
-  const artifacts = new ArtifactStore(db);
+  // One store per table (see db/stores/index.ts for the ownership rule);
+  // services get their store, and the Repo façade composes the same instances.
+  const stores = createStores(db, sqlite);
+  const artifacts = stores.artifacts;
   const bus = new EventBus(db, artifacts);
-  const repo = new Repo(db, sqlite);
-  const workspaces = new WorkspaceService(db, bus, config.infra.fsRoots.map((root) => root.path));
+  const repo = new Repo(db, sqlite, stores);
+  const workspaces = new WorkspaceService(stores.workspaces, bus, config.infra.fsRoots.map((root) => root.path));
   const getWorkspaceRoot = (workspaceId: string): string => workspaces.get(workspaceId).rootPath;
   const timeline = new TimelineService(repo, bus);
   const profiles = new AgentProfileRegistry({ getWorkspaceRoot, db, bus });
@@ -97,11 +101,11 @@ export function createApp(options: CreateAppOptions): App {
   const browsers = options.runtime?.browsers === undefined ? new BrowserManager(artifacts) : options.runtime.browsers;
   const worktrees = options.runtime?.worktrees === undefined ? new WorktreeManager({ dataDir: config.infra.dataDir }) : options.runtime.worktrees;
 
-  const decisions = new DecisionLedger(db);
-  const interactions = new InteractionService(db, bus);
-  const tasks = new TaskService(db, bus, (workspaceId) => void workspaces.get(workspaceId));
+  const decisions = new DecisionLedger(stores.interactions);
+  const interactions = new InteractionService(stores.interactions, bus);
+  const tasks = new TaskService(stores.tasks, bus, (workspaceId) => void workspaces.get(workspaceId));
   const handoffs = new HandoffService({ repo, bus, getWorkspaceRoot });
-  const sessionStore = new SqliteSessionStore(db);
+  const sessionStore = stores.providerEntries;
 
   const lateRunner = late<OrchestratorRunner>("runner");
   const lateManager = late<ProfileManagerService>("manager");
