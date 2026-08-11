@@ -8,77 +8,68 @@ import { openDb } from "./client.ts";
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true }); });
 
-describe("database migration", () => {
-  it("backfills stable task ids before creating their unique index", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agentique-db-")); dirs.push(dir); const file = path.join(dir, "console.db");
-    const legacy = new Database(file);
-    legacy.exec(`CREATE TABLE tasks (sdk_session_id TEXT NOT NULL, sdk_task_id TEXT NOT NULL, workspace_id TEXT NOT NULL, user_session_id TEXT NOT NULL, agent_session_id TEXT, participant TEXT, subject TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', active_form TEXT, status TEXT NOT NULL DEFAULT 'pending', owner TEXT, blocks TEXT NOT NULL DEFAULT '[]', blocked_by TEXT NOT NULL DEFAULT '[]', metadata TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (sdk_session_id, sdk_task_id));`);
-    legacy.prepare("INSERT INTO tasks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run("sdk-1", "7", "ws-1", "us-1", null, null, "Legacy", "", null, "pending", null, "[]", "[]", "{}", "2026-01-01", "2026-01-01");
-    legacy.close();
-    const { sqlite } = openDb(file);
-    const row = sqlite.prepare("SELECT id FROM tasks").get() as { id: string };
-    expect(row.id).toMatch(/^task_/);
-    expect(sqlite.prepare("PRAGMA index_list(tasks)").all()).toEqual(expect.arrayContaining([expect.objectContaining({ name: "tasks_console_id", unique: 1 })]));
-    sqlite.close();
-  });
+function tmpDbFile(): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agentique-db-"));
+  dirs.push(dir);
+  return path.join(dir, "console.db");
+}
 
-  /**
-   * `openDb` execs the DDL block BEFORE `migrateAdditiveColumns`. On an
-   * existing database `CREATE TABLE IF NOT EXISTS` is a no-op, but
-   * `CREATE INDEX IF NOT EXISTS` is not — so an index in the DDL that names a
-   * column only the migration adds fails the entire boot with
-   * "no such column". Caught by opening a copy of a real live database; the
-   * fixture below is that database's `interactions` table.
-   */
-  it("opens a legacy interactions table and backfills its new columns", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agentique-db-")); dirs.push(dir); const file = path.join(dir, "console.db");
-    const legacy = new Database(file);
-    legacy.exec(`
-      CREATE TABLE workspaces (id TEXT PRIMARY KEY, name TEXT NOT NULL, root_path TEXT NOT NULL UNIQUE, metadata TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-      CREATE TABLE user_sessions (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspaces(id), title TEXT, mode TEXT NOT NULL CHECK (mode IN ('execute','plan_execute')), phase TEXT NOT NULL DEFAULT 'planning', status TEXT NOT NULL DEFAULT 'open', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-      CREATE TABLE interactions (id TEXT PRIMARY KEY, user_session_id TEXT NOT NULL REFERENCES user_sessions(id), kind TEXT NOT NULL CHECK (kind IN ('question','plan_approval')), status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','answered','rejected','dismissed','stale')), payload TEXT NOT NULL, response TEXT, tool_use_id TEXT, created_at TEXT NOT NULL, resolved_at TEXT);
-    `);
-    legacy.prepare("INSERT INTO workspaces VALUES (?,?,?,?,?,?)").run("ws-1", "w", "/tmp/ws-1", "{}", "2026-01-01", "2026-01-01");
-    legacy.prepare("INSERT INTO user_sessions VALUES (?,?,?,?,?,?,?,?)").run("us-1", "ws-1", "t", "execute", "executing", "open", "2026-01-01", "2026-01-01");
-    legacy.prepare("INSERT INTO interactions VALUES (?,?,?,?,?,?,?,?,?)").run("int-1", "us-1", "question", "answered", "{}", null, null, "2026-01-01", "2026-01-01");
-    legacy.close();
-
-    const { sqlite } = openDb(file);
-    const columns = new Set((sqlite.prepare("PRAGMA table_info(interactions)").all() as { name: string }[]).map((row) => row.name));
-    for (const added of ["agent_session_id", "participant", "urgency", "source", "detached", "flushed_at", "allow_free_text"]) {
-      expect(columns.has(added)).toBe(true);
+describe("database migrations", () => {
+  it("applies the baseline to a fresh database and records the journal", () => {
+    const { sqlite } = openDb(tmpDbFile());
+    const tables = new Set(
+      (sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map((r) => r.name),
+    );
+    for (const table of ["workspaces", "user_sessions", "agent_sessions", "participants", "messages", "interactions", "tasks", "task_dependencies", "events", "mailbox_deliveries", "handoff_records", "pattern_state"]) {
+      expect(tables.has(table)).toBe(true);
     }
-    // Existing rows land on the defaults that describe what they actually were:
-    // a main-lane blocking question raised by an agent.
-    const row = sqlite.prepare("SELECT urgency, source, detached, participant FROM interactions").get() as Record<string, unknown>;
-    expect(row).toMatchObject({ urgency: "blocking", source: "agent", detached: 0, participant: null });
-    expect(sqlite.prepare("PRAGMA index_list(interactions)").all())
-      .toEqual(expect.arrayContaining([expect.objectContaining({ name: "interactions_agent_open" })]));
+    expect(sqlite.prepare("SELECT count(*) AS n FROM __drizzle_migrations").get()).toMatchObject({ n: 1 });
+    // The two indexes that used to live only in the legacy additive migration.
+    expect(sqlite.prepare("PRAGMA index_list(interactions)").all()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "interactions_session_status" }),
+        expect.objectContaining({ name: "interactions_agent_open" }),
+      ]),
+    );
     sqlite.close();
   });
 
-  it("opens pre-contract agent_sessions/participants and backfills topology columns", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agentique-db-")); dirs.push(dir); const file = path.join(dir, "console.db");
+  it("adopts a pre-journal database at the baseline shape by stamping, and is idempotent", () => {
+    const file = tmpDbFile();
+    const first = openDb(file);
+    first.sqlite.prepare("INSERT INTO workspaces VALUES (?,?,?,?,?,?)").run("ws-1", "w", "/tmp/ws-1", "{}", "2026-01-01", "2026-01-01");
+    // Simulate a database created before the journal existed: current shape, no journal.
+    first.sqlite.exec("DROP TABLE __drizzle_migrations");
+    first.sqlite.close();
+
+    const second = openDb(file);
+    expect(second.sqlite.prepare("SELECT count(*) AS n FROM __drizzle_migrations").get()).toMatchObject({ n: 1 });
+    expect(second.sqlite.prepare("SELECT id FROM workspaces").get()).toMatchObject({ id: "ws-1" });
+    second.sqlite.close();
+
+    const third = openDb(file);
+    expect(third.sqlite.prepare("SELECT count(*) AS n FROM __drizzle_migrations").get()).toMatchObject({ n: 1 });
+    third.sqlite.close();
+  });
+
+  it("refuses a database that predates the baseline shape", () => {
+    const file = tmpDbFile();
     const legacy = new Database(file);
     legacy.exec(`
-      CREATE TABLE workspaces (id TEXT PRIMARY KEY, name TEXT NOT NULL, root_path TEXT NOT NULL UNIQUE, metadata TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-      CREATE TABLE user_sessions (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspaces(id), title TEXT, mode TEXT NOT NULL CHECK (mode IN ('execute','plan_execute')), phase TEXT NOT NULL DEFAULT 'planning', status TEXT NOT NULL DEFAULT 'open', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-      CREATE TABLE agent_sessions (id TEXT PRIMARY KEY, user_session_id TEXT NOT NULL REFERENCES user_sessions(id), title TEXT NOT NULL, mode TEXT NOT NULL CHECK (mode IN ('execute','plan_execute')), phase TEXT NOT NULL DEFAULT 'executing', status TEXT NOT NULL DEFAULT 'open', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-      CREATE TABLE participants (agent_session_id TEXT NOT NULL REFERENCES agent_sessions(id), name TEXT NOT NULL, role TEXT NOT NULL CHECK (role IN ('orchestrator','agent')), preset TEXT, instructions TEXT NOT NULL, model TEXT, last_seen_seq INTEGER NOT NULL DEFAULT 0, ord INTEGER NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (agent_session_id, name));
+      CREATE TABLE user_sessions (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, title TEXT,
+        mode TEXT NOT NULL, phase TEXT NOT NULL DEFAULT 'planning', status TEXT NOT NULL DEFAULT 'open',
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
     `);
-    legacy.prepare("INSERT INTO workspaces VALUES (?,?,?,?,?,?)").run("ws-1", "w", "/tmp/ws-1", "{}", "2026-01-01", "2026-01-01");
-    legacy.prepare("INSERT INTO user_sessions VALUES (?,?,?,?,?,?,?,?)").run("us-1", "ws-1", "t", "execute", "executing", "open", "2026-01-01", "2026-01-01");
-    legacy.prepare("INSERT INTO agent_sessions VALUES (?,?,?,?,?,?,?,?)").run("as-1", "us-1", "star run", "execute", "executing", "open", "2026-01-01", "2026-01-01");
-    legacy.prepare("INSERT INTO participants VALUES (?,?,?,?,?,?,?,?,?)").run("as-1", "orchestrator", "orchestrator", null, "brief", null, 0, 0, "2026-01-01");
     legacy.close();
+    expect(() => openDb(file)).toThrow(/lacks user_sessions\.run_state.*delete the file/s);
+  });
 
-    const { sqlite } = openDb(file);
-    // A pre-contract session row reads as a top-level hub instance.
-    const session = sqlite.prepare("SELECT pattern, topology, parent_agent_session_id, depth FROM agent_sessions").get() as Record<string, unknown>;
-    expect(session).toMatchObject({ pattern: "hub_and_spoke", topology: "{}", parent_agent_session_id: null, depth: 0 });
-    const seat = sqlite.prepare("SELECT pattern_role FROM participants").get() as Record<string, unknown>;
-    expect(seat).toMatchObject({ pattern_role: null });
-    expect(sqlite.prepare("SELECT count(*) as n FROM pattern_state").get()).toMatchObject({ n: 0 });
-    sqlite.close();
+  it("refuses a database the legacy cleanup never ran on", () => {
+    const file = tmpDbFile();
+    const current = openDb(file);
+    current.sqlite.exec("DROP TABLE __drizzle_migrations");
+    current.sqlite.exec("ALTER TABLE agent_sessions ADD COLUMN mode TEXT");
+    current.sqlite.close();
+    expect(() => openDb(file)).toThrow(/still carries agent_sessions\.mode.*delete the file/s);
   });
 });

@@ -1,4 +1,6 @@
+import { sql } from "drizzle-orm";
 import {
+  check,
   index,
   integer,
   primaryKey,
@@ -69,7 +71,13 @@ export const userSessions = sqliteTable("user_sessions", {
   model: text("model"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
-});
+}, (t) => [
+  check("user_sessions_mode", sql`${t.mode} IN ('execute','plan_execute')`),
+  check("user_sessions_phase", sql`${t.phase} IN ('planning','executing')`),
+  check("user_sessions_status", sql`${t.status} IN ('open','archived')`),
+  check("user_sessions_purpose", sql`${t.purpose} IN ('work','profile_manager')`),
+  check("user_sessions_run_state", sql`${t.runState} IN ('active','awaiting_signoff','completed')`),
+]);
 
 /** One proposed end-of-run report, awaiting or carrying the operator's verdict. */
 export const runSummaries = sqliteTable(
@@ -91,7 +99,10 @@ export const runSummaries = sqliteTable(
     createdAt: text("created_at").notNull(),
     resolvedAt: text("resolved_at"),
   },
-  (table) => [index("run_summaries_session").on(table.userSessionId, table.createdAt)],
+  (table) => [
+    index("run_summaries_session").on(table.userSessionId, table.createdAt),
+    check("run_summaries_status", sql`${table.status} IN ('proposed','accepted','changes_requested')`),
+  ],
 );
 
 export const agentSessions = sqliteTable("agent_sessions", {
@@ -117,7 +128,7 @@ export const agentSessions = sqliteTable("agent_sessions", {
   depth: integer("depth").notNull().default(0),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
-});
+}, (t) => [check("agent_sessions_status", sql`${t.status} IN ('open','archived')`)]);
 
 export const participants = sqliteTable(
   "participants",
@@ -165,7 +176,10 @@ export const participants = sqliteTable(
     ord: integer("ord").notNull(),
     createdAt: text("created_at").notNull(),
   },
-  (t) => [primaryKey({ columns: [t.agentSessionId, t.name] })],
+  (t) => [
+    primaryKey({ columns: [t.agentSessionId, t.name] }),
+    check("participants_role", sql`${t.role} IN ('orchestrator','agent')`),
+  ],
 );
 
 
@@ -213,6 +227,9 @@ export const messages = sqliteTable(
   (t) => [
     uniqueIndex("messages_session_seq").on(t.sessionKind, t.sessionId, t.seq),
     index("messages_session").on(t.sessionKind, t.sessionId),
+    check("messages_session_kind", sql`${t.sessionKind} IN ('user','agent')`),
+    check("messages_speaker_kind", sql`${t.speakerKind} IN ('operator','orchestrator','agent','system')`),
+    check("messages_kind", sql`${t.kind} IN ('message','notice','plan')`),
   ],
 );
 
@@ -252,7 +269,14 @@ export const interactions = sqliteTable("interactions", {
   toolUseId: text("tool_use_id"),
   createdAt: text("created_at").notNull(),
   resolvedAt: text("resolved_at"),
-});
+}, (t) => [
+  index("interactions_session_status").on(t.userSessionId, t.status),
+  index("interactions_agent_open").on(t.agentSessionId, t.status, t.urgency),
+  check("interactions_kind", sql`${t.kind} IN ('question','plan_approval')`),
+  check("interactions_status", sql`${t.status} IN ('pending','answered','rejected','dismissed','stale')`),
+  check("interactions_urgency", sql`${t.urgency} IN ('blocking','deferred')`),
+  check("interactions_source", sql`${t.source} IN ('agent','uncertainty','console')`),
+]);
 
 // Operator decisions are NOT a table: a decision is a resolved `interactions`
 // row, and `orchestrator/decisions.ts` is a read-model over them. (A legacy
@@ -275,7 +299,10 @@ export const crons = sqliteTable(
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
   },
-  (t) => [index("crons_session").on(t.userSessionId, t.status)],
+  (t) => [
+    index("crons_session").on(t.userSessionId, t.status),
+    check("crons_status", sql`${t.status} IN ('active','deleted')`),
+  ],
 );
 
 export const tasks = sqliteTable(
@@ -316,6 +343,7 @@ export const tasks = sqliteTable(
     primaryKey({ columns: [t.sdkSessionId, t.sdkTaskId] }),
     uniqueIndex("tasks_console_id").on(t.id),
     index("tasks_user_session").on(t.userSessionId),
+    check("tasks_status", sql`${t.status} IN ('pending','in_progress','completed','deleted')`),
   ],
 );
 
@@ -327,7 +355,10 @@ export const taskDependencies = sqliteTable(
     source: text("source", { enum: ["console", "provider", "migration"] }).notNull(),
     createdAt: text("created_at").notNull(),
   },
-  (t) => [primaryKey({ columns: [t.blockerTaskId, t.blockedTaskId] })],
+  (t) => [
+    primaryKey({ columns: [t.blockerTaskId, t.blockedTaskId] }),
+    check("task_dependencies_source", sql`${t.source} IN ('console','provider','migration')`),
+  ],
 );
 
 export const agentProfileTrust = sqliteTable(
@@ -383,6 +414,8 @@ export const mailboxDeliveries = sqliteTable(
   (t) => [
     uniqueIndex("mailbox_message_recipient").on(t.messageId, t.recipient),
     index("mailbox_recipient_status").on(t.agentSessionId, t.recipient, t.status),
+    check("mailbox_category", sql`${t.category} IN ('assignment','update','milestone','failure','final','decision')`),
+    check("mailbox_status", sql`${t.status} IN ('queued','delivered','acknowledged','cancelled')`),
   ],
 );
 
@@ -413,7 +446,9 @@ export const providerEntries = sqliteTable(
   },
   (t) => [
     index("provider_entries_session").on(t.projectKey, t.sessionId, t.subpath, t.ord),
-    uniqueIndex("provider_entries_uuid").on(t.projectKey, t.sessionId, t.subpath, t.uuid),
+    uniqueIndex("provider_entries_uuid")
+      .on(t.projectKey, t.sessionId, t.subpath, t.uuid)
+      .where(sql`uuid IS NOT NULL`),
   ],
 );
 
@@ -468,5 +503,6 @@ export const handoffRecords = sqliteTable(
   (t) => [
     index("handoffs_user_created").on(t.userSessionId, t.createdAt),
     index("handoffs_agent_recipient").on(t.agentSessionId, t.recipient, t.createdAt),
+    check("handoffs_trigger", sql`${t.trigger} IN ('assignment','update','milestone','decision','failure','final','rotation','recovery')`),
   ],
 );
