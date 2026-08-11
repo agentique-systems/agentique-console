@@ -44,7 +44,8 @@ import { SessionRouting } from "./routing.ts";
 import { WorktreeBinding } from "./worktree-binding.ts";
 import { OperatorSurface } from "./operator.ts";
 import { Mailroom, MATERIAL_CATEGORIES, identitySelector, simpleHandoff } from "./mailroom.ts";
-import type { LaneActivity, OperatorWaitRef, TransferInput } from "./seams.ts";
+import { AgentLanePool, type ActiveTurn, type AgentLane } from "./lanes.ts";
+import type { TransferInput } from "./seams.ts";
 import { grantedTools, runtimeToolNames, type AgentToolName } from "./grants.ts";
 import { dispatchWorkItems, onPatternPost, sweep as patternSweep, type DispatchWorkItemsInput, type PatternContext } from "./patterns/engine.ts";
 import { buildContract } from "./patterns/catalog.ts";
@@ -70,66 +71,6 @@ function stableStringify(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "undefined";
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
   return `{${Object.keys(value as Record<string, unknown>).sort().map((key) => `${JSON.stringify(key)}:${stableStringify((value as Record<string, unknown>)[key])}`).join(",")}}`;
-}
-
-/**
- * An agent's persistent peer session. One streaming-input query per live
- * agent; the process registers the agent's peer name and binds its inbox
- * socket, so an agent is natively addressable exactly while its lane is live.
- * Parked lanes keep only the resume handle — the journal owns anything
- * undelivered.
- */
-interface AgentLane {
-  state: "unspawned" | "waking" | "live" | "rotating" | "parked";
-  input: AsyncQueue<SdkUserMessageLike> | null;
-  query: QueryHandle | null;
-  abort: AbortController | null;
-  pump: Promise<void> | null;
-  /** Resolves when the current spawn is accepting input. */
-  ready: Promise<void> | null;
-  /** The in-flight turn; null between turns. */
-  activeTurn: {
-    turnId: string;
-    startedAt: number;
-    deliveries: MailboxDeliveryRow[];
-    sawSend: boolean;
-    toolStarts: Map<string, number>;
-    /**
-     * The agent's most recent narration; harvested into the synthetic failure
-     * handoff when a turn dies.
-     */
-    lastNarration: string;
-    watchdog: { lastKey: string; identical: number; errorStreak: number; tripped: string | null };
-    /**
-     * Set while this turn is parked inside `ask_operator`. A blocking ask
-     * holds `activeTurn`, so without this the agent looks busy forever. Its
-     * own controller, so the wait can be cut without killing the lane.
-     */
-    awaitingOperator: { interactionId: string; since: number; abort: AbortController } | null;
-  } | null;
-  /** Console pushes awaiting attribution to the next minted turn. */
-  pendingDeliveries: MailboxDeliveryRow[];
-  /** deliveryId → failed-turn redelivery attempts, capped so retries end. */
-  redeliveryAttempts: Map<string, number>;
-  /**
-   * Peak context-window occupancy observed this provider session, from
-   * per-assistant-message usage. This is the rotation signal — NOT the result
-   * message's `inputTokens`, which sums every API round-trip in the turn and
-   * so overstates occupancy by 5-25x on a tool-heavy turn.
-   */
-  contextTokens: number;
-  /** Last cumulative cost/api-duration seen, for per-turn deltas. */
-  lastCumulative: { costUsd: number; apiDurationMs: number };
-  /** Set while rotating/recycling; senders await it before ensureLive. */
-  rotationGate: Promise<void> | null;
-  releaseRotation: (() => void) | null;
-  idleTimer: NodeJS.Timeout | null;
-  /** Cumulative settled turns since the last assignment delivery. */
-  assignmentTurns: number;
-  /** The turn-budget notice fired for the current assignment (latch). */
-  turnBudgetNotified: boolean;
-  lastActiveAt: number;
-  lastStatus: "working" | "idle" | null;
 }
 
 export interface CreateAgentSessionInput {
@@ -190,40 +131,34 @@ export class AgentSessionService {
   readonly #worktreeBinding: WorktreeBinding;
   readonly #operator: OperatorSurface;
   readonly #mailroom: Mailroom;
-  /** The one lane-facts implementation both operator and mailroom read. */
-  readonly #laneActivity: LaneActivity;
-  /** agentSessionId → agent name → its persistent lane. */
-  readonly #seats = new Map<string, Map<string, AgentLane>>();
-  /** Waiters for a resident-capacity slot, resolved oldest-first on park/close. */
-  readonly #capacityWaiters: (() => void)[] = [];
+  /** Seat-lane ownership and capacity; also the LaneActivity implementation. */
+  readonly #lanes: AgentLanePool;
 
   constructor(deps: AgentSessionServiceDeps) {
     this.#deps = deps;
     this.#routing = new SessionRouting({ repo: deps.repo });
-    this.#laneActivity = {
-      hasBusyTurnExcludingOperatorWaits: (agentSessionId) => {
-        const lanes = this.#seats.get(agentSessionId);
-        return [...(lanes?.values() ?? [])].some((lane) => lane.activeTurn !== null && lane.activeTurn.awaitingOperator === null);
-      },
-      operatorWaits: () => {
-        const waits: OperatorWaitRef[] = [];
-        for (const lanes of this.#seats.values()) for (const lane of lanes.values()) {
-          const asking = lane.activeTurn?.awaitingOperator;
-          if (asking) waits.push({ interactionId: asking.interactionId, since: asking.since, release: () => asking.abort.abort() });
+    this.#lanes = new AgentLanePool({
+      config: deps.config,
+      hasQueuedWork: (agentSessionId, seat) => deps.repo.listUnackedDeliveries(agentSessionId, seat).length > 0,
+      reapRuntime: (agentSessionId, seatName, reason) => {
+        const killed = deps.processes?.stopAgent(agentSessionId, seatName) ?? [];
+        void deps.browsers?.closeAgent(`${agentSessionId}:${seatName}`).catch(() => undefined);
+        const session = deps.repo.getAgentSession(agentSessionId);
+        if (session) {
+          // Name what was reaped.
+          const reaped = killed.length === 0 ? "" : `; reaped ${killed.length} process(es): ${killed.map((p) => `${p.processId}${p.pid === undefined ? "" : ` (pid ${p.pid})`}`).join(", ")}`;
+          deps.bus.append({ type: "agent_session.runtime.noted", userSessionId: session.userSessionId, agentSessionId,
+            payload: { agentSessionId, agent: seatName, detail: `agent parked (${reason}); provider session retained${reaped}` } });
         }
-        return waits;
       },
-      bindOperatorWait: (agentSessionId, agent, wait) => {
-        const turn = this.#laneOf(agentSessionId, agent).activeTurn;
-        if (turn) turn.awaitingOperator = wait;
-        return () => { if (turn) turn.awaitingOperator = null; };
+      sessionTree: (agentSessionId) => {
+        const row = deps.repo.getAgentSession(agentSessionId);
+        const rootId = row?.parentAgentSessionId ?? agentSessionId;
+        const ids = new Set([rootId]);
+        for (const child of deps.repo.listChildSessions(rootId)) ids.add(child.id);
+        return ids;
       },
-      hasLane: (agentSessionId, agent) => this.#seats.get(agentSessionId)?.get(agent) !== undefined,
-      namesWithActiveTurn: (agentSessionId) => {
-        const lanes = this.#seats.get(agentSessionId);
-        return [...(lanes?.entries() ?? [])].filter(([, lane]) => lane.activeTurn !== null).map(([name]) => name);
-      },
-    };
+    });
     this.#worktreeBinding = new WorktreeBinding({
       repo: deps.repo, bus: deps.bus, artifacts: deps.artifacts, config: deps.config,
       worktrees: deps.worktrees, getWorkspaceRoot: deps.getWorkspaceRoot,
@@ -236,14 +171,14 @@ export class AgentSessionService {
       decisions: deps.decisions, tasks: deps.tasks, interactions: deps.interactions,
       worktrees: deps.worktrees,
       laneState: (agentSessionId, agent) => {
-        const lane = this.#seats.get(agentSessionId)?.get(agent);
+        const lane = this.#lanes.peek(agentSessionId, agent);
         return lane ? { activeTurn: lane.activeTurn !== null, live: lane.state === "live" } : null;
       },
     });
     this.#operator = new OperatorSurface({
       repo: deps.repo, bus: deps.bus, config: deps.config, interactions: deps.interactions,
       routing: this.#routing,
-      lanes: this.#laneActivity,
+      lanes: this.#lanes,
       transfer: (input) => this.post(input),
       simpleHandoff,
       deliver: (agentSessionId, recipient) => this.#mailroom.deliver(agentSessionId, recipient),
@@ -262,13 +197,13 @@ export class AgentSessionService {
       decisions: deps.decisions, tasks: deps.tasks, handoffs: deps.handoffs, scheduler: deps.scheduler,
       wake: deps.wake,
       routing: this.#routing, worktree: this.#worktreeBinding, composer: this.#composer,
-      lanes: this.#laneActivity,
+      lanes: this.#lanes,
       selector: identitySelector,
       ensureLive: (agentSessionId, seat) => this.ensureSeatLive(agentSessionId, seat),
       injector: {
-        ready: (agentSessionId, recipient) => this.#laneOf(agentSessionId, recipient).input !== null,
+        ready: (agentSessionId, recipient) => this.#lanes.laneOf(agentSessionId, recipient).input !== null,
         inject: (session, recipient, rows, prompt) => {
-          const lane = this.#laneOf(session.id, recipient);
+          const lane = this.#lanes.laneOf(session.id, recipient);
           if (!lane.input) return;
           if (lane.activeTurn) {
             lane.activeTurn.deliveries.push(...rows);
@@ -281,7 +216,7 @@ export class AgentSessionService {
           }
         },
         resetAssignmentTurns: (agentSessionId, recipient) => {
-          const lane = this.#laneOf(agentSessionId, recipient);
+          const lane = this.#lanes.laneOf(agentSessionId, recipient);
           lane.assignmentTurns = 0; lane.turnBudgetNotified = false;
         },
       },
@@ -479,7 +414,7 @@ export class AgentSessionService {
 
   /** Whole-session stop (archive/shutdown): every lane closes hard. */
   interrupt(agentSessionId: string): void {
-    for (const lane of this.#seats.get(agentSessionId)?.values() ?? []) this.#closeLaneHard(lane);
+    this.#lanes.closeAllForSession(agentSessionId);
   }
 
   /**
@@ -490,7 +425,7 @@ export class AgentSessionService {
   interruptAgent(agentSessionId: string, agent: string, reason: string): void {
     const session = this.#deps.repo.getAgentSession(agentSessionId);
     if (!session) throw new NotFoundError(`no agent session ${agentSessionId}`);
-    const lane = this.#seats.get(agentSessionId)?.get(agent);
+    const lane = this.#lanes.peek(agentSessionId, agent);
     if (!lane || lane.activeTurn === null) throw new ConflictError(`${agent} has no turn in flight`);
     for (const delivery of this.#deps.repo.listUnackedDeliveries(agentSessionId, agent)) {
       if (delivery.status === "delivered") this.#mailroom.patchDelivery(session, delivery, "cancelled");
@@ -502,22 +437,7 @@ export class AgentSessionService {
   }
 
   async closeAll(): Promise<void> {
-    const pending: Promise<unknown>[] = [];
-    for (const lanes of this.#seats.values()) for (const lane of lanes.values()) {
-      this.#closeLaneHard(lane);
-      if (lane.pump) pending.push(lane.pump.catch(() => undefined));
-    }
-    await Promise.all(pending);
-  }
-
-  #closeLaneHard(lane: AgentLane): void {
-    lane.input?.close();
-    lane.abort?.abort();
-    void lane.query?.interrupt?.().catch(() => undefined);
-    lane.query?.close?.();
-    if (lane.idleTimer) { clearTimeout(lane.idleTimer); lane.idleTimer = null; }
-    lane.state = "parked";
-    this.#signalCapacity();
+    await this.#lanes.closeAll();
   }
 
   /**
@@ -577,7 +497,7 @@ export class AgentSessionService {
 
   /** The ONE cleanup point for every per-session in-memory structure. */
   #forget(agentSessionId: string): void {
-    this.#seats.delete(agentSessionId);
+    this.#lanes.forget(agentSessionId);
     this.#operator.forget(agentSessionId);
     this.#routing.forget(agentSessionId);
   }
@@ -651,10 +571,7 @@ export class AgentSessionService {
       post: (input) => this.post(input),
       simpleHandoff,
       deliverNow: (agentSessionId, recipient) => void this.#mailroom.deliver(agentSessionId, recipient).catch((error) => this.#recordHostFailure(agentSessionId, error)),
-      hasActivity: (agentSessionId) => {
-        for (const lane of this.#seats.get(agentSessionId)?.values() ?? []) if (lane.activeTurn !== null) return true;
-        return false;
-      },
+      hasActivity: (agentSessionId) => this.#lanes.namesWithActiveTurn(agentSessionId).length > 0,
       sessionReported: (session) => this.#operator.statusOf(session) === "reported",
       profile: (id, workspaceId) => this.#profile(id, workspaceId),
       snapshotProfile: (profile) => this.#snapshotProfile(profile),
@@ -786,7 +703,7 @@ export class AgentSessionService {
    * they legitimately settle many quiet turns mid-orchestration, and their
    * own silence is the operator-debt discharge's job.
    */
-  #carryReport(session: AgentSessionRow, seatName: string, turn: NonNullable<AgentLane["activeTurn"]>): void {
+  #carryReport(session: AgentSessionRow, seatName: string, turn: ActiveTurn): void {
     const seat = this.#deps.repo.getAgent(session.id, seatName);
     if (!seat || seat.role === "coordinator") return;
     const text = turn.lastNarration.trim();
@@ -808,32 +725,18 @@ export class AgentSessionService {
 
   // ── Persistent agent lanes ───────────────────────────────────────────────
 
-  #laneOf(agentSessionId: string, seat: string): AgentLane {
-    let lanes = this.#seats.get(agentSessionId);
-    if (!lanes) { lanes = new Map(); this.#seats.set(agentSessionId, lanes); }
-    let lane = lanes.get(seat);
-    if (!lane) {
-      lane = { state: "unspawned", input: null, query: null, abort: null, pump: null, ready: null,
-        activeTurn: null, pendingDeliveries: [], redeliveryAttempts: new Map(), contextTokens: 0,
-        lastCumulative: { costUsd: 0, apiDurationMs: 0 }, rotationGate: null, releaseRotation: null,
-        idleTimer: null, assignmentTurns: 0, turnBudgetNotified: false, lastActiveAt: 0, lastStatus: null };
-      lanes.set(seat, lane);
-    }
-    return lane;
-  }
-
   /** Spawn or unpark an agent so its peer session is registered and accepting input. */
   async ensureSeatLive(agentSessionId: string, seat: string, deadline?: number): Promise<void> {
     const { repo } = this.#deps;
     const until = deadline ?? Date.now() + (this.#deps.config.policy.agentSpawnTimeoutMs ?? 30_000);
-    const lane = this.#laneOf(agentSessionId, seat);
+    const lane = this.#lanes.laneOf(agentSessionId, seat);
     while (lane.rotationGate) await lane.rotationGate;
     if (lane.state === "live" || lane.state === "waking") { await lane.ready; return; }
     const session = repo.getAgentSession(agentSessionId);
     if (!session || session.lifecycle !== "open") throw new ConflictError(`agent session ${agentSessionId} is not open`);
     const seatRow = repo.getAgent(agentSessionId, seat);
     if (!seatRow) throw new NotFoundError(`no agent ${seat} in ${agentSessionId}`);
-    await this.#reserveCapacity(agentSessionId, until);
+    await this.#lanes.reserveCapacity(agentSessionId, until);
     const raced = lane.state as AgentLane["state"];
     if (raced === "live" || raced === "waking") { await lane.ready; return; }
     this.#spawnSeat(session, seatRow, lane);
@@ -842,76 +745,6 @@ export class AgentSessionService {
     // never consumed; requeue them so the console path re-carries exactly once.
     const stale = repo.listUnackedDeliveries(agentSessionId, seat).filter((row) => row.status === "delivered");
     for (const row of stale) repo.patchDelivery(row.id, { status: "queued", deliveredAt: null });
-  }
-
-  #resident(): number {
-    let count = 0;
-    for (const lanes of this.#seats.values()) {
-      for (const lane of lanes.values()) if (lane.state === "live" || lane.state === "waking" || lane.state === "rotating") count += 1;
-    }
-    return count;
-  }
-
-  /** Session ids sharing one resident budget: the root and its children. */
-  #treeSessionIds(agentSessionId: string): Set<string> {
-    const row = this.#deps.repo.getAgentSession(agentSessionId);
-    const rootId = row?.parentAgentSessionId ?? agentSessionId;
-    const ids = new Set([rootId]);
-    for (const child of this.#deps.repo.listChildSessions(rootId)) ids.add(child.id);
-    return ids;
-  }
-
-  #residentIn(sessionIds: ReadonlySet<string>): number {
-    let count = 0;
-    for (const [sessionId, lanes] of this.#seats) {
-      if (!sessionIds.has(sessionId)) continue;
-      for (const lane of lanes.values()) if (lane.state === "live" || lane.state === "waking" || lane.state === "rotating") count += 1;
-    }
-    return count;
-  }
-
-  /** Resident CLI processes are the scarce resource, not concurrent turns. */
-  async #reserveCapacity(agentSessionId: string, until: number): Promise<void> {
-    const config = this.#deps.config;
-    if (!config) return;
-    for (;;) {
-      const tree = this.#treeSessionIds(agentSessionId);
-      const globalFull = this.#resident() >= config.policy.agentMaxResident;
-      // A parent and its children SHARE a budget: nesting must not multiply
-      // the footprint, and a tree self-throttles before it thrashes strangers.
-      const treeFull = this.#residentIn(tree) >= config.policy.agentMaxResidentPerTree;
-      if (!globalFull && !treeFull) return;
-      // Evict only where it frees the BINDING constraint: when the global cap
-      // binds, try our own tree first.
-      const scope = globalFull ? undefined : tree;
-      if (scope === undefined && this.#parkLeastRecentIdle(tree)) continue;
-      if (this.#parkLeastRecentIdle(scope)) continue;
-      if (Date.now() >= until) throw new Error("no resident seat capacity");
-      await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, Math.min(1_000, Math.max(50, until - Date.now())));
-        timer.unref?.();
-        this.#capacityWaiters.push(() => { clearTimeout(timer); resolve(); });
-      });
-    }
-  }
-
-  #parkLeastRecentIdle(within?: ReadonlySet<string>): boolean {
-    let victim: { sessionId: string; seat: string; lane: AgentLane } | null = null;
-    for (const [sessionId, lanes] of this.#seats) {
-      if (within !== undefined && !within.has(sessionId)) continue;
-      for (const [seat, lane] of lanes) {
-        if (lane.state !== "live" || lane.activeTurn !== null) continue;
-        if (this.#deps.repo.listUnackedDeliveries(sessionId, seat).length > 0) continue;
-        if (!victim || lane.lastActiveAt < victim.lane.lastActiveAt) victim = { sessionId, seat, lane };
-      }
-    }
-    if (!victim) return false;
-    this.#parkSeat(victim.sessionId, victim.seat, victim.lane, "capacity");
-    return true;
-  }
-
-  #signalCapacity(): void {
-    this.#capacityWaiters.shift()?.();
   }
 
   #spawnSeat(session: AgentSessionRow, seatRow: AgentRow, lane: AgentLane): void {
@@ -1002,7 +835,7 @@ export class AgentSessionService {
     })().catch((error) => {
       lane.state = "parked";
       lane.input?.close(); lane.input = null;
-      this.#signalCapacity();
+      this.#lanes.signalCapacity();
       throw error;
     });
   }
@@ -1097,7 +930,7 @@ export class AgentSessionService {
     } finally {
       this.#settleSeatTurn(session, seatName, lane, runtime, "aborted", "the seat stream ended");
       runtime.idle();
-      if (lane.state === "live" || lane.state === "waking") { lane.state = "parked"; lane.input = null; lane.query = null; this.#signalCapacity(); }
+      if (lane.state === "live" || lane.state === "waking") { lane.state = "parked"; lane.input = null; lane.query = null; this.#lanes.signalCapacity(); }
     }
   }
 
@@ -1208,44 +1041,8 @@ export class AgentSessionService {
       void this.#mailroom.deliver(session.id, seatName).catch((error) => this.#recordHostFailure(session.id, error));
     }
     this.#operator.refreshStatus(session.id);
-    this.#armIdleTimer(session.id, seatName, lane);
+    this.#lanes.armIdleTimer(session.id, seatName, lane);
     void this.#maybeRotate(session.id, seatName).catch((error) => this.#recordHostFailure(session.id, error));
-  }
-
-  #armIdleTimer(agentSessionId: string, seatName: string, lane: AgentLane): void {
-    const config = this.#deps.config;
-    if (!config) return;
-    if (lane.idleTimer) clearTimeout(lane.idleTimer);
-    lane.idleTimer = setTimeout(() => {
-      lane.idleTimer = null;
-      if (lane.state !== "live" || lane.activeTurn !== null) return;
-      if (this.#deps.repo.listUnackedDeliveries(agentSessionId, seatName).length > 0) return;
-      this.#parkSeat(agentSessionId, seatName, lane, "idle");
-    }, config.policy.agentIdleReapMs);
-    lane.idleTimer.unref?.();
-  }
-
-  /**
-   * Close the process (name and socket unregister); keep the resume handle.
-   * Runtime the agent still holds dies with the lane: a parked agent is not
-   * coming back imminently, so its dev servers and Chrome are pure leak.
-   */
-  #parkSeat(agentSessionId: string, seatName: string, lane: AgentLane, reason: string): void {
-    lane.state = "parked";
-    lane.input?.close(); lane.input = null;
-    const query = lane.query; lane.query = null;
-    query?.close?.();
-    lane.abort = null;
-    const killed = this.#deps.processes?.stopAgent(agentSessionId, seatName) ?? [];
-    void this.#deps.browsers?.closeAgent(`${agentSessionId}:${seatName}`).catch(() => undefined);
-    const session = this.#deps.repo.getAgentSession(agentSessionId);
-    if (session) {
-      // Name what was reaped.
-      const reaped = killed.length === 0 ? "" : `; reaped ${killed.length} process(es): ${killed.map((p) => `${p.processId}${p.pid === undefined ? "" : ` (pid ${p.pid})`}`).join(", ")}`;
-      this.#deps.bus.append({ type: "agent_session.runtime.noted", userSessionId: session.userSessionId, agentSessionId,
-        payload: { agentSessionId, agent: seatName, detail: `agent parked (${reason}); provider session retained${reaped}` } });
-    }
-    this.#signalCapacity();
   }
 
   /**
@@ -1256,7 +1053,7 @@ export class AgentSessionService {
   async #maybeRotate(agentSessionId: string, seatName: string): Promise<void> {
     const config = this.#deps.config;
     if (!config || !this.#deps.handoffs || !this.#deps.sdk) return;
-    const lane = this.#laneOf(agentSessionId, seatName);
+    const lane = this.#lanes.laneOf(agentSessionId, seatName);
     if (lane.state !== "live" || lane.activeTurn !== null || lane.rotationGate !== null) return;
     const { repo } = this.#deps;
     const session = repo.getAgentSession(agentSessionId);
@@ -1291,7 +1088,7 @@ export class AgentSessionService {
   }
 
   /**
-   * Never hands a tool `lane.abort.signal`: `#parkSeat` nulls `lane.abort`
+   * Never hands a tool `lane.abort.signal`: the pool's park nulls `lane.abort`
    * WITHOUT aborting, so a wait tied to the lane-wide signal would strand on
    * park/rotation/watchdog. Each operator ask mints its own controller,
    * bound to the CURRENT turn through the LaneActivity seam.
@@ -1324,8 +1121,8 @@ export class AgentSessionService {
       cancelAssignment: (assignmentId) =>
         this.#deps.scheduler().cancel(assignmentId, { actor: seat.name, agentSessionId: session.id }),
       askOperator: (args) => this.#operator.askOperator(session, seat, args),
-      currentTurnId: () => this.#laneOf(session.id, seat.name).activeTurn?.turnId,
-      markSawSend: () => { const current = this.#laneOf(session.id, seat.name); if (current.activeTurn) current.activeTurn.sawSend = true; },
+      currentTurnId: () => this.#lanes.laneOf(session.id, seat.name).activeTurn?.turnId,
+      markSawSend: () => { const current = this.#lanes.laneOf(session.id, seat.name); if (current.activeTurn) current.activeTurn.sawSend = true; },
       agentWorkState: (row) => this.#composer.agentWorkState(row),
       simpleHandoff,
       dispatchWorkItems: (input) => this.dispatchWorkItems(seat.name, input),
