@@ -75,7 +75,7 @@ describe("decision ledger", () => {
     expect(decisions[0]).toMatchObject({
       question: MECHANIC.question,
       answer: "Dodge obstacles",
-      askedBy: "orchestrator",
+      askedBy: "coordinator",
       source: "interaction",
       agentSessionId,
     });
@@ -93,12 +93,12 @@ describe("decision ledger", () => {
     // `renderer` never asked, and never will. It must still be told.
     h.host.post({
       agentSessionId,
-      speaker: { kind: "orchestrator", name: "orchestrator" },
+      speaker: { kind: "orchestrator", name: "coordinator" },
       to: "renderer", handoff: handoff("implement src/game.js"), category: "assignment",
     });
     await collectUntil(
       h.bus,
-      (event) => event.type === "agent_session.mailbox"
+      (event) => event.type === "agent_session.delivery.updated"
         && (event.payload as { recipient?: string }).recipient === "renderer"
         && (event.payload as { status?: string }).status === "delivered",
       10_000,
@@ -118,12 +118,12 @@ describe("decision ledger", () => {
     const { h, agentSessionId } = await twoSeats();
     h.host.post({
       agentSessionId,
-      speaker: { kind: "orchestrator", name: "orchestrator" },
+      speaker: { kind: "orchestrator", name: "coordinator" },
       to: "renderer", handoff: handoff("implement src/game.js"), category: "assignment",
     });
     await collectUntil(
       h.bus,
-      (event) => event.type === "agent_session.mailbox"
+      (event) => event.type === "agent_session.delivery.updated"
         && (event.payload as { recipient?: string }).recipient === "renderer"
         && (event.payload as { status?: string }).status === "delivered",
       10_000,
@@ -146,12 +146,12 @@ describe("decision ledger", () => {
     for (const action of ["first delivery", "second delivery"]) {
       h.host.post({
         agentSessionId,
-        speaker: { kind: "orchestrator", name: "orchestrator" },
+        speaker: { kind: "orchestrator", name: "coordinator" },
         to: "renderer", handoff: handoff(action), category: "assignment",
       });
       await collectUntil(
         h.bus,
-        (event) => event.type === "agent_session.message"
+        (event) => event.type === "agent_session.message.appended"
           && String((event.payload as { message?: { text?: string } }).message?.text ?? "").includes(action),
         10_000,
       );
@@ -172,11 +172,11 @@ describe("decision ledger", () => {
 
     h.host.post({
       agentSessionId,
-      speaker: { kind: "orchestrator", name: "orchestrator" },
+      speaker: { kind: "orchestrator", name: "coordinator" },
       to: "main", handoff: handoff("progress"), category: "milestone",
     });
 
-    const record = h.repo.latestHandoff({ userSessionId, agentSessionId, participant: "main", sender: "orchestrator" });
+    const record = h.repo.latestHandoff({ userSessionId, agentSessionId, recipient: "main", sender: "coordinator" });
     // Declared in shared/src/handoffs.ts since the beginning and written by
     // absolutely nothing until now.
     const data = record?.extension.data as { operatorDecisions?: string[] };
@@ -197,12 +197,12 @@ describe("decision ledger", () => {
     // path a rotated seat takes.
     h.host.post({
       agentSessionId,
-      speaker: { kind: "orchestrator", name: "orchestrator" },
+      speaker: { kind: "orchestrator", name: "coordinator" },
       to: "page", handoff: handoff("implement index.html"), category: "assignment",
     });
     await collectUntil(
       h.bus,
-      (event) => event.type === "agent_session.mailbox"
+      (event) => event.type === "agent_session.delivery.updated"
         && (event.payload as { recipient?: string }).recipient === "page"
         && (event.payload as { status?: string }).status === "delivered",
       10_000,

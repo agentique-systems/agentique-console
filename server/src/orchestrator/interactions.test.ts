@@ -32,7 +32,7 @@ function harness() {
   const userSessionId = newId("us");
   db.insert(userSessions).values({
     id: userSessionId, workspaceId, title: "t", mode: "execute", phase: "executing",
-    status: "open", purpose: "work", subjectKey: null, sdkSessionId: null, sdkGeneration: 0,
+    lifecycle: "open", purpose: "work", subjectKey: null, sdkSessionId: null, sdkGeneration: 0,
     sdkTurnCount: 0, contextTokens: 0, memory: "", latestHandoffId: null,
     cumulativeCostUsd: 0, cumulativeApiDurationMs: 0, createdAt: nowIso(), updatedAt: nowIso(),
   }).run();
@@ -46,7 +46,7 @@ describe("chat does not answer a seat's question", () => {
     const { db, service, userSessionId } = harness();
     const main = service.createOperatorQuestion({ userSessionId, questions: QUESTION });
     const seat = service.createOperatorQuestion({
-      userSessionId, agentSessionId: "as_1", participant: "renderer", questions: QUESTION,
+      userSessionId, agentSessionId: "as_1", agent: "renderer", questions: QUESTION,
     });
 
     service.dismissPendingForChat(userSessionId, "actually, use whatever works");
@@ -59,11 +59,11 @@ describe("chat does not answer a seat's question", () => {
 
   it("tells the operator that seat questions are still waiting", () => {
     const { db, service, userSessionId } = harness();
-    service.createOperatorQuestion({ userSessionId, agentSessionId: "as_1", participant: "renderer", questions: QUESTION });
+    service.createOperatorQuestion({ userSessionId, agentSessionId: "as_1", agent: "renderer", questions: QUESTION });
     service.dismissPendingForChat(userSessionId, "hello");
 
     const notices = db.select().from(events).all()
-      .filter((row) => row.type === "user_session.runtime")
+      .filter((row) => row.type === "user_session.runtime.noted")
       .map((row) => String((row.payload as { detail?: string }).detail ?? ""));
     // Silently keeping the card open would be its own trap: the operator needs
     // to know their chat did not answer it.
@@ -74,7 +74,7 @@ describe("chat does not answer a seat's question", () => {
     const { service, userSessionId } = harness();
     const main = service.createOperatorQuestion({ userSessionId, questions: QUESTION });
     const seat = service.createOperatorQuestion({
-      userSessionId, agentSessionId: "as_1", participant: "renderer", questions: QUESTION,
+      userSessionId, agentSessionId: "as_1", agent: "renderer", questions: QUESTION,
     });
     let seatSettled = false;
     void seat.resolution.then(() => { seatSettled = true; });
@@ -92,7 +92,7 @@ describe("boot splits by asker", () => {
     const { db, service, userSessionId } = harness();
     const main = service.createOperatorQuestion({ userSessionId, questions: QUESTION });
     const seat = service.createOperatorQuestion({
-      userSessionId, agentSessionId: "as_1", participant: "renderer", questions: QUESTION,
+      userSessionId, agentSessionId: "as_1", agent: "renderer", questions: QUESTION,
     });
 
     service.expirePendingOnBoot();
@@ -113,7 +113,7 @@ describe("answers owed to the asking seat", () => {
   it("lists an answered question as unflushed until the seat is told", () => {
     const { service, userSessionId } = harness();
     const seat = service.createOperatorQuestion({
-      userSessionId, agentSessionId: "as_1", participant: "renderer", questions: QUESTION,
+      userSessionId, agentSessionId: "as_1", agent: "renderer", questions: QUESTION,
       urgency: "deferred",
     });
     expect(service.listAnsweredUnflushed("as_1", "renderer")).toHaveLength(0);
@@ -131,8 +131,8 @@ describe("answers owed to the asking seat", () => {
 
   it("scopes unflushed answers to the seat that asked", () => {
     const { service, userSessionId } = harness();
-    const a = service.createOperatorQuestion({ userSessionId, agentSessionId: "as_1", participant: "renderer", questions: QUESTION });
-    service.createOperatorQuestion({ userSessionId, agentSessionId: "as_1", participant: "page", questions: QUESTION });
+    const a = service.createOperatorQuestion({ userSessionId, agentSessionId: "as_1", agent: "renderer", questions: QUESTION });
+    service.createOperatorQuestion({ userSessionId, agentSessionId: "as_1", agent: "page", questions: QUESTION });
     service.resolveFromApi(userSessionId, a.id, { answers: {} });
 
     expect(service.listAnsweredUnflushed("as_1", "renderer")).toHaveLength(1);

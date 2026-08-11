@@ -3,9 +3,9 @@
  *
  * db-live-2 reported these created→delivered latencies:
  *
- *     orchestrator→page   assignment   403.5s     (page's first entry: +1s)
- *     orchestrator→renderer assignment 417.7s
- *     orchestrator→check  assignment   417.6s
+ *     coordinator→page   assignment   403.5s     (page's first entry: +1s)
+ *     coordinator→renderer assignment 417.7s
+ *     coordinator→check  assignment   417.6s
  *
  * All three are turn DURATIONS mislabelled as delivery latency — 6 of 12 rows.
  * The mechanism is a stale snapshot: `#deliverConsole` reads rows while they
@@ -26,13 +26,13 @@ function seedDelivery(repo: Repo, db: ReturnType<typeof openDb>["db"]): string {
   // The delivery row FKs to a real message, so mint one through the repo.
   const message = repo.appendMessage({
     sessionKind: "agent", sessionId: "as_1",
-    speaker: { kind: "orchestrator", name: "orchestrator" }, to: "page",
+    speaker: { kind: "orchestrator", name: "coordinator" }, to: "page",
     kind: "message", text: "assignment",
   });
   const id = newId("delivery");
   db.insert(mailboxDeliveries).values({
     id, messageId: message.id, userSessionId: "us_1", agentSessionId: "as_1",
-    sender: "orchestrator", recipient: "page", category: "assignment",
+    sender: "coordinator", recipient: "page", category: "assignment",
     status: "queued", dedupeKey: null,
     deliveredAt: null, acknowledgedAt: null, createdAt: nowIso(),
   }).run();

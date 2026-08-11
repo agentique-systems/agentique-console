@@ -17,10 +17,16 @@ export function openDb(dbFile: string) {
   }
   const sqlite = new Database(dbFile);
   sqlite.pragma("journal_mode = WAL");
-  sqlite.pragma("foreign_keys = ON");
   adoptPreJournalDatabase(sqlite, dbFile);
   const db = drizzle(sqlite, { schema });
+  // Migrations run with foreign keys OFF (better-sqlite3 turns them on by
+  // default): the migrator wraps each migration in a transaction, where the
+  // in-file PRAGMA toggles are no-ops, and a table rebuild must be able to
+  // drop a referenced table (0003 rebuilds user_sessions/agent_sessions in
+  // place).
+  sqlite.pragma("foreign_keys = OFF");
   migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
+  sqlite.pragma("foreign_keys = ON");
   return { db, sqlite };
 }
 

@@ -46,7 +46,7 @@ export interface DecisionSourceRow {
   id: string;
   userSessionId: string;
   agentSessionId: string | null;
-  participant: string | null;
+  agent: string | null;
   kind: string;
   status: string;
   payload: unknown;
@@ -92,7 +92,7 @@ export function decisionOf(row: DecisionSourceRow): OperatorDecision | null {
     interactionId: row.id,
     // Attribution matters: "renderer asked this" reads very differently from
     // "the console asked this" when the operator reviews the run.
-    askedBy: row.participant ?? "main",
+    askedBy: row.agent ?? "main",
     source: isPlan ? "plan_approval" : "interaction",
     question,
     answer,
@@ -121,7 +121,7 @@ export class DecisionLedger {
       ))
       .all();
     return rows
-      .map((row) => decisionOf(row))
+      .map((row) => decisionOf({ ...row, agent: row.participant }))
       .filter((decision): decision is OperatorDecision => decision !== null)
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }

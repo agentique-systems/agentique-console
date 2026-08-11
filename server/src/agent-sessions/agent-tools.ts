@@ -1,14 +1,14 @@
 /**
- * The console_agent MCP tool definitions for a seat. Pure definitions over a
- * narrow context: everything host-private the handlers touch (post, the
+ * The console_agent MCP tool definitions for an agent. Pure definitions over
+ * a narrow context: everything service-private the handlers touch (post, the
  * operator ask, lane turn state) arrives as a bound callback, so nothing here
- * reaches back into the host.
+ * reaches back into the service.
  */
 import { z } from "zod";
 import { PATTERN_IDS, type HandoffDraft, type InteractionUrgency, type Speaker } from "@agentique-console/shared";
 import type { AgentProfile } from "../agent-profiles/registry.ts";
 import type { Config } from "../config.ts";
-import type { AgentSessionRow, MessageRow, ParticipantRow, Repo, UserSessionRow } from "../db/repo.ts";
+import type { AgentSessionRow, MessageRow, AgentRow, Repo, UserSessionRow } from "../db/repo.ts";
 import type { ArtifactStore } from "../events/artifact-store.ts";
 import type { EventBus } from "../events/bus.ts";
 import type { ConsoleSdk, SdkToolResult } from "../sdk/types.ts";
@@ -21,9 +21,9 @@ import { EvidenceRefSchema, HandoffCoreSchema, HandoffDraftSchema } from "../han
 import { consoleTaskListId } from "../tasks/service.ts";
 import { PAGE_DEFAULT_BYTES, PAGE_MAX_BYTES, pageTail } from "../paging.ts";
 import { speakerKindOf } from "./topology.ts";
-import { MAIN_RECIPIENT } from "./peer-names.ts";
-import { resolvedDomains, WithheldFinalError, type Category } from "./governance.ts";
-import type { SeatToolName } from "./grants.ts";
+import { MAIN_RECIPIENT } from "./names.ts";
+import { resolvedDomains, WithheldFinalError, type Category } from "./final-gate.ts";
+import type { AgentToolName } from "./grants.ts";
 
 /**
  * Provider ceiling for an inline base64 image (~5MB). A full-page screenshot at
@@ -63,8 +63,8 @@ interface SendHandoffArgs {
 
 import { fail, ok } from "../sdk/tool-result.ts";
 
-/** The slice of the host's deps the tool handlers read. */
-export interface SeatToolsDeps {
+/** The slice of the service's deps the tool handlers read. */
+export interface AgentToolsDeps {
   repo: Repo;
   bus: EventBus;
   artifacts: ArtifactStore;
@@ -76,37 +76,37 @@ export interface SeatToolsDeps {
   worktrees: WorktreeManager | null;
 }
 
-export interface SeatToolsContext {
+export interface AgentToolsContext {
   sdk: ConsoleSdk;
-  deps: SeatToolsDeps;
+  deps: AgentToolsDeps;
   session: AgentSessionRow;
-  seat: ParticipantRow;
+  agent: AgentRow;
   profile: AgentProfile;
   user: UserSessionRow | undefined;
   workspaceRoot: string;
   /** From grants.ts — the same set the spawn allow-list is built from. */
-  granted: ReadonlySet<SeatToolName>;
-  /** `candidate` if the contract has an edge to it, else this seat's escalation target. */
+  granted: ReadonlySet<AgentToolName>;
+  /** `candidate` if the contract has an edge to it, else this agent's escalation target. */
   legalRecipient(candidate: string): string;
-  // Host-private operations, bound as closures so nothing becomes public.
+  // Service-private operations, bound as closures so nothing becomes public.
   post(input: { agentSessionId: string; speaker: Speaker; to: string; handoff: HandoffDraft; category?: Category; dedupeKey?: string; turnId?: string }): MessageRow;
   askOperator(args: AskOperatorArgs): Promise<SdkToolResult>;
-  /** The seat's in-flight turn id, if a turn is open right now. */
+  /** The agent's in-flight turn id, if a turn is open right now. */
   currentTurnId(): string | undefined;
-  /** Mark the seat's in-flight turn as having sent a handoff. */
+  /** Mark the agent's in-flight turn as having sent a handoff. */
   markSawSend(): void;
-  seatWorkState(seat: ParticipantRow): string;
+  agentWorkState(agent: AgentRow): string;
   simpleHandoff(action: string, status: HandoffDraft["core"]["status"], summary: string, nextAction: string | null): HandoffDraft;
-  dispatchWorkItems(input: { agentSessionId: string; items: { assignment: string; name?: string; owns?: string[] }[]; profileId?: string; instructions?: string; model?: string }): { joinId: string; seats: string[] };
-  createChildSession(input: { pattern: string; title: string; patternConfig?: Record<string, unknown>; agents: { name: string; profileId: string; instructions?: string; model?: string; owns: string[] }[]; briefing: HandoffDraft }): { agentSessionId: string; participants: string[]; entrySeat: string };
+  dispatchWorkItems(input: { agentSessionId: string; items: { assignment: string; name?: string; owns?: string[] }[]; profileId?: string; instructions?: string; model?: string }): { joinId: string; agents: string[] };
+  createChildSession(input: { pattern: string; title: string; patternConfig?: Record<string, unknown>; agents: { name: string; profileId: string; instructions?: string; model?: string; owns: string[] }[]; briefing: HandoffDraft }): { agentSessionId: string; agents: string[]; entryAgent: string };
   abandonChildSession(childAgentSessionId: string, reason: string): void;
 }
 
 // Messaging IS this server: `send_handoff` is the one transfer path (there is
 // no native SendMessage wire), alongside handoff retrieval, the shared ledger,
 // operator asks, contracts, and the console-owned runtime tools.
-export function buildSeatTools(ctx: SeatToolsContext): unknown[] {
-  const { sdk, deps, session, seat, profile, user, workspaceRoot } = ctx;
+export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
+  const { sdk, deps, session, agent, profile, user, workspaceRoot } = ctx;
   const tools: unknown[] = [];
   // The disciplined transfer path. Its parameters ARE the handoff core, so
   // the provider enforces the shape and there is nothing to hand-serialize —
@@ -116,7 +116,7 @@ export function buildSeatTools(ctx: SeatToolsContext): unknown[] {
   tools.push(sdk.tool("send_handoff",
     "Send a typed handoff to another participant. This is the preferred way to transfer anything — assignments, progress, findings, failures, final results. Fill the fields; the console builds and journals the envelope. Your plain text output reaches no one.",
     {
-      to: z.string().min(1).describe("Recipient's bare seat name, or \"main\" to reach the Orchestrator."),
+      to: z.string().min(1).describe("Recipient's bare agent name, or \"main\" to reach the Orchestrator."),
       category: z.enum(["assignment", "update", "milestone", "failure", "final", "decision"]).default("update"),
       status: HandoffCoreSchema.shape.status,
       risk: HandoffCoreSchema.shape.risk.default("medium"),
@@ -147,7 +147,7 @@ export function buildSeatTools(ctx: SeatToolsContext): unknown[] {
       let message: MessageRow;
       try {
         const turnId = ctx.currentTurnId();
-        message = ctx.post({ agentSessionId: session.id, speaker: { kind: speakerKindOf(seat), name: seat.name },
+        message = ctx.post({ agentSessionId: session.id, speaker: { kind: speakerKindOf(agent), name: agent.name },
           to: args.to, handoff: draft, category: args.category, ...(args.dedupeKey ? { dedupeKey: args.dedupeKey } : {}),
           ...(turnId ? { turnId } : {}) });
       } catch (error) {
@@ -166,19 +166,19 @@ export function buildSeatTools(ctx: SeatToolsContext): unknown[] {
   // rotation and never touched the ledger again for 28 minutes.
   if (deps.tasks && user) {
     const listId = consoleTaskListId(session.id);
-    const attribution = { workspaceId: user.workspaceId, userSessionId: session.userSessionId, agentSessionId: session.id, participant: seat.name };
-    tools.push(sdk.tool("task_list", "Read the AgentSession's task ledger. Authoritative and shared by every seat; it survives context rotation.", {},
+    const attribution = { workspaceId: user.workspaceId, userSessionId: session.userSessionId, agentSessionId: session.id, agent: agent.name };
+    tools.push(sdk.tool("task_list", "Read the AgentSession's task ledger. Authoritative and shared by every agent; it survives context rotation.", {},
       async () => ok({ tasks: deps.tasks?.listForUserSession(session.userSessionId).filter((task) => task.agentSessionId === session.id) ?? [] })));
     if (ctx.granted.has("task_create")) {
       tools.push(
         sdk.tool("task_create", "Add a unit of work to the ledger. Track every unit you delegate.", {
           taskId: z.string().min(1).describe("Short stable id you choose, e.g. \"1\" or \"interface\"."),
           subject: z.string().min(1), description: z.string().default(""),
-          owner: z.string().min(1).describe("The seat that will DO this work — not you. The roster, the final caveats and the operator's run summary all read this."),
+          owner: z.string().min(1).describe("The agent that will DO this work — not you. The roster, the final caveats and the operator's run summary all read this."),
         }, async (args: { taskId: string; subject: string; description: string; owner: string }) => {
-          const seats = new Set(deps.repo.listParticipants(session.id).map((row) => row.name));
-          if (!seats.has(args.owner)) {
-            return fail(`no seat named "${args.owner}" in this session; owners are one of: ${[...seats].join(", ")}`);
+          const names = new Set(deps.repo.listAgents(session.id).map((row) => row.name));
+          if (!names.has(args.owner)) {
+            return fail(`no agent named "${args.owner}" in this session; owners are one of: ${[...names].join(", ")}`);
           }
           deps.tasks?.upsertFromCreate({ sdkSessionId: listId, sdkTaskId: args.taskId, subject: args.subject, description: args.description, owner: args.owner, attribution });
           return ok({ taskId: args.taskId, created: true, owner: args.owner });
@@ -196,8 +196,8 @@ export function buildSeatTools(ctx: SeatToolsContext): unknown[] {
       );
     }
   }
-  // Artifacts live in SQLite, outside every seat's read scope, and
-  // browser_screenshot hands back an opaque id. Without this a seat cannot
+  // Artifacts live in SQLite, outside every agent's read scope, and
+  // browser_screenshot hands back an opaque id. Without this an agent cannot
   // inspect its own evidence: in db-live-1 both renderer and `check` resorted
   // to scanning the filesystem for artifact files that were never on disk.
   tools.push(sdk.tool("read_artifact",
@@ -266,10 +266,10 @@ export function buildSeatTools(ctx: SeatToolsContext): unknown[] {
         try { record = handoffsService.get(args.handoffId); }
         catch (error) { return fail(error); }
         if (record.metadata.agentSessionId !== session.id) return fail(`handoff ${args.handoffId} is not from this session`);
-        if (record.metadata.recipient !== seat.name) return fail(`handoff ${args.handoffId} was not addressed to you; forward only what you received`);
+        if (record.metadata.recipient !== agent.name) return fail(`handoff ${args.handoffId} was not addressed to you; forward only what you received`);
         try {
           const message = ctx.post({ agentSessionId: session.id,
-            speaker: { kind: speakerKindOf(seat), name: seat.name },
+            speaker: { kind: speakerKindOf(agent), name: agent.name },
             to: MAIN_RECIPIENT, handoff: { core: record.core, extension: record.extension },
             category: args.category, dedupeKey: `fwd:${record.metadata.id}` });
           return ok({ forwarded: true, messageSeq: message.seq, originalId: record.metadata.id, originalSender: record.metadata.sender });
@@ -289,13 +289,13 @@ export function buildSeatTools(ctx: SeatToolsContext): unknown[] {
       sdk.tool("report_handoff_discrepancy", "Report a handoff claim contradicted by the repository, task ledger, journal, or artifact. The original evidence stays authoritative.", {
         handoffId: z.string(), claim: z.string().min(1), evidence: z.string().min(1),
       }, async (args: { handoffId: string; claim: string; evidence: string }) => {
-        deps.handoffs?.reportDiscrepancy(args.handoffId, seat.name, args.claim, args.evidence); return ok({ recorded: true });
+        deps.handoffs?.reportDiscrepancy(args.handoffId, agent.name, args.claim, args.evidence); return ok({ recorded: true });
       }),
     );
   }
   if (profile.runtime.shell && deps.processes) {
-    const scope = { workspaceRoot: seat.worktreePath ?? workspaceRoot, userSessionId: session.userSessionId, agentSessionId: session.id, participant: seat.name };
-    const processOwner = `${session.id}:${seat.name}`;
+    const scope = { workspaceRoot: agent.worktreePath ?? workspaceRoot, userSessionId: session.userSessionId, agentSessionId: session.id, agent: agent.name };
+    const processOwner = `${session.id}:${agent.name}`;
     tools.push(
       sdk.tool("process_start", "Start a Console-owned long-running process. Pass an executable and argv separately; cwd must remain in the workspace.", { command: z.string(), args: z.array(z.string()).default([]), cwd: z.string().default(".") }, async (args: { command: string; args: string[]; cwd: string }) => ok(deps.processes?.start(scope, args.command, args.args, args.cwd))),
       sdk.tool("process_read", "Read new process output, optionally waiting once for a state change. Use waitMs instead of polling. Output is paged tail-first (default 8KiB, newest last); use cursors for more, afterSeq for incremental reads.", { processId: z.string(), afterSeq: z.number().int().default(0), waitMs: z.number().int().min(0).max(60_000).default(0), cursor: z.string().optional(), maxBytes: z.number().int().min(1).max(PAGE_MAX_BYTES).default(PAGE_DEFAULT_BYTES) }, async (args: { processId: string; afterSeq: number; waitMs: number; cursor?: string; maxBytes: number }) => {
@@ -308,7 +308,7 @@ export function buildSeatTools(ctx: SeatToolsContext): unknown[] {
     );
   }
   if (profile.runtime.browser && deps.browsers) {
-    const key = `${session.id}:${seat.name}`;
+    const key = `${session.id}:${agent.name}`;
     tools.push(
       sdk.tool("browser_open", "Open a URL in the participant's managed local Chrome page.", { url: z.string() }, async (args: { url: string }) => ok(await deps.browsers?.open(key, args.url))),
       sdk.tool("browser_snapshot", "Inspect current URL, title, and rendered body text.", {}, async () => ok(await deps.browsers?.snapshot(key))),
@@ -354,7 +354,7 @@ export function buildSeatTools(ctx: SeatToolsContext): unknown[] {
       "Ask the Human Operator a question only they can answer. This reaches them DIRECTLY — do not route it through your coordinator. " +
       "Use urgency:'blocking' when continuing would waste the work, or when you would otherwise substitute your own judgement for theirs: a version, a scope cut, a deviation from the brief. " +
       "Use urgency:'deferred' when you can keep working meanwhile; the card renders now and their answer reaches you at your next delivery. " +
-      "Every answer is recorded and reaches every seat in this session, so you never need to relay it.",
+      "Every answer is recorded and reaches every agent in this session, so you never need to relay it.",
       {
         question: z.string().min(1).describe("One concrete question. State the decision, not the background."),
         header: z.string().max(24).optional().describe("Two or three words for the card's eyebrow."),
@@ -376,25 +376,25 @@ export function buildSeatTools(ctx: SeatToolsContext): unknown[] {
       }));
   }
   // Who is doing what, on demand. The roster carries this on every delivery
-  // already; this is for the seat that is ABOUT to start something and can
+  // already; this is for the agent that is ABOUT to start something and can
   // check first. db-live-2's renderer spent ~16 minutes building a private
   // duplicate of a dev server `page` had already written and was serving.
   tools.push(sdk.tool("roster_status",
-    "See what every seat in this session is doing right now — live state, what they own, and what they last reported. Check before starting anything substantial that a teammate may already have done.",
+    "See what every agent in this session is doing right now — live state, what they own, and what they last reported. Check before starting anything substantial that a teammate may already have done.",
     {},
     async () => ok({
-      seats: deps.repo.listParticipants(session.id).map((row) => ({
+      agents: deps.repo.listAgents(session.id).map((row) => ({
         name: row.name,
         profile: row.profileId,
         owns: row.ownership,
-        state: ctx.seatWorkState(row),
+        state: ctx.agentWorkState(row),
       })),
     })));
 
   // The curl that actually works.
   //
   // Managed children run in the HOST network namespace (`bwrap --share-net`)
-  // while a seat's Bash runs inside the SDK sandbox's own, so a seat cannot
+  // while an agent's Bash runs inside the SDK sandbox's own, so an agent cannot
   // reach a server it just started. db-live-2's renderer burned three failed
   // curls discovering this and concluded, correctly, "servers started via
   // process_start live in a different network namespace than my Bash shell".
@@ -415,7 +415,7 @@ export function buildSeatTools(ctx: SeatToolsContext): unknown[] {
           return ok({ error: "http_probe accepts only http(s) URLs" });
         }
         const loopback = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1" || parsed.hostname === "::1";
-        const allowed = resolvedDomains(profile, deps.config?.allowedDomains ?? []);
+        const allowed = resolvedDomains(profile, deps.config?.infra.allowedDomains ?? []);
         if (!loopback && !allowed.some((domain) => domain === parsed.hostname || (domain.startsWith("*.") && parsed.hostname.endsWith(domain.slice(1))))) {
           return ok({ error: `${parsed.hostname} is outside this profile's allowed hosts (${allowed.join(", ") || "none"})` });
         }
@@ -430,8 +430,8 @@ export function buildSeatTools(ctx: SeatToolsContext): unknown[] {
   }
 
   // One level of nesting: a controller may spawn a CHILD AgentSession running
-  // any pattern. The child's "main" resolves to THIS seat — its finals arrive
-  // here as milestones — and child seats never receive these tools, so the
+  // any pattern. The child's "main" resolves to THIS agent — its finals arrive
+  // here as milestones — and child agents never receive these tools, so the
   // depth cap is the granting itself.
   if (ctx.granted.has("create_child_session")) {
     tools.push(sdk.tool("create_child_session",
@@ -442,7 +442,7 @@ export function buildSeatTools(ctx: SeatToolsContext): unknown[] {
         patternConfig: z.record(z.string(), z.unknown()).optional(),
         agents: z.array(z.object({
           name: z.string(), profileId: z.string(), instructions: z.string().optional(), model: z.string().optional(),
-          owns: z.array(z.string()).default([]).describe("Must not collide with any seat's scopes anywhere in this session tree."),
+          owns: z.array(z.string()).default([]).describe("Must not collide with any agent's scopes anywhere in this session tree."),
         })).min(1).max(20),
         briefing: HandoffDraftSchema.describe("The child's assignment: objective, evidence, risk, uncertainty, next action."),
       },
@@ -468,11 +468,11 @@ export function buildSeatTools(ctx: SeatToolsContext): unknown[] {
   }
   if (ctx.granted.has("dispatch_work_items")) {
     tools.push(sdk.tool("dispatch_work_items",
-      "Fan the work out: mint one mapper seat per independent work item and assign each its item. The Console holds every mapper report until the join is met, then delivers them ALL to you in one turn for synthesis. One dispatch in flight at a time.",
+      "Fan the work out: mint one mapper agent per independent work item and assign each its item. The Console holds every mapper report until the join is met, then delivers them ALL to you in one turn for synthesis. One dispatch in flight at a time.",
       {
         items: z.array(z.object({
           assignment: z.string().min(1).describe("The complete, self-contained work item — the mapper sees nothing else."),
-          name: z.string().optional().describe("Optional seat name; default map.<dispatch>.<n>."),
+          name: z.string().optional().describe("Optional agent name; default map.<dispatch>.<n>."),
           owns: z.array(z.string()).optional().describe("Ownership scopes if the item writes files."),
         })).min(1).max(8),
         profileId: z.string().optional().describe("Mapper profile; default explorer."),

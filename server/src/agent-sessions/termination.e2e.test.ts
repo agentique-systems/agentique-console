@@ -29,11 +29,11 @@ describe("termination policy e2e (fake SDK)", () => {
         if (coordinatorTurns === 1) yield sendHandoffUse("send-1", "scout", { action: "look", status: "pending", category: "assignment" });
       } else {
         scoutTurns += 1;
-        if (scoutTurns === 1) yield sendHandoffUse("scout-1", "orchestrator", { action: "found it", status: "completed", category: "milestone" });
+        if (scoutTurns === 1) yield sendHandoffUse("scout-1", "coordinator", { action: "found it", status: "completed", category: "milestone" });
       }
       yield successMessage();
     });
-    h.config.patternHandoffCap = 3;
+    h.config.policy.patternHandoffCap = 3;
     const userSessionId = h.addUserSession();
     const tripped = collectUntil(h.bus, (event) => event.type === "agent_session.termination.tripped", 10_000);
     const created = h.host.createSession({ userSessionId, title: "budget", agents: [{ name: "scout", profileId: "explorer" }], briefing });
@@ -42,11 +42,11 @@ describe("termination policy e2e (fake SDK)", () => {
     expect(trip?.payload).toMatchObject({ agentSessionId: created.agentSessionId, pattern: "hub_and_spoke", rule: "max_handoffs" });
     // The close-out ask lands as a journaled decision handoff to the
     // reporting seat, spoken by a route-legal console voice (main).
-    await collectUntil(h.bus, (event) => event.type === "agent_session.message"
+    await collectUntil(h.bus, (event) => event.type === "agent_session.message.appended"
       && JSON.stringify(event.payload).includes("Termination policy tripped"), 10_000);
     const rows = h.repo.listMessages("agent", created.agentSessionId).filter((row) => row.kind === "message");
     const ask = rows.find((row) => ((row.payload?.handoff as { action?: string } | undefined)?.action ?? "").includes("Termination policy tripped"));
-    expect(ask?.toName).toBe("orchestrator");
+    expect(ask?.toName).toBe("coordinator");
     expect(h.repo.getPatternState(created.agentSessionId)?.tripped).toBe("max_handoffs");
   });
 
@@ -57,7 +57,7 @@ describe("termination policy e2e (fake SDK)", () => {
       yield initMessage();
       yield successMessage();
     });
-    h.config.patternStallMs = 1;
+    h.config.policy.patternStallMs = 1;
     const userSessionId = h.addUserSession();
     const tripped = collectUntil(h.bus, (event) => event.type === "agent_session.termination.tripped", 10_000);
     const created = h.host.createSession({ userSessionId, title: "stall", agents: [{ name: "scout", profileId: "explorer" }], briefing });

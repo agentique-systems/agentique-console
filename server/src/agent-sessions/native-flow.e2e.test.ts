@@ -30,21 +30,21 @@ describe("managed AgentSession e2e (fake SDK)", () => {
       } else {
         yield toolUseMessage("read-1", "Read", { file_path: "README.md" });
         yield toolResultMessage("read-1", "the answer is pelican");
-        yield sendHandoffUse("scout-close", "orchestrator", { action: "answer: pelican", status: "completed", category: "milestone" });
+        yield sendHandoffUse("scout-close", "coordinator", { action: "answer: pelican", status: "completed", category: "milestone" });
         yield successMessage();
       }
     });
     const userSessionId = h.addUserSession();
-    const done = collectUntil(h.bus, (event) => event.type === "flow.result", 10_000);
+    const done = collectUntil(h.bus, (event) => event.type === "agent_session.result.returned", 10_000);
     const created = h.host.createSession({ userSessionId, title: "riddle", agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("find the riddle answer", "pending") });
     const events = await done;
     const rows = h.repo.listMessages("agent", created.agentSessionId).filter((row) => row.kind === "message");
     expect(rows.map((row) => `${row.speakerName}→${row.toName}: ${(row.payload?.handoff as { action?: string } | undefined)?.action}`)).toEqual([
-      "main→orchestrator: find the riddle answer", "orchestrator→scout: Inspect README and report the answer.",
-      "scout→orchestrator: answer: pelican", "orchestrator→main: Session done: pelican",
+      "main→coordinator: find the riddle answer", "coordinator→scout: Inspect README and report the answer.",
+      "scout→coordinator: answer: pelican", "coordinator→main: Session done: pelican",
     ]);
-    expect(events.filter((event) => event.type === "flow.result")).toHaveLength(1);
-    expect(events.some((event) => event.type === "agent_session.tool.call" && event.payload.participant === "scout")).toBe(true);
+    expect(events.filter((event) => event.type === "agent_session.result.returned")).toHaveLength(1);
+    expect(events.some((event) => event.type === "agent_session.tool.called" && event.payload.agent === "scout")).toBe(true);
     // Journal states settle: nothing queued, every hop journaled on the console transport.
     const deliveries = h.repo.listQueuedDeliveries(created.agentSessionId);
     expect(deliveries).toHaveLength(0);
@@ -68,7 +68,7 @@ describe("managed AgentSession e2e (fake SDK)", () => {
     });
     const userSessionId = h.addUserSession();
     const done = collectUntil(h.bus, (event) =>
-      event.type === "agent_session.tool.result" && JSON.stringify(event.payload).includes("not allowed"), 10_000);
+      event.type === "agent_session.tool.completed" && JSON.stringify(event.payload).includes("not allowed"), 10_000);
     h.host.createSession({ userSessionId, title: "topology", agents: [{ name: "scout", profileId: "explorer" }, { name: "impl", profileId: "explorer" }], briefing: handoff("go", "pending") });
     const events = await done;
     const denial = events.at(-1);
@@ -106,7 +106,7 @@ describe("managed AgentSession e2e (fake SDK)", () => {
       yield successMessage();
     });
     const userSessionId = h.addUserSession();
-    const done = collectUntil(h.bus, (event) => event.type === "agent_session.watchdog", 10_000);
+    const done = collectUntil(h.bus, (event) => event.type === "agent_session.watchdog.tripped", 10_000);
     const created = h.host.createSession({ userSessionId, title: "salvage", agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("verify", "pending") });
     await done;
     await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled"

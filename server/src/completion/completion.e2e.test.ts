@@ -38,15 +38,15 @@ const FINAL = {
 };
 
 function harness() {
-  const stopParticipant = vi.fn((_a: string, _p: string) => [{ processId: "task_serve", pid: 4242 }]);
+  const stopAgent = vi.fn((_a: string, _p: string) => [{ processId: "task_serve", pid: 4242 }]);
   const h = makeDelegationHarness(
     async function* () {
       yield initMessage();
       yield successMessage();
     },
-    { runtime: { processes: { stopParticipant, stopSession: vi.fn(), closeAll: vi.fn() } as unknown as ProcessManager } },
+    { runtime: { processes: { stopAgent, stopSession: vi.fn(), closeAll: vi.fn() } as unknown as ProcessManager } },
   );
-  return { h, stopParticipant };
+  return { h, stopAgent };
 }
 
 async function runToFinal(h: ReturnType<typeof harness>["h"]) {
@@ -67,7 +67,7 @@ const send = (h: ReturnType<typeof harness>["h"]) =>
 
 describe("run completion", () => {
   it("proposes completion once, after a final, and reaps the run's processes", async () => {
-    const { h, stopParticipant } = harness();
+    const { h, stopAgent } = harness();
     const { userSessionId } = await runToFinal(h);
     await send(h).handler(FINAL, {});
 
@@ -79,11 +79,11 @@ describe("run completion", () => {
     // express: the Console believes this is done and is waiting on them.
     expect(h.repo.getUserSession(userSessionId)?.runState).toBe("awaiting_signoff");
     // `status` is untouched — completion is not archival.
-    expect(h.repo.getUserSession(userSessionId)?.status).toBe("open");
+    expect(h.repo.getUserSession(userSessionId)?.lifecycle).toBe("open");
 
     // Reaped BEFORE the card renders, so the operator never reads a summary
     // while a dev server the run started is still bound to a port.
-    expect(stopParticipant).toHaveBeenCalled();
+    expect(stopAgent).toHaveBeenCalled();
 
     // Idempotent: a second final does not propose again.
     await send(h).handler(FINAL, {});
@@ -145,8 +145,8 @@ describe("run completion", () => {
 
     expect(h.repo.getUserSession(userSessionId)?.runState).toBe("completed");
     // Still open: a completed run reads "done" in the sidebar, not "hidden".
-    expect(h.repo.getUserSession(userSessionId)?.status).toBe("open");
-    expect(h.repo.getAgentSession(agentSessionId)?.status).toBe("archived");
+    expect(h.repo.getUserSession(userSessionId)?.lifecycle).toBe("open");
+    expect(h.repo.getAgentSession(agentSessionId)?.lifecycle).toBe("archived");
     expect(h.db.select().from(runSummaries).all()[0]?.status).toBe("accepted");
   });
 

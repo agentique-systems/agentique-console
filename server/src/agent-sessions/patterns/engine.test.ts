@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { loadConfig } from "../../config.ts";
 import { hubContract } from "../topology.ts";
-import { effectivePolicy, oscillating } from "./progression.ts";
+import { effectivePolicy, oscillating } from "./engine.ts";
 
 describe("termination engine primitives", () => {
   it("oscillation detects A↔B round trips at the tail only", () => {
@@ -17,7 +17,7 @@ describe("termination engine primitives", () => {
   it("effective policy = contract bounds with config ceilings as fallbacks", () => {
     const config = loadConfig({});
     const hub = effectivePolicy(hubContract(), config);
-    expect(hub.maxHandoffs).toBe(config.patternHandoffCap);
+    expect(hub.maxHandoffs).toBe(config.policy.patternHandoffCap);
     expect(hub.oscillationWindow).toBeUndefined();
 
     const strict = effectivePolicy({ ...hubContract(), termination: { maxHandoffs: 5 } }, config);

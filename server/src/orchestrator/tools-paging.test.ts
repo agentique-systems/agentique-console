@@ -23,12 +23,12 @@ async function runFlow() {
         : sendHandoffUse(`send-${coordinatorTurns}`, "main", { action: "Session done", status: "completed", category: "final" });
       yield successMessage();
     } else {
-      yield sendHandoffUse("scout-close", "orchestrator", { action: `observation: ${"x".repeat(2_000)}`, status: "completed", category: "milestone" });
+      yield sendHandoffUse("scout-close", "coordinator", { action: `observation: ${"x".repeat(2_000)}`, status: "completed", category: "milestone" });
       yield successMessage();
     }
   });
   const userSessionId = h.addUserSession();
-  const done = collectUntil(h.bus, (event) => event.type === "flow.result", 10_000);
+  const done = collectUntil(h.bus, (event) => event.type === "agent_session.result.returned", 10_000);
   const created = h.host.createSession({ userSessionId, title: "paging", agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("observe", "pending") });
   await done;
   return { h, created, userSessionId };

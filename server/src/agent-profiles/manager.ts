@@ -11,7 +11,7 @@ import type { OrchestratorRunner } from "../orchestrator/runner.ts";
 import type { EventBus } from "../events/bus.ts";
 import { InvalidInputError, ConflictError, NotFoundError } from "../errors.ts";
 
-export class ManagerService {
+export class ProfileManagerService {
   constructor(private readonly deps: { repo: Repo; workspaces: WorkspaceService; profiles: AgentProfileRegistry; config: Config; bus: EventBus; runner: () => OrchestratorRunner }) {}
 
   create(workspaceId: string, input: { profileId?: string; sourceProfileId?: string } = {}): ManagerSession {
@@ -22,7 +22,7 @@ export class ManagerService {
     const selected = input.profileId ? this.deps.profiles.detail(workspaceId, input.profileId) : undefined;
     const now = nowIso();
     const row: UserSessionRow = { id: newId("us"), workspaceId, title: input.profileId ? `Manager · ${input.profileId}` : "Manager · new profile",
-      mode: "plan_execute", phase: "planning", status: "open", purpose: "profile_manager", subjectKey: profileKey,
+      mode: "plan_execute", phase: "planning", lifecycle: "open", purpose: "profile_manager", subjectKey: profileKey,
       sdkSessionId: null, sdkGeneration: 0, sdkTurnCount: 0, contextTokens: 0,
       memory: selected ? this.#profileContext(selected) : "",
       latestHandoffId: null, cumulativeCostUsd: 0, cumulativeApiDurationMs: 0, runState: "active" as const, runBaseCommit: null,
@@ -93,8 +93,8 @@ export class ManagerService {
   #row(id: string): UserSessionRow { const row = this.deps.repo.getUserSession(id); if (!row || row.purpose !== "profile_manager") throw new NotFoundError(`no manager session ${id}`); return row; }
   #baseRevision(row: UserSessionRow): string | null { try { const parsed = JSON.parse(row.memory) as { selectedProfile?: { source?: string; revision?: string } }; return parsed.selectedProfile?.source === "workspace" ? parsed.selectedProfile.revision ?? null : null; } catch { return null; } }
   #profileContext(detail: AgentProfileDetail): string { return JSON.stringify({ selectedProfile: { id: detail.id, title: detail.title, purpose: detail.purpose, source: detail.source, revision: detail.revision, trusted: detail.trusted, instructions: detail.instructions, tools: detail.tools, skills: detail.skills, runtime: detail.runtime, components: detail.components } }, null, 2); }
-  #wire(row: UserSessionRow): ManagerSession { const key = row.subjectKey ?? `draft:${row.id}`; return { id: row.id, workspaceId: row.workspaceId, profileKey: key, profileId: key.startsWith("draft:") ? null : key, title: row.title ?? "Manager", phase: row.phase, status: row.status, createdAt: row.createdAt, updatedAt: row.updatedAt }; }
-  #draftRoot(id: string): string { return path.join(this.deps.config.dataDir, "manager-drafts", id); }
+  #wire(row: UserSessionRow): ManagerSession { const key = row.subjectKey ?? `draft:${row.id}`; return { id: row.id, workspaceId: row.workspaceId, profileKey: key, profileId: key.startsWith("draft:") ? null : key, title: row.title ?? "Manager", phase: row.phase, lifecycle: row.lifecycle, createdAt: row.createdAt, updatedAt: row.updatedAt }; }
+  #draftRoot(id: string): string { return path.join(this.deps.config.infra.dataDir, "manager-drafts", id); }
   #safeRelative(value: string): string { const normalized = path.posix.normalize(value.replaceAll("\\", "/")); if (normalized === "." || normalized.startsWith("../") || normalized.startsWith("/") || normalized === "..") throw new InvalidInputError("profile path escapes the bundle"); return normalized; }
   #files(root: string): { path: string; content: string }[] { const out: { path: string; content: string }[] = []; const visit = (dir: string) => { for (const entry of fs.readdirSync(dir, { withFileTypes: true })) { const absolute = path.join(dir, entry.name); if (entry.isDirectory()) visit(absolute); else if (entry.isFile()) out.push({ path: path.relative(root, absolute), content: fs.readFileSync(absolute, "utf8") }); } }; visit(root); return out.sort((a, b) => a.path.localeCompare(b.path)); }
 }

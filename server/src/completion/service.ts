@@ -15,7 +15,7 @@
  */
 import type { EventBus } from "../events/bus.ts";
 import type { Repo } from "../db/repo.ts";
-import type { AgentSessionHost } from "../agent-sessions/host.ts";
+import type { AgentSessionService } from "../agent-sessions/host.ts";
 import type { OrchestratorRunner } from "../orchestrator/runner.ts";
 import type { InteractionService } from "../orchestrator/interactions.ts";
 import { newId, nowIso } from "../ids.ts";
@@ -30,7 +30,7 @@ export interface RunCompletionDeps {
   repo: Repo;
   bus: EventBus;
   interactions: InteractionService;
-  host: () => AgentSessionHost;
+  host: () => AgentSessionService;
   runner: () => OrchestratorRunner;
   getWorkspaceRoot: (workspaceId: string) => string;
   /**
@@ -75,11 +75,11 @@ export class RunCompletionService {
     const { repo, interactions } = this.#deps;
     const session = repo.getUserSession(userSessionId);
     if (!session) return false;
-    if (session.runState !== "active" || session.status !== "open") return false;
+    if (session.runState !== "active" || session.lifecycle !== "open") return false;
     // A profile-manager conversation is a tool, not a run; it never "completes".
     if (session.purpose !== "work") return false;
 
-    const agentSessions = repo.listAgentSessions(userSessionId).filter((row) => row.status === "open");
+    const agentSessions = repo.listAgentSessions(userSessionId).filter((row) => row.lifecycle === "open");
     // Never fire on a chat-only session that delegated nothing.
     if (agentSessions.length === 0) return false;
 
@@ -104,7 +104,7 @@ export class RunCompletionService {
       agentSession.parentAgentSessionId === null
       && repo.latestHandoff({
         userSessionId, agentSessionId: agentSession.id,
-        participant: "main", excludeCheckpoints: true,
+        recipient: "main", excludeCheckpoints: true,
       })?.trigger === "final");
   }
 

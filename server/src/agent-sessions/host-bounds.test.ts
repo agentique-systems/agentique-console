@@ -14,7 +14,7 @@ describe("createSession seat bounds", () => {
     });
     const userSessionId = h.addUserSession();
     const created = h.host.createSession({ userSessionId, title: "wide bench", agents: agents(20) });
-    expect(created.participants).toHaveLength(20);
+    expect(created.agents).toHaveLength(20);
     expect(() => h.host.createSession({ userSessionId, title: "too wide", agents: agents(21) }))
       .toThrow(/1 to 20/);
   });
@@ -50,7 +50,7 @@ describe("createSession ownership invariant", () => {
         { name: "check", profileId: "visual-reviewer", owns: [] },
       ],
     });
-    expect(created.participants).toContain("check");
+    expect(created.agents).toContain("check");
   });
 
   it("still lets a read-only seat carry a review scope", () => {
@@ -61,6 +61,6 @@ describe("createSession ownership invariant", () => {
     const created = h.host.createSession({
       userSessionId, title: "scoped reviewer", agents: [{ name: "scout", profileId: "explorer", owns: ["docs/"] }],
     });
-    expect(created.participants).toContain("scout");
+    expect(created.agents).toContain("scout");
   });
 });

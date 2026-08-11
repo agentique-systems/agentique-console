@@ -80,7 +80,7 @@ describe.skipIf(!hasBwrap)("a real sandboxed child", () => {
     const root = workspace();
     fs.writeFileSync(path.join(root, "hello.txt"), "in the workspace");
     const { processId } = manager.start(
-      { workspaceRoot: root, userSessionId: "us_1", agentSessionId: "as_1", participant: "dev" },
+      { workspaceRoot: root, userSessionId: "us_1", agentSessionId: "as_1", agent: "dev" },
       command, args,
     );
     // `read` only waits when there is no NEW output, so poll on a real timer

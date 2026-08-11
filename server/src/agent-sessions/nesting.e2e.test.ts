@@ -7,7 +7,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { initMessage, sendHandoffUse, successMessage, toolUseMessage } from "../sdk/fake.ts";
-import { collectUntil, makeDelegationHarness, seatRoleOf } from "../test-helpers.ts";
+import { collectUntil, makeDelegationHarness, agentRoleOf } from "../test-helpers.ts";
 
 const briefing = (action: string) => ({
   core: { schemaVersion: 1 as const, taskId: null, status: "pending" as const, risk: "low" as const,
@@ -21,7 +21,7 @@ describe("nesting e2e (fake SDK)", () => {
     let parentCoordTurns = 0;
     let childCoordTurns = 0;
     const h = makeDelegationHarness(async function* (options) {
-      const id = seatRoleOf(options);
+      const id = agentRoleOf(options);
       yield initMessage();
       if (id.role === "coordinator" && id.depth === 0) {
         parentCoordTurns += 1;
@@ -40,7 +40,7 @@ describe("nesting e2e (fake SDK)", () => {
           ? sendHandoffUse("c-assign", "scout", { action: "look around", status: "pending", category: "assignment" })
           : sendHandoffUse("c-final", "main", { action: "recon done", stateSummary: "area clear", status: "completed", category: "final" });
       } else if (id.role === "specialist" && id.depth === 1) {
-        yield sendHandoffUse("s-report", "orchestrator", { action: "clear", status: "completed", category: "milestone" });
+        yield sendHandoffUse("s-report", "coordinator", { action: "clear", status: "completed", category: "milestone" });
       }
       yield successMessage();
     });
@@ -51,28 +51,28 @@ describe("nesting e2e (fake SDK)", () => {
 
     // Parentage and depth are rows, not inference.
     const spawned = events.find((event) => event.type === "agent_session.child.spawned");
-    expect(spawned?.payload).toMatchObject({ agentSessionId: created.agentSessionId, pattern: "hub_and_spoke", byParticipant: "orchestrator" });
+    expect(spawned?.payload).toMatchObject({ agentSessionId: created.agentSessionId, pattern: "hub_and_spoke", byAgent: "coordinator" });
     const childId = (spawned?.payload as { childAgentSessionId: string }).childAgentSessionId;
     const child = h.repo.getAgentSession(childId);
-    expect(child).toMatchObject({ parentAgentSessionId: created.agentSessionId, parentControllerSeat: "orchestrator", depth: 1 });
+    expect(child).toMatchObject({ parentAgentSessionId: created.agentSessionId, parentControllerAgent: "coordinator", depth: 1 });
 
     // The depth cap IS the granting: the child coordinator spawned without the
     // spawn tools, and its env says depth 1.
     const childCoordOptions = h.fake.captured.options.find((options) => {
-      const id = seatRoleOf(options);
+      const id = agentRoleOf(options);
       return id.agentSessionId === childId && id.role === "coordinator";
     });
     expect(childCoordOptions).toBeDefined();
-    expect(seatRoleOf(childCoordOptions).depth).toBe(1);
+    expect(agentRoleOf(childCoordOptions).depth).toBe(1);
     expect(childCoordOptions?.allowedTools ?? []).not.toContain("mcp__console_agent__create_child_session");
     const parentCoordOptions = h.fake.captured.options.find((options) => {
-      const id = seatRoleOf(options);
+      const id = agentRoleOf(options);
       return id.agentSessionId === created.agentSessionId && id.role === "coordinator";
     });
     expect(parentCoordOptions?.allowedTools ?? []).toContain("mcp__console_agent__create_child_session");
 
     // The premature final was withheld naming the child hold.
-    const withheld = events.find((event) => event.type === "agent_session.tool.result"
+    const withheld = events.find((event) => event.type === "agent_session.tool.completed"
       && JSON.stringify(event.payload).includes("child session(s) of this session have not reported"));
     expect(withheld).toBeDefined();
 
@@ -80,9 +80,9 @@ describe("nesting e2e (fake SDK)", () => {
     // controller — and the runner was never woken for it (no child flow.result).
     const parentRows = h.repo.listMessages("agent", created.agentSessionId).filter((row) => row.kind === "message");
     const boundary = parentRows.find((row) => row.speakerName === `child:${childId}`);
-    expect(boundary?.toName).toBe("orchestrator");
+    expect(boundary?.toName).toBe("coordinator");
     expect((boundary?.payload?.handoff as { stateSummary?: string } | undefined)?.stateSummary).toContain(`Child session "recon"`);
-    expect(events.filter((event) => event.type === "flow.result" && event.payload.agentSessionId === childId)).toHaveLength(0);
+    expect(events.filter((event) => event.type === "agent_session.result.returned" && event.payload.agentSessionId === childId)).toHaveLength(0);
     expect(events.find((event) => event.type === "agent_session.child.reported")?.payload)
       .toMatchObject({ agentSessionId: created.agentSessionId, childAgentSessionId: childId, status: "completed" });
 
@@ -100,7 +100,7 @@ describe("nesting e2e (fake SDK)", () => {
     let releaseAbandon: (() => void) | undefined;
     const childReady = new Promise<void>((resolve) => { releaseAbandon = resolve; });
     const h = makeDelegationHarness(async function* (options) {
-      const id = seatRoleOf(options);
+      const id = agentRoleOf(options);
       yield initMessage();
       if (id.role === "coordinator" && id.depth === 0) {
         parentCoordTurns += 1;
@@ -129,17 +129,17 @@ describe("nesting e2e (fake SDK)", () => {
       && (event.payload as { status?: string }).status === "failed", 15_000);
     const created = h.host.createSession({ userSessionId, title: "mission", agents: [{ name: "aux", profileId: "explorer" }], briefing: briefing("go") });
     await done;
-    expect(h.repo.getAgentSession(childIdSeen!)?.status).toBe("archived");
+    expect(h.repo.getAgentSession(childIdSeen!)?.lifecycle).toBe("archived");
     const parentRows = h.repo.listMessages("agent", created.agentSessionId).filter((row) => row.kind === "message");
     const notice = parentRows.find((row) => ((row.payload?.handoff as { action?: string } | undefined)?.action ?? "").includes("abandoned"));
     expect(notice?.speakerName).toBe(`child:${childIdSeen}`);
-    expect(notice?.toName).toBe("orchestrator");
+    expect(notice?.toName).toBe("coordinator");
   });
 
   it("boot archives children whose parent is gone", async () => {
     let coordTurns = 0;
     const h = makeDelegationHarness(async function* (options) {
-      const id = seatRoleOf(options);
+      const id = agentRoleOf(options);
       yield initMessage();
       if (id.role === "coordinator" && id.depth === 0 && coordTurns === 0) {
         coordTurns += 1;
@@ -155,8 +155,8 @@ describe("nesting e2e (fake SDK)", () => {
     const events = await spawned;
     const childId = (events.at(-1)?.payload as { childAgentSessionId: string }).childAgentSessionId;
     // The parent vanishes across a "restart"; the sweep reaps the stray child.
-    h.repo.patchAgentSession(created.agentSessionId, { status: "archived" });
+    h.repo.patchAgentSession(created.agentSessionId, { lifecycle: "archived" });
     expect(h.host.archiveOrphanChildren()).toBe(1);
-    expect(h.repo.getAgentSession(childId)?.status).toBe("archived");
+    expect(h.repo.getAgentSession(childId)?.lifecycle).toBe("archived");
   });
 });

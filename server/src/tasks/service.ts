@@ -1,6 +1,6 @@
 /**
  * The console-owned task ledger, written by the console MCP tools
- * (task_create/task_update) and the host's journal-driven auto-transitions.
+ * (task_create/task_update) and the journal-driven auto-transitions.
  * Keyed (sdkSessionId, sdkTaskId) where the "session id" is the SYNTHETIC
  * per-agent-session list id — never a provider session id, which dies at
  * every rotation and is how db-live-1's coordinator watched its own ledger
@@ -26,7 +26,7 @@ export interface TaskAttribution {
   workspaceId: string;
   userSessionId: string;
   agentSessionId: string | null;
-  participant: string | null;
+  agent: string | null;
 }
 
 type TaskRow = typeof tasks.$inferSelect;
@@ -43,7 +43,7 @@ function toWire(row: TaskRow, deps: readonly DependencyRow[], allRows: readonly 
     workspaceId: row.workspaceId,
     userSessionId: row.userSessionId,
     agentSessionId: row.agentSessionId,
-    participant: row.participant,
+    agent: row.participant,
     subject: row.subject,
     description: row.description,
     activeForm: row.activeForm,
@@ -81,7 +81,7 @@ export class TaskService {
     description?: string;
     activeForm?: string;
     metadata?: Record<string, unknown>;
-    /** The seat that will DO the work — not the seat writing the row. */
+    /** The agent that will DO the work — not the agent writing the row. */
     owner?: string | null;
     attribution: TaskAttribution;
   }): void {
@@ -113,7 +113,7 @@ export class TaskService {
       workspaceId: input.attribution.workspaceId,
       userSessionId: input.attribution.userSessionId,
       agentSessionId: input.attribution.agentSessionId,
-      participant: input.attribution.participant,
+      participant: input.attribution.agent,
       subject: input.subject,
       description: input.description ?? "",
       activeForm: input.activeForm ?? null,
@@ -234,7 +234,7 @@ export class TaskService {
     if (this.#reachable(blockedTaskId, blockerTaskId)) throw new Error("task dependency would create a cycle");
     const row: DependencyRow = { blockerTaskId, blockedTaskId, source, createdAt: nowIso() };
     this.#db.insert(taskDependencies).values(row).onConflictDoNothing().run();
-    this.#bus.append({ type: "task_dependency.created", workspaceId: blocked.workspaceId, userSessionId: blocked.userSessionId,
+    this.#bus.append({ type: "task.dependency.created", workspaceId: blocked.workspaceId, userSessionId: blocked.userSessionId,
       ...(blocked.agentSessionId ? { agentSessionId: blocked.agentSessionId } : {}), payload: { dependency: row } });
   }
 

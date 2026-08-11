@@ -1,19 +1,19 @@
 /**
- * Contract compilation, seat→role derivation, and the hub-and-spoke default
+ * Contract compilation, agent→role derivation, and the hub-and-spoke default
  * that every pre-contract session row reads as.
  *
- * A compiled contract is the host's execution surface: route legality is an
+ * A compiled contract is the service's execution surface: route legality is an
  * edge lookup, tool grants and prompts are role lookups. Contracts are
  * immutable once snapshotted — replicable roles grow the ROSTER
- * (participants.pattern_role), never the contract.
+ * (`agents.role`), never the contract.
  */
 import type { EdgeSpec, RolePrompt, RoleSpec, TopologyContract } from "./topology-contract.ts";
-import type { AgentSessionRow, ParticipantRow } from "../db/repo.ts";
-import { CONSOLE_SENDER, MAIN_RECIPIENT, ORCHESTRATOR_SEAT } from "./peer-names.ts";
+import type { AgentSessionRow, AgentRow } from "../db/repo.ts";
+import { CONSOLE_SENDER, MAIN_RECIPIENT, COORDINATOR_AGENT } from "./names.ts";
 import { SESSION_PROTOCOL } from "./presets.ts";
 
-export const SEAT_NAME_RE = /^[A-Za-z0-9_.:-]+$/;
-export const RESERVED_NAMES = new Set([ORCHESTRATOR_SEAT, "operator", "system", MAIN_RECIPIENT, "coordinator", CONSOLE_SENDER]);
+export const AGENT_NAME_RE = /^[A-Za-z0-9_.:-]+$/;
+export const RESERVED_NAMES = new Set([COORDINATOR_AGENT, "operator", "system", MAIN_RECIPIENT, CONSOLE_SENDER]);
 
 export interface CompiledContract {
   contract: TopologyContract;
@@ -38,14 +38,14 @@ export function compileContract(contract: TopologyContract): CompiledContract {
   };
 }
 
-/** A seat's contract role; NULL (pre-contract rows) derives from the frozen `role` column. */
-export function roleOfSeat(seat: Pick<ParticipantRow, "role" | "patternRole">): string {
-  return seat.patternRole ?? (seat.role === "orchestrator" ? "coordinator" : "specialist");
+/** An agent's contract role — the `agents.role` column IS the binding. */
+export function roleOfAgent(agent: Pick<AgentRow, "role">): string {
+  return agent.role;
 }
 
-/** A seat row's transcript speaker kind; an absent row speaks as an agent. */
-export function speakerKindOf(seat: Pick<ParticipantRow, "role"> | undefined | null): "orchestrator" | "agent" {
-  return seat?.role === "orchestrator" ? "orchestrator" : "agent";
+/** An agent row's transcript speaker kind; an absent row speaks as an agent. */
+export function speakerKindOf(agent: Pick<AgentRow, "role"> | undefined | null): "orchestrator" | "agent" {
+  return agent?.role === "coordinator" ? "orchestrator" : "agent";
 }
 
 /** Pinned by native-flow.e2e — the route-denial text existing operators know. */
@@ -53,8 +53,8 @@ export const HUB_ROUTE_SUMMARY = "main ↔ coordinator ↔ specialist";
 
 /**
  * Today's star as a contract. Prompt strings must stay byte-identical to the
- * pre-contract literals (prompt caching + the snapshot tests pin them): the
- * addressing sentences reproduce `seatMessagingBrief`'s, and the protocol is
+ * builder's literals (prompt caching + the snapshot tests pin them): the
+ * addressing sentences reproduce the messaging brief's, and the protocol is
  * the whole SESSION_PROTOCOL block.
  */
 const HUB_CONTRACT: TopologyContract = {
@@ -69,10 +69,10 @@ const HUB_CONTRACT: TopologyContract = {
     specialist: { replicable: false, min: 1, max: 20, grants: [], escalateTo: "coordinator" },
   },
   edges: [
-    { from: "main", to: "coordinator", advance: "router" },
-    { from: "coordinator", to: "main", advance: "router" },
-    { from: "coordinator", to: "specialist", advance: "router" },
-    { from: "specialist", to: "coordinator", advance: "router" },
+    { from: "main", to: "coordinator", advance: "immediate" },
+    { from: "coordinator", to: "main", advance: "immediate" },
+    { from: "coordinator", to: "specialist", advance: "immediate" },
+    { from: "specialist", to: "coordinator", advance: "immediate" },
   ],
   joins: [],
   entry: { role: "coordinator", broadcast: false },
@@ -80,16 +80,16 @@ const HUB_CONTRACT: TopologyContract = {
   completion: { finalFrom: "coordinator", voice: "coordinator" },
   promptPack: {
     coordinator: {
-      addressing: `Address participants by bare name (e.g. "orchestrator"); "main" reaches the Orchestrator. You may address your specialists and main.`,
+      addressing: `Address participants by bare name (e.g. "coordinator"); "main" reaches the Orchestrator. You may address your specialists and main.`,
       protocol: SESSION_PROTOCOL,
     },
     specialist: {
-      addressing: `Address participants by bare name (e.g. "orchestrator"); "main" reaches the Orchestrator. You may address only orchestrator.`,
+      addressing: `Address participants by bare name (e.g. "coordinator"); "main" reaches the Orchestrator. You may address only coordinator.`,
       protocol: SESSION_PROTOCOL,
     },
   },
   routeSummary: HUB_ROUTE_SUMMARY,
-  limits: { minSeats: 1, maxSeats: 20 },
+  limits: { minAgents: 1, maxAgents: 20 },
   config: {},
 };
 

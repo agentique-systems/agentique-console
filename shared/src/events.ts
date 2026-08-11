@@ -1,6 +1,11 @@
-// The event spine wire contract. Frozen at milestone 1 — both server emission
-// and web folds compile against these exact shapes. Persisted events carry a
-// global `seq` (the SSE id); transient frames have no seq and are never replayed.
+// The event spine wire contract. Both server emission and web folds compile
+// against these exact shapes. Persisted events carry a global `seq` (the SSE
+// id); transient frames have no seq and are never replayed.
+//
+// Naming convention (durable events): `scope.subject.verb-past`, two parts
+// allowed when the subject IS the scope entity. Transient stream frames
+// (`stream.*`) are exempt. Payloads never carry a bare `sessionId` — always
+// `userSessionId` / `agentSessionId`.
 
 import type {
   AgentSession,
@@ -18,10 +23,10 @@ import type { HandoffSummary } from "./handoffs.ts";
 
 export type SessionKind = "user" | "agent";
 
-export interface EventScope {
-  kind: SessionKind;
-  sessionId: string;
-}
+/** Which transcript a transient frame belongs to; never a bare `sessionId`. */
+export type EventScope =
+  | { kind: "user"; userSessionId: string }
+  | { kind: "agent"; agentSessionId: string };
 
 // ---------------------------------------------------------------------------
 // Persisted payloads
@@ -40,7 +45,7 @@ export interface UserSessionCreatedPayload {
 export interface UserSessionUpdatedPayload {
   userSessionId: string;
   patch: Partial<
-    Pick<UserSession, "title" | "mode" | "phase" | "status" | "runState">
+    Pick<UserSession, "title" | "mode" | "phase" | "lifecycle" | "runState">
   >;
 }
 export interface UserSessionMessagePayload {
@@ -93,9 +98,9 @@ export interface QuestionAskedPayload {
   userSessionId: string;
   interactionId: string;
   questions: InteractionQuestion[];
-  /** The asking seat, so the card can name it. Absent = the main lane. */
+  /** The asking agent, so the card can name it. Absent = the main lane. */
   agentSessionId?: string;
-  participant?: string;
+  agent?: string;
   urgency: InteractionUrgency;
   source: InteractionSource;
   recommendation?: string;
@@ -146,7 +151,7 @@ export interface RunReopenedPayload {
 }
 
 /**
- * The operator decided something. Durable and session-scoped: every seat and
+ * The operator decided something. Durable and session-scoped: every agent and
  * every later generation reads these back, so an answer given once never has
  * to be relayed or re-derived.
  */
@@ -155,7 +160,7 @@ export interface OperatorDecisionRecordedPayload {
   decisionId: string;
   agentSessionId?: string;
   interactionId?: string;
-  /** Seat name, "orchestrator", "main", or "console". */
+  /** Agent name, "coordinator", "main", or "console". */
   askedBy: string;
   source: "interaction" | "plan_approval";
   question: string;
@@ -175,7 +180,7 @@ export interface PlanResolvedPayload {
 
 export interface AgentSessionCreatedPayload {
   session: AgentSession;
-  participants: string[];
+  agents: string[];
 }
 export interface AgentSessionMessagePayload {
   agentSessionId: string;
@@ -183,12 +188,12 @@ export interface AgentSessionMessagePayload {
 }
 export interface AgentTurnStartedPayload {
   agentSessionId: string;
-  participant: string;
+  agent: string;
   turnId: string;
 }
 export interface AgentTurnSettledPayload {
   agentSessionId: string;
-  participant: string;
+  agent: string;
   turnId: string;
   status: "completed" | "error" | "aborted";
   errorMessage?: string;
@@ -196,13 +201,13 @@ export interface AgentTurnSettledPayload {
 }
 export interface AgentToolCallPayload extends ToolCallCore {
   agentSessionId: string;
-  participant: string;
+  agent: string;
 }
 export interface AgentToolResultPayload extends ToolResultCore {
   agentSessionId: string;
-  participant: string;
+  agent: string;
 }
-export interface AgentSessionStatusPayload {
+export interface AgentSessionStatusChangedPayload {
   agentSessionId: string;
   status: AgentSessionStatus;
 }
@@ -224,15 +229,15 @@ export interface AgentSessionJoinCompletedPayload {
 /**
  * Boundary-edge events. These are ALSO the nesting flow pulses: the web maps
  * child.spawned/child.reported onto the parent card's delegation/result
- * animations, while the legacy `flow.delegation`/`flow.result` pair keeps
- * carrying the root main↔session edges. No third flow vocabulary.
+ * animations, while `agent_session.delegation.sent`/`agent_session.result.returned`
+ * keep carrying the root main↔session edges. No third flow vocabulary.
  */
-/** A controller seat spawned a child session; agentSessionId is the PARENT. */
+/** A controller agent spawned a child session; agentSessionId is the PARENT. */
 export interface AgentSessionChildSpawnedPayload {
   agentSessionId: string;
   childAgentSessionId: string;
   pattern: string;
-  byParticipant: string;
+  byAgent: string;
   title: string;
 }
 /** A child's final/failure crossed the boundary into its parent. */
@@ -242,7 +247,7 @@ export interface AgentSessionChildReportedPayload {
   status: "completed" | "failed";
   handoffId: string;
 }
-export interface AgentMailboxPayload {
+export interface AgentDeliveryUpdatedPayload {
   agentSessionId: string;
   deliveryId: string;
   messageSeq: number;
@@ -253,34 +258,34 @@ export interface AgentMailboxPayload {
 }
 export interface AgentRuntimePayload {
   agentSessionId: string;
-  participant: string;
+  agent: string;
   turnId?: string;
   detail: string;
 }
 export interface AgentContextRotatedPayload {
   agentSessionId: string;
-  participant: string;
+  agent: string;
   generation: number;
   reason: "token_limit" | "turn_limit";
   handoffId?: string; checkpointBytes?: number; degraded?: boolean;
 }
 export interface AgentProcessStartedPayload {
-  agentSessionId: string; participant: string; processId: string;
+  agentSessionId: string; agent: string; processId: string;
   command: string; args: string[]; cwd: string; pid?: number;
 }
 export interface AgentProcessOutputPayload {
-  agentSessionId: string; participant: string; processId: string;
+  agentSessionId: string; agent: string; processId: string;
   seq: number; stream: "stdout" | "stderr"; text: string;
 }
 export interface AgentProcessExitedPayload {
-  agentSessionId: string; participant: string; processId: string;
+  agentSessionId: string; agent: string; processId: string;
   code: number | null; signal: string | null;
 }
 export interface UsageRecordedPayload {
   userSessionId: string;
-  /** Present when the sample belongs to a seat rather than the main lane. */
+  /** Present when the sample belongs to an agent rather than the main lane. */
   agentSessionId?: string;
-  participant: string; profileId?: string; generation: number;
+  agent: string; profileId?: string; generation: number;
   turnId: string; inputTokens: number; outputTokens: number; costUsd?: number;
   uncachedInputTokens?: number; cacheCreationInputTokens?: number; cacheReadInputTokens?: number;
   model?: string; effort?: string; trigger?: string; durationMs?: number;
@@ -295,9 +300,9 @@ export interface UsageRecordedPayload {
  */
 export interface RetryRecordedPayload {
   userSessionId: string;
-  /** Present when the retrying lane is a seat rather than the main lane. */
+  /** Present when the retrying lane is an agent rather than the main lane. */
   agentSessionId?: string;
-  participant?: string;
+  agent?: string;
   kind: "api_error" | "rate_limited";
   attempt?: number;
   retryInMs?: number;
@@ -315,9 +320,9 @@ export interface HandoffCreatedPayload {
   handoff: HandoffSummary; sender: string; recipient: string; checkpoint: boolean;
   bytes: number;
 }
-export interface HandoffConsumedPayload { handoffId: string; participant: string; mode: "compact" | "expanded"; }
+export interface HandoffConsumedPayload { handoffId: string; agent: string; mode: "compact" | "expanded"; }
 export interface HandoffDiscrepancyPayload { handoffId: string; reporter: string; claim: string; evidence: string; }
-export interface HandoffCheckpointFailedPayload { participant: string; reason: string; degraded: boolean; }
+export interface HandoffCheckpointFailedPayload { agent: string; reason: string; degraded: boolean; }
 /**
  * A `final` reached the operator with work still outstanding. The conditions
  * ride along with the report rather than suppressing it — the operator can
@@ -330,12 +335,12 @@ export interface HandoffFinalCaveatsPayload { agentSessionId: string; sender: st
  * occurrence is a coordination defect worth reading — the run produced results
  * that would otherwise have reached nobody.
  */
-export interface AgentSessionUnreportedPayload { agentSessionId: string; seatReports: number; hadCoordinatorReport: boolean; }
+export interface AgentSessionCloseoutForcedPayload { agentSessionId: string; agentReports: number; hadCoordinatorReport: boolean; }
 
-/** The host interrupted a seat turn that was repeating itself without progress. */
-export interface AgentWatchdogPayload {
+/** The console interrupted an agent turn that was repeating itself without progress. */
+export interface AgentWatchdogTrippedPayload {
   agentSessionId: string;
-  participant: string;
+  agent: string;
   turnId: string;
   kind: "repeat_tool_calls" | "tool_error_streak";
   toolName?: string;
@@ -343,44 +348,44 @@ export interface AgentWatchdogPayload {
   detail: string;
 }
 
-/** Governance: the orchestrator lane's canUseTool denied a tool call. */
+/** A `canUseTool` gate denied a tool call. */
 export interface ToolDeniedPayload {
   userSessionId: string;
-  /** Present for a seat-level denial; absent for the main lane's. */
+  /** Present for an agent-level denial; absent for the main lane's. */
   agentSessionId?: string;
-  participant?: string;
+  agent?: string;
   toolName: string;
   kind: "coordination_only" | "empty_question" | "question_declined" | "plan_missing" | "plan_rejected";
   reason: string;
 }
 
-/** Seat worktree isolation: write seats land completed work atomically. */
-export interface SeatWorktreeCreatedPayload {
+/** Agent worktree isolation: write agents land completed work atomically. */
+export interface AgentWorktreeCreatedPayload {
   agentSessionId: string;
-  seat: string;
+  agent: string;
   branch: string;
   baseCommit: string;
 }
 
-export interface SeatWorktreeMergedPayload {
+export interface AgentWorktreeMergedPayload {
   agentSessionId: string;
-  seat: string;
+  agent: string;
   mergeCommit: string;
   filesChanged: number;
   artifactId: string | null;
 }
 
-export interface SeatWorktreeMergeFailedPayload {
+export interface AgentWorktreeMergeFailedPayload {
   agentSessionId: string;
-  seat: string;
+  agent: string;
   conflicts: string[];
   detail: string;
   artifactId: string | null;
 }
 
-export interface SeatWorktreeDiscardedPayload {
+export interface AgentWorktreeDiscardedPayload {
   agentSessionId: string;
-  seat: string;
+  agent: string;
   reason: string;
   artifactId: string | null;
 }
@@ -393,20 +398,20 @@ export interface TaskUpdatedPayload {
   changed: string[];
 }
 
-export interface FlowDelegationPayload {
+export interface DelegationSentPayload {
   userSessionId: string;
   agentSessionId: string;
   kind: "created" | "sent";
   preview: string;
 }
-export interface FlowResultPayload {
+export interface ResultReturnedPayload {
   userSessionId: string;
   agentSessionId: string;
   digestPreview: string;
 }
 
 // ---------------------------------------------------------------------------
-// Streaming payloads are transient. Agent state is durable so crashes and
+// Streaming payloads are transient. Agent activity is durable so crashes and
 // unexpected termination remain visible when a transcript is replayed.
 
 export interface StreamDeltaPayload {
@@ -424,9 +429,9 @@ export type AgentRuntimeState =
   | "waiting"
   | "idle";
 
-export interface AgentStatePayload {
+export interface AgentActivityChangedPayload {
   scope: EventScope;
-  participant: string;
+  agent: string;
   state: AgentRuntimeState;
   toolName?: string;
   /**
@@ -456,14 +461,14 @@ export type ConsoleEvent = Base &
     | { type: "workspace.updated"; payload: WorkspaceUpdatedPayload }
     | { type: "user_session.created"; payload: UserSessionCreatedPayload }
     | { type: "user_session.updated"; payload: UserSessionUpdatedPayload }
-    | { type: "user_session.message"; payload: UserSessionMessagePayload }
+    | { type: "user_session.message.appended"; payload: UserSessionMessagePayload }
     | { type: "user_session.turn.started"; payload: UserTurnStartedPayload }
     | { type: "user_session.turn.settled"; payload: UserTurnSettledPayload }
     | { type: "user_session.context.rotated"; payload: UserContextRotatedPayload }
-    | { type: "user_session.runtime"; payload: UserRuntimePayload }
+    | { type: "user_session.runtime.noted"; payload: UserRuntimePayload }
     | { type: "user_session.retry.recorded"; payload: RetryRecordedPayload }
-    | { type: "user_session.tool.call"; payload: ToolCallPayload }
-    | { type: "user_session.tool.result"; payload: ToolResultPayload }
+    | { type: "user_session.tool.called"; payload: ToolCallPayload }
+    | { type: "user_session.tool.completed"; payload: ToolResultPayload }
     | { type: "user_session.question.asked"; payload: QuestionAskedPayload }
     | { type: "user_session.question.answered"; payload: QuestionAnsweredPayload }
     | { type: "user_session.plan.proposed"; payload: PlanProposedPayload }
@@ -473,14 +478,14 @@ export type ConsoleEvent = Base &
     | { type: "agent_session.join.completed"; payload: AgentSessionJoinCompletedPayload }
     | { type: "agent_session.child.spawned"; payload: AgentSessionChildSpawnedPayload }
     | { type: "agent_session.child.reported"; payload: AgentSessionChildReportedPayload }
-    | { type: "agent_session.message"; payload: AgentSessionMessagePayload }
+    | { type: "agent_session.message.appended"; payload: AgentSessionMessagePayload }
     | { type: "agent_session.turn.started"; payload: AgentTurnStartedPayload }
     | { type: "agent_session.turn.settled"; payload: AgentTurnSettledPayload }
-    | { type: "agent_session.tool.call"; payload: AgentToolCallPayload }
-    | { type: "agent_session.tool.result"; payload: AgentToolResultPayload }
-    | { type: "agent_session.status"; payload: AgentSessionStatusPayload }
-    | { type: "agent_session.mailbox"; payload: AgentMailboxPayload }
-    | { type: "agent_session.runtime"; payload: AgentRuntimePayload }
+    | { type: "agent_session.tool.called"; payload: AgentToolCallPayload }
+    | { type: "agent_session.tool.completed"; payload: AgentToolResultPayload }
+    | { type: "agent_session.status.changed"; payload: AgentSessionStatusChangedPayload }
+    | { type: "agent_session.delivery.updated"; payload: AgentDeliveryUpdatedPayload }
+    | { type: "agent_session.runtime.noted"; payload: AgentRuntimePayload }
     | { type: "agent_session.retry.recorded"; payload: RetryRecordedPayload }
     | { type: "agent_session.context.rotated"; payload: AgentContextRotatedPayload }
     | { type: "agent_session.process.started"; payload: AgentProcessStartedPayload }
@@ -488,13 +493,13 @@ export type ConsoleEvent = Base &
     | { type: "agent_session.process.exited"; payload: AgentProcessExitedPayload }
     | { type: "task.created"; payload: TaskCreatedPayload }
     | { type: "task.updated"; payload: TaskUpdatedPayload }
-    | { type: "task_dependency.created"; payload: TaskDependencyPayload }
-    | { type: "task_dependency.deleted"; payload: TaskDependencyPayload }
+    | { type: "task.dependency.created"; payload: TaskDependencyPayload }
+    | { type: "task.dependency.deleted"; payload: TaskDependencyPayload }
     | { type: "agent_profile.changed"; payload: AgentProfileChangedPayload }
     | { type: "usage.recorded"; payload: UsageRecordedPayload }
     | { type: "handoff.created"; payload: HandoffCreatedPayload }
     | { type: "handoff.consumed"; payload: HandoffConsumedPayload }
-    | { type: "handoff.discrepancy"; payload: HandoffDiscrepancyPayload }
+    | { type: "handoff.discrepancy.reported"; payload: HandoffDiscrepancyPayload }
     | { type: "handoff.checkpoint.failed"; payload: HandoffCheckpointFailedPayload }
     | { type: "handoff.final.caveats"; payload: HandoffFinalCaveatsPayload }
     | { type: "handoff.final.blocked"; payload: FinalBlockedPayload }
@@ -502,18 +507,18 @@ export type ConsoleEvent = Base &
     | { type: "run.completion.proposed"; payload: RunCompletionProposedPayload }
     | { type: "run.signoff.resolved"; payload: RunSignoffResolvedPayload }
     | { type: "run.reopened"; payload: RunReopenedPayload }
-    | { type: "agent_session.unreported"; payload: AgentSessionUnreportedPayload }
-    | { type: "agent_session.watchdog"; payload: AgentWatchdogPayload }
-    | { type: "governance.tool.denied"; payload: ToolDeniedPayload }
-    | { type: "agent_session.worktree.created"; payload: SeatWorktreeCreatedPayload }
-    | { type: "agent_session.worktree.merged"; payload: SeatWorktreeMergedPayload }
-    | { type: "agent_session.worktree.merge_failed"; payload: SeatWorktreeMergeFailedPayload }
-    | { type: "agent_session.worktree.discarded"; payload: SeatWorktreeDiscardedPayload }
-    | { type: "flow.delegation"; payload: FlowDelegationPayload }
-    | { type: "flow.result"; payload: FlowResultPayload }
+    | { type: "agent_session.closeout.forced"; payload: AgentSessionCloseoutForcedPayload }
+    | { type: "agent_session.watchdog.tripped"; payload: AgentWatchdogTrippedPayload }
+    | { type: "tool.denied"; payload: ToolDeniedPayload }
+    | { type: "agent_session.worktree.created"; payload: AgentWorktreeCreatedPayload }
+    | { type: "agent_session.worktree.merged"; payload: AgentWorktreeMergedPayload }
+    | { type: "agent_session.worktree.merge_failed"; payload: AgentWorktreeMergeFailedPayload }
+    | { type: "agent_session.worktree.discarded"; payload: AgentWorktreeDiscardedPayload }
+    | { type: "agent_session.delegation.sent"; payload: DelegationSentPayload }
+    | { type: "agent_session.result.returned"; payload: ResultReturnedPayload }
     | { type: "stream.delta"; payload: StreamDeltaPayload }
     | { type: "stream.reasoning"; payload: StreamReasoningPayload }
-    | { type: "agent.state"; payload: AgentStatePayload }
+    | { type: "agent_session.activity.changed"; payload: AgentActivityChangedPayload }
   );
 
 export type ConsoleEventType = ConsoleEvent["type"];

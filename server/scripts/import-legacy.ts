@@ -13,7 +13,7 @@ const entries = fs.readFileSync(file, "utf8").split(/\r?\n/).filter(Boolean).map
   catch (error) { throw new Error(`invalid JSONL at line ${index + 1}: ${error instanceof Error ? error.message : String(error)}`); }
 });
 const config = loadConfig();
-const { db, sqlite } = openDb(config.dbFile);
+const { db, sqlite } = openDb(config.infra.dbFile);
 try {
   await new SqliteSessionStore(db).append({ projectKey: path.dirname(path.resolve(file)), sessionId, ...(subpath ? { subpath } : {}) }, entries);
   console.log(`imported ${entries.length} provider entries into ${sessionId}${subpath ? `/${subpath}` : ""}`);

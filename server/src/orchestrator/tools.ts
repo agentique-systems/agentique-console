@@ -5,8 +5,8 @@
  * checked and journaled, like every other transfer in the system.
  */
 import { z } from "zod";
-import type { AgentSessionHost } from "../agent-sessions/host.ts";
-import { MAIN_RECIPIENT } from "../agent-sessions/peer-names.ts";
+import type { AgentSessionService } from "../agent-sessions/host.ts";
+import { MAIN_RECIPIENT } from "../agent-sessions/names.ts";
 import type { EventBus } from "../events/bus.ts";
 import type { Repo } from "../db/repo.ts";
 import { NotFoundError } from "../errors.ts";
@@ -23,7 +23,7 @@ import { consoleTaskListId } from "../tasks/service.ts";
 
 export interface ConsoleToolsInput {
   sdk: ConsoleSdk;
-  host: AgentSessionHost;
+  host: AgentSessionService;
   repo: Repo;
   bus: EventBus;
   userSessionId: string;
@@ -46,28 +46,28 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
   const tools = [
     sdk.tool(
       "create_agent_session",
-      "Create and immediately launch a Console-managed AgentSession running an orchestration pattern over profile-bound seats. Default pattern hub_and_spoke = one coordinator + 1-20 specialists; pipeline = the agents ARE the stages in order; evaluator_optimizer = exactly 2 agents (generator, evaluator) cycling until accept or the round cap. The Console owns every provider session, mailbox delivery, retry, and event; never call Agent yourself.",
+      "Create and immediately launch a Console-managed AgentSession running an orchestration pattern over profile-bound agents. Default pattern hub_and_spoke = one coordinator + 1-20 specialists; pipeline = the agents ARE the stages in order; evaluator_optimizer = exactly 2 agents (generator, evaluator) cycling until accept or the round cap. The Console owns every provider session, mailbox delivery, retry, and event; never call Agent yourself.",
       {
         title: z.string().describe("Short working title for the session"),
         pattern: z.enum(PATTERN_IDS).default("hub_and_spoke")
-          .describe("Orchestration pattern; the delegation brief's decision tree says when each fits. hub_and_spoke: coordinator + specialists. pipeline: agents ARE the stages in order. evaluator_optimizer: exactly 2 (generator, evaluator). map_reduce: seat ONLY the reducer. debate: 2-8 debaters, judge auto-seated — a single BLIND round: each debater argues once and never sees the others, so seat instructions must not promise rebuttals or exchanges. peer_to_peer: bounded mesh, use rarely. plan_execute: planner + executors over a task DAG."),
+          .describe("Orchestration pattern; the delegation brief's decision tree says when each fits. hub_and_spoke: coordinator + specialists. pipeline: agents ARE the stages in order. evaluator_optimizer: exactly 2 (generator, evaluator). map_reduce: seat ONLY the reducer. debate: 2-8 debaters, judge auto-seated — a single BLIND round: each debater argues once and never sees the others, so agent instructions must not promise rebuttals or exchanges. peer_to_peer: bounded mesh, use rarely. plan_execute: planner + executors over a task DAG."),
         patternConfig: z.record(z.string(), z.unknown()).optional()
-          .describe("Pattern-specific config. evaluator_optimizer: {rubric, maxRounds?, generatorSeat?, requireDistinctModels?}. map_reduce: {maxMappers?}. debate: {rubric?, judgeProfileId?, judgeModel?}. peer_to_peer: {closerSeat?, maxHandoffs?, oscillationWindow?}. plan_execute: {plannerSeat?}."),
+          .describe("Pattern-specific config. evaluator_optimizer: {rubric, maxRounds?, generatorAgent?, requireDistinctModels?}. map_reduce: {maxMappers?}. debate: {rubric?, judgeProfileId?, judgeModel?}. peer_to_peer: {closerAgent?, maxHandoffs?, oscillationWindow?}. plan_execute: {plannerAgent?}."),
         agents: z
           .array(
             z.object({
               name: z
                 .string()
-                .describe("Seat name, e.g. 'scout' — addressable via @name"),
+                .describe("Agent name, e.g. 'scout' — addressable via @name"),
               profileId: z.string().describe("A profile id returned by list_agent_profiles"),
               instructions: z
                 .string()
                 .optional()
                 .describe(
-                  "Seat brief appended to the profile instructions",
+                  "Agent brief appended to the profile instructions",
                 ),
               model: z.string().optional().describe("Model override"),
-              owns: z.array(z.string()).default([]).describe("Files or directories this seat exclusively owns. Required for a seat that writes; leave empty for a read-only seat such as a reviewer — it owns no files."),
+              owns: z.array(z.string()).default([]).describe("Files or directories this agent exclusively owns. Required for an agent that writes; leave empty for a read-only agent such as a reviewer — it owns no files."),
             }),
           )
           .min(1)
@@ -101,12 +101,12 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           });
           return {
             agentSessionId: created.agentSessionId,
-            participants: created.participants,
+            agents: created.agents,
             pattern: args.pattern,
             // Steer it with `send_to_coordinator`, not with a peer address:
             // the native mesh is gone and a peer name is only live while the
-            // seat's process is. The tool reaches this session's entry seat.
-            entrySeat: created.entrySeat,
+            // agent's process is. The tool reaches this session's entry agent.
+            entryAgent: created.entryAgent,
             ...(created.coordinatorName ? { coordinator: created.coordinatorName } : {}),
             status: "launched",
           };
@@ -125,13 +125,13 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
      * no route check. The console could not steer its own coordinator.
      *
      * Routing is free here: `#assertRoute` already permits exactly
-     * main → orchestrator and nothing else. Delivery goes through
-     * `#deliverConsole`, which spawns a parked seat — so a coordinator whose
+     * main → coordinator and nothing else. Delivery goes through
+     * `#deliverConsole`, which spawns a parked agent — so a coordinator whose
      * process has died is no longer an unreachable one.
      */
     sdk.tool(
       "send_to_coordinator",
-      "Send a typed handoff to an AgentSession's entry seat — its coordinator in a hub session, the first stage of a pipeline, the generator of an evaluator loop. This is how you steer a running session after its briefing: assign more work, redirect, or relay an operator decision. The fields ARE the handoff; the Console builds, journals and carries the envelope.",
+      "Send a typed handoff to an AgentSession's entry agent — its coordinator in a hub session, the first stage of a pipeline, the generator of an evaluator loop. This is how you steer a running session after its briefing: assign more work, redirect, or relay an operator decision. The fields ARE the handoff; the Console builds, journals and carries the envelope.",
       {
         agentSessionId: z.string().min(1),
         category: z.enum(["assignment", "update"]).default("update"),
@@ -155,11 +155,11 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         uncertainty: string[]; nextAction: string | null; taskId: string | null; requestExpandedContext: boolean;
       }) => guarded(() => {
         owned(args.agentSessionId);
-        const entrySeat = host.entrySeat(args.agentSessionId);
+        const entryAgent = host.entryAgent(args.agentSessionId);
         const message = host.post({
           agentSessionId: args.agentSessionId,
           speaker: { kind: "orchestrator", name: "main" },
-          to: entrySeat,
+          to: entryAgent,
           handoff: {
             core: {
               schemaVersion: 1, taskId: args.taskId, status: args.status, risk: args.risk, action: args.action,
@@ -172,7 +172,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           },
           category: args.category,
         });
-        return { delivered: true, messageSeq: message.seq, to: entrySeat, category: args.category };
+        return { delivered: true, messageSeq: message.seq, to: entryAgent, category: args.category };
       }),
     ),
 
@@ -194,7 +194,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         taskId: z.string().min(1).describe("Short stable id you choose, e.g. \"1\" or \"interface\"."),
         subject: z.string().min(1),
         description: z.string().default(""),
-        owner: z.string().min(1).describe("The seat that will DO this work — not you."),
+        owner: z.string().min(1).describe("The agent that will DO this work — not you."),
       },
       async (args: { agentSessionId: string; taskId: string; subject: string; description: string; owner: string }) =>
         guarded(() => {
@@ -202,7 +202,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           tasks?.upsertFromCreate({
             sdkSessionId: consoleTaskListId(args.agentSessionId), sdkTaskId: args.taskId,
             subject: args.subject, description: args.description, owner: args.owner,
-            attribution: { workspaceId: repo.getUserSession(userSessionId)?.workspaceId ?? "", userSessionId, agentSessionId: session.id, participant: null },
+            attribution: { workspaceId: repo.getUserSession(userSessionId)?.workspaceId ?? "", userSessionId, agentSessionId: session.id, agent: null },
           });
           return { taskId: args.taskId, created: true, owner: args.owner };
         }),
@@ -231,7 +231,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
 
     sdk.tool(
       "task_list",
-      "Read the ledger for this conversation. Authoritative, shared with every seat, and it survives context rotation.",
+      "Read the ledger for this conversation. Authoritative, shared with every agent, and it survives context rotation.",
       { agentSessionId: z.string().optional() },
       async (args: { agentSessionId?: string }) =>
         guarded(() => ({

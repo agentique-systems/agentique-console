@@ -22,7 +22,7 @@ export interface UserSession {
   mode: SessionMode;
   phase: SessionPhase;
   /** Is this in the operator's active list. Orthogonal to `runState`. */
-  status: "open" | "archived";
+  lifecycle: "open" | "archived";
   /**
    * Is the work done. `awaiting_signoff` is the Console asserting it believes
    * the run is finished while the operator has not yet agreed — the state
@@ -69,22 +69,27 @@ export interface RunSummaryStats {
  */
 export type AgentSessionStatus = "working" | "idle" | "reported" | "archived";
 
+export type AgentSessionLifecycle = "open" | "archived";
+/** Derived busy state — never stored. */
+export type AgentSessionActivity = "working" | "idle" | "reported";
+
 export interface AgentSession {
   id: string;
   userSessionId: string;
   title: string;
-  status: AgentSessionStatus;
+  lifecycle: AgentSessionLifecycle;
+  activity: AgentSessionActivity;
   /** Orchestration-pattern catalog id (hub_and_spoke, pipeline, …). */
   pattern: string;
   /** NULL = top-level; set = this is a child session nested one level down. */
   parentAgentSessionId: string | null;
-  /** Specialist seat names in seating order (excludes the orchestrator's virtual seat). */
-  participants: string[];
+  /** Specialist agent names in seating order (excludes the coordinator). */
+  agents: string[];
   createdAt: string;
   updatedAt: string;
 }
 export interface AgentRunSummary {
-  participant: string;
+  agent: string;
   profileId: string;
   profile: Record<string, unknown>;
   ownership: string[];
@@ -98,7 +103,7 @@ export type SpeakerKind = "operator" | "orchestrator" | "agent" | "system";
 
 export interface Speaker {
   kind: SpeakerKind;
-  /** "operator" | "orchestrator" | seat name | "system" */
+  /** "operator" | "orchestrator" (the main lane) | agent name | "system" */
   name: string;
 }
 
@@ -128,8 +133,8 @@ export interface Task {
   userSessionId: string;
   /** null = the orchestrator's own list. */
   agentSessionId: string | null;
-  /** Seat name whose SDK session owns the list; null for the orchestrator. */
-  participant: string | null;
+  /** Agent name whose SDK session owns the list; null for the orchestrator. */
+  agent: string | null;
   subject: string;
   description: string;
   activeForm: string | null;
@@ -206,7 +211,7 @@ export interface ManagerSession {
   profileId: string | null;
   title: string;
   phase: SessionPhase;
-  status: "open" | "archived";
+  lifecycle: "open" | "archived";
   createdAt: string;
   updatedAt: string;
 }
@@ -280,8 +285,8 @@ export interface Interaction {
   userSessionId: string;
   /** Null = the main lane. Otherwise the AgentSession the asker sits in. */
   agentSessionId: string | null;
-  /** Null = the main lane. Otherwise the seat name ("orchestrator" for a coordinator). */
-  participant: string | null;
+  /** Null = the main lane. Otherwise the asking agent's name. */
+  agent: string | null;
   kind: InteractionKind;
   status: InteractionStatus;
   urgency: InteractionUrgency;

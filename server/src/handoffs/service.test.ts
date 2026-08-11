@@ -47,7 +47,7 @@ describe("HandoffService", () => {
     expect(recovered?.core.action).toBe("renderer's own report");
     // The recipient filter still works — it just answers a different question,
     // and answering it here is what produced the amnesia spiral.
-    expect(h.repo.latestHandoff({ userSessionId, agentSessionId, participant: "renderer", excludeCheckpoints: true })?.core.action)
+    expect(h.repo.latestHandoff({ userSessionId, agentSessionId, recipient: "renderer", excludeCheckpoints: true })?.core.action)
       .toBe("orchestrator's status ping");
     // Excluding checkpoints stops the "Recovery checkpoint: " prefix accreting
     // across generations (db-live-1 reached a double-prefixed clone at gen 4).

@@ -34,15 +34,15 @@ export async function bootApp(app: App): Promise<BootReport> {
   const requeuedDeliveries = app.repo.requeueUnacknowledgedDeliveries();
   const reconciledCommunications = await reconcileDurableCommunication({ repo: app.repo, bus: app.bus });
 
-  // Worktrees intentionally survive restarts (their seats resume in place);
+  // Worktrees intentionally survive restarts (their agents resume in place);
   // only directories whose session is gone/archived are orphans.
   let orphanedWorktrees = 0;
   if (app.worktrees) {
-    const liveWorktrees = new Set(app.repo.listWorktreeSeats().map((seat) => seat.worktreePath));
+    const liveWorktrees = new Set(app.repo.listWorktreeAgents().map((agent) => agent.worktreePath));
     orphanedWorktrees = app.worktrees.recoverOrphans(
       (agentSessionId, dirName) => {
         const session = app.repo.getAgentSession(agentSessionId);
-        if (!session || session.status !== "open") return false;
+        if (!session || session.lifecycle !== "open") return false;
         for (const path of liveWorktrees) if (path.endsWith(dirName)) return true;
         return false;
       },

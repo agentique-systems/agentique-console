@@ -44,11 +44,11 @@ export function registerViewRoutes(app: FastifyInstance, ctx: AppContext): void 
     if (!request.body?.revision) throw new InvalidInputError("revision is required"); ctx.app.profiles.trust(request.params.id, request.params.profileId, request.body.revision); return { ok: true };
   });
 
-  app.get<{ Params: { id: string } }>("/api/workspaces/:id/manager-sessions", async (request) => ctx.app.manager.list(request.params.id));
-  app.post<{ Params: { id: string }; Body: { profileId?: string; sourceProfileId?: string } }>("/api/workspaces/:id/manager-sessions", async (request, reply) =>
+  app.get<{ Params: { id: string } }>("/api/workspaces/:id/profile-manager-sessions", async (request) => ctx.app.manager.list(request.params.id));
+  app.post<{ Params: { id: string }; Body: { profileId?: string; sourceProfileId?: string } }>("/api/workspaces/:id/profile-manager-sessions", async (request, reply) =>
     reply.status(201).send(ctx.app.manager.create(request.params.id, request.body ?? {})));
-  app.get<{ Params: { id: string } }>("/api/manager-sessions/:id", async (request) => ({ session: ctx.app.manager.get(request.params.id), proposal: ctx.app.manager.proposal(request.params.id) }));
-  app.post<{ Params: { id: string }; Body: { text?: string } }>("/api/manager-sessions/:id/messages", async (request, reply) => {
+  app.get<{ Params: { id: string } }>("/api/profile-manager-sessions/:id", async (request) => ({ session: ctx.app.manager.get(request.params.id), proposal: ctx.app.manager.proposal(request.params.id) }));
+  app.post<{ Params: { id: string }; Body: { text?: string } }>("/api/profile-manager-sessions/:id/messages", async (request, reply) => {
     if (!request.body?.text?.trim()) throw new InvalidInputError("text is required"); return reply.status(202).send(ctx.app.manager.postMessage(request.params.id, request.body.text));
   });
 }

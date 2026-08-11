@@ -15,7 +15,7 @@ interface ManagedProcess {
   waiters: Set<() => void>;
 }
 
-export interface RuntimeScope { workspaceRoot: string; userSessionId: string; agentSessionId: string; participant: string; }
+export interface RuntimeScope { workspaceRoot: string; userSessionId: string; agentSessionId: string; agent: string; }
 
 /** Owns long-running children so agents wait on state changes instead of polling Bash. */
 /**
@@ -103,13 +103,13 @@ export class ProcessManager {
       // dev server actually needs and nothing else.
       { cwd: resolved, env: childEnv(), stdio: "pipe", detached: false });
     const processId = newId("proc");
-    const managed: ManagedProcess = { id: processId, owner: `${scope.agentSessionId}:${scope.participant}`, child, chunks: [], seq: 0, exit: null, waiters: new Set() };
+    const managed: ManagedProcess = { id: processId, owner: `${scope.agentSessionId}:${scope.agent}`, child, chunks: [], seq: 0, exit: null, waiters: new Set() };
     this.#processes.set(processId, managed);
     const ingest = (stream: "stdout" | "stderr", data: Buffer) => {
       const text = data.toString("utf8"); managed.seq += 1; managed.chunks.push({ seq: managed.seq, stream, text });
       while (managed.chunks.reduce((sum, chunk) => sum + chunk.text.length, 0) > 262_144) managed.chunks.shift();
       this.bus.append({ type: "agent_session.process.output", userSessionId: scope.userSessionId, agentSessionId: scope.agentSessionId,
-        payload: { agentSessionId: scope.agentSessionId, participant: scope.participant, processId, seq: managed.seq, stream, text: text.slice(0, 8_192) } });
+        payload: { agentSessionId: scope.agentSessionId, agent: scope.agent, processId, seq: managed.seq, stream, text: text.slice(0, 8_192) } });
       this.#wake(managed);
     };
     child.stdout.on("data", (data: Buffer) => ingest("stdout", data));
@@ -118,11 +118,11 @@ export class ProcessManager {
     child.on("exit", (code, signal) => {
       managed.exit = { code, signal };
       this.bus.append({ type: "agent_session.process.exited", userSessionId: scope.userSessionId, agentSessionId: scope.agentSessionId,
-        payload: { agentSessionId: scope.agentSessionId, participant: scope.participant, processId, code, signal } });
+        payload: { agentSessionId: scope.agentSessionId, agent: scope.agent, processId, code, signal } });
       this.#wake(managed);
     });
     this.bus.append({ type: "agent_session.process.started", userSessionId: scope.userSessionId, agentSessionId: scope.agentSessionId,
-      payload: { agentSessionId: scope.agentSessionId, participant: scope.participant, processId, command, args, cwd: resolved, pid: child.pid } });
+      payload: { agentSessionId: scope.agentSessionId, agent: scope.agent, processId, command, args, cwd: resolved, pid: child.pid } });
     return { processId, pid: child.pid };
   }
 
@@ -149,8 +149,8 @@ export class ProcessManager {
    * Returns what it killed so the caller can say so out loud; a silent reap
    * just moves the mystery.
    */
-  stopParticipant(agentSessionId: string, participant: string): { processId: string; pid: number | undefined }[] {
-    const owner = `${agentSessionId}:${participant}`;
+  stopAgent(agentSessionId: string, agent: string): { processId: string; pid: number | undefined }[] {
+    const owner = `${agentSessionId}:${agent}`;
     const killed: { processId: string; pid: number | undefined }[] = [];
     for (const process of this.#processes.values()) {
       if (process.owner !== owner || process.exit !== null) continue;

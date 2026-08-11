@@ -136,7 +136,7 @@ export class BrowserManager {
   async consoleMessages(key: string): Promise<string[]> { return [...(await this.#seat(key)).console]; }
   async closeAll(): Promise<void> { await Promise.all([...this.#seats.values()].map((seat) => seat.browser.close().catch(() => undefined))); this.#seats.clear(); }
   /** One seat's Chrome, released when its lane parks. Keys are `${agentSessionId}:${seat}`. */
-  async closeParticipant(key: string): Promise<boolean> {
+  async closeAgent(key: string): Promise<boolean> {
     const seat = this.#seats.get(key);
     if (!seat) return false;
     this.#seats.delete(key);

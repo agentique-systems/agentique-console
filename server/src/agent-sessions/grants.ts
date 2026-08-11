@@ -1,7 +1,7 @@
 /**
- * The single source of truth for which console tools a seat gets.
+ * The single source of truth for which console tools an agent gets.
  *
- * Both consumers read THIS: `buildSeatTools` registers a tool iff its name is
+ * Both consumers read THIS: `buildAgentTools` registers a tool iff its name is
  * granted, and `#spawnSeat`'s allow-list is `runtimeToolNames(granted)`.
  * Before this module they were two hand-maintained lists that had already
  * drifted (the allow-list carried task_list unconditionally and the reviewer
@@ -12,9 +12,8 @@
  */
 import type { RoleSpec } from "./topology-contract.ts";
 import type { AgentProfile } from "../agent-profiles/registry.ts";
-import type { ParticipantRow } from "../db/repo.ts";
 
-export type SeatToolName =
+export type AgentToolName =
   | "send_handoff" | "read_artifact" | "write_note" | "ask_operator" | "roster_status"
   | "read_handoff" | "report_handoff_discrepancy" | "forward_message"
   | "task_list" | "task_create" | "task_update"
@@ -23,8 +22,8 @@ export type SeatToolName =
   | "browser_console" | "browser_press" | "browser_evaluate" | "browser_screenshot"
   | "dispatch_work_items" | "create_child_session" | "abandon_child_session";
 
-/** Which host services exist — availability, not permission. */
-export interface SeatGrantDeps {
+/** Which console services exist — availability, not permission. */
+export interface AgentGrantDeps {
   tasks: boolean;
   handoffs: boolean;
   processes: boolean;
@@ -33,7 +32,7 @@ export interface SeatGrantDeps {
   user: boolean;
   /**
    * True only at depth 0 with nesting enabled: the depth cap IS this bit —
-   * a child session's seats never see the spawn tools, so there is no
+   * a child session's agents never see the spawn tools, so there is no
    * counter to forget.
    */
   childSessions: boolean;
@@ -42,10 +41,10 @@ export interface SeatGrantDeps {
 export function grantedTools(
   role: Pick<RoleSpec, "grants"> | undefined,
   profile: AgentProfile,
-  deps: SeatGrantDeps,
-): Set<SeatToolName> {
+  deps: AgentGrantDeps,
+): Set<AgentToolName> {
   const grants = new Set(role?.grants ?? []);
-  const tools = new Set<SeatToolName>(["send_handoff", "read_artifact", "write_note", "ask_operator", "roster_status"]);
+  const tools = new Set<AgentToolName>(["send_handoff", "read_artifact", "write_note", "ask_operator", "roster_status"]);
   if (deps.handoffs) {
     tools.add("read_handoff"); tools.add("report_handoff_discrepancy");
     if (grants.has("forward_message")) tools.add("forward_message");
@@ -70,6 +69,6 @@ export function grantedTools(
   return tools;
 }
 
-export function runtimeToolNames(tools: ReadonlySet<SeatToolName>): string[] {
+export function runtimeToolNames(tools: ReadonlySet<AgentToolName>): string[] {
   return [...tools].map((name) => `mcp__console_agent__${name}`);
 }

@@ -45,7 +45,7 @@ export function reapOrphanedProcesses(deps: OrphanScanDeps): number {
 
   let killed = 0;
   for (const orphan of deps.repo.listOrphanedProcesses()) {
-    const { pid, command, args, agentSessionId, userSessionId, participant, processId } = orphan;
+    const { pid, command, args, agentSessionId, userSessionId, agent, processId } = orphan;
     let outcome = "not running";
     if (pid !== null && isAlive(pid)) {
       // /proc/<pid>/cmdline is NUL-separated. A match on the recorded argv is
@@ -66,7 +66,7 @@ export function reapOrphanedProcesses(deps: OrphanScanDeps): number {
     deps.bus.append({
       type: "agent_session.process.exited",
       userSessionId, agentSessionId,
-      payload: { agentSessionId, participant, processId, code: null, signal: outcome === "SIGTERM" ? "SIGTERM" : null },
+      payload: { agentSessionId, agent, processId, code: null, signal: outcome === "SIGTERM" ? "SIGTERM" : null },
     });
   }
   return killed;

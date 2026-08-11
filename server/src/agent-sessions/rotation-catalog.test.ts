@@ -27,7 +27,7 @@ function makeFlowHarness() {
         : sendHandoffUse(`send-${coordinatorTurns}`, "main", { action: "done", status: "completed", category: "final" });
       yield successMessage();
     } else {
-      yield sendHandoffUse("scout-close", "orchestrator", { action: "seen", status: "completed", category: "milestone" });
+      yield sendHandoffUse("scout-close", "coordinator", { action: "seen", status: "completed", category: "milestone" });
       yield successMessage();
     }
   });
@@ -39,19 +39,19 @@ describe("catalog-derived rotation limits", () => {
     const userSessionId = h.addUserSession();
     const done = collectUntil(h.bus, (event) => event.type === "agent_session.context.rotated", 10_000);
     const created = h.host.createSession({ userSessionId, title: "rotate", agents: [{ name: "scout", profileId: "explorer", model: "mystery-model" }], briefing: handoff("go", "pending") });
-    h.repo.patchParticipant(created.agentSessionId, "scout", { contextTokens: 70_000 });
+    h.repo.patchAgent(created.agentSessionId, "scout", { contextTokens: 70_000 });
     const events = await done;
     const rotated = events.filter((event) => event.type === "agent_session.context.rotated");
     expect(rotated).toHaveLength(1);
-    expect(rotated[0]?.payload).toMatchObject({ participant: "scout", reason: "token_limit" });
+    expect(rotated[0]?.payload).toMatchObject({ agent: "scout", reason: "token_limit" });
   });
 
   it("a known seat model keeps the configured 120K limit binding at 70K tokens", async () => {
     const h = makeFlowHarness();
     const userSessionId = h.addUserSession();
-    const done = collectUntil(h.bus, (event) => event.type === "flow.result", 10_000);
+    const done = collectUntil(h.bus, (event) => event.type === "agent_session.result.returned", 10_000);
     const created = h.host.createSession({ userSessionId, title: "no-rotate", agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("go", "pending") });
-    h.repo.patchParticipant(created.agentSessionId, "scout", { contextTokens: 70_000 });
+    h.repo.patchAgent(created.agentSessionId, "scout", { contextTokens: 70_000 });
     const events = await done;
     expect(events.some((event) => event.type === "agent_session.context.rotated")).toBe(false);
   });

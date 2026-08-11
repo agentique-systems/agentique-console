@@ -11,7 +11,7 @@ function makeBus(): EventBus {
 
 function msgInput(sessionId: string, text: string): EventInput {
   return {
-    type: "user_session.message",
+    type: "user_session.message.appended",
     userSessionId: sessionId,
     payload: {
       userSessionId: sessionId,
@@ -110,7 +110,7 @@ describe("EventBus", () => {
       type: "stream.delta",
       userSessionId: "us_1",
       payload: {
-        scope: { kind: "user", sessionId: "us_1" },
+        scope: { kind: "user", userSessionId: "us_1" },
         speaker: "orchestrator",
         turnId: "turn_1",
         text: "hel",

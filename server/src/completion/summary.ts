@@ -23,7 +23,7 @@ function typed(row: Pick<typeof events.$inferSelect, "type" | "payload">): Conso
 }
 
 export interface ReapResult {
-  processes: { agentSessionId: string; participant: string; processId: string; pid: number | undefined }[];
+  processes: { agentSessionId: string; agent: string; processId: string; pid: number | undefined }[];
   browsers: number;
   /** Processes the ledger shows as started-but-never-exited: real leaks. */
   leakedBefore: number;
@@ -117,7 +117,7 @@ export function buildRunSummary(input: BuildRunSummaryInput): RunSummaryDocument
   const deadAirMs = Math.max(0, durationMs - unionDuration(intervals));
 
   const finals = repo.listAgentSessions(userSessionId)
-    .map((session) => repo.latestHandoff({ userSessionId, agentSessionId: session.id, participant: "main", excludeCheckpoints: true }))
+    .map((session) => repo.latestHandoff({ userSessionId, agentSessionId: session.id, recipient: "main", excludeCheckpoints: true }))
     .filter((row): row is NonNullable<typeof row> => row !== undefined && row.trigger === "final");
   const headline = finals[0]?.core.result.summary ?? finals[0]?.core.state.summary ?? "The run reported a result.";
 
@@ -196,7 +196,7 @@ export function buildRunSummary(input: BuildRunSummaryInput): RunSummaryDocument
       reapedProcesses: reaped.processes.length,
       reapedBrowsers: reaped.browsers,
       leakedBefore: reaped.leakedBefore,
-      detail: reaped.processes.map((process) => `${process.agentSessionId}:${process.participant} ${process.processId}${process.pid === undefined ? "" : ` (pid ${process.pid})`}`),
+      detail: reaped.processes.map((process) => `${process.agentSessionId}:${process.agent} ${process.processId}${process.pid === undefined ? "" : ` (pid ${process.pid})`}`),
     },
     friction,
   };
@@ -215,7 +215,7 @@ function collectDeviations(window: readonly (typeof events.$inferSelect)[], open
     if (event.type === "handoff.final.caveats") {
       for (const caveat of event.payload.caveats) out.push(caveat);
     }
-    if (event.type === "agent_session.unreported") {
+    if (event.type === "agent_session.closeout.forced") {
       out.push("A coordinator went idle without reporting; the Console closed the loop from the journal.");
     }
     if (event.type === "handoff.final.blocked") {

@@ -122,7 +122,7 @@ export class HandoffService {
 
   reportDiscrepancy(id: string, reporter: string, claim: string, evidence: string): void {
     const handoff = this.get(id);
-    this.deps.bus.append({ type: "handoff.discrepancy", userSessionId: handoff.metadata.userSessionId,
+    this.deps.bus.append({ type: "handoff.discrepancy.reported", userSessionId: handoff.metadata.userSessionId,
       ...(handoff.metadata.agentSessionId ? { agentSessionId: handoff.metadata.agentSessionId } : {}),
       payload: { handoffId: id, reporter, claim, evidence } });
   }

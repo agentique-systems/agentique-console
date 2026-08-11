@@ -34,21 +34,21 @@ describe("peer-lane delivery semantics (fake SDK)", () => {
         yield toolUseMessage("t-1", "Read", { file_path: "a.ts" });
         yield toolResultMessage("t-1", "…");
         await scoutGate; // held mid-turn until the steer lands
-        yield sendHandoffUse("scout-close", "orchestrator", { action: "dug", status: "completed", category: "milestone" });
+        yield sendHandoffUse("scout-close", "coordinator", { action: "dug", status: "completed", category: "milestone" });
       }
       yield successMessage();
     });
     const userSessionId = h.addUserSession();
-    const midTurn = collectUntil(h.bus, (event) => event.type === "agent_session.tool.result" && event.payload.participant === "scout", 10_000);
+    const midTurn = collectUntil(h.bus, (event) => event.type === "agent_session.tool.completed" && event.payload.agent === "scout", 10_000);
     const created = h.host.createSession({ userSessionId, title: "steer", agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("go", "pending") });
     await midTurn;
-    const steered = collectUntil(h.bus, (event) => event.type === "agent_session.runtime" && String(event.payload.detail).includes("steered mid-turn"), 10_000);
-    h.host.post({ agentSessionId: created.agentSessionId, speaker: { kind: "orchestrator", name: "orchestrator" }, to: "scout",
+    const steered = collectUntil(h.bus, (event) => event.type === "agent_session.runtime.noted" && String(event.payload.detail).includes("steered mid-turn"), 10_000);
+    h.host.post({ agentSessionId: created.agentSessionId, speaker: { kind: "orchestrator", name: "coordinator" }, to: "scout",
       handoff: handoff("also check b.ts", "pending"), category: "update" });
     await steered;
     releaseScout();
-    const events = await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled" && event.payload.participant === "scout", 10_000);
-    const scoutStarts = events.filter((event) => event.type === "agent_session.turn.started" && event.payload.participant === "scout");
+    const events = await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled" && event.payload.agent === "scout", 10_000);
+    const scoutStarts = events.filter((event) => event.type === "agent_session.turn.started" && event.payload.agent === "scout");
     expect(scoutStarts).toHaveLength(1);
     expect(h.fake.captured.prompts.some((prompt) => prompt.includes("arrived while you were working"))).toBe(true);
     // The steered delivery was consumed by the same settled turn.
@@ -67,15 +67,15 @@ describe("peer-lane delivery semantics (fake SDK)", () => {
       yield initMessage("scout-session");
       yield successMessage();
     });
-    (h.config as { seatIdleReapMs: number }).seatIdleReapMs = 60;
+    h.config.policy.agentIdleReapMs = 60;
     const userSessionId = h.addUserSession();
-    const parked = collectUntil(h.bus, (event) => event.type === "agent_session.runtime"
-      && (event.payload as { participant?: string }).participant === "scout"
-      && String(event.payload.detail).includes("seat parked (idle)"), 10_000);
+    const parked = collectUntil(h.bus, (event) => event.type === "agent_session.runtime.noted"
+      && (event.payload as { agent?: string }).agent === "scout"
+      && String(event.payload.detail).includes("agent parked (idle)"), 10_000);
     const created = h.host.createSession({ userSessionId, title: "reap", agents: [{ name: "scout", profileId: "explorer" }] });
-    h.host.post({ agentSessionId: created.agentSessionId, speaker: { kind: "orchestrator", name: "main" }, to: "orchestrator",
+    h.host.post({ agentSessionId: created.agentSessionId, speaker: { kind: "orchestrator", name: "main" }, to: "coordinator",
       handoff: handoff("brief", "pending"), category: "assignment" });
-    h.host.post({ agentSessionId: created.agentSessionId, speaker: { kind: "orchestrator", name: "orchestrator" }, to: "scout",
+    h.host.post({ agentSessionId: created.agentSessionId, speaker: { kind: "orchestrator", name: "coordinator" }, to: "scout",
       handoff: handoff("look", "pending"), category: "assignment" });
     await parked;
     // A scout spawn is any non-coordinator spawn — same discriminator the
@@ -88,10 +88,10 @@ describe("peer-lane delivery semantics (fake SDK)", () => {
     scoutSpawns = h.fake.captured.options.filter(isScout).length;
     let scoutSettles = 0;
     const woken = collectUntil(h.bus, (event) => {
-      if (event.type === "agent_session.turn.settled" && event.payload.participant === "scout") scoutSettles += 1;
+      if (event.type === "agent_session.turn.settled" && event.payload.agent === "scout") scoutSettles += 1;
       return scoutSettles === 2; // history replays the pre-park settle
     }, 10_000);
-    h.host.post({ agentSessionId: created.agentSessionId, speaker: { kind: "orchestrator", name: "orchestrator" }, to: "scout",
+    h.host.post({ agentSessionId: created.agentSessionId, speaker: { kind: "orchestrator", name: "coordinator" }, to: "scout",
       handoff: handoff("look again", "pending"), category: "assignment" });
     await woken;
     const scoutOptions = h.fake.captured.options.filter(isScout);
@@ -111,11 +111,11 @@ describe("peer-lane delivery semantics (fake SDK)", () => {
       }
       scoutRan = true;
       yield initMessage("scout-1");
-      yield sendHandoffUse("scout-close", "orchestrator", { action: "made it", status: "completed", category: "milestone" });
+      yield sendHandoffUse("scout-close", "coordinator", { action: "made it", status: "completed", category: "milestone" });
       yield successMessage();
     });
-    (h.config as { seatMaxResidentPerTree: number }).seatMaxResidentPerTree = 1;
-    (h.config as { seatSpawnTimeoutMs: number }).seatSpawnTimeoutMs = 150;
+    h.config.policy.agentMaxResidentPerTree = 1;
+    h.config.policy.agentSpawnTimeoutMs = 150;
     const userSessionId = h.addUserSession();
     const created = h.host.createSession({ userSessionId, title: "capacity", agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("go", "pending") });
 
@@ -124,7 +124,7 @@ describe("peer-lane delivery semantics (fake SDK)", () => {
     // reason about, and there is no "do not resend" contract to get wrong.
     // The native path made this a DENIAL the model had to interpret — and it
     // then counted toward the tool-error watchdog.
-    await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled" && event.payload.participant === "scout", 15_000);
+    await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled" && event.payload.agent === "scout", 15_000);
     expect(scoutRan).toBe(true);
     expect(h.repo.listUnackedDeliveries(created.agentSessionId, "scout")).toHaveLength(0);
   });

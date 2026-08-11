@@ -4,17 +4,17 @@
  * Every console session process registers in the machine-wide peer registry
  * (~/.claude/sessions/<pid>.json) under CLAUDE_CODE_SESSION_NAME and binds a
  * UDS inbox; the name is the SendMessage address. Names do three jobs at once:
- * routing (to → seat), attribution (from → seat), and namespacing — the
+ * routing (to → agent), attribution (from → agent), and namespacing — the
  * registry is shared with the operator's own CLI sessions, so the console
  * prefix keeps console traffic distinguishable and inbound trust checkable.
  *
- * Names are host-assigned via env, never model-supplied. That distinction is
- * what buries the spawn-plan era's failure mode (the model dropped the `name`
- * param on all 11 spawns of the first real multi-seat run).
+ * Names are console-assigned via env, never model-supplied. That distinction
+ * is what buries the spawn-plan era's failure mode (the model dropped the
+ * `name` param on all 11 spawns of the first real multi-agent run).
  */
 
-/** The coordinator seat every agent session has; also its speaker name. */
-export const ORCHESTRATOR_SEAT = "orchestrator";
+/** The reserved coordination agent's name; also its speaker name. */
+export const COORDINATOR_AGENT = "coordinator";
 
 /** The virtual recipient for reports up to the user-session lane. */
 export const MAIN_RECIPIENT = "main";
@@ -22,22 +22,22 @@ export const MAIN_RECIPIENT = "main";
 /**
  * Sender-name prefix for cross-session boundary hops: a child AgentSession's
  * report lands in its parent under `child:<childAgentSessionId>`. Reserved at
- * seat-name validation so no operator-named seat can squat the namespace.
+ * agent-name validation so no operator-named agent can squat the namespace.
  */
 export const CHILD_SENDER_PREFIX = "child:";
 
 /** Registry name rules: start alnum; alnum/underscore/hyphen only; max 64. */
 function sanitize(part: string): string {
   const safe = part.replace(/[^A-Za-z0-9_-]/g, "-").replace(/^[_-]+/, "");
-  return safe === "" ? "seat" : safe;
+  return safe === "" ? "agent" : safe;
 }
 
 /** Six id chars past the `as_`/`us_` prefix — enough to disambiguate sessions. */
 /**
  * The Console's own sending identity: console-authored deliveries (operator
  * answers, close-out asks, parent-final releases) post under this name, which
- * `#assertRoute` accepts toward any seat. Replaces the old #answerSpeaker
- * search that impersonated whichever seat happened to have a legal edge.
+ * `#assertRoute` accepts toward any agent. Replaces the old #answerSpeaker
+ * search that impersonated whichever agent happened to have a legal edge.
  */
 export const CONSOLE_SENDER = "console";
 

@@ -8,7 +8,7 @@
  *
  *   23:40:14  SendMessage → "console-orchestrator-a8b946"
  *             → "No agent named 'console-orchestrator-a8b946' is reachable."
- *   23:40:31  SendMessage → "orchestrator"
+ *   23:40:31  SendMessage → "coordinator"
  *             → "No agent named 'orchestrator' is reachable."
  *
  * `ListAgents` showed the renderer's peer name and not the coordinator's,
@@ -71,18 +71,18 @@ describe("send_to_coordinator", () => {
 
     const result = await tool!.handler({ agentSessionId, ...STEER }, {});
     const payload = JSON.parse((result.content[0] as { text: string }).text) as Record<string, unknown>;
-    expect(payload).toMatchObject({ delivered: true, to: "orchestrator", category: "assignment" });
+    expect(payload).toMatchObject({ delivered: true, to: "coordinator", category: "assignment" });
 
     // Journaled — the thing native SendMessage never did.
-    const record = h.repo.latestHandoff({ userSessionId, agentSessionId, sender: "main", participant: "orchestrator" });
+    const record = h.repo.latestHandoff({ userSessionId, agentSessionId, sender: "main", recipient: "coordinator" });
     expect(record?.core.action).toBe(STEER.action);
     expect(record?.core.state.summary).toContain("hold for r160");
 
     // And carried, not merely recorded.
     await collectUntil(
       h.bus,
-      (event) => event.type === "agent_session.mailbox"
-        && (event.payload as { recipient?: string }).recipient === "orchestrator"
+      (event) => event.type === "agent_session.delivery.updated"
+        && (event.payload as { recipient?: string }).recipient === "coordinator"
         && (event.payload as { sender?: string }).sender === "main",
       10_000,
     );

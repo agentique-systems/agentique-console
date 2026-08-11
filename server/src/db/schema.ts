@@ -32,7 +32,7 @@ export const userSessions = sqliteTable("user_sessions", {
   phase: text("phase", { enum: ["planning", "executing"] })
     .notNull()
     .default("planning"),
-  status: text("status", { enum: ["open", "archived"] })
+  lifecycle: text("lifecycle", { enum: ["open", "archived"] })
     .notNull()
     .default("open"),
   purpose: text("purpose", { enum: ["work", "profile_manager"] })
@@ -54,9 +54,9 @@ export const userSessions = sqliteTable("user_sessions", {
   cumulativeCostUsd: real("cumulative_cost_usd").notNull().default(0),
   cumulativeApiDurationMs: integer("cumulative_api_duration_ms").notNull().default(0),
   /**
-   * Orthogonal to `status`. `status` is "in my active list"; this is "is the
-   * work done". `awaiting_signoff` is its own state because it is the only one
-   * where the Console asserts done and the operator has not agreed.
+   * Orthogonal to `lifecycle`. `lifecycle` is "in my active list"; this is
+   * "is the work done". `awaiting_signoff` is its own state because it is the
+   * only one where the Console asserts done and the operator has not agreed.
    */
   runState: text("run_state", { enum: ["active", "awaiting_signoff", "completed"] })
     .notNull()
@@ -74,7 +74,7 @@ export const userSessions = sqliteTable("user_sessions", {
 }, (t) => [
   check("user_sessions_mode", sql`${t.mode} IN ('execute','plan_execute')`),
   check("user_sessions_phase", sql`${t.phase} IN ('planning','executing')`),
-  check("user_sessions_status", sql`${t.status} IN ('open','archived')`),
+  check("user_sessions_lifecycle", sql`${t.lifecycle} IN ('open','archived')`),
   check("user_sessions_purpose", sql`${t.purpose} IN ('work','profile_manager')`),
   check("user_sessions_run_state", sql`${t.runState} IN ('active','awaiting_signoff','completed')`),
 ]);
@@ -111,10 +111,10 @@ export const agentSessions = sqliteTable("agent_sessions", {
     .notNull()
     .references(() => userSessions.id),
   title: text("title").notNull(),
-  status: text("status", { enum: ["open", "archived"] })
+  lifecycle: text("lifecycle", { enum: ["open", "archived"] })
     .notNull()
     .default("open"),
-  /** Orchestration-pattern catalog id — a forensic label; the host executes `topology`. */
+  /** Orchestration-pattern catalog id — a forensic label; the service executes `topology`. */
   pattern: text("pattern").notNull().default("hub_and_spoke"),
   /** Compiled TopologyContract snapshot; '{}' = pre-contract row, read as the hub default. */
   topology: text("topology", { mode: "json" })
@@ -123,22 +123,23 @@ export const agentSessions = sqliteTable("agent_sessions", {
     .default({}),
   /** NULL = top-level. One level of nesting only. */
   parentAgentSessionId: text("parent_agent_session_id"),
-  /** Seat in the PARENT that receives this child's boundary traffic; snapshotted at spawn. */
-  parentControllerSeat: text("parent_controller_seat"),
+  /** Agent in the PARENT that receives this child's boundary traffic; snapshotted at spawn. */
+  parentControllerAgent: text("parent_controller_agent"),
   depth: integer("depth").notNull().default(0),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
-}, (t) => [check("agent_sessions_status", sql`${t.status} IN ('open','archived')`)]);
+}, (t) => [check("agent_sessions_lifecycle", sql`${t.lifecycle} IN ('open','archived')`)]);
 
-export const participants = sqliteTable(
-  "participants",
+export const agents = sqliteTable(
+  "agents",
   {
     agentSessionId: text("agent_session_id")
       .notNull()
       .references(() => agentSessions.id),
-    /** Seat name; "orchestrator" is the reserved virtual seat. */
+    /** Agent name; "coordinator" is the reserved coordination agent. */
     name: text("name").notNull(),
-    role: text("role", { enum: ["orchestrator", "agent"] }).notNull(),
+    /** Contract role binding ("coordinator", "specialist", "mapper", …). */
+    role: text("role").notNull(),
     /** Resolved brief (profile + ad-hoc extension), verbatim. */
     instructions: text("instructions").notNull(),
     model: text("model"),
@@ -160,22 +161,17 @@ export const participants = sqliteTable(
     cumulativeApiDurationMs: integer("cumulative_api_duration_ms").notNull().default(0),
     /** Watermark for the per-delivery operator-decision delta. */
     lastDecisionAt: text("last_decision_at"),
-    /** Isolated git worktree this seat works in; NULL = the real workspace. */
+    /** Isolated git worktree this agent works in; NULL = the real workspace. */
     worktreePath: text("worktree_path"),
-    /** The commit the seat's worktree branched from (diff base). */
+    /** The commit the agent's worktree branched from (diff base). */
     worktreeBaseCommit: text("worktree_base_commit"),
     /** The worktree's branch ref (merge target on completion). */
     worktreeBranch: text("worktree_branch"),
-    /** Contract role binding; written for every seat at insert. */
-    patternRole: text("pattern_role").notNull(),
     /** Seating order for accents and prompt listings. */
     ord: integer("ord").notNull(),
     createdAt: text("created_at").notNull(),
   },
-  (t) => [
-    primaryKey({ columns: [t.agentSessionId, t.name] }),
-    check("participants_role", sql`${t.role} IN ('orchestrator','agent')`),
-  ],
+  (t) => [primaryKey({ columns: [t.agentSessionId, t.name] })],
 );
 
 
@@ -429,7 +425,7 @@ export const eventArtifacts = sqliteTable("event_artifacts", {
 
 /** Eager, console-owned mirror used by the SDK SessionStore. */
 export const providerEntries = sqliteTable(
-  "provider_entries_v2",
+  "provider_entries",
   {
     ord: integer("ord").primaryKey({ autoIncrement: true }),
     projectKey: text("project_key").notNull(),

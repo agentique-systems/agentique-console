@@ -53,7 +53,7 @@ export function buildServer(ctx: AppContext): FastifyInstance {
   // has to preselect the right chip before a session exists to read it from.
   app.get(
     "/api/config",
-    async (): Promise<ConfigResponse> => ({ defaultModel: ctx.config.model }),
+    async (): Promise<ConfigResponse> => ({ defaultModel: ctx.config.infra.model }),
   );
 
   registerEventRoutes(app, ctx);
@@ -67,10 +67,10 @@ export function buildServer(ctx: AppContext): FastifyInstance {
 
   // The built UI rides along on this port, so the app is one process. In vite
   // dev the bundle is absent and the dev server proxies /api here instead.
-  const hasWeb = existsSync(ctx.config.webDir);
+  const hasWeb = existsSync(ctx.config.infra.webDir);
   if (hasWeb) {
     void app.register(fastifyStatic, {
-      root: ctx.config.webDir,
+      root: ctx.config.infra.webDir,
       wildcard: false,
     });
   }

@@ -21,12 +21,12 @@ function harness() {
   const started = (processId: string, pid: number, command: string, args: string[]) =>
     bus.append({
       type: "agent_session.process.started", userSessionId: "us_1", agentSessionId: "as_1",
-      payload: { agentSessionId: "as_1", participant: "check", processId, command, args, cwd: "/tmp", pid },
+      payload: { agentSessionId: "as_1", agent: "check", processId, command, args, cwd: "/tmp", pid },
     });
   const exited = (processId: string) =>
     bus.append({
       type: "agent_session.process.exited", userSessionId: "us_1", agentSessionId: "as_1",
-      payload: { agentSessionId: "as_1", participant: "check", processId, code: 0, signal: null },
+      payload: { agentSessionId: "as_1", agent: "check", processId, code: 0, signal: null },
     });
   return { db, bus, repo, started, exited };
 }

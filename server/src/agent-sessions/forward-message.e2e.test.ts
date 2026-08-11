@@ -37,7 +37,7 @@ describe("forward_message e2e (fake SDK)", () => {
           yield toolUseMessage("fwd-2", "mcp__console_agent__forward_message", { handoffId: reportId, category: "final" });
         }
       } else {
-        yield sendHandoffUse("scout-1", "orchestrator", { action: "audit finished", stateSummary: FINDINGS, status: "completed", category: "milestone" });
+        yield sendHandoffUse("scout-1", "coordinator", { action: "audit finished", stateSummary: FINDINGS, status: "completed", category: "milestone" });
       }
       yield successMessage();
     });
@@ -51,18 +51,18 @@ describe("forward_message e2e (fake SDK)", () => {
         }
       }
     })();
-    const forwarded = collectUntil(h.bus, (event) => event.type === "flow.result", 10_000);
+    const forwarded = collectUntil(h.bus, (event) => event.type === "agent_session.result.returned", 10_000);
     const created = h.host.createSession({ userSessionId, title: "forward", agents: [{ name: "scout", profileId: "explorer" }], briefing });
     await forwarded;
 
     await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled"
-      && JSON.stringify(event.payload).includes("orchestrator"), 10_000);
+      && JSON.stringify(event.payload).includes("coordinator"), 10_000);
     // Verbatim: the final to main carries the specialist's own words.
     const rows = h.repo.listMessages("agent", created.agentSessionId).filter((row) => row.kind === "message");
     const finals = rows.filter((row) => row.toName === "main"
       && ((row.payload?.handoff as { stateSummary?: string } | undefined)?.stateSummary ?? "").includes("Collision tunneling"));
     expect(finals).toHaveLength(1); // the double forward deduped
-    expect(finals[0]?.speakerName).toBe("orchestrator");
+    expect(finals[0]?.speakerName).toBe("coordinator");
     // A forwarded final IS the session's report.
     const row = h.repo.getAgentSession(created.agentSessionId);
     expect(row && h.host.statusOf(row)).toBe("reported");

@@ -12,12 +12,12 @@ import { loadConfig } from "../config.ts";
 import { WorkspaceService } from "../workspaces/service.ts";
 import type { OrchestratorRunner } from "../orchestrator/runner.ts";
 import { AgentProfileRegistry } from "./registry.ts";
-import { ManagerService } from "./manager.ts";
+import { ProfileManagerService } from "./manager.ts";
 
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true }); });
 
-describe("ManagerService", () => {
+describe("ProfileManagerService", () => {
   it("stages, atomically applies, and leaves a new revision disabled", () => {
     const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentique-manager-workspace-")); dirs.push(workspaceRoot);
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "agentique-manager-data-")); dirs.push(dataDir);
@@ -26,7 +26,7 @@ describe("ManagerService", () => {
     const workspaceService = new WorkspaceService(db, bus, [workspaceRoot]);
     const profiles = new AgentProfileRegistry({ getWorkspaceRoot: () => workspaceRoot, db, bus });
     const config = loadConfig({ CONSOLE_DATA_DIR: dataDir });
-    const manager = new ManagerService({ repo, workspaces: workspaceService, profiles, config, bus, runner: () => ({} as OrchestratorRunner) });
+    const manager = new ProfileManagerService({ repo, workspaces: workspaceService, profiles, config, bus, runner: () => ({} as OrchestratorRunner) });
     const session = manager.create("ws_1");
     manager.stageFile(session.id, "agentique.profile.json", JSON.stringify({ id: "api-reviewer", title: "API reviewer", purpose: "Review API changes", instructions: "Review only.", tools: ["Read"], permissionMode: "default", sandboxRequired: true, runtime: { shell: false, browser: false, screenshots: false } }));
     manager.stageFile(session.id, ".claude-plugin/plugin.json", JSON.stringify({ name: "api-reviewer", version: "0.1.0" }));

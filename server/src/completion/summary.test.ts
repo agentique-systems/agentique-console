@@ -63,12 +63,12 @@ describe("run summary friction", () => {
     const h = makeHarness(async function* () { yield undefined as never; });
     const userSessionId = h.addUserSession();
     // Prose alone must count nothing — only `*.retry.recorded` is a retry fact.
-    h.bus.append({ type: "user_session.runtime", userSessionId,
+    h.bus.append({ type: "user_session.runtime.noted", userSessionId,
       payload: { userSessionId, detail: "API error 529 · retry 1/3 · in 2s" } });
     h.bus.append({ type: "user_session.retry.recorded", userSessionId,
-      payload: { userSessionId, participant: "orchestrator", kind: "api_error", attempt: 1, retryInMs: 2_000, detail: "API error 529 · retry 1/3 · in 2s" } });
+      payload: { userSessionId, agent: "orchestrator", kind: "api_error", attempt: 1, retryInMs: 2_000, detail: "API error 529 · retry 1/3 · in 2s" } });
     h.bus.append({ type: "agent_session.retry.recorded", userSessionId, agentSessionId: "as_1",
-      payload: { userSessionId, agentSessionId: "as_1", participant: "scout", kind: "rate_limited", attempt: 2, retryInMs: 90_000, detail: "rate limited · retry 2/5 · in 1m 30s" } });
+      payload: { userSessionId, agentSessionId: "as_1", agent: "scout", kind: "rate_limited", attempt: 2, retryInMs: 90_000, detail: "rate limited · retry 2/5 · in 1m 30s" } });
     const document = buildRunSummary({
       db: h.db, repo: h.repo, interactions: h.interactions,
       userSessionId, seqFrom: 0, reaped: NO_REAP,

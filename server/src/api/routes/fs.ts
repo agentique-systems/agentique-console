@@ -5,12 +5,12 @@ import { BrowseError, listDirectories, resolveRoots } from "../../workspaces/fs-
 
 export function registerFsRoutes(app: FastifyInstance, ctx: AppContext): void {
   app.get("/api/fs/roots", async () => {
-    const roots = await resolveRoots(ctx.config.fsRoots.map((r) => r.path));
+    const roots = await resolveRoots(ctx.config.infra.fsRoots.map((r) => r.path));
     return {
       roots: roots.map((path) => ({
         path,
         label:
-          ctx.config.fsRoots.find((r) => r.path === path)?.label ?? path,
+          ctx.config.infra.fsRoots.find((r) => r.path === path)?.label ?? path,
       })),
     };
   });
@@ -22,7 +22,7 @@ export function registerFsRoutes(app: FastifyInstance, ctx: AppContext): void {
       if (path === undefined || path === "") {
         throw new ApiError(400, "bad_request", "path is required");
       }
-      const roots = await resolveRoots(ctx.config.fsRoots.map((r) => r.path));
+      const roots = await resolveRoots(ctx.config.infra.fsRoots.map((r) => r.path));
       try {
         return await listDirectories(path, {
           roots,

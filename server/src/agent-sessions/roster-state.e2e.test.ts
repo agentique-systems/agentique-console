@@ -52,18 +52,18 @@ describe("roster work state (no worktrees)", () => {
     // moment db-live-2's renderer decided to build its own server.
     h.host.post({
       agentSessionId: created.agentSessionId,
-      speaker: { kind: "agent", name: "page" }, to: "orchestrator",
+      speaker: { kind: "agent", name: "page" }, to: "coordinator",
       handoff: handoff("serve.mjs and index.html are written and serving", "completed"),
       category: "milestone",
     });
     h.host.post({
       agentSessionId: created.agentSessionId,
-      speaker: { kind: "orchestrator", name: "orchestrator" }, to: "renderer",
+      speaker: { kind: "orchestrator", name: "coordinator" }, to: "renderer",
       handoff: handoff("implement src/game.js"), category: "assignment",
     });
     await collectUntil(
       h.bus,
-      (event) => event.type === "agent_session.mailbox"
+      (event) => event.type === "agent_session.delivery.updated"
         && (event.payload as { recipient?: string }).recipient === "renderer"
         && (event.payload as { status?: string }).status === "delivered",
       10_000,
@@ -74,7 +74,7 @@ describe("roster work state (no worktrees)", () => {
 
     // No worktree anywhere — this is the non-git case that produced the blind
     // roster.
-    expect(h.repo.getParticipant(created.agentSessionId, "page")?.worktreePath).toBeNull();
+    expect(h.repo.getAgent(created.agentSessionId, "page")?.worktreePath).toBeNull();
 
     // renderer can see that page exists, what it owns, and that it has already
     // reported. Before this change the line stopped at `owns:`.
@@ -100,12 +100,12 @@ describe("roster work state (no worktrees)", () => {
 
     h.host.post({
       agentSessionId: created.agentSessionId,
-      speaker: { kind: "orchestrator", name: "orchestrator" }, to: "dev",
+      speaker: { kind: "orchestrator", name: "coordinator" }, to: "dev",
       handoff: handoff("implement src/app.ts"), category: "assignment",
     });
     await collectUntil(
       h.bus,
-      (event) => event.type === "agent_session.mailbox"
+      (event) => event.type === "agent_session.delivery.updated"
         && (event.payload as { recipient?: string }).recipient === "dev"
         && (event.payload as { status?: string }).status === "delivered",
       10_000,

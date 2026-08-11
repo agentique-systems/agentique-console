@@ -17,17 +17,17 @@ function classify(type: ConsoleEvent["type"]): "task" | "handoff" | "decision" |
   switch (type) {
     case "task.created":
     case "task.updated":
-    case "task_dependency.created":
-    case "task_dependency.deleted":
+    case "task.dependency.created":
+    case "task.dependency.deleted":
       return "task";
     case "handoff.created":
     case "handoff.consumed":
-    case "handoff.discrepancy":
+    case "handoff.discrepancy.reported":
     case "handoff.checkpoint.failed":
     case "handoff.final.caveats":
     case "handoff.final.blocked":
-    case "flow.delegation":
-    case "flow.result":
+    case "agent_session.delegation.sent":
+    case "agent_session.result.returned":
       return "handoff";
     case "user_session.question.asked":
     case "user_session.question.answered":
@@ -39,8 +39,8 @@ function classify(type: ConsoleEvent["type"]): "task" | "handoff" | "decision" |
       return "rotation";
     case "usage.recorded":
       return "usage";
-    case "user_session.runtime":
-    case "agent_session.runtime":
+    case "user_session.runtime.noted":
+    case "agent_session.runtime.noted":
       return "runtime";
     default:
       return null;
@@ -68,8 +68,8 @@ export class TimelineService {
       const parent = `agent-session:${agentSession.id}`;
       lanes.push({ id: parent, kind: "agent_session", label: agentSession.title,
         parentId: agentSession.parentAgentSessionId === null ? null : `agent-session:${agentSession.parentAgentSessionId}`, order: order++ });
-      for (const participant of this.repo.listParticipants(agentSession.id)) {
-        lanes.push({ id: `agent:${agentSession.id}:${participant.name}`, kind: "agent", label: participant.name, parentId: parent, order: order++ });
+      for (const agent of this.repo.listAgents(agentSession.id)) {
+        lanes.push({ id: `agent:${agentSession.id}:${agent.name}`, kind: "agent", label: agent.name, parentId: parent, order: order++ });
       }
     }
 
@@ -88,35 +88,35 @@ export class TimelineService {
       }
       if (event.type === "user_session.turn.settled") { finish(`turn:${str(p.turnId)}`, event, str(p.status)); continue; }
       if (event.type === "agent_session.turn.started") {
-        const lane = `agent:${str(p.agentSessionId)}:${str(p.participant)}`;
+        const lane = `agent:${str(p.agentSessionId)}:${str(p.agent)}`;
         const item: TimelineItem = { id: `agent-turn:${str(p.turnId)}`, laneId: lane, kind: "turn", label: "agent turn", start: event.ts, end: null, status: "running", eventSeqs: seqs, detail: p };
         starts.set(item.id, item); items.push(item); continue;
       }
       if (event.type === "agent_session.turn.settled") { finish(`agent-turn:${str(p.turnId)}`, event, str(p.status)); continue; }
-      if (event.type === "user_session.tool.call" || event.type === "agent_session.tool.call") {
-        const lane = event.type === "agent_session.tool.call" ? `agent:${event.agentSessionId ?? ""}:${str(p.participant)}` : "orchestrator";
+      if (event.type === "user_session.tool.called" || event.type === "agent_session.tool.called") {
+        const lane = event.type === "agent_session.tool.called" ? `agent:${event.agentSessionId ?? ""}:${str(p.agent)}` : "orchestrator";
         const item: TimelineItem = { id: `tool:${str(p.callId)}`, laneId: lane, kind: "tool", label: str(p.name, "tool"), start: event.ts, end: null, status: "running", eventSeqs: seqs, detail: p };
         starts.set(item.id, item); items.push(item); continue;
       }
-      if (event.type === "user_session.tool.result" || event.type === "agent_session.tool.result") { finish(`tool:${str(p.callId)}`, event, p.isError ? "error" : "completed"); continue; }
+      if (event.type === "user_session.tool.completed" || event.type === "agent_session.tool.completed") { finish(`tool:${str(p.callId)}`, event, p.isError ? "error" : "completed"); continue; }
       if (event.type === "agent_session.process.started") {
-        const item: TimelineItem = { id: `process:${str(p.processId)}`, laneId: `agent:${str(p.agentSessionId)}:${str(p.participant)}`, kind: "process", label: str(p.command, "process"), start: event.ts, end: null, status: "running", eventSeqs: seqs, detail: p };
+        const item: TimelineItem = { id: `process:${str(p.processId)}`, laneId: `agent:${str(p.agentSessionId)}:${str(p.agent)}`, kind: "process", label: str(p.command, "process"), start: event.ts, end: null, status: "running", eventSeqs: seqs, detail: p };
         starts.set(item.id, item); items.push(item); continue;
       }
       if (event.type === "agent_session.process.exited") { finish(`process:${str(p.processId)}`, event, p.code === 0 ? "completed" : "error"); continue; }
       const message = p.message as Record<string, unknown> | undefined;
-      if (event.type === "user_session.message" && message) {
+      if (event.type === "user_session.message.appended" && message) {
         const speaker = message.speaker as Record<string, unknown> | undefined;
         const lane = speaker?.kind === "operator" ? "operator" : "orchestrator";
         items.push({ id: `event:${event.seq}`, laneId: lane, kind: "message", label: str(message.text, "message").slice(0, 80), start: event.ts, end: null, status: null, eventSeqs: seqs, detail: p }); continue;
       }
-      if (event.type === "agent_session.message" && message) {
+      if (event.type === "agent_session.message.appended" && message) {
         const speaker = message.speaker as Record<string, unknown> | undefined;
         items.push({ id: `event:${event.seq}`, laneId: `agent:${event.agentSessionId ?? ""}:${str(speaker?.name)}`, kind: "message", label: str(message.text, "message").slice(0, 80), start: event.ts, end: null, status: null, eventSeqs: seqs, detail: p }); continue;
       }
       const mapped = classify(event.type);
       if (mapped) {
-        const lane = event.agentSessionId ? `agent:${event.agentSessionId}:${str(p.participant, "orchestrator")}` : "orchestrator";
+        const lane = event.agentSessionId ? `agent:${event.agentSessionId}:${str(p.agent, "orchestrator")}` : "orchestrator";
         items.push({ id: `event:${event.seq}`, laneId: lane, kind: mapped, label: event.type.replaceAll("_", " "), start: event.ts, end: null, status: null, eventSeqs: seqs, detail: p });
       }
     }

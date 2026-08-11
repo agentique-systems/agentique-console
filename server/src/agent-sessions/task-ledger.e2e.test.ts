@@ -38,11 +38,11 @@ describe("console-owned task ledger (fake SDK)", () => {
     expect(create && update && list).toBeTruthy();
 
     // `owner` is required now: it names the seat that will DO the work, not the
-    // one writing the row. Defaulting it to the writer put "orchestrator" on
+    // one writing the row. Defaulting it to the writer put "coordinator" on
     // every row of db-live-2's coordinator ledger.
     await create!.handler({ taskId: "1", subject: "Agree the module interface", description: "before either writes code", owner: "scout" }, {});
     await create!.handler({ taskId: "2", subject: "Implement src/game.js", description: "", owner: "scout" }, {});
-    await update!.handler({ taskId: "1", status: "completed", owner: "orchestrator" }, {});
+    await update!.handler({ taskId: "1", status: "completed", owner: "coordinator" }, {});
 
     // The key is derived from the agent session, never from a provider session.
     expect(consoleTaskListId(created.agentSessionId)).toContain(created.agentSessionId);
@@ -51,7 +51,7 @@ describe("console-owned task ledger (fake SDK)", () => {
 
     // Simulate what used to destroy the ledger: the seat's provider session is
     // replaced. The console rows are untouched, and the list still reads back.
-    h.repo.patchParticipant(created.agentSessionId, "orchestrator", { sdkSessionId: null, generation: 1 });
+    h.repo.patchAgent(created.agentSessionId, "coordinator", { sdkSessionId: null, generation: 1 });
     const after = parse(await list!.handler({}, {}));
     expect(after.tasks).toHaveLength(2);
     expect(after.tasks?.find((task) => task.sdkTaskId === "1")?.status).toBe("completed");

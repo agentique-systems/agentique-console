@@ -13,9 +13,9 @@
  * `main.ts`. This module only builds and connects the object graph.
  */
 import Database from "better-sqlite3";
-import { AgentSessionHost } from "./agent-sessions/host.ts";
+import { AgentSessionService } from "./agent-sessions/host.ts";
 import { AgentProfileRegistry } from "./agent-profiles/registry.ts";
-import { ManagerService } from "./agent-profiles/manager.ts";
+import { ProfileManagerService } from "./agent-profiles/manager.ts";
 import { buildManagerMcpServer } from "./agent-profiles/tools.ts";
 import type { Config } from "./config.ts";
 import type { Db } from "./db/client.ts";
@@ -77,11 +77,11 @@ export interface App {
   tasks: TaskService;
   handoffs: HandoffService;
   sessionStore: SqliteSessionStore;
-  host: AgentSessionHost;
+  host: AgentSessionService;
   runner: OrchestratorRunner;
   completion: RunCompletionService;
   userSessions: UserSessionService;
-  manager: ManagerService;
+  manager: ProfileManagerService;
 }
 
 export function createApp(options: CreateAppOptions): App {
@@ -89,13 +89,13 @@ export function createApp(options: CreateAppOptions): App {
   const artifacts = new ArtifactStore(db);
   const bus = new EventBus(db, artifacts);
   const repo = new Repo(db, sqlite);
-  const workspaces = new WorkspaceService(db, bus, config.fsRoots.map((root) => root.path));
+  const workspaces = new WorkspaceService(db, bus, config.infra.fsRoots.map((root) => root.path));
   const getWorkspaceRoot = (workspaceId: string): string => workspaces.get(workspaceId).rootPath;
   const timeline = new TimelineService(repo, bus);
   const profiles = new AgentProfileRegistry({ getWorkspaceRoot, db, bus });
   const processes = options.runtime?.processes === undefined ? new ProcessManager(bus) : options.runtime.processes;
   const browsers = options.runtime?.browsers === undefined ? new BrowserManager(artifacts) : options.runtime.browsers;
-  const worktrees = options.runtime?.worktrees === undefined ? new WorktreeManager({ dataDir: config.dataDir }) : options.runtime.worktrees;
+  const worktrees = options.runtime?.worktrees === undefined ? new WorktreeManager({ dataDir: config.infra.dataDir }) : options.runtime.worktrees;
 
   const decisions = new DecisionLedger(db);
   const interactions = new InteractionService(db, bus);
@@ -104,8 +104,8 @@ export function createApp(options: CreateAppOptions): App {
   const sessionStore = new SqliteSessionStore(db);
 
   const lateRunner = late<OrchestratorRunner>("runner");
-  const lateManager = late<ManagerService>("manager");
-  const host = new AgentSessionHost({
+  const lateManager = late<ProfileManagerService>("manager");
+  const host = new AgentSessionService({
     repo, bus, artifacts, config, profiles, sdk, sessionStore, getWorkspaceRoot,
     processes, browsers, worktrees,
     interactions, decisions, tasks, handoffs,
@@ -122,13 +122,13 @@ export function createApp(options: CreateAppOptions): App {
         : buildConsoleMcpServer({ sdk: sdkInstance, host, repo, bus, userSessionId, tasks, handoffs }),
   });
   lateRunner.set(runner);
-  const manager = new ManagerService({ repo, workspaces, profiles, config, bus, runner: () => runner });
+  const manager = new ProfileManagerService({ repo, workspaces, profiles, config, bus, runner: () => runner });
   lateManager.set(manager);
   const completion = new RunCompletionService({
     db, repo, bus, interactions, getWorkspaceRoot,
     host: () => host,
     runner: () => runner,
-    quietWindowMs: config.completionQuietWindowMs,
+    quietWindowMs: config.policy.completionQuietWindowMs,
   });
   const userSessions = new UserSessionService({
     repo, bus, runner, interactions, workspaces,

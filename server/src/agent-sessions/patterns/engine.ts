@@ -1,8 +1,8 @@
 /**
- * Pattern progression: session-level counters and the composite
- * TerminationPolicy — the engine every pattern shares. Free functions over a
- * bound context (the attempts.ts shape): host-private operations arrive as
- * closures and nothing here reaches back into the host.
+ * The pattern engine: session-level counters and the composite
+ * TerminationPolicy — shared by every pattern. Free functions over a bound
+ * context (the attempts.ts shape): service-private operations arrive as
+ * closures and nothing here reaches back into the service.
  *
  * Enforcement points:
  * - `onPatternPost` — synchronously after every journaled hop; handoff budget
@@ -19,16 +19,16 @@ import type { TerminationPolicy, TopologyContract } from "../topology-contract.t
 import type { AgentProfile } from "../../agent-profiles/registry.ts";
 import { InvalidInputError } from "../../errors.ts";
 import type { Config } from "../../config.ts";
-import type { AgentSessionRow, MessageRow, ParticipantRow, Repo } from "../../db/repo.ts";
+import type { AgentSessionRow, MessageRow, AgentRow, Repo } from "../../db/repo.ts";
 import type { EventBus } from "../../events/bus.ts";
 import { nowIso } from "../../ids.ts";
-import type { Category } from "../governance.ts";
-import { CONSOLE_SENDER } from "../peer-names.ts";
-import { SEAT_NAME_RE, roleOfSeat, speakerKindOf } from "../topology.ts";
+import type { Category } from "../final-gate.ts";
+import { CONSOLE_SENDER } from "../names.ts";
+import { AGENT_NAME_RE, roleOfAgent, speakerKindOf } from "../topology.ts";
 
 export interface PatternContext {
   deps: { repo: Repo; bus: EventBus; config: Config };
-  // Host-private operations, bound as closures so nothing becomes public.
+  // Service-private operations, bound as closures so nothing becomes public.
   contract(session: AgentSessionRow): TopologyContract;
   completionSeat(session: AgentSessionRow, which: "finalFrom" | "voice"): string;
   post(input: { agentSessionId: string; speaker: Speaker; to: string; handoff: HandoffDraft; category?: Category; dedupeKey?: string }): MessageRow;
@@ -39,10 +39,10 @@ export interface PatternContext {
   hasActivity(agentSessionId: string): boolean;
   /** The session already delivered its report to main (#statusOf === "reported"). */
   sessionReported(session: AgentSessionRow): boolean;
-  // Seat minting, for replicable roles — the attempts.ts precedent.
+  // Agent minting, for replicable roles — the attempts.ts precedent.
   profile(id: string, workspaceId?: string): AgentProfile;
   snapshotProfile(profile: AgentProfile): AgentProfile;
-  participant(agentSessionId: string, name: string, role: "orchestrator" | "agent", profile: AgentProfile, extra: string, model: string | undefined, ownership: string[], ord: number, createdAt: string, patternRole: string): ParticipantRow;
+  agent(agentSessionId: string, name: string, role: string, profile: AgentProfile, extra: string, model: string | undefined, ownership: string[], ord: number, createdAt: string): AgentRow;
 }
 
 export interface PatternHop {
@@ -51,18 +51,18 @@ export interface PatternHop {
   category: Category;
   /** The handoff's own status — join arrivals count terminal reports. */
   status: HandoffDraft["core"]["status"];
-  /** Console-authored traffic never counts against the seat-facing budgets. */
-  consoleSynthesized: boolean;
+  /** Console-authored traffic never counts against the agent-facing budgets. */
+  synthetic: boolean;
   /** The traversed edge completes a pattern round (EdgeSpec.countsRound). */
   countsRound: boolean;
-  /** EdgeSpec.advance — console edges are progression-delivered. */
-  advance: "router" | "console";
+  /** EdgeSpec.advance — join edges are engine-delivered. */
+  advance: "immediate" | "join";
 }
 
 /** Runtime state of one fan-in, stored in pattern_state.joins. */
 interface JoinState {
   over: string;
-  /** Seat name (contract deliverTo roles are single-seat). */
+  /** Agent name (contract deliverTo roles are single-agent). */
   deliverTo: string;
   expected: string[];
   reports: Record<string, "completed" | "failed">;
@@ -75,7 +75,7 @@ export function effectivePolicy(contract: TopologyContract, config: Config): Ter
   const fallback = (own: number | undefined, ceiling: number): number | undefined =>
     own ?? (ceiling > 0 ? ceiling : undefined);
   return {
-    ...(fallback(termination.maxHandoffs, config.patternHandoffCap) !== undefined ? { maxHandoffs: fallback(termination.maxHandoffs, config.patternHandoffCap) } : {}),
+    ...(fallback(termination.maxHandoffs, config.policy.patternHandoffCap) !== undefined ? { maxHandoffs: fallback(termination.maxHandoffs, config.policy.patternHandoffCap) } : {}),
     ...(termination.maxRounds !== undefined ? { maxRounds: termination.maxRounds } : {}),
     ...(termination.oscillationWindow !== undefined ? { oscillationWindow: termination.oscillationWindow } : {}),
   };
@@ -102,16 +102,16 @@ export function onPatternPost(ctx: PatternContext, session: AgentSessionRow, hop
   const state = repo.getPatternState(session.id);
   if (state?.tripped) {
     // Counters stop at the trip; deliveries do not — reports still flow.
-    if (hop.advance === "console") advanceConsoleHop(ctx, session, hop);
+    if (hop.advance === "join") advanceJoinHop(ctx, session, hop);
     return;
   }
   const recentEdges = [...(state?.recentEdges ?? []), `${hop.sender}>${hop.recipient}`].slice(-16);
-  const countsRound = hop.countsRound && !hop.consoleSynthesized;
+  const countsRound = hop.countsRound && !hop.synthetic;
   const next = repo.upsertPatternState(session.id, {
     recentEdges,
     lastProgressAt: nowIso(),
     ...(countsRound ? { rounds: (state?.rounds ?? 0) + 1 } : {}),
-    ...(hop.consoleSynthesized ? {} : { handoffCount: (state?.handoffCount ?? 0) + 1 }),
+    ...(hop.synthetic ? {} : { handoffCount: (state?.handoffCount ?? 0) + 1 }),
   });
   const policy = effectivePolicy(ctx.contract(session), ctx.deps.config);
   if (policy.maxHandoffs !== undefined && next.handoffCount >= policy.maxHandoffs) {
@@ -126,17 +126,17 @@ export function onPatternPost(ctx: PatternContext, session: AgentSessionRow, hop
     trip(ctx, session, "oscillation", `the last hops ping-pong between ${hop.sender} and ${hop.recipient} (${policy.oscillationWindow} round trips)`);
     return;
   }
-  if (hop.advance === "console") advanceConsoleHop(ctx, session, hop);
+  if (hop.advance === "join") advanceJoinHop(ctx, session, hop);
 }
 
 /**
- * A console-advanced hop: a joined fan-in waits until every expected seat has
+ * A join-advanced hop: a joined fan-in waits until every expected agent has
  * reported (completed or failed), then one flush delivers every held report
- * in a single minted turn; an unjoined console edge just advances. Late
+ * in a single minted turn; an unjoined join edge just advances. Late
  * arrivals after settle deliver immediately — stragglers reach the collector,
  * they just don't reopen the join.
  */
-function advanceConsoleHop(ctx: PatternContext, session: AgentSessionRow, hop: PatternHop): void {
+function advanceJoinHop(ctx: PatternContext, session: AgentSessionRow, hop: PatternHop): void {
   const { repo, bus } = ctx.deps;
   const senderRole = roleOf(ctx, session, hop.sender);
   const recipientRole = roleOf(ctx, session, hop.recipient);
@@ -153,17 +153,17 @@ function advanceConsoleHop(ctx: PatternContext, session: AgentSessionRow, hop: P
       return;
     }
     // First arrival with no dispatch-registered join (debate): expect every
-    // seat the over-role has right now.
+    // agent the over-role has right now.
     joinId = `${senderRole}#1`;
     joins[joinId] = { over: senderRole, deliverTo: hop.recipient,
-      expected: repo.listParticipants(session.id).filter((seat) => roleOfSeat(seat) === senderRole).map((seat) => seat.name),
+      expected: repo.listAgents(session.id).filter((agent) => roleOfAgent(agent) === senderRole).map((agent) => agent.name),
       reports: {}, settled: false };
   }
   const join = joins[joinId]!;
   if (hop.status === "completed") join.reports[hop.sender] = "completed";
   else if (hop.status === "failed") join.reports[hop.sender] = "failed";
   const failed = Object.values(join.reports).filter((status) => status === "failed").length;
-  const met = join.expected.every((seat) => join.reports[seat] !== undefined);
+  const met = join.expected.every((agent) => join.reports[agent] !== undefined);
   if (met) join.settled = true;
   repo.upsertPatternState(session.id, { joins: joins as unknown as Record<string, unknown> });
   if (met) {
@@ -175,8 +175,8 @@ function advanceConsoleHop(ctx: PatternContext, session: AgentSessionRow, hop: P
 
 function roleOf(ctx: PatternContext, session: AgentSessionRow, name: string): string {
   if (name === "main") return "main";
-  const seat = ctx.deps.repo.getParticipant(session.id, name);
-  return seat ? roleOfSeat(seat) : "";
+  const agent = ctx.deps.repo.getAgent(session.id, name);
+  return agent ? roleOfAgent(agent) : "";
 }
 
 export interface DispatchWorkItemsInput {
@@ -188,12 +188,12 @@ export interface DispatchWorkItemsInput {
 }
 
 /**
- * Fan-out for a replicable role: mint one seat per work item, register the
+ * Fan-out for a replicable role: mint one agent per work item, register the
  * join so the collector's flush waits for every item, then post each item as
  * its own assignment. One unsettled dispatch at a time — the join IS the
  * dispatch's lifecycle.
  */
-export function dispatchWorkItems(ctx: PatternContext, session: AgentSessionRow, dispatcher: ParticipantRow, input: DispatchWorkItemsInput): { joinId: string; seats: string[] } {
+export function dispatchWorkItems(ctx: PatternContext, session: AgentSessionRow, dispatcher: AgentRow, input: DispatchWorkItemsInput): { joinId: string; agents: string[] } {
   const { repo } = ctx.deps;
   const contract = ctx.contract(session);
   const replicableEntry = Object.entries(contract.roles).find(([, role]) => role.replicable);
@@ -213,29 +213,29 @@ export function dispatchWorkItems(ctx: PatternContext, session: AgentSessionRow,
   const now = nowIso();
   const user = repo.getUserSession(session.userSessionId);
   const profile = ctx.snapshotProfile(ctx.profile(input.profileId ?? "explorer", user?.workspaceId));
-  const existing = new Set(repo.listParticipants(session.id).map((seat) => seat.name));
-  const baseOrd = repo.listParticipants(session.id).length;
-  const seats = input.items.map((item, index) => {
+  const existing = new Set(repo.listAgents(session.id).map((agent) => agent.name));
+  const baseOrd = repo.listAgents(session.id).length;
+  const minted = input.items.map((item, index) => {
     const name = item.name ?? `map.${dispatchOrdinal}.${index + 1}`;
-    if (!SEAT_NAME_RE.test(name) || existing.has(name)) throw new InvalidInputError(`invalid or duplicate work-item seat name "${name}"`);
+    if (!AGENT_NAME_RE.test(name) || existing.has(name)) throw new InvalidInputError(`invalid or duplicate work-item agent name "${name}"`);
     existing.add(name);
     return { name, item };
   });
-  for (const [index, seat] of seats.entries()) {
-    repo.insertParticipant(ctx.participant(session.id, seat.name, "agent", profile,
-      input.instructions ?? "", input.model, seat.item.owns ?? [], baseOrd + index, now, mapperRole));
+  for (const [index, mint] of minted.entries()) {
+    repo.insertAgent(ctx.agent(session.id, mint.name, mapperRole, profile,
+      input.instructions ?? "", input.model, mint.item.owns ?? [], baseOrd + index, now));
   }
   const joinId = `${mapperRole}#${dispatchOrdinal}`;
   joins[joinId] = { over: mapperRole,
-    deliverTo: dispatcher.name, expected: seats.map((seat) => seat.name), reports: {}, settled: false };
+    deliverTo: dispatcher.name, expected: minted.map((mint) => mint.name), reports: {}, settled: false };
   repo.upsertPatternState(session.id, { joins: joins as unknown as Record<string, unknown> });
-  for (const seat of seats) {
+  for (const mint of minted) {
     ctx.post({ agentSessionId: session.id, speaker: { kind: speakerKindOf(dispatcher), name: dispatcher.name },
-      to: seat.name, category: "assignment", dedupeKey: `dispatch:${joinId}:${seat.name}`,
-      handoff: ctx.simpleHandoff(seat.item.assignment, "pending", seat.item.assignment,
+      to: mint.name, category: "assignment", dedupeKey: `dispatch:${joinId}:${mint.name}`,
+      handoff: ctx.simpleHandoff(mint.item.assignment, "pending", mint.item.assignment,
         `Do exactly this item and report the result to ${dispatcher.name} with a terminal status.`) });
   }
-  return { joinId, seats: seats.map((seat) => seat.name) };
+  return { joinId, agents: minted.map((mint) => mint.name) };
 }
 
 
@@ -248,12 +248,12 @@ export function dispatchWorkItems(ctx: PatternContext, session: AgentSessionRow,
  */
 export function sweep(ctx: PatternContext, session: AgentSessionRow): void {
   const { repo, config } = { repo: ctx.deps.repo, config: ctx.deps.config };
-  if (config.patternStallMs <= 0) return;
+  if (config.policy.patternStallMs <= 0) return;
   const state = repo.getPatternState(session.id);
   if (state?.tripped) return;
   if (ctx.sessionReported(session) || ctx.hasActivity(session.id)) return;
   const last = Date.parse(state?.lastProgressAt ?? session.createdAt);
-  if (!Number.isFinite(last) || Date.now() - last < config.patternStallMs) return;
+  if (!Number.isFinite(last) || Date.now() - last < config.policy.patternStallMs) return;
   trip(ctx, session, "stall",
     `no participant has sent a handoff for ${Math.round((Date.now() - last) / 60_000)} minutes and no turn is in flight`);
 }

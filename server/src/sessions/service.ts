@@ -58,7 +58,7 @@ export class UserSessionService {
       title: titleFromFirstMessage(message),
       mode: body.mode,
       phase: body.mode === "plan_execute" ? "planning" : "executing",
-      status: "open",
+      lifecycle: "open",
       purpose: "work",
       subjectKey: null,
       sdkSessionId: null,
@@ -112,14 +112,14 @@ export class UserSessionService {
     if (!row) throw new NotFoundError(`no user session ${id}`);
 
     const changes: Partial<
-      Pick<UserSessionRow, "title" | "mode" | "phase" | "status" | "model">
+      Pick<UserSessionRow, "title" | "mode" | "phase" | "lifecycle" | "model">
     > = {};
     if (patch.title !== undefined) {
       const title = patch.title.trim();
       if (title === "") throw new InvalidInputError("title cannot be empty");
       changes.title = title;
     }
-    if (patch.status !== undefined) changes.status = patch.status;
+    if (patch.lifecycle !== undefined) changes.lifecycle = patch.lifecycle;
     if (row.purpose === "profile_manager" && patch.mode !== undefined && patch.mode !== "plan_execute") {
       throw new InvalidInputError("profile Manager sessions always require plan approval");
     }
@@ -142,7 +142,7 @@ export class UserSessionService {
     // The lane's options are frozen at spawn: archiving shuts it down, and a
     // mode or model change recycles it so the next message respawns with fresh
     // options. A turn already in flight finishes on what it started with.
-    if (changes.status === "archived") {
+    if (changes.lifecycle === "archived") {
       this.#completion?.schedule(id);
       this.#archiveAgentSessions?.(id);
       void this.#runner.closeSession(id);

@@ -15,6 +15,7 @@ import type {
 import type { Db } from "./client.ts";
 import {
   agentSessions,
+  agents,
   crons,
   eventArtifacts,
   handoffRecords,
@@ -22,7 +23,6 @@ import {
   interactions,
   mailboxDeliveries,
   messages,
-  participants,
   patternState,
   providerEntries,
   tasks,
@@ -38,13 +38,13 @@ export type UnsettledTurn =
       turnId: string;
       userSessionId: string;
       agentSessionId: string;
-      participant: string;
+      agent: string;
     };
 
 export type MessageRow = typeof messages.$inferSelect;
 export type UserSessionRow = typeof userSessions.$inferSelect;
 export type AgentSessionRow = typeof agentSessions.$inferSelect;
-export type ParticipantRow = typeof participants.$inferSelect;
+export type AgentRow = typeof agents.$inferSelect;
 export type MailboxDeliveryRow = typeof mailboxDeliveries.$inferSelect;
 export type UsageSampleRow = typeof usageSamples.$inferSelect;
 export type HandoffRecordRow = typeof handoffRecords.$inferSelect;
@@ -60,10 +60,11 @@ export function toWireAgentSession(
     id: row.id,
     userSessionId: row.userSessionId,
     title: row.title,
-    status: row.status === "archived" ? "archived" : working ? "working" : "idle",
+    lifecycle: row.lifecycle,
+    activity: working ? "working" : "idle",
     pattern: row.pattern,
     parentAgentSessionId: row.parentAgentSessionId,
-    participants: specialists,
+    agents: specialists,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -89,7 +90,7 @@ export function toWireUserSession(row: UserSessionRow): UserSession {
     title: row.title,
     mode: row.mode,
     phase: row.phase,
-    status: row.status,
+    lifecycle: row.lifecycle,
     runState: row.runState,
     model: row.model,
     createdAt: row.createdAt,
@@ -197,12 +198,12 @@ export class Repo {
       });
       const handoff = { ...input.handoff, messageId: message.id };
       this.#db.insert(handoffRecords).values(handoff).run();
-      for (const participant of new Set([input.recipient, input.speaker.name])) {
-        if (participant === "main") {
+      for (const agent of new Set([input.recipient, input.speaker.name])) {
+        if (agent === "main") {
           this.#db.update(userSessions).set({ latestHandoffId: handoff.id, updatedAt: nowIso() }).where(eq(userSessions.id, input.userSessionId)).run();
         } else {
-          this.#db.update(participants).set({ latestHandoffId: handoff.id }).where(and(
-            eq(participants.agentSessionId, input.agentSessionId), eq(participants.name, participant),
+          this.#db.update(agents).set({ latestHandoffId: handoff.id }).where(and(
+            eq(agents.agentSessionId, input.agentSessionId), eq(agents.name, agent),
           )).run();
         }
       }
@@ -216,9 +217,9 @@ export class Repo {
       if (row.agentSessionId === null) {
         this.#db.update(userSessions).set({ latestHandoffId: row.id, updatedAt: nowIso() }).where(eq(userSessions.id, row.userSessionId)).run();
       } else {
-        this.#db.update(participants).set({ latestHandoffId: row.id }).where(and(
-          eq(participants.agentSessionId, row.agentSessionId),
-          eq(participants.name, row.recipient),
+        this.#db.update(agents).set({ latestHandoffId: row.id }).where(and(
+          eq(agents.agentSessionId, row.agentSessionId),
+          eq(agents.name, row.recipient),
         )).run();
       }
     })();
@@ -229,20 +230,20 @@ export class Repo {
   }
 
   /**
-   * `participant` matches the RECIPIENT — "the last handoff addressed to X".
+   * `recipient` matches the RECIPIENT — "the last handoff addressed to X".
    * `sender` matches the AUTHOR — "the last thing X itself reported". Rotation
-   * recovery must use `sender`: a seat's inheritance is its own last report,
+   * recovery must use `sender`: an agent's inheritance is its own last report,
    * never the last message someone else sent it.
    */
-  latestHandoff(input: { userSessionId: string; agentSessionId?: string | null; participant?: string; sender?: string; excludeCheckpoints?: boolean; excludeConsoleSynthesized?: boolean }): HandoffRecordRow | undefined {
+  latestHandoff(input: { userSessionId: string; agentSessionId?: string | null; recipient?: string; sender?: string; excludeCheckpoints?: boolean; excludeSynthetic?: boolean }): HandoffRecordRow | undefined {
     const filters = [eq(handoffRecords.userSessionId, input.userSessionId)];
     if (input.agentSessionId === null) filters.push(sql`${handoffRecords.agentSessionId} is null`);
     else if (input.agentSessionId !== undefined) filters.push(eq(handoffRecords.agentSessionId, input.agentSessionId));
-    if (input.participant !== undefined) filters.push(eq(handoffRecords.recipient, input.participant));
+    if (input.recipient !== undefined) filters.push(eq(handoffRecords.recipient, input.recipient));
     if (input.sender !== undefined) filters.push(eq(handoffRecords.sender, input.sender));
     if (input.excludeCheckpoints === true) filters.push(eq(handoffRecords.checkpoint, false));
-    // Console-authored notices (see host `#simpleHandoff`) are not reports.
-    if (input.excludeConsoleSynthesized === true) filters.push(eq(handoffRecords.synthetic, false));
+    // Console-authored (synthetic) notices are not reports.
+    if (input.excludeSynthetic === true) filters.push(eq(handoffRecords.synthetic, false));
     // rowid breaks createdAt ties: handoffs written in the same millisecond are
     // ordinary (an ack and its follow-up), and "latest" must not be a coin flip
     // when a rotation checkpoint depends on it.
@@ -267,7 +268,7 @@ export class Repo {
   /** Open, non-manager sessions — the ones a run can complete in. */
   listOpenWorkSessions(): UserSessionRow[] {
     return this.#db.select().from(userSessions)
-      .where(and(eq(userSessions.status, "open"), eq(userSessions.purpose, "work"))).all();
+      .where(and(eq(userSessions.lifecycle, "open"), eq(userSessions.purpose, "work"))).all();
   }
 
   /** userSessionId -> open card count, for the sidebar's attention dots. */
@@ -287,14 +288,14 @@ export class Repo {
    * session, oldest first — the boot-time leak scan. Carries the recorded argv
    * so the caller can guard against pid reuse before killing anything.
    */
-  listOrphanedProcesses(): { processId: string; pid: number | null; command: string; args: string[]; userSessionId: string; agentSessionId: string; participant: string }[] {
+  listOrphanedProcesses(): { processId: string; pid: number | null; command: string; args: string[]; userSessionId: string; agentSessionId: string; agent: string }[] {
     const rows = this.#db.select({ type: events.type, userSessionId: events.userSessionId, agentSessionId: events.agentSessionId, payload: events.payload })
       .from(events)
       .where(inArray(events.type, ["agent_session.process.started", "agent_session.process.exited"]))
       .orderBy(asc(events.seq)).all();
-    const open = new Map<string, { processId: string; pid: number | null; command: string; args: string[]; userSessionId: string; agentSessionId: string; participant: string }>();
+    const open = new Map<string, { processId: string; pid: number | null; command: string; args: string[]; userSessionId: string; agentSessionId: string; agent: string }>();
     for (const row of rows) {
-      const payload = row.payload as { processId?: string; pid?: number; command?: string; args?: string[]; participant?: string };
+      const payload = row.payload as { processId?: string; pid?: number; command?: string; args?: string[]; agent?: string };
       const processId = payload.processId;
       if (processId === undefined) continue;
       if (row.type === "agent_session.process.exited") { open.delete(processId); continue; }
@@ -302,7 +303,7 @@ export class Repo {
         processId, pid: payload.pid ?? null,
         command: payload.command ?? "", args: payload.args ?? [],
         userSessionId: row.userSessionId ?? "", agentSessionId: row.agentSessionId ?? "",
-        participant: payload.participant ?? "",
+        agent: payload.agent ?? "",
       });
     }
     return [...open.values()];
@@ -365,7 +366,7 @@ export class Repo {
     return this.#db.select().from(mailboxDeliveries).where(eq(mailboxDeliveries.id, id)).get();
   }
 
-  /** The seat's most recent inbound assignment, if it was ever assigned anything. */
+  /** The agent's most recent inbound assignment, if it was ever assigned anything. */
   latestAssignmentDelivery(agentSessionId: string, recipient: string): MailboxDeliveryRow | undefined {
     return this.#db.select().from(mailboxDeliveries)
       .where(and(
@@ -457,7 +458,7 @@ export class Repo {
   }
 
   listOpenUserSessions(): UserSessionRow[] {
-    return this.#db.select().from(userSessions).where(eq(userSessions.status, "open")).all();
+    return this.#db.select().from(userSessions).where(eq(userSessions.lifecycle, "open")).all();
   }
 
   listUserSessions(workspaceId: string): UserSessionRow[] {
@@ -484,7 +485,7 @@ export class Repo {
   patchUserSession(
     id: string,
     patch: Partial<
-      Pick<UserSessionRow, "title" | "mode" | "phase" | "status" | "subjectKey" | "sdkSessionId" | "sdkGeneration" | "sdkTurnCount" | "contextTokens" | "memory" |  "latestHandoffId" | "cumulativeCostUsd" | "cumulativeApiDurationMs" | "runState" | "runBaseCommit" | "model">
+      Pick<UserSessionRow, "title" | "mode" | "phase" | "lifecycle" | "subjectKey" | "sdkSessionId" | "sdkGeneration" | "sdkTurnCount" | "contextTokens" | "memory" |  "latestHandoffId" | "cumulativeCostUsd" | "cumulativeApiDurationMs" | "runState" | "runBaseCommit" | "model">
     >,
   ): void {
     this.#db
@@ -529,7 +530,7 @@ export class Repo {
     return this.#db
       .select()
       .from(agentSessions)
-      .where(eq(agentSessions.status, "open"))
+      .where(eq(agentSessions.lifecycle, "open"))
       .all();
   }
 
@@ -578,14 +579,14 @@ export class Repo {
         turnId: string | null;
         userSessionId: string | null;
         agentSessionId: string | null;
-        participant: string | null;
+        agent: string | null;
       }>(sql`
         select
           type,
           json_extract(payload, '$.turnId') as turnId,
           user_session_id as userSessionId,
           agent_session_id as agentSessionId,
-          json_extract(payload, '$.participant') as participant
+          json_extract(payload, '$.agent') as agent
         from events
         where type in ('user_session.turn.started', 'agent_session.turn.started')
           and json_extract(payload, '$.turnId') not in (
@@ -597,14 +598,14 @@ export class Repo {
       .flatMap((row): UnsettledTurn[] => {
         if (row.turnId === null) return [];
         if (row.type === "agent_session.turn.started") {
-          if (row.agentSessionId === null || row.participant === null) return [];
+          if (row.agentSessionId === null || row.agent === null) return [];
           return [
             {
               kind: "agent" as const,
               turnId: row.turnId,
               userSessionId: row.userSessionId ?? "",
               agentSessionId: row.agentSessionId,
-              participant: row.participant,
+              agent: row.agent,
             },
           ];
         }
@@ -622,7 +623,7 @@ export class Repo {
   patchAgentSession(
     id: string,
     patch: Partial<
-      Pick<AgentSessionRow, "status">
+      Pick<AgentSessionRow, "lifecycle">
     >,
   ): void {
     this.#db
@@ -632,40 +633,40 @@ export class Repo {
       .run();
   }
 
-  /** Participants in seating order (the orchestrator's virtual seat is ord 0). */
-  listParticipants(agentSessionId: string): ParticipantRow[] {
+  /** Agents in seating order (the coordinator is ord 0). */
+  listAgents(agentSessionId: string): AgentRow[] {
     return this.#db
       .select()
-      .from(participants)
-      .where(eq(participants.agentSessionId, agentSessionId))
-      .orderBy(asc(participants.ord))
+      .from(agents)
+      .where(eq(agents.agentSessionId, agentSessionId))
+      .orderBy(asc(agents.ord))
       .all();
   }
 
-  getParticipant(
+  getAgent(
     agentSessionId: string,
     name: string,
-  ): ParticipantRow | undefined {
+  ): AgentRow | undefined {
     return this.#db
       .select()
-      .from(participants)
+      .from(agents)
       .where(
         and(
-          eq(participants.agentSessionId, agentSessionId),
-          eq(participants.name, name),
+          eq(agents.agentSessionId, agentSessionId),
+          eq(agents.name, name),
         ),
       )
       .get();
   }
 
-  insertParticipant(row: ParticipantRow): void {
-    this.#db.insert(participants).values(row).run();
+  insertAgent(row: AgentRow): void {
+    this.#db.insert(agents).values(row).run();
   }
 
-  patchParticipant(
+  patchAgent(
     agentSessionId: string,
     name: string,
-    patch: Partial<Pick<ParticipantRow,
+    patch: Partial<Pick<AgentRow,
       "sdkSessionId" | "generation" |
       "turnCount" | "contextTokens" | "profileSnapshot" | "profileId"
       |  "latestHandoffId"
@@ -674,21 +675,21 @@ export class Repo {
     >>,
   ): void {
     this.#db
-      .update(participants)
+      .update(agents)
       .set(patch)
       .where(
         and(
-          eq(participants.agentSessionId, agentSessionId),
-          eq(participants.name, name),
+          eq(agents.agentSessionId, agentSessionId),
+          eq(agents.name, name),
         ),
       )
       .run();
   }
 
-  /** Every seat currently bound to a worktree (boot orphan-recovery input). */
-  listWorktreeSeats(): { agentSessionId: string; name: string; worktreePath: string }[] {
-    return this.#db.select({ agentSessionId: participants.agentSessionId, name: participants.name, worktreePath: participants.worktreePath })
-      .from(participants).where(isNotNull(participants.worktreePath)).all()
+  /** Every agent currently bound to a worktree (boot orphan-recovery input). */
+  listWorktreeAgents(): { agentSessionId: string; name: string; worktreePath: string }[] {
+    return this.#db.select({ agentSessionId: agents.agentSessionId, name: agents.name, worktreePath: agents.worktreePath })
+      .from(agents).where(isNotNull(agents.worktreePath)).all()
       .map((row) => ({ ...row, worktreePath: row.worktreePath! }));
   }
 

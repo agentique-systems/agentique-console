@@ -38,7 +38,7 @@ export function buildOrchestratorCanUseTool(input: CanUseToolInput): CanUseTool 
     kind: "coordination_only" | "empty_question" | "question_declined" | "plan_missing" | "plan_rejected",
     message: string,
   ): { behavior: "deny"; message: string } => {
-    bus.append({ type: "governance.tool.denied", userSessionId,
+    bus.append({ type: "tool.denied", userSessionId,
       payload: { userSessionId, toolName, kind, reason: message.slice(0, 500) } });
     return { behavior: "deny", message };
   };

@@ -42,8 +42,8 @@ import type { HandoffService } from "../handoffs/service.ts";
 import { HandoffDraftSchema, HANDOFF_DRAFT_JSON_SCHEMA } from "../handoffs/schema.ts";
 import { sdkEnv } from "../sdk/env.ts";
 import type { SqliteSessionStore } from "../sdk/session-store.ts";
-import type { AgentSessionHost } from "../agent-sessions/host.ts";
-import { mainPeerName } from "../agent-sessions/peer-names.ts";
+import type { AgentSessionService } from "../agent-sessions/host.ts";
+import { mainPeerName } from "../agent-sessions/names.ts";
 import type { TaskService } from "../tasks/service.ts";
 
 type Job =
@@ -143,7 +143,7 @@ export interface OrchestratorDeps {
    */
   decisions: DecisionLedger;
   /** Lazy — host and runner construct in either order inside `createApp`. */
-  host: () => AgentSessionHost;
+  host: () => AgentSessionService;
   /** Console task-ledger tools for the lane. */
   tasks: TaskService;
 }
@@ -179,7 +179,7 @@ export class OrchestratorRunner {
     const { repo, bus, interactions } = this.#deps;
     const session = repo.getUserSession(sessionId);
     if (!session) throw new NotFoundError(`no user session ${sessionId}`);
-    if (session.status !== "open") {
+    if (session.lifecycle !== "open") {
       throw new ConflictError(`session ${sessionId} is archived`);
     }
     const trimmed = text.trim();
@@ -195,7 +195,7 @@ export class OrchestratorRunner {
       text: trimmed,
     });
     bus.append({
-      type: "user_session.message",
+      type: "user_session.message.appended",
       userSessionId: sessionId,
       payload: { userSessionId: sessionId, message: toWireMessage(row) },
     });
@@ -237,7 +237,7 @@ export class OrchestratorRunner {
     for (const session of this.#deps.repo.listOpenUserSessions()) {
       for (const deadline of this.#deps.repo.listDueDeadlines(session.id, now.toISOString())) {
         this.#deps.repo.patchCron(deadline.id, { status: "deleted" });
-        this.#deps.bus.append({ type: "user_session.runtime", userSessionId: session.id,
+        this.#deps.bus.append({ type: "user_session.runtime.noted", userSessionId: session.id,
           payload: { userSessionId: session.id, detail: `deadline fired: ${deadline.prompt}` } });
         this.#enqueue(session.id, { kind: "cron", text: `[Deadline you set has arrived]\n${deadline.prompt}` });
       }
@@ -354,7 +354,7 @@ export class OrchestratorRunner {
         state: { lastAssistantText: "" },
         runtime: new RuntimeBroadcaster(
           this.#deps.bus,
-          { kind: "user", sessionId },
+          { kind: "user", userSessionId: sessionId },
           "orchestrator",
           { userSessionId: sessionId },
         ),
@@ -393,7 +393,7 @@ export class OrchestratorRunner {
   async #runTurn(sessionId: string, lane: Lane, job: Job): Promise<void> {
     const { repo, bus } = this.#deps;
     const session = repo.getUserSession(sessionId);
-    if (!session || session.status !== "open") return;
+    if (!session || session.lifecycle !== "open") return;
 
     // The standing instruction goes on ONCE, at drain, rather than being
     // baked into each milestone — several appended reports would otherwise
@@ -464,7 +464,7 @@ export class OrchestratorRunner {
    * Seats do not read this — they resolve their model from their profile.
    */
   #modelFor(session: Pick<UserSessionRow, "model">): string {
-    return session.model ?? this.#deps.config.model;
+    return session.model ?? this.#deps.config.infra.model;
   }
 
   /** Spawns the persistent query if the lane has none (lazy + post-death). */
@@ -483,7 +483,7 @@ export class OrchestratorRunner {
       mode: session.mode,
       phase: session.phase,
       model: this.#modelFor(session),
-      effort: config.effort,
+      effort: config.infra.effort,
       abortController: abort,
       canUseTool: buildOrchestratorCanUseTool({
         userSessionId: sessionId,
@@ -499,7 +499,7 @@ export class OrchestratorRunner {
         : session.memory,
       decisionDigest: this.#deps.decisions.digest(sessionId),
       purpose: session.purpose,
-      peerName: mainPeerName(config.peerNamePrefix, sessionId),
+      peerName: mainPeerName(config.policy.peerNamePrefix, sessionId),
     });
 
     const query = sdk.query({ prompt: input, options });
@@ -676,7 +676,7 @@ export class OrchestratorRunner {
       text,
     });
     bus.append({
-      type: "user_session.message",
+      type: "user_session.message.appended",
       userSessionId: sessionId,
       payload: { userSessionId: sessionId, message: toWireMessage(row) },
     });
@@ -689,7 +689,7 @@ export class OrchestratorRunner {
   ): void {
     const { repo, bus } = this.#deps;
     if ("parentCallId" in event && event.parentCallId !== undefined) {
-      bus.append({ type: "user_session.runtime", userSessionId: sessionId, payload: { userSessionId: sessionId, detail: `blocked unowned native subagent event (${event.kind})` } });
+      bus.append({ type: "user_session.runtime.noted", userSessionId: sessionId, payload: { userSessionId: sessionId, detail: `blocked unowned native subagent event (${event.kind})` } });
       return;
     }
     const turn = lane.activeTurn;
@@ -702,14 +702,14 @@ export class OrchestratorRunner {
         return;
       }
       case "delta": {
-        if (!turn) { bus.append({ type: "user_session.runtime", userSessionId: sessionId, payload: { userSessionId: sessionId, detail: "ignored late stream delta after turn settlement" } }); return; }
+        if (!turn) { bus.append({ type: "user_session.runtime.noted", userSessionId: sessionId, payload: { userSessionId: sessionId, detail: "ignored late stream delta after turn settlement" } }); return; }
         const active = turn;
         lane.runtime.set("responding");
         bus.broadcast({
           type: "stream.delta",
           userSessionId: sessionId,
           payload: {
-            scope: { kind: "user", sessionId },
+            scope: { kind: "user", userSessionId: sessionId },
             speaker: "orchestrator",
             turnId: active.turnId,
             text: event.text,
@@ -718,14 +718,14 @@ export class OrchestratorRunner {
         return;
       }
       case "reasoning-delta": {
-        if (!turn) { bus.append({ type: "user_session.runtime", userSessionId: sessionId, payload: { userSessionId: sessionId, detail: "ignored late reasoning delta after turn settlement" } }); return; }
+        if (!turn) { bus.append({ type: "user_session.runtime.noted", userSessionId: sessionId, payload: { userSessionId: sessionId, detail: "ignored late reasoning delta after turn settlement" } }); return; }
         const active = turn;
         lane.runtime.set("thinking");
         bus.broadcast({
           type: "stream.reasoning",
           userSessionId: sessionId,
           payload: {
-            scope: { kind: "user", sessionId },
+            scope: { kind: "user", userSessionId: sessionId },
             speaker: "orchestrator",
             turnId: active.turnId,
             text: event.text,
@@ -735,14 +735,14 @@ export class OrchestratorRunner {
       }
       case "notice": {
         lane.runtime.note(event.text);
-        bus.append({ type: "user_session.runtime", userSessionId: sessionId, payload: { userSessionId: sessionId, detail: event.text } });
+        bus.append({ type: "user_session.runtime.noted", userSessionId: sessionId, payload: { userSessionId: sessionId, detail: event.text } });
         return;
       }
       case "retry": {
         // Alongside the notice prose, never instead of it: the transcript keeps
         // the human-readable line, counters read this one.
         bus.append({ type: "user_session.retry.recorded", userSessionId: sessionId,
-          payload: { userSessionId: sessionId, participant: "orchestrator", kind: event.classification,
+          payload: { userSessionId: sessionId, agent: "orchestrator", kind: event.classification,
             ...(event.attempt === undefined ? {} : { attempt: event.attempt }), retryInMs: event.delayMs, detail: event.detail } });
         return;
       }
@@ -751,7 +751,7 @@ export class OrchestratorRunner {
         lane.state.lastAssistantText = event.text;
         const normalized = event.text.trim().replace(/\s+/g, " ");
         if (active?.trigger === "wake" && normalized !== "" && normalized === lane.lastOperatorFacingText) {
-          bus.append({ type: "user_session.runtime", userSessionId: sessionId, payload: { userSessionId: sessionId, detail: "suppressed an exact duplicate orchestrator message" } });
+          bus.append({ type: "user_session.runtime.noted", userSessionId: sessionId, payload: { userSessionId: sessionId, detail: "suppressed an exact duplicate orchestrator message" } });
           return;
         }
         lane.lastOperatorFacingText = normalized;
@@ -764,7 +764,7 @@ export class OrchestratorRunner {
           ...(active ? { turnId: active.turnId } : {}),
         });
         bus.append({
-          type: "user_session.message",
+          type: "user_session.message.appended",
           userSessionId: sessionId,
           payload: { userSessionId: sessionId, message: toWireMessage(row) },
         });
@@ -775,7 +775,7 @@ export class OrchestratorRunner {
         lane.toolStarts.set(event.callId, Date.now());
         lane.runtime.set("tool", event.name);
         bus.append({
-          type: "user_session.tool.call",
+          type: "user_session.tool.called",
           userSessionId: sessionId,
           payload: {
             userSessionId: sessionId,
@@ -793,7 +793,7 @@ export class OrchestratorRunner {
         const toolStartedAt = lane.toolStarts.get(event.callId);
         lane.toolStarts.delete(event.callId);
         bus.append({
-          type: "user_session.tool.result",
+          type: "user_session.tool.completed",
           userSessionId: sessionId,
           payload: {
             userSessionId: sessionId,
@@ -822,7 +822,7 @@ export class OrchestratorRunner {
         }
         if (session) {
           const contextTokens = Math.max(session.contextTokens, lane.contextTokens);
-          if (session.sdkTurnCount + 1 >= this.#deps.config.contextTurnLimit || contextTokens >= rotationTokenLimit(this.#deps.config.contextTokenLimit, this.#modelFor(session))) lane.recycleAfterTurn = true;
+          if (session.sdkTurnCount + 1 >= this.#deps.config.policy.contextTurnLimit || contextTokens >= rotationTokenLimit(this.#deps.config.policy.contextTokenLimit, this.#modelFor(session))) lane.recycleAfterTurn = true;
           const { costUsd, apiDurationMs } = laneUsageDeltas(lane, event);
           // One patch: turn count, context, and the advanced cumulative
           // baseline (persisted with the provider session it belongs to, so
@@ -832,10 +832,10 @@ export class OrchestratorRunner {
           const usage = { id: newId("usage"), userSessionId: sessionId, agentSessionId: null, participant: "orchestrator", profileId: null,
             generation: session.sdkGeneration, turnId: turn?.turnId ?? "unattributed", inputTokens: event.inputTokens ?? 0,
             uncachedInputTokens: event.uncachedInputTokens ?? 0, cacheCreationInputTokens: event.cacheCreationInputTokens ?? 0, cacheReadInputTokens: event.cacheReadInputTokens ?? 0, outputTokens: event.outputTokens ?? 0,
-            costUsd, model: event.modelId ?? this.#modelFor(session), effort: this.#deps.config.effort ?? null,
+            costUsd, model: event.modelId ?? this.#modelFor(session), effort: this.#deps.config.infra.effort ?? null,
             trigger: turn?.trigger ?? null, durationMs: turn ? Date.now() - turn.startedAt : null, apiDurationMs, sdkDurationMs: event.sdkDurationMs ?? null, status: "completed", stopReason: event.stopReason ?? null, createdAt: nowIso() };
           repo.insertUsage(usage);
-          bus.append({ type: "usage.recorded", userSessionId: sessionId, payload: { userSessionId: sessionId, participant: "orchestrator", generation: session.sdkGeneration,
+          bus.append({ type: "usage.recorded", userSessionId: sessionId, payload: { userSessionId: sessionId, agent: "orchestrator", generation: session.sdkGeneration,
             turnId: usage.turnId, inputTokens: usage.inputTokens, uncachedInputTokens: usage.uncachedInputTokens, cacheCreationInputTokens: usage.cacheCreationInputTokens, cacheReadInputTokens: usage.cacheReadInputTokens,
             outputTokens: usage.outputTokens, ...(costUsd === null ? {} : { costUsd }), model: usage.model ?? undefined, effort: usage.effort ?? undefined,
             trigger: turn?.trigger, durationMs: usage.durationMs ?? undefined, apiDurationMs: usage.apiDurationMs ?? undefined, sdkDurationMs: usage.sdkDurationMs ?? undefined,
@@ -861,15 +861,15 @@ export class OrchestratorRunner {
           const usage = { id: newId("usage"), userSessionId: sessionId, agentSessionId: null, participant: "orchestrator", profileId: null,
             generation: session.sdkGeneration, turnId: turn?.turnId ?? "unattributed", inputTokens: event.inputTokens ?? 0,
             uncachedInputTokens: event.uncachedInputTokens ?? 0, cacheCreationInputTokens: event.cacheCreationInputTokens ?? 0, cacheReadInputTokens: event.cacheReadInputTokens ?? 0, outputTokens: event.outputTokens ?? 0,
-            costUsd, model: event.modelId ?? this.#modelFor(session), effort: this.#deps.config.effort ?? null,
+            costUsd, model: event.modelId ?? this.#modelFor(session), effort: this.#deps.config.infra.effort ?? null,
             trigger: turn?.trigger ?? null, durationMs: turn ? Date.now() - turn.startedAt : null, apiDurationMs, sdkDurationMs: event.sdkDurationMs ?? null, status: event.aborted ? "aborted" : "error", stopReason: event.stopReason ?? null, createdAt: nowIso() };
           repo.insertUsage(usage);
-          bus.append({ type: "usage.recorded", userSessionId: sessionId, payload: { userSessionId: sessionId, participant: "orchestrator", generation: session.sdkGeneration,
+          bus.append({ type: "usage.recorded", userSessionId: sessionId, payload: { userSessionId: sessionId, agent: "orchestrator", generation: session.sdkGeneration,
             turnId: usage.turnId, inputTokens: usage.inputTokens, uncachedInputTokens: usage.uncachedInputTokens, cacheCreationInputTokens: usage.cacheCreationInputTokens, cacheReadInputTokens: usage.cacheReadInputTokens,
             outputTokens: usage.outputTokens, ...(costUsd === null ? {} : { costUsd }), model: usage.model ?? undefined, effort: usage.effort ?? undefined,
             trigger: turn?.trigger, durationMs: usage.durationMs ?? undefined, apiDurationMs: usage.apiDurationMs ?? undefined, sdkDurationMs: usage.sdkDurationMs ?? undefined,
             status: event.aborted ? "aborted" : "error", stopReason: usage.stopReason ?? undefined } });
-          if (session.sdkTurnCount + 1 >= this.#deps.config.contextTurnLimit || contextTokens >= rotationTokenLimit(this.#deps.config.contextTokenLimit, this.#modelFor(session))) lane.recycleAfterTurn = true;
+          if (session.sdkTurnCount + 1 >= this.#deps.config.policy.contextTurnLimit || contextTokens >= rotationTokenLimit(this.#deps.config.policy.contextTokenLimit, this.#modelFor(session))) lane.recycleAfterTurn = true;
         }
         this.#settleTurn(sessionId, lane);
         return;
@@ -895,10 +895,10 @@ export class OrchestratorRunner {
   async #rotateContextIfNeeded(sessionId: string, lane: Lane): Promise<void> {
     const session = this.#deps.repo.getUserSession(sessionId);
     if (!session) return;
-    const tokenLimit = rotationTokenLimit(this.#deps.config.contextTokenLimit, this.#modelFor(session));
+    const tokenLimit = rotationTokenLimit(this.#deps.config.policy.contextTokenLimit, this.#modelFor(session));
     const due = rotationDue({
       turnCount: session.sdkTurnCount, contextTokens: session.contextTokens,
-      turnLimit: this.#deps.config.contextTurnLimit, tokenLimit,
+      turnLimit: this.#deps.config.policy.contextTurnLimit, tokenLimit,
     });
     if (!due) return;
     if (lane.query) await this.#closeLane(lane, { interrupt: false });
@@ -917,7 +917,7 @@ export class OrchestratorRunner {
           result: { summary: null, artifacts: [] }, uncertainty: [failure ?? "no valid checkpoint output"], nextAction: "Verify authoritative state before acting.", requestExpandedContext: true },
           extension: { kind: "coordination", data: {} } };
       this.#deps.bus.append({ type: "handoff.checkpoint.failed", userSessionId: sessionId,
-        payload: { participant: "orchestrator", reason: failure ?? "checkpoint produced no valid handoff", degraded: true } });
+        payload: { agent: "orchestrator", reason: failure ?? "checkpoint produced no valid handoff", degraded: true } });
     }
     // Operator decisions ride the checkpoint into the successor generation.
     // Without this a rotation silently forgets what the operator decided, and
@@ -936,7 +936,7 @@ export class OrchestratorRunner {
       payload: { userSessionId: sessionId, generation: session.sdkGeneration + 1,
         reason: due.reason,
         handoffId: prepared.row.id, checkpointBytes: prepared.row.bytes, degraded } });
-    this.#deps.bus.append({ type: "user_session.runtime", userSessionId: sessionId,
+    this.#deps.bus.append({ type: "user_session.runtime.noted", userSessionId: sessionId,
       payload: { userSessionId: sessionId, detail: `checkpoint ${prepared.row.id} completed in ${Date.now() - started}ms` } });
   }
 
@@ -959,7 +959,7 @@ export class OrchestratorRunner {
       env: sdkEnv(), abortController: abort, persistSession: true,
       ...(this.#deps.sessionStore === undefined ? {} : { sessionStore: this.#deps.sessionStore as SdkOptions["sessionStore"], sessionStoreFlush: "eager" as const }),
       resume: session.sdkSessionId, ...(model ? { model } : {}),
-      ...(this.#deps.config.effort ? { effort: this.#deps.config.effort as SdkOptions["effort"] } : {}),
+      ...(this.#deps.config.infra.effort ? { effort: this.#deps.config.infra.effort as SdkOptions["effort"] } : {}),
     } });
     try {
       for await (const raw of query) for (const event of mapSdkMessage(raw)) {

@@ -1,24 +1,24 @@
 import { describe, expect, it } from "vitest";
 import type { TopologyContract } from "./topology-contract.ts";
-import { compileContract, contractOfSession, hubContract, roleOfSeat } from "./topology.ts";
+import { compileContract, contractOfSession, hubContract, roleOfAgent } from "./topology.ts";
 
 describe("topology contracts", () => {
   it("hub contract encodes exactly the legacy route table", () => {
     const hub = compileContract(hubContract());
-    expect(hub.edge("main", "coordinator")?.advance).toBe("router");
-    expect(hub.edge("coordinator", "main")?.advance).toBe("router");
-    expect(hub.edge("coordinator", "specialist")?.advance).toBe("router");
-    expect(hub.edge("specialist", "coordinator")?.advance).toBe("router");
+    expect(hub.edge("main", "coordinator")?.advance).toBe("immediate");
+    expect(hub.edge("coordinator", "main")?.advance).toBe("immediate");
+    expect(hub.edge("coordinator", "specialist")?.advance).toBe("immediate");
+    expect(hub.edge("specialist", "coordinator")?.advance).toBe("immediate");
     // The three hops the star has always denied.
     expect(hub.edge("specialist", "specialist")).toBeUndefined();
     expect(hub.edge("specialist", "main")).toBeUndefined();
     expect(hub.edge("main", "specialist")).toBeUndefined();
   });
 
-  it("resolves a seat's contract role from its pattern_role binding", () => {
-    expect(roleOfSeat({ role: "orchestrator", patternRole: "coordinator" })).toBe("coordinator");
-    expect(roleOfSeat({ role: "agent", patternRole: "specialist" })).toBe("specialist");
-    expect(roleOfSeat({ role: "agent", patternRole: "mapper" })).toBe("mapper");
+  it("resolves an agent's contract role from its role binding", () => {
+    expect(roleOfAgent({ role: "coordinator" })).toBe("coordinator");
+    expect(roleOfAgent({ role: "specialist" })).toBe("specialist");
+    expect(roleOfAgent({ role: "mapper" })).toBe("mapper");
   });
 
   it("reads an empty topology snapshot as the hub default", () => {

@@ -54,30 +54,30 @@ console.log(`events: ${num(span?.count)} (${span?.first ?? "–"} → ${span?.la
 
 // ── Spend ────────────────────────────────────────────────────────────────────
 heading("Spend by participant (usage_samples)");
-const spend = all<{ participant: string; profile: string | null; model: string | null; turns: number;
+const spend = all<{ agent: string; profile: string | null; model: string | null; turns: number;
   input: number; uncached: number; cacheCreate: number; cacheRead: number; output: number; cost: number | null; errors: number }>(
-  `select participant, profile_id as profile, model,
+  `select participant as agent, profile_id as profile, model,
      count(*) as turns, sum(input_tokens) as input, sum(uncached_input_tokens) as uncached,
      sum(cache_creation_input_tokens) as cacheCreate, sum(cache_read_input_tokens) as cacheRead,
      sum(output_tokens) as output, sum(cost_usd) as cost,
      sum(case when status != 'completed' then 1 else 0 end) as errors
    from usage_samples group by participant, profile_id, model order by sum(output_tokens) desc`);
-table(spend.map((row) => ({ participant: row.participant, profile: row.profile ?? "–", model: row.model ?? "–",
+table(spend.map((row) => ({ agent: row.agent, profile: row.profile ?? "–", model: row.model ?? "–",
   turns: row.turns, input: num(row.input), uncached: num(row.uncached), cacheRead: num(row.cacheRead),
   output: num(row.output), cost: row.cost === null ? "–" : `$${row.cost.toFixed(4)}`, errors: row.errors })),
-  ["participant", "profile", "model", "turns", "input", "uncached", "cacheRead", "output", "cost", "errors"]);
+  ["agent", "profile", "model", "turns", "input", "uncached", "cacheRead", "output", "cost", "errors"]);
 const totals = all<{ input: number; output: number; cost: number | null }>(
   "select sum(input_tokens) as input, sum(output_tokens) as output, sum(cost_usd) as cost from usage_samples")[0];
 console.log(`\n  TOTAL input ${num(totals?.input)} · output ${num(totals?.output)} · cost ${totals?.cost == null ? "–" : `$${totals.cost.toFixed(4)}`}`);
 
 // ── Turn latency ─────────────────────────────────────────────────────────────
 heading("Turn latency (usage_samples.duration_ms)");
-for (const row of all<{ participant: string }>("select distinct participant from usage_samples order by participant")) {
+for (const row of all<{ agent: string }>("select distinct participant as agent from usage_samples order by participant")) {
   const durations = all<{ d: number }>(
-    "select duration_ms as d from usage_samples where participant = ? and duration_ms is not null order by duration_ms", row.participant)
+    "select duration_ms as d from usage_samples where participant = ? and duration_ms is not null order by duration_ms", row.agent)
     .map((entry) => entry.d);
   if (durations.length === 0) continue;
-  console.log(`  ${row.participant.padEnd(20)} n=${String(durations.length).padEnd(5)} p50=${ms(percentile(durations, 50))} p90=${ms(percentile(durations, 90))} max=${ms(durations[durations.length - 1] ?? null)}`);
+  console.log(`  ${row.agent.padEnd(20)} n=${String(durations.length).padEnd(5)} p50=${ms(percentile(durations, 50))} p90=${ms(percentile(durations, 90))} max=${ms(durations[durations.length - 1] ?? null)}`);
 }
 
 // ── Delivery latency ─────────────────────────────────────────────────────────
@@ -101,15 +101,15 @@ for (const transport of ["peer", "console"]) {
 heading("Tool denials (governance.tool.denied)");
 table(all(
   `select json_extract(payload, '$.toolName') as tool, json_extract(payload, '$.kind') as kind, count(*) as count
-   from events where type = 'governance.tool.denied' group by 1, 2 order by count desc`), ["tool", "kind", "count"]);
+   from events where type = 'tool.denied' group by 1, 2 order by count desc`), ["tool", "kind", "count"]);
 
 // ── Watchdog + failures ──────────────────────────────────────────────────────
 heading("Watchdog trips (agent_session.watchdog)");
 table(all(
-  `select json_extract(payload, '$.participant') as participant, json_extract(payload, '$.kind') as kind,
+  `select json_extract(payload, '$.agent') as agent, json_extract(payload, '$.kind') as kind,
      json_extract(payload, '$.toolName') as tool, count(*) as count
-   from events where type = 'agent_session.watchdog' group by 1, 2, 3 order by count desc`),
-  ["participant", "kind", "tool", "count"]);
+   from events where type = 'agent_session.watchdog.tripped' group by 1, 2, 3 order by count desc`),
+  ["agent", "kind", "tool", "count"]);
 heading("Turn outcomes (turn.settled)");
 table(all(
   `select type, json_extract(payload, '$.status') as status, count(*) as count
@@ -130,16 +130,16 @@ table(all(
 // ── Rotation + checkpoints ───────────────────────────────────────────────────
 heading("Context rotations");
 table(all(
-  `select type, json_extract(payload, '$.participant') as participant,
+  `select type, json_extract(payload, '$.agent') as agent,
      json_extract(payload, '$.degraded') as degraded, count(*) as count
    from events where type in ('user_session.context.rotated', 'agent_session.context.rotated')
-   group by 1, 2, 3`), ["type", "participant", "degraded", "count"]);
+   group by 1, 2, 3`), ["type", "agent", "degraded", "count"]);
 heading("Checkpoint gate (handoff.checkpoint.*)");
 table(all(
-  `select type, json_extract(payload, '$.participant') as participant, json_extract(payload, '$.accepted') as accepted,
+  `select type, json_extract(payload, '$.agent') as agent, json_extract(payload, '$.accepted') as accepted,
      json_extract(payload, '$.degraded') as degraded, count(*) as count
    from events where type like 'handoff.checkpoint.%' group by 1, 2, 3, 4`),
-  ["type", "participant", "accepted", "degraded", "count"]);
+  ["type", "agent", "accepted", "degraded", "count"]);
 
 // ── Handoffs ─────────────────────────────────────────────────────────────────
 heading("Handoff records");
@@ -155,8 +155,8 @@ table(all(
    from events where type = 'handoff.consumed' group by 1`), ["mode", "count"]);
 heading("Handoff discrepancies (handoff.discrepancy)");
 table(all(
-  `select json_extract(payload, '$.participant') as participant, json_extract(payload, '$.claim') as claim
-   from events where type = 'handoff.discrepancy' limit 20`), ["participant", "claim"]);
+  `select json_extract(payload, '$.agent') as agent, json_extract(payload, '$.claim') as claim
+   from events where type = 'handoff.discrepancy.reported' limit 20`), ["agent", "claim"]);
 
 // ── Provider friction ────────────────────────────────────────────────────────
 heading("Provider friction (runtime notices)");
@@ -171,7 +171,7 @@ table(all(
        when json_extract(payload, '$.detail') like 'steered mid-turn%' then 'steered_mid_turn'
        else null end as kind,
      count(*) as count
-   from events where type in ('user_session.runtime', 'agent_session.runtime')
+   from events where type in ('user_session.runtime.noted', 'agent_session.runtime.noted')
    group by 1 having kind is not null order by count desc`), ["kind", "count"]);
 
 // ── Health scorecard ─────────────────────────────────────────────────────────
@@ -182,13 +182,13 @@ table(all(
 heading("Health scorecard");
 
 const one = <T = number>(sql: string): T => (all<Record<string, T>>(sql)[0]?.n ?? 0 as T);
-const sends = one(`select count(*) as n from events where type = 'agent_session.tool.call'
+const sends = one(`select count(*) as n from events where type = 'agent_session.tool.called'
   and json_extract(payload, '$.name') in ('SendMessage', 'mcp__console_agent__send_handoff')`);
 const rotations = one(`select count(*) as n from events where type = 'agent_session.context.rotated'`);
 const cpFailed = one(`select count(*) as n from events where type = 'handoff.checkpoint.failed'`);
 const toMain = one(`select count(*) as n from mailbox_deliveries where recipient = 'main'`);
-const unreported = one(`select count(*) as n from events where type = 'agent_session.unreported'`);
-const toolSearch = one(`select count(*) as n from events where type in ('agent_session.tool.call','user_session.tool.call')
+const unreported = one(`select count(*) as n from events where type = 'agent_session.closeout.forced'`);
+const toolSearch = one(`select count(*) as n from events where type in ('agent_session.tool.called','user_session.tool.call')
   and json_extract(payload, '$.name') = 'ToolSearch'`);
 const cliSessions = one(`select count(distinct session_id) as n from provider_entries_v2`);
 
@@ -208,17 +208,17 @@ table([
 
 // Cost is recorded per turn as a delta of the SDK's cumulative figure. If a
 // row still looks cumulative the ledger is over-reporting, as db-live-1's was.
-const costRows = all<{ participant: string; recorded: number; largest: number; turns: number }>(
-  `select participant, sum(cost_usd) as recorded, max(cost_usd) as largest, count(*) as turns
+const costRows = all<{ agent: string; recorded: number; largest: number; turns: number }>(
+  `select participant as agent, sum(cost_usd) as recorded, max(cost_usd) as largest, count(*) as turns
    from usage_samples where cost_usd is not null group by participant order by recorded desc`);
 if (costRows.length > 0) {
   heading("Cost (per-turn deltas)");
   table(costRows.map((row) => ({
-    participant: row.participant,
+    agent: row.agent,
     total: `$${row.recorded.toFixed(2)}`,
     turns: num(row.turns),
     largest_turn: `$${row.largest.toFixed(2)}`,
-  })), ["participant", "total", "turns", "largest_turn"]);
+  })), ["agent", "total", "turns", "largest_turn"]);
   console.log(`\nTotal: $${costRows.reduce((sum, row) => sum + row.recorded, 0).toFixed(2)}`);
 }
 

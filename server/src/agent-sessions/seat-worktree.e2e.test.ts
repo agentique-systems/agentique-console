@@ -64,7 +64,7 @@ function makeWorld(devStatus: "completed" | "failed", options: { conflict?: bool
       fs.writeFileSync(path.join(cwd, "widget.txt"), "implemented\n");
       yield toolUseMessage("w-1", "Write", { file_path: "widget.txt" });
       yield toolResultMessage("w-1", "ok");
-      yield sendHandoffUse("dev-close", "orchestrator", { action: "widget implemented", status: devStatus, category: "milestone" });
+      yield sendHandoffUse("dev-close", "coordinator", { action: "widget implemented", status: devStatus, category: "milestone" });
       yield successMessage();
       return;
     }
@@ -76,7 +76,7 @@ function makeWorld(devStatus: "completed" | "failed", options: { conflict?: bool
 
 async function runFlow(h: DelegationHarness) {
   const userSessionId = h.addUserSession();
-  const done = collectUntil(h.bus, (event) => event.type === "flow.result", 20_000);
+  const done = collectUntil(h.bus, (event) => event.type === "agent_session.result.returned", 20_000);
   const created = h.host.createSession({ userSessionId, title: "swt", agents: [{ name: "dev", profileId: "implementer", owns: ["widget"] }], briefing: handoff("build widget", "pending") });
   return { created, events: await done };
 }
@@ -87,7 +87,7 @@ describe("seat worktree isolation (fake SDK + real git)", () => {
     const { created, events } = await runFlow(h);
     const createdEvents = events.filter((event) => event.type === "agent_session.worktree.created");
     expect(createdEvents).toHaveLength(1);
-    expect(createdEvents[0]?.payload).toMatchObject({ seat: "dev" });
+    expect(createdEvents[0]?.payload).toMatchObject({ agent: "dev" });
     const devOptions = h.fake.captured.options.find((opts) => {
       const append = typeof opts.systemPrompt === "object" && !Array.isArray(opts.systemPrompt) ? opts.systemPrompt.append ?? "" : "";
       return append.includes("exclusively own the assigned files");
@@ -96,14 +96,14 @@ describe("seat worktree isolation (fake SDK + real git)", () => {
     expect((devOptions?.systemPrompt as { append?: string })?.append).toContain("isolated worktree");
     const merged = events.filter((event) => event.type === "agent_session.worktree.merged");
     expect(merged).toHaveLength(1);
-    expect(merged[0]?.payload).toMatchObject({ seat: "dev", filesChanged: 1 });
+    expect(merged[0]?.payload).toMatchObject({ agent: "dev", filesChanged: 1 });
     expect(fs.readFileSync(path.join(repo, "widget.txt"), "utf8")).toBe("implemented\n");
     expect(git(repo, "status", "--porcelain").trim()).toBe("");
     const artifact = h.app.artifacts.get((merged[0]?.payload as { artifactId: string }).artifactId);
     expect(artifact?.content).toContain("widget.txt");
     // The merge commit's parent chain includes the turn-snapshot/report commits.
     expect(git(repo, "log", "--oneline")).toContain("Merge seat dev");
-    const seat = h.repo.getParticipant(created.agentSessionId, "dev");
+    const seat = h.repo.getAgent(created.agentSessionId, "dev");
     expect(seat?.worktreePath).toBeNull();
   });
 
@@ -112,7 +112,7 @@ describe("seat worktree isolation (fake SDK + real git)", () => {
     const { events } = await runFlow(h);
     const discarded = events.filter((event) => event.type === "agent_session.worktree.discarded");
     expect(discarded).toHaveLength(1);
-    expect(discarded[0]?.payload).toMatchObject({ seat: "dev", reason: "seat reported failed" });
+    expect(discarded[0]?.payload).toMatchObject({ agent: "dev", reason: "seat reported failed" });
     expect(fs.existsSync(path.join(repo, "widget.txt"))).toBe(false);
     const artifact = h.app.artifacts.get((discarded[0]?.payload as { artifactId: string }).artifactId);
     expect(artifact?.content).toContain("widget.txt");
@@ -149,12 +149,12 @@ describe("seat worktree isolation (fake SDK + real git)", () => {
         return;
       }
       yield initMessage("seat-1");
-      yield sendHandoffUse("seat-close", "orchestrator", { action: "looked around", status: "completed", category: "milestone" });
+      yield sendHandoffUse("seat-close", "coordinator", { action: "looked around", status: "completed", category: "milestone" });
       yield successMessage();
     }, { workspaceRoot: plain, runtime: { worktrees: new WorktreeManager({ dataDir: path.join(plain, "data") }) },
-      config: { autoInitGit: false } });
+      config: { infra: { autoInitGit: false } } });
     const userSessionId = h.addUserSession();
-    const done = collectUntil(h.bus, (event) => event.type === "flow.result", 20_000);
+    const done = collectUntil(h.bus, (event) => event.type === "agent_session.result.returned", 20_000);
     h.host.createSession({ userSessionId, title: "plain", agents: [{ name: "dev", profileId: "implementer", owns: ["src/widget.ts"] }, { name: "scout", profileId: "explorer" }], briefing: handoff("go", "pending") });
     const events = await done;
     expect(events.some((event) => event.type === "agent_session.worktree.created")).toBe(false);
@@ -176,9 +176,9 @@ describe("seat worktree isolation (fake SDK + real git)", () => {
       }
       yield successMessage();
     }, { workspaceRoot: repo, runtime: { worktrees: new WorktreeManager({ dataDir }) } });
-    (h.config as { seatWorktrees: boolean }).seatWorktrees = false;
+    h.config.policy.agentWorktrees = false;
     const userSessionId = h.addUserSession();
-    const done = collectUntil(h.bus, (event) => event.type === "flow.result", 20_000);
+    const done = collectUntil(h.bus, (event) => event.type === "agent_session.result.returned", 20_000);
     h.host.createSession({ userSessionId, title: "off", agents: [{ name: "dev", profileId: "implementer", owns: ["src/widget.ts"] }], briefing: handoff("go", "pending") });
     const events = await done;
     expect(events.some((event) => event.type === "agent_session.worktree.created")).toBe(false);

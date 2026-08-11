@@ -34,21 +34,21 @@ describe("OrchestratorRunner", () => {
     const events = await collected;
     const types = events.map((e) => e.type);
     expect(types).toEqual([
-      "user_session.message", // operator
+      "user_session.message.appended", // operator
       "user_session.turn.started",
-      "agent.state", // thinking
+      "agent_session.activity.changed", // thinking
       "stream.reasoning",
-      "agent.state", // responding
+      "agent_session.activity.changed", // responding
       "stream.delta",
       "stream.delta",
-      "user_session.message", // orchestrator
+      "user_session.message.appended", // orchestrator
       "usage.recorded",
-      "agent.state", // idle
+      "agent_session.activity.changed", // idle
       "user_session.turn.settled",
     ]);
 
     const orchestratorMsg = events.filter(
-      (e) => e.type === "user_session.message",
+      (e) => e.type === "user_session.message.appended",
     )[1];
     expect(orchestratorMsg?.payload).toMatchObject({
       message: {
@@ -90,7 +90,7 @@ describe("OrchestratorRunner", () => {
     const events = await collected;
 
     const details = events
-      .filter((e) => e.type === "agent.state")
+      .filter((e) => e.type === "agent_session.activity.changed")
       .map((e) => (e.payload as { detail?: string }).detail)
       .filter((detail) => detail !== undefined);
     expect(details).toEqual([
@@ -103,12 +103,12 @@ describe("OrchestratorRunner", () => {
       .slice(
         events.findIndex(
           (e) =>
-            e.type === "user_session.message" &&
+            e.type === "user_session.message.appended" &&
             (e.payload as { message: { text: string } }).message.text ===
               "finally",
         ),
       )
-      .filter((e) => e.type === "agent.state");
+      .filter((e) => e.type === "agent_session.activity.changed");
     expect(
       afterText.every((e) => (e.payload as { detail?: string }).detail === undefined),
     ).toBe(true);
@@ -127,8 +127,8 @@ describe("OrchestratorRunner", () => {
     h.runner.postOperatorMessage(sessionId, "read something");
     const events = await collected;
 
-    const call = events.find((e) => e.type === "user_session.tool.call");
-    const result = events.find((e) => e.type === "user_session.tool.result");
+    const call = events.find((e) => e.type === "user_session.tool.called");
+    const result = events.find((e) => e.type === "user_session.tool.completed");
     expect(call?.payload).toMatchObject({
       callId: "tu_1",
       name: "Read",
@@ -236,7 +236,7 @@ describe("OrchestratorRunner", () => {
       answers: { "Which database?": ["SQLite"] },
     });
     const reply = events
-      .filter((e) => e.type === "user_session.message")
+      .filter((e) => e.type === "user_session.message.appended")
       .at(-1);
     expect(reply?.payload).toMatchObject({
       message: { text: "You chose SQLite" },
@@ -269,7 +269,7 @@ describe("OrchestratorRunner", () => {
     );
     expect(answered?.payload).toMatchObject({ dismissed: true });
     const denyReply = events
-      .filter((e) => e.type === "user_session.message")
+      .filter((e) => e.type === "user_session.message.appended")
       .find((e) =>
         (e.payload as { message: { text: string } }).message.text.startsWith(
           "denied:",
@@ -378,7 +378,7 @@ describe("OrchestratorRunner", () => {
     const noticed = await collectUntil(
       h.bus,
       (e) =>
-        e.type === "user_session.message" &&
+        e.type === "user_session.message.appended" &&
         (e.payload as { message: { kind: string } }).message.kind === "notice",
     );
     expect(

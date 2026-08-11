@@ -22,6 +22,13 @@
       "when": 1786475324455,
       "tag": "0002_pattern_role_backfill",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1786477565017,
+      "tag": "0003_glossary",
+      "breakpoints": true
     }
   ]
 }

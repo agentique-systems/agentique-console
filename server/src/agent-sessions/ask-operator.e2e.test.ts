@@ -80,7 +80,7 @@ describe("ask_operator", () => {
     // blocking — all three were unavailable on the old blocking path.
     const row = h.db.select().from(interactionRows).all()[0]!;
     expect(row.agentSessionId).toBe(agentSessionId);
-    expect(row.participant).toBe("orchestrator");
+    expect(row.participant).toBe("coordinator");
     expect(row.urgency).toBe("blocking");
     expect(row.allowFreeText).toBe(true);
     const questions = (row.payload as { questions: { recommendation?: string }[] }).questions;
@@ -141,12 +141,12 @@ describe("ask_operator", () => {
     h.host.post({
       agentSessionId,
       speaker: { kind: "orchestrator", name: "main" },
-      to: "orchestrator", handoff: handoff("carry on"), category: "assignment",
+      to: "coordinator", handoff: handoff("carry on"), category: "assignment",
     });
     await collectUntil(
       h.bus,
-      (event) => event.type === "agent_session.mailbox"
-        && (event.payload as { recipient?: string }).recipient === "orchestrator"
+      (event) => event.type === "agent_session.delivery.updated"
+        && (event.payload as { recipient?: string }).recipient === "coordinator"
         && (event.payload as { status?: string }).status === "delivered",
       10_000,
     );
@@ -157,7 +157,7 @@ describe("ask_operator", () => {
     expect(prompt).toMatch(/Authoritative — act on these and do not ask again/);
 
     // Flushed exactly once: the seat has been told, so the next prompt is clean.
-    expect(h.interactions.listAnsweredUnflushed(agentSessionId, "orchestrator")).toHaveLength(0);
+    expect(h.interactions.listAnsweredUnflushed(agentSessionId, "coordinator")).toHaveLength(0);
   });
 
   it("never reports a dismissal as a tool error", async () => {

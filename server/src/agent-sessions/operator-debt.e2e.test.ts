@@ -31,8 +31,8 @@ describe("operator debt (fake SDK)", () => {
     const tool = h.fake.captured.tools.filter((t) => t.name === "send_handoff").at(-1);
     expect(tool).toBeDefined();
 
-    const unreported = collectUntil(h.bus, (event) => event.type === "agent_session.unreported", 10_000);
-    h.host.post({ agentSessionId: created.agentSessionId, speaker: { kind: "agent", name: "scout" }, to: "orchestrator",
+    const unreported = collectUntil(h.bus, (event) => event.type === "agent_session.closeout.forced", 10_000);
+    h.host.post({ agentSessionId: created.agentSessionId, speaker: { kind: "agent", name: "scout" }, to: "coordinator",
       handoff: { core: { schemaVersion: 1, taskId: null, status: "completed", risk: "medium",
         action: "Verify the build",
         state: { summary: "Collision tunneling at src/game.js:191 — fix before shipping.", evidence: [] },
@@ -42,7 +42,7 @@ describe("operator debt (fake SDK)", () => {
 
     expect(events.at(-1)?.payload).toMatchObject({ agentSessionId: created.agentSessionId, hadCoordinatorReport: false });
     // The operator is told, and the specialist's finding travels with it.
-    const toMain = h.repo.latestHandoff({ userSessionId, agentSessionId: created.agentSessionId, participant: "main" });
+    const toMain = h.repo.latestHandoff({ userSessionId, agentSessionId: created.agentSessionId, recipient: "main" });
     expect(toMain).toBeDefined();
     expect(toMain?.core.state.summary).toContain("Collision tunneling at src/game.js:191");
     // ...and is honestly labelled as console-assembled, not a coordinator result.
@@ -61,14 +61,14 @@ describe("operator debt (fake SDK)", () => {
 
     // An assignment nobody has acknowledged: the old gate threw here, which is
     // how a jammed ledger silenced the run.
-    h.host.post({ agentSessionId: created.agentSessionId, speaker: { kind: "orchestrator", name: "orchestrator" }, to: "scout",
+    h.host.post({ agentSessionId: created.agentSessionId, speaker: { kind: "orchestrator", name: "coordinator" }, to: "scout",
       handoff: handoff("go dig", "pending"), category: "assignment" });
 
-    const message = h.host.post({ agentSessionId: created.agentSessionId, speaker: { kind: "orchestrator", name: "orchestrator" }, to: "main",
+    const message = h.host.post({ agentSessionId: created.agentSessionId, speaker: { kind: "orchestrator", name: "coordinator" }, to: "main",
       handoff: handoff("all done", "completed"), category: "final" });
     expect(message).toBeDefined();
 
-    const toMain = h.repo.latestHandoff({ userSessionId, agentSessionId: created.agentSessionId, participant: "main" });
+    const toMain = h.repo.latestHandoff({ userSessionId, agentSessionId: created.agentSessionId, recipient: "main" });
     expect(toMain?.core.uncertainty.join(" ")).toContain("reported final with work outstanding");
   });
 });

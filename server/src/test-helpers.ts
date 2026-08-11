@@ -1,6 +1,6 @@
 /** Shared test harness: the REAL composition root over an in-memory DB and a scripted fake SDK. */
 import type { ConsoleEvent } from "@agentique-console/shared";
-import type { AgentSessionHost } from "./agent-sessions/host.ts";
+import type { AgentSessionService } from "./agent-sessions/host.ts";
 import { createApp, type App, type CreateAppOptions } from "./app.ts";
 import { bootApp, type BootReport } from "./boot.ts";
 import { loadConfig, type Config } from "./config.ts";
@@ -18,8 +18,8 @@ import { HandoffService } from "./handoffs/service.ts";
 import type { TaskService } from "./tasks/service.ts";
 
 export interface HarnessOptions {
-  /** Merged over `loadConfig({})` (which already gets a 25ms quiet window). */
-  config?: Partial<Config>;
+  /** Deep-merged over `loadConfig({})` (which already gets a 25ms quiet window). */
+  config?: { infra?: Partial<Config["infra"]>; policy?: Partial<Config["policy"]> };
   /** OS-capability injection; the harness default is explicit absence. */
   runtime?: CreateAppOptions["runtime"];
   /** The workspace row's root path; defaults to /tmp/test-workspace. */
@@ -35,7 +35,7 @@ export interface Harness {
   interactions: InteractionService;
   decisions: DecisionLedger;
   runner: OrchestratorRunner;
-  host: AgentSessionHost;
+  host: AgentSessionService;
   completion: RunCompletionService;
   tasks: TaskService;
   handoffs: HandoffService;
@@ -51,11 +51,11 @@ export type DelegationHarness = Harness;
 export function makeHarness(program: FakeProgram, options: HarnessOptions = {}): Harness {
   const { db, sqlite } = openDb(":memory:");
   const fake = fakeSdk(program);
+  const base = loadConfig({});
   const config: Config = {
-    ...loadConfig({}),
+    infra: { ...base.infra, ...options.config?.infra },
     // The real window is 2s; tests would otherwise pay it on every case.
-    completionQuietWindowMs: 25,
-    ...options.config,
+    policy: { ...base.policy, completionQuietWindowMs: 25, ...options.config?.policy },
   };
   const workspaceRoot = options.workspaceRoot ?? "/tmp/test-workspace";
 
@@ -102,7 +102,7 @@ export function makeHarness(program: FakeProgram, options: HarnessOptions = {}):
         title: "test session",
         mode,
         phase: mode === "plan_execute" ? "planning" : "executing",
-        status: "open",
+        lifecycle: "open",
         purpose: "work",
         subjectKey: null,
         sdkSessionId: null,
@@ -138,7 +138,10 @@ export async function restartHarness(
   harness: Harness,
   options: HarnessOptions = {},
 ): Promise<Harness & { bootReport: BootReport }> {
-  const config: Config = { ...harness.config, ...options.config };
+  const config: Config = {
+    infra: { ...harness.config.infra, ...options.config?.infra },
+    policy: { ...harness.config.policy, ...options.config?.policy },
+  };
   const app = createApp({
     config,
     db: harness.db,
@@ -170,17 +173,17 @@ export async function bootHarness(harness: Harness): Promise<BootReport> {
 }
 
 /**
- * The console-owned seat identity a spawn carried in its env (host.#spawnSeat).
+ * The console-owned agent identity a spawn carried in its env (host.#spawnSeat).
  * Fake programs receive the spawn options as their first argument, so this is
  * the role discriminator — prompt-text sniffing is the legacy alternative.
  */
-export function seatRoleOf(options: { env?: Record<string, string | undefined> } | undefined): {
-  agentSessionId?: string; seat?: string; role?: string; pattern?: string; depth?: number;
+export function agentRoleOf(options: { env?: Record<string, string | undefined> } | undefined): {
+  agentSessionId?: string; agent?: string; role?: string; pattern?: string; depth?: number;
 } {
   const env = options?.env ?? {};
   return {
     ...(env.CONSOLE_AGENT_SESSION_ID !== undefined ? { agentSessionId: env.CONSOLE_AGENT_SESSION_ID } : {}),
-    ...(env.CONSOLE_SEAT_NAME !== undefined ? { seat: env.CONSOLE_SEAT_NAME } : {}),
+    ...(env.CONSOLE_AGENT_NAME !== undefined ? { agent: env.CONSOLE_AGENT_NAME } : {}),
     ...(env.CONSOLE_PATTERN_ROLE !== undefined ? { role: env.CONSOLE_PATTERN_ROLE } : {}),
     ...(env.CONSOLE_PATTERN !== undefined ? { pattern: env.CONSOLE_PATTERN } : {}),
     ...(env.CONSOLE_SESSION_DEPTH !== undefined ? { depth: Number(env.CONSOLE_SESSION_DEPTH) } : {}),

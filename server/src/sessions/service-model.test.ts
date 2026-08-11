@@ -87,7 +87,7 @@ describe("UserSessionService model", () => {
     const session = sessions.create({ workspaceId, mode: "execute", message: "go" });
     runner.recycleSession.mockClear();
 
-    sessions.patch(session.id, { status: "archived" });
+    sessions.patch(session.id, { lifecycle: "archived" });
 
     expect(runner.closeSession).toHaveBeenCalledWith(session.id);
     expect(runner.recycleSession).not.toHaveBeenCalled();

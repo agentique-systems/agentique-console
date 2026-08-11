@@ -31,13 +31,13 @@ const handoff = (action: string) => ({
 });
 
 function stubRuntime() {
-  const stopParticipant = vi.fn((_agentSessionId: string, _participant: string) => [{ processId: "task_stub", pid: 4242 }]);
-  const closeParticipant = vi.fn(async (_key: string) => true);
+  const stopAgent = vi.fn((_agentSessionId: string, _participant: string) => [{ processId: "task_stub", pid: 4242 }]);
+  const closeAgent = vi.fn(async (_key: string) => true);
   return {
-    stopParticipant,
-    closeParticipant,
-    processes: { stopParticipant, stopSession: vi.fn(), closeAll: vi.fn() } as unknown as ProcessManager,
-    browsers: { closeParticipant, closeSession: vi.fn(), closeAll: vi.fn() } as unknown as BrowserManager,
+    stopAgent,
+    closeAgent,
+    processes: { stopAgent, stopSession: vi.fn(), closeAll: vi.fn() } as unknown as ProcessManager,
+    browsers: { closeAgent, closeSession: vi.fn(), closeAll: vi.fn() } as unknown as BrowserManager,
   };
 }
 
@@ -52,7 +52,7 @@ describe("seat park reaps the seat's runtime", () => {
       {
         // A 20ms idle window so the park happens inside the test rather than
         // five minutes later.
-        config: { seatIdleReapMs: 20 },
+        config: { policy: { agentIdleReapMs: 20 } },
         runtime: { processes: runtime.processes, browsers: runtime.browsers },
       },
     );
@@ -65,17 +65,17 @@ describe("seat park reaps the seat's runtime", () => {
     // The park is what triggers the reap; wait for the runtime notice it emits.
     const events = await collectUntil(
       h.bus,
-      (event) => event.type === "agent_session.runtime" && String((event.payload as { detail?: string }).detail ?? "").includes("seat parked"),
+      (event) => event.type === "agent_session.runtime.noted" && String((event.payload as { detail?: string }).detail ?? "").includes("agent parked"),
       10_000,
     );
 
-    expect(runtime.stopParticipant).toHaveBeenCalledWith(created.agentSessionId, "orchestrator");
-    expect(runtime.closeParticipant).toHaveBeenCalledWith(`${created.agentSessionId}:orchestrator`);
+    expect(runtime.stopAgent).toHaveBeenCalledWith(created.agentSessionId, "coordinator");
+    expect(runtime.closeAgent).toHaveBeenCalledWith(`${created.agentSessionId}:coordinator`);
 
     // The notice must name what died. A silent kill turns "my server vanished"
     // into the same forensic exercise the leak itself caused.
     const parked = events.find(
-      (event) => event.type === "agent_session.runtime" && String((event.payload as { detail?: string }).detail ?? "").includes("seat parked"),
+      (event) => event.type === "agent_session.runtime.noted" && String((event.payload as { detail?: string }).detail ?? "").includes("agent parked"),
     );
     const detail = String((parked?.payload as { detail?: string }).detail ?? "");
     expect(detail).toContain("reaped 1 process(es)");
@@ -90,7 +90,7 @@ describe("seat park reaps the seat's runtime", () => {
         yield successMessage();
       },
       {
-        config: { seatIdleReapMs: 20 },
+        config: { policy: { agentIdleReapMs: 20 } },
         runtime: { processes: runtime.processes, browsers: runtime.browsers },
       },
     );
@@ -100,7 +100,7 @@ describe("seat park reaps the seat's runtime", () => {
     });
     await collectUntil(
       h.bus,
-      (event) => event.type === "agent_session.runtime" && String((event.payload as { detail?: string }).detail ?? "").includes("seat parked"),
+      (event) => event.type === "agent_session.runtime.noted" && String((event.payload as { detail?: string }).detail ?? "").includes("agent parked"),
       10_000,
     );
 
@@ -108,8 +108,8 @@ describe("seat park reaps the seat's runtime", () => {
     // difference between reaping and `stopSession`.
     const processes = runtime.processes as unknown as { stopSession: ReturnType<typeof vi.fn> };
     expect(processes.stopSession).not.toHaveBeenCalled();
-    for (const call of runtime.stopParticipant.mock.calls) {
-      expect(call[1]).toBe("orchestrator");
+    for (const call of runtime.stopAgent.mock.calls) {
+      expect(call[1]).toBe("coordinator");
     }
   });
 });

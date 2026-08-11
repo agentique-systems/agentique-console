@@ -1,14 +1,14 @@
 /**
  * The pattern catalog: one pure builder per orchestration pattern, each
- * compiling operator/model input into a TopologyContract plus the seat plan
- * the host inserts. Builders are the ONLY place pattern names mean anything —
- * the host executes whatever contract comes out.
+ * compiling operator/model input into a TopologyContract plus the agent plan
+ * the service inserts. Builders are the ONLY place pattern names mean
+ * anything — the service executes whatever contract comes out.
  *
  * Two invariants every builder must hold (asserted in `buildContract`):
  * - every role's protocol includes the operator-path bullets — the trust
  *   rules are the console's, not the pattern's to drop;
- * - `completion.finalFrom` and `completion.voice` name single-seat roles, so
- *   role→seat resolution is first-by-ord everywhere.
+ * - `completion.finalFrom` and `completion.voice` name single-agent roles, so
+ *   role→agent resolution is first-by-ord everywhere.
  */
 import { z } from "zod";
 import type { PatternId } from "@agentique-console/shared";
@@ -26,10 +26,10 @@ export interface BuildInput {
   config: Record<string, unknown> | undefined;
   resolveProfile(id: string): AgentProfile;
 }
-export interface SeatPlan {
+export interface AgentPlan {
   name: string;
-  dbRole: "orchestrator" | "agent";
-  patternRole: string;
+  /** Contract role binding ("coordinator", "specialist", "mapper", …). */
+  role: string;
   profileId: string;
   instructions?: string;
   model?: string;
@@ -38,8 +38,8 @@ export interface SeatPlan {
 }
 export interface BuildResult {
   contract: TopologyContract;
-  seats: SeatPlan[];
-  /** Seat name of the pattern's dedicated coordination seat, when it seats one. */
+  agents: AgentPlan[];
+  /** Name of the pattern's dedicated coordination agent, when it seats one. */
   coordinatorName?: string;
 }
 
@@ -53,7 +53,7 @@ export function buildContract(pattern: PatternId, input: BuildInput): BuildResul
   for (const which of ["finalFrom", "voice"] as const) {
     const role = result.contract.completion[which];
     if (result.contract.roles[role] === undefined || result.contract.roles[role].max !== 1) {
-      throw new Error(`pattern ${pattern}: completion.${which} must name a single-seat role, got "${role}"`);
+      throw new Error(`pattern ${pattern}: completion.${which} must name a single-agent role, got "${role}"`);
     }
   }
   return result;
@@ -71,9 +71,9 @@ function builderOf(pattern: PatternId): (input: BuildInput) => BuildResult {
   }
 }
 
-function agentSeats(agents: BuildAgent[], patternRole: (index: number) => string, firstOrd: number): SeatPlan[] {
+function agentPlans(agents: BuildAgent[], roleOf: (index: number) => string, firstOrd: number): AgentPlan[] {
   return agents.map((agent, index) => ({
-    name: agent.name, dbRole: "agent" as const, patternRole: patternRole(index),
+    name: agent.name, role: roleOf(index),
     profileId: agent.profileId ?? "explorer",
     ...(agent.instructions !== undefined ? { instructions: agent.instructions } : {}),
     ...(agent.model !== undefined ? { model: agent.model } : {}),
@@ -87,11 +87,11 @@ function buildHub(input: BuildInput): BuildResult {
   if (input.agents.length < 1 || input.agents.length > 20) throw new InvalidInputError("an agent session seats 1 to 20 specialists");
   return {
     contract: hubContract(),
-    seats: [
-      { name: "orchestrator", dbRole: "orchestrator", patternRole: "coordinator", profileId: "coordinator", owns: [], ord: 0 },
-      ...agentSeats(input.agents, () => "specialist", 1),
+    agents: [
+      { name: "coordinator", role: "coordinator", profileId: "coordinator", owns: [], ord: 0 },
+      ...agentPlans(input.agents, () => "specialist", 1),
     ],
-    coordinatorName: "orchestrator",
+    coordinatorName: "coordinator",
   };
 }
 
@@ -133,15 +133,15 @@ function buildPipeline(input: BuildInput): BuildResult {
       pattern: "pipeline",
       roles,
       edges: [
-        { from: "main", to: roleOf(0), advance: "router" },
+        { from: "main", to: roleOf(0), advance: "immediate" },
         ...names.slice(0, -1).map((_, index): TopologyContract["edges"][number] => ({
-          from: roleOf(index), to: roleOf(index + 1), advance: "router",
+          from: roleOf(index), to: roleOf(index + 1), advance: "immediate",
           categories: ["assignment", "update", "milestone", "failure", "decision"],
         })),
         ...names.slice(0, -1).map((_, index): TopologyContract["edges"][number] => ({
-          from: roleOf(index), to: "main", advance: "router", categories: ["failure"],
+          from: roleOf(index), to: "main", advance: "immediate", categories: ["failure"],
         })),
-        { from: roleOf(last), to: "main", advance: "router", categories: ["update", "milestone", "failure", "final"] },
+        { from: roleOf(last), to: "main", advance: "immediate", categories: ["update", "milestone", "failure", "final"] },
       ],
       joins: [],
       entry: { role: roleOf(0), broadcast: false },
@@ -149,17 +149,17 @@ function buildPipeline(input: BuildInput): BuildResult {
       completion: { finalFrom: roleOf(last), voice: roleOf(last) },
       promptPack,
       routeSummary: `main → ${names.join(" → ")} → main`,
-      limits: { minSeats: 2, maxSeats: 20 },
+      limits: { minAgents: 2, maxAgents: 20 },
       config: { stages: names },
     },
-    seats: agentSeats(input.agents, roleOf, 0),
+    agents: agentPlans(input.agents, roleOf, 0),
   };
 }
 
 // ── evaluator_optimizer ────────────────────────────────────────────────────
 
 const EVALUATOR_CONFIG = z.object({
-  generatorSeat: z.string().optional(),
+  generatorAgent: z.string().optional(),
   rubric: z.string().max(4_000).optional(),
   maxRounds: z.number().int().min(1).max(10).default(3),
   requireDistinctModels: z.boolean().default(true),
@@ -179,10 +179,10 @@ const LOOP_DONE_BULLET = `
 function buildEvaluatorOptimizer(input: BuildInput): BuildResult {
   if (input.agents.length !== 2) throw new InvalidInputError("evaluator_optimizer seats exactly 2 agents: a generator and an evaluator");
   const config = EVALUATOR_CONFIG.parse(input.config ?? {});
-  const generator = config.generatorSeat === undefined
+  const generator = config.generatorAgent === undefined
     ? input.agents[0]!
-    : input.agents.find((agent) => agent.name === config.generatorSeat)
-      ?? (() => { throw new InvalidInputError(`generatorSeat "${config.generatorSeat}" is not one of the agents`); })();
+    : input.agents.find((agent) => agent.name === config.generatorAgent)
+      ?? (() => { throw new InvalidInputError(`generatorAgent "${config.generatorAgent}" is not one of the agents`); })();
   const evaluator = input.agents.find((agent) => agent.name !== generator.name)!;
   if (config.requireDistinctModels) {
     const modelOf = (agent: BuildAgent): string | undefined =>
@@ -190,7 +190,7 @@ function buildEvaluatorOptimizer(input: BuildInput): BuildResult {
     const generatorModel = modelOf(generator);
     const evaluatorModel = modelOf(evaluator);
     if (generatorModel !== undefined && generatorModel === evaluatorModel) {
-      throw new InvalidInputError(`generator and evaluator both resolve to ${generatorModel}; same-model loops collude — override one seat's model, or pass patternConfig.requireDistinctModels: false`);
+      throw new InvalidInputError(`generator and evaluator both resolve to ${generatorModel}; same-model loops collude — override one agent's model, or pass patternConfig.requireDistinctModels: false`);
     }
   }
   const protocol = `${PROTOCOL_INTRO}${LOOP_WORK_BULLET}${OPERATOR_PATH_BULLETS}${LOOP_DONE_BULLET}`;
@@ -209,10 +209,10 @@ function buildEvaluatorContract(input: BuildInput, generator: BuildAgent, evalua
         evaluator: { replicable: false, min: 1, max: 1, grants: ["forward_message"], extensionKind: "review", escalateTo: "main" },
       },
       edges: [
-        { from: "main", to: "generator", advance: "router" },
-        { from: "generator", to: "evaluator", advance: "router", categories: ["update", "milestone", "failure", "decision"] },
-        { from: "evaluator", to: "generator", advance: "router", categories: ["assignment", "update", "decision"], countsRound: true },
-        { from: "evaluator", to: "main", advance: "router", categories: ["update", "milestone", "failure", "final"] },
+        { from: "main", to: "generator", advance: "immediate" },
+        { from: "generator", to: "evaluator", advance: "immediate", categories: ["update", "milestone", "failure", "decision"] },
+        { from: "evaluator", to: "generator", advance: "immediate", categories: ["assignment", "update", "decision"], countsRound: true },
+        { from: "evaluator", to: "main", advance: "immediate", categories: ["update", "milestone", "failure", "final"] },
       ],
       joins: [],
       entry: { role: "generator", broadcast: false },
@@ -222,7 +222,7 @@ function buildEvaluatorContract(input: BuildInput, generator: BuildAgent, evalua
         generator: {
           addressing: `Address participants by bare name. You may address only "${evaluator.name}" — send every draft and revision there.`,
           protocol,
-          brief: `You are the GENERATOR. Produce the deliverable; when "${evaluator.name}" returns a critique, revise against every point and resend. Do not judge your own work — that is the evaluator's seat.`,
+          brief: `You are the GENERATOR. Produce the deliverable; when "${evaluator.name}" returns a critique, revise against every point and resend. Do not judge your own work — that is the evaluator's job.`,
         },
         evaluator: {
           addressing: `Address participants by bare name; "main" reaches the Orchestrator. You may address "${generator.name}" and "main".`,
@@ -231,12 +231,12 @@ function buildEvaluatorContract(input: BuildInput, generator: BuildAgent, evalua
         },
       },
       routeSummary: `main → ${generator.name} ⇄ ${evaluator.name} → main`,
-      limits: { minSeats: 2, maxSeats: 2 },
-      config: { generatorSeat: generator.name, evaluatorSeat: evaluator.name, maxRounds: config.maxRounds, ...(config.rubric === undefined ? {} : { rubric: config.rubric }) },
+      limits: { minAgents: 2, maxAgents: 2 },
+      config: { generatorAgent: generator.name, evaluatorAgent: evaluator.name, maxRounds: config.maxRounds, ...(config.rubric === undefined ? {} : { rubric: config.rubric }) },
     },
-    seats: [
-      ...agentSeats([generator], () => "generator", 0),
-      ...agentSeats([evaluator], () => "evaluator", 1),
+    agents: [
+      ...agentPlans([generator], () => "generator", 0),
+      ...agentPlans([evaluator], () => "evaluator", 1),
     ],
   };
 }
@@ -249,7 +249,7 @@ const MAP_REDUCE_CONFIG = z.object({
 
 const MAP_REDUCE_WORK_BULLET = `
 - You are part of a map-reduce: the reducer splits the work into independent
-  items with dispatch_work_items, one minted mapper seat does exactly one item,
+  items with dispatch_work_items, one minted mapper agent does exactly one item,
   and the Console holds every mapper report until the join is met — then they
   all arrive at the reducer in ONE turn for synthesis.`;
 
@@ -272,10 +272,10 @@ function buildMapReduce(input: BuildInput): BuildResult {
         mapper: { replicable: true, min: 0, max: config.maxMappers, grants: [], escalateTo: "reducer" },
       },
       edges: [
-        { from: "main", to: "reducer", advance: "router" },
-        { from: "reducer", to: "mapper", advance: "router", categories: ["assignment", "update", "decision"] },
-        { from: "mapper", to: "reducer", advance: "console", categories: ["update", "milestone", "failure", "decision"] },
-        { from: "reducer", to: "main", advance: "router", categories: ["update", "milestone", "failure", "final"] },
+        { from: "main", to: "reducer", advance: "immediate" },
+        { from: "reducer", to: "mapper", advance: "immediate", categories: ["assignment", "update", "decision"] },
+        { from: "mapper", to: "reducer", advance: "join", categories: ["update", "milestone", "failure", "decision"] },
+        { from: "reducer", to: "main", advance: "immediate", categories: ["update", "milestone", "failure", "final"] },
       ],
       joins: [{ id: "map", over: "mapper", deliverTo: "reducer" }],
       entry: { role: "reducer", broadcast: false },
@@ -288,19 +288,22 @@ function buildMapReduce(input: BuildInput): BuildResult {
           brief: `You are the REDUCER. Split the briefing into independent work items and fan them out with dispatch_work_items — one item per mapper, runtime-decided width. The Console delivers every mapper report to you in one turn once all have reported; synthesize them and report the combined result to "main" with category "final". Do not do the items yourself.`,
         },
         mapper: {
-          addressing: `Address participants by bare name. You may address only your reducer — the seat that dispatched your item.`,
+          addressing: `Address participants by bare name. You may address only your reducer — the agent that dispatched your item.`,
           protocol,
         },
       },
       routeSummary: `main → ${reducer.name} → mappers → ${reducer.name} → main`,
-      limits: { minSeats: 1, maxSeats: 1 },
-      config: { reducerSeat: reducer.name, maxMappers: config.maxMappers },
+      limits: { minAgents: 1, maxAgents: 1 },
+      config: { reducerAgent: reducer.name, maxMappers: config.maxMappers },
     },
-    seats: agentSeats([reducer], () => "reducer", 0),
+    agents: agentPlans([reducer], () => "reducer", 0),
   };
 }
 
 // ── debate ─────────────────────────────────────────────────────────────────
+
+/** The console-seated arbiter's reserved name in a debate. */
+const ARBITER_NAME = "judge";
 
 const DEBATE_CONFIG = z.object({
   judgeProfileId: z.string().default("reviewer"),
@@ -323,7 +326,7 @@ const DEBATE_DONE_BULLET = `
 
 function buildDebate(input: BuildInput): BuildResult {
   if (input.agents.length < 2 || input.agents.length > 8) throw new InvalidInputError("a debate seats 2 to 8 debaters (the judge is seated by the console)");
-  if (input.agents.some((agent) => agent.name === "judge")) throw new InvalidInputError(`"judge" is the console-seated arbiter's name; pick another seat name`);
+  if (input.agents.some((agent) => agent.name === ARBITER_NAME)) throw new InvalidInputError(`"${ARBITER_NAME}" is the console-seated arbiter's name; pick another agent name`);
   const config = DEBATE_CONFIG.parse(input.config ?? {});
   const protocol = `${PROTOCOL_INTRO}${DEBATE_WORK_BULLET}${OPERATOR_PATH_BULLETS}${DEBATE_DONE_BULLET}`;
   const rubric = config.rubric === undefined ? "" : `\n\nJudge against this rubric:\n${config.rubric}`;
@@ -336,9 +339,9 @@ function buildDebate(input: BuildInput): BuildResult {
         judge: { replicable: false, min: 1, max: 1, grants: ["forward_message"], extensionKind: "review", escalateTo: "main" },
       },
       edges: [
-        { from: "main", to: "debater", advance: "router" },
-        { from: "debater", to: "judge", advance: "console", categories: ["update", "milestone", "failure", "decision"] },
-        { from: "judge", to: "main", advance: "router", categories: ["update", "milestone", "failure", "final"] },
+        { from: "main", to: "debater", advance: "immediate" },
+        { from: "debater", to: "judge", advance: "join", categories: ["update", "milestone", "failure", "decision"] },
+        { from: "judge", to: "main", advance: "immediate", categories: ["update", "milestone", "failure", "final"] },
       ],
       joins: [{ id: "positions", over: "debater", deliverTo: "judge" }],
       entry: { role: "debater", broadcast: true },
@@ -356,12 +359,12 @@ function buildDebate(input: BuildInput): BuildResult {
         },
       },
       routeSummary: `main → debaters → judge → main`,
-      limits: { minSeats: 2, maxSeats: 8 },
+      limits: { minAgents: 2, maxAgents: 8 },
       config: { debaters: input.agents.map((agent) => agent.name), judgeProfileId: config.judgeProfileId, ...(config.rubric === undefined ? {} : { rubric: config.rubric }) },
     },
-    seats: [
-      ...agentSeats(input.agents, () => "debater", 0),
-      { name: "judge", dbRole: "agent", patternRole: "judge", profileId: config.judgeProfileId,
+    agents: [
+      ...agentPlans(input.agents, () => "debater", 0),
+      { name: ARBITER_NAME, role: ARBITER_NAME, profileId: config.judgeProfileId,
         ...(config.judgeModel !== undefined ? { model: config.judgeModel } : {}), owns: [], ord: input.agents.length },
     ],
   };
@@ -370,13 +373,13 @@ function buildDebate(input: BuildInput): BuildResult {
 // ── peer_to_peer ───────────────────────────────────────────────────────────
 
 const P2P_CONFIG = z.object({
-  closerSeat: z.string().optional(),
+  closerAgent: z.string().optional(),
   maxHandoffs: z.number().int().min(4).max(60).default(12),
   oscillationWindow: z.number().int().min(2).max(8).default(3),
 });
 
 const P2P_WORK_BULLET = `
-- You are a peer in a bounded mesh: any seat may hand work to any other, and
+- You are a peer in a bounded mesh: any agent may hand work to any other, and
   nobody sequences you. That freedom is on a hard budget — the Console caps
   total handoffs and stops ping-pong — so every send must MOVE the work.
   The closer owns the ending: keep it able to compile the result.`;
@@ -389,10 +392,10 @@ const P2P_DONE_BULLET = `
 function buildPeerToPeer(input: BuildInput): BuildResult {
   if (input.agents.length < 2 || input.agents.length > 8) throw new InvalidInputError("peer_to_peer seats 2 to 8 peers");
   const config = P2P_CONFIG.parse(input.config ?? {});
-  const closer = config.closerSeat === undefined
+  const closer = config.closerAgent === undefined
     ? input.agents[0]!
-    : input.agents.find((agent) => agent.name === config.closerSeat)
-      ?? (() => { throw new InvalidInputError(`closerSeat "${config.closerSeat}" is not one of the agents`); })();
+    : input.agents.find((agent) => agent.name === config.closerAgent)
+      ?? (() => { throw new InvalidInputError(`closerAgent "${config.closerAgent}" is not one of the agents`); })();
   const peers = input.agents.filter((agent) => agent.name !== closer.name);
   const protocol = `${PROTOCOL_INTRO}${P2P_WORK_BULLET}${OPERATOR_PATH_BULLETS}${P2P_DONE_BULLET}`;
   const addressing = `Address participants by bare name; "main" reaches the Orchestrator (closer only). You may address any peer directly.`;
@@ -405,11 +408,11 @@ function buildPeerToPeer(input: BuildInput): BuildResult {
         closer: { replicable: false, min: 1, max: 1, grants: ["forward_message"], escalateTo: "main" },
       },
       edges: [
-        { from: "main", to: "closer", advance: "router" },
-        { from: "peer", to: "peer", advance: "router" },
-        { from: "peer", to: "closer", advance: "router" },
-        { from: "closer", to: "peer", advance: "router" },
-        { from: "closer", to: "main", advance: "router", categories: ["update", "milestone", "failure", "final"] },
+        { from: "main", to: "closer", advance: "immediate" },
+        { from: "peer", to: "peer", advance: "immediate" },
+        { from: "peer", to: "closer", advance: "immediate" },
+        { from: "closer", to: "peer", advance: "immediate" },
+        { from: "closer", to: "main", advance: "immediate", categories: ["update", "milestone", "failure", "final"] },
       ],
       joins: [],
       entry: { role: "closer", broadcast: false },
@@ -424,12 +427,12 @@ function buildPeerToPeer(input: BuildInput): BuildResult {
         },
       },
       routeSummary: `peers ⇄ peers, ${closer.name} → main`,
-      limits: { minSeats: 2, maxSeats: 8 },
-      config: { closerSeat: closer.name, maxHandoffs: config.maxHandoffs, oscillationWindow: config.oscillationWindow },
+      limits: { minAgents: 2, maxAgents: 8 },
+      config: { closerAgent: closer.name, maxHandoffs: config.maxHandoffs, oscillationWindow: config.oscillationWindow },
     },
-    seats: [
-      ...agentSeats([closer], () => "closer", 0),
-      ...agentSeats(peers, () => "peer", 1),
+    agents: [
+      ...agentPlans([closer], () => "closer", 0),
+      ...agentPlans(peers, () => "peer", 1),
     ],
   };
 }
@@ -437,7 +440,7 @@ function buildPeerToPeer(input: BuildInput): BuildResult {
 // ── plan_execute ───────────────────────────────────────────────────────────
 
 const PLAN_EXECUTE_CONFIG = z.object({
-  plannerSeat: z.string().optional(),
+  plannerAgent: z.string().optional(),
 });
 
 const PLAN_WORK_BULLET = `
@@ -455,10 +458,10 @@ const PLAN_DONE_BULLET = `
 function buildPlanExecute(input: BuildInput): BuildResult {
   if (input.agents.length < 2 || input.agents.length > 20) throw new InvalidInputError("plan_execute seats a planner plus 1-19 executors");
   const config = PLAN_EXECUTE_CONFIG.parse(input.config ?? {});
-  const planner = config.plannerSeat === undefined
+  const planner = config.plannerAgent === undefined
     ? input.agents[0]!
-    : input.agents.find((agent) => agent.name === config.plannerSeat)
-      ?? (() => { throw new InvalidInputError(`plannerSeat "${config.plannerSeat}" is not one of the agents`); })();
+    : input.agents.find((agent) => agent.name === config.plannerAgent)
+      ?? (() => { throw new InvalidInputError(`plannerAgent "${config.plannerAgent}" is not one of the agents`); })();
   const executors = input.agents.filter((agent) => agent.name !== planner.name);
   const protocol = `${PROTOCOL_INTRO}${PLAN_WORK_BULLET}${OPERATOR_PATH_BULLETS}${PLAN_DONE_BULLET}`;
   return {
@@ -470,10 +473,10 @@ function buildPlanExecute(input: BuildInput): BuildResult {
         executor: { replicable: false, min: 1, max: 19, grants: [], escalateTo: "planner" },
       },
       edges: [
-        { from: "main", to: "planner", advance: "router" },
-        { from: "planner", to: "main", advance: "router" },
-        { from: "planner", to: "executor", advance: "router" },
-        { from: "executor", to: "planner", advance: "router" },
+        { from: "main", to: "planner", advance: "immediate" },
+        { from: "planner", to: "main", advance: "immediate" },
+        { from: "planner", to: "executor", advance: "immediate" },
+        { from: "executor", to: "planner", advance: "immediate" },
       ],
       joins: [],
       entry: { role: "planner", broadcast: false },
@@ -491,12 +494,12 @@ function buildPlanExecute(input: BuildInput): BuildResult {
         },
       },
       routeSummary: `main ↔ ${planner.name} ↔ executors`,
-      limits: { minSeats: 2, maxSeats: 20 },
-      config: { plannerSeat: planner.name, executors: executors.map((agent) => agent.name) },
+      limits: { minAgents: 2, maxAgents: 20 },
+      config: { plannerAgent: planner.name, executors: executors.map((agent) => agent.name) },
     },
-    seats: [
-      ...agentSeats([planner], () => "planner", 0),
-      ...agentSeats(executors, () => "executor", 1),
+    agents: [
+      ...agentPlans([planner], () => "planner", 0),
+      ...agentPlans(executors, () => "executor", 1),
     ],
   };
 }

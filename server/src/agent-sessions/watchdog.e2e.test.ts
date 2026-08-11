@@ -37,7 +37,7 @@ function makeWatchdogHarness(scoutTurn: ScoutTurn) {
 
 async function runFlow(h: ReturnType<typeof makeWatchdogHarness>) {
   const userSessionId = h.addUserSession();
-  const done = collectUntil(h.bus, (event) => event.type === "flow.result", 10_000);
+  const done = collectUntil(h.bus, (event) => event.type === "agent_session.result.returned", 10_000);
   const created = h.host.createSession({ userSessionId, title: "watchdog", agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("go", "pending") });
   return { created, events: await done };
 }
@@ -50,14 +50,14 @@ describe("seat turn watchdog (fake SDK)", () => {
         yield toolUseMessage(`grep-${i}`, "Grep", { pattern: "needle", path: "src" });
         yield toolResultMessage(`grep-${i}`, "no matches");
       }
-      yield sendHandoffUse("scout-close", "orchestrator", { action: "never reached", status: "completed", category: "milestone" });
+      yield sendHandoffUse("scout-close", "coordinator", { action: "never reached", status: "completed", category: "milestone" });
       yield successMessage();
     });
     const { created, events } = await runFlow(h);
-    const watchdogEvents = events.filter((event) => event.type === "agent_session.watchdog");
+    const watchdogEvents = events.filter((event) => event.type === "agent_session.watchdog.tripped");
     expect(watchdogEvents).toHaveLength(1);
-    expect(watchdogEvents[0]?.payload).toMatchObject({ participant: "scout", kind: "repeat_tool_calls", toolName: "Grep", count: 5 });
-    const settled = events.find((event) => event.type === "agent_session.turn.settled" && event.payload.participant === "scout");
+    expect(watchdogEvents[0]?.payload).toMatchObject({ agent: "scout", kind: "repeat_tool_calls", toolName: "Grep", count: 5 });
+    const settled = events.find((event) => event.type === "agent_session.turn.settled" && event.payload.agent === "scout");
     expect(settled?.payload).toMatchObject({ status: "error" });
     expect((settled?.payload as { errorMessage?: string }).errorMessage).toMatch(/^watchdog: 5 identical consecutive calls to Grep/);
     const failures = h.repo.listMessages("agent", created.agentSessionId)
@@ -73,11 +73,11 @@ describe("seat turn watchdog (fake SDK)", () => {
         yield toolUseMessage(`cmd-${i}`, "Read", { file_path: `src/${i}.ts` });
         yield toolResultMessage(`cmd-${i}`, "boom", true);
       }
-      yield sendHandoffUse("scout-close", "orchestrator", { action: "never reached", status: "completed", category: "milestone" });
+      yield sendHandoffUse("scout-close", "coordinator", { action: "never reached", status: "completed", category: "milestone" });
       yield successMessage();
     });
     const { events } = await runFlow(h);
-    const watchdogEvents = events.filter((event) => event.type === "agent_session.watchdog");
+    const watchdogEvents = events.filter((event) => event.type === "agent_session.watchdog.tripped");
     expect(watchdogEvents).toHaveLength(1);
     expect(watchdogEvents[0]?.payload).toMatchObject({ kind: "tool_error_streak", count: 10 });
   });
@@ -95,12 +95,12 @@ describe("seat turn watchdog (fake SDK)", () => {
         yield toolUseMessage(`b-${i}`, "Grep", { pattern: "needle" });
         yield toolResultMessage(`b-${i}`, "no matches");
       }
-      yield sendHandoffUse("scout-close", "orchestrator", { action: "all seen", status: "completed", category: "milestone" });
+      yield sendHandoffUse("scout-close", "coordinator", { action: "all seen", status: "completed", category: "milestone" });
       yield successMessage();
     });
     const { events } = await runFlow(h);
-    expect(events.some((event) => event.type === "agent_session.watchdog")).toBe(false);
-    const settled = events.find((event) => event.type === "agent_session.turn.settled" && event.payload.participant === "scout");
+    expect(events.some((event) => event.type === "agent_session.watchdog.tripped")).toBe(false);
+    const settled = events.find((event) => event.type === "agent_session.turn.settled" && event.payload.agent === "scout");
     expect(settled?.payload).toMatchObject({ status: "completed" });
   });
 
@@ -111,10 +111,10 @@ describe("seat turn watchdog (fake SDK)", () => {
         yield toolUseMessage(`c-${i}`, "Read", { file_path: `src/${i}.ts` });
         yield toolResultMessage(`c-${i}`, i % 2 === 0 ? "boom" : "fine", i % 2 === 0);
       }
-      yield sendHandoffUse("scout-close", "orchestrator", { action: "survived", status: "completed", category: "milestone" });
+      yield sendHandoffUse("scout-close", "coordinator", { action: "survived", status: "completed", category: "milestone" });
       yield successMessage();
     });
     const { events } = await runFlow(h);
-    expect(events.some((event) => event.type === "agent_session.watchdog")).toBe(false);
+    expect(events.some((event) => event.type === "agent_session.watchdog.tripped")).toBe(false);
   });
 });

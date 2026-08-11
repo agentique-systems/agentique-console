@@ -7,7 +7,7 @@ import { resolveSdk } from "./sdk/client.ts";
 import { buildServer } from "./api/server.ts";
 
 const config = loadConfig();
-const { db, sqlite } = openDb(config.dbFile);
+const { db, sqlite } = openDb(config.infra.dbFile);
 const app = createApp({ config, db, sqlite, sdk: () => resolveSdk() });
 
 const report = await bootApp(app);
@@ -31,9 +31,9 @@ process.on("SIGINT", () => void shutdown());
 process.on("SIGTERM", () => void shutdown());
 
 httpServer
-  .listen({ port: config.port, host: config.host })
+  .listen({ port: config.infra.port, host: config.infra.host })
   .then(() => {
-    console.log(`agentique-console on http://${config.host}:${config.port} (db: ${config.dbFile})`);
+    console.log(`agentique-console on http://${config.infra.host}:${config.infra.port} (db: ${config.infra.dbFile})`);
   })
   .catch((error) => {
     console.error(error);

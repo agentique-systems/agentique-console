@@ -12,7 +12,7 @@ import {
   restartHarness,
 } from "./test-helpers.ts";
 import { reconcileDurableCommunication, recoverInterruptedTurns } from "./recovery.ts";
-import { ORCHESTRATOR_SEAT } from "./agent-sessions/peer-names.ts";
+import { COORDINATOR_AGENT } from "./agent-sessions/names.ts";
 
 describe("recoverInterruptedTurns", () => {
   it("reconciles an authoritative message whose event append was interrupted", async () => {
@@ -20,7 +20,7 @@ describe("recoverInterruptedTurns", () => {
     const userSessionId = h.addUserSession();
     h.repo.appendMessage({ sessionKind: "user", sessionId: userSessionId, speaker: { kind: "system", name: "system" }, kind: "notice", text: "committed before crash" });
     expect(await reconcileDurableCommunication({ repo: h.repo, bus: h.bus })).toBe(1);
-    const events = await collectUntil(h.bus, (event) => event.type === "user_session.message");
+    const events = await collectUntil(h.bus, (event) => event.type === "user_session.message.appended");
     expect(events.at(-1)?.payload).toMatchObject({ message: { text: "committed before crash" } });
     expect(await reconcileDurableCommunication({ repo: h.repo, bus: h.bus })).toBe(0);
   });
@@ -39,7 +39,7 @@ describe("recoverInterruptedTurns", () => {
     // settle — the in-memory lane state vanishes with it.
     const session = h.repo.getAgentSession(agentSessionId)!;
     h.bus.append({ type: "agent_session.turn.started", userSessionId: session.userSessionId, agentSessionId,
-      payload: { agentSessionId, participant: "web", turnId: "tu_web" } });
+      payload: { agentSessionId, agent: "web", turnId: "tu_web" } });
     expect(h.repo.findUnsettledTurns()).toHaveLength(1);
 
     const rebooted = await restartHarness(h);
@@ -50,7 +50,7 @@ describe("recoverInterruptedTurns", () => {
       (e) => e.type === "agent_session.turn.settled",
     );
     expect(events.at(-1)?.payload).toMatchObject({
-      participant: "web",
+      agent: "web",
       turnId: "tu_web",
       status: "aborted",
       errorMessage: "interrupted by a server restart",
@@ -105,6 +105,6 @@ describe("recoverInterruptedTurns", () => {
 
     expect(h.repo.findUnsettledTurns()).toEqual([]);
     expect(recoverInterruptedTurns({ repo: h.repo, bus: h.bus })).toBe(0);
-    expect(h.repo.getParticipant("nope", ORCHESTRATOR_SEAT)).toBeUndefined();
+    expect(h.repo.getAgent("nope", COORDINATOR_AGENT)).toBeUndefined();
   });
 });

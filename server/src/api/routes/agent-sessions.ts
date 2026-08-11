@@ -23,15 +23,15 @@ export function registerAgentSessionRoutes(
       if (!row) throw new NotFoundError(`no agent session ${request.params.id}`);
       return {
         session: ctx.app.host.wireSession(row),
-        runs: ctx.app.repo.listParticipants(row.id).map((participant) => ({
-          participant: participant.name,
-          profileId: participant.profileId,
-          profile: participant.profileSnapshot,
-          ownership: participant.ownership,
-          generation: participant.generation,
-          turnCount: participant.turnCount,
-          contextTokens: participant.contextTokens,
-          providerSessionId: participant.sdkSessionId,
+        runs: ctx.app.repo.listAgents(row.id).map((agent) => ({
+          agent: agent.name,
+          profileId: agent.profileId,
+          profile: agent.profileSnapshot,
+          ownership: agent.ownership,
+          generation: agent.generation,
+          turnCount: agent.turnCount,
+          contextTokens: agent.contextTokens,
+          providerSessionId: agent.sdkSessionId,
         })),
         messages: ctx.app.repo
           .listMessages("agent", row.id)

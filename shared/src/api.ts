@@ -103,7 +103,7 @@ export interface GetUserSessionResponse {
 export interface PatchUserSessionBody {
   mode?: SessionMode;
   title?: string;
-  status?: "open" | "archived";
+  lifecycle?: "open" | "archived";
   /** Takes effect on the next turn: the change recycles the lane. */
   model?: string;
 }
@@ -170,7 +170,7 @@ export type ListAgentProfilesResponse = AgentProfileSummary[];
 // GET /api/workspaces/:id/agent-profiles/:profileId
 export type GetAgentProfileResponse = AgentProfileDetail;
 
-// POST /api/workspaces/:id/manager-sessions
+// POST /api/workspaces/:id/profile-manager-sessions
 export interface CreateManagerSessionBody {
   profileId?: string;
   sourceProfileId?: string;

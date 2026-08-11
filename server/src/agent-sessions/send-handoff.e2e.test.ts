@@ -51,7 +51,7 @@ describe("send_handoff (fake SDK)", () => {
     }, {}));
 
     expect(result).toMatchObject({ delivered: true, to: "scout", category: "assignment" });
-    const record = h.repo.latestHandoff({ userSessionId, agentSessionId: created.agentSessionId, sender: "orchestrator" });
+    const record = h.repo.latestHandoff({ userSessionId, agentSessionId: created.agentSessionId, sender: "coordinator" });
     // Byte-for-byte: newlines, quotes and backslashes all survived intact.
     expect(record?.core.state.summary).toBe(summary);
     expect(record?.core.status).toBe("in_progress");

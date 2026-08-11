@@ -7,7 +7,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { initMessage, sendHandoffUse, successMessage, textMessage, toolUseMessage } from "../sdk/fake.ts";
-import { collectUntil, makeDelegationHarness, seatRoleOf } from "../test-helpers.ts";
+import { collectUntil, makeDelegationHarness, agentRoleOf } from "../test-helpers.ts";
 
 const briefing = (action: string) => ({
   core: { schemaVersion: 1 as const, taskId: null, status: "pending" as const, risk: "low" as const,
@@ -19,7 +19,7 @@ const briefing = (action: string) => ({
 describe("pipeline e2e (fake SDK)", () => {
   it("stages hand forward in order and the last stage's final reports the session", async () => {
     const h = makeDelegationHarness(async function* (options) {
-      const role = seatRoleOf(options).role;
+      const role = agentRoleOf(options).role;
       yield initMessage();
       if (role === "stage.1") yield sendHandoffUse("s1", "edit", { action: "drafted", stateSummary: "the draft", status: "completed", category: "milestone" });
       if (role === "stage.2") yield sendHandoffUse("s2", "polish", { action: "edited", stateSummary: "the edited draft", status: "completed", category: "milestone" });
@@ -27,18 +27,18 @@ describe("pipeline e2e (fake SDK)", () => {
       yield successMessage();
     });
     const userSessionId = h.addUserSession();
-    const done = collectUntil(h.bus, (event) => event.type === "flow.result", 15_000);
+    const done = collectUntil(h.bus, (event) => event.type === "agent_session.result.returned", 15_000);
     const created = h.host.createSession({ userSessionId, title: "essay", pattern: "pipeline",
       agents: [{ name: "draft", profileId: "explorer" }, { name: "edit", profileId: "explorer" }, { name: "polish", profileId: "explorer" }],
       briefing: briefing("write the essay") });
-    expect(created.entrySeat).toBe("draft");
+    expect(created.entryAgent).toBe("draft");
     const events = await done;
     const rows = h.repo.listMessages("agent", created.agentSessionId).filter((row) => row.kind === "message");
     expect(rows.map((row) => `${row.speakerName}→${row.toName}`)).toEqual([
       "main→draft", "draft→edit", "edit→polish", "polish→main",
     ]);
-    expect(events.filter((event) => event.type === "flow.result")).toHaveLength(1);
-    expect(h.repo.listParticipants(created.agentSessionId).map((p) => ({ seat: p.name, role: p.patternRole }))).toEqual([
+    expect(events.filter((event) => event.type === "agent_session.result.returned")).toHaveLength(1);
+    expect(h.repo.listAgents(created.agentSessionId).map((p) => ({ seat: p.name, role: p.role }))).toEqual([
       { seat: "draft", role: "stage.1" }, { seat: "edit", role: "stage.2" }, { seat: "polish", role: "stage.3" }]);
     const row = h.repo.getAgentSession(created.agentSessionId);
     expect(row && h.host.statusOf(row)).toBe("reported");
@@ -46,7 +46,7 @@ describe("pipeline e2e (fake SDK)", () => {
 
   it("denies a stage skipping ahead, with the pipeline's own route summary", async () => {
     const h = makeDelegationHarness(async function* (options) {
-      const role = seatRoleOf(options).role;
+      const role = agentRoleOf(options).role;
       yield initMessage();
       // Stage 1 tries to bypass stage 2 entirely.
       if (role === "stage.1") yield sendHandoffUse("bad", "polish", { action: "skip ahead", status: "completed", category: "milestone" });
@@ -54,7 +54,7 @@ describe("pipeline e2e (fake SDK)", () => {
     });
     const userSessionId = h.addUserSession();
     const denied = collectUntil(h.bus, (event) =>
-      event.type === "agent_session.tool.result" && JSON.stringify(event.payload).includes("not allowed"), 15_000);
+      event.type === "agent_session.tool.completed" && JSON.stringify(event.payload).includes("not allowed"), 15_000);
     h.host.createSession({ userSessionId, title: "skip", pattern: "pipeline",
       agents: [{ name: "draft", profileId: "explorer" }, { name: "edit", profileId: "explorer" }, { name: "polish", profileId: "explorer" }],
       briefing: briefing("go") });
@@ -68,7 +68,7 @@ describe("evaluator_optimizer e2e (fake SDK)", () => {
     let generatorTurns = 0;
     let evaluatorTurns = 0;
     const h = makeDelegationHarness(async function* (options) {
-      const role = seatRoleOf(options).role;
+      const role = agentRoleOf(options).role;
       yield initMessage();
       if (role === "generator") {
         generatorTurns += 1;
@@ -83,7 +83,7 @@ describe("evaluator_optimizer e2e (fake SDK)", () => {
       yield successMessage();
     });
     const userSessionId = h.addUserSession();
-    const done = collectUntil(h.bus, (event) => event.type === "flow.result", 15_000);
+    const done = collectUntil(h.bus, (event) => event.type === "agent_session.result.returned", 15_000);
     const created = h.host.createSession({ userSessionId, title: "loop", pattern: "evaluator_optimizer",
       agents: [{ name: "writer", profileId: "explorer", model: "model-a" }, { name: "critic", profileId: "explorer", model: "model-b" }],
       patternConfig: { rubric: "lead with the finding" },
@@ -101,7 +101,7 @@ describe("evaluator_optimizer e2e (fake SDK)", () => {
   it("trips max_rounds when the critique cycle hits the cap", async () => {
     let generatorTurns = 0;
     const h = makeDelegationHarness(async function* (options) {
-      const role = seatRoleOf(options).role;
+      const role = agentRoleOf(options).role;
       yield initMessage();
       if (role === "generator") {
         generatorTurns += 1;
@@ -128,7 +128,7 @@ describe("evaluator_optimizer e2e (fake SDK)", () => {
     const agents = [{ name: "writer", profileId: "explorer", model: "same" }, { name: "critic", profileId: "explorer", model: "same" }];
     expect(() => h.host.createSession({ userSessionId, title: "collusion", pattern: "evaluator_optimizer", agents, briefing: briefing("go") })).toThrow(/collude/);
     const created = h.host.createSession({ userSessionId, title: "allowed", pattern: "evaluator_optimizer", agents, patternConfig: { requireDistinctModels: false }, briefing: briefing("go") });
-    expect(created.entrySeat).toBe("writer");
+    expect(created.entryAgent).toBe("writer");
   });
 });
 
@@ -136,7 +136,7 @@ describe("map_reduce e2e (fake SDK)", () => {
   it("holds every mapper report until the join is met, then flushes them in one turn", async () => {
     let reducerTurns = 0;
     const h = makeDelegationHarness(async function* (options) {
-      const identity = seatRoleOf(options);
+      const identity = agentRoleOf(options);
       yield initMessage();
       if (identity.role === "reducer") {
         reducerTurns += 1;
@@ -147,13 +147,13 @@ describe("map_reduce e2e (fake SDK)", () => {
           yield sendHandoffUse("reduce", "main", { action: "census done", stateSummary: "3 pelicans, 2 herons", status: "completed", category: "final" });
         }
       } else if (identity.role === "mapper") {
-        yield sendHandoffUse(`item-${identity.seat}`, "collect", { action: "item done",
-          stateSummary: identity.seat === "map.1.1" ? "3 pelicans" : "2 herons", status: "completed", category: "milestone" });
+        yield sendHandoffUse(`item-${identity.agent}`, "collect", { action: "item done",
+          stateSummary: identity.agent === "map.1.1" ? "3 pelicans" : "2 herons", status: "completed", category: "milestone" });
       }
       yield successMessage();
     });
     const userSessionId = h.addUserSession();
-    const done = collectUntil(h.bus, (event) => event.type === "flow.result", 15_000);
+    const done = collectUntil(h.bus, (event) => event.type === "agent_session.result.returned", 15_000);
     const created = h.host.createSession({ userSessionId, title: "census", pattern: "map_reduce",
       agents: [{ name: "collect", profileId: "explorer" }], briefing: briefing("count the birds") });
     const events = await done;
@@ -173,18 +173,18 @@ describe("map_reduce e2e (fake SDK)", () => {
 describe("debate e2e (fake SDK)", () => {
   it("broadcasts the briefing, joins all positions, and the judge's final reports", async () => {
     const h = makeDelegationHarness(async function* (options) {
-      const identity = seatRoleOf(options);
+      const identity = agentRoleOf(options);
       yield initMessage();
       if (identity.role === "debater") {
-        yield sendHandoffUse(`pos-${identity.seat}`, "judge", { action: "position",
-          stateSummary: identity.seat === "optimist" ? "ship it" : "hold it", status: "completed", category: "milestone" });
+        yield sendHandoffUse(`pos-${identity.agent}`, "judge", { action: "position",
+          stateSummary: identity.agent === "optimist" ? "ship it" : "hold it", status: "completed", category: "milestone" });
       } else if (identity.role === "judge") {
         yield sendHandoffUse("verdict", "main", { action: "verdict", stateSummary: "hold it — the risk case is concrete", status: "completed", category: "final" });
       }
       yield successMessage();
     });
     const userSessionId = h.addUserSession();
-    const done = collectUntil(h.bus, (event) => event.type === "flow.result", 15_000);
+    const done = collectUntil(h.bus, (event) => event.type === "agent_session.result.returned", 15_000);
     const created = h.host.createSession({ userSessionId, title: "ship or hold", pattern: "debate",
       agents: [{ name: "optimist", profileId: "explorer" }, { name: "pessimist", profileId: "explorer" }],
       briefing: briefing("should we ship?") });
@@ -206,10 +206,10 @@ describe("debate e2e (fake SDK)", () => {
     // turns without send_handoff. The positions join never armed and the judge
     // never ran. The Console now carries the settled turn's text as the report.
     const h = makeDelegationHarness(async function* (options) {
-      const identity = seatRoleOf(options);
+      const identity = agentRoleOf(options);
       yield initMessage();
       if (identity.role === "debater") {
-        yield textMessage(identity.seat === "optimist"
+        yield textMessage(identity.agent === "optimist"
           ? "Opening case: ship it. I'll rebut once I see the other proposal."
           : "Opening case: hold it. Awaiting rebuttal.");
       } else if (identity.role === "judge") {
@@ -219,7 +219,7 @@ describe("debate e2e (fake SDK)", () => {
       yield successMessage();
     });
     const userSessionId = h.addUserSession();
-    const done = collectUntil(h.bus, (event) => event.type === "flow.result", 15_000);
+    const done = collectUntil(h.bus, (event) => event.type === "agent_session.result.returned", 15_000);
     const created = h.host.createSession({ userSessionId, title: "ship or hold", pattern: "debate",
       agents: [{ name: "optimist", profileId: "explorer" }, { name: "pessimist", profileId: "explorer" }],
       briefing: briefing("should we ship?") });
@@ -244,7 +244,7 @@ describe("silent-seat carry e2e (fake SDK)", () => {
     // Console now carries that text to the coordinator as its report.
     let coordinatorTurns = 0;
     const h = makeDelegationHarness(async function* (options) {
-      const identity = seatRoleOf(options);
+      const identity = agentRoleOf(options);
       yield initMessage();
       if (identity.role === "coordinator") {
         coordinatorTurns += 1;
@@ -257,12 +257,12 @@ describe("silent-seat carry e2e (fake SDK)", () => {
       yield successMessage();
     });
     const userSessionId = h.addUserSession();
-    const done = collectUntil(h.bus, (event) => event.type === "flow.result", 15_000);
+    const done = collectUntil(h.bus, (event) => event.type === "agent_session.result.returned", 15_000);
     const created = h.host.createSession({ userSessionId, title: "silent scout",
       agents: [{ name: "scout", profileId: "explorer" }], briefing: briefing("map it") });
     await done;
     const rows = h.repo.listMessages("agent", created.agentSessionId).filter((row) => row.kind === "message");
-    const carried = rows.find((row) => row.speakerName === "scout" && row.toName === "orchestrator");
+    const carried = rows.find((row) => row.speakerName === "scout" && row.toName === "coordinator");
     expect(carried?.text).toContain("Findings: the entry point is src/main.ts");
     const row = h.repo.getAgentSession(created.agentSessionId);
     expect(row && h.host.statusOf(row)).toBe("reported");
@@ -273,8 +273,8 @@ describe("peer_to_peer e2e (fake SDK)", () => {
   it("trips oscillation on sustained ping-pong between two peers", async () => {
     const sends = new Map<string, number>();
     const h = makeDelegationHarness(async function* (options) {
-      const identity = seatRoleOf(options);
-      const seat = identity.seat ?? "?";
+      const identity = agentRoleOf(options);
+      const seat = identity.agent ?? "?";
       yield initMessage();
       const sent = sends.get(seat) ?? 0;
       if (identity.role === "closer" && sent === 0) {
@@ -301,7 +301,7 @@ describe("plan_execute e2e (fake SDK)", () => {
   it("planner assigns, executor reports, planner finals", async () => {
     let plannerTurns = 0;
     const h = makeDelegationHarness(async function* (options) {
-      const identity = seatRoleOf(options);
+      const identity = agentRoleOf(options);
       yield initMessage();
       if (identity.role === "planner") {
         plannerTurns += 1;
@@ -314,7 +314,7 @@ describe("plan_execute e2e (fake SDK)", () => {
       yield successMessage();
     });
     const userSessionId = h.addUserSession();
-    const done = collectUntil(h.bus, (event) => event.type === "flow.result", 15_000);
+    const done = collectUntil(h.bus, (event) => event.type === "agent_session.result.returned", 15_000);
     const created = h.host.createSession({ userSessionId, title: "widget", pattern: "plan_execute",
       agents: [{ name: "architect", profileId: "explorer" }, { name: "builder", profileId: "explorer" }],
       briefing: briefing("build the widget") });

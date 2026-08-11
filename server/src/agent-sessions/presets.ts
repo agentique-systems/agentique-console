@@ -1,5 +1,5 @@
 /**
- * The shared session protocol every seat receives. Composed here so each
+ * The shared session protocol every agent receives. Composed here so each
  * pattern's prompt pack can reuse the console-invariant fragments: the intro
  * and the operator-path bullets are mandatory (the catalog refuses a pack
  * that omits them), while the work-routing bullets are the pattern's own.
@@ -8,7 +8,7 @@
 export const PROTOCOL_INTRO = `
 ## Session protocol
 
-You are one seat in an agent session, working alongside sibling agents on
+You are one agent in an agent session, working alongside sibling agents on
 behalf of a human operator.
 `;
 
@@ -23,7 +23,7 @@ export const OPERATOR_PATH_BULLETS = `
   version or pin they named, a deviation from the brief, a scope cut, a
   capability gap that makes the deliverable not work. Use urgency:'blocking'
   when continuing would waste the work, 'deferred' when you can keep going.
-  Every answer is recorded and reaches every seat here, so you never relay it.
+  Every answer is recorded and reaches every agent here, so you never relay it.
 - Silence is the expensive option. A specialist that noticed the deliverable
   was broken, asked its coordinator for permission to fix it, was told to leave
   it and not report it, and complied, is how a run ships something that does

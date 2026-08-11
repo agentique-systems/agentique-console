@@ -93,7 +93,7 @@ describe("final report gate", () => {
     expect(hold.blockers[0]?.question).toContain("start gate");
     // The captured ask_operator belongs to the coordinator seat — the first
     // to spawn — so that is who the card is attributed to.
-    expect(hold.blockers[0]?.asker).toBe("orchestrator");
+    expect(hold.blockers[0]?.asker).toBe("coordinator");
     expect(hold.guidance).toMatch(/final report withheld/);
     expect(hold.guidance).toMatch(/asked \d+m ago/);
     expect(hold.guidance).toMatch(/do not re-send/i);
@@ -102,7 +102,7 @@ describe("final report gate", () => {
     await blocked;
     // Nothing was journalled — a withheld final leaves no half-record.
     const userSessionId = h.repo.getAgentSession(agentSessionId)!.userSessionId;
-    expect(h.repo.latestHandoff({ userSessionId, agentSessionId, participant: "main", sender: "orchestrator" })).toBeUndefined();
+    expect(h.repo.latestHandoff({ userSessionId, agentSessionId, recipient: "main", sender: "coordinator" })).toBeUndefined();
   });
 
   it("lets the final through once the operator answers, and tells main why it was late", async () => {
@@ -112,7 +112,7 @@ describe("final report gate", () => {
     const row = h.db.select().from(interactionRows).all()[0]!;
     const cleared = collectUntil(
       h.bus,
-      (event) => event.type === "agent_session.mailbox"
+      (event) => event.type === "agent_session.delivery.updated"
         && (event.payload as { recipient?: string }).recipient === "main"
         && (event.payload as { category?: string }).category === "milestone",
       10_000,
@@ -125,7 +125,7 @@ describe("final report gate", () => {
 
     const second = await send.handler(finalArgs, {});
     expect(second.isError).not.toBe(true);
-    const record = h.repo.latestHandoff({ userSessionId, agentSessionId, participant: "main", sender: "orchestrator" });
+    const record = h.repo.latestHandoff({ userSessionId, agentSessionId, recipient: "main", sender: "coordinator" });
     expect(record?.core.status).toBe("completed");
   });
 
@@ -151,7 +151,7 @@ describe("final report gate", () => {
     const send = h.fake.captured.tools.find((t) => t.name === "send_handoff")!;
     const result = await send.handler(finalArgs, {});
     expect(result.isError).not.toBe(true);
-    const record = h.repo.latestHandoff({ userSessionId, participant: "main", sender: "orchestrator" });
+    const record = h.repo.latestHandoff({ userSessionId, recipient: "main", sender: "coordinator" });
     expect(record?.core.uncertainty.join(" ")).toMatch(/reported final with work outstanding/);
   });
 });

@@ -5,15 +5,15 @@ import type {
 import type { EventBus } from "./bus.ts";
 
 /**
- * Persists agent.state transitions, deduping consecutive identical states so
- * the authoritative trace stays compact. `note()` carries
+ * Persists agent activity transitions, deduping consecutive identical states
+ * so the authoritative trace stays compact. `note()` carries
  * provider liveness (retries, rate limits, tool ticks) under the current
  * state; any real state change clears it, since a stale note reads as truth.
  */
 export class RuntimeBroadcaster {
   readonly #bus: EventBus;
   readonly #scope: EventScope;
-  readonly #participant: string;
+  readonly #agent: string;
   readonly #ids: { userSessionId?: string; agentSessionId?: string };
   #state: AgentRuntimeState = "idle";
   #toolName: string | undefined;
@@ -22,12 +22,12 @@ export class RuntimeBroadcaster {
   constructor(
     bus: EventBus,
     scope: EventScope,
-    participant: string,
+    agent: string,
     ids: { userSessionId?: string; agentSessionId?: string },
   ) {
     this.#bus = bus;
     this.#scope = scope;
-    this.#participant = participant;
+    this.#agent = agent;
     this.#ids = ids;
   }
 
@@ -58,11 +58,11 @@ export class RuntimeBroadcaster {
 
   #emit(): void {
     this.#bus.append({
-      type: "agent.state",
+      type: "agent_session.activity.changed",
       ...this.#ids,
       payload: {
         scope: this.#scope,
-        participant: this.#participant,
+        agent: this.#agent,
         state: this.#state,
         ...(this.#toolName === undefined ? {} : { toolName: this.#toolName }),
         ...(this.#detail === undefined ? {} : { detail: this.#detail }),

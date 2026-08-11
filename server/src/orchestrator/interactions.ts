@@ -49,7 +49,7 @@ function toWire(row: InteractionRow): Interaction {
     id: row.id,
     userSessionId: row.userSessionId,
     agentSessionId: row.agentSessionId,
-    participant: row.participant,
+    agent: row.participant,
     kind: row.kind,
     status: row.status,
     urgency: row.urgency,
@@ -101,7 +101,7 @@ export interface CreateOperatorQuestionInput {
   userSessionId: string;
   /** Null/absent = the main lane. */
   agentSessionId?: string | null;
-  participant?: string | null;
+  agent?: string | null;
   questions: InteractionQuestion[];
   urgency?: InteractionUrgency;
   source?: InteractionSource;
@@ -169,7 +169,7 @@ export class InteractionService {
       input.signal,
       {
         agentSessionId: input.agentSessionId ?? null,
-        participant: input.participant ?? null,
+        participant: input.agent ?? null,
         urgency,
         source,
         recommendation: input.recommendation ?? null,
@@ -186,7 +186,7 @@ export class InteractionService {
             interactionId: id,
             questions: input.questions,
             ...(input.agentSessionId ? { agentSessionId: input.agentSessionId } : {}),
-            ...(input.participant ? { participant: input.participant } : {}),
+            ...(input.agent ? { agent: input.agent } : {}),
             urgency,
             source,
             ...(input.recommendation === undefined ? {} : { recommendation: input.recommendation }),
@@ -423,7 +423,7 @@ export class InteractionService {
     }
     if (held > 0) {
       this.#bus.append({
-        type: "user_session.runtime",
+        type: "user_session.runtime.noted",
         userSessionId,
         payload: {
           userSessionId,
@@ -476,7 +476,7 @@ export class InteractionService {
    * the in-memory deferred map — these survive a restart and are guaranteed to
    * reach the asker at its next delivery.
    */
-  listAnsweredUnflushed(agentSessionId: string, participant?: string): Interaction[] {
+  listAnsweredUnflushed(agentSessionId: string, agent?: string): Interaction[] {
     return this.#db
       .select()
       .from(interactions)
@@ -485,7 +485,7 @@ export class InteractionService {
           eq(interactions.agentSessionId, agentSessionId),
           isNull(interactions.flushedAt),
           isNotNull(interactions.resolvedAt),
-          ...(participant === undefined ? [] : [eq(interactions.participant, participant)]),
+          ...(agent === undefined ? [] : [eq(interactions.participant, agent)]),
         ),
       )
       .all()
@@ -588,12 +588,12 @@ export class InteractionService {
     this.#db.update(interactions).set({ detached: true }).where(eq(interactions.id, id)).run();
     if (row.agentSessionId === null || row.participant === null) return;
     this.#bus.append({
-      type: "agent_session.runtime",
+      type: "agent_session.runtime.noted",
       userSessionId: row.userSessionId,
       agentSessionId: row.agentSessionId,
       payload: {
         agentSessionId: row.agentSessionId,
-        participant: row.participant,
+        agent: row.participant,
         detail: `question ${row.id} detached (${reason}); it stays open and the answer will arrive as a delivery`,
       },
     });

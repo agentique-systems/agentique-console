@@ -1,7 +1,7 @@
 /**
  * Which model the orchestrator lane actually spawns on.
  *
- * The resolution is `session.model ?? config.model`, and the failure mode it
+ * The resolution is `session.model ?? config.infra.model`, and the failure mode it
  * guards against is silent: a per-session choice that never reaches the SDK
  * options looks exactly like one that did, right up until the bill or the
  * output quality says otherwise. So these assert on the options the fake SDK
@@ -40,7 +40,7 @@ describe("orchestrator lane model", () => {
     h.runner.postOperatorMessage(sessionId, "hi");
     await collected;
 
-    expect(h.config.model).toBe("claude-opus-5");
+    expect(h.config.infra.model).toBe("claude-opus-5");
     expect(h.fake.captured.options[0]?.model).toBe("claude-opus-5");
   });
 

@@ -33,7 +33,7 @@ import { usageSamples } from "../db/schema.ts";
  * idle window) is what forces the respawn-over-`resume` this is about.
  */
 const PARKED = (event: { type: string; payload: unknown }): boolean =>
-  event.type === "agent_session.runtime" && String((event.payload as { detail?: string }).detail ?? "").includes("seat parked");
+  event.type === "agent_session.runtime.noted" && String((event.payload as { detail?: string }).detail ?? "").includes("agent parked");
 
 const handoff = (action: string) => ({
   core: {
@@ -64,7 +64,7 @@ describe("cumulative usage baseline", () => {
         yield initMessage("sess-resumed");
         yield invocation === 1 ? usageFrame(4.48, 1_080_818) : usageFrame(4.78, 1_138_239);
       },
-      { config: { seatIdleReapMs: 20 } },
+      { config: { policy: { agentIdleReapMs: 20 } } },
     );
     const userSessionId = h.addUserSession();
     const created = h.host.createSession({
@@ -73,7 +73,7 @@ describe("cumulative usage baseline", () => {
     await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled", 10_000);
 
     // The seat's baseline must have been persisted with the provider session.
-    const afterFirst = h.repo.getParticipant(created.agentSessionId, "orchestrator");
+    const afterFirst = h.repo.getAgent(created.agentSessionId, "coordinator");
     expect(afterFirst?.cumulativeCostUsd).toBeCloseTo(4.48, 6);
     expect(afterFirst?.cumulativeApiDurationMs).toBe(1_080_818);
     expect(afterFirst?.sdkSessionId).toBe("sess-resumed");
@@ -85,18 +85,18 @@ describe("cumulative usage baseline", () => {
     h.host.post({
       agentSessionId: created.agentSessionId,
       speaker: { kind: "orchestrator", name: "main" },
-      to: "orchestrator", handoff: handoff("second unit"), category: "assignment",
+      to: "coordinator", handoff: handoff("second unit"), category: "assignment",
     });
     await collectUntil(
       h.bus,
       (event) => event.type === "usage.recorded" && (event.payload as { turnId?: string }).turnId !== undefined
         && (event.payload as { costUsd?: number }).costUsd !== undefined
-        && h.db.select().from(usageSamples).all().filter((row) => row.participant === "orchestrator").length >= 2,
+        && h.db.select().from(usageSamples).all().filter((row) => row.participant === "coordinator").length >= 2,
       10_000,
     );
 
     const rows = h.db.select().from(usageSamples).all()
-      .filter((row) => row.participant === "orchestrator");
+      .filter((row) => row.participant === "coordinator");
     expect(rows.length).toBeGreaterThanOrEqual(2);
     expect(invocation).toBeGreaterThanOrEqual(2);
 
@@ -124,7 +124,7 @@ describe("cumulative usage baseline", () => {
         yield initMessage("sess-restarted");
         yield invocation === 1 ? usageFrame(4.48, 1_080_818) : usageFrame(0.31, 42_000);
       },
-      { config: { seatIdleReapMs: 20 } },
+      { config: { policy: { agentIdleReapMs: 20 } } },
     );
     const userSessionId = h.addUserSession();
     const created = h.host.createSession({
@@ -135,7 +135,7 @@ describe("cumulative usage baseline", () => {
     h.host.post({
       agentSessionId: created.agentSessionId,
       speaker: { kind: "orchestrator", name: "main" },
-      to: "orchestrator", handoff: handoff("second unit"), category: "assignment",
+      to: "coordinator", handoff: handoff("second unit"), category: "assignment",
     });
     await collectUntil(
       h.bus,
@@ -144,7 +144,7 @@ describe("cumulative usage baseline", () => {
     );
 
     const rows = h.db.select().from(usageSamples).all()
-      .filter((row) => row.participant === "orchestrator");
+      .filter((row) => row.participant === "coordinator");
     // The raw value, not max(0, 0.31 - 4.48) = 0. Asserted over the set for the
     // same redelivery reason as above.
     expect(rows.some((row) => row.costUsd !== null && Math.abs(row.costUsd - 0.31) < 0.001)).toBe(true);

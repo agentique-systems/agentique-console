@@ -128,13 +128,13 @@ export function registerUserSessionRoutes(
       // A seat's answer cannot come back through a tool call that no longer
       // exists, and a seat is not revived by a lane — it is woken by a
       // delivery. So a detached or stale SEAT question is answered by mailbox.
-      if (before.participant !== null && (before.detached || before.status === "stale")) {
+      if (before.agent !== null && (before.detached || before.status === "stale")) {
         ctx.app.host.deliverOperatorAnswer(before);
         return resolved;
       }
       // A stale MAIN-LANE interaction's parked promise died with a previous
       // process — its answer becomes a fresh resumed turn instead (M8 revival).
-      if (before.participant === null && before.status === "stale") {
+      if (before.agent === null && before.status === "stale") {
         if (
           before.kind === "plan_approval" &&
           "decision" in parsed.data &&
