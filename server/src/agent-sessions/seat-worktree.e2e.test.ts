@@ -70,7 +70,7 @@ function makeWorld(devStatus: "completed" | "failed", options: { conflict?: bool
     }
     yield initMessage("other-1");
     yield successMessage({});
-  }, { hostOverrides: { getWorkspaceRoot: () => repo, worktrees: new WorktreeManager({ dataDir }) } });
+  }, { workspaceRoot: repo, runtime: { worktrees: new WorktreeManager({ dataDir }) } });
   return { h, repo };
 }
 
@@ -151,8 +151,8 @@ describe("seat worktree isolation (fake SDK + real git)", () => {
       yield initMessage("seat-1");
       yield sendHandoffUse("seat-close", "orchestrator", { action: "looked around", status: "completed", category: "milestone" });
       yield successMessage();
-    }, { hostOverrides: { getWorkspaceRoot: () => plain, worktrees: new WorktreeManager({ dataDir: path.join(plain, "data") }),
-      config: { ...loadConfig({}), autoInitGit: false } } });
+    }, { workspaceRoot: plain, runtime: { worktrees: new WorktreeManager({ dataDir: path.join(plain, "data") }) },
+      config: { autoInitGit: false } });
     const userSessionId = h.addUserSession();
     const done = collectUntil(h.bus, (event) => event.type === "flow.result", 20_000);
     h.host.createSession({ userSessionId, title: "plain", agents: [{ name: "dev", profileId: "implementer", owns: ["src/widget.ts"] }, { name: "scout", profileId: "explorer" }], briefing: handoff("go", "pending") });
@@ -175,7 +175,7 @@ describe("seat worktree isolation (fake SDK + real git)", () => {
         yield sendHandoffUse("send-1", "main", { action: "done", status: "completed", category: "final" });
       }
       yield successMessage();
-    }, { hostOverrides: { getWorkspaceRoot: () => repo, worktrees: new WorktreeManager({ dataDir }) } });
+    }, { workspaceRoot: repo, runtime: { worktrees: new WorktreeManager({ dataDir }) } });
     (h.config as { seatWorktrees: boolean }).seatWorktrees = false;
     const userSessionId = h.addUserSession();
     const done = collectUntil(h.bus, (event) => event.type === "flow.result", 20_000);

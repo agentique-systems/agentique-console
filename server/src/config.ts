@@ -58,6 +58,12 @@ export interface Config {
   seatSpawnTimeoutMs: number;
   /** Registry namespace for console session names ("console-scout-8fbb2c"). */
   peerNamePrefix: string;
+  /**
+   * Debounce before the run-completion predicate re-evaluates. Long enough
+   * that a settle followed 1ms later by the next turn is a non-event, short
+   * enough that the operator does not notice it.
+   */
+  completionQuietWindowMs: number;
   /** Rotate a participant onto a fresh provider session before the next turn. */
   contextTokenLimit: number;
   contextTurnLimit: number;
@@ -164,6 +170,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     autoInitGit: env.CONSOLE_AUTO_INIT_GIT !== "0",
     seatSpawnTimeoutMs: Number(env.CONSOLE_SEAT_SPAWN_TIMEOUT_MS ?? 30_000),
     peerNamePrefix: env.CONSOLE_PEER_NAME_PREFIX ?? "console-",
+    completionQuietWindowMs: Number(env.CONSOLE_COMPLETION_QUIET_MS ?? 2_000),
     contextTokenLimit: Number(env.CONSOLE_CONTEXT_TOKEN_LIMIT ?? 120_000),
     contextTurnLimit: Number(env.CONSOLE_CONTEXT_TURN_LIMIT ?? 30),
     seatWorktrees: env.CONSOLE_SEAT_WORKTREES !== "0",

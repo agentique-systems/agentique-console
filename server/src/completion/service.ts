@@ -32,18 +32,14 @@ export interface RunCompletionDeps {
   interactions: InteractionService;
   host: () => AgentSessionHost;
   runner: () => OrchestratorRunner;
-  getWorkspaceRoot?: (workspaceId: string) => string;
-  /** Overridable so tests do not pay the real quiet window on every case. */
-  quietWindowMs?: number;
+  getWorkspaceRoot: (workspaceId: string) => string;
+  /**
+   * `config.completionQuietWindowMs`. The predicate is re-evaluated when the
+   * timer FIRES, not when it was scheduled, so a new turn starting inside the
+   * window simply makes it false again.
+   */
+  quietWindowMs: number;
 }
-
-/**
- * Long enough that a settle followed 1ms later by the next turn is a non-event,
- * short enough that the operator does not notice it. The predicate is
- * re-evaluated when the timer FIRES, not when it was scheduled, so a new turn
- * starting inside the window simply makes it false again.
- */
-const QUIET_WINDOW_MS = 2_000;
 
 export class RunCompletionService {
   readonly #deps: RunCompletionDeps;
@@ -60,7 +56,7 @@ export class RunCompletionService {
     const timer = setTimeout(() => {
       this.#timers.delete(userSessionId);
       try { this.evaluate(userSessionId); } catch { /* never let a sweep kill the process */ }
-    }, this.#deps.quietWindowMs ?? QUIET_WINDOW_MS);
+    }, this.#deps.quietWindowMs);
     timer.unref?.();
     this.#timers.set(userSessionId, timer);
   }

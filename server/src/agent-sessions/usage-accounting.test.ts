@@ -64,7 +64,7 @@ describe("cumulative usage baseline", () => {
         yield initMessage("sess-resumed");
         yield invocation === 1 ? usageFrame(4.48, 1_080_818) : usageFrame(4.78, 1_138_239);
       },
-      { hostOverrides: { config: { ...loadConfig({}), seatIdleReapMs: 20 } } },
+      { config: { seatIdleReapMs: 20 } },
     );
     const userSessionId = h.addUserSession();
     const created = h.host.createSession({
@@ -124,7 +124,7 @@ describe("cumulative usage baseline", () => {
         yield initMessage("sess-restarted");
         yield invocation === 1 ? usageFrame(4.48, 1_080_818) : usageFrame(0.31, 42_000);
       },
-      { hostOverrides: { config: { ...loadConfig({}), seatIdleReapMs: 20 } } },
+      { config: { seatIdleReapMs: 20 } },
     );
     const userSessionId = h.addUserSession();
     const created = h.host.createSession({

@@ -19,7 +19,7 @@ export function registerComposeRoutes(
     if (text.length > IMPROVE_MAX_CHARS) {
       throw badRequest(`text must be at most ${IMPROVE_MAX_CHARS} characters`);
     }
-    const sdk = await ctx.sdk();
+    const sdk = await ctx.app.sdk();
     return { text: await improveMessage(sdk, ctx.config, text) };
   });
 }

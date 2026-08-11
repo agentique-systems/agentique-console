@@ -42,10 +42,8 @@ describe("recoverInterruptedTurns", () => {
       payload: { agentSessionId, participant: "web", turnId: "tu_web" } });
     expect(h.repo.findUnsettledTurns()).toHaveLength(1);
 
-    const rebooted = restartHarness(h);
-    expect(
-      recoverInterruptedTurns({ repo: rebooted.repo, bus: rebooted.bus }),
-    ).toBe(1);
+    const rebooted = await restartHarness(h);
+    expect(rebooted.bootReport.recoveredTurns).toBe(1);
 
     const events = await collectUntil(
       h.bus,
@@ -76,10 +74,8 @@ describe("recoverInterruptedTurns", () => {
     await collected;
 
     const promptsBefore = h.fake.captured.prompts.length;
-    const rebooted = restartHarness(h);
-    expect(
-      recoverInterruptedTurns({ repo: rebooted.repo, bus: rebooted.bus }),
-    ).toBe(1);
+    const rebooted = await restartHarness(h);
+    expect(rebooted.bootReport.recoveredTurns).toBe(1);
 
     const rows = h.repo.listMessages("user", userSessionId);
     expect(rows.at(-1)).toMatchObject({

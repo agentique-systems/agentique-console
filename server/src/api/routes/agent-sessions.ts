@@ -11,19 +11,19 @@ export function registerAgentSessionRoutes(
   app.get<{ Params: { id: string } }>(
     "/api/user-sessions/:id/agent-sessions",
     async (request) =>
-      ctx.repo
+      ctx.app.repo
         .listAgentSessions(request.params.id)
-        .map((row) => ctx.host.wireSession(row)),
+        .map((row) => ctx.app.host.wireSession(row)),
   );
 
   app.get<{ Params: { id: string } }>(
     "/api/agent-sessions/:id",
     async (request) => {
-      const row = ctx.repo.getAgentSession(request.params.id);
+      const row = ctx.app.repo.getAgentSession(request.params.id);
       if (!row) throw notFound(`no agent session ${request.params.id}`);
       return {
-        session: ctx.host.wireSession(row),
-        runs: ctx.repo.listParticipants(row.id).map((participant) => ({
+        session: ctx.app.host.wireSession(row),
+        runs: ctx.app.repo.listParticipants(row.id).map((participant) => ({
           participant: participant.name,
           profileId: participant.profileId,
           profile: participant.profileSnapshot,
@@ -33,7 +33,7 @@ export function registerAgentSessionRoutes(
           contextTokens: participant.contextTokens,
           providerSessionId: participant.sdkSessionId,
         })),
-        messages: ctx.repo
+        messages: ctx.app.repo
           .listMessages("agent", row.id)
           .map(toWireMessage),
       };
@@ -43,10 +43,10 @@ export function registerAgentSessionRoutes(
   app.get<{ Params: { id: string } }>(
     "/api/agent-sessions/:id/transcript",
     async (request) => {
-      const row = ctx.repo.getAgentSession(request.params.id);
+      const row = ctx.app.repo.getAgentSession(request.params.id);
       if (!row) throw notFound(`no agent session ${request.params.id}`);
       const events: ConsoleEvent[] = [];
-      for await (const event of ctx.bus.readWithSeq({
+      for await (const event of ctx.app.bus.readWithSeq({
         agentSessionId: row.id,
       })) {
         events.push(event);

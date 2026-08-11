@@ -44,7 +44,7 @@ function harness() {
       yield initMessage();
       yield successMessage();
     },
-    { hostOverrides: { processes: { stopParticipant, stopSession: vi.fn(), closeAll: vi.fn() } as unknown as ProcessManager } },
+    { runtime: { processes: { stopParticipant, stopSession: vi.fn(), closeAll: vi.fn() } as unknown as ProcessManager } },
   );
   return { h, stopParticipant };
 }

@@ -81,9 +81,9 @@ export interface SeatToolsDeps {
   config?: Config;
   tasks?: TaskService;
   handoffs?: HandoffService;
-  processes?: ProcessManager;
-  browsers?: BrowserManager;
-  worktrees?: WorktreeManager;
+  processes: ProcessManager | null;
+  browsers: BrowserManager | null;
+  worktrees: WorktreeManager | null;
 }
 
 export interface SeatToolsContext {

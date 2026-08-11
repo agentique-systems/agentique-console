@@ -57,7 +57,7 @@ export function registerUserSessionRoutes(
   app: FastifyInstance,
   ctx: AppContext,
 ): void {
-  const sessions = ctx.userSessions;
+  const sessions = ctx.app.userSessions;
 
   app.get<{ Querystring: { workspaceId?: string } }>(
     "/api/user-sessions",
@@ -96,8 +96,8 @@ export function registerUserSessionRoutes(
     async (request) => {
       const parsed = SignoffBody.safeParse(request.body);
       if (!parsed.success) throw badRequest(parsed.error.message);
-      ctx.completion.resolve(request.params.id, parsed.data.decision, parsed.data.note);
-      return ctx.userSessions.get(request.params.id).session;
+      ctx.app.completion.resolve(request.params.id, parsed.data.decision, parsed.data.note);
+      return ctx.app.userSessions.get(request.params.id).session;
     },
   );
 
@@ -106,10 +106,10 @@ export function registerUserSessionRoutes(
     async (request, reply) => {
       const parsed = MessageBody.safeParse(request.body);
       if (!parsed.success) throw badRequest(parsed.error.message);
-      const session = ctx.repo.getUserSession(request.params.id);
+      const session = ctx.app.repo.getUserSession(request.params.id);
       const result = session?.purpose === "profile_manager"
-        ? ctx.manager.postMessage(request.params.id, parsed.data.text)
-        : ctx.runner.postOperatorMessage(request.params.id, parsed.data.text);
+        ? ctx.app.manager.postMessage(request.params.id, parsed.data.text)
+        : ctx.app.runner.postOperatorMessage(request.params.id, parsed.data.text);
       return reply.status(202).send(result);
     },
   );
@@ -119,8 +119,8 @@ export function registerUserSessionRoutes(
     async (request) => {
       const parsed = ResolveBody.safeParse(request.body);
       if (!parsed.success) throw badRequest(parsed.error.message);
-      const before = ctx.interactions.get(request.params.interactionId);
-      const resolved = ctx.interactions.resolveFromApi(
+      const before = ctx.app.interactions.get(request.params.interactionId);
+      const resolved = ctx.app.interactions.resolveFromApi(
         request.params.id,
         request.params.interactionId,
         parsed.data,
@@ -129,7 +129,7 @@ export function registerUserSessionRoutes(
       // exists, and a seat is not revived by a lane — it is woken by a
       // delivery. So a detached or stale SEAT question is answered by mailbox.
       if (before.participant !== null && (before.detached || before.status === "stale")) {
-        ctx.host.deliverOperatorAnswer(before);
+        ctx.app.host.deliverOperatorAnswer(before);
         return resolved;
       }
       // A stale MAIN-LANE interaction's parked promise died with a previous
@@ -140,8 +140,8 @@ export function registerUserSessionRoutes(
           "decision" in parsed.data &&
           parsed.data.decision === "approve"
         ) {
-          ctx.repo.patchUserSession(request.params.id, { phase: "executing" });
-          ctx.bus.append({
+          ctx.app.repo.patchUserSession(request.params.id, { phase: "executing" });
+          ctx.app.bus.append({
             type: "user_session.updated",
             userSessionId: request.params.id,
             payload: {
@@ -150,7 +150,7 @@ export function registerUserSessionRoutes(
             },
           });
         }
-        ctx.runner.enqueueRevival(
+        ctx.app.runner.enqueueRevival(
           request.params.id,
           revivalPrompt(before, parsed.data),
         );
@@ -162,7 +162,7 @@ export function registerUserSessionRoutes(
   app.post<{ Params: { id: string } }>(
     "/api/user-sessions/:id/interrupt",
     async (request, reply) => {
-      ctx.runner.interrupt(request.params.id);
+      ctx.app.runner.interrupt(request.params.id);
       return reply.status(202).send({ ok: true });
     },
   );

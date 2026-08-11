@@ -1,10 +1,8 @@
-/** Shared test harness: in-memory DB + bus + runner over a scripted fake SDK. */
+/** Shared test harness: the REAL composition root over an in-memory DB and a scripted fake SDK. */
 import type { ConsoleEvent } from "@agentique-console/shared";
-import type {
-  AgentSessionHost,
-  AgentSessionHostDeps,
-} from "./agent-sessions/host.ts";
-import { createApp, type App } from "./app.ts";
+import type { AgentSessionHost } from "./agent-sessions/host.ts";
+import { createApp, type App, type CreateAppOptions } from "./app.ts";
+import { bootApp, type BootReport } from "./boot.ts";
 import { loadConfig, type Config } from "./config.ts";
 import { openDb } from "./db/client.ts";
 import { Repo, type UserSessionRow } from "./db/repo.ts";
@@ -14,16 +12,22 @@ import { newId, nowIso } from "./ids.ts";
 import type { RunCompletionService } from "./completion/service.ts";
 import { DecisionLedger } from "./orchestrator/decisions.ts";
 import { InteractionService } from "./orchestrator/interactions.ts";
-import {
-  OrchestratorRunner,
-  type OrchestratorDeps,
-} from "./orchestrator/runner.ts";
+import { OrchestratorRunner } from "./orchestrator/runner.ts";
 import { fakeSdk, type FakeProgram, type FakeSdk } from "./sdk/fake.ts";
-import { AgentProfileRegistry } from "./agent-profiles/registry.ts";
 import { HandoffService } from "./handoffs/service.ts";
 import type { TaskService } from "./tasks/service.ts";
 
+export interface HarnessOptions {
+  /** Merged over `loadConfig({})` (which already gets a 25ms quiet window). */
+  config?: Partial<Config>;
+  /** OS-capability injection; the harness default is explicit absence. */
+  runtime?: CreateAppOptions["runtime"];
+  /** The workspace row's root path; defaults to /tmp/test-workspace. */
+  workspaceRoot?: string;
+}
+
 export interface Harness {
+  app: App;
   db: ReturnType<typeof openDb>["db"];
   sqlite: ReturnType<typeof openDb>["sqlite"];
   bus: EventBus;
@@ -31,6 +35,10 @@ export interface Harness {
   interactions: InteractionService;
   decisions: DecisionLedger;
   runner: OrchestratorRunner;
+  host: AgentSessionHost;
+  completion: RunCompletionService;
+  tasks: TaskService;
+  handoffs: HandoffService;
   fake: FakeSdk;
   config: Config;
   workspaceId: string;
@@ -38,51 +46,52 @@ export interface Harness {
   addUserSession(mode?: "execute" | "plan_execute"): string;
 }
 
-export function makeHarness(
-  program: FakeProgram,
-  overrides: Partial<OrchestratorDeps> = {},
-): Harness {
+export type DelegationHarness = Harness;
+
+export function makeHarness(program: FakeProgram, options: HarnessOptions = {}): Harness {
   const { db, sqlite } = openDb(":memory:");
-  const bus = new EventBus(db);
-  const repo = new Repo(db, sqlite);
-  const decisions = new DecisionLedger(db);
-  const interactions = new InteractionService(db, bus);
   const fake = fakeSdk(program);
-  const config = loadConfig({});
-  const handoffs = new HandoffService({ repo, bus, getWorkspaceRoot: () => "/tmp/test-workspace" });
+  const config: Config = {
+    ...loadConfig({}),
+    // The real window is 2s; tests would otherwise pay it on every case.
+    completionQuietWindowMs: 25,
+    ...options.config,
+  };
+  const workspaceRoot = options.workspaceRoot ?? "/tmp/test-workspace";
+
+  const app = createApp({
+    config,
+    db,
+    sqlite,
+    sdk: async () => fake.sdk,
+    runtime: { processes: null, browsers: null, worktrees: null, ...options.runtime },
+  });
 
   const workspaceId = newId("ws");
   db.insert(workspaces)
     .values({
       id: workspaceId,
       name: "test",
-      rootPath: "/tmp/test-workspace",
+      rootPath: workspaceRoot,
       metadata: {},
       createdAt: nowIso(),
       updatedAt: nowIso(),
     })
     .run();
 
-  const runner = new OrchestratorRunner({
-    repo,
-    bus,
-    config,
-    sdk: async () => fake.sdk,
-    interactions,
-    decisions,
-    handoffs,
-    getWorkspaceRoot: () => "/tmp/test-workspace",
-    ...overrides,
-  });
-
   return {
+    app,
     db,
     sqlite,
-    bus,
-    repo,
-    interactions,
-    decisions,
-    runner,
+    bus: app.bus,
+    repo: app.repo,
+    interactions: app.interactions,
+    decisions: app.decisions,
+    runner: app.runner,
+    host: app.host,
+    completion: app.completion,
+    tasks: app.tasks,
+    handoffs: app.handoffs,
     fake,
     config,
     workspaceId,
@@ -110,66 +119,54 @@ export function makeHarness(
         createdAt: nowIso(),
         updatedAt: nowIso(),
       };
-      repo.insertUserSession(row);
+      app.repo.insertUserSession(row);
       return row.id;
     },
   };
 }
 
-export interface DelegationHarness extends Harness {
-  host: AgentSessionHost;
-  completion: RunCompletionService;
-  tasks: TaskService;
-  handoffs: HandoffService;
-}
+/** Same harness; the name marks tests that exercise host↔runner delegation. */
+export const makeDelegationHarness = makeHarness;
 
 /**
- * The full wiring (main.ts in miniature): runner with the console MCP server,
- * host waking the runner.
+ * A restart: a fresh app over the same database and fake SDK, then the real
+ * boot sequence — in-memory pending state is lost exactly as when the process
+ * dies, and recovery runs the same path production takes. The report says what
+ * boot found.
  */
-export function makeDelegationHarness(
-  program: FakeProgram,
-  options: {
-    hostOverrides?: Partial<AgentSessionHostDeps>;
-  } = {},
-): DelegationHarness {
-  const base = makeHarness(program);
-  return { ...base, ...wire(base, options) };
-}
-
-/**
- * A restart: fresh host and runner over the same database and fake SDK. Any
- * turn the old pair had in flight is gone, exactly as it would be after the
- * process died — which is what recovery has to cope with.
- */
-export function restartHarness(
-  harness: DelegationHarness,
-  options: { hostOverrides?: Partial<AgentSessionHostDeps> } = {},
-): DelegationHarness {
-  return { ...harness, ...wire(harness, options) };
-}
-
-/**
- * The REAL composition root over the test doubles: a fresh call is a process
- * restart (in-memory pending state is lost, exactly as in production), and any
- * service wired in `createApp` is wired here by construction.
- */
-function wire(
-  base: Harness,
-  options: { hostOverrides?: Partial<AgentSessionHostDeps> },
-): App {
-  return createApp({
-    config: base.config,
-    db: base.db,
-    bus: base.bus,
-    repo: base.repo,
-    sdk: async () => base.fake.sdk,
-    getWorkspaceRoot: () => "/tmp/test-workspace",
-    profiles: new AgentProfileRegistry("/tmp/agentique-console-test-profiles-missing.json"),
-    // The real window is 2s; tests would otherwise pay it on every case.
-    quietWindowMs: 25,
-    ...(options.hostOverrides ? { hostOverrides: options.hostOverrides } : {}),
+export async function restartHarness(
+  harness: Harness,
+  options: HarnessOptions = {},
+): Promise<Harness & { bootReport: BootReport }> {
+  const config: Config = { ...harness.config, ...options.config };
+  const app = createApp({
+    config,
+    db: harness.db,
+    sqlite: harness.sqlite,
+    sdk: async () => harness.fake.sdk,
+    runtime: { processes: null, browsers: null, worktrees: null, ...options.runtime },
   });
+  const bootReport = await bootApp(app);
+  return {
+    ...harness,
+    app,
+    config,
+    bus: app.bus,
+    repo: app.repo,
+    interactions: app.interactions,
+    decisions: app.decisions,
+    runner: app.runner,
+    host: app.host,
+    completion: app.completion,
+    tasks: app.tasks,
+    handoffs: app.handoffs,
+    bootReport,
+  };
+}
+
+/** Runs the real boot sequence over an existing harness and returns its report. */
+export async function bootHarness(harness: Harness): Promise<BootReport> {
+  return bootApp(harness.app);
 }
 
 /**

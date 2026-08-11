@@ -17,7 +17,7 @@ export function registerWorkspaceRoutes(
   app: FastifyInstance,
   ctx: AppContext,
 ): void {
-  const service = ctx.workspaces;
+  const service = ctx.app.workspaces;
 
   app.get("/api/workspaces", async () => service.list());
 

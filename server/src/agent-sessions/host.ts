@@ -298,13 +298,14 @@ export interface AgentSessionHostDeps {
   bus: EventBus;
   /** Required — every knob's default lives in `loadConfig`, nowhere else. */
   config: Config;
-  profiles?: AgentProfileRegistry;
-  sdk?: () => Promise<ConsoleSdk>;
-  sessionStore?: SqliteSessionStore;
-  getWorkspaceRoot?: (workspaceId: string) => string;
-  wake?: (userSessionId: string, agentSessionId: string, category: Category, text: string) => void;
-  processes?: ProcessManager;
-  browsers?: BrowserManager;
+  profiles: AgentProfileRegistry;
+  sdk: () => Promise<ConsoleSdk>;
+  sessionStore: SqliteSessionStore;
+  getWorkspaceRoot: (workspaceId: string) => string;
+  wake: (userSessionId: string, agentSessionId: string, category: Category, text: string) => void;
+  /** OS capabilities. `null` = absent, stated at the construction site. */
+  processes: ProcessManager | null;
+  browsers: BrowserManager | null;
   interactions: InteractionService;
   /**
    * What the operator has decided. Read into every seat's prompt and into
@@ -314,9 +315,9 @@ export interface AgentSessionHostDeps {
    * ledger shipped dark in production.
    */
   decisions: DecisionLedger;
-  tasks?: TaskService;
-  handoffs?: HandoffService;
-  worktrees?: WorktreeManager;
+  tasks: TaskService;
+  handoffs: HandoffService;
+  worktrees: WorktreeManager | null;
 }
 
 /** The question text of an interaction, for prompts and operator-facing lines. */

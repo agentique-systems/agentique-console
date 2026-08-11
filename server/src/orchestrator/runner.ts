@@ -39,6 +39,7 @@ import { buildOrchestratorCanUseTool, type LaneState } from "./permissions.ts";
 import type { HandoffService } from "../handoffs/service.ts";
 import { HandoffDraftSchema, HANDOFF_DRAFT_JSON_SCHEMA } from "../handoffs/schema.ts";
 import { sdkEnv } from "../sdk/env.ts";
+import type { SqliteSessionStore } from "../sdk/session-store.ts";
 import type { AgentSessionHost } from "../agent-sessions/host.ts";
 import { mainPeerName } from "../agent-sessions/peer-names.ts";
 import { mergeHooks } from "../sdk/hooks.ts";
@@ -128,10 +129,10 @@ export interface OrchestratorDeps {
   sdk: () => Promise<ConsoleSdk>;
   interactions: InteractionService;
   getWorkspaceRoot: (workspaceId: string) => string;
-  /** M6: the console MCP server bound to one user session. */
-  buildMcpServer?: (userSessionId: string, sdk: ConsoleSdk) => unknown;
+  /** The console MCP server bound to one user session. */
+  buildMcpServer: (userSessionId: string, sdk: ConsoleSdk) => unknown;
   /** Eager console-owned provider journal. */
-  sessionStore?: unknown;
+  sessionStore: SqliteSessionStore;
   handoffs: HandoffService;
   /**
    * Operator decisions, injected into the lane's system prompt so main never
@@ -141,11 +142,10 @@ export interface OrchestratorDeps {
    * passed.
    */
   decisions: DecisionLedger;
-  /** Lazy — the host is constructed after the runner; it backs the lane's
-   * SendMessage middleware (main identity) and peer-inbound resolution. */
-  host?: () => AgentSessionHost;
-  /** Native task-tool mirroring for the lane. */
-  tasks?: TaskService;
+  /** Lazy — host and runner construct in either order inside `createApp`. */
+  host: () => AgentSessionHost;
+  /** Console task-ledger tools for the lane. */
+  tasks: TaskService;
 }
 
 /** Bounded grace for a closing lane's pump before the hard abort. */

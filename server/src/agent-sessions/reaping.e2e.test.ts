@@ -50,13 +50,10 @@ describe("seat park reaps the seat's runtime", () => {
         yield successMessage();
       },
       {
-        hostOverrides: {
-          // A 20ms idle window so the park happens inside the test rather than
-          // five minutes later.
-          config: { ...loadConfig({}), seatIdleReapMs: 20 },
-          processes: runtime.processes,
-          browsers: runtime.browsers,
-        },
+        // A 20ms idle window so the park happens inside the test rather than
+        // five minutes later.
+        config: { seatIdleReapMs: 20 },
+        runtime: { processes: runtime.processes, browsers: runtime.browsers },
       },
     );
     const userSessionId = h.addUserSession();
@@ -93,11 +90,8 @@ describe("seat park reaps the seat's runtime", () => {
         yield successMessage();
       },
       {
-        hostOverrides: {
-          config: { ...loadConfig({}), seatIdleReapMs: 20 },
-          processes: runtime.processes,
-          browsers: runtime.browsers,
-        },
+        config: { seatIdleReapMs: 20 },
+        runtime: { processes: runtime.processes, browsers: runtime.browsers },
       },
     );
     const userSessionId = h.addUserSession();
