@@ -6,7 +6,7 @@ import type { Db } from "../db/client.ts";
 import { workspaces } from "../db/schema.ts";
 import type { EventBus } from "../events/bus.ts";
 import { newId, nowIso } from "../ids.ts";
-import { badRequest, conflict, notFound } from "../api/errors.ts";
+import { InvalidInputError, ConflictError, NotFoundError } from "../errors.ts";
 import { BrowseError, resolveNewPath } from "./fs-browse.ts";
 
 type WorkspaceRow = typeof workspaces.$inferSelect;
@@ -43,7 +43,7 @@ export class WorkspaceService {
       .from(workspaces)
       .where(eq(workspaces.id, id))
       .get();
-    if (!row) throw notFound(`no workspace ${id}`);
+    if (!row) throw new NotFoundError(`no workspace ${id}`);
     return toWire(row);
   }
 
@@ -53,20 +53,20 @@ export class WorkspaceService {
     create?: boolean;
   }): Promise<Workspace> {
     const name = input.name.trim();
-    if (name === "") throw badRequest("workspace name is required");
+    if (name === "") throw new InvalidInputError("workspace name is required");
 
     let rootPath: string;
     try {
       rootPath = await resolveNewPath(input.rootPath, this.#roots);
     } catch (error) {
       if (error instanceof BrowseError) {
-        throw badRequest(`rootPath: ${error.message}`);
+        throw new InvalidInputError(`rootPath: ${error.message}`);
       }
       throw error;
     }
     if (!existsSync(rootPath)) {
       if (input.create !== true) {
-        throw badRequest("rootPath does not exist (pass create: true)");
+        throw new InvalidInputError("rootPath does not exist (pass create: true)");
       }
       await mkdir(rootPath, { recursive: true });
     }
@@ -76,7 +76,7 @@ export class WorkspaceService {
       .from(workspaces)
       .where(eq(workspaces.rootPath, rootPath))
       .get();
-    if (existing) throw conflict(`a workspace already uses ${rootPath}`);
+    if (existing) throw new ConflictError(`a workspace already uses ${rootPath}`);
 
     const now = nowIso();
     const row: WorkspaceRow = {
@@ -101,7 +101,7 @@ export class WorkspaceService {
     const current = this.get(id);
     const name = patch.name?.trim();
     if (name !== undefined && name === "") {
-      throw badRequest("workspace name cannot be empty");
+      throw new InvalidInputError("workspace name cannot be empty");
     }
     this.#db
       .update(workspaces)

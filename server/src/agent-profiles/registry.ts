@@ -8,7 +8,7 @@ import type { Db } from "../db/client.ts";
 import { agentProfileTrust } from "../db/schema.ts";
 import type { EventBus } from "../events/bus.ts";
 import { nowIso } from "../ids.ts";
-import { conflict, notFound } from "../api/errors.ts";
+import { ConflictError, NotFoundError } from "../errors.ts";
 
 export const ProfileSchema = z.object({
   id: z.string().regex(/^[a-z][a-z0-9-]*$/),
@@ -189,8 +189,8 @@ export class AgentProfileRegistry {
   trust(workspaceId: string, id: string, revision: string): void {
     if (!this.#options) throw new Error("workspace profiles unavailable");
     const detail = this.detail(workspaceId, id);
-    if (!detail || detail.source !== "workspace") throw notFound(`no workspace profile ${id}`);
-    if (!detail.valid || detail.revision !== revision) throw conflict("profile revision is invalid or stale");
+    if (!detail || detail.source !== "workspace") throw new NotFoundError(`no workspace profile ${id}`);
+    if (!detail.valid || detail.revision !== revision) throw new ConflictError("profile revision is invalid or stale");
     this.#options.db.insert(agentProfileTrust).values({ workspaceId, profileId: id, revision, trustedAt: nowIso() }).onConflictDoNothing().run();
     this.#options.bus.append({ type: "agent_profile.changed", workspaceId, payload: { workspaceId, profileId: id, revision, trusted: true } });
   }

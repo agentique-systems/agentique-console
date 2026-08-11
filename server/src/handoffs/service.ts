@@ -13,7 +13,7 @@ import {
   HANDOFF_READ_MAX_BYTES,
   handoffExtensionKindForProfile,
 } from "@agentique-console/shared";
-import { badRequest, notFound } from "../api/errors.ts";
+import { InvalidInputError, NotFoundError } from "../errors.ts";
 import { decodeCursor, encodeCursor, sliceUtf8Window } from "../paging.ts";
 import type { HandoffRecordRow, Repo } from "../db/repo.ts";
 import type { EventBus } from "../events/bus.ts";
@@ -89,7 +89,7 @@ export class HandoffService {
 
   get(id: string): HandoffRecord {
     const row = this.deps.repo.getHandoff(id);
-    if (!row) throw notFound(`no handoff ${id}`);
+    if (!row) throw new NotFoundError(`no handoff ${id}`);
     return this.toWire(row);
   }
 
@@ -99,7 +99,7 @@ export class HandoffService {
     const offset = cursor ? decodeCursor(cursor, "handoff cursor") : 0;
     const serialized = JSON.stringify(section === "core" ? handoff.core : handoff.extension, null, 2);
     const buffer = Buffer.from(serialized, "utf8");
-    if (offset > buffer.length) throw badRequest("handoff cursor is past the end of the section");
+    if (offset > buffer.length) throw new InvalidInputError("handoff cursor is past the end of the section");
     const { content, end } = sliceUtf8Window(buffer, offset, bounded);
     const nextCursor = end < buffer.length ? encodeCursor(end) : null;
     return { handoff, section, content, nextCursor };

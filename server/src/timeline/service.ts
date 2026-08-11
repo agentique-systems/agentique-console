@@ -1,7 +1,7 @@
 import type { ConsoleEvent, TimelineItem, TimelineLane, TimelinePageResponse } from "@agentique-console/shared";
 import type { Repo } from "../db/repo.ts";
 import type { EventBus } from "../events/bus.ts";
-import { notFound } from "../api/errors.ts";
+import { NotFoundError } from "../errors.ts";
 
 type Payload = Record<string, unknown>;
 
@@ -13,7 +13,7 @@ export class TimelineService {
 
   page(userSessionId: string, beforeSeq?: number, limit = 1_000): TimelinePageResponse {
     const session = this.repo.getUserSession(userSessionId);
-    if (!session) throw notFound(`no user session ${userSessionId}`);
+    if (!session) throw new NotFoundError(`no user session ${userSessionId}`);
     const { events, nextBeforeSeq } = this.bus.pageForUserSession(userSessionId, beforeSeq, Math.min(Math.max(limit, 50), 2_000));
     const lanes: TimelineLane[] = [
       { id: "operator", kind: "operator", label: "Human Operator", parentId: null, order: 0 },

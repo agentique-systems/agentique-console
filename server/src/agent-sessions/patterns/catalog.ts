@@ -12,7 +12,7 @@
  */
 import { z } from "zod";
 import type { PatternId, RolePrompt, RoleSpec, TopologyContract } from "@agentique-console/shared";
-import { badRequest } from "../../api/errors.ts";
+import { InvalidInputError } from "../../errors.ts";
 import type { AgentProfile } from "../../agent-profiles/registry.ts";
 import { OPERATOR_PATH_BULLETS, PROTOCOL_INTRO } from "../presets.ts";
 import { hubContract } from "../topology.ts";
@@ -81,7 +81,7 @@ function agentSeats(agents: BuildAgent[], patternRole: (index: number) => string
 // ── hub_and_spoke ──────────────────────────────────────────────────────────
 
 function buildHub(input: BuildInput): BuildResult {
-  if (input.agents.length < 1 || input.agents.length > 20) throw badRequest("an agent session seats 1 to 20 specialists");
+  if (input.agents.length < 1 || input.agents.length > 20) throw new InvalidInputError("an agent session seats 1 to 20 specialists");
   return {
     contract: hubContract(),
     seats: [
@@ -106,8 +106,8 @@ const PIPELINE_DONE_BULLET = `
 
 function buildPipeline(input: BuildInput): BuildResult {
   const names = input.agents.map((agent) => agent.name);
-  if (names.length < 2) throw badRequest("a pipeline needs at least 2 stages");
-  if (names.length > 20) throw badRequest("a pipeline seats at most 20 stages");
+  if (names.length < 2) throw new InvalidInputError("a pipeline needs at least 2 stages");
+  if (names.length > 20) throw new InvalidInputError("a pipeline seats at most 20 stages");
   const roleOf = (index: number): string => `stage.${index + 1}`;
   const last = names.length - 1;
   const roles: Record<string, RoleSpec> = {};
@@ -173,12 +173,12 @@ const LOOP_DONE_BULLET = `
   more than a confident omission.`;
 
 function buildEvaluatorOptimizer(input: BuildInput): BuildResult {
-  if (input.agents.length !== 2) throw badRequest("evaluator_optimizer seats exactly 2 agents: a generator and an evaluator");
+  if (input.agents.length !== 2) throw new InvalidInputError("evaluator_optimizer seats exactly 2 agents: a generator and an evaluator");
   const config = EVALUATOR_CONFIG.parse(input.config ?? {});
   const generator = config.generatorSeat === undefined
     ? input.agents[0]!
     : input.agents.find((agent) => agent.name === config.generatorSeat)
-      ?? (() => { throw badRequest(`generatorSeat "${config.generatorSeat}" is not one of the agents`); })();
+      ?? (() => { throw new InvalidInputError(`generatorSeat "${config.generatorSeat}" is not one of the agents`); })();
   const evaluator = input.agents.find((agent) => agent.name !== generator.name)!;
   if (config.requireDistinctModels) {
     const modelOf = (agent: BuildAgent): string | undefined =>
@@ -186,7 +186,7 @@ function buildEvaluatorOptimizer(input: BuildInput): BuildResult {
     const generatorModel = modelOf(generator);
     const evaluatorModel = modelOf(evaluator);
     if (generatorModel !== undefined && generatorModel === evaluatorModel) {
-      throw badRequest(`generator and evaluator both resolve to ${generatorModel}; same-model loops collude — override one seat's model, or pass patternConfig.requireDistinctModels: false`);
+      throw new InvalidInputError(`generator and evaluator both resolve to ${generatorModel}; same-model loops collude — override one seat's model, or pass patternConfig.requireDistinctModels: false`);
     }
   }
   const protocol = `${PROTOCOL_INTRO}${LOOP_WORK_BULLET}${OPERATOR_PATH_BULLETS}${LOOP_DONE_BULLET}`;
@@ -255,7 +255,7 @@ const MAP_REDUCE_DONE_BULLET = `
   Include what you could not verify; an honest gap beats a confident omission.`;
 
 function buildMapReduce(input: BuildInput): BuildResult {
-  if (input.agents.length !== 1) throw badRequest("map_reduce seats exactly 1 agent at creation: the reducer (mappers are minted per work item by dispatch_work_items)");
+  if (input.agents.length !== 1) throw new InvalidInputError("map_reduce seats exactly 1 agent at creation: the reducer (mappers are minted per work item by dispatch_work_items)");
   const config = MAP_REDUCE_CONFIG.parse(input.config ?? {});
   const reducer = input.agents[0]!;
   const protocol = `${PROTOCOL_INTRO}${MAP_REDUCE_WORK_BULLET}${OPERATOR_PATH_BULLETS}${MAP_REDUCE_DONE_BULLET}`;
@@ -318,8 +318,8 @@ const DEBATE_DONE_BULLET = `
   could not verify.`;
 
 function buildDebate(input: BuildInput): BuildResult {
-  if (input.agents.length < 2 || input.agents.length > 8) throw badRequest("a debate seats 2 to 8 debaters (the judge is seated by the console)");
-  if (input.agents.some((agent) => agent.name === "judge")) throw badRequest(`"judge" is the console-seated arbiter's name; pick another seat name`);
+  if (input.agents.length < 2 || input.agents.length > 8) throw new InvalidInputError("a debate seats 2 to 8 debaters (the judge is seated by the console)");
+  if (input.agents.some((agent) => agent.name === "judge")) throw new InvalidInputError(`"judge" is the console-seated arbiter's name; pick another seat name`);
   const config = DEBATE_CONFIG.parse(input.config ?? {});
   const protocol = `${PROTOCOL_INTRO}${DEBATE_WORK_BULLET}${OPERATOR_PATH_BULLETS}${DEBATE_DONE_BULLET}`;
   const rubric = config.rubric === undefined ? "" : `\n\nJudge against this rubric:\n${config.rubric}`;
@@ -383,12 +383,12 @@ const P2P_DONE_BULLET = `
   stop — an idle peer is a finished peer, not a failed one.`;
 
 function buildPeerToPeer(input: BuildInput): BuildResult {
-  if (input.agents.length < 2 || input.agents.length > 8) throw badRequest("peer_to_peer seats 2 to 8 peers");
+  if (input.agents.length < 2 || input.agents.length > 8) throw new InvalidInputError("peer_to_peer seats 2 to 8 peers");
   const config = P2P_CONFIG.parse(input.config ?? {});
   const closer = config.closerSeat === undefined
     ? input.agents[0]!
     : input.agents.find((agent) => agent.name === config.closerSeat)
-      ?? (() => { throw badRequest(`closerSeat "${config.closerSeat}" is not one of the agents`); })();
+      ?? (() => { throw new InvalidInputError(`closerSeat "${config.closerSeat}" is not one of the agents`); })();
   const peers = input.agents.filter((agent) => agent.name !== closer.name);
   const protocol = `${PROTOCOL_INTRO}${P2P_WORK_BULLET}${OPERATOR_PATH_BULLETS}${P2P_DONE_BULLET}`;
   const addressing = `Address participants by bare name; "main" reaches the Orchestrator (closer only). You may address any peer directly.`;
@@ -449,12 +449,12 @@ const PLAN_DONE_BULLET = `
   could not verify; an honest gap beats a confident omission.`;
 
 function buildPlanExecute(input: BuildInput): BuildResult {
-  if (input.agents.length < 2 || input.agents.length > 20) throw badRequest("plan_execute seats a planner plus 1-19 executors");
+  if (input.agents.length < 2 || input.agents.length > 20) throw new InvalidInputError("plan_execute seats a planner plus 1-19 executors");
   const config = PLAN_EXECUTE_CONFIG.parse(input.config ?? {});
   const planner = config.plannerSeat === undefined
     ? input.agents[0]!
     : input.agents.find((agent) => agent.name === config.plannerSeat)
-      ?? (() => { throw badRequest(`plannerSeat "${config.plannerSeat}" is not one of the agents`); })();
+      ?? (() => { throw new InvalidInputError(`plannerSeat "${config.plannerSeat}" is not one of the agents`); })();
   const executors = input.agents.filter((agent) => agent.name !== planner.name);
   const protocol = `${PROTOCOL_INTRO}${PLAN_WORK_BULLET}${OPERATOR_PATH_BULLETS}${PLAN_DONE_BULLET}`;
   return {

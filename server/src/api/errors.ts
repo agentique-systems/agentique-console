@@ -1,3 +1,6 @@
+import { ConflictError, InvalidInputError, NotFoundError } from "../errors.ts";
+
+/** A transport-level error that already knows its status (fs browse). */
 export class ApiError extends Error {
   readonly statusCode: number;
   readonly code: string;
@@ -9,15 +12,11 @@ export class ApiError extends Error {
   }
 }
 
-export function badRequest(message: string): ApiError {
-  return new ApiError(400, "bad_request", message);
-}
-export function notFound(message: string): ApiError {
-  return new ApiError(404, "not_found", message);
-}
-export function conflict(message: string): ApiError {
-  return new ApiError(409, "conflict", message);
-}
-export function forbidden(message: string): ApiError {
-  return new ApiError(403, "forbidden", message);
+/** The one domain→HTTP mapping, consumed by api/server.ts's error handler. */
+export function toApiError(error: unknown): ApiError | null {
+  if (error instanceof ApiError) return error;
+  if (error instanceof InvalidInputError) return new ApiError(400, "bad_request", error.message);
+  if (error instanceof NotFoundError) return new ApiError(404, "not_found", error.message);
+  if (error instanceof ConflictError) return new ApiError(409, "conflict", error.message);
+  return null;
 }

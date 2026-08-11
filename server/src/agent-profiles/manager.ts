@@ -9,7 +9,7 @@ import { ProfileSchema } from "./registry.ts";
 import { newId, nowIso } from "../ids.ts";
 import type { OrchestratorRunner } from "../orchestrator/runner.ts";
 import type { EventBus } from "../events/bus.ts";
-import { badRequest, conflict, notFound } from "../api/errors.ts";
+import { InvalidInputError, ConflictError, NotFoundError } from "../errors.ts";
 
 export class ManagerService {
   constructor(private readonly deps: { repo: Repo; workspaces: WorkspaceService; profiles: AgentProfileRegistry; config: Config; bus: EventBus; runner: () => OrchestratorRunner }) {}
@@ -67,16 +67,16 @@ export class ManagerService {
   }
 
   apply(id: string): { profileId: string; revision: string } {
-    const row = this.#row(id); if (row.phase !== "executing") throw conflict("approve the Manager plan before applying profile files");
-    const proposal = this.proposal(id); if (!proposal?.valid || !proposal.profileId) throw badRequest("profile proposal is not valid");
+    const row = this.#row(id); if (row.phase !== "executing") throw new ConflictError("approve the Manager plan before applying profile files");
+    const proposal = this.proposal(id); if (!proposal?.valid || !proposal.profileId) throw new InvalidInputError("profile proposal is not valid");
     const current = this.deps.profiles.detail(row.workspaceId, proposal.profileId);
-    if ((current?.source === "workspace" ? current.revision : null) !== proposal.baseRevision) throw conflict("profile changed after this proposal was staged");
+    if ((current?.source === "workspace" ? current.revision : null) !== proposal.baseRevision) throw new ConflictError("profile changed after this proposal was staged");
     const target = this.deps.profiles.profileRoot(row.workspaceId, proposal.profileId); const parent = path.dirname(target); fs.mkdirSync(parent, { recursive: true });
     const temp = path.join(parent, `.${proposal.profileId}.apply-${newId("artifact")}`); fs.cpSync(this.#draftRoot(id), temp, { recursive: true });
     const backup = `${target}.backup-${Date.now()}`;
     try { if (fs.existsSync(target)) fs.renameSync(target, backup); fs.renameSync(temp, target); if (fs.existsSync(backup)) fs.rmSync(backup, { recursive: true }); }
     catch (error) { if (fs.existsSync(target)) fs.rmSync(target, { recursive: true }); if (fs.existsSync(backup)) fs.renameSync(backup, target); if (fs.existsSync(temp)) fs.rmSync(temp, { recursive: true }); throw error; }
-    const detail = this.deps.profiles.detail(row.workspaceId, proposal.profileId); if (!detail?.valid) throw badRequest("applied profile failed validation");
+    const detail = this.deps.profiles.detail(row.workspaceId, proposal.profileId); if (!detail?.valid) throw new InvalidInputError("applied profile failed validation");
     this.deps.repo.patchUserSession(id, { subjectKey: proposal.profileId, phase: "planning", title: `Manager · ${proposal.profileId}`, memory: this.#profileContext(detail) });
     this.deps.bus.append({ type: "agent_profile.changed", workspaceId: row.workspaceId, payload: { workspaceId: row.workspaceId, profileId: proposal.profileId, revision: detail.revision, trusted: false } });
     return { profileId: proposal.profileId, revision: detail.revision };
@@ -90,11 +90,11 @@ export class ManagerService {
     this.stageFile(id, "agentique.profile.json", JSON.stringify(manifest, null, 2));
     this.stageFile(id, ".claude-plugin/plugin.json", JSON.stringify({ name: targetId, description: detail.purpose, version: "0.1.0" }, null, 2));
   }
-  #row(id: string): UserSessionRow { const row = this.deps.repo.getUserSession(id); if (!row || row.purpose !== "profile_manager") throw notFound(`no manager session ${id}`); return row; }
+  #row(id: string): UserSessionRow { const row = this.deps.repo.getUserSession(id); if (!row || row.purpose !== "profile_manager") throw new NotFoundError(`no manager session ${id}`); return row; }
   #baseRevision(row: UserSessionRow): string | null { try { const parsed = JSON.parse(row.memory) as { selectedProfile?: { source?: string; revision?: string } }; return parsed.selectedProfile?.source === "workspace" ? parsed.selectedProfile.revision ?? null : null; } catch { return null; } }
   #profileContext(detail: AgentProfileDetail): string { return JSON.stringify({ selectedProfile: { id: detail.id, title: detail.title, purpose: detail.purpose, source: detail.source, revision: detail.revision, trusted: detail.trusted, instructions: detail.instructions, tools: detail.tools, skills: detail.skills, runtime: detail.runtime, components: detail.components } }, null, 2); }
   #wire(row: UserSessionRow): ManagerSession { const key = row.subjectKey ?? `draft:${row.id}`; return { id: row.id, workspaceId: row.workspaceId, profileKey: key, profileId: key.startsWith("draft:") ? null : key, title: row.title ?? "Manager", phase: row.phase, status: row.status, createdAt: row.createdAt, updatedAt: row.updatedAt }; }
   #draftRoot(id: string): string { return path.join(this.deps.config.dataDir, "manager-drafts", id); }
-  #safeRelative(value: string): string { const normalized = path.posix.normalize(value.replaceAll("\\", "/")); if (normalized === "." || normalized.startsWith("../") || normalized.startsWith("/") || normalized === "..") throw badRequest("profile path escapes the bundle"); return normalized; }
+  #safeRelative(value: string): string { const normalized = path.posix.normalize(value.replaceAll("\\", "/")); if (normalized === "." || normalized.startsWith("../") || normalized.startsWith("/") || normalized === "..") throw new InvalidInputError("profile path escapes the bundle"); return normalized; }
   #files(root: string): { path: string; content: string }[] { const out: { path: string; content: string }[] = []; const visit = (dir: string) => { for (const entry of fs.readdirSync(dir, { withFileTypes: true })) { const absolute = path.join(dir, entry.name); if (entry.isDirectory()) visit(absolute); else if (entry.isFile()) out.push({ path: path.relative(root, absolute), content: fs.readFileSync(absolute, "utf8") }); } }; visit(root); return out.sort((a, b) => a.path.localeCompare(b.path)); }
 }

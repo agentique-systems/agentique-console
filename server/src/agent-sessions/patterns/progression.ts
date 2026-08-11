@@ -16,7 +16,7 @@
  */
 import type { HandoffDraft, Speaker, TerminationPolicy, TopologyContract } from "@agentique-console/shared";
 import type { AgentProfile } from "../../agent-profiles/registry.ts";
-import { badRequest } from "../../api/errors.ts";
+import { InvalidInputError } from "../../errors.ts";
 import type { Config } from "../../config.ts";
 import type { AgentSessionRow, MessageRow, ParticipantRow, Repo } from "../../db/repo.ts";
 import type { EventBus } from "../../events/bus.ts";
@@ -196,17 +196,17 @@ export function dispatchWorkItems(ctx: PatternContext, session: AgentSessionRow,
   const { repo } = ctx.deps;
   const contract = ctx.contract(session);
   const replicableEntry = Object.entries(contract.roles).find(([, role]) => role.replicable);
-  if (!replicableEntry) throw badRequest(`pattern ${contract.pattern} has no replicable role to dispatch to`);
+  if (!replicableEntry) throw new InvalidInputError(`pattern ${contract.pattern} has no replicable role to dispatch to`);
   const [mapperRole, mapperSpec] = replicableEntry;
   const spec = contract.joins.find((join) => join.over === mapperRole);
-  if (!spec) throw badRequest(`pattern ${contract.pattern} declares no join over ${mapperRole}`);
+  if (!spec) throw new InvalidInputError(`pattern ${contract.pattern} declares no join over ${mapperRole}`);
   if (input.items.length < 1 || input.items.length > mapperSpec.max) {
-    throw badRequest(`dispatch takes 1 to ${mapperSpec.max} work items`);
+    throw new InvalidInputError(`dispatch takes 1 to ${mapperSpec.max} work items`);
   }
   const state = repo.getPatternState(session.id);
   const joins = { ...(state?.joins ?? {}) } as Record<string, JoinState>;
   if (Object.values(joins).some((join) => !join.settled)) {
-    throw badRequest("a dispatch is already in flight; wait for its join to settle before fanning out again");
+    throw new InvalidInputError("a dispatch is already in flight; wait for its join to settle before fanning out again");
   }
   const dispatchOrdinal = Object.keys(joins).length + 1;
   const now = nowIso();
@@ -216,7 +216,7 @@ export function dispatchWorkItems(ctx: PatternContext, session: AgentSessionRow,
   const baseOrd = repo.listParticipants(session.id).length;
   const seats = input.items.map((item, index) => {
     const name = item.name ?? `map.${dispatchOrdinal}.${index + 1}`;
-    if (!SEAT_NAME_RE.test(name) || existing.has(name)) throw badRequest(`invalid or duplicate work-item seat name "${name}"`);
+    if (!SEAT_NAME_RE.test(name) || existing.has(name)) throw new InvalidInputError(`invalid or duplicate work-item seat name "${name}"`);
     existing.add(name);
     return { name, item };
   });

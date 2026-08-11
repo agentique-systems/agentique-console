@@ -3,7 +3,7 @@ import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance } from "fastify";
 import type { ConfigResponse } from "@agentique-console/shared";
 import type { AppContext } from "../context.ts";
-import { ApiError } from "./errors.ts";
+import { toApiError } from "./errors.ts";
 import { registerAgentSessionRoutes } from "./routes/agent-sessions.ts";
 import { registerComposeRoutes } from "./routes/compose.ts";
 import { registerEventRoutes } from "./routes/events.ts";
@@ -17,10 +17,11 @@ export function buildServer(ctx: AppContext): FastifyInstance {
   const app = Fastify({ logger: false });
 
   app.setErrorHandler((error: unknown, _request, reply) => {
-    if (error instanceof ApiError) {
+    const api = toApiError(error);
+    if (api) {
       void reply
-        .status(error.statusCode)
-        .send({ error: { code: error.code, message: error.message } });
+        .status(api.statusCode)
+        .send({ error: { code: api.code, message: api.message } });
       return;
     }
     const fastifyError = error as {

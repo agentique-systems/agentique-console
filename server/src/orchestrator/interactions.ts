@@ -30,7 +30,7 @@ import { interactions } from "../db/schema.ts";
 import { renderAnswer } from "./decisions.ts";
 import type { EventBus } from "../events/bus.ts";
 import { newId, nowIso } from "../ids.ts";
-import { conflict, notFound, badRequest } from "../api/errors.ts";
+import { ConflictError, NotFoundError, InvalidInputError } from "../errors.ts";
 
 export type InteractionResolution =
   | {
@@ -287,18 +287,18 @@ export class InteractionService {
       .where(eq(interactions.id, interactionId))
       .get();
     if (!row || row.userSessionId !== userSessionId) {
-      throw notFound(`no interaction ${interactionId}`);
+      throw new NotFoundError(`no interaction ${interactionId}`);
     }
     if (row.status !== "pending" && row.status !== "stale") {
-      throw conflict(`interaction ${interactionId} is already ${row.status}`);
+      throw new ConflictError(`interaction ${interactionId} is already ${row.status}`);
     }
 
     if ("answers" in body) {
       if (row.kind !== "question") {
-        throw badRequest("answers apply to question interactions");
+        throw new InvalidInputError("answers apply to question interactions");
       }
       if (body.freeText !== undefined && !row.allowFreeText) {
-        throw badRequest("this question does not accept a free-text answer");
+        throw new InvalidInputError("this question does not accept a free-text answer");
       }
       this.#markResolved(interactionId, "answered", {
         answers: body.answers,
@@ -332,7 +332,7 @@ export class InteractionService {
       this.#notifyIfBlockingCleared(row);
     } else {
       if (row.kind !== "plan_approval") {
-        throw badRequest("decisions apply to plan_approval interactions");
+        throw new InvalidInputError("decisions apply to plan_approval interactions");
       }
       const approved = body.decision === "approve";
       this.#markResolved(interactionId, approved ? "answered" : "rejected", {
@@ -564,7 +564,7 @@ export class InteractionService {
       .from(interactions)
       .where(eq(interactions.id, id))
       .get();
-    if (!row) throw notFound(`no interaction ${id}`);
+    if (!row) throw new NotFoundError(`no interaction ${id}`);
     return toWire(row);
   }
 

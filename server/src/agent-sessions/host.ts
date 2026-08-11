@@ -1,7 +1,7 @@
 import type { AgentSessionStatus, EdgeSpec, HandoffDraft, HandoffTrigger, Interaction, InteractionQuestion, InteractionUrgency, PatternId, Speaker } from "@agentique-console/shared";
 import fs from "node:fs";
 import path from "node:path";
-import { badRequest, conflict, notFound } from "../api/errors.ts";
+import { InvalidInputError, ConflictError, NotFoundError } from "../errors.ts";
 import type { AgentProfile, AgentProfileRegistry } from "../agent-profiles/registry.ts";
 import type { Config } from "../config.ts";
 import {
@@ -40,7 +40,8 @@ import {
   WithheldFinalError,
   type Category,
 } from "./governance.ts";
-import { buildSeatTools, ok, type AskOperatorArgs } from "./seat-tools.ts";
+import { buildSeatTools, type AskOperatorArgs } from "./seat-tools.ts";
+import { ok } from "../sdk/tool-result.ts";
 import { compileContract, contractOfSession, hubContract, roleOfSeat, RESERVED_NAMES, SEAT_NAME_RE, type CompiledContract } from "./topology.ts";
 import { grantedTools, runtimeToolNames, type SeatToolName } from "./grants.ts";
 import { dispatchWorkItems, onPatternPost, sweep as patternSweep, type DispatchWorkItemsInput, type PatternContext } from "./patterns/progression.ts";
@@ -356,7 +357,7 @@ export class AgentSessionHost {
   createSession(input: CreateAgentSessionInput): { agentSessionId: string; participants: string[]; entrySeat: string } {
     const { repo, bus } = this.#deps;
     const user = repo.getUserSession(input.userSessionId);
-    if (!user) throw notFound(`no user session ${input.userSessionId}`);
+    if (!user) throw new NotFoundError(`no user session ${input.userSessionId}`);
     // The pattern builder owns roster bounds, role assignment, prompts and
     // wiring; the host only executes what comes out.
     const build = buildContract(input.pattern ?? "hub_and_spoke", {
@@ -366,18 +367,18 @@ export class AgentSessionHost {
     let parentRow: AgentSessionRow | null = null;
     if (input.parent) {
       parentRow = repo.getAgentSession(input.parent.agentSessionId) ?? null;
-      if (!parentRow || parentRow.status !== "open") throw badRequest(`parent session ${input.parent.agentSessionId} is not open`);
-      if (parentRow.parentAgentSessionId !== null) throw badRequest("a child session cannot spawn children of its own — one level of nesting only");
-      if (parentRow.userSessionId !== input.userSessionId) throw badRequest("a child session belongs to its parent's run");
+      if (!parentRow || parentRow.status !== "open") throw new InvalidInputError(`parent session ${input.parent.agentSessionId} is not open`);
+      if (parentRow.parentAgentSessionId !== null) throw new InvalidInputError("a child session cannot spawn children of its own — one level of nesting only");
+      if (parentRow.userSessionId !== input.userSessionId) throw new InvalidInputError("a child session belongs to its parent's run");
       const openChildren = repo.listChildSessions(parentRow.id).filter((child) => child.status === "open");
       if (openChildren.length >= this.#deps.config.maxChildSessionsPerParent) {
-        throw badRequest(`parent already has ${openChildren.length} open child session(s); finish or abandon one first (cap ${this.#deps.config.maxChildSessionsPerParent})`);
+        throw new InvalidInputError(`parent already has ${openChildren.length} open child session(s); finish or abandon one first (cap ${this.#deps.config.maxChildSessionsPerParent})`);
       }
     }
     const names = new Set<string>();
     for (const agent of input.agents) {
-      if (!SEAT_NAME_RE.test(agent.name) || RESERVED_NAMES.has(agent.name.toLowerCase()) || agent.name.toLowerCase().startsWith(CHILD_SENDER_PREFIX)) throw badRequest(`invalid or reserved seat name \"${agent.name}\"`);
-      if (names.has(agent.name)) throw badRequest(`duplicate seat name \"${agent.name}\"`);
+      if (!SEAT_NAME_RE.test(agent.name) || RESERVED_NAMES.has(agent.name.toLowerCase()) || agent.name.toLowerCase().startsWith(CHILD_SENDER_PREFIX)) throw new InvalidInputError(`invalid or reserved seat name \"${agent.name}\"`);
+      if (names.has(agent.name)) throw new InvalidInputError(`duplicate seat name \"${agent.name}\"`);
       names.add(agent.name);
     }
     // Ownership is mandatory for a seat that WRITES, and optional for one that
@@ -395,7 +396,7 @@ export class AgentSessionHost {
       const profile = this.#profile(agent.profileId ?? "explorer", user.workspaceId);
       const writes = profile.tools.includes("Edit") || profile.tools.includes("Write");
       if (writes && (agent.owns ?? []).filter((scope) => scope.trim() !== "").length === 0) {
-        throw badRequest(`seat "${agent.name}" (${profile.id}) writes files, so it must declare what it owns`);
+        throw new InvalidInputError(`seat "${agent.name}" (${profile.id}) writes files, so it must declare what it owns`);
       }
     }
     const ownedScopes = new Map<string, string>();
@@ -420,7 +421,7 @@ export class AgentSessionHost {
       for (const scope of agent.owns ?? []) {
         const normalized = scope.trim(); if (!normalized) continue;
         const owner = ownedScopes.get(normalized);
-        if (owner) throw badRequest(`ownership scope \"${normalized}\" is assigned to both ${owner} and ${agent.name}`);
+        if (owner) throw new InvalidInputError(`ownership scope \"${normalized}\" is assigned to both ${owner} and ${agent.name}`);
         ownedScopes.set(normalized, agent.name);
       }
     }
@@ -429,9 +430,9 @@ export class AgentSessionHost {
     // told about it once, instead of discovering a `.git` appearing later.
     this.#ensureWorkspaceRepo(user.workspaceId, input.userSessionId);
     const title = input.title.trim();
-    if (!title) throw badRequest("a session title is required");
+    if (!title) throw new InvalidInputError("a session title is required");
     const parent = repo.getUserSession(input.userSessionId);
-    if (!parent) throw badRequest("unknown user session");
+    if (!parent) throw new InvalidInputError("unknown user session");
     // The run's baseline for "what was built": HEAD at the first delegation.
     // The Run Summary diffs the working tree against this — a fact, where a
     // handoff's changedPaths is a model's claim.
@@ -479,7 +480,7 @@ export class AgentSessionHost {
   /** The seat main steers: the contract entry role's first seat. */
   entrySeat(agentSessionId: string): string {
     const session = this.#deps.repo.getAgentSession(agentSessionId);
-    if (!session) throw notFound(`no agent session ${agentSessionId}`);
+    if (!session) throw new NotFoundError(`no agent session ${agentSessionId}`);
     const entry = this.#contractOf(session).contract.entry;
     return this.#seatsOfRole(agentSessionId, entry.role)[0]?.name ?? ORCHESTRATOR_SEAT;
   }
@@ -493,8 +494,8 @@ export class AgentSessionHost {
   post(input: { agentSessionId: string; speaker: Speaker; to: string; handoff: HandoffDraft; category?: Category; dedupeKey?: string; turnId?: string }): MessageRow {
     const { repo } = this.#deps;
     const session = repo.getAgentSession(input.agentSessionId);
-    if (!session) throw notFound(`no agent session ${input.agentSessionId}`);
-    if (session.status !== "open") throw conflict(`agent session ${input.agentSessionId} is archived`);
+    if (!session) throw new NotFoundError(`no agent session ${input.agentSessionId}`);
+    if (session.status !== "open") throw new ConflictError(`agent session ${input.agentSessionId} is archived`);
     const category = input.category ?? "update";
     const edge = this.#assertRoute(session, input.speaker.name, input.to, category);
     const finalSeat = this.#completionSeat(session, "finalFrom");
@@ -682,7 +683,7 @@ export class AgentSessionHost {
 
   readSession(input: { agentSessionId: string; afterSeq?: number; limit?: number }) {
     const session = this.#deps.repo.getAgentSession(input.agentSessionId);
-    if (!session) throw notFound(`no agent session ${input.agentSessionId}`);
+    if (!session) throw new NotFoundError(`no agent session ${input.agentSessionId}`);
     let rows = this.#deps.repo.listMessages("agent", session.id, input.afterSeq ?? 0);
     if (input.limit !== undefined) rows = rows.slice(-input.limit);
     return { status: this.#statusOf(session),
@@ -713,9 +714,9 @@ export class AgentSessionHost {
    */
   interruptParticipant(agentSessionId: string, participant: string, reason: string): void {
     const session = this.#deps.repo.getAgentSession(agentSessionId);
-    if (!session) throw notFound(`no agent session ${agentSessionId}`);
+    if (!session) throw new NotFoundError(`no agent session ${agentSessionId}`);
     const lane = this.#seats.get(agentSessionId)?.get(participant);
-    if (!lane || lane.activeTurn === null) throw conflict(`${participant} has no turn in flight`);
+    if (!lane || lane.activeTurn === null) throw new ConflictError(`${participant} has no turn in flight`);
     for (const delivery of this.#deps.repo.listUnackedDeliveries(agentSessionId, participant)) {
       if (delivery.status === "delivered") this.#patchDelivery(session, delivery, "cancelled");
     }
@@ -846,7 +847,7 @@ export class AgentSessionHost {
   abandonChildSession(parentAgentSessionId: string, controllerSeat: string, childAgentSessionId: string, reason: string): void {
     const child = this.#deps.repo.getAgentSession(childAgentSessionId);
     if (!child || child.parentAgentSessionId !== parentAgentSessionId) {
-      throw badRequest(`${childAgentSessionId} is not a child of this session`);
+      throw new InvalidInputError(`${childAgentSessionId} is not a child of this session`);
     }
     if (child.status === "open") this.#archiveOne(child);
     const parent = this.#deps.repo.getAgentSession(parentAgentSessionId);
@@ -958,9 +959,9 @@ export class AgentSessionHost {
   /** map_reduce fan-out; the machinery lives in patterns/progression.ts. */
   dispatchWorkItems(dispatcherSeat: string, input: DispatchWorkItemsInput): { joinId: string; seats: string[] } {
     const session = this.#deps.repo.getAgentSession(input.agentSessionId);
-    if (!session) throw notFound(`no agent session ${input.agentSessionId}`);
+    if (!session) throw new NotFoundError(`no agent session ${input.agentSessionId}`);
     const dispatcher = this.#deps.repo.getParticipant(session.id, dispatcherSeat);
-    if (!dispatcher) throw notFound(`no seat ${dispatcherSeat} in ${input.agentSessionId}`);
+    if (!dispatcher) throw new NotFoundError(`no seat ${dispatcherSeat} in ${input.agentSessionId}`);
     return dispatchWorkItems(this.#patternCtx(), session, dispatcher, input);
   }
 
@@ -1310,15 +1311,15 @@ export class AgentSessionHost {
       if (child && child.parentAgentSessionId === session.id && recipient === child.parentControllerSeat) {
         return { from: "child", to: "controller", advance: "router" };
       }
-      throw badRequest(`route ${sender} → ${recipient} is not allowed; a child session reports only to its own controller`);
+      throw new InvalidInputError(`route ${sender} → ${recipient} is not allowed; a child session reports only to its own controller`);
     }
     const contract = this.#contractOf(session);
     const from = this.#roleOf(session.id, sender);
     const to = this.#roleOf(session.id, recipient);
     const edge = from === "" || to === "" || sender === recipient ? undefined : contract.edge(from, to);
-    if (!edge) throw badRequest(`route ${sender} → ${recipient} is not allowed; communication is ${contract.contract.routeSummary}`);
+    if (!edge) throw new InvalidInputError(`route ${sender} → ${recipient} is not allowed; communication is ${contract.contract.routeSummary}`);
     if (edge.categories && !edge.categories.includes(category)) {
-      throw badRequest(`route ${sender} → ${recipient} does not carry "${category}" handoffs; communication is ${contract.contract.routeSummary}`);
+      throw new InvalidInputError(`route ${sender} → ${recipient} does not carry "${category}" handoffs; communication is ${contract.contract.routeSummary}`);
     }
     return edge;
   }
@@ -1347,9 +1348,9 @@ export class AgentSessionHost {
     while (lane.rotationGate) await lane.rotationGate;
     if (lane.state === "live" || lane.state === "waking") { await lane.ready; return; }
     const session = repo.getAgentSession(agentSessionId);
-    if (!session || session.status !== "open") throw conflict(`agent session ${agentSessionId} is not open`);
+    if (!session || session.status !== "open") throw new ConflictError(`agent session ${agentSessionId} is not open`);
     const seatRow = repo.getParticipant(agentSessionId, seat);
-    if (!seatRow) throw notFound(`no participant ${seat} in ${agentSessionId}`);
+    if (!seatRow) throw new NotFoundError(`no participant ${seat} in ${agentSessionId}`);
     await this.#reserveCapacity(agentSessionId, until);
     const raced = lane.state as SeatLane["state"];
     if (raced === "live" || raced === "waking") { await lane.ready; return; }

@@ -3,7 +3,7 @@ import { z } from "zod";
 import { isOrchestratorModel } from "@agentique-console/shared";
 import type { AppContext } from "../../context.ts";
 import { revivalPrompt } from "../../orchestrator/interactions.ts";
-import { badRequest, notFound } from "../errors.ts";
+import { InvalidInputError, NotFoundError } from "../../errors.ts";
 
 /**
  * Constrained to the offered list rather than accepting any string: an id with
@@ -63,14 +63,14 @@ export function registerUserSessionRoutes(
     "/api/user-sessions",
     async (request) => {
       const workspaceId = request.query.workspaceId;
-      if (!workspaceId) throw badRequest("workspaceId is required");
+      if (!workspaceId) throw new InvalidInputError("workspaceId is required");
       return sessions.list(workspaceId);
     },
   );
 
   app.post("/api/user-sessions", async (request, reply) => {
     const parsed = CreateBody.safeParse(request.body);
-    if (!parsed.success) throw badRequest(parsed.error.message);
+    if (!parsed.success) throw new InvalidInputError(parsed.error.message);
     const session = sessions.create(parsed.data);
     return reply.status(201).send({ session });
   });
@@ -84,7 +84,7 @@ export function registerUserSessionRoutes(
     "/api/user-sessions/:id",
     async (request) => {
       const parsed = PatchBody.safeParse(request.body);
-      if (!parsed.success) throw badRequest(parsed.error.message);
+      if (!parsed.success) throw new InvalidInputError(parsed.error.message);
       return sessions.patch(request.params.id, parsed.data);
     },
   );
@@ -95,7 +95,7 @@ export function registerUserSessionRoutes(
     "/api/user-sessions/:id/signoff",
     async (request) => {
       const parsed = SignoffBody.safeParse(request.body);
-      if (!parsed.success) throw badRequest(parsed.error.message);
+      if (!parsed.success) throw new InvalidInputError(parsed.error.message);
       ctx.app.completion.resolve(request.params.id, parsed.data.decision, parsed.data.note);
       return ctx.app.userSessions.get(request.params.id).session;
     },
@@ -105,7 +105,7 @@ export function registerUserSessionRoutes(
     "/api/user-sessions/:id/messages",
     async (request, reply) => {
       const parsed = MessageBody.safeParse(request.body);
-      if (!parsed.success) throw badRequest(parsed.error.message);
+      if (!parsed.success) throw new InvalidInputError(parsed.error.message);
       const session = ctx.app.repo.getUserSession(request.params.id);
       const result = session?.purpose === "profile_manager"
         ? ctx.app.manager.postMessage(request.params.id, parsed.data.text)
@@ -118,7 +118,7 @@ export function registerUserSessionRoutes(
     "/api/user-sessions/:id/interactions/:interactionId",
     async (request) => {
       const parsed = ResolveBody.safeParse(request.body);
-      if (!parsed.success) throw badRequest(parsed.error.message);
+      if (!parsed.success) throw new InvalidInputError(parsed.error.message);
       const before = ctx.app.interactions.get(request.params.interactionId);
       const resolved = ctx.app.interactions.resolveFromApi(
         request.params.id,

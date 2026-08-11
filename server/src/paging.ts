@@ -6,7 +6,7 @@
  * default to the newest window because recent output is what a seat usually
  * needs next.
  */
-import { badRequest } from "./api/errors.ts";
+import { InvalidInputError } from "./errors.ts";
 
 export const PAGE_DEFAULT_BYTES = 8 * 1024;
 export const PAGE_MAX_BYTES = 32 * 1024;
@@ -17,7 +17,7 @@ export function encodeCursor(offset: number): string {
 
 export function decodeCursor(cursor: string, what = "cursor"): number {
   const value = Number(Buffer.from(cursor, "base64url").toString("utf8"));
-  if (!Number.isSafeInteger(value) || value < 0) throw badRequest(`invalid ${what}`);
+  if (!Number.isSafeInteger(value) || value < 0) throw new InvalidInputError(`invalid ${what}`);
   return value;
 }
 
@@ -57,7 +57,7 @@ export function pageTail(text: string, cursor?: string | null, maxBytes?: number
   const bounded = clampPageBytes(maxBytes);
   const buffer = Buffer.from(text, "utf8");
   const offset = cursor ? decodeCursor(cursor) : Math.max(0, buffer.length - bounded);
-  if (offset > buffer.length) throw badRequest("cursor is past the end of the data");
+  if (offset > buffer.length) throw new InvalidInputError("cursor is past the end of the data");
   const { content, start, end } = sliceUtf8Window(buffer, offset, bounded);
   return {
     content,

@@ -59,20 +59,7 @@ interface SendHandoffArgs {
   dedupeKey?: string;
 }
 
-export function ok(value: unknown): SdkToolResult {
-  return { content: [{ type: "text", text: JSON.stringify(value) }] };
-}
-
-/**
- * The one error shape. A tool result the seat genuinely got wrong — a bad
- * route, an unknown owner, its own JavaScript failing to compile — returns
- * through here; deliberate non-errors (operator silence, a Console-imposed
- * hold, a page exception under probing) stay `ok(...)`, because `isError`
- * feeds the error-streak watchdog.
- */
-function fail(error: unknown): SdkToolResult {
-  return { content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }], isError: true };
-}
+import { fail, ok } from "../sdk/tool-result.ts";
 
 /** The slice of the host's deps the tool handlers read. */
 export interface SeatToolsDeps {

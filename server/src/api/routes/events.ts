@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import type { StatsResponse } from "@agentique-console/shared";
 import type { AppContext } from "../../context.ts";
 import { writeSse } from "../sse.ts";
-import { notFound } from "../errors.ts";
+import { NotFoundError } from "../../errors.ts";
 
 export function registerEventRoutes(app: FastifyInstance, ctx: AppContext): void {
   app.get("/api/stats", async (): Promise<StatsResponse> => {
@@ -11,7 +11,7 @@ export function registerEventRoutes(app: FastifyInstance, ctx: AppContext): void
 
   app.get<{ Params: { id: string } }>("/api/artifacts/:id", async (request, reply) => {
     const artifact = ctx.app.bus.getArtifact(request.params.id);
-    if (!artifact) throw notFound(`no artifact ${request.params.id}`);
+    if (!artifact) throw new NotFoundError(`no artifact ${request.params.id}`);
     if (artifact.mediaType.endsWith(";base64")) {
       reply.header("content-type", artifact.mediaType.slice(0, -7));
       return reply.send(Buffer.from(artifact.content, "base64"));

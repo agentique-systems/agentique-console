@@ -23,7 +23,7 @@ import { buildRunSummary, type RunSummaryDocument } from "./summary.ts";
 import { runSummaries } from "../db/schema.ts";
 import type { Db } from "../db/client.ts";
 import { and, desc, eq } from "drizzle-orm";
-import { conflict, notFound } from "../api/errors.ts";
+import { ConflictError, NotFoundError } from "../errors.ts";
 
 export interface RunCompletionDeps {
   db: Db;
@@ -179,9 +179,9 @@ export class RunCompletionService {
   resolve(userSessionId: string, decision: "accept" | "changes", note?: string): void {
     const { db, repo, bus } = this.#deps;
     const session = repo.getUserSession(userSessionId);
-    if (!session) throw notFound(`no user session ${userSessionId}`);
+    if (!session) throw new NotFoundError(`no user session ${userSessionId}`);
     if (session.runState !== "awaiting_signoff") {
-      throw conflict(`run is ${session.runState}, not awaiting sign-off`);
+      throw new ConflictError(`run is ${session.runState}, not awaiting sign-off`);
     }
     const summary = db.select().from(runSummaries)
       .where(and(eq(runSummaries.userSessionId, userSessionId), eq(runSummaries.status, "proposed")))

@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { ConsoleEvent } from "@agentique-console/shared";
 import type { AppContext } from "../../context.ts";
-import { notFound } from "../errors.ts";
+import { NotFoundError } from "../../errors.ts";
 import { toWireMessage } from "../../db/repo.ts";
 
 export function registerAgentSessionRoutes(
@@ -20,7 +20,7 @@ export function registerAgentSessionRoutes(
     "/api/agent-sessions/:id",
     async (request) => {
       const row = ctx.app.repo.getAgentSession(request.params.id);
-      if (!row) throw notFound(`no agent session ${request.params.id}`);
+      if (!row) throw new NotFoundError(`no agent session ${request.params.id}`);
       return {
         session: ctx.app.host.wireSession(row),
         runs: ctx.app.repo.listParticipants(row.id).map((participant) => ({
@@ -44,7 +44,7 @@ export function registerAgentSessionRoutes(
     "/api/agent-sessions/:id/transcript",
     async (request) => {
       const row = ctx.app.repo.getAgentSession(request.params.id);
-      if (!row) throw notFound(`no agent session ${request.params.id}`);
+      if (!row) throw new NotFoundError(`no agent session ${request.params.id}`);
       const events: ConsoleEvent[] = [];
       for await (const event of ctx.app.bus.readWithSeq({
         agentSessionId: row.id,

@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { openDb } from "../db/client.ts";
 import { EventBus } from "../events/bus.ts";
+import { ConflictError, InvalidInputError } from "../errors.ts";
 import { WorkspaceService } from "./service.ts";
 
 let tmp: string;
@@ -38,13 +39,13 @@ describe("WorkspaceService", () => {
   it("refuses a rootPath outside the allowed roots", async () => {
     await expect(
       service.create({ name: "x", rootPath: "/etc/nope", create: true }),
-    ).rejects.toMatchObject({ statusCode: 400 });
+    ).rejects.toBeInstanceOf(InvalidInputError);
   });
 
   it("refuses a missing rootPath without create", async () => {
     await expect(
       service.create({ name: "x", rootPath: path.join(tmp, "absent") }),
-    ).rejects.toMatchObject({ statusCode: 400 });
+    ).rejects.toBeInstanceOf(InvalidInputError);
   });
 
   it("refuses a duplicate rootPath", async () => {
@@ -52,6 +53,6 @@ describe("WorkspaceService", () => {
     await service.create({ name: "a", rootPath: target, create: true });
     await expect(
       service.create({ name: "b", rootPath: target }),
-    ).rejects.toMatchObject({ statusCode: 409 });
+    ).rejects.toBeInstanceOf(ConflictError);
   });
 });

@@ -24,7 +24,7 @@ import type { EventBus } from "../events/bus.ts";
 import { RuntimeBroadcaster } from "../events/runtime.ts";
 import { newId, nowIso } from "../ids.ts";
 import { rotationTokenLimit } from "../model-catalog.ts";
-import { badRequest, conflict, notFound } from "../api/errors.ts";
+import { InvalidInputError, ConflictError, NotFoundError } from "../errors.ts";
 import { mapSdkMessage } from "../sdk/mapping.ts";
 import type {
   ConsoleSdk,
@@ -178,12 +178,12 @@ export class OrchestratorRunner {
     this.#onOperatorMessage?.(sessionId);
     const { repo, bus, interactions } = this.#deps;
     const session = repo.getUserSession(sessionId);
-    if (!session) throw notFound(`no user session ${sessionId}`);
+    if (!session) throw new NotFoundError(`no user session ${sessionId}`);
     if (session.status !== "open") {
-      throw conflict(`session ${sessionId} is archived`);
+      throw new ConflictError(`session ${sessionId} is archived`);
     }
     const trimmed = text.trim();
-    if (trimmed === "") throw badRequest("message text is required");
+    if (trimmed === "") throw new InvalidInputError("message text is required");
 
     interactions.dismissPendingForChat(sessionId, trimmed);
 
@@ -472,7 +472,7 @@ export class OrchestratorRunner {
     if (lane.query) return;
     const { repo, bus, config, interactions } = this.#deps;
     const session = repo.getUserSession(sessionId);
-    if (!session) throw notFound(`no user session ${sessionId}`);
+    if (!session) throw new NotFoundError(`no user session ${sessionId}`);
 
     const sdk = await this.#deps.sdk();
     const abort = new AbortController();

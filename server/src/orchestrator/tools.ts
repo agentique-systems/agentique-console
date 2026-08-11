@@ -6,9 +6,9 @@
  */
 import { z } from "zod";
 import { MAIN_RECIPIENT, ORCHESTRATOR_SEAT, type AgentSessionHost } from "../agent-sessions/host.ts";
-import { ApiError } from "../api/errors.ts";
 import type { EventBus } from "../events/bus.ts";
 import type { Repo } from "../db/repo.ts";
+import { NotFoundError } from "../errors.ts";
 import { newId } from "../ids.ts";
 import { pageTail } from "../paging.ts";
 import type { ConsoleSdk, SdkToolResult } from "../sdk/types.ts";
@@ -26,24 +26,7 @@ export function consoleTaskListId(agentSessionId: string): string {
   return `console:${agentSessionId}:${ORCHESTRATOR_SEAT}`;
 }
 
-function ok(value: unknown): SdkToolResult {
-  return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }] };
-}
-
-function fail(message: string): SdkToolResult {
-  return { content: [{ type: "text", text: message }], isError: true };
-}
-
-async function guarded(
-  run: () => unknown | Promise<unknown>,
-): Promise<SdkToolResult> {
-  try {
-    return ok(await run());
-  } catch (error) {
-    if (error instanceof ApiError) return fail(error.message);
-    return fail(error instanceof Error ? error.message : String(error));
-  }
-}
+import { fail, guarded, ok } from "../sdk/tool-result.ts";
 
 export interface ConsoleToolsInput {
   sdk: ConsoleSdk;
@@ -63,11 +46,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
   const owned = (agentSessionId: string) => {
     const session = repo.getAgentSession(agentSessionId);
     if (!session || session.userSessionId !== userSessionId) {
-      throw new ApiError(
-        404,
-        "not_found",
-        `no agent session ${agentSessionId} in this conversation`,
-      );
+      throw new NotFoundError(`no agent session ${agentSessionId} in this conversation`);
     }
     return session;
   };

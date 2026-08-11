@@ -10,7 +10,7 @@ import type {
   UserSession,
   UserSessionListItem,
 } from "@agentique-console/shared";
-import { badRequest, notFound } from "../api/errors.ts";
+import { InvalidInputError, NotFoundError } from "../errors.ts";
 import { Repo, toWireUserSession, type UserSessionRow } from "../db/repo.ts";
 import type { EventBus } from "../events/bus.ts";
 import { newId, nowIso } from "../ids.ts";
@@ -48,7 +48,7 @@ export class UserSessionService {
 
   create(body: CreateUserSessionBody): UserSession {
     const message = body.message.trim();
-    if (message === "") throw badRequest("a first message is required");
+    if (message === "") throw new InvalidInputError("a first message is required");
     this.#workspaces.get(body.workspaceId); // 404s on unknown workspace
 
     const now = nowIso();
@@ -100,7 +100,7 @@ export class UserSessionService {
 
   get(id: string): GetUserSessionResponse {
     const row = this.#repo.getUserSession(id);
-    if (!row) throw notFound(`no user session ${id}`);
+    if (!row) throw new NotFoundError(`no user session ${id}`);
     return {
       session: toWireUserSession(row),
       pendingInteractions: this.#interactions.listPending(id),
@@ -109,19 +109,19 @@ export class UserSessionService {
 
   patch(id: string, patch: PatchUserSessionBody): UserSession {
     const row = this.#repo.getUserSession(id);
-    if (!row) throw notFound(`no user session ${id}`);
+    if (!row) throw new NotFoundError(`no user session ${id}`);
 
     const changes: Partial<
       Pick<UserSessionRow, "title" | "mode" | "phase" | "status" | "model">
     > = {};
     if (patch.title !== undefined) {
       const title = patch.title.trim();
-      if (title === "") throw badRequest("title cannot be empty");
+      if (title === "") throw new InvalidInputError("title cannot be empty");
       changes.title = title;
     }
     if (patch.status !== undefined) changes.status = patch.status;
     if (row.purpose === "profile_manager" && patch.mode !== undefined && patch.mode !== "plan_execute") {
-      throw badRequest("profile Manager sessions always require plan approval");
+      throw new InvalidInputError("profile Manager sessions always require plan approval");
     }
     if (patch.mode !== undefined && patch.mode !== row.mode) {
       changes.mode = patch.mode;
@@ -155,7 +155,7 @@ export class UserSessionService {
 
   async transcript(id: string): Promise<ConsoleEvent[]> {
     const row = this.#repo.getUserSession(id);
-    if (!row) throw notFound(`no user session ${id}`);
+    if (!row) throw new NotFoundError(`no user session ${id}`);
     const events: ConsoleEvent[] = [];
     for await (const event of this.#bus.readWithSeq({ userSessionId: id })) {
       events.push(event);

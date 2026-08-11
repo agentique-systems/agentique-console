@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { AppContext } from "../../context.ts";
 import { toWireUserSession } from "../../db/repo.ts";
-import { badRequest, notFound } from "../errors.ts";
+import { InvalidInputError, NotFoundError } from "../../errors.ts";
 
 export function registerViewRoutes(app: FastifyInstance, ctx: AppContext): void {
   app.get<{ Params: { id: string } }>("/api/workspaces/:id/session-tree", async (request) => {
@@ -28,7 +28,7 @@ export function registerViewRoutes(app: FastifyInstance, ctx: AppContext): void 
     async (request) => {
       const beforeSeq = request.query.beforeSeq === undefined ? undefined : Number(request.query.beforeSeq);
       const limit = request.query.limit === undefined ? undefined : Number(request.query.limit);
-      if ((beforeSeq !== undefined && (!Number.isInteger(beforeSeq) || beforeSeq < 1)) || (limit !== undefined && (!Number.isInteger(limit) || limit < 1))) throw badRequest("timeline cursor and limit must be positive integers");
+      if ((beforeSeq !== undefined && (!Number.isInteger(beforeSeq) || beforeSeq < 1)) || (limit !== undefined && (!Number.isInteger(limit) || limit < 1))) throw new InvalidInputError("timeline cursor and limit must be positive integers");
       return ctx.app.timeline.page(request.params.id, beforeSeq, limit);
     },
   );
@@ -38,10 +38,10 @@ export function registerViewRoutes(app: FastifyInstance, ctx: AppContext): void 
   });
   app.get<{ Params: { id: string; profileId: string } }>("/api/workspaces/:id/agent-profiles/:profileId", async (request) => {
     ctx.app.workspaces.get(request.params.id); const detail = ctx.app.profiles.detail(request.params.id, request.params.profileId);
-    if (!detail) throw notFound(`no profile ${request.params.profileId}`); return detail;
+    if (!detail) throw new NotFoundError(`no profile ${request.params.profileId}`); return detail;
   });
   app.post<{ Params: { id: string; profileId: string }; Body: { revision?: string } }>("/api/workspaces/:id/agent-profiles/:profileId/trust", async (request) => {
-    if (!request.body?.revision) throw badRequest("revision is required"); ctx.app.profiles.trust(request.params.id, request.params.profileId, request.body.revision); return { ok: true };
+    if (!request.body?.revision) throw new InvalidInputError("revision is required"); ctx.app.profiles.trust(request.params.id, request.params.profileId, request.body.revision); return { ok: true };
   });
 
   app.get<{ Params: { id: string } }>("/api/workspaces/:id/manager-sessions", async (request) => ctx.app.manager.list(request.params.id));
@@ -49,6 +49,6 @@ export function registerViewRoutes(app: FastifyInstance, ctx: AppContext): void 
     reply.status(201).send(ctx.app.manager.create(request.params.id, request.body ?? {})));
   app.get<{ Params: { id: string } }>("/api/manager-sessions/:id", async (request) => ({ session: ctx.app.manager.get(request.params.id), proposal: ctx.app.manager.proposal(request.params.id) }));
   app.post<{ Params: { id: string }; Body: { text?: string } }>("/api/manager-sessions/:id/messages", async (request, reply) => {
-    if (!request.body?.text?.trim()) throw badRequest("text is required"); return reply.status(202).send(ctx.app.manager.postMessage(request.params.id, request.body.text));
+    if (!request.body?.text?.trim()) throw new InvalidInputError("text is required"); return reply.status(202).send(ctx.app.manager.postMessage(request.params.id, request.body.text));
   });
 }
