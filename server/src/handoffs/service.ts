@@ -83,7 +83,11 @@ export class HandoffService {
       id, userSessionId: input.userSessionId, agentSessionId: input.agentSessionId, messageId: null,
       sender: input.sender, recipient: input.recipient, profileId: input.profileId, generation: input.generation,
       turnId: input.turnId ?? null, trigger: input.trigger, parentHandoffId: parent?.id ?? null, rootHandoffId,
-      checkpoint: input.checkpoint ?? false, core: adjustedCore, extension, bytes,
+      checkpoint: input.checkpoint ?? false,
+      // The column must agree with the JSON marker: readers filter on the
+      // column, payload consumers still read the marker.
+      synthetic: extension.data["consoleSynthesized"] === true,
+      core: adjustedCore, extension, bytes,
       referenceWarnings, createdAt,
     };
     const record = this.toWire(row);

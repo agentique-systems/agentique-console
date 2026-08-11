@@ -15,9 +15,9 @@ describe("topology contracts", () => {
     expect(hub.edge("main", "specialist")).toBeUndefined();
   });
 
-  it("derives a pattern role for pre-contract participant rows", () => {
-    expect(roleOfSeat({ role: "orchestrator", patternRole: null })).toBe("coordinator");
-    expect(roleOfSeat({ role: "agent", patternRole: null })).toBe("specialist");
+  it("resolves a seat's contract role from its pattern_role binding", () => {
+    expect(roleOfSeat({ role: "orchestrator", patternRole: "coordinator" })).toBe("coordinator");
+    expect(roleOfSeat({ role: "agent", patternRole: "specialist" })).toBe("specialist");
     expect(roleOfSeat({ role: "agent", patternRole: "mapper" })).toBe("mapper");
   });
 

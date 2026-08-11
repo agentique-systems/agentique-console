@@ -242,7 +242,7 @@ export class Repo {
     if (input.sender !== undefined) filters.push(eq(handoffRecords.sender, input.sender));
     if (input.excludeCheckpoints === true) filters.push(eq(handoffRecords.checkpoint, false));
     // Console-authored notices (see host `#simpleHandoff`) are not reports.
-    if (input.excludeConsoleSynthesized === true) filters.push(sql`coalesce(json_extract(${handoffRecords.extension}, '$.data.consoleSynthesized'), 0) = 0`);
+    if (input.excludeConsoleSynthesized === true) filters.push(eq(handoffRecords.synthetic, false));
     // rowid breaks createdAt ties: handoffs written in the same millisecond are
     // ordinary (an ack and its follow-up), and "latest" must not be a coin flip
     // when a rotation checkpoint depends on it.

@@ -166,8 +166,8 @@ export const participants = sqliteTable(
     worktreeBaseCommit: text("worktree_base_commit"),
     /** The worktree's branch ref (merge target on completion). */
     worktreeBranch: text("worktree_branch"),
-    /** Contract role binding; NULL derives from `role` (orchestrator→coordinator, agent→specialist). */
-    patternRole: text("pattern_role"),
+    /** Contract role binding; written for every seat at insert. */
+    patternRole: text("pattern_role").notNull(),
     /** Seating order for accents and prompt listings. */
     ord: integer("ord").notNull(),
     createdAt: text("created_at").notNull(),
@@ -490,6 +490,8 @@ export const handoffRecords = sqliteTable(
     parentHandoffId: text("parent_handoff_id"),
     rootHandoffId: text("root_handoff_id").notNull(),
     checkpoint: integer("checkpoint", { mode: "boolean" }).notNull().default(false),
+    /** Console-authored notice, not a participant's report; mirrors `extension.data.consoleSynthesized`. */
+    synthetic: integer("synthetic", { mode: "boolean" }).notNull().default(false),
     core: text("core", { mode: "json" }).$type<import("@agentique-console/shared").HandoffCore>().notNull(),
     extension: text("extension", { mode: "json" }).$type<import("@agentique-console/shared").HandoffExtension>().notNull(),
     bytes: integer("bytes").notNull(),

@@ -42,7 +42,7 @@ export interface PatternContext {
   // Seat minting, for replicable roles — the attempts.ts precedent.
   profile(id: string, workspaceId?: string): AgentProfile;
   snapshotProfile(profile: AgentProfile): AgentProfile;
-  participant(agentSessionId: string, name: string, role: "orchestrator" | "agent", profile: AgentProfile, extra: string, model: string | undefined, ownership: string[], ord: number, createdAt: string, patternRole?: string): ParticipantRow;
+  participant(agentSessionId: string, name: string, role: "orchestrator" | "agent", profile: AgentProfile, extra: string, model: string | undefined, ownership: string[], ord: number, createdAt: string, patternRole: string): ParticipantRow;
 }
 
 export interface PatternHop {

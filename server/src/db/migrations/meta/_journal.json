@@ -8,6 +8,20 @@
       "when": 1786471412736,
       "tag": "0000_baseline",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1786475249799,
+      "tag": "0001_synthetic_flag",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1786475324455,
+      "tag": "0002_pattern_role_backfill",
+      "breakpoints": true
     }
   ]
 }

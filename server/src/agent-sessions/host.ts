@@ -327,7 +327,7 @@ export class AgentSessionHost {
 
   constructor(deps: AgentSessionHostDeps) { this.#deps = deps; }
 
-  createSession(input: CreateAgentSessionInput): { agentSessionId: string; participants: string[]; entrySeat: string } {
+  createSession(input: CreateAgentSessionInput): { agentSessionId: string; participants: string[]; entrySeat: string; coordinatorName?: string } {
     const { repo, bus } = this.#deps;
     const user = repo.getUserSession(input.userSessionId);
     if (!user) throw new NotFoundError(`no user session ${input.userSessionId}`);
@@ -380,7 +380,7 @@ export class AgentSessionHost {
       const treeSessions = [parentRow, ...repo.listChildSessions(parentRow.id).filter((child) => child.status === "open")];
       for (const treeSession of treeSessions) {
         for (const seat of repo.listParticipants(treeSession.id)) {
-          if (seat.profileId.includes("reviewer")) continue;
+          if ((seat.profileSnapshot as AgentProfile | undefined)?.exemptFromOwnership === true) continue;
           for (const scope of seat.ownership) {
             const normalized = scope.trim(); if (!normalized) continue;
             ownedScopes.set(normalized, `${seat.name} (in ${treeSession.id})`);
@@ -389,8 +389,7 @@ export class AgentSessionHost {
       }
     }
     for (const agent of input.agents) {
-      const profileId = agent.profileId ?? "explorer";
-      if (profileId.includes("reviewer")) continue;
+      if (this.#profile(agent.profileId ?? "explorer", user.workspaceId).exemptFromOwnership) continue;
       for (const scope of agent.owns ?? []) {
         const normalized = scope.trim(); if (!normalized) continue;
         const owner = ownedScopes.get(normalized);
@@ -447,7 +446,8 @@ export class AgentSessionHost {
         this.post({ agentSessionId: row.id, speaker: { kind: "orchestrator", name: MAIN_RECIPIENT }, to: seat.name, handoff: input.briefing, category: "assignment" });
       }
     }
-    return { agentSessionId: row.id, participants: specialists, entrySeat: entrySeats[0]?.name ?? ORCHESTRATOR_SEAT };
+    return { agentSessionId: row.id, participants: specialists, entrySeat: entrySeats[0]?.name ?? ORCHESTRATOR_SEAT,
+      ...(build.coordinatorName !== undefined ? { coordinatorName: build.coordinatorName } : {}) };
   }
 
   /** The seat main steers: the contract entry role's first seat. */
@@ -1160,7 +1160,7 @@ export class AgentSessionHost {
     }
   }
 
-  #participant(agentSessionId: string, name: string, role: "orchestrator" | "agent", profile: AgentProfile, extra: string, model: string | undefined, ownership: string[], ord: number, createdAt: string, patternRole?: string): ParticipantRow {
+  #participant(agentSessionId: string, name: string, role: "orchestrator" | "agent", profile: AgentProfile, extra: string, model: string | undefined, ownership: string[], ord: number, createdAt: string, patternRole: string): ParticipantRow {
     const instructions = [profile.instructions, extra.trim()].filter(Boolean).join("\n\nAssigned role context:\n");
     return { agentSessionId, name, role, instructions, model: model ?? profile.model ?? null,
       profileId: profile.id, profileSnapshot: profile, ownership, sdkSessionId: null, lastActiveAt: null,
@@ -1168,12 +1168,12 @@ export class AgentSessionHost {
       contextTokens: 0, latestHandoffId: null,
       cumulativeCostUsd: 0, cumulativeApiDurationMs: 0, lastDecisionAt: null,
       worktreePath: null, worktreeBaseCommit: null, worktreeBranch: null,
-      patternRole: patternRole ?? null, ord, createdAt };
+      patternRole, ord, createdAt };
   }
 
   #profile(id: string, workspaceId?: string): AgentProfile {
     if (this.#deps.profiles) return this.#deps.profiles.get(id, workspaceId);
-    return { id, title: id, purpose: id, instructions: `You are the ${id} specialist.`, tools: ["Read", "Glob", "Grep"], permissionMode: "default", maxTurns: 30, sandboxRequired: true, runtime: { shell: false, browser: false, screenshots: false, network: [] } };
+    return { id, title: id, purpose: id, instructions: `You are the ${id} specialist.`, tools: ["Read", "Glob", "Grep"], permissionMode: "default", exemptFromOwnership: false, maxTurns: 30, sandboxRequired: true, runtime: { shell: false, browser: false, screenshots: false, network: [] } };
   }
 
   // ── Topology contracts ───────────────────────────────────────────────────

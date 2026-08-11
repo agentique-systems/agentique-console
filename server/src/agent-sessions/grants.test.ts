@@ -16,7 +16,7 @@ const stubSdk = { tool: (name: string) => name, createSdkMcpServer: () => ({}) }
 
 function makeProfile(runtime: Partial<AgentProfile["runtime"]> = {}): AgentProfile {
   return { id: "p", title: "p", purpose: "p", instructions: "x", tools: ["Read"], permissionMode: "default",
-    maxTurns: 30, sandboxRequired: true, runtime: { shell: false, browser: false, screenshots: false, network: [], ...runtime } };
+    exemptFromOwnership: false, maxTurns: 30, sandboxRequired: true, runtime: { shell: false, browser: false, screenshots: false, network: [], ...runtime } };
 }
 
 function makeSeat(over: Partial<ParticipantRow>): ParticipantRow {
@@ -25,7 +25,7 @@ function makeSeat(over: Partial<ParticipantRow>): ParticipantRow {
     generation: 0, turnCount: 0, contextTokens: 0, latestHandoffId: null,
     cumulativeCostUsd: 0, cumulativeApiDurationMs: 0, lastDecisionAt: null,
     worktreePath: null, worktreeBaseCommit: null, worktreeBranch: null,
-    patternRole: null, ord: 1, createdAt: "2026-01-01", ...over };
+    patternRole: "specialist", ord: 1, createdAt: "2026-01-01", ...over };
 }
 
 function registeredNames(seat: ParticipantRow, profile: AgentProfile, roleName: string): Set<string> {

@@ -20,6 +20,12 @@ export const ProfileSchema = z.object({
   model: z.string().optional(),
   effort: z.string().optional(),
   handoffExtension: z.enum(["generic", "coordination", "implementation", "investigation", "review"]).optional(),
+  /**
+   * Exempts the profile's seats from write-ownership disjointness: a
+   * read-only reviewer inspects everyone's files, so exclusive scopes do
+   * not apply to it.
+   */
+  exemptFromOwnership: z.boolean().default(false),
   maxTurns: z.number().int().min(1).max(100).default(40),
   sandboxRequired: z.boolean().default(true),
   runtime: z.object({
@@ -57,6 +63,7 @@ const BUILTINS: AgentProfile[] = [
     permissionMode: "default",
     model: "claude-sonnet-5",
     handoffExtension: "coordination",
+    exemptFromOwnership: false,
     maxTurns: 35, sandboxRequired: true,
     runtime: { shell: false, browser: false, screenshots: false, network: [] },
   },
@@ -69,6 +76,7 @@ const BUILTINS: AgentProfile[] = [
     permissionMode: "default",
     model: "claude-sonnet-5",
     handoffExtension: "investigation",
+    exemptFromOwnership: false,
     maxTurns: 30, sandboxRequired: true,
     runtime: { shell: false, browser: false, screenshots: false, network: [] },
   },
@@ -81,6 +89,7 @@ const BUILTINS: AgentProfile[] = [
     permissionMode: "bypassPermissions",
     model: "claude-opus-5",
     handoffExtension: "implementation",
+    exemptFromOwnership: false,
     maxTurns: 50, sandboxRequired: true,
     runtime: { shell: true, browser: false, screenshots: false, network: "default" },
   },
@@ -93,6 +102,7 @@ const BUILTINS: AgentProfile[] = [
     permissionMode: "bypassPermissions",
     model: "claude-opus-5",
     handoffExtension: "implementation",
+    exemptFromOwnership: false,
     maxTurns: 50, sandboxRequired: true,
     runtime: { shell: true, browser: true, screenshots: true, network: "default" },
   },
@@ -105,6 +115,7 @@ const BUILTINS: AgentProfile[] = [
     permissionMode: "default",
     model: "claude-opus-5",
     handoffExtension: "review",
+    exemptFromOwnership: true,
     maxTurns: 35, sandboxRequired: true,
     runtime: { shell: true, browser: false, screenshots: false, network: [] },
   },
@@ -117,6 +128,7 @@ const BUILTINS: AgentProfile[] = [
     permissionMode: "default",
     model: "claude-opus-5",
     handoffExtension: "review",
+    exemptFromOwnership: true,
     maxTurns: 35, sandboxRequired: true,
     runtime: { shell: true, browser: true, screenshots: true, network: "default" },
   },
@@ -129,6 +141,7 @@ const BUILTINS: AgentProfile[] = [
     permissionMode: "default",
     model: "claude-sonnet-5",
     handoffExtension: "investigation",
+    exemptFromOwnership: false,
     maxTurns: 30, sandboxRequired: true,
     runtime: { shell: false, browser: false, screenshots: false, network: "default" },
   },
@@ -234,7 +247,7 @@ export class AgentProfileRegistry {
   }
 
   #revision(files: { path: string; content: string }[]): string { const hash = crypto.createHash("sha256"); for (const file of files) hash.update(file.path).update("\0").update(file.content).update("\0"); return hash.digest("hex"); }
-  #invalidPlaceholder(id: string): AgentProfile { return { id, title: id, purpose: "Invalid profile", instructions: "", tools: [], skills: [], permissionMode: "default", maxTurns: 1, sandboxRequired: true, runtime: { shell: false, browser: false, screenshots: false, network: [] } }; }
+  #invalidPlaceholder(id: string): AgentProfile { return { id, title: id, purpose: "Invalid profile", instructions: "", tools: [], skills: [], permissionMode: "default", exemptFromOwnership: false, maxTurns: 1, sandboxRequired: true, runtime: { shell: false, browser: false, screenshots: false, network: [] } }; }
   #componentCounts(files: { path: string }[]): Record<string, number> { const counts: Record<string, number> = {}; for (const file of files) { const kind = file.path.startsWith("skills/") ? "skills" : file.path.startsWith("hooks/") ? "hooks" : file.path.startsWith("agents/") ? "agents" : file.path === ".mcp.json" ? "mcp" : "files"; counts[kind] = (counts[kind] ?? 0) + 1; } return counts; }
   #summary(profile: AgentProfile, source: "builtin" | "workspace", revision: string, trusted: boolean, valid: boolean, files: { path: string }[]): AgentProfileSummary { return { id: profile.id, title: profile.title, purpose: profile.purpose, source, revision, trusted, valid, tools: profile.tools, skills: profile.skills ?? [], componentCounts: this.#componentCounts(files) }; }
   #detail(profile: AgentProfile, source: "builtin" | "workspace", revision: string, trusted: boolean, issues: ProfileValidationIssue[], files: { path: string; content: string }[]): AgentProfileDetail {

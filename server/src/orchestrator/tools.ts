@@ -6,7 +6,7 @@
  */
 import { z } from "zod";
 import type { AgentSessionHost } from "../agent-sessions/host.ts";
-import { MAIN_RECIPIENT, ORCHESTRATOR_SEAT } from "../agent-sessions/peer-names.ts";
+import { MAIN_RECIPIENT } from "../agent-sessions/peer-names.ts";
 import type { EventBus } from "../events/bus.ts";
 import type { Repo } from "../db/repo.ts";
 import { NotFoundError } from "../errors.ts";
@@ -91,7 +91,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         briefing: HandoffDraft;
       }) =>
         guarded(() => {
-          const { agentSessionId, participants, entrySeat } = host.createSession({
+          const created = host.createSession({
             userSessionId,
             title: args.title,
             pattern: args.pattern,
@@ -100,14 +100,14 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
             briefing: args.briefing,
           });
           return {
-            agentSessionId,
-            participants,
+            agentSessionId: created.agentSessionId,
+            participants: created.participants,
             pattern: args.pattern,
             // Steer it with `send_to_coordinator`, not with a peer address:
             // the native mesh is gone and a peer name is only live while the
             // seat's process is. The tool reaches this session's entry seat.
-            entrySeat,
-            ...(args.pattern === "hub_and_spoke" ? { coordinator: ORCHESTRATOR_SEAT } : {}),
+            entrySeat: created.entrySeat,
+            ...(created.coordinatorName ? { coordinator: created.coordinatorName } : {}),
             status: "launched",
           };
         }),

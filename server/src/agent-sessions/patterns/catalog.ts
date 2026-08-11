@@ -39,6 +39,8 @@ export interface SeatPlan {
 export interface BuildResult {
   contract: TopologyContract;
   seats: SeatPlan[];
+  /** Seat name of the pattern's dedicated coordination seat, when it seats one. */
+  coordinatorName?: string;
 }
 
 export function buildContract(pattern: PatternId, input: BuildInput): BuildResult {
@@ -89,6 +91,7 @@ function buildHub(input: BuildInput): BuildResult {
       { name: "orchestrator", dbRole: "orchestrator", patternRole: "coordinator", profileId: "coordinator", owns: [], ord: 0 },
       ...agentSeats(input.agents, () => "specialist", 1),
     ],
+    coordinatorName: "orchestrator",
   };
 }
 
