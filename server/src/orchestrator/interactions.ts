@@ -17,7 +17,7 @@
  *  - a non-blocking decision lived in an in-memory map and was dropped whenever
  *    no further material report happened to arrive.
  */
-import { and, eq, isNotNull, isNull, lt } from "drizzle-orm";
+import { and, eq, isNotNull, isNull } from "drizzle-orm";
 import type {
   Interaction,
   InteractionQuestion,
@@ -38,7 +38,6 @@ export type InteractionResolution =
       answers: Record<string, string[]>;
       freeText?: Record<string, string>;
       note?: string;
-      autoTaken?: boolean;
     }
   | { kind: "decision"; approved: boolean; note?: string }
   | { kind: "dismissed"; reason: string };
@@ -494,48 +493,6 @@ export class InteractionService {
       .map(toWire);
   }
 
-  /**
-   * Fold more questions into an already-open card, up to the 4-question cap.
-   *
-   * Keeps the invariant that one seat has at most one outstanding
-   * auto-promoted ask: a seat that re-reports its uncertainties on every
-   * update would otherwise mint a card each time, and a wall of simultaneous
-   * cards is unanswerable.
-   */
-  mergeQuestions(id: string, questions: InteractionQuestion[], urgency?: InteractionUrgency): void {
-    const row = this.#db.select().from(interactions).where(eq(interactions.id, id)).get();
-    if (!row || row.status !== "pending") return;
-    const existing = (row.payload as { questions?: InteractionQuestion[] }).questions ?? [];
-    const room = Math.max(0, 4 - existing.length);
-    const added = questions.slice(0, room);
-    // Past the cap the surplus becomes context on the last question rather
-    // than being dropped — the operator still sees that it exists.
-    const spilled = questions.slice(room);
-    const merged = [...existing, ...added];
-    if (spilled.length > 0 && merged.length > 0) {
-      const last = merged[merged.length - 1]!;
-      merged[merged.length - 1] = {
-        ...last,
-        context: `${last.context ?? ""}\n\nAlso open from this seat:\n${spilled.map((question) => `- ${question.question}`).join("\n")}`.trim(),
-      };
-    }
-    this.#db.update(interactions)
-      .set({ payload: { ...(row.payload as Record<string, unknown>), questions: merged }, ...(urgency ? { urgency } : {}) })
-      .where(eq(interactions.id, id))
-      .run();
-    this.#bus.append({
-      type: "user_session.question.asked",
-      userSessionId: row.userSessionId,
-      ...(row.agentSessionId ? { agentSessionId: row.agentSessionId } : {}),
-      payload: {
-        sessionId: row.userSessionId, interactionId: row.id, questions: merged,
-        ...(row.agentSessionId ? { agentSessionId: row.agentSessionId } : {}),
-        ...(row.participant ? { participant: row.participant } : {}),
-        urgency: urgency ?? row.urgency, source: row.source, allowFreeText: row.allowFreeText,
-      },
-    });
-  }
-
   markFlushed(ids: readonly string[]): void {
     if (ids.length === 0) return;
     const now = nowIso();
@@ -681,11 +638,10 @@ export class InteractionService {
     id: string,
     status: "answered" | "rejected" | "dismissed",
     response: Record<string, unknown>,
-    extra: { autoTaken?: boolean } = {},
   ): void {
     this.#db
       .update(interactions)
-      .set({ status, response, resolvedAt: nowIso(), ...extra })
+      .set({ status, response, resolvedAt: nowIso() })
       .where(eq(interactions.id, id))
       .run();
     const row = this.#db.select().from(interactions).where(eq(interactions.id, id)).get();

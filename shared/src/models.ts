@@ -33,17 +33,17 @@ export const ORCHESTRATOR_MODELS: readonly OrchestratorModel[] = [
   {
     id: "claude-fable-5",
     label: "fable-5",
-    blurb: "deepest reasoning · priced above opus · needs 30-day retention",
+    blurb: "highest capability tier",
   },
   {
     id: "claude-opus-5",
     label: "opus-5",
-    blurb: "the default — long-horizon agentic work and delegation",
+    blurb: "the default",
   },
   {
     id: "claude-sonnet-5",
     label: "sonnet-5",
-    blurb: "faster and cheaper, near-opus on most sessions",
+    blurb: "faster, lower cost",
   },
 ];
 

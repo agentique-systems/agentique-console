@@ -14,7 +14,8 @@
  *   only on turn settles froze forever on a fully quiet session, which was
  *   exactly the failure mode it existed to catch (live run 3's debate).
  */
-import type { HandoffDraft, Speaker, TerminationPolicy, TopologyContract } from "@agentique-console/shared";
+import type { HandoffDraft, Speaker } from "@agentique-console/shared";
+import type { TerminationPolicy, TopologyContract } from "../topology-contract.ts";
 import type { AgentProfile } from "../../agent-profiles/registry.ts";
 import { InvalidInputError } from "../../errors.ts";
 import type { Config } from "../../config.ts";

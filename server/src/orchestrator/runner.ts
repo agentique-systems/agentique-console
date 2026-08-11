@@ -44,9 +44,7 @@ import { sdkEnv } from "../sdk/env.ts";
 import type { SqliteSessionStore } from "../sdk/session-store.ts";
 import type { AgentSessionHost } from "../agent-sessions/host.ts";
 import { mainPeerName } from "../agent-sessions/peer-names.ts";
-import { mergeHooks } from "../sdk/hooks.ts";
 import type { TaskService } from "../tasks/service.ts";
-import type { SdkHooksFragment } from "../sdk/types.ts";
 
 type Job =
   | { kind: "operator"; text: string }
@@ -479,14 +477,6 @@ export class OrchestratorRunner {
     const sdk = await this.#deps.sdk();
     const abort = new AbortController();
     const input = new AsyncQueue<SdkUserMessageLike>();
-    const host = this.#deps.host?.();
-    const fragments: SdkHooksFragment[] = [];
-    if (host && session.purpose !== "profile_manager") {
-      // Main reaches its coordinator, and its ledger, through the console tool
-      // surface — the same single path every seat uses. No send middleware, no
-      // peer carry, and no native task mirror keyed to a provider session that
-      // dies at every rotation.
-    }
     const options = buildOrchestratorOptions({
       workspaceRoot: this.#deps.getWorkspaceRoot(session.workspaceId),
       resume: session.sdkSessionId,
@@ -510,7 +500,6 @@ export class OrchestratorRunner {
       decisionDigest: this.#deps.decisions.digest(sessionId),
       purpose: session.purpose,
       peerName: mainPeerName(config.peerNamePrefix, sessionId),
-      ...(fragments.length > 0 ? { hooks: mergeHooks(fragments) as SdkOptions["hooks"] } : {}),
     });
 
     const query = sdk.query({ prompt: input, options });
@@ -883,12 +872,6 @@ export class OrchestratorRunner {
         this.#settleTurn(sessionId, lane);
         return;
       }
-      // Inbound native peer traffic no longer exists: every delivery is
-      // console-carried and journalled on the sender side, so arrival needs no
-      // backstop. Kept as a no-op guard in case a stray frame appears.
-      case "peer-message": {
-        return;
-      }
       case "task-terminal": {
         // A coordinator (or other background task) died without reporting —
         // silence here would read as "still working".
@@ -915,7 +898,7 @@ export class OrchestratorRunner {
     // One ungated model attempt over an always-available floor (mirrors the
     // seat rotation path): a clean checkpoint upgrades the recovery draft, a
     // bad or failed one costs nothing beyond the degraded marker.
-    const { draft: attempted, failure } = await this.#checkpointQuery(session, "");
+    const { draft: attempted, failure } = await this.#checkpointQuery(session);
     const degraded = attempted === null;
     let draft = attempted;
     if (!draft) {
@@ -950,7 +933,7 @@ export class OrchestratorRunner {
   }
 
   /** One tool-free checkpoint query against the lane's current context. */
-  async #checkpointQuery(session: { sdkSessionId: string | null; workspaceId: string; model: string | null }, promptSuffix: string): Promise<{ draft: HandoffDraft | null; failure: string | null }> {
+  async #checkpointQuery(session: { sdkSessionId: string | null; workspaceId: string; model: string | null }): Promise<{ draft: HandoffDraft | null; failure: string | null }> {
     let draft: HandoffDraft | null = null;
     let failure: string | null = null;
     if (!session.sdkSessionId) return { draft, failure };
@@ -958,7 +941,7 @@ export class OrchestratorRunner {
     const abort = new AbortController();
     // The checkpoint runs on the same model as the lane it is checkpointing.
     const model = this.#modelFor(session);
-    const query = sdk.query({ prompt: `Create a lossless rotation checkpoint for the next orchestrator context. Preserve operator intent, decisions, delegated work, verified evidence pointers, uncertainty, and exact next actions. Do not perform work or call tools.${promptSuffix}`, options: {
+    const query = sdk.query({ prompt: `Create a lossless rotation checkpoint for the next orchestrator context. Preserve operator intent, decisions, delegated work, verified evidence pointers, uncertainty, and exact next actions. Do not perform work or call tools.`, options: {
       cwd: this.#deps.getWorkspaceRoot(session.workspaceId), systemPrompt: { type: "preset", preset: "claude_code", append: "Checkpoint faithfully. Repository files, task ledger, artifacts, and provider journal are authoritative; do not invent corrections." },
       settingSources: [], includePartialMessages: false, permissionMode: "plan", allowedTools: [],
       disallowedTools: CHECKPOINT_DENIED_TOOLS,

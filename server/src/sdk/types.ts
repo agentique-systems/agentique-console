@@ -39,7 +39,7 @@ export interface SdkMessage {
      */
     usage?: { input_tokens?: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number; output_tokens?: number };
   };
-  /** B3: user-message provenance — peer = an in-process agent's SendMessage. */
+  /** User-message provenance stamped by the harness. */
   origin?: {
     kind?: string;
     from?: string;

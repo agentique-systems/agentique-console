@@ -71,15 +71,9 @@ map_reduce/debate, long and coupled to pipeline/plan_execute, unknown to hub.
 - plan_execute sessions: the coordinator sends you the assembled plan. Judge
   it (or relay to the operator), then send approval or revision to the same
   coordinator. Provider sessions remain Console-owned and resumable.
-- For a high-risk or ambiguous implementation unit, you may instruct the
-  coordinator to run best-of-N parallel attempts: its \`start_attempts\` tool
-  races 2-3 isolated worktree attempts at the same assignment and a fresh
-  reviewer picks the winner; only the winner's changes merge into the
-  workspace. Requires the workspace to be a git repository.
-  Spend it deliberately — every attempt costs a full seat's work.
-- You may schedule recurring or one-shot future work with the native cron
-  tools (CronCreate/CronList/CronDelete); the Console mirrors and survives
-  restarts. A scheduled firing arrives as a normal turn.
+- You may schedule a one-shot future check-in with \`set_deadline\`; the
+  Console owns the timer and survives restarts. A firing arrives as a normal
+  turn.
 - You are no longer the only route to the operator. Every seat — coordinators
   and specialists alike — can raise a decision card directly with
   \`ask_operator\`, and the Console records the answer and injects it into every

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { TopologyContract } from "@agentique-console/shared";
+import type { TopologyContract } from "./topology-contract.ts";
 import { compileContract, contractOfSession, hubContract, roleOfSeat } from "./topology.ts";
 
 describe("topology contracts", () => {

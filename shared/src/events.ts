@@ -325,14 +325,7 @@ export interface ToolDeniedPayload {
   agentSessionId?: string;
   participant?: string;
   toolName: string;
-  kind:
-    | "coordination_only" | "empty_question" | "question_declined" | "plan_missing" | "plan_rejected"
-    /** A shared-interface contract governs this path and the seat has not accepted it. */
-    | "contract_unaccepted"
-    /** The path is outside the seat's declared ownership. */
-    | "outside_ownership"
-    /** The assignment's blocker task is not complete. */
-    | "blocked_by_dependency";
+  kind: "coordination_only" | "empty_question" | "question_declined" | "plan_missing" | "plan_rejected";
   reason: string;
 }
 

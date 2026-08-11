@@ -27,8 +27,7 @@ export interface ConsoleToolsInput {
   repo: Repo;
   bus: EventBus;
   userSessionId: string;
-  /** A2: console-owned task tools (absent until wired in main/tests). */
-  tasks?: TaskService;
+  tasks: TaskService;
   handoffs: HandoffService;
 }
 
@@ -297,7 +296,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
 
     sdk.tool(
       "read_agent_session",
-      "Read an agent session's transcript (defaults to what you have not seen yet). Reading marks it seen. Returns the newest window (default 8KiB) of the serialized messages plus cursors — retrieval is paged; never assume one call returned everything. Use afterSeq/limit to narrow before paging.",
+      "Read an agent session's transcript. Returns the newest window (default 8KiB) of the serialized messages plus cursors — retrieval is paged; never assume one call returned everything. Use afterSeq/limit to narrow before paging.",
       {
         agentSessionId: z.string(),
         afterSeq: z.number().int().optional(),

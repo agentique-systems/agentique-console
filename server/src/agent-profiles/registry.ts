@@ -52,7 +52,7 @@ const BUILTINS: AgentProfile[] = [
     id: "coordinator",
     title: "Coordinator",
     purpose: "Own a bounded workstream, assign each unit once, integrate results, and report milestones.",
-    instructions: "You are the sole coordinator for this AgentSession. You own decomposition and integration. Send assignments only to your specialists. Do not implement their work, broadcast status, or repeat unchanged information. For one high-stakes implementation unit you may use start_attempts (when available) to race 2-3 isolated attempts and let a reviewer pick the winner; a merge-conflict failure means reassign against the current HEAD.\n\nWrite seats work in ISOLATED worktrees. Files they create are not visible in your workspace until they report completed and the Console merges them — an `ls` that shows nothing proves nothing. Read their progress from the roster line or ask the seat; never conclude from the filesystem that a seat has done nothing.\n\nReport to main for a blocking decision, material failure, milestone, or final result — and always before you go idle. If you are unsure whether a result is worth reporting, report it: the operator can act on a partial result and cannot act on silence. Relay what your specialists actually found, including defects and anything they could not verify, rather than a summary that they finished.",
+    instructions: "You are the sole coordinator for this AgentSession. You own decomposition and integration. Send assignments only to your specialists. Do not implement their work, broadcast status, or repeat unchanged information. A merge-conflict failure means reassign against the current HEAD.\n\nWrite seats work in ISOLATED worktrees. Files they create are not visible in your workspace until they report completed and the Console merges them — an `ls` that shows nothing proves nothing. Read their progress from the roster line or ask the seat; never conclude from the filesystem that a seat has done nothing.\n\nReport to main for a blocking decision, material failure, milestone, or final result — and always before you go idle. If you are unsure whether a result is worth reporting, report it: the operator can act on a partial result and cannot act on silence. Relay what your specialists actually found, including defects and anything they could not verify, rather than a summary that they finished.",
     tools: READ_TOOLS,
     permissionMode: "default",
     model: "claude-sonnet-5",
@@ -138,19 +138,8 @@ export class AgentProfileRegistry {
   readonly #profiles: ReadonlyMap<string, AgentProfile>;
   readonly #options: { getWorkspaceRoot: (workspaceId: string) => string; db: Db; bus: EventBus } | null;
 
-  constructor(profilesFile?: string, options?: { getWorkspaceRoot: (workspaceId: string) => string; db: Db; bus: EventBus }) {
+  constructor(options?: { getWorkspaceRoot: (workspaceId: string) => string; db: Db; bus: EventBus }) {
     const profiles = new Map(BUILTINS.map((profile) => [profile.id, Object.freeze(profile)]));
-    // Legacy loading remains only for isolated compatibility tests. Production
-    // constructs the registry with workspace options and never reads the old file.
-    if (options === undefined && profilesFile && fs.existsSync(profilesFile)) {
-      const parsed = z.array(ProfileSchema).parse(JSON.parse(fs.readFileSync(profilesFile, "utf8")));
-      for (const profile of parsed) {
-        if (profiles.has(profile.id)) {
-          throw new Error(`custom agent profile cannot replace built-in \"${profile.id}\"`);
-        }
-        profiles.set(profile.id, Object.freeze(profile));
-      }
-    }
     this.#profiles = profiles;
     this.#options = options ?? null;
   }

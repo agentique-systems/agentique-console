@@ -15,21 +15,7 @@
  * seats at runtime, and the snapshot must stay immutable while the roster
  * grows.
  */
-import type { HandoffExtensionKind } from "./handoffs.ts";
-
-export const PATTERN_IDS = [
-  "hub_and_spoke",
-  "pipeline",
-  "evaluator_optimizer",
-  "map_reduce",
-  "peer_to_peer",
-  "plan_execute",
-  "debate",
-] as const;
-export type PatternId = (typeof PATTERN_IDS)[number];
-
-/** The six delivery categories — frozen by the mailbox CHECK constraint. */
-export type DeliveryCategory = "assignment" | "update" | "milestone" | "failure" | "final" | "decision";
+import type { HandoffExtensionKind, PatternId } from "@agentique-console/shared";
 
 /**
  * Console-tool grant atoms: the single vocabulary that both seat-tool
@@ -67,7 +53,7 @@ export interface EdgeSpec {
    */
   advance: "router" | "console";
   /** Categories this edge carries; omitted = all six. */
-  categories?: DeliveryCategory[];
+  categories?: ("assignment" | "update" | "milestone" | "failure" | "final" | "decision")[];
   /** Traversing this edge completes one pattern round (an evaluator critique). */
   countsRound?: boolean;
 }

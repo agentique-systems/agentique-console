@@ -1,4 +1,5 @@
-import type { AgentSessionStatus, EdgeSpec, HandoffDraft, HandoffTrigger, Interaction, InteractionQuestion, InteractionUrgency, PatternId, Speaker } from "@agentique-console/shared";
+import type { AgentSessionStatus, HandoffDraft, HandoffTrigger, Interaction, InteractionQuestion, InteractionUrgency, PatternId, Speaker } from "@agentique-console/shared";
+import type { EdgeSpec } from "./topology-contract.ts";
 import fs from "node:fs";
 import path from "node:path";
 import { InvalidInputError, ConflictError, NotFoundError } from "../errors.ts";
@@ -19,7 +20,7 @@ import { newId, nowIso } from "../ids.ts";
 import { rotationTokenLimit } from "../model-catalog.ts";
 import { mapSdkMessage } from "../sdk/mapping.ts";
 import type { SqliteSessionStore } from "../sdk/session-store.ts";
-import type { ConsoleSdk, QueryHandle, SdkHooksFragment, SdkOptions, SdkToolResult, SdkUserMessageLike } from "../sdk/types.ts";
+import type { ConsoleSdk, QueryHandle, SdkOptions, SdkToolResult, SdkUserMessageLike } from "../sdk/types.ts";
 import { sdkEnv } from "../sdk/env.ts";
 import type { ProcessManager } from "../runtime/process-manager.ts";
 import type { BrowserManager } from "../runtime/browser-manager.ts";
@@ -49,7 +50,6 @@ import { compileContract, contractOfSession, hubContract, roleOfSeat, speakerKin
 import { grantedTools, runtimeToolNames, type SeatToolName } from "./grants.ts";
 import { dispatchWorkItems, onPatternPost, sweep as patternSweep, type DispatchWorkItemsInput, type PatternContext } from "./patterns/progression.ts";
 import { buildContract } from "./patterns/catalog.ts";
-import { mergeHooks } from "../sdk/hooks.ts";
 import { AsyncQueue } from "../async-queue.ts";
 
 export { WithheldFinalError } from "./governance.ts";
@@ -1099,7 +1099,7 @@ export class AgentSessionHost {
     if (!worktrees || this.#deps.config.seatWorktrees === false || seat.role !== "agent"
       || seat.worktreePath !== null || !worktrees.isGitRepo(workspaceRoot)) return seat;
     try {
-      const dirName = `seat-${branchSafe(seat.name)}-${seat.generation}-${newId("turn").slice(-6)}`;
+      const dirName = `seat-${branchSafe(seat.name)}-${seat.generation}-${newId("rnd").slice(-6)}`;
       const ref = worktrees.addWorktree(workspaceRoot, session.id, dirName, `seat/${session.id}/${branchSafe(seat.name)}-${seat.generation}`);
       repo.patchParticipant(session.id, seat.name, { worktreePath: ref.path, worktreeBaseCommit: ref.baseCommit, worktreeBranch: ref.branch });
       bus.append({ type: "agent_session.worktree.created", userSessionId: session.userSessionId, agentSessionId: session.id,
@@ -1567,7 +1567,6 @@ export class AgentSessionHost {
           "Agent", "Task", "SendMessage", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet",
           ...GOVERNED_BUILTIN_TOOLS.filter((name) => !profile.tools.includes(name)),
         ])],
-        hooks: this.#buildSeatHooks(session, latestSeat) as SdkOptions["hooks"],
         sandbox: { enabled: true, failIfUnavailable: profile.sandboxRequired, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: false,
           filesystem: { allowManagedReadPathsOnly: true, allowRead: latestSeat.worktreePath ? [seatRoot, workspaceRoot] : [workspaceRoot], allowWrite: [seatRoot] },
           network: sandboxNetwork(profile, this.#deps.config.allowedDomains ?? []) },
@@ -1646,21 +1645,6 @@ export class AgentSessionHost {
 
   #roster(session: AgentSessionRow): string {
     return this.#deps.repo.listParticipants(session.id).map((p) => this.#seatLine(p)).join("; ");
-  }
-
-  #buildSeatHooks(session: AgentSessionRow, seat: ParticipantRow): SdkHooksFragment {
-    // One workspace-root resolution for every fragment below.
-    const user = this.#deps.repo.getUserSession(session.userSessionId);
-    let workspaceRoot = "";
-    try { workspaceRoot = user && this.#deps.getWorkspaceRoot ? this.#deps.getWorkspaceRoot(user.workspaceId) : ""; } catch { workspaceRoot = ""; }
-    // No send middleware: transfers go through the console-owned `send_handoff`
-    // tool, which is journalled by `post()` directly. There is no second wire to
-    // govern, and therefore no envelope to validate, coerce, or degrade.
-    const fragments: SdkHooksFragment[] = [];
-    // No native task mirror: all four Task* tools are in every seat's
-    // `disallowedTools`, so this fragment could never have fired. Seats use the
-    // console-owned task_list/task_create/task_update.
-    return mergeHooks(fragments);
   }
 
   async #pumpSeat(session: AgentSessionRow, seatName: string, lane: SeatLane, query: QueryHandle): Promise<void> {
@@ -2045,7 +2029,7 @@ export class AgentSessionHost {
     const target = path.join(parent, profile.revision);
     if (!fs.existsSync(target)) {
       fs.mkdirSync(parent, { recursive: true });
-      const temp = path.join(parent, `.${profile.revision}-${newId("artifact")}`);
+      const temp = path.join(parent, `.${profile.revision}-${newId("rnd")}`);
       try { fs.cpSync(profile.pluginPath, temp, { recursive: true, dereference: true }); fs.renameSync(temp, target); }
       catch (error) { if (fs.existsSync(temp)) fs.rmSync(temp, { recursive: true }); if (!fs.existsSync(target)) throw error; }
     }
@@ -2244,8 +2228,7 @@ export class AgentSessionHost {
     const config = this.#deps.config;
     if (!config || !this.#deps.handoffs) return seat;
     const started = Date.now();
-    const holder: { query: QueryHandle | null } = { query: null };
-    const { draft: attempted, failure } = await this.#checkpointQuery(session, seat, sdk, holder, "");
+    const { draft: attempted, failure } = await this.#checkpointQuery(session, seat, sdk);
     const degraded = attempted === null;
     const draft = attempted ?? this.#reconstructCheckpoint(session, seat);
     if (degraded) {
@@ -2272,7 +2255,7 @@ export class AgentSessionHost {
   }
 
   /** One tool-free checkpoint query against the seat's current context. */
-  async #checkpointQuery(session: AgentSessionRow, seat: ParticipantRow, sdk: ConsoleSdk, flight: { query: QueryHandle | null }, promptSuffix: string): Promise<{ draft: HandoffDraft | null; failure: string | null }> {
+  async #checkpointQuery(session: AgentSessionRow, seat: ParticipantRow, sdk: ConsoleSdk): Promise<{ draft: HandoffDraft | null; failure: string | null }> {
     const config = this.#deps.config;
     let draft: HandoffDraft | null = null;
     let failure: string | null = null;
@@ -2286,7 +2269,7 @@ export class AgentSessionHost {
     // CLI retry for minutes while #maybeRotate's gate blocks every sender.
     const checkpointDeadline = setTimeout(() => checkpointAbort.abort(), CHECKPOINT_TIMEOUT_MS);
     checkpointDeadline.unref?.();
-    const query = sdk.query({ prompt: `Create a lossless rotation checkpoint for your successor context. Capture only durable task state, verified evidence pointers, results, uncertainty, and the exact next action. Do not perform work or call tools.${promptSuffix}`, options: {
+    const query = sdk.query({ prompt: `Create a lossless rotation checkpoint for your successor context. Capture only durable task state, verified evidence pointers, results, uncertainty, and the exact next action. Do not perform work or call tools.`, options: {
       cwd: checkpointRoot, systemPrompt: { type: "preset", preset: "claude_code", append: "You are checkpointing your own context. Report faithfully; do not correct or embellish uncertain state." },
       settingSources: [], includePartialMessages: false, permissionMode: "plan", allowedTools: [],
       disallowedTools: CHECKPOINT_DENIED_TOOLS,
@@ -2300,7 +2283,6 @@ export class AgentSessionHost {
       sessionStoreFlush: "eager", resume: seat.sdkSessionId, ...(seat.model ? { model: seat.model } : {}),
       ...((profile.effort ?? config?.effort) ? { effort: (profile.effort ?? config?.effort) as SdkOptions["effort"] } : {}),
     } });
-    flight.query = query;
     // A separate process, but `resume: seat.sdkSessionId` above means it is the
     // SAME provider session — so its cumulative totals continue the seat's, and
     // its baseline is the seat's. Starting from zero here would bill the whole
@@ -2317,7 +2299,7 @@ export class AgentSessionHost {
         } else if (event.kind === "error") failure = event.message;
       }
     } catch (error) { failure = error instanceof Error ? error.message : String(error); }
-    finally { clearTimeout(checkpointDeadline); flight.query = null; query.close?.(); }
+    finally { clearTimeout(checkpointDeadline); query.close?.(); }
     return { draft, failure };
   }
 

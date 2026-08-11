@@ -11,7 +11,6 @@ import type {
 import {
   HANDOFF_READ_DEFAULT_BYTES,
   HANDOFF_READ_MAX_BYTES,
-  handoffExtensionKindForProfile,
 } from "@agentique-console/shared";
 import { InvalidInputError, NotFoundError } from "../errors.ts";
 import { decodeCursor, encodeCursor, sliceUtf8Window } from "../paging.ts";
@@ -41,6 +40,18 @@ export interface PrepareHandoffInput {
   extensionDefaults?: Record<string, unknown>;
   /** Root for file-ref validation; a worktree'd seat's refs resolve there. */
   resolveRoot?: string;
+}
+
+/**
+ * Default handoff-extension kind for a profile, by id convention. Server
+ * policy — used only when the caller supplies no explicit extension kind.
+ */
+function handoffExtensionKindForProfile(profileId: string | null): HandoffExtensionKind {
+  if (profileId === "coordinator" || profileId === "main" || profileId === "orchestrator") return "coordination";
+  if (profileId?.includes("implementer")) return "implementation";
+  if (profileId === "explorer" || profileId === "researcher") return "investigation";
+  if (profileId?.includes("reviewer")) return "review";
+  return "generic";
 }
 
 export class HandoffService {

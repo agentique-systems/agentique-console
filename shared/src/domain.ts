@@ -61,7 +61,6 @@ export interface RunSummaryStats {
   reaped: { processes: number; browsers: number; leakedBefore: number };
 }
 
-export type ConversationPurpose = "work" | "profile_manager";
 
 /**
  * `reported` is derived, not stored: the coordinator has delivered a result to
@@ -258,7 +257,7 @@ export type InteractionStatus =
  */
 export type InteractionUrgency = "blocking" | "deferred";
 /** Who raised it: an agent directly, the uncertainty classifier, or the Console. */
-export type InteractionSource = "agent" | "uncertainty" | "console";
+export type InteractionSource = "agent" | "console";
 
 /** One AskUserQuestion question block, as the SDK tool shapes it. */
 export interface InteractionQuestion {
@@ -303,3 +302,15 @@ export interface Interaction {
   createdAt: string;
   resolvedAt: string | null;
 }
+
+/** Orchestration-pattern catalog ids — the create-session wire vocabulary. */
+export const PATTERN_IDS = [
+  "hub_and_spoke",
+  "pipeline",
+  "evaluator_optimizer",
+  "map_reduce",
+  "peer_to_peer",
+  "plan_execute",
+  "debate",
+] as const;
+export type PatternId = (typeof PATTERN_IDS)[number];

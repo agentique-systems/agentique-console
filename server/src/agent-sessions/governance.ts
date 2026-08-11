@@ -1,8 +1,7 @@
 /**
- * The `post()` gate stack: uncertainty promotion, the final-report gate, the
- * assignment-dependency hold, and ledger sync. Free functions over a narrow
- * deps surface — `post()` in host.ts stays the ordered pipeline that calls
- * them, and the ordering comments live with the pipeline.
+ * The `post()` gate stack: the final-report gate and ledger sync. Free
+ * functions over a narrow deps surface — `post()` in host.ts stays the
+ * ordered pipeline that calls them.
  */
 import type { HandoffDraft, HandoffTrigger, Interaction, InteractionQuestion } from "@agentique-console/shared";
 import type { AgentProfile } from "../agent-profiles/registry.ts";

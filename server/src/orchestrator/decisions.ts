@@ -59,14 +59,6 @@ export interface DecisionSourceRow {
 const DIGEST_MAX_ENTRIES = 40;
 const DIGEST_MAX_BYTES = 4 * 1024;
 
-/**
- * `name@1.2.3` and three.js-style `r160` pins inside an answer. Deliberately
- * syntax-agnostic, deliberately: the point is to
- * recognise that the operator NAMED a version, so a later substitution can be
- * detected, not to parse a package manifest.
- */
-const PIN_RE = /(?:^|[\s"'`(/@])([a-z][a-z0-9._-]{1,40})[@ ]v?(\d+\.\d+(?:\.\d+)?|r\d{2,3})\b/gi;
-
 /** Chosen labels plus anything the operator typed, as one readable answer. */
 export function renderAnswer(answers: Record<string, string[]>, freeText?: Record<string, string>): string {
   const chosen = Object.values(answers).flat().filter((label) => label !== "");
@@ -169,32 +161,6 @@ export class DecisionLedger {
     return lines.join("\n");
   }
 
-  /**
-   * Dependency → version the operator named, parsed from their answers.
-   * Consumed by the uncertainty classifier so "shipped r169, they said r160"
-   * is recognisable as a spec deviation rather than a note nobody reads.
-   */
-  pins(userSessionId: string): Map<string, string> {
-    const pins = new Map<string, string>();
-    for (const row of this.list(userSessionId)) {
-      for (const text of [row.question, row.answer]) {
-        for (const match of text.matchAll(PIN_RE)) {
-          const name = (match[1] as string).toLowerCase();
-          // The ANSWER wins over the question: the operator's chosen value
-          // outranks whatever the options offered.
-          if (text === row.answer || !pins.has(name)) pins.set(name, match[2] as string);
-        }
-      }
-    }
-    return pins;
-  }
-
-  /** Raw answer strings, for substring checks against a seat's uncertainty. */
-  constraints(userSessionId: string): string[] {
-    return this.list(userSessionId)
-      .map((row) => row.answer)
-      .filter((answer) => answer.trim() !== "");
-  }
 }
 
 /** One canonical rendering, so every consumer says the same thing. */

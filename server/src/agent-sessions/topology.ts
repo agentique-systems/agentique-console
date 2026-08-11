@@ -7,12 +7,7 @@
  * immutable once snapshotted — replicable roles grow the ROSTER
  * (participants.pattern_role), never the contract.
  */
-import type {
-  EdgeSpec,
-  RolePrompt,
-  RoleSpec,
-  TopologyContract,
-} from "@agentique-console/shared";
+import type { EdgeSpec, RolePrompt, RoleSpec, TopologyContract } from "./topology-contract.ts";
 import type { AgentSessionRow, ParticipantRow } from "../db/repo.ts";
 import { CONSOLE_SENDER, MAIN_RECIPIENT, ORCHESTRATOR_SEAT } from "./peer-names.ts";
 import { SESSION_PROTOCOL } from "./presets.ts";

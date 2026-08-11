@@ -23,7 +23,7 @@ describe("ManagerService", () => {
     const { db, sqlite } = openDb(":memory:"); const bus = new EventBus(db); const repo = new Repo(db, sqlite); const now = nowIso();
     db.insert(workspaces).values({ id: "ws_1", name: "test", rootPath: workspaceRoot, metadata: {}, createdAt: now, updatedAt: now }).run();
     const workspaceService = new WorkspaceService(db, bus, [workspaceRoot]);
-    const profiles = new AgentProfileRegistry(undefined, { getWorkspaceRoot: () => workspaceRoot, db, bus });
+    const profiles = new AgentProfileRegistry({ getWorkspaceRoot: () => workspaceRoot, db, bus });
     const config = loadConfig({ CONSOLE_DATA_DIR: dataDir });
     const manager = new ManagerService({ repo, workspaces: workspaceService, profiles, config, bus, runner: () => ({} as OrchestratorRunner) });
     const session = manager.create("ws_1");

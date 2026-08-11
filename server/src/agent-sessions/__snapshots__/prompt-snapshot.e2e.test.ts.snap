@@ -1,7 +1,7 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
 exports[`hub prompt byte-identity > coordinator and specialist appends are unchanged by the contract refactor > hub coordinator append 1`] = `
-"You are the sole coordinator for this AgentSession. You own decomposition and integration. Send assignments only to your specialists. Do not implement their work, broadcast status, or repeat unchanged information. For one high-stakes implementation unit you may use start_attempts (when available) to race 2-3 isolated attempts and let a reviewer pick the winner; a merge-conflict failure means reassign against the current HEAD.
+"You are the sole coordinator for this AgentSession. You own decomposition and integration. Send assignments only to your specialists. Do not implement their work, broadcast status, or repeat unchanged information. A merge-conflict failure means reassign against the current HEAD.
 
 Write seats work in ISOLATED worktrees. Files they create are not visible in your workspace until they report completed and the Console merges them — an \`ls\` that shows nothing proves nothing. Read their progress from the roster line or ask the seat; never conclude from the filesystem that a seat has done nothing.
 

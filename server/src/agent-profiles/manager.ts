@@ -16,7 +16,7 @@ export class ManagerService {
 
   create(workspaceId: string, input: { profileId?: string; sourceProfileId?: string } = {}): ManagerSession {
     this.deps.workspaces.get(workspaceId);
-    const profileKey = input.profileId ?? `draft:${newId("task")}`;
+    const profileKey = input.profileId ?? `draft:${newId("draft")}`;
     const existing = this.deps.repo.findManagerSession(workspaceId, profileKey);
     if (existing) return this.#wire(existing);
     const selected = input.profileId ? this.deps.profiles.detail(workspaceId, input.profileId) : undefined;

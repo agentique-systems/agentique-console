@@ -2,9 +2,8 @@
  * Byte-true, UTF-8-safe windowing shared by every model-facing "big payload"
  * surface. Storage stays lossless; delivery is bounded: tools return one
  * window plus cursors, and the caller pays another call for more. read_handoff
- * pages head-first (deployed contract); the newer surfaces built on pageTail
- * default to the newest window because recent output is what a seat usually
- * needs next.
+ * pages head-first; the surfaces built on pageTail default to the newest
+ * window because recent output is what a seat usually needs next.
  */
 import { InvalidInputError } from "./errors.ts";
 

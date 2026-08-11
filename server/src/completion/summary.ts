@@ -43,7 +43,7 @@ export interface RunSummaryDocument {
     outputTokens: number;
     byParticipant: { participant: string; usd: number | null; turns: number }[];
   };
-  decisions: { question: string; answer: string; askedBy: string; autoTaken: boolean }[];
+  decisions: { question: string; answer: string; askedBy: string }[];
   /** Console-owned facts about what the run did not do as asked. */
   deviations: string[];
   uncertainty: string[];
@@ -141,8 +141,8 @@ export function buildRunSummary(input: BuildRunSummaryInput): RunSummaryDocument
   const decisions = db.select().from(events)
     .where(and(eq(events.userSessionId, userSessionId), eq(events.type, "operator.decision.recorded"), gte(events.seq, seqFrom)))
     .all()
-    .map((row) => row.payload as { question: string; answer: string; askedBy: string; autoTaken?: boolean })
-    .map((payload) => ({ question: payload.question, answer: payload.answer, askedBy: payload.askedBy, autoTaken: payload.autoTaken === true }));
+    .map((row) => row.payload as { question: string; answer: string; askedBy: string })
+    .map((payload) => ({ question: payload.question, answer: payload.answer, askedBy: payload.askedBy }));
 
   const deviations = collectDeviations(window, open.map((task) => task.subject));
   const uncertainty = [...new Set([

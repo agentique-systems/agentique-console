@@ -139,8 +139,7 @@ export const participants = sqliteTable(
     /** Seat name; "orchestrator" is the reserved virtual seat. */
     name: text("name").notNull(),
     role: text("role", { enum: ["orchestrator", "agent"] }).notNull(),
-    /** Preset registry key; NULL for ad-hoc agents. */
-    /** Resolved brief (preset + ad-hoc extension), verbatim. */
+    /** Resolved brief (profile + ad-hoc extension), verbatim. */
     instructions: text("instructions").notNull(),
     model: text("model"),
     profileId: text("profile_id").notNull().default("explorer"),
@@ -150,14 +149,12 @@ export const participants = sqliteTable(
       .default({}),
     ownership: text("ownership", { mode: "json" }).$type<string[]>().notNull().default([]),
     sdkSessionId: text("sdk_session_id"),
-    /** Machine-registry address (CLAUDE_CODE_SESSION_NAME); stable across rotations. */
     /** Last turn activity; park/reap bookkeeping that survives restarts. */
     lastActiveAt: text("last_active_at"),
     generation: integer("generation").notNull().default(0),
     turnCount: integer("turn_count").notNull().default(0),
     contextTokens: integer("context_tokens").notNull().default(0),
     latestHandoffId: text("latest_handoff_id"),
-    /** Transcript watermark: highest message seq this seat has been shown. */
     /** See userSessions: the cumulative baseline outlives the lane process. */
     cumulativeCostUsd: real("cumulative_cost_usd").notNull().default(0),
     cumulativeApiDurationMs: integer("cumulative_api_duration_ms").notNull().default(0),
@@ -169,7 +166,6 @@ export const participants = sqliteTable(
     worktreeBaseCommit: text("worktree_base_commit"),
     /** The worktree's branch ref (merge target on completion). */
     worktreeBranch: text("worktree_branch"),
-    /** Best-of-N group membership; NULL for ordinary seats. */
     /** Contract role binding; NULL derives from `role` (orchestrator→coordinator, agent→specialist). */
     patternRole: text("pattern_role"),
     /** Seating order for accents and prompt listings. */
@@ -197,7 +193,7 @@ export const patternState = sqliteTable("pattern_state", {
   lastProgressAt: text("last_progress_at"),
   /** Ring buffer of recent "sender>recipient" hops — oscillation detection. */
   recentEdges: text("recent_edges", { mode: "json" }).$type<string[]>().notNull().default([]),
-  /** joinId → { expected: seats[], reports: seat → {handoffId, status} }. */
+  /** joinId → { expected: seats[], reports: seat → "completed"|"failed" }. */
   joins: text("joins", { mode: "json" }).$type<Record<string, unknown>>().notNull().default({}),
   /** Termination reason once tripped; NULL = live. */
   tripped: text("tripped"),
@@ -251,7 +247,7 @@ export const interactions = sqliteTable("interactions", {
   urgency: text("urgency", { enum: ["blocking", "deferred"] })
     .notNull()
     .default("blocking"),
-  source: text("source", { enum: ["agent", "uncertainty", "console"] })
+  source: text("source", { enum: ["agent", "console"] })
     .notNull()
     .default("agent"),
   recommendation: text("recommendation"),
@@ -275,7 +271,7 @@ export const interactions = sqliteTable("interactions", {
   check("interactions_kind", sql`${t.kind} IN ('question','plan_approval')`),
   check("interactions_status", sql`${t.status} IN ('pending','answered','rejected','dismissed','stale')`),
   check("interactions_urgency", sql`${t.urgency} IN ('blocking','deferred')`),
-  check("interactions_source", sql`${t.source} IN ('agent','uncertainty','console')`),
+  check("interactions_source", sql`${t.source} IN ('agent','console')`),
 ]);
 
 // Operator decisions are NOT a table: a decision is a resolved `interactions`
@@ -405,7 +401,7 @@ export const mailboxDeliveries = sqliteTable(
     status: text("status", {
       enum: ["queued", "delivered", "acknowledged", "cancelled"],
     }).notNull().default("queued"),
-    /** Which carrier moved it: native peer socket, or a console input push. */
+    /** Idempotence key for console-authored deliveries (answers, notices, redrives). */
     dedupeKey: text("dedupe_key"),
     deliveredAt: text("delivered_at"),
     acknowledgedAt: text("acknowledged_at"),

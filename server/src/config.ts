@@ -31,8 +31,6 @@ export interface Config {
   improveModel: string;
   /** Reasoning effort for every session; undefined = SDK default. */
   effort: string | undefined;
-  /** Optional operator-owned profile overrides. Built-ins remain immutable. */
-  profilesFile: string;
   /**
    * Peer-mesh knobs. Seats are persistent, name-addressed SDK sessions; these
    * bound resident CLI processes and the delivery/wake protocol around them.
@@ -72,10 +70,6 @@ export interface Config {
    * atomic merge-on-completion. CONSOLE_SEAT_WORKTREES=0 disables.
    */
   seatWorktrees: boolean;
-  /**
-   * Pattern-level TerminationPolicy ceilings, applied when a session's
-   * contract does not set its own bound. 0 disables a ceiling.
-   */
   /** Agent-authored handoffs per session before the console asks for a close-out. */
   patternHandoffCap: number;
   /** Quiet-time stall: unreported session with no hop for this long trips. 0 = off. */
@@ -162,8 +156,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     model: validatedModel(env.CONSOLE_MODEL),
     improveModel: env.CONSOLE_IMPROVE_MODEL ?? "claude-sonnet-5",
     effort: env.CONSOLE_EFFORT,
-    profilesFile:
-      env.CONSOLE_PROFILES_FILE ?? path.join(dataDir, "profiles.json"),
     seatIdleReapMs: Number(env.CONSOLE_SEAT_IDLE_REAP_MS ?? 300_000),
     seatMaxResident: Number(env.CONSOLE_MAX_RESIDENT_SEATS ?? 8),
     operatorAskDetachMs: Number(env.CONSOLE_OPERATOR_ASK_DETACH_MS ?? 300_000),

@@ -11,7 +11,8 @@
  *   role→seat resolution is first-by-ord everywhere.
  */
 import { z } from "zod";
-import type { PatternId, RolePrompt, RoleSpec, TopologyContract } from "@agentique-console/shared";
+import type { PatternId } from "@agentique-console/shared";
+import type { RolePrompt, RoleSpec, TopologyContract } from "../topology-contract.ts";
 import { InvalidInputError } from "../../errors.ts";
 import type { AgentProfile } from "../../agent-profiles/registry.ts";
 import { OPERATOR_PATH_BULLETS, PROTOCOL_INTRO } from "../presets.ts";
@@ -438,9 +439,9 @@ const PLAN_EXECUTE_CONFIG = z.object({
 
 const PLAN_WORK_BULLET = `
 - You are in a plan-and-execute session: the planner decomposes the objective
-  into ledger tasks with explicit blocked_by edges, and the Console DISPATCHES
-  on that DAG — an assignment whose blocker is open is held and released the
-  moment the blocker completes. The plan is the schedule; keep it true.`;
+  into ledger tasks with explicit blocked_by edges. The edges are the plan's
+  stated order — sequence your assignments by them, and keep the ledger true
+  as reality diverges.`;
 
 const PLAN_DONE_BULLET = `
 - Executors: finish your task with a terminal report to the planner — the
@@ -479,7 +480,7 @@ function buildPlanExecute(input: BuildInput): BuildResult {
         planner: {
           addressing: `Address participants by bare name; "main" reaches the Orchestrator. You may address your executors and "main".`,
           protocol,
-          brief: `You are the PLANNER. FIRST decompose the objective into task_create entries — every unit gets a taskId, an owner, and blocked_by edges for real dependencies — then assign each task by taskId. Assignments whose blockers are open are held by the Console and released automatically; do not sequence by hand what the DAG already sequences. Re-plan when reality diverges: update the ledger, do not push a stale plan.`,
+          brief: `You are the PLANNER. FIRST decompose the objective into task_create entries — every unit gets a taskId, an owner, and blocked_by edges for real dependencies — then assign each task by taskId, in dependency order: assign a task only when its blockers are complete. Re-plan when reality diverges: update the ledger, do not push a stale plan.`,
         },
         executor: {
           addressing: `Address participants by bare name. You may address only your planner.`,

@@ -134,11 +134,3 @@ export interface HandoffPage {
 
 export const HANDOFF_READ_DEFAULT_BYTES = 8 * 1024;
 export const HANDOFF_READ_MAX_BYTES = 32 * 1024;
-
-export function handoffExtensionKindForProfile(profileId: string | null): HandoffExtensionKind {
-  if (profileId === "coordinator" || profileId === "main" || profileId === "orchestrator") return "coordination";
-  if (profileId?.includes("implementer")) return "implementation";
-  if (profileId === "explorer" || profileId === "researcher") return "investigation";
-  if (profileId?.includes("reviewer")) return "review";
-  return "generic";
-}

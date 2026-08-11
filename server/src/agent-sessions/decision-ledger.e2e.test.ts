@@ -219,20 +219,4 @@ describe("decision ledger", () => {
     const append = appends[appends.length - 1]!;
     expect(append.indexOf("## Session protocol")).toBeLessThan(append.indexOf("## Operator decisions"));
   });
-
-
-  it("parses version pins the operator named, for the deviation classifier", async () => {
-    const { h, userSessionId } = await twoSeats();
-    const card = h.interactions.createOperatorQuestion({
-      userSessionId,
-      questions: [{ question: "Which three.js?", options: [{ label: "three r160" }, { label: "three r169" }] }],
-    });
-    h.interactions.resolveFromApi(userSessionId, card.id, { answers: { "Which three.js?": ["three r160"] } });
-
-    // Slice 3's classifier needs this to recognise "shipped r169, they said
-    // r160" as a spec deviation rather than a note nobody reads. r160 is not
-    // semver, which is exactly the case a naive rule misses.
-    expect(h.decisions.pins(userSessionId).get("three")).toBe("r160");
-    expect(h.decisions.constraints(userSessionId).join(" ")).toContain("r160");
-  });
 });

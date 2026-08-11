@@ -89,7 +89,7 @@ export function createApp(options: CreateAppOptions): App {
   const workspaces = new WorkspaceService(db, bus, config.fsRoots.map((root) => root.path));
   const getWorkspaceRoot = (workspaceId: string): string => workspaces.get(workspaceId).rootPath;
   const timeline = new TimelineService(repo, bus);
-  const profiles = new AgentProfileRegistry(undefined, { getWorkspaceRoot, db, bus });
+  const profiles = new AgentProfileRegistry({ getWorkspaceRoot, db, bus });
   const processes = options.runtime?.processes === undefined ? new ProcessManager(bus) : options.runtime.processes;
   const browsers = options.runtime?.browsers === undefined ? new BrowserManager(bus) : options.runtime.browsers;
   const worktrees = options.runtime?.worktrees === undefined ? new WorktreeManager({ dataDir: config.dataDir }) : options.runtime.worktrees;

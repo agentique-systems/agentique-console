@@ -1,10 +1,8 @@
 /**
  * Assembles SDK Options for one orchestrator turn. Hermetic by construction:
- * settingSources [] keeps filesystem CLAUDE.md/hooks/skills out; the tool
- * surface is the main agent's working set plus Console-managed delegation.
- * Native SendMessage, task, and cron tools are ALLOWED and governed by hook
- * middleware — the journal observes every send; denial is reserved for
- * in-process subagents (Agent/Task), which would fork ungoverned context.
+ * settingSources [] keeps filesystem CLAUDE.md/hooks/skills out, and the tool
+ * surface is the console MCP tools plus explicitly allowed builtins — every
+ * messaging/task/scheduling path is console-owned and journaled.
  */
 import type { SessionMode, SessionPhase } from "@agentique-console/shared";
 import { sdkEnv } from "../sdk/env.ts";
@@ -28,16 +26,6 @@ export const CONSOLE_TOOL_NAMES = [
   "read_handoff",
   "report_handoff_discrepancy",
 ] as const;
-
-/** Native harness tools the work lane may call; hooks govern and mirror them. */
-/**
- * Native tools main may still use. `SendMessage` is NOT among them: the mesh it
- * addressed is gone, its envelope middleware was deleted, and every send it
- * made in db-live-2 failed with "No agent named … is reachable". Coordinator
- * traffic goes through the console-owned `send_to_coordinator`, which is
- * route-checked and journaled.
- */
-const MAIN_NATIVE_TOOLS: string[] = [];
 
 /**
  * Never available to main, in any configuration. `SendMessage` bypasses the
@@ -128,7 +116,7 @@ export function buildOrchestratorOptions(
       ...(withDelegation
         ? manager
           ? ["read_profile_proposal", "stage_profile_file", "delete_profile_file", "apply_profile"].map((name) => `mcp__profile_manager__${name}`)
-          : [...CONSOLE_TOOL_NAMES.map((name) => `mcp__console__${name}`), ...MAIN_NATIVE_TOOLS]
+          : CONSOLE_TOOL_NAMES.map((name) => `mcp__console__${name}`)
         : []),
     ],
     disallowedTools: [...MAIN_DENIED_TOOLS, "CronCreate", "CronList", "CronDelete"],

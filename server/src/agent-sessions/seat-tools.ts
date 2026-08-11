@@ -1,8 +1,8 @@
 /**
  * The console_agent MCP tool definitions for a seat. Pure definitions over a
  * narrow context: everything host-private the handlers touch (post, the
- * operator ask, lane turn state, best-of-N entry points) arrives as a bound
- * callback, so nothing here reaches back into the host.
+ * operator ask, lane turn state) arrives as a bound callback, so nothing here
+ * reaches back into the host.
  */
 import { z } from "zod";
 import { PATTERN_IDS, type HandoffDraft, type InteractionUrgency, type Speaker } from "@agentique-console/shared";

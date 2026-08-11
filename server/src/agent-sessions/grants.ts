@@ -10,7 +10,7 @@
  * Pattern say ends at `RoleSpec.grants`; profile capabilities (shell, browser,
  * screenshots) and service availability stay orthogonal inputs.
  */
-import type { RoleSpec } from "@agentique-console/shared";
+import type { RoleSpec } from "./topology-contract.ts";
 import type { AgentProfile } from "../agent-profiles/registry.ts";
 import type { ParticipantRow } from "../db/repo.ts";
 

@@ -74,13 +74,7 @@ export type TurnEvent =
       summary: string;
       /** The spawning Agent call — the seat registry's key, when present. */
       toolUseId?: string;
-    }
-  /**
-   * B3: a message from an in-process agent (SendMessage to "main") arriving
-   * in the lane as a peer-origin user message. `from` is the sender's display
-   * name when the harness stamped one, else its id.
-   */
-  | { kind: "peer-message"; from: string; senderTaskId?: string; text: string };
+    };
 
 export function mapSdkMessage(message: SdkMessage): TurnEvent[] {
   switch (message.type) {
@@ -192,28 +186,6 @@ export function mapSdkMessage(message: SdkMessage): TurnEvent[] {
     }
 
     case "user": {
-      // A peer-origin user message is an agent's SendMessage to "main".
-      if (
-        message.parent_tool_use_id == null &&
-        message.origin?.kind === "peer"
-      ) {
-        const text =
-          message.origin.body ??
-          (message.message?.content ?? [])
-            .filter((block) => block.type === "text")
-            .map((block) => block.text ?? "")
-            .join("\n");
-        return [
-          {
-            kind: "peer-message",
-            from: message.origin.name ?? message.origin.from ?? "agent",
-            ...(message.origin.senderTaskId === undefined
-              ? {}
-              : { senderTaskId: message.origin.senderTaskId }),
-            text,
-          },
-        ];
-      }
       const events: TurnEvent[] = [];
       for (const block of message.message?.content ?? []) {
         if (block.type !== "tool_result" || block.tool_use_id === undefined) {

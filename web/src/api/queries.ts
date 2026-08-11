@@ -30,14 +30,6 @@ import { keys } from "./keys";
  */
 const LIVE = { refetchInterval: 8_000 } as const;
 
-export function useStats() {
-  return useQuery({
-    queryKey: keys.stats.all,
-    queryFn: () => apiFetch<StatsResponse>("/api/stats"),
-    ...LIVE,
-  });
-}
-
 /**
  * The server's defaults — currently just the orchestrator model the operator's
  * `CONSOLE_MODEL` resolves to. It cannot change without a server restart, so

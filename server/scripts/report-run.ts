@@ -4,8 +4,8 @@
  *   npx tsx server/scripts/report-run.ts [/path/to/console.db]
  *
  * Prints what a live run needs answered afterwards: who spent what, how long
- * turns took, how fast the mesh delivered, what was denied, what the watchdog
- * and checkpoint gates did, and how handoffs sized and were consumed. All
+ * turns took, how fast deliveries moved, what was denied, what the watchdog
+ * and rotation checkpoints did, and how handoffs sized and were consumed. All
  * queries are against the authoritative tables + event spine; nothing writes.
  */
 import Database from "better-sqlite3";
@@ -127,7 +127,7 @@ table(all(
      json_extract(payload, '$.failed') as failed, count(*) as count
    from events where type = 'agent_session.join.completed' group by 1, 2, 3`), ["joinId", "expected", "failed", "count"]);
 
-// ── Rotation + checkpoint gate ───────────────────────────────────────────────
+// ── Rotation + checkpoints ───────────────────────────────────────────────────
 heading("Context rotations");
 table(all(
   `select type, json_extract(payload, '$.participant') as participant,

@@ -102,7 +102,7 @@ export class ProcessManager {
       // arbitrary operator-authored code. `childEnv` passes what a build or a
       // dev server actually needs and nothing else.
       { cwd: resolved, env: childEnv(), stdio: "pipe", detached: false });
-    const processId = newId("task");
+    const processId = newId("proc");
     const managed: ManagedProcess = { id: processId, owner: `${scope.agentSessionId}:${scope.participant}`, child, chunks: [], seq: 0, exit: null, waiters: new Set() };
     this.#processes.set(processId, managed);
     const ingest = (stream: "stdout" | "stderr", data: Buffer) => {
