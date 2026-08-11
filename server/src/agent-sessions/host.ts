@@ -14,11 +14,8 @@ import { toWireAgentSession, toWireMessage } from "../api/wire.ts";
 import type { ArtifactStore } from "../events/artifact-store.ts";
 import type { EventBus } from "../events/bus.ts";
 import { newId, nowIso } from "../ids.ts";
-import { rotationTokenLimit } from "../model-catalog.ts";
-import { mapSdkMessage } from "../sdk/mapping.ts";
 import type { SqliteSessionStore } from "../sdk/session-store.ts";
-import type { ConsoleSdk, SdkOptions } from "../sdk/types.ts";
-import { sdkEnv } from "../sdk/env.ts";
+import type { ConsoleSdk } from "../sdk/types.ts";
 import type { ProcessManager } from "../runtime/process-manager.ts";
 import type { BrowserManager } from "../runtime/browser-manager.ts";
 import type { WorktreeManager } from "../runtime/worktree-manager.ts";
@@ -27,11 +24,8 @@ import type { InteractionService } from "../orchestrator/interactions.ts";
 import type { AssignmentScheduler } from "../tasks/scheduler.ts";
 import type { TaskService } from "../tasks/service.ts";
 import type { HandoffService } from "../handoffs/service.ts";
-import { HANDOFF_DRAFT_JSON_SCHEMA, HandoffDraftSchema } from "../handoffs/schema.ts";
 import type { ReapResult } from "../completion/summary.ts";
 import { CHILD_SENDER_PREFIX, CONSOLE_SENDER, MAIN_RECIPIENT, COORDINATOR_AGENT } from "./names.ts";
-import { CHECKPOINT_DENIED_TOOLS } from "../lane-runtime/checkpoint.ts";
-import { rotationDue, type RotationReason } from "../lane-runtime/rotation.ts";
 import type { Category } from "./final-gate.ts";
 import { PromptComposer } from "./composer.ts";
 import { roleOfAgent, speakerKindOf, RESERVED_NAMES, AGENT_NAME_RE } from "./topology.ts";
@@ -196,7 +190,6 @@ export class AgentSessionService {
         carryReport: (session, seatName, turn) => this.#carryReport(session, seatName, turn),
         turnBudgetNotice: (session, seat, turn, spentTurns) => this.#turnBudgetNotice(session, seat, turn, spentTurns),
         refreshStatus: (agentSessionId) => this.#operator.refreshStatus(agentSessionId),
-        maybeRotate: (agentSessionId, seatName) => this.#maybeRotate(agentSessionId, seatName),
         recordFailure: (agentSessionId, error) => this.#recordHostFailure(agentSessionId, error),
       },
     });
@@ -739,132 +732,6 @@ export class AgentSessionService {
   /** Spawn or unpark an agent so its peer session accepts input (`AgentRuntime.ensureSeatLive`). */
   async ensureSeatLive(agentSessionId: string, seat: string, deadline?: number): Promise<void> {
     return this.#runtime.ensureSeatLive(agentSessionId, seat, deadline);
-  }
-
-  /**
-   * Context rotation at a turn boundary, under a gate that blocks senders:
-   * checkpoint the old process, close it, respawn the same peer name on a
-   * fresh provider session, then re-carry anything unacknowledged.
-   */
-  async #maybeRotate(agentSessionId: string, seatName: string): Promise<void> {
-    const config = this.#deps.config;
-    if (!config || !this.#deps.handoffs || !this.#deps.sdk) return;
-    const lane = this.#lanes.laneOf(agentSessionId, seatName);
-    if (lane.state !== "live" || lane.activeTurn !== null || lane.rotationGate !== null) return;
-    const { repo } = this.#deps;
-    const session = repo.getAgentSession(agentSessionId);
-    const seat = repo.getAgent(agentSessionId, seatName);
-    if (!session || session.lifecycle !== "open" || !seat) return;
-    const tokenLimit = rotationTokenLimit(config.policy.contextTokenLimit, seat.model ?? config.infra.model);
-    const due = rotationDue({
-      turnCount: seat.turnCount, contextTokens: seat.contextTokens,
-      turnLimit: config.policy.contextTurnLimit, tokenLimit,
-    });
-    if (!due) return;
-    lane.state = "rotating";
-    lane.rotationGate = new Promise((resolve) => { lane.releaseRotation = resolve; });
-    try {
-      lane.input?.close(); lane.input = null;
-      const closing = lane.pump;
-      lane.query?.close?.(); lane.query = null;
-      await closing?.catch(() => undefined);
-      const sdk = await this.#deps.sdk();
-      const rotated = await this.#rotateNow(session, repo.getAgent(agentSessionId, seatName) ?? seat, sdk, due.reason);
-      this.#runtime.spawnSeat(session, rotated, lane);
-      await lane.ready;
-    } finally {
-      const release = lane.releaseRotation;
-      lane.rotationGate = null; lane.releaseRotation = null;
-      if (lane.state === "rotating") lane.state = lane.query ? "live" : "parked";
-      release?.();
-      const stale = repo.listUnackedDeliveries(agentSessionId, seatName).filter((row) => row.status === "delivered");
-      for (const row of stale) repo.patchDelivery(row.id, { status: "queued", deliveredAt: null });
-      void this.#mailroom.deliver(agentSessionId, seatName).catch((error) => this.#recordHostFailure(agentSessionId, error));
-    }
-  }
-
-  /**
-   * The checkpoint-and-rotate body, run by #maybeRotate under its gate after
-   * the agent's process has closed. Returns the successor participant row.
-   * One ungated model attempt over an always-available floor: the Console's
-   * reconstruction is true by construction, so a clean model checkpoint
-   * upgrades it and a bad or failed one costs nothing.
-   */
-  async #rotateNow(session: AgentSessionRow, seat: AgentRow, sdk: ConsoleSdk, reason: RotationReason): Promise<AgentRow> {
-    const config = this.#deps.config;
-    if (!config || !this.#deps.handoffs) return seat;
-    const started = Date.now();
-    const { draft: attempted, failure } = await this.#checkpointQuery(session, seat, sdk);
-    const degraded = attempted === null;
-    const draft = attempted ?? this.#composer.reconstructCheckpoint(session, seat);
-    if (degraded) {
-      this.#deps.bus.append({ type: "handoff.checkpoint.failed", userSessionId: session.userSessionId, agentSessionId: session.id,
-        payload: { agent: seat.name, reason: failure ?? "checkpoint produced no valid handoff", degraded: true } });
-    }
-    const prepared = this.#deps.handoffs.prepare({ draft, userSessionId: session.userSessionId, agentSessionId: session.id,
-      sender: seat.name, recipient: seat.name, profileId: seat.profileId, generation: seat.generation,
-      extensionKind: (seat.profileSnapshot as AgentProfile).handoffExtension,
-      trigger: degraded ? "recovery" : "rotation", parentHandoffId: seat.latestHandoffId, checkpoint: true });
-    this.#deps.repo.insertCheckpointHandoff(prepared.row);
-    this.#deps.handoffs.committed(prepared.record);
-    // Rotation retires the provider session, so its cumulative baseline retires
-    // with it — the successor genuinely starts from zero.
-    this.#deps.repo.patchAgent(session.id, seat.name, { sdkSessionId: null, generation: seat.generation + 1, turnCount: 0, contextTokens: 0, latestHandoffId: prepared.row.id, cumulativeCostUsd: 0, cumulativeApiDurationMs: 0 });
-    const fresh = this.#deps.repo.getAgent(session.id, seat.name) ?? seat;
-    this.#deps.bus.append({ type: "agent_session.context.rotated", userSessionId: session.userSessionId, agentSessionId: session.id,
-      payload: { agentSessionId: session.id, agent: seat.name, generation: seat.generation + 1,
-        reason,
-        handoffId: prepared.row.id, checkpointBytes: prepared.row.bytes, degraded } });
-    this.#deps.bus.append({ type: "agent_session.runtime.noted", userSessionId: session.userSessionId, agentSessionId: session.id,
-      payload: { agentSessionId: session.id, agent: seat.name, detail: `checkpoint ${prepared.row.id} completed in ${Date.now() - started}ms` } });
-    return fresh;
-  }
-
-  /** One tool-free checkpoint query against the agent's current context. */
-  async #checkpointQuery(session: AgentSessionRow, seat: AgentRow, sdk: ConsoleSdk): Promise<{ draft: HandoffDraft | null; failure: string | null }> {
-    const config = this.#deps.config;
-    let draft: HandoffDraft | null = null;
-    let failure: string | null = null;
-    if (!seat.sdkSessionId) return { draft, failure };
-    const checkpointAbort = new AbortController();
-    const profile = seat.profileSnapshot as AgentProfile;
-    const user = this.#deps.repo.getUserSession(session.userSessionId);
-    if (!user || !this.#deps.getWorkspaceRoot) return { draft, failure };
-    const checkpointRoot = seat.worktreePath ?? this.#deps.getWorkspaceRoot(user.workspaceId);
-    // The abort controller is useless unarmed: a provider-side outage makes the
-    // CLI retry for minutes while #maybeRotate's gate blocks every sender.
-    const checkpointDeadline = setTimeout(() => checkpointAbort.abort(), config.policy.checkpointTimeoutMs);
-    checkpointDeadline.unref?.();
-    const query = sdk.query({ prompt: `Create a lossless rotation checkpoint for your successor context. Capture only durable task state, verified evidence pointers, results, uncertainty, and the exact next action. Do not perform work or call tools.`, options: {
-      cwd: checkpointRoot, systemPrompt: { type: "preset", preset: "claude_code", append: "You are checkpointing your own context. Report faithfully; do not correct or embellish uncertain state." },
-      settingSources: [], includePartialMessages: false, permissionMode: "plan", allowedTools: [],
-      disallowedTools: CHECKPOINT_DENIED_TOOLS,
-      // MUST be object-rooted: the CLI turns this into a synthetic
-      // `StructuredOutput` tool and ships it verbatim as input_schema, and the
-      // API rejects anything whose root `type` is not the string "object".
-      outputFormat: { type: "json_schema", schema: HANDOFF_DRAFT_JSON_SCHEMA }, maxTurns: 2,
-      sandbox: { enabled: true, failIfUnavailable: profile.sandboxRequired, autoAllowBashIfSandboxed: false, allowUnsandboxedCommands: false,
-        filesystem: { allowManagedReadPathsOnly: true, allowRead: seat.worktreePath ? [checkpointRoot, this.#deps.getWorkspaceRoot(user.workspaceId)] : [checkpointRoot], allowWrite: [] } },
-      env: sdkEnv(), abortController: checkpointAbort, persistSession: true, sessionStore: this.#deps.sessionStore as never,
-      sessionStoreFlush: "eager", resume: seat.sdkSessionId, ...(seat.model ? { model: seat.model } : {}),
-      ...((profile.effort ?? config?.infra.effort) ? { effort: (profile.effort ?? config?.infra.effort) as SdkOptions["effort"] } : {}),
-    } });
-    // A separate process, but `resume: seat.sdkSessionId` means it is the SAME
-    // provider session — its cumulative totals continue the agent's, and its
-    // baseline is the agent's. Starting from zero here would bill the whole
-    // session-to-date to one checkpoint pseudo-turn.
-    const cumulative = { costUsd: seat.cumulativeCostUsd, apiDurationMs: seat.cumulativeApiDurationMs };
-    try {
-      for await (const raw of query) for (const event of mapSdkMessage(raw)) {
-        if (event.kind === "result") {
-          const parsed = HandoffDraftSchema.safeParse(event.output);
-          if (parsed.success) draft = parsed.data;
-          this.#runtime.recordUsage(session, seat, cumulative, `checkpoint:${newId("turn")}`, event, "completed", undefined, "checkpoint");
-        } else if (event.kind === "error") failure = event.message;
-      }
-    } catch (error) { failure = error instanceof Error ? error.message : String(error); }
-    finally { clearTimeout(checkpointDeadline); query.close?.(); }
-    return { draft, failure };
   }
 
   #specialists(id: string): AgentRow[] { return this.#deps.repo.listAgents(id).filter((p) => p.role !== "coordinator"); }

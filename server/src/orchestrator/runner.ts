@@ -25,7 +25,7 @@ import type { EventBus } from "../events/bus.ts";
 import { RuntimeBroadcaster } from "../events/runtime.ts";
 import { newId, nowIso } from "../ids.ts";
 import { rotationTokenLimit } from "../model-catalog.ts";
-import { CHECKPOINT_DENIED_TOOLS, recoveryAction } from "../lane-runtime/checkpoint.ts";
+import { checkpointQuery, recoveryAction } from "../lane-runtime/checkpoint.ts";
 import { rotationDue } from "../lane-runtime/rotation.ts";
 import { advanceUsageWatermark } from "../lane-runtime/usage.ts";
 import { InvalidInputError, ConflictError, NotFoundError } from "../errors.ts";
@@ -41,7 +41,6 @@ import type { InteractionService } from "./interactions.ts";
 import { buildOrchestratorOptions } from "./options.ts";
 import { buildOrchestratorCanUseTool, type LaneState } from "./permissions.ts";
 import type { HandoffService } from "../handoffs/service.ts";
-import { HandoffDraftSchema, HANDOFF_DRAFT_JSON_SCHEMA } from "../handoffs/schema.ts";
 import { sdkEnv } from "../sdk/env.ts";
 import type { SqliteSessionStore } from "../sdk/session-store.ts";
 import type { AgentSessionService } from "../agent-sessions/host.ts";
@@ -909,36 +908,24 @@ export class OrchestratorRunner {
       payload: { userSessionId: sessionId, detail: `checkpoint ${prepared.row.id} completed in ${Date.now() - started}ms` } });
   }
 
-  /** One tool-free checkpoint query against the lane's current context. */
+  /** The runner side of the shared checkpoint query: lane context in, params out. */
   async #checkpointQuery(session: { sdkSessionId: string | null; workspaceId: string; model: string | null }): Promise<{ draft: HandoffDraft | null; failure: string | null }> {
-    let draft: HandoffDraft | null = null;
-    let failure: string | null = null;
-    if (!session.sdkSessionId) return { draft, failure };
+    if (!session.sdkSessionId) return { draft: null, failure: null };
     const sdk = await this.#deps.sdk();
-    const abort = new AbortController();
-    // The checkpoint runs on the same model as the lane it is checkpointing.
-    const model = this.#modelFor(session);
-    const query = sdk.query({ prompt: `Create a lossless rotation checkpoint for the next orchestrator context. Preserve operator intent, decisions, delegated work, verified evidence pointers, uncertainty, and exact next actions. Do not perform work or call tools.`, options: {
-      cwd: this.#deps.getWorkspaceRoot(session.workspaceId), systemPrompt: { type: "preset", preset: "claude_code", append: "Checkpoint faithfully. Repository files, task ledger, artifacts, and provider journal are authoritative; do not invent corrections." },
-      settingSources: [], includePartialMessages: false, permissionMode: "plan", allowedTools: [],
-      disallowedTools: CHECKPOINT_DENIED_TOOLS,
-      outputFormat: { type: "json_schema", schema: HANDOFF_DRAFT_JSON_SCHEMA }, maxTurns: 2,
-      sandbox: { enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: false, allowUnsandboxedCommands: false,
-        filesystem: { allowManagedReadPathsOnly: true, allowRead: [this.#deps.getWorkspaceRoot(session.workspaceId)], allowWrite: [] } },
-      env: sdkEnv(), abortController: abort, persistSession: true,
-      ...(this.#deps.sessionStore === undefined ? {} : { sessionStore: this.#deps.sessionStore as SdkOptions["sessionStore"], sessionStoreFlush: "eager" as const }),
-      resume: session.sdkSessionId, ...(model ? { model } : {}),
-      ...(this.#deps.config.infra.effort ? { effort: this.#deps.config.infra.effort as SdkOptions["effort"] } : {}),
-    } });
-    try {
-      for await (const raw of query) for (const event of mapSdkMessage(raw)) {
-        if (event.kind === "result") {
-          const parsed = HandoffDraftSchema.safeParse(event.output);
-          if (parsed.success) draft = parsed.data;
-        } else if (event.kind === "error") failure = event.message;
-      }
-    } catch (error) { failure = error instanceof Error ? error.message : String(error); }
-    finally { query.close?.(); }
-    return { draft, failure };
+    const workspaceRoot = this.#deps.getWorkspaceRoot(session.workspaceId);
+    return checkpointQuery(sdk, {
+      prompt: `Create a lossless rotation checkpoint for the next orchestrator context. Preserve operator intent, decisions, delegated work, verified evidence pointers, uncertainty, and exact next actions. Do not perform work or call tools.`,
+      systemPromptAppend: "Checkpoint faithfully. Repository files, task ledger, artifacts, and provider journal are authoritative; do not invent corrections.",
+      cwd: workspaceRoot,
+      readPaths: [workspaceRoot],
+      sandboxRequired: true,
+      resume: session.sdkSessionId,
+      // The checkpoint runs on the same model as the lane it is checkpointing.
+      model: this.#modelFor(session),
+      effort: this.#deps.config.infra.effort,
+      ...(this.#deps.sessionStore === undefined ? {} : { sessionStore: this.#deps.sessionStore as SdkOptions["sessionStore"] }),
+      // No deadline — deliberate: the code unifies, the runner's behavior does not change.
+      timeoutMs: null,
+    });
   }
 }

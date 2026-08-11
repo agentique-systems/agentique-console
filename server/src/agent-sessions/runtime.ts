@@ -8,6 +8,7 @@
  * dependency is a cycle only that root may close, and this module never
  * imports the service.
  */
+import type { HandoffDraft } from "@agentique-console/shared";
 import fs from "node:fs";
 import path from "node:path";
 import type { AgentProfile } from "../agent-profiles/registry.ts";
@@ -21,7 +22,10 @@ import type { EventBus } from "../events/bus.ts";
 import { RuntimeBroadcaster } from "../events/runtime.ts";
 import type { HandoffService } from "../handoffs/service.ts";
 import { newId, nowIso } from "../ids.ts";
+import { checkpointQuery } from "../lane-runtime/checkpoint.ts";
+import { rotationDue, type RotationReason } from "../lane-runtime/rotation.ts";
 import { advanceUsageWatermark } from "../lane-runtime/usage.ts";
+import { rotationTokenLimit } from "../model-catalog.ts";
 import type { BrowserManager } from "../runtime/browser-manager.ts";
 import type { ProcessManager } from "../runtime/process-manager.ts";
 import type { WorktreeManager } from "../runtime/worktree-manager.ts";
@@ -88,8 +92,6 @@ export interface SettleHooks {
   turnBudgetNotice(session: AgentSessionRow, seat: AgentRow, turn: ActiveTurn, spentTurns: number): void;
   /** Re-derive the session's operator-facing status after the turn settles. */
   refreshStatus(agentSessionId: string): void;
-  /** The post-settle context-rotation check. */
-  maybeRotate(agentSessionId: string, seatName: string): Promise<void>;
   /** Journal a host-side failure as a runtime notice on the session. */
   recordFailure: RecordFailure;
 }
@@ -185,7 +187,7 @@ export class AgentRuntime implements Injector, TurnTracker {
     await this.#deps.lanes.reserveCapacity(agentSessionId, until);
     const raced = lane.state as AgentLane["state"];
     if (raced === "live" || raced === "waking") { await lane.ready; return; }
-    this.spawnSeat(session, seatRow, lane);
+    this.#spawnSeat(session, seatRow, lane);
     await lane.ready;
     // A respawn may inherit rows the previous process took delivery of but
     // never consumed; requeue them so the console path re-carries exactly once.
@@ -193,7 +195,7 @@ export class AgentRuntime implements Injector, TurnTracker {
     for (const row of stale) repo.patchDelivery(row.id, { status: "queued", deliveredAt: null });
   }
 
-  spawnSeat(session: AgentSessionRow, seatRow: AgentRow, lane: AgentLane): void {
+  #spawnSeat(session: AgentSessionRow, seatRow: AgentRow, lane: AgentLane): void {
     if (!this.#deps.sdk || !this.#deps.config || !this.#deps.getWorkspaceRoot) throw new Error("SDK unavailable");
     lane.state = "waking";
     lane.abort = new AbortController();
@@ -440,14 +442,14 @@ export class AgentRuntime implements Injector, TurnTracker {
             const seat = repo.getAgent(session.id, seatName);
             if (seat) {
               repo.patchAgent(session.id, seatName, { ...(event.resumeId ? { sdkSessionId: event.resumeId } : {}), contextTokens: Math.max(seat.contextTokens, lane.contextTokens) });
-              this.recordUsage(session, seat, lane.lastCumulative, turnId || newId("turn"), event, "completed", turn ? Date.now() - turn.startedAt : undefined);
+              this.#recordUsage(session, seat, lane.lastCumulative, turnId || newId("turn"), event, "completed", turn ? Date.now() - turn.startedAt : undefined);
             }
             this.#settleSeatTurn(session, seatName, lane, runtime, "completed");
           } else if (event.kind === "error") {
             const seat = repo.getAgent(session.id, seatName);
             if (seat) {
               repo.patchAgent(session.id, seatName, { contextTokens: Math.max(seat.contextTokens, lane.contextTokens) });
-              this.recordUsage(session, seat, lane.lastCumulative, turnId || newId("turn"), event, event.aborted ? "aborted" : "error", turn ? Date.now() - turn.startedAt : undefined);
+              this.#recordUsage(session, seat, lane.lastCumulative, turnId || newId("turn"), event, event.aborted ? "aborted" : "error", turn ? Date.now() - turn.startedAt : undefined);
             }
             this.#settleSeatTurn(session, seatName, lane, runtime, event.aborted ? "aborted" : "error", event.message);
           }
@@ -544,7 +546,116 @@ export class AgentRuntime implements Injector, TurnTracker {
     }
     hooks.refreshStatus(session.id);
     this.#deps.lanes.armIdleTimer(session.id, seatName, lane);
-    void hooks.maybeRotate(session.id, seatName).catch((error) => hooks.recordFailure(session.id, error));
+    void this.#maybeRotate(session.id, seatName).catch((error) => hooks.recordFailure(session.id, error));
+  }
+
+  // ── Context rotation ─────────────────────────────────────────────────────
+
+  /**
+   * Context rotation at a turn boundary, under a gate that blocks senders:
+   * checkpoint the old process, close it, respawn the same peer name on a
+   * fresh provider session, then re-carry anything unacknowledged.
+   */
+  async #maybeRotate(agentSessionId: string, seatName: string): Promise<void> {
+    const config = this.#deps.config;
+    if (!config || !this.#deps.handoffs || !this.#deps.sdk) return;
+    const lane = this.#deps.lanes.laneOf(agentSessionId, seatName);
+    if (lane.state !== "live" || lane.activeTurn !== null || lane.rotationGate !== null) return;
+    const { repo } = this.#deps;
+    const session = repo.getAgentSession(agentSessionId);
+    const seat = repo.getAgent(agentSessionId, seatName);
+    if (!session || session.lifecycle !== "open" || !seat) return;
+    const tokenLimit = rotationTokenLimit(config.policy.contextTokenLimit, seat.model ?? config.infra.model);
+    const due = rotationDue({
+      turnCount: seat.turnCount, contextTokens: seat.contextTokens,
+      turnLimit: config.policy.contextTurnLimit, tokenLimit,
+    });
+    if (!due) return;
+    lane.state = "rotating";
+    lane.rotationGate = new Promise((resolve) => { lane.releaseRotation = resolve; });
+    try {
+      lane.input?.close(); lane.input = null;
+      const closing = lane.pump;
+      lane.query?.close?.(); lane.query = null;
+      await closing?.catch(() => undefined);
+      const sdk = await this.#deps.sdk();
+      const rotated = await this.#rotateNow(session, repo.getAgent(agentSessionId, seatName) ?? seat, sdk, due.reason);
+      this.#spawnSeat(session, rotated, lane);
+      await lane.ready;
+    } finally {
+      const release = lane.releaseRotation;
+      lane.rotationGate = null; lane.releaseRotation = null;
+      if (lane.state === "rotating") lane.state = lane.query ? "live" : "parked";
+      release?.();
+      const stale = repo.listUnackedDeliveries(agentSessionId, seatName).filter((row) => row.status === "delivered");
+      for (const row of stale) repo.patchDelivery(row.id, { status: "queued", deliveredAt: null });
+      void this.#deps.hooks.deliver(agentSessionId, seatName).catch((error) => this.#deps.hooks.recordFailure(agentSessionId, error));
+    }
+  }
+
+  /**
+   * The checkpoint-and-rotate body, run by #maybeRotate under its gate after
+   * the agent's process has closed. Returns the successor participant row.
+   * One ungated model attempt over an always-available floor: the Console's
+   * reconstruction is true by construction, so a clean model checkpoint
+   * upgrades it and a bad or failed one costs nothing.
+   */
+  async #rotateNow(session: AgentSessionRow, seat: AgentRow, sdk: ConsoleSdk, reason: RotationReason): Promise<AgentRow> {
+    const config = this.#deps.config;
+    if (!config || !this.#deps.handoffs) return seat;
+    const started = Date.now();
+    const { draft: attempted, failure } = await this.#checkpointQuery(session, seat, sdk);
+    const degraded = attempted === null;
+    const draft = attempted ?? this.#deps.composer.reconstructCheckpoint(session, seat);
+    if (degraded) {
+      this.#deps.bus.append({ type: "handoff.checkpoint.failed", userSessionId: session.userSessionId, agentSessionId: session.id,
+        payload: { agent: seat.name, reason: failure ?? "checkpoint produced no valid handoff", degraded: true } });
+    }
+    const prepared = this.#deps.handoffs.prepare({ draft, userSessionId: session.userSessionId, agentSessionId: session.id,
+      sender: seat.name, recipient: seat.name, profileId: seat.profileId, generation: seat.generation,
+      extensionKind: (seat.profileSnapshot as AgentProfile).handoffExtension,
+      trigger: degraded ? "recovery" : "rotation", parentHandoffId: seat.latestHandoffId, checkpoint: true });
+    this.#deps.repo.insertCheckpointHandoff(prepared.row);
+    this.#deps.handoffs.committed(prepared.record);
+    // Rotation retires the provider session, so its cumulative baseline retires
+    // with it — the successor genuinely starts from zero.
+    this.#deps.repo.patchAgent(session.id, seat.name, { sdkSessionId: null, generation: seat.generation + 1, turnCount: 0, contextTokens: 0, latestHandoffId: prepared.row.id, cumulativeCostUsd: 0, cumulativeApiDurationMs: 0 });
+    const fresh = this.#deps.repo.getAgent(session.id, seat.name) ?? seat;
+    this.#deps.bus.append({ type: "agent_session.context.rotated", userSessionId: session.userSessionId, agentSessionId: session.id,
+      payload: { agentSessionId: session.id, agent: seat.name, generation: seat.generation + 1,
+        reason,
+        handoffId: prepared.row.id, checkpointBytes: prepared.row.bytes, degraded } });
+    this.#deps.bus.append({ type: "agent_session.runtime.noted", userSessionId: session.userSessionId, agentSessionId: session.id,
+      payload: { agentSessionId: session.id, agent: seat.name, detail: `checkpoint ${prepared.row.id} completed in ${Date.now() - started}ms` } });
+    return fresh;
+  }
+
+  /** The host side of the shared checkpoint query: seat context in, params out. */
+  async #checkpointQuery(session: AgentSessionRow, seat: AgentRow, sdk: ConsoleSdk): Promise<{ draft: HandoffDraft | null; failure: string | null }> {
+    if (!seat.sdkSessionId) return { draft: null, failure: null };
+    const profile = seat.profileSnapshot as AgentProfile;
+    const user = this.#deps.repo.getUserSession(session.userSessionId);
+    if (!user || !this.#deps.getWorkspaceRoot) return { draft: null, failure: null };
+    const workspaceRoot = this.#deps.getWorkspaceRoot(user.workspaceId);
+    const checkpointRoot = seat.worktreePath ?? workspaceRoot;
+    // A separate process, but `resume: seat.sdkSessionId` means it is the SAME
+    // provider session — its cumulative totals continue the agent's, and its
+    // baseline is the agent's. Starting from zero here would bill the whole
+    // session-to-date to one checkpoint pseudo-turn.
+    const cumulative = { costUsd: seat.cumulativeCostUsd, apiDurationMs: seat.cumulativeApiDurationMs };
+    return checkpointQuery(sdk, {
+      prompt: `Create a lossless rotation checkpoint for your successor context. Capture only durable task state, verified evidence pointers, results, uncertainty, and the exact next action. Do not perform work or call tools.`,
+      systemPromptAppend: "You are checkpointing your own context. Report faithfully; do not correct or embellish uncertain state.",
+      cwd: checkpointRoot,
+      readPaths: seat.worktreePath ? [checkpointRoot, workspaceRoot] : [checkpointRoot],
+      sandboxRequired: profile.sandboxRequired,
+      resume: seat.sdkSessionId,
+      model: seat.model,
+      effort: profile.effort ?? this.#deps.config.infra.effort,
+      sessionStore: this.#deps.sessionStore as SdkOptions["sessionStore"],
+      timeoutMs: this.#deps.config.policy.checkpointTimeoutMs,
+      onResult: (event) => this.#recordUsage(session, seat, cumulative, `checkpoint:${newId("turn")}`, event, "completed", undefined, "checkpoint"),
+    });
   }
 
   #recordNarration(session: AgentSessionRow, participant: string, text: string, turnId: string): void {
@@ -558,7 +669,7 @@ export class AgentRuntime implements Injector, TurnTracker {
    * session's running total on every result, so the per-turn figure is the
    * delta against what this lane last saw.
    */
-  recordUsage(session: AgentSessionRow, seat: AgentRow, cumulative: { costUsd: number; apiDurationMs: number }, turnId: string, usageEvent: { inputTokens?: number; uncachedInputTokens?: number; cacheCreationInputTokens?: number; cacheReadInputTokens?: number; outputTokens?: number; cumulativeCostUsd?: number; modelId?: string; cumulativeApiDurationMs?: number; sdkDurationMs?: number; stopReason?: string }, status: "completed" | "error" | "aborted" = "completed", durationMs?: number, trigger = "delivery"): void {
+  #recordUsage(session: AgentSessionRow, seat: AgentRow, cumulative: { costUsd: number; apiDurationMs: number }, turnId: string, usageEvent: { inputTokens?: number; uncachedInputTokens?: number; cacheCreationInputTokens?: number; cacheReadInputTokens?: number; outputTokens?: number; cumulativeCostUsd?: number; modelId?: string; cumulativeApiDurationMs?: number; sdkDurationMs?: number; stopReason?: string }, status: "completed" | "error" | "aborted" = "completed", durationMs?: number, trigger = "delivery"): void {
     // Errors and aborts record unconditionally — a zero-token error is still a
     // real turn. A zero-token COMPLETED result is a CLI-level artifact frame,
     // not a turn that happened; recording those would inflate turn counts.
