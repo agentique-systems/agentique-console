@@ -1,4 +1,4 @@
-import type { AgentSessionStatus, ConsoleEvent, GetAgentSessionResponse, HandoffDraft, HandoffTrigger, Interaction, InteractionQuestion, InteractionUrgency, PatternId, Speaker } from "@agentique-console/shared";
+import type { AgentSessionStatus, ConsoleEvent, GetAgentSessionResponse, HandoffDraft, HandoffTrigger, Interaction, PatternId, Speaker } from "@agentique-console/shared";
 import fs from "node:fs";
 import path from "node:path";
 import { InvalidInputError, ConflictError, NotFoundError } from "../errors.ts";
@@ -19,13 +19,13 @@ import { newId, nowIso } from "../ids.ts";
 import { rotationTokenLimit } from "../model-catalog.ts";
 import { mapSdkMessage } from "../sdk/mapping.ts";
 import type { SqliteSessionStore } from "../sdk/session-store.ts";
-import type { ConsoleSdk, QueryHandle, SdkOptions, SdkToolResult, SdkUserMessageLike } from "../sdk/types.ts";
+import type { ConsoleSdk, QueryHandle, SdkOptions, SdkUserMessageLike } from "../sdk/types.ts";
 import { sdkEnv } from "../sdk/env.ts";
 import type { ProcessManager } from "../runtime/process-manager.ts";
 import type { BrowserManager } from "../runtime/browser-manager.ts";
 import type { WorktreeManager } from "../runtime/worktree-manager.ts";
-import { decisionOf, renderDecision, type DecisionLedger } from "../orchestrator/decisions.ts";
-import { dedupeKeyFor, type InteractionService } from "../orchestrator/interactions.ts";
+import type { DecisionLedger } from "../orchestrator/decisions.ts";
+import type { InteractionService } from "../orchestrator/interactions.ts";
 import type { AssignmentScheduler } from "../tasks/scheduler.ts";
 import type { TaskService } from "../tasks/service.ts";
 import type { HandoffService } from "../handoffs/service.ts";
@@ -45,12 +45,12 @@ import {
 } from "./final-gate.ts";
 import { PromptComposer, questionTextOf, sandboxNetwork, seatUserMessage, summarizeAnswer } from "./composer.ts";
 import { syncLedgerFromHandoff } from "./ledger-sync.ts";
-import { buildAgentTools, type AskOperatorArgs } from "./agent-tools.ts";
-import { ok } from "../sdk/tool-result.ts";
+import { buildAgentTools } from "./agent-tools.ts";
 import { hubContract, roleOfAgent, speakerKindOf, RESERVED_NAMES, AGENT_NAME_RE } from "./topology.ts";
 import { SessionRouting } from "./routing.ts";
 import { WorktreeBinding } from "./worktree-binding.ts";
-import type { TransferInput } from "./seams.ts";
+import { OperatorSurface } from "./operator.ts";
+import type { OperatorWaitRef, TransferInput } from "./seams.ts";
 import { grantedTools, runtimeToolNames, type AgentToolName } from "./grants.ts";
 import { dispatchWorkItems, onPatternPost, sweep as patternSweep, type DispatchWorkItemsInput, type PatternContext } from "./patterns/engine.ts";
 import { buildContract } from "./patterns/catalog.ts";
@@ -195,17 +195,11 @@ export class AgentSessionService {
   readonly #composer: PromptComposer;
   readonly #routing: SessionRouting;
   readonly #worktreeBinding: WorktreeBinding;
+  readonly #operator: OperatorSurface;
   /** agentSessionId → agent name → its persistent lane. */
   readonly #seats = new Map<string, Map<string, AgentLane>>();
   /** Waiters for a resident-capacity slot, resolved oldest-first on park/close. */
   readonly #capacityWaiters: (() => void)[] = [];
-  /** Timer releasing `ask_operator` waits the operator has not returned to. */
-  #askSweep: ReturnType<typeof setInterval> | null = null;
-  /** Notified when a session's derived status changes; completion re-evaluates. */
-  #onStatusChanged: ((userSessionId: string) => void) | undefined;
-  #sessionStatus = new Map<string, AgentSessionStatus | null>();
-  /** Sessions whose operator obligation is closed — reported, or discharged. */
-  readonly #operatorDebtSettled = new Set<string>();
 
   constructor(deps: AgentSessionServiceDeps) {
     this.#deps = deps;
@@ -225,6 +219,42 @@ export class AgentSessionService {
         const lane = this.#seats.get(agentSessionId)?.get(agent);
         return lane ? { activeTurn: lane.activeTurn !== null, live: lane.state === "live" } : null;
       },
+    });
+    this.#operator = new OperatorSurface({
+      repo: deps.repo, bus: deps.bus, config: deps.config, interactions: deps.interactions,
+      routing: this.#routing,
+      lanes: {
+        hasBusyTurnExcludingOperatorWaits: (agentSessionId) => {
+          const lanes = this.#seats.get(agentSessionId);
+          return [...(lanes?.values() ?? [])].some((lane) => lane.activeTurn !== null && lane.activeTurn.awaitingOperator === null);
+        },
+        operatorWaits: () => {
+          const waits: OperatorWaitRef[] = [];
+          for (const lanes of this.#seats.values()) for (const lane of lanes.values()) {
+            const asking = lane.activeTurn?.awaitingOperator;
+            if (asking) waits.push({ interactionId: asking.interactionId, since: asking.since, release: () => asking.abort.abort() });
+          }
+          return waits;
+        },
+        bindOperatorWait: (agentSessionId, agent, wait) => {
+          const turn = this.#laneOf(agentSessionId, agent).activeTurn;
+          if (turn) turn.awaitingOperator = wait;
+          return () => { if (turn) turn.awaitingOperator = null; };
+        },
+        hasLane: (agentSessionId, agent) => this.#seats.get(agentSessionId)?.get(agent) !== undefined,
+      },
+      transfer: (input) => this.post(input),
+      simpleHandoff: (action, status, summary, nextAction) => this.#simpleHandoff(action, status, summary, nextAction),
+      deliver: (agentSessionId, recipient) => this.#deliverConsole(agentSessionId, recipient),
+      maybeReleaseParentFinal: (parent) => this.#maybeReleaseParentFinal(parent),
+      recordFailure: (agentSessionId, error) => this.#recordHostFailure(agentSessionId, error),
+      sweepTasks: [() => {
+        // The quiet-time stall lives here — it can trip while every lane is
+        // quiet, which is exactly when it matters.
+        for (const session of this.#deps.repo.listOpenAgentSessions()) {
+          try { patternSweep(this.#patternCtx(), session); } catch (error) { this.#recordHostFailure(session.id, error); }
+        }
+      }],
     });
   }
 
@@ -397,7 +427,7 @@ export class AgentSessionService {
     // deliberate escape hatch for one that no longer matters. A hold, never an
     // error — the release notice fires when the last child reports.
     if (isFinalToMain(finalSeat, input.speaker.name, input.to, category)) {
-      const unsettled = repo.listChildSessions(session.id).filter((child) => child.lifecycle === "open" && this.#statusOf(child) !== "reported");
+      const unsettled = repo.listChildSessions(session.id).filter((child) => child.lifecycle === "open" && this.#operator.statusOf(child) !== "reported");
       if (unsettled.length > 0) {
         this.#deps.bus.append({ type: "handoff.final.blocked", userSessionId: session.userSessionId, agentSessionId: session.id,
           payload: { agentSessionId: session.id, sender: input.speaker.name, interactionIds: [] } });
@@ -538,21 +568,21 @@ export class AgentSessionService {
     if (!session) throw new NotFoundError(`no agent session ${input.agentSessionId}`);
     let rows = this.#deps.repo.listMessages("agent", session.id, input.afterSeq ?? 0);
     if (input.limit !== undefined) rows = rows.slice(-input.limit);
-    return { status: this.#statusOf(session),
+    return { status: this.#operator.statusOf(session),
       agents: this.#specialists(session.id).map((p) => ({ name: p.name, profileId: p.profileId, model: p.model })),
       messages: rows.map(toWireMessage) };
   }
 
   listForUserSession(userSessionId: string) {
     return this.#deps.repo.listAgentSessions(userSessionId).map((row) => ({
-      id: row.id, title: row.title, status: this.#statusOf(row),
+      id: row.id, title: row.title, status: this.#operator.statusOf(row),
       agents: this.#specialists(row.id).map((p) => p.name),
       unseenCount: this.#deps.repo.listQueuedDeliveries(row.id).filter((d) => d.recipient === MAIN_RECIPIENT).length,
       updatedAt: row.updatedAt,
     }));
   }
 
-  wireSession(row: AgentSessionRow) { return toWireAgentSession(row, this.#specialists(row.id).map((p) => p.name), this.#statusOf(row) === "working"); }
+  wireSession(row: AgentSessionRow) { return toWireAgentSession(row, this.#specialists(row.id).map((p) => p.name), this.#operator.statusOf(row) === "working"); }
 
   wireSessionsForUserSession(userSessionId: string) {
     return this.#deps.repo.listAgentSessions(userSessionId).map((row) => this.wireSession(row));
@@ -689,8 +719,7 @@ export class AgentSessionService {
   /** The ONE cleanup point for every per-session in-memory structure. */
   #forget(agentSessionId: string): void {
     this.#seats.delete(agentSessionId);
-    this.#sessionStatus.delete(agentSessionId);
-    this.#operatorDebtSettled.delete(agentSessionId);
+    this.#operator.forget(agentSessionId);
     this.#routing.forget(agentSessionId);
   }
 
@@ -737,73 +766,20 @@ export class AgentSessionService {
   }
 
   onStatusChanged(handler: (userSessionId: string) => void): void {
-    if (this.#onStatusChanged) throw new Error("onStatusChanged is already registered — wire callbacks once, in createApp");
-    this.#onStatusChanged = handler;
+    this.#operator.onStatusChanged(handler);
   }
 
-  /**
-   * The governance clock: any `ask_operator` wait older than
-   * `operatorAskDetachMs` is detached — the agent's process frees up while the
-   * card stays open on the operator's screen.
-   */
-  startGovernanceSweep(intervalMs = this.#deps.config.policy.governanceSweepIntervalMs): void {
-    if (this.#askSweep) return;
-    this.#askSweep = setInterval(() => {
-      const limit = this.#deps.config.policy.operatorAskDetachMs;
-      const cutoff = Date.now() - limit;
-      for (const lanes of this.#seats.values()) for (const lane of lanes.values()) {
-        const asking = lane.activeTurn?.awaitingOperator;
-        if (asking && asking.since < cutoff) {
-          this.#detachOperatorAsk(lane, `no answer within ${Math.round(limit / 60_000)} minutes; the question stays open`);
-        }
-      }
-      // The quiet-time stall lives here — it can trip while every lane is
-      // quiet, which is exactly when it matters.
-      for (const session of this.#deps.repo.listOpenAgentSessions()) {
-        try { patternSweep(this.#patternCtx(), session); } catch (error) { this.#recordHostFailure(session.id, error); }
-      }
-    }, intervalMs);
-    this.#askSweep.unref?.();
+  startGovernanceSweep(intervalMs?: number): void {
+    if (intervalMs === undefined) this.#operator.startGovernanceSweep();
+    else this.#operator.startGovernanceSweep(intervalMs);
   }
 
   stopGovernanceSweep(): void {
-    if (this.#askSweep) clearInterval(this.#askSweep);
-    this.#askSweep = null;
+    this.#operator.stopGovernanceSweep();
   }
 
-  /**
-   * Hand an agent an answer its own tool call can no longer return.
-   *
-   * An agent is not revived by a lane the way main is — it is woken by a
-   * delivery. So when its parked promise died (park, rotation, watchdog, or a
-   * server restart) the answer arrives as a journaled `decision` handoff from
-   * the coordinator's address, which is a legal `assertRoute` edge where a
-   * `system` speaker would not be. The dedupe key makes a double answer a
-   * no-op.
-   */
   deliverOperatorAnswer(interaction: Interaction): void {
-    if (!interaction.agentSessionId || !interaction.agent) return;
-    const asked = questionTextOf(interaction);
-    // The route resolved the row before calling this — render from the durable
-    // record, through the one canonical renderer, so the agent reads exactly
-    // what every later prompt will say.
-    const decision = decisionOf(this.#deps.interactions.get(interaction.id));
-    const answer = decision === null ? `${asked} → (no answer recorded)` : renderDecision(decision);
-    const session = this.#deps.repo.getAgentSession(interaction.agentSessionId);
-    if (!session) return;
-    this.post({
-      agentSessionId: interaction.agentSessionId,
-      speaker: { kind: "system", name: CONSOLE_SENDER },
-      to: interaction.agent,
-      handoff: this.#simpleHandoff(
-        `Operator answered: ${asked}`,
-        "pending",
-        `${answer}\n\nThis answer was recorded by the Console, not relayed by your coordinator. It is authoritative — do not re-litigate it, and do not ask again.`,
-        "Continue from the operator's decision.",
-      ),
-      category: "decision",
-      dedupeKey: `answer:${interaction.id}`,
-    });
+    this.#operator.deliverOperatorAnswer(interaction);
   }
 
 
@@ -820,7 +796,7 @@ export class AgentSessionService {
         for (const lane of this.#seats.get(agentSessionId)?.values() ?? []) if (lane.activeTurn !== null) return true;
         return false;
       },
-      sessionReported: (session) => this.#statusOf(session) === "reported",
+      sessionReported: (session) => this.#operator.statusOf(session) === "reported",
       profile: (id, workspaceId) => this.#profile(id, workspaceId),
       snapshotProfile: (profile) => this.#snapshotProfile(profile),
       agent: (agentSessionId, name, role, profile, extra, model, ownership, ord, createdAt) =>
@@ -837,38 +813,8 @@ export class AgentSessionService {
     return dispatchWorkItems(this.#patternCtx(), session, dispatcher, input);
   }
 
-  /**
-   * The other half of the final gate: when a session's LAST blocking question
-   * clears, the Console tells both ends — the coordinator learns it may
-   * report, and main learns why the report it was expecting was late.
-   * Registered by `main.ts` on the interaction service.
-   */
   onBlockingQuestionsCleared(userSessionId: string, agentSessionId: string): void {
-    const session = this.#deps.repo.getAgentSession(agentSessionId);
-    if (!session || session.lifecycle !== "open") return;
-    const finalSeat = this.#routing.completionAgent(session, "finalFrom");
-    const voiceSeat = this.#routing.completionAgent(session, "voice");
-    const lane = this.#seats.get(agentSessionId)?.get(finalSeat);
-    // Only meaningful if a final was actually withheld from this session —
-    // derived from the durable handoff.final.blocked event, not an in-memory
-    // set a restart wipes.
-    if (!this.#finalWithheld(session)) return;
-    try {
-      this.post({
-        agentSessionId,
-        speaker: { kind: speakerKindOf(this.#deps.repo.getAgent(agentSessionId, voiceSeat)), name: voiceSeat },
-        to: MAIN_RECIPIENT,
-        handoff: this.#simpleHandoff(
-          "Operator answered; the withheld final can now be sent",
-          "in_progress",
-          "A final report from this session was withheld while the operator had unanswered questions. They have now answered, and the coordinator has been told it may report.",
-          "Expect the coordinator's final shortly.",
-        ),
-        category: "milestone",
-      });
-    } catch { /* the notice is best effort; the reporting agent still gets its delivery */ }
-    if (lane) void this.#deliverConsole(agentSessionId, finalSeat).catch(() => undefined);
-    void userSessionId;
+    this.#operator.onBlockingQuestionsCleared(userSessionId, agentSessionId);
   }
 
   /**
@@ -901,20 +847,11 @@ export class AgentSessionService {
     } catch (error) { this.#recordHostFailure(child.id, error); }
   }
 
-  /**
-   * A final from this session was withheld and its real final has not landed
-   * since — derived from the durable `handoff.final.blocked` event plus the
-   * session's own status, so it survives restarts.
-   */
-  #finalWithheld(session: AgentSessionRow): boolean {
-    return this.#statusOf(session) !== "reported" && this.#deps.repo.hasEvent("handoff.final.blocked", session.id);
-  }
-
   /** The child-hold counterpart of onBlockingQuestionsCleared. */
   #maybeReleaseParentFinal(parent: AgentSessionRow): void {
-    if (!this.#finalWithheld(parent)) return;
+    if (!this.#operator.finalWithheld(parent)) return;
     const unsettled = this.#deps.repo.listChildSessions(parent.id)
-      .filter((child) => child.lifecycle === "open" && this.#statusOf(child) !== "reported");
+      .filter((child) => child.lifecycle === "open" && this.#operator.statusOf(child) !== "reported");
     if (unsettled.length > 0) return;
     const finalSeat = this.#routing.completionAgent(parent, "finalFrom");
     try {
@@ -1114,84 +1051,6 @@ export class AgentSessionService {
     return true;
   }
 
-  /**
-   * Cut a blocking `ask_operator` loose. The tool call returns, the turn ends,
-   * and the question stays open — the answer will arrive as a delivery.
-   */
-  #detachOperatorAsk(lane: AgentLane, reason: string): void {
-    const asking = lane.activeTurn?.awaitingOperator;
-    if (!asking) return;
-    this.#deps.interactions.detach(asking.interactionId, reason);
-    asking.abort.abort();
-  }
-
-  /**
-   * An agent putting a question to the human.
-   *  - a duplicate returns the OPEN card rather than minting a second one;
-   *  - a blocking wait is bounded by ONE mechanism, the operatorAskDetachMs
-   *    timer: the agent's process frees up, the card stays open and blocking;
-   *  - nothing here EVER returns `isError` — a dismissal, a detach or an
-   *    expiry is not the agent's mistake, and error results feed the
-   *    error-streak watchdog.
-   */
-  async #askOperator(session: AgentSessionRow, seat: AgentRow, lane: AgentLane, args: AskOperatorArgs): Promise<SdkToolResult> {
-    const interactions = this.#deps.interactions;
-    if (!interactions) return ok({ resolved: false, reason: "the console cannot reach the operator right now" });
-    const dedupeKey = dedupeKeyFor(seat.name, args.question);
-    const open = interactions.findUnresolvedByDedupe(session.id, dedupeKey);
-    if (open) {
-      return ok({ queued: true, interactionId: open.id, deduped: true,
-        note: "You already asked this and the card is still open on the operator's screen. Do not ask again; keep working or stop." });
-    }
-    const urgency: InteractionUrgency = args.urgency;
-
-    const question: InteractionQuestion = {
-      question: args.question,
-      ...(args.header ? { header: args.header } : {}),
-      ...(args.context ? { context: args.context } : {}),
-      options: args.options,
-      ...(args.recommendation ? { recommendation: args.recommendation } : {}),
-    };
-    // Its OWN controller, chained to the lane's, so park/rotation/watchdog can
-    // release this one wait without taking the lane down with it.
-    const abort = new AbortController();
-    const pending = interactions.createOperatorQuestion({
-      userSessionId: session.userSessionId,
-      agentSessionId: session.id,
-      agent: seat.name,
-      questions: [question],
-      urgency,
-      source: "agent",
-      ...(args.recommendation ? { recommendation: args.recommendation } : {}),
-      allowFreeText: args.allowFreeText,
-      dedupeKey,
-      signal: abort.signal,
-    });
-
-    if (urgency === "deferred") {
-      return ok({ queued: true, interactionId: pending.id, urgency: "deferred",
-        note: "The operator can see this now. Their answer will be handed to you at your next delivery — keep working; do not poll." });
-    }
-
-    const turn = lane.activeTurn;
-    if (turn) turn.awaitingOperator = { interactionId: pending.id, since: Date.now(), abort };
-    this.#deps.bus.append({ type: "agent_session.runtime.noted", userSessionId: session.userSessionId, agentSessionId: session.id,
-      payload: { agentSessionId: session.id, agent: seat.name, detail: `waiting on the operator (${pending.id})` } });
-    try {
-      const resolved = await pending.resolution;
-      if (resolved.kind === "answers") {
-        return ok({ resolved: true, interactionId: pending.id, answers: resolved.answers,
-          ...(resolved.freeText === undefined ? {} : { freeText: resolved.freeText }),
-          ...(resolved.note === undefined ? {} : { note: resolved.note }),
-          ledger: "Recorded as an operator decision; every seat in this session now sees it, so do not relay it." });
-      }
-      return ok({ resolved: false, interactionId: pending.id,
-        reason: resolved.kind === "dismissed" ? resolved.reason : "the operator declined" });
-    } finally {
-      if (turn) turn.awaitingOperator = null;
-    }
-  }
-
   #signalCapacity(): void {
     this.#capacityWaiters.shift()?.();
   }
@@ -1232,7 +1091,7 @@ export class AgentSessionService {
         worktrees: Boolean(this.#deps.worktrees), user: Boolean(user),
         childSessions: this.#deps.config.policy.enableChildSessions !== false && session.parentAgentSessionId === null,
       });
-      const mcp = this.#buildParticipantMcp(sdk, session, latestSeat, lane, granted);
+      const mcp = this.#buildParticipantMcp(sdk, session, latestSeat, granted);
       const options: SdkOptions = {
         cwd: seatRoot,
         systemPrompt: { type: "preset", preset: "claude_code", append: this.#composer.systemPromptAppend(session, latestSeat, profile, rolePrompt) },
@@ -1403,7 +1262,7 @@ export class AgentSessionService {
     if (lane.idleTimer) { clearTimeout(lane.idleTimer); lane.idleTimer = null; }
     this.#deps.bus.append({ type: "agent_session.turn.started", userSessionId: session.userSessionId, agentSessionId: session.id,
       payload: { agentSessionId: session.id, agent: seatName, turnId: lane.activeTurn.turnId } });
-    this.#setStatus(session.id, "working");
+    this.#operator.setStatus(session.id, "working");
   }
 
   #settleSeatTurn(session: AgentSessionRow, seatName: string, lane: AgentLane, runtime: RuntimeBroadcaster, status: "completed" | "error" | "aborted", errorMessage?: string): void {
@@ -1489,7 +1348,7 @@ export class AgentSessionService {
     if (requeued && repo.getAgentSession(session.id)?.lifecycle === "open") {
       void this.#deliverConsole(session.id, seatName).catch((error) => this.#recordHostFailure(session.id, error));
     }
-    this.#refreshStatus(session.id);
+    this.#operator.refreshStatus(session.id);
     this.#armIdleTimer(session.id, seatName, lane);
     void this.#maybeRotate(session.id, seatName).catch((error) => this.#recordHostFailure(session.id, error));
   }
@@ -1598,11 +1457,12 @@ export class AgentSessionService {
   }
 
   /**
-   * Takes the LANE, not `lane.abort.signal`: `#parkSeat` nulls `lane.abort`
+   * Never hands a tool `lane.abort.signal`: `#parkSeat` nulls `lane.abort`
    * WITHOUT aborting, so a wait tied to the lane-wide signal would strand on
-   * park/rotation/watchdog. Each ask mints its own controller.
+   * park/rotation/watchdog. Each operator ask mints its own controller,
+   * bound to the CURRENT turn through the LaneActivity seam.
    */
-  #buildParticipantMcp(sdk: ConsoleSdk, session: AgentSessionRow, seat: AgentRow, lane: AgentLane, granted: ReadonlySet<AgentToolName>): unknown {
+  #buildParticipantMcp(sdk: ConsoleSdk, session: AgentSessionRow, seat: AgentRow, granted: ReadonlySet<AgentToolName>): unknown {
     const user = this.#deps.repo.getUserSession(session.userSessionId);
     const workspaceRoot = user && this.#deps.getWorkspaceRoot ? this.#deps.getWorkspaceRoot(user.workspaceId) : "";
     const tools = buildAgentTools({
@@ -1629,7 +1489,7 @@ export class AgentSessionService {
       },
       cancelAssignment: (assignmentId) =>
         this.#deps.scheduler().cancel(assignmentId, { actor: seat.name, agentSessionId: session.id }),
-      askOperator: (args) => this.#askOperator(session, seat, lane, args),
+      askOperator: (args) => this.#operator.askOperator(session, seat, args),
       currentTurnId: () => this.#laneOf(session.id, seat.name).activeTurn?.turnId,
       markSawSend: () => { const current = this.#laneOf(session.id, seat.name); if (current.activeTurn) current.activeTurn.sawSend = true; },
       agentWorkState: (row) => this.#composer.agentWorkState(row),
@@ -1808,100 +1668,7 @@ export class AgentSessionService {
   }
 
   #specialists(id: string): AgentRow[] { return this.#deps.repo.listAgents(id).filter((p) => p.role !== "coordinator"); }
-  #refreshStatus(agentSessionId: string): void {
-    const row = this.#deps.repo.getAgentSession(agentSessionId);
-    if (!row || row.lifecycle !== "open") return;
-    const computed = this.#statusOf(row);
-    const status = computed === "working" ? "working" : "idle";
-    this.#setStatus(agentSessionId, status);
-    // A child settling into `reported` may be the LAST hold on its parent's
-    // withheld final — the delivery acks that gate the flip land after the
-    // boundary hop itself, so this recompute is the reliable release point.
-    if (computed === "reported" && row.parentAgentSessionId !== null) {
-      const parent = this.#deps.repo.getAgentSession(row.parentAgentSessionId);
-      if (parent && parent.lifecycle === "open") this.#maybeReleaseParentFinal(parent);
-    }
-    if (status === "idle") this.#dischargeOperatorDebt(row);
-  }
-
-  /**
-   * An AgentSession that accepted an assignment owes the operator a reply. The
-   * coordinator is asked to send it, but the obligation is the CONSOLE's.
-   * Discharged from whatever evidence exists: the coordinator's last report,
-   * or failing that every agent's last word. An incomplete report beats
-   * silence.
-   */
-  #dischargeOperatorDebt(session: AgentSessionRow): void {
-    if (this.#operatorDebtSettled.has(session.id)) return;
-    const { repo } = this.#deps;
-    if (repo.listActiveDeliveries(session.id).length > 0) return;
-    const reportedToMain = repo.latestHandoff({ userSessionId: session.userSessionId, agentSessionId: session.id, recipient: MAIN_RECIPIENT });
-    if (reportedToMain) { this.#operatorDebtSettled.add(session.id); return; }
-
-    const voiceSeat = this.#routing.completionAgent(session, "voice");
-    const coordinator = repo.latestHandoff({ userSessionId: session.userSessionId, agentSessionId: session.id, sender: voiceSeat, excludeCheckpoints: true });
-    const seatReports = repo.listAgents(session.id)
-      .filter((seat) => seat.name !== voiceSeat)
-      .map((seat) => repo.latestHandoff({ userSessionId: session.userSessionId, agentSessionId: session.id, sender: seat.name, excludeCheckpoints: true }))
-      .filter((row): row is NonNullable<typeof row> => row !== undefined);
-    if (!coordinator && seatReports.length === 0) return;
-
-    this.#operatorDebtSettled.add(session.id);
-    const lines = seatReports.map((row) => `- ${row.sender} (${row.core.status}): ${row.core.state.summary.slice(0, 1_500)}`);
-    const summary = `This AgentSession went idle without its coordinator reporting a result, so the Console is closing the loop from the journal. Nothing below was assembled or endorsed by the coordinator.\n\n` +
-      `${coordinator ? `Coordinator's last word (${coordinator.core.status}): ${coordinator.core.state.summary.slice(0, 2_000)}\n\n` : ""}` +
-      `${lines.length > 0 ? `Specialist reports:\n${lines.join("\n")}` : "No specialist reported."}`;
-    this.#deps.bus.append({ type: "agent_session.closeout.forced", userSessionId: session.userSessionId, agentSessionId: session.id,
-      payload: { agentSessionId: session.id, agentReports: seatReports.length, hadCoordinatorReport: coordinator !== undefined } });
-    try {
-      this.post({ agentSessionId: session.id, speaker: { kind: speakerKindOf(repo.getAgent(session.id, voiceSeat)), name: voiceSeat }, to: MAIN_RECIPIENT,
-        handoff: this.#simpleHandoff("AgentSession went idle without a final report", "needs_verification", summary,
-          "Review the seat reports above and decide whether the work is complete."), category: "milestone" });
-    } catch (error) { this.#recordHostFailure(session.id, error); }
-  }
-  /**
-   * `reported` distinguishes a completed run from a dead one. A turn parked in
-   * `ask_operator` does NOT count as working: the agent is waiting on a human.
-   */
-  statusOf(row: AgentSessionRow): AgentSessionStatus { return this.#statusOf(row); }
-
-  #statusOf(row: AgentSessionRow): AgentSessionStatus {
-    if (row.lifecycle === "archived") return "archived";
-    const lanes = this.#seats.get(row.id);
-    const working = [...(lanes?.values() ?? [])].some((lane) => lane.activeTurn !== null && lane.activeTurn.awaitingOperator === null);
-    if (working) return "working";
-    if (this.#deps.repo.listQueuedDeliveries(row.id).some((d) => d.recipient !== MAIN_RECIPIENT)) return "working";
-    const reported = this.#deps.repo.latestHandoff({
-      userSessionId: row.userSessionId, agentSessionId: row.id,
-      recipient: MAIN_RECIPIENT, sender: this.#routing.completionAgent(row, "finalFrom"), excludeCheckpoints: true,
-      // Only what the reporting agent ITSELF sent counts as having reported.
-      excludeSynthetic: true,
-    });
-    if (reported && this.#deps.repo.listActiveDeliveries(row.id).length === 0) {
-      // Bottom-up settling: a parent has not truly reported while an open
-      // child still owes its final — the parent's report could not have
-      // reflected work that has not concluded.
-      const unsettledChild = this.#deps.repo.listChildSessions(row.id)
-        .some((child) => child.lifecycle === "open" && this.#statusOf(child) !== "reported");
-      return unsettledChild ? "idle" : "reported";
-    }
-    return "idle";
-  }
-  #setStatus(id: string, status: AgentSessionStatus): void {
-    const session = this.#deps.repo.getAgentSession(id);
-    // Every status transition may be the one that completes the run, so the
-    // predicate gets a chance to look. It is debounced; this is cheap.
-    if (session) this.#onStatusChanged?.(session.userSessionId);
-    const last = this.#sessionStatus.get(id) ?? null;
-    // New work re-opens the obligation: a session that was discharged once and
-    // then given more to do owes the operator another word.
-    if (status === "working") this.#operatorDebtSettled.delete(id);
-    if (last === status) return;
-    if (last === null && status === "idle") { this.#sessionStatus.set(id, status); return; }
-    this.#sessionStatus.set(id, status);
-    if (!session) return;
-    this.#deps.bus.append({ type: "agent_session.status.changed", userSessionId: session.userSessionId, agentSessionId: id, payload: { agentSessionId: id, status } });
-  }
+  statusOf(row: AgentSessionRow): AgentSessionStatus { return this.#operator.statusOf(row); }
   #recordHostFailure(id: string, error: unknown): void {
     const session = this.#deps.repo.getAgentSession(id); if (!session) return;
     const text = error instanceof Error ? error.message : String(error);
