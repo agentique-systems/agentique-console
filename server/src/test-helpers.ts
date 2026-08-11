@@ -1,6 +1,6 @@
 /** Shared test harness: the REAL composition root over an in-memory DB and a scripted fake SDK. */
 import type { ConsoleEvent } from "@agentique-console/shared";
-import type { AgentSessionService } from "./agent-sessions/host.ts";
+import type { AgentSessionService } from "./agent-sessions/service.ts";
 import { createApp, type App, type CreateAppOptions } from "./app.ts";
 import { bootApp, type BootReport } from "./boot.ts";
 import { loadConfig, type Config } from "./config.ts";
@@ -177,7 +177,7 @@ export async function bootHarness(harness: Harness): Promise<BootReport> {
 }
 
 /**
- * The console-owned agent identity a spawn carries in its env (host.#spawnSeat).
+ * The console-owned agent identity a spawn carries in its env (AgentRuntime.#spawnSeat).
  * Fake programs receive the spawn options as their first argument, so this is
  * the role discriminator.
  */

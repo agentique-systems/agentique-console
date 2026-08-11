@@ -1,8 +1,8 @@
 /**
  * TEMPORARY façade over the per-aggregate stores in ./stores/ (see the
- * ownership rule there), kept so host.ts/runner.ts and their tests hold one
- * dependency until the host carve retires it. Every method is a one-line
- * delegation — new SQL goes in a store, never here.
+ * ownership rule there), kept so the agent-sessions modules and runner.ts and
+ * their tests hold one dependency until a later carve retires it. Every
+ * method is a one-line delegation — new SQL goes in a store, never here.
  */
 import type { Db } from "./client.ts";
 import { createStores, type SqliteTransactor, type Stores } from "./stores/index.ts";

@@ -2,8 +2,8 @@
  * Route law for agent sessions: the compiled-contract index and every
  * derivation from it — roles, completion/escalation targets, edge legality,
  * relay collectors. Pure reads over the repo plus one memo; the relay
- * DECISION (whether to carry a silent agent's report) stays in the host's
- * settle path.
+ * DECISION (whether to carry a silent agent's report) stays in the service's
+ * settle-hook path.
  */
 import { InvalidInputError } from "../errors.ts";
 import type { Repo, AgentRow, AgentSessionRow } from "../db/repo.ts";

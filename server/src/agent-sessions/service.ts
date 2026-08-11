@@ -38,8 +38,6 @@ import { NestingBroker } from "./nesting.ts";
 import type { TransferInput } from "./seams.ts";
 import { dispatchWorkItems, onPatternPost, sweep as patternSweep, type DispatchWorkItemsInput, type PatternContext } from "./patterns/engine.ts";
 
-export { WithheldFinalError } from "./final-gate.ts";
-
 export interface AgentSessionServiceDeps {
   repo: Repo;
   bus: EventBus;
@@ -69,7 +67,14 @@ export interface AgentSessionServiceDeps {
   worktrees: WorktreeManager | null;
 }
 
-/** Console-managed, independently resumable participant sessions and durable mailbox. */
+/**
+ * Console-managed, independently resumable participant sessions and durable
+ * mailbox. A facade: the constructor assembles the agent-sessions modules and
+ * closes their cycles (mailroom↔runtime, mailroom↔nesting, operator↔nesting,
+ * nesting↔lifecycle) with typed closures — modules never import this file.
+ * Beyond that wiring it keeps only pure delegation, the small read models,
+ * and the runtime's settle-hook policies (carry/escalate/budget-notice).
+ */
 export class AgentSessionService {
   readonly #deps: AgentSessionServiceDeps;
   readonly #composer: PromptComposer;
@@ -135,12 +140,12 @@ export class AgentSessionService {
       simpleHandoff,
       deliver: (agentSessionId, recipient) => this.#mailroom.deliver(agentSessionId, recipient),
       maybeReleaseParentFinal: (parent) => this.#nesting.maybeReleaseParentFinal(parent),
-      recordFailure: (agentSessionId, error) => this.#recordHostFailure(agentSessionId, error),
+      recordFailure: (agentSessionId, error) => this.#recordFailure(agentSessionId, error),
       sweepTasks: [() => {
         // The quiet-time stall lives here — it can trip while every lane is
         // quiet, which is exactly when it matters.
         for (const session of this.#deps.repo.listOpenAgentSessions()) {
-          try { patternSweep(this.#patternCtx(), session); } catch (error) { this.#recordHostFailure(session.id, error); }
+          try { patternSweep(this.#patternCtx(), session); } catch (error) { this.#recordFailure(session.id, error); }
         }
       }],
     });
@@ -171,7 +176,7 @@ export class AgentSessionService {
         carryReport: (session, seatName, turn) => this.#carryReport(session, seatName, turn),
         turnBudgetNotice: (session, seat, turn, spentTurns) => this.#turnBudgetNotice(session, seat, turn, spentTurns),
         refreshStatus: (agentSessionId) => this.#operator.refreshStatus(agentSessionId),
-        recordFailure: (agentSessionId, error) => this.#recordHostFailure(agentSessionId, error),
+        recordFailure: (agentSessionId, error) => this.#recordFailure(agentSessionId, error),
       },
     });
     this.#nesting = new NestingBroker({
@@ -183,7 +188,7 @@ export class AgentSessionService {
       finalWithheld: (session) => this.#operator.finalWithheld(session),
       sessionStatus: (row) => this.#operator.statusOf(row),
       archiveSession: (session) => this.#lifecycle.archiveOne(session),
-      recordFailure: (agentSessionId, error) => this.#recordHostFailure(agentSessionId, error),
+      recordFailure: (agentSessionId, error) => this.#recordFailure(agentSessionId, error),
     });
     this.#mailroom = new Mailroom({
       repo: deps.repo, bus: deps.bus, config: deps.config, interactions: deps.interactions,
@@ -197,7 +202,7 @@ export class AgentSessionService {
       sessionStatus: (row) => this.#operator.statusOf(row),
       boundary: this.#nesting,
       onPatternPost: (session, hop) => onPatternPost(this.#patternCtx(), session, hop),
-      recordFailure: (agentSessionId, error) => this.#recordHostFailure(agentSessionId, error),
+      recordFailure: (agentSessionId, error) => this.#recordFailure(agentSessionId, error),
     });
     this.#lifecycle = new SessionLifecycle({
       repo: deps.repo, bus: deps.bus, config: deps.config, profiles: deps.profiles,
@@ -210,7 +215,7 @@ export class AgentSessionService {
       deliver: (agentSessionId, recipient) => this.#mailroom.deliver(agentSessionId, recipient),
       redriveChildBoundary: (session, delivery) => this.#nesting.redriveChildBoundary(session, delivery),
       forgetOperator: (agentSessionId) => this.#operator.forget(agentSessionId),
-      recordFailure: (agentSessionId, error) => this.#recordHostFailure(agentSessionId, error),
+      recordFailure: (agentSessionId, error) => this.#recordFailure(agentSessionId, error),
     });
   }
 
@@ -342,7 +347,7 @@ export class AgentSessionService {
       completionSeat: (session, which) => this.#routing.completionAgent(session, which),
       post: (input) => this.post(input),
       simpleHandoff,
-      deliverNow: (agentSessionId, recipient) => void this.#mailroom.deliver(agentSessionId, recipient).catch((error) => this.#recordHostFailure(agentSessionId, error)),
+      deliverNow: (agentSessionId, recipient) => void this.#mailroom.deliver(agentSessionId, recipient).catch((error) => this.#recordFailure(agentSessionId, error)),
       hasActivity: (agentSessionId) => this.#lanes.namesWithActiveTurn(agentSessionId).length > 0,
       sessionReported: (session) => this.#operator.statusOf(session) === "reported",
       profile: (id, workspaceId) => this.#lifecycle.profile(id, workspaceId),
@@ -451,7 +456,7 @@ export class AgentSessionService {
 
   #specialists(id: string): AgentRow[] { return this.#deps.repo.listAgents(id).filter((p) => p.role !== "coordinator"); }
   statusOf(row: AgentSessionRow): AgentSessionStatus { return this.#operator.statusOf(row); }
-  #recordHostFailure(id: string, error: unknown): void {
+  #recordFailure(id: string, error: unknown): void {
     const session = this.#deps.repo.getAgentSession(id); if (!session) return;
     const text = error instanceof Error ? error.message : String(error);
     this.#deps.bus.append({ type: "agent_session.runtime.noted", userSessionId: session.userSessionId, agentSessionId: id, payload: { agentSessionId: id, agent: "system", detail: `scheduler failure: ${text}` } });

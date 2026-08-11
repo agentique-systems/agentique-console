@@ -8,7 +8,7 @@
  * `main.ts`. This module only builds and connects the object graph.
  */
 import Database from "better-sqlite3";
-import { AgentSessionService } from "./agent-sessions/host.ts";
+import { AgentSessionService } from "./agent-sessions/service.ts";
 import { AgentProfileRegistry } from "./agent-profiles/registry.ts";
 import { ProfileManagerService } from "./agent-profiles/manager.ts";
 import { buildManagerMcpServer } from "./agent-profiles/tools.ts";

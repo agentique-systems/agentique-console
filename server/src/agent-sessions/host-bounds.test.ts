@@ -1,4 +1,7 @@
-/** Seat-count bounds on AgentSession creation. */
+/** Seat-count bounds on AgentSession creation, and the facade import law. */
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { initMessage, successMessage } from "../sdk/fake.ts";
 import { makeDelegationHarness } from "../test-helpers.ts";
@@ -59,5 +62,32 @@ describe("createSession ownership invariant", () => {
       userSessionId, title: "scoped reviewer", agents: [{ name: "scout", profileId: "explorer", owns: ["docs/"] }],
     });
     expect(created.agents).toContain("scout");
+  });
+});
+
+/**
+ * The facade law: service.ts imports the modules, never the reverse. A module
+ * that needs a facade capability takes a typed callback (seams.ts) instead.
+ */
+describe("facade import discipline", () => {
+  it("no agent-sessions module imports service.ts", () => {
+    const dir = path.dirname(fileURLToPath(import.meta.url));
+    const facade = path.join(dir, "service.ts");
+    const modules: string[] = [];
+    const walk = (current: string): void => {
+      for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+        const full = path.join(current, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (entry.name.endsWith(".ts") && !entry.name.endsWith(".test.ts") && full !== facade) modules.push(full);
+      }
+    };
+    walk(dir);
+    expect(modules.length).toBeGreaterThan(10);
+    const offenders = modules.filter((file) => {
+      const source = fs.readFileSync(file, "utf8");
+      return [...source.matchAll(/from\s+"(\.[^"]+)"/g)]
+        .some((match) => path.resolve(path.dirname(file), match[1]!) === facade);
+    });
+    expect(offenders).toEqual([]);
   });
 });

@@ -43,7 +43,7 @@ import { buildOrchestratorCanUseTool, type LaneState } from "./permissions.ts";
 import type { HandoffService } from "../handoffs/service.ts";
 import { sdkEnv } from "../sdk/env.ts";
 import type { SqliteSessionStore } from "../sdk/session-store.ts";
-import type { AgentSessionService } from "../agent-sessions/host.ts";
+import type { AgentSessionService } from "../agent-sessions/service.ts";
 import { mainPeerName } from "../agent-sessions/names.ts";
 import type { TaskService } from "../tasks/service.ts";
 

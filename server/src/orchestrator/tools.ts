@@ -5,7 +5,7 @@
  * checked and journaled, like every other transfer in the system.
  */
 import { z } from "zod";
-import type { AgentSessionService } from "../agent-sessions/host.ts";
+import type { AgentSessionService } from "../agent-sessions/service.ts";
 import { MAIN_RECIPIENT } from "../agent-sessions/names.ts";
 import type { EventBus } from "../events/bus.ts";
 import type { Repo } from "../db/repo.ts";

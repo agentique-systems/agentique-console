@@ -8,7 +8,7 @@
  */
 import type { EventBus } from "../events/bus.ts";
 import type { Repo } from "../db/repo.ts";
-import type { AgentSessionService } from "../agent-sessions/host.ts";
+import type { AgentSessionService } from "../agent-sessions/service.ts";
 import type { OrchestratorRunner } from "../orchestrator/runner.ts";
 import type { InteractionService } from "../orchestrator/interactions.ts";
 import type { AssignmentScheduler } from "../tasks/scheduler.ts";

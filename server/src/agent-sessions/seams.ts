@@ -1,6 +1,7 @@
 /**
- * Narrow seams between agent-sessions modules. Modules never import host.ts —
- * where one needs a host capability it takes a typed callback shaped here.
+ * Narrow seams between agent-sessions modules. Modules never import the
+ * facade (service.ts) — where one needs a facade capability it takes a typed
+ * callback shaped here.
  */
 import type { HandoffDraft, Speaker } from "@agentique-console/shared";
 import type { AgentRow, AgentSessionRow, MailboxDeliveryRow, MessageRow } from "../db/repo.ts";

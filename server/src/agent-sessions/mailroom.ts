@@ -4,7 +4,7 @@
  * which is what makes the governance gates inescapable; `deliver` carries
  * queued journal rows into a lane through the DeliverySelector and Injector
  * seams. Runtime, operator, and nesting reach back only through typed
- * callbacks wired where the host constructs the modules.
+ * callbacks wired where the service constructs the modules.
  */
 import type { AgentSessionStatus, HandoffDraft, HandoffTrigger, Speaker } from "@agentique-console/shared";
 import type { AgentProfile } from "../agent-profiles/registry.ts";
@@ -88,7 +88,7 @@ export interface MailroomDeps {
   /** The status derivation, for the unsettled-children hold (operator surface). */
   sessionStatus: (row: AgentSessionRow) => AgentSessionStatus;
   boundary: BoundaryBroker;
-  /** The pattern engine's post hook, context-bound by the host. */
+  /** The pattern engine's post hook, context-bound by the service. */
   onPatternPost: (session: AgentSessionRow, hop: PatternHop) => void;
   recordFailure: RecordFailure;
 }
