@@ -55,16 +55,6 @@ import { AsyncQueue } from "../async-queue.ts";
 export { WithheldFinalError } from "./governance.ts";
 const MATERIAL_CATEGORIES = new Set(["milestone", "failure", "final", "decision"]);
 
-/**
- * Watchdog thresholds: a seat repeating the identical tool call, or piling up
- * consecutive tool errors, is burning its maxTurns allowance without
- * progress. Conservative on purpose — legitimate retries reset the counters
- * on any different call or any success.
- */
-const WATCHDOG_IDENTICAL_CALLS = 5;
-const WATCHDOG_ERROR_STREAK = 10;
-/** Rotation blocks every sender to the seat; a checkpoint may not run forever. */
-const CHECKPOINT_TIMEOUT_MS = 90_000;
 
 /**
  * Unresolved blocking questions allowed per AgentSession before further asks
@@ -72,8 +62,6 @@ const CHECKPOINT_TIMEOUT_MS = 90_000;
  * each blocking ask pins one of `seatMaxResidentPerTree` (4) processes.
  */
 
-/** Failed-turn redeliveries per delivery row before the console gives up. */
-const MAX_REDELIVERY_ATTEMPTS = 2;
 
 /**
  * Built-in tools a profile may grant. Anything here that a profile does NOT
@@ -857,7 +845,7 @@ export class AgentSessionHost {
    * `operatorAskDetachMs` is detached — the seat's process frees up while the
    * card stays open on the operator's screen.
    */
-  startGovernanceSweep(intervalMs = 30_000): void {
+  startGovernanceSweep(intervalMs = this.#deps.config.governanceSweepIntervalMs): void {
     if (this.#askSweep) return;
     this.#askSweep = setInterval(() => {
       const limit = this.#deps.config.operatorAskDetachMs;
@@ -1427,13 +1415,13 @@ export class AgentSessionHost {
    *
    * The hard parts are all about not making things worse than silence:
    *  - a duplicate returns the OPEN card rather than minting a second one, so a
-   *    seat that re-asks does not feed WATCHDOG_IDENTICAL_CALLS (5) or hand the
+   *    seat that re-asks does not feed the identical-call watchdog or hand the
    *    operator the same question twice;
    *  - a blocking wait is bounded by ONE mechanism, the operatorAskDetachMs
    *    timer: the seat's process frees up, the card stays open and blocking;
    *  - nothing here EVER returns `isError`. A dismissal, a detach or an expiry
    *    is not the seat's mistake, and ten consecutive error results trip
-   *    WATCHDOG_ERROR_STREAK and kill its turn. Punishing a seat for the
+   *    the error-streak watchdog and kill its turn. Punishing a seat for the
    *    operator's silence is precisely backwards.
    */
   async #askOperator(session: AgentSessionRow, seat: ParticipantRow, lane: SeatLane, args: AskOperatorArgs): Promise<SdkToolResult> {
@@ -1696,7 +1684,7 @@ export class AgentSessionHost {
               const key = `${event.name} ${stableStringify(event.input)}`;
               turn.watchdog.identical = key === turn.watchdog.lastKey ? turn.watchdog.identical + 1 : 1;
               turn.watchdog.lastKey = key;
-              if (turn.watchdog.identical >= WATCHDOG_IDENTICAL_CALLS) {
+              if (turn.watchdog.identical >= this.#deps.config.watchdogIdenticalCalls) {
                 this.#tripWatchdog(session, seatName, lane, { kind: "repeat_tool_calls", toolName: event.name, count: turn.watchdog.identical,
                   detail: `watchdog: ${turn.watchdog.identical} identical consecutive calls to ${event.name}` });
               }
@@ -1708,7 +1696,7 @@ export class AgentSessionHost {
             bus.append({ type: "agent_session.tool.result", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { sessionId: session.id, participant: seatName, turnId, callId: event.callId, output: captured.value, bytes: captured.bytes, ...(startedAt === undefined ? {} : { durationMs: Date.now() - startedAt }), ...(event.isError ? { isError: true } : {}) } });
             if (turn) {
               turn.watchdog.errorStreak = event.isError ? turn.watchdog.errorStreak + 1 : 0;
-              if (turn.watchdog.errorStreak >= WATCHDOG_ERROR_STREAK) {
+              if (turn.watchdog.errorStreak >= this.#deps.config.watchdogErrorStreak) {
                 this.#tripWatchdog(session, seatName, lane, { kind: "tool_error_streak", count: turn.watchdog.errorStreak,
                   detail: `watchdog: ${turn.watchdog.errorStreak} consecutive tool errors` });
               }
@@ -1787,7 +1775,7 @@ export class AgentSessionHost {
       const transport = isTransportFailure(errorMessage ?? null);
       for (const delivery of turn.deliveries) {
         const attempts = (lane.redeliveryAttempts.get(delivery.id) ?? 0) + (transport ? 0 : 1);
-        if (!retryable || attempts > MAX_REDELIVERY_ATTEMPTS) {
+        if (!retryable || attempts > this.#deps.config.maxRedeliveryAttempts) {
           lane.redeliveryAttempts.delete(delivery.id);
           this.#patchDelivery(session, delivery, "cancelled");
           continue;
@@ -2267,7 +2255,7 @@ export class AgentSessionHost {
     const checkpointRoot = seat.worktreePath ?? this.#deps.getWorkspaceRoot(user.workspaceId);
     // The abort controller is useless unarmed: a provider-side outage makes the
     // CLI retry for minutes while #maybeRotate's gate blocks every sender.
-    const checkpointDeadline = setTimeout(() => checkpointAbort.abort(), CHECKPOINT_TIMEOUT_MS);
+    const checkpointDeadline = setTimeout(() => checkpointAbort.abort(), config.checkpointTimeoutMs);
     checkpointDeadline.unref?.();
     const query = sdk.query({ prompt: `Create a lossless rotation checkpoint for your successor context. Capture only durable task state, verified evidence pointers, results, uncertainty, and the exact next action. Do not perform work or call tools.`, options: {
       cwd: checkpointRoot, systemPrompt: { type: "preset", preset: "claude_code", append: "You are checkpointing your own context. Report faithfully; do not correct or embellish uncertain state." },

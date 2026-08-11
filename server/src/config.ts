@@ -56,6 +56,16 @@ export interface Config {
   seatSpawnTimeoutMs: number;
   /** Registry namespace for console session names ("console-scout-8fbb2c"). */
   peerNamePrefix: string;
+  /** Identical consecutive tool calls before the watchdog kills a seat's turn. */
+  watchdogIdenticalCalls: number;
+  /** Consecutive tool errors before the watchdog kills a seat's turn. */
+  watchdogErrorStreak: number;
+  /** Failed-turn redeliveries per delivery row before the console gives up. */
+  maxRedeliveryAttempts: number;
+  /** Governance sweep period: stale-ask detach + pattern stall checks. */
+  governanceSweepIntervalMs: number;
+  /** Rotation blocks every sender to the seat; a checkpoint may not run forever. */
+  checkpointTimeoutMs: number;
   /**
    * Debounce before the run-completion predicate re-evaluates. Long enough
    * that a settle followed 1ms later by the next turn is a non-event, short
@@ -162,6 +172,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     autoInitGit: env.CONSOLE_AUTO_INIT_GIT !== "0",
     seatSpawnTimeoutMs: Number(env.CONSOLE_SEAT_SPAWN_TIMEOUT_MS ?? 30_000),
     peerNamePrefix: env.CONSOLE_PEER_NAME_PREFIX ?? "console-",
+    watchdogIdenticalCalls: Number(env.CONSOLE_WATCHDOG_IDENTICAL_CALLS ?? 5),
+    watchdogErrorStreak: Number(env.CONSOLE_WATCHDOG_ERROR_STREAK ?? 10),
+    maxRedeliveryAttempts: Number(env.CONSOLE_MAX_REDELIVERY_ATTEMPTS ?? 2),
+    governanceSweepIntervalMs: Number(env.CONSOLE_GOVERNANCE_SWEEP_MS ?? 30_000),
+    checkpointTimeoutMs: Number(env.CONSOLE_CHECKPOINT_TIMEOUT_MS ?? 90_000),
     completionQuietWindowMs: Number(env.CONSOLE_COMPLETION_QUIET_MS ?? 2_000),
     contextTokenLimit: Number(env.CONSOLE_CONTEXT_TOKEN_LIMIT ?? 120_000),
     contextTurnLimit: Number(env.CONSOLE_CONTEXT_TURN_LIMIT ?? 30),
