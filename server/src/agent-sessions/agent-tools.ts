@@ -105,7 +105,6 @@ export interface AgentToolsContext {
   /** Mark the agent's in-flight turn as having sent a handoff. */
   markSawSend(): void;
   agentWorkState(agent: AgentRow): string;
-  simpleHandoff(action: string, status: HandoffDraft["core"]["status"], summary: string, nextAction: string | null): HandoffDraft;
   dispatchWorkItems(input: { agentSessionId: string; items: { assignment: string; name?: string; owns?: string[] }[]; profileId?: string; instructions?: string; model?: string }): { joinId: string; agents: string[] };
   createChildSession(input: { pattern: string; title: string; patternConfig?: Record<string, unknown>; agents: { name: string; profileId: string; instructions?: string; model?: string; owns: string[] }[]; briefing: HandoffDraft }): { agentSessionId: string; agents: string[]; entryAgent: string };
   abandonChildSession(childAgentSessionId: string, reason: string): void;

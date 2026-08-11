@@ -1,6 +1,5 @@
 import type { AgentSessionStatus, ConsoleEvent, GetAgentSessionResponse, HandoffDraft, Interaction, PatternId } from "@agentique-console/shared";
 import fs from "node:fs";
-import path from "node:path";
 import { InvalidInputError, ConflictError, NotFoundError } from "../errors.ts";
 import type { AgentProfile, AgentProfileRegistry } from "../agent-profiles/registry.ts";
 import type { Config } from "../config.ts";
@@ -18,7 +17,7 @@ import { newId, nowIso } from "../ids.ts";
 import { rotationTokenLimit } from "../model-catalog.ts";
 import { mapSdkMessage } from "../sdk/mapping.ts";
 import type { SqliteSessionStore } from "../sdk/session-store.ts";
-import type { ConsoleSdk, SdkOptions, SdkUserMessageLike } from "../sdk/types.ts";
+import type { ConsoleSdk, SdkOptions } from "../sdk/types.ts";
 import { sdkEnv } from "../sdk/env.ts";
 import type { ProcessManager } from "../runtime/process-manager.ts";
 import type { BrowserManager } from "../runtime/browser-manager.ts";
@@ -34,9 +33,8 @@ import { CHILD_SENDER_PREFIX, CONSOLE_SENDER, MAIN_RECIPIENT, COORDINATOR_AGENT 
 import { CHECKPOINT_DENIED_TOOLS } from "../lane-runtime/checkpoint.ts";
 import { rotationDue, type RotationReason } from "../lane-runtime/rotation.ts";
 import type { Category } from "./final-gate.ts";
-import { PromptComposer, sandboxNetwork } from "./composer.ts";
-import { buildAgentTools } from "./agent-tools.ts";
-import { hubContract, roleOfAgent, speakerKindOf, RESERVED_NAMES, AGENT_NAME_RE } from "./topology.ts";
+import { PromptComposer } from "./composer.ts";
+import { roleOfAgent, speakerKindOf, RESERVED_NAMES, AGENT_NAME_RE } from "./topology.ts";
 import { SessionRouting } from "./routing.ts";
 import { WorktreeBinding } from "./worktree-binding.ts";
 import { OperatorSurface } from "./operator.ts";
@@ -44,24 +42,10 @@ import { Mailroom, MATERIAL_CATEGORIES, identitySelector, simpleHandoff } from "
 import { AgentLanePool, type ActiveTurn, type AgentLane } from "./lanes.ts";
 import { AgentRuntime } from "./runtime.ts";
 import type { TransferInput } from "./seams.ts";
-import { grantedTools, runtimeToolNames, type AgentToolName } from "./grants.ts";
 import { dispatchWorkItems, onPatternPost, sweep as patternSweep, type DispatchWorkItemsInput, type PatternContext } from "./patterns/engine.ts";
 import { buildContract } from "./patterns/catalog.ts";
-import { AsyncQueue } from "../async-queue.ts";
 
 export { WithheldFinalError } from "./final-gate.ts";
-
-/**
- * Built-in tools a profile may grant. Anything here that a profile does NOT
- * list is explicitly denied, which is what makes `profile.tools` a real
- * boundary rather than an auto-approval hint. Harness conveniences a governed
- * agent should never reach (subagent spawning, scheduling, its own review
- * tooling) are denied unconditionally alongside these.
- */
-const GOVERNED_BUILTIN_TOOLS = [
-  "Bash", "Edit", "Write", "NotebookEdit", "Read", "Glob", "Grep",
-  "WebFetch", "WebSearch",
-] as const;
 
 
 export interface CreateAgentSessionInput {
@@ -187,7 +171,23 @@ export class AgentSessionService {
     });
     this.#runtime = new AgentRuntime({
       repo: deps.repo, bus: deps.bus, config: deps.config,
-      lanes: this.#lanes, worktree: this.#worktreeBinding,
+      sdk: deps.sdk, sessionStore: deps.sessionStore, getWorkspaceRoot: deps.getWorkspaceRoot,
+      artifacts: deps.artifacts, tasks: deps.tasks, handoffs: deps.handoffs,
+      processes: deps.processes, browsers: deps.browsers, worktrees: deps.worktrees,
+      scheduler: deps.scheduler,
+      lanes: this.#lanes, worktree: this.#worktreeBinding, routing: this.#routing, composer: this.#composer,
+      transfer: (input) => this.post(input),
+      askOperator: (session, seat, args) => this.#operator.askOperator(session, seat, args),
+      createChildSession: (session, controller, input) => this.createSession({
+        userSessionId: session.userSessionId, title: input.title,
+        pattern: input.pattern as PatternId,
+        ...(input.patternConfig ? { patternConfig: input.patternConfig } : {}),
+        parent: { agentSessionId: session.id, controllerAgent: controller.name },
+        agents: input.agents, briefing: input.briefing,
+      }),
+      abandonChildSession: (session, controller, childAgentSessionId, reason) =>
+        this.abandonChildSession(session.id, controller.name, childAgentSessionId, reason),
+      dispatchWorkItems: (dispatcherAgent, input) => this.dispatchWorkItems(dispatcherAgent, input),
       markWorking: (agentSessionId) => this.#operator.setStatus(agentSessionId, "working"),
       hooks: {
         patchDelivery: (session, delivery, status) => this.#mailroom.patchDelivery(session, delivery, status),
@@ -314,7 +314,7 @@ export class AgentSessionService {
           byAgent: input.parent!.controllerAgent, title } });
     }
     for (const plan of build.agents) {
-      const profile = this.#snapshotProfile(this.#profile(plan.profileId, parent.workspaceId));
+      const profile = this.#runtime.snapshotProfile(this.#profile(plan.profileId, parent.workspaceId));
       repo.insertAgent(this.#agentRow(row.id, plan.name, plan.role, profile, plan.instructions ?? "", plan.model, plan.owns, plan.ord, now));
     }
     const specialists = input.agents.map((agent) => agent.name);
@@ -406,23 +406,9 @@ export class AgentSessionService {
     this.#lanes.closeAllForSession(agentSessionId);
   }
 
-  /**
-   * Scoped stop: abort one specialist's in-flight turn without touching its
-   * siblings. Its delivered work is cancelled so redelivery does not restart
-   * the same assignment; the lane survives for the corrected one.
-   */
+  /** Scoped stop: abort one specialist's in-flight turn (`AgentRuntime.interruptAgent`). */
   interruptAgent(agentSessionId: string, agent: string, reason: string): void {
-    const session = this.#deps.repo.getAgentSession(agentSessionId);
-    if (!session) throw new NotFoundError(`no agent session ${agentSessionId}`);
-    const lane = this.#lanes.peek(agentSessionId, agent);
-    if (!lane || lane.activeTurn === null) throw new ConflictError(`${agent} has no turn in flight`);
-    for (const delivery of this.#deps.repo.listUnackedDeliveries(agentSessionId, agent)) {
-      if (delivery.status === "delivered") this.#mailroom.patchDelivery(session, delivery, "cancelled");
-    }
-    this.#deps.bus.append({ type: "agent_session.runtime.noted", userSessionId: session.userSessionId, agentSessionId,
-      payload: { agentSessionId, agent, turnId: lane.activeTurn.turnId, detail: `stopped: ${reason}` } });
-    if (lane.activeTurn) lane.activeTurn.watchdog.tripped = `stopped: ${reason}`;
-    void lane.query?.interrupt?.().catch(() => undefined);
+    this.#runtime.interruptAgent(agentSessionId, agent, reason);
   }
 
   async closeAll(): Promise<void> {
@@ -563,7 +549,7 @@ export class AgentSessionService {
       hasActivity: (agentSessionId) => this.#lanes.namesWithActiveTurn(agentSessionId).length > 0,
       sessionReported: (session) => this.#operator.statusOf(session) === "reported",
       profile: (id, workspaceId) => this.#profile(id, workspaceId),
-      snapshotProfile: (profile) => this.#snapshotProfile(profile),
+      snapshotProfile: (profile) => this.#runtime.snapshotProfile(profile),
       agent: (agentSessionId, name, role, profile, extra, model, ownership, ord, createdAt) =>
         this.#agentRow(agentSessionId, name, role, profile, extra, model, ownership, ord, createdAt),
     };
@@ -750,119 +736,9 @@ export class AgentSessionService {
 
   // ── Persistent agent lanes ───────────────────────────────────────────────
 
-  /** Spawn or unpark an agent so its peer session is registered and accepting input. */
+  /** Spawn or unpark an agent so its peer session accepts input (`AgentRuntime.ensureSeatLive`). */
   async ensureSeatLive(agentSessionId: string, seat: string, deadline?: number): Promise<void> {
-    const { repo } = this.#deps;
-    const until = deadline ?? Date.now() + (this.#deps.config.policy.agentSpawnTimeoutMs ?? 30_000);
-    const lane = this.#lanes.laneOf(agentSessionId, seat);
-    while (lane.rotationGate) await lane.rotationGate;
-    if (lane.state === "live" || lane.state === "waking") { await lane.ready; return; }
-    const session = repo.getAgentSession(agentSessionId);
-    if (!session || session.lifecycle !== "open") throw new ConflictError(`agent session ${agentSessionId} is not open`);
-    const seatRow = repo.getAgent(agentSessionId, seat);
-    if (!seatRow) throw new NotFoundError(`no agent ${seat} in ${agentSessionId}`);
-    await this.#lanes.reserveCapacity(agentSessionId, until);
-    const raced = lane.state as AgentLane["state"];
-    if (raced === "live" || raced === "waking") { await lane.ready; return; }
-    this.#spawnSeat(session, seatRow, lane);
-    await lane.ready;
-    // A respawn may inherit rows the previous process took delivery of but
-    // never consumed; requeue them so the console path re-carries exactly once.
-    const stale = repo.listUnackedDeliveries(agentSessionId, seat).filter((row) => row.status === "delivered");
-    for (const row of stale) repo.patchDelivery(row.id, { status: "queued", deliveredAt: null });
-  }
-
-  #spawnSeat(session: AgentSessionRow, seatRow: AgentRow, lane: AgentLane): void {
-    if (!this.#deps.sdk || !this.#deps.config || !this.#deps.getWorkspaceRoot) throw new Error("SDK unavailable");
-    lane.state = "waking";
-    lane.abort = new AbortController();
-    lane.input = new AsyncQueue<SdkUserMessageLike>();
-    lane.lastActiveAt = Date.now();
-    // Occupancy is re-reported by the first assistant message of any new
-    // process, so it always restarts at zero.
-    lane.contextTokens = 0;
-    // Cost and api-duration do NOT: the SDK reports them cumulatively per
-    // query(), and a RESUMED session continues its running total across the
-    // process boundary — the baseline belongs to the PROVIDER SESSION, not
-    // the lane. An agent with no `sdkSessionId` is genuinely starting fresh
-    // (rotation does that in #rotateNow), so its baseline is zero.
-    lane.lastCumulative = seatRow.sdkSessionId === null
-      ? { costUsd: 0, apiDurationMs: 0 }
-      : { costUsd: seatRow.cumulativeCostUsd, apiDurationMs: seatRow.cumulativeApiDurationMs };
-    lane.ready = (async () => {
-      const sdk = await this.#deps.sdk!();
-      const user = this.#deps.repo.getUserSession(session.userSessionId);
-      if (!user) throw new Error("workspace unavailable");
-      const workspaceRoot = this.#deps.getWorkspaceRoot!(user.workspaceId);
-      const latestSeat = this.#worktreeBinding.ensureAgentWorktree(session, this.#deps.repo.getAgent(session.id, seatRow.name) ?? seatRow, workspaceRoot);
-      const profile = latestSeat.profileSnapshot as AgentProfile;
-      const seatRoot = latestSeat.worktreePath ?? workspaceRoot;
-      const contract = this.#routing.contractOf(session);
-      const seatRole = roleOfAgent(latestSeat);
-      // Builders must supply a prompt for every role; the hub specialist pack
-      // is the conservative fallback for a snapshot that somehow lacks one.
-      const rolePrompt = contract.prompt(seatRole) ?? hubContract().promptPack.specialist!;
-      const granted = grantedTools(contract.role(seatRole), profile, {
-        tasks: Boolean(this.#deps.tasks), handoffs: Boolean(this.#deps.handoffs),
-        processes: Boolean(this.#deps.processes), browsers: Boolean(this.#deps.browsers),
-        worktrees: Boolean(this.#deps.worktrees), user: Boolean(user),
-        childSessions: this.#deps.config.policy.enableChildSessions !== false && session.parentAgentSessionId === null,
-      });
-      const mcp = this.#buildParticipantMcp(sdk, session, latestSeat, granted);
-      const options: SdkOptions = {
-        cwd: seatRoot,
-        systemPrompt: { type: "preset", preset: "claude_code", append: this.#composer.systemPromptAppend(session, latestSeat, profile, rolePrompt) },
-        settingSources: [], includePartialMessages: true,
-        permissionMode: profile.permissionMode,
-        ...(profile.permissionMode === "bypassPermissions" ? { allowDangerouslySkipPermissions: true } : {}),
-        allowedTools: [...profile.tools,
-          ...(profile.tools.includes("Edit") || profile.tools.includes("Write") ? ["EnterWorktree", "ExitWorktree"] : []),
-          ...runtimeToolNames(granted)],
-        // A profile's tool list must be BINDING: `allowedTools` is only an
-        // auto-approval list, so everything the profile did not grant is
-        // denied by name. The native Task* tools are additionally scoped to
-        // the provider session, so their ledger dies at every rotation; agents
-        // use the console-owned task_list/task_create/task_update instead.
-        disallowedTools: [...new Set([
-          // One transport: `send_handoff` is console-carried, so there is no
-          // second wire whose delivery semantics can diverge from it.
-          "Agent", "Task", "SendMessage", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet",
-          ...GOVERNED_BUILTIN_TOOLS.filter((name) => !profile.tools.includes(name)),
-        ])],
-        sandbox: { enabled: true, failIfUnavailable: profile.sandboxRequired, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: false,
-          filesystem: { allowManagedReadPathsOnly: true, allowRead: latestSeat.worktreePath ? [seatRoot, workspaceRoot] : [workspaceRoot], allowWrite: [seatRoot] },
-          network: sandboxNetwork(profile, this.#deps.config.infra.allowedDomains ?? []) },
-        // Agent identity rides the ENV, not the prompt: visible to process
-        // forensics and the test discriminator without perturbing the
-        // cache-invariant system-prompt head above.
-        env: { ...sdkEnv(),
-          CONSOLE_AGENT_SESSION_ID: session.id,
-          CONSOLE_AGENT_NAME: latestSeat.name,
-          CONSOLE_PATTERN_ROLE: seatRole,
-          CONSOLE_PATTERN: session.pattern,
-          CONSOLE_SESSION_DEPTH: String(session.depth),
-        },
-        abortController: lane.abort!, persistSession: true,
-        sessionStore: this.#deps.sessionStore as never, sessionStoreFlush: "eager",
-        mcpServers: { console_agent: mcp as never },
-        ...(latestSeat.model ? { model: latestSeat.model } : {}),
-        ...((profile.pluginPath && profile.source === "workspace") ? { plugins: [{ type: "local" as const, path: profile.pluginPath }] } : {}),
-        // Always explicit: omitting the key lets the CLI fall back to the
-        // OPERATOR's personal skill listing despite settingSources: [].
-        skills: profile.skills ?? [],
-        ...((profile.effort ?? this.#deps.config.infra.effort) ? { effort: (profile.effort ?? this.#deps.config.infra.effort) as SdkOptions["effort"] } : {}),
-        ...(latestSeat.sdkSessionId ? { resume: latestSeat.sdkSessionId } : {}),
-      };
-      const query = sdk.query({ prompt: lane.input as AsyncIterable<SdkUserMessageLike>, options });
-      lane.query = query;
-      lane.state = "live";
-      lane.pump = this.#runtime.pumpSeat(session, latestSeat.name, lane, query).catch((error) => this.#recordHostFailure(session.id, error));
-    })().catch((error) => {
-      lane.state = "parked";
-      lane.input?.close(); lane.input = null;
-      this.#lanes.signalCapacity();
-      throw error;
-    });
+    return this.#runtime.ensureSeatLive(agentSessionId, seat, deadline);
   }
 
   /**
@@ -894,7 +770,7 @@ export class AgentSessionService {
       await closing?.catch(() => undefined);
       const sdk = await this.#deps.sdk();
       const rotated = await this.#rotateNow(session, repo.getAgent(agentSessionId, seatName) ?? seat, sdk, due.reason);
-      this.#spawnSeat(session, rotated, lane);
+      this.#runtime.spawnSeat(session, rotated, lane);
       await lane.ready;
     } finally {
       const release = lane.releaseRotation;
@@ -905,72 +781,6 @@ export class AgentSessionService {
       for (const row of stale) repo.patchDelivery(row.id, { status: "queued", deliveredAt: null });
       void this.#mailroom.deliver(agentSessionId, seatName).catch((error) => this.#recordHostFailure(agentSessionId, error));
     }
-  }
-
-  /**
-   * Never hands a tool `lane.abort.signal`: the pool's park nulls `lane.abort`
-   * WITHOUT aborting, so a wait tied to the lane-wide signal would strand on
-   * park/rotation/watchdog. Each operator ask mints its own controller,
-   * bound to the CURRENT turn through the LaneActivity seam.
-   */
-  #buildParticipantMcp(sdk: ConsoleSdk, session: AgentSessionRow, seat: AgentRow, granted: ReadonlySet<AgentToolName>): unknown {
-    const user = this.#deps.repo.getUserSession(session.userSessionId);
-    const workspaceRoot = user && this.#deps.getWorkspaceRoot ? this.#deps.getWorkspaceRoot(user.workspaceId) : "";
-    const tools = buildAgentTools({
-      sdk, deps: this.#deps, session, agent: seat, profile: seat.profileSnapshot as AgentProfile, user, workspaceRoot,
-      granted,
-      legalRecipient: (candidate) => {
-        const fresh = this.#deps.repo.getAgentSession(session.id) ?? session;
-        const toRole = this.#routing.roleOf(session.id, candidate);
-        const fromRole = this.#routing.roleOf(session.id, seat.name);
-        if (toRole !== "" && candidate !== seat.name && this.#routing.contractOf(fresh).edge(fromRole, toRole)) return candidate;
-        return this.#routing.escalationTarget(fresh, seat.name);
-      },
-      post: (input) => this.post(input),
-      interceptAssignment: (input) => {
-        // Route legality first, exactly as post would assert it — an illegal
-        // recipient must fail NOW, not at dispatch.
-        const fresh = this.#deps.repo.getAgentSession(session.id);
-        if (!fresh || fresh.lifecycle !== "open") throw new ConflictError(`agent session ${session.id} is not open`);
-        this.#routing.assertRoute(fresh, seat.name, input.to, input.category);
-        return this.#deps.scheduler().intercept({
-          agentSessionId: session.id, sender: seat.name, recipient: input.to,
-          category: input.category, handoff: input.handoff,
-        });
-      },
-      cancelAssignment: (assignmentId) =>
-        this.#deps.scheduler().cancel(assignmentId, { actor: seat.name, agentSessionId: session.id }),
-      askOperator: (args) => this.#operator.askOperator(session, seat, args),
-      currentTurnId: () => this.#runtime.currentTurnId(session.id, seat.name),
-      markSawSend: () => this.#runtime.markSawSend(session.id, seat.name),
-      agentWorkState: (row) => this.#composer.agentWorkState(row),
-      simpleHandoff,
-      dispatchWorkItems: (input) => this.dispatchWorkItems(seat.name, input),
-      createChildSession: (input) => this.createSession({
-        userSessionId: session.userSessionId, title: input.title,
-        pattern: input.pattern as PatternId,
-        ...(input.patternConfig ? { patternConfig: input.patternConfig } : {}),
-        parent: { agentSessionId: session.id, controllerAgent: seat.name },
-        agents: input.agents, briefing: input.briefing,
-      }),
-      abandonChildSession: (childAgentSessionId, reason) => this.abandonChildSession(session.id, seat.name, childAgentSessionId, reason),
-    });
-    // alwaysLoad: the profile already decided this agent's tools; deferring
-    // them behind ToolSearch costs a round-trip rediscovering what was granted.
-    return sdk.createSdkMcpServer({ name: "console_agent", version: "2", tools, alwaysLoad: true });
-  }
-
-  #snapshotProfile(profile: AgentProfile): AgentProfile {
-    if (profile.source !== "workspace" || !profile.pluginPath || !profile.revision || !this.#deps.config) return profile;
-    const parent = path.join(this.#deps.config.infra.dataDir, "profile-snapshots");
-    const target = path.join(parent, profile.revision);
-    if (!fs.existsSync(target)) {
-      fs.mkdirSync(parent, { recursive: true });
-      const temp = path.join(parent, `.${profile.revision}-${newId("rnd")}`);
-      try { fs.cpSync(profile.pluginPath, temp, { recursive: true, dereference: true }); fs.renameSync(temp, target); }
-      catch (error) { if (fs.existsSync(temp)) fs.rmSync(temp, { recursive: true }); if (!fs.existsSync(target)) throw error; }
-    }
-    return { ...profile, pluginPath: target };
   }
 
   /**
