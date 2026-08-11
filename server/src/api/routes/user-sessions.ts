@@ -2,8 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { isOrchestratorModel } from "@agentique-console/shared";
 import type { AppContext } from "../../context.ts";
-import { revivalPrompt } from "../../orchestrator/interactions.ts";
-import { InvalidInputError, NotFoundError } from "../../errors.ts";
+import { InvalidInputError } from "../../errors.ts";
 
 /**
  * Constrained to the offered list rather than accepting any string: an id with
@@ -25,7 +24,7 @@ const CreateBody = z.object({
 const PatchBody = z.object({
   mode: z.enum(["execute", "plan_execute"]).optional(),
   title: z.string().optional(),
-  status: z.enum(["open", "archived"]).optional(),
+  lifecycle: z.enum(["open", "archived"]).optional(),
   model: Model.optional(),
 });
 
@@ -96,8 +95,7 @@ export function registerUserSessionRoutes(
     async (request) => {
       const parsed = SignoffBody.safeParse(request.body);
       if (!parsed.success) throw new InvalidInputError(parsed.error.message);
-      ctx.app.completion.resolve(request.params.id, parsed.data.decision, parsed.data.note);
-      return ctx.app.userSessions.get(request.params.id).session;
+      return sessions.signoff(request.params.id, parsed.data);
     },
   );
 
@@ -106,11 +104,9 @@ export function registerUserSessionRoutes(
     async (request, reply) => {
       const parsed = MessageBody.safeParse(request.body);
       if (!parsed.success) throw new InvalidInputError(parsed.error.message);
-      const session = ctx.app.repo.getUserSession(request.params.id);
-      const result = session?.purpose === "profile_manager"
-        ? ctx.app.manager.postMessage(request.params.id, parsed.data.text)
-        : ctx.app.runner.postOperatorMessage(request.params.id, parsed.data.text);
-      return reply.status(202).send(result);
+      return reply
+        .status(202)
+        .send(sessions.postMessage(request.params.id, parsed.data.text));
     },
   );
 
@@ -119,43 +115,11 @@ export function registerUserSessionRoutes(
     async (request) => {
       const parsed = ResolveBody.safeParse(request.body);
       if (!parsed.success) throw new InvalidInputError(parsed.error.message);
-      const before = ctx.app.interactions.get(request.params.interactionId);
-      const resolved = ctx.app.interactions.resolveFromApi(
+      return ctx.app.interactions.resolveAndRoute(
         request.params.id,
         request.params.interactionId,
         parsed.data,
       );
-      // A seat's answer cannot come back through a tool call that no longer
-      // exists, and a seat is not revived by a lane — it is woken by a
-      // delivery. So a detached or stale SEAT question is answered by mailbox.
-      if (before.agent !== null && (before.detached || before.status === "stale")) {
-        ctx.app.host.deliverOperatorAnswer(before);
-        return resolved;
-      }
-      // A stale MAIN-LANE interaction's parked promise died with a previous
-      // process — its answer becomes a fresh resumed turn instead (M8 revival).
-      if (before.agent === null && before.status === "stale") {
-        if (
-          before.kind === "plan_approval" &&
-          "decision" in parsed.data &&
-          parsed.data.decision === "approve"
-        ) {
-          ctx.app.repo.patchUserSession(request.params.id, { phase: "executing" });
-          ctx.app.bus.append({
-            type: "user_session.updated",
-            userSessionId: request.params.id,
-            payload: {
-              userSessionId: request.params.id,
-              patch: { phase: "executing" },
-            },
-          });
-        }
-        ctx.app.runner.enqueueRevival(
-          request.params.id,
-          revivalPrompt(before, parsed.data),
-        );
-      }
-      return resolved;
     },
   );
 
@@ -171,4 +135,23 @@ export function registerUserSessionRoutes(
     "/api/user-sessions/:id/transcript",
     async (request) => sessions.transcript(request.params.id),
   );
+
+  app.get<{
+    Params: { id: string };
+    Querystring: { beforeSeq?: string; limit?: string };
+  }>("/api/user-sessions/:id/timeline", async (request) => {
+    const beforeSeq =
+      request.query.beforeSeq === undefined
+        ? undefined
+        : Number(request.query.beforeSeq);
+    const limit =
+      request.query.limit === undefined ? undefined : Number(request.query.limit);
+    if (
+      (beforeSeq !== undefined && (!Number.isInteger(beforeSeq) || beforeSeq < 1)) ||
+      (limit !== undefined && (!Number.isInteger(limit) || limit < 1))
+    ) {
+      throw new InvalidInputError("timeline cursor and limit must be positive integers");
+    }
+    return ctx.app.timeline.page(request.params.id, beforeSeq, limit);
+  });
 }

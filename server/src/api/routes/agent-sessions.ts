@@ -1,8 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import type { ConsoleEvent } from "@agentique-console/shared";
 import type { AppContext } from "../../context.ts";
-import { NotFoundError } from "../../errors.ts";
-import { toWireMessage } from "../../db/repo.ts";
 
 export function registerAgentSessionRoutes(
   app: FastifyInstance,
@@ -10,48 +7,16 @@ export function registerAgentSessionRoutes(
 ): void {
   app.get<{ Params: { id: string } }>(
     "/api/user-sessions/:id/agent-sessions",
-    async (request) =>
-      ctx.app.repo
-        .listAgentSessions(request.params.id)
-        .map((row) => ctx.app.host.wireSession(row)),
+    async (request) => ctx.app.host.wireSessionsForUserSession(request.params.id),
   );
 
   app.get<{ Params: { id: string } }>(
     "/api/agent-sessions/:id",
-    async (request) => {
-      const row = ctx.app.repo.getAgentSession(request.params.id);
-      if (!row) throw new NotFoundError(`no agent session ${request.params.id}`);
-      return {
-        session: ctx.app.host.wireSession(row),
-        runs: ctx.app.repo.listAgents(row.id).map((agent) => ({
-          agent: agent.name,
-          profileId: agent.profileId,
-          profile: agent.profileSnapshot,
-          ownership: agent.ownership,
-          generation: agent.generation,
-          turnCount: agent.turnCount,
-          contextTokens: agent.contextTokens,
-          providerSessionId: agent.sdkSessionId,
-        })),
-        messages: ctx.app.repo
-          .listMessages("agent", row.id)
-          .map(toWireMessage),
-      };
-    },
+    async (request) => ctx.app.host.detail(request.params.id),
   );
 
   app.get<{ Params: { id: string } }>(
     "/api/agent-sessions/:id/transcript",
-    async (request) => {
-      const row = ctx.app.repo.getAgentSession(request.params.id);
-      if (!row) throw new NotFoundError(`no agent session ${request.params.id}`);
-      const events: ConsoleEvent[] = [];
-      for await (const event of ctx.app.bus.readWithSeq({
-        agentSessionId: row.id,
-      })) {
-        events.push(event);
-      }
-      return events;
-    },
+    async (request) => ctx.app.host.transcript(request.params.id),
   );
 }

@@ -43,6 +43,29 @@ export interface BrowseListing {
 const MAX_ENTRIES = 1000;
 const IGNORED = new Set(["node_modules", ".git", ".cache"]);
 
+/** The roots picker view: each surviving root under its configured label. */
+export async function rootsView(
+  configured: readonly { path: string; label: string }[],
+): Promise<{ roots: { path: string; label: string }[] }> {
+  const roots = await resolveRoots(configured.map((root) => root.path));
+  return {
+    roots: roots.map((path) => ({
+      path,
+      label: configured.find((root) => root.path === path)?.label ?? path,
+    })),
+  };
+}
+
+/** One-call browse for the API: resolve the allow-list, then list under it. */
+export async function browseDirectories(
+  configured: readonly string[],
+  path: string,
+  showHidden: boolean,
+): Promise<BrowseListing> {
+  const roots = await resolveRoots(configured);
+  return listDirectories(path, { roots, showHidden });
+}
+
 /** Realpath'd allow-list. Unreadable or missing roots are dropped rather than failing the call. */
 export async function resolveRoots(
   configured: readonly string[],

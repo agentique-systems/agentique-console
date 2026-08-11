@@ -172,7 +172,17 @@ export class AgentProfileRegistry {
     return [...this.#profiles.values(), ...workspace];
   }
 
+  /**
+   * Workspace-scoped reads 404 on an unknown workspace even when the answer
+   * would not touch it (builtin profiles) — the API contract the routes rely
+   * on instead of a route-level guard.
+   */
+  #assertWorkspace(workspaceId: string): void {
+    this.#options?.getWorkspaceRoot(workspaceId);
+  }
+
   summaries(workspaceId: string): AgentProfileSummary[] {
+    this.#assertWorkspace(workspaceId);
     const builtins = [...this.#profiles.values()].map((profile) => this.#summary(profile, "builtin", `builtin:${profile.id}`, true, true, []));
     const workspace = this.#workspaceProfiles(workspaceId).map(({ id, profile, revision, issues, files }) =>
       this.#summary(profile ?? this.#invalidPlaceholder(id), "workspace", revision, this.isTrusted(workspaceId, id, revision), issues.every((i) => i.level !== "error"), files));
@@ -180,6 +190,7 @@ export class AgentProfileRegistry {
   }
 
   detail(workspaceId: string, id: string): AgentProfileDetail | undefined {
+    this.#assertWorkspace(workspaceId);
     const builtin = this.#profiles.get(id);
     if (builtin) return this.#detail(builtin, "builtin", `builtin:${id}`, true, [], []);
     const entry = this.#workspaceProfiles(workspaceId).find((candidate) => candidate.id === id);

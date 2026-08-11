@@ -41,4 +41,9 @@ export function registerWorkspaceRoutes(
       return service.patch(request.params.id, parsed.data);
     },
   );
+
+  app.get<{ Params: { id: string } }>(
+    "/api/workspaces/:id/session-tree",
+    async (request) => ctx.app.userSessions.sessionTree(request.params.id),
+  );
 }

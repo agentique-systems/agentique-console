@@ -6,4 +6,12 @@ export function registerTaskRoutes(app: FastifyInstance, ctx: AppContext): void 
     "/api/user-sessions/:id/tasks",
     async (request) => ctx.app.tasks.listForUserSession(request.params.id),
   );
+
+  app.get<{
+    Params: { id: string };
+    Querystring: { userSessionId?: string; agentSessionId?: string };
+  }>(
+    "/api/workspaces/:id/tasks",
+    async (request) => ctx.app.tasks.workspaceView(request.params.id, request.query),
+  );
 }

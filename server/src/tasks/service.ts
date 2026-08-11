@@ -7,7 +7,7 @@
  * vanish.
  */
 import { and, eq } from "drizzle-orm";
-import type { Task, TaskDependency } from "@agentique-console/shared";
+import type { Task, TaskDependency, WorkspaceTasksResponse } from "@agentique-console/shared";
 import type { Db } from "../db/client.ts";
 import { taskDependencies, tasks } from "../db/schema.ts";
 import type { EventBus } from "../events/bus.ts";
@@ -67,10 +67,13 @@ export class TaskService {
   #onChange: ((task: Task) => void) | undefined;
   readonly #db: Db;
   readonly #bus: EventBus;
+  /** Throws NotFound on an unknown workspace; the workspaces table stays owned by its service. */
+  readonly #assertWorkspace: (workspaceId: string) => void;
 
-  constructor(db: Db, bus: EventBus) {
+  constructor(db: Db, bus: EventBus, assertWorkspace: (workspaceId: string) => void) {
     this.#db = db;
     this.#bus = bus;
+    this.#assertWorkspace = assertWorkspace;
   }
 
   /** From the `task_create` console tool. Idempotent. */
@@ -219,6 +222,18 @@ export class TaskService {
     const deps = this.#db.select().from(taskDependencies).all();
     const allRows = this.#db.select().from(tasks).all();
     return rows.map((row) => toWire(row, deps, allRows));
+  }
+
+  /** The workspace tasks view: tasks (optionally filtered) plus the dependency graph. */
+  workspaceView(
+    workspaceId: string,
+    filter: { userSessionId?: string; agentSessionId?: string } = {},
+  ): WorkspaceTasksResponse {
+    this.#assertWorkspace(workspaceId);
+    return {
+      tasks: this.listForWorkspace(workspaceId, filter),
+      dependencies: this.listDependencies(workspaceId),
+    };
   }
 
   listDependencies(workspaceId: string): TaskDependency[] {

@@ -1,4 +1,4 @@
-import type { AgentSessionStatus, HandoffDraft, HandoffTrigger, Interaction, InteractionQuestion, InteractionUrgency, PatternId, Speaker } from "@agentique-console/shared";
+import type { AgentSessionStatus, ConsoleEvent, GetAgentSessionResponse, HandoffDraft, HandoffTrigger, Interaction, InteractionQuestion, InteractionUrgency, PatternId, Speaker } from "@agentique-console/shared";
 import type { EdgeSpec } from "./topology-contract.ts";
 import fs from "node:fs";
 import path from "node:path";
@@ -674,6 +674,40 @@ export class AgentSessionService {
   }
 
   wireSession(row: AgentSessionRow) { return toWireAgentSession(row, this.#specialists(row.id).map((p) => p.name), this.#statusOf(row) === "working"); }
+
+  wireSessionsForUserSession(userSessionId: string) {
+    return this.#deps.repo.listAgentSessions(userSessionId).map((row) => this.wireSession(row));
+  }
+
+  /** The session detail view: wire session + per-agent run stats + messages. */
+  detail(agentSessionId: string): GetAgentSessionResponse {
+    const row = this.#deps.repo.getAgentSession(agentSessionId);
+    if (!row) throw new NotFoundError(`no agent session ${agentSessionId}`);
+    return {
+      session: this.wireSession(row),
+      runs: this.#deps.repo.listAgents(row.id).map((agent) => ({
+        agent: agent.name,
+        profileId: agent.profileId,
+        profile: agent.profileSnapshot,
+        ownership: agent.ownership,
+        generation: agent.generation,
+        turnCount: agent.turnCount,
+        contextTokens: agent.contextTokens,
+        providerSessionId: agent.sdkSessionId,
+      })),
+      messages: this.#deps.repo.listMessages("agent", row.id).map(toWireMessage),
+    };
+  }
+
+  async transcript(agentSessionId: string): Promise<ConsoleEvent[]> {
+    const row = this.#deps.repo.getAgentSession(agentSessionId);
+    if (!row) throw new NotFoundError(`no agent session ${agentSessionId}`);
+    const events: ConsoleEvent[] = [];
+    for await (const event of this.#deps.bus.readWithSeq({ agentSessionId: row.id })) {
+      events.push(event);
+    }
+    return events;
+  }
 
   /** Whole-session stop (archive/shutdown): every lane closes hard. */
   interrupt(agentSessionId: string): void {

@@ -4,14 +4,15 @@ import Fastify, { type FastifyInstance } from "fastify";
 import type { ConfigResponse } from "@agentique-console/shared";
 import type { AppContext } from "../context.ts";
 import { toApiError } from "./errors.ts";
+import { registerAgentProfileRoutes } from "./routes/agent-profiles.ts";
 import { registerAgentSessionRoutes } from "./routes/agent-sessions.ts";
 import { registerComposeRoutes } from "./routes/compose.ts";
 import { registerEventRoutes } from "./routes/events.ts";
 import { registerFsRoutes } from "./routes/fs.ts";
+import { registerProfileManagerRoutes } from "./routes/profile-manager.ts";
 import { registerTaskRoutes } from "./routes/tasks.ts";
 import { registerUserSessionRoutes } from "./routes/user-sessions.ts";
 import { registerWorkspaceRoutes } from "./routes/workspaces.ts";
-import { registerViewRoutes } from "./routes/views.ts";
 
 export function buildServer(ctx: AppContext): FastifyInstance {
   const app = Fastify({ logger: false });
@@ -63,7 +64,8 @@ export function buildServer(ctx: AppContext): FastifyInstance {
   registerAgentSessionRoutes(app, ctx);
   registerTaskRoutes(app, ctx);
   registerComposeRoutes(app, ctx);
-  registerViewRoutes(app, ctx);
+  registerAgentProfileRoutes(app, ctx);
+  registerProfileManagerRoutes(app, ctx);
 
   // The built UI rides along on this port, so the app is one process. In vite
   // dev the bundle is absent and the dev server proxies /api here instead.

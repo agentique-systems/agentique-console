@@ -42,6 +42,20 @@ export type InteractionResolution =
   | { kind: "decision"; approved: boolean; note?: string }
   | { kind: "dismissed"; reason: string };
 
+/**
+ * Where an answer goes when its asker's parked promise is gone. Narrow
+ * callbacks (host/runner/user-session methods) wired once in `createApp`, so
+ * this service routes without depending on any of them.
+ */
+export interface StaleAnswerRouting {
+  /** A detached or stale SEAT question: the seat is woken by a mailbox delivery. */
+  deliverToAgent(interaction: Interaction): void;
+  /** A stale MAIN-LANE interaction: the answer becomes a fresh resumed turn. */
+  reviveMain(userSessionId: string, prompt: string): void;
+  /** An approved-but-stale plan still moves the session into execution. */
+  beginExecuting(userSessionId: string): void;
+}
+
 type InteractionRow = typeof interactions.$inferSelect;
 
 function toWire(row: InteractionRow): Interaction {
@@ -120,6 +134,7 @@ export class InteractionService {
   #onBlockingCleared: ((userSessionId: string, agentSessionId: string) => void) | undefined;
   /** Notified whenever any card resolves; the completion predicate re-evaluates. */
   #onResolved: ((userSessionId: string) => void) | undefined;
+  #staleRouting: StaleAnswerRouting | undefined;
 
   constructor(db: Db, bus: EventBus) {
     this.#db = db;
@@ -139,6 +154,46 @@ export class InteractionService {
   onResolved(handler: (userSessionId: string) => void): void {
     if (this.#onResolved) throw new Error("onResolved is already registered — wire callbacks once, in createApp");
     this.#onResolved = handler;
+  }
+
+  onStaleAnswerRouting(routing: StaleAnswerRouting): void {
+    if (this.#staleRouting) throw new Error("onStaleAnswerRouting is already registered — wire callbacks once, in createApp");
+    this.#staleRouting = routing;
+  }
+
+  /**
+   * The REST answer endpoint's whole job: resolve the row, then route the
+   * answer to wherever its asker now lives.
+   *
+   * A seat's answer cannot come back through a tool call that no longer
+   * exists, and a seat is not revived by a lane — it is woken by a delivery.
+   * So a detached or stale SEAT question is answered by mailbox. A stale
+   * MAIN-LANE interaction's parked promise died with a previous process — its
+   * answer becomes a fresh resumed turn instead (M8 revival).
+   */
+  resolveAndRoute(
+    userSessionId: string,
+    interactionId: string,
+    body: ResolveInteractionBody,
+  ): Interaction {
+    if (!this.#staleRouting) throw new Error("onStaleAnswerRouting is not registered — wire callbacks once, in createApp");
+    const before = this.get(interactionId);
+    const resolved = this.resolveFromApi(userSessionId, interactionId, body);
+    if (before.agent !== null && (before.detached || before.status === "stale")) {
+      this.#staleRouting.deliverToAgent(before);
+      return resolved;
+    }
+    if (before.agent === null && before.status === "stale") {
+      if (
+        before.kind === "plan_approval" &&
+        "decision" in body &&
+        body.decision === "approve"
+      ) {
+        this.#staleRouting.beginExecuting(userSessionId);
+      }
+      this.#staleRouting.reviveMain(userSessionId, revivalPrompt(before, body));
+    }
+    return resolved;
   }
 
   /** Creates a pending question card and parks its resolution promise. */

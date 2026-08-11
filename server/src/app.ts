@@ -99,7 +99,7 @@ export function createApp(options: CreateAppOptions): App {
 
   const decisions = new DecisionLedger(db);
   const interactions = new InteractionService(db, bus);
-  const tasks = new TaskService(db, bus);
+  const tasks = new TaskService(db, bus, (workspaceId) => void workspaces.get(workspaceId));
   const handoffs = new HandoffService({ repo, bus, getWorkspaceRoot });
   const sessionStore = new SqliteSessionStore(db);
 
@@ -134,6 +134,8 @@ export function createApp(options: CreateAppOptions): App {
     repo, bus, runner, interactions, workspaces,
     archiveAgentSessions: (userSessionId) => host.archiveForUserSession(userSessionId),
     completion,
+    wireAgentSessions: (userSessionId) => host.wireSessionsForUserSession(userSessionId),
+    postManagerMessage: (userSessionId, text) => manager.postMessage(userSessionId, text),
   });
 
   // Every cross-service callback, registered once. The completion predicate
@@ -145,6 +147,11 @@ export function createApp(options: CreateAppOptions): App {
   interactions.onResolved((userSessionId) => completion.schedule(userSessionId));
   interactions.onBlockingCleared((userSessionId, agentSessionId) =>
     host.onBlockingQuestionsCleared(userSessionId, agentSessionId));
+  interactions.onStaleAnswerRouting({
+    deliverToAgent: (interaction) => host.deliverOperatorAnswer(interaction),
+    reviveMain: (userSessionId, prompt) => runner.enqueueRevival(userSessionId, prompt),
+    beginExecuting: (userSessionId) => userSessions.beginExecuting(userSessionId),
+  });
 
   return {
     config, db, sqlite, bus, artifacts, repo, sdk, getWorkspaceRoot,

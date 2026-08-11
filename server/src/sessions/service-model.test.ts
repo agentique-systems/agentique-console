@@ -39,6 +39,10 @@ function makeService() {
     runner: runner as unknown as OrchestratorRunner,
     interactions,
     workspaces: { get: () => undefined } as never,
+    archiveAgentSessions: vi.fn(),
+    completion: { schedule: vi.fn(), resolve: vi.fn() },
+    wireAgentSessions: () => [],
+    postManagerMessage: vi.fn(() => ({ messageId: "m_mgr", seq: 1 })),
   });
 
   return { sessions, repo, runner, workspaceId };

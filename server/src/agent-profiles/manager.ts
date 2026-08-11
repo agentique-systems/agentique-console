@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { AgentProfileDetail, ManagerSession, ProfileProposal } from "@agentique-console/shared";
+import type { AgentProfileDetail, ManagerSession, ManagerSessionResponse, ProfileProposal } from "@agentique-console/shared";
 import type { Config } from "../config.ts";
 import type { Repo, UserSessionRow } from "../db/repo.ts";
 import type { WorkspaceService } from "../workspaces/service.ts";
@@ -38,6 +38,8 @@ export class ProfileManagerService {
 
   list(workspaceId: string): ManagerSession[] { return this.deps.repo.listManagerSessions(workspaceId).map((row) => this.#wire(row)); }
   get(id: string): ManagerSession { const row = this.#row(id); return this.#wire(row); }
+  /** The session view: the session plus whatever proposal its draft currently stages. */
+  detail(id: string): ManagerSessionResponse { return { session: this.get(id), proposal: this.proposal(id) }; }
   postMessage(id: string, text: string) { const row = this.#row(id); if (row.phase === "executing") {
     this.deps.repo.patchUserSession(id, { phase: "planning" });
     this.deps.bus.append({ type: "user_session.updated", userSessionId: id, payload: { userSessionId: id, patch: { phase: "planning" } } });

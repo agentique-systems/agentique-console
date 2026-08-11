@@ -3,10 +3,14 @@
  * operator sends), listing, mode/status patches, transcript hydration.
  */
 import type {
+  AgentSession,
   ConsoleEvent,
   CreateUserSessionBody,
   GetUserSessionResponse,
   PatchUserSessionBody,
+  PostMessageResponse,
+  RunSignoffBody,
+  SessionTreeResponse,
   UserSession,
   UserSessionListItem,
 } from "@agentique-console/shared";
@@ -25,8 +29,13 @@ export class UserSessionService {
   readonly #runner: OrchestratorRunner;
   readonly #interactions: InteractionService;
   readonly #workspaces: WorkspaceService;
-  readonly #archiveAgentSessions: ((userSessionId: string) => void) | undefined;
-  readonly #completion: { schedule(userSessionId: string): void } | undefined;
+  readonly #archiveAgentSessions: (userSessionId: string) => void;
+  readonly #completion: {
+    schedule(userSessionId: string): void;
+    resolve(userSessionId: string, decision: "accept" | "changes", note?: string): void;
+  };
+  readonly #wireAgentSessions: (userSessionId: string) => AgentSession[];
+  readonly #postManagerMessage: (userSessionId: string, text: string) => PostMessageResponse;
 
   constructor(deps: {
     repo: Repo;
@@ -34,8 +43,13 @@ export class UserSessionService {
     runner: OrchestratorRunner;
     interactions: InteractionService;
     workspaces: WorkspaceService;
-    archiveAgentSessions?: (userSessionId: string) => void;
-    completion?: { schedule(userSessionId: string): void };
+    archiveAgentSessions: (userSessionId: string) => void;
+    completion: {
+      schedule(userSessionId: string): void;
+      resolve(userSessionId: string, decision: "accept" | "changes", note?: string): void;
+    };
+    wireAgentSessions: (userSessionId: string) => AgentSession[];
+    postManagerMessage: (userSessionId: string, text: string) => PostMessageResponse;
   }) {
     this.#repo = deps.repo;
     this.#bus = deps.bus;
@@ -44,6 +58,8 @@ export class UserSessionService {
     this.#workspaces = deps.workspaces;
     this.#archiveAgentSessions = deps.archiveAgentSessions;
     this.#completion = deps.completion;
+    this.#wireAgentSessions = deps.wireAgentSessions;
+    this.#postManagerMessage = deps.postManagerMessage;
   }
 
   create(body: CreateUserSessionBody): UserSession {
@@ -143,14 +159,57 @@ export class UserSessionService {
     // mode or model change recycles it so the next message respawns with fresh
     // options. A turn already in flight finishes on what it started with.
     if (changes.lifecycle === "archived") {
-      this.#completion?.schedule(id);
-      this.#archiveAgentSessions?.(id);
+      this.#completion.schedule(id);
+      this.#archiveAgentSessions(id);
       void this.#runner.closeSession(id);
     } else if (changes.mode !== undefined || changes.model !== undefined) {
       this.#runner.recycleSession(id);
     }
     const updated = this.#repo.getUserSession(id);
     return toWireUserSession(updated ?? row);
+  }
+
+  /** Every session in a workspace with its agent sessions — the sidebar's tree. */
+  sessionTree(workspaceId: string): SessionTreeResponse {
+    this.#workspaces.get(workspaceId); // 404s on unknown workspace
+    return this.#repo.listUserSessions(workspaceId).map((row) => ({
+      session: toWireUserSession(row),
+      agentSessions: this.#wireAgentSessions(row.id),
+    }));
+  }
+
+  /**
+   * An operator chat message. A profile-manager session routes to its own
+   * service (which re-arms planning); everything else goes to the runner.
+   */
+  postMessage(id: string, text: string): PostMessageResponse {
+    const row = this.#repo.getUserSession(id);
+    return row?.purpose === "profile_manager"
+      ? this.#postManagerMessage(id, text)
+      : this.#runner.postOperatorMessage(id, text);
+  }
+
+  /**
+   * The operator's verdict on a proposed run completion. Conflicts (no pending
+   * proposal) surface from the completion service; the fresh session row is
+   * the response.
+   */
+  signoff(id: string, body: RunSignoffBody): UserSession {
+    this.#completion.resolve(id, body.decision, body.note);
+    return this.get(id).session;
+  }
+
+  /**
+   * A stale plan approval still ends the planning gate — the same transition
+   * the live approval path makes inside `canUseTool`.
+   */
+  beginExecuting(id: string): void {
+    this.#repo.patchUserSession(id, { phase: "executing" });
+    this.#bus.append({
+      type: "user_session.updated",
+      userSessionId: id,
+      payload: { userSessionId: id, patch: { phase: "executing" } },
+    });
   }
 
   async transcript(id: string): Promise<ConsoleEvent[]> {
