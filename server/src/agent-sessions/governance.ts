@@ -12,7 +12,7 @@ import type { DecisionLedger } from "../orchestrator/decisions.ts";
 import type { InteractionService } from "../orchestrator/interactions.ts";
 import type { TaskService } from "../tasks/service.ts";
 import type { HandoffService } from "../handoffs/service.ts";
-import { consoleTaskListId } from "../orchestrator/tools.ts";
+import { consoleTaskListId } from "../tasks/service.ts";
 import { MAIN_RECIPIENT } from "./peer-names.ts";
 
 export type Category = MailboxDeliveryRow["category"];

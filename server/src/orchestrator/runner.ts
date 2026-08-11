@@ -24,6 +24,8 @@ import type { EventBus } from "../events/bus.ts";
 import { RuntimeBroadcaster } from "../events/runtime.ts";
 import { newId, nowIso } from "../ids.ts";
 import { rotationTokenLimit } from "../model-catalog.ts";
+import { CHECKPOINT_DENIED_TOOLS, recoveryAction } from "../lane-runtime/checkpoint.ts";
+import { rotationDue } from "../lane-runtime/rotation.ts";
 import { InvalidInputError, ConflictError, NotFoundError } from "../errors.ts";
 import { mapSdkMessage } from "../sdk/mapping.ts";
 import type {
@@ -903,7 +905,11 @@ export class OrchestratorRunner {
     const session = this.#deps.repo.getUserSession(sessionId);
     if (!session) return;
     const tokenLimit = rotationTokenLimit(this.#deps.config.contextTokenLimit, this.#modelFor(session));
-    if (session.sdkTurnCount < this.#deps.config.contextTurnLimit && session.contextTokens < tokenLimit) return;
+    const due = rotationDue({
+      turnCount: session.sdkTurnCount, contextTokens: session.contextTokens,
+      turnLimit: this.#deps.config.contextTurnLimit, tokenLimit,
+    });
+    if (!due) return;
     if (lane.query) await this.#closeLane(lane, { interrupt: false });
     const started = Date.now();
     // One ungated model attempt over an always-available floor (mirrors the
@@ -914,7 +920,7 @@ export class OrchestratorRunner {
     let draft = attempted;
     if (!draft) {
       const latest = this.#deps.repo.latestHandoff({ userSessionId: sessionId });
-      draft = latest ? { core: { ...latest.core, action: `Recovery checkpoint: ${latest.core.action}`, status: "needs_verification", risk: "high", requestExpandedContext: true }, extension: latest.extension }
+      draft = latest ? { core: { ...latest.core, action: recoveryAction(latest.core.action), status: "needs_verification", risk: "high", requestExpandedContext: true }, extension: latest.extension }
         : { core: { schemaVersion: 1, taskId: null, status: "needs_verification", risk: "high", action: "Recover orchestrator context",
           state: { summary: "The checkpoint query failed. Reconstruct from operator messages, task ledger, repository, provider journal, and AgentSession handoffs.", evidence: [] },
           result: { summary: null, artifacts: [] }, uncertainty: [failure ?? "no valid checkpoint output"], nextAction: "Verify authoritative state before acting.", requestExpandedContext: true },
@@ -937,7 +943,7 @@ export class OrchestratorRunner {
     this.#deps.repo.patchUserSession(sessionId, { sdkSessionId: null, sdkGeneration: session.sdkGeneration + 1, sdkTurnCount: 0, contextTokens: 0, latestHandoffId: prepared.row.id, cumulativeCostUsd: 0, cumulativeApiDurationMs: 0 });
     this.#deps.bus.append({ type: "user_session.context.rotated", userSessionId: sessionId,
       payload: { sessionId, generation: session.sdkGeneration + 1,
-        reason: session.contextTokens >= Math.ceil(tokenLimit * 0.75) ? "token_limit" : "turn_limit",
+        reason: due.reason,
         handoffId: prepared.row.id, checkpointBytes: prepared.row.bytes, degraded } });
     this.#deps.bus.append({ type: "user_session.runtime", userSessionId: sessionId,
       payload: { sessionId, detail: `checkpoint ${prepared.row.id} completed in ${Date.now() - started}ms` } });
@@ -955,7 +961,7 @@ export class OrchestratorRunner {
     const query = sdk.query({ prompt: `Create a lossless rotation checkpoint for the next orchestrator context. Preserve operator intent, decisions, delegated work, verified evidence pointers, uncertainty, and exact next actions. Do not perform work or call tools.${promptSuffix}`, options: {
       cwd: this.#deps.getWorkspaceRoot(session.workspaceId), systemPrompt: { type: "preset", preset: "claude_code", append: "Checkpoint faithfully. Repository files, task ledger, artifacts, and provider journal are authoritative; do not invent corrections." },
       settingSources: [], includePartialMessages: false, permissionMode: "plan", allowedTools: [],
-      disallowedTools: ["Agent", "SendMessage", "Task", "Bash", "Edit", "Write", "WebSearch", "WebFetch"],
+      disallowedTools: CHECKPOINT_DENIED_TOOLS,
       outputFormat: { type: "json_schema", schema: HANDOFF_DRAFT_JSON_SCHEMA }, maxTurns: 2,
       sandbox: { enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: false, allowUnsandboxedCommands: false,
         filesystem: { allowManagedReadPathsOnly: true, allowRead: [this.#deps.getWorkspaceRoot(session.workspaceId)], allowWrite: [] } },

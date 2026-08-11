@@ -5,28 +5,21 @@
  * checked and journaled, like every other transfer in the system.
  */
 import { z } from "zod";
-import { MAIN_RECIPIENT, ORCHESTRATOR_SEAT, type AgentSessionHost } from "../agent-sessions/host.ts";
+import type { AgentSessionHost } from "../agent-sessions/host.ts";
+import { MAIN_RECIPIENT, ORCHESTRATOR_SEAT } from "../agent-sessions/peer-names.ts";
 import type { EventBus } from "../events/bus.ts";
 import type { Repo } from "../db/repo.ts";
 import { NotFoundError } from "../errors.ts";
 import { newId } from "../ids.ts";
-import { pageTail } from "../paging.ts";
+import { PAGE_DEFAULT_BYTES, PAGE_MAX_BYTES, pageTail } from "../paging.ts";
 import type { ConsoleSdk, SdkToolResult } from "../sdk/types.ts";
 import type { TaskService } from "../tasks/service.ts";
 import { PATTERN_IDS, type HandoffDraft, type PatternId } from "@agentique-console/shared";
 import type { HandoffService } from "../handoffs/service.ts";
 import { EvidenceRefSchema, HandoffCoreSchema, HandoffDraftSchema } from "../handoffs/schema.ts";
 
-/**
- * Console-owned tasks are keyed by a synthetic SDK-session id: the
- * sub-orchestrator is a subagent with no SDK session of its own, and the
- * synthetic key keeps its list disjoint from every hook-mirrored one.
- */
-export function consoleTaskListId(agentSessionId: string): string {
-  return `console:${agentSessionId}:${ORCHESTRATOR_SEAT}`;
-}
-
 import { fail, guarded, ok } from "../sdk/tool-result.ts";
+import { consoleTaskListId } from "../tasks/service.ts";
 
 export interface ConsoleToolsInput {
   sdk: ConsoleSdk;
@@ -279,7 +272,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
     sdk.tool(
       "read_handoff",
       "Retrieve one lossless handoff section using bounded cursor pagination.",
-      { handoffId: z.string(), section: z.enum(["core", "extension"]).default("core"), cursor: z.string().optional(), maxBytes: z.number().int().min(1).max(32 * 1024).default(8 * 1024) },
+      { handoffId: z.string(), section: z.enum(["core", "extension"]).default("core"), cursor: z.string().optional(), maxBytes: z.number().int().min(1).max(PAGE_MAX_BYTES).default(PAGE_DEFAULT_BYTES) },
       async (args: { handoffId: string; section: "core" | "extension"; cursor?: string; maxBytes: number }) => guarded(() => handoffs.read(args.handoffId, args.section, args.cursor, args.maxBytes)),
     ),
 
@@ -310,7 +303,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         afterSeq: z.number().int().optional(),
         limit: z.number().int().optional(),
         cursor: z.string().optional(),
-        maxBytes: z.number().int().min(1).max(32 * 1024).default(8 * 1024),
+        maxBytes: z.number().int().min(1).max(PAGE_MAX_BYTES).default(PAGE_DEFAULT_BYTES),
       },
       async (args: {
         agentSessionId: string;

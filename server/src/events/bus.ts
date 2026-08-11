@@ -51,6 +51,9 @@ function matches(event: ConsoleEvent, selector: EventSelector): boolean {
   return true;
 }
 
+/** Inline JSON cap before a payload spills to the artifact store. One owner; sdk/mapping.ts imports it. */
+export const INLINE_JSON_CAP_BYTES = 16_384;
+
 export class EventBus {
   readonly #db: Db;
   readonly #subscribers = new Set<Subscriber>();
@@ -72,9 +75,9 @@ export class EventBus {
     let serialized: string;
     try { serialized = JSON.stringify(value) ?? "null"; } catch { serialized = JSON.stringify({ unserializable: true }); }
     const bytes = Buffer.byteLength(serialized);
-    if (serialized.length <= 16_384) return { value, bytes };
+    if (serialized.length <= INLINE_JSON_CAP_BYTES) return { value, bytes };
     const artifact = this.storeArtifact(serialized, "application/json", scope);
-    return { value: { truncated: true, preview: serialized.slice(0, 16_384), ...artifact }, bytes };
+    return { value: { truncated: true, preview: serialized.slice(0, INLINE_JSON_CAP_BYTES), ...artifact }, bytes };
   }
 
   storeArtifact(content: string, mediaType: string, scope: { workspaceId?: string; userSessionId?: string; agentSessionId?: string } = {}): { artifactId: string; bytes: number } {

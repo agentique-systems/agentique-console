@@ -30,7 +30,10 @@ import type { TaskService } from "../tasks/service.ts";
 import type { HandoffService } from "../handoffs/service.ts";
 import { HANDOFF_DRAFT_JSON_SCHEMA, HandoffDraftSchema } from "../handoffs/schema.ts";
 import type { ReapResult } from "../completion/summary.ts";
-import { CHILD_SENDER_PREFIX, CONSOLE_SENDER } from "./peer-names.ts";
+import { CHILD_SENDER_PREFIX, CONSOLE_SENDER, MAIN_RECIPIENT, ORCHESTRATOR_SEAT } from "./peer-names.ts";
+import { CHECKPOINT_DENIED_TOOLS, recoveryAction } from "../lane-runtime/checkpoint.ts";
+import { rotationDue, type RotationReason } from "../lane-runtime/rotation.ts";
+import { isTransportFailure } from "../sdk/failure-classifier.ts";
 import {
   finalReportBlockers,
   finalReportCaveats,
@@ -42,15 +45,13 @@ import {
 } from "./governance.ts";
 import { buildSeatTools, type AskOperatorArgs } from "./seat-tools.ts";
 import { ok } from "../sdk/tool-result.ts";
-import { compileContract, contractOfSession, hubContract, roleOfSeat, RESERVED_NAMES, SEAT_NAME_RE, type CompiledContract } from "./topology.ts";
+import { compileContract, contractOfSession, hubContract, roleOfSeat, speakerKindOf, RESERVED_NAMES, SEAT_NAME_RE, type CompiledContract } from "./topology.ts";
 import { grantedTools, runtimeToolNames, type SeatToolName } from "./grants.ts";
 import { dispatchWorkItems, onPatternPost, sweep as patternSweep, type DispatchWorkItemsInput, type PatternContext } from "./patterns/progression.ts";
 import { buildContract } from "./patterns/catalog.ts";
 import { mergeHooks } from "../sdk/hooks.ts";
 import { AsyncQueue } from "../async-queue.ts";
 
-export const ORCHESTRATOR_SEAT = "orchestrator";
-export const MAIN_RECIPIENT = "main";
 export { WithheldFinalError } from "./governance.ts";
 const MATERIAL_CATEGORIES = new Set(["milestone", "failure", "final", "decision"]);
 
@@ -86,24 +87,6 @@ const GOVERNED_BUILTIN_TOOLS = [
   "WebFetch", "WebSearch",
 ] as const;
 
-/** Rotation-recovery prefix, applied at most once (it used to accrete). */
-const RECOVERY_PREFIX = "Recovery checkpoint: ";
-function recoveryAction(action: string): string {
-  return action.startsWith(RECOVERY_PREFIX) ? action : `${RECOVERY_PREFIX}${action}`;
-}
-
-/**
- * The request never reached the model, so nothing about the seat's context is
- * suspect. Broadened beyond 4xx: a DNS or connection error is even more
- * clearly transport, and db-live-2's three destroyed turns were all
- * `getaddrinfo ENOTIMP api.anthropic.com`.
- */
-function isTransportFailure(failure: string | null): boolean {
-  if (failure === null) return false;
-  return /API Error: 4\d\d/.test(failure)
-    || /\b(ENOTIMP|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN)\b/.test(failure)
-    || /Connection error|Unable to connect to API/i.test(failure);
-}
 
 /** Seat names may contain chars git refs forbid; branch components drop them. */
 function branchSafe(name: string): string {
@@ -989,7 +972,7 @@ export class AgentSessionHost {
     try {
       this.post({
         agentSessionId,
-        speaker: { kind: this.#deps.repo.getParticipant(agentSessionId, voiceSeat)?.role === "orchestrator" ? "orchestrator" : "agent", name: voiceSeat },
+        speaker: { kind: speakerKindOf(this.#deps.repo.getParticipant(agentSessionId, voiceSeat)), name: voiceSeat },
         to: MAIN_RECIPIENT,
         handoff: this.#simpleHandoff(
           "Operator answered; the withheld final can now be sent",
@@ -1866,7 +1849,7 @@ export class AgentSessionHost {
       } catch {
         draft = this.#simpleHandoff("Turn failed", "failed", reason, "Inspect the failure and retry or reassign.");
       }
-      this.post({ agentSessionId: session.id, speaker: { kind: seat?.role === "orchestrator" ? "orchestrator" : "agent", name: seatName }, to: target,
+      this.post({ agentSessionId: session.id, speaker: { kind: speakerKindOf(seat), name: seatName }, to: target,
         handoff: draft, category: "failure", turnId: turn.turnId });
     }
     // Error settles already reached the collector above (escalateTo IS the
@@ -1879,7 +1862,7 @@ export class AgentSessionHost {
     if (status === "completed" && profile && lane.assignmentTurns >= profile.maxTurns + 1 && !lane.turnBudgetNotified && repo.getAgentSession(session.id)?.status === "open") {
       lane.turnBudgetNotified = true;
       const target = this.#escalationTarget(session, seatName);
-      this.post({ agentSessionId: session.id, speaker: { kind: seat?.role === "orchestrator" ? "orchestrator" : "agent", name: seatName }, to: target,
+      this.post({ agentSessionId: session.id, speaker: { kind: speakerKindOf(seat), name: seatName }, to: target,
         handoff: this.#simpleHandoff("Turn budget exhausted", "blocked",
           `${seatName} has spent ${lane.assignmentTurns - 1} turns on the current assignment (budget ${profile.maxTurns}).`,
           "Refocus, reassign, or explicitly continue the work."), category: "failure", turnId: turn.turnId });
@@ -1983,7 +1966,11 @@ export class AgentSessionHost {
     const seat = repo.getParticipant(agentSessionId, seatName);
     if (!session || session.status !== "open" || !seat) return;
     const tokenLimit = rotationTokenLimit(config.contextTokenLimit, seat.model ?? config.model);
-    if (seat.turnCount < config.contextTurnLimit && seat.contextTokens < tokenLimit) return;
+    const due = rotationDue({
+      turnCount: seat.turnCount, contextTokens: seat.contextTokens,
+      turnLimit: config.contextTurnLimit, tokenLimit,
+    });
+    if (!due) return;
     lane.state = "rotating";
     lane.rotationGate = new Promise((resolve) => { lane.releaseRotation = resolve; });
     try {
@@ -1992,7 +1979,7 @@ export class AgentSessionHost {
       lane.query?.close?.(); lane.query = null;
       await closing?.catch(() => undefined);
       const sdk = await this.#deps.sdk();
-      const rotated = await this.#rotateNow(session, repo.getParticipant(agentSessionId, seatName) ?? seat, sdk, tokenLimit);
+      const rotated = await this.#rotateNow(session, repo.getParticipant(agentSessionId, seatName) ?? seat, sdk, due.reason);
       this.#spawnSeat(session, rotated, lane);
       await lane.ready;
     } finally {
@@ -2253,7 +2240,7 @@ export class AgentSessionHost {
    * (db-live-1's 13/13 checkpoint 400s) that was a schema bug, fixed and
    * pinned by assertProviderToolSchema — and it never fired live.
    */
-  async #rotateNow(session: AgentSessionRow, seat: ParticipantRow, sdk: ConsoleSdk, tokenLimit: number): Promise<ParticipantRow> {
+  async #rotateNow(session: AgentSessionRow, seat: ParticipantRow, sdk: ConsoleSdk, reason: RotationReason): Promise<ParticipantRow> {
     const config = this.#deps.config;
     if (!config || !this.#deps.handoffs) return seat;
     const started = Date.now();
@@ -2277,7 +2264,7 @@ export class AgentSessionHost {
     const fresh = this.#deps.repo.getParticipant(session.id, seat.name) ?? seat;
     this.#deps.bus.append({ type: "agent_session.context.rotated", userSessionId: session.userSessionId, agentSessionId: session.id,
       payload: { agentSessionId: session.id, participant: seat.name, generation: seat.generation + 1,
-        reason: seat.contextTokens >= Math.ceil(tokenLimit * 0.75) ? "token_limit" : "turn_limit",
+        reason,
         handoffId: prepared.row.id, checkpointBytes: prepared.row.bytes, degraded } });
     this.#deps.bus.append({ type: "agent_session.runtime", userSessionId: session.userSessionId, agentSessionId: session.id,
       payload: { agentSessionId: session.id, participant: seat.name, detail: `checkpoint ${prepared.row.id} completed in ${Date.now() - started}ms` } });
@@ -2302,7 +2289,7 @@ export class AgentSessionHost {
     const query = sdk.query({ prompt: `Create a lossless rotation checkpoint for your successor context. Capture only durable task state, verified evidence pointers, results, uncertainty, and the exact next action. Do not perform work or call tools.${promptSuffix}`, options: {
       cwd: checkpointRoot, systemPrompt: { type: "preset", preset: "claude_code", append: "You are checkpointing your own context. Report faithfully; do not correct or embellish uncertain state." },
       settingSources: [], includePartialMessages: false, permissionMode: "plan", allowedTools: [],
-      disallowedTools: ["Agent", "SendMessage", "Task", "Bash", "Edit", "Write", "WebSearch", "WebFetch"],
+      disallowedTools: CHECKPOINT_DENIED_TOOLS,
       // MUST be object-rooted: the CLI turns this into a synthetic
       // `StructuredOutput` tool and ships it verbatim as input_schema, and the
       // API rejects anything whose root `type` is not the string "object".
@@ -2366,7 +2353,7 @@ export class AgentSessionHost {
 
   #recordNarration(session: AgentSessionRow, participant: string, text: string, turnId: string): void {
     const seatRow = this.#deps.repo.getParticipant(session.id, participant);
-    const row = this.#deps.repo.appendMessage({ sessionKind: "agent", sessionId: session.id, speaker: { kind: seatRow?.role === "orchestrator" ? "orchestrator" : "agent", name: participant }, kind: "notice", text, turnId, payload: { channel: "model_output" } });
+    const row = this.#deps.repo.appendMessage({ sessionKind: "agent", sessionId: session.id, speaker: { kind: speakerKindOf(seatRow), name: participant }, kind: "notice", text, turnId, payload: { channel: "model_output" } });
     this.#deps.bus.append({ type: "agent_session.message", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { agentSessionId: session.id, message: toWireMessage(row) } });
   }
 
@@ -2485,7 +2472,7 @@ export class AgentSessionHost {
     this.#deps.bus.append({ type: "agent_session.unreported", userSessionId: session.userSessionId, agentSessionId: session.id,
       payload: { agentSessionId: session.id, seatReports: seatReports.length, hadCoordinatorReport: coordinator !== undefined } });
     try {
-      this.post({ agentSessionId: session.id, speaker: { kind: repo.getParticipant(session.id, voiceSeat)?.role === "orchestrator" ? "orchestrator" : "agent", name: voiceSeat }, to: MAIN_RECIPIENT,
+      this.post({ agentSessionId: session.id, speaker: { kind: speakerKindOf(repo.getParticipant(session.id, voiceSeat)), name: voiceSeat }, to: MAIN_RECIPIENT,
         handoff: this.#simpleHandoff("AgentSession went idle without a final report", "needs_verification", summary,
           "Review the seat reports above and decide whether the work is complete."), category: "milestone" });
     } catch (error) { this.#recordHostFailure(session.id, error); }

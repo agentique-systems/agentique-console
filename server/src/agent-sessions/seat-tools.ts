@@ -17,8 +17,9 @@ import type { WorktreeManager } from "../runtime/worktree-manager.ts";
 import type { TaskService } from "../tasks/service.ts";
 import type { HandoffService } from "../handoffs/service.ts";
 import { EvidenceRefSchema, HandoffCoreSchema, HandoffDraftSchema } from "../handoffs/schema.ts";
-import { consoleTaskListId } from "../orchestrator/tools.ts";
-import { pageTail } from "../paging.ts";
+import { consoleTaskListId } from "../tasks/service.ts";
+import { PAGE_DEFAULT_BYTES, PAGE_MAX_BYTES, pageTail } from "../paging.ts";
+import { speakerKindOf } from "./topology.ts";
 import { MAIN_RECIPIENT } from "./peer-names.ts";
 import { resolvedDomains, WithheldFinalError, type Category } from "./governance.ts";
 import type { SeatToolName } from "./grants.ts";
@@ -144,7 +145,7 @@ export function buildSeatTools(ctx: SeatToolsContext): unknown[] {
       let message: MessageRow;
       try {
         const turnId = ctx.currentTurnId();
-        message = ctx.post({ agentSessionId: session.id, speaker: { kind: seat.role === "orchestrator" ? "orchestrator" : "agent", name: seat.name },
+        message = ctx.post({ agentSessionId: session.id, speaker: { kind: speakerKindOf(seat), name: seat.name },
           to: args.to, handoff: draft, category: args.category, ...(args.dedupeKey ? { dedupeKey: args.dedupeKey } : {}),
           ...(turnId ? { turnId } : {}) });
       } catch (error) {
@@ -199,7 +200,7 @@ export function buildSeatTools(ctx: SeatToolsContext): unknown[] {
   // to scanning the filesystem for artifact files that were never on disk.
   tools.push(sdk.tool("read_artifact",
     "Read back an artifact you or a teammate produced (screenshot, diff, captured payload) by its artifact id. Images return as viewable content.",
-    { artifactId: z.string().min(1), cursor: z.string().optional(), maxBytes: z.number().int().min(1).max(32 * 1024).default(8 * 1024) },
+    { artifactId: z.string().min(1), cursor: z.string().optional(), maxBytes: z.number().int().min(1).max(PAGE_MAX_BYTES).default(PAGE_DEFAULT_BYTES) },
     async (args: { artifactId: string; cursor?: string; maxBytes: number }) => {
       const artifact = deps.bus.getArtifact(args.artifactId);
       if (!artifact) return fail(`no artifact ${args.artifactId}`);
@@ -266,7 +267,7 @@ export function buildSeatTools(ctx: SeatToolsContext): unknown[] {
         if (record.metadata.recipient !== seat.name) return fail(`handoff ${args.handoffId} was not addressed to you; forward only what you received`);
         try {
           const message = ctx.post({ agentSessionId: session.id,
-            speaker: { kind: seat.role === "orchestrator" ? "orchestrator" : "agent", name: seat.name },
+            speaker: { kind: speakerKindOf(seat), name: seat.name },
             to: MAIN_RECIPIENT, handoff: { core: record.core, extension: record.extension },
             category: args.category, dedupeKey: `fwd:${record.metadata.id}` });
           return ok({ forwarded: true, messageSeq: message.seq, originalId: record.metadata.id, originalSender: record.metadata.sender });
@@ -281,7 +282,7 @@ export function buildSeatTools(ctx: SeatToolsContext): unknown[] {
   if (deps.handoffs) {
     tools.push(
       sdk.tool("read_handoff", "Retrieve a lossless handoff section with cursor pagination. Use only when the compact envelope is insufficient.", {
-        handoffId: z.string(), section: z.enum(["core", "extension"]).default("core"), cursor: z.string().optional(), maxBytes: z.number().int().min(1).max(32 * 1024).default(8 * 1024),
+        handoffId: z.string(), section: z.enum(["core", "extension"]).default("core"), cursor: z.string().optional(), maxBytes: z.number().int().min(1).max(PAGE_MAX_BYTES).default(PAGE_DEFAULT_BYTES),
       }, async (args: { handoffId: string; section: "core" | "extension"; cursor?: string; maxBytes: number }) => ok(deps.handoffs?.read(args.handoffId, args.section, args.cursor, args.maxBytes))),
       sdk.tool("report_handoff_discrepancy", "Report a handoff claim contradicted by the repository, task ledger, journal, or artifact. The original evidence stays authoritative.", {
         handoffId: z.string(), claim: z.string().min(1), evidence: z.string().min(1),
@@ -295,7 +296,7 @@ export function buildSeatTools(ctx: SeatToolsContext): unknown[] {
     const processOwner = `${session.id}:${seat.name}`;
     tools.push(
       sdk.tool("process_start", "Start a Console-owned long-running process. Pass an executable and argv separately; cwd must remain in the workspace.", { command: z.string(), args: z.array(z.string()).default([]), cwd: z.string().default(".") }, async (args: { command: string; args: string[]; cwd: string }) => ok(deps.processes?.start(scope, args.command, args.args, args.cwd))),
-      sdk.tool("process_read", "Read new process output, optionally waiting once for a state change. Use waitMs instead of polling. Output is paged tail-first (default 8KiB, newest last); use cursors for more, afterSeq for incremental reads.", { processId: z.string(), afterSeq: z.number().int().default(0), waitMs: z.number().int().min(0).max(60_000).default(0), cursor: z.string().optional(), maxBytes: z.number().int().min(1).max(32 * 1024).default(8 * 1024) }, async (args: { processId: string; afterSeq: number; waitMs: number; cursor?: string; maxBytes: number }) => {
+      sdk.tool("process_read", "Read new process output, optionally waiting once for a state change. Use waitMs instead of polling. Output is paged tail-first (default 8KiB, newest last); use cursors for more, afterSeq for incremental reads.", { processId: z.string(), afterSeq: z.number().int().default(0), waitMs: z.number().int().min(0).max(60_000).default(0), cursor: z.string().optional(), maxBytes: z.number().int().min(1).max(PAGE_MAX_BYTES).default(PAGE_DEFAULT_BYTES) }, async (args: { processId: string; afterSeq: number; waitMs: number; cursor?: string; maxBytes: number }) => {
         const result = await deps.processes?.read(processOwner, args.processId, args.afterSeq, args.waitMs);
         if (!result) return ok(result);
         const text = result.chunks.map((chunk) => `[${chunk.stream} #${chunk.seq}] ${chunk.text}`).join("");
@@ -403,7 +404,7 @@ export function buildSeatTools(ctx: SeatToolsContext): unknown[] {
         url: z.string().min(1).describe("http(s) URL. Loopback, or a host your profile is allowed to reach."),
         method: z.enum(["GET", "HEAD", "POST"]).default("GET"),
         timeoutMs: z.number().int().min(100).max(30_000).default(5_000),
-        maxBytes: z.number().int().min(1).max(32 * 1024).default(8 * 1024),
+        maxBytes: z.number().int().min(1).max(PAGE_MAX_BYTES).default(PAGE_DEFAULT_BYTES),
       },
       async (args: { url: string; method: "GET" | "HEAD" | "POST"; timeoutMs: number; maxBytes: number }) => {
         let parsed: URL;

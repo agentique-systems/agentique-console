@@ -8,6 +8,7 @@
  * so seat transcripts still show the top-level thread only.
  */
 import type { SdkMessage } from "./types.ts";
+import { INLINE_JSON_CAP_BYTES as JSON_CAP_BYTES } from "../events/bus.ts";
 
 export type TurnEvent =
   | { kind: "resume"; resumeId: string; modelId?: string }
@@ -386,7 +387,7 @@ function resultErrorMessage(message: SdkMessage): string {
   }
 }
 
-const JSON_CAP_BYTES = 16_384;
+
 
 /**
  * Size-caps a JSON value for spine persistence. Values whose serialized form

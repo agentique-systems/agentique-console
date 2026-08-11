@@ -48,6 +48,11 @@ export function roleOfSeat(seat: Pick<ParticipantRow, "role" | "patternRole">): 
   return seat.patternRole ?? (seat.role === "orchestrator" ? "coordinator" : "specialist");
 }
 
+/** A seat row's transcript speaker kind; an absent row speaks as an agent. */
+export function speakerKindOf(seat: Pick<ParticipantRow, "role"> | undefined | null): "orchestrator" | "agent" {
+  return seat?.role === "orchestrator" ? "orchestrator" : "agent";
+}
+
 /** Pinned by native-flow.e2e — the route-denial text existing operators know. */
 export const HUB_ROUTE_SUMMARY = "main ↔ coordinator ↔ specialist";
 

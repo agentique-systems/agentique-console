@@ -23,7 +23,7 @@ import type { EventBus } from "../../events/bus.ts";
 import { nowIso } from "../../ids.ts";
 import type { Category } from "../governance.ts";
 import { CONSOLE_SENDER } from "../peer-names.ts";
-import { SEAT_NAME_RE, roleOfSeat } from "../topology.ts";
+import { SEAT_NAME_RE, roleOfSeat, speakerKindOf } from "../topology.ts";
 
 export interface PatternContext {
   deps: { repo: Repo; bus: EventBus; config: Config };
@@ -229,7 +229,7 @@ export function dispatchWorkItems(ctx: PatternContext, session: AgentSessionRow,
     deliverTo: dispatcher.name, expected: seats.map((seat) => seat.name), reports: {}, settled: false };
   repo.upsertPatternState(session.id, { joins: joins as unknown as Record<string, unknown> });
   for (const seat of seats) {
-    ctx.post({ agentSessionId: session.id, speaker: { kind: dispatcher.role === "orchestrator" ? "orchestrator" : "agent", name: dispatcher.name },
+    ctx.post({ agentSessionId: session.id, speaker: { kind: speakerKindOf(dispatcher), name: dispatcher.name },
       to: seat.name, category: "assignment", dedupeKey: `dispatch:${joinId}:${seat.name}`,
       handoff: ctx.simpleHandoff(seat.item.assignment, "pending", seat.item.assignment,
         `Do exactly this item and report the result to ${dispatcher.name} with a terminal status.`) });

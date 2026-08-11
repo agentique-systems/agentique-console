@@ -13,7 +13,7 @@
 import { describe, expect, it } from "vitest";
 import { initMessage, successMessage } from "../sdk/fake.ts";
 import { collectUntil, makeDelegationHarness } from "../test-helpers.ts";
-import { consoleTaskListId } from "../orchestrator/tools.ts";
+import { consoleTaskListId } from "../tasks/service.ts";
 
 const handoff = (action: string, status: "pending" | "completed") => ({ core: { schemaVersion: 1 as const, taskId: null, status, risk: "low" as const,
   action, state: { summary: action, evidence: [] }, result: { summary: status === "completed" ? action : null, artifacts: [] },

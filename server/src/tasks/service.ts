@@ -13,6 +13,15 @@ import { taskDependencies, tasks } from "../db/schema.ts";
 import type { EventBus } from "../events/bus.ts";
 import { newId, nowIso } from "../ids.ts";
 
+/**
+ * The console-owned task list's synthetic SDK-session key. Frozen data format:
+ * persisted in `tasks.sdk_session_id`, so the trailing literal never tracks a
+ * rename.
+ */
+export function consoleTaskListId(agentSessionId: string): string {
+  return `console:${agentSessionId}:orchestrator`;
+}
+
 export interface TaskAttribution {
   workspaceId: string;
   userSessionId: string;

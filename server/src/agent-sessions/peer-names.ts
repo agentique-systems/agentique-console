@@ -42,7 +42,9 @@ function sanitize(part: string): string {
 export const CONSOLE_SENDER = "console";
 
 export function sessionSuffix(sessionId: string): string {
-  return sessionId.slice(3, 9);
+  const sep = sessionId.indexOf("_");
+  const start = sep === -1 ? 0 : sep + 1;
+  return sessionId.slice(start, start + 6);
 }
 
 /** The peer name of the user session's orchestrator lane. */
