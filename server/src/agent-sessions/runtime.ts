@@ -120,7 +120,7 @@ export interface AgentRuntimeDeps {
   transfer: Transfer;
   /** `OperatorSurface.askOperator`, bound to the asking seat's turn. */
   askOperator: (session: AgentSessionRow, seat: AgentRow, args: AskOperatorArgs) => Promise<SdkToolResult>;
-  /** Host-remaining lifecycle/nesting capabilities (the C8 carve's). */
+  /** Lifecycle/nesting capabilities — facade-wired: both post back through the mailroom. */
   createChildSession: (session: AgentSessionRow, controller: AgentRow, input: Parameters<AgentToolsContext["createChildSession"]>[0]) => ReturnType<AgentToolsContext["createChildSession"]>;
   abandonChildSession: (session: AgentSessionRow, controller: AgentRow, childAgentSessionId: string, reason: string) => void;
   dispatchWorkItems: (dispatcherAgent: string, input: DispatchWorkItemsInput) => { joinId: string; agents: string[] };

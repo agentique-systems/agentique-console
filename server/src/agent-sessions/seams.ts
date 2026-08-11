@@ -37,8 +37,8 @@ export interface OperatorWaitRef {
 }
 
 /**
- * Read-only lane facts for modules that must not own lanes. Implemented over
- * the live seat map (the host today, the lane pool after the C6 carve).
+ * Read-only lane facts for modules that must not own lanes. Implemented by
+ * the lane pool over the live seat map.
  */
 export interface LaneActivity {
   /**
@@ -97,7 +97,7 @@ export interface Injector {
   resetAssignmentTurns(agentSessionId: string, recipient: string): void;
 }
 
-/** Nesting's side of the mailroom's main sink (host-owned until that carve). */
+/** Nesting's side of the mailroom's main sink (the NestingBroker). */
 export interface BoundaryBroker {
   /** Re-post a child's material report into its parent (`#crossBoundary`). */
   crossBoundary(child: AgentSessionRow, message: MessageRow, draft: HandoffDraft, category: Category): void;

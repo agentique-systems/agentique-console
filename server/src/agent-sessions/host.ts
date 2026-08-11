@@ -1,19 +1,17 @@
 import type { AgentSessionStatus, ConsoleEvent, GetAgentSessionResponse, HandoffDraft, Interaction, PatternId } from "@agentique-console/shared";
 import fs from "node:fs";
-import { InvalidInputError, ConflictError, NotFoundError } from "../errors.ts";
+import { NotFoundError } from "../errors.ts";
 import type { AgentProfile, AgentProfileRegistry } from "../agent-profiles/registry.ts";
 import type { Config } from "../config.ts";
 import {
   Repo,
   type AgentSessionRow,
-  type MailboxDeliveryRow,
   type MessageRow,
   type AgentRow,
 } from "../db/repo.ts";
 import { toWireAgentSession, toWireMessage } from "../api/wire.ts";
 import type { ArtifactStore } from "../events/artifact-store.ts";
 import type { EventBus } from "../events/bus.ts";
-import { newId, nowIso } from "../ids.ts";
 import type { SqliteSessionStore } from "../sdk/session-store.ts";
 import type { ConsoleSdk } from "../sdk/types.ts";
 import type { ProcessManager } from "../runtime/process-manager.ts";
@@ -25,43 +23,22 @@ import type { AssignmentScheduler } from "../tasks/scheduler.ts";
 import type { TaskService } from "../tasks/service.ts";
 import type { HandoffService } from "../handoffs/service.ts";
 import type { ReapResult } from "../completion/summary.ts";
-import { CHILD_SENDER_PREFIX, CONSOLE_SENDER, MAIN_RECIPIENT, COORDINATOR_AGENT } from "./names.ts";
+import { MAIN_RECIPIENT } from "./names.ts";
 import type { Category } from "./final-gate.ts";
 import { PromptComposer } from "./composer.ts";
-import { roleOfAgent, speakerKindOf, RESERVED_NAMES, AGENT_NAME_RE } from "./topology.ts";
+import { roleOfAgent, speakerKindOf } from "./topology.ts";
 import { SessionRouting } from "./routing.ts";
 import { WorktreeBinding } from "./worktree-binding.ts";
 import { OperatorSurface } from "./operator.ts";
-import { Mailroom, MATERIAL_CATEGORIES, identitySelector, simpleHandoff } from "./mailroom.ts";
-import { AgentLanePool, type ActiveTurn, type AgentLane } from "./lanes.ts";
+import { Mailroom, identitySelector, simpleHandoff } from "./mailroom.ts";
+import { AgentLanePool, type ActiveTurn } from "./lanes.ts";
 import { AgentRuntime } from "./runtime.ts";
+import { SessionLifecycle, type CreateAgentSessionInput } from "./lifecycle.ts";
+import { NestingBroker } from "./nesting.ts";
 import type { TransferInput } from "./seams.ts";
 import { dispatchWorkItems, onPatternPost, sweep as patternSweep, type DispatchWorkItemsInput, type PatternContext } from "./patterns/engine.ts";
-import { buildContract } from "./patterns/catalog.ts";
 
 export { WithheldFinalError } from "./final-gate.ts";
-
-
-export interface CreateAgentSessionInput {
-  userSessionId: string;
-  title: string;
-  /**
-   * Orchestration pattern; omitted = hub_and_spoke. Agent sessions have no
-   * mode/phase of their own: agents always execute; operator-level plan mode
-   * lives on the USER session.
-   */
-  pattern?: PatternId;
-  /** Pattern-specific config, validated by the pattern's builder. */
-  patternConfig?: Record<string, unknown>;
-  /**
-   * Set when a controller agent spawns this as a CHILD session. The child's
-   * "main" traffic then crosses to `controllerAgent` in the parent instead of
-   * waking the runner. One level only — children never get the spawn grant.
-   */
-  parent?: { agentSessionId: string; controllerAgent: string };
-  agents: { name: string; profileId?: string; instructions?: string; model?: string; owns?: string[] }[];
-  briefing?: HandoffDraft;
-}
 
 export interface AgentSessionServiceDeps {
   repo: Repo;
@@ -104,6 +81,10 @@ export class AgentSessionService {
   readonly #lanes: AgentLanePool;
   /** Pump/watchdog/mint/settle over pool lanes; the mailroom's Injector. */
   readonly #runtime: AgentRuntime;
+  /** Session creation and teardown; the boot redrive. */
+  readonly #lifecycle: SessionLifecycle;
+  /** Child-boundary traffic; the mailroom's BoundaryBroker. */
+  readonly #nesting: NestingBroker;
 
   constructor(deps: AgentSessionServiceDeps) {
     this.#deps = deps;
@@ -153,7 +134,7 @@ export class AgentSessionService {
       transfer: (input) => this.post(input),
       simpleHandoff,
       deliver: (agentSessionId, recipient) => this.#mailroom.deliver(agentSessionId, recipient),
-      maybeReleaseParentFinal: (parent) => this.#maybeReleaseParentFinal(parent),
+      maybeReleaseParentFinal: (parent) => this.#nesting.maybeReleaseParentFinal(parent),
       recordFailure: (agentSessionId, error) => this.#recordHostFailure(agentSessionId, error),
       sweepTasks: [() => {
         // The quiet-time stall lives here — it can trip while every lane is
@@ -172,7 +153,7 @@ export class AgentSessionService {
       lanes: this.#lanes, worktree: this.#worktreeBinding, routing: this.#routing, composer: this.#composer,
       transfer: (input) => this.post(input),
       askOperator: (session, seat, args) => this.#operator.askOperator(session, seat, args),
-      createChildSession: (session, controller, input) => this.createSession({
+      createChildSession: (session, controller, input) => this.#lifecycle.createSession({
         userSessionId: session.userSessionId, title: input.title,
         pattern: input.pattern as PatternId,
         ...(input.patternConfig ? { patternConfig: input.patternConfig } : {}),
@@ -180,7 +161,7 @@ export class AgentSessionService {
         agents: input.agents, briefing: input.briefing,
       }),
       abandonChildSession: (session, controller, childAgentSessionId, reason) =>
-        this.abandonChildSession(session.id, controller.name, childAgentSessionId, reason),
+        this.#nesting.abandonChildSession(session.id, controller.name, childAgentSessionId, reason),
       dispatchWorkItems: (dispatcherAgent, input) => this.dispatchWorkItems(dispatcherAgent, input),
       markWorking: (agentSessionId) => this.#operator.setStatus(agentSessionId, "working"),
       hooks: {
@@ -193,6 +174,17 @@ export class AgentSessionService {
         recordFailure: (agentSessionId, error) => this.#recordHostFailure(agentSessionId, error),
       },
     });
+    this.#nesting = new NestingBroker({
+      repo: deps.repo, bus: deps.bus, handoffs: deps.handoffs,
+      routing: this.#routing,
+      transfer: (input) => this.post(input),
+      simpleHandoff,
+      patchDelivery: (session, delivery, status) => this.#mailroom.patchDelivery(session, delivery, status),
+      finalWithheld: (session) => this.#operator.finalWithheld(session),
+      sessionStatus: (row) => this.#operator.statusOf(row),
+      archiveSession: (session) => this.#lifecycle.archiveOne(session),
+      recordFailure: (agentSessionId, error) => this.#recordHostFailure(agentSessionId, error),
+    });
     this.#mailroom = new Mailroom({
       repo: deps.repo, bus: deps.bus, config: deps.config, interactions: deps.interactions,
       decisions: deps.decisions, tasks: deps.tasks, handoffs: deps.handoffs, scheduler: deps.scheduler,
@@ -203,135 +195,32 @@ export class AgentSessionService {
       ensureLive: (agentSessionId, seat) => this.ensureSeatLive(agentSessionId, seat),
       injector: this.#runtime,
       sessionStatus: (row) => this.#operator.statusOf(row),
-      boundary: {
-        crossBoundary: (child, message, draft, category) => this.#crossBoundary(child, message, draft, category),
-        maybeReleaseParentFinal: (parent) => this.#maybeReleaseParentFinal(parent),
-      },
+      boundary: this.#nesting,
       onPatternPost: (session, hop) => onPatternPost(this.#patternCtx(), session, hop),
+      recordFailure: (agentSessionId, error) => this.#recordHostFailure(agentSessionId, error),
+    });
+    this.#lifecycle = new SessionLifecycle({
+      repo: deps.repo, bus: deps.bus, config: deps.config, profiles: deps.profiles,
+      getWorkspaceRoot: deps.getWorkspaceRoot,
+      processes: deps.processes, browsers: deps.browsers, worktrees: deps.worktrees,
+      routing: this.#routing, lanes: this.#lanes, worktree: this.#worktreeBinding,
+      transfer: (input) => this.post(input),
+      snapshotProfile: (profile) => this.#runtime.snapshotProfile(profile),
+      patchDelivery: (session, delivery, status) => this.#mailroom.patchDelivery(session, delivery, status),
+      deliver: (agentSessionId, recipient) => this.#mailroom.deliver(agentSessionId, recipient),
+      redriveChildBoundary: (session, delivery) => this.#nesting.redriveChildBoundary(session, delivery),
+      forgetOperator: (agentSessionId) => this.#operator.forget(agentSessionId),
       recordFailure: (agentSessionId, error) => this.#recordHostFailure(agentSessionId, error),
     });
   }
 
   createSession(input: CreateAgentSessionInput): { agentSessionId: string; agents: string[]; entryAgent: string; coordinatorName?: string } {
-    const { repo, bus } = this.#deps;
-    const user = repo.getUserSession(input.userSessionId);
-    if (!user) throw new NotFoundError(`no user session ${input.userSessionId}`);
-    // The pattern builder owns roster bounds, role assignment, prompts and
-    // wiring; the host only executes what comes out.
-    const build = buildContract(input.pattern ?? "hub_and_spoke", {
-      agents: input.agents, config: input.patternConfig,
-      resolveProfile: (id) => this.#profile(id, user.workspaceId),
-    });
-    let parentRow: AgentSessionRow | null = null;
-    if (input.parent) {
-      parentRow = repo.getAgentSession(input.parent.agentSessionId) ?? null;
-      if (!parentRow || parentRow.lifecycle !== "open") throw new InvalidInputError(`parent session ${input.parent.agentSessionId} is not open`);
-      if (parentRow.parentAgentSessionId !== null) throw new InvalidInputError("a child session cannot spawn children of its own — one level of nesting only");
-      if (parentRow.userSessionId !== input.userSessionId) throw new InvalidInputError("a child session belongs to its parent's run");
-      const openChildren = repo.listChildSessions(parentRow.id).filter((child) => child.lifecycle === "open");
-      if (openChildren.length >= this.#deps.config.policy.maxChildSessionsPerParent) {
-        throw new InvalidInputError(`parent already has ${openChildren.length} open child session(s); finish or abandon one first (cap ${this.#deps.config.policy.maxChildSessionsPerParent})`);
-      }
-    }
-    const names = new Set<string>();
-    for (const agent of input.agents) {
-      if (!AGENT_NAME_RE.test(agent.name) || RESERVED_NAMES.has(agent.name.toLowerCase()) || agent.name.toLowerCase().startsWith(CHILD_SENDER_PREFIX)) throw new InvalidInputError(`invalid or reserved agent name \"${agent.name}\"`);
-      if (names.has(agent.name)) throw new InvalidInputError(`duplicate agent name \"${agent.name}\"`);
-      names.add(agent.name);
-    }
-    // Ownership is mandatory for an agent that WRITES, and optional for one
-    // that does not. Deliberately NOT symmetric: a read-only agent may still
-    // declare a scope, because `owns` doubles as the assignment/review
-    // boundary for agents that never write.
-    for (const agent of input.agents) {
-      const profile = this.#profile(agent.profileId ?? "explorer", user.workspaceId);
-      const writes = profile.tools.includes("Edit") || profile.tools.includes("Write");
-      if (writes && (agent.owns ?? []).filter((scope) => scope.trim() !== "").length === 0) {
-        throw new InvalidInputError(`agent "${agent.name}" (${profile.id}) writes files, so it must declare what it owns`);
-      }
-    }
-    const ownedScopes = new Map<string, string>();
-    if (parentRow) {
-      // Cross-tree disjointness: parent-tree agents and this child's agents
-      // all merge worktrees into ONE workspace, so their write scopes must not
-      // collide any more than sibling agents' may.
-      const treeSessions = [parentRow, ...repo.listChildSessions(parentRow.id).filter((child) => child.lifecycle === "open")];
-      for (const treeSession of treeSessions) {
-        for (const seat of repo.listAgents(treeSession.id)) {
-          if ((seat.profileSnapshot as AgentProfile | undefined)?.exemptFromOwnership === true) continue;
-          for (const scope of seat.ownership) {
-            const normalized = scope.trim(); if (!normalized) continue;
-            ownedScopes.set(normalized, `${seat.name} (in ${treeSession.id})`);
-          }
-        }
-      }
-    }
-    for (const agent of input.agents) {
-      if (this.#profile(agent.profileId ?? "explorer", user.workspaceId).exemptFromOwnership) continue;
-      for (const scope of agent.owns ?? []) {
-        const normalized = scope.trim(); if (!normalized) continue;
-        const owner = ownedScopes.get(normalized);
-        if (owner) throw new InvalidInputError(`ownership scope \"${normalized}\" is assigned to both ${owner} and ${agent.name}`);
-        ownedScopes.set(normalized, agent.name);
-      }
-    }
-    // Worktree isolation needs a repository; ensured at session creation, not
-    // lazily at agent spawn.
-    this.#worktreeBinding.ensureWorkspaceRepo(user.workspaceId, input.userSessionId);
-    const title = input.title.trim();
-    if (!title) throw new InvalidInputError("a session title is required");
-    const parent = repo.getUserSession(input.userSessionId);
-    if (!parent) throw new InvalidInputError("unknown user session");
-    // The run's baseline for "what was built": HEAD at the first delegation.
-    // The Run Summary diffs the working tree against this.
-    if (parent.runBaseCommit === null && this.#deps.worktrees && this.#deps.getWorkspaceRoot) {
-      try {
-        const root = this.#deps.getWorkspaceRoot(user.workspaceId);
-        repo.patchUserSession(input.userSessionId, { runBaseCommit: this.#deps.worktrees.headCommit(root) });
-      } catch { /* not a repo — the summary falls back to handoff claims */ }
-    }
-    const now = nowIso();
-    const contract = build.contract;
-    const row: AgentSessionRow = {
-      id: newId("as"), userSessionId: input.userSessionId, title,
-      lifecycle: "open", createdAt: now, updatedAt: now,
-      pattern: contract.pattern, topology: contract as unknown as Record<string, unknown>,
-      parentAgentSessionId: parentRow?.id ?? null,
-      parentControllerAgent: parentRow ? input.parent!.controllerAgent : null,
-      depth: parentRow ? 1 : 0,
-    };
-    repo.insertAgentSession(row);
-    if (parentRow) {
-      bus.append({ type: "agent_session.child.spawned", userSessionId: row.userSessionId, agentSessionId: parentRow.id,
-        payload: { agentSessionId: parentRow.id, childAgentSessionId: row.id, pattern: row.pattern,
-          byAgent: input.parent!.controllerAgent, title } });
-    }
-    for (const plan of build.agents) {
-      const profile = this.#runtime.snapshotProfile(this.#profile(plan.profileId, parent.workspaceId));
-      repo.insertAgent(this.#agentRow(row.id, plan.name, plan.role, profile, plan.instructions ?? "", plan.model, plan.owns, plan.ord, now));
-    }
-    const specialists = input.agents.map((agent) => agent.name);
-    bus.append({ type: "agent_session.created", userSessionId: row.userSessionId, agentSessionId: row.id,
-      payload: { session: toWireAgentSession(row, specialists, false), agents: specialists } });
-    bus.append({ type: "agent_session.delegation.sent", userSessionId: row.userSessionId, agentSessionId: row.id,
-      payload: { userSessionId: row.userSessionId, agentSessionId: row.id, kind: "created", preview: title } });
-    const entry = this.#routing.contractOf(row).contract.entry;
-    const entrySeats = this.#routing.agentsOfRole(row.id, entry.role);
-    if (input.briefing) {
-      for (const seat of entry.broadcast ? entrySeats : entrySeats.slice(0, 1)) {
-        this.post({ agentSessionId: row.id, speaker: { kind: "orchestrator", name: MAIN_RECIPIENT }, to: seat.name, handoff: input.briefing, category: "assignment" });
-      }
-    }
-    return { agentSessionId: row.id, agents: specialists, entryAgent: entrySeats[0]?.name ?? COORDINATOR_AGENT,
-      ...(build.coordinatorName !== undefined ? { coordinatorName: build.coordinatorName } : {}) };
+    return this.#lifecycle.createSession(input);
   }
 
   /** The agent main steers: the contract entry role's first agent. */
   entryAgent(agentSessionId: string): string {
-    const session = this.#deps.repo.getAgentSession(agentSessionId);
-    if (!session) throw new NotFoundError(`no agent session ${agentSessionId}`);
-    const entry = this.#routing.contractOf(session).contract.entry;
-    return this.#routing.agentsOfRole(agentSessionId, entry.role)[0]?.name ?? COORDINATOR_AGENT;
+    return this.#lifecycle.entryAgent(agentSessionId);
   }
 
   /** The ONE transfer path — `Mailroom.post`; kept public as the facade every service and tool posts through. */
@@ -396,7 +285,7 @@ export class AgentSessionService {
 
   /** Whole-session stop (archive/shutdown): every lane closes hard. */
   interrupt(agentSessionId: string): void {
-    this.#lanes.closeAllForSession(agentSessionId);
+    this.#lifecycle.interrupt(agentSessionId);
   }
 
   /** Scoped stop: abort one specialist's in-flight turn (`AgentRuntime.interruptAgent`). */
@@ -405,111 +294,26 @@ export class AgentSessionService {
   }
 
   async closeAll(): Promise<void> {
-    await this.#lanes.closeAll();
+    await this.#lifecycle.closeAll();
   }
 
-  /**
-   * Release every runtime resource this run holds, WITHOUT archiving anything
-   * and WITHOUT touching worktrees. It stops short of archival because the
-   * operator may ask for changes: agents respawn lazily over their retained
-   * provider sessions, and a worktree destroyed here could not be merged
-   * afterwards. Returns what it killed, so the summary can state it.
-   */
+  /** Runtime-resource release without archival (`SessionLifecycle.reapForUserSession`). */
   reapForUserSession(userSessionId: string): ReapResult {
-    const processes: ReapResult["processes"] = [];
-    let browsers = 0;
-    for (const session of this.#deps.repo.listAgentSessions(userSessionId)) {
-      if (session.lifecycle !== "open") continue;
-      for (const seat of this.#deps.repo.listAgents(session.id)) {
-        for (const killed of this.#deps.processes?.stopAgent(session.id, seat.name) ?? []) {
-          processes.push({ agentSessionId: session.id, agent: seat.name, processId: killed.processId, pid: killed.pid });
-        }
-        void this.#deps.browsers?.closeAgent(`${session.id}:${seat.name}`)
-          .then((closed) => { if (closed) browsers += 1; })
-          .catch(() => undefined);
-      }
-    }
-    // Processes the JOURNAL says are still running: started with no matching
-    // exit. Counted separately from what we just killed, because a non-zero
-    // figure here means something outlived its own bookkeeping.
-    const started = new Map<string, string>();
-    for (const event of this.#deps.repo.listProcessEvents(userSessionId)) {
-      if (event.type === "agent_session.process.started") started.set(event.processId, event.processId);
-      if (event.type === "agent_session.process.exited") started.delete(event.processId);
-    }
-    return { processes, browsers, leakedBefore: started.size };
+    return this.#lifecycle.reapForUserSession(userSessionId);
   }
 
   archiveForUserSession(userSessionId: string): void {
-    this.reapForUserSession(userSessionId);
-    // Children first (they sort newer), so a child's cancelled deliveries can
-    // never race its parent's teardown. Children share the userSessionId, so
-    // the flat list covers the whole tree by construction.
-    const open = this.#deps.repo.listAgentSessions(userSessionId)
-      .filter((session) => session.lifecycle === "open")
-      .sort((a, b) => b.depth - a.depth);
-    for (const session of open) this.#archiveOne(session);
+    this.#lifecycle.archiveForUserSession(userSessionId);
   }
 
-  #archiveOne(session: AgentSessionRow): void {
-    this.interrupt(session.id);
-    this.#deps.processes?.stopSession(session.id);
-    void this.#deps.browsers?.closeSession(session.id);
-    this.#worktreeBinding.removeForSession(session);
-    for (const delivery of this.#deps.repo.listActiveDeliveries(session.id)) this.#mailroom.patchDelivery(session, delivery, "cancelled");
-    this.#deps.repo.patchAgentSession(session.id, { lifecycle: "archived" });
-    this.#forget(session.id);
-    this.#deps.bus.append({ type: "agent_session.status.changed", userSessionId: session.userSessionId, agentSessionId: session.id,
-      payload: { agentSessionId: session.id, status: "archived" } });
-  }
-
-  /** The ONE cleanup point for every per-session in-memory structure. */
-  #forget(agentSessionId: string): void {
-    this.#lanes.forget(agentSessionId);
-    this.#operator.forget(agentSessionId);
-    this.#routing.forget(agentSessionId);
-  }
-
-  /**
-   * Boot sweep: children whose parent is archived or gone can never report to
-   * anyone.
-   */
+  /** Boot sweep: orphaned children can never report (`NestingBroker.archiveOrphanChildren`). */
   archiveOrphanChildren(): number {
-    let archived = 0;
-    for (const session of this.#deps.repo.listOpenAgentSessions()) {
-      if (session.parentAgentSessionId === null) continue;
-      const parent = this.#deps.repo.getAgentSession(session.parentAgentSessionId);
-      if (parent && parent.lifecycle === "open") continue;
-      this.#archiveOne(session);
-      archived += 1;
-      this.#deps.bus.append({ type: "agent_session.runtime.noted", userSessionId: session.userSessionId, agentSessionId: session.id,
-        payload: { agentSessionId: session.id, agent: "system", detail: "archived: parent session is no longer open" } });
-    }
-    return archived;
+    return this.#nesting.archiveOrphanChildren();
   }
 
-  /**
-   * The escape hatch for a wedged child: archive it and hand the parent's
-   * controller a console failure so the tree can still conclude.
-   */
+  /** The wedged-child escape hatch (`NestingBroker.abandonChildSession`). */
   abandonChildSession(parentAgentSessionId: string, controllerAgent: string, childAgentSessionId: string, reason: string): void {
-    const child = this.#deps.repo.getAgentSession(childAgentSessionId);
-    if (!child || child.parentAgentSessionId !== parentAgentSessionId) {
-      throw new InvalidInputError(`${childAgentSessionId} is not a child of this session`);
-    }
-    if (child.lifecycle === "open") this.#archiveOne(child);
-    const parent = this.#deps.repo.getAgentSession(parentAgentSessionId);
-    if (!parent || parent.lifecycle !== "open") return;
-    try {
-      this.post({ agentSessionId: parent.id, speaker: { kind: "agent", name: `${CHILD_SENDER_PREFIX}${child.id}` },
-        to: child.parentControllerAgent ?? controllerAgent, category: "failure", dedupeKey: `child-abandoned:${child.id}`,
-        handoff: simpleHandoff(`Child session "${child.title}" abandoned`, "failed",
-          `Abandoned by ${controllerAgent}: ${reason}. Whatever the child journaled is retrievable with read_handoff; nothing further will arrive from it.`,
-          "Account for the abandoned work in your plan and your final report.") });
-    } catch (error) { this.#recordHostFailure(parent.id, error); }
-    this.#deps.bus.append({ type: "agent_session.child.reported", userSessionId: child.userSessionId, agentSessionId: parentAgentSessionId,
-      payload: { agentSessionId: parentAgentSessionId, childAgentSessionId: child.id, status: "failed", handoffId: "" } });
-    if (parent) this.#maybeReleaseParentFinal(parent);
+    this.#nesting.abandonChildSession(parentAgentSessionId, controllerAgent, childAgentSessionId, reason);
   }
 
   onStatusChanged(handler: (userSessionId: string) => void): void {
@@ -541,10 +345,10 @@ export class AgentSessionService {
       deliverNow: (agentSessionId, recipient) => void this.#mailroom.deliver(agentSessionId, recipient).catch((error) => this.#recordHostFailure(agentSessionId, error)),
       hasActivity: (agentSessionId) => this.#lanes.namesWithActiveTurn(agentSessionId).length > 0,
       sessionReported: (session) => this.#operator.statusOf(session) === "reported",
-      profile: (id, workspaceId) => this.#profile(id, workspaceId),
+      profile: (id, workspaceId) => this.#lifecycle.profile(id, workspaceId),
       snapshotProfile: (profile) => this.#runtime.snapshotProfile(profile),
       agent: (agentSessionId, name, role, profile, extra, model, ownership, ord, createdAt) =>
-        this.#agentRow(agentSessionId, name, role, profile, extra, model, ownership, ord, createdAt),
+        this.#lifecycle.agentRow(agentSessionId, name, role, profile, extra, model, ownership, ord, createdAt),
     };
   }
 
@@ -561,103 +365,14 @@ export class AgentSessionService {
     this.#operator.onBlockingQuestionsCleared(userSessionId, agentSessionId);
   }
 
-  /**
-   * A child's material report crosses into its parent as a journaled handoff
-   * to the parent's controller — verbatim core and extension, a state-summary
-   * preamble naming the child, and the child final downgraded to a parent
-   * MILESTONE (a child finishing is a milestone of the parent's work; keeping
-   * `isFinalToMain` false on the boundary keeps the parent's final gate
-   * honest). Uncertainty was already classified child-side, so the boundary
-   * hop never re-promotes it. Idempotent by dedupe key across restarts.
-   */
-  #crossBoundary(child: AgentSessionRow, message: MessageRow, draft: HandoffDraft, category: Category): void {
-    const parent = child.parentAgentSessionId === null ? undefined : this.#deps.repo.getAgentSession(child.parentAgentSessionId);
-    if (!parent || parent.lifecycle !== "open" || child.parentControllerAgent === null) return;
-    const mapped: Category = category === "final" ? "milestone" : category === "failure" ? "failure" : "update";
-    const handoffId = (message.payload?.handoff as { id?: string } | undefined)?.id ?? message.id;
-    const boundaryDraft: HandoffDraft = {
-      core: { ...draft.core, state: { ...draft.core.state,
-        summary: `Child session "${child.title}" (${child.id}) reports:\n${draft.core.state.summary}` } },
-      extension: draft.extension,
-    };
-    try {
-      this.post({ agentSessionId: parent.id, speaker: { kind: "agent", name: `${CHILD_SENDER_PREFIX}${child.id}` },
-        to: child.parentControllerAgent, handoff: boundaryDraft, category: mapped, dedupeKey: `child:${handoffId}` });
-      if (category === "final" || category === "failure") {
-        this.#deps.bus.append({ type: "agent_session.child.reported", userSessionId: parent.userSessionId, agentSessionId: parent.id,
-          payload: { agentSessionId: parent.id, childAgentSessionId: child.id,
-            status: category === "final" ? "completed" : "failed", handoffId } });
-      }
-    } catch (error) { this.#recordHostFailure(child.id, error); }
-  }
-
-  /** The child-hold counterpart of onBlockingQuestionsCleared. */
-  #maybeReleaseParentFinal(parent: AgentSessionRow): void {
-    if (!this.#operator.finalWithheld(parent)) return;
-    const unsettled = this.#deps.repo.listChildSessions(parent.id)
-      .filter((child) => child.lifecycle === "open" && this.#operator.statusOf(child) !== "reported");
-    if (unsettled.length > 0) return;
-    const finalSeat = this.#routing.completionAgent(parent, "finalFrom");
-    try {
-      this.post({ agentSessionId: parent.id, speaker: { kind: "system", name: CONSOLE_SENDER }, to: finalSeat,
-        handoff: simpleHandoff("All child sessions have reported", "in_progress",
-          "Every child session's final has crossed into this session. The withheld final may be sent now.",
-          "Compile and send your final report."),
-        category: "decision", dedupeKey: `children-clear:${parent.id}` });
-    } catch { /* best effort — the next final attempt re-evaluates the gate */ }
-  }
-
-  /** Boot replay of a crash between a child's journal write and its boundary ack. */
-  #redriveChildBoundary(session: AgentSessionRow, delivery: MailboxDeliveryRow): void {
-    try {
-      const message = this.#deps.repo.getMessageById(delivery.messageId);
-      const summary = message?.payload?.handoff as { id?: string } | undefined;
-      if (!message) return;
-      if (summary?.id && this.#deps.handoffs && MATERIAL_CATEGORIES.has(delivery.category)) {
-        const record = this.#deps.handoffs.get(summary.id);
-        this.#crossBoundary(session, message, { core: record.core, extension: record.extension }, delivery.category);
-      }
-      this.#mailroom.patchDelivery(session, delivery, "acknowledged");
-      const parent = session.parentAgentSessionId === null ? undefined : this.#deps.repo.getAgentSession(session.parentAgentSessionId);
-      if (parent && parent.lifecycle === "open") this.#maybeReleaseParentFinal(parent);
-    } catch (error) { this.#recordHostFailure(session.id, error); }
-  }
-
+  /** Boot redrive: wake queued deliveries, replay child-boundary rows (`SessionLifecycle.boot`). */
   boot(): void {
-    const wakes = new Set<string>();
-    for (const delivery of this.#deps.repo.listQueuedDeliveries()) {
-      if (delivery.recipient === MAIN_RECIPIENT) {
-        const session = this.#deps.repo.getAgentSession(delivery.agentSessionId);
-        if (session && session.lifecycle === "open" && session.parentAgentSessionId !== null) this.#redriveChildBoundary(session, delivery);
-        continue;
-      }
-      wakes.add(`${delivery.agentSessionId} ${delivery.recipient}`);
-    }
-    for (const key of wakes) {
-      const [agentSessionId, recipient] = key.split(" ") as [string, string];
-      void this.#mailroom.deliver(agentSessionId, recipient).catch((error) => this.#recordHostFailure(agentSessionId, error));
-    }
+    this.#lifecycle.boot();
   }
 
   profiles(workspaceId?: string): AgentProfile[] { return this.#deps.profiles?.list(workspaceId) ?? []; }
   runtimeAvailability(): { sandbox: boolean; chrome: boolean } {
     return { sandbox: fs.existsSync("/usr/bin/bwrap") || fs.existsSync("/usr/local/bin/bwrap"), chrome: fs.existsSync("/usr/bin/google-chrome") };
-  }
-
-  #agentRow(agentSessionId: string, name: string, role: string, profile: AgentProfile, extra: string, model: string | undefined, ownership: string[], ord: number, createdAt: string): AgentRow {
-    const instructions = [profile.instructions, extra.trim()].filter(Boolean).join("\n\nAssigned role context:\n");
-    return { agentSessionId, name, role, instructions, model: model ?? profile.model ?? null,
-      profileId: profile.id, profileSnapshot: profile, ownership, sdkSessionId: null, lastActiveAt: null,
-      generation: 0, turnCount: 0,
-      contextTokens: 0, latestHandoffId: null,
-      cumulativeCostUsd: 0, cumulativeApiDurationMs: 0, lastDecisionAt: null,
-      worktreePath: null, worktreeBaseCommit: null, worktreeBranch: null,
-      ord, createdAt };
-  }
-
-  #profile(id: string, workspaceId?: string): AgentProfile {
-    if (this.#deps.profiles) return this.#deps.profiles.get(id, workspaceId);
-    return { id, title: id, purpose: id, instructions: `You are the ${id} specialist.`, tools: ["Read", "Glob", "Grep"], permissionMode: "default", exemptFromOwnership: false, maxTurns: 30, sandboxRequired: true, runtime: { shell: false, browser: false, screenshots: false, network: [] } };
   }
 
   /**

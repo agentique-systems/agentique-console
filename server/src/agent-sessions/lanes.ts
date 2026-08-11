@@ -221,7 +221,7 @@ export class AgentLanePool implements LaneActivity {
     await Promise.all(pending);
   }
 
-  /** Session cleanup on archive — the host's `#forget` calls this. */
+  /** Session cleanup on archive — the lifecycle's `#forget` calls this. */
   forget(agentSessionId: string): void {
     this.#seats.delete(agentSessionId);
   }

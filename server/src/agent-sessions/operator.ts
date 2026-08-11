@@ -32,7 +32,7 @@ export interface OperatorSurfaceDeps {
   simpleHandoff: SimpleHandoff;
   /** Console-path delivery, for nudging a released final seat. */
   deliver: Deliver;
-  /** Nesting's child-hold release check (host-owned until the nesting carve). */
+  /** `NestingBroker.maybeReleaseParentFinal` — the child-hold release check. */
   maybeReleaseParentFinal: (parent: AgentSessionRow) => void;
   recordFailure: RecordFailure;
   /** Extra per-tick sweep jobs (the pattern-engine sweep), run after ask-detach. */
@@ -234,7 +234,7 @@ export class OperatorSurface {
     }
   }
 
-  /** Memo cleanup on archive — the host's `#forget` calls this. */
+  /** Memo cleanup on archive — the lifecycle's `#forget` calls this. */
   forget(agentSessionId: string): void {
     this.#sessionStatus.delete(agentSessionId);
     this.#operatorDebtSettled.delete(agentSessionId);

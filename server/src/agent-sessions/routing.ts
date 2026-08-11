@@ -29,7 +29,7 @@ export class SessionRouting {
     return compiled;
   }
 
-  /** Memo cleanup on archive — the host's `#forget` calls this. */
+  /** Memo cleanup on archive — the lifecycle's `#forget` calls this. */
   forget(agentSessionId: string): void {
     this.#contracts.delete(agentSessionId);
   }
