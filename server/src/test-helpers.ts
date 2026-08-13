@@ -206,20 +206,30 @@ export async function collectUntil(
   const seen: ConsoleEvent[] = [];
   const source = bus.readWithSeq({ fromSeq: 1, follow: true });
   const iterator = source[Symbol.asyncIterator]();
-  const timer = setTimeout(() => void iterator.return?.(), timeoutMs);
+  // `iterator.return()` cannot interrupt a PENDING next() (an async generator
+  // queues return behind the in-flight await), so the timeout must reject the
+  // race directly rather than trying to unblock the iterator.
+  let timedOut: () => void = () => undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`collectUntil timed out; saw: ${seen.map((e) => e.type).join(", ")}`));
+    }, timeoutMs);
+    timedOut = () => clearTimeout(timer);
+  });
   try {
     for (;;) {
-      const next = await iterator.next();
+      const next = await Promise.race([iterator.next(), timeout]);
       if (next.done === true) {
         throw new Error(
-          `collectUntil timed out; saw: ${seen.map((e) => e.type).join(", ")}`,
+          `collectUntil stream closed; saw: ${seen.map((e) => e.type).join(", ")}`,
         );
       }
       seen.push(next.value);
       if (predicate(next.value)) return seen;
     }
   } finally {
-    clearTimeout(timer);
-    await iterator.return?.().catch(() => undefined);
+    timedOut?.();
+    // Fire-and-forget: a return against a parked next() would never settle.
+    void iterator.return?.().catch(() => undefined);
   }
 }
