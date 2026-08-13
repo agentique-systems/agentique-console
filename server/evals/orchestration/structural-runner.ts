@@ -105,15 +105,22 @@ export async function runScenarioVariant(
 
   const injector = armInjections(harness, fake.injections ?? []);
   const operator = armOperator(harness, userSessionId, scenario.operatorScript);
-  const doneWhen = fake.doneWhen?.() ?? ((event: Ev) => event.type === "agent_session.result.returned");
+  const doneWhen = variant.doneWhen?.() ?? fake.doneWhen?.() ?? ((event: Ev) => event.type === "agent_session.result.returned");
   const done = collectUntil(harness.bus, (event) => doneWhen(event as unknown as Ev), fake.timeoutMs ?? 10_000);
 
-  harness.runner.postOperatorMessage(userSessionId, scenario.taskCard);
-  await done;
-  // Give trailing async work (deliveries, completion sweep) a breath before reading.
-  await new Promise((resolve) => setTimeout(resolve, 50));
-  await operator.disarm();
-  await injector.disarm();
+  // The governance sweep (pattern stall + liveness alarms) runs in scenarios
+  // exactly as in production — the supervision scenarios depend on it.
+  harness.host.startGovernanceSweep(10);
+  try {
+    harness.runner.postOperatorMessage(userSessionId, scenario.taskCard);
+    await done;
+    // Give trailing async work (deliveries, completion sweep) a breath before reading.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  } finally {
+    harness.host.stopGovernanceSweep();
+    await operator.disarm();
+    await injector.disarm();
+  }
 
   const trace = Trace.fromSqlite(harness.sqlite, userSessionId);
   const results = scenario.checks.map((check) => ({

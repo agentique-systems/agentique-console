@@ -3,6 +3,7 @@ import type { OrchestrationScenario } from "../scenario.ts";
 import agentFailure from "./agent-failure.ts";
 import hiddenConstraint from "./hidden-constraint.ts";
 import parallelExploration from "./parallel-exploration.ts";
+import hungAgent from "./hung-agent.ts";
 import trivialNoDelegation from "./trivial-no-delegation.ts";
 import vagueGreenfield from "./vague-greenfield.ts";
 import wastefulParallelism from "./wasteful-parallelism.ts";
@@ -16,6 +17,7 @@ export const SCENARIOS: OrchestrationScenario[] = [
   agentFailure,
   parallelExploration,
   hiddenConstraint,
+  hungAgent,
 ];
 
 /**
@@ -24,12 +26,11 @@ export const SCENARIOS: OrchestrationScenario[] = [
  * Scenarios marked live-only never get a Tier A variant.
  */
 export const PLANNED: { id: string; awaiting: string }[] = [
-  { id: "hung-agent", awaiting: "liveness alarms + interrupt_agent + session_activity (Phase 3)" },
-  { id: "suboptimal-framing", awaiting: "investigation ordering is testable today; framing-challenge quality is judge-only — lands with Tier B rubrics" },
-  { id: "noisy-contrary-evidence", awaiting: "stayedTheCourse over orchestration-state triggers (Phase 5)" },
-  { id: "ambiguous-signal", awaiting: "orchestration-state + discriminating-probe commissions (Phase 5)" },
-  { id: "two-perspectives-better", awaiting: "add_agent / multi-session composition levers (Phase 4)" },
-  { id: "reviewer-invalidates-spec", awaiting: "spec_revisions + run sign-off flow against spec (Phase 5)" },
-  { id: "restart-honesty", awaiting: "boot resume digests (Phase 6); recoveredHonestly() is ready" },
+  { id: "suboptimal-framing", awaiting: "features landed; scenario authoring pending (framing-challenge quality is judge-only)" },
+  { id: "noisy-contrary-evidence", awaiting: "features landed (orchestration state); scenario authoring pending" },
+  { id: "ambiguous-signal", awaiting: "features landed (orchestration state); scenario authoring pending" },
+  { id: "two-perspectives-better", awaiting: "features landed (add_agent, composition levers); scenario authoring pending" },
+  { id: "reviewer-invalidates-spec", awaiting: "features landed (spec_revisions, sign-off); scenario authoring pending" },
+  { id: "restart-honesty", awaiting: "features landed (boot digests); needs restart support in the structural runner" },
   { id: "visual-judgment", awaiting: "live-only by design (rendering cannot be faked); lands with Tier B" },
 ];

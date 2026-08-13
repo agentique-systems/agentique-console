@@ -85,6 +85,12 @@ export interface ScenarioVariant {
   expect: "pass" | "flag";
   /** Check ids expected to flag on a violation variant (any one suffices). */
   flaggedChecks?: string[];
+  /**
+   * Variant-specific done predicate (factory, fresh per run) — a violation
+   * often cannot conclude the way the exemplary flow does (e.g. a wedged
+   * agent nobody stops never produces a final).
+   */
+  doneWhen?: () => (event: Ev) => boolean;
 }
 
 /** Mutable per-run context handed to program factories (gates, counters). */
