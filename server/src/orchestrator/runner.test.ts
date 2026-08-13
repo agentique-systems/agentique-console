@@ -276,6 +276,57 @@ describe("OrchestratorRunner", () => {
         ),
       );
     expect(denyReply).toBeDefined();
+    // The deny itself carries the operator's words — the model must not have
+    // to correlate a contentless bounce with a later chat turn (a live run
+    // proceeded on defaults exactly because of that gap).
+    expect((denyReply?.payload as { message: { text: string } }).message.text)
+      .toContain('"actually just do it"');
+  });
+
+  it("free-text answers reach the model merged with any picked labels", async () => {
+    const h = makeHarness(async function* (options) {
+      yield initMessage();
+      const result = await options.canUseTool?.(
+        "AskUserQuestion",
+        {
+          questions: [
+            {
+              question: "Which renderer?",
+              options: [{ label: "ASCII" }, { label: "Canvas" }],
+            },
+          ],
+        },
+        permissionContext(),
+      );
+      if (result?.behavior === "allow") {
+        const answers = (result.updatedInput as { answers: Record<string, string> }).answers;
+        yield textMessage(`Renderer: ${answers["Which renderer?"]}`);
+      } else {
+        yield textMessage("No answer.");
+      }
+      yield successMessage();
+    });
+    const sessionId = h.addUserSession();
+    const collected = collectUntil(h.bus, settled);
+
+    h.runner.postOperatorMessage(sessionId, "build the game");
+    await collectUntil(h.bus, (e) => e.type === "user_session.question.asked");
+    const pending = h.interactions.listPending(sessionId);
+    // Main-lane cards accept free text now; the operator's own words outrank
+    // the offered options.
+    expect(pending[0]?.allowFreeText).toBe(true);
+    h.interactions.resolveFromApi(sessionId, pending[0]!.id, {
+      answers: {},
+      freeText: { "Which renderer?": "use three.js" },
+    });
+
+    const events = await collected;
+    const reply = events
+      .filter((e) => e.type === "user_session.message.appended")
+      .at(-1);
+    expect(reply?.payload).toMatchObject({
+      message: { text: "Renderer: use three.js" },
+    });
   });
 
   it("gates plan_execute sessions behind ExitPlanMode approval", async () => {

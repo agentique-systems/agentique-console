@@ -154,7 +154,11 @@ export class InteractionStore {
     return counts;
   }
 
-  /** The rows a decision can be read from: answered, or a resolved plan approval. */
+  /**
+   * The rows a decision can be read from: answered, a resolved plan approval,
+   * or a question dismissed by a chat reply (its stored chatText IS the
+   * answer — decisionOf filters the wordless dismissals).
+   */
   listDecisionSourceRows(userSessionId: string): InteractionRow[] {
     return this.#db
       .select()
@@ -164,6 +168,7 @@ export class InteractionStore {
         or(
           eq(interactions.status, "answered"),
           and(eq(interactions.kind, "plan_approval"), inArray(interactions.status, ["answered", "rejected"])),
+          and(eq(interactions.kind, "question"), eq(interactions.status, "dismissed")),
         ),
       ))
       .all();

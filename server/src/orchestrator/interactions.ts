@@ -192,6 +192,10 @@ export class InteractionService {
     return this.createOperatorQuestion({
       userSessionId,
       questions,
+      // Free text is first-class on MAIN's cards: the roguelike run's operator
+      // disliked every offered option, had no way to say so, typed in chat —
+      // and the answer was lost. Their words always outrank the options.
+      allowFreeText: true,
       ...(toolUseId === undefined ? {} : { toolUseId }),
       ...(signal === undefined ? {} : { signal }),
     });
@@ -431,13 +435,20 @@ export class InteractionService {
             note: chatText,
           },
         });
+        // Event parity with the card path: the run summary reads
+        // operator.decision.recorded, and a chat rejection is no less a
+        // decision than a clicked one.
+        this.#recordDecision(row, {
+          answer: `Requested changes to the plan (in chat): ${chatText}`,
+          source: "plan_approval",
+        });
         this.#pending.get(row.id)?.({
           kind: "decision",
           approved: false,
           note: chatText,
         });
       } else {
-        this.#markResolved(row.id, "dismissed", { reason: "chat" });
+        this.#markResolved(row.id, "dismissed", { reason: "chat", chatText });
         this.#bus.append({
           type: "user_session.question.answered",
           userSessionId,
@@ -445,12 +456,24 @@ export class InteractionService {
             userSessionId,
             interactionId: row.id,
             dismissed: true,
+            note: chatText,
           },
         });
+        // The words themselves enter the decision ledger — "use three.js"
+        // typed in chat was lost by the old contentless dismissal, and the
+        // orchestrator built on its own defaults.
+        this.#recordDecision(row, {
+          answer: `(answered in chat) ${chatText}`,
+          source: "interaction",
+        });
+        // The deny result the model is LOOKING AT when it decides its next
+        // action carries the answer itself; "read their next message" was a
+        // forward reference to a message the model had not been given.
         this.#pending.get(row.id)?.({
           kind: "dismissed",
           reason:
-            "The operator replied in chat instead — read their next message.",
+            `The operator answered in chat instead of the card. Their words: ${JSON.stringify(chatText)}. ` +
+            "Treat this as their answer to the question(s) above — do not proceed on defaults, and do not re-ask.",
         });
       }
       this.#pending.delete(row.id);

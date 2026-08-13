@@ -71,16 +71,25 @@ export function buildOrchestratorCanUseTool(input: CanUseToolInput): CanUseTool 
       );
       const resolved = await resolution;
       if (resolved.kind === "answers") {
+        // Merge picked labels with per-question FREE TEXT — a typed answer is
+        // the operator's own words and outranks the offered options. The old
+        // mapping read only `answers`, so a freeText-only reply came back as
+        // an empty result.
+        const merged = Object.fromEntries(
+          questions
+            .map((question) => {
+              const labels = resolved.answers[question.question] ?? [];
+              const typed = resolved.freeText?.[question.question]?.trim() ?? "";
+              return [question.question, [...labels, ...(typed === "" ? [] : [typed])].join(", ")] as const;
+            })
+            .filter(([, value]) => value !== ""),
+        );
+        const note = resolved.note?.trim() ?? "";
         return {
           behavior: "allow" as const,
           updatedInput: {
             ...toolInput,
-            answers: Object.fromEntries(
-              Object.entries(resolved.answers).map(([question, labels]) => [
-                question,
-                labels.join(", "),
-              ]),
-            ),
+            answers: note === "" ? merged : { ...merged, "operator note": note },
           },
         };
       }

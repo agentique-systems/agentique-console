@@ -53,22 +53,29 @@ export function renderAnswer(answers: Record<string, string[]>, freeText?: Recor
 
 /**
  * The decision a resolved interaction records, or null when it records none
- * (unresolved, dismissed, or contentless). Rejected plans count — "requested
- * changes" is a decision the run must respect.
+ * (unresolved, contentless, or dismissed WITHOUT words). Rejected plans count
+ * — "requested changes" is a decision the run must respect. So does a
+ * question the operator answered in CHAT: the dismissal stores their words as
+ * `chatText`, and "use three.js" typed into the input box is no less binding
+ * than a clicked option.
  */
 export function decisionOf(row: DecisionSourceRow): OperatorDecision | null {
   const isPlan = row.kind === "plan_approval";
-  if (row.status !== "answered" && !(isPlan && row.status === "rejected")) return null;
   const response = (row.response ?? {}) as {
     answers?: Record<string, string[]>; freeText?: Record<string, string>;
-    note?: string; decision?: string;
+    note?: string; decision?: string; chatText?: string;
   };
+  const chatAnswered = !isPlan && row.status === "dismissed" &&
+    typeof response.chatText === "string" && response.chatText.trim() !== "";
+  if (row.status !== "answered" && !(isPlan && row.status === "rejected") && !chatAnswered) return null;
   const question = isPlan
     ? "Plan approval"
     : ((row.payload as { questions?: InteractionQuestion[] }).questions ?? []).map((q) => q.question).join(" | ");
   const answer = isPlan
     ? `${response.decision === "approve" ? "Approved the plan" : "Requested changes to the plan"}${response.note === undefined ? "" : `: ${response.note}`}`
-    : renderAnswer(response.answers ?? {}, response.freeText);
+    : chatAnswered
+      ? `(in chat) ${response.chatText!.trim()}`
+      : renderAnswer(response.answers ?? {}, response.freeText);
   if (question === "" && answer === "") return null;
   return {
     id: row.id,

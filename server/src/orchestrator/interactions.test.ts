@@ -78,6 +78,46 @@ describe("chat does not answer an agent's question", () => {
   });
 });
 
+describe("a chat reply IS the answer", () => {
+  it("the dismissal's deny reason carries the operator's words", async () => {
+    const { service, userSessionId } = harness();
+    const main = service.createOperatorQuestion({ userSessionId, questions: QUESTION });
+
+    service.dismissPendingForChat(userSessionId, "use three.js");
+
+    // The model reads THIS when it decides its next action — a forward
+    // reference ("read their next message") lost a live run's answer.
+    const resolved = await main.resolution;
+    expect(resolved).toMatchObject({ kind: "dismissed" });
+    expect((resolved as { reason: string }).reason).toContain('"use three.js"');
+    expect((resolved as { reason: string }).reason).toContain("do not proceed on defaults");
+  });
+
+  it("stores the chat text on the row and records an operator decision", () => {
+    const { db, service, userSessionId } = harness();
+    const main = service.createOperatorQuestion({ userSessionId, questions: QUESTION });
+
+    service.dismissPendingForChat(userSessionId, "use three.js");
+
+    const row = db.select().from(rows).all().find((entry) => entry.id === main.id);
+    expect((row?.response as { chatText?: string })?.chatText).toBe("use three.js");
+    const decisions = db.select().from(events).all().filter((entry) => entry.type === "operator.decision.recorded");
+    expect(decisions).toHaveLength(1);
+    expect((decisions[0]?.payload as { answer?: string }).answer).toBe("(answered in chat) use three.js");
+  });
+
+  it("a chat-rejected plan records a decision too (event parity with the card)", () => {
+    const { db, service, userSessionId } = harness();
+    service.createPlanApproval(userSessionId, "the plan", undefined, undefined);
+
+    service.dismissPendingForChat(userSessionId, "no, do it with vite");
+
+    const decisions = db.select().from(events).all().filter((entry) => entry.type === "operator.decision.recorded");
+    expect(decisions).toHaveLength(1);
+    expect((decisions[0]?.payload as { answer?: string }).answer).toContain("Requested changes to the plan (in chat): no, do it with vite");
+  });
+});
+
 describe("boot splits by asker", () => {
   it("stales main-lane rows and detaches agent rows", () => {
     const { db, service, userSessionId } = harness();
