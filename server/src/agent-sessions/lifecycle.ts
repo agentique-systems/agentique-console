@@ -23,6 +23,7 @@ import { buildContract } from "./patterns/catalog.ts";
 import type { SessionRouting } from "./routing.ts";
 import type { Deliver, RecordFailure, SimpleHandoff, Transfer } from "./seams.ts";
 import { AGENT_NAME_RE, RESERVED_NAMES } from "./topology.ts";
+import { consoleTaskListId, type TaskService } from "../tasks/service.ts";
 import type { WorktreeBinding } from "./worktree-binding.ts";
 
 export interface CreateAgentSessionInput {
@@ -44,6 +45,13 @@ export interface CreateAgentSessionInput {
   parent?: { agentSessionId: string; controllerAgent: string };
   agents: { name: string; profileId?: string; instructions?: string; model?: string; owns?: string[] }[];
   briefing?: HandoffDraft;
+  /**
+   * Ledger units created WITH the session, before its briefing dispatches —
+   * the old "task_create before the briefing" instruction was impossible to
+   * follow (the briefing posts synchronously inside creation), so no
+   * assignment could ever reference a task and the auto-sync never fired.
+   */
+  tasks?: { taskId: string; subject: string; description?: string; owner?: string; blockedBy?: string[] }[];
 }
 
 export interface SessionLifecycleDeps {
@@ -59,6 +67,8 @@ export interface SessionLifecycleDeps {
   worktree: WorktreeBinding;
   transfer: Transfer;
   simpleHandoff: SimpleHandoff;
+  /** Ledger upserts for creation-time task units. */
+  tasks: TaskService;
   /** `AgentRuntime.snapshotProfile` — the runtime owns snapshot semantics. */
   snapshotProfile: (profile: AgentProfile) => AgentProfile;
   /** `Mailroom.patchDelivery`, for cancelling active deliveries at archive. */
@@ -174,6 +184,21 @@ export class SessionLifecycle {
     for (const plan of build.agents) {
       const profile = this.#deps.snapshotProfile(this.profile(plan.profileId, parent.workspaceId));
       repo.insertAgent(this.agentRow(row.id, plan.name, plan.role, profile, plan.instructions ?? "", plan.model, plan.owns, plan.ord, now));
+    }
+    // Units land BEFORE the briefing so the briefing's taskId resolves and
+    // syncLedgerFromHandoff can mark the entry assignment in_progress.
+    const roster = new Set(build.agents.map((plan) => plan.name));
+    for (const unit of input.tasks ?? []) {
+      if (unit.owner !== undefined && !roster.has(unit.owner)) {
+        throw new InvalidInputError(`task "${unit.taskId}" names owner "${unit.owner}", who is not in this session`);
+      }
+      this.#deps.tasks.upsertFromCreate({
+        sdkSessionId: consoleTaskListId(row.id), sdkTaskId: unit.taskId, subject: unit.subject,
+        ...(unit.description === undefined ? {} : { description: unit.description }),
+        ...(unit.owner === undefined ? {} : { owner: unit.owner }),
+        ...(unit.blockedBy === undefined ? {} : { blockedBy: unit.blockedBy }),
+        attribution: { workspaceId: user.workspaceId, userSessionId: input.userSessionId, agentSessionId: row.id, agent: null },
+      });
     }
     const specialists = input.agents.map((agent) => agent.name);
     bus.append({ type: "agent_session.created", userSessionId: row.userSessionId, agentSessionId: row.id,

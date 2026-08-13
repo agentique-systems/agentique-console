@@ -290,12 +290,26 @@ export class OperatorSurface {
     if (this.reportedFinal(session)) { this.#operatorDebtSettled.add(session.id); return; }
 
     const voiceSeat = this.#deps.routing.completionAgent(session, "voice");
-    const coordinator = repo.latestHandoff({ userSessionId: session.userSessionId, agentSessionId: session.id, sender: voiceSeat, excludeCheckpoints: true, excludeSynthetic: true });
-    const seatReports = repo.listAgents(session.id)
+    let coordinator = repo.latestHandoff({ userSessionId: session.userSessionId, agentSessionId: session.id, sender: voiceSeat, excludeCheckpoints: true, excludeSynthetic: true });
+    let seatReports = repo.listAgents(session.id)
       .filter((seat) => seat.name !== voiceSeat)
       .map((seat) => repo.latestHandoff({ userSessionId: session.userSessionId, agentSessionId: session.id, sender: seat.name, excludeCheckpoints: true, excludeSynthetic: true }))
       .filter((row): row is NonNullable<typeof row> => row !== undefined);
-    if (!coordinator && seatReports.length === 0) return;
+    let allSynthetic = false;
+    if (!coordinator && seatReports.length === 0) {
+      // Every record may be console-synthesized (each seat's only handoff was
+      // a turn-failure the console wrote FOR it — the exact shape a killed
+      // process leaves). Bailing here was the silence this closeout exists to
+      // prevent: fall back to the synthetic evidence, labelled as such, and
+      // stay silent only for a session that never produced ANYTHING.
+      coordinator = repo.latestHandoff({ userSessionId: session.userSessionId, agentSessionId: session.id, sender: voiceSeat, excludeCheckpoints: true });
+      seatReports = repo.listAgents(session.id)
+        .filter((seat) => seat.name !== voiceSeat)
+        .map((seat) => repo.latestHandoff({ userSessionId: session.userSessionId, agentSessionId: session.id, sender: seat.name, excludeCheckpoints: true }))
+        .filter((row): row is NonNullable<typeof row> => row !== undefined);
+      if (!coordinator && seatReports.length === 0) return;
+      allSynthetic = true;
+    }
 
     // Exactly once per BODY OF EVIDENCE, journaled rather than remembered.
     // The in-memory latch alone is not enough: this closeout wakes main, that
@@ -313,6 +327,7 @@ export class OperatorSurface {
     this.#operatorDebtSettled.add(session.id);
     const lines = seatReports.map((row) => `- ${row.sender} (${row.core.status}): ${row.core.state.summary.slice(0, 1_500)}`);
     const summary = `This AgentSession went idle without its coordinator reporting a result, so the Console is closing the loop from the journal. Nothing below was assembled or endorsed by the coordinator.\n\n` +
+      `${allSynthetic ? "EVERY record below is Console-synthesized — no agent authored a report; these are failure reconstructions the Console wrote for dead turns.\n\n" : ""}` +
       `${coordinator ? `Coordinator's last word (${coordinator.core.status}): ${coordinator.core.state.summary.slice(0, 2_000)}\n\n` : ""}` +
       `${lines.length > 0 ? `Specialist reports:\n${lines.join("\n")}` : "No specialist reported."}`;
     this.#deps.bus.append({ type: "agent_session.closeout.forced", userSessionId: session.userSessionId, agentSessionId: session.id,

@@ -56,6 +56,13 @@ describe("recoverInterruptedTurns", () => {
       status: "aborted",
       errorMessage: "interrupted by a server restart",
     });
+    // The restart is MATERIAL: boot posts a resume digest that wakes main so
+    // it decides resume/steer/close — wait for that woken turn to settle.
+    // (rebooted.bus: post-restart live events publish on the NEW app's bus.)
+    await collectUntil(rebooted.bus, (e) => e.type === "user_session.turn.settled");
+    const resume = h.repo.listMessages("agent", agentSessionId)
+      .find((row) => String((row.payload?.handoff as { action?: string } | undefined)?.action ?? "").startsWith("Server restart interrupted"));
+    expect(resume).toBeDefined();
     // Recovery is one-shot: the settle it wrote clears the backlog.
     expect(findUnsettledTurns(h.db)).toHaveLength(0);
   });
@@ -105,7 +112,7 @@ describe("recoverInterruptedTurns", () => {
     await collected;
 
     expect(findUnsettledTurns(h.db)).toEqual([]);
-    expect(recoverInterruptedTurns({ db: h.db, repo: h.repo, bus: h.bus })).toBe(0);
+    expect(recoverInterruptedTurns({ db: h.db, repo: h.repo, bus: h.bus })).toEqual({ count: 0, agentTurns: [] });
     expect(h.repo.getAgent("nope", COORDINATOR_AGENT)).toBeUndefined();
   });
 });

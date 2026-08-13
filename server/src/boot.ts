@@ -29,7 +29,8 @@ export async function bootApp(app: App): Promise<BootReport> {
   // In-flight promises died with the previous process; their rows go stale so
   // the UI renders greyed cards whose answers become revival turns.
   app.interactions.expirePendingOnBoot();
-  const recoveredTurns = recoverInterruptedTurns({ db: app.db, repo: app.repo, bus: app.bus });
+  const recovered = recoverInterruptedTurns({ db: app.db, repo: app.repo, bus: app.bus });
+  const recoveredTurns = recovered.count;
   const requeuedDeliveries = app.repo.requeueUnacknowledgedDeliveries();
   const reconciledCommunications = await reconcileDurableCommunication({ repo: app.repo, bus: app.bus });
 
@@ -54,6 +55,37 @@ export async function bootApp(app: App): Promise<BootReport> {
   }
 
   app.host.boot();
+  // The resume digest: a restart that killed agent turns is a MATERIAL event
+  // for main — what died, what is preserved, what redelivers — so IT decides
+  // resume/steer/close instead of the run silently resuming (or silently
+  // not). Deduped per (session, turn-set): a double boot posts once.
+  const bySession = new Map<string, typeof recovered.agentTurns>();
+  for (const turn of recovered.agentTurns) {
+    bySession.set(turn.agentSessionId, [...(bySession.get(turn.agentSessionId) ?? []), turn]);
+  }
+  for (const [agentSessionId, turns] of bySession) {
+    const session = app.repo.getAgentSession(agentSessionId);
+    if (!session || session.lifecycle !== "open") continue;
+    const queued = app.repo.listQueuedDeliveries(agentSessionId).length;
+    const agents = [...new Set(turns.map((turn) => turn.agent))];
+    try {
+      app.host.post({
+        agentSessionId,
+        speaker: { kind: "system", name: "console" },
+        to: "main",
+        category: "milestone",
+        dedupeKey: `restart:${agentSessionId}:${turns.map((turn) => turn.turnId).sort().join(",")}`,
+        handoff: { core: { schemaVersion: 1, taskId: null, status: "needs_verification", risk: "medium",
+          action: `Server restart interrupted ${agents.join(", ")} in "${session.title}"`,
+          state: { summary: `The console process restarted. In this session, ${agents.length} agent turn(s) died mid-flight (${agents.join(", ")}); provider sessions and worktrees are preserved, and ${queued} queued deliver${queued === 1 ? "y" : "ies"} will redeliver now. Nothing was lost, but in-context reasoning from the dead turns was.`, evidence: [] },
+          result: { summary: null, artifacts: [] },
+          uncertainty: ["Work the interrupted turns had in flight may need re-deriving."],
+          nextAction: "Decide: let redelivery resume the session, steer it with fresh context, or close it out.",
+          requestExpandedContext: false },
+          extension: { kind: "generic", data: { consoleSynthesized: true } } },
+      });
+    } catch { /* best effort — the transcripts already carry the notices */ }
+  }
   // Children whose parent archived or vanished across the restart can never
   // report to anyone.
   const archivedOrphanChildren = app.host.archiveOrphanChildren();

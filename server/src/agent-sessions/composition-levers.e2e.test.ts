@@ -100,6 +100,29 @@ describe("composition levers (fake SDK)", () => {
     expect(() => h.host.closeSession(created.agentSessionId, "again")).toThrow(/already archived/);
   });
 
+  it("creation-time tasks exist before the briefing, so the entry assignment starts its unit", async () => {
+    const h = makeHubHarness();
+    const userSessionId = h.addUserSession();
+    const settled = collectUntil(h.bus, (event) =>
+      event.type === "agent_session.turn.settled" && (event.payload as { agent?: string }).agent === "scout", 10_000);
+    const created = h.host.createSession({
+      userSessionId, title: "ledgered",
+      agents: [{ name: "scout", profileId: "explorer" }],
+      tasks: [{ taskId: "survey", subject: "Survey the repo", owner: "scout" }],
+      briefing: { ...draft("survey"), core: { ...draft("survey").core, taskId: "survey" } },
+    });
+    await settled;
+    // The old order made this impossible: the briefing posted synchronously
+    // inside creation, before any task could exist — so no unit ever left
+    // `pending` (the roguelike run's whole ledger stayed pending forever).
+    const unit = h.sqlite.prepare(
+      "SELECT status FROM tasks WHERE agent_session_id = ? AND sdk_task_id = 'survey'").get(created.agentSessionId) as { status: string } | undefined;
+    expect(unit?.status).toBe("in_progress");
+    // And the ledger now rides every delivery prompt.
+    const scoutPrompt = h.fake.captured.prompts.find((prompt) => prompt.includes("Task ledger (console-owned, authoritative)"));
+    expect(scoutPrompt).toBeDefined();
+  });
+
   it("a fresh briefing from main resets a tripped pattern's budgets", async () => {
     const h = makeHubHarness();
     const { created } = await seatHub(h);

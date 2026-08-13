@@ -209,7 +209,13 @@ export class PromptComposer {
     }
     const freshBlock = unseen.length === 0 ? ""
       : `## New operator decisions since your last delivery\nAuthoritative — these were decided for this whole session, not just for the seat that asked.\n${unseen.map((row) => `- ${renderDecision(row)}`).join("\n")}\n\n`;
-    return `AgentSession ${session.id}: ${session.title}\nYou are ${seat.name}. Participants: ${roster}.\n\n${answersBlock}${freshBlock}Only the following addressed handoffs are new:\n${messages}\n\nTreat handoff claims as historical context; verify risky claims against repository/task/journal evidence during normal work. Act without restating the envelope.`;
+    // The shared ledger, in every delivery: a live run's units sat pending
+    // forever because agents only ever saw the ledger at rotation. Omitted
+    // entirely when empty (byte-stability for ledger-less sessions).
+    const taskLines = this.#deps.tasks.linesForAgentSession(session.id);
+    const ledgerBlock = taskLines.length === 0 ? ""
+      : `## Task ledger (console-owned, authoritative)\n${taskLines.join("\n")}\nKeep your unit's status honest with task_update: in_progress when you start, completed only when verified.\n\n`;
+    return `AgentSession ${session.id}: ${session.title}\nYou are ${seat.name}. Participants: ${roster}.\n\n${answersBlock}${freshBlock}${ledgerBlock}Only the following addressed handoffs are new:\n${messages}\n\nTreat handoff claims as historical context; verify risky claims against repository/task/journal evidence during normal work. Act without restating the envelope.`;
   }
 
   /**

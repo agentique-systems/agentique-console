@@ -93,6 +93,14 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           .describe("Why this session, this pattern, now — one or two sentences. Journaled with the briefing; the run review reads it."),
         expecting: z.string().max(280).optional()
           .describe("What evidence or output counts as success — or would change your plan. The session READS this as its success contract."),
+        tasks: z.array(z.object({
+          taskId: z.string().min(1).describe("Short stable id, e.g. \"core\""),
+          subject: z.string().min(1),
+          description: z.string().optional(),
+          owner: z.string().optional().describe("The agent that will do the work"),
+          blockedBy: z.array(z.string()).optional().describe("taskIds this unit depends on"),
+        })).max(20).optional()
+          .describe("Ledger units created WITH the session, BEFORE its briefing dispatches — so the briefing's taskId resolves and the entry assignment starts its unit. This replaces calling task_create afterwards for the initial breakdown."),
       },
       async (args: {
         title: string;
@@ -108,6 +116,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         briefing: HandoffDraft;
         why?: string;
         expecting?: string;
+        tasks?: { taskId: string; subject: string; description?: string; owner?: string; blockedBy?: string[] }[];
       }) =>
         guarded(() => {
           // Rationale rides the briefing's extension: captured AT the act,
@@ -127,6 +136,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
             ...(args.patternConfig ? { patternConfig: args.patternConfig } : {}),
             agents: args.agents,
             briefing,
+            ...(args.tasks === undefined ? {} : { tasks: args.tasks }),
           });
           return {
             agentSessionId: created.agentSessionId,

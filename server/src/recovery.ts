@@ -29,13 +29,21 @@ import { findUnsettledTurns } from "./events/projections.ts";
 
 const RESTART_NOTE = "interrupted by a server restart";
 
+export interface RecoveredAgentTurn {
+  userSessionId: string;
+  agentSessionId: string;
+  agent: string;
+  turnId: string;
+}
+
 export function recoverInterruptedTurns(deps: {
   db: Db;
   repo: Repo;
   bus: EventBus;
-}): number {
+}): { count: number; agentTurns: RecoveredAgentTurn[] } {
   const { repo, bus } = deps;
   const unsettled = findUnsettledTurns(deps.db);
+  const agentTurns: RecoveredAgentTurn[] = [];
 
   for (const turn of unsettled) {
     if (turn.kind === "user") {
@@ -68,8 +76,10 @@ export function recoverInterruptedTurns(deps: {
       continue;
     }
 
-    // Native subagents die with the process and have no resume handle — the
-    // settle closes the spinner; the Orchestrator respawns via the spawn plan.
+    // The seat's provider session survives (resume handle in the DB); only
+    // its in-flight turn died. Settle it, SAY so on the agent transcript
+    // (silent recovery reads as a wedge), and report it upward so boot can
+    // wake main with a resume digest.
     bus.append({
       type: "agent_session.turn.settled",
       userSessionId: turn.userSessionId,
@@ -82,9 +92,18 @@ export function recoverInterruptedTurns(deps: {
         errorMessage: RESTART_NOTE,
       },
     });
+    bus.append({
+      type: "agent_session.runtime.noted",
+      userSessionId: turn.userSessionId,
+      agentSessionId: turn.agentSessionId,
+      payload: { agentSessionId: turn.agentSessionId, agent: turn.agent,
+        detail: `${turn.agent}'s turn was ${RESTART_NOTE}; its provider session is retained and queued deliveries will redeliver` },
+    });
+    agentTurns.push({ userSessionId: turn.userSessionId, agentSessionId: turn.agentSessionId,
+      agent: turn.agent, turnId: turn.turnId });
   }
 
-  return unsettled.length;
+  return { count: unsettled.length, agentTurns };
 }
 
 /** Rebuild event projections after a crash between an authoritative row and its journal append. */

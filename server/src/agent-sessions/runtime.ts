@@ -197,6 +197,7 @@ export class AgentRuntime implements Injector, TurnTracker {
   #spawnSeat(session: AgentSessionRow, seatRow: AgentRow, lane: AgentLane): void {
     if (!this.#deps.sdk || !this.#deps.config || !this.#deps.getWorkspaceRoot) throw new Error("SDK unavailable");
     lane.state = "waking";
+    lane.deliberateStop = false;
     lane.abort = new AbortController();
     lane.input = new AsyncQueue<SdkUserMessageLike>();
     lane.lastActiveAt = Date.now();
@@ -546,7 +547,11 @@ export class AgentRuntime implements Injector, TurnTracker {
     }
     lane.assignmentTurns += 1;
     lane.lastActiveAt = Date.now();
-    if (status === "error" && repo.getAgentSession(session.id)?.lifecycle === "open") {
+    // Aborted-but-NOT-deliberate = the stream/process died under a live turn
+    // (in-process CLI death). Before this it settled silently — no failure
+    // handoff, no escalation, a run that just stopped.
+    const infraDeath = status === "aborted" && !lane.deliberateStop;
+    if ((status === "error" || infraDeath) && repo.getAgentSession(session.id)?.lifecycle === "open") {
       const reason = turn.watchdog.tripped ?? `Provider turn failed: ${errorMessage}`;
       hooks.escalateFailure(session, seatName, seat, turn, reason);
     }
@@ -596,6 +601,7 @@ export class AgentRuntime implements Injector, TurnTracker {
     });
     if (!due) return;
     lane.state = "rotating";
+    lane.deliberateStop = true;
     lane.rotationGate = new Promise((resolve) => { lane.releaseRotation = resolve; });
     try {
       lane.input?.close(); lane.input = null;

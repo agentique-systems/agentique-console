@@ -226,6 +226,7 @@ export class AgentSessionService {
       routing: this.#routing, lanes: this.#lanes, worktree: this.#worktreeBinding,
       transfer: (input) => this.post(input),
       simpleHandoff,
+      tasks: deps.tasks,
       snapshotProfile: (profile) => this.#runtime.snapshotProfile(profile),
       patchDelivery: (session, delivery, status) => this.#mailroom.patchDelivery(session, delivery, status),
       deliver: (agentSessionId, recipient) => this.#mailroom.deliver(agentSessionId, recipient),

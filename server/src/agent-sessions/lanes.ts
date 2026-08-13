@@ -100,6 +100,13 @@ export interface AgentLane {
   idleTimer: NodeJS.Timeout | null;
   /** Cumulative settled turns since the last assignment delivery. */
   assignmentTurns: number;
+  /**
+   * The console CHOSE to end this lane (park, rotation, archive, shutdown).
+   * An aborted settle without this flag is an infrastructure death — the
+   * stream/process dying under a live turn — and must escalate like an error
+   * instead of vanishing silently.
+   */
+  deliberateStop: boolean;
   /** The turn-budget notice fired for the current assignment (latch). */
   turnBudgetNotified: boolean;
   lastActiveAt: number;
@@ -133,7 +140,7 @@ export class AgentLanePool implements LaneActivity {
       lane = { state: "unspawned", input: null, query: null, abort: null, pump: null, ready: null,
         activeTurn: null, pendingDeliveries: [], redeliveryAttempts: new Map(), contextTokens: 0,
         lastCumulative: { costUsd: 0, apiDurationMs: 0 }, rotationGate: null, releaseRotation: null,
-        idleTimer: null, assignmentTurns: 0, turnBudgetNotified: false, lastActiveAt: 0, lastStatus: null };
+        idleTimer: null, assignmentTurns: 0, turnBudgetNotified: false, deliberateStop: false, lastActiveAt: 0, lastStatus: null };
       lanes.set(seat, lane);
     }
     return lane;
@@ -207,6 +214,7 @@ export class AgentLanePool implements LaneActivity {
    * coming back imminently, so its dev servers and Chrome are pure leak.
    */
   #park(agentSessionId: string, seatName: string, lane: AgentLane, reason: string): void {
+    lane.deliberateStop = true;
     lane.state = "parked";
     lane.input?.close(); lane.input = null;
     const query = lane.query; lane.query = null;
@@ -230,6 +238,7 @@ export class AgentLanePool implements LaneActivity {
   }
 
   #closeHard(lane: AgentLane): void {
+    lane.deliberateStop = true;
     lane.input?.close();
     lane.abort?.abort();
     void lane.query?.interrupt?.().catch(() => undefined);

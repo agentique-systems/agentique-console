@@ -105,8 +105,11 @@ const PIPELINE_WORK_BULLET = `
 
 const PIPELINE_DONE_BULLET = `
 - When your stage's work is done, send the FULL result — the actual content,
-  not a summary of what you did — onward, then stop. Include what you could
-  not verify; an honest gap is worth more than a confident omission.`;
+  not a summary of what you did — onward, then stop. Send it with a TERMINAL
+  status — completed (or failed) — carrying your ledger taskId: the Console
+  closes that unit from the handoff, and a stage that reports without a
+  terminal status leaves its unit open forever. Include what you could not
+  verify; an honest gap is worth more than a confident omission.`;
 
 function buildPipeline(input: BuildInput): BuildResult {
   const names = input.agents.map((agent) => agent.name);
@@ -118,7 +121,10 @@ function buildPipeline(input: BuildInput): BuildResult {
   const promptPack: Record<string, RolePrompt> = {};
   const protocol = `${PROTOCOL_INTRO}${PIPELINE_WORK_BULLET}${OPERATOR_PATH_BULLETS}${PIPELINE_DONE_BULLET}`;
   names.forEach((name, index) => {
-    roles[roleOf(index)] = { replicable: false, min: 1, max: 1, grants: [], escalateTo: "main" };
+    // tasks_write: the evaluator learned this the hard way (a live run ended
+    // with both its units still pending — see the evaluator's grant comment);
+    // the same hole then bit a pipeline run. Every stage owns a unit.
+    roles[roleOf(index)] = { replicable: false, min: 1, max: 1, grants: ["tasks_write"], escalateTo: "main" };
     const position = `You are stage ${index + 1} of ${names.length} in a pipeline.`;
     promptPack[roleOf(index)] = {
       addressing: index === last
@@ -349,7 +355,7 @@ function buildDebate(input: BuildInput): BuildResult {
       pattern: "debate",
       roles: {
         debater: { replicable: false, min: 2, max: 8, grants: [], escalateTo: "judge" },
-        judge: { replicable: false, min: 1, max: 1, grants: ["forward_message"], extensionKind: "review", escalateTo: "main" },
+        judge: { replicable: false, min: 1, max: 1, grants: ["forward_message", "tasks_write"], extensionKind: "review", escalateTo: "main" },
       },
       edges: [
         { from: "main", to: "debater", advance: "immediate" },
@@ -419,7 +425,7 @@ function buildPeerToPeer(input: BuildInput): BuildResult {
       pattern: "peer_to_peer",
       roles: {
         peer: { replicable: false, min: 1, max: 7, grants: [], escalateTo: "closer" },
-        closer: { replicable: false, min: 1, max: 1, grants: ["forward_message"], escalateTo: "main" },
+        closer: { replicable: false, min: 1, max: 1, grants: ["forward_message", "tasks_write"], escalateTo: "main" },
       },
       edges: [
         { from: "main", to: "closer", advance: "immediate" },
