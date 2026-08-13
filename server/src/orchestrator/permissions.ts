@@ -10,6 +10,7 @@ import type { Repo } from "../db/repo.ts";
 import type { EventBus } from "../events/bus.ts";
 import type { SdkOptions } from "../sdk/types.ts";
 import type { InteractionService } from "./interactions.ts";
+import type { SpecService } from "./spec.ts";
 
 /**
  * Per-lane callback state. Lives as long as the persistent query; the runner
@@ -26,12 +27,14 @@ export interface CanUseToolInput {
   bus: EventBus;
   interactions: InteractionService;
   laneState: LaneState;
+  /** The approved plan text is recorded as the run's first SPEC revision. */
+  specs: SpecService;
 }
 
 type CanUseTool = NonNullable<SdkOptions["canUseTool"]>;
 
 export function buildOrchestratorCanUseTool(input: CanUseToolInput): CanUseTool {
-  const { userSessionId, repo, bus, interactions, laneState } = input;
+  const { userSessionId, repo, bus, interactions, laneState, specs } = input;
 
   const deny = (
     toolName: string,
@@ -117,6 +120,15 @@ export function buildOrchestratorCanUseTool(input: CanUseToolInput): CanUseTool 
       );
       const resolved = await resolution;
       if (resolved.kind === "decision" && resolved.approved) {
+        // The planning phase's deliverable IS the specification: the approved
+        // (possibly operator-edited) plan text becomes the governing spec, so
+        // plan_execute sessions get the living-spec artifact for free.
+        try {
+          const finalText = resolved.editedDocument?.trim() || plan;
+          const draft = specs.propose(userSessionId, finalText, "approved via ExitPlanMode");
+          specs.approve(draft.id, { document: finalText,
+            edited: resolved.editedDocument !== undefined && resolved.editedDocument.trim() !== plan.trim() });
+        } catch { /* best effort — plan approval itself must not fail on spec recording */ }
         repo.patchUserSession(userSessionId, { phase: "executing" });
         bus.append({
           type: "user_session.updated",

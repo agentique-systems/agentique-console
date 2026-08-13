@@ -28,6 +28,8 @@ export interface RunCompletionDeps {
   host: () => AgentSessionService;
   runner: () => OrchestratorRunner;
   getWorkspaceRoot: (workspaceId: string) => string;
+  /** Main's record_completion source; optional so unit harnesses stay small. */
+  orchestrationState?: { latestCompletion(userSessionId: string): { revision: number; completion: { criteria: { criterion: string; met: boolean; evidence: { kind: string; ref: string }[] }[]; knownGaps: string[]; nonGoals: string[] } } | null };
   /**
    * `config.completionQuietWindowMs`. The predicate is re-evaluated when the
    * timer FIRES, not when it was scheduled, so a new turn starting inside the
@@ -137,6 +139,7 @@ export class RunCompletionService {
     const document = buildRunSummary({
       db, repo, userSessionId, seqFrom, reaped,
       interactions: this.#deps.interactions,
+      completionRecord: this.#deps.orchestrationState?.latestCompletion(userSessionId) ?? null,
       ...(this.#deps.getWorkspaceRoot ? { getWorkspaceRoot: this.#deps.getWorkspaceRoot } : {}),
     });
 

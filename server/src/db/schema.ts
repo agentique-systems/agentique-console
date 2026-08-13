@@ -433,6 +433,69 @@ export const events = sqliteTable(
   ],
 );
 
+/**
+ * The living specification: operator-approved revisions of what "done well"
+ * means for a run. Approval flows through a plan_approval card; the approved
+ * text briefs every agent and is the standard reviews check against. Rows are
+ * append-only — an amendment supersedes, never edits.
+ */
+export const specRevisions = sqliteTable(
+  "spec_revisions",
+  {
+    id: text("id").primaryKey(),
+    userSessionId: text("user_session_id").notNull().references(() => userSessions.id),
+    /** Monotonic per session, 1-based. */
+    revision: integer("revision").notNull(),
+    /** Markdown; on approval this is the operator-approved (possibly edited) text. */
+    document: text("document").notNull(),
+    /** One line: what changed and why (amendments). */
+    changeNote: text("change_note"),
+    status: text("status", { enum: ["draft", "approved", "superseded", "rejected"] }).notNull().default("draft"),
+    /** Whether the operator edited the text before approving. */
+    origin: text("origin", { enum: ["main", "operator_edited"] }).notNull().default("main"),
+    /** The approving interaction card. */
+    interactionId: text("interaction_id"),
+    createdAt: text("created_at").notNull(),
+    approvedAt: text("approved_at"),
+  },
+  (t) => [
+    index("spec_revisions_session").on(t.userSessionId, t.revision),
+    check("spec_revisions_status", sql`${t.status} IN ('draft','approved','superseded','rejected')`),
+    check("spec_revisions_origin", sql`${t.origin} IN ('main','operator_edited')`),
+  ],
+);
+
+/**
+ * The orchestrator's model-authored working state: strategy, uncertainties,
+ * assumptions, risks — section-replace revisions updated on material events
+ * (never per-turn ceremony). Append-only: the history is the review surface,
+ * and rationale cannot be retro-edited, only superseded. A trigger of
+ * 'completion' carries the criteria→evidence justification in `completion`.
+ */
+export const orchestrationStateRevisions = sqliteTable(
+  "orchestration_state_revisions",
+  {
+    id: text("id").primaryKey(),
+    userSessionId: text("user_session_id").notNull().references(() => userSessions.id),
+    revision: integer("revision").notNull(),
+    trigger: text("trigger", { enum: ["commission", "discovery", "alarm", "direction_change", "completion", "operator"] }).notNull(),
+    strategy: text("strategy").notNull().default(""),
+    strategyWhy: text("strategy_why").notNull().default(""),
+    uncertainties: text("uncertainties", { mode: "json" }).$type<string[]>().notNull().default([]),
+    assumptions: text("assumptions", { mode: "json" }).$type<string[]>().notNull().default([]),
+    risks: text("risks", { mode: "json" }).$type<string[]>().notNull().default([]),
+    /** What occasioned THIS update, one line. */
+    note: text("note"),
+    /** Only on trigger='completion': {criteria:[{criterion,met,evidence}],knownGaps,nonGaps}. */
+    completion: text("completion", { mode: "json" }).$type<Record<string, unknown> | null>(),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [
+    index("orchestration_state_session").on(t.userSessionId, t.revision),
+    check("orchestration_state_trigger", sql`${t.trigger} IN ('commission','discovery','alarm','direction_change','completion','operator')`),
+  ],
+);
+
 /** One durable delivery record per addressed transcript message. */
 export const mailboxDeliveries = sqliteTable(
   "mailbox_deliveries",

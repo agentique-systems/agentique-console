@@ -39,6 +39,7 @@ import { declaredMcpServers, seatUserMessage, type PromptComposer } from "./comp
 import { grantedTools, runtimeToolNames, type AgentToolName } from "./grants.ts";
 import type { ActiveTurn, AgentLane, AgentLanePool } from "./lanes.ts";
 import type { DispatchWorkItemsInput } from "./patterns/engine.ts";
+import type { SpecService } from "../orchestrator/spec.ts";
 import type { SessionRouting } from "./routing.ts";
 import type { Deliver, Injector, RecordFailure, Transfer } from "./seams.ts";
 import { hubContract, roleOfAgent, speakerKindOf } from "./topology.ts";
@@ -104,6 +105,8 @@ export interface AgentRuntimeDeps {
   artifacts: ArtifactStore;
   tasks: TaskService;
   handoffs: HandoffService;
+  /** The living spec, for the seats' read_spec. */
+  specs: SpecService;
   /** OS capabilities. `null` = absent, stated at the construction site. */
   worktrees: WorktreeManager | null;
   /** Lazy — the scheduler posts through the service, composed after it. */

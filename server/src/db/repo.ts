@@ -87,6 +87,9 @@ export class Repo {
   listDueDeadlines(userSessionId: string, nowIsoTime: string): CronRow[] { return this.#s.crons.listDueDeadlines(userSessionId, nowIsoTime); }
   patchCron(id: string, patch: Partial<Pick<CronRow, "schedule" | "prompt" | "status">>): void { this.#s.crons.patchCron(id, patch); }
   getPatternState(agentSessionId: string): PatternStateRow | undefined { return this.#s.patternState.getPatternState(agentSessionId); }
+  /** The living spec + orchestration state stores, exposed whole — services own the semantics. */
+  get specs() { return this.#s.specs; }
+  get orchestrationState() { return this.#s.orchestrationState; }
   upsertPatternState(agentSessionId: string, patch: Parameters<Stores["patternState"]["upsertPatternState"]>[1]): PatternStateRow { return this.#s.patternState.upsertPatternState(agentSessionId, patch); }
 
   // --- Cross-aggregate reads ------------------------------------------------

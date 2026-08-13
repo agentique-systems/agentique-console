@@ -171,6 +171,8 @@ export interface PlanProposedPayload {
   userSessionId: string;
   interactionId: string;
   plan: string;
+  /** Present when this card proposes a SPEC revision rather than a plan. */
+  spec?: { revision: number };
 }
 export interface PlanResolvedPayload {
   userSessionId: string;
@@ -391,6 +393,24 @@ export interface AgentWorktreeDiscardedPayload {
   archivedBranch?: string | null;
 }
 
+/** A spec revision was approved (possibly operator-edited); it now governs the run. */
+export interface SpecUpdatedPayload {
+  userSessionId: string;
+  revision: number;
+  changeNote?: string;
+  edited: boolean;
+}
+
+/** Main revised its working state (strategy/uncertainties/assumptions/risks/completion). */
+export interface StateUpdatedPayload {
+  userSessionId: string;
+  revision: number;
+  trigger: "commission" | "discovery" | "alarm" | "direction_change" | "completion" | "operator";
+  sections: string[];
+  strategy?: string;
+  counts: { uncertainties: number; assumptions: number; risks: number };
+}
+
 /** A seat joined an open session mid-run (main's add_agent). */
 export interface AgentAddedPayload {
   agentSessionId: string;
@@ -497,6 +517,8 @@ export type ConsoleEvent = Base &
     | { type: "user_session.question.answered"; payload: QuestionAnsweredPayload }
     | { type: "user_session.plan.proposed"; payload: PlanProposedPayload }
     | { type: "user_session.plan.resolved"; payload: PlanResolvedPayload }
+    | { type: "user_session.spec.updated"; payload: SpecUpdatedPayload }
+    | { type: "user_session.state.updated"; payload: StateUpdatedPayload }
     | { type: "agent_session.created"; payload: AgentSessionCreatedPayload }
     | { type: "agent_session.termination.tripped"; payload: AgentSessionTerminationTrippedPayload }
     | { type: "agent_session.join.completed"; payload: AgentSessionJoinCompletedPayload }

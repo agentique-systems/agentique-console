@@ -15,6 +15,8 @@ export function HandoffCard({ handoff, sender, recipient }: { handoff: HandoffSu
       <div className="font-medium">{handoff.action}</div>
       <div className="mt-1 text-muted-foreground">{handoff.stateSummary}</div>
       {handoff.resultSummary && <div className="mt-2"><FileCheckIcon className="mr-1 inline size-3.5" />{handoff.resultSummary}</div>}
+      {handoff.why && <div className="mt-2 text-xs text-muted-foreground">why: {handoff.why}</div>}
+      {handoff.expecting && <div className="mt-1 text-xs text-muted-foreground">expecting: {handoff.expecting}</div>}
       {handoff.nextAction && <div className="mt-2 text-xs"><ArrowRightIcon className="mr-1 inline size-3.5" />{handoff.nextAction}</div>}
       <div className="mt-2 font-mono text-3xs text-muted-foreground">
         {handoff.evidenceCount} evidence · {handoff.artifactCount} artifacts · {handoff.extensionKind}

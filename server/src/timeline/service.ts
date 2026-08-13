@@ -13,7 +13,7 @@ function str(value: unknown, fallback = ""): string { return typeof value === "s
  * `*.retry.recorded` stays unmapped: its runtime prose twin already renders,
  * and two rows per retry would double every storm.
  */
-function classify(type: ConsoleEvent["type"]): "task" | "handoff" | "decision" | "rotation" | "usage" | "runtime" | null {
+function classify(type: ConsoleEvent["type"]): "task" | "handoff" | "decision" | "rotation" | "usage" | "runtime" | "state" | null {
   switch (type) {
     case "task.created":
     case "task.updated":
@@ -37,6 +37,11 @@ function classify(type: ConsoleEvent["type"]): "task" | "handoff" | "decision" |
     case "user_session.plan.proposed":
     case "user_session.plan.resolved":
       return "decision";
+    // Strategy changes and completion records are visible pulses on main's
+    // lane — the review surface for "when did the story change".
+    case "user_session.spec.updated":
+    case "user_session.state.updated":
+      return "state";
     case "user_session.context.rotated":
     case "agent_session.context.rotated":
       return "rotation";

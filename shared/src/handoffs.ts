@@ -51,6 +51,10 @@ export interface CoordinationHandoffData extends Record<string, unknown> {
   conflicts?: string[];
   operatorDecisions?: string[];
   activeSessions?: string[];
+  /** Capture-at-act rationale: why this move, now (≤280 chars). */
+  why?: string;
+  /** The success contract: what evidence would count as done, or change the plan. */
+  expecting?: string;
 }
 export interface ImplementationHandoffData extends Record<string, unknown> {
   changedPaths?: string[];
@@ -123,6 +127,9 @@ export interface HandoffSummary {
   artifactCount: number;
   extensionKind: HandoffExtensionKind;
   referenceWarnings: string[];
+  /** Lifted from a coordination extension when present (bounded fields). */
+  why?: string;
+  expecting?: string;
 }
 
 export interface HandoffPage {

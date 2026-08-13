@@ -21,6 +21,9 @@ import type { HandoffService } from "../handoffs/service.ts";
 import { EvidenceRefSchema, HandoffCoreSchema, HandoffDraftSchema } from "../handoffs/schema.ts";
 
 import { fail, guarded, ok } from "../sdk/tool-result.ts";
+import type { InteractionService } from "./interactions.ts";
+import type { SpecService } from "./spec.ts";
+import type { CompletionRecord, OrchestrationStateService } from "./state.ts";
 
 /** Same bound the agent-side read_artifact applies (provider inline-image cap). */
 const MAX_IMAGE_BASE64_CHARS = 5 * 1024 * 1024;
@@ -36,10 +39,13 @@ export interface ConsoleToolsInput {
   scheduler: AssignmentScheduler;
   handoffs: HandoffService;
   artifacts: ArtifactStore;
+  interactions: InteractionService;
+  specs: SpecService;
+  state: OrchestrationStateService;
 }
 
 export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
-  const { sdk, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts } = input;
+  const { sdk, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, specs, state } = input;
 
   /** Tools operate only on this UserSession's agent sessions. */
   const owned = (agentSessionId: string) => {
@@ -83,6 +89,10 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           .describe(
             "Typed coordinator assignment: objective, current evidence, risk, uncertainty, and next action",
           ),
+        why: z.string().max(280).optional()
+          .describe("Why this session, this pattern, now — one or two sentences. Journaled with the briefing; the run review reads it."),
+        expecting: z.string().max(280).optional()
+          .describe("What evidence or output counts as success — or would change your plan. The session READS this as its success contract."),
       },
       async (args: {
         title: string;
@@ -96,15 +106,27 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           owns: string[];
         }[];
         briefing: HandoffDraft;
+        why?: string;
+        expecting?: string;
       }) =>
         guarded(() => {
+          // Rationale rides the briefing's extension: captured AT the act,
+          // journaled with it, and read by the recipient as its success
+          // contract — never a retrospective diary.
+          const briefing: HandoffDraft = args.why === undefined && args.expecting === undefined ? args.briefing : {
+            core: args.briefing.core,
+            extension: { kind: args.briefing.extension?.kind ?? "coordination",
+              data: { ...(args.briefing.extension?.data ?? {}),
+                ...(args.why === undefined ? {} : { why: args.why }),
+                ...(args.expecting === undefined ? {} : { expecting: args.expecting }) } } as HandoffDraft["extension"],
+          };
           const created = host.createSession({
             userSessionId,
             title: args.title,
             pattern: args.pattern,
             ...(args.patternConfig ? { patternConfig: args.patternConfig } : {}),
             agents: args.agents,
-            briefing: args.briefing,
+            briefing,
           });
           return {
             agentSessionId: created.agentSessionId,
@@ -151,6 +173,10 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         taskId: z.string().nullable().default(null)
           .describe("The ledger taskId this assignment covers. The Console starts that entry on delivery and holds the assignment until its dependencies complete."),
         requestExpandedContext: z.boolean().default(false),
+        why: z.string().max(280).optional()
+          .describe("Why this move now (redirects and commissions deserve one; routine relays may skip it)."),
+        expecting: z.string().max(280).optional()
+          .describe("What evidence would count as success, or change your plan."),
       },
       async (args: {
         agentSessionId: string; to?: string; category: "assignment" | "update";
@@ -158,6 +184,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         action: string; stateSummary: string; evidence: HandoffDraft["core"]["state"]["evidence"];
         resultSummary: string | null; artifacts: HandoffDraft["core"]["result"]["artifacts"];
         uncertainty: string[]; nextAction: string | null; taskId: string | null; requestExpandedContext: boolean;
+        why?: string; expecting?: string;
       }) => guarded(() => {
         const session = owned(args.agentSessionId);
         const entryAgent = host.entryAgent(args.agentSessionId);
@@ -170,7 +197,9 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
             uncertainty: args.uncertainty, nextAction: args.nextAction,
             requestExpandedContext: args.requestExpandedContext,
           },
-          extension: { kind: "coordination", data: {} },
+          extension: { kind: "coordination", data: {
+            ...(args.why === undefined ? {} : { why: args.why }),
+            ...(args.expecting === undefined ? {} : { expecting: args.expecting }) } },
         };
         // An archived session skips the intercept so post() raises its
         // Conflict instead of recording a schedule nobody can dispatch.
@@ -350,6 +379,94 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         guarded(() => {
           owned(args.agentSessionId);
           return host.activity(args.agentSessionId);
+        }),
+    ),
+
+    sdk.tool(
+      "propose_spec",
+      "Put a SPECIFICATION (or an amendment to it) to the operator for approval. The spec is the shared definition of done-well: goals, constraints, the decisions that need making (with your recommendations), acceptance criteria a reviewer can check, standing uncertainties/assumptions, and the crew you propose. The operator reads it, may EDIT it in place, and approves or rejects; the approved text is injected into your prompt, every agent's prompt, and every rotation — reviews check work against it. This call BLOCKS until they respond. Amend with a new propose_spec when reality invalidates part of it; never silently diverge. Proportionality is your judgment — a toy request may not need one.",
+      {
+        document: z.string().min(1).describe("The full spec text (markdown). Include '## Open uncertainties', '## Assumptions', and '## Out of scope' sections so reviews can target them."),
+        changeNote: z.string().min(1).max(280).describe("One line: what this revision is, or what changed and why (for amendments)."),
+      },
+      async (args: { document: string; changeNote: string }) => {
+        const draft = specs.propose(userSessionId, args.document, args.changeNote);
+        const { resolution } = interactions.createSpecApproval(userSessionId, args.document, draft.revision);
+        const resolved = await resolution;
+        if (resolved.kind === "decision" && resolved.approved) {
+          const finalText = resolved.editedDocument?.trim() || args.document;
+          const approved = specs.approve(draft.id, { document: finalText,
+            edited: resolved.editedDocument !== undefined && resolved.editedDocument.trim() !== args.document.trim() });
+          return ok({ approved: true, revision: approved.revision, edited: approved.origin === "operator_edited",
+            document: finalText,
+            note: approved.origin === "operator_edited"
+              ? "The operator EDITED the spec before approving — the text above is theirs and governs. Read it fully."
+              : "Approved as proposed. This revision now governs the run." });
+        }
+        specs.reject(draft.id);
+        const note = resolved.kind === "decision" ? (resolved.note ?? "") : resolved.kind === "dismissed" ? resolved.reason : "";
+        return ok({ approved: false, note, next: "Revise the spec to address their words and propose again — or ask a sharper question first." });
+      },
+    ),
+
+    sdk.tool(
+      "read_spec",
+      "Read the governing specification (latest approved revision by default, or a named one). The injected digest is byte-capped; this returns the full text, paged.",
+      {
+        revision: z.number().int().optional(),
+        cursor: z.string().optional(),
+        maxBytes: z.number().int().min(1).max(PAGE_MAX_BYTES).default(PAGE_DEFAULT_BYTES),
+      },
+      async (args: { revision?: number; cursor?: string; maxBytes: number }) =>
+        guarded(() => {
+          const row = args.revision === undefined
+            ? specs.latestApproved(userSessionId)
+            : specs.listForUserSession(userSessionId).find((entry) => entry.revision === args.revision);
+          if (!row) return { spec: null, note: "no approved specification yet — propose one with propose_spec" };
+          return { revision: row.revision, status: row.status, changeNote: row.changeNote,
+            document: pageTail(row.document, args.cursor, args.maxBytes) };
+        }),
+    ),
+
+    sdk.tool(
+      "update_orchestration_state",
+      "Revise YOUR working state — the durable memory your next generation reads: current strategy (and why), open uncertainties, standing assumptions, live risks. Any section you pass REPLACES that section wholly; omitted sections persist. Update on material events — commissioning, an alarm you acted on, a discovery that changes the plan, a direction change, before declaring done — never as per-turn ceremony. When you work around a coordination structure the patterns cannot express, note it with the tag 'pattern-friction:'.",
+      {
+        trigger: z.enum(["commission", "discovery", "alarm", "direction_change", "operator"])
+          .describe("What occasioned this update."),
+        strategy: z.string().max(500).optional().describe("Current approach, one or two sentences."),
+        strategyWhy: z.string().max(500).optional().describe("Why this strategy over its live alternatives."),
+        uncertainties: z.array(z.string().max(200)).max(8).optional().describe("Open CONSEQUENTIAL uncertainties (whose answers would change the build)."),
+        assumptions: z.array(z.string().max(200)).max(8).optional().describe("Load-bearing assumptions the plan rests on."),
+        risks: z.array(z.string().max(200)).max(8).optional().describe("Live risks that currently matter."),
+        note: z.string().max(280).optional().describe("What occasioned THIS update, one line."),
+      },
+      async (args: { trigger: "commission" | "discovery" | "alarm" | "direction_change" | "operator";
+        strategy?: string; strategyWhy?: string; uncertainties?: string[]; assumptions?: string[]; risks?: string[]; note?: string }) =>
+        guarded(() => {
+          const row = state.update(userSessionId, args);
+          return { revision: row.revision, note: "Recorded. Your next generation reads this back — keep it true." };
+        }),
+    ),
+
+    sdk.tool(
+      "record_completion",
+      "Record the completion justification when you believe the run is done: each acceptance criterion mapped to its EVIDENCE (met or honestly not), known gaps, and deliberate non-goals. The sign-off card shows this beside the console's own facts (git diff, ledger, uncertainty) — an absent record renders as a visible omission. Not a gate: recording it does not complete the run; the operator does.",
+      {
+        criteria: z.array(z.object({
+          criterion: z.string().max(200).describe("An acceptance criterion, ideally quoting the spec"),
+          met: z.boolean(),
+          evidence: z.array(EvidenceRefSchema).default([]).describe("What proves it: artifacts, files, journal refs, commands"),
+        })).min(1).max(12),
+        knownGaps: z.array(z.string().max(200)).max(8).default([]).describe("What is not done or not verified, and you know it"),
+        nonGoals: z.array(z.string().max(200)).max(8).default([]).describe("Deliberately out of scope (incl. declined opportunities)"),
+        note: z.string().max(280).optional(),
+      },
+      async (args: { criteria: CompletionRecord["criteria"]; knownGaps: string[]; nonGoals: string[]; note?: string }) =>
+        guarded(() => {
+          const row = state.recordCompletion(userSessionId,
+            { criteria: args.criteria, knownGaps: args.knownGaps, nonGoals: args.nonGoals }, args.note);
+          return { revision: row.revision, recorded: true };
         }),
     ),
 

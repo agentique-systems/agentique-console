@@ -24,6 +24,8 @@ import { DecisionLedger } from "./orchestrator/decisions.ts";
 import { InteractionService } from "./orchestrator/interactions.ts";
 import { OrchestratorRunner } from "./orchestrator/runner.ts";
 import { buildConsoleMcpServer } from "./orchestrator/tools.ts";
+import { SpecService } from "./orchestrator/spec.ts";
+import { OrchestrationStateService } from "./orchestrator/state.ts";
 import type { ConsoleSdk } from "./sdk/types.ts";
 import type { SqliteSessionStore } from "./sdk/session-store.ts";
 import { WorktreeManager } from "./runtime/worktree-manager.ts";
@@ -71,6 +73,8 @@ export interface App {
   sessionStore: SqliteSessionStore;
   host: AgentSessionService;
   runner: OrchestratorRunner;
+  specs: SpecService;
+  orchestrationState: OrchestrationStateService;
   completion: RunCompletionService;
   userSessions: UserSessionService;
   manager: ProfileManagerService;
@@ -94,13 +98,15 @@ export function createApp(options: CreateAppOptions): App {
   const interactions = new InteractionService(stores.interactions, bus);
   const tasks = new TaskService(stores.tasks, stores.assignments, bus, (workspaceId) => void workspaces.get(workspaceId));
   const handoffs = new HandoffService({ repo, bus, getWorkspaceRoot });
+  const specs = new SpecService(stores.specs, bus);
+  const orchestrationState = new OrchestrationStateService(stores.orchestrationState, bus);
   const sessionStore = stores.providerEntries;
 
   const lateRunner = late<OrchestratorRunner>("runner");
   const lateManager = late<ProfileManagerService>("manager");
   const lateScheduler = late<AssignmentScheduler>("scheduler");
   const host = new AgentSessionService({
-    repo, bus, artifacts, config, profiles, sdk, sessionStore, getWorkspaceRoot,
+    repo, bus, artifacts, config, profiles, sdk, sessionStore, getWorkspaceRoot, specs,
     worktrees,
     interactions, decisions, tasks, handoffs,
     scheduler: () => lateScheduler.get(),
@@ -114,18 +120,19 @@ export function createApp(options: CreateAppOptions): App {
   lateScheduler.set(scheduler);
   const runner = new OrchestratorRunner({
     repo, bus, config, sdk, interactions, decisions, handoffs, sessionStore, getWorkspaceRoot,
+    specs, orchestrationState,
     host: () => host,
     tasks,
     buildMcpServer: (userSessionId, sdkInstance) =>
       repo.getUserSession(userSessionId)?.purpose === "profile_manager"
         ? buildManagerMcpServer(sdkInstance, lateManager.get(), userSessionId)
-        : buildConsoleMcpServer({ sdk: sdkInstance, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts }),
+        : buildConsoleMcpServer({ sdk: sdkInstance, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, specs, state: orchestrationState }),
   });
   lateRunner.set(runner);
   const manager = new ProfileManagerService({ repo, workspaces, profiles, config, bus, runner: () => runner });
   lateManager.set(manager);
   const completion = new RunCompletionService({
-    db, repo, bus, interactions, scheduler, getWorkspaceRoot,
+    db, repo, bus, interactions, scheduler, getWorkspaceRoot, orchestrationState,
     host: () => host,
     runner: () => runner,
     quietWindowMs: config.policy.completionQuietWindowMs,
@@ -156,7 +163,7 @@ export function createApp(options: CreateAppOptions): App {
   });
 
   return {
-    config, db, sqlite, bus, artifacts, repo, sdk, getWorkspaceRoot,
+    config, db, sqlite, bus, artifacts, repo, sdk, getWorkspaceRoot, specs, orchestrationState,
     workspaces, timeline, profiles, worktrees,
     decisions, interactions, tasks, scheduler, handoffs, sessionStore,
     host, runner, completion, userSessions, manager,

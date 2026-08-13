@@ -58,6 +58,8 @@ export interface PlanItem {
   readonly type: "plan";
   readonly interactionId: string;
   readonly plan: string;
+  /** Present when the card proposes a SPEC revision rather than a plan. */
+  readonly spec?: { readonly revision: number };
   readonly resolution?: {
     readonly approved: boolean;
     readonly note?: string;
@@ -254,6 +256,7 @@ export function foldUserItems(events: readonly ConsoleEvent[]): UserItem[] {
           type: "plan",
           interactionId: event.payload.interactionId,
           plan: event.payload.plan,
+          ...(event.payload.spec === undefined ? {} : { spec: event.payload.spec }),
         });
         break;
       }

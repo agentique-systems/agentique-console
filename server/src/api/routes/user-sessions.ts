@@ -48,6 +48,9 @@ const ResolveBody = z.union([
   z.object({
     decision: z.enum(["approve", "reject"]),
     note: z.string().optional(),
+    // The operator's edited plan/spec text; on approval it becomes the
+    // governing document.
+    editedDocument: z.string().optional(),
   }),
 ]);
 
@@ -106,6 +109,40 @@ export function registerUserSessionRoutes(
       return reply
         .status(202)
         .send(sessions.postMessage(request.params.id, parsed.data.text));
+    },
+  );
+
+  // The living spec: revision history + the approved text that governs the run.
+  app.get<{ Params: { id: string } }>(
+    "/api/user-sessions/:id/spec",
+    async (request) => ({
+      revisions: ctx.app.specs.listForUserSession(request.params.id),
+      approved: ctx.app.specs.latestApproved(request.params.id) ?? null,
+    }),
+  );
+
+  // The orchestration state: current working state, its history, and every
+  // commission joined to its rationale and outcome — the review surface that
+  // distinguishes good orchestration from lucky outcomes.
+  app.get<{ Params: { id: string } }>(
+    "/api/user-sessions/:id/orchestration",
+    async (request) => {
+      const userSessionId = request.params.id;
+      const commissions = ctx.app.repo.listAgentSessions(userSessionId).map((session) => {
+        const briefing = ctx.app.repo.latestHandoff({ userSessionId, agentSessionId: session.id, sender: "main", excludeCheckpoints: true });
+        const outcome = ctx.app.repo.latestHandoff({ userSessionId, agentSessionId: session.id, recipient: "main", excludeCheckpoints: true });
+        const data = (briefing?.extension?.data ?? {}) as { why?: string; expecting?: string };
+        return {
+          agentSessionId: session.id, title: session.title, pattern: session.pattern, lifecycle: session.lifecycle,
+          why: data.why ?? null, expecting: data.expecting ?? null,
+          outcome: outcome === undefined ? null : { trigger: outcome.trigger, status: outcome.core.status, action: outcome.core.action.slice(0, 200) },
+        };
+      });
+      return {
+        current: ctx.app.orchestrationState.current(userSessionId) ?? null,
+        revisions: ctx.app.orchestrationState.history(userSessionId),
+        commissions,
+      };
     },
   );
 

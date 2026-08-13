@@ -37,6 +37,8 @@ import type {
   SdkUserMessageLike,
 } from "../sdk/types.ts";
 import type { DecisionLedger } from "./decisions.ts";
+import type { SpecService } from "./spec.ts";
+import type { OrchestrationStateService } from "./state.ts";
 import type { InteractionService } from "./interactions.ts";
 import { buildOrchestratorOptions } from "./options.ts";
 import { buildOrchestratorCanUseTool, type LaneState } from "./permissions.ts";
@@ -119,6 +121,9 @@ export interface OrchestratorDeps {
    * Required: an optional dep would let a missing wire typecheck.
    */
   decisions: DecisionLedger;
+  /** The living spec + working state, injected into every generation like decisions. */
+  specs: SpecService;
+  orchestrationState: OrchestrationStateService;
   /** Lazy — host and runner construct in either order inside `createApp`. */
   host: () => AgentSessionService;
   /** Console task-ledger tools for the lane. */
@@ -460,6 +465,7 @@ export class OrchestratorRunner {
         bus,
         interactions,
         laneState: lane.state,
+        specs: this.#deps.specs,
       }),
       mcpServer: this.#deps.buildMcpServer?.(sessionId, sdk),
       sessionStore: this.#deps.sessionStore,
@@ -467,6 +473,8 @@ export class OrchestratorRunner {
         ? JSON.stringify(this.#deps.handoffs.get(session.latestHandoffId), null, 2)
         : session.memory,
       decisionDigest: this.#deps.decisions.digest(sessionId),
+      specDigest: this.#deps.specs.digest(sessionId),
+      stateDigest: this.#deps.orchestrationState.digest(sessionId),
       purpose: session.purpose,
       peerName: mainPeerName(config.policy.peerNamePrefix, sessionId),
     });
@@ -889,12 +897,21 @@ export class OrchestratorRunner {
     }
     // Operator decisions ride the checkpoint into the successor generation.
     // Without this a rotation silently forgets what the operator decided, and
-    // the next generation is free to contradict them.
+    // the next generation is free to contradict them. The spec pointer and
+    // working-state lines ride the same way — though both also re-enter via
+    // prompt injection, the checkpoint must be self-sufficiently true.
     const decisionLines = this.#deps.decisions.lines(sessionId, { max: 12 });
+    const specPointer = this.#deps.specs.pointer(sessionId);
+    const stateLines = this.#deps.orchestrationState.lines(sessionId);
+    const extensionDefaults = {
+      ...(decisionLines.length > 0 ? { operatorDecisions: decisionLines } : {}),
+      ...(specPointer === null ? {} : { approvedSpec: specPointer }),
+      ...(stateLines.length > 0 ? { workingState: stateLines } : {}),
+    };
     const prepared = this.#deps.handoffs.prepare({ draft, userSessionId: sessionId, agentSessionId: null,
       sender: "orchestrator", recipient: "orchestrator", profileId: "main", generation: session.sdkGeneration,
       trigger: degraded ? "recovery" : "rotation", parentHandoffId: session.latestHandoffId, checkpoint: true,
-      ...(decisionLines.length > 0 ? { extensionDefaults: { operatorDecisions: decisionLines } } : {}) });
+      ...(Object.keys(extensionDefaults).length > 0 ? { extensionDefaults } : {}) });
     this.#deps.repo.insertCheckpointHandoff(prepared.row);
     this.#deps.handoffs.committed(prepared.record);
     // Rotation retires the provider session, so its cumulative baseline retires
@@ -914,7 +931,7 @@ export class OrchestratorRunner {
     const sdk = await this.#deps.sdk();
     const workspaceRoot = this.#deps.getWorkspaceRoot(session.workspaceId);
     return checkpointQuery(sdk, {
-      prompt: `Create a lossless rotation checkpoint for the next orchestrator context. Preserve operator intent, decisions, delegated work, verified evidence pointers, uncertainty, and exact next actions. Do not perform work or call tools.`,
+      prompt: `Create a lossless rotation checkpoint for the next orchestrator context. Preserve operator intent, the approved specification and its acceptance criteria, decisions, your working state (strategy, open uncertainties, assumptions, risks), delegated work, verified evidence pointers, and exact next actions. Do not perform work or call tools.`,
       systemPromptAppend: "Checkpoint faithfully. Repository files, task ledger, artifacts, and provider journal are authoritative; do not invent corrections.",
       cwd: workspaceRoot,
       readPaths: [workspaceRoot],

@@ -4,7 +4,8 @@
  * focuses the composer — the operator's next chat message auto-rejects the
  * plan server-side with that text as the note.
  */
-import { FileTextIcon } from "lucide-react";
+import { FileTextIcon, PencilIcon } from "lucide-react";
+import { useState } from "react";
 import { toast } from "sonner";
 
 import { ApiError } from "@/api/client";
@@ -37,13 +38,19 @@ export function PlanCard({
   const resolve = useResolveInteraction();
   const resolution = item.resolution;
   const resolved = resolution !== undefined;
+  // Edit-in-place: the operator's version becomes the governing text — their
+  // words outrank the proposal. (The roguelike run's operator had no way to
+  // say "none of these" except chat, which lost the answer.)
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(item.plan);
 
   const approve = () => {
+    const edited = editing && draft.trim() !== "" && draft.trim() !== item.plan.trim();
     resolve.mutate(
       {
         sessionId,
         interactionId: item.interactionId,
-        body: { decision: "approve" },
+        body: { decision: "approve", ...(edited ? { editedDocument: draft } : {}) },
       },
       {
         onError: (error) => {
@@ -65,7 +72,7 @@ export function PlanCard({
       <CardHeader>
         <CardEyebrow className={cn(!resolved && "text-attention")}>
           <FileTextIcon className="size-3.5 shrink-0" />
-          <span>proposed plan</span>
+          <span>{item.spec !== undefined ? `proposed specification (rev ${item.spec.revision})` : "proposed plan"}</span>
         </CardEyebrow>
         {resolution !== undefined && (
           <Badge
@@ -83,7 +90,16 @@ export function PlanCard({
       </CardHeader>
 
       <CardContent className="pt-0">
-        <MessageResponse>{item.plan}</MessageResponse>
+        {editing && !resolved ? (
+          <textarea
+            className="min-h-48 w-full resize-y rounded-md border border-border bg-background p-2 font-mono text-xs"
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            aria-label="edit the proposed text"
+          />
+        ) : (
+          <MessageResponse>{item.plan}</MessageResponse>
+        )}
         {resolution?.note !== undefined && (
           <div className="mt-2 text-2xs text-muted-foreground">
             note: {resolution.note}
@@ -102,6 +118,15 @@ export function PlanCard({
           ) : (
             "Approve & execute"
           )}
+        </Button>
+        <Button
+          size="xs"
+          variant="ghost"
+          disabled={resolved || resolve.isPending}
+          onClick={() => setEditing((value) => !value)}
+        >
+          <PencilIcon className="size-3" />
+          {editing ? "Preview" : "Edit"}
         </Button>
         <Button
           size="xs"

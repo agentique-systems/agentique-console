@@ -17,6 +17,7 @@ import type { EventBus } from "../events/bus.ts";
 import type { HandoffService } from "../handoffs/service.ts";
 import { recoveryAction } from "../lane-runtime/checkpoint.ts";
 import { decisionOf, renderDecision, type DecisionLedger } from "../orchestrator/decisions.ts";
+import type { SpecService } from "../orchestrator/spec.ts";
 import type { InteractionService } from "../orchestrator/interactions.ts";
 import type { WorktreeManager } from "../runtime/worktree-manager.ts";
 import type { SdkUserMessageLike } from "../sdk/types.ts";
@@ -118,6 +119,8 @@ export interface PromptComposerDeps {
   config: Config;
   handoffs: HandoffService;
   decisions: DecisionLedger;
+  /** The living spec — injected into every seat like decisions are. */
+  specs: SpecService;
   tasks: TaskService;
   interactions: InteractionService;
   worktrees: WorktreeManager | null;
@@ -139,7 +142,7 @@ export class PromptComposer {
    * last.
    */
   systemPromptAppend(session: AgentSessionRow, seat: AgentRow, profile: AgentProfile, rolePrompt: RolePrompt): string {
-    return `${seat.instructions}\n\n${capabilityBrief(profile, seat.worktreePath !== null)}${seat.worktreePath ? "\nNever run git commit — the Console lands your work when you report completed. Install dependencies only if you must run validation." : ""}\n\n${seatMessagingBrief(this.rosterLine(session), rolePrompt.addressing)}\n${rolePrompt.protocol}${this.#decisionContext(session)}${this.#checkpointContext(seat)}`;
+    return `${seat.instructions}\n\n${capabilityBrief(profile, seat.worktreePath !== null)}${seat.worktreePath ? "\nNever run git commit — the Console lands your work when you report completed. Install dependencies only if you must run validation." : ""}\n\n${seatMessagingBrief(this.rosterLine(session), rolePrompt.addressing)}\n${rolePrompt.protocol}${this.#decisionContext(session)}${this.#specContext(session)}${this.#checkpointContext(seat)}`;
   }
 
   /**
@@ -176,7 +179,14 @@ export class PromptComposer {
       // Rendered in SEND shape, not as a top-level `CORE:` blob — the flat
       // rendering is the agent's only worked example of a handoff, and it must
       // not teach a shape `send_handoff` rejects.
-      return `[${row.speakerName} → ${row.toName} | ${row.createdAt}] Handoff ${id}\n${JSON.stringify({ handoff: { core: handoff.core, extension: expanded ? handoff.extension : undefined } }, null, 2)}${expanded ? "" : `\nExtension ${handoff.extension.kind} is available with read_handoff.`}`;
+      // The sender's rationale rides even the COMPACT form: `expecting` is the
+      // recipient's success contract, and a contract buried behind
+      // read_handoff is one nobody reads. Bounded fields (≤280 chars each).
+      const data = handoff.extension.data as { why?: unknown; expecting?: unknown };
+      const rationale =
+        (typeof data.why === "string" && data.why !== "" ? `\nWhy: ${data.why}` : "") +
+        (typeof data.expecting === "string" && data.expecting !== "" ? `\nExpected evidence: ${data.expecting}` : "");
+      return `[${row.speakerName} → ${row.toName} | ${row.createdAt}] Handoff ${id}\n${JSON.stringify({ handoff: { core: handoff.core, extension: expanded ? handoff.extension : undefined } }, null, 2)}${rationale}${expanded ? "" : `\nExtension ${handoff.extension.kind} is available with read_handoff.`}`;
     }).join("\n\n");
     // The operator's answers to THIS agent's own questions. Rendered before
     // the handoffs because it outranks them — an operator decision is not a
@@ -325,6 +335,17 @@ export class PromptComposer {
     const digest = this.#deps.decisions.digest(session.userSessionId);
     if (digest === "") return "";
     return `\n\n## Operator decisions (authoritative)\nThe operator made these. Do not re-litigate them, do not contradict them, and do not ask again.\n${digest}`;
+  }
+
+  /**
+   * The approved spec, after decisions (both authoritative) and before the
+   * checkpoint (the spec outranks a model-authored summary of state). Renders
+   * empty when no spec is approved — the byte-stability rule.
+   */
+  #specContext(session: AgentSessionRow): string {
+    const digest = this.#deps.specs.digest(session.userSessionId);
+    if (digest === "") return "";
+    return `\n\n${digest}\nYour work is checked against this specification. read_spec returns the full text.`;
   }
 
   #checkpointContext(seat: AgentRow): string {

@@ -270,7 +270,7 @@ export interface TimelineLane {
 export interface TimelineItem {
   id: string;
   laneId: string;
-  kind: "message" | "turn" | "tool" | "task" | "handoff" | "decision" | "rotation" | "runtime" | "usage";
+  kind: "message" | "turn" | "tool" | "task" | "handoff" | "decision" | "rotation" | "runtime" | "usage" | "state";
   label: string;
   start: string;
   end: string | null;

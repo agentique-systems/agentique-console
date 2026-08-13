@@ -45,7 +45,7 @@ function mailroomWith(h: Harness, selector: DeliverySelector, sink: {
       escalationTarget: () => "main", isReviewRole: () => false,
       transfer: () => { throw new Error("unused"); }, simpleHandoff }),
     composer: new PromptComposer({ repo: h.repo, bus: h.bus, config: h.config, handoffs: h.handoffs,
-      decisions: h.decisions, tasks: h.tasks, interactions: h.interactions, worktrees: null, laneState: () => null }),
+      decisions: h.decisions, specs: h.app.specs, tasks: h.tasks, interactions: h.interactions, worktrees: null, laneState: () => null }),
     lanes: { hasBusyTurnExcludingOperatorWaits: () => false, operatorWaits: () => [],
       bindOperatorWait: () => () => {}, hasLane: () => false, namesWithActiveTurn: () => [] },
     selector,

@@ -39,6 +39,8 @@ import { HandoffStore } from "./handoff-store.ts";
 import { InteractionStore } from "./interaction-store.ts";
 import { MessageStore } from "./message-store.ts";
 import { PatternStateStore } from "./pattern-state-store.ts";
+import { SpecStore } from "./spec-store.ts";
+import { OrchestrationStateStore } from "./state-store.ts";
 import { SessionStore } from "./session-store.ts";
 import { TaskStore } from "./task-store.ts";
 import { UsageStore } from "./usage-store.ts";
@@ -50,6 +52,8 @@ export { HandoffStore } from "./handoff-store.ts";
 export { InteractionStore } from "./interaction-store.ts";
 export { MessageStore } from "./message-store.ts";
 export { PatternStateStore } from "./pattern-state-store.ts";
+export { SpecStore, type SpecRevisionRow } from "./spec-store.ts";
+export { OrchestrationStateStore, type OrchestrationStateRow } from "./state-store.ts";
 export { SessionStore } from "./session-store.ts";
 export { TaskStore } from "./task-store.ts";
 export { UsageStore } from "./usage-store.ts";
@@ -67,6 +71,8 @@ export interface Stores {
   usage: UsageStore;
   crons: CronStore;
   patternState: PatternStateStore;
+  specs: SpecStore;
+  orchestrationState: OrchestrationStateStore;
   tasks: TaskStore;
   assignments: AssignmentStore;
   workspaces: WorkspaceStore;
@@ -84,6 +90,8 @@ export function createStores(db: Db, sqlite: SqliteTransactor): Stores {
     usage: new UsageStore(db),
     crons: new CronStore(db),
     patternState: new PatternStateStore(db),
+    specs: new SpecStore(db),
+    orchestrationState: new OrchestrationStateStore(db),
     tasks: new TaskStore(db),
     assignments: new AssignmentStore(db),
     workspaces: new WorkspaceStore(db),

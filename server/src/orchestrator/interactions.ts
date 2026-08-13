@@ -27,7 +27,7 @@ export type InteractionResolution =
       freeText?: Record<string, string>;
       note?: string;
     }
-  | { kind: "decision"; approved: boolean; note?: string }
+  | { kind: "decision"; approved: boolean; note?: string; editedDocument?: string }
   | { kind: "dismissed"; reason: string };
 
 /**
@@ -243,6 +243,35 @@ export class InteractionService {
   }
 
   /** Creates a pending plan-approval card and parks its resolution promise. */
+  /**
+   * A SPEC revision rides the plan-approval machinery (the interactions.kind
+   * CHECK cannot be widened on an existing SQLite database): same card, same
+   * parked promise, same chat-dismissal note-attachment — distinguished by
+   * the `spec` payload marker. The operator can edit the text in place;
+   * their version becomes the governing document.
+   */
+  createSpecApproval(
+    userSessionId: string,
+    document: string,
+    specRevision: number,
+  ): { id: string; resolution: Promise<InteractionResolution> } {
+    return this.#create(
+      userSessionId,
+      "plan_approval",
+      { plan: document, spec: { revision: specRevision } },
+      undefined,
+      undefined,
+      {},
+      (id) => {
+        this.#bus.append({
+          type: "user_session.plan.proposed",
+          userSessionId,
+          payload: { userSessionId, interactionId: id, plan: document, spec: { revision: specRevision } },
+        });
+      },
+    );
+  }
+
   createPlanApproval(
     userSessionId: string,
     plan: string,
@@ -375,6 +404,7 @@ export class InteractionService {
       this.#markResolved(interactionId, approved ? "answered" : "rejected", {
         decision: body.decision,
         ...(body.note === undefined ? {} : { note: body.note }),
+        ...(body.editedDocument === undefined ? {} : { editedDocument: body.editedDocument }),
       });
       this.#bus.append({
         type: "user_session.plan.resolved",
@@ -395,6 +425,7 @@ export class InteractionService {
         kind: "decision",
         approved,
         ...(body.note === undefined ? {} : { note: body.note }),
+        ...(body.editedDocument === undefined ? {} : { editedDocument: body.editedDocument }),
       });
       this.#pending.delete(interactionId);
     }

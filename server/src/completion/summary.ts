@@ -58,6 +58,17 @@ export interface RunSummaryDocument {
   uncertainty: string[];
   /** Seats whose provider process the Console released when the run settled. */
   resources: { reapedSeats: number; detail: string[] };
+  /**
+   * Main's own criteria→evidence record (record_completion), rendered beside
+   * the console's facts. Null = the orchestrator recorded none — a VISIBLE
+   * omission on the sign-off card, deliberately not a blocker.
+   */
+  justification: {
+    revision: number;
+    criteria: { criterion: string; met: boolean; evidence: { kind: string; ref: string }[] }[];
+    knownGaps: string[];
+    nonGoals: string[];
+  } | null;
   friction: { apiRetries: number; rateLimited: number; failedTurns: number; watchdogTrips: number };
 }
 
@@ -69,6 +80,8 @@ export interface BuildRunSummaryInput {
   seqFrom: number;
   reaped: ReapResult;
   getWorkspaceRoot?: (workspaceId: string) => string;
+  /** Main's latest record_completion, when one exists. */
+  completionRecord?: { revision: number; completion: { criteria: { criterion: string; met: boolean; evidence: { kind: string; ref: string }[] }[]; knownGaps: string[]; nonGoals: string[] } } | null;
 }
 
 /** Total covered by a set of intervals, counting overlap once. */
@@ -190,6 +203,7 @@ export function buildRunSummary(input: BuildRunSummaryInput): RunSummaryDocument
       byParticipant,
     },
     decisions, deviations, uncertainty,
+    justification: input.completionRecord ? { revision: input.completionRecord.revision, ...input.completionRecord.completion } : null,
     resources: {
       reapedSeats: reaped.seats.length,
       detail: reaped.seats.map((seat) => `${seat.agentSessionId}:${seat.agent}`),

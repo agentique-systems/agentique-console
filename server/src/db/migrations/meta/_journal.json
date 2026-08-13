@@ -43,6 +43,13 @@
       "when": 1786652620211,
       "tag": "0005_salvage_columns",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1786654311153,
+      "tag": "0006_spec_and_state",
+      "breakpoints": true
     }
   ]
 }

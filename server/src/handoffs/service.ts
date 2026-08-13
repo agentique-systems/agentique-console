@@ -134,11 +134,16 @@ export class HandoffService {
   }
 
   summary(record: HandoffRecord): HandoffSummary {
+    // why/expecting are capture-at-act rationale (main's commissions); lifted
+    // so cards, timelines and the recipient's delivery text carry them.
+    const data = record.extension.data as { why?: unknown; expecting?: unknown };
     return { id: record.metadata.id, trigger: record.metadata.trigger, status: record.core.status, risk: record.core.risk,
       action: record.core.action, stateSummary: record.core.state.summary, resultSummary: record.core.result.summary,
       nextAction: record.core.nextAction, evidenceCount: record.core.state.evidence.length,
       artifactCount: record.core.result.artifacts.length, extensionKind: record.extension.kind,
-      referenceWarnings: record.metadata.referenceWarnings };
+      referenceWarnings: record.metadata.referenceWarnings,
+      ...(typeof data.why === "string" && data.why !== "" ? { why: data.why.slice(0, 280) } : {}),
+      ...(typeof data.expecting === "string" && data.expecting !== "" ? { expecting: data.expecting.slice(0, 280) } : {}) };
   }
 
   render(record: HandoffRecord): string {
@@ -148,6 +153,10 @@ export class HandoffService {
     // Verbatim, always: the reader judges uncertainty; the console refuses to
     // hide it.
     if (record.core.uncertainty.length > 0) lines.push(`Unverified: ${record.core.uncertainty.join("; ")}`);
+    // The success contract the sender attached: hollow rationale degrades the
+    // sender's own results, which is what keeps it honest.
+    if (s.why) lines.push(`Why: ${s.why}`);
+    if (s.expecting) lines.push(`Expected evidence: ${s.expecting}`);
     if (s.nextAction) lines.push(`Next: ${s.nextAction}`);
     lines.push(`Evidence: ${s.evidenceCount} · Artifacts: ${s.artifactCount} · full record available with read_handoff`);
     if (s.referenceWarnings.length) lines.push(`Reference warnings: ${s.referenceWarnings.join("; ")}`);

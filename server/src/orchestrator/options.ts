@@ -30,6 +30,10 @@ export const CONSOLE_TOOL_NAMES = [
   "close_agent_session",
   "read_artifact",
   "add_agent",
+  "propose_spec",
+  "read_spec",
+  "update_orchestration_state",
+  "record_completion",
 ] as const;
 
 /**
@@ -70,6 +74,10 @@ export interface OrchestratorOptionsInput {
    * one — every agent has it already.
    */
   decisionDigest?: string;
+  /** The approved living spec, injected AFTER decisions (both authoritative). */
+  specDigest?: string;
+  /** Main's own working state — the durable memory of the orchestration loop. */
+  stateDigest?: string;
   purpose?: "work" | "profile_manager";
   /** The lane's registry address (CLAUDE_CODE_SESSION_NAME). */
   peerName?: string;
@@ -108,7 +116,9 @@ export function buildOrchestratorOptions(
       append: (manager ? MANAGER_BRIEF + (input.contextMemory ? `\n\n## Selected profile (read-only baseline)\n${input.contextMemory}` : "") : withDelegation
         ? ORCHESTRATOR_BRIEF + ORCHESTRATOR_DELEGATION_BRIEF + (input.contextMemory ? `\n\n## Rotation checkpoint (or read-only legacy memory)\n${input.contextMemory}` : "")
         : ORCHESTRATOR_BRIEF + (input.contextMemory ? `\n\n## Rotation checkpoint (or read-only legacy memory)\n${input.contextMemory}` : ""))
-        + (input.decisionDigest ? `\n\n## Operator decisions (authoritative)\nThe operator made these. Do not re-litigate them, do not contradict them, and do not relay them to seats — they already have them.\n${input.decisionDigest}` : ""),
+        + (input.decisionDigest ? `\n\n## Operator decisions (authoritative)\nThe operator made these. Do not re-litigate them, do not contradict them, and do not relay them to seats — they already have them.\n${input.decisionDigest}` : "")
+        + (input.specDigest ? `\n\n${input.specDigest}` : "")
+        + (input.stateDigest ? `\n\n${input.stateDigest}` : ""),
     },
     settingSources: [],
     includePartialMessages: true,

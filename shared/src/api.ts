@@ -133,7 +133,16 @@ export type ResolveInteractionBody =
       /** Card-level note attached to any answer. */
       note?: string;
     }
-  | { decision: "approve" | "reject"; note?: string };
+  | {
+      decision: "approve" | "reject";
+      note?: string;
+      /**
+       * The operator's edited version of the proposed plan/spec text. On
+       * approval this becomes the governing text — their words outrank the
+       * proposal.
+       */
+      editedDocument?: string;
+    };
 
 // POST /api/user-sessions/:id/signoff
 export interface RunSignoffBody {

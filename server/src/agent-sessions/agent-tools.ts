@@ -60,6 +60,7 @@ interface SendHandoffArgs {
 }
 
 import { fail, ok } from "../sdk/tool-result.ts";
+import type { SpecService } from "../orchestrator/spec.ts";
 
 /** The slice of the service's deps the tool handlers read. */
 export interface AgentToolsDeps {
@@ -69,6 +70,8 @@ export interface AgentToolsDeps {
   config?: Config;
   tasks?: TaskService;
   handoffs?: HandoffService;
+  /** The living spec, for read_spec (absent in some unit harnesses). */
+  specs?: SpecService;
   worktrees: WorktreeManager | null;
 }
 
@@ -248,6 +251,19 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
       }
       return ok({ artifactId: artifact.id, mediaType: artifact.mediaType, bytes: artifact.bytes, content: pageTail(artifact.content, args.cursor, args.maxBytes) });
     }));
+  // The injected spec digest is byte-capped; the full governing text stays a
+  // tool call away for every seat.
+  if (deps.specs) {
+    const specs = deps.specs;
+    tools.push(sdk.tool("read_spec",
+      "Read the run's governing specification (latest approved revision) in full, paged. Your work is checked against it.",
+    { cursor: z.string().optional(), maxBytes: z.number().int().min(1).max(PAGE_MAX_BYTES).default(PAGE_DEFAULT_BYTES) },
+    async (args: { cursor?: string; maxBytes: number }) => {
+      const row = specs.latestApproved(ctx.session.userSessionId);
+      if (!row) return ok({ spec: null, note: "no approved specification for this run" });
+      return ok({ revision: row.revision, changeNote: row.changeNote, document: pageTail(row.document, args.cursor, args.maxBytes) });
+    }));
+  }
   /**
    * A place to put a long body that is NOT a JSON string parameter: a long
    * free-text tool argument is exposed to provider-side JSON parse failures,

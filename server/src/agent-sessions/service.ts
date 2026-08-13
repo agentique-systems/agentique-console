@@ -16,6 +16,7 @@ import type { SqliteSessionStore } from "../sdk/session-store.ts";
 import type { ConsoleSdk } from "../sdk/types.ts";
 import type { WorktreeManager } from "../runtime/worktree-manager.ts";
 import type { DecisionLedger } from "../orchestrator/decisions.ts";
+import type { SpecService } from "../orchestrator/spec.ts";
 import type { InteractionService } from "../orchestrator/interactions.ts";
 import type { AssignmentScheduler } from "../tasks/scheduler.ts";
 import type { TaskService } from "../tasks/service.ts";
@@ -39,6 +40,7 @@ import { dispatchWorkItems, onPatternPost, sweep as patternSweep, type DispatchW
 
 export interface AgentSessionServiceDeps {
   repo: Repo;
+  specs: SpecService;
   bus: EventBus;
   artifacts: ArtifactStore;
   /** Required — every knob's default lives in `loadConfig`, nowhere else. */
@@ -128,7 +130,7 @@ export class AgentSessionService {
     });
     this.#composer = new PromptComposer({
       repo: deps.repo, bus: deps.bus, config: deps.config, handoffs: deps.handoffs,
-      decisions: deps.decisions, tasks: deps.tasks, interactions: deps.interactions,
+      decisions: deps.decisions, specs: deps.specs, tasks: deps.tasks, interactions: deps.interactions,
       worktrees: deps.worktrees,
       laneState: (agentSessionId, agent) => {
         const lane = this.#lanes.peek(agentSessionId, agent);
@@ -165,7 +167,7 @@ export class AgentSessionService {
     this.#runtime = new AgentRuntime({
       repo: deps.repo, bus: deps.bus, config: deps.config,
       sdk: deps.sdk, sessionStore: deps.sessionStore, getWorkspaceRoot: deps.getWorkspaceRoot,
-      artifacts: deps.artifacts, tasks: deps.tasks, handoffs: deps.handoffs,
+      artifacts: deps.artifacts, tasks: deps.tasks, handoffs: deps.handoffs, specs: deps.specs,
       worktrees: deps.worktrees,
       scheduler: deps.scheduler,
       lanes: this.#lanes, worktree: this.#worktreeBinding, routing: this.#routing, composer: this.#composer,
