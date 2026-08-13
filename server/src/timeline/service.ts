@@ -102,11 +102,6 @@ export class TimelineService {
         starts.set(item.id, item); items.push(item); continue;
       }
       if (event.type === "user_session.tool.completed" || event.type === "agent_session.tool.completed") { finish(`tool:${str(p.callId)}`, event, p.isError ? "error" : "completed"); continue; }
-      if (event.type === "agent_session.process.started") {
-        const item: TimelineItem = { id: `process:${str(p.processId)}`, laneId: `agent:${str(p.agentSessionId)}:${str(p.agent)}`, kind: "process", label: str(p.command, "process"), start: event.ts, end: null, status: "running", eventSeqs: seqs, detail: p };
-        starts.set(item.id, item); items.push(item); continue;
-      }
-      if (event.type === "agent_session.process.exited") { finish(`process:${str(p.processId)}`, event, p.code === 0 ? "completed" : "error"); continue; }
       const message = p.message as Record<string, unknown> | undefined;
       if (event.type === "user_session.message.appended" && message) {
         const speaker = message.speaker as Record<string, unknown> | undefined;

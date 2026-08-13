@@ -14,9 +14,9 @@ import { hubContract } from "./topology.ts";
 
 const stubSdk = { tool: (name: string) => name, createSdkMcpServer: () => ({}) } as unknown as ConsoleSdk;
 
-function makeProfile(runtime: Partial<AgentProfile["runtime"]> = {}): AgentProfile {
+function makeProfile(over: Partial<AgentProfile> = {}): AgentProfile {
   return { id: "p", title: "p", purpose: "p", instructions: "x", tools: ["Read"], permissionMode: "default",
-    exemptFromOwnership: false, maxTurns: 30, sandboxRequired: true, runtime: { shell: false, browser: false, screenshots: false, network: [], ...runtime } };
+    exemptFromOwnership: false, maxTurns: 30, mcpServers: {}, ...over };
 }
 
 function makeAgent(over: Partial<AgentRow>): AgentRow {
@@ -30,11 +30,11 @@ function makeAgent(over: Partial<AgentRow>): AgentRow {
 
 function registeredNames(agent: AgentRow, profile: AgentProfile, roleName: string): Set<string> {
   const hub = hubContract();
-  const deps: AgentGrantDeps = { tasks: true, handoffs: true, processes: true, browsers: true, worktrees: true, user: true, childSessions: true };
+  const deps: AgentGrantDeps = { tasks: true, handoffs: true, worktrees: true, user: true, childSessions: true };
   const granted = grantedTools(hub.roles[roleName], profile, deps);
   const ctx = {
     sdk: stubSdk,
-    deps: { repo: {}, bus: {}, tasks: {}, handoffs: {}, processes: {}, browsers: {}, worktrees: {} },
+    deps: { repo: {}, bus: {}, tasks: {}, handoffs: {}, worktrees: {} },
     session: { id: "as1", userSessionId: "us1" } as AgentSessionRow,
     agent, profile,
     user: { workspaceId: "ws" } as UserSessionRow,
@@ -54,7 +54,7 @@ function registeredNames(agent: AgentRow, profile: AgentProfile, roleName: strin
 }
 
 function grantedNames(profile: AgentProfile, roleName: string): Set<string> {
-  const deps: AgentGrantDeps = { tasks: true, handoffs: true, processes: true, browsers: true, worktrees: true, user: true, childSessions: true };
+  const deps: AgentGrantDeps = { tasks: true, handoffs: true, worktrees: true, user: true, childSessions: true };
   return new Set(grantedTools(hubContract().roles[roleName], profile, deps));
 }
 
@@ -65,10 +65,22 @@ describe("grants parity", () => {
     expect(registeredNames(agent, profile, "coordinator")).toEqual(grantedNames(profile, "coordinator"));
   });
 
-  it("hub specialist with shell+browser: registration equals the granted set", () => {
+  it("hub specialist: registration equals the granted set", () => {
     const agent = makeAgent({ role: "specialist" });
-    const profile = makeProfile({ shell: true, browser: true, screenshots: true });
+    const profile = makeProfile();
     expect(registeredNames(agent, profile, "specialist")).toEqual(grantedNames(profile, "specialist"));
+  });
+
+  // The Console grants COORDINATION and nothing else. Capability is native
+  // Bash plus whatever MCP servers a profile declares, so no console tool name
+  // may ever describe a browser, a process, or an HTTP request again.
+  it("grants no capability tools, whatever the profile asks for", () => {
+    const profile = makeProfile();
+    for (const role of ["coordinator", "specialist"]) {
+      for (const name of grantedNames(profile, role)) {
+        expect(name).not.toMatch(/^(browser_|process_|http_probe)/);
+      }
+    }
   });
 
 });

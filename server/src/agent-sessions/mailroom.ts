@@ -30,6 +30,8 @@ import {
   finalReportBlockers,
   finalReportCaveats,
   isFinalToMain,
+  promotedCategory,
+  TERMINAL_REPORT_TRIGGERS,
   WithheldFinalError,
   type Category,
 } from "./final-gate.ts";
@@ -109,9 +111,16 @@ export class Mailroom {
     const session = repo.getAgentSession(input.agentSessionId);
     if (!session) throw new NotFoundError(`no agent session ${input.agentSessionId}`);
     if (session.lifecycle !== "open") throw new ConflictError(`agent session ${input.agentSessionId} is archived`);
-    const category = input.category ?? "update";
-    const edge = this.#deps.routing.assertRoute(session, input.speaker.name, input.to, category);
     const finalSeat = this.#deps.routing.completionAgent(session, "finalFrom");
+    // Promote BEFORE the route check and the gates: a report the Console
+    // recognises as final must be route-checked, gated and journaled as one.
+    const requested = input.category ?? "update";
+    const category = promotedCategory(finalSeat, input.speaker.name, input.to, requested, input.handoff.core.status);
+    if (category !== requested) {
+      this.#deps.bus.append({ type: "handoff.category.promoted", userSessionId: session.userSessionId, agentSessionId: session.id,
+        payload: { agentSessionId: session.id, sender: input.speaker.name, from: requested, to: category, status: input.handoff.core.status } });
+    }
+    const edge = this.#deps.routing.assertRoute(session, input.speaker.name, input.to, category);
     if (input.dedupeKey) {
       const prior = repo.findDeliveryByDedupe(session.id, input.speaker.name, input.to, input.dedupeKey);
       const priorMessage = prior ? repo.getMessageById(prior.messageId) : undefined;
@@ -164,11 +173,22 @@ export class Mailroom {
         payload: { agentSessionId: session.id, sender: input.speaker.name, caveats } });
     }
     // The ledger follows the journal, not a coordinator's memory.
-    syncLedgerFromHandoff(this.#deps, session, input.to, input.handoff, category);
+    syncLedgerFromHandoff(this.#deps, session, input.speaker.name, input.to, input.handoff, category);
     const { message, delivery, text } = this.#journal(session, input.speaker, input.to, input.handoff, category, {
       ...(input.dedupeKey ? { dedupeKey: input.dedupeKey } : {}), ...(input.turnId ? { turnId: input.turnId } : {}),
     });
     if (input.to === MAIN_RECIPIENT) {
+      // The report that concludes the session lands the session's work, before
+      // anyone is told about it — so the files exist by the time the report is
+      // read. A seat that never declares itself "completed" (the evaluator
+      // loop's generator is instructed to do exactly that) lands here or never:
+      // one live run shipped a finished deliverable and left the operator's
+      // workspace empty. Child sessions land the same way; their controller is
+      // reading the same workspace.
+      if (TERMINAL_REPORT_TRIGGERS.has(category) && input.speaker.name === finalSeat) {
+        try { this.#deps.worktree.landForSession(session); }
+        catch (error) { this.#deps.recordFailure(session.id, error); }
+      }
       if (session.parentAgentSessionId !== null) {
         // A child session's "main" is its parent's controller. The literal
         // stays "main" in the child's journal and every governance predicate;
@@ -269,8 +289,13 @@ export class Mailroom {
       else repo.setAgentLatestHandoff(session.id, agent, prepared.row.id);
     }
     this.#deps.handoffs.committed(prepared.record);
-    if (senderSeat && senderSeat.worktreePath && (prepared.record.core.status === "completed" || prepared.record.core.status === "failed")) {
-      this.#deps.worktree.landOnReport(session, senderSeat, prepared.record.core.status);
+    if (senderSeat?.worktreePath) {
+      const status = prepared.record.core.status;
+      if (status === "completed" || status === "failed") this.#deps.worktree.landOnReport(session, senderSeat, status);
+      // Not terminal, but the work still moved: commit it so the branch tells
+      // the truth the moment the handoff does. A recipient seated on this
+      // branch is spawned from inside this very call.
+      else this.#deps.worktree.snapshot(session.id, senderSeat.name, `seat ${senderSeat.name}: handoff ${prepared.row.id}`);
     }
     bus.append({ type: "agent_session.message.appended", userSessionId: session.userSessionId, agentSessionId: session.id,
       payload: { agentSessionId: session.id, message: toWireMessage(message) } });

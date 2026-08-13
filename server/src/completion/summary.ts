@@ -22,11 +22,14 @@ function typed(row: Pick<typeof events.$inferSelect, "type" | "payload">): Conso
   return { type: row.type, payload: row.payload } as ConsoleEvent;
 }
 
+/**
+ * Seats whose provider process was released. Everything an agent started —
+ * a background `Bash` server, an MCP server's browser — is a child of that
+ * process, so releasing the seat releases them; the Console keeps no process
+ * table of its own to sweep.
+ */
 export interface ReapResult {
-  processes: { agentSessionId: string; agent: string; processId: string; pid: number | undefined }[];
-  browsers: number;
-  /** Processes the ledger shows as started-but-never-exited: real leaks. */
-  leakedBefore: number;
+  seats: { agentSessionId: string; agent: string }[];
 }
 
 export interface RunSummaryDocument {
@@ -53,12 +56,8 @@ export interface RunSummaryDocument {
   /** Console-owned facts about what the run did not do as asked. */
   deviations: string[];
   uncertainty: string[];
-  resources: {
-    reapedProcesses: number;
-    reapedBrowsers: number;
-    leakedBefore: number;
-    detail: string[];
-  };
+  /** Seats whose provider process the Console released when the run settled. */
+  resources: { reapedSeats: number; detail: string[] };
   friction: { apiRetries: number; rateLimited: number; failedTurns: number; watchdogTrips: number };
 }
 
@@ -152,7 +151,7 @@ export function buildRunSummary(input: BuildRunSummaryInput): RunSummaryDocument
       ? [{ question: event.payload.question, answer: event.payload.answer, askedBy: event.payload.askedBy }]
       : []);
 
-  const deviations = collectDeviations(window, open.map((task) => task.subject));
+  const deviations = [...collectDeviations(window, open.map((task) => task.subject)), ...unmergedBranches(repo, userSessionId)];
   const uncertainty = [...new Set([
     ...finals.flatMap((row) => row.core.uncertainty),
     ...input.interactions.listPending(userSessionId).map((row) =>
@@ -192,10 +191,8 @@ export function buildRunSummary(input: BuildRunSummaryInput): RunSummaryDocument
     },
     decisions, deviations, uncertainty,
     resources: {
-      reapedProcesses: reaped.processes.length,
-      reapedBrowsers: reaped.browsers,
-      leakedBefore: reaped.leakedBefore,
-      detail: reaped.processes.map((process) => `${process.agentSessionId}:${process.agent} ${process.processId}${process.pid === undefined ? "" : ` (pid ${process.pid})`}`),
+      reapedSeats: reaped.seats.length,
+      detail: reaped.seats.map((seat) => `${seat.agentSessionId}:${seat.agent}`),
     },
     friction,
   };
@@ -235,6 +232,20 @@ function collectDeviations(window: readonly (typeof events.$inferSelect)[], open
  * worktree writes directly and commits nothing, and its files must still
  * count.
  */
+/**
+ * Seat work that never reached the workspace. A deliverable stranded on an
+ * unmerged branch under the Console's data dir is invisible to the operator —
+ * one whole run's output sat there while its workspace read as empty — so the
+ * sign-off card names the branch rather than letting it disappear quietly.
+ */
+function unmergedBranches(repo: Repo, userSessionId: string): string[] {
+  return repo.listAgentSessions(userSessionId)
+    .filter((session) => session.lifecycle === "open")
+    .flatMap((session) => repo.listAgents(session.id))
+    .filter((seat) => seat.worktreeBranch !== null && seat.worktreePath !== null)
+    .map((seat) => `${seat.name}'s work is still on unmerged branch ${seat.worktreeBranch} — it is not in the workspace`);
+}
+
 function collectBuild(
   db: Db,
   repo: Repo,

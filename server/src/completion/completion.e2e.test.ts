@@ -3,7 +3,6 @@ import { describe, expect, it, vi } from "vitest";
 import { initMessage, successMessage } from "../sdk/fake.ts";
 import { collectUntil, makeDelegationHarness } from "../test-helpers.ts";
 import { interactions as interactionRows, runSummaries } from "../db/schema.ts";
-import type { ProcessManager } from "../runtime/process-manager.ts";
 
 const draft = (action: string, status: "pending" | "completed" = "pending") => ({
   core: {
@@ -24,15 +23,11 @@ const FINAL = {
 };
 
 function harness() {
-  const stopAgent = vi.fn((_a: string, _p: string) => [{ processId: "task_serve", pid: 4242 }]);
-  const h = makeDelegationHarness(
-    async function* () {
-      yield initMessage();
-      yield successMessage();
-    },
-    { runtime: { processes: { stopAgent, stopSession: vi.fn(), closeAll: vi.fn() } as unknown as ProcessManager } },
-  );
-  return { h, stopAgent };
+  const h = makeDelegationHarness(async function* () {
+    yield initMessage();
+    yield successMessage();
+  });
+  return { h };
 }
 
 async function runToFinal(h: ReturnType<typeof harness>["h"]) {
@@ -52,8 +47,8 @@ const send = (h: ReturnType<typeof harness>["h"]) =>
   h.fake.captured.tools.find((tool) => tool.name === "send_handoff")!;
 
 describe("run completion", () => {
-  it("proposes completion once, after a final, and reaps the run's processes", async () => {
-    const { h, stopAgent } = harness();
+  it("proposes completion once, after a final, and releases the run's seats", async () => {
+    const { h } = harness();
     const { userSessionId } = await runToFinal(h);
     await send(h).handler(FINAL, {});
 
@@ -67,9 +62,11 @@ describe("run completion", () => {
     // `status` is untouched — completion is not archival.
     expect(h.repo.getUserSession(userSessionId)?.lifecycle).toBe("open");
 
-    // Reaped BEFORE the card renders, so the operator never reads a summary
-    // while a dev server the run started is still bound to a port.
-    expect(stopAgent).toHaveBeenCalled();
+    // Seats are released BEFORE the card renders, so the operator never reads
+    // a summary while a dev server one of them started still holds a port.
+    // Closing the lane closes the CLI subprocess, and everything the agent
+    // started is a child of it.
+    expect((event.payload as { reaped: { seats: number } }).reaped.seats).toBeGreaterThan(0);
 
     // Idempotent: a second final does not propose again.
     await send(h).handler(FINAL, {});
@@ -103,6 +100,44 @@ describe("run completion", () => {
     });
     await collectUntil(h.bus, (event) => event.type === "run.completion.proposed", 10_000);
     expect(h.repo.getUserSession(userSessionId)?.runState).toBe("awaiting_signoff");
+  });
+
+  /**
+   * The 2026-08-12 live run: the reporting agent sent its ACCEPT verdict to
+   * main with a terminal status but the wrong category (it omitted the
+   * parameter, and the schema defaulted it to `update`). Main never woke, no
+   * card appeared, and the run sat `active` forever while three other
+   * predicates believed the session had reported. What a report IS is the
+   * Console's call.
+   */
+  it("treats a terminal-status report to main as final whatever category it carries", async () => {
+    const { h } = harness();
+    const { userSessionId, agentSessionId } = await runToFinal(h);
+
+    const promoted = collectUntil(h.bus, (event) => event.type === "run.completion.proposed", 10_000);
+    await send(h).handler({ ...FINAL, category: "update" }, {});
+    await promoted;
+
+    expect(h.repo.getUserSession(userSessionId)?.runState).toBe("awaiting_signoff");
+    // Journaled as what it is, and the near-miss is on the record.
+    expect(h.repo.latestHandoff({ userSessionId, agentSessionId, recipient: "main" })?.trigger).toBe("final");
+  });
+
+  it("closes the operator loop when a run goes quiet without any final", async () => {
+    const { h } = harness();
+    const { userSessionId, agentSessionId } = await runToFinal(h);
+
+    // A seat reports its work to the coordinator, which then goes quiet
+    // without ever addressing main — the shape that used to end in silence.
+    const closed = collectUntil(h.bus, (event) => event.type === "agent_session.closeout.forced", 10_000);
+    h.host.post({ agentSessionId, speaker: { kind: "agent", name: "check" }, to: "coordinator",
+      handoff: draft("page verified, one defect open", "completed"), category: "final" });
+    await closed;
+
+    const toMain = h.repo.latestHandoff({ userSessionId, agentSessionId, recipient: "main" });
+    expect(toMain?.core.state.summary).toContain("page verified, one defect open");
+    // Told, but not signed off: a Console-assembled note is not a final report.
+    expect(h.completion.isComplete(userSessionId)).toBe(false);
   });
 
   it("does not propose without a final, however quiet the run gets", async () => {

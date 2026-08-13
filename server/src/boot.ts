@@ -8,7 +8,6 @@
  * path production takes.
  */
 import type { App } from "./app.ts";
-import { reapOrphanedProcesses } from "./completion/orphans.ts";
 import { reconcileDurableCommunication, recoverInterruptedTurns } from "./recovery.ts";
 
 export interface BootReport {
@@ -20,8 +19,6 @@ export interface BootReport {
   reconciledCommunications: number;
   /** Worktree directories whose session is gone or archived, removed. */
   orphanedWorktrees: number;
-  /** Managed child processes of a previous run, killed. */
-  reapedProcesses: number;
   /** Child sessions whose parent archived or vanished across the restart. */
   archivedOrphanChildren: number;
   /** Scheduled assignments found ready at boot and dispatched. */
@@ -56,11 +53,6 @@ export async function bootApp(app: App): Promise<BootReport> {
     );
   }
 
-  // Managed children of a PREVIOUS process are unreachable by id but still
-  // hold their ports; the next run would inherit them squatting the ports it
-  // wants.
-  const reapedProcesses = reapOrphanedProcesses({ db: app.db, bus: app.bus });
-
   app.host.boot();
   // Children whose parent archived or vanished across the restart can never
   // report to anyone.
@@ -81,7 +73,6 @@ export async function bootApp(app: App): Promise<BootReport> {
     requeuedDeliveries,
     reconciledCommunications,
     orphanedWorktrees,
-    reapedProcesses,
     archivedOrphanChildren,
     scheduledAssignmentsRedriven,
   };
@@ -96,6 +87,4 @@ export async function shutdownApp(app: App): Promise<void> {
   // Persistent lanes are CLI subprocesses — none may outlive the server.
   await app.runner.closeAll().catch(() => undefined);
   await app.host.closeAll().catch(() => undefined);
-  app.processes?.closeAll();
-  await app.browsers?.closeAll().catch(() => undefined);
 }

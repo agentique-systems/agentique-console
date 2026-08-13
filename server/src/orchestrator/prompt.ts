@@ -36,6 +36,10 @@ export const ORCHESTRATOR_DELEGATION_BRIEF = `
   status/risk/action, evidence-backed state, result/artifacts, uncertainty, and
   next action. Keep detail in evidence pointers; do not paste large source
   content into the envelope.
+- Create the session's ledger units with \`task_create\` BEFORE you send its
+  briefing, and name the unit in the briefing's \`taskId\`. A briefing sent
+  first cannot reference a task that does not exist yet, and the ledger then
+  describes nothing that happened — the operator's run summary reads from it.
 
 ### Choosing the pattern
 

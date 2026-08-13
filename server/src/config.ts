@@ -33,19 +33,23 @@ export interface InfraConfig {
   /** Reasoning effort for every session; undefined = SDK default. */
   effort: string | undefined;
   /**
-   * Hosts sandboxed commands may reach, workspace-wide. Profiles narrow this
-   * or opt out entirely. Nothing here is a security boundary on its own — the
-   * filesystem scope is — it exists so a coding agent can install and fetch
-   * what the work actually needs. CONSOLE_ALLOWED_DOMAINS overrides
-   * (comma-separated; empty string means fully offline).
-   */
-  allowedDomains: string[];
-  /**
    * `git init` a non-repo workspace so agent isolation can engage. Off makes
    * the Console leave operator directories alone at the cost of running every
    * agent in one shared tree.
    */
   autoInitGit: boolean;
+  /**
+   * MCP servers to drop from every profile that declares them, by name.
+   * CONSOLE_MCP_DISABLED (comma-separated). Capability is declared per profile
+   * and launched by the Console; this is the operator's off switch.
+   */
+  mcpDisabled: string[];
+  /**
+   * Replaces the `browser` server's command for every profile that declares
+   * one, as `[command, ...args]`. CONSOLE_BROWSER_MCP, whitespace-separated.
+   * Undefined leaves each profile's own declaration alone.
+   */
+  browserMcp: string[] | undefined;
 }
 
 /** How the console orchestrates: budgets, timers, caps, protocol knobs. */
@@ -110,20 +114,6 @@ export interface Config {
   infra: InfraConfig;
   policy: PolicyConfig;
 }
-
-/**
- * Package registries and the CDNs their docs point at. Deliberately not
- * "everything": egress stays enumerable, and an operator who needs more sets
- * CONSOLE_ALLOWED_DOMAINS.
- */
-const DEFAULT_ALLOWED_DOMAINS = [
-  "registry.npmjs.org", "*.npmjs.org",
-  "pypi.org", "*.pythonhosted.org",
-  "crates.io", "*.crates.io",
-  "proxy.golang.org", "sum.golang.org",
-  "github.com", "*.githubusercontent.com", "codeload.github.com",
-  "unpkg.com", "cdn.jsdelivr.net", "esm.sh", "cdnjs.cloudflare.com",
-];
 
 /**
  * Env names retired by THE RENAME. A retired name that is still set fails the
@@ -195,10 +185,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       model: validatedModel(env.CONSOLE_MODEL),
       improveModel: env.CONSOLE_IMPROVE_MODEL ?? "claude-sonnet-5",
       effort: env.CONSOLE_EFFORT,
-      allowedDomains: env.CONSOLE_ALLOWED_DOMAINS === undefined
-        ? DEFAULT_ALLOWED_DOMAINS
-        : env.CONSOLE_ALLOWED_DOMAINS.split(",").map((entry) => entry.trim()).filter((entry) => entry !== ""),
       autoInitGit: env.CONSOLE_AUTO_INIT_GIT !== "0",
+      mcpDisabled: (env.CONSOLE_MCP_DISABLED ?? "").split(",").map((entry) => entry.trim()).filter((entry) => entry !== ""),
+      browserMcp: env.CONSOLE_BROWSER_MCP === undefined ? undefined
+        : env.CONSOLE_BROWSER_MCP.split(/\s+/).filter((entry) => entry !== ""),
     },
     policy: {
       agentIdleReapMs: Number(env.CONSOLE_AGENT_IDLE_REAP_MS ?? 300_000),

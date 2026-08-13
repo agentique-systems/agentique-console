@@ -10,7 +10,6 @@ describe("bootApp", () => {
       requeuedDeliveries: 0,
       reconciledCommunications: 0,
       orphanedWorktrees: 0,
-      reapedProcesses: 0,
       archivedOrphanChildren: 0,
       scheduledAssignmentsRedriven: 0,
     });

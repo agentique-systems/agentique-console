@@ -229,7 +229,7 @@ describe("0003_glossary replay over a mid-run pre-rename database", () => {
       db,
       sqlite,
       sdk: async () => fake.sdk,
-      runtime: { processes: null, browsers: null, worktrees: null },
+      runtime: { worktrees: null },
     });
     const bootReport = await bootApp(app);
     expect(bootReport.requeuedDeliveries).toBeGreaterThanOrEqual(0);

@@ -26,8 +26,6 @@ import { OrchestratorRunner } from "./orchestrator/runner.ts";
 import { buildConsoleMcpServer } from "./orchestrator/tools.ts";
 import type { ConsoleSdk } from "./sdk/types.ts";
 import type { SqliteSessionStore } from "./sdk/session-store.ts";
-import { ProcessManager } from "./runtime/process-manager.ts";
-import { BrowserManager } from "./runtime/browser-manager.ts";
 import { WorktreeManager } from "./runtime/worktree-manager.ts";
 import { UserSessionService } from "./sessions/service.ts";
 import { AssignmentScheduler } from "./tasks/scheduler.ts";
@@ -44,12 +42,10 @@ export interface CreateAppOptions {
   /**
    * OS-resource managers. Omitted members are constructed for real; `null`
    * states — at the construction site, visibly — that a capability is absent
-   * (tests that never spawn processes or worktrees say so here instead of
-   * relying on a forgotten optional).
+   * (tests that never touch git say so here instead of relying on a forgotten
+   * optional).
    */
   runtime?: {
-    processes?: ProcessManager | null;
-    browsers?: BrowserManager | null;
     worktrees?: WorktreeManager | null;
   };
 }
@@ -66,8 +62,6 @@ export interface App {
   workspaces: WorkspaceService;
   timeline: TimelineService;
   profiles: AgentProfileRegistry;
-  processes: ProcessManager | null;
-  browsers: BrowserManager | null;
   worktrees: WorktreeManager | null;
   decisions: DecisionLedger;
   interactions: InteractionService;
@@ -94,8 +88,6 @@ export function createApp(options: CreateAppOptions): App {
   const getWorkspaceRoot = (workspaceId: string): string => workspaces.get(workspaceId).rootPath;
   const timeline = new TimelineService(repo, bus);
   const profiles = new AgentProfileRegistry({ getWorkspaceRoot, db, bus });
-  const processes = options.runtime?.processes === undefined ? new ProcessManager(bus) : options.runtime.processes;
-  const browsers = options.runtime?.browsers === undefined ? new BrowserManager(artifacts) : options.runtime.browsers;
   const worktrees = options.runtime?.worktrees === undefined ? new WorktreeManager({ dataDir: config.infra.dataDir }) : options.runtime.worktrees;
 
   const decisions = new DecisionLedger(stores.interactions);
@@ -109,7 +101,7 @@ export function createApp(options: CreateAppOptions): App {
   const lateScheduler = late<AssignmentScheduler>("scheduler");
   const host = new AgentSessionService({
     repo, bus, artifacts, config, profiles, sdk, sessionStore, getWorkspaceRoot,
-    processes, browsers, worktrees,
+    worktrees,
     interactions, decisions, tasks, handoffs,
     scheduler: () => lateScheduler.get(),
     wake: (userSessionId, agentSessionId, category, text) =>
@@ -165,7 +157,7 @@ export function createApp(options: CreateAppOptions): App {
 
   return {
     config, db, sqlite, bus, artifacts, repo, sdk, getWorkspaceRoot,
-    workspaces, timeline, profiles, processes, browsers, worktrees,
+    workspaces, timeline, profiles, worktrees,
     decisions, interactions, tasks, scheduler, handoffs, sessionStore,
     host, runner, completion, userSessions, manager,
   };

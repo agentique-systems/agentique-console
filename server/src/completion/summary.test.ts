@@ -17,7 +17,7 @@ import { buildRunSummary } from "./summary.ts";
 const git = (cwd: string, args: string[]): string =>
   execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 
-const NO_REAP = { processes: [], browsers: 0, leakedBefore: 0 };
+const NO_REAP = { seats: [] };
 
 describe("run summary build source", () => {
   it("uses the git diff against run_base_commit, counting modified AND new files", () => {

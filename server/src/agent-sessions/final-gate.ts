@@ -48,10 +48,6 @@ export class WithheldFinalError extends Error {
   }
 }
 
-export function resolvedDomains(profile: AgentProfile, workspaceDomains: string[]): string[] {
-  return profile.runtime.network === "default" ? workspaceDomains : profile.runtime.network;
-}
-
 /**
  * Conditions that make a `final` a lie the Console can PROVE. The distinction
  * from `finalReportCaveats` below: caveats are model-maintained facts — an
@@ -73,6 +69,34 @@ export function finalReportBlockers(deps: FinalGateDeps, session: AgentSessionRo
  */
 export function isFinalToMain(finalAgent: string, sender: string, to: string, category: Category): boolean {
   return sender === finalAgent && to === MAIN_RECIPIENT && category === "final";
+}
+
+/**
+ * The triggers that CONCLUDE a session: the reporting agent's own verdict to
+ * main, whether it succeeded or failed. Every predicate that asks "has this
+ * session reported?" reads this one set, so they cannot drift apart again.
+ */
+export const TERMINAL_REPORT_TRIGGERS: ReadonlySet<string> = new Set(["final", "failure"]);
+
+/**
+ * What a report IS is the Console's call, not a defaulted enum's.
+ *
+ * The reporting agent addressing main with a terminal status has reported,
+ * whatever category it typed. A live run died silent because a judge omitted
+ * `category` entirely: the schema default made its ACCEPT verdict an `update`,
+ * so main never woke and no sign-off was proposed — while three other
+ * predicates still counted the session as reported. The parameter is required
+ * now, but a category the model gets wrong must not be able to strand a run.
+ */
+export function promotedCategory(
+  finalAgent: string, sender: string, to: string, category: Category,
+  status: "pending" | "in_progress" | "blocked" | "needs_verification" | "completed" | "failed",
+): Category {
+  if (sender !== finalAgent || to !== MAIN_RECIPIENT) return category;
+  if (TERMINAL_REPORT_TRIGGERS.has(category)) return category;
+  if (status === "completed") return "final";
+  if (status === "failed") return "failure";
+  return category;
 }
 
 /**

@@ -21,50 +21,49 @@ import type { InteractionService } from "../orchestrator/interactions.ts";
 import type { WorktreeManager } from "../runtime/worktree-manager.ts";
 import type { SdkUserMessageLike } from "../sdk/types.ts";
 import type { TaskService } from "../tasks/service.ts";
-import { resolvedDomains } from "./final-gate.ts";
 import type { RolePrompt } from "./topology-contract.ts";
 
 /**
- * Sandbox network policy. `allowLocalBinding` is unconditional: an agent must
- * be able to reach a server it started itself.
+ * The MCP servers a seat actually gets: what its profile declared, minus what
+ * the operator disabled, with the browser server swappable by name.
+ *
+ * Config-declared and console-launched — the Console vendors no capability of
+ * its own. `CONSOLE_MCP_DISABLED=browser` turns a server off for a whole
+ * install; `CONSOLE_BROWSER_MCP='<command> <args…>'` replaces the browser one
+ * without touching a profile.
  */
-export function sandboxNetwork(profile: AgentProfile, workspaceDomains: string[]): { allowedDomains: string[]; allowLocalBinding: true; strictAllowlist: true } {
-  const configured = profile.runtime.network;
-  return {
-    allowedDomains: configured === "default" ? workspaceDomains : configured,
-    allowLocalBinding: true,
-    strictAllowlist: true,
-  };
+export function declaredMcpServers(profile: AgentProfile, config: Config): Record<string, { command: string; args: string[]; env?: Record<string, string> }> {
+  const disabled = new Set(config.infra.mcpDisabled ?? []);
+  const out: Record<string, { command: string; args: string[]; env?: Record<string, string> }> = {};
+  // A profile SNAPSHOT taken before this field existed has no `mcpServers`.
+  // Snapshots are cast, never re-parsed, so the default never applies to them:
+  // a session open across the upgrade must degrade to "no servers", not crash.
+  for (const [name, spec] of Object.entries(profile.mcpServers ?? {})) {
+    if (disabled.has(name)) continue;
+    const override = name === "browser" ? config.infra.browserMcp : undefined;
+    if (override !== undefined) {
+      const [command, ...args] = override;
+      if (command === undefined) continue;
+      out[name] = { command, args };
+      continue;
+    }
+    out[name] = spec;
+  }
+  return out;
 }
 
-function capabilityBrief(profile: AgentProfile, hasWorktree: boolean, workspaceDomains: string[]): string {
+function capabilityBrief(profile: AgentProfile, hasWorktree: boolean): string {
   const can: string[] = [];
   const cannot: string[] = [];
-  if (profile.runtime.shell) can.push("run processes (process_start/read/stop) and Bash inside a sandbox");
-  else cannot.push("run any process or shell command");
-  if (profile.runtime.browser) {
-    can.push("drive a real local Chrome: open, click, fill, press keys, evaluate JS, read the console");
-    if (profile.runtime.screenshots) can.push("capture screenshots as durable artifacts (read them back with read_artifact)");
-    else cannot.push("take screenshots");
-  } else cannot.push("open a browser");
-  const domains = resolvedDomains(profile, workspaceDomains);
-  // Managed children run in the host network namespace; an agent's Bash runs
-  // inside the SDK sandbox's own. They share no loopback: curl from Bash
-  // cannot see a server `process_start` launched, while the browser can.
-  if (profile.runtime.shell) {
-    can.push(
-      "start servers with process_start and reach them from the browser tools and from other process_start children" +
-      (profile.runtime.browser
-        ? " — verify one with http_probe, browser_open or process_read, never with curl from Bash: Bash runs in a different network namespace and cannot see them"
-        : " — check one with http_probe or process_read, not with curl from Bash: Bash runs in a different network namespace and cannot see them"),
-    );
-  }
-  if (domains.length === 0) {
-    cannot.push("reach any outbound host. Anything fetched from a CDN or registry at runtime will fail; vendor it locally or verify without it");
-  } else {
-    can.push(`reach these hosts and no others: ${domains.join(", ")}. A fetch outside that list fails — say so rather than working around it`);
-  }
-  cannot.push("read outside the paths below, or write outside your own working copy");
+  // `?? {}`: a snapshot from before this field existed is cast, not parsed.
+  const servers = Object.keys(profile.mcpServers ?? {});
+  if (profile.tools.includes("Bash")) {
+    can.push("run shell commands with Bash, including long-running ones in the background — background a server and read its output back rather than blocking a turn");
+  } else cannot.push("run any shell command");
+  if (servers.length > 0) {
+    can.push(`use the tools your MCP server(s) provide — ${servers.join(", ")}, named mcp__<server>__<tool>`);
+  } else cannot.push("reach any MCP server (your profile declares none)");
+  cannot.push("write outside your own working copy — teammates own theirs");
   return `## Your capabilities\nYou can: ${can.join("; ") || "read files only"}.\nYou cannot: ${cannot.join("; ")}.\n` +
     `${hasWorktree ? "Your cwd is an isolated worktree; teammates and the coordinator cannot see your files until the Console merges them when you report completed.\n" : ""}` +
     `If an assignment needs something in the "cannot" list, say so immediately in a handoff rather than working around it — the limit is real and will not change mid-run.`;
@@ -74,8 +73,8 @@ function capabilityBrief(profile: AgentProfile, hasWorktree: boolean, workspaceD
 function capabilityTag(profile: AgentProfile): string {
   const caps = [
     ...(profile.tools.includes("Edit") || profile.tools.includes("Write") ? ["writes files"] : ["read-only"]),
-    ...(profile.runtime.shell ? ["runs processes"] : []),
-    ...(profile.runtime.browser ? [profile.runtime.screenshots ? "browser+keyboard+screenshots" : "browser+keyboard"] : []),
+    ...(profile.tools.includes("Bash") ? ["runs commands"] : []),
+    ...Object.keys(profile.mcpServers ?? {}),
   ];
   return `can: ${caps.join(", ")}`;
 }
@@ -135,7 +134,7 @@ export class PromptComposer {
    * last.
    */
   systemPromptAppend(session: AgentSessionRow, seat: AgentRow, profile: AgentProfile, rolePrompt: RolePrompt): string {
-    return `${seat.instructions}\n\n${capabilityBrief(profile, seat.worktreePath !== null, this.#deps.config.infra.allowedDomains ?? [])}${seat.worktreePath ? "\nNever run git commit — the Console lands your work when you report completed. Install dependencies only if you must run validation." : ""}\n\n${seatMessagingBrief(this.rosterLine(session), rolePrompt.addressing)}\n${rolePrompt.protocol}${this.#decisionContext(session)}${this.#checkpointContext(seat)}`;
+    return `${seat.instructions}\n\n${capabilityBrief(profile, seat.worktreePath !== null)}${seat.worktreePath ? "\nNever run git commit — the Console lands your work when you report completed. Install dependencies only if you must run validation." : ""}\n\n${seatMessagingBrief(this.rosterLine(session), rolePrompt.addressing)}\n${rolePrompt.protocol}${this.#decisionContext(session)}${this.#checkpointContext(seat)}`;
   }
 
   /**

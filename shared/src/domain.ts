@@ -56,7 +56,8 @@ export interface RunSummaryStats {
   /** 1 = every observed turn has a usage row. Below 0.9 the cost reads "partial". */
   costCoverage: number;
   openUncertainty: number;
-  reaped: { processes: number; browsers: number; leakedBefore: number };
+  /** Seats whose provider process the Console released when the run settled. */
+  reaped: { seats: number };
 }
 
 
@@ -227,8 +228,8 @@ export interface AgentProfileDetail extends AgentProfileSummary {
   model: string | null;
   effort: string | null;
   maxTurns: number;
-  sandboxRequired: boolean;
-  runtime: { shell: boolean; browser: boolean; screenshots: boolean };
+  /** Capability comes from declared MCP servers, never from console-built tools. */
+  mcpServers: Record<string, { command: string; args: string[] }>;
   handoffExtension: string | null;
   pluginPath: string | null;
   components: AgentProfileComponent[];
@@ -269,7 +270,7 @@ export interface TimelineLane {
 export interface TimelineItem {
   id: string;
   laneId: string;
-  kind: "message" | "turn" | "tool" | "process" | "task" | "handoff" | "decision" | "rotation" | "runtime" | "usage";
+  kind: "message" | "turn" | "tool" | "task" | "handoff" | "decision" | "rotation" | "runtime" | "usage";
   label: string;
   start: string;
   end: string | null;

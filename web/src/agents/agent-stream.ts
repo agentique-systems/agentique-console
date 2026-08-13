@@ -37,9 +37,6 @@ export const AGENT_TRANSCRIPT_TYPES: ReadonlySet<ConsoleEventType> = new Set([
   "agent_session.delivery.updated",
   "agent_session.runtime.noted",
   "agent_session.context.rotated",
-  "agent_session.process.started",
-  "agent_session.process.output",
-  "agent_session.process.exited",
   "usage.recorded",
 ]);
 

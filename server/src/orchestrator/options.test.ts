@@ -50,8 +50,12 @@ describe("orchestrator options", () => {
     expect(allowed).not.toContain("SendMessage");
   });
 
-  it("enables fail-closed workspace sandboxing", () => {
-    expect(options().sandbox).toMatchObject({ enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false });
+  // The console runs no sandbox of its own. A dev server an agent starts must
+  // outlive the Bash call that started it and be reachable by the browser
+  // driving it — the SDK sandbox gave each call its own network and PID
+  // namespace, which made both impossible.
+  it("declares no sandbox", () => {
+    expect(options().sandbox).toBeUndefined();
   });
 
   it("registers under its peer name and accepts cross-session inbound", () => {

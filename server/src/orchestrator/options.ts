@@ -108,8 +108,6 @@ export function buildOrchestratorOptions(
     settingSources: [],
     includePartialMessages: true,
     permissionMode: planning ? "plan" : "default",
-    sandbox: { enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: true,
-      allowUnsandboxedCommands: false, filesystem: { allowManagedReadPathsOnly: true, allowRead: [input.workspaceRoot], allowWrite: [input.workspaceRoot] } },
     ...(planning ? { planModeInstructions: manager ? MANAGER_PLAN_MODE_BODY : PLAN_MODE_BODY } : {}),
     allowedTools: [
       ...MAIN_WORK_TOOLS,

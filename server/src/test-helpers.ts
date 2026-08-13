@@ -66,7 +66,7 @@ export function makeHarness(program: FakeProgram, options: HarnessOptions = {}):
     db,
     sqlite,
     sdk: async () => fake.sdk,
-    runtime: { processes: null, browsers: null, worktrees: null, ...options.runtime },
+    runtime: { worktrees: null, ...options.runtime },
   });
 
   const workspaceId = newId("ws");
@@ -150,7 +150,7 @@ export async function restartHarness(
     db: harness.db,
     sqlite: harness.sqlite,
     sdk: async () => harness.fake.sdk,
-    runtime: { processes: null, browsers: null, worktrees: null, ...options.runtime },
+    runtime: { worktrees: null, ...options.runtime },
   });
   const bootReport = await bootApp(app);
   return {

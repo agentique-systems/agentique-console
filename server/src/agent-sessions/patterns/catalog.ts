@@ -206,7 +206,11 @@ function buildEvaluatorContract(input: BuildInput, generator: BuildAgent, evalua
       pattern: "evaluator_optimizer",
       roles: {
         generator: { replicable: false, min: 1, max: 1, grants: [], escalateTo: "evaluator" },
-        evaluator: { replicable: false, min: 1, max: 1, grants: ["forward_message"], extensionKind: "review", escalateTo: "main" },
+        // `tasks_write`: the evaluator is this session's reporting agent, and a
+        // loop with no ledger-writing seat cannot close a single unit main
+        // opened for it — a live run ended with both of its tasks still
+        // `pending` because neither role held this grant.
+        evaluator: { replicable: false, min: 1, max: 1, grants: ["forward_message", "tasks_write"], extensionKind: "review", escalateTo: "main" },
       },
       edges: [
         { from: "main", to: "generator", advance: "immediate" },

@@ -186,23 +186,6 @@ export function foldAgentItems(events: readonly ConsoleEvent[]): AgentItem[] {
           label: "context rotated", detail: `generation ${event.payload.generation} · ${event.payload.reason}` });
         break;
 
-      case "agent_session.process.started":
-        items.push({ type: "trace", uid: `process-start:${event.payload.processId}`, agent: event.payload.agent,
-          label: "process started", detail: `${event.payload.command} ${event.payload.args.join(" ")} · pid ${event.payload.pid ?? "?"}` });
-        break;
-
-      case "agent_session.process.output":
-        items.push({ type: "trace", uid: `process-output:${event.payload.processId}:${event.payload.seq}`, agent: event.payload.agent,
-          label: `${event.payload.stream} · ${event.payload.processId}`, detail: event.payload.text,
-          ...(event.payload.stream === "stderr" ? { tone: "error" as const } : { tone: "muted" as const }) });
-        break;
-
-      case "agent_session.process.exited":
-        items.push({ type: "trace", uid: `process-exit:${event.payload.processId}`, agent: event.payload.agent,
-          label: "process exited", detail: `code ${event.payload.code ?? "null"}${event.payload.signal ? ` · ${event.payload.signal}` : ""}`,
-          ...(event.payload.code && event.payload.code !== 0 ? { tone: "error" as const } : {}) });
-        break;
-
       case "usage.recorded":
         items.push({ type: "trace", uid: `usage:${event.seq ?? event.payload.turnId}`, agent: event.payload.agent,
           label: "usage", detail: `${event.payload.inputTokens.toLocaleString()} input · ${event.payload.outputTokens.toLocaleString()} output${event.payload.costUsd === undefined ? "" : ` · $${event.payload.costUsd.toFixed(4)}`} · generation ${event.payload.generation}` });

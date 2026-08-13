@@ -270,18 +270,6 @@ export interface AgentContextRotatedPayload {
   reason: "token_limit" | "turn_limit";
   handoffId?: string; checkpointBytes?: number; degraded?: boolean;
 }
-export interface AgentProcessStartedPayload {
-  agentSessionId: string; agent: string; processId: string;
-  command: string; args: string[]; cwd: string; pid?: number;
-}
-export interface AgentProcessOutputPayload {
-  agentSessionId: string; agent: string; processId: string;
-  seq: number; stream: "stdout" | "stderr"; text: string;
-}
-export interface AgentProcessExitedPayload {
-  agentSessionId: string; agent: string; processId: string;
-  code: number | null; signal: string | null;
-}
 export interface UsageRecordedPayload {
   userSessionId: string;
   /** Present when the sample belongs to an agent rather than the main lane. */
@@ -330,6 +318,16 @@ export interface HandoffCheckpointFailedPayload { agent: string; reason: string;
  * judge an incomplete result, but cannot judge silence.
  */
 export interface HandoffFinalCaveatsPayload { agentSessionId: string; sender: string; caveats: string[]; }
+
+/**
+ * The Console recognised a report the sender labelled as something lesser: the
+ * reporting agent addressed main with a terminal status. Every occurrence is a
+ * near-miss worth reading — before the promotion existed, one of these ended a
+ * run in silence.
+ */
+export interface HandoffCategoryPromotedPayload {
+  agentSessionId: string; sender: string; from: string; to: string; status: string;
+}
 
 /**
  * The Console closed an operator obligation the coordinator left open. Any
@@ -493,9 +491,6 @@ export type ConsoleEvent = Base &
     | { type: "agent_session.runtime.noted"; payload: AgentRuntimePayload }
     | { type: "agent_session.retry.recorded"; payload: RetryRecordedPayload }
     | { type: "agent_session.context.rotated"; payload: AgentContextRotatedPayload }
-    | { type: "agent_session.process.started"; payload: AgentProcessStartedPayload }
-    | { type: "agent_session.process.output"; payload: AgentProcessOutputPayload }
-    | { type: "agent_session.process.exited"; payload: AgentProcessExitedPayload }
     | { type: "task.created"; payload: TaskCreatedPayload }
     | { type: "task.updated"; payload: TaskUpdatedPayload }
     | { type: "task.dependency.created"; payload: TaskDependencyPayload }
@@ -511,6 +506,7 @@ export type ConsoleEvent = Base &
     | { type: "handoff.checkpoint.failed"; payload: HandoffCheckpointFailedPayload }
     | { type: "handoff.final.caveats"; payload: HandoffFinalCaveatsPayload }
     | { type: "handoff.final.blocked"; payload: FinalBlockedPayload }
+    | { type: "handoff.category.promoted"; payload: HandoffCategoryPromotedPayload }
     | { type: "operator.decision.recorded"; payload: OperatorDecisionRecordedPayload }
     | { type: "run.completion.proposed"; payload: RunCompletionProposedPayload }
     | { type: "run.signoff.resolved"; payload: RunSignoffResolvedPayload }

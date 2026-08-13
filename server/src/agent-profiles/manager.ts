@@ -88,13 +88,13 @@ export class ProfileManagerService {
     const detail = this.deps.profiles.detail(workspaceId, sourceId); if (!detail) return;
     const targetId = `${sourceId}-copy`; const manifest = { id: targetId, title: `${detail.title} copy`, purpose: detail.purpose, instructions: detail.instructions,
       tools: detail.tools, skills: detail.skills, permissionMode: detail.permissionMode, ...(detail.model ? { model: detail.model } : {}), ...(detail.effort ? { effort: detail.effort } : {}),
-      maxTurns: detail.maxTurns, sandboxRequired: detail.sandboxRequired, runtime: detail.runtime, ...(detail.handoffExtension ? { handoffExtension: detail.handoffExtension } : {}) };
+      maxTurns: detail.maxTurns, ...(detail.handoffExtension ? { handoffExtension: detail.handoffExtension } : {}) };
     this.stageFile(id, "agentique.profile.json", JSON.stringify(manifest, null, 2));
     this.stageFile(id, ".claude-plugin/plugin.json", JSON.stringify({ name: targetId, description: detail.purpose, version: "0.1.0" }, null, 2));
   }
   #row(id: string): UserSessionRow { const row = this.deps.repo.getUserSession(id); if (!row || row.purpose !== "profile_manager") throw new NotFoundError(`no manager session ${id}`); return row; }
   #baseRevision(row: UserSessionRow): string | null { try { const parsed = JSON.parse(row.memory) as { selectedProfile?: { source?: string; revision?: string } }; return parsed.selectedProfile?.source === "workspace" ? parsed.selectedProfile.revision ?? null : null; } catch { return null; } }
-  #profileContext(detail: AgentProfileDetail): string { return JSON.stringify({ selectedProfile: { id: detail.id, title: detail.title, purpose: detail.purpose, source: detail.source, revision: detail.revision, trusted: detail.trusted, instructions: detail.instructions, tools: detail.tools, skills: detail.skills, runtime: detail.runtime, components: detail.components } }, null, 2); }
+  #profileContext(detail: AgentProfileDetail): string { return JSON.stringify({ selectedProfile: { id: detail.id, title: detail.title, purpose: detail.purpose, source: detail.source, revision: detail.revision, trusted: detail.trusted, instructions: detail.instructions, tools: detail.tools, skills: detail.skills, mcpServers: detail.mcpServers, components: detail.components } }, null, 2); }
   #wire(row: UserSessionRow): ManagerSession { const key = row.subjectKey ?? `draft:${row.id}`; return { id: row.id, workspaceId: row.workspaceId, profileKey: key, profileId: key.startsWith("draft:") ? null : key, title: row.title ?? "Manager", phase: row.phase, lifecycle: row.lifecycle, createdAt: row.createdAt, updatedAt: row.updatedAt }; }
   #draftRoot(id: string): string { return path.join(this.deps.config.infra.dataDir, "manager-drafts", id); }
   #safeRelative(value: string): string { const normalized = path.posix.normalize(value.replaceAll("\\", "/")); if (normalized === "." || normalized.startsWith("../") || normalized.startsWith("/") || normalized === "..") throw new InvalidInputError("profile path escapes the bundle"); return normalized; }

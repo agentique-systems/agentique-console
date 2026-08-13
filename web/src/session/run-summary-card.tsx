@@ -114,9 +114,9 @@ export function RunSummaryCard({
               {stats.openUncertainty} open item{stats.openUncertainty === 1 ? "" : "s"}
             </span>
           )}
-          {stats.reaped.processes > 0 && (
+          {stats.reaped.seats > 0 && (
             <span>
-              stopped {stats.reaped.processes} process{stats.reaped.processes === 1 ? "" : "es"}
+              released {stats.reaped.seats} agent{stats.reaped.seats === 1 ? "" : "s"}
             </span>
           )}
         </div>

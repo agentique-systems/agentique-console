@@ -128,17 +128,20 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
       "An assignment whose taskId still has incomplete dependencies is SCHEDULED, not delivered — {scheduled:true} comes back and the Console dispatches it when the dependencies complete; never re-send it.",
       {
         agentSessionId: z.string().min(1),
-        category: z.enum(["assignment", "update"]).default("update"),
+        category: z.enum(["assignment", "update"])
+          .describe("\"assignment\" is new work the session owes you back; \"update\" is steering or context for work already assigned."),
         status: HandoffCoreSchema.shape.status,
         risk: HandoffCoreSchema.shape.risk.default("medium"),
         action: z.string().min(1).describe("The request, in one line."),
         stateSummary: z.string().min(1).describe("What is true now — the substance, not a description of it."),
-        evidence: z.array(EvidenceRefSchema).default([]),
-        resultSummary: z.string().nullable().default(null),
-        artifacts: z.array(EvidenceRefSchema).default([]),
-        uncertainty: z.array(z.string()).default([]),
-        nextAction: z.string().nullable().default(null),
-        taskId: z.string().nullable().default(null),
+        evidence: z.array(EvidenceRefSchema).default([]).describe("Pointers backing the state: files, artifacts, tasks, commands, urls."),
+        resultSummary: z.string().nullable().default(null)
+          .describe("Anything already produced that the session should build on, and where it is."),
+        artifacts: z.array(EvidenceRefSchema).default([]).describe("Outputs you are handing over, distinct from the evidence backing them."),
+        uncertainty: z.array(z.string()).default([]).describe("What you could not verify. State it rather than omitting it."),
+        nextAction: z.string().nullable().default(null).describe("The exact next step for the recipient, or null when nothing is owed."),
+        taskId: z.string().nullable().default(null)
+          .describe("The ledger taskId this assignment covers. The Console starts that entry on delivery and holds the assignment until its dependencies complete."),
         requestExpandedContext: z.boolean().default(false),
       },
       async (args: {
@@ -288,7 +291,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
       {},
       async () => guarded(() => {
         const workspaceId = repo.getUserSession(userSessionId)?.workspaceId;
-        return { availability: host.runtimeAvailability(), profiles: host.profiles(workspaceId).map(({ id, title, purpose, tools, runtime, sandboxRequired }) => ({ id, title, purpose, tools, runtime, sandboxRequired })) };
+        return { availability: host.runtimeAvailability(), profiles: host.profiles(workspaceId).map(({ id, title, purpose, tools }) => ({ id, title, purpose, tools })) };
       }),
     ),
 

@@ -14,8 +14,6 @@ import type { ArtifactStore } from "../events/artifact-store.ts";
 import type { EventBus } from "../events/bus.ts";
 import type { SqliteSessionStore } from "../sdk/session-store.ts";
 import type { ConsoleSdk } from "../sdk/types.ts";
-import type { ProcessManager } from "../runtime/process-manager.ts";
-import type { BrowserManager } from "../runtime/browser-manager.ts";
 import type { WorktreeManager } from "../runtime/worktree-manager.ts";
 import type { DecisionLedger } from "../orchestrator/decisions.ts";
 import type { InteractionService } from "../orchestrator/interactions.ts";
@@ -49,9 +47,6 @@ export interface AgentSessionServiceDeps {
   sessionStore: SqliteSessionStore;
   getWorkspaceRoot: (workspaceId: string) => string;
   wake: (userSessionId: string, agentSessionId: string, category: Category, text: string) => void;
-  /** OS capabilities. `null` = absent, stated at the construction site. */
-  processes: ProcessManager | null;
-  browsers: BrowserManager | null;
   interactions: InteractionService;
   /**
    * What the operator has decided. Read into every agent's prompt and into
@@ -97,16 +92,14 @@ export class AgentSessionService {
     this.#lanes = new AgentLanePool({
       config: deps.config,
       hasQueuedWork: (agentSessionId, seat) => deps.repo.listUnackedDeliveries(agentSessionId, seat).length > 0,
+      // Closing the lane closes the seat's CLI subprocess, and everything the
+      // agent started is a child of it: a background Bash server, an MCP
+      // server's browser. The Console owns no capability, so it sweeps none.
       reapRuntime: (agentSessionId, seatName, reason) => {
-        const killed = deps.processes?.stopAgent(agentSessionId, seatName) ?? [];
-        void deps.browsers?.closeAgent(`${agentSessionId}:${seatName}`).catch(() => undefined);
         const session = deps.repo.getAgentSession(agentSessionId);
-        if (session) {
-          // Name what was reaped.
-          const reaped = killed.length === 0 ? "" : `; reaped ${killed.length} process(es): ${killed.map((p) => `${p.processId}${p.pid === undefined ? "" : ` (pid ${p.pid})`}`).join(", ")}`;
-          deps.bus.append({ type: "agent_session.runtime.noted", userSessionId: session.userSessionId, agentSessionId,
-            payload: { agentSessionId, agent: seatName, detail: `agent parked (${reason}); provider session retained${reaped}` } });
-        }
+        if (!session) return;
+        deps.bus.append({ type: "agent_session.runtime.noted", userSessionId: session.userSessionId, agentSessionId,
+          payload: { agentSessionId, agent: seatName, detail: `agent parked (${reason}); provider session retained` } });
       },
       sessionTree: (agentSessionId) => {
         const row = deps.repo.getAgentSession(agentSessionId);
@@ -120,6 +113,7 @@ export class AgentSessionService {
       repo: deps.repo, bus: deps.bus, artifacts: deps.artifacts, config: deps.config,
       worktrees: deps.worktrees, getWorkspaceRoot: deps.getWorkspaceRoot,
       escalationTarget: (session, agentName) => this.#routing.escalationTarget(session, agentName),
+      isReviewRole: (session, agentName) => this.#routing.isReviewRole(session, agentName),
       transfer: (input) => this.post(input),
       simpleHandoff,
     });
@@ -153,7 +147,7 @@ export class AgentSessionService {
       repo: deps.repo, bus: deps.bus, config: deps.config,
       sdk: deps.sdk, sessionStore: deps.sessionStore, getWorkspaceRoot: deps.getWorkspaceRoot,
       artifacts: deps.artifacts, tasks: deps.tasks, handoffs: deps.handoffs,
-      processes: deps.processes, browsers: deps.browsers, worktrees: deps.worktrees,
+      worktrees: deps.worktrees,
       scheduler: deps.scheduler,
       lanes: this.#lanes, worktree: this.#worktreeBinding, routing: this.#routing, composer: this.#composer,
       transfer: (input) => this.post(input),
@@ -207,7 +201,7 @@ export class AgentSessionService {
     this.#lifecycle = new SessionLifecycle({
       repo: deps.repo, bus: deps.bus, config: deps.config, profiles: deps.profiles,
       getWorkspaceRoot: deps.getWorkspaceRoot,
-      processes: deps.processes, browsers: deps.browsers, worktrees: deps.worktrees,
+      worktrees: deps.worktrees,
       routing: this.#routing, lanes: this.#lanes, worktree: this.#worktreeBinding,
       transfer: (input) => this.post(input),
       snapshotProfile: (profile) => this.#runtime.snapshotProfile(profile),
@@ -376,8 +370,9 @@ export class AgentSessionService {
   }
 
   profiles(workspaceId?: string): AgentProfile[] { return this.#deps.profiles?.list(workspaceId) ?? []; }
-  runtimeAvailability(): { sandbox: boolean; chrome: boolean } {
-    return { sandbox: fs.existsSync("/usr/bin/bwrap") || fs.existsSync("/usr/local/bin/bwrap"), chrome: fs.existsSync("/usr/bin/google-chrome") };
+  /** What this host can actually do, for the profile listing main reads. */
+  runtimeAvailability(): { git: boolean; chrome: boolean } {
+    return { git: this.#deps.worktrees !== null, chrome: fs.existsSync("/usr/bin/google-chrome") };
   }
 
   /**
@@ -456,6 +451,10 @@ export class AgentSessionService {
 
   #specialists(id: string): AgentRow[] { return this.#deps.repo.listAgents(id).filter((p) => p.role !== "coordinator"); }
   statusOf(row: AgentSessionRow): AgentSessionStatus { return this.#operator.statusOf(row); }
+  /** The one "has this session reported?" predicate; run completion reads it too. */
+  reportedFinal(row: AgentSessionRow): boolean { return this.#operator.reportedFinal(row); }
+  /** Run completion's backstop: close the operator loop on any quiet session. */
+  dischargeQuietDebts(userSessionId: string): void { this.#operator.dischargeQuietDebts(userSessionId); }
   #recordFailure(id: string, error: unknown): void {
     const session = this.#deps.repo.getAgentSession(id); if (!session) return;
     const text = error instanceof Error ? error.message : String(error);

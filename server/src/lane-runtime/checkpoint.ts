@@ -20,7 +20,6 @@ export interface CheckpointQueryParams {
   cwd: string;
   /** Sandbox read scope; the write scope is always empty — a checkpoint acts on nothing. */
   readPaths: string[];
-  sandboxRequired: boolean;
   /** The provider session being checkpointed. */
   resume: string;
   model: string | null;
@@ -53,8 +52,6 @@ export async function checkpointQuery(sdk: ConsoleSdk, params: CheckpointQueryPa
     // `StructuredOutput` tool and ships it verbatim as input_schema, and the
     // API rejects anything whose root `type` is not the string "object".
     outputFormat: { type: "json_schema", schema: HANDOFF_DRAFT_JSON_SCHEMA }, maxTurns: 2,
-    sandbox: { enabled: true, failIfUnavailable: params.sandboxRequired, autoAllowBashIfSandboxed: false, allowUnsandboxedCommands: false,
-      filesystem: { allowManagedReadPathsOnly: true, allowRead: params.readPaths, allowWrite: [] } },
     env: sdkEnv(), abortController: abort, persistSession: true,
     ...(params.sessionStore === undefined ? {} : { sessionStore: params.sessionStore, sessionStoreFlush: "eager" as const }),
     resume: params.resume, ...(params.model ? { model: params.model } : {}),

@@ -12,7 +12,7 @@ import type { HandoffRecordRow } from "./stores/handoff-store.ts";
 import type { CronRow } from "./stores/cron-store.ts";
 import type { PatternStateRow } from "./stores/pattern-state-store.ts";
 import type { UsageSampleRow } from "./stores/usage-store.ts";
-import { hasEvent, listProcessEvents } from "../events/projections.ts";
+import { hasEvent } from "../events/projections.ts";
 
 export type { AppendMessageInput, MailboxDeliveryRow, MessageRow } from "./stores/message-store.ts";
 export type { AgentRow, AgentSessionRow, UserSessionRow } from "./stores/session-store.ts";
@@ -102,6 +102,5 @@ export class Repo {
 
   // --- Events read-models (SQL lives in events/projections.ts) --------------
 
-  listProcessEvents(userSessionId: string): { type: string; processId: string }[] { return listProcessEvents(this.#db, userSessionId); }
   hasEvent(type: string, agentSessionId: string): boolean { return hasEvent(this.#db, type, agentSessionId); }
 }

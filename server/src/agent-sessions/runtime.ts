@@ -26,8 +26,6 @@ import { checkpointQuery } from "../lane-runtime/checkpoint.ts";
 import { rotationDue, type RotationReason } from "../lane-runtime/rotation.ts";
 import { advanceUsageWatermark } from "../lane-runtime/usage.ts";
 import { rotationTokenLimit } from "../model-catalog.ts";
-import type { BrowserManager } from "../runtime/browser-manager.ts";
-import type { ProcessManager } from "../runtime/process-manager.ts";
 import type { WorktreeManager } from "../runtime/worktree-manager.ts";
 import { sdkEnv } from "../sdk/env.ts";
 import { isTransportFailure } from "../sdk/failure-classifier.ts";
@@ -37,7 +35,7 @@ import type { ConsoleSdk, QueryHandle, SdkOptions, SdkToolResult, SdkUserMessage
 import type { AssignmentScheduler } from "../tasks/scheduler.ts";
 import type { TaskService } from "../tasks/service.ts";
 import { buildAgentTools, type AgentToolsContext, type AskOperatorArgs } from "./agent-tools.ts";
-import { sandboxNetwork, seatUserMessage, type PromptComposer } from "./composer.ts";
+import { declaredMcpServers, seatUserMessage, type PromptComposer } from "./composer.ts";
 import { grantedTools, runtimeToolNames, type AgentToolName } from "./grants.ts";
 import type { ActiveTurn, AgentLane, AgentLanePool } from "./lanes.ts";
 import type { DispatchWorkItemsInput } from "./patterns/engine.ts";
@@ -107,8 +105,6 @@ export interface AgentRuntimeDeps {
   tasks: TaskService;
   handoffs: HandoffService;
   /** OS capabilities. `null` = absent, stated at the construction site. */
-  processes: ProcessManager | null;
-  browsers: BrowserManager | null;
   worktrees: WorktreeManager | null;
   /** Lazy — the scheduler posts through the service, composed after it. */
   scheduler: () => AssignmentScheduler;
@@ -227,11 +223,11 @@ export class AgentRuntime implements Injector, TurnTracker {
       const rolePrompt = contract.prompt(seatRole) ?? hubContract().promptPack.specialist!;
       const granted = grantedTools(contract.role(seatRole), profile, {
         tasks: Boolean(this.#deps.tasks), handoffs: Boolean(this.#deps.handoffs),
-        processes: Boolean(this.#deps.processes), browsers: Boolean(this.#deps.browsers),
         worktrees: Boolean(this.#deps.worktrees), user: Boolean(user),
         childSessions: this.#deps.config.policy.enableChildSessions !== false && session.parentAgentSessionId === null,
       });
       const mcp = this.#buildParticipantMcp(sdk, session, latestSeat, granted);
+      const declared = declaredMcpServers(profile, this.#deps.config);
       const options: SdkOptions = {
         cwd: seatRoot,
         systemPrompt: { type: "preset", preset: "claude_code", append: this.#deps.composer.systemPromptAppend(session, latestSeat, profile, rolePrompt) },
@@ -240,6 +236,13 @@ export class AgentRuntime implements Injector, TurnTracker {
         ...(profile.permissionMode === "bypassPermissions" ? { allowDangerouslySkipPermissions: true } : {}),
         allowedTools: [...profile.tools,
           ...(profile.tools.includes("Edit") || profile.tools.includes("Write") ? ["EnterWorktree", "ExitWorktree"] : []),
+          // Background work is native: a seat starts a dev server with Bash and
+          // reads it back, where it used to call console process tools.
+          ...(profile.tools.includes("Bash") ? ["TaskOutput", "TaskStop", "Monitor"] : []),
+          // A declared server's whole surface is auto-approved — the profile
+          // granting the server IS the permission decision, and there is no
+          // console-side list of its tool names to drift out of date.
+          ...Object.keys(declared).map((name) => `mcp__${name}`),
           ...runtimeToolNames(granted)],
         // A profile's tool list must be BINDING: `allowedTools` is only an
         // auto-approval list, so everything the profile did not grant is
@@ -252,9 +255,6 @@ export class AgentRuntime implements Injector, TurnTracker {
           "Agent", "Task", "SendMessage", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet",
           ...GOVERNED_BUILTIN_TOOLS.filter((name) => !profile.tools.includes(name)),
         ])],
-        sandbox: { enabled: true, failIfUnavailable: profile.sandboxRequired, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: false,
-          filesystem: { allowManagedReadPathsOnly: true, allowRead: latestSeat.worktreePath ? [seatRoot, workspaceRoot] : [workspaceRoot], allowWrite: [seatRoot] },
-          network: sandboxNetwork(profile, this.#deps.config.infra.allowedDomains ?? []) },
         // Agent identity rides the ENV, not the prompt: visible to process
         // forensics and the test discriminator without perturbing the
         // cache-invariant system-prompt head above.
@@ -267,7 +267,10 @@ export class AgentRuntime implements Injector, TurnTracker {
         },
         abortController: lane.abort!, persistSession: true,
         sessionStore: this.#deps.sessionStore as never, sessionStoreFlush: "eager",
-        mcpServers: { console_agent: mcp as never },
+        // Coordination is the console's own in-process server; CAPABILITY is
+        // whatever the profile declared. The console launches those and owns
+        // nothing about them.
+        mcpServers: { console_agent: mcp as never, ...declared } as never,
         ...(latestSeat.model ? { model: latestSeat.model } : {}),
         ...((profile.pluginPath && profile.source === "workspace") ? { plugins: [{ type: "local" as const, path: profile.pluginPath }] } : {}),
         // Always explicit: omitting the key lets the CLI fall back to the
@@ -286,6 +289,19 @@ export class AgentRuntime implements Injector, TurnTracker {
       this.#deps.lanes.signalCapacity();
       throw error;
     });
+  }
+
+  /**
+   * The seat's sandbox READ scope: its own tree, the workspace, and every
+   * other worktree this session holds. Deduped and order-stable so the option
+   * object stays cache-identical across a session's spawns.
+   */
+  #readScope(session: AgentSessionRow, seatRoot: string, workspaceRoot: string): string[] {
+    const roots = new Set<string>([seatRoot, workspaceRoot]);
+    for (const seat of this.#deps.repo.listAgents(session.id)) {
+      if (seat.worktreePath) roots.add(seat.worktreePath);
+    }
+    return [...roots];
   }
 
   /**
@@ -648,7 +664,6 @@ export class AgentRuntime implements Injector, TurnTracker {
       systemPromptAppend: "You are checkpointing your own context. Report faithfully; do not correct or embellish uncertain state.",
       cwd: checkpointRoot,
       readPaths: seat.worktreePath ? [checkpointRoot, workspaceRoot] : [checkpointRoot],
-      sandboxRequired: profile.sandboxRequired,
       resume: seat.sdkSessionId,
       model: seat.model,
       effort: profile.effort ?? this.#deps.config.infra.effort,

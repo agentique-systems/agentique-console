@@ -29,6 +29,8 @@ export interface WorktreeBindingDeps {
   getWorkspaceRoot: (workspaceId: string) => string;
   /** Where a merge-conflict failure escalates (routing's escalationTarget). */
   escalationTarget: (session: AgentSessionRow, agentName: string) => string;
+  /** Routing's `isReviewRole` — decides which base a seat's snapshot is cut from. */
+  isReviewRole: (session: AgentSessionRow, agentName: string) => boolean;
   transfer: Transfer;
   simpleHandoff: SimpleHandoff;
 }
@@ -79,7 +81,9 @@ export class WorktreeBinding {
       || seat.worktreePath !== null || !worktrees.isGitRepo(workspaceRoot)) return seat;
     try {
       const dirName = `seat-${branchSafe(seat.name)}-${seat.generation}-${newId("rnd").slice(-6)}`;
-      const ref = worktrees.addWorktree(workspaceRoot, session.id, dirName, `seat/${session.id}/${branchSafe(seat.name)}-${seat.generation}`);
+      const base = this.#reviewBase(session, seat);
+      const ref = worktrees.addWorktree(workspaceRoot, session.id, dirName, `seat/${session.id}/${branchSafe(seat.name)}-${seat.generation}`,
+        base === null ? {} : { base });
       repo.patchAgent(session.id, seat.name, { worktreePath: ref.path, worktreeBaseCommit: ref.baseCommit, worktreeBranch: ref.branch });
       bus.append({ type: "agent_session.worktree.created", userSessionId: session.userSessionId, agentSessionId: session.id,
         payload: { agentSessionId: session.id, agent: seat.name, branch: ref.branch, baseCommit: ref.baseCommit } });
@@ -88,6 +92,43 @@ export class WorktreeBinding {
       bus.append({ type: "agent_session.runtime.noted", userSessionId: session.userSessionId, agentSessionId: session.id,
         payload: { agentSessionId: session.id, agent: seat.name, detail: `worktree isolation unavailable (${error instanceof Error ? error.message : String(error)}); working directly in the workspace` } });
       return seat;
+    }
+  }
+
+  /**
+   * The branch a reviewer's snapshot must be cut from: the unmerged worktree
+   * branch of whoever handed it the work. Null for everyone else, and for a
+   * sender whose work already landed.
+   *
+   * Without this a reviewer is given a snapshot that provably does not contain
+   * the thing it was sent to review. That happened live — the judge found
+   * nothing at the shared path, was blocked from serving the generator's
+   * worktree, and ended up reading the file out of the branch with raw git.
+   */
+  #reviewBase(session: AgentSessionRow, seat: AgentRow): string | null {
+    if (!this.#deps.isReviewRole(session, seat.name)) return null;
+    const inbound = this.#deps.repo.latestHandoff({
+      userSessionId: session.userSessionId, agentSessionId: session.id,
+      recipient: seat.name, excludeCheckpoints: true,
+    });
+    if (!inbound || inbound.sender === seat.name) return null;
+    return this.#deps.repo.getAgent(session.id, inbound.sender)?.worktreeBranch ?? null;
+  }
+
+  /**
+   * The session reported: land every write seat that still holds a worktree.
+   *
+   * `landOnReport` fires on a SEAT declaring itself completed, which whole
+   * patterns never do — an evaluator_optimizer generator reports
+   * `needs_verification` to its evaluator, exactly as its brief instructs, so
+   * that condition is unreachable and its work stayed on an unmerged branch
+   * while the operator's workspace sat empty. Landing belongs to the moment the
+   * SESSION concludes; the seat-level path stays as the eager optimisation.
+   */
+  landForSession(session: AgentSessionRow): void {
+    if (!this.#deps.worktrees) return;
+    for (const seat of this.#deps.repo.listAgents(session.id)) {
+      if (seat.worktreePath) this.landOnReport(session, seat, "completed");
     }
   }
 
@@ -153,9 +194,20 @@ export class WorktreeBinding {
    * lossless, and the completion diff (base..branch) is unaffected.
    */
   snapshotTurn(agentSessionId: string, agentName: string, turnId: string): void {
+    this.snapshot(agentSessionId, agentName, `turn ${turnId}`);
+  }
+
+  /**
+   * Commit whatever the seat has written so far. Also called when a seat hands
+   * work to a teammate MID-TURN, which is the ordinary case: the transfer
+   * happens long before the sender's turn settles, so without this a recipient
+   * seated on the sender's branch gets a snapshot that does not yet contain the
+   * thing it was sent.
+   */
+  snapshot(agentSessionId: string, agentName: string, message: string): void {
     const current = this.#deps.repo.getAgent(agentSessionId, agentName);
     if (current?.worktreePath && this.#deps.worktrees && fs.existsSync(current.worktreePath)) {
-      try { this.#deps.worktrees.commitAll(current.worktreePath, `turn ${turnId}`, current.ownership); } catch { /* snapshot is best-effort */ }
+      try { this.#deps.worktrees.commitAll(current.worktreePath, message, current.ownership); } catch { /* snapshot is best-effort */ }
     }
   }
 

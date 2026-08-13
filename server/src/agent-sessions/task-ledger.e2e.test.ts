@@ -49,4 +49,35 @@ describe("console-owned task ledger (fake SDK)", () => {
     expect(after.tasks?.find((task) => task.sdkTaskId === "1")?.status).toBe("completed");
     expect(after.tasks?.find((task) => task.sdkTaskId === "2")?.status).toBe("pending");
   });
+
+  /**
+   * A whole live run passed `taskId: null` on every handoff, so its ledger
+   * stayed `pending` from creation to the end and described nothing. The
+   * console closes what it can infer — and only what it can infer.
+   */
+  it("closes an owner's single open unit from a terminal report that names no taskId", async () => {
+    const h = makeDelegationHarness(async function* () {
+      yield initMessage();
+      yield successMessage();
+    });
+    const userSessionId = h.addUserSession();
+    const created = h.host.createSession({ userSessionId, title: "infer", agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("investigate", "pending") });
+    await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled", 10_000);
+    const create = h.fake.captured.tools.find((t) => t.name === "task_create")!;
+    const list = h.fake.captured.tools.find((t) => t.name === "task_list")!;
+    await create.handler({ taskId: "dig", subject: "Trace the collision path", description: "", owner: "scout" }, {});
+
+    h.host.post({ agentSessionId: created.agentSessionId, speaker: { kind: "agent", name: "scout" }, to: "coordinator",
+      handoff: handoff("traced it", "completed"), category: "milestone" });
+    expect(parse(await list.handler({}, {})).tasks?.find((task) => task.sdkTaskId === "dig")?.status).toBe("completed");
+
+    // Two open units and no taskId is genuinely ambiguous: the console closes
+    // NEITHER rather than guessing, and they ride out as final-report caveats.
+    await create.handler({ taskId: "a", subject: "One", description: "", owner: "scout" }, {});
+    await create.handler({ taskId: "b", subject: "Two", description: "", owner: "scout" }, {});
+    h.host.post({ agentSessionId: created.agentSessionId, speaker: { kind: "agent", name: "scout" }, to: "coordinator",
+      handoff: handoff("done with something", "completed"), category: "milestone" });
+    const rows = parse(await list.handler({}, {})).tasks ?? [];
+    expect(rows.filter((task) => task.status !== "completed").map((task) => task.sdkTaskId).sort()).toEqual(["a", "b"]);
+  });
 });

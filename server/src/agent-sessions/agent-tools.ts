@@ -12,8 +12,6 @@ import type { AgentSessionRow, MessageRow, AgentRow, Repo, UserSessionRow } from
 import type { ArtifactStore } from "../events/artifact-store.ts";
 import type { EventBus } from "../events/bus.ts";
 import type { ConsoleSdk, SdkToolResult } from "../sdk/types.ts";
-import type { ProcessManager } from "../runtime/process-manager.ts";
-import type { BrowserManager } from "../runtime/browser-manager.ts";
 import type { WorktreeManager } from "../runtime/worktree-manager.ts";
 import type { TaskService } from "../tasks/service.ts";
 import type { HandoffService } from "../handoffs/service.ts";
@@ -22,7 +20,7 @@ import { consoleTaskListId } from "../tasks/service.ts";
 import { PAGE_DEFAULT_BYTES, PAGE_MAX_BYTES, pageTail } from "../paging.ts";
 import { speakerKindOf } from "./topology.ts";
 import { MAIN_RECIPIENT } from "./names.ts";
-import { resolvedDomains, WithheldFinalError, type Category } from "./final-gate.ts";
+import { WithheldFinalError, type Category } from "./final-gate.ts";
 import type { AgentToolName } from "./grants.ts";
 
 /**
@@ -71,8 +69,6 @@ export interface AgentToolsDeps {
   config?: Config;
   tasks?: TaskService;
   handoffs?: HandoffService;
-  processes: ProcessManager | null;
-  browsers: BrowserManager | null;
   worktrees: WorktreeManager | null;
 }
 
@@ -124,17 +120,26 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
     "An assignment whose taskId still has incomplete dependencies is SCHEDULED, not delivered: you get {scheduled:true} back and the Console dispatches it the moment the dependencies complete — never re-send it.",
     {
       to: z.string().min(1).describe("Recipient's bare agent name, or \"main\" to reach the Orchestrator."),
-      category: z.enum(["assignment", "update", "milestone", "failure", "final", "decision"]).default("update"),
+      // No default. A defaulted category once turned an ACCEPT verdict into an
+      // `update`: main never woke and the run ended in silence. State it.
+      category: z.enum(["assignment", "update", "milestone", "failure", "final", "decision"])
+        .describe("What this transfer IS, and it decides who is woken. \"final\" is the report that ends this session's obligation to the operator — send it when your work is concluded. \"failure\" concludes it unsuccessfully. \"milestone\", \"decision\" and \"failure\" wake the Orchestrator; \"update\" and \"assignment\" do not."),
       status: HandoffCoreSchema.shape.status,
       risk: HandoffCoreSchema.shape.risk.default("medium"),
       action: z.string().min(1).describe("The request or the work this handoff is about, in one line."),
       stateSummary: z.string().min(1).describe("What is true now — the substance. Write the findings themselves, not a description of having found them."),
       evidence: z.array(EvidenceRefSchema).default([]).describe("Pointers backing the state: files, artifacts, tasks, commands, urls."),
-      resultSummary: z.string().nullable().default(null),
-      artifacts: z.array(EvidenceRefSchema).default([]),
+      // Undescribed, these three went unfilled on every handoff of a whole live
+      // run — leaving the recipient with no pointer to the deliverable and the
+      // task ledger with nothing to key on.
+      resultSummary: z.string().nullable().default(null)
+        .describe("The DELIVERABLE itself — what the recipient is meant to consume, and where it is. `stateSummary` is the situation; this is the output. Null only when the work produced nothing to hand over."),
+      artifacts: z.array(EvidenceRefSchema).default([])
+        .describe("What you PRODUCED — files written, artifacts stored, branches. Distinct from `evidence`, which is what backs your claims about them."),
       uncertainty: z.array(z.string()).default([]).describe("What you could not verify. Say so plainly rather than omitting it."),
       nextAction: z.string().nullable().default(null).describe("The exact next step for the recipient, or null when nothing is owed."),
-      taskId: z.string().nullable().default(null),
+      taskId: z.string().nullable().default(null)
+        .describe("The ledger taskId this handoff is about, from task_list. The Console moves that entry on it: an assignment starts it, a terminal report closes it. Omit only when the work is not a ledger unit."),
       requestExpandedContext: z.boolean().default(false),
       dedupeKey: z.string().optional(),
     },
@@ -305,52 +310,6 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
       }),
     );
   }
-  if (profile.runtime.shell && deps.processes) {
-    const scope = { workspaceRoot: agent.worktreePath ?? workspaceRoot, userSessionId: session.userSessionId, agentSessionId: session.id, agent: agent.name };
-    const processOwner = `${session.id}:${agent.name}`;
-    tools.push(
-      sdk.tool("process_start", "Start a Console-owned long-running process. Pass an executable and argv separately; cwd must remain in the workspace.", { command: z.string(), args: z.array(z.string()).default([]), cwd: z.string().default(".") }, async (args: { command: string; args: string[]; cwd: string }) => ok(deps.processes?.start(scope, args.command, args.args, args.cwd))),
-      sdk.tool("process_read", "Read new process output, optionally waiting once for a state change. Use waitMs instead of polling. Output is paged tail-first (default 8KiB, newest last); use cursors for more, afterSeq for incremental reads.", { processId: z.string(), afterSeq: z.number().int().default(0), waitMs: z.number().int().min(0).max(60_000).default(0), cursor: z.string().optional(), maxBytes: z.number().int().min(1).max(PAGE_MAX_BYTES).default(PAGE_DEFAULT_BYTES) }, async (args: { processId: string; afterSeq: number; waitMs: number; cursor?: string; maxBytes: number }) => {
-        const result = await deps.processes?.read(processOwner, args.processId, args.afterSeq, args.waitMs);
-        if (!result) return ok(result);
-        const text = result.chunks.map((chunk) => `[${chunk.stream} #${chunk.seq}] ${chunk.text}`).join("");
-        return ok({ headSeq: result.headSeq, exit: result.exit, output: pageTail(text, args.cursor, args.maxBytes) });
-      }),
-      sdk.tool("process_stop", "Stop a process owned by this participant.", { processId: z.string() }, async (args: { processId: string }) => { deps.processes?.stop(processOwner, args.processId); return ok({ stopped: true }); }),
-    );
-  }
-  if (profile.runtime.browser && deps.browsers) {
-    const key = `${session.id}:${agent.name}`;
-    tools.push(
-      sdk.tool("browser_open", "Open a URL in the participant's managed local Chrome page.", { url: z.string() }, async (args: { url: string }) => ok(await deps.browsers?.open(key, args.url))),
-      sdk.tool("browser_snapshot", "Inspect current URL, title, and rendered body text.", {}, async () => ok(await deps.browsers?.snapshot(key))),
-      sdk.tool("browser_click", "Click a locator (CSS or Playwright text locator syntax).", { selector: z.string() }, async (args: { selector: string }) => { await deps.browsers?.click(key, args.selector); return ok({ clicked: true }); }),
-      sdk.tool("browser_fill", "Fill an input located by CSS or Playwright locator syntax.", { selector: z.string(), value: z.string() }, async (args: { selector: string; value: string }) => { await deps.browsers?.fill(key, args.selector, args.value); return ok({ filled: true }); }),
-      sdk.tool("browser_console", "Read browser console and page errors.", {}, async () => ok(await deps.browsers?.consoleMessages(key))),
-      sdk.tool("browser_press", "Press a key (e.g. \"ArrowLeft\", \"Enter\", \"Space\"). Use this to exercise keyboard-driven UI — games, shortcuts, form submission. Target the page by default, or a locator to focus first.", {
-        keys: z.string().min(1), selector: z.string().optional(),
-        repeat: z.number().int().min(1).max(100).default(1), delayMs: z.number().int().min(0).max(2_000).optional(),
-      }, async (args: { keys: string; selector?: string; repeat: number; delayMs?: number }) =>
-        ok(await deps.browsers?.press(key, args.keys, { ...(args.selector ? { selector: args.selector } : {}), repeat: args.repeat, ...(args.delayMs === undefined ? {} : { delayMs: args.delayMs }) }))),
-      sdk.tool("browser_evaluate", "Evaluate JavaScript in the page and return the result as JSON. Use it to read state the rendered text does not expose — localStorage, canvas/game state, module exports. Bare expressions and statement bodies both work. A result carrying `threw` means the page raised (a finding); `undefined:true` means the expression produced nothing, which is different from producing null.", {
-        expression: z.string().min(1),
-        timeoutMs: z.number().int().min(1_000).max(60_000).default(15_000),
-      }, async (args: { expression: string; timeoutMs: number }) => {
-        const outcome = await deps.browsers?.evaluate(key, args.expression, args.timeoutMs);
-        // Only a compile failure is the AGENT's error — that is its own
-        // JavaScript failing to parse, and it is actionable. A page
-        // exception or a null is data, and marking those `isError` would
-        // feed the consecutive-error watchdog for legitimate probing.
-        if (outcome?.compileError !== undefined) {
-          return fail(JSON.stringify(outcome));
-        }
-        return ok(outcome);
-      }),
-    );
-    if (profile.runtime.screenshots) {
-      tools.push(sdk.tool("browser_screenshot", "Capture a full-page screenshot as a durable Console artifact.", {}, async () => ok(await deps.browsers?.screenshot(key, { userSessionId: session.userSessionId, agentSessionId: session.id }))));
-    }
-  }
   // Available to EVERY agent, not just the coordinator: a specialist's
   // question reaches the human directly, with no model hop able to drop it.
   {
@@ -394,39 +353,6 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
       })),
     })));
 
-  // Managed children run in the HOST network namespace (`bwrap --share-net`)
-  // while an agent's Bash runs inside the SDK sandbox's own, so an agent
-  // cannot reach a server it just started. Executed in the SERVER process,
-  // which shares the children's namespace.
-  if (profile.runtime.shell) {
-    tools.push(sdk.tool("http_probe",
-      "Make an HTTP request from the Console's own process — the only way to reach a server you started with process_start, since your Bash shell is in a different network namespace. Use this instead of curl for localhost checks.",
-      {
-        url: z.string().min(1).describe("http(s) URL. Loopback, or a host your profile is allowed to reach."),
-        method: z.enum(["GET", "HEAD", "POST"]).default("GET"),
-        timeoutMs: z.number().int().min(100).max(30_000).default(5_000),
-        maxBytes: z.number().int().min(1).max(PAGE_MAX_BYTES).default(PAGE_DEFAULT_BYTES),
-      },
-      async (args: { url: string; method: "GET" | "HEAD" | "POST"; timeoutMs: number; maxBytes: number }) => {
-        let parsed: URL;
-        try { parsed = new URL(args.url); } catch { return ok({ error: `not a URL: ${args.url}` }); }
-        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-          return ok({ error: "http_probe accepts only http(s) URLs" });
-        }
-        const loopback = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1" || parsed.hostname === "::1";
-        const allowed = resolvedDomains(profile, deps.config?.infra.allowedDomains ?? []);
-        if (!loopback && !allowed.some((domain) => domain === parsed.hostname || (domain.startsWith("*.") && parsed.hostname.endsWith(domain.slice(1))))) {
-          return ok({ error: `${parsed.hostname} is outside this profile's allowed hosts (${allowed.join(", ") || "none"})` });
-        }
-        try {
-          const response = await fetch(parsed, { method: args.method, signal: AbortSignal.timeout(args.timeoutMs) });
-          const body = args.method === "HEAD" ? "" : (await response.text()).slice(0, args.maxBytes);
-          return ok({ status: response.status, ok: response.ok, headers: Object.fromEntries(response.headers), body });
-        } catch (error) {
-          return ok({ error: error instanceof Error ? error.message : String(error) });
-        }
-      }));
-  }
 
   // One level of nesting: a controller may spawn a CHILD AgentSession running
   // any pattern. The child's "main" resolves to THIS agent — its finals arrive

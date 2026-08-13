@@ -918,7 +918,6 @@ export class OrchestratorRunner {
       systemPromptAppend: "Checkpoint faithfully. Repository files, task ledger, artifacts, and provider journal are authoritative; do not invent corrections.",
       cwd: workspaceRoot,
       readPaths: [workspaceRoot],
-      sandboxRequired: true,
       resume: session.sdkSessionId,
       // The checkpoint runs on the same model as the lane it is checkpointing.
       model: this.#modelFor(session),

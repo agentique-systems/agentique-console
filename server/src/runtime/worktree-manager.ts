@@ -33,6 +33,11 @@ const SANDBOX_STUB_EXCLUDES = [
   ":(exclude).zshrc", ":(exclude).zprofile",
   ":(exclude).gitconfig", ":(exclude).gitmodules", ":(exclude).ripgreprc",
   ":(exclude).mcp.json", ":(exclude).idea", ":(exclude).vscode",
+  // An MCP server's scratch output. Playwright's writes every snapshot and
+  // screenshot into `.playwright-mcp/` under the seat's cwd — which IS the
+  // worktree — so without this every verification screenshot would merge into
+  // the operator's repository alongside the actual deliverable.
+  ":(exclude,glob).playwright-mcp/**", ":(exclude).playwright-mcp",
 ];
 
 export interface WorktreeRef {
@@ -164,20 +169,34 @@ export class WorktreeManager {
   }
 
   /**
-   * Creates a worktree + branch at HEAD. `dirName` and `branchPath` must be
+   * Creates a worktree + branch. `dirName` and `branchPath` must be
    * server-generated (the branch becomes `agentique/<branchPath>`). Throws
    * with an operator-actionable message when the workspace is not a git repo.
+   *
+   * `base` branches from another ref instead of the workspace HEAD — a reviewer
+   * must be cut from the branch it is reviewing. Without it a reviewer gets a
+   * snapshot that provably does not contain the work it was sent, which is what
+   * happened live: the judge found nothing at the shared path and had to read
+   * the file out of the generator's branch with raw git. An unresolvable ref
+   * falls back to HEAD rather than failing the spawn.
    */
-  addWorktree(workspaceRoot: string, agentSessionId: string, dirName: string, branchPath: string): WorktreeRef {
+  addWorktree(workspaceRoot: string, agentSessionId: string, dirName: string, branchPath: string, opts: { base?: string } = {}): WorktreeRef {
     if (!this.isGitRepo(workspaceRoot)) {
       throw new Error(`worktree isolation requires the workspace to be a git repository; ${workspaceRoot} is not one (git init it, or run without isolation)`);
     }
     const worktreePath = path.join(this.#root, agentSessionId, dirName);
     const branch = `agentique/${branchPath}`;
     fs.mkdirSync(path.dirname(worktreePath), { recursive: true });
-    const baseCommit = this.headCommit(workspaceRoot);
-    this.#git(workspaceRoot, ["worktree", "add", "-b", branch, worktreePath, "HEAD"]);
+    const startPoint = opts.base === undefined ? "HEAD" : this.#resolvable(workspaceRoot, opts.base) ? opts.base : "HEAD";
+    // The base commit is the START POINT, not the workspace HEAD: every diff
+    // this seat produces is measured against what it actually started from.
+    const baseCommit = this.#git(workspaceRoot, ["rev-parse", startPoint]).trim();
+    this.#git(workspaceRoot, ["worktree", "add", "-b", branch, worktreePath, startPoint]);
     return { path: worktreePath, branch, baseCommit };
+  }
+
+  #resolvable(workspaceRoot: string, ref: string): boolean {
+    try { this.#git(workspaceRoot, ["rev-parse", "--verify", `${ref}^{commit}`]); return true; } catch { return false; }
   }
 
   /**

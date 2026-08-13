@@ -15,6 +15,7 @@ import { ok } from "../sdk/tool-result.ts";
 import type { SdkToolResult } from "../sdk/types.ts";
 import type { AskOperatorArgs } from "./agent-tools.ts";
 import { questionTextOf } from "./composer.ts";
+import { TERMINAL_REPORT_TRIGGERS } from "./final-gate.ts";
 import { CONSOLE_SENDER, MAIN_RECIPIENT } from "./names.ts";
 import type { SessionRouting } from "./routing.ts";
 import type { Deliver, LaneActivity, OperatorWaitRef, RecordFailure, SimpleHandoff, Transfer } from "./seams.ts";
@@ -257,6 +258,22 @@ export class OperatorSurface {
   }
 
   /**
+   * The backstop, called by run completion when it decides a run is NOT done.
+   * `refreshStatus` discharges on the idle transition, but that moment can be
+   * one where the session's own delivery is still in flight — and nothing
+   * re-triggers afterwards. Run completion re-evaluates on a quiet timer, so it
+   * is the right place to ask again. Idempotent: `#operatorDebtSettled` and the
+   * dedupe on the posted notice make repeats no-ops.
+   */
+  dischargeQuietDebts(userSessionId: string): void {
+    for (const session of this.#deps.repo.listAgentSessions(userSessionId)) {
+      if (session.lifecycle !== "open") continue;
+      if (this.statusOf(session) === "working") continue;
+      this.#dischargeOperatorDebt(session);
+    }
+  }
+
+  /**
    * An AgentSession that accepted an assignment owes the operator a reply. The
    * coordinator is asked to send it, but the obligation is the CONSOLE's.
    * Discharged from whatever evidence exists: the coordinator's last report,
@@ -267,16 +284,31 @@ export class OperatorSurface {
     if (this.#operatorDebtSettled.has(session.id)) return;
     const { repo } = this.#deps;
     if (repo.listActiveDeliveries(session.id).length > 0) return;
-    const reportedToMain = repo.latestHandoff({ userSessionId: session.userSessionId, agentSessionId: session.id, recipient: MAIN_RECIPIENT });
-    if (reportedToMain) { this.#operatorDebtSettled.add(session.id); return; }
+    // The SAME predicate the status derivation uses. Reading "any handoff to
+    // main" here is what let a non-final update settle the obligation while
+    // run completion still considered the run unfinished.
+    if (this.reportedFinal(session)) { this.#operatorDebtSettled.add(session.id); return; }
 
     const voiceSeat = this.#deps.routing.completionAgent(session, "voice");
-    const coordinator = repo.latestHandoff({ userSessionId: session.userSessionId, agentSessionId: session.id, sender: voiceSeat, excludeCheckpoints: true });
+    const coordinator = repo.latestHandoff({ userSessionId: session.userSessionId, agentSessionId: session.id, sender: voiceSeat, excludeCheckpoints: true, excludeSynthetic: true });
     const seatReports = repo.listAgents(session.id)
       .filter((seat) => seat.name !== voiceSeat)
-      .map((seat) => repo.latestHandoff({ userSessionId: session.userSessionId, agentSessionId: session.id, sender: seat.name, excludeCheckpoints: true }))
+      .map((seat) => repo.latestHandoff({ userSessionId: session.userSessionId, agentSessionId: session.id, sender: seat.name, excludeCheckpoints: true, excludeSynthetic: true }))
       .filter((row): row is NonNullable<typeof row> => row !== undefined);
     if (!coordinator && seatReports.length === 0) return;
+
+    // Exactly once per BODY OF EVIDENCE, journaled rather than remembered.
+    // The in-memory latch alone is not enough: this closeout wakes main, that
+    // wake flips the session to `working`, and `setStatus` re-arms the debt —
+    // so an unreported session posted the same notice on every flap. Keying
+    // the delivery to the reports it summarizes means new work (new report
+    // ids) earns a new closeout and unchanged work earns silence, across
+    // restarts too.
+    const dedupeKey = `closeout:${[coordinator?.id, ...seatReports.map((row) => row.id)].filter(Boolean).sort().join(",")}`;
+    if (repo.findDeliveryByDedupe(session.id, voiceSeat, MAIN_RECIPIENT, dedupeKey)) {
+      this.#operatorDebtSettled.add(session.id);
+      return;
+    }
 
     this.#operatorDebtSettled.add(session.id);
     const lines = seatReports.map((row) => `- ${row.sender} (${row.core.status}): ${row.core.state.summary.slice(0, 1_500)}`);
@@ -288,8 +320,28 @@ export class OperatorSurface {
     try {
       this.#deps.transfer({ agentSessionId: session.id, speaker: { kind: speakerKindOf(repo.getAgent(session.id, voiceSeat)), name: voiceSeat }, to: MAIN_RECIPIENT,
         handoff: this.#deps.simpleHandoff("AgentSession went idle without a final report", "needs_verification", summary,
-          "Review the seat reports above and decide whether the work is complete."), category: "milestone" });
+          "Review the seat reports above and decide whether the work is complete."), category: "milestone", dedupeKey });
     } catch (error) { this.#deps.recordFailure(session.id, error); }
+  }
+
+  /**
+   * THE "has this session reported?" predicate. `statusOf`, the operator-debt
+   * discharge, the pattern stall sweep and run completion all read this one
+   * function — they used to each ask their own version, and a run died silent
+   * when three of them said "reported" while the fourth said "not final".
+   *
+   * A report is the reporting agent's OWN terminal verdict to main: `final` or
+   * `failure`. Anything else it sends main — progress, a milestone — leaves the
+   * obligation open.
+   */
+  reportedFinal(row: AgentSessionRow): boolean {
+    const reported = this.#deps.repo.latestHandoff({
+      userSessionId: row.userSessionId, agentSessionId: row.id,
+      recipient: MAIN_RECIPIENT, sender: this.#deps.routing.completionAgent(row, "finalFrom"), excludeCheckpoints: true,
+      // Only what the reporting agent ITSELF sent counts as having reported.
+      excludeSynthetic: true,
+    });
+    return reported !== undefined && TERMINAL_REPORT_TRIGGERS.has(reported.trigger);
   }
 
   /**
@@ -300,13 +352,7 @@ export class OperatorSurface {
     if (row.lifecycle === "archived") return "archived";
     if (this.#deps.lanes.hasBusyTurnExcludingOperatorWaits(row.id)) return "working";
     if (this.#deps.repo.listQueuedDeliveries(row.id).some((d) => d.recipient !== MAIN_RECIPIENT)) return "working";
-    const reported = this.#deps.repo.latestHandoff({
-      userSessionId: row.userSessionId, agentSessionId: row.id,
-      recipient: MAIN_RECIPIENT, sender: this.#deps.routing.completionAgent(row, "finalFrom"), excludeCheckpoints: true,
-      // Only what the reporting agent ITSELF sent counts as having reported.
-      excludeSynthetic: true,
-    });
-    if (reported && this.#deps.repo.listActiveDeliveries(row.id).length === 0) {
+    if (this.reportedFinal(row) && this.#deps.repo.listActiveDeliveries(row.id).length === 0) {
       // Bottom-up settling: a parent has not truly reported while an open
       // child still owes its final — the parent's report could not have
       // reflected work that has not concluded.

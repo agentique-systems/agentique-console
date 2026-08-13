@@ -11,7 +11,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { WorktreeManager } from "../runtime/worktree-manager.ts";
 import { initMessage, sendHandoffUse, successMessage, toolResultMessage, toolUseMessage } from "../sdk/fake.ts";
-import { collectUntil, makeDelegationHarness, type DelegationHarness } from "../test-helpers.ts";
+import { agentRoleOf, collectUntil, makeDelegationHarness, type DelegationHarness } from "../test-helpers.ts";
 
 const git = (cwd: string, ...args: string[]) =>
   execFileSync("git", ["-c", "user.name=test", "-c", "user.email=t@t.invalid", ...args], { cwd, encoding: "utf8" });
@@ -164,6 +164,52 @@ describe("agent worktree isolation (fake SDK + real git)", () => {
     });
     expect(seatOptions.length).toBeGreaterThan(0);
     for (const opts of seatOptions) expect(opts.cwd).toBe(plain);
+  });
+
+  /**
+   * The 2026-08-12 live run, reduced. An evaluator loop's generator reports
+   * `needs_verification` to its evaluator — exactly what its brief instructs —
+   * so it NEVER declares itself completed, and seat-level landing could never
+   * fire. The run produced a working deliverable and left the operator's
+   * workspace empty, the file stranded on an unmerged branch. Landing belongs
+   * to the session's report, and the reviewer must be cut from the branch it is
+   * reviewing rather than from a baseline that provably lacks the work.
+   */
+  it("lands a generator that never says 'completed', and seats the evaluator on its branch", async () => {
+    const { repo, dataDir } = makeRepoDir();
+    // Read INSIDE the judge's turn: its read-only snapshot is discarded the
+    // moment it reports, so afterwards there is nothing left to inspect.
+    let judgeSaw: string | null = null;
+    const h = makeDelegationHarness(async function* (opts) {
+      const role = agentRoleOf(opts).role;
+      yield initMessage(`${role}-1`);
+      if (role === "generator") {
+        fs.writeFileSync(path.join(opts.cwd ?? "", "index.html"), "<!doctype html>\n");
+        yield toolUseMessage("w-1", "Write", { file_path: "index.html" });
+        yield toolResultMessage("w-1", "ok");
+        // The pattern's own instruction: hand the draft over for judging.
+        yield sendHandoffUse("gen-1", "judge", { action: "first playable build", status: "needs_verification", category: "milestone" });
+      } else if (role === "evaluator") {
+        const own = path.join(opts.cwd ?? "", "index.html");
+        judgeSaw = fs.existsSync(own) ? fs.readFileSync(own, "utf8") : null;
+        yield sendHandoffUse("judge-1", "main", { action: "Verdict: ACCEPT", status: "completed", category: "final" });
+      }
+      yield successMessage();
+    }, { workspaceRoot: repo, runtime: { worktrees: new WorktreeManager({ dataDir }) } });
+
+    const userSessionId = h.addUserSession();
+    const done = collectUntil(h.bus, (event) => event.type === "agent_session.result.returned", 20_000);
+    h.host.createSession({ userSessionId, title: "loop", pattern: "evaluator_optimizer",
+      agents: [{ name: "builder", profileId: "implementer", model: "model-a", owns: ["index.html"] }, { name: "judge", profileId: "reviewer", model: "model-b" }],
+      briefing: handoff("build it", "pending") });
+    await done;
+
+    // The judge reviewed the actual work: its snapshot contained the file.
+    expect(judgeSaw).toBe("<!doctype html>\n");
+    // ...and the operator's workspace has it, from a seat that never once
+    // reported itself completed.
+    expect(fs.readFileSync(path.join(repo, "index.html"), "utf8")).toBe("<!doctype html>\n");
+    expect(git(repo, "status", "--porcelain").trim()).toBe("");
   });
 
   it("CONSOLE_AGENT_WORKTREES=0 disables isolation in a git workspace", async () => {

@@ -5,8 +5,15 @@
  * granted, and `#spawnSeat`'s allow-list is `runtimeToolNames(granted)` — one
  * list, so registration and the allow-list cannot drift.
  *
- * Pattern say ends at `RoleSpec.grants`; profile capabilities (shell, browser,
- * screenshots) and service availability stay orthogonal inputs.
+ * Every name below is COORDINATION. The Console has no capability tools: shell
+ * and background work are native `Bash`, and anything else — a browser, a
+ * database client — is an MCP server the profile declares. The console-built
+ * browser and process tools that used to live here were deleted; owning a
+ * second-rate copy of somebody else's capability cost a live run its
+ * verification (`browser_evaluate` failed on every call behind a green suite)
+ * and most of its wall clock (one keypress per round trip).
+ *
+ * Pattern say ends at `RoleSpec.grants`; service availability stays orthogonal.
  */
 import type { RoleSpec } from "./topology-contract.ts";
 import type { AgentProfile } from "../agent-profiles/registry.ts";
@@ -15,17 +22,12 @@ export type AgentToolName =
   | "send_handoff" | "read_artifact" | "write_note" | "ask_operator" | "roster_status"
   | "read_handoff" | "report_handoff_discrepancy" | "forward_message"
   | "task_list" | "task_create" | "task_update" | "assignment_cancel"
-  | "http_probe" | "process_start" | "process_read" | "process_stop"
-  | "browser_open" | "browser_snapshot" | "browser_click" | "browser_fill"
-  | "browser_console" | "browser_press" | "browser_evaluate" | "browser_screenshot"
   | "dispatch_work_items" | "create_child_session" | "abandon_child_session";
 
 /** Which console services exist — availability, not permission. */
 export interface AgentGrantDeps {
   tasks: boolean;
   handoffs: boolean;
-  processes: boolean;
-  browsers: boolean;
   worktrees: boolean;
   user: boolean;
   /**
@@ -38,7 +40,7 @@ export interface AgentGrantDeps {
 
 export function grantedTools(
   role: Pick<RoleSpec, "grants"> | undefined,
-  profile: AgentProfile,
+  _profile: AgentProfile,
   deps: AgentGrantDeps,
 ): Set<AgentToolName> {
   const grants = new Set(role?.grants ?? []);
@@ -50,15 +52,6 @@ export function grantedTools(
   if (deps.tasks && deps.user) {
     tools.add("task_list");
     if (grants.has("tasks_write")) { tools.add("task_create"); tools.add("task_update"); tools.add("assignment_cancel"); }
-  }
-  if (profile.runtime.shell) {
-    tools.add("http_probe");
-    if (deps.processes) { tools.add("process_start"); tools.add("process_read"); tools.add("process_stop"); }
-  }
-  if (profile.runtime.browser && deps.browsers) {
-    tools.add("browser_open"); tools.add("browser_snapshot"); tools.add("browser_click"); tools.add("browser_fill");
-    tools.add("browser_console"); tools.add("browser_press"); tools.add("browser_evaluate");
-    if (profile.runtime.screenshots) tools.add("browser_screenshot");
   }
   if (grants.has("map_dispatch")) tools.add("dispatch_work_items");
   if (grants.has("child_sessions") && deps.childSessions) {

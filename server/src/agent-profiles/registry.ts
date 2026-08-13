@@ -27,19 +27,23 @@ export const ProfileSchema = z.object({
    */
   exemptFromOwnership: z.boolean().default(false),
   maxTurns: z.number().int().min(1).max(100).default(40),
-  sandboxRequired: z.boolean().default(true),
-  runtime: z.object({
-    shell: z.boolean().default(false),
-    browser: z.boolean().default(false),
-    screenshots: z.boolean().default(false),
-    /**
-     * Outbound hosts this profile may reach from sandboxed commands.
-     * `"default"` takes the workspace allowlist (CONSOLE_ALLOWED_DOMAINS);
-     * `[]` means offline; an explicit list overrides. Loopback is always
-     * permitted — an agent must be able to reach a server it just started.
-     */
-    network: z.union([z.literal("default"), z.array(z.string())]).default("default"),
-  }),
+  /**
+   * MCP servers this profile's agents get, merged with the console's own.
+   * This is where CAPABILITY lives: the Console owns coordination and supplies
+   * nothing else. Browser automation, for instance, is a declared stdio server,
+   * not a console tool — the console-built browser and process tools were
+   * deleted after a live run in which `browser_evaluate` was broken 100% of the
+   * time behind a green test suite, screenshots cost a round trip each to look
+   * at, and one keypress per call made real verification unaffordable.
+   *
+   * Keys become the `mcp__<key>__*` tool prefix and are auto-approved for the
+   * profile's agents. `CONSOLE_MCP_DISABLED` names servers to drop.
+   */
+  mcpServers: z.record(z.string(), z.object({
+    command: z.string().min(1),
+    args: z.array(z.string()).default([]),
+    env: z.record(z.string(), z.string()).optional(),
+  })).default({}),
   skills: z.array(z.string()).optional(),
   entryAgent: z.string().optional(),
   pluginPath: z.string().optional(),
@@ -52,6 +56,30 @@ export type AgentProfile = z.infer<typeof ProfileSchema>;
 const READ_TOOLS = ["Read", "Glob", "Grep"];
 const CODE_TOOLS = [...READ_TOOLS, "Edit", "Write", "Bash"];
 
+/**
+ * The browser the visual profiles drive. Declared, not vendored: the Console
+ * launches what the manifest names and owns none of it. Swap or disable it
+ * with CONSOLE_BROWSER_MCP / CONSOLE_MCP_DISABLED — a profile that names a
+ * server the host cannot start says so in a runtime notice and runs without it.
+ */
+const BROWSER_MCP = {
+  browser: {
+    command: "npx",
+    args: [
+      "-y", "@playwright/mcp@latest",
+      // Headed is this server's DEFAULT and fails on a headless host; Chrome's
+      // own sandbox fails inside a container or WSL. Both were verified by
+      // driving the server over stdio, not assumed.
+      "--headless", "--no-sandbox", "--isolated",
+      // Without this a screenshot comes back as a file path and costs a second
+      // round trip to look at — 60 of one live run's 330 requests were exactly
+      // that. With it the image is in the tool result.
+      "--image-responses", "allow",
+      "--viewport-size", "1280x800",
+    ],
+  },
+};
+
 const BUILTINS: AgentProfile[] = [
   {
     id: "coordinator",
@@ -63,8 +91,8 @@ const BUILTINS: AgentProfile[] = [
     model: "claude-sonnet-5",
     handoffExtension: "coordination",
     exemptFromOwnership: false,
-    maxTurns: 35, sandboxRequired: true,
-    runtime: { shell: false, browser: false, screenshots: false, network: [] },
+    maxTurns: 35,
+    mcpServers: {},
   },
   {
     id: "explorer",
@@ -76,8 +104,8 @@ const BUILTINS: AgentProfile[] = [
     model: "claude-sonnet-5",
     handoffExtension: "investigation",
     exemptFromOwnership: false,
-    maxTurns: 30, sandboxRequired: true,
-    runtime: { shell: false, browser: false, screenshots: false, network: [] },
+    maxTurns: 30,
+    mcpServers: {},
   },
   {
     id: "implementer",
@@ -89,21 +117,21 @@ const BUILTINS: AgentProfile[] = [
     model: "claude-opus-5",
     handoffExtension: "implementation",
     exemptFromOwnership: false,
-    maxTurns: 50, sandboxRequired: true,
-    runtime: { shell: true, browser: false, screenshots: false, network: "default" },
+    maxTurns: 50,
+    mcpServers: {},
   },
   {
     id: "frontend-implementer",
     title: "Frontend implementer",
     purpose: "Implement frontend behavior and validate the rendered application.",
-    instructions: "Own the assigned frontend slice. Run the application, inspect browser behavior and screenshots when available, test interactions, and report concrete validation rather than visual guesses.",
+    instructions: "Own the assigned frontend slice. Run the application, drive the real browser through your MCP browser tools, test interactions, and report concrete validation rather than visual guesses.",
     tools: CODE_TOOLS,
     permissionMode: "bypassPermissions",
     model: "claude-opus-5",
     handoffExtension: "implementation",
     exemptFromOwnership: false,
-    maxTurns: 50, sandboxRequired: true,
-    runtime: { shell: true, browser: true, screenshots: true, network: "default" },
+    maxTurns: 50,
+    mcpServers: BROWSER_MCP,
   },
   {
     id: "reviewer",
@@ -115,8 +143,8 @@ const BUILTINS: AgentProfile[] = [
     model: "claude-opus-5",
     handoffExtension: "review",
     exemptFromOwnership: true,
-    maxTurns: 35, sandboxRequired: true,
-    runtime: { shell: true, browser: false, screenshots: false, network: [] },
+    maxTurns: 35,
+    mcpServers: {},
   },
   {
     id: "visual-reviewer",
@@ -128,8 +156,8 @@ const BUILTINS: AgentProfile[] = [
     model: "claude-opus-5",
     handoffExtension: "review",
     exemptFromOwnership: true,
-    maxTurns: 35, sandboxRequired: true,
-    runtime: { shell: true, browser: true, screenshots: true, network: "default" },
+    maxTurns: 35,
+    mcpServers: BROWSER_MCP,
   },
   {
     id: "researcher",
@@ -141,8 +169,8 @@ const BUILTINS: AgentProfile[] = [
     model: "claude-sonnet-5",
     handoffExtension: "investigation",
     exemptFromOwnership: false,
-    maxTurns: 30, sandboxRequired: true,
-    runtime: { shell: false, browser: false, screenshots: false, network: "default" },
+    maxTurns: 30,
+    mcpServers: {},
   },
 ];
 
@@ -257,12 +285,12 @@ export class AgentProfileRegistry {
   }
 
   #revision(files: { path: string; content: string }[]): string { const hash = crypto.createHash("sha256"); for (const file of files) hash.update(file.path).update("\0").update(file.content).update("\0"); return hash.digest("hex"); }
-  #invalidPlaceholder(id: string): AgentProfile { return { id, title: id, purpose: "Invalid profile", instructions: "", tools: [], skills: [], permissionMode: "default", exemptFromOwnership: false, maxTurns: 1, sandboxRequired: true, runtime: { shell: false, browser: false, screenshots: false, network: [] } }; }
+  #invalidPlaceholder(id: string): AgentProfile { return { id, title: id, purpose: "Invalid profile", instructions: "", tools: [], skills: [], permissionMode: "default", exemptFromOwnership: false, maxTurns: 1, mcpServers: {} }; }
   #componentCounts(files: { path: string }[]): Record<string, number> { const counts: Record<string, number> = {}; for (const file of files) { const kind = file.path.startsWith("skills/") ? "skills" : file.path.startsWith("hooks/") ? "hooks" : file.path.startsWith("agents/") ? "agents" : file.path === ".mcp.json" ? "mcp" : "files"; counts[kind] = (counts[kind] ?? 0) + 1; } return counts; }
   #summary(profile: AgentProfile, source: "builtin" | "workspace", revision: string, trusted: boolean, valid: boolean, files: { path: string }[]): AgentProfileSummary { return { id: profile.id, title: profile.title, purpose: profile.purpose, source, revision, trusted, valid, tools: profile.tools, skills: profile.skills ?? [], componentCounts: this.#componentCounts(files) }; }
   #detail(profile: AgentProfile, source: "builtin" | "workspace", revision: string, trusted: boolean, issues: ProfileValidationIssue[], files: { path: string; content: string }[]): AgentProfileDetail {
     const summary = this.#summary(profile, source, revision, trusted, issues.every((i) => i.level !== "error"), files);
     const components = files.filter((file) => file.path !== "agentique.profile.json" && file.path !== ".claude-plugin/plugin.json").map((file) => { const kind = file.path.startsWith("skills/") ? "skill" : file.path.startsWith("hooks/") ? "hook" : file.path.startsWith("agents/") ? "agent" : file.path === ".mcp.json" ? "mcp" : file.path.startsWith("commands/") ? "command" : file.path.startsWith("monitors/") ? "monitor" : file.path === "settings.json" ? "settings" : "other"; return { kind, name: path.basename(file.path), path: file.path, supported: ["skill", "hook", "agent", "mcp", "command", "settings"].includes(kind), summary: file.content.slice(0, 160) } as AgentProfileDetail["components"][number]; });
-    return { ...summary, instructions: profile.instructions, permissionMode: profile.permissionMode, model: profile.model ?? null, effort: profile.effort ?? null, maxTurns: profile.maxTurns, sandboxRequired: profile.sandboxRequired, runtime: profile.runtime, handoffExtension: profile.handoffExtension ?? null, pluginPath: profile.pluginPath ?? null, components, files, issues };
+    return { ...summary, instructions: profile.instructions, permissionMode: profile.permissionMode, model: profile.model ?? null, effort: profile.effort ?? null, maxTurns: profile.maxTurns, mcpServers: profile.mcpServers, handoffExtension: profile.handoffExtension ?? null, pluginPath: profile.pluginPath ?? null, components, files, issues };
   }
 }

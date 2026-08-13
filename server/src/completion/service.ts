@@ -94,16 +94,14 @@ export class RunCompletionService {
     if (runner.queuedJobs(userSessionId) > 0) return false;
     if (!runner.laneIdle(userSessionId)) return false;
 
-    // Somebody TOP-LEVEL must actually have reported a final. Idle is not
-    // done, and a child's "final" never reaches the literal main lane — it
-    // crossed into its parent as a milestone — so children cannot satisfy
-    // this clause and must not be consulted for it.
+    // Somebody TOP-LEVEL must actually have reported. Idle is not done, and a
+    // child's "final" never reaches the literal main lane — it crossed into
+    // its parent as a milestone — so children cannot satisfy this clause and
+    // must not be consulted for it. `host.reportedFinal` is the SAME predicate
+    // the status derivation, the operator-debt discharge and the stall sweep
+    // read: they disagreed once, and the run hung in `active` forever.
     return repo.listAgentSessions(userSessionId).some((agentSession) =>
-      agentSession.parentAgentSessionId === null
-      && repo.latestHandoff({
-        userSessionId, agentSessionId: agentSession.id,
-        recipient: "main", excludeCheckpoints: true,
-      })?.trigger === "final");
+      agentSession.parentAgentSessionId === null && host.reportedFinal(agentSession));
   }
 
   /**
@@ -112,7 +110,13 @@ export class RunCompletionService {
    * `awaiting_signoff` synchronously, so the run state IS the arming latch.
    */
   evaluate(userSessionId: string): boolean {
-    if (!this.isComplete(userSessionId)) return false;
+    if (!this.isComplete(userSessionId)) {
+      // Not done — but if the work has nonetheless gone quiet, the operator is
+      // owed whatever exists. A run may end incomplete; it may never end in
+      // silence, which is exactly how the 2026-08-12 run ended.
+      try { this.#deps.host().dischargeQuietDebts(userSessionId); } catch { /* a backstop must not throw */ }
+      return false;
+    }
     this.#propose(userSessionId);
     return true;
   }
@@ -157,7 +161,7 @@ export class RunCompletionService {
         costUsd: document.cost.usd,
         costCoverage: document.cost.coverage,
         openUncertainty: document.uncertainty.length,
-        reaped: { processes: reaped.processes.length, browsers: reaped.browsers, leakedBefore: reaped.leakedBefore },
+        reaped: { seats: reaped.seats.length },
       },
     });
     bus.append({

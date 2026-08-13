@@ -56,6 +56,16 @@ export class SessionRouting {
     return this.agentsOfRole(session.id, role)[0]?.name ?? COORDINATOR_AGENT;
   }
 
+  /**
+   * Whether a seat's role reviews someone else's output. Its worktree is a
+   * SNAPSHOT OF THE THING UNDER REVIEW, so it must be cut from the branch the
+   * work is on, not from the workspace baseline.
+   */
+  isReviewRole(session: AgentSessionRow, seatName: string): boolean {
+    const seat = this.#deps.repo.getAgent(session.id, seatName);
+    return seat !== undefined && this.contractOf(session).role(roleOfAgent(seat))?.extensionKind === "review";
+  }
+
   /** Where an agent's console-synthesized failures go (RoleSpec.escalateTo). */
   escalationTarget(session: AgentSessionRow, seatName: string): string {
     const seat = this.#deps.repo.getAgent(session.id, seatName);

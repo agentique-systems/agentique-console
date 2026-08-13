@@ -16,8 +16,6 @@ import type { AgentRow, AgentSessionRow, MailboxDeliveryRow, Repo } from "../db/
 import { InvalidInputError, NotFoundError } from "../errors.ts";
 import type { EventBus } from "../events/bus.ts";
 import { newId, nowIso } from "../ids.ts";
-import type { BrowserManager } from "../runtime/browser-manager.ts";
-import type { ProcessManager } from "../runtime/process-manager.ts";
 import type { WorktreeManager } from "../runtime/worktree-manager.ts";
 import type { AgentLanePool } from "./lanes.ts";
 import { CHILD_SENDER_PREFIX, COORDINATOR_AGENT, MAIN_RECIPIENT } from "./names.ts";
@@ -55,8 +53,6 @@ export interface SessionLifecycleDeps {
   profiles: AgentProfileRegistry;
   getWorkspaceRoot: (workspaceId: string) => string;
   /** OS capabilities. `null` = absent, stated at the construction site. */
-  processes: ProcessManager | null;
-  browsers: BrowserManager | null;
   worktrees: WorktreeManager | null;
   routing: SessionRouting;
   lanes: AgentLanePool;
@@ -216,31 +212,24 @@ export class SessionLifecycle {
    * and WITHOUT touching worktrees. It stops short of archival because the
    * operator may ask for changes: agents respawn lazily over their retained
    * provider sessions, and a worktree destroyed here could not be merged
-   * afterwards. Returns what it killed, so the summary can state it.
+   * afterwards. Returns what it released, so the summary can state it.
+   *
+   * Closing a seat's lane closes its CLI subprocess, and everything the agent
+   * started — a background `Bash` dev server, an MCP server's browser — is a
+   * child of that process. There is no separate console-owned process table to
+   * sweep: the console stopped owning capability, so it stopped owning the
+   * leaks too.
    */
   reapForUserSession(userSessionId: string): ReapResult {
-    const processes: ReapResult["processes"] = [];
-    let browsers = 0;
+    const seats: ReapResult["seats"] = [];
     for (const session of this.#deps.repo.listAgentSessions(userSessionId)) {
       if (session.lifecycle !== "open") continue;
       for (const seat of this.#deps.repo.listAgents(session.id)) {
-        for (const killed of this.#deps.processes?.stopAgent(session.id, seat.name) ?? []) {
-          processes.push({ agentSessionId: session.id, agent: seat.name, processId: killed.processId, pid: killed.pid });
-        }
-        void this.#deps.browsers?.closeAgent(`${session.id}:${seat.name}`)
-          .then((closed) => { if (closed) browsers += 1; })
-          .catch(() => undefined);
+        if (this.#deps.lanes.hasLane(session.id, seat.name)) seats.push({ agentSessionId: session.id, agent: seat.name });
       }
+      this.#deps.lanes.closeAllForSession(session.id);
     }
-    // Processes the JOURNAL says are still running: started with no matching
-    // exit. Counted separately from what we just killed, because a non-zero
-    // figure here means something outlived its own bookkeeping.
-    const started = new Map<string, string>();
-    for (const event of this.#deps.repo.listProcessEvents(userSessionId)) {
-      if (event.type === "agent_session.process.started") started.set(event.processId, event.processId);
-      if (event.type === "agent_session.process.exited") started.delete(event.processId);
-    }
-    return { processes, browsers, leakedBefore: started.size };
+    return { seats };
   }
 
   archiveForUserSession(userSessionId: string): void {
@@ -257,8 +246,6 @@ export class SessionLifecycle {
   /** The ONE teardown path — the nesting broker archives through this too. */
   archiveOne(session: AgentSessionRow): void {
     this.interrupt(session.id);
-    this.#deps.processes?.stopSession(session.id);
-    void this.#deps.browsers?.closeSession(session.id);
     this.#deps.worktree.removeForSession(session);
     for (const delivery of this.#deps.repo.listActiveDeliveries(session.id)) this.#deps.patchDelivery(session, delivery, "cancelled");
     this.#deps.repo.patchAgentSession(session.id, { lifecycle: "archived" });
@@ -303,6 +290,6 @@ export class SessionLifecycle {
 
   profile(id: string, workspaceId?: string): AgentProfile {
     if (this.#deps.profiles) return this.#deps.profiles.get(id, workspaceId);
-    return { id, title: id, purpose: id, instructions: `You are the ${id} specialist.`, tools: ["Read", "Glob", "Grep"], permissionMode: "default", exemptFromOwnership: false, maxTurns: 30, sandboxRequired: true, runtime: { shell: false, browser: false, screenshots: false, network: [] } };
+    return { id, title: id, purpose: id, instructions: `You are the ${id} specialist.`, tools: ["Read", "Glob", "Grep"], permissionMode: "default", exemptFromOwnership: false, maxTurns: 30, mcpServers: {} };
   }
 }

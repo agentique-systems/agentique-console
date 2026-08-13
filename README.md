@@ -40,14 +40,20 @@ single npm-workspaces application backed by SQLite and the Claude Agent SDK.
   A coordinator can pass a specialist's report upward verbatim with
   `forward_message` — the operator reads the specialist's words, not a
   paraphrase.
-- **Native for capability, console for coordination.** The SDK supplies the
-  sandbox, managed processes, local Chrome, git worktrees behind
-  `EnterWorktree`, and model invocation — real engineering with no
-  console-specific semantics. Addressing, delivery, the task ledger, context
-  lifetime and the operator obligation stay console-owned, because the console
-  holds invariants the native versions do not know about: a fixed roster, an
-  agent that outlives many provider sessions, journal-as-truth, and a human who
-  is owed a report. The native cross-session `SendMessage` mesh and the native
+- **Native for capability, console for coordination**, with no exceptions. The
+  SDK supplies `Bash` (including backgrounded work read back with
+  `TaskOutput`/`Monitor`), git worktrees behind `EnterWorktree`, and model
+  invocation; anything beyond that — a browser, a database client — is an MCP
+  server a profile declares and the Console launches. The Console builds no
+  capability tools of its own. It used to: browser automation, process
+  management and an HTTP probe. They were deleted after a live run in which
+  `browser_evaluate` failed on every call behind a green test suite, every
+  screenshot cost a second round trip to look at, and one keypress per call
+  made real verification unaffordable. Addressing, delivery, the task ledger,
+  context lifetime and the operator obligation stay console-owned, because the
+  console holds invariants the native versions do not know about: a fixed
+  roster, an agent that outlives many provider sessions, journal-as-truth, and
+  a human who is owed a report. The native cross-session `SendMessage` mesh and the native
   `Task*` ledger were tried for those jobs and removed; both keyed durable
   state to the provider session, which dies at every context rotation.
 - The task ledger is console-owned (`task_list`/`task_create`/`task_update`),
@@ -63,10 +69,9 @@ single npm-workspaces application backed by SQLite and the Claude Agent SDK.
   it. Runtime state is rendered as trace data instead of chat narration.
 
 SQLite is the authoritative event and mailbox store. It records messages,
-delivery transitions, tool calls/results, runtime notices, retries, process
-output, failures, turns, context rotations, and termination. Large tool
-payloads and screenshots become durable artifacts referenced by bounded event
-rows. The SDK's eager `SessionStore` mirror is also SQLite-backed, so provider
+delivery transitions, tool calls/results, runtime notices, retries, failures,
+turns, context rotations, and termination. Large tool payloads and screenshots
+become durable artifacts referenced by bounded event rows. The SDK's eager `SessionStore` mirror is also SQLite-backed, so provider
 history is available for recovery even when a participant crashes before it
 can send a closing message.
 
@@ -75,7 +80,7 @@ can send a closing message.
 Immutable built-ins are `coordinator`, `explorer`, `implementer`,
 `frontend-implementer`, `reviewer`, `visual-reviewer`, and `researcher`.
 Profiles define purpose, instructions, exact tools, permission mode, model and
-effort overrides, turn limit, sandbox requirement, and runtime capabilities.
+effort overrides, turn limit, and any MCP servers its agents get.
 
 Add custom profiles as workspace plugin bundles: a directory per profile under
 `.agentique/agents/<id>/`, holding an `agentique.profile.json` manifest (the id
@@ -94,27 +99,29 @@ clone to a new id. Example manifest:
   "tools": ["Read", "Glob", "Grep", "Bash"],
   "permissionMode": "default",
   "maxTurns": 30,
-  "sandboxRequired": true,
-  "runtime": { "shell": true, "browser": false, "screenshots": false }
+  "mcpServers": {}
 }
 ```
 
-Shell-capable profiles receive Console-owned start/read/stop process tools;
-`process_read` can wait for a state change so agents do not poll. Frontend and
-visual profiles also receive managed local-Chrome navigation, interaction,
-keyboard, JS evaluation, console, snapshot, and screenshot tools. Any agent can
+Capability is native or declared, never console-built. `Bash` in the profile's
+`tools` gives an agent a shell — long-running work is backgrounded and read
+back with the native `TaskOutput`/`TaskStop`/`Monitor`, so nothing polls and
+nothing blocks a turn. Anything more comes from `mcpServers`: a
+`{command, args}` per server, launched by the Console and auto-approved whole,
+so its tool names never have to be mirrored in a console-side list. The
+built-in `frontend-implementer` and `visual-reviewer` declare a browser server
+this way. `CONSOLE_MCP_DISABLED` drops servers by name and
+`CONSOLE_BROWSER_MCP` replaces the browser one install-wide. Any agent can
 dereference an artifact it or a teammate produced with `read_artifact`.
-Process execution and SDK Bash are fail-closed when the Linux sandbox is
-unavailable.
 
-A profile's `tools` list is binding: every built-in it does not grant is denied
-by name, not merely left un-auto-approved. `runtime.network` sets the sandbox
-egress allowlist — `"default"` takes the workspace list
-(`CONSOLE_ALLOWED_DOMAINS`, package registries and common CDNs), `[]` is
-offline, or name hosts explicitly. Loopback is always reachable so an agent can
-verify a server it started. Each agent is told its own capabilities and
-allowlist at spawn, so a limit is a stated fact rather than something to
-discover by failing.
+**The Console runs no sandbox.** The SDK's gave every Bash call its own network
+and PID namespace, so a dev server died with the call that started it and was
+unreachable from the browser sent to verify it — the two things a coding agent
+most needs. Containment is the worktree: a write agent works in its own tree and
+only merges when its session reports. A profile's `tools` list is still binding —
+every built-in it does not grant is denied by name, not merely left
+un-auto-approved — and each agent is told its own capabilities at spawn, so a
+limit is a stated fact rather than something to discover by failing.
 
 ## Context and decisions
 
@@ -159,7 +166,7 @@ turn rather than mid-turn. Agent models come from profiles and are unaffected.
 
 Settings: `CONSOLE_PORT`, `CONSOLE_HOST`, `CONSOLE_MODEL`,
 `CONSOLE_IMPROVE_MODEL`, `CONSOLE_EFFORT`, `CONSOLE_FS_ROOTS`,
-`CONSOLE_ALLOWED_DOMAINS` (comma-separated; empty string is fully offline).
+`CONSOLE_MCP_DISABLED`, `CONSOLE_BROWSER_MCP`.
 Agent-residency knobs: `CONSOLE_MAX_RESIDENT_AGENTS` (default 8),
 `CONSOLE_MAX_RESIDENT_AGENTS_PER_TREE` (default 4; a parent session and its
 children share the budget), `CONSOLE_AGENT_IDLE_REAP_MS` (default 300000),
@@ -184,7 +191,7 @@ server/
   agent-profiles/registry.ts   immutable built-ins + trusted workspace bundles
   events/bus.ts                replayable event journal + artifacts
   sdk/session-store.ts         eager provider-entry journal
-  runtime/                     sandboxed processes + local-Chrome inspection
+  runtime/worktree-manager.ts  console-owned git worktrees per seat
 web/
   live/                        one replay-then-tail EventSource
   session/, agents/            conversation and complete execution inspector
