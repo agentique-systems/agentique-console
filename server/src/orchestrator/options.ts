@@ -27,6 +27,9 @@ export const CONSOLE_TOOL_NAMES = [
   "report_handoff_discrepancy",
   "session_activity",
   "interrupt_agent",
+  "close_agent_session",
+  "read_artifact",
+  "add_agent",
 ] as const;
 
 /**

@@ -119,7 +119,7 @@ export function createApp(options: CreateAppOptions): App {
     buildMcpServer: (userSessionId, sdkInstance) =>
       repo.getUserSession(userSessionId)?.purpose === "profile_manager"
         ? buildManagerMcpServer(sdkInstance, lateManager.get(), userSessionId)
-        : buildConsoleMcpServer({ sdk: sdkInstance, host, repo, bus, userSessionId, tasks, scheduler, handoffs }),
+        : buildConsoleMcpServer({ sdk: sdkInstance, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts }),
   });
   lateRunner.set(runner);
   const manager = new ProfileManagerService({ repo, workspaces, profiles, config, bus, runner: () => runner });

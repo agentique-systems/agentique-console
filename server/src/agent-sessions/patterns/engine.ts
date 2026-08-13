@@ -98,11 +98,25 @@ export function oscillating(recentEdges: readonly string[], window: number): boo
 
 export function onPatternPost(ctx: PatternContext, session: AgentSessionRow, hop: PatternHop): void {
   const { repo } = ctx.deps;
-  const state = repo.getPatternState(session.id);
+  let state = repo.getPatternState(session.id);
   if (state?.tripped) {
-    // Counters stop at the trip; deliveries do not — reports still flow.
-    if (hop.advance === "join") advanceJoinHop(ctx, session, hop);
-    return;
+    // A fresh main→entry ASSIGNMENT on a tripped session is a re-brief: the
+    // budgets restart exactly as a fresh invocation's would. Without this,
+    // re-briefing a tripped session (which is legal) ran it with NO budget
+    // enforcement at all — the counters froze at the trip forever.
+    const entryRole = ctx.contract(session).entry.role;
+    const recipientRole = repo.getAgent(session.id, hop.recipient)?.role;
+    const isRebrief = !hop.synthetic && hop.sender === "main" && hop.category === "assignment" &&
+      recipientRole === entryRole;
+    if (isRebrief) {
+      state = repo.upsertPatternState(session.id, { tripped: null, handoffCount: 0, rounds: 0, recentEdges: [] });
+      ctx.deps.bus.append({ type: "agent_session.runtime.noted", userSessionId: session.userSessionId, agentSessionId: session.id,
+        payload: { agentSessionId: session.id, agent: hop.recipient, detail: "pattern budgets reset by a fresh briefing from main" } });
+    } else {
+      // Counters stop at the trip; deliveries do not — reports still flow.
+      if (hop.advance === "join") advanceJoinHop(ctx, session, hop);
+      return;
+    }
   }
   const recentEdges = [...(state?.recentEdges ?? []), `${hop.sender}>${hop.recipient}`].slice(-16);
   const countsRound = hop.countsRound && !hop.synthetic;

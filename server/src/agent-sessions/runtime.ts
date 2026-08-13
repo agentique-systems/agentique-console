@@ -224,7 +224,7 @@ export class AgentRuntime implements Injector, TurnTracker {
       const granted = grantedTools(contract.role(seatRole), profile, {
         tasks: Boolean(this.#deps.tasks), handoffs: Boolean(this.#deps.handoffs),
         worktrees: Boolean(this.#deps.worktrees), user: Boolean(user),
-        childSessions: this.#deps.config.policy.enableChildSessions !== false && session.parentAgentSessionId === null,
+        childSessions: this.#deps.config.policy.enableChildSessions !== false && session.depth < this.#deps.config.policy.maxSessionDepth,
       });
       const mcp = this.#buildParticipantMcp(sdk, session, latestSeat, granted);
       const declared = declaredMcpServers(profile, this.#deps.config);

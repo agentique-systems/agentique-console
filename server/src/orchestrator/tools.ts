@@ -7,6 +7,7 @@
 import { z } from "zod";
 import type { AgentSessionService } from "../agent-sessions/service.ts";
 import { MAIN_RECIPIENT } from "../agent-sessions/names.ts";
+import type { ArtifactStore } from "../events/artifact-store.ts";
 import type { EventBus } from "../events/bus.ts";
 import type { Repo } from "../db/repo.ts";
 import { NotFoundError } from "../errors.ts";
@@ -20,6 +21,9 @@ import type { HandoffService } from "../handoffs/service.ts";
 import { EvidenceRefSchema, HandoffCoreSchema, HandoffDraftSchema } from "../handoffs/schema.ts";
 
 import { fail, guarded, ok } from "../sdk/tool-result.ts";
+
+/** Same bound the agent-side read_artifact applies (provider inline-image cap). */
+const MAX_IMAGE_BASE64_CHARS = 5 * 1024 * 1024;
 import { consoleTaskListId } from "../tasks/service.ts";
 
 export interface ConsoleToolsInput {
@@ -31,10 +35,11 @@ export interface ConsoleToolsInput {
   tasks: TaskService;
   scheduler: AssignmentScheduler;
   handoffs: HandoffService;
+  artifacts: ArtifactStore;
 }
 
 export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
-  const { sdk, host, repo, bus, userSessionId, tasks, scheduler, handoffs } = input;
+  const { sdk, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts } = input;
 
   /** Tools operate only on this UserSession's agent sessions. */
   const owned = (agentSessionId: string) => {
@@ -125,9 +130,12 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
     sdk.tool(
       "send_to_coordinator",
       "Send a typed handoff to an AgentSession's entry agent — its coordinator in a hub session, the first stage of a pipeline, the generator of an evaluator loop. This is how you steer a running session after its briefing: assign more work, redirect, or relay an operator decision. The fields ARE the handoff; the Console builds, journals and carries the envelope. " +
+      "Set `to` to reach ANY agent in the session directly with a category:\"update\" steering message (a correction, a discovery, a binding redirect) — assignments still enter only through the entry agent. " +
       "An assignment whose taskId still has incomplete dependencies is SCHEDULED, not delivered — {scheduled:true} comes back and the Console dispatches it when the dependencies complete; never re-send it.",
       {
         agentSessionId: z.string().min(1),
+        to: z.string().min(1).optional()
+          .describe("Recipient agent name (session_activity lists them). Omit for the entry agent. Non-entry recipients accept category \"update\" only."),
         category: z.enum(["assignment", "update"])
           .describe("\"assignment\" is new work the session owes you back; \"update\" is steering or context for work already assigned."),
         status: HandoffCoreSchema.shape.status,
@@ -145,7 +153,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         requestExpandedContext: z.boolean().default(false),
       },
       async (args: {
-        agentSessionId: string; category: "assignment" | "update";
+        agentSessionId: string; to?: string; category: "assignment" | "update";
         status: HandoffDraft["core"]["status"]; risk: HandoffDraft["core"]["risk"];
         action: string; stateSummary: string; evidence: HandoffDraft["core"]["state"]["evidence"];
         resultSummary: string | null; artifacts: HandoffDraft["core"]["result"]["artifacts"];
@@ -153,6 +161,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
       }) => guarded(() => {
         const session = owned(args.agentSessionId);
         const entryAgent = host.entryAgent(args.agentSessionId);
+        const recipient = args.to ?? entryAgent;
         const handoff: HandoffDraft = {
           core: {
             schemaVersion: 1, taskId: args.taskId, status: args.status, risk: args.risk, action: args.action,
@@ -165,9 +174,12 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         };
         // An archived session skips the intercept so post() raises its
         // Conflict instead of recording a schedule nobody can dispatch.
-        if (session.lifecycle === "open") {
+        // Only ENTRY traffic can be scheduled: a dependency-parked assignment
+        // dispatches to its stored recipient later, and the front door is the
+        // only recipient every pattern accepts assignments through.
+        if (session.lifecycle === "open" && recipient === entryAgent) {
           const scheduled = scheduler.intercept({
-            agentSessionId: args.agentSessionId, sender: MAIN_RECIPIENT, recipient: entryAgent,
+            agentSessionId: args.agentSessionId, sender: MAIN_RECIPIENT, recipient,
             category: args.category, handoff,
           });
           if (scheduled) {
@@ -178,11 +190,11 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         const message = host.post({
           agentSessionId: args.agentSessionId,
           speaker: { kind: "orchestrator", name: "main" },
-          to: entryAgent,
+          to: recipient,
           handoff,
           category: args.category,
         });
-        return { delivered: true, messageSeq: message.seq, to: entryAgent, category: args.category };
+        return { delivered: true, messageSeq: message.seq, to: recipient, category: args.category };
       }),
     ),
 
@@ -338,6 +350,69 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         guarded(() => {
           owned(args.agentSessionId);
           return host.activity(args.agentSessionId);
+        }),
+    ),
+
+    sdk.tool(
+      "read_artifact",
+      "Read an artifact by id — a landed or archived worktree diff, a screenshot, a note, a captured payload. Artifacts are the EVIDENCE behind reports (worktree events, salvage pointers, handoff refs carry the ids); read them before deciding on the work they describe. Images return as viewable content.",
+      { artifactId: z.string().min(1), cursor: z.string().optional(), maxBytes: z.number().int().min(1).max(PAGE_MAX_BYTES).default(PAGE_DEFAULT_BYTES) },
+      async (args: { artifactId: string; cursor?: string; maxBytes: number }) => {
+        const artifact = artifacts.get(args.artifactId);
+        if (!artifact) return fail(`no artifact ${args.artifactId}`);
+        if (artifact.mediaType.startsWith("image/")) {
+          // MCP's ImageContent is {type,data,mimeType}; strip the console's
+          // `;base64` storage suffix only here, at the boundary.
+          const mimeType = artifact.mediaType.replace(/;base64$/, "");
+          if (artifact.content.length > MAX_IMAGE_BASE64_CHARS) {
+            return ok({ artifactId: artifact.id, mediaType: artifact.mediaType, bytes: artifact.bytes,
+              error: `image is ${Math.round(artifact.bytes / 1024)}KiB, over the provider limit for inline images.` });
+          }
+          return { content: [{ type: "image" as const, data: artifact.content, mimeType }] };
+        }
+        return ok({ artifactId: artifact.id, mediaType: artifact.mediaType, bytes: artifact.bytes,
+          content: pageTail(artifact.content, args.cursor, args.maxBytes) });
+      },
+    ),
+
+    sdk.tool(
+      "add_agent",
+      "Add ONE agent to an open session mid-run — an emergent need the original roster did not anticipate (a security pass, a second perspective, more capacity). Works for open multi-seat roles only: hub specialists, plan_execute executors, peer_to_peer peers. Fixed-roster patterns (pipeline, debate, evaluator, map_reduce) refuse — spawn a follow-up session for those. The entry agent is told immediately; assign the new seat work through it.",
+      {
+        agentSessionId: z.string().min(1),
+        name: z.string().min(1).describe("Agent name, e.g. 'auditor'"),
+        profileId: z.string().min(1).describe("A profile id from list_agent_profiles"),
+        instructions: z.string().optional().describe("Brief appended to the profile instructions"),
+        model: z.string().optional(),
+        owns: z.array(z.string()).default([]).describe("Exclusive write scope; required for a writing profile"),
+      },
+      async (args: { agentSessionId: string; name: string; profileId: string; instructions?: string; model?: string; owns: string[] }) =>
+        guarded(() => {
+          owned(args.agentSessionId);
+          const added = host.addAgent(args.agentSessionId, {
+            name: args.name, profileId: args.profileId,
+            ...(args.instructions === undefined ? {} : { instructions: args.instructions }),
+            ...(args.model === undefined ? {} : { model: args.model }),
+            owns: args.owns,
+          });
+          return { ...added, status: "seated",
+            note: "The entry agent has been told. Route assignments through it; you can steer the new seat directly with send_to_coordinator's `to` (update-only)." };
+        }),
+    ),
+
+    sdk.tool(
+      "close_agent_session",
+      "Terminate a whole session that is no longer productive (superseded strategy, wedged past saving, obsoleted by a discovery). Lanes close, pending deliveries cancel, unlanded worktree branches ARCHIVE (nothing merges, nothing is destroyed), and the session stops blocking run completion. A child session's controller is told via a journaled failure. Returns the session's still-open ledger units so you can re-own them in a successor session. Prefer close+create over deforming a running session past its briefing.",
+      {
+        agentSessionId: z.string().min(1),
+        reason: z.string().min(1).max(280).describe("Why — journaled; a child's controller reads it"),
+      },
+      async (args: { agentSessionId: string; reason: string }) =>
+        guarded(() => {
+          owned(args.agentSessionId);
+          const closed = host.closeSession(args.agentSessionId, args.reason);
+          return { ...closed,
+            note: "Worktree branches were archived, not merged; the journal stays readable via read_handoff. Re-own the open units in a successor session if the work still matters." };
         }),
     ),
 

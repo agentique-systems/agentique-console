@@ -134,6 +134,13 @@ function buildPipeline(input: BuildInput): BuildResult {
       roles,
       edges: [
         { from: "main", to: roleOf(0), advance: "immediate" },
+        // Corrections stop being smuggled through stage 1: main can steer ANY
+        // stage directly, update-only — assignments keep one front door. The
+        // roguelike run's "FOR STAGE 3 (ui)" addressed to stage 1 (the only
+        // legal recipient) woke a finished agent that misapplied it.
+        ...names.slice(1).map((_, index): TopologyContract["edges"][number] => ({
+          from: "main", to: roleOf(index + 1), advance: "immediate", categories: ["update"],
+        })),
         ...names.slice(0, -1).map((_, index): TopologyContract["edges"][number] => ({
           from: roleOf(index), to: roleOf(index + 1), advance: "immediate",
           categories: ["assignment", "update", "milestone", "failure", "decision"],
@@ -214,6 +221,7 @@ function buildEvaluatorContract(input: BuildInput, generator: BuildAgent, evalua
       },
       edges: [
         { from: "main", to: "generator", advance: "immediate" },
+        { from: "main", to: "evaluator", advance: "immediate", categories: ["update"] },
         { from: "generator", to: "evaluator", advance: "immediate", categories: ["update", "milestone", "failure", "decision"] },
         { from: "evaluator", to: "generator", advance: "immediate", categories: ["assignment", "update", "decision"], countsRound: true },
         { from: "evaluator", to: "main", advance: "immediate", categories: ["update", "milestone", "failure", "final"] },
@@ -277,6 +285,7 @@ function buildMapReduce(input: BuildInput): BuildResult {
       },
       edges: [
         { from: "main", to: "reducer", advance: "immediate" },
+        { from: "main", to: "mapper", advance: "immediate", categories: ["update"] },
         { from: "reducer", to: "mapper", advance: "immediate", categories: ["assignment", "update", "decision"] },
         { from: "mapper", to: "reducer", advance: "join", categories: ["update", "milestone", "failure", "decision"] },
         { from: "reducer", to: "main", advance: "immediate", categories: ["update", "milestone", "failure", "final"] },
@@ -344,6 +353,7 @@ function buildDebate(input: BuildInput): BuildResult {
       },
       edges: [
         { from: "main", to: "debater", advance: "immediate" },
+        { from: "main", to: "judge", advance: "immediate", categories: ["update"] },
         { from: "debater", to: "judge", advance: "join", categories: ["update", "milestone", "failure", "decision"] },
         { from: "judge", to: "main", advance: "immediate", categories: ["update", "milestone", "failure", "final"] },
       ],
@@ -413,6 +423,7 @@ function buildPeerToPeer(input: BuildInput): BuildResult {
       },
       edges: [
         { from: "main", to: "closer", advance: "immediate" },
+        { from: "main", to: "peer", advance: "immediate", categories: ["update"] },
         { from: "peer", to: "peer", advance: "immediate" },
         { from: "peer", to: "closer", advance: "immediate" },
         { from: "closer", to: "peer", advance: "immediate" },
@@ -480,6 +491,7 @@ function buildPlanExecute(input: BuildInput): BuildResult {
       },
       edges: [
         { from: "main", to: "planner", advance: "immediate" },
+        { from: "main", to: "executor", advance: "immediate", categories: ["update"] },
         { from: "planner", to: "main", advance: "immediate" },
         { from: "planner", to: "executor", advance: "immediate" },
         { from: "executor", to: "planner", advance: "immediate" },

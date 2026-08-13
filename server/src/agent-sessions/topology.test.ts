@@ -3,16 +3,18 @@ import type { TopologyContract } from "./topology-contract.ts";
 import { compileContract, contractOfSession, hubContract, roleOfAgent } from "./topology.ts";
 
 describe("topology contracts", () => {
-  it("hub contract encodes exactly the legacy route table", () => {
+  it("hub contract encodes the star plus main's update-only steering edge", () => {
     const hub = compileContract(hubContract());
     expect(hub.edge("main", "coordinator")?.advance).toBe("immediate");
     expect(hub.edge("coordinator", "main")?.advance).toBe("immediate");
     expect(hub.edge("coordinator", "specialist")?.advance).toBe("immediate");
     expect(hub.edge("specialist", "coordinator")?.advance).toBe("immediate");
-    // The three hops the star has always denied.
+    // Main can steer a specialist directly — update-only, so assignments
+    // still enter through the coordinator alone.
+    expect(hub.edge("main", "specialist")?.categories).toEqual(["update"]);
+    // The hops the star still denies.
     expect(hub.edge("specialist", "specialist")).toBeUndefined();
     expect(hub.edge("specialist", "main")).toBeUndefined();
-    expect(hub.edge("main", "specialist")).toBeUndefined();
   });
 
   it("resolves an agent's contract role from its role binding", () => {

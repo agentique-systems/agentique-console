@@ -126,6 +126,12 @@ export interface PolicyConfig {
   enableChildSessions: boolean;
   /** Open child sessions one parent may have at a time. */
   maxChildSessionsPerParent: number;
+  /**
+   * Maximum session-tree depth (0 = top-level). Controllers in sessions with
+   * depth < cap receive create_child_session; the cap IS the granting. The
+   * resident-process budgets still bound machine load whatever the shape.
+   */
+  maxSessionDepth: number;
 }
 
 export interface Config {
@@ -230,7 +236,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       patternHandoffCap: Number(env.CONSOLE_PATTERN_HANDOFF_CAP ?? 40),
       patternStallMs: Number(env.CONSOLE_PATTERN_STALL_MS ?? 600_000),
       enableChildSessions: env.CONSOLE_CHILD_SESSIONS !== "0",
-      maxChildSessionsPerParent: Number(env.CONSOLE_MAX_CHILD_SESSIONS ?? 3),
+      maxChildSessionsPerParent: Number(env.CONSOLE_MAX_CHILD_SESSIONS ?? 5),
+      maxSessionDepth: Number(env.CONSOLE_MAX_SESSION_DEPTH ?? 2),
     },
   };
 }

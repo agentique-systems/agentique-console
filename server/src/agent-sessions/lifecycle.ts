@@ -18,10 +18,10 @@ import type { EventBus } from "../events/bus.ts";
 import { newId, nowIso } from "../ids.ts";
 import type { WorktreeManager } from "../runtime/worktree-manager.ts";
 import type { AgentLanePool } from "./lanes.ts";
-import { CHILD_SENDER_PREFIX, COORDINATOR_AGENT, MAIN_RECIPIENT } from "./names.ts";
+import { CHILD_SENDER_PREFIX, CONSOLE_SENDER, COORDINATOR_AGENT, MAIN_RECIPIENT } from "./names.ts";
 import { buildContract } from "./patterns/catalog.ts";
 import type { SessionRouting } from "./routing.ts";
-import type { Deliver, RecordFailure, Transfer } from "./seams.ts";
+import type { Deliver, RecordFailure, SimpleHandoff, Transfer } from "./seams.ts";
 import { AGENT_NAME_RE, RESERVED_NAMES } from "./topology.ts";
 import type { WorktreeBinding } from "./worktree-binding.ts";
 
@@ -58,6 +58,7 @@ export interface SessionLifecycleDeps {
   lanes: AgentLanePool;
   worktree: WorktreeBinding;
   transfer: Transfer;
+  simpleHandoff: SimpleHandoff;
   /** `AgentRuntime.snapshotProfile` — the runtime owns snapshot semantics. */
   snapshotProfile: (profile: AgentProfile) => AgentProfile;
   /** `Mailroom.patchDelivery`, for cancelling active deliveries at archive. */
@@ -90,7 +91,7 @@ export class SessionLifecycle {
     if (input.parent) {
       parentRow = repo.getAgentSession(input.parent.agentSessionId) ?? null;
       if (!parentRow || parentRow.lifecycle !== "open") throw new InvalidInputError(`parent session ${input.parent.agentSessionId} is not open`);
-      if (parentRow.parentAgentSessionId !== null) throw new InvalidInputError("a child session cannot spawn children of its own — one level of nesting only");
+      if (parentRow.depth + 1 > this.#deps.config.policy.maxSessionDepth) throw new InvalidInputError(`session nesting is capped at depth ${this.#deps.config.policy.maxSessionDepth}`);
       if (parentRow.userSessionId !== input.userSessionId) throw new InvalidInputError("a child session belongs to its parent's run");
       const openChildren = repo.listChildSessions(parentRow.id).filter((child) => child.lifecycle === "open");
       if (openChildren.length >= this.#deps.config.policy.maxChildSessionsPerParent) {
@@ -162,7 +163,7 @@ export class SessionLifecycle {
       pattern: contract.pattern, topology: contract as unknown as Record<string, unknown>,
       parentAgentSessionId: parentRow?.id ?? null,
       parentControllerAgent: parentRow ? input.parent!.controllerAgent : null,
-      depth: parentRow ? 1 : 0,
+      depth: parentRow ? parentRow.depth + 1 : 0,
     };
     repo.insertAgentSession(row);
     if (parentRow) {
@@ -196,6 +197,78 @@ export class SessionLifecycle {
     if (!session) throw new NotFoundError(`no agent session ${agentSessionId}`);
     const entry = this.#deps.routing.contractOf(session).contract.entry;
     return this.#deps.routing.agentsOfRole(agentSessionId, entry.role)[0]?.name ?? COORDINATOR_AGENT;
+  }
+
+  /**
+   * Mid-run roster growth, for exactly the patterns whose contracts have an
+   * open multi-seat role that is neither the completion voice nor
+   * join-collected nor runtime-minted: hub specialists, plan_execute
+   * executors, peer_to_peer peers. Everything else refuses — a late debate
+   * position would never be join-collected, a pipeline's stages ARE its
+   * shape, and mappers are the reducer's to mint. The contract stays frozen;
+   * `agents.role` is the binding, which is what makes a late seat honest.
+   */
+  addAgent(agentSessionId: string, input: { name: string; profileId: string; instructions?: string; model?: string; owns?: string[] }): { agent: string; role: string } {
+    const { repo, bus } = this.#deps;
+    const session = repo.getAgentSession(agentSessionId);
+    if (!session) throw new NotFoundError(`no agent session ${agentSessionId}`);
+    if (session.lifecycle !== "open") throw new InvalidInputError(`agent session ${agentSessionId} is archived`);
+    const contract = this.#deps.routing.contractOf(session).contract;
+    const joinRoles = new Set(contract.joins.map((join) => join.over));
+    const candidates = Object.entries(contract.roles).filter(([role, spec]) =>
+      spec.max > 1 && !spec.replicable && !joinRoles.has(role) &&
+      role !== contract.completion.finalFrom && role !== contract.completion.voice);
+    if (candidates.length !== 1) {
+      throw new InvalidInputError(`the ${session.pattern} roster is fixed; spawn a follow-up session with create_agent_session instead`);
+    }
+    const [role, spec] = candidates[0]!;
+    const existing = repo.listAgents(agentSessionId);
+    const inRole = existing.filter((seat) => seat.role === role).length;
+    if (inRole >= spec.max) throw new InvalidInputError(`role ${role} is at its cap of ${spec.max}`);
+    const name = input.name.trim();
+    if (!AGENT_NAME_RE.test(name) || RESERVED_NAMES.has(name.toLowerCase()) || name.toLowerCase().startsWith(CHILD_SENDER_PREFIX)) {
+      throw new InvalidInputError(`invalid or reserved agent name "${name}"`);
+    }
+    if (existing.some((seat) => seat.name === name)) throw new InvalidInputError(`duplicate agent name "${name}"`);
+    const user = repo.getUserSession(session.userSessionId);
+    if (!user) throw new NotFoundError("unknown user session");
+    const profile = this.profile(input.profileId, user.workspaceId);
+    const owns = (input.owns ?? []).map((scope) => scope.trim()).filter((scope) => scope !== "");
+    const writes = profile.tools.includes("Edit") || profile.tools.includes("Write");
+    if (writes && owns.length === 0) {
+      throw new InvalidInputError(`agent "${name}" (${profile.id}) writes files, so it must declare what it owns`);
+    }
+    // Ownership disjointness across the session TREE, same rule as creation:
+    // every seat merges into one workspace.
+    if (!profile.exemptFromOwnership) {
+      const treeRoot = session.parentAgentSessionId === null ? session : repo.getAgentSession(session.parentAgentSessionId);
+      const treeSessions = treeRoot === null || treeRoot === undefined ? [session]
+        : [treeRoot, ...repo.listChildSessions(treeRoot.id).filter((child) => child.lifecycle === "open")];
+      for (const treeSession of treeSessions) {
+        for (const seat of repo.listAgents(treeSession.id)) {
+          if ((seat.profileSnapshot as AgentProfile | undefined)?.exemptFromOwnership === true) continue;
+          for (const scope of seat.ownership) {
+            if (owns.includes(scope.trim()) && scope.trim() !== "") {
+              throw new InvalidInputError(`ownership scope "${scope.trim()}" is assigned to both ${seat.name} and ${name}`);
+            }
+          }
+        }
+      }
+    }
+    const ord = existing.reduce((max, seat) => Math.max(max, seat.ord), -1) + 1;
+    const snapshot = this.#deps.snapshotProfile(profile);
+    repo.insertAgent(this.agentRow(agentSessionId, name, role, snapshot, input.instructions ?? "", input.model, owns, ord, nowIso()));
+    bus.append({ type: "agent_session.agent.added", userSessionId: session.userSessionId, agentSessionId,
+      payload: { agentSessionId, agent: name, role, profileId: profile.id } });
+    // The entry agent learns immediately — roster lines refresh per delivery,
+    // but an unannounced teammate is a coordination trap.
+    try {
+      this.#deps.transfer({ agentSessionId, speaker: { kind: "system", name: CONSOLE_SENDER }, to: this.entryAgent(agentSessionId),
+        handoff: this.#deps.simpleHandoff(`New agent "${name}" (${profile.id}) joined as ${role}`, "in_progress",
+          `Main added "${name}" to this session mid-run${owns.length > 0 ? `; it owns ${owns.join(", ")}` : ""}. Assign it work as you would any ${role}.`,
+          null), category: "update", dedupeKey: `agent-added:${agentSessionId}:${name}` });
+    } catch { /* best effort — the seat exists and the roster shows it */ }
+    return { agent: name, role };
   }
 
   /** Whole-session stop (archive/shutdown): every lane closes hard. */

@@ -391,6 +391,14 @@ export interface AgentWorktreeDiscardedPayload {
   archivedBranch?: string | null;
 }
 
+/** A seat joined an open session mid-run (main's add_agent). */
+export interface AgentAddedPayload {
+  agentSessionId: string;
+  agent: string;
+  role: string;
+  profileId: string;
+}
+
 /** A live turn is wedged: an in-flight tool call or the stream itself went quiet. */
 export interface AgentLivenessTrippedPayload {
   agentSessionId: string;
@@ -527,6 +535,7 @@ export type ConsoleEvent = Base &
     | { type: "agent_session.closeout.forced"; payload: AgentSessionCloseoutForcedPayload }
     | { type: "agent_session.watchdog.tripped"; payload: AgentWatchdogTrippedPayload }
     | { type: "agent_session.liveness.tripped"; payload: AgentLivenessTrippedPayload }
+    | { type: "agent_session.agent.added"; payload: AgentAddedPayload }
     | { type: "tool.denied"; payload: ToolDeniedPayload }
     | { type: "agent_session.worktree.created"; payload: AgentWorktreeCreatedPayload }
     | { type: "agent_session.worktree.merged"; payload: AgentWorktreeMergedPayload }

@@ -103,10 +103,18 @@ export class AgentSessionService {
           payload: { agentSessionId, agent: seatName, detail: `agent parked (${reason}); provider session retained` } });
       },
       sessionTree: (agentSessionId) => {
-        const row = deps.repo.getAgentSession(agentSessionId);
-        const rootId = row?.parentAgentSessionId ?? agentSessionId;
-        const ids = new Set([rootId]);
-        for (const child of deps.repo.listChildSessions(rootId)) ids.add(child.id);
+        // Walk to the TRUE root (nesting may be deeper than one level), then
+        // collect the whole subtree — a shared budget must see every layer.
+        let root = deps.repo.getAgentSession(agentSessionId);
+        while (root?.parentAgentSessionId) root = deps.repo.getAgentSession(root.parentAgentSessionId);
+        const ids = new Set([root?.id ?? agentSessionId]);
+        const frontier = [...ids];
+        while (frontier.length > 0) {
+          const current = frontier.pop()!;
+          for (const child of deps.repo.listChildSessions(current)) {
+            if (!ids.has(child.id)) { ids.add(child.id); frontier.push(child.id); }
+          }
+        }
         return ids;
       },
     });
@@ -215,6 +223,7 @@ export class AgentSessionService {
       worktrees: deps.worktrees,
       routing: this.#routing, lanes: this.#lanes, worktree: this.#worktreeBinding,
       transfer: (input) => this.post(input),
+      simpleHandoff,
       snapshotProfile: (profile) => this.#runtime.snapshotProfile(profile),
       patchDelivery: (session, delivery, status) => this.#mailroom.patchDelivery(session, delivery, status),
       deliver: (agentSessionId, recipient) => this.#mailroom.deliver(agentSessionId, recipient),
@@ -356,6 +365,37 @@ export class AgentSessionService {
   /** Scoped stop: abort one specialist's in-flight turn (`AgentRuntime.interruptAgent`). */
   interruptAgent(agentSessionId: string, agent: string, reason: string): void {
     this.#runtime.interruptAgent(agentSessionId, agent, reason);
+  }
+
+  /** Mid-run roster growth (`SessionLifecycle.addAgent`); patterns with fixed rosters refuse. */
+  addAgent(agentSessionId: string, input: { name: string; profileId: string; instructions?: string; model?: string; owns?: string[] }): { agent: string; role: string } {
+    return this.#lifecycle.addAgent(agentSessionId, input);
+  }
+
+  /**
+   * Main-side branch termination — "terminate unproductive branches" as a
+   * first-class act. Also closes a run-liveness hole: `isComplete` requires
+   * every OPEN session to report, so an unproductive session whose final seat
+   * never will blocked completion forever (main's only remedy was archiving
+   * the whole conversation). A child is abandoned THROUGH the nesting broker
+   * so its controller receives the journaled failure and the parent's
+   * withheld final releases; a top-level session takes the one teardown path
+   * (worktree branches archive — abandoned work never lands, never vanishes).
+   */
+  closeSession(agentSessionId: string, reason: string): { archived: true; openTasks: string[] } {
+    const session = this.#deps.repo.getAgentSession(agentSessionId);
+    if (!session) throw new NotFoundError(`no agent session ${agentSessionId}`);
+    if (session.lifecycle !== "open") throw new NotFoundError(`agent session ${agentSessionId} is already archived`);
+    const openTasks = this.#deps.tasks.linesForAgentSession(agentSessionId)
+      .filter((line) => !line.startsWith("- [completed]"));
+    this.#deps.bus.append({ type: "agent_session.runtime.noted", userSessionId: session.userSessionId, agentSessionId,
+      payload: { agentSessionId, agent: MAIN_RECIPIENT, detail: `session closed by main: ${reason}` } });
+    if (session.parentAgentSessionId !== null) {
+      this.#nesting.abandonChildSession(session.parentAgentSessionId, MAIN_RECIPIENT, agentSessionId, reason);
+    } else {
+      this.#lifecycle.archiveOne(session);
+    }
+    return { archived: true, openTasks };
   }
 
   async closeAll(): Promise<void> {

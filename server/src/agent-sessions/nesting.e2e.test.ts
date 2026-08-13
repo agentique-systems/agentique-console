@@ -56,15 +56,16 @@ describe("nesting e2e (fake SDK)", () => {
     const child = h.repo.getAgentSession(childId);
     expect(child).toMatchObject({ parentAgentSessionId: created.agentSessionId, parentControllerAgent: "coordinator", depth: 1 });
 
-    // The depth cap IS the granting: the child coordinator spawned without the
-    // spawn tools, and its env says depth 1.
+    // The depth cap IS the granting: with CONSOLE_MAX_SESSION_DEPTH's default
+    // of 2, a depth-1 controller may still spawn (its child would be depth 2);
+    // its env says depth 1.
     const childCoordOptions = h.fake.captured.options.find((options) => {
       const id = agentRoleOf(options);
       return id.agentSessionId === childId && id.role === "coordinator";
     });
     expect(childCoordOptions).toBeDefined();
     expect(agentRoleOf(childCoordOptions).depth).toBe(1);
-    expect(childCoordOptions?.allowedTools ?? []).not.toContain("mcp__console_agent__create_child_session");
+    expect(childCoordOptions?.allowedTools ?? []).toContain("mcp__console_agent__create_child_session");
     const parentCoordOptions = h.fake.captured.options.find((options) => {
       const id = agentRoleOf(options);
       return id.agentSessionId === created.agentSessionId && id.role === "coordinator";

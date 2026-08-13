@@ -70,6 +70,10 @@ const HUB_CONTRACT: TopologyContract = {
   },
   edges: [
     { from: "main", to: "coordinator", advance: "immediate" },
+    // Update-only: main can steer a specialist directly (a correction, a
+    // discovery) without deposing the coordinator — assignments still enter
+    // through the coordinator alone.
+    { from: "main", to: "specialist", advance: "immediate", categories: ["update"] },
     { from: "coordinator", to: "main", advance: "immediate" },
     { from: "coordinator", to: "specialist", advance: "immediate" },
     { from: "specialist", to: "coordinator", advance: "immediate" },
