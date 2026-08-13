@@ -417,6 +417,9 @@ export class AgentRuntime implements Injector, TurnTracker {
           }
           const turn = lane.activeTurn;
           const turnId = turn?.turnId ?? "";
+          // Any stream event proves the turn is alive; the liveness sweep
+          // reads this clock to tell a quiet-but-working turn from a dead one.
+          if (turn) turn.lastEventAt = Date.now();
           if (event.kind === "delta") {
             runtime.set("responding");
             bus.broadcast({ type: "stream.delta", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { scope: { kind: "agent", agentSessionId: session.id }, speaker: seatName, turnId, text: event.text } });
@@ -428,7 +431,8 @@ export class AgentRuntime implements Injector, TurnTracker {
             if (turn) turn.lastNarration = event.text;
             this.#recordNarration(session, seatName, event.text, turnId);
           } else if (event.kind === "tool.call") {
-            turn?.toolStarts.set(event.callId, Date.now());
+            turn?.toolStarts.set(event.callId, { startedAt: Date.now(), name: event.name,
+              inputPreview: stableStringify(event.input).slice(0, 200) });
             runtime.set("tool", event.name);
             bus.append({ type: "agent_session.tool.called", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { agentSessionId: session.id, agent: seatName, turnId, callId: event.callId, name: event.name, input: bus.captureSized(event.input, { userSessionId: session.userSessionId, agentSessionId: session.id }).value } });
             if (turn) {
@@ -442,7 +446,7 @@ export class AgentRuntime implements Injector, TurnTracker {
             }
           } else if (event.kind === "tool.result") {
             const captured = bus.captureSized(event.output, { userSessionId: session.userSessionId, agentSessionId: session.id });
-            const startedAt = turn?.toolStarts.get(event.callId); turn?.toolStarts.delete(event.callId);
+            const startedAt = turn?.toolStarts.get(event.callId)?.startedAt; turn?.toolStarts.delete(event.callId);
             runtime.set("thinking");
             bus.append({ type: "agent_session.tool.completed", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { agentSessionId: session.id, agent: seatName, turnId, callId: event.callId, output: captured.value, bytes: captured.bytes, ...(startedAt === undefined ? {} : { durationMs: Date.now() - startedAt }), ...(event.isError ? { isError: true } : {}) } });
             if (turn) {
@@ -493,7 +497,8 @@ export class AgentRuntime implements Injector, TurnTracker {
     const attributed = deliveries.length > 0 ? deliveries
       : this.#deps.repo.listUnackedDeliveries(session.id, seatName).filter((row) => row.status === "delivered");
     lane.activeTurn = { turnId: newId("turn"), startedAt: Date.now(), deliveries: attributed, sawSend: false,
-      toolStarts: new Map(), lastNarration: "", watchdog: { lastKey: "", identical: 0, errorStreak: 0, tripped: null }, awaitingOperator: null };
+      toolStarts: new Map(), lastEventAt: Date.now(), alarmsFired: new Set(), lastNarration: "",
+      watchdog: { lastKey: "", identical: 0, errorStreak: 0, tripped: null }, awaitingOperator: null };
     lane.lastActiveAt = Date.now();
     if (lane.idleTimer) { clearTimeout(lane.idleTimer); lane.idleTimer = null; }
     this.#deps.bus.append({ type: "agent_session.turn.started", userSessionId: session.userSessionId, agentSessionId: session.id,

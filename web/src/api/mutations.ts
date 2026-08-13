@@ -148,6 +148,17 @@ export function useInterruptUserSession() {
   });
 }
 
+/** Per-agent stop: kills one wedged turn, never the session or the process. */
+export function useInterruptAgent() {
+  return useMutation({
+    mutationFn: ({ agentSessionId, agent, reason }: { agentSessionId: string; agent: string; reason?: string }) =>
+      apiFetch<undefined>(
+        `/api/agent-sessions/${agentSessionId}/agents/${encodeURIComponent(agent)}/interrupt`,
+        { method: "POST", body: JSON.stringify({ reason: reason ?? "" }) },
+      ),
+  });
+}
+
 export function useCreateManagerSession() {
   const queryClient = useQueryClient();
   return useMutation({ mutationFn: ({ workspaceId, profileId, sourceProfileId }: { workspaceId: string; profileId?: string; sourceProfileId?: string }) => apiFetch<ManagerSession>(`/api/workspaces/${workspaceId}/profile-manager-sessions`, { method: "POST", body: JSON.stringify({ profileId, sourceProfileId }) }), onSuccess: (_data, vars) => void queryClient.invalidateQueries({ queryKey: keys.managerSessions(vars.workspaceId) }) });

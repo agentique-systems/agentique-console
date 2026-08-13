@@ -90,6 +90,15 @@ export interface PolicyConfig {
    * can adapt to (and the error-streak watchdog bounds the retries). 0 = off.
    */
   mcpToolTimeoutMs: number;
+  /**
+   * Liveness alarm: an in-flight tool call older than this wakes MAIN with a
+   * console-authored failure handoff carrying the call's name, preview and
+   * age. Deliberately BELOW the mechanical mcpToolTimeoutMs floor so the
+   * orchestrator can act with judgment before the axe falls. 0 = off.
+   */
+  toolCallAlarmMs: number;
+  /** Liveness alarm: a live turn with no stream event for this long. 0 = off. */
+  turnQuietAlarmMs: number;
   /** Identical consecutive tool calls before the watchdog kills an agent's turn. */
   watchdogIdenticalCalls: number;
   /** Consecutive tool errors before the watchdog kills an agent's turn. */
@@ -208,6 +217,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       operatorAskDetachMs: Number(env.CONSOLE_OPERATOR_ASK_DETACH_MS ?? 300_000),
       peerNamePrefix: env.CONSOLE_PEER_NAME_PREFIX ?? "console-",
       mcpToolTimeoutMs: Number(env.CONSOLE_MCP_TOOL_TIMEOUT_MS ?? 300_000),
+      toolCallAlarmMs: Number(env.CONSOLE_TOOL_ALARM_MS ?? 180_000),
+      turnQuietAlarmMs: Number(env.CONSOLE_TURN_QUIET_ALARM_MS ?? 300_000),
       watchdogIdenticalCalls: Number(env.CONSOLE_WATCHDOG_IDENTICAL_CALLS ?? 5),
       watchdogErrorStreak: Number(env.CONSOLE_WATCHDOG_ERROR_STREAK ?? 10),
       maxRedeliveryAttempts: Number(env.CONSOLE_MAX_REDELIVERY_ATTEMPTS ?? 2),

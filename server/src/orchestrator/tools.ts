@@ -330,6 +330,34 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
       async () => guarded(() => ({ sessions: host.listForUserSession(userSessionId) })),
     ),
 
+    sdk.tool(
+      "session_activity",
+      "LIVE state of a session's agents — what they are DOING right now, not what they said: lane posture, the current turn's age, the in-flight tool call with its name/input-preview/elapsed time, last-stream-event age, queued deliveries, context tokens, last handoff, and pattern-state facts. Use this to diagnose before intervening: 'working' in list_agent_sessions covers both healthy work and a wedged call; this tool tells them apart.",
+      { agentSessionId: z.string().min(1) },
+      async (args: { agentSessionId: string }) =>
+        guarded(() => {
+          owned(args.agentSessionId);
+          return host.activity(args.agentSessionId);
+        }),
+    ),
+
+    sdk.tool(
+      "interrupt_agent",
+      "Stop ONE agent's in-flight turn (a wedged tool call, a runaway loop, work a discovery just invalidated). The turn dies; the agent, its lane and its inbox survive. The interrupted turn's delivered rows are cancelled — they do NOT redeliver — while QUEUED deliveries deliver next, so a correction you post right after the interrupt arrives with them. The seat's uncommitted work is preserved (archived branch + diff artifact) by the failure path. No-op error if the agent has no turn in flight.",
+      {
+        agentSessionId: z.string().min(1),
+        agent: z.string().min(1).describe("The agent name shown by session_activity"),
+        reason: z.string().min(1).max(280).describe("Why — journaled and shown to the agent's successor turn"),
+      },
+      async (args: { agentSessionId: string; agent: string; reason: string }) =>
+        guarded(() => {
+          owned(args.agentSessionId);
+          host.interruptAgent(args.agentSessionId, args.agent, `main: ${args.reason}`);
+          return { interrupted: true, agent: args.agent,
+            note: "The turn was stopped and its deliveries cancelled; queued deliveries (including anything you post now) deliver next. The seat's work so far is preserved by the failure path." };
+        }),
+    ),
+
   ];
 
   return sdk.createSdkMcpServer({ name: "console", version: "1.0.0", tools, alwaysLoad: true });

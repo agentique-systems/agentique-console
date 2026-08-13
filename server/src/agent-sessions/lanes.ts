@@ -12,13 +12,30 @@ import type { MailboxDeliveryRow } from "../db/repo.ts";
 import type { QueryHandle, SdkUserMessageLike } from "../sdk/types.ts";
 import type { LaneActivity, OperatorWait, OperatorWaitRef } from "./seams.ts";
 
+/** An MCP/native tool call that has started and not yet returned. */
+export interface InFlightToolCall {
+  startedAt: number;
+  name: string;
+  /** Bounded stringified input — enough to recognize the call, never the payload. */
+  inputPreview: string;
+}
+
 /** The in-flight turn; null between turns. */
 export interface ActiveTurn {
   turnId: string;
   startedAt: number;
   deliveries: MailboxDeliveryRow[];
   sawSend: boolean;
-  toolStarts: Map<string, number>;
+  /**
+   * Every in-flight tool call with its start time, name and input preview.
+   * The liveness sweep reads this — a wedged call emits ONE event and then
+   * nothing, so wall-clock over this map is the only signal that exists.
+   */
+  toolStarts: Map<string, InFlightToolCall>;
+  /** Wall-clock of the last SDK stream event; a quiet live turn is a signal too. */
+  lastEventAt: number;
+  /** Liveness alarms already fired for this turn (dedupe latch). */
+  alarmsFired: Set<string>;
   /**
    * The agent's most recent narration; harvested into the synthetic failure
    * handoff when a turn dies.
@@ -31,6 +48,21 @@ export interface ActiveTurn {
    * own controller, so the wait can be cut without killing the lane.
    */
   awaitingOperator: OperatorWait | null;
+}
+
+/** A read-only snapshot of one lane's live state (session_activity, liveness). */
+export interface LaneSnapshot {
+  agentSessionId: string;
+  agent: string;
+  state: AgentLane["state"];
+  contextTokens: number;
+  turn: null | {
+    turnId: string;
+    startedAt: number;
+    lastEventAt: number;
+    awaitingOperator: boolean;
+    inFlight: { callId: string; name: string; inputPreview: string; startedAt: number }[];
+  };
 }
 
 /**
@@ -259,5 +291,44 @@ export class AgentLanePool implements LaneActivity {
   namesWithActiveTurn(agentSessionId: string): string[] {
     const lanes = this.#seats.get(agentSessionId);
     return [...(lanes?.entries() ?? [])].filter(([, lane]) => lane.activeTurn !== null).map(([name]) => name);
+  }
+
+  /**
+   * One-shot alarm latch on the live turn: true exactly once per (turn, key).
+   * The sweep runs every 30s; without the latch a 16-minute hang would wake
+   * main 30 times.
+   */
+  latchAlarm(agentSessionId: string, agent: string, key: string): boolean {
+    const turn = this.#seats.get(agentSessionId)?.get(agent)?.activeTurn;
+    if (!turn || turn.alarmsFired.has(key)) return false;
+    turn.alarmsFired.add(key);
+    return true;
+  }
+
+  /** Live lane state for every seat (or one session's), for inspection and alarms. */
+  laneSnapshots(agentSessionId?: string): LaneSnapshot[] {
+    const snapshots: LaneSnapshot[] = [];
+    for (const [sessionId, lanes] of this.#seats) {
+      if (agentSessionId !== undefined && sessionId !== agentSessionId) continue;
+      for (const [agent, lane] of lanes) {
+        const turn = lane.activeTurn;
+        snapshots.push({
+          agentSessionId: sessionId,
+          agent,
+          state: lane.state,
+          contextTokens: lane.contextTokens,
+          turn: turn === null ? null : {
+            turnId: turn.turnId,
+            startedAt: turn.startedAt,
+            lastEventAt: turn.lastEventAt,
+            awaitingOperator: turn.awaitingOperator !== null,
+            inFlight: [...turn.toolStarts.entries()].map(([callId, call]) => ({
+              callId, name: call.name, inputPreview: call.inputPreview, startedAt: call.startedAt,
+            })),
+          },
+        });
+      }
+    }
+    return snapshots;
   }
 }

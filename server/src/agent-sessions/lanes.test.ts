@@ -34,7 +34,8 @@ function poolWith(policy: Partial<Config["policy"]>, over: {
 }
 
 const openTurn = (): ActiveTurn => ({ turnId: "turn_x", startedAt: 0, deliveries: [], sawSend: false,
-  toolStarts: new Map(), lastNarration: "", watchdog: { lastKey: "", identical: 0, errorStreak: 0, tripped: null },
+  toolStarts: new Map(), lastEventAt: 0, alarmsFired: new Set(), lastNarration: "",
+  watchdog: { lastKey: "", identical: 0, errorStreak: 0, tripped: null },
   awaitingOperator: null });
 
 describe("parkLeastRecentIdle victim selection", () => {

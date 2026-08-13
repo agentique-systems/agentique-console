@@ -8,6 +8,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { useAgentTranscript } from "@/api/queries";
+import { useInterruptAgent } from "@/api/mutations";
 import type { AgentSession, ConsoleEvent } from "@agentique-console/shared";
 import {
   Conversation as ChatRoot,
@@ -43,6 +44,7 @@ const EMPTY_EVENTS: readonly ConsoleEvent[] = [];
 
 export function AgentTranscript({ session }: { session: AgentSession }) {
   const id = session.id;
+  const interrupt = useInterruptAgent();
   const key = agentStreamKey(id);
   const spineOpen = useConnectionStore((s) => s.status === "open");
   const stream = useAgentSessionStreamsStore((s) => s.streams[key]);
@@ -159,11 +161,23 @@ export function AgentTranscript({ session }: { session: AgentSession }) {
           </div>
         ))}
         {silentWorkers.map((worker) => (
-          <WorkingLine
-            key={worker.name}
-            name={worker.name}
-            runtime={worker.runtime}
-          />
+          <div key={worker.name} className="flex items-baseline gap-2">
+            <div className="min-w-0 flex-1">
+              <WorkingLine name={worker.name} runtime={worker.runtime} />
+            </div>
+            {/* The per-agent stop the roguelike run lacked: a wedged tool call
+                had no lever short of killing the whole process. */}
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-5 shrink-0 px-1.5 text-3xs text-muted-foreground hover:text-status-failed"
+              disabled={interrupt.isPending}
+              onClick={() => interrupt.mutate({ agentSessionId: id, agent: worker.name })}
+              title={`stop ${worker.name}'s current turn (the agent and its inbox survive)`}
+            >
+              stop
+            </Button>
+          </div>
         ))}
       </ChatContent>
       <ChatScrollButton />

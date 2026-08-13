@@ -391,6 +391,17 @@ export interface AgentWorktreeDiscardedPayload {
   archivedBranch?: string | null;
 }
 
+/** A live turn is wedged: an in-flight tool call or the stream itself went quiet. */
+export interface AgentLivenessTrippedPayload {
+  agentSessionId: string;
+  agent: string;
+  turnId: string;
+  kind: "tool_hang" | "quiet_turn";
+  elapsedMs: number;
+  toolName?: string;
+  inputPreview?: string;
+}
+
 export interface TaskCreatedPayload {
   task: Task;
 }
@@ -515,6 +526,7 @@ export type ConsoleEvent = Base &
     | { type: "run.reopened"; payload: RunReopenedPayload }
     | { type: "agent_session.closeout.forced"; payload: AgentSessionCloseoutForcedPayload }
     | { type: "agent_session.watchdog.tripped"; payload: AgentWatchdogTrippedPayload }
+    | { type: "agent_session.liveness.tripped"; payload: AgentLivenessTrippedPayload }
     | { type: "tool.denied"; payload: ToolDeniedPayload }
     | { type: "agent_session.worktree.created"; payload: AgentWorktreeCreatedPayload }
     | { type: "agent_session.worktree.merged"; payload: AgentWorktreeMergedPayload }

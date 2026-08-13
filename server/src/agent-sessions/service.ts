@@ -29,6 +29,7 @@ import { SessionRouting } from "./routing.ts";
 import { WorktreeBinding } from "./worktree-binding.ts";
 import { OperatorSurface } from "./operator.ts";
 import { Mailroom, identitySelector, simpleHandoff } from "./mailroom.ts";
+import { sweepLiveness } from "./liveness.ts";
 import { AgentLanePool, type ActiveTurn } from "./lanes.ts";
 import { AgentRuntime } from "./runtime.ts";
 import { SessionLifecycle, type CreateAgentSessionInput } from "./lifecycle.ts";
@@ -141,6 +142,16 @@ export class AgentSessionService {
         for (const session of this.#deps.repo.listOpenAgentSessions()) {
           try { patternSweep(this.#patternCtx(), session); } catch (error) { this.#recordFailure(session.id, error); }
         }
+      }, () => {
+        // The liveness alarms cover the opposite case: a turn that IS in
+        // flight and dead — the one dimension every completed-action guard
+        // (watchdogs, stall, reaping) is structurally blind to.
+        for (const session of this.#deps.repo.listOpenAgentSessions()) {
+          try {
+            sweepLiveness({ config: this.#deps.config, lanes: this.#lanes, bus: this.#deps.bus,
+              transfer: (input) => this.post(input), simpleHandoff }, session);
+          } catch (error) { this.#recordFailure(session.id, error); }
+        }
       }],
     });
     this.#runtime = new AgentRuntime({
@@ -235,6 +246,61 @@ export class AgentSessionService {
     return { status: this.#operator.statusOf(session),
       agents: this.#specialists(session.id).map((p) => ({ name: p.name, profileId: p.profileId, model: p.model })),
       messages: rows.map(toWireMessage) };
+  }
+
+  /**
+   * LIVE state, not the journal: per-seat lane posture, the in-flight tool
+   * call with its age, last-stream-event age, queued deliveries, last
+   * handoff, pattern-state facts. `read_agent_session` shows what agents
+   * SAID; this shows what they are DOING — the roguelike orchestrator
+   * misdiagnosed a 14-minute hang as "mid-flight and progressing" because
+   * only the human UI carried this data.
+   */
+  activity(agentSessionId: string) {
+    const session = this.#deps.repo.getAgentSession(agentSessionId);
+    if (!session) throw new NotFoundError(`no agent session ${agentSessionId}`);
+    const now = Date.now();
+    const snapshots = new Map(this.#lanes.laneSnapshots(agentSessionId).map((snapshot) => [snapshot.agent, snapshot]));
+    const patternState = this.#deps.repo.getPatternState(agentSessionId);
+    return {
+      agentSessionId,
+      pattern: session.pattern,
+      status: this.#operator.statusOf(session),
+      patternState: patternState === undefined ? null : {
+        tripped: patternState.tripped ?? null,
+        handoffCount: patternState.handoffCount,
+        lastProgressAt: patternState.lastProgressAt ?? null,
+      },
+      agents: this.#deps.repo.listAgents(agentSessionId).map((seat) => {
+        const lane = snapshots.get(seat.name);
+        const turn = lane?.turn ?? null;
+        const lastHandoffRow = seat.latestHandoffId === null ? undefined : this.#deps.repo.getHandoff(seat.latestHandoffId);
+        return {
+          name: seat.name,
+          role: seat.role,
+          profileId: seat.profileId,
+          model: seat.model,
+          generation: seat.generation,
+          contextTokens: Math.max(seat.contextTokens, lane?.contextTokens ?? 0),
+          laneState: lane?.state ?? "unspawned",
+          queuedDeliveries: this.#deps.repo.listUnackedDeliveries(agentSessionId, seat.name).length,
+          lastHandoff: lastHandoffRow === undefined ? null : {
+            status: (lastHandoffRow.core as { status?: string }).status ?? "unknown",
+            action: String((lastHandoffRow.core as { action?: string }).action ?? "").slice(0, 160),
+            ageMs: now - Date.parse(lastHandoffRow.createdAt),
+          },
+          turn: turn === null ? null : {
+            turnId: turn.turnId,
+            ageMs: now - turn.startedAt,
+            lastEventAgeMs: now - turn.lastEventAt,
+            awaitingOperator: turn.awaitingOperator,
+            inFlight: turn.inFlight.map((call) => ({
+              name: call.name, inputPreview: call.inputPreview, elapsedMs: now - call.startedAt,
+            })),
+          },
+        };
+      }),
+    };
   }
 
   listForUserSession(userSessionId: string) {
