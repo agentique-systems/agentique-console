@@ -239,11 +239,19 @@ function collectDeviations(window: readonly (typeof events.$inferSelect)[], open
  * sign-off card names the branch rather than letting it disappear quietly.
  */
 function unmergedBranches(repo: Repo, userSessionId: string): string[] {
-  return repo.listAgentSessions(userSessionId)
+  const seats = repo.listAgentSessions(userSessionId)
     .filter((session) => session.lifecycle === "open")
-    .flatMap((session) => repo.listAgents(session.id))
-    .filter((seat) => seat.worktreeBranch !== null && seat.worktreePath !== null)
-    .map((seat) => `${seat.name}'s work is still on unmerged branch ${seat.worktreeBranch} — it is not in the workspace`);
+    .flatMap((session) => repo.listAgents(session.id));
+  return [
+    ...seats
+      .filter((seat) => seat.worktreeBranch !== null && seat.worktreePath !== null)
+      .map((seat) => `${seat.name}'s work is still on unmerged branch ${seat.worktreeBranch} — it is not in the workspace`),
+    // A discarded seat has its worktree columns nulled, so without this the
+    // archived branch (infra failure / merge conflict) vanishes from sign-off.
+    ...seats
+      .filter((seat) => seat.worktreePath === null && seat.salvageBranch !== null)
+      .map((seat) => `${seat.name}'s failed-turn work is archived on branch ${seat.salvageBranch}${seat.salvageArtifactId ? ` (diff artifact ${seat.salvageArtifactId})` : ""} — it is not in the workspace`),
+  ];
 }
 
 function collectBuild(

@@ -135,17 +135,23 @@ export class WorktreeBinding {
   /**
    * A worktree'd write agent reported terminal status: completed work merges
    * atomically into the workspace (conflict → failure handoff, workspace
-   * untouched); failed work is discarded with its diff retained. Fail-open on
-   * git errors — the mailbox append already happened.
+   * untouched); failed work is discarded with its diff retained — EXCEPT when
+   * the failure is console-synthesized (`opts.synthetic`): the agent never
+   * judged its own work bad, the infrastructure died under it, so the branch
+   * is archived rather than deleted and the salvage pointers are recorded on
+   * the seat. A live run lost 35 minutes of verified work to the old
+   * indiscriminate `branch -D`. Fail-open on git errors — the mailbox append
+   * already happened.
    */
-  landOnReport(session: AgentSessionRow, seat: AgentRow, status: "completed" | "failed"): void {
+  landOnReport(session: AgentSessionRow, seat: AgentRow, status: "completed" | "failed", opts: { synthetic?: boolean } = {}): void {
     const { repo, bus } = this.#deps;
     const worktrees = this.#deps.worktrees;
     if (!worktrees || !seat.worktreePath || !seat.worktreeBranch || !seat.worktreeBaseCommit || !this.#deps.getWorkspaceRoot) return;
     const user = repo.getUserSession(session.userSessionId);
     if (!user) return;
     const workspaceRoot = this.#deps.getWorkspaceRoot(user.workspaceId);
-    const release = () => repo.patchAgent(session.id, seat.name, { worktreePath: null, worktreeBaseCommit: null, worktreeBranch: null });
+    const release = (salvage: { salvageBranch?: string | null; salvageArtifactId?: string | null } = {}) =>
+      repo.patchAgent(session.id, seat.name, { worktreePath: null, worktreeBaseCommit: null, worktreeBranch: null, ...salvage });
     // A read-only agent's worktree exists to give it a stable snapshot;
     // discard it rather than merging incidental scratch files.
     const profile = seat.profileSnapshot as AgentProfile;
@@ -162,16 +168,23 @@ export class WorktreeBinding {
       const artifactId = diff.filesChanged === 0 ? null
         : this.#deps.artifacts.store(`${diff.stat}\n\n${diff.patch}`, "text/x-patch", { userSessionId: session.userSessionId, agentSessionId: session.id }).artifactId;
       if (status === "failed" || diff.filesChanged === 0) {
-        worktrees.remove(workspaceRoot, seat.worktreePath, seat.worktreeBranch);
-        release();
+        // Infra failure with real work: archive, never delete. An agent that
+        // ITSELF reported failed judged its work; the console judging FOR a
+        // dead agent must not destroy what it cannot evaluate.
+        const preserve = status === "failed" && opts.synthetic === true && diff.filesChanged > 0;
+        const removed = worktrees.remove(workspaceRoot, seat.worktreePath, seat.worktreeBranch, { archiveBranch: preserve });
+        release(preserve ? { salvageBranch: removed.archivedBranch, salvageArtifactId: artifactId } : {});
         bus.append({ type: "agent_session.worktree.discarded", userSessionId: session.userSessionId, agentSessionId: session.id,
-          payload: { agentSessionId: session.id, agent: seat.name, reason: status === "failed" ? "seat reported failed" : "no changes to land", artifactId } });
+          payload: { agentSessionId: session.id, agent: seat.name,
+            reason: preserve ? "seat turn failed under the console; work archived"
+              : status === "failed" ? "seat reported failed" : "no changes to land",
+            artifactId, archivedBranch: removed.archivedBranch } });
         return;
       }
       const outcome = worktrees.mergeBranch(workspaceRoot, seat.worktreeBranch,
         `Merge seat ${seat.name} (session ${session.id})\n\nSeat-Worktree: ${seat.worktreeBranch}`);
-      worktrees.remove(workspaceRoot, seat.worktreePath, seat.worktreeBranch, { archiveBranch: !outcome.merged });
-      release();
+      const removed = worktrees.remove(workspaceRoot, seat.worktreePath, seat.worktreeBranch, { archiveBranch: !outcome.merged });
+      release(outcome.merged ? {} : { salvageBranch: removed.archivedBranch, salvageArtifactId: artifactId });
       if (outcome.merged) {
         bus.append({ type: "agent_session.worktree.merged", userSessionId: session.userSessionId, agentSessionId: session.id,
           payload: { agentSessionId: session.id, agent: seat.name, mergeCommit: outcome.commit, filesChanged: diff.filesChanged, artifactId } });
@@ -181,7 +194,7 @@ export class WorktreeBinding {
         payload: { agentSessionId: session.id, agent: seat.name, conflicts: outcome.conflicts, detail: outcome.detail, artifactId } });
       this.#deps.transfer({ agentSessionId: session.id, speaker: { kind: "agent", name: seat.name }, to: this.#deps.escalationTarget(session, seat.name),
         handoff: this.#deps.simpleHandoff("Completed work failed to merge", "failed",
-          `The workspace advanced past this seat's base; merging its changes conflicts in: ${outcome.conflicts.join(", ") || "unknown files"}. The diff is retained as artifact ${artifactId ?? "n/a"}.`,
+          `The workspace advanced past this seat's base; merging its changes conflicts in: ${outcome.conflicts.join(", ") || "unknown files"}. The diff is retained as artifact ${artifactId ?? "n/a"}${removed.archivedBranch === null ? "" : ` and on branch ${removed.archivedBranch}`}.`,
           "Reassign the unit against the current HEAD."), category: "failure" });
     } catch (error) {
       bus.append({ type: "agent_session.runtime.noted", userSessionId: session.userSessionId, agentSessionId: session.id,
@@ -217,8 +230,12 @@ export class WorktreeBinding {
       const user = this.#deps.repo.getUserSession(session.userSessionId);
       for (const seat of this.#deps.repo.listAgents(session.id)) {
         if (!seat.worktreePath || !user) continue;
-        try { this.#deps.worktrees.remove(this.#deps.getWorkspaceRoot(user.workspaceId), seat.worktreePath, seat.worktreeBranch ?? "", { archiveBranch: true }); } catch { /* best effort */ }
-        this.#deps.repo.patchAgent(session.id, seat.name, { worktreePath: null, worktreeBaseCommit: null, worktreeBranch: null });
+        let archivedBranch: string | null = null;
+        try {
+          archivedBranch = this.#deps.worktrees.remove(this.#deps.getWorkspaceRoot(user.workspaceId), seat.worktreePath, seat.worktreeBranch ?? "", { archiveBranch: true }).archivedBranch;
+        } catch { /* best effort */ }
+        this.#deps.repo.patchAgent(session.id, seat.name, { worktreePath: null, worktreeBaseCommit: null, worktreeBranch: null,
+          ...(archivedBranch === null ? {} : { salvageBranch: archivedBranch }) });
       }
     }
   }

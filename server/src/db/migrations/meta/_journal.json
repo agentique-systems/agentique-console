@@ -36,6 +36,13 @@
       "when": 1786484053175,
       "tag": "0004_scheduled_assignments",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1786652620211,
+      "tag": "0005_salvage_columns",
+      "breakpoints": true
     }
   ]
 }

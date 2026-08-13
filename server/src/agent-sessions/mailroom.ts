@@ -291,7 +291,12 @@ export class Mailroom {
     this.#deps.handoffs.committed(prepared.record);
     if (senderSeat?.worktreePath) {
       const status = prepared.record.core.status;
-      if (status === "completed" || status === "failed") this.#deps.worktree.landOnReport(session, senderSeat, status);
+      // `synthetic` distinguishes "the agent judged its work failed" from "the
+      // console reported failure FOR a dead agent" — the landing disposition
+      // differs (delete vs archive). Derived exactly as the row's synthetic
+      // column is (line ~237).
+      const synthetic = (prepared.record.extension?.data as { consoleSynthesized?: boolean } | undefined)?.consoleSynthesized === true;
+      if (status === "completed" || status === "failed") this.#deps.worktree.landOnReport(session, senderSeat, status, { synthetic });
       // Not terminal, but the work still moved: commit it so the branch tells
       // the truth the moment the handoff does. A recipient seated on this
       // branch is spawned from inside this very call.

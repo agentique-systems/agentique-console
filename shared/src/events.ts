@@ -387,6 +387,8 @@ export interface AgentWorktreeDiscardedPayload {
   agent: string;
   reason: string;
   artifactId: string | null;
+  /** Set when the branch was archived (infra failure) instead of deleted. */
+  archivedBranch?: string | null;
 }
 
 export interface TaskCreatedPayload {

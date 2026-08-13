@@ -27,6 +27,12 @@ describe("loadConfig agent-lane knobs", () => {
     expect(config.policy.peerNamePrefix).toBe("lab-");
   });
 
+  it("MCP tool-call timeout defaults to 5 minutes and 0 disables it", () => {
+    expect(loadConfig({}).policy.mcpToolTimeoutMs).toBe(300_000);
+    expect(loadConfig({ CONSOLE_MCP_TOOL_TIMEOUT_MS: "60000" }).policy.mcpToolTimeoutMs).toBe(60_000);
+    expect(loadConfig({ CONSOLE_MCP_TOOL_TIMEOUT_MS: "0" }).policy.mcpToolTimeoutMs).toBe(0);
+  });
+
   it("rejects every retired env name loudly, naming the replacement", () => {
     expect(() => loadConfig({ CONSOLE_SEAT_IDLE_REAP_MS: "1000" }))
       .toThrow(/CONSOLE_SEAT_IDLE_REAP_MS \(use CONSOLE_AGENT_IDLE_REAP_MS\)/);

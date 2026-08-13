@@ -261,14 +261,29 @@ export class WorktreeManager {
     }
   }
 
-  /** Removes the worktree and its branch; archiveBranch renames instead of deleting. */
-  remove(workspaceRoot: string, worktreePath: string, branch: string, opts: { archiveBranch?: boolean } = {}): void {
+  /**
+   * Removes the worktree and its branch; archiveBranch renames instead of
+   * deleting and RETURNS the new name so callers can record a salvage pointer.
+   * Every branch this manager mints is `agentique/…`-prefixed; the generic
+   * `archive/` fallback guards any future caller that passes a bare name
+   * (where the prefix-replace would rename the branch to itself and throw).
+   */
+  remove(workspaceRoot: string, worktreePath: string, branch: string, opts: { archiveBranch?: boolean } = {}): { archivedBranch: string | null } {
     try { this.#git(workspaceRoot, ["worktree", "remove", "--force", worktreePath]); } catch { fs.rmSync(worktreePath, { recursive: true, force: true }); }
+    let archivedBranch: string | null = null;
     try {
-      if (opts.archiveBranch) this.#git(workspaceRoot, ["branch", "-m", branch, branch.replace(/^agentique\//, "agentique/archive/")]);
-      else this.#git(workspaceRoot, ["branch", "-D", branch]);
+      if (opts.archiveBranch) {
+        const target = branch.startsWith("agentique/")
+          ? branch.replace(/^agentique\//, "agentique/archive/")
+          : `archive/${branch}`;
+        this.#git(workspaceRoot, ["branch", "-m", branch, target]);
+        archivedBranch = target;
+      } else {
+        this.#git(workspaceRoot, ["branch", "-D", branch]);
+      }
     } catch { /* branch already gone */ }
     try { this.#git(workspaceRoot, ["worktree", "prune"]); } catch { /* best effort */ }
+    return { archivedBranch };
   }
 
   /**

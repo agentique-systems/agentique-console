@@ -167,6 +167,14 @@ export const agents = sqliteTable(
     worktreeBaseCommit: text("worktree_base_commit"),
     /** The worktree's branch ref (merge target on completion). */
     worktreeBranch: text("worktree_branch"),
+    /**
+     * Where unlanded work survives after an infra-failure archive or merge
+     * conflict: the renamed branch and the captured diff artifact. A discarded
+     * seat vanishes from `worktreePath`-based scans, so without these pointers
+     * salvaged work is invisible to checkpoints and the sign-off summary.
+     */
+    salvageBranch: text("salvage_branch"),
+    salvageArtifactId: text("salvage_artifact_id"),
     /** Seating order for accents and prompt listings. */
     ord: integer("ord").notNull(),
     createdAt: text("created_at").notNull(),

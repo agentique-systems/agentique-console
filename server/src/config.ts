@@ -81,6 +81,15 @@ export interface PolicyConfig {
   operatorAskDetachMs: number;
   /** Registry namespace for console session names ("console-scout-8fbb2c"). */
   peerNamePrefix: string;
+  /**
+   * Hard wall-clock cap per MCP tool call on the DECLARED capability servers
+   * (browser, database, …). Applied per-server via the SDK's `timeout` field —
+   * never as the blanket MCP_TOOL_TIMEOUT env, which would also bound the
+   * console's own server, where `ask_operator` legitimately parks for up to
+   * operatorAskDetachMs. A timed-out call returns an error result the agent
+   * can adapt to (and the error-streak watchdog bounds the retries). 0 = off.
+   */
+  mcpToolTimeoutMs: number;
   /** Identical consecutive tool calls before the watchdog kills an agent's turn. */
   watchdogIdenticalCalls: number;
   /** Consecutive tool errors before the watchdog kills an agent's turn. */
@@ -198,6 +207,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       agentWorktrees: env.CONSOLE_AGENT_WORKTREES !== "0",
       operatorAskDetachMs: Number(env.CONSOLE_OPERATOR_ASK_DETACH_MS ?? 300_000),
       peerNamePrefix: env.CONSOLE_PEER_NAME_PREFIX ?? "console-",
+      mcpToolTimeoutMs: Number(env.CONSOLE_MCP_TOOL_TIMEOUT_MS ?? 300_000),
       watchdogIdenticalCalls: Number(env.CONSOLE_WATCHDOG_IDENTICAL_CALLS ?? 5),
       watchdogErrorStreak: Number(env.CONSOLE_WATCHDOG_ERROR_STREAK ?? 10),
       maxRedeliveryAttempts: Number(env.CONSOLE_MAX_REDELIVERY_ATTEMPTS ?? 2),

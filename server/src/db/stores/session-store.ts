@@ -174,6 +174,7 @@ export class SessionStore {
       "turnCount" | "contextTokens" | "profileSnapshot" | "profileId"
       |  "latestHandoffId"
       | "worktreePath" | "worktreeBaseCommit" | "worktreeBranch"
+      | "salvageBranch" | "salvageArtifactId"
       | "lastActiveAt" | "cumulativeCostUsd" | "cumulativeApiDurationMs" | "lastDecisionAt"
     >>,
   ): void {

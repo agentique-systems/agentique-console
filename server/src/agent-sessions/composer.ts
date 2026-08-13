@@ -32,9 +32,14 @@ import type { RolePrompt } from "./topology-contract.ts";
  * install; `CONSOLE_BROWSER_MCP='<command> <args…>'` replaces the browser one
  * without touching a profile.
  */
-export function declaredMcpServers(profile: AgentProfile, config: Config): Record<string, { command: string; args: string[]; env?: Record<string, string> }> {
+export function declaredMcpServers(profile: AgentProfile, config: Config): Record<string, { command: string; args: string[]; env?: Record<string, string>; timeout?: number }> {
   const disabled = new Set(config.infra.mcpDisabled ?? []);
-  const out: Record<string, { command: string; args: string[]; env?: Record<string, string> }> = {};
+  const out: Record<string, { command: string; args: string[]; env?: Record<string, string>; timeout?: number }> = {};
+  // Per-call wall clock on every DECLARED server. Without it a wedged
+  // browser_evaluate holds a turn open forever — no watchdog counts an
+  // in-flight call, and a live run died exactly this way. The console's own
+  // in-process server carries no timeout: ask_operator parks legally.
+  const timeout = config.policy.mcpToolTimeoutMs > 0 ? { timeout: config.policy.mcpToolTimeoutMs } : {};
   // A profile SNAPSHOT taken before this field existed has no `mcpServers`.
   // Snapshots are cast, never re-parsed, so the default never applies to them:
   // a session open across the upgrade must degrade to "no servers", not crash.
@@ -44,10 +49,10 @@ export function declaredMcpServers(profile: AgentProfile, config: Config): Recor
     if (override !== undefined) {
       const [command, ...args] = override;
       if (command === undefined) continue;
-      out[name] = { command, args };
+      out[name] = { command, args, ...timeout };
       continue;
     }
-    out[name] = spec;
+    out[name] = { ...spec, ...timeout };
   }
   return out;
 }
@@ -221,10 +226,19 @@ export class PromptComposer {
     if (taskLines.length > 0) facts.push(`Task ledger:\n${taskLines.join("\n")}`);
     if (seat.worktreePath && this.#deps.worktrees && seat.worktreeBranch && seat.worktreeBaseCommit) {
       try {
+        // Commit whatever the dead turn left uncommitted FIRST: a checkpoint
+        // that says "no changes yet" over a tree full of unstaged work is a
+        // lie a successor acts on (a live run's reconstruction claimed exactly
+        // that over 35 minutes of edits).
+        try { this.#deps.worktrees.commitAll(seat.worktreePath, "console: reconstruction snapshot", seat.ownership); } catch { /* best effort */ }
         const diff = this.#deps.worktrees.captureDiffStats(seat.worktreePath, seat.worktreeBaseCommit, seat.worktreeBranch);
         const stat = diff.filesChanged === 0 ? "no changes yet" : `${diff.filesChanged} file(s) +${diff.insertions}/-${diff.deletions}`;
         facts.push(`Isolated worktree ${seat.worktreeBranch}: ${stat}. Not visible in the shared workspace until you report completed.`);
       } catch { facts.push(`Isolated worktree ${seat.worktreeBranch} (diff unavailable).`); }
+    }
+    if (!seat.worktreePath && seat.salvageBranch) {
+      facts.push(`Previous work is preserved on archived branch ${seat.salvageBranch}${seat.salvageArtifactId ? ` and as diff artifact ${seat.salvageArtifactId} (read_artifact)` : ""} — recover from it rather than assuming the work is gone.`);
+      if (seat.salvageArtifactId) evidence.push({ kind: "artifact", ref: seat.salvageArtifactId, label: "archived diff of the previous attempt" });
     }
     if (assignment) {
       facts.push(`Current assignment from ${assignment.sender}: ${assignment.core.action}${assignment.core.nextAction ? ` — next: ${assignment.core.nextAction}` : ""}`);

@@ -10,7 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { WorktreeManager } from "../runtime/worktree-manager.ts";
-import { initMessage, sendHandoffUse, successMessage, toolResultMessage, toolUseMessage } from "../sdk/fake.ts";
+import { errorMessage, initMessage, sendHandoffUse, successMessage, toolResultMessage, toolUseMessage } from "../sdk/fake.ts";
 import { agentRoleOf, collectUntil, makeDelegationHarness, type DelegationHarness } from "../test-helpers.ts";
 
 const git = (cwd: string, ...args: string[]) =>
@@ -116,6 +116,56 @@ describe("agent worktree isolation (fake SDK + real git)", () => {
     expect(fs.existsSync(path.join(repo, "widget.txt"))).toBe(false);
     const artifact = h.app.artifacts.get((discarded[0]?.payload as { artifactId: string }).artifactId);
     expect(artifact?.content).toContain("widget.txt");
+  });
+
+  it("infra failure (console-synthesized) archives the branch with salvage pointers instead of deleting", async () => {
+    // Dev writes real work, then its PROVIDER TURN dies — the console reports
+    // the failure for it. The agent never judged its own work bad, so the
+    // branch must archive, not `-D`.
+    const { repo, dataDir } = makeRepoDir();
+    let coordinatorTurns = 0;
+    const h = makeDelegationHarness(async function* (opts) {
+      const append = typeof opts.systemPrompt === "object" && !Array.isArray(opts.systemPrompt) ? opts.systemPrompt.append ?? "" : "";
+      if (append.includes("sole coordinator")) {
+        coordinatorTurns += 1;
+        yield initMessage(`coord-${coordinatorTurns}`);
+        yield coordinatorTurns === 1
+          ? sendHandoffUse("send-1", "dev", { action: "implement the widget", status: "pending", category: "assignment" })
+          : sendHandoffUse(`send-${coordinatorTurns}`, "main", { action: "wrapped after dev's turn died", status: "failed", category: "final" });
+        yield successMessage();
+        return;
+      }
+      if (append.includes("exclusively own the assigned files")) {
+        yield initMessage("dev-1");
+        fs.writeFileSync(path.join(opts.cwd ?? "", "widget.txt"), "half implemented\n");
+        yield toolUseMessage("w-1", "Write", { file_path: "widget.txt" });
+        yield toolResultMessage("w-1", "ok");
+        yield errorMessage("error_during_execution");
+        return;
+      }
+      yield initMessage("other-1");
+      yield successMessage({});
+    }, { workspaceRoot: repo, runtime: { worktrees: new WorktreeManager({ dataDir }) } });
+
+    const { created, events } = await runFlow(h);
+    const discarded = events.filter((event) => event.type === "agent_session.worktree.discarded");
+    expect(discarded).toHaveLength(1);
+    const payload = discarded[0]?.payload as { reason: string; artifactId: string; archivedBranch: string };
+    expect(payload.reason).toBe("seat turn failed under the console; work archived");
+    expect(payload.archivedBranch).toBe(`agentique/archive/seat/${created.agentSessionId}/dev-0`);
+    // The branch survives in the repo; the workspace itself is untouched.
+    expect(git(repo, "branch", "--list", payload.archivedBranch).trim()).not.toBe("");
+    expect(fs.existsSync(path.join(repo, "widget.txt"))).toBe(false);
+    // Salvage pointers on the seat make the work findable by checkpoints and sign-off.
+    const seat = h.repo.getAgent(created.agentSessionId, "dev");
+    expect(seat?.salvageBranch).toBe(payload.archivedBranch);
+    expect(seat?.salvageArtifactId).toBe(payload.artifactId);
+    const artifact = h.app.artifacts.get(payload.artifactId);
+    expect(artifact?.content).toContain("widget.txt");
+    // The console-synthesized failure handoff is flagged, so report scans skip it.
+    const failureRow = h.sqlite.prepare(
+      "SELECT synthetic FROM handoff_records WHERE sender = 'dev' AND trigger = 'failure'").get() as { synthetic: number } | undefined;
+    expect(failureRow?.synthetic).toBe(1);
   });
 
   it("merge conflict posts a failure handoff and leaves the workspace clean", async () => {

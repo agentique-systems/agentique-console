@@ -418,12 +418,17 @@ export class AgentSessionService {
     let draft: HandoffDraft;
     try {
       const reconstructed = seat ? this.#composer.reconstructCheckpoint(session, seat) : null;
+      // The reconstructed draft is console-authored too: without the
+      // consoleSynthesized flag it (a) read as an agent's own report to every
+      // excludeSynthetic scan and (b) got the seat's branch DELETED as if the
+      // agent had judged its own work failed.
       draft = reconstructed
         ? { core: { ...reconstructed.core, status: "failed", risk: "high", action: "Turn failed",
             state: { ...reconstructed.core.state,
               summary: `${reason}\n\nState the Console can vouch for:\n${reconstructed.core.state.summary}${salvaged === "" ? "" : `\n\nUnsent work from ${seatName}'s last output (unverified — it never passed through a handoff):\n${salvaged.slice(0, 8_000)}`}` },
             nextAction: "Inspect the failure and retry or reassign." },
-            ...(reconstructed.extension ? { extension: reconstructed.extension } : {}) }
+            extension: { kind: reconstructed.extension?.kind ?? "generic",
+              data: { ...(reconstructed.extension?.data ?? {}), consoleSynthesized: true } } }
         : simpleHandoff("Turn failed", "failed", reason, "Inspect the failure and retry or reassign.");
     } catch {
       draft = simpleHandoff("Turn failed", "failed", reason, "Inspect the failure and retry or reassign.");
