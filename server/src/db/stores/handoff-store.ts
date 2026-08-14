@@ -59,4 +59,17 @@ export class HandoffStore {
     return this.#db.select().from(handoffRecords).where(and(...filters))
       .orderBy(desc(handoffRecords.createdAt), desc(sql`rowid`)).get();
   }
+
+  /** Same filters as latestHandoff, EVERY row, oldest first — the commission read-model needs "the FIRST", not "the latest". */
+  listHandoffs(input: Parameters<HandoffStore["latestHandoff"]>[0]): HandoffRecordRow[] {
+    const filters = [eq(handoffRecords.userSessionId, input.userSessionId)];
+    if (input.agentSessionId === null) filters.push(sql`${handoffRecords.agentSessionId} is null`);
+    else if (input.agentSessionId !== undefined) filters.push(eq(handoffRecords.agentSessionId, input.agentSessionId));
+    if (input.recipient !== undefined) filters.push(eq(handoffRecords.recipient, input.recipient));
+    if (input.sender !== undefined) filters.push(eq(handoffRecords.sender, input.sender));
+    if (input.excludeCheckpoints === true) filters.push(eq(handoffRecords.checkpoint, false));
+    if (input.excludeSynthetic === true) filters.push(eq(handoffRecords.synthetic, false));
+    return this.#db.select().from(handoffRecords).where(and(...filters))
+      .orderBy(handoffRecords.createdAt, sql`rowid`).all();
+  }
 }

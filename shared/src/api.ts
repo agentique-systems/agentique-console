@@ -3,6 +3,7 @@
 
 import type {
   AgentSession,
+  AgentSessionStatus,
   AgentRunSummary,
   Interaction,
   ScheduledAssignment,
@@ -209,4 +210,58 @@ export interface ImproveMessageBody {
 }
 export interface ImproveMessageResponse {
   text: string;
+}
+
+// GET /api/user-sessions/:id/spec — the living specification.
+export interface SpecRevisionWire {
+  id: string;
+  revision: number;
+  document: string;
+  changeNote: string | null;
+  status: "draft" | "approved" | "superseded" | "rejected";
+  origin: "main" | "operator_edited";
+  /** The interaction card that approved this revision. */
+  interactionId: string | null;
+  createdAt: string;
+  approvedAt: string | null;
+}
+export interface GetSpecResponse {
+  revisions: SpecRevisionWire[];
+  approved: SpecRevisionWire | null;
+}
+
+// GET /api/user-sessions/:id/orchestration — the review surface: working
+// state plus every commission joined to its rationale and outcome by STABLE
+// ids (the creation briefing's handoff, never whatever main sent last).
+export interface OrchestrationStateWire {
+  revision: number;
+  trigger: string;
+  strategy: string;
+  strategyWhy: string;
+  uncertainties: string[];
+  assumptions: string[];
+  risks: string[];
+  note: string | null;
+  completion: Record<string, unknown> | null;
+  createdAt: string;
+}
+export interface CommissionSummary {
+  agentSessionId: string;
+  title: string;
+  pattern: string;
+  lifecycle: string;
+  parentAgentSessionId: string | null;
+  /** The derived live status (working/idle/reported/archived), not just the lifecycle bit. */
+  status: AgentSessionStatus;
+  /** The creation briefing — later steering never overwrites it. Null for child sessions (their controller commissions them). */
+  commission: { handoffId: string; action: string; why: string | null; expecting: string | null; briefedAt: string } | null;
+  /** Steering after the briefing is counted, not listed — the handoffs are first-class on the timeline. */
+  steering: { count: number };
+  /** The last terminal report (final/failure) to main, by stable id. */
+  outcome: { handoffId: string; trigger: string; status: string; action: string } | null;
+}
+export interface GetOrchestrationResponse {
+  current: OrchestrationStateWire | null;
+  revisions: OrchestrationStateWire[];
+  commissions: CommissionSummary[];
 }

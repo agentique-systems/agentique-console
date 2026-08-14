@@ -471,6 +471,11 @@ export const specRevisions = sqliteTable(
  * (never per-turn ceremony). Append-only: the history is the review surface,
  * and rationale cannot be retro-edited, only superseded. A trigger of
  * 'completion' carries the criteria→evidence justification in `completion`.
+ *
+ * Deliberately NO agentSessionId column: commission↔state attribution rides
+ * the journal (`incorporating` refs on the state.updated event payload), and
+ * the evaluation treats refs as use-when-present, never required. Revisit
+ * only if a live series shows journal-level refs insufficient for the joins.
  */
 export const orchestrationStateRevisions = sqliteTable(
   "orchestration_state_revisions",

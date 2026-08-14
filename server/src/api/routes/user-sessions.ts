@@ -3,6 +3,7 @@ import { z } from "zod";
 import { isOrchestratorModel } from "@agentique-console/shared";
 import type { AppContext } from "../../context.ts";
 import { InvalidInputError } from "../../errors.ts";
+import { buildCommissions } from "../../orchestrator/commissions.ts";
 
 /**
  * Constrained to the offered list rather than accepting any string: an id with
@@ -123,25 +124,16 @@ export function registerUserSessionRoutes(
 
   // The orchestration state: current working state, its history, and every
   // commission joined to its rationale and outcome — the review surface that
-  // distinguishes good orchestration from lucky outcomes.
+  // distinguishes good orchestration from lucky outcomes. Joins are by
+  // stable id (buildCommissions), never by recency.
   app.get<{ Params: { id: string } }>(
     "/api/user-sessions/:id/orchestration",
     async (request) => {
       const userSessionId = request.params.id;
-      const commissions = ctx.app.repo.listAgentSessions(userSessionId).map((session) => {
-        const briefing = ctx.app.repo.latestHandoff({ userSessionId, agentSessionId: session.id, sender: "main", excludeCheckpoints: true });
-        const outcome = ctx.app.repo.latestHandoff({ userSessionId, agentSessionId: session.id, recipient: "main", excludeCheckpoints: true });
-        const data = (briefing?.extension?.data ?? {}) as { why?: string; expecting?: string };
-        return {
-          agentSessionId: session.id, title: session.title, pattern: session.pattern, lifecycle: session.lifecycle,
-          why: data.why ?? null, expecting: data.expecting ?? null,
-          outcome: outcome === undefined ? null : { trigger: outcome.trigger, status: outcome.core.status, action: outcome.core.action.slice(0, 200) },
-        };
-      });
       return {
         current: ctx.app.orchestrationState.current(userSessionId) ?? null,
         revisions: ctx.app.orchestrationState.history(userSessionId),
-        commissions,
+        commissions: buildCommissions({ repo: ctx.app.repo, statusOf: (row) => ctx.app.host.statusOf(row) }, userSessionId),
       };
     },
   );

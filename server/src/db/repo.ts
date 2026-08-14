@@ -78,6 +78,7 @@ export class Repo {
   insertCheckpointHandoff(row: HandoffRecordRow): void { this.#s.handoffs.insertCheckpointHandoff(row); }
   getHandoff(id: string): HandoffRecordRow | undefined { return this.#s.handoffs.getHandoff(id); }
   latestHandoff(input: Parameters<Stores["handoffs"]["latestHandoff"]>[0]): HandoffRecordRow | undefined { return this.#s.handoffs.latestHandoff(input); }
+  listHandoffs(input: Parameters<Stores["handoffs"]["listHandoffs"]>[0]): HandoffRecordRow[] { return this.#s.handoffs.listHandoffs(input); }
 
   // --- Usage, crons, pattern state ------------------------------------------
 
