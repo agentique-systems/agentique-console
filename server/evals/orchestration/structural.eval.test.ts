@@ -16,7 +16,6 @@ describe("orchestration structural evals (Tier A)", () => {
       for (const [variantName, variant] of Object.entries(scenario.fake?.variants ?? {})) {
         it(`${variantName} (${variant.expect})`, { timeout: 30_000 }, async () => {
           const run = await runScenarioVariant(scenario, variantName);
-          expect(run.injectionFailures).toEqual([]);
           const failed = run.results.filter((entry) => !entry.result.pass);
           if (variant.expect === "pass") {
             expect(

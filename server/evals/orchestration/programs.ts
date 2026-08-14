@@ -11,7 +11,7 @@
  *   env name is authoritative and works for every pattern.
  */
 import type { FakeProgram } from "../../src/sdk/fake.ts";
-import { errorMessage, initMessage, successMessage, toolResultMessage, toolUseMessage } from "../../src/sdk/fake.ts";
+import { initMessage, successMessage, toolResultMessage, toolUseMessage } from "../../src/sdk/fake.ts";
 import { agentRoleOf } from "../../src/test-helpers.ts";
 
 type Turn = FakeProgram;
@@ -107,13 +107,5 @@ export function errorStreak(n: number, then?: Turn): Turn {
     }
     if (then) yield* then(options, tools);
     else yield successMessage();
-  };
-}
-
-/** A turn that ends in a provider error. */
-export function errorTurn(subtype = "error_during_execution"): Turn {
-  return async function* () {
-    yield initMessage();
-    yield errorMessage(subtype);
   };
 }

@@ -68,16 +68,15 @@ export type OperatorStep =
       say: string;
     }
   | {
-      /** Resolve a proposed completion / plan approval. */
+      /**
+       * Resolve a proposed spec/plan card or a completion sign-off.
+       * `kind` narrows the match: "spec" = a plan card carrying the spec
+       * marker, "completion" = the sign-off; omitted = first of either.
+       */
       onProposal: "approve" | "reject";
+      kind?: "spec" | "completion";
       note?: string;
     };
-
-export interface Injection {
-  /** Fires `act` once, after the first bus event matching `when`. */
-  when: (event: Ev) => boolean;
-  act: (harness: Harness) => void | Promise<void>;
-}
 
 export interface ScenarioVariant {
   program: (ctx: ProgramCtx) => FakeProgram;
@@ -118,8 +117,14 @@ export interface OrchestrationScenario {
   /** Tier A material; absent for live-only scenarios (e.g. visual judgment). */
   fake?: {
     variants: Record<string, ScenarioVariant>;
-    injections?: Injection[];
     harness?: HarnessOptions;
+    /**
+     * Two-phase run: phase 1 collects until `when` fires, then the harness
+     * restarts (same sqlite, real bootApp recovery — the restart-honesty
+     * substrate), and phase 2 collects until doneWhen. Unfired operator
+     * steps re-arm on the restarted harness.
+     */
+    restart?: { when: () => (event: Ev) => boolean };
     /**
      * Factory for the done predicate (fresh per run so counting predicates
      * cannot leak state across variants). Defaults to the first
