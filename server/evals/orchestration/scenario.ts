@@ -142,12 +142,21 @@ export interface OrchestrationScenario {
     /** Persona hint for an LLM-simulated operator (scripted table still wins). */
     operatorPersona?: string;
     /**
-     * True when the scenario has no meaningful pre-change baseline because the
-     * behavior under test depends on capabilities that did not exist before
-     * this project (alarms, spec tools, orchestration state). Marked, never
-     * manufactured.
+     * Independent orchestrator executions per invocation (`--runs` overrides).
+     * Cheap scenarios afford 2–3; expensive ones default to 1 — a single
+     * behavioral sample, and the report says so.
      */
-    noPreChangeBaseline?: boolean;
+    defaultRuns?: number;
+    /**
+     * Objective mechanical floor for the artifact axis: run in a copy of the
+     * exported workspace; exit code + output land in evidence/validator.json
+     * and the outcome judge treats them as authoritative.
+     */
+    validator?: { command: string; timeoutMs?: number };
+    /** Artifact files worth showing the outcome judge (size-capped at export). */
+    evidence?: { globs: string[]; maxFileBytes?: number; maxTotalBytes?: number };
+    /** Needs a browser MCP (CONSOLE_BROWSER_MCP); the runner SKIPs with a message when unset. */
+    needsBrowser?: boolean;
   };
 }
 

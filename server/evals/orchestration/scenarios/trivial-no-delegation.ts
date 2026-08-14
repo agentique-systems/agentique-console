@@ -12,7 +12,7 @@ import { createSessionUse } from "./shared.ts";
 export default defineScenario({
   id: "trivial-no-delegation",
   title: "Trivial repo question needs no crew",
-  taskCard: "What port does the console listen on by default? Just tell me.",
+  taskCard: "Where does the tracker store its data by default? Just tell me.",
   operatorScript: [],
   stressedDimensions: ["marginal-agent-value", "question-economy", "cost-latency"],
   checks: [noAgentSessions(), zeroClarifyingQuestions(), settledWithinTurns(2)],
@@ -25,9 +25,9 @@ export default defineScenario({
           roleSwitch({
             main: turns(async function* () {
               yield initMessage();
-              yield toolUseMessage("read-1", "Grep", { pattern: "CONSOLE_PORT", path: "server/src" });
-              yield toolResultMessage("read-1", "config.ts: port: Number(env.CONSOLE_PORT ?? 4400)");
-              yield textMessage("4400 by default (CONSOLE_PORT overrides it).");
+              yield toolUseMessage("read-1", "Grep", { pattern: "DATA_FILE", path: "src" });
+              yield toolResultMessage("read-1", 'store.js: export const DATA_FILE = process.env.READING_TRACKER_FILE ?? ".reading-tracker.json";');
+              yield textMessage(".reading-tracker.json in the working directory (READING_TRACKER_FILE overrides it).");
               yield successMessage();
             }),
           }),
@@ -61,5 +61,5 @@ export default defineScenario({
       },
     },
   },
-  live: { maxBudgetUsd: 2, timeoutMin: 10 },
+  live: { fixture: "small-cli", maxBudgetUsd: 2, timeoutMin: 10, defaultRuns: 3 },
 });

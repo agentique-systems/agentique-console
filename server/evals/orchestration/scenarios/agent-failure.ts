@@ -103,5 +103,8 @@ export default defineScenario({
       },
     },
   },
-  live: { maxBudgetUsd: 4, timeoutMin: 15 },
+  // Structural-only: the premise (a seat dying to the watchdog) cannot be
+  // induced deterministically in a live run, and a nondeterministic premise
+  // makes the failure checks flag for want of a premise, not for want of
+  // orchestration quality. Tier A owns this substrate.
 });

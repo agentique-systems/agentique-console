@@ -4,14 +4,20 @@
  *   AGENTIQUE_LIVE_ORCH_EVAL=1 npx tsx server/evals/orchestration/live/run-live.ts \
  *     --scenario vague-greenfield|smoke|all [--budget-usd 10] [--label pre-charter]
  *
- * Per scenario: a fresh data dir + workspace (fixture-seeded), the real app
- * over the real SDK, the scripted operator policy, a hard budget/timeout
- * guard, then export: run.json, transcript.md, checks.json, workspace
- * snapshot. Results land in evals/orchestration/results/runs/<stamp>-<id>/.
+ * Per scenario: a fresh data dir + workspace (fixture-seeded and committed as
+ * a git baseline for the artifact diff), the real app over the real SDK, the
+ * scripted operator policy, a hard budget/timeout guard, then export:
+ * run.json, transcript.md, checks.json, workspace snapshot, unmerged
+ * worktrees. Results land in evals/orchestration/results/runs/<stamp>-<id>/.
  *
- * The "smoke" trio (vague-greenfield, agent-failure, wasteful-parallelism)
- * is the routine charter-iteration set; "all" is for before/after baselines.
+ * A scenario whose prerequisites are missing (absent fixture, no browser MCP)
+ * SKIPs with a printed reason — `--scenario all` and `smoke` always complete.
+ *
+ * The "smoke" trio (vague-greenfield, wasteful-parallelism,
+ * hidden-constraint) is the routine charter-iteration set; "all" is for
+ * post-change reference series.
  */
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -41,7 +47,7 @@ function argOf(flag: string): string | undefined {
   return index === -1 ? undefined : args[index + 1];
 }
 
-const SMOKE = ["vague-greenfield", "agent-failure", "wasteful-parallelism"];
+const SMOKE = ["vague-greenfield", "wasteful-parallelism", "hidden-constraint"];
 const which = argOf("--scenario") ?? "smoke";
 const budgetOverride = argOf("--budget-usd") !== undefined ? Number(argOf("--budget-usd")) : undefined;
 const label = argOf("--label") ?? "run";
@@ -52,12 +58,29 @@ const selected: OrchestrationScenario[] =
   : SCENARIOS.filter((scenario) => scenario.id === which);
 if (selected.length === 0) throw new Error(`no scenario matches "${which}"`);
 
+/** A missing prerequisite is a SKIP with a reason, never a throw — the suite always completes. */
+function skipReasonOf(scenario: OrchestrationScenario): string | null {
+  const fixture = scenario.live?.fixture;
+  if (fixture !== undefined && fixture !== "empty-workspace" && !fs.existsSync(path.join(here, "../fixtures", fixture))) {
+    return `fixture missing: evals/orchestration/fixtures/${fixture}`;
+  }
+  if (scenario.live?.needsBrowser === true && (process.env.CONSOLE_BROWSER_MCP ?? "") === "") {
+    return "needs a browser MCP: set CONSOLE_BROWSER_MCP";
+  }
+  return null;
+}
+
 function seedWorkspace(fixture: string | undefined, dir: string): void {
   fs.mkdirSync(dir, { recursive: true });
-  if (fixture === undefined || fixture === "empty-workspace") return;
-  const source = path.join(here, "../fixtures", fixture);
-  if (!fs.existsSync(source)) throw new Error(`fixture missing: ${source} — add it under evals/orchestration/fixtures/`);
-  fs.cpSync(source, dir, { recursive: true });
+  if (fixture !== undefined && fixture !== "empty-workspace") {
+    fs.cpSync(path.join(here, "../fixtures", fixture), dir, { recursive: true });
+  }
+  // The fixture baseline commit anchors the artifact diff: "what did the run
+  // change" is only well-defined against a committed starting point.
+  const git = (...argv: string[]) => execFileSync("git", ["-C", dir, ...argv], { stdio: "pipe" });
+  git("init", "--quiet");
+  git("-c", "user.name=orch-eval", "-c", "user.email=orch-eval@localhost", "add", "-A");
+  git("-c", "user.name=orch-eval", "-c", "user.email=orch-eval@localhost", "commit", "--quiet", "--allow-empty", "-m", "fixture-baseline");
 }
 
 async function runOne(scenario: OrchestrationScenario): Promise<void> {
@@ -108,8 +131,13 @@ async function runOne(scenario: OrchestrationScenario): Promise<void> {
 
   fs.mkdirSync(outDir, { recursive: true });
   fs.copyFileSync(config.infra.dbFile, path.join(outDir, "console.db"));
-  // The artifact axis: snapshot the final workspace next to the trace.
+  // The artifact axis: snapshot the final workspace (with its git history —
+  // the fixture-baseline commit anchors diffs) next to the trace, and the
+  // seat worktrees: unmerged/in-flight work is exactly the interesting
+  // failure evidence, and it lives outside the workspace until a seat lands.
   fs.cpSync(workspaceRoot, path.join(outDir, "workspace"), { recursive: true });
+  const worktreesDir = path.join(dataDir, "worktrees");
+  if (fs.existsSync(worktreesDir)) fs.cpSync(worktreesDir, path.join(outDir, "worktrees"), { recursive: true });
   exportRunToDir(path.join(outDir, "console.db"), outDir);
 
   const trace = Trace.fromFile(path.join(outDir, "console.db"), session.id);
@@ -123,5 +151,14 @@ async function runOne(scenario: OrchestrationScenario): Promise<void> {
 }
 
 for (const scenario of selected) {
+  const skip = skipReasonOf(scenario);
+  if (scenario.live === undefined) {
+    console.log(`\n== ${scenario.id} SKIP — structural-only (no live block)`);
+    continue;
+  }
+  if (skip !== null) {
+    console.log(`\n== ${scenario.id} SKIP — ${skip}`);
+    continue;
+  }
   await runOne(scenario);
 }

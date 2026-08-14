@@ -29,34 +29,39 @@ AGENTIQUE_LIVE_ORCH_EVAL=1 npm run eval:orchestration:judge -- evals/orchestrati
 npm run eval:orchestration:compare -- evals/orchestration/results/runs/<dir>
 ```
 
-Each run gets a fresh data dir and fixture workspace, the real app over the
-real SDK, the scenario's scripted operator, and hard budget/timeout guards.
-Outputs per run: `console.db`, `run.json` (mechanical metrics), `transcript.md`
-(judge input), `checks.json` (the shared checkers), `workspace/` (the artifact
-snapshot), `judgment.json` (per-dimension scores + verbatim notes).
+Each run gets a fresh data dir and fixture workspace (committed as a
+`fixture-baseline` for the artifact diff), the real app over the real SDK, the
+scenario's scripted operator, and hard budget/timeout guards. Outputs per run:
+`console.db`, `run.json` (mechanical metrics), `transcript.md` (judge input),
+`checks.json` (the shared checkers), `workspace/` (the artifact snapshot, with
+git history), `worktrees/` (unmerged seat work), `judgment.json`
+(per-dimension scores + verbatim notes).
 
-`--scenario smoke` = vague-greenfield, agent-failure, wasteful-parallelism —
-the routine charter-iteration trio. `--scenario all` = every live-enabled
-scenario, for before/after baselines. Runs are non-deterministic: always
-repetitions + medians + spread, never single-run verdicts.
+**Prerequisites (clean checkout):** `npm ci` at the repo root;
+`AGENTIQUE_LIVE_ORCH_EVAL=1` (the spend gate); real SDK credentials in the
+environment; `git` on PATH. Fixtures are committed under `fixtures/` — nothing
+to download. A scenario whose prerequisite is missing (a fixture, a browser
+MCP) **SKIPs with a printed reason**; `--scenario all` and `smoke` always
+complete.
 
-## The pre-change baseline (do this BEFORE the charter lands)
+`--scenario smoke` = vague-greenfield, wasteful-parallelism,
+hidden-constraint — the routine charter-iteration trio. `--scenario all` =
+every live-enabled scenario, for post-change reference series.
 
-The point of this framework is a before/after answer to *"what behavior
-actually improved because of this project?"* Before the new orchestrator brief
-(A4) or behavior-affecting tools merge:
+**Structural-only scenarios** (no live block, by design): agent-failure and
+hung-agent — their premises are induced failures (an error-streak corpse, a
+wedged tool call) that cannot be reproduced deterministically live, and a
+nondeterministic premise makes their checks flag for want of a premise, not
+for want of orchestration quality. Tier A owns that substrate; live
+supervision quality is judged opportunistically wherever a real alarm fires.
 
-```
-AGENTIQUE_LIVE_ORCH_EVAL=1 npm run eval:orchestration:live -- --scenario all --label baseline-pre
-# judge each run dir, then copy the run dirs into results/baseline-pre/ and commit run.json,
-# checks.json, judgment.json and transcript.md (console.db and workspace/ stay local).
-```
+## The reference series (post-change)
 
-Scenarios whose behavior depends on capabilities that did not exist before
-this project are **marked `noPreChangeBaseline` and skipped — never
-manufactured**: hung-agent (no alarms/interrupt existed), spec/state-dependent
-checks (no propose_spec / update_orchestration_state), restart digests
-(partial: recovery existed, digests did not).
+The skipped pre-change baseline was a deliberate operator decision — this
+framework measures the CURRENT orchestrator forward. The first accepted
+series after a behavior-affecting change becomes the reference:
+`results/baseline.json` holds its per-scenario, per-dimension medians, and
+updating it is an explicit, human-reviewed commit citing trace evidence.
 
 ## Goodhart policy (binding)
 
@@ -86,11 +91,11 @@ standing experimental program.
 ```
 trace.ts               journal read API (both tiers)      scenario.ts   types
 checks.ts              dimension-tagged checkers          programs.ts   fake-program combinators
-injector.ts            bus-triggered failure injection    structural-runner.ts  Tier A engine
+structural-runner.ts   Tier A engine (proposals, restart phases)
 structural.eval.test.ts  CI gate                          scenarios/    the suite + PLANNED list
 live/run-live.ts       Tier B runner                      live/operator-policy.ts  scripted operator
 live/export-trace.ts   run.json + transcript.md (revived report-run)
 live/judge.ts          rubric judging                     live/compare.ts  baseline diff
-rubrics/               one .md per judged dimension       fixtures/     live workspace seeds
+rubrics/               one .md per judged dimension       fixtures/     committed workspace seeds
 results/baseline.json  committed medians                  results/runs/ raw runs (gitignored)
 ```

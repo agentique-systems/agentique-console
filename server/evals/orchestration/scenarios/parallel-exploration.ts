@@ -10,7 +10,7 @@ import { defineScenario } from "../scenario.ts";
 import type { Ev } from "../trace.ts";
 import { createSessionUse } from "./shared.ts";
 
-const SURVEYS = ["db", "api", "web"] as const;
+const SURVEYS = ["src", "test", "docs"] as const;
 
 function coordinatorRoutes() {
   return turns(
@@ -39,7 +39,7 @@ function threeResults() {
 export default defineScenario({
   id: "parallel-exploration",
   title: "Independent surveys run concurrently",
-  taskCard: "Survey three independent subsystems — db, api, and web — and give me an inventory of each. They share nothing.",
+  taskCard: "Survey three independent areas of this project — src/, test/, and docs/ — and give me an inventory of each. They share nothing.",
   operatorScript: [],
   stressedDimensions: ["parallelism", "exploration", "delegation"],
   checks: [parallelOverlapAtLeast(2), sessionCountAtMost(3)],
@@ -121,5 +121,5 @@ export default defineScenario({
       },
     },
   },
-  live: { maxBudgetUsd: 10, timeoutMin: 30 },
+  live: { fixture: "small-cli", maxBudgetUsd: 10, timeoutMin: 30 },
 });

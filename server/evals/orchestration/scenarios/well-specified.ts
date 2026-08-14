@@ -32,12 +32,12 @@ export default defineScenario({
   id: "well-specified",
   title: "A fully specified task earns zero questions",
   taskCard:
-    "Add a --version flag to the CLI entry at src/cli.ts. It must print the version field from package.json and exit 0. " +
-    "No other output, no other changes. Acceptance: `node src/cli.ts --version` prints the version string alone.",
+    "Add a --json flag to the list command in src/cli.js. It must print the entries as a JSON array and exit 0. " +
+    "No other output, no other changes. Acceptance: `node src/cli.js list --json` prints valid JSON alone.",
   operatorScript: [
     // Only the violation variant ever asks; answering keeps its flow moving so
     // the flagged check is question COUNT, not a timeout.
-    { onQuestionMatching: /which file|what version|exit code/i, answer: { "Which file is the CLI entry?": ["src/cli.ts"] } },
+    { onQuestionMatching: /which file|what version|exit code/i, answer: { "Which file is the CLI entry?": ["src/cli.js"] } },
   ],
   stressedDimensions: ["question-economy", "marginal-agent-value", "operator-alignment"],
   checks: [zeroClarifyingQuestions(), sessionCountAtMost(1)],
@@ -74,7 +74,7 @@ export default defineScenario({
                   "AskUserQuestion",
                   {
                     questions: [
-                      { question: "Which file is the CLI entry?", options: [{ label: "src/cli.ts" }, { label: "src/index.ts" }] },
+                      { question: "Which file is the CLI entry?", options: [{ label: "src/cli.js" }, { label: "src/index.js" }] },
                     ],
                   },
                   permissionContext(),

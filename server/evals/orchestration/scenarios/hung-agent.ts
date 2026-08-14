@@ -194,5 +194,8 @@ export default defineScenario({
       },
     },
   },
-  live: { maxBudgetUsd: 8, timeoutMin: 25, noPreChangeBaseline: true },
+  // Structural-only: nothing wedges a live agent on demand (the Tier A wedge
+  // is a scripted gate), so the alarm checks would flag every live run for
+  // want of a premise. Live supervision quality is judged opportunistically
+  // wherever a real alarm fires.
 });

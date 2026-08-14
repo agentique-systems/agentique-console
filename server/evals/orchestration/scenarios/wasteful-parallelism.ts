@@ -32,7 +32,7 @@ const agentRoutes = {
 export default defineScenario({
   id: "wasteful-parallelism",
   title: "One agent is plenty for a mechanical rename",
-  taskCard: "Rename the function fooBar to barFoo in src/util.ts and update its 3 call sites under src/.",
+  taskCard: "Rename the function fooBar to barFoo in src/util.js and update its 3 call sites under src/.",
   operatorScript: [],
   stressedDimensions: ["marginal-agent-value", "unnecessary-work", "cost-latency"],
   checks: [sessionCountAtMost(1), questionCountAtMost(1)],
