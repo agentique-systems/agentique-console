@@ -2,7 +2,13 @@
  * Tier B: run scenarios against the REAL orchestrator. Priced and opt-in:
  *
  *   AGENTIQUE_LIVE_ORCH_EVAL=1 npx tsx server/evals/orchestration/live/run-live.ts \
- *     --scenario vague-greenfield|smoke|all [--budget-usd 10] [--label pre-charter]
+ *     --scenario vague-greenfield|smoke|all [--runs N] [--budget-usd 10] [--label after-charter]
+ *
+ * --runs N executes the orchestrator N INDEPENDENT times (fresh data dir and
+ * workspace each) — behavioral variance. That is a different quantity from
+ * the judge's repetitions over one frozen trace (judge --reps), and the two
+ * are never blended: a series with N=1 is a single behavioral sample and the
+ * report says so.
  *
  * Per scenario: a fresh data dir + workspace (fixture-seeded and committed as
  * a git baseline for the artifact diff), the real app over the real SDK, the
@@ -50,6 +56,7 @@ function argOf(flag: string): string | undefined {
 const SMOKE = ["vague-greenfield", "wasteful-parallelism", "hidden-constraint"];
 const which = argOf("--scenario") ?? "smoke";
 const budgetOverride = argOf("--budget-usd") !== undefined ? Number(argOf("--budget-usd")) : undefined;
+const runsOverride = argOf("--runs") !== undefined ? Number(argOf("--runs")) : undefined;
 const label = argOf("--label") ?? "run";
 
 const selected: OrchestrationScenario[] =
@@ -83,9 +90,7 @@ function seedWorkspace(fixture: string | undefined, dir: string): void {
   git("-c", "user.name=orch-eval", "-c", "user.email=orch-eval@localhost", "commit", "--quiet", "--allow-empty", "-m", "fixture-baseline");
 }
 
-async function runOne(scenario: OrchestrationScenario): Promise<void> {
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-  const outDir = path.join(here, "../results/runs", `${stamp}-${label}-${scenario.id}`);
+async function runOne(scenario: OrchestrationScenario, outDir: string): Promise<void> {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), `orch-eval-${scenario.id}-`));
   const workspaceRoot = path.join(dataDir, "workspace");
   seedWorkspace(scenario.live?.fixture, workspaceRoot);
@@ -160,5 +165,14 @@ for (const scenario of selected) {
     console.log(`\n== ${scenario.id} SKIP — ${skip}`);
     continue;
   }
-  await runOne(scenario);
+  const runs = Math.max(1, runsOverride ?? scenario.live.defaultRuns ?? 1);
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const seriesDir = path.join(here, "../results/runs", `${stamp}-${label}-${scenario.id}`);
+  fs.mkdirSync(seriesDir, { recursive: true });
+  fs.writeFileSync(path.join(seriesDir, "series.json"),
+    `${JSON.stringify({ version: 1, scenario: scenario.id, label, runs, budgetPerRunUsd: budgetOverride ?? scenario.live.maxBudgetUsd, startedAt: nowIso() }, null, 2)}\n`);
+  for (let run = 1; run <= runs; run += 1) {
+    if (runs > 1) console.log(`\n=== ${scenario.id} run ${run}/${runs} (independent execution)`);
+    await runOne(scenario, path.join(seriesDir, `run-${run}`));
+  }
 }

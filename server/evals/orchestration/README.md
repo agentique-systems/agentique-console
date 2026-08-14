@@ -24,10 +24,19 @@ Never present Tier A green as "orchestration improved."
 ## Tier B — live (real model, priced, manual, informs — never gates)
 
 ```
-AGENTIQUE_LIVE_ORCH_EVAL=1 npm run eval:orchestration:live -- --scenario smoke --label after-charter
-AGENTIQUE_LIVE_ORCH_EVAL=1 npm run eval:orchestration:judge -- evals/orchestration/results/runs/<dir>
-npm run eval:orchestration:compare -- evals/orchestration/results/runs/<dir>
+AGENTIQUE_LIVE_ORCH_EVAL=1 npm run eval:orchestration:live -- --scenario smoke --runs 2 --label after-charter
+AGENTIQUE_LIVE_ORCH_EVAL=1 npm run eval:orchestration:judge -- evals/orchestration/results/runs/<seriesDir> --reps 3
+npm run eval:orchestration:compare -- evals/orchestration/results/runs/<seriesDir>
 ```
+
+**Two kinds of repetition, never blended.** `--runs N` executes the
+orchestrator N independent times (behavioral variance; cheap scenarios
+default to 2–3 via `defaultRuns`, expensive ones to 1). `--reps M` re-judges
+one frozen trace M times (judge variance). The compare report shows each
+axis separately; an N=1 series is labeled a **single behavioral sample** and
+makes no behavioral-variance or stability claim. A failed judgment is
+recorded as an error entry and reported as `k/M judgments succeeded` — never
+silently absent.
 
 Each run gets a fresh data dir and fixture workspace (committed as a
 `fixture-baseline` for the artifact diff), the real app over the real SDK, the
