@@ -22,7 +22,13 @@ auditable places:
    uncertainties, standing assumptions, live risks. Injected into the
    orchestrator's own next generation, so dishonest state poisons its writer
    first. Section-replace semantics; append-only history; updated on material
-   events, never per turn.
+   events, never per turn. Every update returns the FULL merged document, so
+   the writer confirms in-context what its next generation will read — that
+   read-back, plus the sole-writer fact, is why no `read_state` tool exists:
+   a mid-generation read could only re-fetch a document its reader alone has
+   changed, pure ceremony surface. An update may name the evidence it
+   incorporates (`incorporating`: handoff/session/artifact ids) — journaled
+   for the evaluation's consumption joins, never required, never a column.
 2. **Calculus** — the compact tests in the brief (consequential uncertainty,
    load-bearing assumptions, better-version, evidence independence,
    unblocking, decision-relevance, marginal agent value, reversibility).

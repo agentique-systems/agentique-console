@@ -460,12 +460,21 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         assumptions: z.array(z.string().max(200)).max(8).optional().describe("Load-bearing assumptions the plan rests on."),
         risks: z.array(z.string().max(200)).max(8).optional().describe("Live risks that currently matter."),
         note: z.string().max(280).optional().describe("What occasioned THIS update, one line."),
+        incorporating: z.array(z.string().min(1)).max(8).optional()
+          .describe("When this update incorporates specific returned results or evidence, name them (handoff / agent-session / artifact ids). Optional — skip when the update isn't about a returned result."),
       },
       async (args: { trigger: "commission" | "discovery" | "alarm" | "direction_change" | "operator";
-        strategy?: string; strategyWhy?: string; uncertainties?: string[]; assumptions?: string[]; risks?: string[]; note?: string }) =>
+        strategy?: string; strategyWhy?: string; uncertainties?: string[]; assumptions?: string[]; risks?: string[]; note?: string;
+        incorporating?: string[] }) =>
         guarded(() => {
           const row = state.update(userSessionId, args);
-          return { revision: row.revision, note: "Recorded. Your next generation reads this back — keep it true." };
+          // The full merged document, not just the revision: section-replace
+          // means the writer otherwise cannot confirm what its next
+          // generation will actually read until that generation spawns.
+          return { revision: row.revision,
+            state: { trigger: row.trigger, strategy: row.strategy, strategyWhy: row.strategyWhy,
+              uncertainties: row.uncertainties, assumptions: row.assumptions, risks: row.risks, note: row.note },
+            note: "Recorded. This is the full merged state your next generation reads — keep it true." };
         }),
     ),
 

@@ -47,9 +47,12 @@ export class OrchestrationStateService {
     assumptions?: string[];
     risks?: string[];
     note?: string;
+    /** Evidence refs this update incorporates — journaled, never stored. */
+    incorporating?: string[];
   }): OrchestrationStateRow {
-    const row = this.#store.append({ userSessionId, ...patch });
-    this.#emit(row, patch);
+    const { incorporating, ...sections } = patch;
+    const row = this.#store.append({ userSessionId, ...sections });
+    this.#emit(row, patch, incorporating);
     return row;
   }
 
@@ -102,7 +105,7 @@ export class OrchestrationStateService {
   }
 
   #emit(row: OrchestrationStateRow, patch: { trigger: OrchestrationStateRow["trigger"]; strategy?: string;
-    uncertainties?: string[]; assumptions?: string[]; risks?: string[] }): void {
+    uncertainties?: string[]; assumptions?: string[]; risks?: string[] }, incorporating?: string[]): void {
     const sections = (["strategy", "uncertainties", "assumptions", "risks"] as const)
       .filter((section) => patch[section] !== undefined);
     this.#bus.append({
@@ -111,7 +114,8 @@ export class OrchestrationStateService {
       payload: { userSessionId: row.userSessionId, revision: row.revision, trigger: row.trigger,
         sections: row.trigger === "completion" ? ["completion"] : sections,
         ...(row.strategy === "" ? {} : { strategy: row.strategy.slice(0, 200) }),
-        counts: { uncertainties: row.uncertainties.length, assumptions: row.assumptions.length, risks: row.risks.length } },
+        counts: { uncertainties: row.uncertainties.length, assumptions: row.assumptions.length, risks: row.risks.length },
+        ...(incorporating === undefined || incorporating.length === 0 ? {} : { incorporating }) },
     });
   }
 }

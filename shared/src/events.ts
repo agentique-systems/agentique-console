@@ -409,6 +409,13 @@ export interface StateUpdatedPayload {
   sections: string[];
   strategy?: string;
   counts: { uncertainties: number; assumptions: number; risks: number };
+  /**
+   * Refs to the evidence this update incorporates (handoff / agent-session /
+   * artifact ids). Journal-only attribution: never required, never a DB
+   * column — evaluation uses it to tie a state change to the returned result
+   * that occasioned it.
+   */
+  incorporating?: string[];
 }
 
 /** A seat joined an open session mid-run (main's add_agent). */

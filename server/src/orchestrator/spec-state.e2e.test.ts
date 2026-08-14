@@ -131,6 +131,7 @@ describe("orchestration state (fake SDK)", () => {
         trigger: "discovery",
         uncertainties: [],
         note: "api layer confirmed stateless — uncertainty resolved",
+        incorporating: ["ho_survey_final"],
       });
       yield successMessage();
     });
@@ -146,8 +147,22 @@ describe("orchestration state (fake SDK)", () => {
     expect(current?.uncertainties).toEqual([]);
     const digest = h.app.orchestrationState.digest(sessionId);
     expect(digest).toContain("parallel survey");
-    const events = h.sqlite.prepare("SELECT count(*) AS n FROM events WHERE type = 'user_session.state.updated'").get() as { n: number };
-    expect(events.n).toBe(2);
+    const events = h.sqlite.prepare(
+      "SELECT payload FROM events WHERE type = 'user_session.state.updated' ORDER BY seq").all() as { payload: string }[];
+    expect(events).toHaveLength(2);
+    // Evidence attribution rides the journal, exactly when passed.
+    expect(JSON.parse(events[0]!.payload).incorporating).toBeUndefined();
+    expect(JSON.parse(events[1]!.payload).incorporating).toEqual(["ho_survey_final"]);
+    // The rev-2 tool RESULT returns the MERGED document — the writer sees
+    // what its next generation will read, including rev-1's strategy.
+    const results = h.sqlite.prepare(
+      "SELECT payload FROM events WHERE type = 'user_session.tool.completed'").all()
+      .map((row) => String((row as { payload: string }).payload));
+    const merged = results.filter((payload) => payload.includes("full merged state")).at(-1);
+    expect(merged).toBeDefined();
+    // The second call passed no strategy, yet its result carries rev-1's.
+    expect(merged).toContain("parallel survey");
+    expect(merged).toContain("uncertainty resolved");
   });
 
   it("record_completion lands in the run summary as the justification", async () => {
