@@ -212,6 +212,59 @@ export interface ImproveMessageResponse {
   text: string;
 }
 
+/**
+ * The end-of-run report the operator reads on the sign-off card: console-owned
+ * facts plus main's own criteria→evidence justification (null = a VISIBLE
+ * omission, deliberately never a blocker). Lives here because the card
+ * renders it; the completion service re-exports it for server code.
+ */
+export interface RunSummaryDocument {
+  seqFrom: number;
+  seqTo: number;
+  verdict: "completed" | "completed_with_caveats" | "failed";
+  headline: string;
+  durationMs: number;
+  /** Wall clock minus the UNION of every turn interval across both lanes. */
+  deadAirMs: number;
+  build: { filesChanged: number; files: string[]; source: "git" | "handoff" | "none" };
+  tasks: { completed: number; total: number; open: string[]; ledgerUpdatedAt: string | null };
+  cost: {
+    usd: number | null;
+    /** recordedTurns / observedTurns. Below 0.9 the figure is labelled partial. */
+    coverage: number;
+    recordedTurns: number;
+    observedTurns: number;
+    inputTokens: number;
+    outputTokens: number;
+    byParticipant: { participant: string; usd: number | null; turns: number }[];
+  };
+  decisions: { question: string; answer: string; askedBy: string }[];
+  /** Console-owned facts about what the run did not do as asked. */
+  deviations: string[];
+  uncertainty: string[];
+  /** Seats whose provider process the Console released when the run settled. */
+  resources: { reapedSeats: number; detail: string[] };
+  justification: {
+    revision: number;
+    criteria: { criterion: string; met: boolean; evidence: { kind: string; ref: string }[] }[];
+    knownGaps: string[];
+    nonGoals: string[];
+  } | null;
+  friction: { apiRetries: number; rateLimited: number; failedTurns: number; watchdogTrips: number };
+}
+
+// GET /api/user-sessions/:id/run-summaries/:summaryId — the full document
+// behind the sign-off card's scalars.
+export interface GetRunSummaryResponse {
+  id: string;
+  status: "proposed" | "accepted" | "changes_requested";
+  verdict: RunSummaryDocument["verdict"];
+  note: string | null;
+  createdAt: string;
+  resolvedAt: string | null;
+  document: RunSummaryDocument;
+}
+
 // GET /api/user-sessions/:id/spec — the living specification.
 export interface SpecRevisionWire {
   id: string;

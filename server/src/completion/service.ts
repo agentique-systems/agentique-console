@@ -181,6 +181,18 @@ export class RunCompletionService {
    * either way — completion is not archival, and a completed run in the
    * sidebar should read "done", not "hidden".
    */
+  /**
+   * The full persisted document behind a sign-off card's scalars — the
+   * justification, deviations, and uncertainty LIST the proposal event's
+   * stats deliberately omit.
+   */
+  getSummary(userSessionId: string, summaryId: string): { id: string; status: "proposed" | "accepted" | "changes_requested"; verdict: RunSummaryDocument["verdict"]; note: string | null; createdAt: string; resolvedAt: string | null; document: RunSummaryDocument } {
+    const row = this.#deps.db.select().from(runSummaries).where(eq(runSummaries.id, summaryId)).get();
+    if (!row || row.userSessionId !== userSessionId) throw new NotFoundError(`no run summary ${summaryId} in session ${userSessionId}`);
+    return { id: row.id, status: row.status, verdict: row.verdict, note: row.note,
+      createdAt: row.createdAt, resolvedAt: row.resolvedAt, document: row.document as unknown as RunSummaryDocument };
+  }
+
   resolve(userSessionId: string, decision: "accept" | "changes", note?: string): void {
     const { db, repo, bus } = this.#deps;
     const session = repo.getUserSession(userSessionId);

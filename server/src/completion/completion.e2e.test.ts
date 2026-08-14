@@ -72,6 +72,20 @@ describe("run completion", () => {
     await send(h).handler(FINAL, {});
     await settle();
     expect(h.db.select().from(runSummaries).all()).toHaveLength(1);
+
+    // The full document is servable behind the card's scalars — the
+    // justification/deviations/uncertainty LIST the stats payload omits.
+    const summaryRow = h.db.select().from(runSummaries).all()[0]!;
+    const served = h.completion.getSummary(userSessionId, summaryRow.id);
+    expect(served.id).toBe(summaryRow.id);
+    expect(served.status).toBe("proposed");
+    expect(served.document.headline).toBeTruthy();
+    expect(Array.isArray(served.document.uncertainty)).toBe(true);
+    // justification is null here (no record_completion ran) — a VISIBLE
+    // omission the card renders, not an absent field.
+    expect(served.document.justification).toBeNull();
+    // A foreign session cannot read it.
+    expect(() => h.completion.getSummary("us_someone_else", summaryRow.id)).toThrow(/no run summary/);
   });
 
   it("does NOT propose while a question is pending", async () => {

@@ -113,6 +113,12 @@ export function registerUserSessionRoutes(
     },
   );
 
+  // The full run-summary document behind a sign-off card's scalars.
+  app.get<{ Params: { id: string; summaryId: string } }>(
+    "/api/user-sessions/:id/run-summaries/:summaryId",
+    async (request) => ctx.app.completion.getSummary(request.params.id, request.params.summaryId),
+  );
+
   // The living spec: revision history + the approved text that governs the run.
   app.get<{ Params: { id: string } }>(
     "/api/user-sessions/:id/spec",

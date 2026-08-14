@@ -11,6 +11,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { and, asc, eq, gte, inArray } from "drizzle-orm";
+import type { RunSummaryDocument } from "@agentique-console/shared";
 import type { ConsoleEvent } from "@agentique-console/shared";
 import type { Db } from "../db/client.ts";
 import type { Repo } from "../db/repo.ts";
@@ -32,45 +33,9 @@ export interface ReapResult {
   seats: { agentSessionId: string; agent: string }[];
 }
 
-export interface RunSummaryDocument {
-  seqFrom: number;
-  seqTo: number;
-  verdict: "completed" | "completed_with_caveats" | "failed";
-  headline: string;
-  durationMs: number;
-  /** Wall clock minus the UNION of every turn interval across both lanes. */
-  deadAirMs: number;
-  build: { filesChanged: number; files: string[]; source: "git" | "handoff" | "none" };
-  tasks: { completed: number; total: number; open: string[]; ledgerUpdatedAt: string | null };
-  cost: {
-    usd: number | null;
-    /** recordedTurns / observedTurns. Below 0.9 the figure is labelled partial. */
-    coverage: number;
-    recordedTurns: number;
-    observedTurns: number;
-    inputTokens: number;
-    outputTokens: number;
-    byParticipant: { participant: string; usd: number | null; turns: number }[];
-  };
-  decisions: { question: string; answer: string; askedBy: string }[];
-  /** Console-owned facts about what the run did not do as asked. */
-  deviations: string[];
-  uncertainty: string[];
-  /** Seats whose provider process the Console released when the run settled. */
-  resources: { reapedSeats: number; detail: string[] };
-  /**
-   * Main's own criteria→evidence record (record_completion), rendered beside
-   * the console's facts. Null = the orchestrator recorded none — a VISIBLE
-   * omission on the sign-off card, deliberately not a blocker.
-   */
-  justification: {
-    revision: number;
-    criteria: { criterion: string; met: boolean; evidence: { kind: string; ref: string }[] }[];
-    knownGaps: string[];
-    nonGoals: string[];
-  } | null;
-  friction: { apiRetries: number; rateLimited: number; failedTurns: number; watchdogTrips: number };
-}
+// RunSummaryDocument now lives in shared/src/api.ts (the sign-off card
+// renders it); re-exported here for server-internal imports.
+export type { RunSummaryDocument };
 
 export interface BuildRunSummaryInput {
   db: Db;
