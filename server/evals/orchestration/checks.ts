@@ -510,7 +510,7 @@ export function notSignedOffAfter(objection: EvPredicate, label = "the reviewer'
       if (at === undefined) return fail(`marker for ${label} not found`);
       const accepted = trace
         .events("run.signoff.resolved")
-        .find((event) => event.seq > at.seq && event.payload.accepted === true);
+        .find((event) => event.seq > at.seq && event.payload.decision === "accept");
       if (accepted === undefined) return pass("no unchallenged sign-off followed the objection", [at]);
       const responded = trace
         .events()

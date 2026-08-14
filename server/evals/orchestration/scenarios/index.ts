@@ -6,6 +6,8 @@ import hiddenConstraint from "./hidden-constraint.ts";
 import parallelExploration from "./parallel-exploration.ts";
 import hungAgent from "./hung-agent.ts";
 import noisyContraryEvidence from "./noisy-contrary-evidence.ts";
+import restartHonesty from "./restart-honesty.ts";
+import reviewerInvalidatesSpec from "./reviewer-invalidates-spec.ts";
 import suboptimalFraming from "./suboptimal-framing.ts";
 import trivialNoDelegation from "./trivial-no-delegation.ts";
 import twoPerspectivesBetter from "./two-perspectives-better.ts";
@@ -25,7 +27,9 @@ export const SCENARIOS: OrchestrationScenario[] = [
   noisyContraryEvidence,
   ambiguousSignal,
   twoPerspectivesBetter,
+  reviewerInvalidatesSpec,
   hungAgent,
+  restartHonesty,
 ];
 
 /**
@@ -34,7 +38,5 @@ export const SCENARIOS: OrchestrationScenario[] = [
  * Scenarios marked live-only never get a Tier A variant.
  */
 export const PLANNED: { id: string; awaiting: string }[] = [
-  { id: "reviewer-invalidates-spec", awaiting: "scenario authoring (uses the runner's proposal resolution)" },
-  { id: "restart-honesty", awaiting: "scenario authoring (uses the runner's restart phases)" },
   { id: "visual-judgment", awaiting: "live-only by design (rendering cannot be faked); lands with the artifact-evidence bundle" },
 ];
