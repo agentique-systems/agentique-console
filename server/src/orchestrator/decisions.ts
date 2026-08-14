@@ -51,6 +51,42 @@ export function renderAnswer(answers: Record<string, string[]>, freeText?: Recor
   return [...chosen, ...typed].join(" · ");
 }
 
+/** The spec marker a living-spec card carries in its plan_approval payload. */
+export function specMarkerOf(payload: unknown): { revision: number; changeNote?: string } | null {
+  const spec = (payload as { spec?: { revision?: unknown; changeNote?: unknown } } | null | undefined)?.spec;
+  if (!spec || typeof spec.revision !== "number") return null;
+  return {
+    revision: spec.revision,
+    ...(typeof spec.changeNote === "string" && spec.changeNote !== "" ? { changeNote: spec.changeNote } : {}),
+  };
+}
+
+/** One question string for a plan_approval row, spec-aware. */
+export function planDecisionQuestion(payload: unknown): string {
+  const marker = specMarkerOf(payload);
+  return marker ? `Specification approval (rev ${marker.revision})` : "Plan approval";
+}
+
+/**
+ * One renderer for every consumer of a plan_approval decision. Plain plans
+ * keep the historical strings byte-for-byte; spec-marked rows say WHICH
+ * revision changed and why — the per-delivery decision delta is how a
+ * running seat learns the governing spec moved, and a generic
+ * "Approved the plan" line told it nothing.
+ */
+export function planDecisionStrings(payload: unknown, approved: boolean, note?: string): { question: string; answer: string } {
+  const marker = specMarkerOf(payload);
+  const suffix = note === undefined ? "" : `: ${note}`;
+  if (!marker) {
+    return { question: "Plan approval", answer: `${approved ? "Approved the plan" : "Requested changes to the plan"}${suffix}` };
+  }
+  const change = marker.changeNote === undefined ? "" : ` — ${marker.changeNote}`;
+  return {
+    question: `Specification approval (rev ${marker.revision})`,
+    answer: `${approved ? "Approved" : "Requested changes to"} specification revision ${marker.revision}${change}${suffix}`,
+  };
+}
+
 /**
  * The decision a resolved interaction records, or null when it records none
  * (unresolved, contentless, or dismissed WITHOUT words). Rejected plans count
@@ -68,11 +104,12 @@ export function decisionOf(row: DecisionSourceRow): OperatorDecision | null {
   const chatAnswered = !isPlan && row.status === "dismissed" &&
     typeof response.chatText === "string" && response.chatText.trim() !== "";
   if (row.status !== "answered" && !(isPlan && row.status === "rejected") && !chatAnswered) return null;
-  const question = isPlan
-    ? "Plan approval"
+  const planStrings = isPlan ? planDecisionStrings(row.payload, response.decision === "approve", response.note) : null;
+  const question = planStrings
+    ? planStrings.question
     : ((row.payload as { questions?: InteractionQuestion[] }).questions ?? []).map((q) => q.question).join(" | ");
-  const answer = isPlan
-    ? `${response.decision === "approve" ? "Approved the plan" : "Requested changes to the plan"}${response.note === undefined ? "" : `: ${response.note}`}`
+  const answer = planStrings
+    ? planStrings.answer
     : chatAnswered
       ? `(in chat) ${response.chatText!.trim()}`
       : renderAnswer(response.answers ?? {}, response.freeText);

@@ -401,7 +401,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
       },
       async (args: { document: string; changeNote: string }) => {
         const draft = specs.propose(userSessionId, args.document, args.changeNote);
-        const { resolution } = interactions.createSpecApproval(userSessionId, args.document, draft.revision);
+        const { resolution } = interactions.createSpecApproval(userSessionId, args.document, draft.revision, args.changeNote);
         const resolved = await resolution;
         if (resolved.kind === "decision" && resolved.approved) {
           const finalText = resolved.editedDocument?.trim() || args.document;

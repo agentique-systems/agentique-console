@@ -15,7 +15,7 @@ import type {
   ResolveInteractionBody,
 } from "@agentique-console/shared";
 import type { InteractionRow, InteractionStore } from "../db/stores/interaction-store.ts";
-import { renderAnswer } from "./decisions.ts";
+import { planDecisionQuestion, planDecisionStrings, renderAnswer } from "./decisions.ts";
 import type { EventBus } from "../events/bus.ts";
 import { newId, nowIso } from "../ids.ts";
 import { ConflictError, NotFoundError, InvalidInputError } from "../errors.ts";
@@ -254,11 +254,13 @@ export class InteractionService {
     userSessionId: string,
     document: string,
     specRevision: number,
+    changeNote?: string,
   ): { id: string; resolution: Promise<InteractionResolution> } {
+    const spec = { revision: specRevision, ...(changeNote === undefined || changeNote === "" ? {} : { changeNote }) };
     return this.#create(
       userSessionId,
       "plan_approval",
-      { plan: document, spec: { revision: specRevision } },
+      { plan: document, spec },
       undefined,
       undefined,
       {},
@@ -266,7 +268,7 @@ export class InteractionService {
         this.#bus.append({
           type: "user_session.plan.proposed",
           userSessionId,
-          payload: { userSessionId, interactionId: id, plan: document, spec: { revision: specRevision } },
+          payload: { userSessionId, interactionId: id, plan: document, spec },
         });
       },
     );
@@ -417,8 +419,10 @@ export class InteractionService {
         },
       });
       // A plan approval IS an operator decision — the largest one they make.
+      // Spec-marked cards record the revision they govern (the decision delta
+      // is how running seats learn the spec moved).
       this.#recordDecision(row, {
-        answer: `${approved ? "Approved the plan" : "Requested changes to the plan"}${body.note === undefined ? "" : `: ${body.note}`}`,
+        answer: planDecisionStrings(row.payload, approved, body.note).answer,
         source: "plan_approval",
       });
       this.#pending.get(interactionId)?.({
@@ -470,7 +474,7 @@ export class InteractionService {
         // operator.decision.recorded, and a chat rejection is no less a
         // decision than a clicked one.
         this.#recordDecision(row, {
-          answer: `Requested changes to the plan (in chat): ${chatText}`,
+          answer: `${planDecisionStrings(row.payload, false).answer} (in chat): ${chatText}`,
           source: "plan_approval",
         });
         this.#pending.get(row.id)?.({
@@ -599,7 +603,7 @@ export class InteractionService {
     input: { answer: string; note?: string; source: "interaction" | "plan_approval" },
   ): void {
     const question = row.kind === "plan_approval"
-      ? "Plan approval"
+      ? planDecisionQuestion(row.payload)
       : ((row.payload as { questions?: InteractionQuestion[] }).questions ?? []).map((q) => q.question).join(" | ");
     if (question === "" && input.answer === "") return;
     this.#bus.append({

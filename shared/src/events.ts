@@ -172,7 +172,7 @@ export interface PlanProposedPayload {
   interactionId: string;
   plan: string;
   /** Present when this card proposes a SPEC revision rather than a plan. */
-  spec?: { revision: number };
+  spec?: { revision: number; changeNote?: string };
 }
 export interface PlanResolvedPayload {
   userSessionId: string;
