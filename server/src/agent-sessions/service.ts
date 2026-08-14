@@ -359,7 +359,7 @@ export class AgentSessionService {
   }
 
   /** Mid-run roster growth (`SessionLifecycle.addAgent`); patterns with fixed rosters refuse. */
-  addAgent(agentSessionId: string, input: { name: string; profileId: string; instructions?: string; model?: string; owns?: string[] }): { agent: string; role: string } {
+  addAgent(agentSessionId: string, input: { name: string; profileId: string; instructions?: string; model?: string; owns?: string[]; why?: string }): { agent: string; role: string } {
     return this.#lifecycle.addAgent(agentSessionId, input);
   }
 

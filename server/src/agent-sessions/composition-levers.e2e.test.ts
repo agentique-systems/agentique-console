@@ -61,15 +61,30 @@ describe("composition levers (fake SDK)", () => {
     const h = makeHubHarness();
     const { created } = await seatHub(h);
 
-    const added = h.host.addAgent(created.agentSessionId, { name: "auditor", profileId: "reviewer" });
+    const added = h.host.addAgent(created.agentSessionId, { name: "auditor", profileId: "reviewer",
+      why: "the diff touches auth — it needs an independent security pass" });
     expect(added).toEqual({ agent: "auditor", role: "specialist" });
     expect(h.repo.getAgent(created.agentSessionId, "auditor")?.role).toBe("specialist");
     const events = h.sqlite.prepare("SELECT payload FROM events WHERE type = 'agent_session.agent.added'").all() as { payload: string }[];
     expect(events).toHaveLength(1);
-    // The coordinator was told about its new teammate through the mailroom.
+    // Capture-at-act rationale rides the event…
+    expect(JSON.parse(events[0]!.payload).why).toBe("the diff touches auth — it needs an independent security pass");
+    // …and the coordinator's notice, through the mailroom.
     const notice = h.repo.listMessages("agent", created.agentSessionId)
       .find((row) => row.toName === "coordinator" && String((row.payload?.handoff as { action?: string } | undefined)?.action ?? "").startsWith("New agent \"auditor\""));
     expect(notice).toBeDefined();
+    expect(String((notice!.payload?.handoff as { stateSummary?: string }).stateSummary ?? "")).toContain("Why: the diff touches auth");
+
+    // Without a why, the notice keeps its original bytes — absence is a dash,
+    // never boilerplate.
+    h.host.addAgent(created.agentSessionId, { name: "helper", profileId: "explorer" });
+    const plain = h.repo.listMessages("agent", created.agentSessionId)
+      .find((row) => String((row.payload?.handoff as { action?: string } | undefined)?.action ?? "").startsWith("New agent \"helper\""));
+    const summary = String((plain!.payload?.handoff as { stateSummary?: string }).stateSummary ?? "");
+    expect(summary).not.toContain("Why:");
+    expect(summary).toContain("Assign it work as you would any specialist.");
+    const addedEvents = h.sqlite.prepare("SELECT payload FROM events WHERE type = 'agent_session.agent.added'").all() as { payload: string }[];
+    expect(JSON.parse(addedEvents[1]!.payload).why).toBeUndefined();
 
     // A pipeline's stages ARE its shape: no late seats.
     const userSessionId = h.addUserSession();

@@ -235,7 +235,7 @@ export class SessionLifecycle {
    * shape, and mappers are the reducer's to mint. The contract stays frozen;
    * `agents.role` is the binding, which is what makes a late seat honest.
    */
-  addAgent(agentSessionId: string, input: { name: string; profileId: string; instructions?: string; model?: string; owns?: string[] }): { agent: string; role: string } {
+  addAgent(agentSessionId: string, input: { name: string; profileId: string; instructions?: string; model?: string; owns?: string[]; why?: string }): { agent: string; role: string } {
     const { repo, bus } = this.#deps;
     const session = repo.getAgentSession(agentSessionId);
     if (!session) throw new NotFoundError(`no agent session ${agentSessionId}`);
@@ -283,14 +283,16 @@ export class SessionLifecycle {
     const ord = existing.reduce((max, seat) => Math.max(max, seat.ord), -1) + 1;
     const snapshot = this.#deps.snapshotProfile(profile);
     repo.insertAgent(this.agentRow(agentSessionId, name, role, snapshot, input.instructions ?? "", input.model, owns, ord, nowIso()));
+    const why = input.why?.trim();
     bus.append({ type: "agent_session.agent.added", userSessionId: session.userSessionId, agentSessionId,
-      payload: { agentSessionId, agent: name, role, profileId: profile.id } });
+      payload: { agentSessionId, agent: name, role, profileId: profile.id, ...(why ? { why } : {}) } });
     // The entry agent learns immediately — roster lines refresh per delivery,
-    // but an unannounced teammate is a coordination trap.
+    // but an unannounced teammate is a coordination trap. Main's rationale
+    // rides the notice: the seat's PURPOSE shapes what work it gets.
     try {
       this.#deps.transfer({ agentSessionId, speaker: { kind: "system", name: CONSOLE_SENDER }, to: this.entryAgent(agentSessionId),
         handoff: this.#deps.simpleHandoff(`New agent "${name}" (${profile.id}) joined as ${role}`, "in_progress",
-          `Main added "${name}" to this session mid-run${owns.length > 0 ? `; it owns ${owns.join(", ")}` : ""}. Assign it work as you would any ${role}.`,
+          `Main added "${name}" to this session mid-run${owns.length > 0 ? `; it owns ${owns.join(", ")}` : ""}${why ? `. Why: ${why}` : ""}. Assign it work as you would any ${role}.`,
           null), category: "update", dedupeKey: `agent-added:${agentSessionId}:${name}` });
     } catch { /* best effort — the seat exists and the roster shows it */ }
     return { agent: name, role };

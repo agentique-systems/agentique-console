@@ -531,8 +531,10 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         instructions: z.string().optional().describe("Brief appended to the profile instructions"),
         model: z.string().optional(),
         owns: z.array(z.string()).default([]).describe("Exclusive write scope; required for a writing profile"),
+        why: z.string().max(280).optional()
+          .describe("Why this seat now — the emergent need the roster did not anticipate. Journaled with the addition; the entry agent and the run review read it."),
       },
-      async (args: { agentSessionId: string; name: string; profileId: string; instructions?: string; model?: string; owns: string[] }) =>
+      async (args: { agentSessionId: string; name: string; profileId: string; instructions?: string; model?: string; owns: string[]; why?: string }) =>
         guarded(() => {
           owned(args.agentSessionId);
           const added = host.addAgent(args.agentSessionId, {
@@ -540,6 +542,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
             ...(args.instructions === undefined ? {} : { instructions: args.instructions }),
             ...(args.model === undefined ? {} : { model: args.model }),
             owns: args.owns,
+            ...(args.why === undefined ? {} : { why: args.why }),
           });
           return { ...added, status: "seated",
             note: "The entry agent has been told. Route assignments through it; you can steer the new seat directly with send_to_coordinator's `to` (update-only)." };

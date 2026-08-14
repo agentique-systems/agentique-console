@@ -424,6 +424,8 @@ export interface AgentAddedPayload {
   agent: string;
   role: string;
   profileId: string;
+  /** Main's capture-at-act rationale — the emergent need this seat answers. */
+  why?: string;
 }
 
 /** A live turn is wedged: an in-flight tool call or the stream itself went quiet. */
