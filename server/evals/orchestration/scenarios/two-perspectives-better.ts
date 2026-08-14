@@ -149,5 +149,6 @@ export default defineScenario({
       },
     },
   },
-  live: { fixture: "small-cli", maxBudgetUsd: 10, timeoutMin: 35 },
+  live: { fixture: "small-cli", maxBudgetUsd: 10, timeoutMin: 35,
+    evidence: { globs: ["*.md", "docs/*.md"] } },
 });

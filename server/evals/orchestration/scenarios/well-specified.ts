@@ -94,5 +94,7 @@ export default defineScenario({
       },
     },
   },
-  live: { fixture: "small-cli", maxBudgetUsd: 5, timeoutMin: 20 },
+  live: { fixture: "small-cli", maxBudgetUsd: 5, timeoutMin: 20, defaultRuns: 2,
+    validator: { command: "node --test && node src/cli.js list --json" },
+    evidence: { globs: ["src/cli.js"] } },
 });

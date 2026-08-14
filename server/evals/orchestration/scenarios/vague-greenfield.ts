@@ -95,5 +95,6 @@ export default defineScenario({
       },
     },
   },
-  live: { fixture: "empty-workspace", maxBudgetUsd: 8, timeoutMin: 30 },
+  live: { fixture: "empty-workspace", maxBudgetUsd: 8, timeoutMin: 30, defaultRuns: 2,
+    evidence: { globs: ["*.md", "package.json", "src/**"] } },
 });

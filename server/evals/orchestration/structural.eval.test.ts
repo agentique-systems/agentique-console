@@ -12,6 +12,7 @@ import { runScenarioVariant } from "./structural-runner.ts";
 
 describe("orchestration structural evals (Tier A)", () => {
   for (const scenario of SCENARIOS) {
+    if (scenario.fake === undefined) continue; // live-only by design (e.g. visual-judgment)
     describe(scenario.id, () => {
       for (const [variantName, variant] of Object.entries(scenario.fake?.variants ?? {})) {
         it(`${variantName} (${variant.expect})`, { timeout: 30_000 }, async () => {
@@ -45,9 +46,11 @@ describe("orchestration structural evals (Tier A)", () => {
     }
   });
 
-  describe("planned scenarios (land with their features)", () => {
-    for (const planned of PLANNED) {
-      it.todo(`${planned.id} — awaiting ${planned.awaiting}`);
-    }
-  });
+  if (PLANNED.length > 0) {
+    describe("planned scenarios (land with their features)", () => {
+      for (const planned of PLANNED) {
+        it.todo(`${planned.id} — awaiting ${planned.awaiting}`);
+      }
+    });
+  }
 });

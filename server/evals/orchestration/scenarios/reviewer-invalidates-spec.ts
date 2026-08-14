@@ -296,5 +296,7 @@ export default defineScenario({
       },
     },
   },
-  live: { fixture: "small-cli", maxBudgetUsd: 10, timeoutMin: 35 },
+  live: { fixture: "small-cli", maxBudgetUsd: 10, timeoutMin: 35,
+    validator: { command: "node --test" },
+    evidence: { globs: ["src/*.js", "tracker.config.json"] } },
 });

@@ -39,6 +39,7 @@ import type { UserSessionRow } from "../../../src/db/repo.ts";
 import { SCENARIOS } from "../scenarios/index.ts";
 import type { OrchestrationScenario } from "../scenario.ts";
 import { Trace } from "../trace.ts";
+import { exportEvidenceBundle } from "./export-evidence.ts";
 import { exportRunToDir } from "./export-trace.ts";
 import { runOperatorPolicy } from "./operator-policy.ts";
 
@@ -144,6 +145,7 @@ async function runOne(scenario: OrchestrationScenario, outDir: string): Promise<
   const worktreesDir = path.join(dataDir, "worktrees");
   if (fs.existsSync(worktreesDir)) fs.cpSync(worktreesDir, path.join(outDir, "worktrees"), { recursive: true });
   exportRunToDir(path.join(outDir, "console.db"), outDir);
+  exportEvidenceBundle(scenario, outDir);
 
   const trace = Trace.fromFile(path.join(outDir, "console.db"), session.id);
   const checks = scenario.checks.map((check) => ({

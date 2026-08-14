@@ -26,6 +26,7 @@ interface RunReport {
   outcome: string;
   checks: { id: string; pass: boolean; detail: string }[];
   judgments: Judgment[];
+  outcomeJudgments: Judgment[];
 }
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -36,10 +37,11 @@ const baselineFile = process.argv[3] ?? path.join(here, "../results/baseline.jso
 function readRun(runDir: string): RunReport {
   const checks = JSON.parse(fs.readFileSync(path.join(runDir, "checks.json"), "utf8")) as { scenario: string; outcome: string; checks: RunReport["checks"] };
   const judgmentFile = path.join(runDir, "judgment.json");
-  const judgments = fs.existsSync(judgmentFile)
-    ? (JSON.parse(fs.readFileSync(judgmentFile, "utf8")) as { judgments: Judgment[] }).judgments
-    : [];
-  return { name: path.basename(runDir), scenario: checks.scenario, outcome: checks.outcome, checks: checks.checks, judgments };
+  const parsed = fs.existsSync(judgmentFile)
+    ? (JSON.parse(fs.readFileSync(judgmentFile, "utf8")) as { judgments: Judgment[]; outcomeJudgments?: Judgment[] })
+    : { judgments: [], outcomeJudgments: [] };
+  return { name: path.basename(runDir), scenario: checks.scenario, outcome: checks.outcome, checks: checks.checks,
+    judgments: parsed.judgments, outcomeJudgments: parsed.outcomeJudgments ?? [] };
 }
 
 const isSeries = fs.existsSync(path.join(target, "series.json"));
@@ -81,31 +83,45 @@ for (const id of checkIds) {
 }
 for (const run of runs) console.log(`  (${run.name} outcome: ${run.outcome})`);
 
-// Judged dimensions: per-run judge medians, then (N ≥ 2 only) across-run stats.
-console.log(`\n## Judged dimensions (judge median of reps per run${single ? "" : "; across-run median and range"})\n`);
-const dimensions = [...new Set(runs.flatMap((run) => run.judgments.map((entry) => entry.dimension)))];
-for (const dimension of dimensions) {
-  const perRun = runs.map((run) => {
-    const entries = run.judgments.filter((entry) => entry.dimension === dimension);
-    const scores = entries.map((entry) => entry.judgment?.score).filter((value): value is number => typeof value === "number");
-    const failed = entries.filter((entry) => entry.error !== undefined).length;
-    return { run: run.name, scores, failed, total: entries.length, median: median(scores), notes: entries.map((entry) => entry.judgment?.notes).filter((value): value is string => typeof value === "string" && value !== "") };
-  });
-  const parts = perRun.map((entry) => {
-    if (entry.scores.length < 2) return `${entry.run}: insufficient valid judgments (${entry.scores.length}/${entry.total})`;
-    const spread = `${Math.min(...entry.scores)}–${Math.max(...entry.scores)}`;
-    const failures = entry.failed > 0 ? `, ${entry.total - entry.failed}/${entry.total} judgments succeeded` : "";
-    return `${entry.run}: ${entry.median} [${spread}]${failures}`;
-  });
-  const runMedians = perRun.map((entry) => entry.median).filter((value): value is number => value !== null);
-  const across = !single && runMedians.length >= 2
-    ? ` | across runs: ${median(runMedians)} (range ${Math.min(...runMedians)}–${Math.max(...runMedians)})`
-    : "";
-  const base = baseline.scenarios?.[scenario]?.dimensions?.[dimension]?.median;
-  const anchor = single ? perRun[0]!.median : median(runMedians);
-  const delta = anchor !== null && base !== undefined ? ` (baseline ${base}, Δ${(anchor - base) >= 0 ? "+" : ""}${anchor - base})` : base === undefined ? " (no baseline)" : "";
-  console.log(`- **${dimension}**: ${parts.join("; ")}${across}${delta}`);
-  const note = perRun.flatMap((entry) => entry.notes)[0];
-  if (note !== undefined) console.log(`  > ${note.slice(0, 400)}`);
+function renderDimensions(entriesOf: (run: RunReport) => Judgment[]): void {
+  const dimensions = [...new Set(runs.flatMap((run) => entriesOf(run).map((entry) => entry.dimension)))];
+  if (dimensions.length === 0) {
+    console.log("(no judgments recorded)");
+    return;
+  }
+  for (const dimension of dimensions) {
+    const perRun = runs.map((run) => {
+      const entries = entriesOf(run).filter((entry) => entry.dimension === dimension);
+      const scores = entries.map((entry) => entry.judgment?.score).filter((value): value is number => typeof value === "number");
+      const failed = entries.filter((entry) => entry.error !== undefined).length;
+      return { run: run.name, scores, failed, total: entries.length, median: median(scores), notes: entries.map((entry) => entry.judgment?.notes).filter((value): value is string => typeof value === "string" && value !== "") };
+    });
+    const parts = perRun.map((entry) => {
+      if (entry.scores.length < 2) return `${entry.run}: insufficient valid judgments (${entry.scores.length}/${entry.total})`;
+      const spread = `${Math.min(...entry.scores)}–${Math.max(...entry.scores)}`;
+      const failures = entry.failed > 0 ? `, ${entry.total - entry.failed}/${entry.total} judgments succeeded` : "";
+      return `${entry.run}: ${entry.median} [${spread}]${failures}`;
+    });
+    const runMedians = perRun.map((entry) => entry.median).filter((value): value is number => value !== null);
+    const across = !single && runMedians.length >= 2
+      ? ` | across runs: ${median(runMedians)} (range ${Math.min(...runMedians)}–${Math.max(...runMedians)})`
+      : "";
+    const base = baseline.scenarios?.[scenario]?.dimensions?.[dimension]?.median;
+    const anchor = single ? perRun[0]!.median : median(runMedians);
+    const delta = anchor !== null && base !== undefined ? ` (baseline ${base}, Δ${(anchor - base) >= 0 ? "+" : ""}${anchor - base})` : base === undefined ? " (no baseline)" : "";
+    console.log(`- **${dimension}**: ${parts.join("; ")}${across}${delta}`);
+    const note = perRun.flatMap((entry) => entry.notes)[0];
+    if (note !== undefined) console.log(`  > ${note.slice(0, 400)}`);
+  }
 }
+
+// Judged dimensions: per-run judge medians, then (N ≥ 2 only) across-run stats.
+console.log(`\n## Trace axis — judged dimensions (judge median of reps per run${single ? "" : "; across-run median and range"})\n`);
+renderDimensions((run) => run.judgments);
+
+// The artifact, on its own axis — never averaged with trace dimensions: a
+// beautiful trace with an inferior artifact is a failure, and a good artifact
+// from a poor process is luck. Both facts must survive the report.
+console.log("\n## Outcome axis — artifact quality (separate axis, never blended with the trace)\n");
+renderDimensions((run) => run.outcomeJudgments);
 console.log("\nQualitative notes above are part of the verdict — a delta without its note is not evidence.");

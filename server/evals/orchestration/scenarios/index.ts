@@ -12,6 +12,7 @@ import suboptimalFraming from "./suboptimal-framing.ts";
 import trivialNoDelegation from "./trivial-no-delegation.ts";
 import twoPerspectivesBetter from "./two-perspectives-better.ts";
 import vagueGreenfield from "./vague-greenfield.ts";
+import visualJudgment from "./visual-judgment.ts";
 import wastefulParallelism from "./wasteful-parallelism.ts";
 import wellSpecified from "./well-specified.ts";
 
@@ -30,13 +31,13 @@ export const SCENARIOS: OrchestrationScenario[] = [
   reviewerInvalidatesSpec,
   hungAgent,
   restartHonesty,
+  visualJudgment,
 ];
 
 /**
- * Planned scenarios that depend on capabilities this project is adding; each
- * lands (and its it.todo flips to a real test) with the feature it names.
- * Scenarios marked live-only never get a Tier A variant.
+ * Planned scenarios awaiting features. Empty: every planned scenario has
+ * landed. (visual-judgment is live-only by design — rendering cannot be
+ * faked — so it ships without Tier A variants and uses only checkers other
+ * scenarios validate.)
  */
-export const PLANNED: { id: string; awaiting: string }[] = [
-  { id: "visual-judgment", awaiting: "live-only by design (rendering cannot be faked); lands with the artifact-evidence bundle" },
-];
+export const PLANNED: { id: string; awaiting: string }[] = [];

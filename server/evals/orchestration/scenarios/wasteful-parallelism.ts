@@ -81,5 +81,7 @@ export default defineScenario({
       },
     },
   },
-  live: { fixture: "small-cli", maxBudgetUsd: 4, timeoutMin: 15 },
+  live: { fixture: "small-cli", maxBudgetUsd: 4, timeoutMin: 15, defaultRuns: 2,
+    validator: { command: "node --test && ! grep -rn fooBar src" },
+    evidence: { globs: ["src/util.js"] } },
 });

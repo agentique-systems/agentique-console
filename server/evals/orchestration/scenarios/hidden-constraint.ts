@@ -202,5 +202,7 @@ export default defineScenario({
       },
     },
   },
-  live: { fixture: "pinned-node-repo", maxBudgetUsd: 8, timeoutMin: 30 },
+  live: { fixture: "pinned-node-repo", maxBudgetUsd: 8, timeoutMin: 30,
+    validator: { command: "npm test" },
+    evidence: { globs: ["package.json", "scripts/build.js"] } },
 });
