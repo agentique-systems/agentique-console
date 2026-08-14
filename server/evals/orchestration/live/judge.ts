@@ -60,6 +60,20 @@ async function judgeRun(runDir: string): Promise<{ dimensionsWithNoValidScore: s
   if (!scenario) throw new Error(`unknown scenario ${checks.scenario}`);
   const transcript = fs.readFileSync(path.join(runDir, "transcript.md"), "utf8");
   const metrics = fs.readFileSync(path.join(runDir, "run.json"), "utf8");
+  // Decision-time evidence: for the dimensions that judge WHAT WAS KNOWABLE
+  // at each act, hand the judge the per-act packets and the full questions —
+  // the decision-quality rubric demands contemporaneous context, and the
+  // transcript alone under-serves it.
+  const wantsDecisionEvidence = scenario.stressedDimensions.some((dimension) =>
+    ["decision-quality", "question-quality", "question-economy", "intent-development"].includes(dimension));
+  const readIfPresent = (file: string, cap: number): string => {
+    const full = path.join(runDir, file);
+    return fs.existsSync(full) ? fs.readFileSync(full, "utf8").slice(0, cap) : "";
+  };
+  const decisionEvidence = wantsDecisionEvidence
+    ? `\n\n## Decision-time evidence packets (what was knowable AT each major act)\n${readIfPresent("evidence/packets.json", 30_000)}` +
+      `\n\n## Questions asked and answered\n${readIfPresent("questions.json", 15_000)}`
+    : "";
 
   const rubricsDir = path.join(here, "../rubrics");
   const rubricFiles = fs.readdirSync(rubricsDir).filter((name) => name.endsWith(".md") && !name.startsWith("_"));
@@ -81,7 +95,7 @@ async function judgeRun(runDir: string): Promise<{ dimensionsWithNoValidScore: s
             `Judge ONE dimension of an orchestration run against the rubric below. ` +
             `Cite transcript evidence; distinguish decision quality (reasonable given what was known at the time) from outcome luck.\n\n` +
             `## Rubric: ${dimension}\n${rubric}\n\n## The operator's task\n${scenario.taskCard}\n\n` +
-            `## Mechanical metrics (authoritative — do not re-derive counts)\n${metrics.slice(0, 20_000)}\n\n` +
+            `## Mechanical metrics (authoritative — do not re-derive counts)\n${metrics.slice(0, 20_000)}${decisionEvidence}\n\n` +
             `## Transcript\n${transcript.slice(0, 150_000)}`,
           options: {
             cwd: process.cwd(), systemPrompt: "You are a rigorous orchestration-trace judge. Score only the named dimension. Anchor every claim in quoted evidence.",
