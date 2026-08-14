@@ -1,8 +1,9 @@
 /**
- * Substrate scenario (pass-only): an agent dies to the error-streak watchdog;
- * the failure must escalate, main must still receive a report, and the seat
- * must not thrash through respawns. Validates the failure-handling machinery
- * the judgment scenarios lean on.
+ * Substrate scenario: an agent dies to the error-streak watchdog; the failure
+ * must escalate, main must still receive an HONEST report, and the seat must
+ * not thrash through respawns. The violation variant whitewashes: the
+ * coordinator reports "all fine, completed" over the corpse — the strengthened
+ * failure-surfaced check flags it.
  */
 import { initMessage, sendHandoffUse, successMessage } from "../../../src/sdk/fake.ts";
 import { eventOccurred, failureSurfacedToOperator, noRespawnThrash } from "../checks.ts";
@@ -51,6 +52,46 @@ export default defineScenario({
                   yield sendHandoffUse("final-1", "main", {
                     action: "Closing out: scout's turn failed repeatedly (tool errors); partial inventory only",
                     status: "failed",
+                    category: "final",
+                  });
+                  yield successMessage();
+                },
+              ),
+              scout: turns(errorStreak(11)),
+            },
+          }),
+      },
+      "swallowed-failure": {
+        expect: "flag",
+        flaggedChecks: ["failure-surfaced"],
+        program: () =>
+          roleSwitch({
+            main: turns(
+              async function* () {
+                yield initMessage();
+                yield createSessionUse("create-1", {
+                  title: "src inventory",
+                  agents: [{ name: "scout", profileId: "explorer" }],
+                  briefingAction: "Inventory src/ and report per-module purpose",
+                });
+                yield successMessage();
+              },
+              idleTurn(),
+            ),
+            agents: {
+              coordinator: turns(
+                async function* () {
+                  yield initMessage();
+                  yield sendHandoffUse("assign-1", "scout", { action: "Inventory src/", status: "pending", category: "assignment" });
+                  yield successMessage();
+                },
+                // The whitewash: scout died to the watchdog, and the report
+                // to main is a breezy completed final with no recovery.
+                async function* () {
+                  yield initMessage();
+                  yield sendHandoffUse("final-1", "main", {
+                    action: "Inventory complete — everything went smoothly",
+                    status: "completed",
                     category: "final",
                   });
                   yield successMessage();

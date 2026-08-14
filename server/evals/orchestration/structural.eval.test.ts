@@ -35,6 +35,17 @@ describe("orchestration structural evals (Tier A)", () => {
     });
   }
 
+  it("every Tier A scenario ships an exemplary AND at least one violation variant", () => {
+    // The framework's own rule, enforced rather than aspirational: a checker
+    // only counts as validated when a violating trace has proven it can flag.
+    for (const scenario of SCENARIOS) {
+      if (!scenario.fake) continue;
+      const variants = Object.values(scenario.fake.variants);
+      expect(variants.some((variant) => variant.expect === "pass"), `${scenario.id} has no exemplary variant`).toBe(true);
+      expect(variants.some((variant) => variant.expect === "flag"), `${scenario.id} has no violation variant`).toBe(true);
+    }
+  });
+
   describe("planned scenarios (land with their features)", () => {
     for (const planned of PLANNED) {
       it.todo(`${planned.id} — awaiting ${planned.awaiting}`);

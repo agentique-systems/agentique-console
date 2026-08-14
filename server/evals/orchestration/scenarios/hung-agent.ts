@@ -7,6 +7,7 @@
  * transcript, calls it healthy, and does nothing.
  */
 import { initMessage, sendHandoffUse, successMessage, textMessage, toolUseMessage } from "../../../src/sdk/fake.ts";
+import { agentRoleOf } from "../../../src/test-helpers.ts";
 import { alarmEmitted, failureSurfacedToOperator, reactedToAlarmWithin } from "../checks.ts";
 import { roleSwitch, turns } from "../programs.ts";
 import { defineScenario, type ProgramCtx } from "../scenario.ts";
@@ -93,6 +94,66 @@ export default defineScenario({
               void tools;
             },
             agents: { coordinator: coordinatorRoutes(), scout: wedgedScout(ctx) },
+          });
+        },
+      },
+      // ID-anchoring proof: main reacts promptly — on the WRONG session. The
+      // alarm names the wedged scout; main inspects and interrupts an idle
+      // decoy instead. A positionally-scored reaction check passed on this.
+      "interrupts-wrong-session": {
+        expect: "flag",
+        flaggedChecks: ["reacted-to-alarm"],
+        doneWhen: () => {
+          let alarmed = false;
+          return (event: Ev) => {
+            if (event.type === "agent_session.liveness.tripped") alarmed = true;
+            return alarmed && event.type === "user_session.turn.settled";
+          };
+        },
+        program: (ctx) => {
+          let mainTurns = 0;
+          const buildCoordinator = coordinatorRoutes();
+          return roleSwitch({
+            main: async function* () {
+              mainTurns += 1;
+              yield initMessage();
+              if (mainTurns === 1) {
+                yield createSessionUse("create-1", {
+                  title: "browser verification",
+                  agents: [{ name: "scout", profileId: "explorer" }],
+                  briefingAction: "Play a run in the browser and report with screenshots",
+                });
+                yield createSessionUse("create-2", {
+                  title: "background watch",
+                  agents: [{ name: "watcher", profileId: "explorer" }],
+                  briefingAction: "Watch the logs",
+                });
+              } else {
+                const decoyId = (ctx.harness().sqlite
+                  .prepare("SELECT id FROM agent_sessions WHERE title = 'background watch'")
+                  .get() as { id: string }).id;
+                yield toolUseMessage("act-1", "mcp__console__session_activity", { agentSessionId: decoyId });
+                yield toolUseMessage("act-2", "mcp__console__interrupt_agent", {
+                  agentSessionId: decoyId, agent: "watcher", reason: "looks stuck to me",
+                });
+              }
+              yield successMessage();
+            },
+            agents: {
+              coordinator: async function* (options, tools) {
+                const sessionId = agentRoleOf(options).agentSessionId;
+                const hasScout = sessionId !== undefined && (ctx.harness().sqlite
+                  .prepare("SELECT count(*) AS n FROM agents WHERE agent_session_id = ? AND name = 'scout'")
+                  .get(sessionId) as { n: number }).n > 0;
+                if (hasScout) {
+                  yield* buildCoordinator(options, tools);
+                } else {
+                  yield initMessage();
+                  yield successMessage();
+                }
+              },
+              scout: wedgedScout(ctx),
+            },
           });
         },
       },
