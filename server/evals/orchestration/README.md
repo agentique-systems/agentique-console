@@ -12,14 +12,16 @@ npm test                # picked up by the normal suite
 npx vitest run evals/orchestration/structural.eval.test.ts
 ```
 
-Every scenario ships an `exemplary` program variant and violation variants;
-the suite asserts the checkers pass the former and flag the latter. **Tier A
-cannot measure orchestration judgment** — main's turns are scripted by us. Its
+Every Tier A scenario ships an `exemplary` program variant AND at least one
+violation variant — a meta-assertion in the suite enforces it, because a
+checker only counts as validated once a violating trace has proven it can
+flag. (visual-judgment is live-only by design and exempt.) **Tier A cannot
+measure orchestration judgment** — main's turns are scripted by us. Its
 real products are: a regression net over the substrate (alarms, interrupts,
-routing, recovery), the *evaluability contract* (every signal a judge or
-metric needs is actually journaled — if a refactor stops journaling question
-events, this suite goes red), and a validated checker library for Tier B.
-Never present Tier A green as "orchestration improved."
+routing, recovery, restart phases), the *evaluability contract* (every
+signal a judge or metric needs is actually journaled — if a refactor stops
+journaling question events, this suite goes red), and a validated checker
+library for Tier B. Never present Tier A green as "orchestration improved."
 
 ## Tier B — live (real model, priced, manual, informs — never gates)
 
@@ -77,7 +79,8 @@ updating it is an explicit, human-reviewed commit citing trace evidence.
 1. Judged scores never gate merges; only Tier A's structural invariants do.
 2. No scalar collapse: reports are per-dimension, and a delta without its
    qualitative note is not evidence.
-3. Rubric text must never enter any orchestrator prompt. (Structural check.)
+3. Rubric text must never enter any orchestrator prompt. (Enforced by
+   `rubric-leak.test.ts` in CI.)
 4. Never score pivot counts (score evidence-responsiveness) and never reward
    reviewer counts (score evidence sufficiency relative to stakes).
 5. Trace quality and artifact quality are separate axes: a beautiful trace
@@ -87,13 +90,15 @@ updating it is an explicit, human-reviewed commit citing trace evidence.
    major evaluations.
 7. Baseline bumps are explicit, human-reviewed commits citing trace evidence.
 
-## Ablations (selective)
+## Ablations (deliberately deferred)
 
-When a capability is expensive or its contribution uncertain, rerun a scenario
-with it switched off (env/config-gated: doctrine-without-state,
-state-without-why/expecting, no-opportunity-instruction, no-independent-review
-instruction, no add/close levers) and compare. This is a scalpel, not a
-standing experimental program.
+No ablation mechanism exists, on purpose. Ablations answer "which expensive
+capability earns its cost" — a question that is only posable against a
+reference series, and none has been run yet. Building env-gated prompt
+excision now would create unexercised config paths and push the brief toward
+a template engine. When a reference series exists and a capability's
+contribution is genuinely uncertain, add the narrowest switch that answers
+that one question (a scalpel, never a standing experimental program).
 
 ## Layout
 
@@ -102,9 +107,11 @@ trace.ts               journal read API (both tiers)      scenario.ts   types
 checks.ts              dimension-tagged checkers          programs.ts   fake-program combinators
 structural-runner.ts   Tier A engine (proposals, restart phases)
 structural.eval.test.ts  CI gate                          scenarios/    the suite + PLANNED list
-live/run-live.ts       Tier B runner                      live/operator-policy.ts  scripted operator
-live/export-trace.ts   run.json + transcript.md (revived report-run)
-live/judge.ts          rubric judging                     live/compare.ts  baseline diff
+live/run-live.ts       Tier B runner (--runs series)      live/operator-policy.ts  scripted operator
+live/export-trace.ts   run.json + transcript + spine + evidence packets
+live/export-evidence.ts  the artifact bundle (tree/diff/validator/screenshots)
+live/judge.ts          trace + outcome axes               live/compare.ts  two-axis baseline diff
 rubrics/               one .md per judged dimension       fixtures/     committed workspace seeds
+rubric-leak.test.ts    Goodhart rule 3, enforced          export.test.ts  export logic, CI-proven
 results/baseline.json  committed medians                  results/runs/ raw runs (gitignored)
 ```
