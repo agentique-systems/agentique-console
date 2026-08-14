@@ -370,10 +370,10 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
     })));
 
 
-  // One level of nesting: a controller may spawn a CHILD AgentSession running
-  // any pattern. The child's "main" resolves to THIS agent — its finals arrive
-  // here as milestones — and child agents never receive these tools, so the
-  // depth cap is the granting itself.
+  // Nesting: a controller may spawn a CHILD AgentSession running any pattern.
+  // The child's "main" resolves to THIS agent — its finals arrive here as
+  // milestones. Depth is capped by `config.policy.maxSessionDepth`: sessions
+  // at the cap never receive these tools, so the cap is the granting itself.
   if (ctx.granted.has("create_child_session")) {
     tools.push(sdk.tool("create_child_session",
       "Spawn a child AgentSession running its own orchestration pattern, briefed by you and reporting to you. Its final arrives to you as a milestone; your own final is withheld until every child has reported (or you abandon it). Use a child session when a sub-problem deserves its own topology — a pipeline inside your hub, a debate inside your plan.",

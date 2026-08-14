@@ -33,6 +33,7 @@ import { Mailroom, identitySelector, simpleHandoff } from "./mailroom.ts";
 import { sweepLiveness } from "./liveness.ts";
 import { AgentLanePool, type ActiveTurn } from "./lanes.ts";
 import { AgentRuntime } from "./runtime.ts";
+import { sessionTree } from "./session-tree.ts";
 import { SessionLifecycle, type CreateAgentSessionInput } from "./lifecycle.ts";
 import { NestingBroker } from "./nesting.ts";
 import type { TransferInput } from "./seams.ts";
@@ -104,21 +105,8 @@ export class AgentSessionService {
         deps.bus.append({ type: "agent_session.runtime.noted", userSessionId: session.userSessionId, agentSessionId,
           payload: { agentSessionId, agent: seatName, detail: `agent parked (${reason}); provider session retained` } });
       },
-      sessionTree: (agentSessionId) => {
-        // Walk to the TRUE root (nesting may be deeper than one level), then
-        // collect the whole subtree — a shared budget must see every layer.
-        let root = deps.repo.getAgentSession(agentSessionId);
-        while (root?.parentAgentSessionId) root = deps.repo.getAgentSession(root.parentAgentSessionId);
-        const ids = new Set([root?.id ?? agentSessionId]);
-        const frontier = [...ids];
-        while (frontier.length > 0) {
-          const current = frontier.pop()!;
-          for (const child of deps.repo.listChildSessions(current)) {
-            if (!ids.has(child.id)) { ids.add(child.id); frontier.push(child.id); }
-          }
-        }
-        return ids;
-      },
+      // A shared budget must see every layer of the true root's tree.
+      sessionTree: (agentSessionId) => new Set(sessionTree(deps.repo, agentSessionId).map((row) => row.id)),
     });
     this.#worktreeBinding = new WorktreeBinding({
       repo: deps.repo, bus: deps.bus, artifacts: deps.artifacts, config: deps.config,

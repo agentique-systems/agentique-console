@@ -22,6 +22,7 @@ import { CHILD_SENDER_PREFIX, CONSOLE_SENDER, COORDINATOR_AGENT, MAIN_RECIPIENT 
 import { buildContract } from "./patterns/catalog.ts";
 import type { SessionRouting } from "./routing.ts";
 import type { Deliver, RecordFailure, SimpleHandoff, Transfer } from "./seams.ts";
+import { sessionTree } from "./session-tree.ts";
 import { AGENT_NAME_RE, RESERVED_NAMES } from "./topology.ts";
 import { consoleTaskListId, type TaskService } from "../tasks/service.ts";
 import type { WorktreeBinding } from "./worktree-binding.ts";
@@ -40,7 +41,8 @@ export interface CreateAgentSessionInput {
   /**
    * Set when a controller agent spawns this as a CHILD session. The child's
    * "main" traffic then crosses to `controllerAgent` in the parent instead of
-   * waking the runner. One level only — children never get the spawn grant.
+   * waking the runner. Nesting is capped by `config.policy.maxSessionDepth`;
+   * sessions at the cap never get the spawn grant.
    */
   parent?: { agentSessionId: string; controllerAgent: string };
   agents: { name: string; profileId?: string; instructions?: string; model?: string; owns?: string[] }[];
@@ -127,10 +129,10 @@ export class SessionLifecycle {
     }
     const ownedScopes = new Map<string, string>();
     if (parentRow) {
-      // Cross-tree disjointness: parent-tree agents and this child's agents
-      // all merge worktrees into ONE workspace, so their write scopes must not
-      // collide any more than sibling agents' may.
-      const treeSessions = [parentRow, ...repo.listChildSessions(parentRow.id).filter((child) => child.lifecycle === "open")];
+      // Cross-tree disjointness: every open session in the TRUE root's tree
+      // merges worktrees into ONE workspace, so write scopes must not collide
+      // anywhere in it — cousins and grandparents included.
+      const treeSessions = sessionTree(repo, parentRow.id).filter((row) => row.lifecycle === "open");
       for (const treeSession of treeSessions) {
         for (const seat of repo.listAgents(treeSession.id)) {
           if ((seat.profileSnapshot as AgentProfile | undefined)?.exemptFromOwnership === true) continue;
@@ -263,12 +265,10 @@ export class SessionLifecycle {
     if (writes && owns.length === 0) {
       throw new InvalidInputError(`agent "${name}" (${profile.id}) writes files, so it must declare what it owns`);
     }
-    // Ownership disjointness across the session TREE, same rule as creation:
-    // every seat merges into one workspace.
+    // Ownership disjointness across the whole TRUE-root session tree, same
+    // rule as creation: every seat merges into one workspace.
     if (!profile.exemptFromOwnership) {
-      const treeRoot = session.parentAgentSessionId === null ? session : repo.getAgentSession(session.parentAgentSessionId);
-      const treeSessions = treeRoot === null || treeRoot === undefined ? [session]
-        : [treeRoot, ...repo.listChildSessions(treeRoot.id).filter((child) => child.lifecycle === "open")];
+      const treeSessions = sessionTree(repo, session.id).filter((row) => row.lifecycle === "open");
       for (const treeSession of treeSessions) {
         for (const seat of repo.listAgents(treeSession.id)) {
           if ((seat.profileSnapshot as AgentProfile | undefined)?.exemptFromOwnership === true) continue;

@@ -121,7 +121,7 @@ export const agentSessions = sqliteTable("agent_sessions", {
     .$type<Record<string, unknown>>()
     .notNull()
     .default({}),
-  /** NULL = top-level. One level of nesting only. */
+  /** NULL = top-level. Nesting depth is capped by `config.policy.maxSessionDepth`. */
   parentAgentSessionId: text("parent_agent_session_id"),
   /** Agent in the PARENT that receives this child's boundary traffic; snapshotted at spawn. */
   parentControllerAgent: text("parent_controller_agent"),

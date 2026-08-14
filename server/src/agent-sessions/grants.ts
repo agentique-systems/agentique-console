@@ -31,8 +31,8 @@ export interface AgentGrantDeps {
   worktrees: boolean;
   user: boolean;
   /**
-   * True only at depth 0 with nesting enabled: the depth cap IS this bit —
-   * a child session's agents never see the spawn tools, so there is no
+   * True below `maxSessionDepth` with nesting enabled: the depth cap IS this
+   * bit — a session AT the cap never sees the spawn tools, so there is no
    * counter to forget.
    */
   childSessions: boolean;

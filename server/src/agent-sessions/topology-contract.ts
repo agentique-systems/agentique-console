@@ -26,7 +26,7 @@ export type ConsoleToolGrant =
   | "tasks_write"      // task_create / task_update
   | "forward_message"  // verbatim passthrough of an agent report to main
   | "map_dispatch"     // dispatch_work_items (map_reduce fan-out)
-  | "child_sessions";  // create_child_session / abandon_child_session (depth 0 only)
+  | "child_sessions";  // create_child_session / abandon_child_session (below the depth cap only)
 
 export interface RoleSpec {
   /** Agents of this role are minted at runtime rather than all seated at creation. */
