@@ -52,6 +52,53 @@ describe("living spec (fake SDK)", () => {
     expect(specEvents.n).toBe(1);
   });
 
+  it("an amendment's tool result lists sessions still running against the old revision", async () => {
+    let mainTurns = 0;
+    const h = makeHarness(async function* (options) {
+      const identity = agentRoleOf(options);
+      yield initMessage();
+      if (identity.agent === undefined && (mainTurns += 1) === 1) {
+        yield toolUseMessage("create-1", "mcp__console__create_agent_session", {
+          title: "long build", pattern: "hub_and_spoke",
+          agents: [{ name: "scout", profileId: "explorer", owns: [] }],
+          briefing: {
+            core: { schemaVersion: 1, taskId: null, status: "pending", risk: "low", action: "Build it",
+              state: { summary: "start", evidence: [] }, result: { summary: null, artifacts: [] },
+              uncertainty: [], nextAction: "build", requestExpandedContext: false },
+            extension: { kind: "coordination", data: {} },
+          },
+        });
+        yield toolUseMessage("spec-1", "mcp__console__propose_spec", { document: "# V1", changeNote: "initial" });
+        yield toolUseMessage("spec-2", "mcp__console__propose_spec", { document: "# V2", changeNote: "drop three.js" });
+        yield successMessage();
+      } else {
+        yield successMessage();
+      }
+    });
+    const sessionId = h.addUserSession();
+    const done = collectUntil(h.bus, settled);
+    h.runner.postOperatorMessage(sessionId, "build");
+    for (let card = 1; card <= 2; card += 1) {
+      await collectUntil(h.bus, (event) => event.type === "user_session.plan.proposed"
+        && (event.payload as { spec?: { revision?: number } }).spec?.revision === card);
+      const pending = h.interactions.listPending(sessionId);
+      h.interactions.resolveFromApi(sessionId, pending[0]!.id, { decision: "approve" });
+    }
+    await done;
+
+    const results = h.sqlite.prepare(
+      "SELECT payload FROM events WHERE type = 'user_session.tool.completed'").all()
+      .map((row) => String((row as { payload: string }).payload));
+    const amendment = results.find((payload) => payload.includes("runningSessions"));
+    expect(amendment).toBeDefined();
+    expect(amendment).toContain("long build");
+    expect(amendment).toContain("briefed under an earlier revision");
+    // The initial approval carries no such list — there was nothing running
+    // against an older revision.
+    const initial = results.find((payload) => payload.includes("Approved as proposed") && !payload.includes("runningSessions"));
+    expect(initial).toBeDefined();
+  });
+
   it("a rejected spec stays non-governing and the tool reports the operator's words", async () => {
     const h = makeHarness(async function* () {
       yield initMessage();

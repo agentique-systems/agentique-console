@@ -62,7 +62,10 @@ The first product of a non-trivial run is a shared understanding of "done
 well": goals, constraints, decisions with recommendations, acceptance
 criteria a reviewer can check, standing uncertainties and assumptions, the
 proposed crew. `propose_spec` → operator edits in place → their text
-governs → injected everywhere → amended, never silently diverged from.
+governs → injected into every seat's system prompt, re-anchored by a
+pointer in every delivery, announced by revision in the decision delta,
+carried through rotation checkpoints → amended, never silently diverged
+from.
 
 The **uncertainty map** is a per-task map, not a checklist: a dimension
 matters iff plausible answers differ in a way that changes the build.

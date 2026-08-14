@@ -215,7 +215,14 @@ export class PromptComposer {
     const taskLines = this.#deps.tasks.linesForAgentSession(session.id);
     const ledgerBlock = taskLines.length === 0 ? ""
       : `## Task ledger (console-owned, authoritative)\n${taskLines.join("\n")}\nKeep your unit's status honest with task_update: in_progress when you start, completed only when verified.\n\n`;
-    return `AgentSession ${session.id}: ${session.title}\nYou are ${seat.name}. Participants: ${roster}.\n\n${answersBlock}${freshBlock}${ledgerBlock}Only the following addressed handoffs are new:\n${messages}\n\nTreat handoff claims as historical context; verify risky claims against repository/task/journal evidence during normal work. Act without restating the envelope.`;
+    // The governing revision on EVERY delivery: the decision delta announces
+    // an amendment once, but a long-lived seat's context can scroll it away —
+    // the pointer re-anchors each time work arrives. Omitted entirely when no
+    // spec exists (byte-stability for spec-less sessions).
+    const specPointer = this.#deps.specs.pointer(session.userSessionId);
+    const specBlock = specPointer === null ? ""
+      : `Governing specification: ${specPointer}. If your system prompt shows an older revision, read_spec before continuing.\n\n`;
+    return `AgentSession ${session.id}: ${session.title}\nYou are ${seat.name}. Participants: ${roster}.\n\n${answersBlock}${freshBlock}${ledgerBlock}${specBlock}Only the following addressed handoffs are new:\n${messages}\n\nTreat handoff claims as historical context; verify risky claims against repository/task/journal evidence during normal work. Act without restating the envelope.`;
   }
 
   /**
@@ -238,6 +245,10 @@ export class PromptComposer {
     // model-maintained state.
     const decisions = this.#deps.decisions.lines(session.userSessionId, { max: 12 });
     if (decisions.length > 0) facts.push(`Operator decisions (Console-recorded, authoritative — do not contradict):\n${decisions.map((line) => `- ${line}`).join("\n")}`);
+    // The checkpoint must be self-sufficiently true: the successor re-reads
+    // the spec digest at spawn, but the reconstruction is what it TRUSTS.
+    const specPointer = this.#deps.specs.pointer(session.userSessionId);
+    if (specPointer !== null) facts.push(`Governing specification: ${specPointer}.`);
     const taskLines = this.#deps.tasks?.linesForAgentSession(session.id) ?? [];
     if (taskLines.length > 0) facts.push(`Task ledger:\n${taskLines.join("\n")}`);
     if (seat.worktreePath && this.#deps.worktrees && seat.worktreeBranch && seat.worktreeBaseCommit) {

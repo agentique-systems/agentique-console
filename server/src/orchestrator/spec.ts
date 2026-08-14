@@ -1,9 +1,12 @@
 /**
  * The living specification: the shared definition of "done well" for a run.
  * Main drafts it (propose_spec), the operator edits/approves it through a
- * plan-approval card, and the approved text is injected into main's prompt,
- * every agent's prompt, and rotation checkpoints. Amendments supersede;
- * nothing silently diverges from an approved spec.
+ * plan-approval card. The approved text reaches agents on four surfaces:
+ * the digest in every seat's system prompt at spawn/respawn, a one-line
+ * pointer in every delivery prompt (re-anchoring seats that outlive an
+ * amendment), the spec-labeled decision line in the per-delivery decision
+ * delta, and the pointer in rotation checkpoints (main's and seats').
+ * Amendments supersede; nothing silently diverges from an approved spec.
  */
 import type { EventBus } from "../events/bus.ts";
 import type { SpecRevisionRow, SpecStore } from "../db/stores/spec-store.ts";

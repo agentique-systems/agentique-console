@@ -641,10 +641,15 @@ export class AgentRuntime implements Injector, TurnTracker {
       this.#deps.bus.append({ type: "handoff.checkpoint.failed", userSessionId: session.userSessionId, agentSessionId: session.id,
         payload: { agent: seat.name, reason: failure ?? "checkpoint produced no valid handoff", degraded: true } });
     }
+    // The spec pointer rides the seat checkpoint exactly as it rides main's:
+    // the successor re-reads the digest at spawn, but the checkpoint must be
+    // self-sufficiently true.
+    const specPointer = this.#deps.specs.pointer(session.userSessionId);
     const prepared = this.#deps.handoffs.prepare({ draft, userSessionId: session.userSessionId, agentSessionId: session.id,
       sender: seat.name, recipient: seat.name, profileId: seat.profileId, generation: seat.generation,
       extensionKind: (seat.profileSnapshot as AgentProfile).handoffExtension,
-      trigger: degraded ? "recovery" : "rotation", parentHandoffId: seat.latestHandoffId, checkpoint: true });
+      trigger: degraded ? "recovery" : "rotation", parentHandoffId: seat.latestHandoffId, checkpoint: true,
+      ...(specPointer === null ? {} : { extensionDefaults: { approvedSpec: specPointer } }) });
     this.#deps.repo.insertCheckpointHandoff(prepared.row);
     this.#deps.handoffs.committed(prepared.record);
     // Rotation retires the provider session, so its cumulative baseline retires

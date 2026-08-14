@@ -407,11 +407,21 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           const finalText = resolved.editedDocument?.trim() || args.document;
           const approved = specs.approve(draft.id, { document: finalText,
             edited: resolved.editedDocument !== undefined && resolved.editedDocument.trim() !== args.document.trim() });
+          // An AMENDMENT lands while sessions may be mid-assignment against
+          // the old revision. The next delivery re-anchors each of them, but
+          // whether one needs steering NOW is main's materiality call — hand
+          // it the list to make that call against.
+          const running = approved.revision > 1
+            ? host.listForUserSession(userSessionId).filter((s) => s.status !== "archived")
+              .map((s) => ({ agentSessionId: s.id, title: s.title, status: s.status }))
+            : [];
           return ok({ approved: true, revision: approved.revision, edited: approved.origin === "operator_edited",
             document: finalText,
             note: approved.origin === "operator_edited"
               ? "The operator EDITED the spec before approving — the text above is theirs and governs. Read it fully."
-              : "Approved as proposed. This revision now governs the run." });
+              : "Approved as proposed. This revision now governs the run.",
+            ...(running.length === 0 ? {} : { runningSessions: running,
+              amendmentNote: "These sessions were briefed under an earlier revision. They learn of the change at their next delivery; judge materiality per session — steer with send_to_coordinator (category \"update\"), interrupt_agent for urgent redirects, or let immaterial ones finish." }) });
         }
         specs.reject(draft.id);
         const note = resolved.kind === "decision" ? (resolved.note ?? "") : resolved.kind === "dismissed" ? resolved.reason : "";
