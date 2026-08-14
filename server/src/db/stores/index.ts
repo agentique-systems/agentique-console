@@ -90,7 +90,7 @@ export function createStores(db: Db, sqlite: SqliteTransactor): Stores {
     usage: new UsageStore(db),
     crons: new CronStore(db),
     patternState: new PatternStateStore(db),
-    specs: new SpecStore(db),
+    specs: new SpecStore(db, sqlite),
     orchestrationState: new OrchestrationStateStore(db),
     tasks: new TaskStore(db),
     assignments: new AssignmentStore(db),

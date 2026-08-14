@@ -8,9 +8,11 @@ export type SpecRevisionRow = typeof specRevisions.$inferSelect;
 
 export class SpecStore {
   readonly #db: Db;
+  readonly #sqlite: { transaction<T>(fn: () => T): () => T };
 
-  constructor(db: Db) {
+  constructor(db: Db, sqlite: { transaction<T>(fn: () => T): () => T }) {
     this.#db = db;
+    this.#sqlite = sqlite;
   }
 
   get(id: string): SpecRevisionRow | undefined {
@@ -53,22 +55,29 @@ export class SpecStore {
     return row;
   }
 
-  /** Approves one revision (with the operator's final text) and supersedes the previous approved one atomically. */
+  /**
+   * Approves one revision (with the operator's final text) and supersedes the
+   * previous approved one in ONE transaction: a crash between the two writes
+   * must never leave the session with zero approved revisions — digest()
+   * would render empty and every prompt would silently lose the spec.
+   */
   approve(id: string, input: { document: string; edited: boolean; interactionId?: string | null }): SpecRevisionRow {
-    const row = this.get(id);
-    if (!row) throw new Error(`no spec revision ${id}`);
-    const previous = this.latestApproved(row.userSessionId);
-    if (previous && previous.id !== id) {
-      this.#db.update(specRevisions).set({ status: "superseded" }).where(eq(specRevisions.id, previous.id)).run();
-    }
-    this.#db.update(specRevisions).set({
-      document: input.document,
-      status: "approved",
-      origin: input.edited ? "operator_edited" : "main",
-      interactionId: input.interactionId ?? null,
-      approvedAt: nowIso(),
-    }).where(eq(specRevisions.id, id)).run();
-    return this.get(id)!;
+    return this.#sqlite.transaction(() => {
+      const row = this.get(id);
+      if (!row) throw new Error(`no spec revision ${id}`);
+      const previous = this.latestApproved(row.userSessionId);
+      if (previous && previous.id !== id) {
+        this.#db.update(specRevisions).set({ status: "superseded" }).where(eq(specRevisions.id, previous.id)).run();
+      }
+      this.#db.update(specRevisions).set({
+        document: input.document,
+        status: "approved",
+        origin: input.edited ? "operator_edited" : "main",
+        interactionId: input.interactionId ?? null,
+        approvedAt: nowIso(),
+      }).where(eq(specRevisions.id, id)).run();
+      return this.get(id)!;
+    })();
   }
 
   reject(id: string): void {
