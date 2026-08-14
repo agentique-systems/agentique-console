@@ -110,3 +110,21 @@ describe("routeEvent — boundary flow pulses", () => {
     expect(d.pulseFlow).toHaveBeenCalledWith("as_parent", "result", "2026-08-09T10:04:00.000Z");
   });
 });
+
+describe("routeEvent — orchestration surfaces", () => {
+  it("spec and state revisions invalidate the user-sessions prefix and the spec marker reaches the stream", () => {
+    const d = deps();
+    routeEvent({
+      type: "user_session.spec.updated", seq: 30, ts: "2026-08-09T10:05:00.000Z", userSessionId: "us_1",
+      payload: { userSessionId: "us_1", revision: 2, changeNote: "drop three.js", edited: false },
+    } as unknown as ConsoleEvent, d);
+    expect(d.invalidate).toHaveBeenCalledWith(["user-sessions"]);
+    expect(d.appendUserStreamEvent).toHaveBeenCalledWith("us_1", expect.objectContaining({ type: "user_session.spec.updated" }));
+
+    routeEvent({
+      type: "user_session.state.updated", seq: 31, ts: "2026-08-09T10:06:00.000Z", userSessionId: "us_1",
+      payload: { userSessionId: "us_1", revision: 1, trigger: "commission", sections: ["strategy"], counts: { uncertainties: 0, assumptions: 0, risks: 0 } },
+    } as unknown as ConsoleEvent, d);
+    expect(d.invalidate).toHaveBeenCalledWith(["user-sessions"]);
+  });
+});

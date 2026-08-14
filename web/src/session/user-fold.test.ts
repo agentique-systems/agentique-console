@@ -370,6 +370,18 @@ describe("foldUserItems", () => {
     expect(second).toEqual(first);
     expect(events).toHaveLength(3);
   });
+
+  it("an approved spec revision folds to a marker with its changeNote", () => {
+    const items = foldUserItems([
+      ev("user_session.spec.updated", { userSessionId: "us_1", revision: 2, changeNote: "drop three.js", edited: true }),
+    ]);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      type: "runtime",
+      label: "specification",
+      detail: "rev 2 approved — drop three.js (operator-edited)",
+    });
+  });
 });
 
 describe("foldBusy", () => {

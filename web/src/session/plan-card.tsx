@@ -72,7 +72,12 @@ export function PlanCard({
       <CardHeader>
         <CardEyebrow className={cn(!resolved && "text-attention")}>
           <FileTextIcon className="size-3.5 shrink-0" />
-          <span>{item.spec !== undefined ? `proposed specification (rev ${item.spec.revision})` : "proposed plan"}</span>
+          <span>
+            {item.spec !== undefined ? `proposed specification (rev ${item.spec.revision})` : "proposed plan"}
+            {item.spec?.changeNote !== undefined && (
+              <span className="ml-1 normal-case text-muted-foreground">— {item.spec.changeNote}</span>
+            )}
+          </span>
         </CardEyebrow>
         {resolution !== undefined && (
           <Badge

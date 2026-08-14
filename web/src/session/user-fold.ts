@@ -59,7 +59,7 @@ export interface PlanItem {
   readonly interactionId: string;
   readonly plan: string;
   /** Present when the card proposes a SPEC revision rather than a plan. */
-  readonly spec?: { readonly revision: number };
+  readonly spec?: { readonly revision: number; readonly changeNote?: string };
   readonly resolution?: {
     readonly approved: boolean;
     readonly note?: string;
@@ -303,6 +303,13 @@ export function foldUserItems(events: readonly ConsoleEvent[]): UserItem[] {
 
       case "user_session.runtime.noted":
         items.push({ type: "runtime", uid: `runtime:${event.seq ?? items.length}`, label: "runtime", detail: event.payload.detail });
+        break;
+
+      // The governing spec moved — a fact worth a marker in the conversation,
+      // where the operator's approval just happened.
+      case "user_session.spec.updated":
+        items.push({ type: "runtime", uid: `spec:${event.payload.revision}`, label: "specification",
+          detail: `rev ${event.payload.revision} approved${event.payload.changeNote ? ` — ${event.payload.changeNote}` : ""}${event.payload.edited ? " (operator-edited)" : ""}` });
         break;
 
       case "user_session.context.rotated":

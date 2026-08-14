@@ -19,6 +19,9 @@ import type {
   ManagerSession,
   ManagerSessionResponse,
   TimelinePageResponse,
+  GetSpecResponse,
+  GetOrchestrationResponse,
+  GetRunSummaryResponse,
 } from "@agentique-console/shared";
 
 import { apiFetch, withQuery } from "./client";
@@ -167,6 +170,16 @@ export function useManagerSessions(workspaceId: string | null) {
 }
 export function useManagerSession(id: string | null) {
   return useQuery({ queryKey: keys.managerSession(id ?? ""), queryFn: () => apiFetch<ManagerSessionResponse>(`/api/profile-manager-sessions/${id}`), enabled: id !== null, refetchInterval: id ? 4_000 : false });
+}
+export function useSpec(id: string | null) {
+  return useQuery({ queryKey: keys.userSessions.spec(id ?? ""), queryFn: () => apiFetch<GetSpecResponse>(`/api/user-sessions/${id}/spec`), enabled: id !== null });
+}
+export function useOrchestration(id: string | null) {
+  return useQuery({ queryKey: keys.userSessions.orchestration(id ?? ""), queryFn: () => apiFetch<GetOrchestrationResponse>(`/api/user-sessions/${id}/orchestration`), enabled: id !== null });
+}
+/** Fetch-on-expand: the sign-off card's justification disclosure. */
+export function useRunSummaryDocument(id: string | null, summaryId: string | null, enabled: boolean) {
+  return useQuery({ queryKey: keys.userSessions.runSummary(id ?? "", summaryId ?? ""), queryFn: () => apiFetch<GetRunSummaryResponse>(`/api/user-sessions/${id}/run-summaries/${summaryId}`), enabled: enabled && id !== null && summaryId !== null });
 }
 export function useTimeline(id: string | null) {
   return useInfiniteQuery({ queryKey: keys.timeline(id ?? ""), initialPageParam: undefined as number | undefined,

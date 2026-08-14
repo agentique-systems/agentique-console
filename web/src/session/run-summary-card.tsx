@@ -6,11 +6,13 @@
  * attention border while unresolved. The one that says "your call" should look
  * like the other one that says "your call".
  */
-import { CheckCircle2Icon } from "lucide-react";
+import { useState } from "react";
+import { CheckCircle2Icon, CheckIcon, XIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { ApiError } from "@/api/client";
 import { useResolveSignoff } from "@/api/mutations";
+import { useRunSummaryDocument } from "@/api/queries";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -52,6 +54,63 @@ function formatCost(usd: number | null, coverage: number): string {
   if (usd === null) return "cost not recorded";
   const amount = `$${usd.toFixed(2)}`;
   return coverage >= 0.9 ? amount : `~${amount} (partial)`;
+}
+
+/**
+ * Main's criteria→evidence record beside the console's facts, fetched on
+ * expand. A null justification renders as an EXPLICIT omission line — a
+ * visible absence, deliberately never a blocker.
+ */
+function JustificationDisclosure({ sessionId, summaryId }: { sessionId: string; summaryId: string }) {
+  const [open, setOpen] = useState(false);
+  const summary = useRunSummaryDocument(sessionId, summaryId, open);
+  const document = summary.data?.document;
+  return (
+    <div className="mt-2">
+      <button type="button" className="text-3xs text-muted-foreground underline" onClick={() => setOpen((value) => !value)}>
+        {open ? "hide" : "show"} completion justification
+      </button>
+      {open && (
+        summary.isLoading ? <p className="mt-1 text-2xs text-muted-foreground">Loading…</p>
+        : document === undefined ? <p className="mt-1 text-2xs text-muted-foreground">Unavailable.</p>
+        : (
+          <div className="mt-1 space-y-2 text-2xs" data-testid="run-summary-justification">
+            {document.justification === null ? (
+              <p className="text-status-waiting">main recorded no completion justification — the console's facts above stand alone.</p>
+            ) : (
+              <ul className="space-y-1">
+                {document.justification.criteria.map((criterion) => (
+                  <li key={criterion.criterion} className="flex items-start gap-1">
+                    {criterion.met ? <CheckIcon className="mt-0.5 size-3 shrink-0 text-status-completed" /> : <XIcon className="mt-0.5 size-3 shrink-0 text-status-failed" />}
+                    <span>
+                      {criterion.criterion}
+                      {criterion.evidence.length > 0 && (
+                        <span className="ml-1 text-muted-foreground">
+                          ({criterion.evidence.map((reference) => `${reference.kind}:${reference.ref}`).join(", ")})
+                        </span>
+                      )}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {document.justification !== null && document.justification.knownGaps.length > 0 && (
+              <p><span className="font-medium">Known gaps:</span> {document.justification.knownGaps.join("; ")}</p>
+            )}
+            {document.justification !== null && document.justification.nonGoals.length > 0 && (
+              <p><span className="font-medium">Non-goals:</span> {document.justification.nonGoals.join("; ")}</p>
+            )}
+            {document.deviations.length > 0 && (
+              <p><span className="font-medium">Deviations:</span> {document.deviations.join("; ")}</p>
+            )}
+            {document.uncertainty.length > 0 && (
+              <p><span className="font-medium">Open uncertainty:</span> {document.uncertainty.join("; ")}</p>
+            )}
+          </div>
+        )
+      )}
+    </div>
+  );
 }
 
 export function RunSummaryCard({
@@ -123,6 +182,7 @@ export function RunSummaryCard({
         {resolution?.note !== undefined && (
           <div className="mt-2 text-2xs text-muted-foreground">note: {resolution.note}</div>
         )}
+        <JustificationDisclosure sessionId={sessionId} summaryId={item.summaryId} />
       </CardContent>
 
       <CardFooter className="pt-0">

@@ -66,6 +66,11 @@ export function routeEvent(event: ConsoleEvent, deps: RouterDeps): void {
     case "user_session.question.answered":
     case "user_session.plan.proposed":
     case "user_session.plan.resolved":
+    // The orchestration surfaces (spec chip, working-state panel) live under
+    // the user-sessions prefix; these two events previously invalidated
+    // NOTHING, so the panel would sit stale until an unrelated event swept it.
+    case "user_session.spec.updated":
+    case "user_session.state.updated":
       deps.invalidate(keys.userSessions.all);
       deps.invalidate(keys.sessionTreeAll);
       break;
@@ -147,6 +152,9 @@ export function routeEvent(event: ConsoleEvent, deps: RouterDeps): void {
     case "user_session.tool.completed":
     case "user_session.turn.started":
     case "user_session.turn.settled":
+    // An approved spec revision is a conversation-level fact — the fold
+    // renders it as a marker between messages.
+    case "user_session.spec.updated":
       deps.appendUserStreamEvent(event.payload.userSessionId, event);
       return;
 

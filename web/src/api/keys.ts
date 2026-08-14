@@ -18,6 +18,10 @@ export const keys = {
     list: (workspaceId: string) =>
       ["user-sessions", "list", workspaceId] as const,
     detail: (id: string) => ["user-sessions", "detail", id] as const,
+    /** The living spec + orchestration read-models — under this prefix so spec/state invalidations reach them. */
+    spec: (id: string) => ["user-sessions", "spec", id] as const,
+    orchestration: (id: string) => ["user-sessions", "orchestration", id] as const,
+    runSummary: (id: string, summaryId: string) => ["user-sessions", "run-summary", id, summaryId] as const,
   },
   /**
    * Transcripts deliberately live OUTSIDE the user-sessions prefix: they are
