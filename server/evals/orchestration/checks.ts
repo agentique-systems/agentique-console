@@ -13,7 +13,7 @@
  *   only by scenarios whose stakes warrant it, and there is deliberately no
  *   "reviewer count" metric anywhere.
  */
-import type { Ev, EvPredicate, Trace } from "./trace.ts";
+import type { Ev, EvPredicate, HandoffRow, Trace } from "./trace.ts";
 import type { CheckResult, DimensionId, TraceCheck } from "./scenario.ts";
 
 function pass(detail: string, evidence: Ev[] = []): CheckResult {
@@ -305,24 +305,29 @@ export function evidenceConsumed(): TraceCheck {
     dimension: "evidence-consumption",
     description: "each commissioned result was causally integrated",
     run(trace) {
+      // The result anchor is the REPORT HANDOFF's seq, not the
+      // result.returned wake event: that event lands after the woken turn
+      // settles, so the very acts that consume a result would otherwise
+      // precede their own trigger.
+      const reportsOf = (agentSessionId: string) => trace.handoffs((row) =>
+        row.agentSessionId === agentSessionId && row.recipient === "main" && !row.synthetic &&
+        ["final", "failure", "milestone", "decision"].includes(row.trigger) && row.seq !== null);
       const commissions = trace.commissions()
-        .map((commission) => ({ commission, firstResult: trace.resultsOf(commission.agentSessionId)[0] }))
-        .filter((entry): entry is { commission: typeof entry.commission; firstResult: Ev } => entry.firstResult !== undefined);
+        .map((commission) => ({ commission, firstReport: reportsOf(commission.agentSessionId)[0] }))
+        .filter((entry): entry is { commission: typeof entry.commission; firstReport: HandoffRow } => entry.firstReport !== undefined);
       if (commissions.length === 0) return pass("no commissioned results returned yet");
       const events = trace.events();
       const reportIds = new Map<string, Set<string>>();
       for (const { commission } of commissions) {
-        reportIds.set(commission.agentSessionId, new Set(trace.handoffs((row) =>
-          row.agentSessionId === commission.agentSessionId && row.recipient === "main" &&
-          ["final", "failure", "milestone", "decision"].includes(row.trigger)).map((row) => row.id)));
+        reportIds.set(commission.agentSessionId, new Set(reportsOf(commission.agentSessionId).map((row) => row.id)));
       }
       const completionRecordedAt = events.find((event) =>
         event.type === "user_session.state.updated" && event.payload.trigger === "completion")?.seq;
       const consumedAt = new Map<string, number>();
       // Pass 1: id-anchored and run-level consumption.
-      for (const { commission, firstResult } of commissions) {
+      for (const { commission, firstReport } of commissions) {
         for (const event of events) {
-          if (event.seq <= firstResult.seq) continue;
+          if (event.seq <= firstReport.seq!) continue;
           const runLevel = event.type === "user_session.spec.updated" ||
             event.type === "user_session.question.asked" ||
             event.type === "agent_session.created" ||
@@ -341,7 +346,7 @@ export function evidenceConsumed(): TraceCheck {
       // result — never several concurrent ones.
       for (const event of events) {
         if (event.type !== "user_session.state.updated" || Array.isArray(event.payload.incorporating)) continue;
-        const pending = commissions.filter(({ commission, firstResult }) => firstResult.seq < event.seq &&
+        const pending = commissions.filter(({ commission, firstReport }) => firstReport.seq! < event.seq &&
           (consumedAt.get(commission.agentSessionId) === undefined || consumedAt.get(commission.agentSessionId)! > event.seq));
         if (pending.length !== 1) continue;
         const only = pending[0]!.commission.agentSessionId;
@@ -352,8 +357,59 @@ export function evidenceConsumed(): TraceCheck {
       return unconsumed.length === 0
         ? pass(`${commissions.length} commissioned result(s), each causally integrated`)
         : fail(unconsumed.map(({ commission }) =>
-            `result of ${commission.agentSessionId} never integrated${commission.expecting === null ? "" : ` (expected: ${commission.expecting})`}`).join("; "),
-            unconsumed.map(({ firstResult }) => firstResult));
+            `result of ${commission.agentSessionId} never integrated${commission.expecting === null ? "" : ` (expected: ${commission.expecting})`}`).join("; "));
+    },
+  };
+}
+
+/**
+ * After a noisy or conflicting signal, a corroborating act exists BEFORE any
+ * completion proposal: a discriminating steer (send_to_coordinator), a fresh
+ * commission, or a question. The right response to ambiguity is usually more
+ * evidence — this is the checker for "sought it" (stayedTheCourse covers
+ * "didn't reflexively pivot").
+ */
+export function soughtCorroboration(marker: EvPredicate, label = "the noisy signal"): TraceCheck {
+  return {
+    id: "sought-corroboration",
+    dimension: "adaptation",
+    description: `a corroborating act followed ${label}`,
+    run(trace) {
+      const at = trace.events().find(marker);
+      if (at === undefined) return fail(`marker for ${label} not found in trace`);
+      const completion = trace.first("run.completion.proposed");
+      const acts = trace
+        .events()
+        .filter((event) => event.seq > at.seq && (completion === undefined || event.seq < completion.seq))
+        .filter((event) =>
+          event.type === "agent_session.created" ||
+          event.type === "user_session.question.asked" ||
+          (event.type === "user_session.tool.called" &&
+            String(event.payload.name ?? "") === "mcp__console__send_to_coordinator"));
+      return acts.length > 0
+        ? pass(`corroboration sought (${acts[0]!.type})`, [at, acts[0]!])
+        : fail(`no discriminating evidence was sought after ${label}`, [at]);
+    },
+  };
+}
+
+/**
+ * At least `n` genuinely different perspectives contributed material output:
+ * distinct sender PROFILES among non-synthetic milestone handoffs. The
+ * synthesis voice (a coordinator's final) deliberately does not count as a
+ * perspective. Scenario-scoped — never a global reviewer-count metric.
+ */
+export function distinctPerspectivesAtLeast(n: number): TraceCheck {
+  return {
+    id: `distinct-perspectives-at-least-${n}`,
+    dimension: "marginal-agent-value",
+    description: `at least ${n} distinct-profile perspectives produced material output`,
+    run(trace) {
+      const profiles = new Set(trace.handoffs((row) => !row.synthetic && row.trigger === "milestone" && row.profileId !== null)
+        .map((row) => row.profileId!));
+      return profiles.size >= n
+        ? pass(`${profiles.size} distinct perspective profile(s): ${[...profiles].join(", ")}`)
+        : fail(`only ${profiles.size} distinct perspective profile(s) contributed — the marginal information of a second solution family is missing`);
     },
   };
 }
