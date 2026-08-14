@@ -57,11 +57,52 @@ export interface HandoffRow {
   agentSessionId: string | null;
   sender: string;
   recipient: string;
+  /** The sender seat's profile at send time (null for main/console senders). */
+  profileId: string | null;
   trigger: string;
   synthetic: boolean;
   core: Record<string, unknown>;
   extension: Record<string, unknown>;
   bytes: number;
+  createdAt: string;
+  /** Seq of the handoff.created event — the honest ordering key (createdAt ties within a millisecond). Null when the event was never journaled. */
+  seq: number | null;
+}
+
+/** One commission: the FIRST main→session assignment handoff — the creation briefing. Later steering never overwrites it. */
+export interface CommissionRow {
+  agentSessionId: string;
+  handoffId: string;
+  seq: number | null;
+  action: string;
+  why: string | null;
+  expecting: string | null;
+  createdAt: string;
+}
+
+export interface SpecRevisionTraceRow {
+  id: string;
+  revision: number;
+  document: string;
+  changeNote: string | null;
+  status: string;
+  origin: string;
+  interactionId: string | null;
+  createdAt: string;
+  approvedAt: string | null;
+}
+
+export interface StateRevisionTraceRow {
+  id: string;
+  revision: number;
+  trigger: string;
+  strategy: string;
+  strategyWhy: string;
+  uncertainties: string[];
+  assumptions: string[];
+  risks: string[];
+  note: string | null;
+  completion: Record<string, unknown> | null;
   createdAt: string;
 }
 
@@ -268,21 +309,117 @@ export class Trace {
 
   handoffs(filter?: (row: HandoffRow) => boolean): HandoffRow[] {
     const rows = this.#userSessionId === null
-      ? this.#all("SELECT id, agent_session_id, sender, recipient, trigger, synthetic, core, extension, bytes, created_at FROM handoff_records ORDER BY created_at")
-      : this.#all("SELECT id, agent_session_id, sender, recipient, trigger, synthetic, core, extension, bytes, created_at FROM handoff_records WHERE user_session_id = ? ORDER BY created_at", this.#userSessionId);
+      ? this.#all("SELECT id, agent_session_id, sender, recipient, profile_id, trigger, synthetic, core, extension, bytes, created_at FROM handoff_records ORDER BY created_at, rowid")
+      : this.#all("SELECT id, agent_session_id, sender, recipient, profile_id, trigger, synthetic, core, extension, bytes, created_at FROM handoff_records WHERE user_session_id = ? ORDER BY created_at, rowid", this.#userSessionId);
+    const seqs = this.#handoffSeqs();
     const mapped = rows.map((row) => ({
       id: row.id as string,
       agentSessionId: (row.agent_session_id as string | null) ?? null,
       sender: row.sender as string,
       recipient: row.recipient as string,
+      profileId: (row.profile_id as string | null) ?? null,
       trigger: row.trigger as string,
       synthetic: asBool(row.synthetic),
       core: typeof row.core === "string" ? (JSON.parse(row.core as string) as Record<string, unknown>) : ((row.core ?? {}) as Record<string, unknown>),
       extension: typeof row.extension === "string" ? (JSON.parse(row.extension as string) as Record<string, unknown>) : ((row.extension ?? {}) as Record<string, unknown>),
       bytes: row.bytes as number,
       createdAt: row.created_at as string,
+      seq: seqs.get(row.id as string) ?? null,
     }));
     return filter === undefined ? mapped : mapped.filter(filter);
+  }
+
+  #handoffSeqCache: Map<string, number> | null = null;
+
+  /** handoff id → seq of its handoff.created event. */
+  #handoffSeqs(): Map<string, number> {
+    if (this.#handoffSeqCache === null) {
+      this.#handoffSeqCache = new Map();
+      for (const event of this.events("handoff.created")) {
+        const id = (event.payload as { handoff?: { id?: unknown } }).handoff?.id;
+        if (typeof id === "string" && !this.#handoffSeqCache.has(id)) this.#handoffSeqCache.set(id, event.seq);
+      }
+    }
+    return this.#handoffSeqCache;
+  }
+
+  /**
+   * One row per commissioned session: the FIRST main→session assignment
+   * handoff — by construction the creation briefing. why/expecting come from
+   * THAT handoff, so later steering can never overwrite a commission's
+   * rationale in the read-model.
+   */
+  commissions(): CommissionRow[] {
+    const seen = new Set<string>();
+    const rows: CommissionRow[] = [];
+    for (const handoff of this.handoffs((row) =>
+      row.sender === "main" && row.trigger === "assignment" && row.agentSessionId !== null && !row.synthetic)) {
+      if (seen.has(handoff.agentSessionId!)) continue;
+      seen.add(handoff.agentSessionId!);
+      const data = ((handoff.extension as { data?: Record<string, unknown> }).data ?? {}) as { why?: unknown; expecting?: unknown };
+      rows.push({
+        agentSessionId: handoff.agentSessionId!,
+        handoffId: handoff.id,
+        seq: handoff.seq,
+        action: String((handoff.core as { action?: unknown }).action ?? ""),
+        why: typeof data.why === "string" && data.why !== "" ? data.why : null,
+        expecting: typeof data.expecting === "string" && data.expecting !== "" ? data.expecting : null,
+        createdAt: handoff.createdAt,
+      });
+    }
+    return rows;
+  }
+
+  /** agent_session.result.returned events for ONE session — its returned results. */
+  resultsOf(agentSessionId: string): Ev[] {
+    return this.events("agent_session.result.returned", (_payload, event) => event.agentSessionId === agentSessionId);
+  }
+
+  specRevisions(): SpecRevisionTraceRow[] {
+    if (!this.#tableExists("spec_revisions")) return [];
+    const rows = this.#userSessionId === null
+      ? this.#all("SELECT id, revision, document, change_note, status, origin, interaction_id, created_at, approved_at FROM spec_revisions ORDER BY revision")
+      : this.#all("SELECT id, revision, document, change_note, status, origin, interaction_id, created_at, approved_at FROM spec_revisions WHERE user_session_id = ? ORDER BY revision", this.#userSessionId);
+    return rows.map((row) => ({
+      id: row.id as string,
+      revision: row.revision as number,
+      document: row.document as string,
+      changeNote: (row.change_note as string | null) ?? null,
+      status: row.status as string,
+      origin: row.origin as string,
+      interactionId: (row.interaction_id as string | null) ?? null,
+      createdAt: row.created_at as string,
+      approvedAt: (row.approved_at as string | null) ?? null,
+    }));
+  }
+
+  /** ALL columns — strategyWhy, uncertainties, assumptions, risks, completion included; the decision-time evidence layer reads these. */
+  stateRevisions(): StateRevisionTraceRow[] {
+    if (!this.#tableExists("orchestration_state_revisions")) return [];
+    const rows = this.#userSessionId === null
+      ? this.#all("SELECT id, revision, trigger, strategy, strategy_why, uncertainties, assumptions, risks, note, completion, created_at FROM orchestration_state_revisions ORDER BY revision")
+      : this.#all("SELECT id, revision, trigger, strategy, strategy_why, uncertainties, assumptions, risks, note, completion, created_at FROM orchestration_state_revisions WHERE user_session_id = ? ORDER BY revision", this.#userSessionId);
+    const json = <T>(value: unknown, fallback: T): T => {
+      if (typeof value !== "string") return (value as T | null) ?? fallback;
+      try { return JSON.parse(value) as T; } catch { return fallback; }
+    };
+    return rows.map((row) => ({
+      id: row.id as string,
+      revision: row.revision as number,
+      trigger: row.trigger as string,
+      strategy: (row.strategy as string | null) ?? "",
+      strategyWhy: (row.strategy_why as string | null) ?? "",
+      uncertainties: json<string[]>(row.uncertainties, []),
+      assumptions: json<string[]>(row.assumptions, []),
+      risks: json<string[]>(row.risks, []),
+      note: (row.note as string | null) ?? null,
+      completion: json<Record<string, unknown> | null>(row.completion, null),
+      createdAt: row.created_at as string,
+    }));
+  }
+
+  #tableExists(name: string): boolean {
+    return this.#db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) !== undefined;
   }
 
   tasks(): TaskRow[] {
