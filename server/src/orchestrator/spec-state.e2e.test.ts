@@ -41,6 +41,8 @@ describe("living spec (fake SDK)", () => {
     expect(approved?.status).toBe("approved");
     expect(approved?.origin).toBe("operator_edited");
     expect(approved?.document).toContain("operator's cut");
+    // The revision names the interaction that approved it.
+    expect(approved?.interactionId).toBe(pending[0]!.id);
     // The digest that reaches every prompt carries the operator's words.
     expect(h.app.specs.digest(sessionId)).toContain("articles");
     // The tool result told main the text was edited and returned it verbatim.

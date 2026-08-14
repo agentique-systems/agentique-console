@@ -112,7 +112,7 @@ export function buildOrchestratorCanUseTool(input: CanUseToolInput): CanUseTool 
         return deny(toolName, "plan_missing",
           "No plan text was captured — write the plan out, then call ExitPlanMode again.");
       }
-      const { resolution } = interactions.createPlanApproval(
+      const { id: approvalId, resolution } = interactions.createPlanApproval(
         userSessionId,
         plan,
         undefined,
@@ -126,7 +126,7 @@ export function buildOrchestratorCanUseTool(input: CanUseToolInput): CanUseTool 
         try {
           const finalText = resolved.editedDocument?.trim() || plan;
           const draft = specs.propose(userSessionId, finalText, "approved via ExitPlanMode");
-          specs.approve(draft.id, { document: finalText,
+          specs.approve(draft.id, { document: finalText, interactionId: approvalId,
             edited: resolved.editedDocument !== undefined && resolved.editedDocument.trim() !== plan.trim() });
         } catch { /* best effort — plan approval itself must not fail on spec recording */ }
         repo.patchUserSession(userSessionId, { phase: "executing" });

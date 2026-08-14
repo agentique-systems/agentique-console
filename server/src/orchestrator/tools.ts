@@ -401,11 +401,11 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
       },
       async (args: { document: string; changeNote: string }) => {
         const draft = specs.propose(userSessionId, args.document, args.changeNote);
-        const { resolution } = interactions.createSpecApproval(userSessionId, args.document, draft.revision, args.changeNote);
+        const { id: approvalId, resolution } = interactions.createSpecApproval(userSessionId, args.document, draft.revision, args.changeNote);
         const resolved = await resolution;
         if (resolved.kind === "decision" && resolved.approved) {
           const finalText = resolved.editedDocument?.trim() || args.document;
-          const approved = specs.approve(draft.id, { document: finalText,
+          const approved = specs.approve(draft.id, { document: finalText, interactionId: approvalId,
             edited: resolved.editedDocument !== undefined && resolved.editedDocument.trim() !== args.document.trim() });
           // An AMENDMENT lands while sessions may be mid-assignment against
           // the old revision. The next delivery re-anchors each of them, but
