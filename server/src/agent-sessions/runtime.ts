@@ -35,7 +35,7 @@ import type { ConsoleSdk, QueryHandle, SdkOptions, SdkToolResult, SdkUserMessage
 import type { AssignmentScheduler } from "../tasks/scheduler.ts";
 import type { TaskService } from "../tasks/service.ts";
 import { buildAgentTools, type AgentToolsContext, type AskOperatorArgs } from "./agent-tools.ts";
-import { declaredMcpServers, seatUserMessage, type PromptComposer } from "./composer.ts";
+import { GOVERNED_BUILTIN_TOOLS, declaredMcpServers, seatUserMessage, type PromptComposer } from "./composer.ts";
 import { grantedTools, runtimeToolNames, type AgentToolName } from "./grants.ts";
 import type { ActiveTurn, AgentLane, AgentLanePool } from "./lanes.ts";
 import type { DispatchWorkItemsInput } from "./patterns/engine.ts";
@@ -44,18 +44,6 @@ import type { SessionRouting } from "./routing.ts";
 import type { Deliver, Injector, RecordFailure, Transfer } from "./seams.ts";
 import { hubContract, roleOfAgent, speakerKindOf } from "./topology.ts";
 import type { WorktreeBinding } from "./worktree-binding.ts";
-
-/**
- * Built-in tools a profile may grant. Anything here that a profile does NOT
- * list is explicitly denied, which is what makes `profile.tools` a real
- * boundary rather than an auto-approval hint. Harness conveniences a governed
- * agent should never reach (subagent spawning, scheduling, its own review
- * tooling) are denied unconditionally alongside these.
- */
-const GOVERNED_BUILTIN_TOOLS = [
-  "Bash", "Edit", "Write", "NotebookEdit", "Read", "Glob", "Grep",
-  "WebFetch", "WebSearch",
-] as const;
 
 /** JSON with recursively sorted object keys — a stable identity for tool inputs. */
 function stableStringify(value: unknown): string {
@@ -239,6 +227,11 @@ export class AgentRuntime implements Injector, TurnTracker {
         permissionMode: profile.permissionMode,
         ...(profile.permissionMode === "bypassPermissions" ? { allowDangerouslySkipPermissions: true } : {}),
         allowedTools: [...profile.tools,
+          // Deferred tools (the web pair among them) are absent from the
+          // turn-1 list and load only through ToolSearch, which the capability
+          // brief tells the seat to call. Granted explicitly rather than left
+          // to work by being permission-free.
+          "ToolSearch",
           ...(profile.tools.includes("Edit") || profile.tools.includes("Write") ? ["EnterWorktree", "ExitWorktree"] : []),
           // Background work is native: a seat starts a dev server with Bash and
           // reads it back, where it used to call console process tools.

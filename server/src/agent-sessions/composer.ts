@@ -58,19 +58,89 @@ export function declaredMcpServers(profile: AgentProfile, config: Config): Recor
   return out;
 }
 
+/**
+ * Built-in tools a profile may grant. Anything here that a profile does NOT
+ * list is explicitly denied, which is what makes `profile.tools` a real
+ * boundary rather than an auto-approval hint. Harness conveniences a governed
+ * agent should never reach (subagent spawning, scheduling, its own review
+ * tooling) are denied unconditionally alongside these — see `runtime.ts`.
+ *
+ * Lives here, next to the brief that describes it: the two must not drift.
+ * A live run lost two of four researchers to exactly that drift — they held
+ * WebSearch and WebFetch while the brief told them "read files only", and
+ * they dutifully reported the limit instead of using the tools.
+ */
+export const GOVERNED_BUILTIN_TOOLS = [
+  "Bash", "Edit", "Write", "NotebookEdit", "Read", "Glob", "Grep",
+  "WebFetch", "WebSearch",
+] as const;
+
+type GovernedTool = (typeof GOVERNED_BUILTIN_TOOLS)[number];
+
+/**
+ * How each governed tool is described to the agent holding (or lacking) it.
+ * Grouped so the prose reads as sentences rather than as a tool manifest: a
+ * group speaks when the profile has ANY of its tools, so an implementer with
+ * Edit and Write is not told it cannot edit because it lacks NotebookEdit.
+ * `note` is a granted-only follow-up sentence, for a capability that needs
+ * more than a clause.
+ */
+const CAPABILITY_GROUPS = [
+  {
+    tools: ["Read", "Glob", "Grep"],
+    can: "read files with Read, Glob, and Grep",
+    cannot: "read any file",
+  },
+  {
+    tools: ["Edit", "Write", "NotebookEdit"],
+    can: "create and edit files",
+    cannot: "create or edit any file",
+  },
+  {
+    tools: ["Bash"],
+    can: "run shell commands with Bash, including long-running ones in the background — background a server and read its output back rather than blocking a turn",
+    cannot: "run any shell command",
+  },
+  {
+    tools: ["WebSearch", "WebFetch"],
+    can: "search the web with WebSearch and read pages with WebFetch",
+    cannot: "reach the web",
+    // The web tools are DEFERRED: they are absent from the turn-1 tool list
+    // and load only on request. Without this sentence a seat that reads its
+    // tool list concludes it has no web access and says so — which is exactly
+    // how a live run produced a sourceless research section.
+    note: 'WebSearch and WebFetch may not appear in your tool list at the start of a turn. That means deferred, not absent: call ToolSearch with {"query": "select:WebSearch,WebFetch"} once, then use them normally.',
+  },
+] as const satisfies readonly { tools: readonly GovernedTool[]; can: string; cannot: string; note?: string }[];
+
+/**
+ * Every governed tool must be described. Adding one to
+ * `GOVERNED_BUILTIN_TOOLS` without giving it a group fails THIS line rather
+ * than silently telling every agent it lacks the tool — the failure mode that
+ * hid web access from seats that held it.
+ */
+type Undescribed = Exclude<GovernedTool, (typeof CAPABILITY_GROUPS)[number]["tools"][number]>;
+type AssertNone<T extends never> = T;
+export type _AllGovernedToolsDescribed = AssertNone<Undescribed>;
+
 function capabilityBrief(profile: AgentProfile, hasWorktree: boolean): string {
   const can: string[] = [];
   const cannot: string[] = [];
+  const notes: string[] = [];
+  for (const group of CAPABILITY_GROUPS) {
+    if (group.tools.some((tool) => profile.tools.includes(tool))) {
+      can.push(group.can);
+      if ("note" in group) notes.push(group.note);
+    } else cannot.push(group.cannot);
+  }
   // `?? {}`: a snapshot from before this field existed is cast, not parsed.
   const servers = Object.keys(profile.mcpServers ?? {});
-  if (profile.tools.includes("Bash")) {
-    can.push("run shell commands with Bash, including long-running ones in the background — background a server and read its output back rather than blocking a turn");
-  } else cannot.push("run any shell command");
   if (servers.length > 0) {
     can.push(`use the tools your MCP server(s) provide — ${servers.join(", ")}, named mcp__<server>__<tool>`);
   } else cannot.push("reach any MCP server (your profile declares none)");
   cannot.push("write outside your own working copy — teammates own theirs");
-  return `## Your capabilities\nYou can: ${can.join("; ") || "read files only"}.\nYou cannot: ${cannot.join("; ")}.\n` +
+  return `## Your capabilities\nYou can: ${can.join("; ") || "nothing beyond your console coordination tools"}.\nYou cannot: ${cannot.join("; ")}.\n` +
+    `${notes.map((note) => `${note}\n`).join("")}` +
     `${hasWorktree ? "Your cwd is an isolated worktree; teammates and the coordinator cannot see your files until the Console merges them when you report completed.\n" : ""}` +
     `If an assignment needs something in the "cannot" list, say so immediately in a handoff rather than working around it — the limit is real and will not change mid-run.`;
 }
@@ -80,6 +150,9 @@ function capabilityTag(profile: AgentProfile): string {
   const caps = [
     ...(profile.tools.includes("Edit") || profile.tools.includes("Write") ? ["writes files"] : ["read-only"]),
     ...(profile.tools.includes("Bash") ? ["runs commands"] : []),
+    // Without this a coordinator reads "read-only" off a researcher's roster
+    // line and assigns — or reports — as though the seat had no web access.
+    ...(profile.tools.includes("WebSearch") || profile.tools.includes("WebFetch") ? ["reads the web"] : []),
     ...Object.keys(profile.mcpServers ?? {}),
   ];
   return `can: ${caps.join(", ")}`;

@@ -55,6 +55,14 @@ export type AgentProfile = z.infer<typeof ProfileSchema>;
 
 const READ_TOOLS = ["Read", "Glob", "Grep"];
 const CODE_TOOLS = [...READ_TOOLS, "Edit", "Write", "Bash"];
+/**
+ * Every evidence-gathering profile reaches the web. A reviewer checking an API
+ * against its upstream docs and an explorer tracing a dependency's behavior
+ * both need the source, not a recollection of it. The write profiles are
+ * deliberately excluded: their job is a bounded change, and Bash already gives
+ * them the network when validation genuinely needs it.
+ */
+const WEB_TOOLS = ["WebSearch", "WebFetch"];
 
 /**
  * The browser the visual profiles drive. Declared, not vendored: the Console
@@ -86,7 +94,7 @@ const BUILTINS: AgentProfile[] = [
     title: "Coordinator",
     purpose: "Own a bounded workstream, assign each unit once, integrate results, and report milestones.",
     instructions: "You are the sole coordinator for this AgentSession. You own decomposition and integration. Send assignments only to your specialists. Do not implement their work, broadcast status, or repeat unchanged information. A merge-conflict failure means reassign against the current HEAD.\n\nWrite seats work in ISOLATED worktrees. Files they create are not visible in your workspace until they report completed and the Console merges them — an `ls` that shows nothing proves nothing. Read their progress from the roster line or ask the seat; never conclude from the filesystem that a seat has done nothing.\n\nReport to main for a blocking decision, material failure, milestone, or final result — and always before you go idle. If you are unsure whether a result is worth reporting, report it: the operator can act on a partial result and cannot act on silence. Relay what your specialists actually found, including defects and anything they could not verify, rather than a summary that they finished.",
-    tools: READ_TOOLS,
+    tools: [...READ_TOOLS, ...WEB_TOOLS],
     permissionMode: "default",
     model: "claude-sonnet-5",
     handoffExtension: "coordination",
@@ -98,8 +106,8 @@ const BUILTINS: AgentProfile[] = [
     id: "explorer",
     title: "Explorer",
     purpose: "Trace code and runtime behavior and return concrete evidence without editing.",
-    instructions: "Inspect only the assigned scope. Cite concrete files, symbols, commands, and observations. Do not edit files. Return one concise findings report to your coordinator.",
-    tools: READ_TOOLS,
+    instructions: "Inspect only the assigned scope. Cite concrete files, symbols, commands, and observations. Do not edit files. Upstream documentation and sources are reachable with WebSearch and WebFetch when the repository alone cannot settle a question — read the source rather than recalling it. Return one concise findings report to your coordinator.",
+    tools: [...READ_TOOLS, ...WEB_TOOLS],
     permissionMode: "default",
     model: "claude-sonnet-5",
     handoffExtension: "investigation",
@@ -138,7 +146,7 @@ const BUILTINS: AgentProfile[] = [
     title: "Reviewer",
     purpose: "Review a completed change and report actionable defects with evidence.",
     instructions: "Review only; do not edit. Inspect the diff, run relevant validation, and report defects by severity with file references and reproduction evidence. Say explicitly when no defect is found.",
-    tools: [...READ_TOOLS, "Bash"],
+    tools: [...READ_TOOLS, "Bash", ...WEB_TOOLS],
     permissionMode: "default",
     model: "claude-opus-5",
     handoffExtension: "review",
@@ -151,7 +159,7 @@ const BUILTINS: AgentProfile[] = [
     title: "Visual reviewer",
     purpose: "Inspect a rendered UI through browser interaction and screenshots.",
     instructions: "Review only; do not edit. Exercise the assigned user flow in the browser, capture evidence, inspect console/runtime errors, and report concrete visual or interaction defects.",
-    tools: [...READ_TOOLS, "Bash"],
+    tools: [...READ_TOOLS, "Bash", ...WEB_TOOLS],
     permissionMode: "default",
     model: "claude-opus-5",
     handoffExtension: "review",
@@ -163,8 +171,8 @@ const BUILTINS: AgentProfile[] = [
     id: "researcher",
     title: "Researcher",
     purpose: "Gather focused external or repository evidence for one decision.",
-    instructions: "Research only the assigned question. Prefer primary sources, separate facts from inference, and return a concise recommendation with evidence.",
-    tools: [...READ_TOOLS, "WebSearch", "WebFetch"],
+    instructions: "Research only the assigned question. Reach primary sources directly with WebSearch and WebFetch and cite the URLs you actually read; a named source you could not open is not evidence. Separate facts from inference, and return a concise recommendation with evidence.",
+    tools: [...READ_TOOLS, ...WEB_TOOLS],
     permissionMode: "default",
     model: "claude-sonnet-5",
     handoffExtension: "investigation",
