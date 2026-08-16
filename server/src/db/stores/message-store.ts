@@ -4,7 +4,7 @@
  * MAX(seq)+1 inside a synchronous transaction — safe because this is a single
  * process and better-sqlite3 serializes writes.
  */
-import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, sql } from "drizzle-orm";
 import type { HandoffSummary, MessageKind, Speaker } from "@agentique-console/shared";
 import type { Db } from "../client.ts";
 import { agents, handoffRecords, mailboxDeliveries, messages, userSessions } from "../schema.ts";
@@ -202,6 +202,27 @@ export class MessageStore {
   requeueUnacknowledgedDeliveries(): number {
     return this.#db.update(mailboxDeliveries).set({ status: "queued", deliveredAt: null })
       .where(eq(mailboxDeliveries.status, "delivered")).run().changes;
+  }
+
+  /**
+   * Did `speaker` file a terminal-status handoff after `afterSeq`? One indexed
+   * SQL probe — the assignment-boundary check runs at EVERY turn settle, and
+   * loading the full message table for it allocated the whole transcript per
+   * settle on long runs (straf3: 1,601 messages x 168 settles).
+   */
+  hasTerminalReportSince(sessionId: string, speaker: string, afterSeq: number): boolean {
+    return this.#db
+      .select({ id: messages.id })
+      .from(messages)
+      .where(and(
+        eq(messages.sessionKind, "agent"),
+        eq(messages.sessionId, sessionId),
+        eq(messages.speakerName, speaker),
+        gt(messages.seq, afterSeq),
+        sql`json_extract(${messages.payload}, '$.handoff.status') IN ('completed','failed')`,
+      ))
+      .limit(1)
+      .get() !== undefined;
   }
 
   listMessages(

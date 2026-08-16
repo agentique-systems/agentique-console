@@ -61,7 +61,14 @@ export interface InfraConfig {
 export interface PolicyConfig {
   /** Close an idle agent's process (socket included) after this long; resume-on-wake. */
   agentIdleReapMs: number;
-  /** Max resident agent processes machine-wide. */
+  /**
+   * Max resident agent processes machine-wide. Each resident seat is a full
+   * CLI node process (~400-600MB RSS), and they share the machine with the
+   * builds and browsers those seats launch — the default is therefore sized
+   * to RAM (~1.5GB per seat, clamped 4..12) rather than fixed: a 10GB WSL VM
+   * that ran a fixed cap of 8 alongside concurrent cargo links spent the end
+   * of a live run deep in swap. CONSOLE_MAX_RESIDENT_AGENTS overrides.
+   */
   agentMaxResident: number;
   /**
    * Resident agent processes per SESSION. Deliberately not per tree: a child
@@ -251,7 +258,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     },
     policy: {
       agentIdleReapMs: Number(env.CONSOLE_AGENT_IDLE_REAP_MS ?? 300_000),
-      agentMaxResident: Number(env.CONSOLE_MAX_RESIDENT_AGENTS ?? 12),
+      agentMaxResident: Number(env.CONSOLE_MAX_RESIDENT_AGENTS ?? Math.min(12, Math.max(4, Math.floor(os.totalmem() / (1.5 * 1024 ** 3))))),
       agentMaxResidentPerSession: Number(env.CONSOLE_MAX_RESIDENT_AGENTS_PER_SESSION ?? 4),
       agentSpawnTimeoutMs: Number(env.CONSOLE_AGENT_SPAWN_TIMEOUT_MS ?? 30_000),
       agentWorktrees: env.CONSOLE_AGENT_WORKTREES !== "0",

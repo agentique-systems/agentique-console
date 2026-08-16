@@ -538,9 +538,7 @@ export class AgentSessionService {
     const assignment = this.#deps.repo.latestAssignmentDelivery(session.id, seatName);
     if (!assignment) return;
     const assignmentSeq = this.#deps.repo.getMessageById(assignment.messageId)?.seq ?? 0;
-    const reported = this.#deps.repo.listMessages("agent", session.id).some((row) =>
-      row.speakerName === seatName && row.seq > assignmentSeq
-      && ["completed", "failed"].includes((row.payload?.handoff as { status?: string } | undefined)?.status ?? ""));
+    const reported = this.#deps.repo.hasTerminalReportSince(session.id, seatName, assignmentSeq);
     if (reported) return;
     const collector = this.#routing.relayCollector(session, roleOfAgent(seat), seatName);
     if (collector === null) return;

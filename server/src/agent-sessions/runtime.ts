@@ -681,9 +681,7 @@ export class AgentRuntime implements Injector, TurnTracker {
     const assignment = this.#deps.repo.latestAssignmentDelivery(session.id, seatName);
     if (!assignment) return true;
     const assignmentSeq = this.#deps.repo.getMessageById(assignment.messageId)?.seq ?? 0;
-    return this.#deps.repo.listMessages("agent", session.id).some((row) =>
-      row.speakerName === seatName && row.seq > assignmentSeq
-      && ["completed", "failed"].includes((row.payload?.handoff as { status?: string } | undefined)?.status ?? ""));
+    return this.#deps.repo.hasTerminalReportSince(session.id, seatName, assignmentSeq);
   }
 
   /**

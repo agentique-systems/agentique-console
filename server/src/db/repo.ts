@@ -47,6 +47,7 @@ export class Repo {
   requeueUnacknowledgedDeliveries(): number { return this.#s.messages.requeueUnacknowledgedDeliveries(); }
   listMessages(sessionKind: "user" | "agent", sessionId: string, afterSeq = 0): MessageRow[] { return this.#s.messages.listMessages(sessionKind, sessionId, afterSeq); }
   listAllMessages(): MessageRow[] { return this.#s.messages.listAllMessages(); }
+  hasTerminalReportSince(agentSessionId: string, speaker: string, afterSeq: number): boolean { return this.#s.messages.hasTerminalReportSince(agentSessionId, speaker, afterSeq); }
   listAllDeliveries(): MailboxDeliveryRow[] { return this.#s.messages.listAllDeliveries(); }
   messagesHeadSeq(sessionKind: "user" | "agent", sessionId: string): number { return this.#s.messages.messagesHeadSeq(sessionKind, sessionId); }
 

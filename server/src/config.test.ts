@@ -1,4 +1,5 @@
 /** Config defaults, env overrides, and the loud rejection of retired env names. */
+import os from "node:os";
 import { describe, expect, it } from "vitest";
 import { loadConfig } from "./config.ts";
 
@@ -6,7 +7,8 @@ describe("loadConfig agent-lane knobs", () => {
   it("has resident/wake/naming defaults", () => {
     const config = loadConfig({});
     expect(config.policy.agentIdleReapMs).toBe(300_000);
-    expect(config.policy.agentMaxResident).toBe(12);
+    expect(config.policy.agentMaxResident)
+      .toBe(Math.min(12, Math.max(4, Math.floor(os.totalmem() / (1.5 * 1024 ** 3)))));
     expect(config.policy.agentMaxResidentPerSession).toBe(4);
     expect(config.policy.agentSpawnTimeoutMs).toBe(30_000);
     expect(config.policy.peerNamePrefix).toBe("console-");
