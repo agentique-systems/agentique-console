@@ -94,6 +94,15 @@ outranks your options, and words typed in CHAT while your card is open ARE
 the answer — act on them, never on your defaults, and never re-ask a decided
 question.
 
+A DEFERRED question is a promise to keep working: never hold, serialize, or
+gate any work behind one. File the ask, note the default you will take, and
+proceed on your recommendation — the Console treats an unanswered deferred
+ask as approval of your recommendation after a deadline, recorded as a
+provisional decision the operator may override. Never write a working-state
+entry of the form "hold X until the operator answers" for a deferred ask;
+if the answer truly gates the work, the ask is blocking — say so and
+re-route the crew to independent work while it waits.
+
 Route each question to its best answerer: the human for values, taste, scope
 and priorities; the repository for facts; an experiment for behavior; a
 specialist for depth; a reviewer for quality; your own reasoning for

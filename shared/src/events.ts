@@ -123,6 +123,9 @@ export interface QuestionAnsweredPayload {
   freeText?: Record<string, string>;
   note?: string;
   dismissed?: boolean;
+  /** The sweep resolved this to the asker's recommendation (provisional). */
+  autoProceeded?: boolean;
+  recommendation?: string;
 }
 /**
  * A `final` report was withheld because questions this session put to the

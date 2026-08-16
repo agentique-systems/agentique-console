@@ -46,6 +46,15 @@ export class InteractionStore {
       .all();
   }
 
+  /** Every pending question across sessions — the auto-proceed sweep's scan. */
+  listPendingQuestions(): InteractionRow[] {
+    return this.#db
+      .select()
+      .from(interactions)
+      .where(and(eq(interactions.status, "pending"), eq(interactions.kind, "question")))
+      .all();
+  }
+
   findUnresolvedByDedupe(agentSessionId: string, dedupeKey: string): InteractionRow | undefined {
     return this.#db
       .select()

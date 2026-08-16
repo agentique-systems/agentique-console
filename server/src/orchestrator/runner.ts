@@ -518,6 +518,7 @@ export class OrchestratorRunner {
       decisionDigest: this.#deps.decisions.digest(sessionId),
       specDigest: this.#deps.specs.digest(sessionId),
       stateDigest: this.#deps.orchestrationState.digest(sessionId),
+      autonomy: session.autonomy,
       purpose: session.purpose,
       peerName: mainPeerName(config.policy.peerNamePrefix, sessionId),
     });

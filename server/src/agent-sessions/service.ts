@@ -159,6 +159,23 @@ export class AgentSessionService {
               transfer: (input) => this.post(input), simpleHandoff }, session);
           } catch (error) { this.#recordFailure(session.id, error); }
         }
+      }, () => {
+        // The autonomy sweep: deferred asks auto-proceed on their
+        // recommendation; stale blocking asks escalate to main.
+        try {
+          deps.interactions.sweepStaleAsks({
+            deferredAutoProceedMs: deps.config.policy.deferredAutoProceedMs,
+            blockingAskEscalateMs: deps.config.policy.blockingAskEscalateMs,
+            autonomyOf: (userSessionId) => deps.repo.getUserSession(userSessionId)?.autonomy ?? "standard",
+            escalate: (row) => {
+              if (row.agentSessionId === null) return;
+              deps.wake(row.userSessionId, row.agentSessionId, "failure",
+                `Blocking operator question ${row.id} from ${row.agent ?? "an agent"} has been unanswered for over ` +
+                `${Math.round(deps.config.policy.blockingAskEscalateMs / 60_000)} minutes. ` +
+                "Re-route independent work around it, and decide whether an investigation can answer it instead of the operator.");
+            },
+          });
+        } catch { /* the sweep must never take the tick down */ }
       }],
     });
     this.#runtime = new AgentRuntime({

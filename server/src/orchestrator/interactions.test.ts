@@ -1,9 +1,10 @@
 /**
- * Who a card belongs to determines what may happen to it. An agent has no
- * access to the operator's chat lane — only main does — so chat must not
- * dismiss agent cards, and the boot revival path (which replays a stale answer
- * into MAIN's lane) must not swallow an agent's question.
+ * Chat words reach every open card WITH the words attached (hedged for agent
+ * cards), the autonomy sweep converts stale deferred asks into provisional
+ * decisions, and the boot revival path (which replays a stale answer into
+ * MAIN's lane) must not swallow an agent's question.
  */
+import { eq } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import { openDb } from "../db/client.ts";
 import { ArtifactStore } from "../events/artifact-store.ts";
@@ -32,8 +33,11 @@ function harness() {
 
 const QUESTION = [{ question: "Ship r169 or hold for r160?", options: [{ label: "Ship" }, { label: "Hold" }] }];
 
-describe("chat does not answer an agent's question", () => {
-  it("dismisses a main-lane card but leaves an agent's card open", () => {
+describe("chat answers agent questions too, with the words attached", () => {
+  // The old policy held agent cards ("chatting does not answer them") — a
+  // live run's operator typed answers in chat three times, was refused three
+  // times, and four questions aged 5–7.5 hours.
+  it("resolves both a main-lane card and an agent's card", () => {
     const { db, service, userSessionId } = harness();
     const main = service.createOperatorQuestion({ userSessionId, questions: QUESTION });
     const seat = service.createOperatorQuestion({
@@ -44,11 +48,10 @@ describe("chat does not answer an agent's question", () => {
 
     const all = db.select().from(rows).all();
     expect(all.find((row) => row.id === main.id)?.status).toBe("dismissed");
-    // Still open: the operator's chat went to main, and the agent cannot read it.
-    expect(all.find((row) => row.id === seat.id)?.status).toBe("pending");
+    expect(all.find((row) => row.id === seat.id)?.status).toBe("dismissed");
   });
 
-  it("tells the operator that agent questions are still waiting", () => {
+  it("tells the operator their chat was delivered as the answer", () => {
     const { db, service, userSessionId } = harness();
     service.createOperatorQuestion({ userSessionId, agentSessionId: "as_1", agent: "renderer", questions: QUESTION });
     service.dismissPendingForChat(userSessionId, "hello");
@@ -56,25 +59,102 @@ describe("chat does not answer an agent's question", () => {
     const notices = db.select().from(events).all()
       .filter((row) => row.type === "user_session.runtime.noted")
       .map((row) => String((row.payload as { detail?: string }).detail ?? ""));
-    // Silently keeping the card open would be its own trap: the operator needs
-    // to know their chat did not answer it.
-    expect(notices.join(" ")).toMatch(/stay open — chatting does not answer them/);
+    expect(notices.join(" ")).toMatch(/delivered to 1 agent question/);
   });
 
-  it("resolves a main-lane card's parked promise but not an agent's", async () => {
+  it("resolves an agent's parked promise with the words, hedged", async () => {
     const { service, userSessionId } = harness();
-    const main = service.createOperatorQuestion({ userSessionId, questions: QUESTION });
     const seat = service.createOperatorQuestion({
       userSessionId, agentSessionId: "as_1", agent: "renderer", questions: QUESTION,
     });
-    let seatSettled = false;
-    void seat.resolution.then(() => { seatSettled = true; });
 
-    service.dismissPendingForChat(userSessionId, "hello");
+    service.dismissPendingForChat(userSessionId, "ship r169");
 
-    await expect(main.resolution).resolves.toMatchObject({ kind: "dismissed" });
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(seatSettled).toBe(false);
+    const resolved = await seat.resolution;
+    expect(resolved).toMatchObject({ kind: "dismissed" });
+    // Hedged: one chat message may address only some of several open cards.
+    expect((resolved as { reason: string }).reason).toContain('"ship r169"');
+    expect((resolved as { reason: string }).reason).toContain("if it addresses your question");
+  });
+});
+
+describe("the autonomy sweep", () => {
+  const age = (db: ReturnType<typeof harness>["db"], id: string, minutes: number) => {
+    db.update(rows).set({ createdAt: new Date(Date.now() - minutes * 60_000).toISOString() }).where(eq(rows.id, id)).run();
+  };
+  const sweep = (service: InteractionService, over: Partial<Parameters<InteractionService["sweepStaleAsks"]>[0]> = {}) =>
+    service.sweepStaleAsks({ deferredAutoProceedMs: 900_000, blockingAskEscalateMs: 900_000,
+      autonomyOf: () => "standard", escalate: () => {}, ...over });
+
+  it("a stale deferred ask with a recommendation auto-proceeds as a provisional decision", async () => {
+    const { db, service, userSessionId } = harness();
+    const seat = service.createOperatorQuestion({ userSessionId, agentSessionId: "as_1", agent: "verifier",
+      questions: QUESTION, urgency: "deferred", recommendation: "Ship r169" });
+    age(db, seat.id, 20);
+
+    sweep(service);
+
+    expect(db.select().from(rows).all().find((row) => row.id === seat.id)?.status).toBe("answered");
+    const resolved = await seat.resolution;
+    expect(resolved).toMatchObject({ kind: "dismissed" });
+    expect((resolved as { reason: string }).reason).toContain("Ship r169");
+    expect((resolved as { reason: string }).reason).toContain("provisional");
+  });
+
+  it("a fresh deferred ask and one without a recommendation are left alone", () => {
+    const { db, service, userSessionId } = harness();
+    const fresh = service.createOperatorQuestion({ userSessionId, agentSessionId: "as_1", agent: "a",
+      questions: QUESTION, urgency: "deferred", recommendation: "do X" });
+    const bare = service.createOperatorQuestion({ userSessionId, agentSessionId: "as_1", agent: "b",
+      questions: QUESTION, urgency: "deferred" });
+    age(db, bare.id, 20);
+
+    sweep(service);
+
+    const all = db.select().from(rows).all();
+    expect(all.find((row) => row.id === fresh.id)?.status).toBe("pending");
+    expect(all.find((row) => row.id === bare.id)?.status).toBe("pending");
+  });
+
+  it("a stale blocking ask escalates once, and never auto-proceeds in standard mode", () => {
+    const { db, service, userSessionId } = harness();
+    const seat = service.createOperatorQuestion({ userSessionId, agentSessionId: "as_1", agent: "architect",
+      questions: QUESTION, urgency: "blocking", recommendation: "fix C4" });
+    age(db, seat.id, 90);
+
+    let escalations = 0;
+    sweep(service, { escalate: () => { escalations += 1; } });
+    sweep(service, { escalate: () => { escalations += 1; } });
+
+    expect(escalations).toBe(1);
+    expect(db.select().from(rows).all().find((row) => row.id === seat.id)?.status).toBe("pending");
+  });
+
+  it("in away mode a stale blocking ask WITH a recommendation auto-proceeds", () => {
+    const { db, service, userSessionId } = harness();
+    const seat = service.createOperatorQuestion({ userSessionId, agentSessionId: "as_1", agent: "architect",
+      questions: QUESTION, urgency: "blocking", recommendation: "fix C4" });
+    age(db, seat.id, 90);
+
+    sweep(service, { autonomyOf: () => "away" });
+
+    expect(db.select().from(rows).all().find((row) => row.id === seat.id)?.status).toBe("answered");
+  });
+
+  it("the operator can retroactively override an auto-proceeded decision", async () => {
+    const { db, service, userSessionId } = harness();
+    const seat = service.createOperatorQuestion({ userSessionId, agentSessionId: "as_1", agent: "verifier",
+      questions: QUESTION, urgency: "deferred", recommendation: "Ship r169" });
+    age(db, seat.id, 20);
+    sweep(service);
+    await seat.resolution;
+
+    const overridden = service.resolveFromApi(userSessionId, seat.id,
+      { answers: { "Ship r169 or hold for r160?": ["Hold"] } });
+    expect(overridden.status).toBe("answered");
+    // A second override attempt now conflicts — the human answer is final.
+    expect(() => service.resolveFromApi(userSessionId, seat.id,
+      { answers: { "Ship r169 or hold for r160?": ["Ship"] } })).toThrow(/already answered/);
   });
 });
 

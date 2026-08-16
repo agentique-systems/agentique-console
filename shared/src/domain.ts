@@ -34,6 +34,12 @@ export interface UserSession {
    * "null", so it reads `/api/config` for it.
    */
   model: string | null;
+  /** "away": proceed on recommendations; queue only irreversible decisions. */
+  autonomy: "standard" | "away";
+  /** Set while a provider-capacity or budget pause holds. */
+  pauseReason: "capacity" | "budget" | null;
+  /** Auto-resume time for a capacity pause (ISO); null otherwise. */
+  pausedUntil: string | null;
   createdAt: string;
   updatedAt: string;
 }

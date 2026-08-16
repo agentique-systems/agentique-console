@@ -164,8 +164,13 @@ export class InteractionService {
   ): Interaction {
     if (!this.#staleRouting) throw new Error("onStaleAnswerRouting is not registered — wire callbacks once, in createApp");
     const before = this.get(interactionId);
+    const beforeRow = this.#store.get(interactionId);
+    const overridingAutoProceeded = beforeRow?.status === "answered"
+      && (beforeRow.response as { autoProceeded?: boolean } | null)?.autoProceeded === true;
     const resolved = this.resolveFromApi(userSessionId, interactionId, body);
-    if (before.agent !== null && (before.detached || before.status === "stale")) {
+    // An auto-proceeded row's asker already moved on; the override reaches it
+    // by mailbox exactly as a detached answer does.
+    if (before.agent !== null && (before.detached || before.status === "stale" || overridingAutoProceeded)) {
       this.#staleRouting.deliverToAgent(before);
       return resolved;
     }
@@ -357,7 +362,12 @@ export class InteractionService {
     if (!row || row.userSessionId !== userSessionId) {
       throw new NotFoundError(`no interaction ${interactionId}`);
     }
-    if (row.status !== "pending" && row.status !== "stale") {
+    // An auto-proceeded row stays overridable: the operator's real answer
+    // supersedes the provisional one, enters the ledger, and reaches seats
+    // through the ordinary decision delta.
+    const autoProceeded = row.status === "answered"
+      && (row.response as { autoProceeded?: boolean } | null)?.autoProceeded === true;
+    if (row.status !== "pending" && row.status !== "stale" && !autoProceeded) {
       throw new ConflictError(`interaction ${interactionId} is already ${row.status}`);
     }
 
@@ -442,17 +452,44 @@ export class InteractionService {
    * MAIN-LANE cards are dismissed: the model is about to read the operator's
    * actual message, which is a better answer than the card would have been.
    *
-   * AGENT cards are NOT. An agent has no access to the operator's chat lane —
-   * only main does — so resolving one with "read their next message" hands an
-   * agent an instruction it cannot follow, and silently drops a question a
-   * specialist thought was important enough to stop for.
+   * AGENT cards resolve too, with the words ATTACHED. This once held agent
+   * cards ("chatting does not answer them; use their cards") on the theory
+   * that an agent cannot read the chat lane — but the resolution now carries
+   * the operator's words to the agent itself, so the theory no longer holds,
+   * and a live run showed what holding buys: the operator typed answers in
+   * chat three times, was refused three times, and four questions aged 5–7.5
+   * hours. The delivery is hedged: one chat message may address only some of
+   * several open cards.
    */
   dismissPendingForChat(userSessionId: string, chatText: string): void {
     const rows = this.#listByStatus(userSessionId, "pending");
-    let held = 0;
+    let deliveredToAgents = 0;
     for (const row of rows) {
       if (row.participant !== null) {
-        held += 1;
+        this.#markResolved(row.id, "dismissed", { reason: "chat", chatText });
+        this.#bus.append({
+          type: "user_session.question.answered",
+          userSessionId,
+          ...(row.agentSessionId ? { agentSessionId: row.agentSessionId } : {}),
+          payload: { userSessionId, interactionId: row.id, dismissed: true, note: chatText },
+        });
+        this.#recordDecision(row, {
+          answer: `(answered in chat) ${chatText}`,
+          source: "interaction",
+        });
+        const hedge =
+          `The operator typed in chat while your question card was open. Their words: ${JSON.stringify(chatText)}. ` +
+          "Treat this as their answer if it addresses your question; if it clearly does not, proceed on your stated recommendation or re-ask once.";
+        const parked = this.#pending.get(row.id);
+        if (parked) {
+          parked({ kind: "dismissed", reason: hedge });
+          this.#pending.delete(row.id);
+        } else if (this.#staleRouting) {
+          // Detached asker: the answer arrives as a mailbox delivery.
+          try { this.#staleRouting.deliverToAgent(this.get(row.id)); } catch { /* journaled above regardless */ }
+        }
+        this.#notifyIfBlockingCleared(row);
+        deliveredToAgents += 1;
         continue;
       }
       if (row.kind === "plan_approval") {
@@ -513,16 +550,93 @@ export class InteractionService {
       }
       this.#pending.delete(row.id);
     }
-    if (held > 0) {
+    if (deliveredToAgents > 0) {
       this.#bus.append({
         type: "user_session.runtime.noted",
         userSessionId,
         payload: {
           userSessionId,
-          detail: `${held} question(s) raised by agent seats stay open — chatting does not answer them; use their cards.`,
+          detail: `chat answer delivered to ${deliveredToAgents} agent question(s) as their answer`,
         },
       });
     }
+  }
+
+  /** Escalations already sent, so a blocking ask wakes main once, not per sweep. */
+  readonly #escalated = new Set<string>();
+
+  /**
+   * The autonomy sweep. A live run held 5h23m (46% of wall clock) behind
+   * four questions ALL filed `urgency: deferred` — the field said "you can
+   * keep going" and nothing enforced it, while every ask carried a
+   * `recommendation` nothing ever consumed. Two rules:
+   *
+   * - a pending DEFERRED question with a recommendation older than the
+   *   deadline resolves as a PROVISIONAL decision — the recommendation,
+   *   flagged as auto-proceeded, overridable by the operator retroactively
+   *   (resolveFromApi accepts re-resolution of these rows);
+   * - a pending BLOCKING question older than its deadline escalates ONCE:
+   *   main is woken to re-route independent work and decide whether an
+   *   investigation can answer it (a real defect report sat 83 minutes
+   *   unanswered with no clock on it at all). In "away" autonomy a blocking
+   *   ask WITH a recommendation auto-proceeds at the deadline instead.
+   *
+   * plan_approval cards never auto-proceed: a specification needs a human.
+   */
+  sweepStaleAsks(input: {
+    deferredAutoProceedMs: number;
+    blockingAskEscalateMs: number;
+    autonomyOf: (userSessionId: string) => "standard" | "away";
+    escalate: (row: Interaction) => void;
+  }): void {
+    if (input.deferredAutoProceedMs <= 0 && input.blockingAskEscalateMs <= 0) return;
+    const now = Date.now();
+    for (const row of this.#store.listPendingQuestions()) {
+      const age = now - Date.parse(row.createdAt);
+      const away = input.autonomyOf(row.userSessionId) === "away";
+      const recommendation = row.recommendation?.trim() || null;
+      const deferredDeadline = away ? Math.max(60_000, input.deferredAutoProceedMs / 3) : input.deferredAutoProceedMs;
+      const canAutoProceed = recommendation !== null
+        && (row.urgency === "deferred" ? input.deferredAutoProceedMs > 0 && age >= deferredDeadline
+          : away && input.blockingAskEscalateMs > 0 && age >= input.blockingAskEscalateMs);
+      if (canAutoProceed) {
+        this.#autoProceed(row, recommendation as string, Math.round(age / 60_000));
+        continue;
+      }
+      if (row.urgency === "blocking" && input.blockingAskEscalateMs > 0 && age >= input.blockingAskEscalateMs
+        && row.participant !== null && !this.#escalated.has(row.id)) {
+        this.#escalated.add(row.id);
+        try { input.escalate(this.get(row.id)); } catch { /* re-escalated never; the card stays visible */ }
+      }
+    }
+  }
+
+  #autoProceed(row: InteractionRow, recommendation: string, ageMinutes: number): void {
+    this.#markResolved(row.id, "answered", {
+      autoProceeded: true, freeText: recommendation,
+      note: "provisional — proceeded on the asker's recommendation; the operator may override",
+    });
+    this.#bus.append({
+      type: "user_session.question.answered",
+      userSessionId: row.userSessionId,
+      ...(row.agentSessionId ? { agentSessionId: row.agentSessionId } : {}),
+      payload: { userSessionId: row.userSessionId, interactionId: row.id, autoProceeded: true, recommendation },
+    });
+    this.#recordDecision(row, {
+      answer: `(provisional — proceeded on the asker's recommendation after ${ageMinutes} min unanswered; you may override) ${recommendation}`,
+      source: "interaction",
+    });
+    const reason =
+      `No operator answer after ${ageMinutes} minutes. Proceed on your stated recommendation: ${JSON.stringify(recommendation)}. ` +
+      "This is recorded as a provisional decision the operator may override later — note the assumption in your work and continue.";
+    const parked = this.#pending.get(row.id);
+    if (parked) {
+      parked({ kind: "dismissed", reason });
+      this.#pending.delete(row.id);
+    } else if (this.#staleRouting && row.participant !== null) {
+      try { this.#staleRouting.deliverToAgent(this.get(row.id)); } catch { /* journaled above regardless */ }
+    }
+    this.#notifyIfBlockingCleared(row);
   }
 
   listPending(userSessionId: string): Interaction[] {

@@ -71,6 +71,9 @@ export function toWireUserSession(row: UserSessionRow): UserSession {
     lifecycle: row.lifecycle,
     runState: row.runState,
     model: row.model,
+    autonomy: row.autonomy,
+    pauseReason: row.pauseReason,
+    pausedUntil: row.pausedUntil,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };

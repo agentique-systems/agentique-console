@@ -5,7 +5,7 @@
  * "blocked", "done" and "ready" stopped being the same pixels. Mode switching
  * and interrupting live in the composer, next to the textarea they act on.
  */
-import { ArchiveIcon, BellIcon, DownloadIcon } from "lucide-react";
+import { ArchiveIcon, BellIcon, DownloadIcon, MoonIcon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
@@ -216,6 +216,34 @@ export function SessionHeader({
 
       <div className="flex shrink-0 items-center gap-2">
         <StateChip state={state} />
+
+        {session.lifecycle === "open" && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant={session.autonomy === "away" ? "secondary" : "ghost"}
+                size="icon-xs"
+                aria-label={session.autonomy === "away" ? "away mode on — click to return" : "enable away mode"}
+                aria-pressed={session.autonomy === "away"}
+                disabled={patch.isPending}
+                onClick={() => {
+                  patch.mutate(
+                    { id: session.id, autonomy: session.autonomy === "away" ? "standard" : "away" },
+                    { onError: (error) => toast.error(`Autonomy change failed: ${error.message}`) },
+                  );
+                }}
+              >
+                <MoonIcon className="size-3" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              {session.autonomy === "away"
+                ? "away mode: the run proceeds on recommendations and queues only irreversible decisions"
+                : "away mode: let the run proceed on recommendations while you are gone"}
+            </TooltipContent>
+          </Tooltip>
+        )}
 
         {notifPermission === "default" && (
           <Tooltip>

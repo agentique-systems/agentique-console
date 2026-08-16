@@ -112,6 +112,19 @@ export interface PolicyConfig {
   /** Governance sweep period: stale-ask detach + pattern stall checks. */
   governanceSweepIntervalMs: number;
   /**
+   * A pending DEFERRED ask with a recommendation auto-resolves to that
+   * recommendation after this long, as a provisional (operator-overridable)
+   * decision. "Deferred" means "you can keep going" — a live run held 5h23m
+   * behind four deferred asks because nothing enforced that. 0 = off.
+   */
+  deferredAutoProceedMs: number;
+  /**
+   * A pending BLOCKING ask older than this escalates once (main is woken to
+   * re-route work); in "away" autonomy a blocking ask WITH a recommendation
+   * auto-proceeds instead. 0 = off.
+   */
+  blockingAskEscalateMs: number;
+  /**
    * Rotation blocks every sender to the agent; a checkpoint may not run
    * forever. Sized for a checkpoint over a ~120k-token context, which
    * routinely needs minutes: a live run whose cap was 90s aborted 31 of 35
@@ -244,6 +257,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       watchdogErrorStreak: Number(env.CONSOLE_WATCHDOG_ERROR_STREAK ?? 10),
       maxRedeliveryAttempts: Number(env.CONSOLE_MAX_REDELIVERY_ATTEMPTS ?? 2),
       governanceSweepIntervalMs: Number(env.CONSOLE_GOVERNANCE_SWEEP_MS ?? 30_000),
+      deferredAutoProceedMs: Number(env.CONSOLE_DEFERRED_AUTO_PROCEED_MS ?? 900_000),
+      blockingAskEscalateMs: Number(env.CONSOLE_BLOCKING_ASK_ESCALATE_MS ?? 900_000),
       checkpointTimeoutMs: Number(env.CONSOLE_CHECKPOINT_TIMEOUT_MS ?? 300_000),
       completionQuietWindowMs: Number(env.CONSOLE_COMPLETION_QUIET_MS ?? 2_000),
       contextTokenLimit: Number(env.CONSOLE_CONTEXT_TOKEN_LIMIT ?? 120_000),

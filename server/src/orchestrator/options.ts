@@ -78,6 +78,8 @@ export interface OrchestratorOptionsInput {
   specDigest?: string;
   /** Main's own working state — the durable memory of the orchestration loop. */
   stateDigest?: string;
+  /** "away" injects one line: prefer proceeding on recommendations. */
+  autonomy?: "standard" | "away";
   purpose?: "work" | "profile_manager";
   /** The lane's registry address (CLAUDE_CODE_SESSION_NAME). */
   peerName?: string;
@@ -118,7 +120,8 @@ export function buildOrchestratorOptions(
         : ORCHESTRATOR_BRIEF + (input.contextMemory ? `\n\n## Rotation checkpoint (or read-only legacy memory)\n${input.contextMemory}` : ""))
         + (input.decisionDigest ? `\n\n## Operator decisions (authoritative)\nThe operator made these. Do not re-litigate them, do not contradict them, and do not relay them to seats — they already have them.\n${input.decisionDigest}` : "")
         + (input.specDigest ? `\n\n${input.specDigest}` : "")
-        + (input.stateDigest ? `\n\n${input.stateDigest}` : ""),
+        + (input.stateDigest ? `\n\n${input.stateDigest}` : "")
+        + (input.autonomy === "away" ? "\n\nThe operator is AWAY: prefer proceeding on recommendations and provisional decisions; queue only irreversible choices for their return." : ""),
     },
     settingSources: [],
     includePartialMessages: true,
