@@ -11,7 +11,7 @@
 import { describe, expect, it } from "vitest";
 import { buildOrchestratorOptions } from "./options.ts";
 
-const WRITE_TOOLS = ["Write", "Edit", "NotebookEdit", "Bash"];
+const WRITE_TOOLS = ["Write", "Edit", "NotebookEdit"];
 
 function options(withDelegation = true) {
   return buildOrchestratorOptions({
@@ -31,7 +31,8 @@ function options(withDelegation = true) {
 describe("orchestrator options", () => {
   it("denies in-process subagents and write tools; allows governed native tools", () => {
     const disallowed = options().disallowedTools ?? [];
-    expect(disallowed).toEqual(expect.arrayContaining(["Agent", "Task", "Bash", "Write", "Edit"]));
+    expect(disallowed).toEqual(expect.arrayContaining(["Agent", "Task", "Write", "Edit"]));
+    expect(disallowed).not.toContain("Bash");
     // Denied in every configuration: it bypasses the journal entirely.
     expect(disallowed).toContain("SendMessage");
     // As do the lane-waking natives, which fire a turn with no mailbox row,

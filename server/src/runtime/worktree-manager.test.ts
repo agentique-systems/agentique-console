@@ -104,6 +104,48 @@ describe("WorktreeManager", () => {
     expect(fs.readFileSync(path.join(repo, "README.md"), "utf8")).toBe("diverged on main\n");
   });
 
+  it("re-adds a branch name that leaked from an rmSync-fallback removal", () => {
+    const { repo, manager } = makeRepo();
+    const first = manager.addWorktree(repo, "as_1", "seat-fixer", "seat/as_1/fixer-2");
+    // Simulate the leak: the directory vanishes OUTSIDE git (the rmSync
+    // fallback path), so git still registers the branch as checked out there.
+    fs.rmSync(first.path, { recursive: true, force: true });
+    manager.remove(repo, first.path, first.branch, { archiveBranch: false });
+    // A live run wedged here: create-only `-b` died with "a branch named
+    // 'agentique/seat/…/fixer-2' already exists" three times in a row.
+    const second = manager.addWorktree(repo, "as_1", "seat-fixer", "seat/as_1/fixer-2");
+    expect(second.branch).toBe("agentique/seat/as_1/fixer-2");
+    expect(fs.existsSync(second.path)).toBe(true);
+  });
+
+  it("a second archive of the same branch name gets a suffixed archive name", () => {
+    const { repo, manager } = makeRepo();
+    const a = manager.addWorktree(repo, "as_1", "seat-dev", "seat/as_1/dev-0");
+    fs.writeFileSync(path.join(a.path, "one.txt"), "one\n");
+    manager.commitAll(a.path, "one");
+    const firstArchive = manager.remove(repo, a.path, a.branch, { archiveBranch: true });
+    expect(firstArchive.archivedBranch).toBe("agentique/archive/seat/as_1/dev-0");
+    const b = manager.addWorktree(repo, "as_1", "seat-dev", "seat/as_1/dev-0");
+    fs.writeFileSync(path.join(b.path, "two.txt"), "two\n");
+    manager.commitAll(b.path, "two");
+    const secondArchive = manager.remove(repo, b.path, b.branch, { archiveBranch: true });
+    // Previously the rename collided and silently LEAKED the seat branch.
+    expect(secondArchive.archivedBranch).toBe("agentique/archive/seat/as_1/dev-0-2");
+    expect(git(repo, "branch", "--list", "agentique/seat/as_1/dev-0").trim()).toBe("");
+  });
+
+  it("keepDirectory leaves a live seat's directory and archives the branch in place", () => {
+    const { repo, manager } = makeRepo();
+    const ref = manager.addWorktree(repo, "as_1", "seat-dev", "seat/as_1/dev-0");
+    fs.writeFileSync(path.join(ref.path, "work.txt"), "wip\n");
+    manager.commitAll(ref.path, "wip");
+    const removed = manager.remove(repo, ref.path, ref.branch, { archiveBranch: true, keepDirectory: true });
+    // The directory (a live process's cwd) survives; the branch is renamed
+    // in place, so preserved work keeps its salvage name.
+    expect(fs.existsSync(path.join(ref.path, "work.txt"))).toBe(true);
+    expect(removed.archivedBranch).toBe("agentique/archive/seat/as_1/dev-0");
+  });
+
   it("re-provisions over a stale directory at the same stable path", () => {
     const { repo, manager } = makeRepo();
     // Stable per-seat dir names mean a crash (or a deferred removal) can leave

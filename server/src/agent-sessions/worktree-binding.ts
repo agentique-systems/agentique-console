@@ -32,6 +32,14 @@ export interface WorktreeBindingDeps {
   isReviewRole: (session: AgentSessionRow, agentName: string) => boolean;
   /** True while the seat has an ACTIVE TURN — landing must not yank its cwd. */
   laneBusy: (agentSessionId: string, agent: string) => boolean;
+  /**
+   * True while the seat's PROCESS is live (turn or not). Removing a live
+   * lane's directory deletes the inode under its cwd — the next injected
+   * turn then dies with "Path … does not exist" (observed twice in a live
+   * run). Landing keeps the directory for live lanes; the next provisioning
+   * force-reset reclaims it.
+   */
+  laneLive: (agentSessionId: string, agent: string) => boolean;
   transfer: Transfer;
   simpleHandoff: SimpleHandoff;
 }
@@ -202,8 +210,9 @@ export class WorktreeBinding {
     // A read-only agent's worktree exists to give it a stable snapshot;
     // discard it rather than merging incidental scratch files.
     const profile = seat.profileSnapshot as AgentProfile;
+    const keepDirectory = this.#deps.laneLive(session.id, seat.name);
     if (!profile.tools.includes("Edit") && !profile.tools.includes("Write")) {
-      try { worktrees.remove(workspaceRoot, seat.worktreePath, seat.worktreeBranch, { archiveBranch: false }); } catch { /* best effort */ }
+      try { worktrees.remove(workspaceRoot, seat.worktreePath, seat.worktreeBranch, { archiveBranch: false, keepDirectory }); } catch { /* best effort */ }
       release();
       bus.append({ type: "agent_session.worktree.discarded", userSessionId: session.userSessionId, agentSessionId: session.id,
         payload: { agentSessionId: session.id, agent: seat.name, reason: "read-only seat: snapshot discarded, nothing to land", artifactId: null } });
@@ -219,7 +228,7 @@ export class WorktreeBinding {
         // ITSELF reported failed judged its work; the console judging FOR a
         // dead agent must not destroy what it cannot evaluate.
         const preserve = status === "failed" && opts.synthetic === true && diff.filesChanged > 0;
-        const removed = worktrees.remove(workspaceRoot, seat.worktreePath, seat.worktreeBranch, { archiveBranch: preserve });
+        const removed = worktrees.remove(workspaceRoot, seat.worktreePath, seat.worktreeBranch, { archiveBranch: preserve, keepDirectory });
         release(preserve ? { salvageBranch: removed.archivedBranch, salvageArtifactId: artifactId } : {});
         bus.append({ type: "agent_session.worktree.discarded", userSessionId: session.userSessionId, agentSessionId: session.id,
           payload: { agentSessionId: session.id, agent: seat.name,
@@ -230,7 +239,7 @@ export class WorktreeBinding {
       }
       const outcome = worktrees.mergeBranch(workspaceRoot, seat.worktreeBranch,
         `Merge seat ${seat.name} (session ${session.id})\n\nSeat-Worktree: ${seat.worktreeBranch}`);
-      const removed = worktrees.remove(workspaceRoot, seat.worktreePath, seat.worktreeBranch, { archiveBranch: !outcome.merged });
+      const removed = worktrees.remove(workspaceRoot, seat.worktreePath, seat.worktreeBranch, { archiveBranch: !outcome.merged, keepDirectory });
       release(outcome.merged ? {} : { salvageBranch: removed.archivedBranch, salvageArtifactId: artifactId });
       if (outcome.merged) {
         bus.append({ type: "agent_session.worktree.merged", userSessionId: session.userSessionId, agentSessionId: session.id,

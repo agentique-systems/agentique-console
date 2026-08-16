@@ -207,7 +207,12 @@ export class WorktreeManager {
     // The base commit is the START POINT, not the workspace HEAD: every diff
     // this seat produces is measured against what it actually started from.
     const baseCommit = this.#git(workspaceRoot, ["rev-parse", startPoint]).trim();
-    this.#git(workspaceRoot, ["worktree", "add", "-b", branch, worktreePath, startPoint]);
+    // -B, not -b: the `agentique/seat/*` namespace is console-owned, and
+    // preserved work lives only under `agentique/archive/*` by construction —
+    // so a same-name branch at provisioning time is always litter from a
+    // failed prior cycle. Create-only `-b` let one leaked branch wedge a
+    // live run's session behind "a branch named … already exists".
+    this.#git(workspaceRoot, ["worktree", "add", "-B", branch, worktreePath, startPoint]);
     return { path: worktreePath, branch, baseCommit };
   }
 
@@ -315,18 +320,35 @@ export class WorktreeManager {
    * Every branch this manager mints is `agentique/…`-prefixed; the generic
    * `archive/` fallback guards any future caller that passes a bare name
    * (where the prefix-replace would rename the branch to itself and throw).
+   *
+   * `keepDirectory` leaves the directory (and, for non-archive removals, the
+   * branch) in place — for a seat whose PROCESS is still live and cwd'd
+   * there. An archive rename still happens (git renames a checked-out branch
+   * in place), so preserved work keeps its salvage name either way; the next
+   * provisioning's force-reset reclaims whatever lingers.
    */
-  remove(workspaceRoot: string, worktreePath: string, branch: string, opts: { archiveBranch?: boolean } = {}): { archivedBranch: string | null } {
-    try { this.#git(workspaceRoot, ["worktree", "remove", "--force", worktreePath]); } catch { fs.rmSync(worktreePath, { recursive: true, force: true }); }
+  remove(workspaceRoot: string, worktreePath: string, branch: string, opts: { archiveBranch?: boolean; keepDirectory?: boolean } = {}): { archivedBranch: string | null } {
+    if (!opts.keepDirectory) {
+      try { this.#git(workspaceRoot, ["worktree", "remove", "--force", worktreePath]); } catch { fs.rmSync(worktreePath, { recursive: true, force: true }); }
+      // Prune BEFORE the branch ops: after the rmSync fallback git still
+      // registers the branch as checked out in the deleted worktree, and both
+      // `branch -D` and `branch -m` refuse — the silent leak that blocked a
+      // live run's re-provisioning with "a branch named … already exists".
+      try { this.#git(workspaceRoot, ["worktree", "prune"]); } catch { /* best effort */ }
+    }
     let archivedBranch: string | null = null;
     try {
       if (opts.archiveBranch) {
-        const target = branch.startsWith("agentique/")
+        const base = branch.startsWith("agentique/")
           ? branch.replace(/^agentique\//, "agentique/archive/")
           : `archive/${branch}`;
+        // A second archive of the same (session, seat, generation) collides
+        // with the first; suffix instead of leaking the seat branch.
+        let target = base;
+        for (let n = 2; this.#resolvable(workspaceRoot, target) && n < 20; n += 1) target = `${base}-${n}`;
         this.#git(workspaceRoot, ["branch", "-m", branch, target]);
         archivedBranch = target;
-      } else {
+      } else if (!opts.keepDirectory) {
         this.#git(workspaceRoot, ["branch", "-D", branch]);
       }
     } catch { /* branch already gone */ }

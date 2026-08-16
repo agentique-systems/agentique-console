@@ -40,9 +40,10 @@ export const CONSOLE_TOOL_NAMES = [
 /**
  * Never available to main, in any configuration. `SendMessage` bypasses the
  * journal; `ScheduleWakeup`/`Monitor`/`TaskStop` wake a console-owned lane with
- * no mailbox row, no handoff and no turn attribution.
+ * no mailbox row, no handoff and no turn attribution. Write/Edit stay denied
+ * — implementation goes through seats — but NOT Bash: see MAIN_WORK_TOOLS.
  */
-const MAIN_DENIED_TOOLS = ["Agent", "Task", "Bash", "Write", "Edit", "NotebookEdit", "SendMessage", "ScheduleWakeup", "Monitor", "TaskStop",
+const MAIN_DENIED_TOOLS = ["Agent", "Task", "Write", "Edit", "NotebookEdit", "SendMessage", "ScheduleWakeup", "Monitor", "TaskStop",
   // The native ledger is keyed on the provider session id, which changes at
   // every rotation.
   "TaskCreate", "TaskUpdate", "TaskGet", "TaskList"];
@@ -53,6 +54,14 @@ const MAIN_WORK_TOOLS = [
   "Grep",
   "WebFetch",
   "WebSearch",
+  // Infrastructure surgery, by operator directive: two live runs wedged on
+  // one-command git blockers (a stray uncommitted edit; a leaked seat
+  // branch) that main had diagnosed exactly and could not fix — one ended
+  // in the operator running git by hand, the other in a blocking question
+  // whose own recommendation read "it is one safe command". The charter
+  // bounds usage (unblock and verify, never a seat's implementation work);
+  // every call is journaled as a tool event.
+  "Bash",
 ];
 
 export interface OrchestratorOptionsInput {

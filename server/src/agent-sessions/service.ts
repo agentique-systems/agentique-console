@@ -119,6 +119,11 @@ export class AgentSessionService {
         const lane = this.#lanes.peek(agentSessionId, agent);
         return lane !== undefined && lane.activeTurn !== null;
       },
+      // Live process = its cwd inode must survive the landing.
+      laneLive: (agentSessionId, agent) => {
+        const lane = this.#lanes.peek(agentSessionId, agent);
+        return lane !== undefined && (lane.state === "live" || lane.state === "waking" || lane.state === "rotating");
+      },
       transfer: (input) => this.post(input),
       simpleHandoff,
     });
