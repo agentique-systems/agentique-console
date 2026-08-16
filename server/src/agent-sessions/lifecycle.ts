@@ -45,7 +45,7 @@ export interface CreateAgentSessionInput {
    * sessions at the cap never get the spawn grant.
    */
   parent?: { agentSessionId: string; controllerAgent: string };
-  agents: { name: string; profileId?: string; instructions?: string; model?: string; owns?: string[] }[];
+  agents: { name: string; profileId?: string; instructions?: string; model?: string; owns?: string[]; skills?: string[] }[];
   briefing?: HandoffDraft;
   /**
    * Ledger units created WITH the session, before its briefing dispatches —
@@ -185,7 +185,11 @@ export class SessionLifecycle {
     }
     for (const plan of build.agents) {
       const profile = this.#deps.snapshotProfile(this.profile(plan.profileId, parent.workspaceId));
-      repo.insertAgent(this.agentRow(row.id, plan.name, plan.role, profile, plan.instructions ?? "", plan.model, plan.owns, plan.ord, now));
+      // Commission-time skills pin into THIS seat's snapshot: rotation
+      // respawns the same skill set; the base profile is untouched.
+      const seatProfile = plan.skills === undefined || plan.skills.length === 0 ? profile
+        : { ...profile, skills: [...new Set([...(profile.skills ?? []), ...plan.skills])] };
+      repo.insertAgent(this.agentRow(row.id, plan.name, plan.role, seatProfile, plan.instructions ?? "", plan.model, plan.owns, plan.ord, now));
     }
     // Units land BEFORE the briefing so the briefing's taskId resolves and
     // syncLedgerFromHandoff can mark the entry assignment in_progress.
@@ -235,7 +239,7 @@ export class SessionLifecycle {
    * shape, and mappers are the reducer's to mint. The contract stays frozen;
    * `agents.role` is the binding, which is what makes a late seat honest.
    */
-  addAgent(agentSessionId: string, input: { name: string; profileId: string; instructions?: string; model?: string; owns?: string[]; why?: string }): { agent: string; role: string } {
+  addAgent(agentSessionId: string, input: { name: string; profileId: string; instructions?: string; model?: string; owns?: string[]; skills?: string[]; why?: string }): { agent: string; role: string } {
     const { repo, bus } = this.#deps;
     const session = repo.getAgentSession(agentSessionId);
     if (!session) throw new NotFoundError(`no agent session ${agentSessionId}`);
@@ -282,7 +286,9 @@ export class SessionLifecycle {
     }
     const ord = existing.reduce((max, seat) => Math.max(max, seat.ord), -1) + 1;
     const snapshot = this.#deps.snapshotProfile(profile);
-    repo.insertAgent(this.agentRow(agentSessionId, name, role, snapshot, input.instructions ?? "", input.model, owns, ord, nowIso()));
+    const seatSnapshot = input.skills === undefined || input.skills.length === 0 ? snapshot
+      : { ...snapshot, skills: [...new Set([...(snapshot.skills ?? []), ...input.skills])] };
+    repo.insertAgent(this.agentRow(agentSessionId, name, role, seatSnapshot, input.instructions ?? "", input.model, owns, ord, nowIso()));
     const why = input.why?.trim();
     bus.append({ type: "agent_session.agent.added", userSessionId: session.userSessionId, agentSessionId,
       payload: { agentSessionId, agent: name, role, profileId: profile.id, ...(why ? { why } : {}) } });

@@ -5,10 +5,10 @@ import { z } from "zod";
 import { and, eq } from "drizzle-orm";
 import type { AgentProfileDetail, AgentProfileSummary, ProfileValidationIssue } from "@agentique-console/shared";
 import type { Db } from "../db/client.ts";
-import { agentProfileTrust } from "../db/schema.ts";
+import { agentProfileTrust, mintedProfiles } from "../db/schema.ts";
 import type { EventBus } from "../events/bus.ts";
 import { nowIso } from "../ids.ts";
-import { ConflictError, NotFoundError } from "../errors.ts";
+import { ConflictError, InvalidInputError, NotFoundError } from "../errors.ts";
 
 export const ProfileSchema = z.object({
   id: z.string().regex(/^[a-z][a-z0-9-]*$/),
@@ -88,6 +88,15 @@ const BROWSER_MCP = {
   },
 };
 
+/**
+ * The servers a mint may attach BY NAME. The declaration (command, args) is
+ * console-owned; a mint can never supply a command — arbitrary server launch
+ * stays human-only, through workspace profile bundles and the trust click.
+ */
+export const ATTACHABLE_MCP_SERVERS: Record<string, { command: string; args: string[] }> = {
+  ...BROWSER_MCP,
+};
+
 const BUILTINS: AgentProfile[] = [
   {
     id: "coordinator",
@@ -97,6 +106,7 @@ const BUILTINS: AgentProfile[] = [
     tools: [...READ_TOOLS, ...WEB_TOOLS],
     permissionMode: "default",
     model: "claude-sonnet-5",
+    skills: ["handoff-discipline"],
     handoffExtension: "coordination",
     exemptFromOwnership: false,
     maxTurns: 35,
@@ -110,6 +120,7 @@ const BUILTINS: AgentProfile[] = [
     tools: [...READ_TOOLS, ...WEB_TOOLS],
     permissionMode: "default",
     model: "claude-sonnet-5",
+    skills: ["handoff-discipline"],
     handoffExtension: "investigation",
     exemptFromOwnership: false,
     maxTurns: 30,
@@ -123,6 +134,7 @@ const BUILTINS: AgentProfile[] = [
     tools: CODE_TOOLS,
     permissionMode: "bypassPermissions",
     model: "claude-opus-5",
+    skills: ["long-build-discipline", "build-hygiene", "worktree-etiquette", "probe-method", "handoff-discipline"],
     handoffExtension: "implementation",
     exemptFromOwnership: false,
     maxTurns: 50,
@@ -136,6 +148,7 @@ const BUILTINS: AgentProfile[] = [
     tools: CODE_TOOLS,
     permissionMode: "bypassPermissions",
     model: "claude-opus-5",
+    skills: ["long-build-discipline", "build-hygiene", "worktree-etiquette", "handoff-discipline"],
     handoffExtension: "implementation",
     exemptFromOwnership: false,
     maxTurns: 50,
@@ -149,6 +162,7 @@ const BUILTINS: AgentProfile[] = [
     tools: [...READ_TOOLS, "Bash", ...WEB_TOOLS],
     permissionMode: "default",
     model: "claude-opus-5",
+    skills: ["long-build-discipline", "worktree-etiquette", "handoff-discipline"],
     handoffExtension: "review",
     exemptFromOwnership: true,
     maxTurns: 35,
@@ -162,6 +176,7 @@ const BUILTINS: AgentProfile[] = [
     tools: [...READ_TOOLS, "Bash", ...WEB_TOOLS],
     permissionMode: "default",
     model: "claude-opus-5",
+    skills: ["long-build-discipline", "worktree-etiquette", "handoff-discipline"],
     handoffExtension: "review",
     exemptFromOwnership: true,
     maxTurns: 35,
@@ -175,6 +190,7 @@ const BUILTINS: AgentProfile[] = [
     tools: [...READ_TOOLS, ...WEB_TOOLS],
     permissionMode: "default",
     model: "claude-sonnet-5",
+    skills: ["handoff-discipline"],
     handoffExtension: "investigation",
     exemptFromOwnership: false,
     maxTurns: 30,
@@ -186,13 +202,96 @@ export class AgentProfileRegistry {
   readonly #profiles: ReadonlyMap<string, AgentProfile>;
   readonly #options: { getWorkspaceRoot: (workspaceId: string) => string; db: Db; bus: EventBus } | null;
 
+  /** Orchestrator-minted narrow-only variants; loaded from the DB at boot. */
+  readonly #minted = new Map<string, AgentProfile>();
+
   constructor(options?: { getWorkspaceRoot: (workspaceId: string) => string; db: Db; bus: EventBus }) {
     const profiles = new Map(BUILTINS.map((profile) => [profile.id, Object.freeze(profile)]));
     this.#profiles = profiles;
     this.#options = options ?? null;
+    if (options) {
+      try {
+        for (const row of options.db.select().from(mintedProfiles).all()) {
+          const parsed = ProfileSchema.safeParse(row.profile);
+          if (parsed.success) this.#minted.set(parsed.data.id, Object.freeze(parsed.data));
+        }
+      } catch { /* pre-migration database; mints simply start empty */ }
+    }
+  }
+
+  /**
+   * Mint a profile the orchestrator may seat: a NARROW-ONLY variant of a
+   * trusted base. Every dimension is bounded by the base — subset tools,
+   * same-or-lower permissionMode, additive instructions, catalog-name-only
+   * MCP attachments — so a mint grants strictly less than the per-seat
+   * instruction/model overrides the orchestrator already holds, and needs no
+   * per-mint operator approval. Resolved ONCE here; seats snapshot the
+   * result exactly as they snapshot any profile.
+   */
+  mint(input: {
+    id: string; userSessionId: string; baseProfileId: string; workspaceId?: string;
+    title?: string; purpose?: string; instructionsAppend?: string;
+    tools?: string[]; permissionMode?: "default" | "plan" | "bypassPermissions";
+    model?: string; skills?: string[]; attachServers?: string[]; maxTurns?: number; why?: string;
+  }): AgentProfile {
+    if (this.#minted.has(input.id) || this.#profiles.has(input.id)) {
+      throw new ConflictError(`profile id "${input.id}" already exists`);
+    }
+    const base = this.get(input.baseProfileId, input.workspaceId);
+    const tools = input.tools ?? base.tools;
+    const widened = tools.filter((tool) => !base.tools.includes(tool));
+    if (widened.length > 0) {
+      throw new InvalidInputError(`a mint may only narrow — tools not in base "${base.id}": ${widened.join(", ")}`);
+    }
+    const rank: Record<AgentProfile["permissionMode"], number> = { plan: 0, default: 1, bypassPermissions: 2 };
+    const permissionMode = input.permissionMode ?? base.permissionMode;
+    if (rank[permissionMode] > rank[base.permissionMode]) {
+      throw new InvalidInputError(`a mint may not raise permissionMode above the base's "${base.permissionMode}"`);
+    }
+    const attached: AgentProfile["mcpServers"] = {};
+    for (const name of input.attachServers ?? []) {
+      const declared = ATTACHABLE_MCP_SERVERS[name];
+      if (declared === undefined) {
+        throw new InvalidInputError(`"${name}" is not an attachable console-catalog MCP server (attachable: ${Object.keys(ATTACHABLE_MCP_SERVERS).join(", ")})`);
+      }
+      attached[name] = { command: declared.command, args: declared.args };
+    }
+    const profile = ProfileSchema.parse({
+      ...base,
+      id: input.id,
+      title: input.title ?? `${base.title} (specialized)`,
+      purpose: input.purpose ?? base.purpose,
+      instructions: input.instructionsAppend === undefined ? base.instructions
+        : `${base.instructions}\n\nSpecialization:\n${input.instructionsAppend}`,
+      tools, permissionMode,
+      ...(input.model === undefined ? {} : { model: input.model }),
+      ...(input.skills === undefined ? {} : { skills: input.skills }),
+      mcpServers: { ...base.mcpServers, ...attached },
+      ...(input.maxTurns === undefined ? {} : { maxTurns: input.maxTurns }),
+      revision: `mint:${input.id}`,
+    });
+    this.#options?.db.insert(mintedProfiles).values({
+      id: profile.id, userSessionId: input.userSessionId, baseProfileId: base.id,
+      baseRevision: base.revision ?? `builtin:${base.id}`,
+      profile: profile as unknown as Record<string, unknown>,
+      why: input.why ?? null, createdAt: nowIso(),
+    }).run();
+    this.#minted.set(profile.id, Object.freeze(profile));
+    this.#options?.bus.append({
+      type: "agent_profile.minted",
+      userSessionId: input.userSessionId,
+      payload: { userSessionId: input.userSessionId, profileId: profile.id, baseProfileId: base.id,
+        baseRevision: base.revision ?? `builtin:${base.id}`, tools: profile.tools,
+        permissionMode: profile.permissionMode, ...(input.why === undefined ? {} : { why: input.why }) },
+    });
+    return profile;
   }
 
   get(id: string, workspaceId?: string): AgentProfile {
+    // Mints resolve first: validated at mint time against a then-trusted
+    // base, run-scoped, never re-gated on the base's later trust state.
+    const minted = this.#minted.get(id);
+    if (minted) return minted;
     const profile = workspaceId === undefined ? this.#profiles.get(id) : this.#resolvedWorkspaceProfile(workspaceId, id);
     if (!profile) throw new Error(`unknown agent profile \"${id}\"`);
     if (workspaceId !== undefined && profile.source === "workspace" && !this.isTrusted(workspaceId, id, profile.revision ?? "")) {
@@ -202,9 +301,9 @@ export class AgentProfileRegistry {
   }
 
   list(workspaceId?: string): AgentProfile[] {
-    if (workspaceId === undefined || this.#options === null) return [...this.#profiles.values()];
+    if (workspaceId === undefined || this.#options === null) return [...this.#profiles.values(), ...this.#minted.values()];
     const workspace = this.#workspaceProfiles(workspaceId).filter((entry) => entry.profile !== null).map((entry) => entry.profile!);
-    return [...this.#profiles.values(), ...workspace];
+    return [...this.#profiles.values(), ...workspace, ...this.#minted.values()];
   }
 
   /**

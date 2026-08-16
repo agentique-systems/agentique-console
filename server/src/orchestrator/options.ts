@@ -30,6 +30,7 @@ export const CONSOLE_TOOL_NAMES = [
   "close_agent_session",
   "read_artifact",
   "add_agent",
+  "specialize_profile",
   "propose_spec",
   "read_spec",
   "update_orchestration_state",

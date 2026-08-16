@@ -34,6 +34,8 @@ import { AssignmentScheduler } from "./tasks/scheduler.ts";
 import { TaskService } from "./tasks/service.ts";
 import { TimelineService } from "./timeline/service.ts";
 import { CapacityService } from "./capacity/service.ts";
+import { CapabilityCatalog } from "./agent-profiles/capability-catalog.ts";
+import path from "node:path";
 import { HandoffService } from "./handoffs/service.ts";
 import { WorkspaceService } from "./workspaces/service.ts";
 
@@ -105,6 +107,7 @@ export function createApp(options: CreateAppOptions): App {
   const sessionStore = stores.providerEntries;
 
   const capacity = new CapacityService({ repo, bus });
+  const catalog = new CapabilityCatalog(path.join(config.infra.skillsPluginDir, "skills"));
   const lateRunner = late<OrchestratorRunner>("runner");
   const lateManager = late<ProfileManagerService>("manager");
   const lateScheduler = late<AssignmentScheduler>("scheduler");
@@ -129,7 +132,7 @@ export function createApp(options: CreateAppOptions): App {
     buildMcpServer: (userSessionId, sdkInstance) =>
       repo.getUserSession(userSessionId)?.purpose === "profile_manager"
         ? buildManagerMcpServer(sdkInstance, lateManager.get(), userSessionId)
-        : buildConsoleMcpServer({ sdk: sdkInstance, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, specs, state: orchestrationState }),
+        : buildConsoleMcpServer({ sdk: sdkInstance, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, specs, state: orchestrationState, catalog, registry: profiles }),
   });
   lateRunner.set(runner);
   const manager = new ProfileManagerService({ repo, workspaces, profiles, config, bus, runner: () => runner });

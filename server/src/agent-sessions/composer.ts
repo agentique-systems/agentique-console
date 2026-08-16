@@ -144,8 +144,12 @@ function capabilityBrief(profile: AgentProfile, hasWorktree: boolean): string {
     can.push(`use the tools your MCP server(s) provide — ${servers.join(", ")}, named mcp__<server>__<tool>`);
   } else cannot.push("reach any MCP server (your profile declares none)");
   cannot.push("write outside your own working copy — teammates own theirs");
+  // The deferred-tools lesson, applied to skills: a capability nobody names
+  // goes unused. Byte-stable when the list is empty.
+  const skills = profile.skills ?? [];
   return `## Your capabilities\nYou can: ${can.join("; ") || "nothing beyond your console coordination tools"}.\nYou cannot: ${cannot.join("; ")}.\n` +
     `${notes.map((note) => `${note}\n`).join("")}` +
+    `${skills.length > 0 ? `You have skills loaded: ${skills.join(", ")}. Before starting work a skill covers, invoke it with the Skill tool and follow it — do not re-derive procedure it already settles.\n` : ""}` +
     `${hasWorktree ? "Your cwd is an isolated worktree; teammates and the coordinator cannot see your files until the Console merges them when you report completed.\n" : ""}` +
     `If an assignment needs something in the "cannot" list, say so immediately in a handoff rather than working around it — the limit is real and will not change mid-run.`;
 }

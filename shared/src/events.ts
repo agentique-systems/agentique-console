@@ -469,6 +469,17 @@ export interface AgentLivenessTrippedPayload {
   inputPreview?: string;
 }
 
+/** The orchestrator minted a narrow-only profile variant from a trusted base. */
+export interface AgentProfileMintedPayload {
+  userSessionId: string;
+  profileId: string;
+  baseProfileId: string;
+  baseRevision: string;
+  tools: string[];
+  permissionMode: string;
+  why?: string;
+}
+
 /** An alarmed tool call returned on its own — the alarm was a false positive. */
 export interface AgentLivenessResolvedPayload {
   agentSessionId: string;
@@ -590,6 +601,7 @@ export type ConsoleEvent = Base &
     | { type: "task.assignment.dispatched"; payload: TaskAssignmentPayload }
     | { type: "task.assignment.canceled"; payload: TaskAssignmentPayload }
     | { type: "agent_profile.changed"; payload: AgentProfileChangedPayload }
+    | { type: "agent_profile.minted"; payload: AgentProfileMintedPayload }
     | { type: "usage.recorded"; payload: UsageRecordedPayload }
     | { type: "handoff.created"; payload: HandoffCreatedPayload }
     | { type: "handoff.consumed"; payload: HandoffConsumedPayload }

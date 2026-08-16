@@ -439,6 +439,23 @@ export const agentProfileTrust = sqliteTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.profileId, t.revision] })],
 );
 
+/**
+ * Orchestrator-minted profiles: narrow-only variants of trusted bases,
+ * resolved ONCE at mint time and stored complete. Journaled, no per-mint
+ * operator approval — a mint grants strictly less than the per-seat
+ * instructions+model overrides the orchestrator already holds. Rows persist
+ * so seats resolving a mint survive a server restart.
+ */
+export const mintedProfiles = sqliteTable("minted_profiles", {
+  id: text("id").primaryKey(),
+  userSessionId: text("user_session_id").notNull(),
+  baseProfileId: text("base_profile_id").notNull(),
+  baseRevision: text("base_revision").notNull(),
+  profile: text("profile", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
+  why: text("why"),
+  createdAt: text("created_at").notNull(),
+});
+
 export const events = sqliteTable(
   "events",
   {

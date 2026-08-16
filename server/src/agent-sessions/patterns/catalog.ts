@@ -20,6 +20,8 @@ import { hubContract } from "../topology.ts";
 
 export interface BuildAgent {
   name: string; profileId?: string; instructions?: string; model?: string; owns?: string[];
+  /** Commission-time skill additions, union'd with the profile's defaults. */
+  skills?: string[];
 }
 export interface BuildInput {
   agents: BuildAgent[];
@@ -33,6 +35,8 @@ export interface AgentPlan {
   profileId: string;
   instructions?: string;
   model?: string;
+  /** Extra skills pinned into this seat's profile snapshot at creation. */
+  skills?: string[];
   owns: string[];
   ord: number;
 }
@@ -77,6 +81,7 @@ function agentPlans(agents: BuildAgent[], roleOf: (index: number) => string, fir
     profileId: agent.profileId ?? "explorer",
     ...(agent.instructions !== undefined ? { instructions: agent.instructions } : {}),
     ...(agent.model !== undefined ? { model: agent.model } : {}),
+    ...(agent.skills !== undefined ? { skills: agent.skills } : {}),
     owns: agent.owns ?? [], ord: firstOrd + index,
   }));
 }

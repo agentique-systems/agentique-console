@@ -235,6 +235,9 @@ export class AgentRuntime implements Injector, TurnTracker {
           // brief tells the seat to call. Granted explicitly rather than left
           // to work by being permission-free.
           "ToolSearch",
+          // Skill bodies load through the Skill tool; without this a seat
+          // told "invoke your skills" has no approved way to do it.
+          "Skill",
           ...(profile.tools.includes("Edit") || profile.tools.includes("Write") ? ["EnterWorktree", "ExitWorktree"] : []),
           // Background work is native: a seat starts a dev server with Bash and
           // reads it back, where it used to call console process tools.
@@ -272,7 +275,15 @@ export class AgentRuntime implements Injector, TurnTracker {
         // nothing about them.
         mcpServers: { console_agent: mcp as never, ...declared } as never,
         ...(latestSeat.model ? { model: latestSeat.model } : {}),
-        ...((profile.pluginPath && profile.source === "workspace") ? { plugins: [{ type: "local" as const, path: profile.pluginPath }] } : {}),
+        // The console's skills plugin loads for EVERY seat; the `skills`
+        // filter below decides what each seat actually sees (empty list =
+        // nothing loads), so seats that opt out pay zero tokens. Skills are
+        // rotation-proof by construction: the snapshot's list respawns with
+        // every generation.
+        plugins: [
+          { type: "local" as const, path: this.#deps.config.infra.skillsPluginDir },
+          ...((profile.pluginPath && profile.source === "workspace") ? [{ type: "local" as const, path: profile.pluginPath }] : []),
+        ],
         // Always explicit: omitting the key lets the CLI fall back to the
         // OPERATOR's personal skill listing despite settingSources: [].
         skills: profile.skills ?? [],

@@ -12,6 +12,12 @@ export interface InfraConfig {
   /** The built web bundle; served at / when present (absent in vite dev). */
   webDir: string;
   /**
+   * The console's own skills plugin (server/skills). Shipped with the
+   * server, trusted like builtin profiles; loaded into every seat, where the
+   * SDK's `skills` filter decides what each seat actually sees.
+   */
+  skillsPluginDir: string;
+  /**
    * Browse roots for the workspace directory picker, and the containment
    * allow-list for workspace creation. Defaults to the whole filesystem with
    * home as a shortcut; narrow it with CONSOLE_FS_ROOTS (colon-separated).
@@ -233,6 +239,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       port: Number(env.CONSOLE_PORT ?? 4400),
       host: env.CONSOLE_HOST ?? "127.0.0.1",
       webDir: path.resolve(import.meta.dirname, "../../web/dist"),
+      skillsPluginDir: env.CONSOLE_SKILLS_DIR ?? path.resolve(import.meta.dirname, "../skills"),
       fsRoots: parseRoots(env.CONSOLE_FS_ROOTS, home),
       model: validatedModel(env.CONSOLE_MODEL),
       improveModel: env.CONSOLE_IMPROVE_MODEL ?? "claude-sonnet-5",

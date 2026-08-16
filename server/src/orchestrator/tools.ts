@@ -24,6 +24,9 @@ import { fail, guarded, ok } from "../sdk/tool-result.ts";
 import type { InteractionService } from "./interactions.ts";
 import type { SpecService } from "./spec.ts";
 import type { CompletionRecord, OrchestrationStateService } from "./state.ts";
+import type { CapabilityCatalog } from "../agent-profiles/capability-catalog.ts";
+import { MCP_CATALOG } from "../agent-profiles/capability-catalog.ts";
+import type { AgentProfileRegistry } from "../agent-profiles/registry.ts";
 
 /** Same bound the agent-side read_artifact applies (provider inline-image cap). */
 const MAX_IMAGE_BASE64_CHARS = 5 * 1024 * 1024;
@@ -54,10 +57,14 @@ export interface ConsoleToolsInput {
   interactions: InteractionService;
   specs: SpecService;
   state: OrchestrationStateService;
+  /** Skills + attachable-server metadata, for staffing and mint validation. */
+  catalog: CapabilityCatalog;
+  /** The profile registry — the mint path lives on it. */
+  registry: AgentProfileRegistry;
 }
 
 export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
-  const { sdk, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, specs, state } = input;
+  const { sdk, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, specs, state, catalog, registry } = input;
 
   /** Tools operate only on this UserSession's agent sessions. */
   const owned = (agentSessionId: string) => {
@@ -92,6 +99,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
                   "Agent brief appended to the profile instructions",
                 ),
               model: z.string().optional().describe("Model override"),
+              skills: z.array(z.string()).optional().describe("Extra skills for this seat, from list_agent_profiles' catalog — union'd with the profile's defaults and pinned into the seat's snapshot (rotation-proof)."),
               owns: z.array(z.string()).default([]).describe("Files or directories this agent exclusively owns. Required for an agent that writes; leave empty for a read-only agent such as a reviewer — it owns no files."),
             }),
           )
@@ -123,6 +131,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           profileId: string;
           instructions?: string;
           model?: string;
+          skills?: string[];
           owns: string[];
         }[];
         briefing: HandoffDraft;
@@ -141,6 +150,16 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
                 ...(args.why === undefined ? {} : { why: args.why }),
                 ...(args.expecting === undefined ? {} : { expecting: args.expecting }) } } as HandoffDraft["extension"],
           };
+          // A skill a seat cannot act on must not load (the deferred-tools
+          // lesson): validate every commission-time skill against the
+          // profile's granted tools before anything spawns.
+          const workspaceIdForSkills = repo.getUserSession(userSessionId)?.workspaceId;
+          for (const agent of args.agents) {
+            if (agent.skills === undefined || agent.skills.length === 0) continue;
+            const profileTools = host.profiles(workspaceIdForSkills).find((profile) => profile.id === agent.profileId)?.tools ?? [];
+            const problems = catalog.validateAssignment(agent.skills, profileTools);
+            if (problems.length > 0) throw new InvalidInputError(`agent "${agent.name}": ${problems.join("; ")}`);
+          }
           const created = host.createSession({
             userSessionId,
             title: args.title,
@@ -354,7 +373,26 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
       {},
       async () => guarded(() => {
         const workspaceId = repo.getUserSession(userSessionId)?.workspaceId;
-        return { availability: host.runtimeAvailability(), profiles: host.profiles(workspaceId).map(({ id, title, purpose, tools }) => ({ id, title, purpose, tools })) };
+        // The full staffing picture, not a 4-field summary: a live run
+        // staffed 34 seats without ever seeing models, permissions, turn
+        // budgets, or skills — and invented phantom middle-manager seats the
+        // catalog could have told it were miscast.
+        return {
+          availability: host.runtimeAvailability(),
+          profiles: host.profiles(workspaceId).map((profile) => ({
+            id: profile.id, title: profile.title, purpose: profile.purpose,
+            tools: profile.tools, permissionMode: profile.permissionMode,
+            model: profile.model ?? null, maxTurns: profile.maxTurns,
+            skills: profile.skills ?? [], mcpServers: Object.keys(profile.mcpServers ?? {}),
+            handoffExtension: profile.handoffExtension ?? "generic",
+          })),
+          catalog: {
+            skills: catalog.selectable().map(({ name, version, status, description, whenToUse, requiresTools, costNote }) =>
+              ({ name, version, status, description, whenToUse, requiresTools, costNote })),
+            mcpServers: MCP_CATALOG,
+          },
+          note: "Compose a variant with specialize_profile (narrow-only); assign extra skills per seat at commission time.",
+        };
       }),
     ),
 
@@ -558,6 +596,40 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
     ),
 
     sdk.tool(
+      "specialize_profile",
+      "Mint a run-scoped profile VARIANT from a trusted base, then seat it like any profile. Narrow-only by construction: tools must be a subset of the base's, permissionMode may only stay or drop, instructions are ADDITIVE, MCP servers attach by catalog name only (never a command), skills come from the catalog. Use it when the fixed profiles miscast a role — a cheaper implementer for mechanical work, an implementer with the browser for visual verification, a reviewer scoped to one subsystem. Journaled; no operator approval needed because a mint grants strictly less than the per-seat overrides you already hold.",
+      {
+        id: z.string().regex(/^[a-z][a-z0-9-]*$/).describe("New profile id, e.g. 'render-implementer'"),
+        baseProfileId: z.string().min(1).describe("A trusted base from list_agent_profiles"),
+        title: z.string().optional(),
+        purpose: z.string().optional(),
+        instructionsAppend: z.string().optional().describe("Appended to the base instructions as a Specialization section"),
+        tools: z.array(z.string()).optional().describe("Subset of the base's tools; omit to keep them all"),
+        permissionMode: z.enum(["default", "plan", "bypassPermissions"]).optional().describe("Same or lower than the base's"),
+        model: z.string().optional(),
+        skills: z.array(z.string()).optional().describe("From the catalog; validated against the mint's tools"),
+        attachServers: z.array(z.string()).optional().describe("Attachable console-catalog MCP servers, by name (e.g. 'browser')"),
+        maxTurns: z.number().int().min(1).max(100).optional(),
+        why: z.string().optional().describe("Why this variant — journaled with the mint"),
+      },
+      async (args: { id: string; baseProfileId: string; title?: string; purpose?: string; instructionsAppend?: string;
+        tools?: string[]; permissionMode?: "default" | "plan" | "bypassPermissions"; model?: string;
+        skills?: string[]; attachServers?: string[]; maxTurns?: number; why?: string }) =>
+        guarded(() => {
+          const workspaceId = repo.getUserSession(userSessionId)?.workspaceId;
+          const minted = registry.mint({ ...args, userSessionId, ...(workspaceId === undefined ? {} : { workspaceId }) });
+          if (args.skills !== undefined && args.skills.length > 0) {
+            const problems = catalog.validateAssignment(args.skills, minted.tools);
+            if (problems.length > 0) throw new InvalidInputError(problems.join("; "));
+          }
+          return { profileId: minted.id, base: args.baseProfileId, tools: minted.tools,
+            permissionMode: minted.permissionMode, skills: minted.skills ?? [],
+            mcpServers: Object.keys(minted.mcpServers ?? {}), maxTurns: minted.maxTurns,
+            note: "Seat it via create_agent_session or add_agent like any profile id." };
+        }),
+    ),
+
+    sdk.tool(
       "add_agent",
       "Add ONE agent to an open session mid-run — an emergent need the original roster did not anticipate (a security pass, a second perspective, more capacity). Works for open multi-seat roles only: hub specialists, plan_execute executors, peer_to_peer peers. Fixed-roster patterns (pipeline, debate, evaluator, map_reduce) refuse — spawn a follow-up session for those. The entry agent is told immediately; assign the new seat work through it.",
       {
@@ -567,17 +639,25 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         instructions: z.string().optional().describe("Brief appended to the profile instructions"),
         model: z.string().optional(),
         owns: z.array(z.string()).default([]).describe("Exclusive write scope; required for a writing profile"),
+        skills: z.array(z.string()).optional().describe("Extra skills for this seat, from the catalog — pinned into its snapshot."),
         why: z.string().optional()
           .describe("Why this seat now — the emergent need the roster did not anticipate. Journaled with the addition; the entry agent and the run review read it."),
       },
-      async (args: { agentSessionId: string; name: string; profileId: string; instructions?: string; model?: string; owns: string[]; why?: string }) =>
+      async (args: { agentSessionId: string; name: string; profileId: string; instructions?: string; model?: string; owns: string[]; skills?: string[]; why?: string }) =>
         guarded(() => {
-          owned(args.agentSessionId);
+          const session = owned(args.agentSessionId);
+          if (args.skills !== undefined && args.skills.length > 0) {
+            const profileTools = host.profiles(repo.getUserSession(session.userSessionId)?.workspaceId)
+              .find((profile) => profile.id === args.profileId)?.tools ?? [];
+            const problems = catalog.validateAssignment(args.skills, profileTools);
+            if (problems.length > 0) throw new InvalidInputError(problems.join("; "));
+          }
           const added = host.addAgent(args.agentSessionId, {
             name: args.name, profileId: args.profileId,
             ...(args.instructions === undefined ? {} : { instructions: args.instructions }),
             ...(args.model === undefined ? {} : { model: args.model }),
             owns: args.owns,
+            ...(args.skills === undefined ? {} : { skills: args.skills }),
             ...(args.why === undefined ? {} : { why: args.why }),
           });
           return { ...added, status: "seated",
