@@ -220,6 +220,9 @@ export class AgentRuntime implements Injector, TurnTracker {
         tasks: Boolean(this.#deps.tasks), handoffs: Boolean(this.#deps.handoffs),
         worktrees: Boolean(this.#deps.worktrees), user: Boolean(user),
         childSessions: this.#deps.config.policy.enableChildSessions !== false && session.depth < this.#deps.config.policy.maxSessionDepth,
+        // Commission-time opt-in: the orchestrator flagged this session as
+        // one whose ENTRY agent may nest, whatever the pattern.
+        sessionAllowsChildren: session.allowChildSessions && seatRole === contract.contract.entry.role,
       });
       const mcp = this.#buildParticipantMcp(sdk, session, latestSeat, granted);
       const declared = declaredMcpServers(profile, this.#deps.config);

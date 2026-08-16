@@ -34,7 +34,6 @@ import { Mailroom, identitySelector, simpleHandoff } from "./mailroom.ts";
 import { sweepLiveness } from "./liveness.ts";
 import { AgentLanePool, type ActiveTurn } from "./lanes.ts";
 import { AgentRuntime } from "./runtime.ts";
-import { sessionTree } from "./session-tree.ts";
 import { SessionLifecycle, type CreateAgentSessionInput } from "./lifecycle.ts";
 import { NestingBroker } from "./nesting.ts";
 import type { TransferInput } from "./seams.ts";
@@ -108,8 +107,6 @@ export class AgentSessionService {
         deps.bus.append({ type: "agent_session.runtime.noted", userSessionId: session.userSessionId, agentSessionId,
           payload: { agentSessionId, agent: seatName, detail: `agent parked (${reason}); provider session retained` } });
       },
-      // A shared budget must see every layer of the true root's tree.
-      sessionTree: (agentSessionId) => new Set(sessionTree(deps.repo, agentSessionId).map((row) => row.id)),
     });
     this.#worktreeBinding = new WorktreeBinding({
       repo: deps.repo, bus: deps.bus, artifacts: deps.artifacts, config: deps.config,
@@ -428,6 +425,12 @@ export class AgentSessionService {
     if (session.parentAgentSessionId !== null) {
       this.#nesting.abandonChildSession(session.parentAgentSessionId, MAIN_RECIPIENT, agentSessionId, reason);
     } else {
+      // Closing a parent must not orphan its children mid-work: each open
+      // child is abandoned (journaled, archived, salvage-preserved) first.
+      for (const child of this.#deps.repo.listChildSessions(agentSessionId).filter((row) => row.lifecycle === "open")) {
+        try { this.#nesting.abandonChildSession(agentSessionId, MAIN_RECIPIENT, child.id, `parent session closed: ${reason}`); }
+        catch (error) { this.#recordFailure(agentSessionId, error); }
+      }
       this.#lifecycle.archiveOne(session);
     }
     return { archived: true, openTasks };

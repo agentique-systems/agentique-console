@@ -109,6 +109,8 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           .describe(
             "Typed coordinator assignment: objective, current evidence, risk, uncertainty, and next action",
           ),
+        allowChildSessions: z.boolean().default(false)
+          .describe("Let this session's ENTRY agent spawn child sessions (depth-capped). Give it to a session that owns a workstream with its own internal decomposition; leave it off for leaf work."),
         why: z.string().optional()
           .describe("Why this session, this pattern, now — one or two sentences. Journaled with the briefing; the run review reads it."),
         expecting: z.string().optional()
@@ -135,6 +137,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           owns: string[];
         }[];
         briefing: HandoffDraft;
+        allowChildSessions?: boolean;
         why?: string;
         expecting?: string;
         tasks?: { taskId: string; subject: string; description?: string; owner?: string; blockedBy?: string[] }[];
@@ -167,6 +170,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
             ...(args.patternConfig ? { patternConfig: args.patternConfig } : {}),
             agents: args.agents,
             briefing,
+            ...(args.allowChildSessions === true ? { allowChildSessions: true } : {}),
             ...(args.tasks === undefined ? {} : { tasks: args.tasks }),
           });
           return {

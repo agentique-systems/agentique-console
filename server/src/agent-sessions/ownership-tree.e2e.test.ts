@@ -52,19 +52,32 @@ describe("ownership across the session tree (e2e, fake SDK)", () => {
       agents: [writer("w-ga", "area/root")] })).toThrow(/assigned to both/);
   });
 
-  it("rejects a grandchild claiming an UNCLE's scope, and a cousin claiming a cousin's", () => {
+  it("allows a grandchild to claim an UNCLE's scope — disjointness is lineage-scoped", () => {
+    // Deliberately allowed since the lineage change: the old whole-tree scan
+    // made a child session strictly harder to create than the flat session
+    // it replaced (flat siblings never checked each other), and was one of
+    // five structural reasons a 12-hour live run created zero child
+    // sessions. Ancestors and siblings still collide (tests above/below);
+    // cousins and uncles are the orchestrator's coordination problem, as
+    // they always were for flat sessions.
     const { h, userSessionId, childA, childB } = makeTree();
-    // Uncle: child-b's scope, claimed from under child-a.
-    expect(() => h.host.createSession({ userSessionId, title: "grand-a",
+    const grand = h.host.createSession({ userSessionId, title: "grand-a",
       parent: { agentSessionId: childA.agentSessionId, controllerAgent: childA.entryAgent },
-      agents: [writer("w-ga", "area/b")] })).toThrow(/assigned to both/);
-    // Cousin vs cousin across separate depth-2 branches.
-    h.host.createSession({ userSessionId, title: "grand-a",
-      parent: { agentSessionId: childA.agentSessionId, controllerAgent: childA.entryAgent },
-      agents: [writer("w-ga", "area/ga")] });
-    expect(() => h.host.createSession({ userSessionId, title: "grand-b",
+      agents: [writer("w-ga", "area/b")] });
+    expect(grand.agentSessionId).toBeTruthy();
+    // Cousin vs cousin across separate depth-2 branches: also lineage-exempt.
+    const grandB = h.host.createSession({ userSessionId, title: "grand-b",
       parent: { agentSessionId: childB.agentSessionId, controllerAgent: childB.entryAgent },
-      agents: [writer("w-gb", "area/ga")] })).toThrow(/assigned to both/);
+      agents: [writer("w-gb", "area/b2")] });
+    expect(grandB.agentSessionId).toBeTruthy();
+  });
+
+  it("rejects a SIBLING claiming a sibling's scope", () => {
+    const { h, userSessionId, childA, root } = makeTree();
+    void childA;
+    expect(() => h.host.createSession({ userSessionId, title: "child-c",
+      parent: { agentSessionId: root.agentSessionId, controllerAgent: root.entryAgent },
+      agents: [writer("w-c2", "area/a")] })).toThrow(/assigned to both/);
   });
 
   it("add_agent on a grandchild checks the whole tree, not its local branch", () => {

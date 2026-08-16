@@ -30,6 +30,8 @@ export interface AgentGrantDeps {
   handoffs: boolean;
   worktrees: boolean;
   user: boolean;
+  /** The session was created with allowChildSessions and this seat is its entry agent. */
+  sessionAllowsChildren?: boolean;
   /**
    * True below `maxSessionDepth` with nesting enabled: the depth cap IS this
    * bit — a session AT the cap never sees the spawn tools, so there is no
@@ -54,7 +56,11 @@ export function grantedTools(
     if (grants.has("tasks_write")) { tools.add("task_create"); tools.add("task_update"); tools.add("assignment_cancel"); }
   }
   if (grants.has("map_dispatch")) tools.add("dispatch_work_items");
-  if (grants.has("child_sessions") && deps.childSessions) {
+  // Role-granted (hub coordinator, plan_execute planner) OR commission-time
+  // session opt-in (the entry agent of a session created with
+  // allowChildSessions, any pattern) — the run-level kill switch and depth
+  // cap (deps.childSessions) still gate both paths.
+  if ((grants.has("child_sessions") || deps.sessionAllowsChildren === true) && deps.childSessions) {
     tools.add("create_child_session"); tools.add("abandon_child_session");
   }
   return tools;

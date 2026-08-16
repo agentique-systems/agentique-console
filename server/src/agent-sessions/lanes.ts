@@ -121,8 +121,6 @@ export interface AgentLanePoolDeps {
   hasQueuedWork: (agentSessionId: string, seat: string) => boolean;
   /** Kill the seat's processes/browsers and journal the park notice. */
   reapRuntime: (agentSessionId: string, seat: string, reason: string) => void;
-  /** Session ids sharing one resident budget: the root and its children. */
-  sessionTree: (agentSessionId: string) => ReadonlySet<string>;
 }
 
 export class AgentLanePool implements LaneActivity {
@@ -175,16 +173,19 @@ export class AgentLanePool implements LaneActivity {
     const config = this.#deps.config;
     if (!config) return;
     for (;;) {
-      const tree = this.#deps.sessionTree(agentSessionId);
+      const own = new Set([agentSessionId]);
       const globalFull = this.#resident() >= config.policy.agentMaxResident;
-      // A parent and its children SHARE a budget: nesting must not multiply
-      // the footprint, and a tree self-throttles before it thrashes strangers.
-      const treeFull = this.#residentIn(tree) >= config.policy.agentMaxResidentPerTree;
-      if (!globalFull && !treeFull) return;
+      // Budgets are PER SESSION, not per tree: a child session brings its own
+      // residency under the global cap, so nesting genuinely adds parallel
+      // capacity. (The old shared-tree budget meant nesting could never buy
+      // parallelism — one of five structural reasons a 12-hour live run
+      // created zero child sessions. The global cap still bounds the machine.)
+      const sessionFull = this.#residentIn(own) >= config.policy.agentMaxResidentPerSession;
+      if (!globalFull && !sessionFull) return;
       // Evict only where it frees the BINDING constraint: when the global cap
-      // binds, try our own tree first.
-      const scope = globalFull ? undefined : tree;
-      if (scope === undefined && this.#parkLeastRecentIdle(tree)) continue;
+      // binds, try our own session first.
+      const scope = globalFull ? undefined : own;
+      if (scope === undefined && this.#parkLeastRecentIdle(own)) continue;
       if (this.#parkLeastRecentIdle(scope)) continue;
       if (Date.now() >= until) throw new Error("no resident seat capacity");
       await new Promise<void>((resolve) => {

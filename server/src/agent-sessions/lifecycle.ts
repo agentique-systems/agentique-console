@@ -45,6 +45,8 @@ export interface CreateAgentSessionInput {
    * sessions at the cap never get the spawn grant.
    */
   parent?: { agentSessionId: string; controllerAgent: string };
+  /** Grants the entry agent create_child_session (depth cap still applies). */
+  allowChildSessions?: boolean;
   agents: { name: string; profileId?: string; instructions?: string; model?: string; owns?: string[]; skills?: string[] }[];
   briefing?: HandoffDraft;
   /**
@@ -129,10 +131,20 @@ export class SessionLifecycle {
     }
     const ownedScopes = new Map<string, string>();
     if (parentRow) {
-      // Cross-tree disjointness: every open session in the TRUE root's tree
-      // merges worktrees into ONE workspace, so write scopes must not collide
-      // anywhere in it — cousins and grandparents included.
-      const treeSessions = sessionTree(repo, parentRow.id).filter((row) => row.lifecycle === "open");
+      // LINEAGE-scoped disjointness: the ancestor chain (whose scopes are
+      // being delegated from) and open SIBLINGS (concurrent writers under the
+      // same parent). Cousins under other branches are deliberately not
+      // consulted — flat sibling sessions never were, and the old whole-tree
+      // scan made a child session strictly harder to create than the flat
+      // session it replaced (one of five structural reasons a 12-hour live
+      // run created zero child sessions).
+      const lineage: AgentSessionRow[] = [];
+      for (let cursor: AgentSessionRow | null = parentRow; cursor !== null;
+        cursor = cursor.parentAgentSessionId === null ? null : repo.getAgentSession(cursor.parentAgentSessionId) ?? null) {
+        lineage.push(cursor);
+      }
+      const siblings = repo.listChildSessions(parentRow.id);
+      const treeSessions = [...lineage, ...siblings].filter((row) => row.lifecycle === "open");
       for (const treeSession of treeSessions) {
         for (const seat of repo.listAgents(treeSession.id)) {
           if ((seat.profileSnapshot as AgentProfile | undefined)?.exemptFromOwnership === true) continue;
@@ -176,6 +188,7 @@ export class SessionLifecycle {
       parentAgentSessionId: parentRow?.id ?? null,
       parentControllerAgent: parentRow ? input.parent!.controllerAgent : null,
       depth: parentRow ? parentRow.depth + 1 : 0,
+      allowChildSessions: input.allowChildSessions === true,
     };
     repo.insertAgentSession(row);
     if (parentRow) {

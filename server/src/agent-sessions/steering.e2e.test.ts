@@ -114,7 +114,7 @@ describe("peer-lane delivery semantics (fake SDK)", () => {
       yield sendHandoffUse("scout-close", "coordinator", { action: "made it", status: "completed", category: "milestone" });
       yield successMessage();
     });
-    h.config.policy.agentMaxResidentPerTree = 1;
+    h.config.policy.agentMaxResidentPerSession = 1;
     h.config.policy.agentSpawnTimeoutMs = 150;
     const userSessionId = h.addUserSession();
     const created = h.host.createSession({ userSessionId, title: "capacity", agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("go", "pending") });

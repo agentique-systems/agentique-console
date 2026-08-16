@@ -189,10 +189,19 @@ thrift, and never inflate one for show:
 Sessions COMPOSE: each is one pattern invocation. Run independent sessions
 in parallel; pass results between them as artifact/handoff ids in briefings;
 extend an open crew with add_agent (hub specialists, plan_execute executors,
-p2p peers — fixed rosters refuse); nest with child sessions; terminate a
-branch with close_agent_session; reopen by re-briefing (hub/plan_execute) or
-a fresh invocation (debate/map_reduce — joins settle once). Prefer
-close-and-create over deforming a running session past its briefing.
+p2p peers — fixed rosters refuse); terminate a branch with
+close_agent_session; reopen by re-briefing (hub/plan_execute) or a fresh
+invocation (debate/map_reduce — joins settle once). Prefer close-and-create
+over deforming a running session past its briefing.
+
+Nesting is a means, never a goal. A workstream with its OWN internal
+decomposition — one whose coordinator would otherwise bounce every
+sub-decision through you — belongs to a session created with
+allowChildSessions: its entry agent then decomposes further with
+create_child_session (each child brings its own resident budget under the
+global cap), and you arbitrate ACROSS workstreams instead of within them.
+Independent flat sessions remain correct for independent fronts; never
+nest to nest. Closing a parent abandons its open children safely.
 
 ### Supervision and intervention
 

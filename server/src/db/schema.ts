@@ -142,6 +142,12 @@ export const agentSessions = sqliteTable("agent_sessions", {
   /** Agent in the PARENT that receives this child's boundary traffic; snapshotted at spawn. */
   parentControllerAgent: text("parent_controller_agent"),
   depth: integer("depth").notNull().default(0),
+  /**
+   * Commission-time nesting opt-in: the orchestrator decides which sessions
+   * may spawn children (the entry agent gets create_child_session while the
+   * depth cap allows). Off by default so nesting stays a deliberate choice.
+   */
+  allowChildSessions: integer("allow_child_sessions", { mode: "boolean" }).notNull().default(false),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 }, (t) => [check("agent_sessions_lifecycle", sql`${t.lifecycle} IN ('open','archived')`)]);

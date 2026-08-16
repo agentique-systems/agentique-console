@@ -24,8 +24,7 @@ export interface InfraConfig {
    */
   fsRoots: { path: string; label: string }[];
   /**
-   * Default orchestrator-lane model (also the profile-manager lane and the
-   * lane's rotation checkpoint). A session that records its own `model` wins
+   * Default orchestrator-lane model (also the lane's rotation checkpoint). A session that records its own `model` wins
    * over this; sessions created internally record none and land here. Agents
    * carry their own profile models; they never read this. CONSOLE_MODEL
    * overrides the default for new sessions.
@@ -65,12 +64,12 @@ export interface PolicyConfig {
   /** Max resident agent processes machine-wide. */
   agentMaxResident: number;
   /**
-   * Resident agent processes per session TREE (a parent and its children share
-   * this budget). Defaults to the per-session cap, so childless sessions are
-   * unchanged and a parent that spawns children shares its slots rather than
-   * multiplying its footprint.
+   * Resident agent processes per SESSION. Deliberately not per tree: a child
+   * session brings its own residency (under the global cap), so nesting adds
+   * parallel capacity — the old shared-tree budget was one of five structural
+   * reasons a 12-hour live run created zero child sessions.
    */
-  agentMaxResidentPerTree: number;
+  agentMaxResidentPerSession: number;
   /** How long a delivery waits for its recipient agent to spawn or unpark. */
   agentSpawnTimeoutMs: number;
   /**
@@ -181,7 +180,8 @@ export interface Config {
 const RETIRED_ENV_NAMES: Record<string, string> = {
   CONSOLE_SEAT_IDLE_REAP_MS: "CONSOLE_AGENT_IDLE_REAP_MS",
   CONSOLE_MAX_RESIDENT_SEATS: "CONSOLE_MAX_RESIDENT_AGENTS",
-  CONSOLE_MAX_RESIDENT_SEATS_PER_TREE: "CONSOLE_MAX_RESIDENT_AGENTS_PER_TREE",
+  CONSOLE_MAX_RESIDENT_SEATS_PER_TREE: "CONSOLE_MAX_RESIDENT_AGENTS_PER_SESSION",
+  CONSOLE_MAX_RESIDENT_AGENTS_PER_TREE: "CONSOLE_MAX_RESIDENT_AGENTS_PER_SESSION",
   CONSOLE_SEAT_SPAWN_TIMEOUT_MS: "CONSOLE_AGENT_SPAWN_TIMEOUT_MS",
   CONSOLE_SEAT_WORKTREES: "CONSOLE_AGENT_WORKTREES",
 };
@@ -251,8 +251,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     },
     policy: {
       agentIdleReapMs: Number(env.CONSOLE_AGENT_IDLE_REAP_MS ?? 300_000),
-      agentMaxResident: Number(env.CONSOLE_MAX_RESIDENT_AGENTS ?? 8),
-      agentMaxResidentPerTree: Number(env.CONSOLE_MAX_RESIDENT_AGENTS_PER_TREE ?? 4),
+      agentMaxResident: Number(env.CONSOLE_MAX_RESIDENT_AGENTS ?? 12),
+      agentMaxResidentPerSession: Number(env.CONSOLE_MAX_RESIDENT_AGENTS_PER_SESSION ?? 4),
       agentSpawnTimeoutMs: Number(env.CONSOLE_AGENT_SPAWN_TIMEOUT_MS ?? 30_000),
       agentWorktrees: env.CONSOLE_AGENT_WORKTREES !== "0",
       operatorAskDetachMs: Number(env.CONSOLE_OPERATOR_ASK_DETACH_MS ?? 300_000),
