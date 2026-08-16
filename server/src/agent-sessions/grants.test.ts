@@ -25,7 +25,7 @@ function makeAgent(over: Partial<AgentRow>): AgentRow {
     generation: 0, turnCount: 0, contextTokens: 0, latestHandoffId: null,
     cumulativeCostUsd: 0, cumulativeApiDurationMs: 0, lastDecisionAt: null,
     worktreePath: null, worktreeBaseCommit: null, worktreeBranch: null,
-    salvageBranch: null, salvageArtifactId: null,
+    salvageBranch: null, salvageArtifactId: null, pendingCheckpointHandoffId: null,
     ord: 1, createdAt: "2026-01-01", ...over };
 }
 

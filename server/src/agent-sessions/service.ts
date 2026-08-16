@@ -113,6 +113,12 @@ export class AgentSessionService {
       worktrees: deps.worktrees, getWorkspaceRoot: deps.getWorkspaceRoot,
       escalationTarget: (session, agentName) => this.#routing.escalationTarget(session, agentName),
       isReviewRole: (session, agentName) => this.#routing.isReviewRole(session, agentName),
+      // Landing removes the seat's worktree directory; doing that under a
+      // live turn yanks the cwd out from under a running build.
+      laneBusy: (agentSessionId, agent) => {
+        const lane = this.#lanes.peek(agentSessionId, agent);
+        return lane !== undefined && lane.activeTurn !== null;
+      },
       transfer: (input) => this.post(input),
       simpleHandoff,
     });

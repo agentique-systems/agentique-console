@@ -107,6 +107,8 @@ export interface AgentLane {
    * instead of vanishing silently.
    */
   deliberateStop: boolean;
+  /** In-flight proactive checkpoint guard — at most one per lane at a time. */
+  proactiveCheckpointInFlight: boolean;
   /** The turn-budget notice fired for the current assignment (latch). */
   turnBudgetNotified: boolean;
   lastActiveAt: number;
@@ -140,7 +142,7 @@ export class AgentLanePool implements LaneActivity {
       lane = { state: "unspawned", input: null, query: null, abort: null, pump: null, ready: null,
         activeTurn: null, pendingDeliveries: [], redeliveryAttempts: new Map(), contextTokens: 0,
         lastCumulative: { costUsd: 0, apiDurationMs: 0 }, rotationGate: null, releaseRotation: null,
-        idleTimer: null, assignmentTurns: 0, turnBudgetNotified: false, deliberateStop: false, lastActiveAt: 0, lastStatus: null };
+        idleTimer: null, assignmentTurns: 0, turnBudgetNotified: false, deliberateStop: false, proactiveCheckpointInFlight: false, lastActiveAt: 0, lastStatus: null };
       lanes.set(seat, lane);
     }
     return lane;

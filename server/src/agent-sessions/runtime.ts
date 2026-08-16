@@ -574,13 +574,19 @@ export class AgentRuntime implements Injector, TurnTracker {
     bus.append({ type: "agent_session.turn.settled", userSessionId: session.userSessionId, agentSessionId: session.id,
       payload: { agentSessionId: session.id, agent: seatName, turnId: turn.turnId, status, durationMs: Date.now() - turn.startedAt, ...(errorMessage ? { errorMessage } : {}) } });
     this.#deps.worktree.snapshotTurn(session.id, seatName, turn.turnId);
+    this.#deps.worktree.flushDeferredLanding(session, seatName);
     runtime.idle();
     if (requeued && repo.getAgentSession(session.id)?.lifecycle === "open") {
       void hooks.deliver(session.id, seatName).catch((error) => hooks.recordFailure(session.id, error));
     }
     hooks.refreshStatus(session.id);
     this.#deps.lanes.armIdleTimer(session.id, seatName, lane);
-    void this.#maybeRotate(session.id, seatName).catch((error) => hooks.recordFailure(session.id, error));
+    // Rotation first; if it happened the seat starts fresh and the proactive
+    // checkpoint is a no-op. Otherwise a seat nearing its budget checkpoints
+    // NOW, while healthy — not from its deathbed.
+    void this.#maybeRotate(session.id, seatName)
+      .then(() => this.#maybeProactiveCheckpoint(session.id, seatName))
+      .catch((error) => hooks.recordFailure(session.id, error));
   }
 
   // ── Context rotation ─────────────────────────────────────────────────────
@@ -605,6 +611,12 @@ export class AgentRuntime implements Injector, TurnTracker {
       turnLimit: config.policy.contextTurnLimit, tokenLimit,
     });
     if (!due) return;
+    // Soft rotation waits for an assignment boundary: mid-assignment rotation
+    // throws away exactly the state a boundary rotation carries for free (a
+    // live run rotated 47/47 times mid-work). The hard ceiling (1.25×) still
+    // rotates unconditionally, and the proactive checkpoint covers the window.
+    if (due.urgency === "soft" && !this.#atAssignmentBoundary(session, seatName)
+      && repo.listUnackedDeliveries(agentSessionId, seatName).length > 0) return;
     lane.state = "rotating";
     lane.deliberateStop = true;
     lane.rotationGate = new Promise((resolve) => { lane.releaseRotation = resolve; });
@@ -629,16 +641,96 @@ export class AgentRuntime implements Injector, TurnTracker {
   }
 
   /**
+   * True once the seat has filed a terminal report for its latest assignment
+   * (or was never assigned). The soft-rotation deferral reads this: rotating
+   * AT the boundary means the checkpoint describes finished work, not a
+   * half-derived state the successor must re-derive.
+   */
+  #atAssignmentBoundary(session: AgentSessionRow, seatName: string): boolean {
+    const assignment = this.#deps.repo.latestAssignmentDelivery(session.id, seatName);
+    if (!assignment) return true;
+    const assignmentSeq = this.#deps.repo.getMessageById(assignment.messageId)?.seq ?? 0;
+    return this.#deps.repo.listMessages("agent", session.id).some((row) =>
+      row.speakerName === seatName && row.seq > assignmentSeq
+      && ["completed", "failed"].includes((row.payload?.handoff as { status?: string } | undefined)?.status ?? ""));
+  }
+
+  /**
+   * Checkpoint a seat nearing its rotation budget (≥80%) while it is still
+   * healthy — a separate resumed query over the live provider session, no
+   * gate, no abort pressure. Rotation then consumes the stored handoff
+   * instead of interrogating a dying process (which failed 31 of 35 times
+   * in a live run and cost ~$62 of re-priming).
+   */
+  async #maybeProactiveCheckpoint(agentSessionId: string, seatName: string): Promise<void> {
+    const config = this.#deps.config;
+    if (!config || !this.#deps.handoffs || !this.#deps.sdk) return;
+    const lane = this.#deps.lanes.laneOf(agentSessionId, seatName);
+    if (lane.state !== "live" || lane.activeTurn !== null || lane.rotationGate !== null || lane.proactiveCheckpointInFlight) return;
+    const { repo } = this.#deps;
+    const session = repo.getAgentSession(agentSessionId);
+    const seat = repo.getAgent(agentSessionId, seatName);
+    if (!session || session.lifecycle !== "open" || !seat || !seat.sdkSessionId) return;
+    if (seat.pendingCheckpointHandoffId !== null) return;
+    const tokenLimit = rotationTokenLimit(config.policy.contextTokenLimit, seat.model ?? config.infra.model);
+    const nearing = seat.contextTokens >= 0.8 * tokenLimit || seat.turnCount >= 0.8 * config.policy.contextTurnLimit;
+    // Due-now is the rotation path's job; this only covers the 80–100% band.
+    if (!nearing || rotationDue({ turnCount: seat.turnCount, contextTokens: seat.contextTokens,
+      turnLimit: config.policy.contextTurnLimit, tokenLimit }) !== null) return;
+    lane.proactiveCheckpointInFlight = true;
+    try {
+      const sdk = await this.#deps.sdk();
+      const { draft } = await this.#checkpointQuery(session, seat, sdk);
+      if (!draft) return; // silent — the rotation path keeps its own floor
+      const current = repo.getAgent(agentSessionId, seatName);
+      // Rotated (or replaced) underneath while the query ran: stale, drop it.
+      if (!current || current.generation !== seat.generation) return;
+      const specPointer = this.#deps.specs.pointer(session.userSessionId);
+      const prepared = this.#deps.handoffs.prepare({ draft, userSessionId: session.userSessionId, agentSessionId: session.id,
+        sender: seat.name, recipient: seat.name, profileId: seat.profileId, generation: seat.generation,
+        extensionKind: (seat.profileSnapshot as AgentProfile).handoffExtension,
+        trigger: "rotation", parentHandoffId: current.latestHandoffId, checkpoint: true,
+        ...(specPointer === null ? {} : { extensionDefaults: { approvedSpec: specPointer } }) });
+      repo.insertCheckpointHandoff(prepared.row);
+      this.#deps.handoffs.committed(prepared.record);
+      repo.patchAgent(agentSessionId, seatName, { pendingCheckpointHandoffId: prepared.row.id });
+      this.#deps.bus.append({ type: "agent_session.runtime.noted", userSessionId: session.userSessionId, agentSessionId: session.id,
+        payload: { agentSessionId: session.id, agent: seat.name,
+          detail: `proactive checkpoint ${prepared.row.id} taken at ${seat.contextTokens.toLocaleString()} tokens / ${seat.turnCount} turns` } });
+    } finally {
+      lane.proactiveCheckpointInFlight = false;
+    }
+  }
+
+  /**
    * The checkpoint-and-rotate body, run by #maybeRotate under its gate after
    * the agent's process has closed. Returns the successor participant row.
-   * One ungated model attempt over an always-available floor: the Console's
-   * reconstruction is true by construction, so a clean model checkpoint
-   * upgrades it and a bad or failed one costs nothing.
+   * Preference order: the proactive checkpoint (taken healthy, already
+   * journaled) → one deathbed model attempt → the Console's reconstruction,
+   * which is true by construction and always available.
    */
   async #rotateNow(session: AgentSessionRow, seat: AgentRow, sdk: ConsoleSdk, reason: RotationReason): Promise<AgentRow> {
     const config = this.#deps.config;
     if (!config || !this.#deps.handoffs) return seat;
     const started = Date.now();
+    const pending = seat.pendingCheckpointHandoffId === null ? undefined
+      : this.#deps.repo.getHandoff(seat.pendingCheckpointHandoffId);
+    if (pending !== undefined) {
+      // The proactive checkpoint is already a journaled handoff for THIS
+      // generation; point the successor at it directly — no dying-process
+      // query, no second row.
+      this.#deps.repo.patchAgent(session.id, seat.name, { sdkSessionId: null, generation: seat.generation + 1,
+        turnCount: 0, contextTokens: 0, latestHandoffId: pending.id, pendingCheckpointHandoffId: null,
+        cumulativeCostUsd: 0, cumulativeApiDurationMs: 0 });
+      const fresh = this.#deps.repo.getAgent(session.id, seat.name) ?? seat;
+      this.#deps.bus.append({ type: "agent_session.context.rotated", userSessionId: session.userSessionId, agentSessionId: session.id,
+        payload: { agentSessionId: session.id, agent: seat.name, generation: seat.generation + 1,
+          reason, handoffId: pending.id, checkpointBytes: pending.bytes, degraded: false } });
+      this.#deps.bus.append({ type: "agent_session.runtime.noted", userSessionId: session.userSessionId, agentSessionId: session.id,
+        payload: { agentSessionId: session.id, agent: seat.name,
+          detail: `rotation consumed proactive checkpoint ${pending.id} (taken ${Math.max(0, Date.now() - Date.parse(pending.createdAt))}ms earlier)` } });
+      return fresh;
+    }
     const { draft: attempted, failure } = await this.#checkpointQuery(session, seat, sdk);
     const degraded = attempted === null;
     const draft = attempted ?? this.#deps.composer.reconstructCheckpoint(session, seat);
@@ -659,7 +751,7 @@ export class AgentRuntime implements Injector, TurnTracker {
     this.#deps.handoffs.committed(prepared.record);
     // Rotation retires the provider session, so its cumulative baseline retires
     // with it — the successor genuinely starts from zero.
-    this.#deps.repo.patchAgent(session.id, seat.name, { sdkSessionId: null, generation: seat.generation + 1, turnCount: 0, contextTokens: 0, latestHandoffId: prepared.row.id, cumulativeCostUsd: 0, cumulativeApiDurationMs: 0 });
+    this.#deps.repo.patchAgent(session.id, seat.name, { sdkSessionId: null, generation: seat.generation + 1, turnCount: 0, contextTokens: 0, latestHandoffId: prepared.row.id, pendingCheckpointHandoffId: null, cumulativeCostUsd: 0, cumulativeApiDurationMs: 0 });
     const fresh = this.#deps.repo.getAgent(session.id, seat.name) ?? seat;
     this.#deps.bus.append({ type: "agent_session.context.rotated", userSessionId: session.userSessionId, agentSessionId: session.id,
       payload: { agentSessionId: session.id, agent: seat.name, generation: seat.generation + 1,

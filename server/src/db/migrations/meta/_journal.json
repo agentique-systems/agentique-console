@@ -50,6 +50,13 @@
       "when": 1786654311153,
       "tag": "0006_spec_and_state",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1786871503158,
+      "tag": "0007_proactive_checkpoint",
+      "breakpoints": true
     }
   ]
 }

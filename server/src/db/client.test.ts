@@ -23,7 +23,7 @@ describe("database migrations", () => {
     for (const table of ["workspaces", "user_sessions", "agent_sessions", "agents", "messages", "interactions", "tasks", "task_dependencies", "events", "mailbox_deliveries", "handoff_records", "pattern_state"]) {
       expect(tables.has(table)).toBe(true);
     }
-    expect(sqlite.prepare("SELECT count(*) AS n FROM __drizzle_migrations").get()).toMatchObject({ n: 7 });
+    expect(sqlite.prepare("SELECT count(*) AS n FROM __drizzle_migrations").get()).toMatchObject({ n: 8 });
     // Indexes the baseline must create.
     expect(sqlite.prepare("PRAGMA index_list(interactions)").all()).toEqual(
       expect.arrayContaining([
@@ -51,7 +51,7 @@ describe("database migrations", () => {
     legacy.close();
 
     const second = openDb(file);
-    expect(second.sqlite.prepare("SELECT count(*) AS n FROM __drizzle_migrations").get()).toMatchObject({ n: 7 });
+    expect(second.sqlite.prepare("SELECT count(*) AS n FROM __drizzle_migrations").get()).toMatchObject({ n: 8 });
     expect(second.sqlite.prepare("SELECT id FROM workspaces").get()).toMatchObject({ id: "ws-1" });
     // Post-baseline backfills reached the adopted rows (pattern_role became
     // the single `agents.role` column in 0003).
@@ -63,7 +63,7 @@ describe("database migrations", () => {
     second.sqlite.close();
 
     const third = openDb(file);
-    expect(third.sqlite.prepare("SELECT count(*) AS n FROM __drizzle_migrations").get()).toMatchObject({ n: 7 });
+    expect(third.sqlite.prepare("SELECT count(*) AS n FROM __drizzle_migrations").get()).toMatchObject({ n: 8 });
     third.sqlite.close();
   });
 

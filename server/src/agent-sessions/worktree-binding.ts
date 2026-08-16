@@ -30,12 +30,16 @@ export interface WorktreeBindingDeps {
   escalationTarget: (session: AgentSessionRow, agentName: string) => string;
   /** Routing's `isReviewRole` — decides which base a seat's snapshot is cut from. */
   isReviewRole: (session: AgentSessionRow, agentName: string) => boolean;
+  /** True while the seat has an ACTIVE TURN — landing must not yank its cwd. */
+  laneBusy: (agentSessionId: string, agent: string) => boolean;
   transfer: Transfer;
   simpleHandoff: SimpleHandoff;
 }
 
 export class WorktreeBinding {
   readonly #deps: WorktreeBindingDeps;
+  /** Landings deferred because the seat's turn was still running; flushed at settle. */
+  readonly #deferredLandings = new Map<string, { status: "completed" | "failed"; synthetic: boolean }>();
 
   constructor(deps: WorktreeBindingDeps) { this.#deps = deps; }
 
@@ -67,8 +71,9 @@ export class WorktreeBinding {
   /**
    * Default-on isolation for EVERY agent in a git workspace: a lazy worktree
    * per assignment, so completed work lands atomically and interrupted work
-   * leaves zero residue. Fail-open — if the worktree cannot be created the
-   * agent runs directly in the workspace, with a runtime notice.
+   * leaves zero residue. Fail-open only for read-only profiles — a seat that
+   * can write or run commands fails the spawn loudly rather than running at
+   * the canonical root (see the catch below).
    */
   ensureAgentWorktree(session: AgentSessionRow, seat: AgentRow, workspaceRoot: string): AgentRow {
     const { repo, bus } = this.#deps;
@@ -105,8 +110,24 @@ export class WorktreeBinding {
         payload: { agentSessionId: session.id, agent: seat.name, branch: ref.branch, baseCommit: ref.baseCommit } });
       return repo.getAgent(session.id, seat.name) ?? seat;
     } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      const profile = seat.profileSnapshot as AgentProfile;
+      // Fail-open into the canonical root is only safe for a seat that can
+      // neither edit files nor run commands. A write/Bash seat spawned at the
+      // root is how a live run's canonical checkout grew the stray state that
+      // wedged four merges — those seats fail loudly instead.
+      if (profile.tools.includes("Edit") || profile.tools.includes("Write") || profile.tools.includes("Bash")) {
+        try {
+          this.#deps.transfer({ agentSessionId: session.id, speaker: { kind: "agent", name: seat.name },
+            to: this.#deps.escalationTarget(session, seat.name),
+            handoff: this.#deps.simpleHandoff("Worktree provisioning failed", "failed",
+              `${seat.name} could not get an isolated worktree (${detail}) and holds write/Bash tools, so it was NOT spawned into the canonical workspace.`,
+              "Fix the workspace's git state (or disable isolation deliberately), then reassign."), category: "failure" });
+        } catch { /* the throw below still reports through the spawn path */ }
+        throw new Error(`worktree isolation unavailable for write-capable seat ${seat.name}: ${detail}`);
+      }
       bus.append({ type: "agent_session.runtime.noted", userSessionId: session.userSessionId, agentSessionId: session.id,
-        payload: { agentSessionId: session.id, agent: seat.name, detail: `worktree isolation unavailable (${error instanceof Error ? error.message : String(error)}); working directly in the workspace` } });
+        payload: { agentSessionId: session.id, agent: seat.name, detail: `worktree isolation unavailable (${detail}); working directly in the workspace (read-only profile)` } });
       return seat;
     }
   }
@@ -163,6 +184,16 @@ export class WorktreeBinding {
     const { repo, bus } = this.#deps;
     const worktrees = this.#deps.worktrees;
     if (!worktrees || !seat.worktreePath || !seat.worktreeBranch || !seat.worktreeBaseCommit || !this.#deps.getWorkspaceRoot) return;
+    // A report journaled MID-TURN (send_handoff during the seat's own turn)
+    // must not land yet: landing removes the worktree directory while the
+    // process is cwd'd in it — a live run had three worktrees yanked under
+    // running cargo builds this way. Defer to the turn settle.
+    if (this.#deps.laneBusy(session.id, seat.name)) {
+      this.#deferredLandings.set(`${session.id}/${seat.name}`, { status, synthetic: opts.synthetic === true });
+      bus.append({ type: "agent_session.runtime.noted", userSessionId: session.userSessionId, agentSessionId: session.id,
+        payload: { agentSessionId: session.id, agent: seat.name, detail: `landing deferred until the turn settles (${status})` } });
+      return;
+    }
     const user = repo.getUserSession(session.userSessionId);
     if (!user) return;
     const workspaceRoot = this.#deps.getWorkspaceRoot(user.workspaceId);
@@ -237,6 +268,17 @@ export class WorktreeBinding {
    */
   snapshotTurn(agentSessionId: string, agentName: string, turnId: string): void {
     this.snapshot(agentSessionId, agentName, `turn ${turnId}`);
+  }
+
+  /** The settle-side flush of a landing deferred mid-turn (see landOnReport). */
+  flushDeferredLanding(session: AgentSessionRow, seatName: string): void {
+    const key = `${session.id}/${seatName}`;
+    const deferred = this.#deferredLandings.get(key);
+    if (deferred === undefined) return;
+    this.#deferredLandings.delete(key);
+    const seat = this.#deps.repo.getAgent(session.id, seatName);
+    if (!seat) return;
+    this.landOnReport(session, seat, deferred.status, { synthetic: deferred.synthetic });
   }
 
   /**

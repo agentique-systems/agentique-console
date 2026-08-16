@@ -104,6 +104,19 @@ describe("WorktreeManager", () => {
     expect(fs.readFileSync(path.join(repo, "README.md"), "utf8")).toBe("diverged on main\n");
   });
 
+  it("re-provisions over a stale directory at the same stable path", () => {
+    const { repo, manager } = makeRepo();
+    // Stable per-seat dir names mean a crash (or a deferred removal) can leave
+    // the previous cycle's directory in place; the next provision must clear
+    // and reuse the path instead of failing the spawn.
+    const first = manager.addWorktree(repo, "as_1", "seat-dev", "seat/as_1/dev-0");
+    fs.writeFileSync(path.join(first.path, "leftover.txt"), "stale\n");
+    const second = manager.addWorktree(repo, "as_1", "seat-dev", "seat/as_1/dev-1");
+    expect(second.path).toBe(first.path);
+    expect(fs.existsSync(path.join(second.path, "leftover.txt"))).toBe(false);
+    expect(second.branch).toBe("agentique/seat/as_1/dev-1");
+  });
+
   it("stashes dirty workspace files, merges, and preserves the local edit", () => {
     const { repo, manager } = makeRepo();
     const ref = manager.addWorktree(repo, "as_1", "g-1", "g/1");

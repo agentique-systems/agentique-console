@@ -385,7 +385,7 @@ export class SessionLifecycle {
       contextTokens: 0, latestHandoffId: null,
       cumulativeCostUsd: 0, cumulativeApiDurationMs: 0, lastDecisionAt: null,
       worktreePath: null, worktreeBaseCommit: null, worktreeBranch: null,
-      salvageBranch: null, salvageArtifactId: null,
+      salvageBranch: null, salvageArtifactId: null, pendingCheckpointHandoffId: null,
       ord, createdAt };
   }
 
