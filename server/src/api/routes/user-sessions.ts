@@ -128,7 +128,13 @@ export function registerUserSessionRoutes(
   // The full run-summary document behind a sign-off card's scalars.
   app.get<{ Params: { id: string; summaryId: string } }>(
     "/api/user-sessions/:id/run-summaries/:summaryId",
-    async (request) => ctx.app.completion.getSummary(request.params.id, request.params.summaryId),
+    async (request) =>
+      // "tail" = the unsummarized end of the run, built on demand — always
+      // readable, never persisted (statics beat params in fastify, but the
+      // sentinel keeps it one route and one response shape).
+      request.params.summaryId === "tail"
+        ? ctx.app.completion.tailSummary(request.params.id)
+        : ctx.app.completion.getSummary(request.params.id, request.params.summaryId),
   );
 
   // The living spec: revision history + the approved text that governs the run.

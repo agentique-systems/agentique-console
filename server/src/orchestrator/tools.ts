@@ -10,7 +10,7 @@ import { MAIN_RECIPIENT } from "../agent-sessions/names.ts";
 import type { ArtifactStore } from "../events/artifact-store.ts";
 import type { EventBus } from "../events/bus.ts";
 import type { Repo } from "../db/repo.ts";
-import { NotFoundError } from "../errors.ts";
+import { InvalidInputError, NotFoundError } from "../errors.ts";
 import { newId } from "../ids.ts";
 import { PAGE_DEFAULT_BYTES, PAGE_MAX_BYTES, pageTail } from "../paging.ts";
 import type { ConsoleSdk, SdkToolResult } from "../sdk/types.ts";
@@ -509,13 +509,27 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         })).min(1).describe("At most 12 survive."),
         knownGaps: z.array(z.string()).default([]).describe("What is not done or not verified, and you know it. At most 8 survive."),
         nonGoals: z.array(z.string()).default([]).describe("Deliberately out of scope (incl. declined opportunities). At most 8 survive."),
+        specRevision: z.number().int().min(1).optional()
+          .describe("The approved spec revision these criteria verify against. REQUIRED when a spec exists — the completion predicate matches it against the current approved revision."),
         note: z.string().optional(),
       },
-      async (args: { criteria: CompletionRecord["criteria"]; knownGaps: string[]; nonGoals: string[]; note?: string }) =>
+      async (args: { criteria: CompletionRecord["criteria"]; knownGaps: string[]; nonGoals: string[]; specRevision?: number; note?: string }) =>
         guarded(() => {
+          // Fail loudly on a stale or missing revision — a record against a
+          // superseded spec would silently never satisfy the completion gate.
+          const approved = specs.latestApproved(userSessionId);
+          if (approved !== undefined) {
+            if (args.specRevision === undefined) {
+              throw new InvalidInputError(`a spec exists (approved rev ${approved.revision}); pass specRevision after verifying the criteria against it`);
+            }
+            if (args.specRevision !== approved.revision) {
+              throw new InvalidInputError(`specRevision ${args.specRevision} is not the current approved revision ${approved.revision}; re-verify against the current spec`);
+            }
+          }
           const row = state.recordCompletion(userSessionId,
-            { criteria: args.criteria.slice(0, 12).map((entry) => ({ ...entry, criterion: clip(entry.criterion, 200) })),
-              knownGaps: clipAll(args.knownGaps, 200, 8), nonGoals: clipAll(args.nonGoals, 200, 8) },
+            { criteria: args.criteria.slice(0, 12).map((entry) => ({ ...entry, criterion: clip(entry.criterion, 200), evidence: entry.evidence ?? [] })),
+              knownGaps: clipAll(args.knownGaps ?? [], 200, 8), nonGoals: clipAll(args.nonGoals ?? [], 200, 8),
+              ...(args.specRevision === undefined ? {} : { specRevision: args.specRevision }) },
             args.note === undefined ? undefined : clip(args.note, 280));
           return { revision: row.revision, recorded: true };
         }),

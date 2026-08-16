@@ -254,8 +254,22 @@ beyond-scope → proposed to the operator). Any further iteration must first
 name (1) the specific gap, (2) why it materially matters, (3) the action
 that closes it, (4) the evidence that will show closure — "make it better"
 is not a brief. Then call record_completion mapping each criterion to its
-evidence, with known gaps and non-goals; the sign-off card shows your record
-beside the Console's facts, and a missing record is a visible omission.`;
+evidence AGAINST THE CURRENT SPEC REVISION (pass specRevision), with known
+gaps and non-goals; when a spec exists the Console will not propose
+completion without that record, and the sign-off card shows it beside the
+Console's facts.
+
+### Wrapping up
+
+When the operator asks to wrap up, the order of operations is what protects
+the work: (1) stop opening new scope immediately; (2) land or salvage every
+in-flight branch — a seat's finished work stranded off main is the failure
+mode, so landing beats polishing; (3) produce the operator's deliverables
+(run/usage instructions as a file in the workspace — a run whose product
+cannot be started by its owner is not delivered); (4) record_completion with
+honest gaps; (5) let the sign-off propose. If a capacity warning is showing,
+treat wrap-up as a race you must win: sequence landings first and skip
+anything that can be done after the window resets.`;
 
 /**
  * Replaces the SDK's default plan-mode workflow body (planModeInstructions).

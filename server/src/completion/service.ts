@@ -29,7 +29,9 @@ export interface RunCompletionDeps {
   runner: () => OrchestratorRunner;
   getWorkspaceRoot: (workspaceId: string) => string;
   /** Main's record_completion source; optional so unit harnesses stay small. */
-  orchestrationState?: { latestCompletion(userSessionId: string): { revision: number; completion: { criteria: { criterion: string; met: boolean; evidence: { kind: string; ref: string }[] }[]; knownGaps: string[]; nonGoals: string[] } } | null };
+  orchestrationState?: { latestCompletion(userSessionId: string): { revision: number; completion: { criteria: { criterion: string; met: boolean; evidence: { kind: string; ref: string }[] }[]; knownGaps: string[]; nonGoals: string[]; specRevision?: number } } | null };
+  /** The approved spec — the completion oracle; optional for spec-less harnesses. */
+  specs?: { latestApproved(userSessionId: string): { revision: number } | undefined };
   /**
    * `config.completionQuietWindowMs`. The predicate is re-evaluated when the
    * timer FIRES, not when it was scheduled, so a new turn starting inside the
@@ -119,8 +121,43 @@ export class RunCompletionService {
       try { this.#deps.host().dischargeQuietDebts(userSessionId); } catch { /* a backstop must not throw */ }
       return false;
     }
+    if (!this.#completionRecordSatisfiesSpec(userSessionId)) {
+      this.#nudgeForCompletionRecord(userSessionId);
+      return false;
+    }
     this.#propose(userSessionId);
     return true;
+  }
+
+  /**
+   * The spec is the completion oracle: with an approved spec, quiet ledgers
+   * are not enough — main must have verified THIS revision's acceptance
+   * criteria via record_completion. A live run proposed "done" for a game
+   * with no window and no renderer because the heuristic stopped at "the
+   * current wave's ledger is clean". Spec-less runs keep the old behavior.
+   */
+  #completionRecordSatisfiesSpec(userSessionId: string): boolean {
+    const approved = this.#deps.specs?.latestApproved(userSessionId);
+    if (approved === undefined) return true;
+    const record = this.#deps.orchestrationState?.latestCompletion(userSessionId);
+    return record !== null && record !== undefined
+      && record.completion.specRevision === approved.revision;
+  }
+
+  /** One nudge per (session, spec revision): verify-and-record, or keep working. */
+  readonly #nudgedForRevision = new Map<string, number>();
+
+  #nudgeForCompletionRecord(userSessionId: string): void {
+    const approved = this.#deps.specs?.latestApproved(userSessionId);
+    if (approved === undefined) return;
+    if (this.#nudgedForRevision.get(userSessionId) === approved.revision) return;
+    const anchor = this.#deps.repo.listAgentSessions(userSessionId)
+      .find((row) => row.parentAgentSessionId === null);
+    if (!anchor) return;
+    this.#nudgedForRevision.set(userSessionId, approved.revision);
+    this.#deps.runner().enqueueAgentMilestone(userSessionId, anchor.id, "decision",
+      `The Console sees quiet sessions and final reports, but no completion record against spec rev ${approved.revision}. ` +
+      "Verify the spec's acceptance criteria and call record_completion (with specRevision), or name the gap and keep working — the run will not propose completion until then.");
   }
 
   #propose(userSessionId: string): void {
@@ -186,6 +223,29 @@ export class RunCompletionService {
    * justification, deviations, and uncertainty LIST the proposal event's
    * stats deliberately omit.
    */
+  /**
+   * The unsummarized tail — everything after the last persisted summary —
+   * built on demand and never persisted, so the end of a run is ALWAYS
+   * readable. A live run died with its last 6,900 events unsummarized
+   * because summaries were only ever built inside a completion proposal.
+   */
+  tailSummary(userSessionId: string): { id: "tail"; status: "proposed"; verdict: RunSummaryDocument["verdict"]; note: null; createdAt: string; resolvedAt: null; document: RunSummaryDocument } {
+    const { db, repo } = this.#deps;
+    if (!repo.getUserSession(userSessionId)) throw new NotFoundError(`no user session ${userSessionId}`);
+    const previous = db.select().from(runSummaries)
+      .where(eq(runSummaries.userSessionId, userSessionId))
+      .orderBy(desc(runSummaries.createdAt)).get();
+    const document = buildRunSummary({
+      db, repo, userSessionId, seqFrom: previous ? previous.seqTo + 1 : 0,
+      reaped: { seats: [] },
+      interactions: this.#deps.interactions,
+      completionRecord: this.#deps.orchestrationState?.latestCompletion(userSessionId) ?? null,
+      ...(this.#deps.getWorkspaceRoot ? { getWorkspaceRoot: this.#deps.getWorkspaceRoot } : {}),
+    });
+    return { id: "tail", status: "proposed", verdict: document.verdict, note: null,
+      createdAt: nowIso(), resolvedAt: null, document };
+  }
+
   getSummary(userSessionId: string, summaryId: string): { id: string; status: "proposed" | "accepted" | "changes_requested"; verdict: RunSummaryDocument["verdict"]; note: string | null; createdAt: string; resolvedAt: string | null; document: RunSummaryDocument } {
     const row = this.#deps.db.select().from(runSummaries).where(eq(runSummaries.id, summaryId)).get();
     if (!row || row.userSessionId !== userSessionId) throw new NotFoundError(`no run summary ${summaryId} in session ${userSessionId}`);

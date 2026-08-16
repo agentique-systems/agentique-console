@@ -135,7 +135,7 @@ export function createApp(options: CreateAppOptions): App {
   const manager = new ProfileManagerService({ repo, workspaces, profiles, config, bus, runner: () => runner });
   lateManager.set(manager);
   const completion = new RunCompletionService({
-    db, repo, bus, interactions, scheduler, getWorkspaceRoot, orchestrationState,
+    db, repo, bus, interactions, scheduler, getWorkspaceRoot, orchestrationState, specs,
     host: () => host,
     runner: () => runner,
     quietWindowMs: config.policy.completionQuietWindowMs,

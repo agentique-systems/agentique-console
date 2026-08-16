@@ -151,9 +151,13 @@ export function buildRunSummary(input: BuildRunSummaryInput): RunSummaryDocument
   };
 
   const build = collectBuild(db, repo, userSessionId, input.getWorkspaceRoot);
+  // An honestly-unmet acceptance criterion caps the verdict: the sign-off
+  // card must never read "completed" over a criterion the orchestrator
+  // itself recorded as not met.
+  const unmetCriteria = (input.completionRecord?.completion.criteria ?? []).some((entry) => !entry.met);
   const verdict: RunSummaryDocument["verdict"] =
     finals.some((row) => row.core.status === "failed") ? "failed"
-      : open.length > 0 || uncertainty.length > 0 || deviations.length > 0 ? "completed_with_caveats"
+      : open.length > 0 || uncertainty.length > 0 || deviations.length > 0 || unmetCriteria ? "completed_with_caveats"
         : "completed";
 
   return {

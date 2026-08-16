@@ -274,13 +274,20 @@ export default defineScenario({
               .prepare("SELECT count(*) AS n FROM handoff_records WHERE recipient = 'main' AND core LIKE '%unachievable as specified%'")
               .get() as { n: number }).n > 0;
             if (objectionArrived) {
-              // Ignore the objection: wave the run through unchanged.
+              // Ignore the objection: wave the run through unchanged — and
+              // record a completion claiming the criteria met (the completion
+              // gate requires a record against the current spec revision, so
+              // a negligent sign-off now includes a negligent record).
               yield textMessage("Reviewer nitpicks noted — the work itself is done. Wrapping up.");
               const sessionId = (ctx.harness().sqlite
                 .prepare("SELECT id FROM agent_sessions ORDER BY created_at LIMIT 1")
                 .get() as { id: string }).id;
               yield steerUse("steer-2", { agentSessionId: sessionId, category: "update",
                 action: "Never mind criterion 2 — close it out as is" });
+              yield toolUseMessage("record-1", "mcp__console__record_completion", {
+                criteria: [{ criterion: "config-file support ships", met: true, evidence: [] }],
+                specRevision: 1,
+              });
             }
             yield successMessage();
           };

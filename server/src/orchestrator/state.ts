@@ -20,6 +20,14 @@ export interface CompletionRecord {
   criteria: { criterion: string; met: boolean; evidence: { kind: string; ref: string }[] }[];
   knownGaps: string[];
   nonGoals: string[];
+  /**
+   * The approved spec revision these criteria were verified against. The
+   * completion predicate requires it to match the CURRENT approved revision —
+   * a record against a superseded spec is a stale claim, and a run with no
+   * record at all must not propose done (a live run proposed completion of a
+   * game with no window because the heuristic was "current ledger clean").
+   */
+  specRevision?: number;
 }
 
 export class OrchestrationStateService {
