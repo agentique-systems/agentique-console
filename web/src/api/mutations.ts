@@ -14,7 +14,6 @@ import type {
   ScheduledAssignment,
   UserSession,
   Workspace,
-  ManagerSession,
 } from "@agentique-console/shared";
 
 import { apiFetch } from "./client";
@@ -159,10 +158,6 @@ export function useInterruptAgent() {
   });
 }
 
-export function useCreateManagerSession() {
-  const queryClient = useQueryClient();
-  return useMutation({ mutationFn: ({ workspaceId, profileId, sourceProfileId }: { workspaceId: string; profileId?: string; sourceProfileId?: string }) => apiFetch<ManagerSession>(`/api/workspaces/${workspaceId}/profile-manager-sessions`, { method: "POST", body: JSON.stringify({ profileId, sourceProfileId }) }), onSuccess: (_data, vars) => void queryClient.invalidateQueries({ queryKey: keys.managerSessions(vars.workspaceId) }) });
-}
 export function useTrustProfile() {
   const queryClient = useQueryClient();
   return useMutation({ mutationFn: ({ workspaceId, profileId, revision }: { workspaceId: string; profileId: string; revision: string }) => apiFetch<{ ok: true }>(`/api/workspaces/${workspaceId}/agent-profiles/${profileId}/trust`, { method: "POST", body: JSON.stringify({ revision }) }), onSuccess: () => void queryClient.invalidateQueries({ queryKey: keys.profiles.all }) });

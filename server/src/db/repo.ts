@@ -56,8 +56,6 @@ export class Repo {
   listOpenUserSessions(): UserSessionRow[] { return this.#s.sessions.listOpenUserSessions(); }
   listOpenWorkSessions(): UserSessionRow[] { return this.#s.sessions.listOpenWorkSessions(); }
   listUserSessions(workspaceId: string): UserSessionRow[] { return this.#s.sessions.listUserSessions(workspaceId); }
-  listManagerSessions(workspaceId: string): UserSessionRow[] { return this.#s.sessions.listManagerSessions(workspaceId); }
-  findManagerSession(workspaceId: string, subjectKey: string): UserSessionRow | undefined { return this.#s.sessions.findManagerSession(workspaceId, subjectKey); }
   insertUserSession(row: UserSessionRow): void { this.#s.sessions.insertUserSession(row); }
   patchUserSession(id: string, patch: Parameters<Stores["sessions"]["patchUserSession"]>[1]): void { this.#s.sessions.patchUserSession(id, patch); }
   touchUserSession(id: string): void { this.#s.sessions.touchUserSession(id); }

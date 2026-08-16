@@ -36,7 +36,6 @@ export class UserSessionService {
     resolve(userSessionId: string, decision: "accept" | "changes", note?: string): void;
   };
   readonly #wireAgentSessions: (userSessionId: string) => AgentSession[];
-  readonly #postManagerMessage: (userSessionId: string, text: string) => PostMessageResponse;
 
   constructor(deps: {
     repo: Repo;
@@ -50,7 +49,6 @@ export class UserSessionService {
       resolve(userSessionId: string, decision: "accept" | "changes", note?: string): void;
     };
     wireAgentSessions: (userSessionId: string) => AgentSession[];
-    postManagerMessage: (userSessionId: string, text: string) => PostMessageResponse;
   }) {
     this.#repo = deps.repo;
     this.#bus = deps.bus;
@@ -60,7 +58,6 @@ export class UserSessionService {
     this.#archiveAgentSessions = deps.archiveAgentSessions;
     this.#completion = deps.completion;
     this.#wireAgentSessions = deps.wireAgentSessions;
-    this.#postManagerMessage = deps.postManagerMessage;
   }
 
   create(body: CreateUserSessionBody): UserSession {
@@ -89,7 +86,7 @@ export class UserSessionService {
       runState: "active",
       runBaseCommit: null, pausedUntil: null, pauseReason: null, budgetUsd: null, autonomy: "standard" as const,
       // Null is a real value here, not a placeholder: it means "track the
-      // configured default", which is what the profile-manager session wants.
+      // configured default".
       model: body.model ?? null,
       createdAt: now,
       updatedAt: now,
@@ -137,9 +134,6 @@ export class UserSessionService {
       changes.title = title;
     }
     if (patch.lifecycle !== undefined) changes.lifecycle = patch.lifecycle;
-    if (row.purpose === "profile_manager" && patch.mode !== undefined && patch.mode !== "plan_execute") {
-      throw new InvalidInputError("profile Manager sessions always require plan approval");
-    }
     if (patch.mode !== undefined && patch.mode !== row.mode) {
       changes.mode = patch.mode;
       // Entering plan_execute re-arms planning; leaving it ends the gate.
@@ -183,15 +177,9 @@ export class UserSessionService {
     }));
   }
 
-  /**
-   * An operator chat message. A profile-manager session routes to its own
-   * service (which re-arms planning); everything else goes to the runner.
-   */
+  /** An operator chat message, delivered to the orchestrator lane. */
   postMessage(id: string, text: string): PostMessageResponse {
-    const row = this.#repo.getUserSession(id);
-    return row?.purpose === "profile_manager"
-      ? this.#postManagerMessage(id, text)
-      : this.#runner.postOperatorMessage(id, text);
+    return this.#runner.postOperatorMessage(id, text);
   }
 
   /**

@@ -74,7 +74,8 @@ export class RunCompletionService {
     const session = repo.getUserSession(userSessionId);
     if (!session) return false;
     if (session.runState !== "active" || session.lifecycle !== "open") return false;
-    // A profile-manager conversation is a tool, not a run; it never "completes".
+    // Guards legacy non-"work" rows (the retired profile-manager lane); those
+    // conversations were tools, not runs, and never "complete".
     if (session.purpose !== "work") return false;
 
     const agentSessions = repo.listAgentSessions(userSessionId).filter((row) => row.lifecycle === "open");

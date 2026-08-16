@@ -248,27 +248,6 @@ export interface AgentProfileDetail extends AgentProfileSummary {
   issues: ProfileValidationIssue[];
 }
 
-export interface ManagerSession {
-  id: string;
-  workspaceId: string;
-  profileKey: string;
-  profileId: string | null;
-  title: string;
-  phase: SessionPhase;
-  lifecycle: "open" | "archived";
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface ProfileProposal {
-  managerSessionId: string;
-  baseRevision: string | null;
-  profileId: string | null;
-  files: { path: string; before: string | null; after: string | null }[];
-  issues: ProfileValidationIssue[];
-  valid: boolean;
-}
-
 export type TimelineLaneKind = "operator" | "orchestrator" | "agent_session" | "agent";
 export interface TimelineLane {
   id: string;

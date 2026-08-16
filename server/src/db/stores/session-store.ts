@@ -33,7 +33,11 @@ export class SessionStore {
     return this.#db.select().from(userSessions).where(eq(userSessions.lifecycle, "open")).all();
   }
 
-  /** Open, non-manager sessions — the ones a run can complete in. */
+  /**
+   * Open work sessions — the ones a run can complete in. The purpose filter
+   * guards against legacy profile-manager rows (the authoring lane is gone;
+   * its rows may survive in old databases).
+   */
   listOpenWorkSessions(): UserSessionRow[] {
     return this.#db.select().from(userSessions)
       .where(and(eq(userSessions.lifecycle, "open"), eq(userSessions.purpose, "work"))).all();
@@ -46,14 +50,6 @@ export class SessionStore {
       .where(and(eq(userSessions.workspaceId, workspaceId), eq(userSessions.purpose, "work")))
       .orderBy(desc(userSessions.updatedAt))
       .all();
-  }
-
-  listManagerSessions(workspaceId: string): UserSessionRow[] {
-    return this.#db.select().from(userSessions).where(and(eq(userSessions.workspaceId, workspaceId), eq(userSessions.purpose, "profile_manager"))).orderBy(desc(userSessions.updatedAt)).all();
-  }
-
-  findManagerSession(workspaceId: string, subjectKey: string): UserSessionRow | undefined {
-    return this.#db.select().from(userSessions).where(and(eq(userSessions.workspaceId, workspaceId), eq(userSessions.purpose, "profile_manager"), eq(userSessions.subjectKey, subjectKey))).get();
   }
 
   insertUserSession(row: UserSessionRow): void {

@@ -16,8 +16,6 @@ import type {
   SessionTreeBranch,
   AgentProfileSummary,
   AgentProfileDetail,
-  ManagerSession,
-  ProfileProposal,
   TimelineLane,
   TimelineItem,
 } from "./domain.ts";
@@ -186,16 +184,6 @@ export interface WorkspaceTasksResponse {
 export type ListAgentProfilesResponse = AgentProfileSummary[];
 // GET /api/workspaces/:id/agent-profiles/:profileId
 export type GetAgentProfileResponse = AgentProfileDetail;
-
-// POST /api/workspaces/:id/profile-manager-sessions
-export interface CreateManagerSessionBody {
-  profileId?: string;
-  sourceProfileId?: string;
-}
-export interface ManagerSessionResponse {
-  session: ManagerSession;
-  proposal: ProfileProposal | null;
-}
 
 // GET /api/user-sessions/:id/timeline
 export interface TimelinePageResponse {

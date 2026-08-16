@@ -16,8 +16,6 @@ import type {
   WorkspaceTasksResponse,
   ListAgentProfilesResponse,
   GetAgentProfileResponse,
-  ManagerSession,
-  ManagerSessionResponse,
   TimelinePageResponse,
   GetSpecResponse,
   GetOrchestrationResponse,
@@ -164,12 +162,6 @@ export function useAgentProfiles(workspaceId: string | null) {
 }
 export function useAgentProfile(workspaceId: string | null, id: string | null) {
   return useQuery({ queryKey: keys.profiles.detail(workspaceId ?? "", id ?? ""), queryFn: () => apiFetch<GetAgentProfileResponse>(`/api/workspaces/${workspaceId}/agent-profiles/${id}`), enabled: workspaceId !== null && id !== null });
-}
-export function useManagerSessions(workspaceId: string | null) {
-  return useQuery({ queryKey: keys.managerSessions(workspaceId ?? ""), queryFn: () => apiFetch<ManagerSession[]>(`/api/workspaces/${workspaceId}/profile-manager-sessions`), enabled: workspaceId !== null });
-}
-export function useManagerSession(id: string | null) {
-  return useQuery({ queryKey: keys.managerSession(id ?? ""), queryFn: () => apiFetch<ManagerSessionResponse>(`/api/profile-manager-sessions/${id}`), enabled: id !== null, refetchInterval: id ? 4_000 : false });
 }
 export function useSpec(id: string | null) {
   return useQuery({ queryKey: keys.userSessions.spec(id ?? ""), queryFn: () => apiFetch<GetSpecResponse>(`/api/user-sessions/${id}/spec`), enabled: id !== null });

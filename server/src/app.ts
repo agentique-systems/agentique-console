@@ -10,8 +10,6 @@
 import Database from "better-sqlite3";
 import { AgentSessionService } from "./agent-sessions/service.ts";
 import { AgentProfileRegistry } from "./agent-profiles/registry.ts";
-import { ProfileManagerService } from "./agent-profiles/manager.ts";
-import { buildManagerMcpServer } from "./agent-profiles/tools.ts";
 import type { Config } from "./config.ts";
 import type { Db } from "./db/client.ts";
 import { Repo } from "./db/repo.ts";
@@ -80,7 +78,6 @@ export interface App {
   orchestrationState: OrchestrationStateService;
   completion: RunCompletionService;
   userSessions: UserSessionService;
-  manager: ProfileManagerService;
   capacity: CapacityService;
 }
 
@@ -109,7 +106,6 @@ export function createApp(options: CreateAppOptions): App {
   const capacity = new CapacityService({ repo, bus });
   const catalog = new CapabilityCatalog(path.join(config.infra.skillsPluginDir, "skills"));
   const lateRunner = late<OrchestratorRunner>("runner");
-  const lateManager = late<ProfileManagerService>("manager");
   const lateScheduler = late<AssignmentScheduler>("scheduler");
   const host = new AgentSessionService({
     repo, bus, artifacts, config, profiles, sdk, sessionStore, getWorkspaceRoot, specs,
@@ -130,13 +126,9 @@ export function createApp(options: CreateAppOptions): App {
     host: () => host,
     tasks, capacity,
     buildMcpServer: (userSessionId, sdkInstance) =>
-      repo.getUserSession(userSessionId)?.purpose === "profile_manager"
-        ? buildManagerMcpServer(sdkInstance, lateManager.get(), userSessionId)
-        : buildConsoleMcpServer({ sdk: sdkInstance, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, specs, state: orchestrationState, catalog, registry: profiles }),
+      buildConsoleMcpServer({ sdk: sdkInstance, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, specs, state: orchestrationState, catalog, registry: profiles }),
   });
   lateRunner.set(runner);
-  const manager = new ProfileManagerService({ repo, workspaces, profiles, config, bus, runner: () => runner });
-  lateManager.set(manager);
   const completion = new RunCompletionService({
     db, repo, bus, interactions, scheduler, getWorkspaceRoot, orchestrationState, specs,
     host: () => host,
@@ -148,7 +140,6 @@ export function createApp(options: CreateAppOptions): App {
     archiveAgentSessions: (userSessionId) => host.archiveForUserSession(userSessionId),
     completion,
     wireAgentSessions: (userSessionId) => host.wireSessionsForUserSession(userSessionId),
-    postManagerMessage: (userSessionId, text) => manager.postMessage(userSessionId, text),
   });
 
   // Every cross-service callback, registered once. The completion predicate
@@ -175,6 +166,6 @@ export function createApp(options: CreateAppOptions): App {
     config, db, sqlite, bus, artifacts, repo, sdk, getWorkspaceRoot, specs, orchestrationState,
     workspaces, timeline, profiles, worktrees, capacity,
     decisions, interactions, tasks, scheduler, handoffs, sessionStore,
-    host, runner, completion, userSessions, manager,
+    host, runner, completion, userSessions,
   };
 }
