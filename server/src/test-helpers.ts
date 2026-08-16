@@ -117,7 +117,7 @@ export function makeHarness(program: FakeProgram, options: HarnessOptions = {}):
         cumulativeCostUsd: 0,
         cumulativeApiDurationMs: 0,
         runState: "active",
-        runBaseCommit: null,
+        runBaseCommit: null, pausedUntil: null, pauseReason: null, budgetUsd: null, autonomy: "standard" as const,
         model: null,
         createdAt: nowIso(),
         updatedAt: nowIso(),

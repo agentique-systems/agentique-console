@@ -147,6 +147,7 @@ export function buildRunSummary(input: BuildRunSummaryInput): RunSummaryDocument
     failedTurns: window.map(typed).filter((event) =>
       (event.type === "user_session.turn.settled" || event.type === "agent_session.turn.settled") && event.payload.status === "error").length,
     watchdogTrips: window.filter((row) => row.type === "agent_session.watchdog").length,
+    capacityPauses: window.filter((row) => row.type === "run.capacity.paused").length,
   };
 
   const build = collectBuild(db, repo, userSessionId, input.getWorkspaceRoot);

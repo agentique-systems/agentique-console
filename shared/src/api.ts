@@ -108,6 +108,10 @@ export interface PatchUserSessionBody {
   lifecycle?: "open" | "archived";
   /** Takes effect on the next turn: the change recycles the lane. */
   model?: string;
+  /** Spend ceiling (USD); crossing it pauses the run. null clears it. */
+  budgetUsd?: number | null;
+  /** "away" = proceed on recommendations; queue only irreversible decisions. */
+  autonomy?: "standard" | "away";
 }
 
 // POST /api/user-sessions/:id/messages → 202
@@ -250,7 +254,7 @@ export interface RunSummaryDocument {
     knownGaps: string[];
     nonGoals: string[];
   } | null;
-  friction: { apiRetries: number; rateLimited: number; failedTurns: number; watchdogTrips: number };
+  friction: { apiRetries: number; rateLimited: number; failedTurns: number; watchdogTrips: number; capacityPauses: number };
 }
 
 // GET /api/user-sessions/:id/run-summaries/:summaryId — the full document

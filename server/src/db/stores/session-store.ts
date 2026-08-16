@@ -63,7 +63,7 @@ export class SessionStore {
   patchUserSession(
     id: string,
     patch: Partial<
-      Pick<UserSessionRow, "title" | "mode" | "phase" | "lifecycle" | "subjectKey" | "sdkSessionId" | "sdkGeneration" | "sdkTurnCount" | "contextTokens" | "memory" |  "latestHandoffId" | "cumulativeCostUsd" | "cumulativeApiDurationMs" | "runState" | "runBaseCommit" | "model">
+      Pick<UserSessionRow, "title" | "mode" | "phase" | "lifecycle" | "subjectKey" | "sdkSessionId" | "sdkGeneration" | "sdkTurnCount" | "contextTokens" | "memory" |  "latestHandoffId" | "cumulativeCostUsd" | "cumulativeApiDurationMs" | "runState" | "runBaseCommit" | "model" | "pausedUntil" | "pauseReason" | "budgetUsd" | "autonomy">
     >,
   ): void {
     this.#db

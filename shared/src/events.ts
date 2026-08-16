@@ -161,6 +161,22 @@ export interface RunReopenedPayload {
 }
 
 /**
+ * Provider capacity (or budget ceiling) paused the run. The run is NOT
+ * failed: queued work stays queued and resumes when capacity returns.
+ */
+export interface RunCapacityPausedPayload {
+  userSessionId: string;
+  reason: "capacity" | "budget";
+  /** Auto-resume time (ISO); null for budget pauses (operator resumes). */
+  until: string | null;
+  detail?: string;
+}
+export interface RunCapacityResumedPayload {
+  userSessionId: string;
+  manual?: boolean;
+}
+
+/**
  * The operator decided something. Durable and session-scoped: every agent and
  * every later generation reads these back, so an answer given once never has
  * to be relayed or re-derived.
@@ -583,6 +599,8 @@ export type ConsoleEvent = Base &
     | { type: "run.completion.proposed"; payload: RunCompletionProposedPayload }
     | { type: "run.signoff.resolved"; payload: RunSignoffResolvedPayload }
     | { type: "run.reopened"; payload: RunReopenedPayload }
+    | { type: "run.capacity.paused"; payload: RunCapacityPausedPayload }
+    | { type: "run.capacity.resumed"; payload: RunCapacityResumedPayload }
     | { type: "agent_session.closeout.forced"; payload: AgentSessionCloseoutForcedPayload }
     | { type: "agent_session.watchdog.tripped"; payload: AgentWatchdogTrippedPayload }
     | { type: "agent_session.liveness.tripped"; payload: AgentLivenessTrippedPayload }

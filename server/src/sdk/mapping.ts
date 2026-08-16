@@ -49,6 +49,13 @@ export type TurnEvent =
    */
   | { kind: "notice"; text: string }
   /**
+   * Structured plan/subscription rate-limit state (SDKRateLimitInfo).
+   * `rejected` means the provider will accept no more work until `resetsAt` —
+   * the capacity service pauses the run on it instead of letting turns
+   * hot-spin to failure.
+   */
+  | { kind: "limit"; status: "allowed" | "allowed_warning" | "rejected"; resetsAt?: number; limitType?: string; utilization?: number }
+  /**
    * Context-window occupancy after one API call — `input + cache_creation +
    * cache_read` from an assistant message's own usage. The consumer keeps the
    * running max as the rotation signal. Emitted per assistant message, never
@@ -142,8 +149,20 @@ export function mapSdkMessage(message: SdkMessage): TurnEvent[] {
       ];
     }
 
-    case "rate_limit_event":
-      return [{ kind: "notice", text: "rate limited — waiting for capacity" }];
+    case "rate_limit_event": {
+      // The structured info, not just prose: `status: "rejected"` is the
+      // subscription-cap signal a live run died on while its telemetry read
+      // `rateLimited: 0` — the fields were discarded exactly here.
+      const info = (message as { rate_limit_info?: { status?: string; resetsAt?: number; rateLimitType?: string; utilization?: number } }).rate_limit_info;
+      const status = info?.status === "rejected" ? "rejected" : info?.status === "allowed_warning" ? "allowed_warning" : "allowed";
+      return [
+        { kind: "notice", text: status === "rejected" ? "usage limit reached — pausing until capacity returns" : "rate limited — waiting for capacity" },
+        { kind: "limit", status,
+          ...(info?.resetsAt === undefined ? {} : { resetsAt: info.resetsAt }),
+          ...(info?.rateLimitType === undefined ? {} : { limitType: info.rateLimitType }),
+          ...(info?.utilization === undefined ? {} : { utilization: info.utilization }) },
+      ];
+    }
 
     case "stream_event": {
       const delta = message.event?.delta;

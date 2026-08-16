@@ -45,6 +45,8 @@ import type { HandoffService } from "../handoffs/service.ts";
 import { sdkEnv } from "../sdk/env.ts";
 import type { SqliteSessionStore } from "../sdk/session-store.ts";
 import type { AgentSessionService } from "../agent-sessions/service.ts";
+import type { CapacityService } from "../capacity/service.ts";
+import { isCapacityFailure } from "../sdk/failure-classifier.ts";
 import { mainPeerName } from "../agent-sessions/names.ts";
 import type { TaskService } from "../tasks/service.ts";
 
@@ -127,6 +129,8 @@ export interface OrchestratorDeps {
   host: () => AgentSessionService;
   /** Console task-ledger tools for the lane. */
   tasks: TaskService;
+  /** Pause/resume on provider capacity and budget ceilings. */
+  capacity: CapacityService;
 }
 
 /** Bounded grace for a closing lane's pump before the hard abort. */
@@ -213,6 +217,8 @@ export class OrchestratorRunner {
     if (this.#cronTimer) { clearInterval(this.#cronTimer); this.#cronTimer = null; }
   }
   #cronTick(now: Date): void {
+    // A paused run's deadlines hold; firing them would mint turns that die.
+    if (this.#deps.capacity.paused) return;
     for (const session of this.#deps.repo.listOpenUserSessions()) {
       for (const deadline of this.#deps.repo.listDueDeadlines(session.id, now.toISOString())) {
         this.#deps.repo.patchCron(deadline.id, { status: "deleted" });
@@ -376,12 +382,22 @@ export class OrchestratorRunner {
     lane.draining = true;
     try {
       for (;;) {
+        // Capacity pause: jobs stay queued, no turn is minted, nothing is
+        // coalesced away. `resumeQueued()` re-enters this loop on resume.
+        if (this.#deps.capacity.paused) break;
         const job = lane.queue.shift();
         if (!job) break;
         await this.#runTurn(sessionId, lane, job);
       }
     } finally {
       lane.draining = false;
+    }
+  }
+
+  /** Post-resume kick: every session with queued jobs starts draining again. */
+  resumeQueued(): void {
+    for (const [sessionId, lane] of this.#lanes) {
+      if (lane.queue.length > 0 && !lane.draining) void this.#drain(sessionId);
     }
   }
 
@@ -393,10 +409,14 @@ export class OrchestratorRunner {
     // The standing instruction goes on ONCE, at drain, rather than being
     // baked into each milestone — several appended reports would otherwise
     // repeat it verbatim and teach the model to skim.
+    if (job.text === "") return;
+    // The capacity warning rides EVERY prompt kind: an operator wrap-up
+    // request needs it most of all (the straf3 run got 2 minutes' notice).
+    const capacityLine = this.#deps.capacity.warningLine();
+    const warning = capacityLine === null ? "" : `\n${capacityLine}`;
     const prompt = job.kind === "agent-milestone"
-      ? `${job.text}${this.#pendingDeadlinesLine(sessionId)}\n\nAct only if needed. Do not repeat an unchanged operator update. Use read_agent_session for additional detail only when necessary.`
-      : job.text;
-    if (prompt === "") return;
+      ? `${job.text}${this.#pendingDeadlinesLine(sessionId)}${warning}\n\nAct only if needed. Do not repeat an unchanged operator update. Use read_agent_session for additional detail only when necessary.`
+      : `${job.text}${warning}`;
 
     const turnId = newId("turn");
     // "deadline" is distinct from "wake" so forensics (and the model itself)
@@ -745,6 +765,17 @@ export class OrchestratorRunner {
             ...(event.attempt === undefined ? {} : { attempt: event.attempt }), retryInMs: event.delayMs, detail: event.detail } });
         return;
       }
+      case "limit": {
+        // Also journaled as a retry row so `friction.rateLimited` can never
+        // again read 0 in a run a limit killed.
+        if (event.status !== "allowed") {
+          bus.append({ type: "user_session.retry.recorded", userSessionId: sessionId,
+            payload: { userSessionId: sessionId, agent: "orchestrator", kind: "rate_limited", retryInMs: 0,
+              detail: `limit ${event.status}${event.limitType === undefined ? "" : ` (${event.limitType})`}${event.utilization === undefined ? "" : ` at ${Math.round(event.utilization * 100)}%`}` } });
+        }
+        this.#deps.capacity.noteLimit(event);
+        return;
+      }
       case "message": {
         const active = turn;
         lane.state.lastAssistantText = event.text;
@@ -834,6 +865,7 @@ export class OrchestratorRunner {
             costUsd, model: event.modelId ?? this.#modelFor(session), effort: this.#deps.config.infra.effort ?? null,
             trigger: turn?.trigger ?? null, durationMs: turn ? Date.now() - turn.startedAt : null, apiDurationMs, sdkDurationMs: event.sdkDurationMs ?? null, status: "completed", stopReason: event.stopReason ?? null, createdAt: nowIso() };
           repo.insertUsage(usage);
+          this.#deps.capacity.checkBudget(sessionId);
           bus.append({ type: "usage.recorded", userSessionId: sessionId, payload: { userSessionId: sessionId, agent: "orchestrator", generation: session.sdkGeneration,
             turnId: usage.turnId, inputTokens: usage.inputTokens, uncachedInputTokens: usage.uncachedInputTokens, cacheCreationInputTokens: usage.cacheCreationInputTokens, cacheReadInputTokens: usage.cacheReadInputTokens,
             outputTokens: usage.outputTokens, ...(costUsd === null ? {} : { costUsd }), model: usage.model ?? undefined, effort: usage.effort ?? undefined,
@@ -848,6 +880,9 @@ export class OrchestratorRunner {
           turn.outcome.status = event.aborted ? "aborted" : "error";
           turn.outcome.errorMessage = event.message;
         }
+        // A capacity-prose failure without a structured limit event still
+        // pauses the run instead of letting the next queued job hot-spin.
+        if (isCapacityFailure(event.message)) this.#deps.capacity.noteCapacityFailure(event.message);
         const session = repo.getUserSession(sessionId);
         if (session) {
           const contextTokens = Math.max(session.contextTokens, lane.contextTokens);
@@ -863,6 +898,7 @@ export class OrchestratorRunner {
             costUsd, model: event.modelId ?? this.#modelFor(session), effort: this.#deps.config.infra.effort ?? null,
             trigger: turn?.trigger ?? null, durationMs: turn ? Date.now() - turn.startedAt : null, apiDurationMs, sdkDurationMs: event.sdkDurationMs ?? null, status: event.aborted ? "aborted" : "error", stopReason: event.stopReason ?? null, createdAt: nowIso() };
           repo.insertUsage(usage);
+          this.#deps.capacity.checkBudget(sessionId);
           bus.append({ type: "usage.recorded", userSessionId: sessionId, payload: { userSessionId: sessionId, agent: "orchestrator", generation: session.sdkGeneration,
             turnId: usage.turnId, inputTokens: usage.inputTokens, uncachedInputTokens: usage.uncachedInputTokens, cacheCreationInputTokens: usage.cacheCreationInputTokens, cacheReadInputTokens: usage.cacheReadInputTokens,
             outputTokens: usage.outputTokens, ...(costUsd === null ? {} : { costUsd }), model: usage.model ?? undefined, effort: usage.effort ?? undefined,

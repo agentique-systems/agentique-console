@@ -57,6 +57,13 @@
       "when": 1786871503158,
       "tag": "0007_proactive_checkpoint",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1786872326896,
+      "tag": "0008_capacity_and_autonomy",
+      "breakpoints": true
     }
   ]
 }

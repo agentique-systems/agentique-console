@@ -39,6 +39,7 @@ function mailroomWith(h: Harness, selector: DeliverySelector, sink: {
     repo: h.repo, bus: h.bus, config: h.config, interactions: h.interactions,
     decisions: h.decisions, tasks: h.tasks, handoffs: h.handoffs, scheduler: () => h.scheduler,
     wake: () => {},
+    capacityPaused: () => false,
     routing,
     worktree: new WorktreeBinding({ repo: h.repo, bus: h.bus, artifacts: h.app.artifacts, config: h.config,
       worktrees: null, getWorkspaceRoot: () => "/tmp/test-workspace",

@@ -87,7 +87,7 @@ export class UserSessionService {
       cumulativeCostUsd: 0,
       cumulativeApiDurationMs: 0,
       runState: "active",
-      runBaseCommit: null,
+      runBaseCommit: null, pausedUntil: null, pauseReason: null, budgetUsd: null, autonomy: "standard" as const,
       // Null is a real value here, not a placeholder: it means "track the
       // configured default", which is what the profile-manager session wants.
       model: body.model ?? null,
@@ -129,7 +129,7 @@ export class UserSessionService {
     if (!row) throw new NotFoundError(`no user session ${id}`);
 
     const changes: Partial<
-      Pick<UserSessionRow, "title" | "mode" | "phase" | "lifecycle" | "model">
+      Pick<UserSessionRow, "title" | "mode" | "phase" | "lifecycle" | "model" | "budgetUsd" | "autonomy">
     > = {};
     if (patch.title !== undefined) {
       const title = patch.title.trim();
@@ -148,6 +148,10 @@ export class UserSessionService {
     if (patch.model !== undefined && patch.model !== row.model) {
       changes.model = patch.model;
     }
+    // Neither recycles the lane: the budget acts at the next usage row, and
+    // autonomy is read by the governance sweep + the next generation's prompt.
+    if (patch.budgetUsd !== undefined) changes.budgetUsd = patch.budgetUsd;
+    if (patch.autonomy !== undefined) changes.autonomy = patch.autonomy;
     if (Object.keys(changes).length === 0) return toWireUserSession(row);
 
     this.#repo.patchUserSession(id, changes);

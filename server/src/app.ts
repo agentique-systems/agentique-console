@@ -33,6 +33,7 @@ import { UserSessionService } from "./sessions/service.ts";
 import { AssignmentScheduler } from "./tasks/scheduler.ts";
 import { TaskService } from "./tasks/service.ts";
 import { TimelineService } from "./timeline/service.ts";
+import { CapacityService } from "./capacity/service.ts";
 import { HandoffService } from "./handoffs/service.ts";
 import { WorkspaceService } from "./workspaces/service.ts";
 
@@ -78,6 +79,7 @@ export interface App {
   completion: RunCompletionService;
   userSessions: UserSessionService;
   manager: ProfileManagerService;
+  capacity: CapacityService;
 }
 
 export function createApp(options: CreateAppOptions): App {
@@ -102,12 +104,13 @@ export function createApp(options: CreateAppOptions): App {
   const orchestrationState = new OrchestrationStateService(stores.orchestrationState, bus);
   const sessionStore = stores.providerEntries;
 
+  const capacity = new CapacityService({ repo, bus });
   const lateRunner = late<OrchestratorRunner>("runner");
   const lateManager = late<ProfileManagerService>("manager");
   const lateScheduler = late<AssignmentScheduler>("scheduler");
   const host = new AgentSessionService({
     repo, bus, artifacts, config, profiles, sdk, sessionStore, getWorkspaceRoot, specs,
-    worktrees,
+    worktrees, capacity,
     interactions, decisions, tasks, handoffs,
     scheduler: () => lateScheduler.get(),
     wake: (userSessionId, agentSessionId, category, text) =>
@@ -122,7 +125,7 @@ export function createApp(options: CreateAppOptions): App {
     repo, bus, config, sdk, interactions, decisions, handoffs, sessionStore, getWorkspaceRoot,
     specs, orchestrationState,
     host: () => host,
-    tasks,
+    tasks, capacity,
     buildMcpServer: (userSessionId, sdkInstance) =>
       repo.getUserSession(userSessionId)?.purpose === "profile_manager"
         ? buildManagerMcpServer(sdkInstance, lateManager.get(), userSessionId)
@@ -150,6 +153,9 @@ export function createApp(options: CreateAppOptions): App {
   // final must not become a silence. The task hook is the scheduler's release
   // path: every ledger transition flows through it, and dispatch rides it.
   tasks.onChange(scheduler.onTaskChanged);
+  // Capacity resume re-kicks both lane engines: queued orchestrator jobs
+  // drain and queued seat deliveries redeliver — nothing was cancelled.
+  capacity.onResume(() => { runner.resumeQueued(); host.resumeQueuedDeliveries(); });
   runner.onSettled((userSessionId) => completion.schedule(userSessionId));
   runner.onOperatorMessage((userSessionId) => completion.noteOperatorMessage(userSessionId));
   host.onStatusChanged((userSessionId) => completion.schedule(userSessionId));
@@ -164,7 +170,7 @@ export function createApp(options: CreateAppOptions): App {
 
   return {
     config, db, sqlite, bus, artifacts, repo, sdk, getWorkspaceRoot, specs, orchestrationState,
-    workspaces, timeline, profiles, worktrees,
+    workspaces, timeline, profiles, worktrees, capacity,
     decisions, interactions, tasks, scheduler, handoffs, sessionStore,
     host, runner, completion, userSessions, manager,
   };

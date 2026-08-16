@@ -27,6 +27,8 @@ const PatchBody = z.object({
   title: z.string().optional(),
   lifecycle: z.enum(["open", "archived"]).optional(),
   model: Model.optional(),
+  budgetUsd: z.number().positive().nullable().optional(),
+  autonomy: z.enum(["standard", "away"]).optional(),
 });
 
 const MessageBody = z.object({ text: z.string() });
@@ -88,6 +90,16 @@ export function registerUserSessionRoutes(
       const parsed = PatchBody.safeParse(request.body);
       if (!parsed.success) throw new InvalidInputError(parsed.error.message);
       return sessions.patch(request.params.id, parsed.data);
+    },
+  );
+
+  // Manual "resume now" for a capacity/budget pause — the operator raised
+  // the budget, bought capacity, or knows the window reset early.
+  app.post<{ Params: { id: string } }>(
+    "/api/user-sessions/:id/resume-capacity",
+    async () => {
+      ctx.app.capacity.resume({ manual: true });
+      return { resumed: true };
     },
   );
 

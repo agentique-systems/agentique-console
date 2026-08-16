@@ -29,6 +29,9 @@ export async function bootApp(app: App): Promise<BootReport> {
   // In-flight promises died with the previous process; their rows go stale so
   // the UI renders greyed cards whose answers become revival turns.
   app.interactions.expirePendingOnBoot();
+  // A persisted capacity/budget pause survives the restart: re-arm its
+  // resume timer (or resume immediately when the window already reset).
+  app.capacity.armFromBoot();
   const recovered = recoverInterruptedTurns({ db: app.db, repo: app.repo, bus: app.bus });
   const recoveredTurns = recovered.count;
   const requeuedDeliveries = app.repo.requeueUnacknowledgedDeliveries();

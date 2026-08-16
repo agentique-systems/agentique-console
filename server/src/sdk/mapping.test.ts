@@ -283,9 +283,17 @@ describe("liveness notices", () => {
     ]);
   });
 
-  it("reports rate-limit events", () => {
+  it("reports rate-limit events with the structured limit state", () => {
     expect(mapSdkMessage({ type: "rate_limit_event" })).toEqual([
       { kind: "notice", text: "rate limited — waiting for capacity" },
+      { kind: "limit", status: "allowed" },
+    ]);
+    // The rejected form is the subscription-cap signal the capacity service
+    // pauses on — a live run died because these fields were discarded.
+    expect(mapSdkMessage({ type: "rate_limit_event",
+      rate_limit_info: { status: "rejected", resetsAt: 1_700_000_000, rateLimitType: "five_hour", utilization: 1 } })).toEqual([
+      { kind: "notice", text: "usage limit reached — pausing until capacity returns" },
+      { kind: "limit", status: "rejected", resetsAt: 1_700_000_000, limitType: "five_hour", utilization: 1 },
     ]);
   });
 

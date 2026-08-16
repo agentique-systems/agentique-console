@@ -64,6 +64,22 @@ export const userSessions = sqliteTable("user_sessions", {
   /** HEAD when the first agent session was created; diff base for the summary. */
   runBaseCommit: text("run_base_commit"),
   /**
+   * Provider-capacity / budget pause. While `pauseReason` is set the run
+   * mints no turns: queued work stays queued, nothing is cancelled, nothing
+   * is salvaged-off-main. `pausedUntil` is the auto-resume time for capacity
+   * pauses; null for budget pauses (operator resumes). Columns, not a
+   * `runState` widening — a paused run is still `active` work.
+   */
+  pausedUntil: text("paused_until"),
+  pauseReason: text("pause_reason", { enum: ["capacity", "budget"] }),
+  /** Optional spend ceiling (USD); crossing it pauses with reason "budget". */
+  budgetUsd: real("budget_usd"),
+  /**
+   * Operator-away autonomy. "away" shortens auto-proceed deadlines and lets
+   * blocking asks WITH a recommendation proceed provisionally.
+   */
+  autonomy: text("autonomy", { enum: ["standard", "away"] }).notNull().default("standard"),
+  /**
    * This session's orchestrator model. NULL falls back to `config.model`, which
    * is what internally-created sessions (the profile manager) carry. Agents are
    * unaffected — they resolve their own model from the profile.

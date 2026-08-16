@@ -84,6 +84,8 @@ export interface MailroomDeps {
   /** Read-only lane facts, for the final-report caveat scan. */
   lanes: LaneActivity;
   selector: DeliverySelector;
+  /** True while a capacity/budget pause holds — deliver() then leaves work queued. */
+  capacityPaused: () => boolean;
   /** Spawn or unpark the recipient so its lane accepts input (`ensureSeatLive`). */
   ensureLive: (agentSessionId: string, seat: string) => Promise<void>;
   injector: Injector;
@@ -315,6 +317,9 @@ export class Mailroom {
    * the Injector's.
    */
   async deliver(agentSessionId: string, recipient: string): Promise<void> {
+    // Capacity pause: deliveries stay queued (never cancelled) and redeliver
+    // on resume; not even the recipient's process is spawned.
+    if (this.#deps.capacityPaused()) return;
     await this.#deps.ensureLive(agentSessionId, recipient);
     const { repo } = this.#deps;
     const session = repo.getAgentSession(agentSessionId);

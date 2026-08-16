@@ -28,9 +28,10 @@ import { advanceUsageWatermark } from "../lane-runtime/usage.ts";
 import { rotationTokenLimit } from "../model-catalog.ts";
 import type { WorktreeManager } from "../runtime/worktree-manager.ts";
 import { sdkEnv } from "../sdk/env.ts";
-import { isTransportFailure } from "../sdk/failure-classifier.ts";
+import { isCapacityFailure, isTransportFailure } from "../sdk/failure-classifier.ts";
 import { mapSdkMessage } from "../sdk/mapping.ts";
 import type { SqliteSessionStore } from "../sdk/session-store.ts";
+import type { CapacityService } from "../capacity/service.ts";
 import type { ConsoleSdk, QueryHandle, SdkOptions, SdkToolResult, SdkUserMessageLike } from "../sdk/types.ts";
 import type { AssignmentScheduler } from "../tasks/scheduler.ts";
 import type { TaskService } from "../tasks/service.ts";
@@ -99,6 +100,8 @@ export interface AgentRuntimeDeps {
   worktrees: WorktreeManager | null;
   /** Lazy — the scheduler posts through the service, composed after it. */
   scheduler: () => AssignmentScheduler;
+  /** Pause/resume on provider capacity and budget ceilings. */
+  capacity: CapacityService;
   lanes: AgentLanePool;
   worktree: WorktreeBinding;
   routing: SessionRouting;
@@ -406,6 +409,15 @@ export class AgentRuntime implements Injector, TurnTracker {
                 ...(event.attempt === undefined ? {} : { attempt: event.attempt }), retryInMs: event.delayMs, detail: event.detail } });
             continue;
           }
+          if (event.kind === "limit") {
+            if (event.status !== "allowed") {
+              bus.append({ type: "agent_session.retry.recorded", userSessionId: session.userSessionId, agentSessionId: session.id,
+                payload: { userSessionId: session.userSessionId, agentSessionId: session.id, agent: seatName, kind: "rate_limited", retryInMs: 0,
+                  detail: `limit ${event.status}${event.limitType === undefined ? "" : ` (${event.limitType})`}` } });
+            }
+            this.#deps.capacity.noteLimit(event);
+            continue;
+          }
           // Output with no open turn: the CLI resumed work on its own (e.g.
           // after an interrupt landed mid-stream). Mint a turn so the work is
           // attributed rather than orphaned.
@@ -529,7 +541,12 @@ export class AgentRuntime implements Injector, TurnTracker {
       const retryable = status === "error" && turn.watchdog.tripped === null;
       // A transport failure says nothing about the delivery — the request
       // never reached the model — so it does not spend a redelivery attempt.
-      const transport = isTransportFailure(errorMessage ?? null);
+      // A capacity failure is the same class (the provider will take the work
+      // later), and it ALSO pauses the run so the redelivery waits for
+      // capacity instead of hot-spinning.
+      const capacityFailure = isCapacityFailure(errorMessage ?? null);
+      if (capacityFailure) this.#deps.capacity.noteCapacityFailure(errorMessage ?? "provider capacity failure");
+      const transport = isTransportFailure(errorMessage ?? null) || capacityFailure;
       for (const delivery of turn.deliveries) {
         const attempts = (lane.redeliveryAttempts.get(delivery.id) ?? 0) + (transport ? 0 : 1);
         if (!retryable || attempts > this.#deps.config.policy.maxRedeliveryAttempts) {
@@ -819,6 +836,7 @@ export class AgentRuntime implements Injector, TurnTracker {
       model: usageEvent.modelId ?? seat.model, effort: (seat.profileSnapshot as AgentProfile).effort ?? this.#deps.config.infra.effort ?? null,
       trigger, durationMs: durationMs ?? null, apiDurationMs, sdkDurationMs: usageEvent.sdkDurationMs ?? null, status, stopReason: usageEvent.stopReason ?? null, createdAt: nowIso() };
     this.#deps.repo.insertUsage(usage);
+    this.#deps.capacity.checkBudget(session.userSessionId);
     this.#deps.bus.append({ type: "usage.recorded", userSessionId: session.userSessionId, agentSessionId: session.id,
       payload: { userSessionId: session.userSessionId, agentSessionId: session.id, agent: seat.name, profileId: seat.profileId, generation: seat.generation, turnId,
         inputTokens: usage.inputTokens, uncachedInputTokens: usage.uncachedInputTokens, cacheCreationInputTokens: usage.cacheCreationInputTokens,

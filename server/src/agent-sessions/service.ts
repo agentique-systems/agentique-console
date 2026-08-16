@@ -13,6 +13,7 @@ import { toWireAgentSession, toWireMessage } from "../api/wire.ts";
 import type { ArtifactStore } from "../events/artifact-store.ts";
 import type { EventBus } from "../events/bus.ts";
 import type { SqliteSessionStore } from "../sdk/session-store.ts";
+import type { CapacityService } from "../capacity/service.ts";
 import type { ConsoleSdk } from "../sdk/types.ts";
 import type { WorktreeManager } from "../runtime/worktree-manager.ts";
 import type { DecisionLedger } from "../orchestrator/decisions.ts";
@@ -64,6 +65,8 @@ export interface AgentSessionServiceDeps {
   /** Lazy — the scheduler posts through this host, so it is composed after it. */
   scheduler: () => AssignmentScheduler;
   worktrees: WorktreeManager | null;
+  /** Pause/resume on provider capacity and budget ceilings. */
+  capacity: CapacityService;
 }
 
 /**
@@ -163,7 +166,7 @@ export class AgentSessionService {
       sdk: deps.sdk, sessionStore: deps.sessionStore, getWorkspaceRoot: deps.getWorkspaceRoot,
       artifacts: deps.artifacts, tasks: deps.tasks, handoffs: deps.handoffs, specs: deps.specs,
       worktrees: deps.worktrees,
-      scheduler: deps.scheduler,
+      scheduler: deps.scheduler, capacity: deps.capacity,
       lanes: this.#lanes, worktree: this.#worktreeBinding, routing: this.#routing, composer: this.#composer,
       transfer: (input) => this.post(input),
       askOperator: (session, seat, args) => this.#operator.askOperator(session, seat, args),
@@ -203,6 +206,7 @@ export class AgentSessionService {
       repo: deps.repo, bus: deps.bus, config: deps.config, interactions: deps.interactions,
       decisions: deps.decisions, tasks: deps.tasks, handoffs: deps.handoffs, scheduler: deps.scheduler,
       wake: deps.wake,
+      capacityPaused: () => deps.capacity.paused,
       routing: this.#routing, worktree: this.#worktreeBinding, composer: this.#composer,
       lanes: this.#lanes,
       selector: identitySelector,
@@ -322,6 +326,18 @@ export class AgentSessionService {
 
   wireSessionsForUserSession(userSessionId: string) {
     return this.#deps.repo.listAgentSessions(userSessionId).map((row) => this.wireSession(row));
+  }
+
+  /** Post-capacity-resume kick: every queued delivery starts moving again. */
+  resumeQueuedDeliveries(): void {
+    const seen = new Set<string>();
+    for (const row of this.#deps.repo.listQueuedDeliveries()) {
+      const key = `${row.agentSessionId}/${row.recipient}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      void this.#mailroom.deliver(row.agentSessionId, row.recipient)
+        .catch((error) => this.#recordFailure(row.agentSessionId, error));
+    }
   }
 
   /** The session detail view: wire session + per-agent run stats + messages. */
