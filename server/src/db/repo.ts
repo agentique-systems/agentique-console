@@ -84,8 +84,10 @@ export class Repo {
 
   insertUsage(row: UsageSampleRow): void { this.#s.usage.insertUsage(row); }
   listUsage(userSessionId: string): UsageSampleRow[] { return this.#s.usage.listUsage(userSessionId); }
+  aggregateUsageByParticipant(agentSessionId: string): Map<string, { costUsd: number; turns: number; outputTokens: number }> { return this.#s.usage.aggregateByParticipant(agentSessionId); }
   insertCron(row: CronRow): void { this.#s.crons.insertCron(row); }
   listDueDeadlines(userSessionId: string, nowIsoTime: string): CronRow[] { return this.#s.crons.listDueDeadlines(userSessionId, nowIsoTime); }
+  listPendingDeadlines(userSessionId: string, nowIsoTime: string): CronRow[] { return this.#s.crons.listPendingDeadlines(userSessionId, nowIsoTime); }
   patchCron(id: string, patch: Partial<Pick<CronRow, "schedule" | "prompt" | "status">>): void { this.#s.crons.patchCron(id, patch); }
   getPatternState(agentSessionId: string): PatternStateRow | undefined { return this.#s.patternState.getPatternState(agentSessionId); }
   /** The living spec + orchestration state stores, exposed whole — services own the semantics. */
@@ -97,11 +99,19 @@ export class Repo {
 
   countPendingInteractions(workspaceId: string): Map<string, number> { return this.#s.interactions.countPendingByUserSession(workspaceId); }
 
-  /** One existence probe per owning store, dispatched on the reference kind. */
+  /**
+   * One existence probe per owning store, dispatched on the reference kind.
+   * "journal" also accepts handoff and message ids: the console's OWN
+   * reconstruction cites handoff ids as journal refs and agents copy that
+   * example — a live run emitted 163 warnings against citations that were
+   * perfectly resolvable, training agents to ignore the validator.
+   */
   hasDurableReference(kind: "journal" | "artifact" | "task", ref: string): boolean {
     if (kind === "artifact") return this.#s.artifacts.has(ref);
     if (kind === "task") return this.#s.tasks.hasSdkTaskId(ref);
-    return this.#s.providerEntries.hasEntryRef(ref);
+    return this.#s.providerEntries.hasEntryRef(ref)
+      || this.#s.handoffs.getHandoff(ref) !== undefined
+      || this.#s.messages.getMessageById(ref) !== undefined;
   }
 
   // --- Events read-models (SQL lives in events/projections.ts) --------------

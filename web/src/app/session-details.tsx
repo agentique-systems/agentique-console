@@ -18,7 +18,7 @@ export function SessionDetails() {
     : tab === "tasks" ? <TaskLedger userSessionId={userId} agentSessionId={agentId} /> : <div className="min-h-0 overflow-y-auto p-4">
       {!userId ? <p className="text-xs text-muted-foreground">Select a session for details.</p> : agentId && agent.data ? <>
         <h2 className="text-sm font-medium">{agent.data.session.title}</h2><div className="mt-2 flex gap-1"><Badge variant="outline">{agent.data.session.lifecycle === "archived" ? "archived" : agent.data.session.activity}</Badge></div>
-        <dl className="mt-4 grid gap-3 text-2xs">{agent.data.runs.map((run) => <div key={run.agent}><dt className="font-mono text-foreground">{run.agent}</dt><dd className="text-muted-foreground">{run.profileId} · gen {run.generation} · {run.turnCount} turns · {run.contextTokens.toLocaleString()} tokens</dd></div>)}</dl>
+        <dl className="mt-4 grid gap-3 text-2xs">{agent.data.runs.map((run) => <div key={run.agent}><dt className="font-mono text-foreground">{run.agent}</dt><dd className="text-muted-foreground">{run.profileId} · gen {run.generation} · {run.totalTurns} turns · ${run.totalCostUsd.toFixed(2)} · {run.contextTokens.toLocaleString()} ctx now</dd></div>)}</dl>
       </> : user.data ? <><h2 className="text-sm font-medium">{user.data.session.title ?? "untitled"}</h2><div className="mt-2 flex gap-1"><Badge variant="outline">{user.data.session.lifecycle}</Badge><Badge variant="outline">{user.data.session.phase}</Badge><Badge variant="outline">{user.data.session.mode}</Badge></div><p className="mt-4 text-2xs text-muted-foreground">Created {new Date(user.data.session.createdAt).toLocaleString()}</p></> : <p className="text-xs text-muted-foreground">Loading session details…</p>}
     </div>}
   </div>;

@@ -40,13 +40,15 @@ describe("termination policy e2e (fake SDK)", () => {
     const events = await tripped;
     const trip = events.at(-1);
     expect(trip?.payload).toMatchObject({ agentSessionId: created.agentSessionId, pattern: "hub_and_spoke", rule: "max_handoffs" });
-    // The close-out ask lands as a journaled decision handoff to the
-    // reporting agent, spoken by a route-legal console voice (main).
+    // max_handoffs notifies MAIN — the budget says nothing about the work,
+    // and main holds both the reset lever (a fresh briefing) and the axe.
+    // A live run killed three healthy sessions when this ordered the seat
+    // to wrap instead.
     await collectUntil(h.bus, (event) => event.type === "agent_session.message.appended"
       && JSON.stringify(event.payload).includes("Termination policy tripped"), 10_000);
     const rows = h.repo.listMessages("agent", created.agentSessionId).filter((row) => row.kind === "message");
     const ask = rows.find((row) => ((row.payload?.handoff as { action?: string } | undefined)?.action ?? "").includes("Termination policy tripped"));
-    expect(ask?.toName).toBe("coordinator");
+    expect(ask?.toName).toBe("main");
     expect(h.repo.getPatternState(created.agentSessionId)?.tripped).toBe("max_handoffs");
   });
 

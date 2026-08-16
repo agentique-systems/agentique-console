@@ -11,7 +11,6 @@ import type { Config } from "../config.ts";
 import type { Repo, AgentRow, AgentSessionRow } from "../db/repo.ts";
 import type { ArtifactStore } from "../events/artifact-store.ts";
 import type { EventBus } from "../events/bus.ts";
-import { newId } from "../ids.ts";
 import type { WorktreeManager } from "../runtime/worktree-manager.ts";
 import type { SimpleHandoff, Transfer } from "./seams.ts";
 
@@ -78,9 +77,26 @@ export class WorktreeBinding {
     // what it is reviewing. Its worktree is discarded rather than merged —
     // `landOnReport` only merges an agent whose profile can write.
     if (!worktrees || this.#deps.config.policy.agentWorktrees === false || seat.role === "coordinator"
-      || seat.worktreePath !== null || !worktrees.isGitRepo(workspaceRoot)) return seat;
+      || !worktrees.isGitRepo(workspaceRoot)) return seat;
+    if (seat.worktreePath !== null) {
+      if (fs.existsSync(seat.worktreePath)) return seat;
+      // A dangling pointer (crash between removal and release, or an
+      // out-of-band deletion) used to spawn the SDK into a nonexistent cwd —
+      // 13 "Path does not exist" scheduler failures in one live run. Clear it,
+      // keep a salvage pointer to the branch (it may still exist), re-provision.
+      repo.patchAgent(session.id, seat.name, { worktreePath: null, worktreeBaseCommit: null, worktreeBranch: null,
+        ...(seat.salvageBranch === null && seat.worktreeBranch !== null ? { salvageBranch: seat.worktreeBranch } : {}) });
+      bus.append({ type: "agent_session.runtime.noted", userSessionId: session.userSessionId, agentSessionId: session.id,
+        payload: { agentSessionId: session.id, agent: seat.name, detail: `worktree path ${seat.worktreePath} no longer exists; re-provisioning a fresh worktree` } });
+      seat = repo.getAgent(session.id, seat.name) ?? seat;
+    }
     try {
-      const dirName = `seat-${branchSafe(seat.name)}-${seat.generation}-${newId("rnd").slice(-6)}`;
+      // Stable path per seat: a resumed provider session's remembered cwd
+      // stays valid across assignment cycles and build caches survive.
+      // (Previously seat-<name>-<generation>-<random>: every re-provision was
+      // a new world, and 37 of 64 worktree creations in one live run were
+      // re-provisions of a seat that already had one.)
+      const dirName = `seat-${branchSafe(seat.name)}`;
       const base = this.#reviewBase(session, seat);
       const ref = worktrees.addWorktree(workspaceRoot, session.id, dirName, `seat/${session.id}/${branchSafe(seat.name)}-${seat.generation}`,
         base === null ? {} : { base });
@@ -191,11 +207,24 @@ export class WorktreeBinding {
         return;
       }
       bus.append({ type: "agent_session.worktree.merge_failed", userSessionId: session.userSessionId, agentSessionId: session.id,
-        payload: { agentSessionId: session.id, agent: seat.name, conflicts: outcome.conflicts, detail: outcome.detail, artifactId } });
+        payload: { agentSessionId: session.id, agent: seat.name, kind: outcome.kind, conflicts: outcome.conflicts, detail: outcome.detail, artifactId } });
+      // The remedy depends on WHAT blocked. A live run's orchestrator was told
+      // "reassign against HEAD" for a dirty canonical checkout and burned five
+      // seats across four sessions re-attempting a land no seat could fix.
+      const explanation = outcome.kind === "conflict"
+        ? `The workspace advanced past this seat's base; merging its changes conflicts in: ${outcome.conflicts.join(", ") || "unknown files"}.`
+        : outcome.kind === "dirty_tree"
+          ? `The canonical checkout has local changes the Console could not stash aside, so git refused the merge before it started. This is workspace state, not a defect in the seat's work — retrying the seat will not fix it. Detail: ${outcome.detail}`
+          : `The merge failed: ${outcome.detail}`;
+      const remedy = outcome.kind === "conflict"
+        ? "Reassign the unit against the current HEAD."
+        : outcome.kind === "dirty_tree"
+          ? "Resolve the canonical checkout's local changes (ask the operator if they are theirs), then land the archived branch — do not respawn the seat."
+          : "Inspect the detail; the work is preserved on the archived branch and as the diff artifact.";
       this.#deps.transfer({ agentSessionId: session.id, speaker: { kind: "agent", name: seat.name }, to: this.#deps.escalationTarget(session, seat.name),
         handoff: this.#deps.simpleHandoff("Completed work failed to merge", "failed",
-          `The workspace advanced past this seat's base; merging its changes conflicts in: ${outcome.conflicts.join(", ") || "unknown files"}. The diff is retained as artifact ${artifactId ?? "n/a"}${removed.archivedBranch === null ? "" : ` and on branch ${removed.archivedBranch}`}.`,
-          "Reassign the unit against the current HEAD."), category: "failure" });
+          `${explanation} The diff is retained as artifact ${artifactId ?? "n/a"}${removed.archivedBranch === null ? "" : ` and on branch ${removed.archivedBranch}`}.`,
+          remedy), category: "failure" });
     } catch (error) {
       bus.append({ type: "agent_session.runtime.noted", userSessionId: session.userSessionId, agentSessionId: session.id,
         payload: { agentSessionId: session.id, agent: seat.name, detail: `worktree landing failed: ${error instanceof Error ? error.message : String(error)}` } });

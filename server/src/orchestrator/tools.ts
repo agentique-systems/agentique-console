@@ -27,6 +27,18 @@ import type { CompletionRecord, OrchestrationStateService } from "./state.ts";
 
 /** Same bound the agent-side read_artifact applies (provider inline-image cap). */
 const MAX_IMAGE_BASE64_CHARS = 5 * 1024 * 1024;
+
+/**
+ * Prose length is a rendering concern, not a validity concern: hard `max()`
+ * caps on rationale fields rejected 97 tool calls in one live run (~100k
+ * output tokens discarded), and the retry spirals truncated the very
+ * recovery instructions the successor turns depended on. Fields that feed
+ * prompt digests are clipped here with a visible marker instead.
+ */
+const clip = (value: string, limit: number): string =>
+  value.length > limit ? `${value.slice(0, limit)} …[truncated]` : value;
+const clipAll = (values: string[], limit: number, maxItems: number): string[] =>
+  values.slice(0, maxItems).map((value) => clip(value, limit));
 import { consoleTaskListId } from "../tasks/service.ts";
 
 export interface ConsoleToolsInput {
@@ -89,9 +101,9 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           .describe(
             "Typed coordinator assignment: objective, current evidence, risk, uncertainty, and next action",
           ),
-        why: z.string().max(280).optional()
+        why: z.string().optional()
           .describe("Why this session, this pattern, now — one or two sentences. Journaled with the briefing; the run review reads it."),
-        expecting: z.string().max(280).optional()
+        expecting: z.string().optional()
           .describe("What evidence or output counts as success — or would change your plan. The session READS this as its success contract."),
         tasks: z.array(z.object({
           taskId: z.string().min(1).describe("Short stable id, e.g. \"core\""),
@@ -183,9 +195,9 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         taskId: z.string().nullable().default(null)
           .describe("The ledger taskId this assignment covers. The Console starts that entry on delivery and holds the assignment until its dependencies complete."),
         requestExpandedContext: z.boolean().default(false),
-        why: z.string().max(280).optional()
+        why: z.string().optional()
           .describe("Why this move now (redirects and commissions deserve one; routine relays may skip it)."),
-        expecting: z.string().max(280).optional()
+        expecting: z.string().optional()
           .describe("What evidence would count as success, or change your plan."),
       },
       async (args: {
@@ -397,11 +409,12 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
       "Put a SPECIFICATION (or an amendment to it) to the operator for approval. The spec is the shared definition of done-well: goals, constraints, the decisions that need making (with your recommendations), acceptance criteria a reviewer can check, standing uncertainties/assumptions, and the crew you propose. The operator reads it, may EDIT it in place, and approves or rejects; the approved text is injected into your prompt, every agent's prompt, and every rotation — reviews check work against it. This call BLOCKS until they respond. Amend with a new propose_spec when reality invalidates part of it; never silently diverge. Proportionality is your judgment — a toy request may not need one.",
       {
         document: z.string().min(1).describe("The full spec text (markdown). Include '## Open uncertainties', '## Assumptions', and '## Out of scope' sections so reviews can target them."),
-        changeNote: z.string().min(1).max(280).describe("One line: what this revision is, or what changed and why (for amendments)."),
+        changeNote: z.string().min(1).describe("One line: what this revision is, or what changed and why (for amendments)."),
       },
       async (args: { document: string; changeNote: string }) => {
-        const draft = specs.propose(userSessionId, args.document, args.changeNote);
-        const { id: approvalId, resolution } = interactions.createSpecApproval(userSessionId, args.document, draft.revision, args.changeNote);
+        const changeNote = clip(args.changeNote, 280);
+        const draft = specs.propose(userSessionId, args.document, changeNote);
+        const { id: approvalId, resolution } = interactions.createSpecApproval(userSessionId, args.document, draft.revision, changeNote);
         const resolved = await resolution;
         if (resolved.kind === "decision" && resolved.approved) {
           const finalText = resolved.editedDocument?.trim() || args.document;
@@ -454,12 +467,12 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
       {
         trigger: z.enum(["commission", "discovery", "alarm", "direction_change", "operator"])
           .describe("What occasioned this update."),
-        strategy: z.string().max(500).optional().describe("Current approach, one or two sentences."),
-        strategyWhy: z.string().max(500).optional().describe("Why this strategy over its live alternatives."),
-        uncertainties: z.array(z.string().max(200)).max(8).optional().describe("Open CONSEQUENTIAL uncertainties (whose answers would change the build)."),
-        assumptions: z.array(z.string().max(200)).max(8).optional().describe("Load-bearing assumptions the plan rests on."),
-        risks: z.array(z.string().max(200)).max(8).optional().describe("Live risks that currently matter."),
-        note: z.string().max(280).optional().describe("What occasioned THIS update, one line."),
+        strategy: z.string().optional().describe("Current approach, one or two sentences."),
+        strategyWhy: z.string().optional().describe("Why this strategy over its live alternatives."),
+        uncertainties: z.array(z.string()).optional().describe("Open CONSEQUENTIAL uncertainties (whose answers would change the build). At most 8 survive."),
+        assumptions: z.array(z.string()).optional().describe("Load-bearing assumptions the plan rests on. At most 8 survive."),
+        risks: z.array(z.string()).optional().describe("Live risks that currently matter. At most 8 survive."),
+        note: z.string().optional().describe("What occasioned THIS update, one line."),
         incorporating: z.array(z.string().min(1)).max(8).optional()
           .describe("When this update incorporates specific returned results or evidence, name them (handoff / agent-session / artifact ids). Optional — skip when the update isn't about a returned result."),
       },
@@ -467,7 +480,14 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         strategy?: string; strategyWhy?: string; uncertainties?: string[]; assumptions?: string[]; risks?: string[]; note?: string;
         incorporating?: string[] }) =>
         guarded(() => {
-          const row = state.update(userSessionId, args);
+          // These sections feed a size-capped prompt digest: clip, never reject.
+          const row = state.update(userSessionId, { ...args,
+            ...(args.strategy === undefined ? {} : { strategy: clip(args.strategy, 500) }),
+            ...(args.strategyWhy === undefined ? {} : { strategyWhy: clip(args.strategyWhy, 500) }),
+            ...(args.uncertainties === undefined ? {} : { uncertainties: clipAll(args.uncertainties, 200, 8) }),
+            ...(args.assumptions === undefined ? {} : { assumptions: clipAll(args.assumptions, 200, 8) }),
+            ...(args.risks === undefined ? {} : { risks: clipAll(args.risks, 200, 8) }),
+            ...(args.note === undefined ? {} : { note: clip(args.note, 280) }) });
           // The full merged document, not just the revision: section-replace
           // means the writer otherwise cannot confirm what its next
           // generation will actually read until that generation spawns.
@@ -483,18 +503,20 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
       "Record the completion justification when you believe the run is done: each acceptance criterion mapped to its EVIDENCE (met or honestly not), known gaps, and deliberate non-goals. The sign-off card shows this beside the console's own facts (git diff, ledger, uncertainty) — an absent record renders as a visible omission. Not a gate: recording it does not complete the run; the operator does.",
       {
         criteria: z.array(z.object({
-          criterion: z.string().max(200).describe("An acceptance criterion, ideally quoting the spec"),
+          criterion: z.string().describe("An acceptance criterion, ideally quoting the spec"),
           met: z.boolean(),
           evidence: z.array(EvidenceRefSchema).default([]).describe("What proves it: artifacts, files, journal refs, commands"),
-        })).min(1).max(12),
-        knownGaps: z.array(z.string().max(200)).max(8).default([]).describe("What is not done or not verified, and you know it"),
-        nonGoals: z.array(z.string().max(200)).max(8).default([]).describe("Deliberately out of scope (incl. declined opportunities)"),
-        note: z.string().max(280).optional(),
+        })).min(1).describe("At most 12 survive."),
+        knownGaps: z.array(z.string()).default([]).describe("What is not done or not verified, and you know it. At most 8 survive."),
+        nonGoals: z.array(z.string()).default([]).describe("Deliberately out of scope (incl. declined opportunities). At most 8 survive."),
+        note: z.string().optional(),
       },
       async (args: { criteria: CompletionRecord["criteria"]; knownGaps: string[]; nonGoals: string[]; note?: string }) =>
         guarded(() => {
           const row = state.recordCompletion(userSessionId,
-            { criteria: args.criteria, knownGaps: args.knownGaps, nonGoals: args.nonGoals }, args.note);
+            { criteria: args.criteria.slice(0, 12).map((entry) => ({ ...entry, criterion: clip(entry.criterion, 200) })),
+              knownGaps: clipAll(args.knownGaps, 200, 8), nonGoals: clipAll(args.nonGoals, 200, 8) },
+            args.note === undefined ? undefined : clip(args.note, 280));
           return { revision: row.revision, recorded: true };
         }),
     ),
@@ -531,7 +553,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         instructions: z.string().optional().describe("Brief appended to the profile instructions"),
         model: z.string().optional(),
         owns: z.array(z.string()).default([]).describe("Exclusive write scope; required for a writing profile"),
-        why: z.string().max(280).optional()
+        why: z.string().optional()
           .describe("Why this seat now — the emergent need the roster did not anticipate. Journaled with the addition; the entry agent and the run review read it."),
       },
       async (args: { agentSessionId: string; name: string; profileId: string; instructions?: string; model?: string; owns: string[]; why?: string }) =>
@@ -554,12 +576,12 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
       "Terminate a whole session that is no longer productive (superseded strategy, wedged past saving, obsoleted by a discovery). Lanes close, pending deliveries cancel, unlanded worktree branches ARCHIVE (nothing merges, nothing is destroyed), and the session stops blocking run completion. A child session's controller is told via a journaled failure. Returns the session's still-open ledger units so you can re-own them in a successor session. Prefer close+create over deforming a running session past its briefing.",
       {
         agentSessionId: z.string().min(1),
-        reason: z.string().min(1).max(280).describe("Why — journaled; a child's controller reads it"),
+        reason: z.string().min(1).describe("Why — journaled; a child's controller reads it"),
       },
       async (args: { agentSessionId: string; reason: string }) =>
         guarded(() => {
           owned(args.agentSessionId);
-          const closed = host.closeSession(args.agentSessionId, args.reason);
+          const closed = host.closeSession(args.agentSessionId, clip(args.reason, 280));
           return { ...closed,
             note: "Worktree branches were archived, not merged; the journal stays readable via read_handoff. Re-own the open units in a successor session if the work still matters." };
         }),
@@ -571,12 +593,15 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
       {
         agentSessionId: z.string().min(1),
         agent: z.string().min(1).describe("The agent name shown by session_activity"),
-        reason: z.string().min(1).max(280).describe("Why — journaled and shown to the agent's successor turn"),
+        reason: z.string().min(1).describe("Why — journaled and shown to the agent's successor turn"),
       },
       async (args: { agentSessionId: string; agent: string; reason: string }) =>
         guarded(() => {
           owned(args.agentSessionId);
-          host.interruptAgent(args.agentSessionId, args.agent, `main: ${args.reason}`);
+          // The successor turn reads this reason; clipping generously beats
+          // the observed alternative (four rejected attempts in 11 seconds,
+          // each retry hand-shortening the recovery instruction).
+          host.interruptAgent(args.agentSessionId, args.agent, `main: ${clip(args.reason, 1_000)}`);
           return { interrupted: true, agent: args.agent,
             note: "The turn was stopped and its deliveries cancelled; queued deliveries (including anything you post now) deliver next. The seat's work so far is preserved by the failure path." };
         }),

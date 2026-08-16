@@ -25,7 +25,7 @@ import type { EventBus } from "../events/bus.ts";
 import { RuntimeBroadcaster } from "../events/runtime.ts";
 import { newId, nowIso } from "../ids.ts";
 import { rotationTokenLimit } from "../model-catalog.ts";
-import { checkpointQuery, recoveryAction } from "../lane-runtime/checkpoint.ts";
+import { recoveryAction } from "../lane-runtime/checkpoint.ts";
 import { rotationDue } from "../lane-runtime/rotation.ts";
 import { advanceUsageWatermark } from "../lane-runtime/usage.ts";
 import { InvalidInputError, ConflictError, NotFoundError } from "../errors.ts";
@@ -33,7 +33,6 @@ import { mapSdkMessage } from "../sdk/mapping.ts";
 import type {
   ConsoleSdk,
   QueryHandle,
-  SdkOptions,
   SdkUserMessageLike,
 } from "../sdk/types.ts";
 import type { DecisionLedger } from "./decisions.ts";
@@ -57,7 +56,7 @@ type Job =
 
 interface ActiveTurn {
   turnId: string;
-  trigger: "operator" | "wake" | "answer";
+  trigger: "operator" | "wake" | "answer" | "deadline";
   startedAt: number;
   settled: Promise<void>;
   resolve: () => void;
@@ -217,11 +216,32 @@ export class OrchestratorRunner {
     for (const session of this.#deps.repo.listOpenUserSessions()) {
       for (const deadline of this.#deps.repo.listDueDeadlines(session.id, now.toISOString())) {
         this.#deps.repo.patchCron(deadline.id, { status: "deleted" });
+        // createdAt/dueAt/lateness in the note settle "did the timer misfire"
+        // forensically — a live run's orchestrator believed its deadlines
+        // fired 20–50s after creation and no payload could prove otherwise.
+        const latenessMs = now.getTime() - Date.parse(deadline.dueAt ?? deadline.createdAt);
         this.#deps.bus.append({ type: "user_session.runtime.noted", userSessionId: session.id,
-          payload: { userSessionId: session.id, detail: `deadline fired: ${deadline.prompt}` } });
-        this.#enqueue(session.id, { kind: "cron", text: `[Deadline you set has arrived]\n${deadline.prompt}` });
+          payload: { userSessionId: session.id, detail: `deadline fired: ${deadline.prompt}`,
+            cronId: deadline.id, createdAt: deadline.createdAt, dueAt: deadline.dueAt, latenessMs } });
+        this.#enqueue(session.id, { kind: "cron", text: `[Deadline you set has arrived — set at ${deadline.createdAt}, due ${deadline.dueAt}]\n${deadline.prompt}` });
       }
     }
+  }
+
+  /**
+   * Wakes that are NOT a deadline say so. A live run's orchestrator read
+   * milestone wakes arriving seconds after set_deadline as its deadlines
+   * firing early, concluded the timer was broken, and re-armed a storm of
+   * one-shot wakes ($44.67 of self-polling).
+   */
+  #pendingDeadlinesLine(sessionId: string): string {
+    let pending;
+    try { pending = this.#deps.repo.listPendingDeadlines(sessionId, new Date().toISOString()); } catch { return ""; }
+    if (pending.length === 0) return "";
+    const now = Date.now();
+    const lines = pending.map((row) =>
+      `"${row.prompt.slice(0, 60)}" fires in ~${Math.max(0, Math.round((Date.parse(row.dueAt ?? "") - now) / 1000))}s`);
+    return `\n[This wake is NOT one of your deadlines. Still pending: ${lines.join("; ")}.]`;
   }
 
   /** Material AgentSession reports only. Repeated reports coalesce per session. */
@@ -374,12 +394,15 @@ export class OrchestratorRunner {
     // baked into each milestone — several appended reports would otherwise
     // repeat it verbatim and teach the model to skim.
     const prompt = job.kind === "agent-milestone"
-      ? `${job.text}\n\nAct only if needed. Do not repeat an unchanged operator update. Use read_agent_session for additional detail only when necessary.`
+      ? `${job.text}${this.#pendingDeadlinesLine(sessionId)}\n\nAct only if needed. Do not repeat an unchanged operator update. Use read_agent_session for additional detail only when necessary.`
       : job.text;
     if (prompt === "") return;
 
     const turnId = newId("turn");
-    const trigger = job.kind === "operator" ? "operator" : job.kind === "agent-milestone" || job.kind === "cron" ? "wake" : "answer";
+    // "deadline" is distinct from "wake" so forensics (and the model itself)
+    // can tell a deadline fire from a report wake — a live run misread
+    // milestone wakes as early deadline fires and re-armed a wake storm.
+    const trigger = job.kind === "operator" ? "operator" : job.kind === "cron" ? "deadline" : job.kind === "agent-milestone" ? "wake" : "answer";
     bus.append({
       type: "user_session.turn.started",
       userSessionId: sessionId,
@@ -879,22 +902,19 @@ export class OrchestratorRunner {
     if (!due) return;
     if (lane.query) await this.#closeLane(lane, { interrupt: false });
     const started = Date.now();
-    // One ungated model attempt over an always-available floor (mirrors the
-    // agent rotation path): a clean checkpoint upgrades the recovery draft, a
-    // bad or failed one costs nothing beyond the degraded marker.
-    const { draft: attempted, failure } = await this.#checkpointQuery(session);
-    const degraded = attempted === null;
-    let draft = attempted;
-    if (!draft) {
-      const latest = this.#deps.repo.latestHandoff({ userSessionId: sessionId });
-      draft = latest ? { core: { ...latest.core, action: recoveryAction(latest.core.action), status: "needs_verification", risk: "high", requestExpandedContext: true }, extension: latest.extension }
-        : { core: { schemaVersion: 1, taskId: null, status: "needs_verification", risk: "high", action: "Recover orchestrator context",
-          state: { summary: "The checkpoint query failed. Reconstruct from operator messages, task ledger, repository, provider journal, and AgentSession handoffs.", evidence: [] },
-          result: { summary: null, artifacts: [] }, uncertainty: [failure ?? "no valid checkpoint output"], nextAction: "Verify authoritative state before acting.", requestExpandedContext: true },
-          extension: { kind: "coordination", data: {} } };
-      this.#deps.bus.append({ type: "handoff.checkpoint.failed", userSessionId: sessionId,
-        payload: { agent: "orchestrator", reason: failure ?? "checkpoint produced no valid handoff", degraded: true } });
-    }
+    // No model checkpoint here — deliberate. Main's durable memory is
+    // externalized by design: decisions, the spec pointer, and working-state
+    // lines all re-enter by prompt injection, and the latest handoff carries
+    // the thread. Querying the dying context added a failure mode (4 of 12
+    // such checkpoints failed in a live run) and spend for information that
+    // is already durable, so the reconstruction IS the checkpoint.
+    const latest = this.#deps.repo.latestHandoff({ userSessionId: sessionId });
+    const draft: HandoffDraft = latest
+      ? { core: { ...latest.core, action: recoveryAction(latest.core.action), status: "needs_verification", risk: "high", requestExpandedContext: true }, extension: latest.extension }
+      : { core: { schemaVersion: 1, taskId: null, status: "needs_verification", risk: "high", action: "Recover orchestrator context",
+        state: { summary: "First rotation before any handoff existed. Reconstruct from operator messages, task ledger, repository, provider journal, and AgentSession handoffs.", evidence: [] },
+        result: { summary: null, artifacts: [] }, uncertainty: [], nextAction: "Verify authoritative state before acting.", requestExpandedContext: true },
+        extension: { kind: "coordination", data: {} } };
     // Operator decisions ride the checkpoint into the successor generation.
     // Without this a rotation silently forgets what the operator decided, and
     // the next generation is free to contradict them. The spec pointer and
@@ -910,7 +930,7 @@ export class OrchestratorRunner {
     };
     const prepared = this.#deps.handoffs.prepare({ draft, userSessionId: sessionId, agentSessionId: null,
       sender: "orchestrator", recipient: "orchestrator", profileId: "main", generation: session.sdkGeneration,
-      trigger: degraded ? "recovery" : "rotation", parentHandoffId: session.latestHandoffId, checkpoint: true,
+      trigger: "rotation", parentHandoffId: session.latestHandoffId, checkpoint: true,
       ...(Object.keys(extensionDefaults).length > 0 ? { extensionDefaults } : {}) });
     this.#deps.repo.insertCheckpointHandoff(prepared.row);
     this.#deps.handoffs.committed(prepared.record);
@@ -920,28 +940,8 @@ export class OrchestratorRunner {
     this.#deps.bus.append({ type: "user_session.context.rotated", userSessionId: sessionId,
       payload: { userSessionId: sessionId, generation: session.sdkGeneration + 1,
         reason: due.reason,
-        handoffId: prepared.row.id, checkpointBytes: prepared.row.bytes, degraded } });
+        handoffId: prepared.row.id, checkpointBytes: prepared.row.bytes, degraded: false } });
     this.#deps.bus.append({ type: "user_session.runtime.noted", userSessionId: sessionId,
       payload: { userSessionId: sessionId, detail: `checkpoint ${prepared.row.id} completed in ${Date.now() - started}ms` } });
-  }
-
-  /** The runner side of the shared checkpoint query: lane context in, params out. */
-  async #checkpointQuery(session: { sdkSessionId: string | null; workspaceId: string; model: string | null }): Promise<{ draft: HandoffDraft | null; failure: string | null }> {
-    if (!session.sdkSessionId) return { draft: null, failure: null };
-    const sdk = await this.#deps.sdk();
-    const workspaceRoot = this.#deps.getWorkspaceRoot(session.workspaceId);
-    return checkpointQuery(sdk, {
-      prompt: `Create a lossless rotation checkpoint for the next orchestrator context. Preserve operator intent, the approved specification and its acceptance criteria, decisions, your working state (strategy, open uncertainties, assumptions, risks), delegated work, verified evidence pointers, and exact next actions. Do not perform work or call tools.`,
-      systemPromptAppend: "Checkpoint faithfully. Repository files, task ledger, artifacts, and provider journal are authoritative; do not invent corrections.",
-      cwd: workspaceRoot,
-      readPaths: [workspaceRoot],
-      resume: session.sdkSessionId,
-      // The checkpoint runs on the same model as the lane it is checkpointing.
-      model: this.#modelFor(session),
-      effort: this.#deps.config.infra.effort,
-      ...(this.#deps.sessionStore === undefined ? {} : { sessionStore: this.#deps.sessionStore as SdkOptions["sessionStore"] }),
-      // No deadline — deliberate: the code unifies, the runner's behavior does not change.
-      timeoutMs: null,
-    });
   }
 }

@@ -22,7 +22,7 @@ import type { AgentSessionRow, MessageRow, AgentRow, Repo } from "../../db/repo.
 import type { EventBus } from "../../events/bus.ts";
 import { nowIso } from "../../ids.ts";
 import type { Category } from "../final-gate.ts";
-import { CONSOLE_SENDER } from "../names.ts";
+import { CONSOLE_SENDER, MAIN_RECIPIENT } from "../names.ts";
 import { AGENT_NAME_RE, roleOfAgent, speakerKindOf } from "../topology.ts";
 
 export interface PatternContext {
@@ -284,11 +284,30 @@ export function trip(ctx: PatternContext, session: AgentSessionRow, rule: string
     payload: { agentSessionId: session.id, pattern: session.pattern, rule, detail } });
   queueMicrotask(() => {
     try {
+      // max_handoffs says nothing about the WORK — a live run killed three
+      // healthy sessions at 40/40, one of them after its work had already
+      // merged but before it could report so. The decision moves to main,
+      // which holds the reset lever (a fresh briefing to the entry agent —
+      // the re-brief path above) as well as the axe.
+      if (rule === "max_handoffs") {
+        ctx.post({ agentSessionId: session.id, speaker: { kind: "system", name: CONSOLE_SENDER }, to: MAIN_RECIPIENT,
+          handoff: ctx.simpleHandoff(`Termination policy tripped: ${rule}`, "blocked",
+            `${detail}. This is a Console-imposed bound, not a judgement on the work — the session may be mid-productive-work. Counters are frozen; reports still flow.`,
+            "Decide: a fresh assignment briefing to the session's entry agent resets its budgets and continues it; otherwise order a close-out or close_agent_session."),
+          category: "failure", dedupeKey: `termination:${session.id}` });
+        return;
+      }
       const finalSeat = ctx.completionSeat(session, "finalFrom");
+      // A tripped loop must not swallow its evaluator's last findings: a live
+      // run's max_rounds trip ended an architecture loop with a real defect
+      // dying unreported in the evaluator's final critique.
+      const closeout = rule === "max_rounds"
+        ? "Compile and send your final report now from what exists; include the evaluator's latest verdict VERBATIM — unresolved defects must reach main, not die with the loop."
+        : "Compile and send your final report now from what exists; include what is unverified rather than continuing.";
       ctx.post({ agentSessionId: session.id, speaker: { kind: "system", name: CONSOLE_SENDER }, to: finalSeat,
         handoff: ctx.simpleHandoff(`Termination policy tripped: ${rule}`, "blocked",
           `${detail}. This is a Console-imposed bound, not a judgement on the work.`,
-          "Compile and send your final report now from what exists; include what is unverified rather than continuing."),
+          closeout),
         category: "decision", dedupeKey: `termination:${session.id}` });
     } catch { /* best effort — the tripped flag already stops the counters */ }
   });

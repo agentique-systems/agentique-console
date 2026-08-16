@@ -93,8 +93,13 @@ export interface AgentRunSummary {
   profile: Record<string, unknown>;
   ownership: string[];
   generation: number;
+  /** Turns of the CURRENT generation only — resets at every rotation. */
   turnCount: number;
+  /** Current-generation context occupancy — resets at every rotation, never sum it. */
   contextTokens: number;
+  /** Lifetime totals across all generations, from usage samples. */
+  totalCostUsd: number;
+  totalTurns: number;
   providerSessionId: string | null;
 }
 

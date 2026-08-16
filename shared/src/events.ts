@@ -53,7 +53,8 @@ export interface UserSessionMessagePayload {
   userSessionId: string;
   message: SessionMessage;
 }
-export type TurnTrigger = "operator" | "wake" | "answer";
+/** "deadline" is a set_deadline fire — distinct from "wake" so a deadline fire and a report wake are never conflated. */
+export type TurnTrigger = "operator" | "wake" | "answer" | "deadline";
 export interface UserTurnStartedPayload {
   userSessionId: string;
   turnId: string;
@@ -72,7 +73,15 @@ export interface UserContextRotatedPayload {
   userSessionId: string; generation: number; reason: "token_limit" | "turn_limit";
   handoffId?: string; checkpointBytes?: number; degraded?: boolean;
 }
-export interface UserRuntimePayload { userSessionId: string; detail: string; }
+export interface UserRuntimePayload {
+  userSessionId: string;
+  detail: string;
+  /** Deadline-fire forensics: which cron, when it was set/due, how late it fired. */
+  cronId?: string;
+  createdAt?: string;
+  dueAt?: string | null;
+  latenessMs?: number;
+}
 interface ToolCallCore {
   turnId: string;
   callId: string;
@@ -379,6 +388,8 @@ export interface AgentWorktreeMergedPayload {
 export interface AgentWorktreeMergeFailedPayload {
   agentSessionId: string;
   agent: string;
+  /** Which remedy applies: content conflict vs dirty canonical checkout vs other. */
+  kind: "conflict" | "dirty_tree" | "other";
   conflicts: string[];
   detail: string;
   artifactId: string | null;
@@ -437,6 +448,15 @@ export interface AgentLivenessTrippedPayload {
   elapsedMs: number;
   toolName?: string;
   inputPreview?: string;
+}
+
+/** An alarmed tool call returned on its own — the alarm was a false positive. */
+export interface AgentLivenessResolvedPayload {
+  agentSessionId: string;
+  agent: string;
+  turnId: string;
+  callId: string;
+  elapsedMs?: number;
 }
 
 export interface TaskCreatedPayload {
@@ -566,6 +586,7 @@ export type ConsoleEvent = Base &
     | { type: "agent_session.closeout.forced"; payload: AgentSessionCloseoutForcedPayload }
     | { type: "agent_session.watchdog.tripped"; payload: AgentWatchdogTrippedPayload }
     | { type: "agent_session.liveness.tripped"; payload: AgentLivenessTrippedPayload }
+    | { type: "agent_session.liveness.resolved"; payload: AgentLivenessResolvedPayload }
     | { type: "agent_session.agent.added"; payload: AgentAddedPayload }
     | { type: "tool.denied"; payload: ToolDeniedPayload }
     | { type: "agent_session.worktree.created"; payload: AgentWorktreeCreatedPayload }

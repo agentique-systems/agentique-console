@@ -243,8 +243,11 @@ function collectBuild(
   if (session?.runBaseCommit && getWorkspaceRoot) {
     try {
       const root = getWorkspaceRoot(session.workspaceId);
+      // 64MB, not the 1MB default: `ls-files --others` over a workspace whose
+      // .gitignore misses a build dir (a live Rust run committed none of
+      // target/) exceeds 1MB and ENOBUFS here killed the whole run summary.
       const git = (args: string[]): string =>
-        execFileSync("git", args, { cwd: root, encoding: "utf8", timeout: 10_000 }).trim();
+        execFileSync("git", args, { cwd: root, encoding: "utf8", timeout: 10_000, maxBuffer: 64 * 1024 * 1024 }).trim();
       const numstat = git(["diff", "--numstat", session.runBaseCommit]);
       // A run's most common product is NEW files, which `git diff` does not
       // list until something commits them — count the untracked ones too.

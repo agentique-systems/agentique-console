@@ -93,8 +93,12 @@ export interface PolicyConfig {
   /**
    * Liveness alarm: an in-flight tool call older than this wakes MAIN with a
    * console-authored failure handoff carrying the call's name, preview and
-   * age. Deliberately BELOW the mechanical mcpToolTimeoutMs floor so the
-   * orchestrator can act with judgment before the axe falls. 0 = off.
+   * age. Deliberately ABOVE the mechanical mcpToolTimeoutMs floor: declared
+   * MCP calls fail mechanically first, so the alarm covers only floor-less
+   * calls (foreground Bash, native tools). It was once below the floor "so
+   * main can act with judgment first" — a live run showed what that buys:
+   * 20 of 21 alarms fired on healthy cargo builds (which routinely run 5–9
+   * minutes) and main killed them. 0 = off.
    */
   toolCallAlarmMs: number;
   /** Liveness alarm: a live turn with no stream event for this long. 0 = off. */
@@ -107,7 +111,12 @@ export interface PolicyConfig {
   maxRedeliveryAttempts: number;
   /** Governance sweep period: stale-ask detach + pattern stall checks. */
   governanceSweepIntervalMs: number;
-  /** Rotation blocks every sender to the agent; a checkpoint may not run forever. */
+  /**
+   * Rotation blocks every sender to the agent; a checkpoint may not run
+   * forever. Sized for a checkpoint over a ~120k-token context, which
+   * routinely needs minutes: a live run whose cap was 90s aborted 31 of 35
+   * seat checkpoints mid-query and paid ~$62 re-deriving what they knew.
+   */
   checkpointTimeoutMs: number;
   /**
    * Debounce before the run-completion predicate re-evaluates. Long enough
@@ -118,7 +127,13 @@ export interface PolicyConfig {
   /** Rotate a lane onto a fresh provider session before the next turn. */
   contextTokenLimit: number;
   contextTurnLimit: number;
-  /** Agent-authored handoffs per session before the console asks for a close-out. */
+  /**
+   * Agent-authored handoffs per session before the console asks MAIN to
+   * re-brief (which resets the budgets) or close. Sized for a real multi-seat
+   * session: 40 counted every assignment, update, and report, and three
+   * healthy sessions in one live run died at 40/40 mid-productive-work.
+   * 0 = off.
+   */
   patternHandoffCap: number;
   /** Quiet-time stall: unreported session with no hop for this long trips. 0 = off. */
   patternStallMs: number;
@@ -223,17 +238,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       operatorAskDetachMs: Number(env.CONSOLE_OPERATOR_ASK_DETACH_MS ?? 300_000),
       peerNamePrefix: env.CONSOLE_PEER_NAME_PREFIX ?? "console-",
       mcpToolTimeoutMs: Number(env.CONSOLE_MCP_TOOL_TIMEOUT_MS ?? 300_000),
-      toolCallAlarmMs: Number(env.CONSOLE_TOOL_ALARM_MS ?? 180_000),
+      toolCallAlarmMs: Number(env.CONSOLE_TOOL_ALARM_MS ?? 600_000),
       turnQuietAlarmMs: Number(env.CONSOLE_TURN_QUIET_ALARM_MS ?? 300_000),
       watchdogIdenticalCalls: Number(env.CONSOLE_WATCHDOG_IDENTICAL_CALLS ?? 5),
       watchdogErrorStreak: Number(env.CONSOLE_WATCHDOG_ERROR_STREAK ?? 10),
       maxRedeliveryAttempts: Number(env.CONSOLE_MAX_REDELIVERY_ATTEMPTS ?? 2),
       governanceSweepIntervalMs: Number(env.CONSOLE_GOVERNANCE_SWEEP_MS ?? 30_000),
-      checkpointTimeoutMs: Number(env.CONSOLE_CHECKPOINT_TIMEOUT_MS ?? 90_000),
+      checkpointTimeoutMs: Number(env.CONSOLE_CHECKPOINT_TIMEOUT_MS ?? 300_000),
       completionQuietWindowMs: Number(env.CONSOLE_COMPLETION_QUIET_MS ?? 2_000),
       contextTokenLimit: Number(env.CONSOLE_CONTEXT_TOKEN_LIMIT ?? 120_000),
       contextTurnLimit: Number(env.CONSOLE_CONTEXT_TURN_LIMIT ?? 30),
-      patternHandoffCap: Number(env.CONSOLE_PATTERN_HANDOFF_CAP ?? 40),
+      patternHandoffCap: Number(env.CONSOLE_PATTERN_HANDOFF_CAP ?? 120),
       patternStallMs: Number(env.CONSOLE_PATTERN_STALL_MS ?? 600_000),
       enableChildSessions: env.CONSOLE_CHILD_SESSIONS !== "0",
       maxChildSessionsPerParent: Number(env.CONSOLE_MAX_CHILD_SESSIONS ?? 5),

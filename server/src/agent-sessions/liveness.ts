@@ -9,7 +9,9 @@
  * Two rules, both wall-clock over live-lane state, both skipping legal
  * ask_operator parks:
  * - tool hang: an in-flight call older than `toolCallAlarmMs` (deliberately
- *   below the mechanical MCP timeout so main can act with judgment first);
+ *   ABOVE the mechanical MCP timeout: declared-server calls fail mechanically
+ *   first, so the alarm covers only floor-less calls like foreground Bash —
+ *   where a cold cargo build legitimately runs 5–9 minutes);
  * - quiet turn: a live turn with no stream event for `turnQuietAlarmMs`.
  *
  * A trip wakes MAIN through the mailroom as a console-authored failure
@@ -65,8 +67,8 @@ export function sweepLiveness(deps: LivenessDeps, session: AgentSessionRow): voi
           headline: `Liveness alarm: ${snapshot.agent} has been inside ${call.name} for ${minutes(elapsed)}`,
           detail: `${snapshot.agent}'s turn ${turn.turnId} has an in-flight ${call.name} call that started ${minutes(elapsed)} ago and has not returned. ` +
             `Input preview: ${call.inputPreview || "(empty)"}. ` +
-            `The per-call MCP timeout${config.policy.mcpToolTimeoutMs > 0 ? ` will force an error at ${minutes(config.policy.mcpToolTimeoutMs)}` : " is off"}; ` +
-            "you can act before that with judgment the timeout does not have.",
+            "A long call is not itself a wedge — builds and full test suites legitimately run past this alarm. " +
+            "If the call later returns on its own, no action is needed.",
         });
       }
     }
@@ -107,7 +109,8 @@ function fire(
       speaker: { kind: "system", name: CONSOLE_SENDER },
       to: MAIN_RECIPIENT,
       handoff: deps.simpleHandoff(alarm.headline, "blocked", `${alarm.detail}\n\n${LEVERS}`,
-        "Diagnose from live state and intervene — waiting a failure out is a supervision failure."),
+        "Verify with session_activity before acting: a long-running call on real work is normal. " +
+        "Interrupt only on positive evidence of a wedge — identical repeated calls, an error streak, or continued silence well past this alarm."),
       category: "failure",
       dedupeKey: `liveness:${alarm.key}`,
     });

@@ -51,7 +51,7 @@ export interface CoordinationHandoffData extends Record<string, unknown> {
   conflicts?: string[];
   operatorDecisions?: string[];
   activeSessions?: string[];
-  /** Capture-at-act rationale: why this move, now (≤280 chars). */
+  /** Capture-at-act rationale: why this move, now (truncated to 280 in summaries). */
   why?: string;
   /** The success contract: what evidence would count as done, or change the plan. */
   expecting?: string;

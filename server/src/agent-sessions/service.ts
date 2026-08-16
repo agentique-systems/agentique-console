@@ -322,6 +322,9 @@ export class AgentSessionService {
   detail(agentSessionId: string): GetAgentSessionResponse {
     const row = this.#deps.repo.getAgentSession(agentSessionId);
     if (!row) throw new NotFoundError(`no agent session ${agentSessionId}`);
+    // The agents-row columns are per-generation watermarks; the lifetime
+    // truth lives in usage samples (see aggregateUsageByParticipant).
+    const totals = this.#deps.repo.aggregateUsageByParticipant(row.id);
     return {
       session: this.wireSession(row),
       runs: this.#deps.repo.listAgents(row.id).map((agent) => ({
@@ -332,6 +335,8 @@ export class AgentSessionService {
         generation: agent.generation,
         turnCount: agent.turnCount,
         contextTokens: agent.contextTokens,
+        totalCostUsd: totals.get(agent.name)?.costUsd ?? 0,
+        totalTurns: totals.get(agent.name)?.turns ?? 0,
         providerSessionId: agent.sdkSessionId,
       })),
       messages: this.#deps.repo.listMessages("agent", row.id).map(toWireMessage),
@@ -530,8 +535,11 @@ export class AgentSessionService {
     } catch {
       draft = simpleHandoff("Turn failed", "failed", reason, "Inspect the failure and retry or reassign.");
     }
+    // One escalation per dead turn: the settle path already gates on
+    // "gave up", and the dedupe absorbs any replay of the same turn's death
+    // through a second code path.
     this.post({ agentSessionId: session.id, speaker: { kind: speakerKindOf(seat), name: seatName }, to: target,
-      handoff: draft, category: "failure", turnId: turn.turnId });
+      handoff: draft, category: "failure", turnId: turn.turnId, dedupeKey: `turn-failure:${turn.turnId}` });
   }
 
   /** The once-per-assignment budget notice; the runtime owns the latch. */

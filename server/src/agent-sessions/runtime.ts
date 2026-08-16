@@ -446,6 +446,14 @@ export class AgentRuntime implements Injector, TurnTracker {
             const startedAt = turn?.toolStarts.get(event.callId)?.startedAt; turn?.toolStarts.delete(event.callId);
             runtime.set("thinking");
             bus.append({ type: "agent_session.tool.completed", userSessionId: session.userSessionId, agentSessionId: session.id, payload: { agentSessionId: session.id, agent: seatName, turnId, callId: event.callId, output: captured.value, bytes: captured.bytes, ...(startedAt === undefined ? {} : { durationMs: Date.now() - startedAt }), ...(event.isError ? { isError: true } : {}) } });
+            // An alarmed call that returned was a false alarm; record the
+            // resolution for the UI and forensics WITHOUT waking main — a
+            // resolution wake would double the cost of every false positive.
+            if (turn?.alarmsFired.has(`tool:${turnId}:${event.callId}`)) {
+              bus.append({ type: "agent_session.liveness.resolved", userSessionId: session.userSessionId, agentSessionId: session.id,
+                payload: { agentSessionId: session.id, agent: seatName, turnId, callId: event.callId,
+                  ...(startedAt === undefined ? {} : { elapsedMs: Date.now() - startedAt }) } });
+            }
             if (turn) {
               turn.watchdog.errorStreak = event.isError ? turn.watchdog.errorStreak + 1 : 0;
               if (turn.watchdog.errorStreak >= this.#deps.config.policy.watchdogErrorStreak) {
@@ -544,7 +552,11 @@ export class AgentRuntime implements Injector, TurnTracker {
     // (in-process CLI death). Before this it settled silently — no failure
     // handoff, no escalation, a run that just stopped.
     const infraDeath = status === "aborted" && !lane.deliberateStop;
-    if ((status === "error" || infraDeath) && repo.getAgentSession(session.id)?.lifecycle === "open") {
+    // Escalate only when the console has given up on the deliveries. While a
+    // redelivery is queued the failure is still being handled here; escalating
+    // every attempt produced three differently-worded failure handoffs for
+    // one dead turn in a live run, each a delivery into the coordinator.
+    if ((status === "error" || infraDeath) && !requeued && repo.getAgentSession(session.id)?.lifecycle === "open") {
       const reason = turn.watchdog.tripped ?? `Provider turn failed: ${errorMessage}`;
       hooks.escalateFailure(session, seatName, seat, turn, reason);
     }

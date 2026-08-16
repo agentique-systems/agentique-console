@@ -98,22 +98,32 @@ describe("WorktreeManager", () => {
     fs.writeFileSync(path.join(repo, "README.md"), "diverged on main\n");
     git(repo, "commit", "-am", "diverge", "--no-gpg-sign");
     const outcome = manager.mergeBranch(repo, ref.branch, "Merge winner");
-    expect(outcome).toMatchObject({ merged: false });
+    expect(outcome).toMatchObject({ merged: false, kind: "conflict" });
     if (!outcome.merged) expect(outcome.conflicts).toContain("README.md");
     expect(git(repo, "status", "--porcelain").trim()).toBe("");
     expect(fs.readFileSync(path.join(repo, "README.md"), "utf8")).toBe("diverged on main\n");
   });
 
-  it("refuses to overwrite dirty workspace files and leaves them intact", () => {
+  it("stashes dirty workspace files, merges, and preserves the local edit", () => {
     const { repo, manager } = makeRepo();
     const ref = manager.addWorktree(repo, "as_1", "g-1", "g/1");
     fs.writeFileSync(path.join(ref.path, "README.md"), "attempt version\n");
     manager.commitAll(ref.path, "attempt work");
     fs.writeFileSync(path.join(repo, "README.md"), "uncommitted local edit\n");
+    // Previously this REFUSED the merge outright — a live run failed the same
+    // land four times on one stray edit until the operator ran git by hand.
     const outcome = manager.mergeBranch(repo, ref.branch, "Merge winner");
-    expect(outcome.merged).toBe(false);
-    expect(fs.readFileSync(path.join(repo, "README.md"), "utf8")).toBe("uncommitted local edit\n");
+    expect(outcome.merged).toBe(true);
+    // The seat's work landed; the local edit survives — in place when the pop
+    // is clean, otherwise as the newest stash entry (announced via stashNote).
+    if (outcome.merged && outcome.stashNote !== undefined) {
+      expect(fs.readFileSync(path.join(repo, "README.md"), "utf8")).toBe("attempt version\n");
+      expect(git(repo, "stash", "list")).toContain("agentique-console: pre-merge stash");
+    } else {
+      expect(fs.readFileSync(path.join(repo, "README.md"), "utf8")).toBe("uncommitted local edit\n");
+    }
   });
+
 
   it("removes worktrees and branches; archiveBranch renames instead", () => {
     const { repo, manager } = makeRepo();

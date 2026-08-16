@@ -25,6 +25,14 @@ export class CronStore {
       .filter((row) => row.dueAt !== null && row.dueAt <= nowIsoTime);
   }
 
+  /** Console-owned deadlines not yet due — so wake prompts can say "this wake is not it". */
+  listPendingDeadlines(userSessionId: string, nowIsoTime: string): CronRow[] {
+    return this.#db.select().from(crons)
+      .where(and(eq(crons.userSessionId, userSessionId), eq(crons.status, "active"), isNotNull(crons.dueAt)))
+      .all()
+      .filter((row) => row.dueAt !== null && row.dueAt > nowIsoTime);
+  }
+
   patchCron(id: string, patch: Partial<Pick<CronRow, "schedule" | "prompt" | "status">>): void {
     this.#db.update(crons).set({ ...patch, updatedAt: nowIso() }).where(eq(crons.id, id)).run();
   }

@@ -174,7 +174,10 @@ function buildPipeline(input: BuildInput): BuildResult {
 const EVALUATOR_CONFIG = z.object({
   generatorAgent: z.string().optional(),
   rubric: z.string().max(4_000).optional(),
-  maxRounds: z.number().int().min(1).max(10).default(3),
+  // Default 5, not 3: a live run's architecture loop tripped at round 3 with
+  // a real defect unreported — the evaluator had found it, the loop died
+  // before the fix round.
+  maxRounds: z.number().int().min(1).max(10).default(5),
   requireDistinctModels: z.boolean().default(true),
 });
 

@@ -55,8 +55,15 @@ export interface DiffCapture {
 }
 
 export type MergeOutcome =
-  | { merged: true; commit: string }
-  | { merged: false; conflicts: string[]; detail: string };
+  | { merged: true; commit: string; stashNote?: string }
+  /**
+   * `kind` tells the caller WHICH remedy applies: a `conflict` needs a rebase
+   * or reassignment against current HEAD; a `dirty_tree` is the console's own
+   * problem (the canonical checkout has local changes) and retrying the seat
+   * fixes nothing — a live run burned five seats across four sessions on
+   * exactly that misdiagnosis.
+   */
+  | { merged: false; kind: "conflict" | "dirty_tree" | "other"; conflicts: string[]; detail: string };
 
 export class WorktreeManager {
   readonly #root: string;
@@ -143,9 +150,12 @@ export class WorktreeManager {
     try {
       this.#git(workspaceRoot, ["init", "-b", "main"]);
       const gitignore = path.join(workspaceRoot, ".gitignore");
-      // An existing .gitignore is the operator's, byte for byte.
+      // An existing .gitignore is the operator's, byte for byte. The defaults
+      // cover the common build-output dirs across ecosystems: a live Rust run
+      // without `target/` swept 556MB of build artifacts into history and
+      // produced multi-MB `ls-files` output that blew a subprocess buffer.
       if (!fs.existsSync(gitignore)) {
-        fs.writeFileSync(gitignore, "node_modules/\n.env\ndist/\n.DS_Store\n", "utf8");
+        fs.writeFileSync(gitignore, "node_modules/\n.env\ndist/\ntarget/\nbuild/\n.venv/\n.DS_Store\n", "utf8");
       }
       this.#git(workspaceRoot, ["add", "-A", "--", ".", ...SANDBOX_STUB_EXCLUDES]);
       if (this.#git(workspaceRoot, ["diff", "--cached", "--name-only"]).trim() === "") {
@@ -187,6 +197,12 @@ export class WorktreeManager {
     const worktreePath = path.join(this.#root, agentSessionId, dirName);
     const branch = `agentique/${branchPath}`;
     fs.mkdirSync(path.dirname(worktreePath), { recursive: true });
+    // Stable dir names mean a stale directory from a previous assignment
+    // cycle may still be present; clear it so the add succeeds.
+    if (fs.existsSync(worktreePath)) {
+      try { this.#git(workspaceRoot, ["worktree", "remove", "--force", worktreePath]); } catch { fs.rmSync(worktreePath, { recursive: true, force: true }); }
+      try { this.#git(workspaceRoot, ["worktree", "prune"]); } catch { /* best effort */ }
+    }
     const startPoint = opts.base === undefined ? "HEAD" : this.#resolvable(workspaceRoot, opts.base) ? opts.base : "HEAD";
     // The base commit is the START POINT, not the workspace HEAD: every diff
     // this seat produces is measured against what it actually started from.
@@ -245,9 +261,25 @@ export class WorktreeManager {
 
   /** --no-ff so --abort semantics are clean and branch commits stay reachable. */
   mergeBranch(workspaceRoot: string, branch: string, message: string): MergeOutcome {
+    // A dirty canonical checkout makes git REFUSE the merge outright ("your
+    // local changes would be overwritten") — observed live as four identical
+    // failures on one stray edit, ended only by an operator shell. Stash
+    // whatever is there, merge, put it back; the stray edit survives either
+    // way (worst case as the newest stash entry).
+    let stashed = false;
+    if (this.isDirty(workspaceRoot)) {
+      try {
+        this.#git(workspaceRoot, [...GIT_IDENTITY, "stash", "push", "--include-untracked", "-m", "agentique-console: pre-merge stash"]);
+        stashed = true;
+      } catch (error) {
+        return { merged: false, kind: "dirty_tree", conflicts: [],
+          detail: `the canonical checkout has local changes and stashing them failed: ${error instanceof Error ? error.message : String(error)}` };
+      }
+    }
+    let outcome: MergeOutcome;
     try {
       this.#git(workspaceRoot, [...GIT_IDENTITY, "merge", "--no-ff", "--no-gpg-sign", "-m", message, branch], { allowFailure: true });
-      return { merged: true, commit: this.headCommit(workspaceRoot) };
+      outcome = { merged: true, commit: this.headCommit(workspaceRoot) };
     } catch (error) {
       const stderr = ((error as { stderr?: string }).stderr ?? "") + ((error as { stdout?: string }).stdout ?? "");
       // Capture conflicted paths BEFORE aborting — the abort clears them.
@@ -257,8 +289,24 @@ export class WorktreeManager {
         conflicts = unmerged === "" ? [] : unmerged.split("\n");
       } catch { /* refused pre-merge: no unmerged paths exist */ }
       try { this.#git(workspaceRoot, ["merge", "--abort"]); } catch { /* no MERGE_HEAD: git refused before starting */ }
-      return { merged: false, conflicts, detail: stderr.trim() || "merge failed" };
+      const kind = /would be overwritten by merge/.test(stderr) ? "dirty_tree"
+        : conflicts.length > 0 ? "conflict" : "other";
+      outcome = { merged: false, kind, conflicts, detail: stderr.trim() || "merge failed" };
     }
+    if (stashed) {
+      try {
+        this.#git(workspaceRoot, ["stash", "pop"]);
+      } catch {
+        // A failed pop keeps the stash entry. Restore the clean post-stash
+        // tree so the NEXT merge is not blocked by half-applied conflict
+        // state — everything the reset removes is preserved in the stash.
+        try { this.#git(workspaceRoot, ["reset", "--hard", "HEAD"]); } catch { /* best effort */ }
+        try { this.#git(workspaceRoot, ["clean", "-fd"]); } catch { /* best effort */ }
+        const note = "the canonical checkout's pre-merge local changes could not be reapplied cleanly; they are preserved as the newest `git stash list` entry";
+        outcome = outcome.merged ? { ...outcome, stashNote: note } : { ...outcome, detail: `${outcome.detail}\n${note}` };
+      }
+    }
+    return outcome;
   }
 
   /**

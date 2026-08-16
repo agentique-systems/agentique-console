@@ -100,6 +100,11 @@ const CAPABILITY_GROUPS = [
     tools: ["Bash"],
     can: "run shell commands with Bash, including long-running ones in the background — background a server and read its output back rather than blocking a turn",
     cannot: "run any shell command",
+    // Bash-holders also get Monitor/TaskOutput/TaskStop, but those are
+    // DEFERRED like the web pair. Without this note agents hunt for a wait
+    // primitive (8 of 19 ToolSearch calls in a live run) or invent polling
+    // loops that burn whole model turns on `true`.
+    note: 'Monitor, TaskOutput, and TaskStop may not appear in your tool list at the start of a turn. That means deferred, not absent: call ToolSearch with {"query": "select:Monitor,TaskOutput,TaskStop"} once, then use them normally. For any command expected to exceed ~2 minutes, run it with Bash run_in_background and wait on Monitor or TaskOutput instead of blocking the turn or polling in a loop.',
   },
   {
     tools: ["WebSearch", "WebFetch"],
