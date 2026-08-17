@@ -37,7 +37,7 @@ import type { ConsoleSdk, QueryHandle, SdkOptions, SdkToolResult, SdkUserMessage
 import type { AssignmentScheduler } from "../tasks/scheduler.ts";
 import type { TaskService } from "../tasks/service.ts";
 import { buildAgentTools, type AgentToolsContext, type AskOperatorArgs } from "./agent-tools.ts";
-import { GOVERNED_BUILTIN_TOOLS, declaredMcpServers, seatUserMessage, type PromptComposer } from "./composer.ts";
+import { GOVERNED_BUILTIN_TOOLS, declaredMcpServers, effectiveBuiltinTools, seatUserMessage, type PromptComposer } from "./composer.ts";
 import { grantedTools, runtimeToolNames, type AgentToolName } from "./grants.ts";
 import type { ActiveTurn, AgentLane, AgentLanePool } from "./lanes.ts";
 import type { DispatchWorkItemsInput } from "./patterns/engine.ts";
@@ -227,6 +227,10 @@ export class AgentRuntime implements Injector, TurnTracker {
       });
       const mcp = this.#buildParticipantMcp(sdk, session, latestSeat, granted);
       const declared = declaredMcpServers(profile, this.#deps.config);
+      // Containment is the worktree: an isolated seat holds every governed
+      // builtin; one sharing the operator's tree keeps its profile binding.
+      const isolated = latestSeat.worktreePath !== null;
+      const builtins = effectiveBuiltinTools(profile, isolated);
       const options: SdkOptions = {
         cwd: seatRoot,
         systemPrompt: { type: "preset", preset: "claude_code", append: this.#deps.composer.systemPromptAppend(session, latestSeat, profile, rolePrompt) },
@@ -235,7 +239,7 @@ export class AgentRuntime implements Injector, TurnTracker {
         settingSources: ["user", "project", "local"], includePartialMessages: true,
         permissionMode: profile.permissionMode,
         ...(profile.permissionMode === "bypassPermissions" ? { allowDangerouslySkipPermissions: true } : {}),
-        allowedTools: [...profile.tools,
+        allowedTools: [...builtins,
           // Deferred tools (the web pair among them) are absent from the
           // turn-1 list and load only through ToolSearch, which the capability
           // brief tells the seat to call. Granted explicitly rather than left
@@ -244,25 +248,24 @@ export class AgentRuntime implements Injector, TurnTracker {
           // Skill bodies load through the Skill tool; without this a seat
           // told "invoke your skills" has no approved way to do it.
           "Skill",
-          ...(profile.tools.includes("Edit") || profile.tools.includes("Write") ? ["EnterWorktree", "ExitWorktree"] : []),
+          ...(builtins.includes("Edit") || builtins.includes("Write") ? ["EnterWorktree", "ExitWorktree"] : []),
           // Background work is native: a seat starts a dev server with Bash and
           // reads it back, where it used to call console process tools.
-          ...(profile.tools.includes("Bash") ? ["TaskOutput", "TaskStop", "Monitor"] : []),
+          ...(builtins.includes("Bash") ? ["TaskOutput", "TaskStop", "Monitor"] : []),
           // A declared server's whole surface is auto-approved — the profile
           // granting the server IS the permission decision, and there is no
           // console-side list of its tool names to drift out of date.
           ...Object.keys(declared).map((name) => `mcp__${name}`),
           ...runtimeToolNames(granted)],
-        // A profile's tool list must be BINDING: `allowedTools` is only an
-        // auto-approval list, so everything the profile did not grant is
-        // denied by name. The native Task* tools are additionally scoped to
-        // the provider session, so their ledger dies at every rotation; agents
-        // use the console-owned task_list/task_create/task_update instead.
+        // Without a worktree the profile's tool list is BINDING: `allowedTools`
+        // is only an auto-approval list, so everything the profile did not
+        // grant is denied by name. The native Task* tools are scoped to the
+        // provider session; agents use the console-owned task ledger instead.
         disallowedTools: [...new Set([
           // One transport: `send_handoff` is console-carried, so there is no
           // second wire whose delivery semantics can diverge from it.
           "Agent", "Task", "SendMessage", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet",
-          ...GOVERNED_BUILTIN_TOOLS.filter((name) => !profile.tools.includes(name)),
+          ...(isolated ? [] : GOVERNED_BUILTIN_TOOLS.filter((name) => !profile.tools.includes(name))),
         ])],
         // Agent identity rides the ENV, not the prompt: visible to process
         // forensics and the test discriminator without perturbing the

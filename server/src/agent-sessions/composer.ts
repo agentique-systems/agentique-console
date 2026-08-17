@@ -59,11 +59,14 @@ export function declaredMcpServers(profile: AgentProfile, config: Config): Recor
 }
 
 /**
- * Built-in tools a profile may grant. Anything here that a profile does NOT
- * list is explicitly denied, which is what makes `profile.tools` a real
- * boundary rather than an auto-approval hint. Harness conveniences a governed
- * agent should never reach (subagent spawning, scheduling, its own review
- * tooling) are denied unconditionally alongside these — see `runtime.ts`.
+ * The built-in tools the console governs. An ISOLATED seat — one with its own
+ * worktree — holds all of them: containment is the worktree, and the
+ * profile's instructions govern use. A seat WITHOUT a worktree (the
+ * coordinator, or any seat in a non-git workspace) shares the operator's
+ * tree, so there the profile's list stays binding: whatever it does not grant
+ * is denied by name. Harness conveniences a governed agent never reaches
+ * (subagent spawning, native messaging and task ledgers) are denied
+ * unconditionally — see `runtime.ts`.
  *
  * Lives here, next to the brief that describes it: the two must not drift.
  * A live run lost two of four researchers to exactly that drift — they held
@@ -76,6 +79,11 @@ export const GOVERNED_BUILTIN_TOOLS = [
 ] as const;
 
 type GovernedTool = (typeof GOVERNED_BUILTIN_TOOLS)[number];
+
+/** The builtins a seat actually holds — see `GOVERNED_BUILTIN_TOOLS`. */
+export function effectiveBuiltinTools(profile: AgentProfile, isolated: boolean): string[] {
+  return isolated ? [...new Set([...profile.tools, ...GOVERNED_BUILTIN_TOOLS])] : [...profile.tools];
+}
 
 /**
  * How each governed tool is described to the agent holding (or lacking) it.
@@ -132,8 +140,12 @@ function capabilityBrief(profile: AgentProfile, hasWorktree: boolean): string {
   const can: string[] = [];
   const cannot: string[] = [];
   const notes: string[] = [];
+  const tools = effectiveBuiltinTools(profile, hasWorktree);
+  // The merge rule stays profile-based (worktree-binding.ts): only a write
+  // profile's worktree lands, so an isolated read-only seat must be told.
+  const writes = profile.tools.includes("Edit") || profile.tools.includes("Write");
   for (const group of CAPABILITY_GROUPS) {
-    if (group.tools.some((tool) => profile.tools.includes(tool))) {
+    if (group.tools.some((tool) => tools.includes(tool))) {
       can.push(group.can);
       if ("note" in group) notes.push(group.note);
     } else cannot.push(group.cannot);
@@ -150,7 +162,9 @@ function capabilityBrief(profile: AgentProfile, hasWorktree: boolean): string {
   return `## Your capabilities\nYou can: ${can.join("; ") || "nothing beyond your console coordination tools"}.\nYou cannot: ${cannot.join("; ")}.\n` +
     `${notes.map((note) => `${note}\n`).join("")}` +
     `${skills.length > 0 ? `You have skills loaded: ${skills.join(", ")}. Before starting work a skill covers, invoke it with the Skill tool and follow it — do not re-derive procedure it already settles.\n` : ""}` +
-    `${hasWorktree ? "Your cwd is an isolated worktree; teammates and the coordinator cannot see your files until the Console merges them when you report completed.\n" : ""}` +
+    `${hasWorktree ? (writes
+      ? "Your cwd is an isolated worktree; teammates and the coordinator cannot see your files until the Console merges them when you report completed.\n"
+      : "Your cwd is an isolated worktree — a stable snapshot for your review. It is discarded, not merged, when you report: describe defects and fixes in your report rather than applying them.\n") : ""}` +
     `If an assignment needs something in the "cannot" list, say so immediately in a handoff rather than working around it — the limit is real and will not change mid-run.`;
 }
 

@@ -51,8 +51,8 @@ export function buildOrchestratorCanUseTool(input: CanUseToolInput): CanUseTool 
     toolInput: Record<string, unknown>,
     context?: { signal?: AbortSignal; suggestions?: unknown; agentID?: string },
   ) => {
-    if (["Agent", "Task", "Write", "Edit", "NotebookEdit"].includes(toolName)) {
-      return deny(toolName, "coordination_only", "Main is coordination-only. Delegate execution to profile-bound Console AgentSessions; in-process subagents fork ungoverned context. (Bash is allowed for infrastructure surgery only.)");
+    if (["Agent", "Task"].includes(toolName)) {
+      return deny(toolName, "coordination_only", "Main never forks in-process subagents — they run ungoverned context. Delegate execution to profile-bound Console AgentSessions.");
     }
     // Native SendMessage never reaches this callback — its PreToolUse
     // middleware decides allow/deny; task and cron tools run and are

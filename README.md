@@ -62,8 +62,9 @@ single npm-workspaces application backed by SQLite and the Claude Agent SDK.
   scheduled rather than delivered, and dispatches the moment its last blocker
   completes. Main wakes itself later with the console-owned `set_deadline`
   (the native cron and wakeup tools are denied). In-process subagents
-  (`Agent`/`Task`) are denied — they would fork ungoverned context — as are
-  any built-in tools an agent's profile does not grant.
+  (`Agent`/`Task`) are denied everywhere — they would fork ungoverned context.
+  Main holds Read, Bash, Write and Edit for unblocking, verifying and operator
+  deliverables; commissioned implementation goes through seats.
 - Main wakes only for a decision, failure, milestone, or final result. Repeated
   pending reports from one AgentSession coalesce; ordinary updates never wake
   it. Runtime state is rendered as trace data instead of chat narration.
@@ -123,11 +124,16 @@ dereference an artifact it or a teammate produced with `read_artifact`.
 **The Console runs no sandbox.** The SDK's gave every Bash call its own network
 and PID namespace, so a dev server died with the call that started it and was
 unreachable from the browser sent to verify it — the two things a coding agent
-most needs. Containment is the worktree: a write agent works in its own tree and
-only merges when its session reports. A profile's `tools` list is still binding —
-every built-in it does not grant is denied by name, not merely left
-un-auto-approved — and each agent is told its own capabilities at spawn, so a
-limit is a stated fact rather than something to discover by failing.
+most needs. Containment is the worktree: every non-coordinator agent in a git
+workspace works in its own tree, and only a write profile's tree merges when its
+session reports. An isolated agent holds every built-in tool — Read through
+Bash, Write and the web — and its profile's instructions govern use; a
+read-only profile's tree is a snapshot that is discarded, and the agent is told
+so. Only an agent WITHOUT a worktree (the coordinator, or any agent in a
+non-git workspace) keeps its profile's `tools` list binding: there, every
+built-in the profile does not grant is denied by name. Each agent is told its
+own capabilities at spawn, so a limit is a stated fact rather than something to
+discover by failing.
 
 ## Context and decisions
 

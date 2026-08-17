@@ -1,8 +1,8 @@
 /**
- * Main never owns participant processes: in-process subagents and write tools
- * stay denied, while the native task/cron tools are allowed and governed by
- * hook middleware. The lane registers under its peer name and accepts
- * cross-session inbound.
+ * Main never owns participant processes: in-process subagents stay denied,
+ * the workshop's tools (Read/Bash/Write/Edit) are allowed and bounded by the
+ * charter, and every messaging/task/scheduling path is console-owned. The
+ * lane registers under its peer name and accepts cross-session inbound.
  *
  * `SendMessage` is denied unconditionally: coordinator traffic goes through
  * the console-owned `send_to_coordinator`, which is route-checked and
@@ -29,10 +29,11 @@ function options(withDelegation = true, effort: "low" | "max" | undefined = unde
 }
 
 describe("orchestrator options", () => {
-  it("denies in-process subagents and write tools; allows governed native tools", () => {
+  it("denies in-process subagents; allows the workshop's tools", () => {
     const disallowed = options().disallowedTools ?? [];
-    expect(disallowed).toEqual(expect.arrayContaining(["Agent", "Task", "Write", "Edit"]));
+    expect(disallowed).toEqual(expect.arrayContaining(["Agent", "Task"]));
     expect(disallowed).not.toContain("Bash");
+    expect(disallowed).not.toEqual(expect.arrayContaining(WRITE_TOOLS));
     // Denied in every configuration: it bypasses the journal entirely.
     expect(disallowed).toContain("SendMessage");
     // As do the lane-waking natives, which fire a turn with no mailbox row,
@@ -74,9 +75,9 @@ describe("orchestrator options", () => {
     expect(built.settings).toMatchObject({ crossSessionInbound: "accept" });
   });
 
-  it("restricts main to inspection and durable coordination", () => {
+  it("main holds the workshop's tools and durable coordination", () => {
     const allowed = options().allowedTools ?? [];
-    expect(allowed).not.toEqual(expect.arrayContaining(WRITE_TOOLS));
+    expect(allowed).toEqual(expect.arrayContaining([...WRITE_TOOLS, "Bash", "Read", "Glob", "Grep"]));
     expect(allowed).toEqual(expect.arrayContaining(["mcp__console__create_agent_session", "mcp__console__read_agent_session", "mcp__console__list_agent_profiles"]));
     expect(allowed).not.toContain("Agent");
     // The two that must reach canUseTool to become operator cards.
@@ -89,6 +90,7 @@ describe("orchestrator options", () => {
     expect(allowed.some((tool) => tool.startsWith("mcp__console__"))).toBe(false);
     expect(allowed).not.toContain("SendMessage");
     expect(options(false).disallowedTools).toEqual(expect.arrayContaining(["SendMessage", "TaskCreate"]));
-    expect(allowed).not.toEqual(expect.arrayContaining(WRITE_TOOLS));
+    // The workshop's tools do not depend on delegation being wired.
+    expect(allowed).toEqual(expect.arrayContaining(WRITE_TOOLS));
   });
 });

@@ -12,6 +12,7 @@ import { describe, expect, it } from "vitest";
 import { WorktreeManager } from "../runtime/worktree-manager.ts";
 import { errorMessage, initMessage, sendHandoffUse, successMessage, toolResultMessage, toolUseMessage } from "../sdk/fake.ts";
 import { agentRoleOf, collectUntil, makeDelegationHarness, type DelegationHarness } from "../test-helpers.ts";
+import { GOVERNED_BUILTIN_TOOLS } from "./composer.ts";
 
 const git = (cwd: string, ...args: string[]) =>
   execFileSync("git", ["-c", "user.name=test", "-c", "user.email=t@t.invalid", ...args], { cwd, encoding: "utf8" });
@@ -94,6 +95,14 @@ describe("agent worktree isolation (fake SDK + real git)", () => {
     });
     expect(devOptions?.cwd).toContain(path.join("worktrees", created.agentSessionId));
     expect((devOptions?.systemPrompt as { append?: string })?.append).toContain("isolated worktree");
+    // Containment is the worktree: an isolated seat holds every governed
+    // builtin (the implementer profile grants no web tools), while the
+    // coordinator, which shares the operator's tree, keeps its profile binding.
+    expect(devOptions?.allowedTools).toEqual(expect.arrayContaining([...GOVERNED_BUILTIN_TOOLS]));
+    expect(devOptions?.disallowedTools).not.toEqual(expect.arrayContaining(["WebSearch", "WebFetch", "NotebookEdit"]));
+    expect(devOptions?.disallowedTools).toEqual(expect.arrayContaining(["Agent", "Task", "SendMessage", "TaskCreate"]));
+    const coordinatorOptions = h.fake.captured.options.find((opts) => agentRoleOf(opts).role === "coordinator");
+    expect(coordinatorOptions?.disallowedTools).toEqual(expect.arrayContaining(["Edit", "Write", "Bash"]));
     const merged = events.filter((event) => event.type === "agent_session.worktree.merged");
     expect(merged).toHaveLength(1);
     expect(merged[0]?.payload).toMatchObject({ agent: "dev", filesChanged: 1 });
@@ -214,6 +223,10 @@ describe("agent worktree isolation (fake SDK + real git)", () => {
     });
     expect(seatOptions.length).toBeGreaterThan(0);
     for (const opts of seatOptions) expect(opts.cwd).toBe(plain);
+    // No worktree, no containment: the profile's tool list stays binding
+    // (the explorer case is in seat-options.e2e).
+    const implementerOptions = seatOptions.find((opts) => agentRoleOf(opts).agent === "dev");
+    expect(implementerOptions?.disallowedTools).toEqual(expect.arrayContaining(["WebSearch", "WebFetch", "NotebookEdit"]));
   });
 
   /**
@@ -256,6 +269,14 @@ describe("agent worktree isolation (fake SDK + real git)", () => {
 
     // The judge reviewed the actual work: its snapshot contained the file.
     expect(judgeSaw).toBe("<!doctype html>\n");
+    // Isolated, so it holds the write tools too — and is told its snapshot is
+    // discarded rather than merged, so it reports fixes instead of applying them.
+    const judgeOptions = h.fake.captured.options.find((opts) => agentRoleOf(opts).role === "evaluator");
+    expect(judgeOptions?.allowedTools).toEqual(expect.arrayContaining(["Edit", "Write", "Bash"]));
+    expect(judgeOptions?.disallowedTools).not.toEqual(expect.arrayContaining(["Edit", "Write", "Bash"]));
+    const judgeAppend = (judgeOptions?.systemPrompt as { append?: string })?.append ?? "";
+    expect(judgeAppend).toContain("create and edit files");
+    expect(judgeAppend).toContain("discarded, not merged");
     // ...and the operator's workspace has it, from a seat that never once
     // reported itself completed.
     expect(fs.readFileSync(path.join(repo, "index.html"), "utf8")).toBe("<!doctype html>\n");

@@ -47,12 +47,12 @@ export const CONSOLE_TOOL_NAMES = [
 ] as const;
 
 /**
- * Never available to main, in any configuration. `SendMessage` bypasses the
- * journal; `ScheduleWakeup`/`Monitor`/`TaskStop` wake a console-owned lane with
- * no mailbox row, no handoff and no turn attribution. Write/Edit stay denied
- * — implementation goes through seats — but NOT Bash: see MAIN_WORK_TOOLS.
+ * Never available to main, in any configuration. `Agent`/`Task` fork
+ * ungoverned context; `SendMessage` bypasses the journal;
+ * `ScheduleWakeup`/`Monitor`/`TaskStop` wake a console-owned lane with no
+ * mailbox row, no handoff and no turn attribution.
  */
-const MAIN_DENIED_TOOLS = ["Agent", "Task", "Write", "Edit", "NotebookEdit", "SendMessage", "ScheduleWakeup", "Monitor", "TaskStop",
+const MAIN_DENIED_TOOLS = ["Agent", "Task", "SendMessage", "ScheduleWakeup", "Monitor", "TaskStop",
   // The native ledger is keyed on the provider session id, which changes at
   // every rotation.
   "TaskCreate", "TaskUpdate", "TaskGet", "TaskList"];
@@ -63,14 +63,19 @@ const MAIN_WORK_TOOLS = [
   "Grep",
   "WebFetch",
   "WebSearch",
-  // Infrastructure surgery, by operator directive: two live runs wedged on
+  // The workshop's tools, by operator directive: two live runs wedged on
   // one-command git blockers (a stray uncommitted edit; a leaked seat
   // branch) that main had diagnosed exactly and could not fix — one ended
   // in the operator running git by hand, the other in a blocking question
-  // whose own recommendation read "it is one safe command". The charter
-  // bounds usage (unblock and verify, never a seat's implementation work);
-  // every call is journaled as a tool event.
+  // whose own recommendation read "it is one safe command". Write/Edit
+  // followed Bash for the same reason: an operator deliverable or a
+  // one-line unblock is not worth a commissioned session. The charter
+  // bounds usage (unblock, verify, small fixes, deliverables — never a
+  // seat's implementation work); every call is journaled as a tool event.
   "Bash",
+  "Write",
+  "Edit",
+  "NotebookEdit",
 ];
 
 export interface OrchestratorOptionsInput {
