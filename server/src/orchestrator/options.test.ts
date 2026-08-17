@@ -10,6 +10,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { buildOrchestratorOptions } from "./options.ts";
+import { ORCHESTRATOR_BRIEF, ORCHESTRATOR_DELEGATION_BRIEF } from "./prompt.ts";
 
 const WRITE_TOOLS = ["Write", "Edit", "NotebookEdit"];
 
@@ -58,6 +59,12 @@ describe("orchestrator options", () => {
   // namespace, which made both impossible.
   it("declares no sandbox", () => {
     expect(options().sandbox).toBeUndefined();
+  });
+
+  // The brief shapes attention; the mechanics live in tool descriptions. It
+  // was 17 KB once, and every line competes with the native system prompt.
+  it("keeps the standing brief within its byte budget", () => {
+    expect(Buffer.byteLength(ORCHESTRATOR_BRIEF + ORCHESTRATOR_DELEGATION_BRIEF, "utf8")).toBeLessThanOrEqual(10_000);
   });
 
   it("loads settings, CLAUDE.md and skills like the CLI", () => {
