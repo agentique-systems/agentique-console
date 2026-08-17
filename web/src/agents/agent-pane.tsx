@@ -84,7 +84,7 @@ function PaneBody({ session, runs }: { session: AgentSession; runs: AgentRunSumm
           {runs.map((run) => (
             <div key={run.agent} className="flex min-w-0 items-center gap-1 font-mono text-3xs text-muted-foreground">
               <span className="truncate" title={run.ownership.join(", ")}>{run.agent} · {run.profileId} · {run.ownership.join(", ") || "coordination"}</span>
-              <span className="ml-auto shrink-0">gen {run.generation} · {run.totalTurns} turns · ${run.totalCostUsd.toFixed(2)} · {run.contextTokens.toLocaleString()} ctx</span>
+              <span className="ml-auto shrink-0">gen {run.generation} · {run.totalTurns} turns · ${run.totalCostUsd.toFixed(2)} · {run.contextTokens.toLocaleString()} peak ctx</span>
             </div>
           ))}
         </div>

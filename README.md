@@ -137,15 +137,21 @@ discover by failing.
 
 ## Context and decisions
 
-Provider sessions rotate before the next turn at 120,000 tokens of measured
-context occupancy or 30 model turns by default. Occupancy is the largest
-single request's prompt — never the turn's summed input, which counts every
-cache read again per round trip and would rotate a healthy agent after one turn.
-Rotation asks the agent for a checkpoint; if that fails, the Console
-deterministically reconstructs one from state it owns (task ledger, ownership,
-worktree branch and diff, the agent's own last report), so a successor always
-inherits something true. The full prior journal remains durable. Tune with
-`CONSOLE_CONTEXT_TOKEN_LIMIT` and `CONSOLE_CONTEXT_TURN_LIMIT`.
+A lane — main or any agent — keeps one provider session for its whole life,
+and the CLI's native auto-compaction manages its context exactly as it does for
+an interactive session. Console-side context rotation is opt-in
+(`CONSOLE_CONTEXT_ROTATION=1`): on, a lane is rotated onto a fresh provider
+session the moment it reaches `CONSOLE_CONTEXT_TOKEN_LIMIT` (default 120,000)
+tokens of measured occupancy or `CONSOLE_CONTEXT_TURN_LIMIT` model turns
+(default 0 = no turn limit). Occupancy is the largest single request's prompt —
+never the turn's summed input, which counts every cache read again per round
+trip and would rotate a healthy agent after one turn. Rotation asks the agent
+for a checkpoint; if that fails, the Console deterministically reconstructs one
+from state it owns (task ledger, ownership, worktree branch and diff, the
+agent's own last report), so a successor always inherits something true. The
+full prior journal remains durable either way. The occupancy figure the UI
+shows is a per-process high-water mark; after a native compaction it stays at
+the peak.
 
 An AgentSession owes the operator a reply. If it goes idle without its
 coordinator reporting, the Console closes the loop itself from the journal —

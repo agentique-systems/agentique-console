@@ -12,7 +12,7 @@ const handoff = (action: string) => ({ core: { schemaVersion: 1 as const, taskId
   action, state: { summary: action, evidence: [] }, result: { summary: null, artifacts: [] },
   uncertainty: [], nextAction: action, requestExpandedContext: false }, extension: { kind: "generic" as const, data: {} } });
 
-function makeFlowHarness() {
+function makeFlowHarness(harnessOptions: Parameters<typeof makeDelegationHarness>[1] = {}) {
   let coordinatorTurns = 0;
   return makeDelegationHarness(async function* (options) {
     const append = typeof options.systemPrompt === "object" && !Array.isArray(options.systemPrompt) ? options.systemPrompt.append ?? "" : "";
@@ -28,7 +28,7 @@ function makeFlowHarness() {
       yield sendHandoffUse("scout-close", "coordinator", { action: "seen", status: "completed", category: "milestone" });
       yield successMessage();
     }
-  });
+  }, harnessOptions);
 }
 
 function approveSpec(h: ReturnType<typeof makeFlowHarness>, userSessionId: string): void {
@@ -64,7 +64,7 @@ describe("spec currency for seats (fake SDK)", () => {
   });
 
   it("a seat rotation checkpoint carries the spec pointer", async () => {
-    const h = makeFlowHarness();
+    const h = makeFlowHarness({ config: { policy: { contextRotation: true } } });
     const userSessionId = h.addUserSession();
     approveSpec(h, userSessionId);
     const done = collectUntil(h.bus, (event) => event.type === "agent_session.context.rotated", 10_000);

@@ -1,7 +1,8 @@
 /**
- * The per-model catalog gates rotation: an unknown agent model lowers the
- * token ceiling to the conservative default (68K), while known models keep
- * the configured 120K limit binding.
+ * Rotation is opt-in; when on, the per-model catalog gates it: an unknown
+ * agent model lowers the token ceiling to the conservative default (68K),
+ * while known models keep the configured 120K limit binding. Off (the
+ * default), a seat keeps its provider session however large its context.
  */
 import { describe, expect, it } from "vitest";
 import { initMessage, sendHandoffUse, successMessage } from "../sdk/fake.ts";
@@ -14,7 +15,7 @@ const handoff = (action: string, status: "pending" | "completed") => ({ core: { 
 const envelope = (action: string, status: "pending" | "completed", category: string) =>
   JSON.stringify({ handoff: handoff(action, status), category, checkpointReadiness: "stable" });
 
-function makeFlowHarness() {
+function makeFlowHarness(harnessOptions: Parameters<typeof makeDelegationHarness>[1] = { config: { policy: { contextRotation: true } } }) {
   let coordinatorTurns = 0;
   return makeDelegationHarness(async function* (options) {
     const append = typeof options.systemPrompt === "object" && !Array.isArray(options.systemPrompt) ? options.systemPrompt.append ?? "" : "";
@@ -30,7 +31,7 @@ function makeFlowHarness() {
       yield sendHandoffUse("scout-close", "coordinator", { action: "seen", status: "completed", category: "milestone" });
       yield successMessage();
     }
-  });
+  }, harnessOptions);
 }
 
 describe("catalog-derived rotation limits", () => {
@@ -54,5 +55,19 @@ describe("catalog-derived rotation limits", () => {
     h.repo.patchAgent(created.agentSessionId, "scout", { contextTokens: 70_000 });
     const events = await done;
     expect(events.some((event) => event.type === "agent_session.context.rotated")).toBe(false);
+  });
+
+  it("with rotation off (the default) a seat keeps its provider session at any occupancy", async () => {
+    const h = makeFlowHarness({});
+    expect(h.config.policy.contextRotation).toBe(false);
+    const userSessionId = h.addUserSession();
+    const done = collectUntil(h.bus, (event) => event.type === "agent_session.result.returned", 10_000);
+    const created = h.host.createSession({ userSessionId, title: "never", agents: [{ name: "scout", profileId: "explorer", model: "mystery-model" }], briefing: handoff("go", "pending") });
+    h.repo.patchAgent(created.agentSessionId, "scout", { contextTokens: 500_000, turnCount: 100 });
+    const events = await done;
+    expect(events.some((event) => event.type === "agent_session.context.rotated")).toBe(false);
+    const scout = h.repo.getAgent(created.agentSessionId, "scout");
+    expect(scout?.generation).toBe(0);
+    expect(scout?.sdkSessionId).toBe("scout-1");
   });
 });

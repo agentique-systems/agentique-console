@@ -65,10 +65,18 @@ low-risk record to medium risk. They are never silently removed.
 
 ## Rotation
 
-Soft rotation begins at 75% of the token limit or 80% of the turn limit. A seat
-may defer while state is unstable. At a stable boundary the old provider context
-runs a tool-free checkpoint pass using the same model and effort. A failed soft
-checkpoint leaves the old context resumable and retries later.
+Console-side rotation is opt-in (`CONSOLE_CONTEXT_ROTATION=1`). By default a
+lane keeps one provider session for life and the CLI's native compaction
+carries continuity — the same thread an interactive session has, and none of
+the re-priming a rotation pays. Everything below describes rotation when it is
+on.
+
+A seat nearing its budget (80% of the token limit, or of the turn limit when
+one is set) checkpoints proactively: a tool-free pass over the still-healthy
+provider session using the same model and effort, stored for the rotation to
+consume. At the limit itself the seat rotates unconditionally: the pending
+proactive checkpoint if there is one, else a deathbed checkpoint query, else the
+Console's own reconstruction.
 
 The token limit is the configured cap, lowered — never raised — by a per-model
 context catalog whose windows are deliberate under-estimates: an unknown model
@@ -79,14 +87,13 @@ non-blank summary, a next action and at least one resolving evidence ref for
 non-completed work, and a resolving task ref when one is claimed. A failing
 draft is retried once with the specific failures appended to the prompt; the
 attempt is journaled (`handoff.checkpoint.retried`). If both drafts fail the
-gate, a soft rotation defers exactly like a failed soft checkpoint, and a hard
-rotation accepts the better draft and records its remaining failures. Checks
-are structural only — an honest empty-work checkpoint passes, and length is
-never scored.
+gate, the rotation accepts the better draft and records its remaining
+failures. Checks are structural only — an honest empty-work checkpoint passes,
+and length is never scored.
 
-Hard limits remain the configured token/turn caps. A failed hard checkpoint
-rotates with a degraded, high-risk recovery handoff assembled from the latest
-valid envelope and durable authorities. Recent transcript slicing is never used.
+A failed checkpoint rotates with a degraded, high-risk recovery handoff
+assembled from the latest valid envelope and durable authorities. Recent
+transcript slicing is never used.
 
 ## Observability and evaluation
 

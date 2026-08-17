@@ -443,10 +443,20 @@ export class OrchestratorRunner {
       resolve: resolveSettled,
       outcome: { status: "completed", errorMessage: undefined },
     };
+    // Rotation BEFORE the turn is live: closing a lane whose activeTurn is
+    // already set lets the dying pump settle the new turn as "stream ended",
+    // and its real result then lands on no turn at all.
+    try {
+      await this.#rotateContextIfNeeded(sessionId, lane);
+    } catch (error) {
+      turn.outcome = { status: "error", errorMessage: error instanceof Error ? error.message : String(error) };
+      lane.activeTurn = turn;
+      this.#settleTurn(sessionId, lane);
+      return;
+    }
     lane.activeTurn = turn;
 
     try {
-      await this.#rotateContextIfNeeded(sessionId, lane);
       await this.#ensureLaneQuery(sessionId, lane);
       lane.runtime.set("thinking");
       // Push synchronously after ensure — no await in between, so the input
@@ -858,7 +868,7 @@ export class OrchestratorRunner {
         }
         if (session) {
           const contextTokens = Math.max(session.contextTokens, lane.contextTokens);
-          if (session.sdkTurnCount + 1 >= this.#deps.config.policy.contextTurnLimit || contextTokens >= rotationTokenLimit(this.#deps.config.policy.contextTokenLimit, this.#modelFor(session))) lane.recycleAfterTurn = true;
+          if (this.#rotationDueAfterTurn(session, contextTokens)) lane.recycleAfterTurn = true;
           const { costUsd, apiDurationMs } = advanceUsageWatermark(lane.lastCumulative, event);
           // One patch: turn count, context, and the advanced cumulative
           // baseline (persisted with the provider session it belongs to, so
@@ -910,7 +920,7 @@ export class OrchestratorRunner {
             outputTokens: usage.outputTokens, ...(costUsd === null ? {} : { costUsd }), model: usage.model ?? undefined, effort: usage.effort ?? undefined,
             trigger: turn?.trigger, durationMs: usage.durationMs ?? undefined, apiDurationMs: usage.apiDurationMs ?? undefined, sdkDurationMs: usage.sdkDurationMs ?? undefined,
             status: event.aborted ? "aborted" : "error", stopReason: usage.stopReason ?? undefined } });
-          if (session.sdkTurnCount + 1 >= this.#deps.config.policy.contextTurnLimit || contextTokens >= rotationTokenLimit(this.#deps.config.policy.contextTokenLimit, this.#modelFor(session))) lane.recycleAfterTurn = true;
+          if (this.#rotationDueAfterTurn(session, contextTokens)) lane.recycleAfterTurn = true;
         }
         this.#settleTurn(sessionId, lane);
         return;
@@ -933,7 +943,27 @@ export class OrchestratorRunner {
     }
   }
 
+  /**
+   * Whether the turn that just settled put the lane over a rotation limit —
+   * the process then dies at turn end and the next message respawns it fresh
+   * through #rotateContextIfNeeded. Always false with rotation off (a turn
+   * limit of 0 would otherwise recycle every turn).
+   */
+  #rotationDueAfterTurn(session: Pick<UserSessionRow, "model" | "sdkTurnCount">, contextTokens: number): boolean {
+    const { policy } = this.#deps.config;
+    if (!policy.contextRotation) return false;
+    return rotationDue({
+      turnCount: session.sdkTurnCount + 1, contextTokens,
+      turnLimit: policy.contextTurnLimit, tokenLimit: rotationTokenLimit(policy.contextTokenLimit, this.#modelFor(session)),
+    }) !== null;
+  }
+
+  /**
+   * Opt-in (`policy.contextRotation`): by default main keeps one provider
+   * session for its whole life and the CLI's native compaction manages it.
+   */
   async #rotateContextIfNeeded(sessionId: string, lane: Lane): Promise<void> {
+    if (!this.#deps.config.policy.contextRotation) return;
     const session = this.#deps.repo.getUserSession(sessionId);
     if (!session) return;
     const tokenLimit = rotationTokenLimit(this.#deps.config.policy.contextTokenLimit, this.#modelFor(session));

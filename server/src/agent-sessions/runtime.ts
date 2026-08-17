@@ -618,9 +618,10 @@ export class AgentRuntime implements Injector, TurnTracker {
     }
     hooks.refreshStatus(session.id);
     this.#deps.lanes.armIdleTimer(session.id, seatName, lane);
-    // Rotation first; if it happened the seat starts fresh and the proactive
-    // checkpoint is a no-op. Otherwise a seat nearing its budget checkpoints
-    // NOW, while healthy — not from its deathbed.
+    // Both are no-ops unless the operator turned rotation on. Rotation first;
+    // if it happened the seat starts fresh and the proactive checkpoint is a
+    // no-op. Otherwise a seat nearing its budget checkpoints NOW, while
+    // healthy — not from its deathbed.
     void this.#maybeRotate(session.id, seatName)
       .then(() => this.#maybeProactiveCheckpoint(session.id, seatName))
       .catch((error) => hooks.recordFailure(session.id, error));
@@ -631,11 +632,13 @@ export class AgentRuntime implements Injector, TurnTracker {
   /**
    * Context rotation at a turn boundary, under a gate that blocks senders:
    * checkpoint the old process, close it, respawn the same peer name on a
-   * fresh provider session, then re-carry anything unacknowledged.
+   * fresh provider session, then re-carry anything unacknowledged. Opt-in
+   * (`policy.contextRotation`): by default a seat keeps one provider session
+   * for life and the CLI's native compaction manages its context.
    */
   async #maybeRotate(agentSessionId: string, seatName: string): Promise<void> {
     const config = this.#deps.config;
-    if (!config || !this.#deps.handoffs || !this.#deps.sdk) return;
+    if (!config?.policy.contextRotation || !this.#deps.handoffs || !this.#deps.sdk) return;
     const lane = this.#deps.lanes.laneOf(agentSessionId, seatName);
     if (lane.state !== "live" || lane.activeTurn !== null || lane.rotationGate !== null) return;
     const { repo } = this.#deps;
@@ -648,12 +651,6 @@ export class AgentRuntime implements Injector, TurnTracker {
       turnLimit: config.policy.contextTurnLimit, tokenLimit,
     });
     if (!due) return;
-    // Soft rotation waits for an assignment boundary: mid-assignment rotation
-    // throws away exactly the state a boundary rotation carries for free (a
-    // live run rotated 47/47 times mid-work). The hard ceiling (1.25×) still
-    // rotates unconditionally, and the proactive checkpoint covers the window.
-    if (due.urgency === "soft" && !this.#atAssignmentBoundary(session, seatName)
-      && repo.listUnackedDeliveries(agentSessionId, seatName).length > 0) return;
     lane.state = "rotating";
     lane.deliberateStop = true;
     lane.rotationGate = new Promise((resolve) => { lane.releaseRotation = resolve; });
@@ -678,19 +675,6 @@ export class AgentRuntime implements Injector, TurnTracker {
   }
 
   /**
-   * True once the seat has filed a terminal report for its latest assignment
-   * (or was never assigned). The soft-rotation deferral reads this: rotating
-   * AT the boundary means the checkpoint describes finished work, not a
-   * half-derived state the successor must re-derive.
-   */
-  #atAssignmentBoundary(session: AgentSessionRow, seatName: string): boolean {
-    const assignment = this.#deps.repo.latestAssignmentDelivery(session.id, seatName);
-    if (!assignment) return true;
-    const assignmentSeq = this.#deps.repo.getMessageById(assignment.messageId)?.seq ?? 0;
-    return this.#deps.repo.hasTerminalReportSince(session.id, seatName, assignmentSeq);
-  }
-
-  /**
    * Checkpoint a seat nearing its rotation budget (≥80%) while it is still
    * healthy — a separate resumed query over the live provider session, no
    * gate, no abort pressure. Rotation then consumes the stored handoff
@@ -699,7 +683,7 @@ export class AgentRuntime implements Injector, TurnTracker {
    */
   async #maybeProactiveCheckpoint(agentSessionId: string, seatName: string): Promise<void> {
     const config = this.#deps.config;
-    if (!config || !this.#deps.handoffs || !this.#deps.sdk) return;
+    if (!config?.policy.contextRotation || !this.#deps.handoffs || !this.#deps.sdk) return;
     const lane = this.#deps.lanes.laneOf(agentSessionId, seatName);
     if (lane.state !== "live" || lane.activeTurn !== null || lane.rotationGate !== null || lane.proactiveCheckpointInFlight) return;
     const { repo } = this.#deps;
@@ -708,7 +692,8 @@ export class AgentRuntime implements Injector, TurnTracker {
     if (!session || session.lifecycle !== "open" || !seat || !seat.sdkSessionId) return;
     if (seat.pendingCheckpointHandoffId !== null) return;
     const tokenLimit = rotationTokenLimit(config.policy.contextTokenLimit, seat.model ?? config.infra.model);
-    const nearing = seat.contextTokens >= 0.8 * tokenLimit || seat.turnCount >= 0.8 * config.policy.contextTurnLimit;
+    const nearing = seat.contextTokens >= 0.8 * tokenLimit
+      || (config.policy.contextTurnLimit > 0 && seat.turnCount >= 0.8 * config.policy.contextTurnLimit);
     // Due-now is the rotation path's job; this only covers the 80–100% band.
     if (!nearing || rotationDue({ turnCount: seat.turnCount, contextTokens: seat.contextTokens,
       turnLimit: config.policy.contextTurnLimit, tokenLimit }) !== null) return;

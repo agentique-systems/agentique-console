@@ -147,6 +147,7 @@ export interface PolicyConfig {
    * forever. Sized for a checkpoint over a ~120k-token context, which
    * routinely needs minutes: a live run whose cap was 90s aborted 31 of 35
    * seat checkpoints mid-query and paid ~$62 re-deriving what they knew.
+   * (Rotation on only.)
    */
   checkpointTimeoutMs: number;
   /**
@@ -155,8 +156,19 @@ export interface PolicyConfig {
    * enough that the operator does not notice it.
    */
   completionQuietWindowMs: number;
-  /** Rotate a lane onto a fresh provider session before the next turn. */
+  /**
+   * Console-side context rotation. OFF (default): a lane keeps one provider
+   * session for its whole life and the CLI's native auto-compaction manages
+   * context — the same continuity an interactive session has. ON: the lane
+   * is rotated onto a fresh provider session, with a checkpoint handoff, the
+   * moment it reaches either limit below. Rotation was the default until a
+   * live series showed every mid-work rotation paying re-priming for state
+   * the thread had for free. CONSOLE_CONTEXT_ROTATION=1.
+   */
+  contextRotation: boolean;
+  /** Rotation on: measured context occupancy (largest single request) at which a lane rotates. */
   contextTokenLimit: number;
+  /** Rotation on: model turns at which a lane rotates; 0 = no turn limit. */
   contextTurnLimit: number;
   /**
    * Agent-authored handoffs per session before the console asks MAIN to
@@ -290,8 +302,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       blockingAskEscalateMs: Number(env.CONSOLE_BLOCKING_ASK_ESCALATE_MS ?? 900_000),
       checkpointTimeoutMs: Number(env.CONSOLE_CHECKPOINT_TIMEOUT_MS ?? 300_000),
       completionQuietWindowMs: Number(env.CONSOLE_COMPLETION_QUIET_MS ?? 2_000),
+      contextRotation: env.CONSOLE_CONTEXT_ROTATION === "1",
       contextTokenLimit: Number(env.CONSOLE_CONTEXT_TOKEN_LIMIT ?? 120_000),
-      contextTurnLimit: Number(env.CONSOLE_CONTEXT_TURN_LIMIT ?? 30),
+      contextTurnLimit: Number(env.CONSOLE_CONTEXT_TURN_LIMIT ?? 0),
       patternHandoffCap: Number(env.CONSOLE_PATTERN_HANDOFF_CAP ?? 120),
       patternStallMs: Number(env.CONSOLE_PATTERN_STALL_MS ?? 600_000),
       enableChildSessions: env.CONSOLE_CHILD_SESSIONS !== "0",
