@@ -162,7 +162,8 @@ summarize it afterwards with
 The orchestrator runs on `claude-opus-5` by default. `CONSOLE_MODEL` moves that
 default, and the composer's model chip overrides it per session (opus-5,
 fable-5, sonnet-5) — a change recycles the lane, so it takes effect on the next
-turn rather than mid-turn. Agent models come from profiles and are unaffected.
+turn rather than mid-turn. Agent models come from profiles and are unaffected;
+every builtin profile runs on `claude-opus-5`.
 
 Settings: `CONSOLE_PORT`, `CONSOLE_HOST`, `CONSOLE_MODEL`,
 `CONSOLE_IMPROVE_MODEL`, `CONSOLE_EFFORT`, `CONSOLE_FS_ROOTS`,
