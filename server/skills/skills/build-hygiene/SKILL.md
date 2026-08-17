@@ -39,4 +39,6 @@ every subsequent clone/diff/summary paid for it.
 
 `Cargo.lock` / `package-lock.json` merge conflicts are regenerable: take the
 current mainline lockfile and re-run the resolver (`cargo check`,
-`npm install --package-lock-only`) rather than hand-merging hunks.
+`npm install --package-lock-only`) rather than hand-merging hunks. For the
+conflict operation itself (index stages, ours/theirs, verification), follow
+`git-gud-conflicts` — it governs every conflict you resolve.

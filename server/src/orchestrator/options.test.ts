@@ -69,6 +69,18 @@ describe("orchestrator options", () => {
 
   it("loads settings, CLAUDE.md and skills like the CLI", () => {
     expect(options().settingSources).toEqual(["user", "project", "local"]);
+    expect(options().skills).toBe("all");
+  });
+
+  it("holds the console skills plugin when the runner names it, like every seat", () => {
+    const built = buildOrchestratorOptions({
+      workspaceRoot: "/tmp/ws", resume: null, mode: "execute", phase: "executing", model: undefined, effort: undefined,
+      abortController: new AbortController(), canUseTool: async () => ({ behavior: "allow", updatedInput: {} }),
+      mcpServer: {}, skillsPluginDir: "/opt/console/skills",
+    });
+    expect(built.plugins).toEqual([{ type: "local", path: "/opt/console/skills" }]);
+    // Hermetic callers omit the dir and get no plugin, not a broken path.
+    expect("plugins" in options()).toBe(false);
   });
 
   it("passes the resolved effort through unchanged, and omits the key when unset", () => {

@@ -108,6 +108,13 @@ export interface OrchestratorOptionsInput {
   peerName?: string;
   /** Governance/mirror hooks (SendMessage middleware, task + cron mirrors). */
   hooks?: SdkOptions["hooks"];
+  /**
+   * The console's skills plugin (config.infra.skillsPluginDir). Main holds
+   * the same skills every seat holds — git-gud for repo surgery above all —
+   * on top of whatever the settings sources discover. Optional so hermetic
+   * callers (tests, tooling) can omit it.
+   */
+  skillsPluginDir?: string;
 }
 
 export function buildOrchestratorOptions(
@@ -131,6 +138,10 @@ export function buildOrchestratorOptions(
     // CLI parity: without "project" the CLI never loads CLAUDE.md, and the
     // agent re-derives per session what the operator wrote down once.
     settingSources: ["user", "project", "local"],
+    // Every discovered skill is visible, like the CLI and like every seat;
+    // the console plugin rides alongside the user/project skills.
+    ...(input.skillsPluginDir === undefined ? {} : { plugins: [{ type: "local" as const, path: input.skillsPluginDir }] }),
+    skills: "all",
     includePartialMessages: true,
     permissionMode: planning ? "plan" : "default",
     ...(planning ? { planModeInstructions: PLAN_MODE_BODY } : {}),

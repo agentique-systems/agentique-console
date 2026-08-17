@@ -86,7 +86,11 @@ effort overrides, turn limit, and any MCP servers its agents get.
 Every lane sees the workspace as an interactive Claude Code session would: the
 CLI's user, project and local settings load (CLAUDE.md, permissions, skills,
 hooks), and every discovered skill is visible to every agent — a profile's
-`skills` list is the set its brief recommends, not a filter. Only the rotation
+`skills` list is the set its brief recommends, not a filter. The console's own
+skills plugin (`server/skills`) loads for main and every seat alike; it ships
+the six `git-gud-*` skills (commits, conflicts, coordinate, recover, sync,
+worktrees), which govern every git operation an agent runs itself and take
+precedence over the older `worktree-etiquette` note. Only the rotation
 checkpoint and the composer's rewrite pass run hermetically.
 
 Add custom profiles as workspace plugin bundles: a directory per profile under

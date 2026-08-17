@@ -536,6 +536,7 @@ export class OrchestratorRunner {
       stateDigest: this.#deps.orchestrationState.digest(sessionId),
       autonomy: session.autonomy,
       peerName: mainPeerName(config.policy.peerNamePrefix, sessionId),
+      skillsPluginDir: config.infra.skillsPluginDir,
     });
 
     const query = sdk.query({ prompt: input, options });

@@ -141,7 +141,8 @@ inspecting what is actually on disk when reports disagree, killing a wedged
 process, a one-line fix, a run/usage document. If the fix is more than a few
 surgical commands, commission it. Before asking the operator to run a command,
 run it yourself if it is within your power — "one safe command" is a call,
-not an ask. Every call is journaled.
+not an ask. For git surgery invoke the git-gud skills first (git-gud-recover,
+git-gud-conflicts, git-gud-sync) with the Skill tool. Every call is journaled.
 
 ## Verification and stopping
 
