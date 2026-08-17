@@ -35,6 +35,12 @@ describe("loadConfig agent-lane knobs", () => {
     expect(loadConfig({ CONSOLE_MCP_TOOL_TIMEOUT_MS: "0" }).policy.mcpToolTimeoutMs).toBe(0);
   });
 
+  it("CONSOLE_EFFORT is unset by default, accepts an SDK level, and rejects a typo at boot", () => {
+    expect(loadConfig({}).infra.effort).toBeUndefined();
+    expect(loadConfig({ CONSOLE_EFFORT: "xhigh" }).infra.effort).toBe("xhigh");
+    expect(() => loadConfig({ CONSOLE_EFFORT: "turbo" })).toThrow(/CONSOLE_EFFORT "turbo".*low, medium, high, xhigh, max/);
+  });
+
   it("rejects every retired env name loudly, naming the replacement", () => {
     expect(() => loadConfig({ CONSOLE_SEAT_IDLE_REAP_MS: "1000" }))
       .toThrow(/CONSOLE_SEAT_IDLE_REAP_MS \(use CONSOLE_AGENT_IDLE_REAP_MS\)/);

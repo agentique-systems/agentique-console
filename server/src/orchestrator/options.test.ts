@@ -13,14 +13,14 @@ import { buildOrchestratorOptions } from "./options.ts";
 
 const WRITE_TOOLS = ["Write", "Edit", "NotebookEdit"];
 
-function options(withDelegation = true) {
+function options(withDelegation = true, effort: "low" | "max" | undefined = undefined) {
   return buildOrchestratorOptions({
     workspaceRoot: "/tmp/ws",
     resume: null,
     mode: "execute",
     phase: "executing",
     model: undefined,
-    effort: undefined,
+    effort,
     abortController: new AbortController(),
     canUseTool: async () => ({ behavior: "allow", updatedInput: {} }),
     peerName: "console-main-abc123",
@@ -57,6 +57,11 @@ describe("orchestrator options", () => {
   // namespace, which made both impossible.
   it("declares no sandbox", () => {
     expect(options().sandbox).toBeUndefined();
+  });
+
+  it("passes the resolved effort through unchanged, and omits the key when unset", () => {
+    expect(options(true, "max").effort).toBe("max");
+    expect("effort" in options()).toBe(false);
   });
 
   it("registers under its peer name and accepts cross-session inbound", () => {

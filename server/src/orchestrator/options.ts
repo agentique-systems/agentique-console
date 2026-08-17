@@ -5,6 +5,7 @@
  * messaging/task/scheduling path is console-owned and journaled.
  */
 import type { SessionMode, SessionPhase } from "@agentique-console/shared";
+import type { EffortLevel } from "../sdk/effort.ts";
 import { sdkEnv } from "../sdk/env.ts";
 import type { SdkOptions } from "../sdk/types.ts";
 import {
@@ -12,6 +13,13 @@ import {
   ORCHESTRATOR_DELEGATION_BRIEF,
   PLAN_MODE_BODY,
 } from "./prompt.ts";
+
+/**
+ * Main's own effort when the operator sets no CONSOLE_EFFORT: the lane that
+ * specifies, plans, judges evidence and decides when to stop deserves the
+ * deepest reasoning the model offers.
+ */
+export const MAIN_DEFAULT_EFFORT: EffortLevel = "xhigh";
 
 export const CONSOLE_TOOL_NAMES = [
   "send_to_coordinator",
@@ -70,7 +78,7 @@ export interface OrchestratorOptionsInput {
   mode: SessionMode;
   phase: SessionPhase;
   model: string | undefined;
-  effort: string | undefined;
+  effort: EffortLevel | undefined;
   maxTurns?: number;
   abortController: AbortController;
   canUseTool: NonNullable<SdkOptions["canUseTool"]>;
@@ -130,9 +138,7 @@ export function buildOrchestratorOptions(
     ...(input.maxTurns === undefined ? {} : { maxTurns: input.maxTurns }),
     // Never inherit the launching session's agent settings (see sdkEnv).
     env: sdkEnv(input.peerName === undefined ? {} : { sessionName: input.peerName }),
-    ...(input.effort === undefined
-      ? {}
-      : { effort: input.effort as SdkOptions["effort"] }),
+    ...(input.effort === undefined ? {} : { effort: input.effort }),
     canUseTool: input.canUseTool,
     ...(input.model === undefined ? {} : { model: input.model }),
     ...(input.resume === null ? {} : { resume: input.resume }),

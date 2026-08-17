@@ -1,6 +1,7 @@
 /** The checkpoint query shared by both lane engines' rotation paths. */
 import type { HandoffDraft } from "@agentique-console/shared";
 import { HANDOFF_DRAFT_JSON_SCHEMA, HandoffDraftSchema } from "../handoffs/schema.ts";
+import type { EffortLevel } from "../sdk/effort.ts";
 import { sdkEnv } from "../sdk/env.ts";
 import { mapSdkMessage, type TurnEvent } from "../sdk/mapping.ts";
 import type { ConsoleSdk, SdkOptions } from "../sdk/types.ts";
@@ -23,7 +24,7 @@ export interface CheckpointQueryParams {
   /** The provider session being checkpointed. */
   resume: string;
   model: string | null;
-  effort: string | null | undefined;
+  effort: EffortLevel | null | undefined;
   /** Present = persist through it with eager flush; absent = CLI default. */
   sessionStore?: SdkOptions["sessionStore"];
   /**
@@ -62,7 +63,7 @@ export async function checkpointQuery(sdk: ConsoleSdk, params: CheckpointQueryPa
     env: sdkEnv(), abortController: abort, persistSession: true,
     ...(params.sessionStore === undefined ? {} : { sessionStore: params.sessionStore, sessionStoreFlush: "eager" as const }),
     resume: params.resume, ...(params.model ? { model: params.model } : {}),
-    ...(params.effort ? { effort: params.effort as SdkOptions["effort"] } : {}),
+    ...(params.effort ? { effort: params.effort } : {}),
   } });
   try {
     for await (const raw of query) for (const event of mapSdkMessage(raw)) {

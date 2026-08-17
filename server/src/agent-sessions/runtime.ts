@@ -27,6 +27,7 @@ import { rotationDue, type RotationReason } from "../lane-runtime/rotation.ts";
 import { advanceUsageWatermark } from "../lane-runtime/usage.ts";
 import { rotationTokenLimit } from "../model-catalog.ts";
 import type { WorktreeManager } from "../runtime/worktree-manager.ts";
+import type { EffortLevel } from "../sdk/effort.ts";
 import { sdkEnv } from "../sdk/env.ts";
 import { isCapacityFailure, isTransportFailure } from "../sdk/failure-classifier.ts";
 import { mapSdkMessage } from "../sdk/mapping.ts";
@@ -290,7 +291,9 @@ export class AgentRuntime implements Injector, TurnTracker {
         // Always explicit: omitting the key lets the CLI fall back to the
         // OPERATOR's personal skill listing despite settingSources: [].
         skills: profile.skills ?? [],
-        ...((profile.effort ?? this.#deps.config.infra.effort) ? { effort: (profile.effort ?? this.#deps.config.infra.effort) as SdkOptions["effort"] } : {}),
+        // The operator's CONSOLE_EFFORT is an install-wide override, so it
+        // outranks the profile's own pin; unset, the profile decides.
+        ...(this.#seatEffort(profile) === undefined ? {} : { effort: this.#seatEffort(profile) }),
         ...(latestSeat.sdkSessionId ? { resume: latestSeat.sdkSessionId } : {}),
       };
       const query = sdk.query({ prompt: lane.input as AsyncIterable<SdkUserMessageLike>, options });
@@ -811,11 +814,16 @@ export class AgentRuntime implements Injector, TurnTracker {
       readPaths: seat.worktreePath ? [checkpointRoot, workspaceRoot] : [checkpointRoot],
       resume: seat.sdkSessionId,
       model: seat.model,
-      effort: profile.effort ?? this.#deps.config.infra.effort,
+      effort: this.#seatEffort(profile),
       sessionStore: this.#deps.sessionStore as SdkOptions["sessionStore"],
       timeoutMs: this.#deps.config.policy.checkpointTimeoutMs,
       onResult: (event) => this.#recordUsage(session, seat, cumulative, `checkpoint:${newId("turn")}`, event, "completed", undefined, "checkpoint"),
     });
+  }
+
+  /** CONSOLE_EFFORT (operator override) > the profile's own pin > SDK default. */
+  #seatEffort(profile: AgentProfile): EffortLevel | undefined {
+    return this.#deps.config.infra.effort ?? profile.effort;
   }
 
   #recordNarration(session: AgentSessionRow, participant: string, text: string, turnId: string): void {
@@ -845,7 +853,7 @@ export class AgentRuntime implements Injector, TurnTracker {
       generation: seat.generation, turnId, inputTokens: usageEvent.inputTokens ?? 0, uncachedInputTokens: usageEvent.uncachedInputTokens ?? 0,
       cacheCreationInputTokens: usageEvent.cacheCreationInputTokens ?? 0, cacheReadInputTokens: usageEvent.cacheReadInputTokens ?? 0,
       outputTokens: usageEvent.outputTokens ?? 0, costUsd,
-      model: usageEvent.modelId ?? seat.model, effort: (seat.profileSnapshot as AgentProfile).effort ?? this.#deps.config.infra.effort ?? null,
+      model: usageEvent.modelId ?? seat.model, effort: this.#seatEffort(seat.profileSnapshot as AgentProfile) ?? null,
       trigger, durationMs: durationMs ?? null, apiDurationMs, sdkDurationMs: usageEvent.sdkDurationMs ?? null, status, stopReason: usageEvent.stopReason ?? null, createdAt: nowIso() };
     this.#deps.repo.insertUsage(usage);
     this.#deps.capacity.checkBudget(session.userSessionId);

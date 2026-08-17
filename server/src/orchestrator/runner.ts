@@ -39,7 +39,8 @@ import type { DecisionLedger } from "./decisions.ts";
 import type { SpecService } from "./spec.ts";
 import type { OrchestrationStateService } from "./state.ts";
 import type { InteractionService } from "./interactions.ts";
-import { buildOrchestratorOptions } from "./options.ts";
+import { MAIN_DEFAULT_EFFORT, buildOrchestratorOptions } from "./options.ts";
+import type { EffortLevel } from "../sdk/effort.ts";
 import { buildOrchestratorCanUseTool, type LaneState } from "./permissions.ts";
 import type { HandoffService } from "../handoffs/service.ts";
 import { sdkEnv } from "../sdk/env.ts";
@@ -484,6 +485,11 @@ export class OrchestratorRunner {
     return session.model ?? this.#deps.config.infra.model;
   }
 
+  /** The operator's install-wide override wins; otherwise main runs at its own default. */
+  #effortFor(): EffortLevel {
+    return this.#deps.config.infra.effort ?? MAIN_DEFAULT_EFFORT;
+  }
+
   /** Spawns the persistent query if the lane has none (lazy + post-death). */
   async #ensureLaneQuery(sessionId: string, lane: Lane): Promise<void> {
     if (lane.query) return;
@@ -500,7 +506,7 @@ export class OrchestratorRunner {
       mode: session.mode,
       phase: session.phase,
       model: this.#modelFor(session),
-      effort: config.infra.effort,
+      effort: this.#effortFor(),
       abortController: abort,
       canUseTool: buildOrchestratorCanUseTool({
         userSessionId: sessionId,
@@ -862,7 +868,7 @@ export class OrchestratorRunner {
           const usage = { id: newId("usage"), userSessionId: sessionId, agentSessionId: null, participant: "orchestrator", profileId: null,
             generation: session.sdkGeneration, turnId: turn?.turnId ?? "unattributed", inputTokens: event.inputTokens ?? 0,
             uncachedInputTokens: event.uncachedInputTokens ?? 0, cacheCreationInputTokens: event.cacheCreationInputTokens ?? 0, cacheReadInputTokens: event.cacheReadInputTokens ?? 0, outputTokens: event.outputTokens ?? 0,
-            costUsd, model: event.modelId ?? this.#modelFor(session), effort: this.#deps.config.infra.effort ?? null,
+            costUsd, model: event.modelId ?? this.#modelFor(session), effort: this.#effortFor(),
             trigger: turn?.trigger ?? null, durationMs: turn ? Date.now() - turn.startedAt : null, apiDurationMs, sdkDurationMs: event.sdkDurationMs ?? null, status: "completed", stopReason: event.stopReason ?? null, createdAt: nowIso() };
           repo.insertUsage(usage);
           this.#deps.capacity.checkBudget(sessionId);
@@ -895,7 +901,7 @@ export class OrchestratorRunner {
           const usage = { id: newId("usage"), userSessionId: sessionId, agentSessionId: null, participant: "orchestrator", profileId: null,
             generation: session.sdkGeneration, turnId: turn?.turnId ?? "unattributed", inputTokens: event.inputTokens ?? 0,
             uncachedInputTokens: event.uncachedInputTokens ?? 0, cacheCreationInputTokens: event.cacheCreationInputTokens ?? 0, cacheReadInputTokens: event.cacheReadInputTokens ?? 0, outputTokens: event.outputTokens ?? 0,
-            costUsd, model: event.modelId ?? this.#modelFor(session), effort: this.#deps.config.infra.effort ?? null,
+            costUsd, model: event.modelId ?? this.#modelFor(session), effort: this.#effortFor(),
             trigger: turn?.trigger ?? null, durationMs: turn ? Date.now() - turn.startedAt : null, apiDurationMs, sdkDurationMs: event.sdkDurationMs ?? null, status: event.aborted ? "aborted" : "error", stopReason: event.stopReason ?? null, createdAt: nowIso() };
           repo.insertUsage(usage);
           this.#deps.capacity.checkBudget(sessionId);

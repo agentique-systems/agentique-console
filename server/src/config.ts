@@ -2,6 +2,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { DEFAULT_ORCHESTRATOR_MODEL, isOrchestratorModel } from "@agentique-console/shared";
+import { EFFORT_LEVELS, isEffortLevel, type EffortLevel } from "./sdk/effort.ts";
 
 /** Where the console runs: paths, network, models, filesystem reach. */
 export interface InfraConfig {
@@ -35,8 +36,12 @@ export interface InfraConfig {
    * one-shot text edit, so it runs on a cheaper tier than the orchestrator.
    */
   improveModel: string;
-  /** Reasoning effort for every session; undefined = SDK default. */
-  effort: string | undefined;
+  /**
+   * The operator's install-wide effort override. Set, it wins over every
+   * lane's own default (main's `xhigh`, a profile's `effort`); unset, each
+   * lane runs at its own default. CONSOLE_EFFORT.
+   */
+  effort: EffortLevel | undefined;
   /**
    * `git init` a non-repo workspace so agent isolation can engage. Off makes
    * the Console leave operator directories alone at the cost of running every
@@ -234,6 +239,15 @@ function validatedModel(id: string | undefined): string {
   return id;
 }
 
+/** Same rule for CONSOLE_EFFORT: a typo fails at boot, not silently at the CLI. */
+function validatedEffort(raw: string | undefined): EffortLevel | undefined {
+  if (raw === undefined) return undefined;
+  if (!isEffortLevel(raw)) {
+    throw new Error(`CONSOLE_EFFORT "${raw}" is not an effort level (expected one of ${EFFORT_LEVELS.join(", ")})`);
+  }
+  return raw;
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   rejectRetiredEnvNames(env);
   const dataDir =
@@ -250,7 +264,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       fsRoots: parseRoots(env.CONSOLE_FS_ROOTS, home),
       model: validatedModel(env.CONSOLE_MODEL),
       improveModel: env.CONSOLE_IMPROVE_MODEL ?? "claude-sonnet-5",
-      effort: env.CONSOLE_EFFORT,
+      effort: validatedEffort(env.CONSOLE_EFFORT),
       autoInitGit: env.CONSOLE_AUTO_INIT_GIT !== "0",
       mcpDisabled: (env.CONSOLE_MCP_DISABLED ?? "").split(",").map((entry) => entry.trim()).filter((entry) => entry !== ""),
       browserMcp: env.CONSOLE_BROWSER_MCP === undefined ? undefined

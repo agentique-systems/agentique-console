@@ -70,6 +70,26 @@ describe("orchestrator lane model", () => {
     expect(usage[0]?.model).toBe("claude-sonnet-5");
   });
 
+  it("main runs at xhigh unless CONSOLE_EFFORT overrides it, and the usage row records what ran", async () => {
+    const h = makeModelHarness();
+    const sessionId = h.addUserSession();
+    h.runner.postOperatorMessage(sessionId, "hi");
+    await collectUntil(h.bus, settled);
+    expect(h.fake.captured.options[0]?.effort).toBe("xhigh");
+    expect(h.repo.listUsage(sessionId)[0]?.effort).toBe("xhigh");
+
+    const low = makeHarness(async function* () {
+      yield initMessage("sdk-sess-2");
+      yield textMessage("ok");
+      yield successMessage(undefined, { session_id: "sdk-sess-2" });
+    }, { config: { infra: { effort: "low" } } });
+    const lowSession = low.addUserSession();
+    low.runner.postOperatorMessage(lowSession, "hi");
+    await collectUntil(low.bus, settled);
+    expect(low.fake.captured.options[0]?.effort).toBe("low");
+    expect(low.repo.listUsage(lowSession)[0]?.effort).toBe("low");
+  });
+
   /**
    * The lane's options are frozen at spawn, so a mid-session change only lands
    * once the lane recycles — which is exactly what the service does on a model

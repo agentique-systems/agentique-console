@@ -9,6 +9,7 @@ import { agentProfileTrust, mintedProfiles } from "../db/schema.ts";
 import type { EventBus } from "../events/bus.ts";
 import { nowIso } from "../ids.ts";
 import { ConflictError, InvalidInputError, NotFoundError } from "../errors.ts";
+import { EFFORT_LEVELS } from "../sdk/effort.ts";
 
 export const ProfileSchema = z.object({
   id: z.string().regex(/^[a-z][a-z0-9-]*$/),
@@ -18,7 +19,8 @@ export const ProfileSchema = z.object({
   tools: z.array(z.string()).min(1),
   permissionMode: z.enum(["default", "plan", "bypassPermissions"]),
   model: z.string().optional(),
-  effort: z.string().optional(),
+  /** Reasoning effort for the profile's agents; CONSOLE_EFFORT overrides it. */
+  effort: z.enum(EFFORT_LEVELS).optional(),
   handoffExtension: z.enum(["generic", "coordination", "implementation", "investigation", "review"]).optional(),
   /**
    * Exempts the profile's agents from write-ownership disjointness: a
@@ -106,6 +108,7 @@ const BUILTINS: AgentProfile[] = [
     tools: [...READ_TOOLS, ...WEB_TOOLS],
     permissionMode: "default",
     model: "claude-opus-5",
+    effort: "high",
     skills: ["handoff-discipline"],
     handoffExtension: "coordination",
     exemptFromOwnership: false,
@@ -120,6 +123,7 @@ const BUILTINS: AgentProfile[] = [
     tools: [...READ_TOOLS, ...WEB_TOOLS],
     permissionMode: "default",
     model: "claude-opus-5",
+    effort: "high",
     skills: ["handoff-discipline"],
     handoffExtension: "investigation",
     exemptFromOwnership: false,
@@ -134,6 +138,7 @@ const BUILTINS: AgentProfile[] = [
     tools: CODE_TOOLS,
     permissionMode: "bypassPermissions",
     model: "claude-opus-5",
+    effort: "xhigh",
     skills: ["long-build-discipline", "build-hygiene", "worktree-etiquette", "probe-method", "handoff-discipline"],
     handoffExtension: "implementation",
     exemptFromOwnership: false,
@@ -148,6 +153,7 @@ const BUILTINS: AgentProfile[] = [
     tools: CODE_TOOLS,
     permissionMode: "bypassPermissions",
     model: "claude-opus-5",
+    effort: "xhigh",
     skills: ["long-build-discipline", "build-hygiene", "worktree-etiquette", "handoff-discipline"],
     handoffExtension: "implementation",
     exemptFromOwnership: false,
@@ -162,6 +168,7 @@ const BUILTINS: AgentProfile[] = [
     tools: [...READ_TOOLS, "Bash", ...WEB_TOOLS],
     permissionMode: "default",
     model: "claude-opus-5",
+    effort: "xhigh",
     skills: ["long-build-discipline", "worktree-etiquette", "handoff-discipline"],
     handoffExtension: "review",
     exemptFromOwnership: true,
@@ -176,6 +183,7 @@ const BUILTINS: AgentProfile[] = [
     tools: [...READ_TOOLS, "Bash", ...WEB_TOOLS],
     permissionMode: "default",
     model: "claude-opus-5",
+    effort: "xhigh",
     skills: ["long-build-discipline", "worktree-etiquette", "handoff-discipline"],
     handoffExtension: "review",
     exemptFromOwnership: true,
@@ -190,6 +198,7 @@ const BUILTINS: AgentProfile[] = [
     tools: [...READ_TOOLS, ...WEB_TOOLS],
     permissionMode: "default",
     model: "claude-opus-5",
+    effort: "high",
     skills: ["handoff-discipline"],
     handoffExtension: "investigation",
     exemptFromOwnership: false,
