@@ -411,6 +411,80 @@ describe("OrchestratorRunner", () => {
     await h.runner.closeAll();
   });
 
+  it("an operator pause cuts main's turn, holds its queue, and wakes it once on resume", async () => {
+    let calls = 0;
+    const h = makeHarness(async function* () {
+      calls += 1;
+      yield initMessage(`sess-${calls}`);
+      if (calls === 1) {
+        yield deltaMessage("working…");
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+      yield textMessage(`reply ${calls}`);
+      yield successMessage();
+    });
+    const sessionId = h.addUserSession();
+
+    const firstSettled = collectUntil(h.bus, settled);
+    h.runner.postOperatorMessage(sessionId, "long job");
+    await collectUntil(h.bus, (e) => e.type === "stream.delta");
+    // A seat report queues behind the live turn (operator text would steer it).
+    h.runner.enqueueAgentMilestone(sessionId, "as_x", "milestone", "and then this");
+    const response = h.app.system.pause({ mode: "hard" });
+    expect(response.interrupted.main).toBe(1);
+    const first = await firstSettled;
+    expect(first.at(-1)?.payload).toMatchObject({ status: "aborted" });
+    // Paused: the queued job stays queued and no turn is minted.
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(h.runner.queuedJobs(sessionId)).toBe(1);
+    expect(h.fake.captured.prompts.filter((p) => p.includes("and then this"))).toHaveLength(0);
+
+    // Resume: ONE console note first, then the queued job, on the same lane.
+    let settles = 0;
+    const thirdSettled = collectUntil(h.bus, (e) => settled(e) && ++settles === 3);
+    h.app.system.resume();
+    await thirdSettled;
+    const prompts = h.fake.captured.prompts;
+    const noteIndex = prompts.findIndex((p) => p.startsWith("[Console: the operator paused the whole system"));
+    expect(noteIndex).toBeGreaterThan(0);
+    expect(prompts.filter((p) => p.startsWith("[Console: the operator paused"))).toHaveLength(1);
+    expect(prompts[noteIndex]).toContain("1 queued wake(s) follow this one");
+    expect(prompts.indexOf(prompts.find((p) => p.includes("and then this"))!)).toBeGreaterThan(noteIndex);
+    expect(h.fake.captured.options).toHaveLength(1);
+    await h.runner.closeAll();
+  });
+
+  it("a soft pause lets the live turn finish and only holds the next", async () => {
+    let calls = 0;
+    const h = makeHarness(async function* () {
+      calls += 1;
+      yield initMessage(`sess-${calls}`);
+      if (calls === 1) {
+        yield deltaMessage("working…");
+        await new Promise((resolve) => setTimeout(resolve, 80));
+      }
+      yield textMessage(`reply ${calls}`);
+      yield successMessage();
+    });
+    const sessionId = h.addUserSession();
+    const firstSettled = collectUntil(h.bus, settled);
+    h.runner.postOperatorMessage(sessionId, "long job");
+    await collectUntil(h.bus, (e) => e.type === "stream.delta");
+    h.runner.enqueueAgentMilestone(sessionId, "as_x", "milestone", "queued report");
+    expect(h.app.system.pause({ mode: "soft" }).interrupted).toEqual({ main: 0, seats: 0 });
+    const first = await firstSettled;
+    expect(first.at(-1)?.payload).toMatchObject({ status: "completed" });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(h.runner.queuedJobs(sessionId)).toBe(1);
+    let settles = 0;
+    const secondSettled = collectUntil(h.bus, (e) => settled(e) && ++settles === 2);
+    h.app.system.resume();
+    await secondSettled;
+    // No note for a lane the pause never cut.
+    expect(h.fake.captured.prompts.some((p) => p.startsWith("[Console: the operator paused"))).toBe(false);
+    await h.runner.closeAll();
+  });
+
   it("a dead lane settles the open turn, notices, and respawns on the next job", async () => {
     let calls = 0;
     const h = makeHarness(async function* () {

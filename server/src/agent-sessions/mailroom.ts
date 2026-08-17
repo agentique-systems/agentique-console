@@ -321,6 +321,10 @@ export class Mailroom {
     // on resume; not even the recipient's process is spawned.
     if (this.#deps.capacityPaused()) return;
     await this.#deps.ensureLive(agentSessionId, recipient);
+    // Re-check after the spawn wait: a pause pressed while the seat was
+    // waking must not slip a delivery through (rows flip to `delivered`
+    // only below, so nothing is lost by returning here).
+    if (this.#deps.capacityPaused()) return;
     const { repo } = this.#deps;
     const session = repo.getAgentSession(agentSessionId);
     const seatRow = repo.getAgent(agentSessionId, recipient);

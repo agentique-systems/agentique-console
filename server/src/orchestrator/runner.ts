@@ -55,7 +55,9 @@ type Job =
   | { kind: "operator"; text: string }
   | { kind: "answer-revival"; text: string }
   | { kind: "agent-milestone"; text: string; agentSessionId: string }
-  | { kind: "cron"; text: string };
+  | { kind: "cron"; text: string }
+  /** A console-authored wake (post-pause resume note); rendered verbatim. */
+  | { kind: "console-note"; text: string };
 
 interface ActiveTurn {
   turnId: string;
@@ -103,6 +105,12 @@ interface Lane {
   contextTokens: number;
   /** Last cumulative cost/api-duration seen, for per-turn deltas. */
   lastCumulative: { costUsd: number; apiDurationMs: number };
+  /**
+   * The operator's whole-system pause cut this lane's turn. On resume main
+   * is woken exactly once with a console note about the pause window before
+   * the queue drains.
+   */
+  pausedMidTurn: { turnId: string; atMs: number } | null;
 }
 
 export interface OrchestratorDeps {
@@ -366,6 +374,7 @@ export class OrchestratorRunner {
         toolStarts: new Map(),
         contextTokens: 0,
         lastCumulative: { costUsd: 0, apiDurationMs: 0 },
+        pausedMidTurn: null,
       };
       this.#lanes.set(sessionId, lane);
     }
@@ -395,11 +404,42 @@ export class OrchestratorRunner {
     }
   }
 
-  /** Post-resume kick: every session with queued jobs starts draining again. */
+  /**
+   * Post-resume kick: every session with queued jobs starts draining again.
+   * A lane the pause cut mid-turn first gets ONE console note describing the
+   * window, so main re-reads its own last message instead of guessing.
+   */
   resumeQueued(): void {
     for (const [sessionId, lane] of this.#lanes) {
+      const paused = lane.pausedMidTurn;
+      if (paused !== null) {
+        lane.pausedMidTurn = null;
+        const at = new Date(paused.atMs).toISOString();
+        const minutes = Math.max(1, Math.round((Date.now() - paused.atMs) / 60_000));
+        lane.queue.unshift({ kind: "console-note",
+          text: `[Console: the operator paused the whole system at ${at} and resumed at ${nowIso()} (~${minutes} min). Your turn ${paused.turnId} was interrupted mid-response. Nothing was cancelled: seats that were mid-turn continue their in-progress work with worktrees intact, and ${lane.queue.length} queued wake(s) follow this one. Re-read your last message and continue; check session_activity before assuming any seat's state.]` });
+      }
       if (lane.queue.length > 0 && !lane.draining) void this.#drain(sessionId);
     }
+  }
+
+  /**
+   * The operator's whole-system pause, main side: interrupt every lane's
+   * in-flight turn. The turn settles `aborted` through the normal path; the
+   * lane and its queue survive, and `resumeQueued` wakes it once about the
+   * pause. Returns how many turns were cut.
+   */
+  interruptAllForPause(_reason: string): number {
+    let count = 0;
+    for (const [sessionId, lane] of this.#lanes) {
+      if (!lane.query || !lane.activeTurn || lane.pausedMidTurn !== null) continue;
+      lane.pausedMidTurn = { turnId: lane.activeTurn.turnId, atMs: Date.now() };
+      this.#deps.bus.append({ type: "user_session.runtime.noted", userSessionId: sessionId,
+        payload: { userSessionId: sessionId, detail: "paused by the operator mid-turn — the turn settles now; main is woken once on resume" } });
+      void lane.query.interrupt?.().catch(() => undefined);
+      count += 1;
+    }
+    return count;
   }
 
   async #runTurn(sessionId: string, lane: Lane, job: Job): Promise<void> {
@@ -423,7 +463,7 @@ export class OrchestratorRunner {
     // "deadline" is distinct from "wake" so forensics (and the model itself)
     // can tell a deadline fire from a report wake — a live run misread
     // milestone wakes as early deadline fires and re-armed a wake storm.
-    const trigger = job.kind === "operator" ? "operator" : job.kind === "cron" ? "deadline" : job.kind === "agent-milestone" ? "wake" : "answer";
+    const trigger = job.kind === "operator" ? "operator" : job.kind === "cron" ? "deadline" : job.kind === "agent-milestone" || job.kind === "console-note" ? "wake" : "answer";
     bus.append({
       type: "user_session.turn.started",
       userSessionId: sessionId,
@@ -458,6 +498,15 @@ export class OrchestratorRunner {
 
     try {
       await this.#ensureLaneQuery(sessionId, lane);
+      // A pause pressed while the lane was spawning: nothing has reached the
+      // CLI, so the job goes back to the head of the queue unduplicated and
+      // the turn settles as never started.
+      if (this.#deps.capacity.paused) {
+        lane.queue.unshift(job);
+        turn.outcome = { status: "aborted", errorMessage: "paused before the turn started" };
+        this.#settleTurn(sessionId, lane);
+        return;
+      }
       lane.runtime.set("thinking");
       // Push synchronously after ensure — no await in between, so the input
       // queue cannot have been closed under us.

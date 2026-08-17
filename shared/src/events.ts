@@ -19,6 +19,8 @@ import type {
   Task,
   UserSession,
   Workspace,
+  PauseReason,
+  SystemPauseState,
 } from "./domain.ts";
 import type { HandoffSummary } from "./handoffs.ts";
 
@@ -169,7 +171,7 @@ export interface RunReopenedPayload {
  */
 export interface RunCapacityPausedPayload {
   userSessionId: string;
-  reason: "capacity" | "budget";
+  reason: PauseReason;
   /** Auto-resume time (ISO); null for budget pauses (operator resumes). */
   until: string | null;
   detail?: string;
@@ -178,6 +180,13 @@ export interface RunCapacityResumedPayload {
   userSessionId: string;
   manual?: boolean;
 }
+/**
+ * The process-wide pause flipped. Scopeless (no session id) like
+ * `workspace.created`: the top bar reads one signal for the whole install,
+ * even when no session is open. Payload = the full state, so a late joiner
+ * needs no other read.
+ */
+export type SystemPauseChangedPayload = SystemPauseState;
 
 /**
  * The operator decided something. Durable and session-scoped: every agent and
@@ -616,6 +625,7 @@ export type ConsoleEvent = Base &
     | { type: "run.reopened"; payload: RunReopenedPayload }
     | { type: "run.capacity.paused"; payload: RunCapacityPausedPayload }
     | { type: "run.capacity.resumed"; payload: RunCapacityResumedPayload }
+    | { type: "system.pause.changed"; payload: SystemPauseChangedPayload }
     | { type: "agent_session.closeout.forced"; payload: AgentSessionCloseoutForcedPayload }
     | { type: "agent_session.watchdog.tripped"; payload: AgentWatchdogTrippedPayload }
     | { type: "agent_session.liveness.tripped"; payload: AgentLivenessTrippedPayload }

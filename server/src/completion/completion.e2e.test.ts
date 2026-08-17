@@ -88,6 +88,19 @@ describe("run completion", () => {
     expect(() => h.completion.getSummary("us_someone_else", summaryRow.id)).toThrow(/no run summary/);
   });
 
+  it("does NOT propose while the operator has paused the system; resume re-arms it", async () => {
+    const { h } = harness();
+    const { userSessionId } = await runToFinal(h);
+    h.app.system.pause({ mode: "soft" });
+    await send(h).handler(FINAL, {});
+    await settle();
+    expect(h.db.select().from(runSummaries).all()).toHaveLength(0);
+    expect(h.repo.getUserSession(userSessionId)?.runState).toBe("active");
+    h.app.system.resume();
+    await collectUntil(h.bus, (event) => event.type === "run.completion.proposed", 10_000);
+    expect(h.repo.getUserSession(userSessionId)?.runState).toBe("awaiting_signoff");
+  });
+
   it("does NOT propose while a question is pending", async () => {
     const { h } = harness();
     const { userSessionId } = await runToFinal(h);

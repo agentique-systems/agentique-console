@@ -94,11 +94,14 @@ export function registerUserSessionRoutes(
   );
 
   // Manual "resume now" for a capacity/budget pause — the operator raised
-  // the budget, bought capacity, or knows the window reset early.
+  // the budget, bought capacity, or knows the window reset early. The pause
+  // is process-wide, so this delegates to the system switch (`:id` is not
+  // consulted); kept for older clients, `POST /api/system/resume` is the
+  // canonical route.
   app.post<{ Params: { id: string } }>(
     "/api/user-sessions/:id/resume-capacity",
     async () => {
-      ctx.app.capacity.resume({ manual: true });
+      ctx.app.system.resume();
       return { resumed: true };
     },
   );

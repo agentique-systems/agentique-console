@@ -81,6 +81,61 @@ describe("CapacityService", () => {
     expired.stop();
   });
 
+  it("an operator pause holds until resume, persists as reason operator, and emits the system snapshot", () => {
+    const { h, capacity, userSessionId } = makeWorld();
+    capacity.pauseByOperator("top bar");
+    expect(capacity.paused).toBe(true);
+    const row = h.repo.getUserSession(userSessionId);
+    expect(row?.pauseReason).toBe("operator");
+    expect(row?.pausedUntil).toBeNull();
+    const snap = capacity.snapshot();
+    expect(snap).toMatchObject({ paused: true, reason: "operator", until: null, detail: "top bar" });
+    expect(snap.since).not.toBeNull();
+    const changed = h.sqlite.prepare("SELECT payload FROM events WHERE type = 'system.pause.changed' ORDER BY seq").all() as { payload: string }[];
+    expect(changed.map((event) => JSON.parse(event.payload).paused)).toEqual([true]);
+    const perSession = h.sqlite.prepare("SELECT payload FROM events WHERE type = 'run.capacity.paused'").all() as { payload: string }[];
+    expect(perSession.map((event) => JSON.parse(event.payload).reason)).toEqual(["operator"]);
+    // Idempotent: a second press changes nothing and emits nothing new.
+    capacity.pauseByOperator();
+    expect((h.sqlite.prepare("SELECT count(*) AS n FROM events WHERE type = 'system.pause.changed'").get() as { n: number }).n).toBe(1);
+    capacity.stop();
+  });
+
+  it("the ladder: operator outranks budget outranks capacity, in both directions", () => {
+    const { h, capacity, userSessionId } = makeWorld();
+    // Lower never displaces higher.
+    capacity.pauseByOperator();
+    capacity.noteLimit({ status: "rejected", resetsAt: Math.floor(Date.now() / 1000) - 10 });
+    h.repo.patchUserSession(userSessionId, { budgetUsd: 0 });
+    capacity.checkBudget(userSessionId);
+    expect(capacity.snapshot().reason).toBe("operator");
+    // A capacity reset in the past would have self-expired a capacity pause; the operator pause holds.
+    expect(capacity.paused).toBe(true);
+    capacity.resume({ manual: true });
+    expect(capacity.paused).toBe(false);
+    // Higher displaces lower and drops the lower's timer.
+    capacity.noteLimit({ status: "rejected", resetsAt: Math.floor(Date.now() / 1000) + 1 });
+    expect(capacity.snapshot().reason).toBe("capacity");
+    capacity.pauseByOperator();
+    expect(capacity.snapshot()).toMatchObject({ reason: "operator", until: null });
+    capacity.stop();
+  });
+
+  it("resume emits the unpaused snapshot once and armFromBoot restores an operator pause without a start time", () => {
+    const { h, capacity } = makeWorld();
+    capacity.pauseByOperator();
+    capacity.resume({ manual: true });
+    const changed = h.sqlite.prepare("SELECT payload FROM events WHERE type = 'system.pause.changed' ORDER BY seq").all() as { payload: string }[];
+    expect(changed.map((event) => JSON.parse(event.payload).paused)).toEqual([true, false]);
+    expect(capacity.snapshot()).toEqual({ paused: false, reason: null, since: null, until: null });
+    capacity.pauseByOperator();
+    const restored = new CapacityService({ repo: h.repo, bus: h.bus });
+    restored.armFromBoot();
+    expect(restored.snapshot()).toMatchObject({ paused: true, reason: "operator", since: null, until: null });
+    restored.stop();
+    capacity.stop();
+  });
+
   it("warningLine appears only at high utilization", () => {
     const { capacity } = makeWorld();
     capacity.noteLimit({ status: "allowed_warning", utilization: 0.5 });

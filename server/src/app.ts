@@ -32,6 +32,7 @@ import { AssignmentScheduler } from "./tasks/scheduler.ts";
 import { TaskService } from "./tasks/service.ts";
 import { TimelineService } from "./timeline/service.ts";
 import { CapacityService } from "./capacity/service.ts";
+import { SystemPauseService } from "./system/pause.ts";
 import { CapabilityCatalog } from "./agent-profiles/capability-catalog.ts";
 import path from "node:path";
 import { HandoffService } from "./handoffs/service.ts";
@@ -79,6 +80,8 @@ export interface App {
   completion: RunCompletionService;
   userSessions: UserSessionService;
   capacity: CapacityService;
+  /** The operator's whole-system Pause/Resume over `capacity`. */
+  system: SystemPauseService;
 }
 
 export function createApp(options: CreateAppOptions): App {
@@ -118,6 +121,7 @@ export function createApp(options: CreateAppOptions): App {
   const scheduler = new AssignmentScheduler({
     store: stores.assignments, tasks, sessions: stores.sessions, messages: stores.messages, bus,
     post: (input) => host.post(input),
+    paused: () => capacity.paused,
   });
   lateScheduler.set(scheduler);
   const runner = new OrchestratorRunner({
@@ -134,7 +138,9 @@ export function createApp(options: CreateAppOptions): App {
     host: () => host,
     runner: () => runner,
     quietWindowMs: config.policy.completionQuietWindowMs,
+    paused: () => capacity.paused,
   });
+  const system = new SystemPauseService({ capacity, runner, host });
   const userSessions = new UserSessionService({
     repo, bus, runner, interactions, workspaces,
     archiveAgentSessions: (userSessionId) => host.archiveForUserSession(userSessionId),
@@ -149,7 +155,16 @@ export function createApp(options: CreateAppOptions): App {
   tasks.onChange(scheduler.onTaskChanged);
   // Capacity resume re-kicks both lane engines: queued orchestrator jobs
   // drain and queued seat deliveries redeliver — nothing was cancelled.
-  capacity.onResume(() => { runner.resumeQueued(); host.resumeQueuedDeliveries(); });
+  // Capacity resume re-kicks every engine the pause held: queued orchestrator
+  // jobs drain, queued seat deliveries redeliver, ready scheduled assignments
+  // dispatch, and every open run's completion predicate is re-armed —
+  // nothing was cancelled.
+  capacity.onResume(() => {
+    runner.resumeQueued();
+    host.resumeQueuedDeliveries();
+    scheduler.redriveReady();
+    for (const session of repo.listOpenWorkSessions()) completion.schedule(session.id);
+  });
   runner.onSettled((userSessionId) => completion.schedule(userSessionId));
   runner.onOperatorMessage((userSessionId) => completion.noteOperatorMessage(userSessionId));
   host.onStatusChanged((userSessionId) => completion.schedule(userSessionId));
@@ -166,6 +181,6 @@ export function createApp(options: CreateAppOptions): App {
     config, db, sqlite, bus, artifacts, repo, sdk, getWorkspaceRoot, specs, orchestrationState,
     workspaces, timeline, profiles, worktrees, capacity,
     decisions, interactions, tasks, scheduler, handoffs, sessionStore,
-    host, runner, completion, userSessions,
+    host, runner, completion, userSessions, system,
   };
 }

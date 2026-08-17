@@ -36,8 +36,8 @@ export interface UserSession {
   model: string | null;
   /** "away": proceed on recommendations; queue only irreversible decisions. */
   autonomy: "standard" | "away";
-  /** Set while a provider-capacity or budget pause holds. */
-  pauseReason: "capacity" | "budget" | null;
+  /** Set while a provider-capacity, budget, or operator pause holds. */
+  pauseReason: PauseReason | null;
   /** Auto-resume time for a capacity pause (ISO); null otherwise. */
   pausedUntil: string | null;
   createdAt: string;
@@ -45,6 +45,27 @@ export interface UserSession {
 }
 
 export type RunState = "active" | "awaiting_signoff" | "completed";
+
+/**
+ * Why the system is paused. One process-wide pause covers every run:
+ * `capacity` (provider usage window; auto-resumes), `budget` (a session's
+ * spend ceiling; operator resumes), `operator` (the top-bar Pause; holds
+ * until Resume and outranks the other two).
+ */
+export type PauseReason = "capacity" | "budget" | "operator";
+
+/**
+ * The whole-system pause as the web reads it. `since` is null after a
+ * server restart restored a persisted pause (the start time is not
+ * persisted); `until` is the auto-resume time of a capacity pause.
+ */
+export interface SystemPauseState {
+  paused: boolean;
+  reason: PauseReason | null;
+  since: string | null;
+  until: string | null;
+  detail?: string;
+}
 
 /**
  * The render-ready projection of a run summary — ONE shape shared by the

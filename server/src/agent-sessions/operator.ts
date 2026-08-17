@@ -38,6 +38,8 @@ export interface OperatorSurfaceDeps {
   recordFailure: RecordFailure;
   /** Extra per-tick sweep jobs (the pattern-engine sweep), run after ask-detach. */
   sweepTasks: readonly (() => void)[];
+  /** The whole-system pause: a paused tick does nothing (cutoffs are wall-clock; the first tick after resume catches up). */
+  paused: () => boolean;
 }
 
 export class OperatorSurface {
@@ -65,6 +67,7 @@ export class OperatorSurface {
   startGovernanceSweep(intervalMs = this.#deps.config.policy.governanceSweepIntervalMs): void {
     if (this.#askSweep) return;
     this.#askSweep = setInterval(() => {
+      if (this.#deps.paused()) return;
       const limit = this.#deps.config.policy.operatorAskDetachMs;
       const cutoff = Date.now() - limit;
       for (const wait of this.#deps.lanes.operatorWaits()) {

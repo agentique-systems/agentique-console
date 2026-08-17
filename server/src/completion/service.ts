@@ -38,6 +38,8 @@ export interface RunCompletionDeps {
    * window simply makes it false again.
    */
   quietWindowMs: number;
+  /** The whole-system pause: a paused run is quiet by decree, not done — evaluate holds. */
+  paused?: () => boolean;
 }
 
 export class RunCompletionService {
@@ -115,6 +117,9 @@ export class RunCompletionService {
    * `awaiting_signoff` synchronously, so the run state IS the arming latch.
    */
   evaluate(userSessionId: string): boolean {
+    // Paused: nothing is proposed, discharged or nudged; the resume hook
+    // reschedules every open run.
+    if (this.#deps.paused?.()) return false;
     if (!this.isComplete(userSessionId)) {
       // Not done — but if the work has nonetheless gone quiet, the operator is
       // owed whatever exists. A run may end incomplete; it may never end in

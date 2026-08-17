@@ -145,6 +145,7 @@ export class AgentSessionService {
       deliver: (agentSessionId, recipient) => this.#mailroom.deliver(agentSessionId, recipient),
       maybeReleaseParentFinal: (parent) => this.#nesting.maybeReleaseParentFinal(parent),
       recordFailure: (agentSessionId, error) => this.#recordFailure(agentSessionId, error),
+      paused: () => deps.capacity.paused,
       sweepTasks: [() => {
         // The quiet-time stall lives here — it can trip while every lane is
         // quiet, which is exactly when it matters.
@@ -397,6 +398,15 @@ export class AgentSessionService {
   /** Whole-session stop (archive/shutdown): every lane closes hard. */
   interrupt(agentSessionId: string): void {
     this.#lifecycle.interrupt(agentSessionId);
+  }
+
+  /**
+   * The operator's whole-system pause: interrupt every seat's in-flight turn
+   * without cancelling its deliveries (`AgentRuntime.interruptAllForPause`).
+   * Returns how many turns were cut.
+   */
+  interruptAllForPause(reason: string): number {
+    return this.#runtime.interruptAllForPause(reason);
   }
 
   /** Scoped stop: abort one specialist's in-flight turn (`AgentRuntime.interruptAgent`). */

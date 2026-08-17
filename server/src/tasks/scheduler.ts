@@ -35,6 +35,8 @@ export interface AssignmentSchedulerDeps {
     category?: Category;
     dedupeKey?: string;
   }) => MessageRow;
+  /** The whole-system pause: a ready row stays `scheduled`; `redriveReady()` runs on resume. */
+  paused?: () => boolean;
 }
 
 export interface InterceptResult {
@@ -145,6 +147,24 @@ export class AssignmentScheduler {
     return redriven;
   }
 
+  /**
+   * Resume after a pause: every scheduled row whose task is ready dispatches
+   * now (a subset of `boot()`; the post's `sched:<id>` dedupe keeps it
+   * exactly-once). Returns the redriven count.
+   */
+  redriveReady(): number {
+    let redriven = 0;
+    for (const row of this.#deps.store.listScheduled()) {
+      try {
+        if (this.#priorDelivery(row) || this.#deps.tasks.getWire(row.taskId)?.ready === true) {
+          redriven += 1;
+          this.#enqueue({ kind: "dispatch", assignmentId: row.id });
+        }
+      } catch (error) { this.#recordFailure(row, error); }
+    }
+    return redriven;
+  }
+
   /** Live rows for OPEN sessions only — the completion gate's clause. */
   countScheduled(userSessionId: string): number {
     return this.#deps.store.countScheduledForOpenSessions(userSessionId);
@@ -203,6 +223,8 @@ export class AssignmentScheduler {
   #dispatchById(assignmentId: string): void {
     const row = this.#deps.store.getById(assignmentId);
     if (!row || row.status !== "scheduled") return;
+    // Paused: the row stays scheduled and the resume hook redrives it.
+    if (this.#deps.paused?.()) return;
     const prior = this.#priorDelivery(row);
     if (prior) {
       if (this.#deps.store.markDispatched(row.id, prior.messageId, nowIso())) {

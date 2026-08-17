@@ -54,6 +54,11 @@ function stableStringify(value: unknown): string {
   return `{${Object.keys(value as Record<string, unknown>).sort().map((key) => `${JSON.stringify(key)}:${stableStringify((value as Record<string, unknown>)[key])}`).join(",")}}`;
 }
 
+/** Prefix for the first prompt a seat sees after an operator pause cut its turn. */
+export function pauseResumeNoteText(pausedAt: string): string {
+  return `[Console: the operator paused the whole system at ${pausedAt} while you were mid-turn on the handoffs below; it resumed at ${nowIso()}. Your provider session and worktree are intact — CONTINUE the work in progress; do not restart it. The handoffs are re-delivered only so you have them in context.]`;
+}
+
 /** The turn-attribution facts the agent tools bind (send attribution). */
 export interface TurnTracker {
   /** The agent's in-flight turn id, if a turn is open right now. */
@@ -135,14 +140,19 @@ export class AgentRuntime implements Injector, TurnTracker {
   inject(session: AgentSessionRow, recipient: string, rows: MailboxDeliveryRow[], prompt: string): void {
     const lane = this.#deps.lanes.laneOf(session.id, recipient);
     if (!lane.input) return;
+    // A seat the operator paused mid-turn gets its handoffs back as CONTEXT
+    // for work already under way, not as a fresh assignment to restart.
+    const note = lane.pauseResumeNote;
+    lane.pauseResumeNote = null;
+    const text = note === null ? prompt : `${pauseResumeNoteText(note.pausedAt)}\n\n${prompt}`;
     if (lane.activeTurn) {
       lane.activeTurn.deliveries.push(...rows);
-      lane.input.push(seatUserMessage(`New addressed handoffs arrived while you were working — fold them into the work in progress.\n\n${prompt}`));
+      lane.input.push(seatUserMessage(`New addressed handoffs arrived while you were working — fold them into the work in progress.\n\n${text}`));
       this.#deps.bus.append({ type: "agent_session.runtime.noted", userSessionId: session.userSessionId, agentSessionId: session.id,
         payload: { agentSessionId: session.id, agent: recipient, turnId: lane.activeTurn.turnId, detail: `steered mid-turn (${rows.length} deliveries)` } });
     } else {
       this.#mintTurn(session, recipient, lane, rows);
-      lane.input.push(seatUserMessage(prompt));
+      lane.input.push(seatUserMessage(text));
     }
   }
 
@@ -402,6 +412,33 @@ export class AgentRuntime implements Injector, TurnTracker {
     void lane.query?.interrupt?.().catch(() => undefined);
   }
 
+  /**
+   * The operator's whole-system pause, seat side: interrupt every in-flight
+   * turn WITHOUT a verdict on its work. Unlike `interruptAgent`, deliveries
+   * are not cancelled — settle returns them to `queued` and they redeliver on
+   * resume with a note that the seat should continue, not restart. Turns
+   * parked in `ask_operator` cost nothing and are left alone (the question
+   * stays open); turns already dying are left to die.
+   */
+  interruptAllForPause(reason: string): number {
+    let count = 0;
+    for (const snap of this.#deps.lanes.laneSnapshots()) {
+      const lane = this.#deps.lanes.peek(snap.agentSessionId, snap.agent);
+      const turn = lane?.activeTurn;
+      if (!lane || !turn || !lane.query) continue;
+      if (turn.pauseInterrupt !== null || turn.watchdog.tripped !== null || turn.awaitingOperator !== null) continue;
+      const session = this.#deps.repo.getAgentSession(snap.agentSessionId);
+      if (!session) continue;
+      turn.pauseInterrupt = reason;
+      lane.pauseResumeNote = { pausedAt: nowIso() };
+      this.#deps.bus.append({ type: "agent_session.runtime.noted", userSessionId: session.userSessionId, agentSessionId: session.id,
+        payload: { agentSessionId: session.id, agent: snap.agent, turnId: turn.turnId, detail: `paused by the operator mid-turn — deliveries requeue and redeliver on resume` } });
+      void lane.query.interrupt?.().catch(() => undefined);
+      count += 1;
+    }
+    return count;
+  }
+
   // ── The SDK-event loop ───────────────────────────────────────────────────
 
   async pumpSeat(session: AgentSessionRow, seatName: string, lane: AgentLane, query: QueryHandle): Promise<void> {
@@ -535,7 +572,7 @@ export class AgentRuntime implements Injector, TurnTracker {
       : this.#deps.repo.listUnackedDeliveries(session.id, seatName).filter((row) => row.status === "delivered");
     lane.activeTurn = { turnId: newId("turn"), startedAt: Date.now(), deliveries: attributed, sawSend: false,
       toolStarts: new Map(), lastEventAt: Date.now(), alarmsFired: new Set(), lastNarration: "",
-      watchdog: { lastKey: "", identical: 0, errorStreak: 0, tripped: null }, awaitingOperator: null };
+      watchdog: { lastKey: "", identical: 0, errorStreak: 0, tripped: null }, awaitingOperator: null, pauseInterrupt: null };
     lane.lastActiveAt = Date.now();
     if (lane.idleTimer) { clearTimeout(lane.idleTimer); lane.idleTimer = null; }
     this.#deps.bus.append({ type: "agent_session.turn.started", userSessionId: session.userSessionId, agentSessionId: session.id,
@@ -549,8 +586,16 @@ export class AgentRuntime implements Injector, TurnTracker {
     lane.activeTurn = null;
     const { repo, bus, hooks } = this.#deps;
     if (turn.watchdog.tripped !== null) { status = "error"; errorMessage = turn.watchdog.tripped; }
+    // An operator pause cut this turn: no verdict on the work. Deliveries go
+    // back to `queued` at their CURRENT attempt count (no attempt spent, no
+    // escalation, no assignment-turn spend) and redeliver on resume.
+    const pausedMidTurn = turn.pauseInterrupt !== null;
     let requeued = false;
-    if (status === "completed") {
+    if (pausedMidTurn) {
+      status = "aborted"; errorMessage = "paused by operator";
+      for (const delivery of turn.deliveries) hooks.patchDelivery(session, delivery, "queued");
+      requeued = turn.deliveries.length > 0;
+    } else if (status === "completed") {
       for (const delivery of turn.deliveries) hooks.patchDelivery(session, delivery, "acknowledged");
       for (const delivery of turn.deliveries) lane.redeliveryAttempts.delete(delivery.id);
     } else {
@@ -583,12 +628,12 @@ export class AgentRuntime implements Injector, TurnTracker {
     if (seat) {
       repo.patchAgent(session.id, seatName, { turnCount: seat.turnCount + 1, lastActiveAt: nowIso() });
     }
-    lane.assignmentTurns += 1;
+    if (!pausedMidTurn) lane.assignmentTurns += 1;
     lane.lastActiveAt = Date.now();
     // Aborted-but-NOT-deliberate = the stream/process died under a live turn
     // (in-process CLI death). Before this it settled silently — no failure
     // handoff, no escalation, a run that just stopped.
-    const infraDeath = status === "aborted" && !lane.deliberateStop;
+    const infraDeath = status === "aborted" && !lane.deliberateStop && !pausedMidTurn;
     // Escalate only when the console has given up on the deliveries. While a
     // redelivery is queued the failure is still being handled here; escalating
     // every attempt produced three differently-worded failure handoffs for
@@ -613,7 +658,8 @@ export class AgentRuntime implements Injector, TurnTracker {
     this.#deps.worktree.snapshotTurn(session.id, seatName, turn.turnId);
     this.#deps.worktree.flushDeferredLanding(session, seatName);
     runtime.idle();
-    if (requeued && repo.getAgentSession(session.id)?.lifecycle === "open") {
+    // Paused seats wait for the resume hook's redelivery sweep instead.
+    if (requeued && !pausedMidTurn && repo.getAgentSession(session.id)?.lifecycle === "open") {
       void hooks.deliver(session.id, seatName).catch((error) => hooks.recordFailure(session.id, error));
     }
     hooks.refreshStatus(session.id);
@@ -639,6 +685,8 @@ export class AgentRuntime implements Injector, TurnTracker {
   async #maybeRotate(agentSessionId: string, seatName: string): Promise<void> {
     const config = this.#deps.config;
     if (!config?.policy.contextRotation || !this.#deps.handoffs || !this.#deps.sdk) return;
+    // A paused system spawns no queries; the next settle re-evaluates.
+    if (this.#deps.capacity.paused) return;
     const lane = this.#deps.lanes.laneOf(agentSessionId, seatName);
     if (lane.state !== "live" || lane.activeTurn !== null || lane.rotationGate !== null) return;
     const { repo } = this.#deps;
@@ -684,6 +732,7 @@ export class AgentRuntime implements Injector, TurnTracker {
   async #maybeProactiveCheckpoint(agentSessionId: string, seatName: string): Promise<void> {
     const config = this.#deps.config;
     if (!config?.policy.contextRotation || !this.#deps.handoffs || !this.#deps.sdk) return;
+    if (this.#deps.capacity.paused) return;
     const lane = this.#deps.lanes.laneOf(agentSessionId, seatName);
     if (lane.state !== "live" || lane.activeTurn !== null || lane.rotationGate !== null || lane.proactiveCheckpointInFlight) return;
     const { repo } = this.#deps;

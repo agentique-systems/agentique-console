@@ -7,11 +7,19 @@
  *
  * Process-wide, because the cap is per-account, not per-session. While
  * paused: the orchestrator drains nothing, deadlines do not fire, the seat
- * mailroom mints no turns. Nothing is cancelled and nothing is salvaged —
+ * mailroom mints no turns, the scheduler dispatches nothing, the governance
+ * and completion sweeps hold. Nothing is cancelled and nothing is salvaged —
  * queued work stays queued and redelivers on resume. Persistence is two
  * columns on every open user session (`pausedUntil`, `pauseReason`) so a
  * server restart re-arms the resume timer instead of forgetting the pause.
+ *
+ * The same switch serves the operator's top-bar Pause: reason `operator`
+ * outranks `budget` outranks `capacity` — a higher reason replaces a lower
+ * one, a lower one never displaces a higher one, and an operator pause holds
+ * until an explicit resume. Interrupting in-flight turns is NOT this
+ * service's job (see system/pause.ts); this is the mint gate only.
  */
+import type { PauseReason, SystemPauseState } from "@agentique-console/shared";
 import type { Repo } from "../db/repo.ts";
 import type { EventBus } from "../events/bus.ts";
 import { nowIso } from "../ids.ts";
@@ -22,6 +30,8 @@ const UNKNOWN_RESET_MS = 30 * 60_000;
 const RESUME_JITTER_MS = 15_000;
 /** Utilization at which wake prompts start warning the orchestrator. */
 const WARNING_THRESHOLD = 0.85;
+/** Higher never yields to lower; equal only extends (capacity resets). */
+const RANK: Record<PauseReason, number> = { capacity: 0, budget: 1, operator: 2 };
 
 export interface CapacityDeps {
   repo: Repo;
@@ -37,7 +47,7 @@ export interface LimitInfo {
 
 export class CapacityService {
   readonly #deps: CapacityDeps;
-  #state: { reason: "capacity" | "budget"; untilMs: number | null; detail?: string } | null = null;
+  #state: { reason: PauseReason; untilMs: number | null; since: string | null; detail?: string } | null = null;
   #timer: NodeJS.Timeout | null = null;
   #warning: { utilization: number; resetsAt?: number } | null = null;
   #onResume: Array<() => void> = [];
@@ -91,14 +101,17 @@ export class CapacityService {
     this.pause("budget", undefined, `spend $${spent.toFixed(2)} reached the $${session.budgetUsd.toFixed(2)} ceiling`);
   }
 
-  pause(reason: "capacity" | "budget", untilMs?: number, detail?: string): void {
-    const until = reason === "budget" ? null : (untilMs ?? Date.now() + UNKNOWN_RESET_MS);
+  pause(reason: PauseReason, untilMs?: number, detail?: string): void {
+    const until = reason === "capacity" ? (untilMs ?? Date.now() + UNKNOWN_RESET_MS) : null;
     if (this.#state !== null) {
-      // Idempotent under a storm of limit events; only a LATER reset extends.
-      if (this.#state.reason === "budget") return;
-      if (until === null || (this.#state.untilMs !== null && until <= this.#state.untilMs)) return;
+      // A higher-ranked pause never yields to a lower one; a storm of limit
+      // events is idempotent, and only a LATER capacity reset extends.
+      if (RANK[this.#state.reason] > RANK[reason]) return;
+      if (this.#state.reason === reason) {
+        if (until === null || this.#state.untilMs === null || until <= this.#state.untilMs) return;
+      }
     }
-    this.#state = { reason, untilMs: until, ...(detail === undefined ? {} : { detail }) };
+    this.#state = { reason, untilMs: until, since: nowIso(), ...(detail === undefined ? {} : { detail }) };
     const untilIso = until === null ? null : new Date(until).toISOString();
     for (const session of this.#deps.repo.listOpenUserSessions()) {
       this.#deps.repo.patchUserSession(session.id, { pausedUntil: untilIso, pauseReason: reason });
@@ -108,13 +121,23 @@ export class CapacityService {
         payload: { userSessionId: session.id,
           detail: reason === "capacity"
             ? `run paused — ${detail ?? "provider usage limit"}; resumes automatically at ${untilIso ?? "the next probe"} (nothing was cancelled)`
-            : `run paused — ${detail ?? "budget ceiling reached"}; raise the budget or resume manually (nothing was cancelled)` } });
+            : reason === "budget"
+              ? `run paused — ${detail ?? "budget ceiling reached"}; raise the budget or resume manually (nothing was cancelled)`
+              : `run paused by the operator${detail === undefined ? "" : ` — ${detail}`}; nothing was cancelled, queued work redelivers on resume` } });
     }
+    // Clears any lower pause's timer; an operator/budget pause arms none.
     this.#armTimer();
+    this.#emitChanged();
+  }
+
+  /** The operator's whole-system Pause. Holds until `resume`. */
+  pauseByOperator(detail?: string): void {
+    this.pause("operator", undefined, detail);
   }
 
   resume(opts: { manual: boolean }): void {
     if (this.#state === null) return;
+    const was = this.#state.reason;
     this.#state = null;
     if (this.#timer) { clearTimeout(this.#timer); this.#timer = null; }
     for (const session of this.#deps.repo.listOpenUserSessions()) {
@@ -123,11 +146,31 @@ export class CapacityService {
       this.#deps.bus.append({ type: "run.capacity.resumed", userSessionId: session.id,
         payload: { userSessionId: session.id, manual: opts.manual } });
       this.#deps.bus.append({ type: "user_session.runtime.noted", userSessionId: session.id,
-        payload: { userSessionId: session.id, detail: `capacity restored at ${nowIso()} — nothing was lost; queued work redelivers now` } });
+        payload: { userSessionId: session.id, detail: was === "operator"
+          ? `resumed by the operator at ${nowIso()} — nothing was lost; queued work redelivers now`
+          : `capacity restored at ${nowIso()} — nothing was lost; queued work redelivers now` } });
     }
+    this.#emitChanged();
     for (const hook of this.#onResume) {
       try { hook(); } catch { /* one consumer's failure must not strand the rest */ }
     }
+  }
+
+  /** The whole-system pause as one value; reading it lets a stale capacity pause expire. */
+  snapshot(): SystemPauseState {
+    const paused = this.paused;
+    const state = this.#state;
+    return {
+      paused,
+      reason: paused && state ? state.reason : null,
+      since: paused && state ? state.since : null,
+      until: paused && state && state.untilMs !== null ? new Date(state.untilMs).toISOString() : null,
+      ...(paused && state?.detail !== undefined ? { detail: state.detail } : {}),
+    };
+  }
+
+  #emitChanged(): void {
+    this.#deps.bus.append({ type: "system.pause.changed", payload: this.snapshot() });
   }
 
   /**
@@ -146,7 +189,8 @@ export class CapacityService {
     for (const session of this.#deps.repo.listOpenUserSessions()) {
       if (session.pauseReason === null) continue;
       const untilMs = session.pausedUntil === null ? null : Date.parse(session.pausedUntil);
-      this.#state = { reason: session.pauseReason, untilMs: untilMs !== null && Number.isNaN(untilMs) ? null : untilMs };
+      // `since` is not persisted: the UI shows the pause without a start time.
+      this.#state = { reason: session.pauseReason, untilMs: untilMs !== null && Number.isNaN(untilMs) ? null : untilMs, since: null };
       break;
     }
     if (this.#state === null) return;

@@ -48,6 +48,13 @@ export interface ActiveTurn {
    * own controller, so the wait can be cut without killing the lane.
    */
   awaitingOperator: OperatorWait | null;
+  /**
+   * Set when the operator's whole-system pause interrupted this turn. Settle
+   * then treats the turn as no verdict on the work: deliveries return to
+   * `queued` at their current attempt count, nothing escalates, and the
+   * seat continues on resume.
+   */
+  pauseInterrupt: string | null;
 }
 
 /** A read-only snapshot of one lane's live state (session_activity, liveness). */
@@ -109,6 +116,12 @@ export interface AgentLane {
   deliberateStop: boolean;
   /** In-flight proactive checkpoint guard — at most one per lane at a time. */
   proactiveCheckpointInFlight: boolean;
+  /**
+   * The seat was interrupted mid-turn by an operator pause at this time; the
+   * next injected prompt is prefixed with a console note saying so, so the
+   * redelivered handoffs read as context, not as a fresh assignment.
+   */
+  pauseResumeNote: { pausedAt: string } | null;
   /** The turn-budget notice fired for the current assignment (latch). */
   turnBudgetNotified: boolean;
   lastActiveAt: number;
@@ -140,7 +153,7 @@ export class AgentLanePool implements LaneActivity {
       lane = { state: "unspawned", input: null, query: null, abort: null, pump: null, ready: null,
         activeTurn: null, pendingDeliveries: [], redeliveryAttempts: new Map(), contextTokens: 0,
         lastCumulative: { costUsd: 0, apiDurationMs: 0 }, rotationGate: null, releaseRotation: null,
-        idleTimer: null, assignmentTurns: 0, turnBudgetNotified: false, deliberateStop: false, proactiveCheckpointInFlight: false, lastActiveAt: 0, lastStatus: null };
+        idleTimer: null, assignmentTurns: 0, turnBudgetNotified: false, deliberateStop: false, proactiveCheckpointInFlight: false, pauseResumeNote: null, lastActiveAt: 0, lastStatus: null };
       lanes.set(seat, lane);
     }
     return lane;

@@ -114,6 +114,22 @@ describe("assignment scheduling e2e (fake SDK)", () => {
     expect(r2.db.select().from(scheduledAssignments).where(eq(scheduledAssignments.id, assignmentId)).get()?.status).toBe("dispatched");
   });
 
+  it("an operator pause holds a ready dispatch; resume redrives it exactly once", async () => {
+    const { h, agentSessionId, listId, assignmentId } = scheduledFixture();
+    h.app.system.pause({ mode: "soft" });
+    // The blocker completes through the live hook — the row is READY but the
+    // pause holds it: no message, still `scheduled`.
+    h.tasks.markCompleted(listId, "t1");
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(messagesTo(h, agentSessionId, "builder")).toHaveLength(0);
+    expect(h.db.select().from(scheduledAssignments).where(eq(scheduledAssignments.id, assignmentId)).get()?.status).toBe("scheduled");
+    // Resume: the resume hook's redrive posts it (the `sched:<id>` dedupe keeps it single).
+    h.app.system.resume();
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(messagesTo(h, agentSessionId, "builder")).toHaveLength(1);
+    expect(h.db.select().from(scheduledAssignments).where(eq(scheduledAssignments.id, assignmentId)).get()?.status).toBe("dispatched");
+  });
+
   it("boot cancels rows whose session archived while down", async () => {
     const { h, userSessionId, assignmentId } = scheduledFixture();
     h.host.archiveForUserSession(userSessionId);

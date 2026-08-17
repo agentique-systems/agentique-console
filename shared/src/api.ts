@@ -18,6 +18,7 @@ import type {
   AgentProfileDetail,
   TimelineLane,
   TimelineItem,
+  SystemPauseState,
 } from "./domain.ts";
 import type { HandoffPage } from "./handoffs.ts";
 import type { ConsoleEvent } from "./events.ts";
@@ -35,6 +36,17 @@ export interface HealthResponse {
 export interface StatsResponse {
   lastEventSeq: number;
 }
+
+// GET /api/system/pause · POST /api/system/pause · POST /api/system/resume
+export interface PauseSystemBody {
+  /** hard (default): interrupt in-flight turns too; soft: only mint no new ones. */
+  mode?: "hard" | "soft";
+  detail?: string;
+}
+export type PauseSystemResponse = SystemPauseState & {
+  /** Turns the hard pause interrupted; 0/0 for soft. */
+  interrupted: { main: number; seats: number };
+};
 
 // GET /api/config
 /**

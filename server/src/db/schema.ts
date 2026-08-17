@@ -64,14 +64,16 @@ export const userSessions = sqliteTable("user_sessions", {
   /** HEAD when the first agent session was created; diff base for the summary. */
   runBaseCommit: text("run_base_commit"),
   /**
-   * Provider-capacity / budget pause. While `pauseReason` is set the run
-   * mints no turns: queued work stays queued, nothing is cancelled, nothing
-   * is salvaged-off-main. `pausedUntil` is the auto-resume time for capacity
-   * pauses; null for budget pauses (operator resumes). Columns, not a
-   * `runState` widening — a paused run is still `active` work.
+   * Provider-capacity / budget / operator pause. While `pauseReason` is set
+   * the run mints no turns: queued work stays queued, nothing is cancelled,
+   * nothing is salvaged-off-main. `pausedUntil` is the auto-resume time for
+   * capacity pauses; null for budget and operator pauses (the operator
+   * resumes). Columns, not a `runState` widening — a paused run is still
+   * `active` work. The pause is process-wide; every open session carries the
+   * same value so a restart can restore it.
    */
   pausedUntil: text("paused_until"),
-  pauseReason: text("pause_reason", { enum: ["capacity", "budget"] }),
+  pauseReason: text("pause_reason", { enum: ["capacity", "budget", "operator"] }),
   /** Optional spend ceiling (USD); crossing it pauses with reason "budget". */
   budgetUsd: real("budget_usd"),
   /**
