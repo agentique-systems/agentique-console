@@ -14,8 +14,9 @@ export interface InfraConfig {
   webDir: string;
   /**
    * The console's own skills plugin (server/skills). Shipped with the
-   * server, trusted like builtin profiles; loaded into every seat, where the
-   * SDK's `skills` filter decides what each seat actually sees.
+   * server, trusted like builtin profiles; loaded into every seat alongside
+   * the user/project skills the settings sources discover. A profile's
+   * `skills` names the ones its brief recommends; every skill stays visible.
    */
   skillsPluginDir: string;
   /**

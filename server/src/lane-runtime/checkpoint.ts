@@ -50,6 +50,8 @@ export async function checkpointQuery(sdk: ConsoleSdk, params: CheckpointQueryPa
   const append = `${params.systemPromptAppend}\nAll tools are disabled for this query. Do not attempt any tool call — emit only the structured checkpoint.`;
   const query = sdk.query({ prompt: params.prompt, options: {
     cwd: params.cwd, systemPrompt: { type: "preset", preset: "claude_code", append },
+    // Deliberately hermetic (lanes run CLI-parity): a checkpoint reads no
+    // CLAUDE.md, loads no skills, and needs neither.
     settingSources: [], includePartialMessages: false, permissionMode: "plan", allowedTools: [],
     disallowedTools: CHECKPOINT_DENIED_TOOLS,
     // MUST be object-rooted: the CLI turns this into a synthetic

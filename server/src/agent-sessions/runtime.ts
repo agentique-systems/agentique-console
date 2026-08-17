@@ -230,7 +230,9 @@ export class AgentRuntime implements Injector, TurnTracker {
       const options: SdkOptions = {
         cwd: seatRoot,
         systemPrompt: { type: "preset", preset: "claude_code", append: this.#deps.composer.systemPromptAppend(session, latestSeat, profile, rolePrompt) },
-        settingSources: [], includePartialMessages: true,
+        // CLI parity (see orchestrator/options.ts): CLAUDE.md, user/project
+        // settings and skills load exactly as they would for the operator.
+        settingSources: ["user", "project", "local"], includePartialMessages: true,
         permissionMode: profile.permissionMode,
         ...(profile.permissionMode === "bypassPermissions" ? { allowDangerouslySkipPermissions: true } : {}),
         allowedTools: [...profile.tools,
@@ -279,18 +281,16 @@ export class AgentRuntime implements Injector, TurnTracker {
         // nothing about them.
         mcpServers: { console_agent: mcp as never, ...declared } as never,
         ...(latestSeat.model ? { model: latestSeat.model } : {}),
-        // The console's skills plugin loads for EVERY seat; the `skills`
-        // filter below decides what each seat actually sees (empty list =
-        // nothing loads), so seats that opt out pay zero tokens. Skills are
-        // rotation-proof by construction: the snapshot's list respawns with
-        // every generation.
+        // The console's skills plugin loads for EVERY seat, alongside
+        // whatever user/project skills the settings sources discover.
         plugins: [
           { type: "local" as const, path: this.#deps.config.infra.skillsPluginDir },
           ...((profile.pluginPath && profile.source === "workspace") ? [{ type: "local" as const, path: profile.pluginPath }] : []),
         ],
-        // Always explicit: omitting the key lets the CLI fall back to the
-        // OPERATOR's personal skill listing despite settingSources: [].
-        skills: profile.skills ?? [],
+        // Every discovered skill is visible, like the CLI: the listing costs
+        // frontmatter only, bodies load on invocation. `profile.skills` is the
+        // RECOMMENDED list the capability brief names, not a filter.
+        skills: "all",
         // The operator's CONSOLE_EFFORT is an install-wide override, so it
         // outranks the profile's own pin; unset, the profile decides.
         ...(this.#seatEffort(profile) === undefined ? {} : { effort: this.#seatEffort(profile) }),

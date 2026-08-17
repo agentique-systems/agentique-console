@@ -59,6 +59,10 @@ describe("orchestrator options", () => {
     expect(options().sandbox).toBeUndefined();
   });
 
+  it("loads settings, CLAUDE.md and skills like the CLI", () => {
+    expect(options().settingSources).toEqual(["user", "project", "local"]);
+  });
+
   it("passes the resolved effort through unchanged, and omits the key when unset", () => {
     expect(options(true, "max").effort).toBe("max");
     expect("effort" in options()).toBe(false);

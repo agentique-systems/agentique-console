@@ -1,8 +1,9 @@
 /**
- * Assembles SDK Options for one orchestrator turn. Hermetic by construction:
- * settingSources [] keeps filesystem CLAUDE.md/hooks/skills out, and the tool
- * surface is the console MCP tools plus explicitly allowed builtins — every
- * messaging/task/scheduling path is console-owned and journaled.
+ * Assembles SDK Options for one orchestrator turn. Main sees the workspace
+ * exactly as an interactive Claude Code session would — CLAUDE.md, user and
+ * project settings, skills — and adds the console MCP tools on top; every
+ * messaging/task/scheduling path stays console-owned and journaled. Only the
+ * checkpoint and composer-rewrite queries are hermetic.
  */
 import type { SessionMode, SessionPhase } from "@agentique-console/shared";
 import type { EffortLevel } from "../sdk/effort.ts";
@@ -122,7 +123,9 @@ export function buildOrchestratorOptions(
         + (input.stateDigest ? `\n\n${input.stateDigest}` : "")
         + (input.autonomy === "away" ? "\n\nThe operator is AWAY: prefer proceeding on recommendations and provisional decisions; queue only irreversible choices for their return." : ""),
     },
-    settingSources: [],
+    // CLI parity: without "project" the CLI never loads CLAUDE.md, and the
+    // agent re-derives per session what the operator wrote down once.
+    settingSources: ["user", "project", "local"],
     includePartialMessages: true,
     permissionMode: planning ? "plan" : "default",
     ...(planning ? { planModeInstructions: PLAN_MODE_BODY } : {}),

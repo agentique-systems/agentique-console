@@ -99,7 +99,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
                   "Agent brief appended to the profile instructions",
                 ),
               model: z.string().optional().describe("Model override"),
-              skills: z.array(z.string()).optional().describe("Extra skills for this seat, from list_agent_profiles' catalog — union'd with the profile's defaults and pinned into the seat's snapshot (rotation-proof)."),
+              skills: z.array(z.string()).optional().describe("Extra skills to RECOMMEND to this seat, from list_agent_profiles' catalog — union'd with the profile's defaults, named in the seat's brief and pinned into its snapshot. Every discovered skill is visible to every seat; this decides which ones it is told to use."),
               owns: z.array(z.string()).default([]).describe("Files or directories this agent exclusively owns. Required for an agent that writes; leave empty for a read-only agent such as a reviewer — it owns no files."),
             }),
           )

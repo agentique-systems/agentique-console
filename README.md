@@ -82,6 +82,12 @@ Immutable built-ins are `coordinator`, `explorer`, `implementer`,
 Profiles define purpose, instructions, exact tools, permission mode, model and
 effort overrides, turn limit, and any MCP servers its agents get.
 
+Every lane sees the workspace as an interactive Claude Code session would: the
+CLI's user, project and local settings load (CLAUDE.md, permissions, skills,
+hooks), and every discovered skill is visible to every agent — a profile's
+`skills` list is the set its brief recommends, not a filter. Only the rotation
+checkpoint and the composer's rewrite pass run hermetically.
+
 Add custom profiles as workspace plugin bundles: a directory per profile under
 `.agentique/agents/<id>/`, holding an `agentique.profile.json` manifest (the id
 must match the directory) plus any Claude plugin components — `skills/`,
