@@ -219,7 +219,7 @@ export class AgentRuntime implements Injector, TurnTracker {
       const rolePrompt = contract.prompt(seatRole) ?? hubContract().promptPack.specialist!;
       const granted = grantedTools(contract.role(seatRole), profile, {
         tasks: Boolean(this.#deps.tasks), handoffs: Boolean(this.#deps.handoffs),
-        worktrees: Boolean(this.#deps.worktrees), user: Boolean(user),
+        worktrees: Boolean(this.#deps.worktrees), user: Boolean(user), specs: Boolean(this.#deps.specs),
         childSessions: this.#deps.config.policy.enableChildSessions !== false && session.depth < this.#deps.config.policy.maxSessionDepth,
         // Commission-time opt-in: the orchestrator flagged this session as
         // one whose ENTRY agent may nest, whatever the pattern.

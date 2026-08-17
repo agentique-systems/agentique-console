@@ -88,10 +88,10 @@ export function effectiveBuiltinTools(profile: AgentProfile, isolated: boolean):
 /**
  * How each governed tool is described to the agent holding (or lacking) it.
  * Grouped so the prose reads as sentences rather than as a tool manifest: a
- * group speaks when the profile has ANY of its tools, so an implementer with
+ * group speaks when the seat has ANY of its tools, so an implementer with
  * Edit and Write is not told it cannot edit because it lacks NotebookEdit.
- * `note` is a granted-only follow-up sentence, for a capability that needs
- * more than a clause.
+ * `deferred` names the group's tools that are absent from the turn-1 tool
+ * list and load only through ToolSearch — one combined sentence covers them.
  */
 const CAPABILITY_GROUPS = [
   {
@@ -106,25 +106,25 @@ const CAPABILITY_GROUPS = [
   },
   {
     tools: ["Bash"],
-    can: "run shell commands with Bash, including long-running ones in the background — background a server and read its output back rather than blocking a turn",
+    can: "run shell commands with Bash — background anything expected to exceed ~2 minutes with run_in_background and wait on Monitor or TaskOutput rather than blocking the turn or polling",
     cannot: "run any shell command",
     // Bash-holders also get Monitor/TaskOutput/TaskStop, but those are
-    // DEFERRED like the web pair. Without this note agents hunt for a wait
+    // DEFERRED like the web pair. Without naming them agents hunt for a wait
     // primitive (8 of 19 ToolSearch calls in a live run) or invent polling
     // loops that burn whole model turns on `true`.
-    note: 'Monitor, TaskOutput, and TaskStop may not appear in your tool list at the start of a turn. That means deferred, not absent: call ToolSearch with {"query": "select:Monitor,TaskOutput,TaskStop"} once, then use them normally. For any command expected to exceed ~2 minutes, run it with Bash run_in_background and wait on Monitor or TaskOutput instead of blocking the turn or polling in a loop.',
+    deferred: ["Monitor", "TaskOutput", "TaskStop"],
   },
   {
     tools: ["WebSearch", "WebFetch"],
     can: "search the web with WebSearch and read pages with WebFetch",
     cannot: "reach the web",
-    // The web tools are DEFERRED: they are absent from the turn-1 tool list
-    // and load only on request. Without this sentence a seat that reads its
-    // tool list concludes it has no web access and says so — which is exactly
-    // how a live run produced a sourceless research section.
-    note: 'WebSearch and WebFetch may not appear in your tool list at the start of a turn. That means deferred, not absent: call ToolSearch with {"query": "select:WebSearch,WebFetch"} once, then use them normally.',
+    // The web tools are DEFERRED: absent from the turn-1 tool list, loaded on
+    // request. Without naming them a seat that reads its tool list concludes
+    // it has no web access and says so — which is exactly how a live run
+    // produced a sourceless research section.
+    deferred: ["WebSearch", "WebFetch"],
   },
-] as const satisfies readonly { tools: readonly GovernedTool[]; can: string; cannot: string; note?: string }[];
+] as const satisfies readonly { tools: readonly GovernedTool[]; can: string; cannot: string; deferred?: readonly string[] }[];
 
 /**
  * Every governed tool must be described. Adding one to
@@ -136,10 +136,15 @@ type Undescribed = Exclude<GovernedTool, (typeof CAPABILITY_GROUPS)[number]["too
 type AssertNone<T extends never> = T;
 export type _AllGovernedToolsDescribed = AssertNone<Undescribed>;
 
+/**
+ * What the seat holds, said once and positively. The "cannot" line exists
+ * only for a seat whose profile is binding (no worktree): an isolated seat
+ * holds every builtin, so there is nothing to deny it.
+ */
 function capabilityBrief(profile: AgentProfile, hasWorktree: boolean): string {
   const can: string[] = [];
   const cannot: string[] = [];
-  const notes: string[] = [];
+  const deferred: string[] = [];
   const tools = effectiveBuiltinTools(profile, hasWorktree);
   // The merge rule stays profile-based (worktree-binding.ts): only a write
   // profile's worktree lands, so an isolated read-only seat must be told.
@@ -147,25 +152,25 @@ function capabilityBrief(profile: AgentProfile, hasWorktree: boolean): string {
   for (const group of CAPABILITY_GROUPS) {
     if (group.tools.some((tool) => tools.includes(tool))) {
       can.push(group.can);
-      if ("note" in group) notes.push(group.note);
+      if ("deferred" in group) deferred.push(...group.deferred);
     } else cannot.push(group.cannot);
   }
   // `?? {}`: a snapshot from before this field existed is cast, not parsed.
   const servers = Object.keys(profile.mcpServers ?? {});
-  if (servers.length > 0) {
-    can.push(`use the tools your MCP server(s) provide — ${servers.join(", ")}, named mcp__<server>__<tool>`);
-  } else cannot.push("reach any MCP server (your profile declares none)");
-  cannot.push("write outside your own working copy — teammates own theirs");
+  if (servers.length > 0) can.push(`use your MCP server(s) — ${servers.join(", ")}, tools named mcp__<server>__<tool>`);
   // The deferred-tools lesson, applied to skills: a capability nobody names
   // goes unused. Byte-stable when the list is empty.
   const skills = profile.skills ?? [];
-  return `## Your capabilities\nYou can: ${can.join("; ") || "nothing beyond your console coordination tools"}.\nYou cannot: ${cannot.join("; ")}.\n` +
-    `${notes.map((note) => `${note}\n`).join("")}` +
-    `${skills.length > 0 ? `You have skills loaded: ${skills.join(", ")}. Before starting work a skill covers, invoke it with the Skill tool and follow it — do not re-derive procedure it already settles.\n` : ""}` +
-    `${hasWorktree ? (writes
-      ? "Your cwd is an isolated worktree; teammates and the coordinator cannot see your files until the Console merges them when you report completed.\n"
-      : "Your cwd is an isolated worktree — a stable snapshot for your review. It is discarded, not merged, when you report: describe defects and fixes in your report rather than applying them.\n") : ""}` +
-    `If an assignment needs something in the "cannot" list, say so immediately in a handoff rather than working around it — the limit is real and will not change mid-run.`;
+  const lines = [
+    `You can: ${can.join("; ")}.`,
+    ...(cannot.length > 0 ? [`You cannot: ${cannot.join("; ")}. If an assignment needs one of those, say so in a handoff rather than working around it — the limit is real for this run.`] : []),
+    ...(deferred.length > 0 ? [`${deferred.join(", ")} may be missing from your tool list at the start of a turn — deferred, not absent: load them once with ToolSearch {"query": "select:${deferred.join(",")}"} and use them normally.`] : []),
+    ...(skills.length > 0 ? [`Recommended skills: ${skills.join(", ")}. Invoke one with the Skill tool before starting work it covers.`] : []),
+    ...(hasWorktree ? [writes
+      ? "Your cwd is an isolated worktree; teammates cannot see your files until the Console merges them when you report completed."
+      : "Your cwd is an isolated worktree — a stable snapshot for your review. It is discarded, not merged, when you report: describe defects and fixes in your report rather than applying them."] : []),
+  ];
+  return `## Your capabilities\n${lines.join("\n")}`;
 }
 
 /** Compact capability tag for roster lines — what this agent can be asked to do. */
@@ -186,15 +191,14 @@ export function seatUserMessage(text: string): SdkUserMessageLike {
   return { type: "user", message: { role: "user", content: [{ type: "text", text }] }, parent_tool_use_id: null, shouldQuery: true };
 }
 
-/** The agent's messaging documentation. */
+/**
+ * The agent's messaging documentation. The mechanics (fields, scheduling,
+ * long bodies) live in the tool descriptions; this says who is here and how
+ * to reach them.
+ */
 function seatMessagingBrief(roster: string, addressing: string): string {
-  return `Communication: your plain text output reaches no one. To transfer anything — an assignment, progress, findings, a failure, a final result — call send_handoff. Its fields are typed; there is no JSON to write or escape. Participants: ${roster}. ` +
-    `${addressing} ` +
-    `The Human Operator is reachable separately and directly with ask_operator — that path does not go through anyone. ` +
-    `Put the substance in stateSummary — the findings themselves, not a description of having found them — and say what you could not verify in uncertainty. ` +
-    `Size is not a constraint on truth: if the substance is long, put it in write_note and reference the artifact. Never shorten a finding to fit. ` +
-    `If send_handoff ever rejects your input as unparseable, do NOT retry the same payload — move the body into write_note and re-send with the reference. ` +
-    `Never use the Agent or SendMessage tools.`;
+  return `## Working with the team\nParticipants: ${roster}.\n${addressing}\n` +
+    `Everything you transfer — an assignment, progress, findings, a failure, a result — goes through send_handoff; your plain text output reaches no one. Put the substance itself in stateSummary and long material in write_note. The Human Operator is reachable directly with ask_operator.`;
 }
 
 /** The question text of an interaction, for prompts and operator-facing lines. */
@@ -238,7 +242,9 @@ export class PromptComposer {
    * last.
    */
   systemPromptAppend(session: AgentSessionRow, seat: AgentRow, profile: AgentProfile, rolePrompt: RolePrompt): string {
-    return `${seat.instructions}\n\n${capabilityBrief(profile, seat.worktreePath !== null)}${seat.worktreePath ? "\nNever run git commit — the Console lands your work when you report completed. Install dependencies only if you must run validation." : ""}\n\n${seatMessagingBrief(this.rosterLine(session), rolePrompt.addressing)}\n${rolePrompt.protocol}${this.#decisionContext(session)}${this.#specContext(session)}${this.#checkpointContext(seat)}`;
+    const identity = rolePrompt.brief === undefined ? seat.instructions : `${seat.instructions}\n\n${rolePrompt.brief}`;
+    const worktree = seat.worktreePath ? "\nThe Console commits and lands your work when you report; do not run git commit yourself." : "";
+    return `${identity}\n\n${capabilityBrief(profile, seat.worktreePath !== null)}${worktree}\n\n${seatMessagingBrief(this.rosterLine(session), rolePrompt.addressing)}\n${rolePrompt.protocol}${this.#decisionContext(session)}${this.#specContext(session)}${this.#checkpointContext(seat)}`;
   }
 
   /**
@@ -447,7 +453,7 @@ export class PromptComposer {
   #decisionContext(session: AgentSessionRow): string {
     const digest = this.#deps.decisions.digest(session.userSessionId);
     if (digest === "") return "";
-    return `\n\n## Operator decisions (authoritative)\nThe operator made these. Do not re-litigate them, do not contradict them, and do not ask again.\n${digest}`;
+    return `\n\n## Operator decisions (authoritative)\nAlready decided for this run — act on them as given.\n${digest}`;
   }
 
   /**
@@ -461,10 +467,28 @@ export class PromptComposer {
     return `\n\n${digest}\nYour work is checked against this specification. read_spec returns the full text.`;
   }
 
+  /**
+   * Where the previous generation left off (rotation on only), as prose the
+   * successor can act on. The lossless record stays one read_handoff away.
+   */
   #checkpointContext(seat: AgentRow): string {
     if (seat.latestHandoffId && this.#deps.handoffs) {
       const handoff = this.#deps.handoffs.get(seat.latestHandoffId);
-      return `\n\n## Rotation checkpoint ${handoff.metadata.id}\n${JSON.stringify({ core: handoff.core, extension: handoff.extension }, null, 2)}`;
+      // `latestHandoffId` is the seat's inbound pointer: for a seat that has
+      // not rotated it names its briefing or last assignment, which the lane
+      // already delivered — only a real checkpoint is worth a tail.
+      if (!handoff.metadata.checkpoint) return "";
+      const { core } = handoff;
+      const evidence = core.state.evidence.map((ref) => `${ref.kind}:${ref.ref}${ref.label ? ` (${ref.label})` : ""}`);
+      const lines = [
+        `Action: ${core.action} — ${core.status}, risk ${core.risk}.`,
+        `State: ${core.state.summary}`,
+        ...(core.result.summary ? [`Result: ${core.result.summary}`] : []),
+        ...(core.uncertainty.length > 0 ? [`Uncertain: ${core.uncertainty.join(" | ")}`] : []),
+        ...(core.nextAction ? [`Next: ${core.nextAction}`] : []),
+        ...(evidence.length > 0 ? [`Evidence: ${evidence.join("; ")}`] : []),
+      ];
+      return `\n\n## Where you left off (checkpoint ${handoff.metadata.id})\nYour previous context wrote this before rotating; read_handoff returns the full record. Treat it as a starting point and verify anything risky.\n${lines.join("\n")}`;
     }
     return "";
   }

@@ -1,7 +1,9 @@
 /**
- * Pins the hub agents' system-prompt append byte-for-byte. Prompt caching and
- * operator familiarity both require these strings stable — a diff in this
- * snapshot is a regression, not an update to accept.
+ * Pins the hub agents' system-prompt append byte-for-byte, and its size.
+ * Prompt caching and operator familiarity both require these strings stable —
+ * a diff in this snapshot is a regression, not an update to accept — and the
+ * byte budget keeps the append a brief rather than a manual: everything here
+ * competes with the native system prompt for the model's attention.
  */
 import { describe, expect, it } from "vitest";
 import { initMessage, sendHandoffUse, successMessage } from "../sdk/fake.ts";
@@ -61,5 +63,11 @@ describe("hub prompt byte-identity", () => {
     expect(coordinator).toContain("digger (researcher; can: read-only, reads the web");
     // The grant reaches every evidence-gathering profile, not just researcher.
     expect(specialist).toContain("search the web with WebSearch");
+    // The byte budget: down from 5.1/4.4/4.3 KB. A regression guard, not a
+    // target — the roster line grows with the crew.
+    for (const append of [coordinator!, specialist!, researcher!]) {
+      const head = append.split("\n\n## Where you left off")[0]!;
+      expect(Buffer.byteLength(head, "utf8")).toBeLessThanOrEqual(3_000);
+    }
   });
 });

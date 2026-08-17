@@ -45,6 +45,15 @@ describe("catalog-derived rotation limits", () => {
     const rotated = events.filter((event) => event.type === "agent_session.context.rotated");
     expect(rotated).toHaveLength(1);
     expect(rotated[0]?.payload).toMatchObject({ agent: "scout", reason: "token_limit" });
+    // The successor's prompt carries the checkpoint as prose, not JSON — and
+    // only a real checkpoint: the first generation's tail was empty.
+    const appends = h.fake.captured.options
+      .map((options) => (typeof options.systemPrompt === "object" && !Array.isArray(options.systemPrompt) ? options.systemPrompt.append ?? "" : ""))
+      .filter((append) => append.startsWith("Inspect only the assigned scope"));
+    expect(appends.length).toBeGreaterThanOrEqual(2);
+    expect(appends[0]).not.toContain("## Where you left off");
+    expect(appends.at(-1)).toContain("## Where you left off (checkpoint handoff_");
+    expect(appends.at(-1)).not.toContain('"schemaVersion"');
   });
 
   it("a known agent model keeps the configured 120K limit binding at 70K tokens", async () => {

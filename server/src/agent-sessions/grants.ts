@@ -20,7 +20,7 @@ import type { AgentProfile } from "../agent-profiles/registry.ts";
 
 export type AgentToolName =
   | "send_handoff" | "read_artifact" | "write_note" | "ask_operator" | "roster_status"
-  | "read_handoff" | "report_handoff_discrepancy" | "forward_message"
+  | "read_handoff" | "report_handoff_discrepancy" | "forward_message" | "read_spec"
   | "task_list" | "task_create" | "task_update" | "assignment_cancel"
   | "dispatch_work_items" | "create_child_session" | "abandon_child_session";
 
@@ -30,6 +30,8 @@ export interface AgentGrantDeps {
   handoffs: boolean;
   worktrees: boolean;
   user: boolean;
+  /** The spec service exists — `read_spec` is registered whenever it does. */
+  specs: boolean;
   /** The session was created with allowChildSessions and this seat is its entry agent. */
   sessionAllowsChildren?: boolean;
   /**
@@ -51,6 +53,9 @@ export function grantedTools(
     tools.add("read_handoff"); tools.add("report_handoff_discrepancy");
     if (grants.has("forward_message")) tools.add("forward_message");
   }
+  // Every seat: the prompt points at it, so a default-permission seat must
+  // hold the approval — registered-but-unapproved was a live gap.
+  if (deps.specs) tools.add("read_spec");
   if (deps.tasks && deps.user) {
     tools.add("task_list");
     if (grants.has("tasks_write")) { tools.add("task_create"); tools.add("task_update"); tools.add("assignment_cancel"); }

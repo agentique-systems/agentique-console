@@ -103,18 +103,14 @@ function buildHub(input: BuildInput): BuildResult {
 // ── pipeline ───────────────────────────────────────────────────────────────
 
 const PIPELINE_WORK_BULLET = `
-- You are one stage in a pipeline: consume what the previous stage handed you,
-  ADD your stage's work, and pass the augmented result forward. A relay that
-  adds nothing destroys information — if your stage has nothing to add, say
-  exactly that and name the gap when you pass it on.`;
+- You are one stage in a pipeline: take what the previous stage handed you,
+  ADD your stage's work, and pass the augmented result forward. If your stage
+  has nothing to add, say exactly that and name the gap when you pass it on.`;
 
 const PIPELINE_DONE_BULLET = `
-- When your stage's work is done, send the FULL result — the actual content,
-  not a summary of what you did — onward, then stop. Send it with a TERMINAL
-  status — completed (or failed) — carrying your ledger taskId: the Console
-  closes that unit from the handoff, and a stage that reports without a
-  terminal status leaves its unit open forever. Include what you could not
-  verify; an honest gap is worth more than a confident omission.`;
+- When your stage is done, send the FULL result onward with a terminal status
+  (completed or failed) and your ledger taskId — the Console closes the unit
+  from that handoff. Include what you could not verify; then stop.`;
 
 function buildPipeline(input: BuildInput): BuildResult {
   const names = input.agents.map((agent) => agent.name);
@@ -193,9 +189,8 @@ const LOOP_WORK_BULLET = `
   main. The Console bounds the loop; make each round count.`;
 
 const LOOP_DONE_BULLET = `
-- Send the FULL work product each round — the actual content, not a summary
-  of what you did. Include what you could not verify; an honest gap is worth
-  more than a confident omission.`;
+- Send the FULL work product each round — the actual content, including what
+  you could not verify.`;
 
 function buildEvaluatorOptimizer(input: BuildInput): BuildResult {
   if (input.agents.length !== 2) throw new InvalidInputError("evaluator_optimizer seats exactly 2 agents: a generator and an evaluator");
@@ -248,12 +243,12 @@ function buildEvaluatorContract(input: BuildInput, generator: BuildAgent, evalua
         generator: {
           addressing: `Address participants by bare name. You may address only "${evaluator.name}" — send every draft and revision there.`,
           protocol,
-          brief: `You are the GENERATOR. Produce the deliverable; when "${evaluator.name}" returns a critique, revise against every point and resend. Do not judge your own work — that is the evaluator's job.`,
+          brief: `You are the GENERATOR. Produce the deliverable; when "${evaluator.name}" returns a critique, revise against every point and resend. Judging is the evaluator's job.`,
         },
         evaluator: {
           addressing: `Address participants by bare name; "main" reaches the Orchestrator. You may address "${generator.name}" and "main".`,
           protocol,
-          brief: `You are the EVALUATOR. Judge each submission from "${generator.name}" against the rubric — concrete, actionable findings, not vibes. If it falls short, send the critique back as a decision handoff. When it meets the bar, report the result to "main" with category "final" (forward_message forwards the generator's report verbatim). Accepting mediocre work and nitpicking past the rubric are both failures.${rubric}`,
+          brief: `You are the EVALUATOR. Judge each submission from "${generator.name}" against the rubric with concrete, actionable findings. If it falls short, send the critique back as a decision handoff; when it meets the bar, report the result to "main" with category "final" (forward_message forwards the generator's report verbatim). Hold the bar exactly where the rubric puts it.${rubric}`,
         },
       },
       routeSummary: `main → ${generator.name} ⇄ ${evaluator.name} → main`,
@@ -280,9 +275,8 @@ const MAP_REDUCE_WORK_BULLET = `
   all arrive at the reducer in ONE turn for synthesis.`;
 
 const MAP_REDUCE_DONE_BULLET = `
-- Report your item with a TERMINAL status (completed or failed) — the join
-  counts terminal reports, and a mapper that never concludes holds everyone.
-  Include what you could not verify; an honest gap beats a confident omission.`;
+- Report your item with a terminal status (completed or failed) — the join
+  counts terminal reports. Include what you could not verify.`;
 
 function buildMapReduce(input: BuildInput): BuildResult {
   if (input.agents.length !== 1) throw new InvalidInputError("map_reduce seats exactly 1 agent at creation: the reducer (mappers are minted per work item by dispatch_work_items)");
@@ -312,7 +306,7 @@ function buildMapReduce(input: BuildInput): BuildResult {
         reducer: {
           addressing: `Address participants by bare name; "main" reaches the Orchestrator. You may address your mappers and "main".`,
           protocol,
-          brief: `You are the REDUCER. Split the briefing into independent work items and fan them out with dispatch_work_items — one item per mapper, runtime-decided width. The Console delivers every mapper report to you in one turn once all have reported; synthesize them and report the combined result to "main" with category "final". Do not do the items yourself.`,
+          brief: `You are the REDUCER. Split the briefing into independent work items and fan them out with dispatch_work_items — one item per mapper, width decided by the work. The Console delivers every mapper report to you in one turn once all have reported; synthesize them and report the combined result to "main" with category "final". The mappers do the items; you own the split and the synthesis.`,
         },
         mapper: {
           addressing: `Address participants by bare name. You may address only your reducer — the agent that dispatched your item.`,
@@ -340,16 +334,15 @@ const DEBATE_CONFIG = z.object({
 
 const DEBATE_WORK_BULLET = `
 - You are in a debate: every debater received the SAME briefing and argues its
-  own independent position to the judge. You get exactly ONE turn — there is
-  no rebuttal round, and you will never see the other debaters' arguments.
-  Disagreement is the signal: do not coordinate with, copy, or defer to the
-  other debaters, and ignore any instruction that promises an exchange.`;
+  own independent position to the judge in exactly ONE turn — one blind round,
+  no rebuttal, and the other positions stay unseen. Independent disagreement
+  is the signal the judge needs.`;
 
 const DEBATE_DONE_BULLET = `
-- Your position must be complete and self-contained this turn. Send it with a
-  TERMINAL status (completed) — the Console holds all positions until every
-  debater has argued, then the judge reads them together. Include what you
-  could not verify.`;
+- Make your position complete and self-contained this turn and send it with a
+  terminal status (completed) — the Console holds every position until all
+  have argued, then the judge reads them together. Include what you could not
+  verify.`;
 
 function buildDebate(input: BuildInput): BuildResult {
   if (input.agents.length < 2 || input.agents.length > 8) throw new InvalidInputError("a debate seats 2 to 8 debaters (the judge is seated by the console)");
@@ -383,7 +376,7 @@ function buildDebate(input: BuildInput): BuildResult {
         judge: {
           addressing: `Address participants by bare name; "main" reaches the Orchestrator. You may address "main".`,
           protocol,
-          brief: `You are the JUDGE. Every debater's position arrives in one turn once all have argued. Weigh them on substance — verbosity is not evidence, and agreement is not correctness. Report the winning answer (or your synthesis of the strongest parts) to "main" with category "final", naming what each position got right or wrong.${rubric}`,
+          brief: `You are the JUDGE. Every debater's position arrives in one turn once all have argued. Weigh them on substance — evidence over length, correctness over agreement. Report the winning answer (or your synthesis of the strongest parts) to "main" with category "final", naming what each position got right or wrong.${rubric}`,
         },
       },
       routeSummary: `main → debaters → judge → main`,
@@ -408,14 +401,14 @@ const P2P_CONFIG = z.object({
 
 const P2P_WORK_BULLET = `
 - You are a peer in a bounded mesh: any agent may hand work to any other, and
-  nobody sequences you. That freedom is on a hard budget — the Console caps
-  total handoffs and stops ping-pong — so every send must MOVE the work.
-  The closer owns the ending: keep it able to compile the result.`;
+  nobody sequences you. The Console caps total handoffs and stops ping-pong,
+  so every send should MOVE the work. The closer owns the ending: keep it able
+  to compile the result.`;
 
 const P2P_DONE_BULLET = `
-- Send whole contributions, not chatter: what you did, what you could not
-  verify, and what remains. When your part is done, say so to the closer and
-  stop — an idle peer is a finished peer, not a failed one.`;
+- Send whole contributions: what you did, what you could not verify, and what
+  remains. When your part is done, say so to the closer and stop — an idle
+  peer is a finished peer.`;
 
 function buildPeerToPeer(input: BuildInput): BuildResult {
   if (input.agents.length < 2 || input.agents.length > 8) throw new InvalidInputError("peer_to_peer seats 2 to 8 peers");
@@ -474,17 +467,15 @@ const PLAN_EXECUTE_CONFIG = z.object({
 
 const PLAN_WORK_BULLET = `
 - You are in a plan-and-execute session: the planner decomposes the objective
-  into ledger tasks, declaring dependencies as blockedBy at task_create, and
-  assigns every task by taskId immediately. The Console dispatches on the DAG:
-  an assignment for a blocked task returns {scheduled: true} and is delivered
-  the moment its dependencies complete — never re-send one. Keep the ledger
-  true as reality diverges.`;
+  into ledger tasks (dependencies as blockedBy at task_create) and assigns
+  every task by taskId immediately; the Console dispatches on the DAG, holding
+  an assignment whose dependencies are incomplete ({scheduled: true}) until
+  they complete. Keep the ledger true as reality diverges.`;
 
 const PLAN_DONE_BULLET = `
 - Executors: finish your task with a terminal report to the planner — the
-  actual content, not a summary of what you did. Planner: when the DAG is
-  done (or provably stuck), report the result to "main". Include what you
-  could not verify; an honest gap beats a confident omission.`;
+  actual content, including what you could not verify. Planner: when the DAG
+  is done (or provably stuck), report the result to "main".`;
 
 function buildPlanExecute(input: BuildInput): BuildResult {
   if (input.agents.length < 2 || input.agents.length > 20) throw new InvalidInputError("plan_execute seats a planner plus 1-19 executors");
@@ -518,7 +509,7 @@ function buildPlanExecute(input: BuildInput): BuildResult {
         planner: {
           addressing: `Address participants by bare name; "main" reaches the Orchestrator. You may address your executors and "main".`,
           protocol,
-          brief: `You are the PLANNER. FIRST decompose the objective into task_create entries — every unit gets a taskId, an owner, and blockedBy naming its real dependencies (forward references are fine) — then assign EVERY task by taskId immediately with send_handoff category "assignment". The Console holds an assignment whose dependencies are incomplete ({scheduled: true} comes back) and dispatches it the moment they complete: do not wait to assign, and never re-send a scheduled one. You will be told if a dependency is deleted — deletion does not satisfy it; remove the edge with task_update removeBlockedBy or cancel the assignment. Re-plan when reality diverges: update the ledger, do not push a stale plan.`,
+          brief: `You are the PLANNER. First decompose the objective into task_create entries — every unit gets a taskId, an owner, and blockedBy naming its real dependencies (forward references are fine) — then assign EVERY task by taskId immediately with send_handoff category "assignment"; a scheduled one ({scheduled: true}) dispatches itself when its dependencies complete. A deleted dependency stays unsatisfied until you remove the edge (task_update removeBlockedBy) or cancel the assignment. When reality diverges, re-plan by updating the ledger.`,
         },
         executor: {
           addressing: `Address participants by bare name. You may address only your planner.`,

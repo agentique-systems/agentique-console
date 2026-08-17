@@ -31,11 +31,11 @@ function makeAgent(over: Partial<AgentRow>): AgentRow {
 
 function registeredNames(agent: AgentRow, profile: AgentProfile, roleName: string): Set<string> {
   const hub = hubContract();
-  const deps: AgentGrantDeps = { tasks: true, handoffs: true, worktrees: true, user: true, childSessions: true };
+  const deps: AgentGrantDeps = { tasks: true, handoffs: true, worktrees: true, user: true, specs: true, childSessions: true };
   const granted = grantedTools(hub.roles[roleName], profile, deps);
   const ctx = {
     sdk: stubSdk,
-    deps: { repo: {}, bus: {}, tasks: {}, handoffs: {}, worktrees: {} },
+    deps: { repo: {}, bus: {}, tasks: {}, handoffs: {}, worktrees: {}, specs: {} },
     session: { id: "as1", userSessionId: "us1" } as AgentSessionRow,
     agent, profile,
     user: { workspaceId: "ws" } as UserSessionRow,
@@ -55,7 +55,7 @@ function registeredNames(agent: AgentRow, profile: AgentProfile, roleName: strin
 }
 
 function grantedNames(profile: AgentProfile, roleName: string): Set<string> {
-  const deps: AgentGrantDeps = { tasks: true, handoffs: true, worktrees: true, user: true, childSessions: true };
+  const deps: AgentGrantDeps = { tasks: true, handoffs: true, worktrees: true, user: true, specs: true, childSessions: true };
   return new Set(grantedTools(hubContract().roles[roleName], profile, deps));
 }
 
