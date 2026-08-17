@@ -10,6 +10,7 @@ import type {
   ListTasksResponse,
   ListUserSessionsResponse,
   StatsResponse,
+  SystemPauseState,
   TranscriptResponse,
   Workspace,
   SessionTreeResponse,
@@ -41,6 +42,18 @@ export function useConfig() {
     queryKey: keys.config,
     queryFn: () => apiFetch<ConfigResponse>("/api/config"),
     staleTime: Infinity,
+  });
+}
+
+/**
+ * The whole-system pause. The spine's `system.pause.changed` writes the
+ * payload straight into this key; the interval is only the reconnect belt.
+ */
+export function useSystemPause() {
+  return useQuery({
+    queryKey: keys.system.pause,
+    queryFn: () => apiFetch<SystemPauseState>("/api/system/pause"),
+    ...LIVE,
   });
 }
 

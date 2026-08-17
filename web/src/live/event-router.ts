@@ -1,6 +1,6 @@
 import type { QueryClient } from "@tanstack/react-query";
 
-import type { AgentActivityChangedPayload, ConsoleEvent, EventScope } from "@agentique-console/shared";
+import type { AgentActivityChangedPayload, ConsoleEvent, EventScope, SystemPauseState } from "@agentique-console/shared";
 
 import { keys } from "@/api/keys";
 import { agentStreamKey, userStreamKey } from "@/live/watched";
@@ -31,6 +31,8 @@ export interface RouterDeps {
   ): void;
   /** Transient gate: deltas for unwatched sessions are dropped here. */
   isWatched(key: string): boolean;
+  /** The whole-system pause flipped: the payload IS the state — written straight into the cache. */
+  setSystemPause(state: SystemPauseState): void;
 }
 
 /** The session id a transient frame's scope names — the owning stream. */
@@ -78,6 +80,11 @@ export function routeEvent(event: ConsoleEvent, deps: RouterDeps): void {
     case "workspace.updated":
       deps.invalidate(keys.workspaces);
       break;
+    // Per-session pause columns (pauseReason/pausedUntil) ride the detail rows.
+    case "run.capacity.paused":
+    case "run.capacity.resumed":
+      deps.invalidate(keys.userSessions.all);
+      break;
     case "agent_session.created":
     case "agent_session.status.changed":
     case "agent_session.turn.started":
@@ -112,6 +119,10 @@ export function routeEvent(event: ConsoleEvent, deps: RouterDeps): void {
     // for sessions whose transcript may not be mounted.
     case "agent_session.activity.changed":
       deps.ingestAgentActivity(event.payload);
+      return;
+    // The install-wide pause: one scopeless event, one cache write.
+    case "system.pause.changed":
+      deps.setSystemPause(event.payload);
       return;
 
     // 2a. Transient stream frames: watched sessions only — an unwatched

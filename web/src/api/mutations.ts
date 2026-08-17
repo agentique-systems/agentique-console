@@ -8,7 +8,10 @@ import type {
   ImproveMessageResponse,
   Interaction,
   PatchUserSessionBody,
+  PauseSystemBody,
+  PauseSystemResponse,
   RunSignoffBody,
+  SystemPauseState,
   PostMessageResponse,
   ResolveInteractionBody,
   ScheduledAssignment,
@@ -135,6 +138,27 @@ export function useImproveMessage() {
         method: "POST",
         body: JSON.stringify(body),
       }),
+  });
+}
+
+/**
+ * The top bar's Pause: the whole system, every lane. The response IS the new
+ * state, so the cache flips at once instead of waiting on the spine.
+ */
+export function usePauseSystem() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: PauseSystemBody = {}) =>
+      apiFetch<PauseSystemResponse>("/api/system/pause", { method: "POST", body: JSON.stringify(body) }),
+    onSuccess: ({ interrupted: _interrupted, ...state }) => queryClient.setQueryData<SystemPauseState>(keys.system.pause, state),
+  });
+}
+
+export function useResumeSystem() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => apiFetch<SystemPauseState>("/api/system/resume", { method: "POST" }),
+    onSuccess: (state) => queryClient.setQueryData<SystemPauseState>(keys.system.pause, state),
   });
 }
 

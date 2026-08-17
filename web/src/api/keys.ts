@@ -12,6 +12,10 @@ export const keys = {
   },
   /** Server-resolved defaults. Fixed for the life of the process. */
   config: ["config"] as const,
+  /** Install-wide switches — the whole-system pause. Fed by `system.pause.changed`. */
+  system: {
+    pause: ["system", "pause"] as const,
+  },
   workspaces: ["workspaces"] as const,
   userSessions: {
     all: ["user-sessions"] as const,

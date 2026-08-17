@@ -19,6 +19,7 @@ function deps(): RouterDeps & { setAwaitingInput: ReturnType<typeof vi.fn> } {
     setAwaitingInput: vi.fn(),
     pulseFlow: vi.fn(),
     isWatched: () => true,
+    setSystemPause: vi.fn(),
   } as unknown as RouterDeps & { setAwaitingInput: ReturnType<typeof vi.fn> };
 }
 
@@ -125,6 +126,14 @@ describe("routeEvent — orchestration surfaces", () => {
       type: "user_session.state.updated", seq: 31, ts: "2026-08-09T10:06:00.000Z", userSessionId: "us_1",
       payload: { userSessionId: "us_1", revision: 1, trigger: "commission", sections: ["strategy"], counts: { uncertainties: 0, assumptions: 0, risks: 0 } },
     } as unknown as ConsoleEvent, d);
+    expect(d.invalidate).toHaveBeenCalledWith(["user-sessions"]);
+  });
+  it("system.pause.changed writes the snapshot straight into the cache; run.capacity.* refresh sessions", () => {
+    const d = deps();
+    const state = { paused: true, reason: "operator" as const, since: "2026-08-17T20:14:00.000Z", until: null };
+    routeEvent({ type: "system.pause.changed", seq: 9, ts: "2026-08-17T20:14:00.000Z", payload: state } as unknown as ConsoleEvent, d);
+    expect(d.setSystemPause).toHaveBeenCalledWith(state);
+    routeEvent({ type: "run.capacity.paused", seq: 10, ts: "2026-08-17T20:14:00.000Z", userSessionId: "us_1", payload: { userSessionId: "us_1", reason: "operator", until: null } } as unknown as ConsoleEvent, d);
     expect(d.invalidate).toHaveBeenCalledWith(["user-sessions"]);
   });
 });
