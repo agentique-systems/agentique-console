@@ -2,16 +2,16 @@ import type { FastifyInstance } from "fastify";
 import type { StatsResponse } from "@agentique-console/shared";
 import type { AppContext } from "../../context.ts";
 import { writeSse } from "../sse.ts";
-import { notFound } from "../errors.ts";
+import { NotFoundError } from "../../errors.ts";
 
 export function registerEventRoutes(app: FastifyInstance, ctx: AppContext): void {
   app.get("/api/stats", async (): Promise<StatsResponse> => {
-    return { lastEventSeq: ctx.bus.headSeq() };
+    return { lastEventSeq: ctx.app.bus.headSeq() };
   });
 
   app.get<{ Params: { id: string } }>("/api/artifacts/:id", async (request, reply) => {
-    const artifact = ctx.bus.getArtifact(request.params.id);
-    if (!artifact) throw notFound(`no artifact ${request.params.id}`);
+    const artifact = ctx.app.artifacts.get(request.params.id);
+    if (!artifact) throw new NotFoundError(`no artifact ${request.params.id}`);
     if (artifact.mediaType.endsWith(";base64")) {
       reply.header("content-type", artifact.mediaType.slice(0, -7));
       return reply.send(Buffer.from(artifact.content, "base64"));
@@ -32,11 +32,11 @@ export function registerEventRoutes(app: FastifyInstance, ctx: AppContext): void
         request.query.fromSeq !== undefined
           ? Number(request.query.fromSeq)
           : undefined;
-      const fromSeq = headerSeq ?? querySeq ?? ctx.bus.headSeq() + 1;
+      const fromSeq = headerSeq ?? querySeq ?? ctx.app.bus.headSeq() + 1;
       await writeSse(
         request,
         reply,
-        ctx.bus.readWithSeq({ fromSeq, follow: true }),
+        ctx.app.bus.readWithSeq({ fromSeq, follow: true }),
       );
     },
   );

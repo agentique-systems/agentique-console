@@ -34,21 +34,21 @@ describe("OrchestratorRunner", () => {
     const events = await collected;
     const types = events.map((e) => e.type);
     expect(types).toEqual([
-      "user_session.message", // operator
+      "user_session.message.appended", // operator
       "user_session.turn.started",
-      "agent.state", // thinking
+      "agent_session.activity.changed", // thinking
       "stream.reasoning",
-      "agent.state", // responding
+      "agent_session.activity.changed", // responding
       "stream.delta",
       "stream.delta",
-      "user_session.message", // orchestrator
+      "user_session.message.appended", // orchestrator
       "usage.recorded",
-      "agent.state", // idle
+      "agent_session.activity.changed", // idle
       "user_session.turn.settled",
     ]);
 
     const orchestratorMsg = events.filter(
-      (e) => e.type === "user_session.message",
+      (e) => e.type === "user_session.message.appended",
     )[1];
     expect(orchestratorMsg?.payload).toMatchObject({
       message: {
@@ -90,7 +90,7 @@ describe("OrchestratorRunner", () => {
     const events = await collected;
 
     const details = events
-      .filter((e) => e.type === "agent.state")
+      .filter((e) => e.type === "agent_session.activity.changed")
       .map((e) => (e.payload as { detail?: string }).detail)
       .filter((detail) => detail !== undefined);
     expect(details).toEqual([
@@ -103,12 +103,12 @@ describe("OrchestratorRunner", () => {
       .slice(
         events.findIndex(
           (e) =>
-            e.type === "user_session.message" &&
+            e.type === "user_session.message.appended" &&
             (e.payload as { message: { text: string } }).message.text ===
               "finally",
         ),
       )
-      .filter((e) => e.type === "agent.state");
+      .filter((e) => e.type === "agent_session.activity.changed");
     expect(
       afterText.every((e) => (e.payload as { detail?: string }).detail === undefined),
     ).toBe(true);
@@ -127,8 +127,8 @@ describe("OrchestratorRunner", () => {
     h.runner.postOperatorMessage(sessionId, "read something");
     const events = await collected;
 
-    const call = events.find((e) => e.type === "user_session.tool.call");
-    const result = events.find((e) => e.type === "user_session.tool.result");
+    const call = events.find((e) => e.type === "user_session.tool.called");
+    const result = events.find((e) => e.type === "user_session.tool.completed");
     expect(call?.payload).toMatchObject({
       callId: "tu_1",
       name: "Read",
@@ -236,7 +236,7 @@ describe("OrchestratorRunner", () => {
       answers: { "Which database?": ["SQLite"] },
     });
     const reply = events
-      .filter((e) => e.type === "user_session.message")
+      .filter((e) => e.type === "user_session.message.appended")
       .at(-1);
     expect(reply?.payload).toMatchObject({
       message: { text: "You chose SQLite" },
@@ -269,13 +269,64 @@ describe("OrchestratorRunner", () => {
     );
     expect(answered?.payload).toMatchObject({ dismissed: true });
     const denyReply = events
-      .filter((e) => e.type === "user_session.message")
+      .filter((e) => e.type === "user_session.message.appended")
       .find((e) =>
         (e.payload as { message: { text: string } }).message.text.startsWith(
           "denied:",
         ),
       );
     expect(denyReply).toBeDefined();
+    // The deny itself carries the operator's words — the model must not have
+    // to correlate a contentless bounce with a later chat turn (a live run
+    // proceeded on defaults exactly because of that gap).
+    expect((denyReply?.payload as { message: { text: string } }).message.text)
+      .toContain('"actually just do it"');
+  });
+
+  it("free-text answers reach the model merged with any picked labels", async () => {
+    const h = makeHarness(async function* (options) {
+      yield initMessage();
+      const result = await options.canUseTool?.(
+        "AskUserQuestion",
+        {
+          questions: [
+            {
+              question: "Which renderer?",
+              options: [{ label: "ASCII" }, { label: "Canvas" }],
+            },
+          ],
+        },
+        permissionContext(),
+      );
+      if (result?.behavior === "allow") {
+        const answers = (result.updatedInput as { answers: Record<string, string> }).answers;
+        yield textMessage(`Renderer: ${answers["Which renderer?"]}`);
+      } else {
+        yield textMessage("No answer.");
+      }
+      yield successMessage();
+    });
+    const sessionId = h.addUserSession();
+    const collected = collectUntil(h.bus, settled);
+
+    h.runner.postOperatorMessage(sessionId, "build the game");
+    await collectUntil(h.bus, (e) => e.type === "user_session.question.asked");
+    const pending = h.interactions.listPending(sessionId);
+    // Main-lane cards accept free text now; the operator's own words outrank
+    // the offered options.
+    expect(pending[0]?.allowFreeText).toBe(true);
+    h.interactions.resolveFromApi(sessionId, pending[0]!.id, {
+      answers: {},
+      freeText: { "Which renderer?": "use three.js" },
+    });
+
+    const events = await collected;
+    const reply = events
+      .filter((e) => e.type === "user_session.message.appended")
+      .at(-1);
+    expect(reply?.payload).toMatchObject({
+      message: { text: "Renderer: use three.js" },
+    });
   });
 
   it("gates plan_execute sessions behind ExitPlanMode approval", async () => {
@@ -318,6 +369,10 @@ describe("OrchestratorRunner", () => {
     ).toMatchObject({ approved: true });
     expect(h.repo.getUserSession(sessionId)?.phase).toBe("executing");
     expect(h.fake.captured.options[0]?.permissionMode).toBe("plan");
+    // The approved plan IS the governing spec, LINKED to the card that
+    // approved it — the lineage the schema always promised.
+    const approvedSpec = h.app.specs.latestApproved(sessionId);
+    expect(approvedSpec?.interactionId).toBe(pending[0]!.id);
   });
 
   it("interrupt settles the turn aborted and the lane survives for the next", async () => {
@@ -356,6 +411,80 @@ describe("OrchestratorRunner", () => {
     await h.runner.closeAll();
   });
 
+  it("an operator pause cuts main's turn, holds its queue, and wakes it once on resume", async () => {
+    let calls = 0;
+    const h = makeHarness(async function* () {
+      calls += 1;
+      yield initMessage(`sess-${calls}`);
+      if (calls === 1) {
+        yield deltaMessage("working…");
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+      yield textMessage(`reply ${calls}`);
+      yield successMessage();
+    });
+    const sessionId = h.addUserSession();
+
+    const firstSettled = collectUntil(h.bus, settled);
+    h.runner.postOperatorMessage(sessionId, "long job");
+    await collectUntil(h.bus, (e) => e.type === "stream.delta");
+    // A seat report queues behind the live turn (operator text would steer it).
+    h.runner.enqueueAgentMilestone(sessionId, "as_x", "milestone", "and then this");
+    const response = h.app.system.pause({ mode: "hard" });
+    expect(response.interrupted.main).toBe(1);
+    const first = await firstSettled;
+    expect(first.at(-1)?.payload).toMatchObject({ status: "aborted" });
+    // Paused: the queued job stays queued and no turn is minted.
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(h.runner.queuedJobs(sessionId)).toBe(1);
+    expect(h.fake.captured.prompts.filter((p) => p.includes("and then this"))).toHaveLength(0);
+
+    // Resume: ONE console note first, then the queued job, on the same lane.
+    let settles = 0;
+    const thirdSettled = collectUntil(h.bus, (e) => settled(e) && ++settles === 3);
+    h.app.system.resume();
+    await thirdSettled;
+    const prompts = h.fake.captured.prompts;
+    const noteIndex = prompts.findIndex((p) => p.startsWith("[Console: the operator paused the whole system"));
+    expect(noteIndex).toBeGreaterThan(0);
+    expect(prompts.filter((p) => p.startsWith("[Console: the operator paused"))).toHaveLength(1);
+    expect(prompts[noteIndex]).toContain("1 queued wake(s) follow this one");
+    expect(prompts.indexOf(prompts.find((p) => p.includes("and then this"))!)).toBeGreaterThan(noteIndex);
+    expect(h.fake.captured.options).toHaveLength(1);
+    await h.runner.closeAll();
+  });
+
+  it("a soft pause lets the live turn finish and only holds the next", async () => {
+    let calls = 0;
+    const h = makeHarness(async function* () {
+      calls += 1;
+      yield initMessage(`sess-${calls}`);
+      if (calls === 1) {
+        yield deltaMessage("working…");
+        await new Promise((resolve) => setTimeout(resolve, 80));
+      }
+      yield textMessage(`reply ${calls}`);
+      yield successMessage();
+    });
+    const sessionId = h.addUserSession();
+    const firstSettled = collectUntil(h.bus, settled);
+    h.runner.postOperatorMessage(sessionId, "long job");
+    await collectUntil(h.bus, (e) => e.type === "stream.delta");
+    h.runner.enqueueAgentMilestone(sessionId, "as_x", "milestone", "queued report");
+    expect(h.app.system.pause({ mode: "soft" }).interrupted).toEqual({ main: 0, seats: 0 });
+    const first = await firstSettled;
+    expect(first.at(-1)?.payload).toMatchObject({ status: "completed" });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(h.runner.queuedJobs(sessionId)).toBe(1);
+    let settles = 0;
+    const secondSettled = collectUntil(h.bus, (e) => settled(e) && ++settles === 2);
+    h.app.system.resume();
+    await secondSettled;
+    // No note for a lane the pause never cut.
+    expect(h.fake.captured.prompts.some((p) => p.startsWith("[Console: the operator paused"))).toBe(false);
+    await h.runner.closeAll();
+  });
+
   it("a dead lane settles the open turn, notices, and respawns on the next job", async () => {
     let calls = 0;
     const h = makeHarness(async function* () {
@@ -378,7 +507,7 @@ describe("OrchestratorRunner", () => {
     const noticed = await collectUntil(
       h.bus,
       (e) =>
-        e.type === "user_session.message" &&
+        e.type === "user_session.message.appended" &&
         (e.payload as { message: { kind: string } }).message.kind === "notice",
     );
     expect(

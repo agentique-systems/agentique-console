@@ -1,11 +1,12 @@
 /**
- * Assembles SDK Options for one orchestrator turn. Hermetic by construction:
- * settingSources [] keeps filesystem CLAUDE.md/hooks/skills out; the tool
- * surface is the main agent's working set plus Console-managed delegation.
- * Native SDK subagents and SendMessage are denied: they bypass the durable
- * mailbox and authoritative event journal.
+ * Assembles SDK Options for one orchestrator turn. Main sees the workspace
+ * exactly as an interactive Claude Code session would — CLAUDE.md, user and
+ * project settings, skills — and adds the console MCP tools on top; every
+ * messaging/task/scheduling path stays console-owned and journaled. Only the
+ * checkpoint and composer-rewrite queries are hermetic.
  */
 import type { SessionMode, SessionPhase } from "@agentique-console/shared";
+import type { EffortLevel } from "../sdk/effort.ts";
 import { sdkEnv } from "../sdk/env.ts";
 import type { SdkOptions } from "../sdk/types.ts";
 import {
@@ -14,18 +15,47 @@ import {
   PLAN_MODE_BODY,
 } from "./prompt.ts";
 
+/**
+ * Main's own effort when the operator sets no CONSOLE_EFFORT: the lane that
+ * specifies, plans, judges evidence and decides when to stop deserves the
+ * deepest reasoning the model offers.
+ */
+export const MAIN_DEFAULT_EFFORT: EffortLevel = "xhigh";
+
 export const CONSOLE_TOOL_NAMES = [
+  "send_to_coordinator",
+  "set_deadline",
+  "task_create",
+  "task_update",
+  "task_list",
   "create_agent_session",
-  "send_agent_message",
   "read_agent_session",
   "list_agent_sessions",
   "list_agent_profiles",
   "read_handoff",
   "report_handoff_discrepancy",
-  "task_create",
-  "task_update",
-  "task_list",
+  "session_activity",
+  "interrupt_agent",
+  "close_agent_session",
+  "read_artifact",
+  "add_agent",
+  "specialize_profile",
+  "propose_spec",
+  "read_spec",
+  "update_orchestration_state",
+  "record_completion",
 ] as const;
+
+/**
+ * Never available to main, in any configuration. `Agent`/`Task` fork
+ * ungoverned context; `SendMessage` bypasses the journal;
+ * `ScheduleWakeup`/`Monitor`/`TaskStop` wake a console-owned lane with no
+ * mailbox row, no handoff and no turn attribution.
+ */
+const MAIN_DENIED_TOOLS = ["Agent", "Task", "SendMessage", "ScheduleWakeup", "Monitor", "TaskStop",
+  // The native ledger is keyed on the provider session id, which changes at
+  // every rotation.
+  "TaskCreate", "TaskUpdate", "TaskGet", "TaskList"];
 
 const MAIN_WORK_TOOLS = [
   "Read",
@@ -33,6 +63,19 @@ const MAIN_WORK_TOOLS = [
   "Grep",
   "WebFetch",
   "WebSearch",
+  // The workshop's tools, by operator directive: two live runs wedged on
+  // one-command git blockers (a stray uncommitted edit; a leaked seat
+  // branch) that main had diagnosed exactly and could not fix — one ended
+  // in the operator running git by hand, the other in a blocking question
+  // whose own recommendation read "it is one safe command". Write/Edit
+  // followed Bash for the same reason: an operator deliverable or a
+  // one-line unblock is not worth a commissioned session. The charter
+  // bounds usage (unblock, verify, small fixes, deliverables — never a
+  // seat's implementation work); every call is journaled as a tool event.
+  "Bash",
+  "Write",
+  "Edit",
+  "NotebookEdit",
 ];
 
 export interface OrchestratorOptionsInput {
@@ -41,78 +84,87 @@ export interface OrchestratorOptionsInput {
   mode: SessionMode;
   phase: SessionPhase;
   model: string | undefined;
-  effort: string | undefined;
+  effort: EffortLevel | undefined;
   maxTurns?: number;
   abortController: AbortController;
   canUseTool: NonNullable<SdkOptions["canUseTool"]>;
-  /** The console MCP server instance (absent until M6 wires delegation). */
+  /** The console MCP server instance. */
   mcpServer?: unknown;
   sessionStore?: unknown;
   contextMemory?: string;
-  purpose?: "work" | "profile_manager";
+  /**
+   * The operator's decisions, appended AFTER the rotation checkpoint. Main
+   * must not contradict a call the operator already made, and must not relay
+   * one — every agent has it already.
+   */
+  decisionDigest?: string;
+  /** The approved living spec, injected AFTER decisions (both authoritative). */
+  specDigest?: string;
+  /** Main's own working state — the durable memory of the orchestration loop. */
+  stateDigest?: string;
+  /** "away" injects one line: prefer proceeding on recommendations. */
+  autonomy?: "standard" | "away";
+  /** The lane's registry address (CLAUDE_CODE_SESSION_NAME). */
+  peerName?: string;
+  /** Governance/mirror hooks (SendMessage middleware, task + cron mirrors). */
+  hooks?: SdkOptions["hooks"];
+  /**
+   * The console's skills plugin (config.infra.skillsPluginDir). Main holds
+   * the same skills every seat holds — git-gud for repo surgery above all —
+   * on top of whatever the settings sources discover. Optional so hermetic
+   * callers (tests, tooling) can omit it.
+   */
+  skillsPluginDir?: string;
 }
-
-const MANAGER_BRIEF = `# Profile Manager
-
-You work directly with the Human Operator to design Agentique agent profiles.
-Inspect the workspace read-only so the profile fits the project. All profile
-changes must go through the profile_manager staging tools. During planning,
-stage a complete bundle, inspect its diff and validation, then use ExitPlanMode
-to ask the operator to Apply or discard it. After approval call apply_profile.
-Never modify files outside the staged profile bundle.`;
-
-const MANAGER_PLAN_MODE_BODY = `This is an interactive profile-editing session.
-Inspect the selected profile and workspace read-only, then build the complete
-candidate bundle only with the profile_manager staging tools. Keep the proposal
-valid as you work. Summarize the exact file diff, validation findings, and
-security-relevant capabilities, then use ExitPlanMode to request explicit Apply
-approval. After approval, call apply_profile once. Do not create Console tasks
-or AgentSessions for this workflow.`;
 
 export function buildOrchestratorOptions(
   input: OrchestratorOptionsInput,
 ): SdkOptions {
   const planning = input.mode === "plan_execute" && input.phase === "planning";
-  const manager = input.purpose === "profile_manager";
   const withDelegation = input.mcpServer !== undefined;
   const options: SdkOptions = {
     cwd: input.workspaceRoot,
     systemPrompt: {
       type: "preset",
       preset: "claude_code",
-      append: manager ? MANAGER_BRIEF + (input.contextMemory ? `\n\n## Selected profile (read-only baseline)\n${input.contextMemory}` : "") : withDelegation
+      append: (withDelegation
         ? ORCHESTRATOR_BRIEF + ORCHESTRATOR_DELEGATION_BRIEF + (input.contextMemory ? `\n\n## Rotation checkpoint (or read-only legacy memory)\n${input.contextMemory}` : "")
-        : ORCHESTRATOR_BRIEF + (input.contextMemory ? `\n\n## Rotation checkpoint (or read-only legacy memory)\n${input.contextMemory}` : ""),
+        : ORCHESTRATOR_BRIEF + (input.contextMemory ? `\n\n## Rotation checkpoint (or read-only legacy memory)\n${input.contextMemory}` : ""))
+        + (input.decisionDigest ? `\n\n## Operator decisions (authoritative)\nThe operator made these. Do not re-litigate them, do not contradict them, and do not relay them to seats — they already have them.\n${input.decisionDigest}` : "")
+        + (input.specDigest ? `\n\n${input.specDigest}` : "")
+        + (input.stateDigest ? `\n\n${input.stateDigest}` : "")
+        + (input.autonomy === "away" ? "\n\nThe operator is AWAY: prefer proceeding on recommendations and provisional decisions; queue only irreversible choices for their return." : ""),
     },
-    settingSources: [],
+    // CLI parity: without "project" the CLI never loads CLAUDE.md, and the
+    // agent re-derives per session what the operator wrote down once.
+    settingSources: ["user", "project", "local"],
+    // Every discovered skill is visible, like the CLI and like every seat;
+    // the console plugin rides alongside the user/project skills.
+    ...(input.skillsPluginDir === undefined ? {} : { plugins: [{ type: "local" as const, path: input.skillsPluginDir }] }),
+    skills: "all",
     includePartialMessages: true,
     permissionMode: planning ? "plan" : "default",
-    sandbox: { enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: true,
-      allowUnsandboxedCommands: false, filesystem: { allowManagedReadPathsOnly: true, allowRead: [input.workspaceRoot], allowWrite: [input.workspaceRoot] } },
-    ...(planning ? { planModeInstructions: manager ? MANAGER_PLAN_MODE_BODY : PLAN_MODE_BODY } : {}),
+    ...(planning ? { planModeInstructions: PLAN_MODE_BODY } : {}),
     allowedTools: [
       ...MAIN_WORK_TOOLS,
-      ...(withDelegation
-        ? manager
-          ? ["read_profile_proposal", "stage_profile_file", "delete_profile_file", "apply_profile"].map((name) => `mcp__profile_manager__${name}`)
-          : CONSOLE_TOOL_NAMES.map((name) => `mcp__console__${name}`)
-        : []),
+      ...(withDelegation ? CONSOLE_TOOL_NAMES.map((name) => `mcp__console__${name}`) : []),
     ],
-    disallowedTools: ["Agent", "Task", "SendMessage", "TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "Bash", "Write", "Edit", "NotebookEdit"],
+    disallowedTools: [...MAIN_DENIED_TOOLS, "CronCreate", "CronList", "CronDelete"],
+    ...(input.hooks === undefined ? {} : { hooks: input.hooks }),
+    settings: { crossSessionInbound: "accept" } as unknown as SdkOptions["settings"],
     // In streaming mode maxTurns counts cumulatively over the whole session
     // run — any default here would kill a long-lived lane. Callers opt in.
     ...(input.maxTurns === undefined ? {} : { maxTurns: input.maxTurns }),
     // Never inherit the launching session's agent settings (see sdkEnv).
-    env: sdkEnv(),
-    ...(input.effort === undefined
-      ? {}
-      : { effort: input.effort as SdkOptions["effort"] }),
+    env: sdkEnv(input.peerName === undefined ? {} : { sessionName: input.peerName }),
+    ...(input.effort === undefined ? {} : { effort: input.effort }),
     canUseTool: input.canUseTool,
     ...(input.model === undefined ? {} : { model: input.model }),
     ...(input.resume === null ? {} : { resume: input.resume }),
     // persistSession defaults true: transcripts live in ~/.claude/projects/…
-    // exactly like the CLI, and `resume` reads them natively (B1 dropped the
-    // SQLite mirror — it was always a second copy).
+    // exactly like the CLI, and `resume` reads them natively. The SQLite
+    // mirror below (provider_entries_v2, eager flush) is a deliberate second
+    // copy: it backs journal-kind evidence verification and run forensics.
     abortController: input.abortController,
     ...(input.sessionStore === undefined ? {} : {
       persistSession: true,
@@ -123,7 +175,7 @@ export function buildOrchestratorOptions(
       ? {}
       : {
           mcpServers: {
-            [manager ? "profile_manager" : "console"]: input.mcpServer as never,
+            console: input.mcpServer as never,
           },
         }),
   };

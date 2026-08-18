@@ -1,7 +1,7 @@
 /**
  * Turning a raw tool call into something an operator can read at a glance.
  * Shared by both transcripts — the orchestrator's chain-of-thought steps and
- * the inspector's per-seat tool runs want exactly the same treatment.
+ * the inspector's per-agent tool runs want exactly the same treatment.
  */
 
 /**

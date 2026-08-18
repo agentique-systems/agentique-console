@@ -8,6 +8,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { useAgentTranscript } from "@/api/queries";
+import { useInterruptAgent } from "@/api/mutations";
 import type { AgentSession, ConsoleEvent } from "@agentique-console/shared";
 import {
   Conversation as ChatRoot,
@@ -43,6 +44,7 @@ const EMPTY_EVENTS: readonly ConsoleEvent[] = [];
 
 export function AgentTranscript({ session }: { session: AgentSession }) {
   const id = session.id;
+  const interrupt = useInterruptAgent();
   const key = agentStreamKey(id);
   const spineOpen = useConnectionStore((s) => s.status === "open");
   const stream = useAgentSessionStreamsStore((s) => s.streams[key]);
@@ -68,14 +70,14 @@ export function AgentTranscript({ session }: { session: AgentSession }) {
   }, [transcript.data, buffering, hydrateStream, key]);
 
   const events = stream?.items ?? EMPTY_EVENTS;
-  // Fold to items, then collapse each seat's tool run into one Task block.
+  // Fold to items, then collapse each agent's tool run into one Task block.
   // Trimming happens on the grouped list so a run is never cut in half.
   const items = useMemo(() => groupAgentItems(foldAgentItems(events)), [events]);
   const visible = showAll ? items : items.slice(-TAIL_LIMIT);
 
   const accents = useMemo(
-    () => buildAccents(session.participants),
-    [session.participants],
+    () => buildAccents(session.agents),
+    [session.agents],
   );
 
   // Streaming overlays, one per speaker key with any text.
@@ -94,10 +96,10 @@ export function AgentTranscript({ session }: { session: AgentSession }) {
     return list;
   }, [deltas]);
 
-  // Silent workers: seats the runtime store says are busy without any overlay
-  // text yet — a shimmer row per seat keeps the silence honest.
+  // Silent workers: agents the runtime store says are busy without any
+  // overlay text yet — a shimmer row per agent keeps the silence honest.
   const seats = useRuntimeStore((s) => s.bySession[id]);
-  const silentWorkers = session.participants.flatMap((name) => {
+  const silentWorkers = session.agents.flatMap((name) => {
     const runtime = seats?.[name];
     if (runtime === undefined) return [];
     if (runtime.state !== "thinking" && runtime.state !== "tool") return [];
@@ -159,11 +161,23 @@ export function AgentTranscript({ session }: { session: AgentSession }) {
           </div>
         ))}
         {silentWorkers.map((worker) => (
-          <WorkingLine
-            key={worker.name}
-            name={worker.name}
-            runtime={worker.runtime}
-          />
+          <div key={worker.name} className="flex items-baseline gap-2">
+            <div className="min-w-0 flex-1">
+              <WorkingLine name={worker.name} runtime={worker.runtime} />
+            </div>
+            {/* The per-agent stop the roguelike run lacked: a wedged tool call
+                had no lever short of killing the whole process. */}
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-5 shrink-0 px-1.5 text-3xs text-muted-foreground hover:text-status-failed"
+              disabled={interrupt.isPending}
+              onClick={() => interrupt.mutate({ agentSessionId: id, agent: worker.name })}
+              title={`stop ${worker.name}'s current turn (the agent and its inbox survive)`}
+            >
+              stop
+            </Button>
+          </div>
         ))}
       </ChatContent>
       <ChatScrollButton />

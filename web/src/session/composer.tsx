@@ -1,16 +1,16 @@
 /**
- * The conversation's write surface — trimmed from v1's session-composer: the
- * operator only ever talks to the Orchestrator, so there is no mention popover
- * and no addressing. Enter submits; Shift+Enter breaks a line; Shift+Tab cycles
+ * The conversation's write surface: the operator only ever talks to the
+ * Orchestrator, so there is no mention popover and no addressing. Enter submits; Shift+Enter breaks a line; Shift+Tab cycles
  * the session mode (Claude Code's gesture).
  *
  * Built on the vendored AI Elements prompt-input, which owns the shell, the
  * composition-safe Enter handling (a bare keydown submits mid-IME-composition
  * and breaks every CJK input method), and the ChatStatus-driven submit button.
  *
- * The footer owns every control that acts on the textarea: mode on the left,
- * the rewrite pass and the one send/stop/steer button on the right. There is no
- * separate interrupt button — see `sendMode` for the states.
+ * The footer owns every control that acts on the turn about to be sent: mode
+ * and orchestrator model on the left, the rewrite pass and the one
+ * send/stop/steer button on the right. There is no separate interrupt button —
+ * see `sendMode` for the states.
  */
 import { CornerDownRightIcon, SparklesIcon } from "lucide-react";
 import { forwardRef, useImperativeHandle, useRef, useState } from "react";
@@ -23,6 +23,7 @@ import {
   usePatchUserSession,
   usePostUserMessage,
 } from "@/api/mutations";
+import { useConfig } from "@/api/queries";
 import type { SessionMode, UserSession } from "@agentique-console/shared";
 import {
   PromptInput,
@@ -36,6 +37,7 @@ import {
 } from "@/components/ai-elements/prompt-input";
 import { Spinner } from "@/components/ui/spinner";
 
+import { ModelPicker } from "./model-picker";
 import { ModeToggle, nextMode } from "./session-header";
 
 export interface ComposerHandle {
@@ -58,12 +60,13 @@ const SEND_LABEL: Record<SendMode, string> = {
 
 export const Composer = forwardRef<
   ComposerHandle,
-  { session: UserSession; busy: boolean; lockMode?: boolean }
->(function Composer({ session, busy, lockMode = false }, ref) {
+  { session: UserSession; busy: boolean }
+>(function Composer({ session, busy }, ref) {
   const post = usePostUserMessage();
   const patch = usePatchUserSession();
   const interrupt = useInterruptUserSession();
   const improve = useImproveMessage();
+  const config = useConfig();
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const [draft, setDraft] = useState("");
 
@@ -71,8 +74,14 @@ export const Composer = forwardRef<
     focus: () => textareaRef.current?.focus(),
   }));
 
-  const archived = session.status === "archived";
+  const archived = session.lifecycle === "archived";
   const empty = draft.trim() === "";
+  /**
+   * A session with no recorded model tracks the server's default, so the chip
+   * shows that. Undefined until `/api/config` lands — the chip is held back
+   * rather than flashing a guess that a `CONSOLE_MODEL` override would correct.
+   */
+  const model = session.model ?? config.data?.defaultModel;
   const sendMode: SendMode =
     busy && !archived ? (empty ? "interrupt" : "steer") : "send";
 
@@ -122,6 +131,20 @@ export const Composer = forwardRef<
     );
   };
 
+  // The lane's options are frozen at spawn, so the server recycles it — a turn
+  // already running finishes on the model it started with.
+  const setModel = (model: string) => {
+    if (model === session.model) return;
+    patch.mutate(
+      { id: session.id, model },
+      {
+        onSuccess: () =>
+          toast.success(`Next turn runs on ${model}`, { duration: 3000 }),
+        onError: (error) => toast.error(`Model change failed: ${error.message}`),
+      },
+    );
+  };
+
   const runImprove = () => {
     const original = draft;
     if (original.trim() === "" || archived || improve.isPending) return;
@@ -160,7 +183,7 @@ export const Composer = forwardRef<
             disabled={archived || post.isPending}
             onChange={(event) => setDraft(event.target.value)}
             onKeyDown={(event) => {
-              if (!lockMode && event.key === "Tab" && event.shiftKey) {
+              if (event.key === "Tab" && event.shiftKey) {
                 // preventDefault also stops prompt-input's own Enter handling,
                 // which is exactly the contract it documents.
                 event.preventDefault();
@@ -172,14 +195,19 @@ export const Composer = forwardRef<
 
         <PromptInputFooter>
           <PromptInputTools>
-            {lockMode ? <span className="truncate text-3xs text-muted-foreground">plan approval required</span> : <><ModeToggle
+            <ModeToggle
               mode={session.mode}
               disabled={patch.isPending || archived}
               onChange={setMode}
             />
-            <span className="truncate text-3xs text-muted-foreground">
-              shift+tab to cycle
-            </span></>}
+            {/* Null means "the server's default" — render that, not "null". */}
+            {model !== undefined && (
+              <ModelPicker
+                model={model}
+                disabled={patch.isPending || archived}
+                onChange={setModel}
+              />
+            )}
           </PromptInputTools>
 
           <PromptInputTools className="shrink-0 gap-1">

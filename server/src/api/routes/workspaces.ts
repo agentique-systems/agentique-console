@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { AppContext } from "../../context.ts";
-import { badRequest } from "../errors.ts";
+import { InvalidInputError } from "../../errors.ts";
 
 const CreateBody = z.object({
   name: z.string(),
@@ -17,13 +17,13 @@ export function registerWorkspaceRoutes(
   app: FastifyInstance,
   ctx: AppContext,
 ): void {
-  const service = ctx.workspaces;
+  const service = ctx.app.workspaces;
 
   app.get("/api/workspaces", async () => service.list());
 
   app.post("/api/workspaces", async (request, reply) => {
     const parsed = CreateBody.safeParse(request.body);
-    if (!parsed.success) throw badRequest(parsed.error.message);
+    if (!parsed.success) throw new InvalidInputError(parsed.error.message);
     const workspace = await service.create(parsed.data);
     return reply.status(201).send(workspace);
   });
@@ -37,8 +37,13 @@ export function registerWorkspaceRoutes(
     "/api/workspaces/:id",
     async (request) => {
       const parsed = PatchBody.safeParse(request.body);
-      if (!parsed.success) throw badRequest(parsed.error.message);
+      if (!parsed.success) throw new InvalidInputError(parsed.error.message);
       return service.patch(request.params.id, parsed.data);
     },
+  );
+
+  app.get<{ Params: { id: string } }>(
+    "/api/workspaces/:id/session-tree",
+    async (request) => ctx.app.userSessions.sessionTree(request.params.id),
   );
 }

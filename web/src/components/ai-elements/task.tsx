@@ -4,8 +4,8 @@
  * Vendored from AI Elements (elements.ai-sdk.dev/components/task). Local
  * changes, all deliberate:
  *   - registry import paths rewritten to this repo's `@/components/ui/*`
- *   - the trigger icon is a prop; upstream hardcodes a magnifier, but a seat
- *     does more than search
+ *   - the trigger icon is a prop; upstream hardcodes a magnifier, but an
+ *     agent does more than search
  *   - sizes stepped down to the console's density
  */
 import type { LucideIcon } from "lucide-react";

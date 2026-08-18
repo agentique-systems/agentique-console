@@ -1,16 +1,20 @@
 /**
  * The conversation header: inline-editable title, the phase chip while gated,
- * the transcript export, and the busy spinner. Busy is fold-derived
- * (turn.started/settled + queuedJobs), not guessed from HTTP in-flight state.
- * Mode switching and interrupting live in the composer, next to the textarea
- * they act on.
+ * the transcript export, and the session-state chip. The state is the shared
+ * five-value model (`lib/session-state.ts`) — "working", "needs you",
+ * "blocked", "done" and "ready" stopped being the same pixels. Mode switching
+ * and interrupting live in the composer, next to the textarea they act on.
  */
-import { DownloadIcon } from "lucide-react";
+import { ArchiveIcon, BellIcon, DownloadIcon, MoonIcon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
 import { usePatchUserSession } from "@/api/mutations";
 import type { SessionMode, UserSession } from "@agentique-console/shared";
+import {
+  SESSION_STATE_LABEL,
+  type SessionState,
+} from "@/lib/session-state";
 import {
   downloadMarkdown,
   messagesToMarkdown,
@@ -40,7 +44,12 @@ export function nextMode(mode: SessionMode): SessionMode {
   return MODES[(MODES.indexOf(mode) + 1) % MODES.length] as SessionMode;
 }
 
-/** Shared by the composer and the draft view — the one mode picker. */
+/**
+ * Shared by the composer and the draft view — the one mode picker. The
+ * Shift+Tab gesture is taught by the tooltip rather than a line of text beside
+ * it: the footer now carries a model chip too, and two chips plus a sentence
+ * wrap at the panel widths the operator actually uses.
+ */
 export function ModeToggle({
   mode,
   disabled = false,
@@ -50,7 +59,7 @@ export function ModeToggle({
   disabled?: boolean;
   onChange: (mode: SessionMode) => void;
 }) {
-  return (
+  const group = (
     <div
       role="radiogroup"
       aria-label="session mode"
@@ -79,18 +88,57 @@ export function ModeToggle({
       ))}
     </div>
   );
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{group}</TooltipTrigger>
+      <TooltipContent>
+        session mode
+        <span className="ml-2 font-mono text-muted-foreground">shift+tab</span>
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
+/**
+ * The one visual per state. `needs_you` uses --attention, not a status tone:
+ * it is the only state that means "you, now", and it has a colour reserved.
+ */
+function StateChip({ state }: { state: SessionState }) {
+  if (state === "working") return <Spinner className="size-3.5 text-status-running" />;
+  if (state === "ready") return null;
+  return (
+    <Badge
+      variant="outline"
+      className={cn(
+        "text-3xs uppercase",
+        state === "needs_you" && "border-attention text-attention",
+        state === "blocked" && "text-status-failed",
+        state === "done" && "text-status-completed",
+      )}
+    >
+      {SESSION_STATE_LABEL[state]}
+    </Badge>
+  );
 }
 
 export function SessionHeader({
   session,
-  busy,
+  state,
 }: {
   session: UserSession;
-  busy: boolean;
+  state: SessionState;
 }) {
   const patch = usePatchUserSession();
   const [editing, setEditing] = useState(false);
   const [draftTitle, setDraftTitle] = useState("");
+  const busy = state === "working";
+  // The Notification API only grants permission from a user gesture — asking
+  // unprompted on load is exactly the dialog everyone reflexively declines.
+  // One small bell, shown only while the choice is still open.
+  const [notifPermission, setNotifPermission] = useState(
+    typeof Notification === "undefined" ? "unsupported" : Notification.permission,
+  );
 
   /**
    * Folded lazily, on click: the header renders on every stream tick, and
@@ -167,7 +215,56 @@ export function SessionHeader({
       )}
 
       <div className="flex shrink-0 items-center gap-2">
-        {busy && <Spinner className="size-3.5 text-status-running" />}
+        <StateChip state={state} />
+
+        {session.lifecycle === "open" && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant={session.autonomy === "away" ? "secondary" : "ghost"}
+                size="icon-xs"
+                aria-label={session.autonomy === "away" ? "away mode on — click to return" : "enable away mode"}
+                aria-pressed={session.autonomy === "away"}
+                disabled={patch.isPending}
+                onClick={() => {
+                  patch.mutate(
+                    { id: session.id, autonomy: session.autonomy === "away" ? "standard" : "away" },
+                    { onError: (error) => toast.error(`Autonomy change failed: ${error.message}`) },
+                  );
+                }}
+              >
+                <MoonIcon className="size-3" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              {session.autonomy === "away"
+                ? "away mode: the run proceeds on recommendations and queues only irreversible decisions"
+                : "away mode: let the run proceed on recommendations while you are gone"}
+            </TooltipContent>
+          </Tooltip>
+        )}
+
+        {notifPermission === "default" && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                aria-label="enable desktop notifications"
+                onClick={() => {
+                  void Notification.requestPermission().then((granted) => setNotifPermission(granted));
+                }}
+              >
+                <BellIcon className="size-3" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              get a desktop notification when a run needs you and this tab is hidden
+            </TooltipContent>
+          </Tooltip>
+        )}
 
         <Tooltip>
           <TooltipTrigger asChild>
@@ -183,6 +280,37 @@ export function SessionHeader({
           </TooltipTrigger>
           <TooltipContent>export transcript as markdown</TooltipContent>
         </Tooltip>
+
+        {session.lifecycle === "open" && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                aria-label="archive this session"
+                // Archiving reaps the run's agents, managed processes and
+                // browsers — the only operator-driven end-of-run action.
+                disabled={busy || patch.isPending}
+                onClick={() => {
+                  if (!window.confirm("Archive this session? Its agents stop and any servers they started are shut down.")) return;
+                  patch.mutate(
+                    { id: session.id, lifecycle: "archived" },
+                    {
+                      onSuccess: () => toast.success("Session archived."),
+                      onError: () => toast.error("Could not archive the session."),
+                    },
+                  );
+                }}
+              >
+                <ArchiveIcon className="size-3" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              {busy ? "still working — interrupt before archiving" : "archive: stop the agents and reap their processes"}
+            </TooltipContent>
+          </Tooltip>
+        )}
 
         {session.mode === "plan_execute" && (
           <Badge

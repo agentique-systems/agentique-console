@@ -176,9 +176,27 @@ describe("mapSdkMessage", () => {
         kind: "result",
         output: { message: "done", to: null },
         resumeId: "sess-2",
-        costUsd: 0.42,
+        // Named cumulative because it IS: the SDK restates the session's
+        // running total on every result, so consumers must delta, not sum.
+        cumulativeCostUsd: 0.42,
       },
     ]);
+  });
+
+  it("routes a CLI-level failure to the error branch despite subtype success", () => {
+    const events = mapSdkMessage(successMessage(undefined, { is_error: true, session_id: "sess-3" }));
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ kind: "error" });
+  });
+
+  it("emits context occupancy from an assistant message's own usage", () => {
+    // Per-call prompt size — the rotation signal. The result message's usage is
+    // the turn-wide sum and would overstate occupancy several-fold.
+    const events = mapSdkMessage({
+      type: "assistant",
+      message: { content: [{ type: "text", text: "hi" }], usage: { input_tokens: 12, cache_creation_input_tokens: 300, cache_read_input_tokens: 41_000 } },
+    });
+    expect(events).toContainEqual({ kind: "context", occupancyTokens: 41_312 });
   });
 
   it("maps success without structured output (orchestrator turns)", () => {
@@ -230,6 +248,9 @@ describe("liveness notices", () => {
     ).toEqual([]);
   });
 
+  // Each retry now yields TWO events: the human-readable notice and the
+  // structured numbers the console budgets on. Throwing the numbers away is
+  // why nothing could notice a retry storm consuming 55% of a run.
   it("spells out rate-limit retries with the delay", () => {
     expect(
       mapSdkMessage({
@@ -240,7 +261,10 @@ describe("liveness notices", () => {
         retry_delay_ms: 90_000,
         error_status: 429,
       }),
-    ).toEqual([{ kind: "notice", text: "rate limited · retry 2/5 · in 1m 30s" }]);
+    ).toEqual([
+      { kind: "notice", text: "rate limited · retry 2/5 · in 1m 30s" },
+      { kind: "retry", classification: "rate_limited", attempt: 2, maxRetries: 5, delayMs: 90_000, status: 429, detail: "rate limited · retry 2/5 · in 1m 30s" },
+    ]);
   });
 
   it("names non-429 API errors by status", () => {
@@ -253,12 +277,23 @@ describe("liveness notices", () => {
         retry_delay_ms: 2_000,
         error_status: 529,
       }),
-    ).toEqual([{ kind: "notice", text: "API error 529 · retry 1/3 · in 2s" }]);
+    ).toEqual([
+      { kind: "notice", text: "API error 529 · retry 1/3 · in 2s" },
+      { kind: "retry", classification: "api_error", attempt: 1, maxRetries: 3, delayMs: 2_000, status: 529, detail: "API error 529 · retry 1/3 · in 2s" },
+    ]);
   });
 
-  it("reports rate-limit events", () => {
+  it("reports rate-limit events with the structured limit state", () => {
     expect(mapSdkMessage({ type: "rate_limit_event" })).toEqual([
       { kind: "notice", text: "rate limited — waiting for capacity" },
+      { kind: "limit", status: "allowed" },
+    ]);
+    // The rejected form is the subscription-cap signal the capacity service
+    // pauses on — a live run died because these fields were discarded.
+    expect(mapSdkMessage({ type: "rate_limit_event",
+      rate_limit_info: { status: "rejected", resetsAt: 1_700_000_000, rateLimitType: "five_hour", utilization: 1 } })).toEqual([
+      { kind: "notice", text: "usage limit reached — pausing until capacity returns" },
+      { kind: "limit", status: "rejected", resetsAt: 1_700_000_000, limitType: "five_hour", utilization: 1 },
     ]);
   });
 

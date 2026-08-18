@@ -8,11 +8,15 @@ import type {
   ImproveMessageResponse,
   Interaction,
   PatchUserSessionBody,
+  PauseSystemBody,
+  PauseSystemResponse,
+  RunSignoffBody,
+  SystemPauseState,
   PostMessageResponse,
   ResolveInteractionBody,
+  ScheduledAssignment,
   UserSession,
   Workspace,
-  ManagerSession,
 } from "@agentique-console/shared";
 
 import { apiFetch } from "./client";
@@ -69,6 +73,26 @@ export function usePostUserMessage() {
   });
 }
 
+/**
+ * The operator's verdict on a proposed run completion. 409 = the run is no
+ * longer awaiting one (someone else resolved it, or a chat message already
+ * reopened it).
+ */
+export function useResolveSignoff() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ sessionId, body }: { sessionId: string; body: RunSignoffBody }) =>
+      apiFetch<UserSession>(`/api/user-sessions/${sessionId}/signoff`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    onSuccess: (_data, { sessionId }) => {
+      void queryClient.invalidateQueries({ queryKey: keys.userSessions.detail(sessionId) });
+      void queryClient.invalidateQueries({ queryKey: keys.userSessions.all });
+    },
+  });
+}
+
 /** Answers a question card or decides a plan. 409 = already resolved. */
 export function useResolveInteraction() {
   const queryClient = useQueryClient();
@@ -93,6 +117,19 @@ export function useResolveInteraction() {
   });
 }
 
+/** Withdraw a scheduled assignment before dispatch. 409 = already settled. */
+export function useCancelAssignment() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (assignmentId: string) =>
+      apiFetch<ScheduledAssignment>(`/api/scheduled-assignments/${assignmentId}/cancel`, { method: "POST" }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: keys.tasks.all });
+      void queryClient.invalidateQueries({ queryKey: keys.workspaceTasksAll });
+    },
+  });
+}
+
 /** A rewrite of the draft. Nothing persists, so there is nothing to invalidate. */
 export function useImproveMessage() {
   return useMutation({
@@ -101,6 +138,27 @@ export function useImproveMessage() {
         method: "POST",
         body: JSON.stringify(body),
       }),
+  });
+}
+
+/**
+ * The top bar's Pause: the whole system, every lane. The response IS the new
+ * state, so the cache flips at once instead of waiting on the spine.
+ */
+export function usePauseSystem() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: PauseSystemBody = {}) =>
+      apiFetch<PauseSystemResponse>("/api/system/pause", { method: "POST", body: JSON.stringify(body) }),
+    onSuccess: ({ interrupted: _interrupted, ...state }) => queryClient.setQueryData<SystemPauseState>(keys.system.pause, state),
+  });
+}
+
+export function useResumeSystem() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => apiFetch<SystemPauseState>("/api/system/resume", { method: "POST" }),
+    onSuccess: (state) => queryClient.setQueryData<SystemPauseState>(keys.system.pause, state),
   });
 }
 
@@ -113,13 +171,17 @@ export function useInterruptUserSession() {
   });
 }
 
-export function useCreateManagerSession() {
-  const queryClient = useQueryClient();
-  return useMutation({ mutationFn: ({ workspaceId, profileId, sourceProfileId }: { workspaceId: string; profileId?: string; sourceProfileId?: string }) => apiFetch<ManagerSession>(`/api/workspaces/${workspaceId}/manager-sessions`, { method: "POST", body: JSON.stringify({ profileId, sourceProfileId }) }), onSuccess: (_data, vars) => void queryClient.invalidateQueries({ queryKey: keys.managerSessions(vars.workspaceId) }) });
+/** Per-agent stop: kills one wedged turn, never the session or the process. */
+export function useInterruptAgent() {
+  return useMutation({
+    mutationFn: ({ agentSessionId, agent, reason }: { agentSessionId: string; agent: string; reason?: string }) =>
+      apiFetch<undefined>(
+        `/api/agent-sessions/${agentSessionId}/agents/${encodeURIComponent(agent)}/interrupt`,
+        { method: "POST", body: JSON.stringify({ reason: reason ?? "" }) },
+      ),
+  });
 }
-export function usePostManagerMessage() {
-  return useMutation({ mutationFn: ({ id, text }: { id: string; text: string }) => apiFetch<PostMessageResponse>(`/api/manager-sessions/${id}/messages`, { method: "POST", body: JSON.stringify({ text }) }) });
-}
+
 export function useTrustProfile() {
   const queryClient = useQueryClient();
   return useMutation({ mutationFn: ({ workspaceId, profileId, revision }: { workspaceId: string; profileId: string; revision: string }) => apiFetch<{ ok: true }>(`/api/workspaces/${workspaceId}/agent-profiles/${profileId}/trust`, { method: "POST", body: JSON.stringify({ revision }) }), onSuccess: () => void queryClient.invalidateQueries({ queryKey: keys.profiles.all }) });

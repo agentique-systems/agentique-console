@@ -50,7 +50,7 @@ export function AgentPane() {
 }
 
 function PaneBody({ session, runs }: { session: AgentSession; runs: AgentRunSummary[] }) {
-  const accents = buildAccents(session.participants);
+  const accents = buildAccents(session.agents);
 
   return (
     <div className="flex min-h-0 flex-col">
@@ -59,25 +59,9 @@ function PaneBody({ session, runs }: { session: AgentSession; runs: AgentRunSumm
           <span className="min-w-0 flex-1 truncate text-sm font-medium">
             {session.title}
           </span>
-          <Badge variant="outline" className="text-3xs uppercase">
-            {session.mode === "plan_execute" ? "plan + execute" : "execute"}
-          </Badge>
-          {session.mode === "plan_execute" && (
-            <Badge
-              variant="outline"
-              className={cn(
-                "text-3xs uppercase",
-                session.phase === "planning"
-                  ? "text-status-waiting"
-                  : "text-status-running",
-              )}
-            >
-              {session.phase}
-            </Badge>
-          )}
         </div>
         <div className="mt-1 flex flex-wrap items-center gap-2">
-          {session.participants.map((name) => (
+          {session.agents.map((name) => (
             <span
               key={name}
               className="flex items-center gap-1 font-mono text-3xs text-muted-foreground"
@@ -98,9 +82,9 @@ function PaneBody({ session, runs }: { session: AgentSession; runs: AgentRunSumm
         </div>
         <div className="mt-1 grid gap-0.5">
           {runs.map((run) => (
-            <div key={run.participant} className="flex min-w-0 items-center gap-1 font-mono text-3xs text-muted-foreground">
-              <span className="truncate" title={run.ownership.join(", ")}>{run.participant} · {run.profileId} · {run.ownership.join(", ") || "coordination"}</span>
-              <span className="ml-auto shrink-0">gen {run.generation} · {run.turnCount} turns · {run.contextTokens.toLocaleString()} ctx</span>
+            <div key={run.agent} className="flex min-w-0 items-center gap-1 font-mono text-3xs text-muted-foreground">
+              <span className="truncate" title={run.ownership.join(", ")}>{run.agent} · {run.profileId} · {run.ownership.join(", ") || "coordination"}</span>
+              <span className="ml-auto shrink-0">gen {run.generation} · {run.totalTurns} turns · ${run.totalCostUsd.toFixed(2)} · {run.contextTokens.toLocaleString()} peak ctx</span>
             </div>
           ))}
         </div>

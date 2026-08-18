@@ -13,11 +13,18 @@ import type { UserSession } from "@agentique-console/shared";
 import { Composer } from "./composer";
 
 function stubFetch(body: unknown = {}) {
-  const spy = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => ({
+  const spy = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => ({
     ok: true,
     status: 200,
     statusText: "OK",
-    json: () => Promise.resolve(body),
+    // The model chip is held back until /api/config lands, so every mount
+    // needs a real answer here even when the test is about something else.
+    json: () =>
+      Promise.resolve(
+        String(input).endsWith("/api/config")
+          ? { defaultModel: "claude-opus-5" }
+          : body,
+      ),
   }) as Response);
   vi.stubGlobal("fetch", spy);
   return spy;
@@ -37,7 +44,12 @@ const SESSION: UserSession = {
   title: "test",
   mode: "execute",
   phase: "executing",
-  status: "open",
+  lifecycle: "open",
+  runState: "active",
+  model: null,
+  autonomy: "standard",
+  pauseReason: null,
+  pausedUntil: null,
   createdAt: "2026-01-01T00:00:00.000Z",
   updatedAt: "2026-01-01T00:00:00.000Z",
 };
@@ -110,7 +122,7 @@ describe("Composer", () => {
 
   it("an archived session never offers interrupt, even mid-turn", () => {
     stubFetch();
-    mount({ session: { ...SESSION, status: "archived" }, busy: true });
+    mount({ session: { ...SESSION, lifecycle: "archived" }, busy: true });
     expect(screen.getByLabelText("send message")).toBeDisabled();
   });
 
@@ -155,5 +167,51 @@ describe("Composer", () => {
     stubFetch();
     mount();
     expect(screen.getByLabelText("improve wording")).toBeDisabled();
+  });
+
+  it("a session with no model shows the server default on the chip", async () => {
+    stubFetch();
+    mount();
+    await screen.findByLabelText("orchestrator model: opus-5");
+  });
+
+  it("the session's own model wins over the server default", async () => {
+    stubFetch();
+    mount({ session: { ...SESSION, model: "claude-sonnet-5" } });
+    await screen.findByLabelText("orchestrator model: sonnet-5");
+  });
+
+  /**
+   * The chips live inside PromptInput's <form>; type="button" is what keeps a
+   * click from submitting the draft as a message.
+   */
+  it("clicking a model chip never sends the draft", async () => {
+    const spy = stubFetch(SESSION);
+    const user = userEvent.setup();
+    mount();
+
+    await user.type(screen.getByRole("textbox"), "do not send me");
+    await user.click(await screen.findByRole("radio", { name: "fable-5" }));
+
+    expect(
+      spy.mock.calls.some(([url]) =>
+        String(url).endsWith("/api/user-sessions/us_1/messages"),
+      ),
+    ).toBe(false);
+  });
+
+  it("picking a model patches the session", async () => {
+    const spy = stubFetch(SESSION);
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("radio", { name: "fable-5" }));
+
+    await waitFor(() => {
+      const patch = spy.mock.calls.find(([, init]) => init?.method === "PATCH");
+      expect(JSON.parse(String(patch?.[1]?.body))).toEqual({
+        model: "claude-fable-5",
+      });
+    });
   });
 });

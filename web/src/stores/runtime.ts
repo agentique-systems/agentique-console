@@ -1,8 +1,8 @@
 import { create } from "zustand";
 
 import type {
+  AgentActivityChangedPayload,
   AgentRuntimeState,
-  AgentStatePayload,
 } from "@agentique-console/shared";
 
 export interface SeatRuntime {
@@ -19,15 +19,15 @@ export interface SeatRuntime {
 }
 
 /**
- * Live per-participant runtime states from replayable `agent.state` frames,
- * keyed session → participant. Never replayed, so a reconnect clears the lot —
+ * Live per-agent runtime states from `agent_session.activity.changed` frames,
+ * keyed session → agent. Never replayed, so a reconnect clears the lot —
  * the next frames repaint it.
  */
 interface RuntimeState {
   readonly bySession: Readonly<
     Record<string, Readonly<Record<string, SeatRuntime>>>
   >;
-  ingest(payload: AgentStatePayload): void;
+  ingest(payload: AgentActivityChangedPayload): void;
   clearAll(): void;
 }
 
@@ -36,8 +36,11 @@ export const useRuntimeStore = create<RuntimeState>((set) => ({
   ingest: (payload) =>
     set((state) => {
       const now = Date.now();
-      const previous =
-        state.bySession[payload.scope.sessionId]?.[payload.participant];
+      const sessionId =
+        payload.scope.kind === "user"
+          ? payload.scope.userSessionId
+          : payload.scope.agentSessionId;
+      const previous = state.bySession[sessionId]?.[payload.agent];
       const sameState =
         previous !== undefined &&
         previous.state === payload.state &&
@@ -45,9 +48,9 @@ export const useRuntimeStore = create<RuntimeState>((set) => ({
       return {
         bySession: {
           ...state.bySession,
-          [payload.scope.sessionId]: {
-            ...state.bySession[payload.scope.sessionId],
-            [payload.participant]: {
+          [sessionId]: {
+            ...state.bySession[sessionId],
+            [payload.agent]: {
               state: payload.state,
               ...(payload.toolName === undefined
                 ? {}

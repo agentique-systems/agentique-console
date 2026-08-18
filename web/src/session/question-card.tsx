@@ -1,7 +1,9 @@
 /**
  * The inline AskUserQuestion card: 1..n question blocks, each with option
- * buttons. A single single-select question submits on click; anything richer
- * (multiSelect, several questions) toggles selections and submits once.
+ * buttons, the asking agent's own words (context) and recommendation, and —
+ * when the asker allowed it — a free-text answer box. A single single-select
+ * question submits on option click; anything richer (multiSelect, several
+ * questions, typed answers) toggles selections and submits once.
  *
  * Answered/dismissed cards render read-only with the chosen options
  * highlighted; stale cards (server restarted under the promise) grey out but
@@ -33,6 +35,7 @@ export function QuestionCard({
 }) {
   const resolve = useResolveInteraction();
   const [selections, setSelections] = useState<Record<string, string[]>>({});
+  const [freeTexts, setFreeTexts] = useState<Record<string, string>>({});
   // A 409 means someone else answered — treat as answered locally.
   const [settled, setSettled] = useState(false);
 
@@ -40,14 +43,27 @@ export function QuestionCard({
   const dismissed = item.answer?.dismissed === true;
   const stale = !answered && pendingStatus === "stale";
   const busy = resolve.isPending;
+  const allowFreeText = item.allowFreeText === true;
 
-  // One question, single select → clicking IS the answer.
+  const typedNow = (question: string) => (freeTexts[question] ?? "").trim();
+  const anyTyped = item.questions.some((question) => typedNow(question.question) !== "");
+
+  // One question, single select, nothing typed → clicking IS the answer.
   const immediate =
-    item.questions.length === 1 && item.questions[0]?.multiSelect !== true;
+    item.questions.length === 1 && item.questions[0]?.multiSelect !== true && !anyTyped;
 
   const submit = (answers: Record<string, string[]>) => {
+    const freeText = Object.fromEntries(
+      item.questions
+        .map((question) => [question.question, typedNow(question.question)] as const)
+        .filter(([, text]) => text !== ""),
+    );
     resolve.mutate(
-      { sessionId, interactionId: item.interactionId, body: { answers } },
+      {
+        sessionId,
+        interactionId: item.interactionId,
+        body: Object.keys(freeText).length > 0 ? { answers, freeText } : { answers },
+      },
       {
         onError: (error) => {
           if (error instanceof ApiError && error.status === 409) {
@@ -74,7 +90,9 @@ export function QuestionCard({
   };
 
   const allChosen = item.questions.every(
-    (question) => (selections[question.question] ?? []).length > 0,
+    (question) =>
+      (selections[question.question] ?? []).length > 0 ||
+      typedNow(question.question) !== "",
   );
 
   return (
@@ -89,7 +107,7 @@ export function QuestionCard({
       <CardHeader>
         <CardEyebrow className={cn(!answered && "text-attention")}>
           <CircleHelpIcon className="size-3.5 shrink-0" />
-          <span>the orchestrator asks</span>
+          <span>{item.askedBy === undefined ? "the orchestrator asks" : `${item.askedBy} asks`}</span>
         </CardEyebrow>
         {stale && (
           <span className="text-2xs normal-case text-muted-foreground">
@@ -102,6 +120,7 @@ export function QuestionCard({
       {item.questions.map((question) => {
         const chosenNow = selections[question.question] ?? [];
         const chosenFinal = item.answer?.answers?.[question.question] ?? [];
+        const typedFinal = item.answer?.freeText?.[question.question];
         return (
           <div key={question.question} className="mb-2 last:mb-0">
             {question.header !== undefined && (
@@ -110,6 +129,17 @@ export function QuestionCard({
               </div>
             )}
             <div className="mb-1.5 text-sm">{question.question}</div>
+            {question.context !== undefined && (
+              <div className="mb-1.5 whitespace-pre-wrap text-2xs text-muted-foreground">
+                {question.context}
+              </div>
+            )}
+            {question.recommendation !== undefined && (
+              <div className="mb-1.5 text-2xs text-muted-foreground">
+                <span className="font-medium text-foreground/80">recommends:</span>{" "}
+                {question.recommendation}
+              </div>
+            )}
             <div className="flex flex-wrap gap-1.5">
               {question.options.map((option) => {
                 const multiSelect = question.multiSelect === true;
@@ -152,11 +182,28 @@ export function QuestionCard({
                 );
               })}
             </div>
+            {allowFreeText && !answered && (
+              <textarea
+                rows={1}
+                placeholder="Or answer in your own words…"
+                disabled={busy}
+                value={freeTexts[question.question] ?? ""}
+                onChange={(event) =>
+                  setFreeTexts((current) => ({ ...current, [question.question]: event.target.value }))
+                }
+                className="mt-1.5 w-full resize-y rounded-md border border-border bg-card px-2.5 py-1.5 text-xs placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+              />
+            )}
+            {answered && typedFinal !== undefined && (
+              <div className="mt-1 text-2xs text-muted-foreground">
+                answered in your words: “{typedFinal}”
+              </div>
+            )}
           </div>
         );
       })}
 
-      {!answered && !immediate && (
+      {!answered && (!immediate || anyTyped) && (
         <Button
           size="xs"
           className="mt-1"

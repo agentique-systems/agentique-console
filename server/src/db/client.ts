@@ -1,11 +1,15 @@
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
-import { DDL } from "./ddl.ts";
+import { migrate } from "drizzle-orm/better-sqlite3/migrator";
+import { readMigrationFiles } from "drizzle-orm/migrator";
 import * as schema from "./schema.ts";
 
 export type Db = ReturnType<typeof openDb>["db"];
+
+const MIGRATIONS_FOLDER = fileURLToPath(new URL("./migrations", import.meta.url));
 
 export function openDb(dbFile: string) {
   if (dbFile !== ":memory:") {
@@ -13,51 +17,62 @@ export function openDb(dbFile: string) {
   }
   const sqlite = new Database(dbFile);
   sqlite.pragma("journal_mode = WAL");
-  sqlite.pragma("foreign_keys = ON");
-  sqlite.exec(DDL);
-  migrateAdditiveColumns(sqlite);
+  adoptPreJournalDatabase(sqlite, dbFile);
   const db = drizzle(sqlite, { schema });
+  // Migrations run with foreign keys OFF (better-sqlite3 turns them on by
+  // default): the migrator wraps each migration in a transaction, where the
+  // in-file PRAGMA toggles are no-ops, and a table rebuild must be able to
+  // drop a referenced table (0003 rebuilds user_sessions/agent_sessions in
+  // place).
+  sqlite.pragma("foreign_keys = OFF");
+  migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
+  sqlite.pragma("foreign_keys = ON");
   return { db, sqlite };
 }
 
-function migrateAdditiveColumns(sqlite: Database.Database): void {
-  const userColumns = new Set(sqlite.prepare("pragma table_info(user_sessions)").all().map((row) => (row as { name: string }).name));
-  for (const [name, ddl] of [["sdk_generation", "INTEGER NOT NULL DEFAULT 0"], ["sdk_turn_count", "INTEGER NOT NULL DEFAULT 0"], ["context_tokens", "INTEGER NOT NULL DEFAULT 0"], ["memory", "TEXT NOT NULL DEFAULT ''"], ["latest_handoff_id", "TEXT"], ["purpose", "TEXT NOT NULL DEFAULT 'work'"], ["subject_key", "TEXT"]] as const) {
-    if (!userColumns.has(name)) sqlite.exec(`ALTER TABLE user_sessions ADD COLUMN ${name} ${ddl}`);
+/**
+ * A database created before the migration journal existed is adopted by
+ * stamping the baseline as applied — its tables already have the shape the
+ * baseline describes. Adoption requires evidence that the legacy boot-time
+ * migrations all ran: `user_sessions.run_state` (the last column the legacy
+ * additive migration added) must exist, and `agent_sessions.mode` (dropped by
+ * the legacy cleanup; NOT NULL without default, so inserts fail while it
+ * remains) must not. Anything else predates the baseline and cannot boot.
+ */
+function adoptPreJournalDatabase(sqlite: Database.Database, dbFile: string): void {
+  if (tableExists(sqlite, "__drizzle_migrations")) return;
+  if (!tableExists(sqlite, "user_sessions")) return; // fresh: migrate() applies the baseline
+  const refuse = (why: string): never => {
+    throw new Error(
+      `database at ${dbFile} ${why}, so it predates the migration baseline and cannot be adopted; ` +
+        `pre-release databases are test artifacts — delete the file and restart`,
+    );
+  };
+  if (!columnExists(sqlite, "user_sessions", "run_state")) refuse("lacks user_sessions.run_state");
+  if (tableExists(sqlite, "agent_sessions") && columnExists(sqlite, "agent_sessions", "mode")) {
+    refuse("still carries agent_sessions.mode");
   }
-  const columns = new Set(
-    sqlite
-      .prepare("pragma table_info(participants)")
-      .all()
-      .map((row) => (row as { name: string }).name),
+  const [baseline] = readMigrationFiles({ migrationsFolder: MIGRATIONS_FOLDER });
+  if (!baseline) throw new Error(`no migrations found at ${MIGRATIONS_FOLDER}`);
+  // Same DDL drizzle's migrator uses, so migrate() recognizes the journal.
+  sqlite.exec(
+    'CREATE TABLE IF NOT EXISTS "__drizzle_migrations" (id SERIAL PRIMARY KEY, hash text NOT NULL, created_at numeric)',
   );
-  const additions: [string, string][] = [
-    ["profile_id", "TEXT NOT NULL DEFAULT 'explorer'"],
-    ["profile_snapshot", "TEXT NOT NULL DEFAULT '{}'"],
-    ["ownership", "TEXT NOT NULL DEFAULT '[]'"],
-    ["sdk_session_id", "TEXT"],
-    ["generation", "INTEGER NOT NULL DEFAULT 0"],
-    ["turn_count", "INTEGER NOT NULL DEFAULT 0"],
-    ["context_tokens", "INTEGER NOT NULL DEFAULT 0"],
-    ["memory", "TEXT NOT NULL DEFAULT ''"],
-    ["latest_handoff_id", "TEXT"],
-    ["checkpoint_ready", "INTEGER NOT NULL DEFAULT 1"],
-    ["pending_turn_seq", "INTEGER NOT NULL DEFAULT 0"],
-  ];
-  for (const [name, ddl] of additions) {
-    if (!columns.has(name)) sqlite.exec(`ALTER TABLE participants ADD COLUMN ${name} ${ddl}`);
-  }
-  const usageColumns = new Set(sqlite.prepare("pragma table_info(usage_samples)").all().map((row) => (row as { name: string }).name));
-  for (const name of ["uncached_input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"]) {
-    if (!usageColumns.has(name)) sqlite.exec(`ALTER TABLE usage_samples ADD COLUMN ${name} INTEGER NOT NULL DEFAULT 0`);
-  }
-  const usageOptional: [string, string][] = [["model", "TEXT"], ["effort", "TEXT"], ["trigger", "TEXT"], ["duration_ms", "INTEGER"], ["api_duration_ms", "INTEGER"], ["sdk_duration_ms", "INTEGER"], ["status", "TEXT"], ["stop_reason", "TEXT"]];
-  for (const [name, ddl] of usageOptional) if (!usageColumns.has(name)) sqlite.exec(`ALTER TABLE usage_samples ADD COLUMN ${name} ${ddl}`);
+  sqlite
+    .prepare('INSERT INTO "__drizzle_migrations" ("hash", "created_at") VALUES (?, ?)')
+    .run(baseline.hash, baseline.folderMillis);
+}
 
-  const taskColumns = new Set(sqlite.prepare("pragma table_info(tasks)").all().map((row) => (row as { name: string }).name));
-  if (!taskColumns.has("id")) sqlite.exec("ALTER TABLE tasks ADD COLUMN id TEXT");
-  const missing = sqlite.prepare("SELECT sdk_session_id, sdk_task_id FROM tasks WHERE id IS NULL OR id = ''").all() as { sdk_session_id: string; sdk_task_id: string }[];
-  const updateTaskId = sqlite.prepare("UPDATE tasks SET id = ? WHERE sdk_session_id = ? AND sdk_task_id = ?");
-  for (const row of missing) updateTaskId.run(`task_${Buffer.from(`${row.sdk_session_id}\0${row.sdk_task_id}`).toString("base64url")}`, row.sdk_session_id, row.sdk_task_id);
-  sqlite.exec("CREATE UNIQUE INDEX IF NOT EXISTS tasks_console_id ON tasks(id)");
+function tableExists(sqlite: Database.Database, name: string): boolean {
+  return (
+    sqlite.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) !==
+    undefined
+  );
+}
+
+function columnExists(sqlite: Database.Database, table: string, column: string): boolean {
+  const rows = sqlite.prepare(`pragma table_info(${JSON.stringify(table)})`).all() as {
+    name: string;
+  }[];
+  return rows.some((row) => row.name === column);
 }

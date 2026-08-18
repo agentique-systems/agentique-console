@@ -1,6 +1,7 @@
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 
 import type {
+  ConfigResponse,
   FsDirsResponse,
   FsRootsResponse,
   GetAgentSessionResponse,
@@ -9,15 +10,17 @@ import type {
   ListTasksResponse,
   ListUserSessionsResponse,
   StatsResponse,
+  SystemPauseState,
   TranscriptResponse,
   Workspace,
   SessionTreeResponse,
   WorkspaceTasksResponse,
   ListAgentProfilesResponse,
   GetAgentProfileResponse,
-  ManagerSession,
-  ManagerSessionResponse,
   TimelinePageResponse,
+  GetSpecResponse,
+  GetOrchestrationResponse,
+  GetRunSummaryResponse,
 } from "@agentique-console/shared";
 
 import { apiFetch, withQuery } from "./client";
@@ -29,10 +32,27 @@ import { keys } from "./keys";
  */
 const LIVE = { refetchInterval: 8_000 } as const;
 
-export function useStats() {
+/**
+ * The server's defaults — currently just the orchestrator model the operator's
+ * `CONSOLE_MODEL` resolves to. It cannot change without a server restart, so
+ * this is fetched once and never revalidated.
+ */
+export function useConfig() {
   return useQuery({
-    queryKey: keys.stats.all,
-    queryFn: () => apiFetch<StatsResponse>("/api/stats"),
+    queryKey: keys.config,
+    queryFn: () => apiFetch<ConfigResponse>("/api/config"),
+    staleTime: Infinity,
+  });
+}
+
+/**
+ * The whole-system pause. The spine's `system.pause.changed` writes the
+ * payload straight into this key; the interval is only the reconnect belt.
+ */
+export function useSystemPause() {
+  return useQuery({
+    queryKey: keys.system.pause,
+    queryFn: () => apiFetch<SystemPauseState>("/api/system/pause"),
     ...LIVE,
   });
 }
@@ -156,11 +176,15 @@ export function useAgentProfiles(workspaceId: string | null) {
 export function useAgentProfile(workspaceId: string | null, id: string | null) {
   return useQuery({ queryKey: keys.profiles.detail(workspaceId ?? "", id ?? ""), queryFn: () => apiFetch<GetAgentProfileResponse>(`/api/workspaces/${workspaceId}/agent-profiles/${id}`), enabled: workspaceId !== null && id !== null });
 }
-export function useManagerSessions(workspaceId: string | null) {
-  return useQuery({ queryKey: keys.managerSessions(workspaceId ?? ""), queryFn: () => apiFetch<ManagerSession[]>(`/api/workspaces/${workspaceId}/manager-sessions`), enabled: workspaceId !== null });
+export function useSpec(id: string | null) {
+  return useQuery({ queryKey: keys.userSessions.spec(id ?? ""), queryFn: () => apiFetch<GetSpecResponse>(`/api/user-sessions/${id}/spec`), enabled: id !== null });
 }
-export function useManagerSession(id: string | null) {
-  return useQuery({ queryKey: keys.managerSession(id ?? ""), queryFn: () => apiFetch<ManagerSessionResponse>(`/api/manager-sessions/${id}`), enabled: id !== null, refetchInterval: id ? 4_000 : false });
+export function useOrchestration(id: string | null) {
+  return useQuery({ queryKey: keys.userSessions.orchestration(id ?? ""), queryFn: () => apiFetch<GetOrchestrationResponse>(`/api/user-sessions/${id}/orchestration`), enabled: id !== null });
+}
+/** Fetch-on-expand: the sign-off card's justification disclosure. */
+export function useRunSummaryDocument(id: string | null, summaryId: string | null, enabled: boolean) {
+  return useQuery({ queryKey: keys.userSessions.runSummary(id ?? "", summaryId ?? ""), queryFn: () => apiFetch<GetRunSummaryResponse>(`/api/user-sessions/${id}/run-summaries/${summaryId}`), enabled: enabled && id !== null && summaryId !== null });
 }
 export function useTimeline(id: string | null) {
   return useInfiniteQuery({ queryKey: keys.timeline(id ?? ""), initialPageParam: undefined as number | undefined,

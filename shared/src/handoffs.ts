@@ -51,6 +51,10 @@ export interface CoordinationHandoffData extends Record<string, unknown> {
   conflicts?: string[];
   operatorDecisions?: string[];
   activeSessions?: string[];
+  /** Capture-at-act rationale: why this move, now (truncated to 280 in summaries). */
+  why?: string;
+  /** The success contract: what evidence would count as done, or change the plan. */
+  expecting?: string;
 }
 export interface ImplementationHandoffData extends Record<string, unknown> {
   changedPaths?: string[];
@@ -99,8 +103,6 @@ export interface HandoffMetadata {
   rootHandoffId: string;
   checkpoint: boolean;
   bytes: number;
-  softTargetBytes: number;
-  overflow: boolean;
   referenceWarnings: string[];
   createdAt: string;
 }
@@ -124,8 +126,10 @@ export interface HandoffSummary {
   evidenceCount: number;
   artifactCount: number;
   extensionKind: HandoffExtensionKind;
-  overflow: boolean;
   referenceWarnings: string[];
+  /** Lifted from a coordination extension when present (bounded fields). */
+  why?: string;
+  expecting?: string;
 }
 
 export interface HandoffPage {
@@ -135,15 +139,5 @@ export interface HandoffPage {
   nextCursor: string | null;
 }
 
-export const HANDOFF_SOFT_TARGET_BYTES = 4 * 1024;
-export const HANDOFF_CHECKPOINT_SOFT_TARGET_BYTES = 12 * 1024;
 export const HANDOFF_READ_DEFAULT_BYTES = 8 * 1024;
 export const HANDOFF_READ_MAX_BYTES = 32 * 1024;
-
-export function handoffExtensionKindForProfile(profileId: string | null): HandoffExtensionKind {
-  if (profileId === "coordinator" || profileId === "main" || profileId === "orchestrator") return "coordination";
-  if (profileId?.includes("implementer")) return "implementation";
-  if (profileId === "explorer" || profileId === "researcher") return "investigation";
-  if (profileId?.includes("reviewer")) return "review";
-  return "generic";
-}

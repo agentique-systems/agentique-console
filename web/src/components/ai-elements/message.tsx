@@ -8,7 +8,7 @@ import { cn } from "@/lib/utils";
 
 import { markdownPlugins } from "./markdown-plugins";
 
-/** Inlined from the v1 `ai` dependency: the console has exactly two chat roles. */
+/** Inlined from the `ai` dependency: the console has exactly two chat roles. */
 export type MessageRole = "user" | "assistant";
 
 export type MessageProps = HTMLAttributes<HTMLDivElement> & {

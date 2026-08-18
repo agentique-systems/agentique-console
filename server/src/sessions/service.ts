@@ -3,14 +3,20 @@
  * operator sends), listing, mode/status patches, transcript hydration.
  */
 import type {
+  AgentSession,
   ConsoleEvent,
   CreateUserSessionBody,
   GetUserSessionResponse,
   PatchUserSessionBody,
+  PostMessageResponse,
+  RunSignoffBody,
+  SessionTreeResponse,
   UserSession,
+  UserSessionListItem,
 } from "@agentique-console/shared";
-import { badRequest, notFound } from "../api/errors.ts";
-import { Repo, toWireUserSession, type UserSessionRow } from "../db/repo.ts";
+import { InvalidInputError, NotFoundError } from "../errors.ts";
+import { Repo, type UserSessionRow } from "../db/repo.ts";
+import { toWireUserSession } from "../api/wire.ts";
 import type { EventBus } from "../events/bus.ts";
 import { newId, nowIso } from "../ids.ts";
 import type { InteractionService } from "../orchestrator/interactions.ts";
@@ -24,7 +30,12 @@ export class UserSessionService {
   readonly #runner: OrchestratorRunner;
   readonly #interactions: InteractionService;
   readonly #workspaces: WorkspaceService;
-  readonly #archiveAgentSessions: ((userSessionId: string) => void) | undefined;
+  readonly #archiveAgentSessions: (userSessionId: string) => void;
+  readonly #completion: {
+    schedule(userSessionId: string): void;
+    resolve(userSessionId: string, decision: "accept" | "changes", note?: string): void;
+  };
+  readonly #wireAgentSessions: (userSessionId: string) => AgentSession[];
 
   constructor(deps: {
     repo: Repo;
@@ -32,7 +43,12 @@ export class UserSessionService {
     runner: OrchestratorRunner;
     interactions: InteractionService;
     workspaces: WorkspaceService;
-    archiveAgentSessions?: (userSessionId: string) => void;
+    archiveAgentSessions: (userSessionId: string) => void;
+    completion: {
+      schedule(userSessionId: string): void;
+      resolve(userSessionId: string, decision: "accept" | "changes", note?: string): void;
+    };
+    wireAgentSessions: (userSessionId: string) => AgentSession[];
   }) {
     this.#repo = deps.repo;
     this.#bus = deps.bus;
@@ -40,11 +56,13 @@ export class UserSessionService {
     this.#interactions = deps.interactions;
     this.#workspaces = deps.workspaces;
     this.#archiveAgentSessions = deps.archiveAgentSessions;
+    this.#completion = deps.completion;
+    this.#wireAgentSessions = deps.wireAgentSessions;
   }
 
   create(body: CreateUserSessionBody): UserSession {
     const message = body.message.trim();
-    if (message === "") throw badRequest("a first message is required");
+    if (message === "") throw new InvalidInputError("a first message is required");
     this.#workspaces.get(body.workspaceId); // 404s on unknown workspace
 
     const now = nowIso();
@@ -54,7 +72,7 @@ export class UserSessionService {
       title: titleFromFirstMessage(message),
       mode: body.mode,
       phase: body.mode === "plan_execute" ? "planning" : "executing",
-      status: "open",
+      lifecycle: "open",
       purpose: "work",
       subjectKey: null,
       sdkSessionId: null,
@@ -63,6 +81,13 @@ export class UserSessionService {
       contextTokens: 0,
       memory: "",
       latestHandoffId: null,
+      cumulativeCostUsd: 0,
+      cumulativeApiDurationMs: 0,
+      runState: "active",
+      runBaseCommit: null, pausedUntil: null, pauseReason: null, budgetUsd: null, autonomy: "standard" as const,
+      // Null is a real value here, not a placeholder: it means "track the
+      // configured default".
+      model: body.model ?? null,
       createdAt: now,
       updatedAt: now,
     };
@@ -78,13 +103,18 @@ export class UserSessionService {
     return session;
   }
 
-  list(workspaceId: string): UserSession[] {
-    return this.#repo.listUserSessions(workspaceId).map(toWireUserSession);
+  list(workspaceId: string): UserSessionListItem[] {
+    // One grouped query rather than N: the sidebar renders every session.
+    const pending = this.#repo.countPendingInteractions(workspaceId);
+    return this.#repo.listUserSessions(workspaceId).map((row) => ({
+      ...toWireUserSession(row),
+      pendingInteractions: pending.get(row.id) ?? 0,
+    }));
   }
 
   get(id: string): GetUserSessionResponse {
     const row = this.#repo.getUserSession(id);
-    if (!row) throw notFound(`no user session ${id}`);
+    if (!row) throw new NotFoundError(`no user session ${id}`);
     return {
       session: toWireUserSession(row),
       pendingInteractions: this.#interactions.listPending(id),
@@ -93,48 +123,91 @@ export class UserSessionService {
 
   patch(id: string, patch: PatchUserSessionBody): UserSession {
     const row = this.#repo.getUserSession(id);
-    if (!row) throw notFound(`no user session ${id}`);
+    if (!row) throw new NotFoundError(`no user session ${id}`);
 
     const changes: Partial<
-      Pick<UserSessionRow, "title" | "mode" | "phase" | "status">
+      Pick<UserSessionRow, "title" | "mode" | "phase" | "lifecycle" | "model" | "budgetUsd" | "autonomy">
     > = {};
     if (patch.title !== undefined) {
       const title = patch.title.trim();
-      if (title === "") throw badRequest("title cannot be empty");
+      if (title === "") throw new InvalidInputError("title cannot be empty");
       changes.title = title;
     }
-    if (patch.status !== undefined) changes.status = patch.status;
-    if (row.purpose === "profile_manager" && patch.mode !== undefined && patch.mode !== "plan_execute") {
-      throw badRequest("profile Manager sessions always require plan approval");
-    }
+    if (patch.lifecycle !== undefined) changes.lifecycle = patch.lifecycle;
     if (patch.mode !== undefined && patch.mode !== row.mode) {
       changes.mode = patch.mode;
       // Entering plan_execute re-arms planning; leaving it ends the gate.
       changes.phase = patch.mode === "plan_execute" ? "planning" : "executing";
     }
+    if (patch.model !== undefined && patch.model !== row.model) {
+      changes.model = patch.model;
+    }
+    // Neither recycles the lane: the budget acts at the next usage row, and
+    // autonomy is read by the governance sweep + the next generation's prompt.
+    if (patch.budgetUsd !== undefined) changes.budgetUsd = patch.budgetUsd;
+    if (patch.autonomy !== undefined) changes.autonomy = patch.autonomy;
     if (Object.keys(changes).length === 0) return toWireUserSession(row);
 
     this.#repo.patchUserSession(id, changes);
     this.#bus.append({
       type: "user_session.updated",
       userSessionId: id,
-      payload: { sessionId: id, patch: changes },
+      payload: { userSessionId: id, patch: changes },
     });
-    // The lane's options are frozen at spawn: archiving shuts it down, a mode
-    // change recycles it so the next message respawns with fresh options.
-    if (changes.status === "archived") {
-      this.#archiveAgentSessions?.(id);
+    // The lane's options are frozen at spawn: archiving shuts it down, and a
+    // mode or model change recycles it so the next message respawns with fresh
+    // options. A turn already in flight finishes on what it started with.
+    if (changes.lifecycle === "archived") {
+      this.#completion.schedule(id);
+      this.#archiveAgentSessions(id);
       void this.#runner.closeSession(id);
-    } else if (changes.mode !== undefined) {
+    } else if (changes.mode !== undefined || changes.model !== undefined) {
       this.#runner.recycleSession(id);
     }
     const updated = this.#repo.getUserSession(id);
     return toWireUserSession(updated ?? row);
   }
 
+  /** Every session in a workspace with its agent sessions — the sidebar's tree. */
+  sessionTree(workspaceId: string): SessionTreeResponse {
+    this.#workspaces.get(workspaceId); // 404s on unknown workspace
+    return this.#repo.listUserSessions(workspaceId).map((row) => ({
+      session: toWireUserSession(row),
+      agentSessions: this.#wireAgentSessions(row.id),
+    }));
+  }
+
+  /** An operator chat message, delivered to the orchestrator lane. */
+  postMessage(id: string, text: string): PostMessageResponse {
+    return this.#runner.postOperatorMessage(id, text);
+  }
+
+  /**
+   * The operator's verdict on a proposed run completion. Conflicts (no pending
+   * proposal) surface from the completion service; the fresh session row is
+   * the response.
+   */
+  signoff(id: string, body: RunSignoffBody): UserSession {
+    this.#completion.resolve(id, body.decision, body.note);
+    return this.get(id).session;
+  }
+
+  /**
+   * A stale plan approval still ends the planning gate — the same transition
+   * the live approval path makes inside `canUseTool`.
+   */
+  beginExecuting(id: string): void {
+    this.#repo.patchUserSession(id, { phase: "executing" });
+    this.#bus.append({
+      type: "user_session.updated",
+      userSessionId: id,
+      payload: { userSessionId: id, patch: { phase: "executing" } },
+    });
+  }
+
   async transcript(id: string): Promise<ConsoleEvent[]> {
     const row = this.#repo.getUserSession(id);
-    if (!row) throw notFound(`no user session ${id}`);
+    if (!row) throw new NotFoundError(`no user session ${id}`);
     const events: ConsoleEvent[] = [];
     for await (const event of this.#bus.readWithSeq({ userSessionId: id })) {
       events.push(event);

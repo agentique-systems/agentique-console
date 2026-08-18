@@ -1,19 +1,20 @@
 import { describe, expect, it } from "vitest";
 import type { ConsoleEvent } from "@agentique-console/shared";
 import { openDb } from "../db/client.ts";
+import { ArtifactStore } from "./artifact-store.ts";
 import { EventBus, type EventInput } from "./bus.ts";
 
 function makeBus(): EventBus {
   const { db } = openDb(":memory:");
-  return new EventBus(db);
+  return new EventBus(db, new ArtifactStore(db));
 }
 
 function msgInput(sessionId: string, text: string): EventInput {
   return {
-    type: "user_session.message",
+    type: "user_session.message.appended",
     userSessionId: sessionId,
     payload: {
-      sessionId,
+      userSessionId: sessionId,
       message: {
         seq: 1,
         speaker: { kind: "operator", name: "operator" },
@@ -40,11 +41,13 @@ async function collect(
 describe("EventBus", () => {
   it("stores oversized payloads as retrievable durable artifacts", () => {
     const { db } = openDb(":memory:");
-    const bus = new EventBus(db);
-    const captured = bus.capture({ output: "x".repeat(20_000) }) as { artifactId: string; truncated: boolean; bytes: number };
-    expect(captured.truncated).toBe(true);
+    const artifacts = new ArtifactStore(db);
+    const bus = new EventBus(db, artifacts);
+    const captured = bus.captureSized({ output: "x".repeat(20_000) });
+    const value = captured.value as { artifactId: string; truncated: boolean };
+    expect(value.truncated).toBe(true);
     expect(captured.bytes).toBeGreaterThan(20_000);
-    expect(JSON.parse(bus.getArtifact(captured.artifactId)?.content ?? "{}").output).toHaveLength(20_000);
+    expect(JSON.parse(artifacts.get(value.artifactId)?.content ?? "{}").output).toHaveLength(20_000);
   });
   it("stamps increasing seq on append and reports headSeq", () => {
     const bus = makeBus();
@@ -107,7 +110,7 @@ describe("EventBus", () => {
       type: "stream.delta",
       userSessionId: "us_1",
       payload: {
-        scope: { kind: "user", sessionId: "us_1" },
+        scope: { kind: "user", userSessionId: "us_1" },
         speaker: "orchestrator",
         turnId: "turn_1",
         text: "hel",

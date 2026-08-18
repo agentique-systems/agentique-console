@@ -13,7 +13,7 @@ import {
 function tool(
   name: string,
   uid: string,
-  participant = "scout",
+  agent = "scout",
   output?: unknown,
 ): AgentToolItem {
   return {
@@ -21,7 +21,7 @@ function tool(
     uid,
     callId: uid,
     name,
-    participant,
+    agent,
     input: {},
     ...(output === undefined ? {} : { output }),
   };
@@ -43,24 +43,24 @@ function message(seq: number): AgentItem {
  * is the input contract — if agent-fold.ts grows an arm, this must stay total.
  */
 describe("groupAgentItems", () => {
-  it("collapses one seat's consecutive calls into a single run", () => {
+  it("collapses one agent's consecutive calls into a single run", () => {
     const groups = groupAgentItems([
       tool("Read", "a", "scout", "x"),
       tool("Grep", "b", "scout", "y"),
     ]);
 
     expect(groups).toHaveLength(1);
-    expect((groups[0] as ToolRunItem).participant).toBe("scout");
+    expect((groups[0] as ToolRunItem).agent).toBe("scout");
     expect((groups[0] as ToolRunItem).tools).toHaveLength(2);
   });
 
-  it("splits a run when the seat changes, with nothing in between", () => {
+  it("splits a run when the agent changes, with nothing in between", () => {
     const groups = groupAgentItems([
       tool("Read", "a", "scout", "x"),
       tool("Edit", "b", "coder", "y"),
     ]);
 
-    expect(groups.map((g) => (g as ToolRunItem).participant)).toEqual([
+    expect(groups.map((g) => (g as ToolRunItem).agent)).toEqual([
       "scout",
       "coder",
     ]);
@@ -83,7 +83,7 @@ describe("groupAgentItems", () => {
   it("passes non-tool items through untouched and in order", () => {
     const items: AgentItem[] = [
       message(1),
-      { type: "phase", seq: 2, phase: "executing" },
+      message(2),
     ];
     expect(groupAgentItems(items)).toEqual(items);
   });

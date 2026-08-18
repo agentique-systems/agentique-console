@@ -1,19 +1,27 @@
 /**
  * Pure SDK-message → TurnEvent mapper (port of agentique-core's mapping.ts,
  * cut to what v2 consumes). One SDK message maps to zero or more events; the
- * consumer decides persistence. Subagent-parented blocks (A4, with
+ * consumer decides persistence. Subagent-parented blocks (with
  * forwardSubagentText on) are TAGGED with their parentCallId rather than
  * dropped: the runner routes a bound coordinator's traffic into its agent
  * session's lane and drops the rest; the specialist consumer skips them all,
- * so seat transcripts still show the top-level thread only.
+ * so agent transcripts still show the top-level thread only.
  */
 import type { SdkMessage } from "./types.ts";
+import { INLINE_JSON_CAP_BYTES as JSON_CAP_BYTES } from "../events/bus.ts";
 
 export type TurnEvent =
   | { kind: "resume"; resumeId: string; modelId?: string }
   | { kind: "delta"; text: string; parentCallId?: string }
   | { kind: "reasoning-delta"; text: string; parentCallId?: string }
   | { kind: "message"; text: string; parentCallId?: string }
+  /**
+   * A provider retry, with its numbers intact. The console budgets on wall
+   * clock rather than waiting for the CLI's own attempt count to run out.
+   * `detail` restates the same fact as the accompanying notice; consumers
+   * persist THIS one.
+   */
+  | { kind: "retry"; classification: "api_error" | "rate_limited"; attempt?: number; maxRetries?: number; delayMs: number; status?: number; detail: string }
   | {
       kind: "tool.call";
       callId: string;
@@ -40,8 +48,22 @@ export type TurnEvent =
    * persisted; it exists so a slow turn reads as working rather than stuck.
    */
   | { kind: "notice"; text: string }
-  | { kind: "result"; output: unknown; resumeId?: string; costUsd?: number; inputTokens?: number; uncachedInputTokens?: number; cacheCreationInputTokens?: number; cacheReadInputTokens?: number; outputTokens?: number; modelId?: string; apiDurationMs?: number; sdkDurationMs?: number; stopReason?: string }
-  | { kind: "error"; message: string; aborted: boolean; inputTokens?: number; uncachedInputTokens?: number; cacheCreationInputTokens?: number; cacheReadInputTokens?: number; outputTokens?: number; costUsd?: number; modelId?: string; apiDurationMs?: number; sdkDurationMs?: number; stopReason?: string }
+  /**
+   * Structured plan/subscription rate-limit state (SDKRateLimitInfo).
+   * `rejected` means the provider will accept no more work until `resetsAt` —
+   * the capacity service pauses the run on it instead of letting turns
+   * hot-spin to failure.
+   */
+  | { kind: "limit"; status: "allowed" | "allowed_warning" | "rejected"; resetsAt?: number; limitType?: string; utilization?: number }
+  /**
+   * Context-window occupancy after one API call — `input + cache_creation +
+   * cache_read` from an assistant message's own usage. The consumer keeps the
+   * running max as the rotation signal. Emitted per assistant message, never
+   * persisted.
+   */
+  | { kind: "context"; occupancyTokens: number }
+  | { kind: "result"; output: unknown; resumeId?: string; cumulativeCostUsd?: number; inputTokens?: number; uncachedInputTokens?: number; cacheCreationInputTokens?: number; cacheReadInputTokens?: number; outputTokens?: number; modelId?: string; cumulativeApiDurationMs?: number; sdkDurationMs?: number; stopReason?: string }
+  | { kind: "error"; message: string; aborted: boolean; inputTokens?: number; uncachedInputTokens?: number; cacheCreationInputTokens?: number; cacheReadInputTokens?: number; outputTokens?: number; cumulativeCostUsd?: number; modelId?: string; cumulativeApiDurationMs?: number; sdkDurationMs?: number; stopReason?: string }
   /**
    * The SDK's authoritative turn-over signal (session_state_changed → idle).
    * A persistent lane settles its open turn on this even when the result
@@ -59,13 +81,7 @@ export type TurnEvent =
       summary: string;
       /** The spawning Agent call — the seat registry's key, when present. */
       toolUseId?: string;
-    }
-  /**
-   * B3: a message from an in-process agent (SendMessage to "main") arriving
-   * in the lane as a peer-origin user message. `from` is the sender's display
-   * name when the harness stamped one, else its id.
-   */
-  | { kind: "peer-message"; from: string; senderTaskId?: string; text: string };
+    };
 
 export function mapSdkMessage(message: SdkMessage): TurnEvent[] {
   switch (message.type) {
@@ -76,7 +92,7 @@ export function mapSdkMessage(message: SdkMessage): TurnEvent[] {
       if (message.subtype === "session_state_changed") {
         return message.state === "idle" ? [{ kind: "turn-idle" }] : [];
       }
-      // A5: background-task lifecycle. Progress (with its ~30s AI summary
+      // Background-task lifecycle. Progress (with its ~30s AI summary
       // when enabled) is liveness; failures become persistent rows.
       if (message.subtype === "task_progress") {
         const summary = stringOf(message.summary);
@@ -133,8 +149,20 @@ export function mapSdkMessage(message: SdkMessage): TurnEvent[] {
       ];
     }
 
-    case "rate_limit_event":
-      return [{ kind: "notice", text: "rate limited — waiting for capacity" }];
+    case "rate_limit_event": {
+      // The structured info, not just prose: `status: "rejected"` is the
+      // subscription-cap signal a live run died on while its telemetry read
+      // `rateLimited: 0` — the fields were discarded exactly here.
+      const info = (message as { rate_limit_info?: { status?: string; resetsAt?: number; rateLimitType?: string; utilization?: number } }).rate_limit_info;
+      const status = info?.status === "rejected" ? "rejected" : info?.status === "allowed_warning" ? "allowed_warning" : "allowed";
+      return [
+        { kind: "notice", text: status === "rejected" ? "usage limit reached — pausing until capacity returns" : "rate limited — waiting for capacity" },
+        { kind: "limit", status,
+          ...(info?.resetsAt === undefined ? {} : { resetsAt: info.resetsAt }),
+          ...(info?.rateLimitType === undefined ? {} : { limitType: info.rateLimitType }),
+          ...(info?.utilization === undefined ? {} : { utilization: info.utilization }) },
+      ];
+    }
 
     case "stream_event": {
       const delta = message.event?.delta;
@@ -152,6 +180,11 @@ export function mapSdkMessage(message: SdkMessage): TurnEvent[] {
 
     case "assistant": {
       const events: TurnEvent[] = [];
+      const usage = message.message?.usage;
+      if (usage !== undefined) {
+        const occupancyTokens = (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0);
+        if (occupancyTokens > 0) events.push({ kind: "context", occupancyTokens });
+      }
       for (const block of message.message?.content ?? []) {
         if (
           block.type === "text" &&
@@ -172,28 +205,6 @@ export function mapSdkMessage(message: SdkMessage): TurnEvent[] {
     }
 
     case "user": {
-      // A peer-origin user message is an agent's SendMessage to "main".
-      if (
-        message.parent_tool_use_id == null &&
-        message.origin?.kind === "peer"
-      ) {
-        const text =
-          message.origin.body ??
-          (message.message?.content ?? [])
-            .filter((block) => block.type === "text")
-            .map((block) => block.text ?? "")
-            .join("\n");
-        return [
-          {
-            kind: "peer-message",
-            from: message.origin.name ?? message.origin.from ?? "agent",
-            ...(message.origin.senderTaskId === undefined
-              ? {}
-              : { senderTaskId: message.origin.senderTaskId }),
-            text,
-          },
-        ];
-      }
       const events: TurnEvent[] = [];
       for (const block of message.message?.content ?? []) {
         if (block.type !== "tool_result" || block.tool_use_id === undefined) {
@@ -213,7 +224,10 @@ export function mapSdkMessage(message: SdkMessage): TurnEvent[] {
     }
 
     case "result": {
-      if (message.subtype === "success") {
+      // A CLI-level failure is reported as subtype "success" with is_error set,
+      // and carries zeroed usage. Treating it as a result recorded junk usage
+      // rows and hid real failures behind a "completed" turn.
+      if (message.subtype === "success" && message.is_error !== true) {
         return [
           {
             kind: "result",
@@ -223,7 +237,7 @@ export function mapSdkMessage(message: SdkMessage): TurnEvent[] {
               : { resumeId: message.session_id }),
             ...(message.total_cost_usd === undefined
               ? {}
-              : { costUsd: message.total_cost_usd }),
+              : { cumulativeCostUsd: message.total_cost_usd }),
             ...((message.usage?.input_tokens ?? message.usage?.cache_creation_input_tokens ?? message.usage?.cache_read_input_tokens) === undefined ? {} : {
               inputTokens: (message.usage?.input_tokens ?? 0) + (message.usage?.cache_creation_input_tokens ?? 0) + (message.usage?.cache_read_input_tokens ?? 0),
               uncachedInputTokens: message.usage?.input_tokens ?? 0,
@@ -250,21 +264,26 @@ export function mapSdkMessage(message: SdkMessage): TurnEvent[] {
   }
 }
 
-function usageFields(message: SdkMessage): { inputTokens?: number; uncachedInputTokens?: number; cacheCreationInputTokens?: number; cacheReadInputTokens?: number; outputTokens?: number; costUsd?: number; modelId?: string; apiDurationMs?: number; sdkDurationMs?: number; stopReason?: string } {
+function usageFields(message: SdkMessage): { inputTokens?: number; uncachedInputTokens?: number; cacheCreationInputTokens?: number; cacheReadInputTokens?: number; outputTokens?: number; cumulativeCostUsd?: number; modelId?: string; cumulativeApiDurationMs?: number; sdkDurationMs?: number; stopReason?: string } {
   const hasInput = message.usage?.input_tokens !== undefined || message.usage?.cache_creation_input_tokens !== undefined || message.usage?.cache_read_input_tokens !== undefined;
   return {
     ...(hasInput ? { inputTokens: (message.usage?.input_tokens ?? 0) + (message.usage?.cache_creation_input_tokens ?? 0) + (message.usage?.cache_read_input_tokens ?? 0),
       uncachedInputTokens: message.usage?.input_tokens ?? 0, cacheCreationInputTokens: message.usage?.cache_creation_input_tokens ?? 0,
       cacheReadInputTokens: message.usage?.cache_read_input_tokens ?? 0 } : {}),
     ...(message.usage?.output_tokens === undefined ? {} : { outputTokens: message.usage.output_tokens }),
-    ...(message.total_cost_usd === undefined ? {} : { costUsd: message.total_cost_usd }),
+    ...(message.total_cost_usd === undefined ? {} : { cumulativeCostUsd: message.total_cost_usd }),
     ...resultTelemetry(message),
   };
 }
 
-function resultTelemetry(message: SdkMessage): { modelId?: string; apiDurationMs?: number; sdkDurationMs?: number; stopReason?: string } {
+/**
+ * `total_cost_usd` and `duration_api_ms` are CUMULATIVE per provider session —
+ * each result restates the running total. The names carry that so consumers
+ * are forced to delta rather than sum.
+ */
+function resultTelemetry(message: SdkMessage): { modelId?: string; cumulativeApiDurationMs?: number; sdkDurationMs?: number; stopReason?: string } {
   const modelId = message.modelUsage ? Object.entries(message.modelUsage).sort((a, b) => (b[1].outputTokens ?? 0) - (a[1].outputTokens ?? 0))[0]?.[0] : message.model;
-  return { ...(modelId ? { modelId } : {}), ...(message.duration_api_ms === undefined ? {} : { apiDurationMs: message.duration_api_ms }), ...(message.duration_ms === undefined ? {} : { sdkDurationMs: message.duration_ms }), ...(message.stop_reason === undefined ? {} : { stopReason: message.stop_reason }) };
+  return { ...(modelId ? { modelId } : {}), ...(message.duration_api_ms === undefined ? {} : { cumulativeApiDurationMs: message.duration_api_ms }), ...(message.duration_ms === undefined ? {} : { sdkDurationMs: message.duration_ms }), ...(message.stop_reason === undefined ? {} : { stopReason: message.stop_reason }) };
 }
 
 /** Stamps subagent-parented events with their parent tool_use id. */
@@ -276,8 +295,8 @@ function tagged(message: SdkMessage, events: TurnEvent[]): TurnEvent[] {
 
 /**
  * System messages that carry no content but say what the provider is doing.
- * v1 called these notices; without them a turn that spends minutes in retry
- * backoff looks identical to a hung one.
+ * Without them a turn that spends minutes in retry backoff looks identical to
+ * a hung one.
  */
 function systemNotice(message: SdkMessage): TurnEvent[] {
   switch (message.subtype) {
@@ -301,7 +320,21 @@ function systemNotice(message: SdkMessage): TurnEvent[] {
           : `retry ${attempt}/${max}`,
         delay === undefined ? undefined : `in ${formatSeconds(delay / 1000)}`,
       ].filter((part): part is string => part !== undefined);
-      return [{ kind: "notice", text: parts.join(" · ") }];
+      const detail = parts.join(" · ");
+      // The STRUCTURE as well as the prose: the numbers must survive so the
+      // console can act on a retry storm, not just narrate it.
+      return [
+        { kind: "notice", text: detail },
+        {
+          kind: "retry",
+          classification: status === 429 ? "rate_limited" : "api_error",
+          ...(attempt === undefined ? {} : { attempt }),
+          ...(max === undefined ? {} : { maxRetries: max }),
+          delayMs: delay ?? 0,
+          ...(status === undefined ? {} : { status }),
+          detail,
+        },
+      ];
     }
     case "informational": {
       const content = stringOf(message.content);
@@ -346,7 +379,7 @@ function resultErrorMessage(message: SdkMessage): string {
   }
 }
 
-const JSON_CAP_BYTES = 16_384;
+
 
 /**
  * Size-caps a JSON value for spine persistence. Values whose serialized form

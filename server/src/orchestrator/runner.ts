@@ -19,33 +19,49 @@
 import type { HandoffDraft, PostMessageResponse } from "@agentique-console/shared";
 import { AsyncQueue } from "../async-queue.ts";
 import type { Config } from "../config.ts";
-import { Repo, toWireMessage } from "../db/repo.ts";
+import { Repo, type UserSessionRow } from "../db/repo.ts";
+import { toWireMessage } from "../api/wire.ts";
 import type { EventBus } from "../events/bus.ts";
 import { RuntimeBroadcaster } from "../events/runtime.ts";
 import { newId, nowIso } from "../ids.ts";
-import { badRequest, conflict, notFound } from "../api/errors.ts";
+import { rotationTokenLimit } from "../model-catalog.ts";
+import { recoveryAction } from "../lane-runtime/checkpoint.ts";
+import { rotationDue } from "../lane-runtime/rotation.ts";
+import { advanceUsageWatermark } from "../lane-runtime/usage.ts";
+import { InvalidInputError, ConflictError, NotFoundError } from "../errors.ts";
 import { mapSdkMessage } from "../sdk/mapping.ts";
 import type {
   ConsoleSdk,
   QueryHandle,
-  SdkOptions,
   SdkUserMessageLike,
 } from "../sdk/types.ts";
+import type { DecisionLedger } from "./decisions.ts";
+import type { SpecService } from "./spec.ts";
+import type { OrchestrationStateService } from "./state.ts";
 import type { InteractionService } from "./interactions.ts";
-import { buildOrchestratorOptions } from "./options.ts";
+import { MAIN_DEFAULT_EFFORT, buildOrchestratorOptions } from "./options.ts";
+import type { EffortLevel } from "../sdk/effort.ts";
 import { buildOrchestratorCanUseTool, type LaneState } from "./permissions.ts";
 import type { HandoffService } from "../handoffs/service.ts";
-import { HandoffDraftSchema, HANDOFF_DRAFT_JSON_SCHEMA } from "../handoffs/schema.ts";
 import { sdkEnv } from "../sdk/env.ts";
+import type { SqliteSessionStore } from "../sdk/session-store.ts";
+import type { AgentSessionService } from "../agent-sessions/service.ts";
+import type { CapacityService } from "../capacity/service.ts";
+import { isCapacityFailure } from "../sdk/failure-classifier.ts";
+import { mainPeerName } from "../agent-sessions/names.ts";
+import type { TaskService } from "../tasks/service.ts";
 
 type Job =
   | { kind: "operator"; text: string }
   | { kind: "answer-revival"; text: string }
-  | { kind: "agent-milestone"; text: string; agentSessionId: string };
+  | { kind: "agent-milestone"; text: string; agentSessionId: string }
+  | { kind: "cron"; text: string }
+  /** A console-authored wake (post-pause resume note); rendered verbatim. */
+  | { kind: "console-note"; text: string };
 
 interface ActiveTurn {
   turnId: string;
-  trigger: "operator" | "wake" | "answer";
+  trigger: "operator" | "wake" | "answer" | "deadline";
   startedAt: number;
   settled: Promise<void>;
   resolve: () => void;
@@ -72,7 +88,7 @@ interface Lane {
   /** Mode changed mid-turn: close after settle so fresh options apply. */
   recycleAfterTurn: boolean;
   /**
-   * A5: operator messages pushed into the live turn (true steering). The CLI
+   * Operator messages pushed into the live turn (true steering). The CLI
    * either folds them into the running turn or runs them as its own next
    * turn — the settle path mints a follow-up turn to catch that output.
    */
@@ -81,6 +97,20 @@ interface Lane {
   lastOperatorFacingText: string;
   /** Tool-call start times used to emit useful timeline durations. */
   toolStarts: Map<string, number>;
+  /**
+   * Peak context-window occupancy this provider session, from per-API-call
+   * usage — NOT the result message's turn-wide `inputTokens` sum, which
+   * overstates occupancy on a tool-heavy turn.
+   */
+  contextTokens: number;
+  /** Last cumulative cost/api-duration seen, for per-turn deltas. */
+  lastCumulative: { costUsd: number; apiDurationMs: number };
+  /**
+   * The operator's whole-system pause cut this lane's turn. On resume main
+   * is woken exactly once with a console note about the pause window before
+   * the queue drains.
+   */
+  pausedMidTurn: { turnId: string; atMs: number } | null;
 }
 
 export interface OrchestratorDeps {
@@ -90,11 +120,26 @@ export interface OrchestratorDeps {
   sdk: () => Promise<ConsoleSdk>;
   interactions: InteractionService;
   getWorkspaceRoot: (workspaceId: string) => string;
-  /** M6: the console MCP server bound to one user session. */
-  buildMcpServer?: (userSessionId: string, sdk: ConsoleSdk) => unknown;
+  /** The console MCP server bound to one user session. */
+  buildMcpServer: (userSessionId: string, sdk: ConsoleSdk) => unknown;
   /** Eager console-owned provider journal. */
-  sessionStore?: unknown;
+  sessionStore: SqliteSessionStore;
   handoffs: HandoffService;
+  /**
+   * Operator decisions, injected into the lane's system prompt so main never
+   * contradicts a call the operator already made — and never has to relay one.
+   * Required: an optional dep would let a missing wire typecheck.
+   */
+  decisions: DecisionLedger;
+  /** The living spec + working state, injected into every generation like decisions. */
+  specs: SpecService;
+  orchestrationState: OrchestrationStateService;
+  /** Lazy — host and runner construct in either order inside `createApp`. */
+  host: () => AgentSessionService;
+  /** Console task-ledger tools for the lane. */
+  tasks: TaskService;
+  /** Pause/resume on provider capacity and budget ceilings. */
+  capacity: CapacityService;
 }
 
 /** Bounded grace for a closing lane's pump before the hard abort. */
@@ -110,6 +155,10 @@ function sleep(ms: number): Promise<void> {
 export class OrchestratorRunner {
   readonly #deps: OrchestratorDeps;
   readonly #lanes = new Map<string, Lane>();
+  /** Notified after every turn settle; the completion predicate re-evaluates. */
+  #onSettled: ((userSessionId: string) => void) | undefined;
+  /** Notified before an operator message is processed; reopens a signed-off run. */
+  #onOperatorMessage: ((userSessionId: string) => void) | undefined;
 
   constructor(deps: OrchestratorDeps) {
     this.#deps = deps;
@@ -117,14 +166,18 @@ export class OrchestratorRunner {
 
   /** Persists an operator message, dismisses pending cards, queues a turn. */
   postOperatorMessage(sessionId: string, text: string): PostMessageResponse {
+    // Chat while a sign-off card is open IS a change request. Without this the
+    // operator types "actually add X", the orchestrator answers, and the card
+    // sits there still claiming the run is done.
+    this.#onOperatorMessage?.(sessionId);
     const { repo, bus, interactions } = this.#deps;
     const session = repo.getUserSession(sessionId);
-    if (!session) throw notFound(`no user session ${sessionId}`);
-    if (session.status !== "open") {
-      throw conflict(`session ${sessionId} is archived`);
+    if (!session) throw new NotFoundError(`no user session ${sessionId}`);
+    if (session.lifecycle !== "open") {
+      throw new ConflictError(`session ${sessionId} is archived`);
     }
     const trimmed = text.trim();
-    if (trimmed === "") throw badRequest("message text is required");
+    if (trimmed === "") throw new InvalidInputError("message text is required");
 
     interactions.dismissPendingForChat(sessionId, trimmed);
 
@@ -136,12 +189,12 @@ export class OrchestratorRunner {
       text: trimmed,
     });
     bus.append({
-      type: "user_session.message",
+      type: "user_session.message.appended",
       userSessionId: sessionId,
-      payload: { sessionId, message: toWireMessage(row) },
+      payload: { userSessionId: sessionId, message: toWireMessage(row) },
     });
     repo.touchUserSession(sessionId);
-    // A5: a message landing mid-turn steers the live turn instead of queueing
+    // A message landing mid-turn steers the live turn instead of queueing
     // behind it — pushed straight into the stream, exactly like typing into
     // the CLI while it works.
     const lane = this.#lane(sessionId);
@@ -154,17 +207,67 @@ export class OrchestratorRunner {
     return { messageId: row.id, seq: row.seq };
   }
 
-  /** M8: a stale interaction was answered after a restart. */
+  /** A stale interaction was answered after a restart. */
   enqueueRevival(userSessionId: string, text: string): void {
     this.#enqueue(userSessionId, { kind: "answer-revival", text });
+  }
+
+  /**
+   * Console-owned deadlines (`set_deadline`) fire on absolute time, whether
+   * or not the lane is live — one scheduler, no parser, no liveness condition.
+   */
+  #cronTimer: NodeJS.Timeout | null = null;
+  startCronFallback(): void {
+    if (this.#cronTimer) return;
+    this.#cronTimer = setInterval(() => this.#cronTick(new Date()), 30_000);
+    this.#cronTimer.unref?.();
+  }
+  stopCronFallback(): void {
+    if (this.#cronTimer) { clearInterval(this.#cronTimer); this.#cronTimer = null; }
+  }
+  #cronTick(now: Date): void {
+    // A paused run's deadlines hold; firing them would mint turns that die.
+    if (this.#deps.capacity.paused) return;
+    for (const session of this.#deps.repo.listOpenUserSessions()) {
+      for (const deadline of this.#deps.repo.listDueDeadlines(session.id, now.toISOString())) {
+        this.#deps.repo.patchCron(deadline.id, { status: "deleted" });
+        // createdAt/dueAt/lateness in the note settle "did the timer misfire"
+        // forensically — a live run's orchestrator believed its deadlines
+        // fired 20–50s after creation and no payload could prove otherwise.
+        const latenessMs = now.getTime() - Date.parse(deadline.dueAt ?? deadline.createdAt);
+        this.#deps.bus.append({ type: "user_session.runtime.noted", userSessionId: session.id,
+          payload: { userSessionId: session.id, detail: `deadline fired: ${deadline.prompt}`,
+            cronId: deadline.id, createdAt: deadline.createdAt, dueAt: deadline.dueAt, latenessMs } });
+        this.#enqueue(session.id, { kind: "cron", text: `[Deadline you set has arrived — set at ${deadline.createdAt}, due ${deadline.dueAt}]\n${deadline.prompt}` });
+      }
+    }
+  }
+
+  /**
+   * Wakes that are NOT a deadline say so. A live run's orchestrator read
+   * milestone wakes arriving seconds after set_deadline as its deadlines
+   * firing early, concluded the timer was broken, and re-armed a storm of
+   * one-shot wakes ($44.67 of self-polling).
+   */
+  #pendingDeadlinesLine(sessionId: string): string {
+    let pending;
+    try { pending = this.#deps.repo.listPendingDeadlines(sessionId, new Date().toISOString()); } catch { return ""; }
+    if (pending.length === 0) return "";
+    const now = Date.now();
+    const lines = pending.map((row) =>
+      `"${row.prompt.slice(0, 60)}" fires in ~${Math.max(0, Math.round((Date.parse(row.dueAt ?? "") - now) / 1000))}s`);
+    return `\n[This wake is NOT one of your deadlines. Still pending: ${lines.join("; ")}.]`;
   }
 
   /** Material AgentSession reports only. Repeated reports coalesce per session. */
   enqueueAgentMilestone(userSessionId: string, agentSessionId: string, category: string, text: string): void {
     const lane = this.#lane(userSessionId);
-    const prompt = `[AgentSession ${agentSessionId} ${category}]\n${text.slice(0, 8_192)}\n\nAct only if needed. Do not repeat an unchanged operator update. Use read_agent_session for additional detail only when necessary.`;
+    const prompt = `[AgentSession ${agentSessionId} ${category}]\n${text.slice(0, 8_192)}`;
     const existing = lane.queue.find((job): job is Extract<Job, { kind: "agent-milestone" }> => job.kind === "agent-milestone" && job.agentSessionId === agentSessionId);
-    if (existing) existing.text = prompt;
+    // APPEND, never overwrite: two reports arriving before the drain would
+    // otherwise lose the first. Losing a milestone is strictly worse than a
+    // longer prompt.
+    if (existing) existing.text = `${existing.text}\n\n${prompt}`;
     else lane.queue.push({ kind: "agent-milestone", agentSessionId, text: prompt });
     if (!lane.draining) void this.#drain(userSessionId);
   }
@@ -217,12 +320,34 @@ export class OrchestratorRunner {
   }
 
   /** True while a turn is in flight or queued. */
+  onSettled(handler: (userSessionId: string) => void): void {
+    if (this.#onSettled) throw new Error("onSettled is already registered — wire callbacks once, in createApp");
+    this.#onSettled = handler;
+  }
+
+  onOperatorMessage(handler: (userSessionId: string) => void): void {
+    if (this.#onOperatorMessage) throw new Error("onOperatorMessage is already registered — wire callbacks once, in createApp");
+    this.#onOperatorMessage = handler;
+  }
+
   busy(sessionId: string): boolean {
     // activeTurn covers the steer-minted follow-up turn no drain job owns.
     return (
       this.queuedJobs(sessionId) > 0 ||
       this.#lanes.get(sessionId)?.activeTurn != null
     );
+  }
+
+  /**
+   * Like `busy()` inverted, except a turn parked inside `canUseTool` waiting on
+   * an operator card does NOT count as working — `AskUserQuestion` awaits its
+   * resolution, and waiting on a human is not "in progress".
+   */
+  laneIdle(sessionId: string): boolean {
+    const lane = this.#lanes.get(sessionId);
+    if (!lane) return true;
+    if (lane.queue.length > 0 || lane.draining) return false;
+    return lane.activeTurn === null || this.#deps.interactions.listPending(sessionId).length > 0;
   }
 
   #lane(sessionId: string): Lane {
@@ -239,7 +364,7 @@ export class OrchestratorRunner {
         state: { lastAssistantText: "" },
         runtime: new RuntimeBroadcaster(
           this.#deps.bus,
-          { kind: "user", sessionId },
+          { kind: "user", userSessionId: sessionId },
           "orchestrator",
           { userSessionId: sessionId },
         ),
@@ -247,6 +372,9 @@ export class OrchestratorRunner {
         steeredMidTurn: 0,
         lastOperatorFacingText: "",
         toolStarts: new Map(),
+        contextTokens: 0,
+        lastCumulative: { costUsd: 0, apiDurationMs: 0 },
+        pausedMidTurn: null,
       };
       this.#lanes.set(sessionId, lane);
     }
@@ -264,6 +392,9 @@ export class OrchestratorRunner {
     lane.draining = true;
     try {
       for (;;) {
+        // Capacity pause: jobs stay queued, no turn is minted, nothing is
+        // coalesced away. `resumeQueued()` re-enters this loop on resume.
+        if (this.#deps.capacity.paused) break;
         const job = lane.queue.shift();
         if (!job) break;
         await this.#runTurn(sessionId, lane, job);
@@ -273,20 +404,70 @@ export class OrchestratorRunner {
     }
   }
 
+  /**
+   * Post-resume kick: every session with queued jobs starts draining again.
+   * A lane the pause cut mid-turn first gets ONE console note describing the
+   * window, so main re-reads its own last message instead of guessing.
+   */
+  resumeQueued(): void {
+    for (const [sessionId, lane] of this.#lanes) {
+      const paused = lane.pausedMidTurn;
+      if (paused !== null) {
+        lane.pausedMidTurn = null;
+        const at = new Date(paused.atMs).toISOString();
+        const minutes = Math.max(1, Math.round((Date.now() - paused.atMs) / 60_000));
+        lane.queue.unshift({ kind: "console-note",
+          text: `[Console: the operator paused the whole system at ${at} and resumed at ${nowIso()} (~${minutes} min). Your turn ${paused.turnId} was interrupted mid-response. Nothing was cancelled: seats that were mid-turn continue their in-progress work with worktrees intact, and ${lane.queue.length} queued wake(s) follow this one. Re-read your last message and continue; check session_activity before assuming any seat's state.]` });
+      }
+      if (lane.queue.length > 0 && !lane.draining) void this.#drain(sessionId);
+    }
+  }
+
+  /**
+   * The operator's whole-system pause, main side: interrupt every lane's
+   * in-flight turn. The turn settles `aborted` through the normal path; the
+   * lane and its queue survive, and `resumeQueued` wakes it once about the
+   * pause. Returns how many turns were cut.
+   */
+  interruptAllForPause(_reason: string): number {
+    let count = 0;
+    for (const [sessionId, lane] of this.#lanes) {
+      if (!lane.query || !lane.activeTurn || lane.pausedMidTurn !== null) continue;
+      lane.pausedMidTurn = { turnId: lane.activeTurn.turnId, atMs: Date.now() };
+      this.#deps.bus.append({ type: "user_session.runtime.noted", userSessionId: sessionId,
+        payload: { userSessionId: sessionId, detail: "paused by the operator mid-turn — the turn settles now; main is woken once on resume" } });
+      void lane.query.interrupt?.().catch(() => undefined);
+      count += 1;
+    }
+    return count;
+  }
+
   async #runTurn(sessionId: string, lane: Lane, job: Job): Promise<void> {
     const { repo, bus } = this.#deps;
     const session = repo.getUserSession(sessionId);
-    if (!session || session.status !== "open") return;
+    if (!session || session.lifecycle !== "open") return;
 
-    const prompt = job.text;
-    if (prompt === "") return;
+    // The standing instruction goes on ONCE, at drain, rather than being
+    // baked into each milestone — several appended reports would otherwise
+    // repeat it verbatim and teach the model to skim.
+    if (job.text === "") return;
+    // The capacity warning rides EVERY prompt kind: an operator wrap-up
+    // request needs it most of all (the straf3 run got 2 minutes' notice).
+    const capacityLine = this.#deps.capacity.warningLine();
+    const warning = capacityLine === null ? "" : `\n${capacityLine}`;
+    const prompt = job.kind === "agent-milestone"
+      ? `${job.text}${this.#pendingDeadlinesLine(sessionId)}${warning}\n\nAct only if needed. Do not repeat an unchanged operator update. Use read_agent_session for additional detail only when necessary.`
+      : `${job.text}${warning}`;
 
     const turnId = newId("turn");
-    const trigger = job.kind === "operator" ? "operator" : job.kind === "agent-milestone" ? "wake" : "answer";
+    // "deadline" is distinct from "wake" so forensics (and the model itself)
+    // can tell a deadline fire from a report wake — a live run misread
+    // milestone wakes as early deadline fires and re-armed a wake storm.
+    const trigger = job.kind === "operator" ? "operator" : job.kind === "cron" ? "deadline" : job.kind === "agent-milestone" || job.kind === "console-note" ? "wake" : "answer";
     bus.append({
       type: "user_session.turn.started",
       userSessionId: sessionId,
-      payload: { sessionId, turnId, trigger },
+      payload: { userSessionId: sessionId, turnId, trigger },
     });
 
     lane.state.lastAssistantText = "";
@@ -302,11 +483,30 @@ export class OrchestratorRunner {
       resolve: resolveSettled,
       outcome: { status: "completed", errorMessage: undefined },
     };
+    // Rotation BEFORE the turn is live: closing a lane whose activeTurn is
+    // already set lets the dying pump settle the new turn as "stream ended",
+    // and its real result then lands on no turn at all.
+    try {
+      await this.#rotateContextIfNeeded(sessionId, lane);
+    } catch (error) {
+      turn.outcome = { status: "error", errorMessage: error instanceof Error ? error.message : String(error) };
+      lane.activeTurn = turn;
+      this.#settleTurn(sessionId, lane);
+      return;
+    }
     lane.activeTurn = turn;
 
     try {
-      await this.#rotateContextIfNeeded(sessionId, lane);
       await this.#ensureLaneQuery(sessionId, lane);
+      // A pause pressed while the lane was spawning: nothing has reached the
+      // CLI, so the job goes back to the head of the queue unduplicated and
+      // the turn settles as never started.
+      if (this.#deps.capacity.paused) {
+        lane.queue.unshift(job);
+        turn.outcome = { status: "aborted", errorMessage: "paused before the turn started" };
+        this.#settleTurn(sessionId, lane);
+        return;
+      }
       lane.runtime.set("thinking");
       // Push synchronously after ensure — no await in between, so the input
       // queue cannot have been closed under us.
@@ -334,12 +534,27 @@ export class OrchestratorRunner {
     }
   }
 
+
+  /**
+   * The model this session's orchestrator lane runs on. The session's own
+   * choice wins; a session that recorded none tracks the configured default.
+   * Agents do not read this — they resolve their model from their profile.
+   */
+  #modelFor(session: Pick<UserSessionRow, "model">): string {
+    return session.model ?? this.#deps.config.infra.model;
+  }
+
+  /** The operator's install-wide override wins; otherwise main runs at its own default. */
+  #effortFor(): EffortLevel {
+    return this.#deps.config.infra.effort ?? MAIN_DEFAULT_EFFORT;
+  }
+
   /** Spawns the persistent query if the lane has none (lazy + post-death). */
   async #ensureLaneQuery(sessionId: string, lane: Lane): Promise<void> {
     if (lane.query) return;
     const { repo, bus, config, interactions } = this.#deps;
     const session = repo.getUserSession(sessionId);
-    if (!session) throw notFound(`no user session ${sessionId}`);
+    if (!session) throw new NotFoundError(`no user session ${sessionId}`);
 
     const sdk = await this.#deps.sdk();
     const abort = new AbortController();
@@ -349,8 +564,8 @@ export class OrchestratorRunner {
       resume: session.sdkSessionId,
       mode: session.mode,
       phase: session.phase,
-      model: config.model,
-      effort: config.effort,
+      model: this.#modelFor(session),
+      effort: this.#effortFor(),
       abortController: abort,
       canUseTool: buildOrchestratorCanUseTool({
         userSessionId: sessionId,
@@ -358,19 +573,35 @@ export class OrchestratorRunner {
         bus,
         interactions,
         laneState: lane.state,
+        specs: this.#deps.specs,
       }),
       mcpServer: this.#deps.buildMcpServer?.(sessionId, sdk),
       sessionStore: this.#deps.sessionStore,
       contextMemory: session.latestHandoffId
         ? JSON.stringify(this.#deps.handoffs.get(session.latestHandoffId), null, 2)
         : session.memory,
-      purpose: session.purpose,
+      decisionDigest: this.#deps.decisions.digest(sessionId),
+      specDigest: this.#deps.specs.digest(sessionId),
+      stateDigest: this.#deps.orchestrationState.digest(sessionId),
+      autonomy: session.autonomy,
+      peerName: mainPeerName(config.policy.peerNamePrefix, sessionId),
+      skillsPluginDir: config.infra.skillsPluginDir,
     });
 
     const query = sdk.query({ prompt: input, options });
     lane.query = query;
     lane.input = input;
     lane.abort = abort;
+    // Occupancy is re-reported by the first assistant message of any new
+    // process, so it always restarts at zero.
+    lane.contextTokens = 0;
+    // Cost and api-duration do NOT: `resume: session.sdkSessionId` above keeps
+    // the same provider session, and the SDK's cumulative totals continue
+    // across the process that started them. The baseline therefore belongs to
+    // the provider session and is persisted with it.
+    lane.lastCumulative = session.sdkSessionId === null
+      ? { costUsd: 0, apiDurationMs: 0 }
+      : { costUsd: session.cumulativeCostUsd, apiDurationMs: session.cumulativeApiDurationMs };
     lane.pump = this.#pumpOutput(sessionId, lane, query);
   }
 
@@ -396,8 +627,8 @@ export class OrchestratorRunner {
         this.#settleTurn(sessionId, lane);
       }
     } catch (error) {
-      // In-process lane death — new failure mode vs. process-per-turn. The
-      // resume id survives in the DB, so the next job respawns transparently.
+      // In-process lane death. The resume id survives in the DB, so the next
+      // job respawns transparently.
       console.error(`orchestrator lane died (${sessionId}):`, error);
       if (lane.activeTurn) {
         lane.activeTurn.outcome = {
@@ -464,6 +695,10 @@ export class OrchestratorRunner {
   }
 
   #settleTurn(sessionId: string, lane: Lane): void {
+    // Fired FIRST so every return path below still schedules a re-evaluation.
+    // Reading stale state here is harmless: the completion predicate is
+    // debounced and re-runs when its timer fires, not when it was scheduled.
+    this.#onSettled?.(sessionId);
     const turn = lane.activeTurn;
     if (!turn) return;
     lane.activeTurn = null;
@@ -474,7 +709,7 @@ export class OrchestratorRunner {
       type: "user_session.turn.settled",
       userSessionId: sessionId,
       payload: {
-        sessionId,
+        userSessionId: sessionId,
         turnId: turn.turnId,
         status: turn.outcome.status,
         durationMs: Date.now() - turn.startedAt,
@@ -486,7 +721,7 @@ export class OrchestratorRunner {
     });
     turn.resolve();
 
-    // A5: steered input the CLI may answer as its own next turn needs a turn
+    // Steered input the CLI may answer as its own next turn needs a turn
     // to land in. If it was instead folded into the turn that just settled,
     // the session_state_changed idle backstop settles this one immediately.
     // A dead lane mints nothing — the steer died with it, and the death
@@ -498,7 +733,7 @@ export class OrchestratorRunner {
       bus.append({
         type: "user_session.turn.started",
         userSessionId: sessionId,
-        payload: { sessionId, turnId: followId, trigger: "operator" },
+        payload: { userSessionId: sessionId, turnId: followId, trigger: "operator" },
       });
       let resolveFollow: () => void = () => undefined;
       const settled = new Promise<void>((resolve) => {
@@ -526,9 +761,9 @@ export class OrchestratorRunner {
       text,
     });
     bus.append({
-      type: "user_session.message",
+      type: "user_session.message.appended",
       userSessionId: sessionId,
-      payload: { sessionId, message: toWireMessage(row) },
+      payload: { userSessionId: sessionId, message: toWireMessage(row) },
     });
   }
 
@@ -539,7 +774,7 @@ export class OrchestratorRunner {
   ): void {
     const { repo, bus } = this.#deps;
     if ("parentCallId" in event && event.parentCallId !== undefined) {
-      bus.append({ type: "user_session.runtime", userSessionId: sessionId, payload: { sessionId, detail: `blocked unowned native subagent event (${event.kind})` } });
+      bus.append({ type: "user_session.runtime.noted", userSessionId: sessionId, payload: { userSessionId: sessionId, detail: `blocked unowned native subagent event (${event.kind})` } });
       return;
     }
     const turn = lane.activeTurn;
@@ -552,14 +787,14 @@ export class OrchestratorRunner {
         return;
       }
       case "delta": {
-        if (!turn) { bus.append({ type: "user_session.runtime", userSessionId: sessionId, payload: { sessionId, detail: "ignored late stream delta after turn settlement" } }); return; }
+        if (!turn) { bus.append({ type: "user_session.runtime.noted", userSessionId: sessionId, payload: { userSessionId: sessionId, detail: "ignored late stream delta after turn settlement" } }); return; }
         const active = turn;
         lane.runtime.set("responding");
         bus.broadcast({
           type: "stream.delta",
           userSessionId: sessionId,
           payload: {
-            scope: { kind: "user", sessionId },
+            scope: { kind: "user", userSessionId: sessionId },
             speaker: "orchestrator",
             turnId: active.turnId,
             text: event.text,
@@ -568,14 +803,14 @@ export class OrchestratorRunner {
         return;
       }
       case "reasoning-delta": {
-        if (!turn) { bus.append({ type: "user_session.runtime", userSessionId: sessionId, payload: { sessionId, detail: "ignored late reasoning delta after turn settlement" } }); return; }
+        if (!turn) { bus.append({ type: "user_session.runtime.noted", userSessionId: sessionId, payload: { userSessionId: sessionId, detail: "ignored late reasoning delta after turn settlement" } }); return; }
         const active = turn;
         lane.runtime.set("thinking");
         bus.broadcast({
           type: "stream.reasoning",
           userSessionId: sessionId,
           payload: {
-            scope: { kind: "user", sessionId },
+            scope: { kind: "user", userSessionId: sessionId },
             speaker: "orchestrator",
             turnId: active.turnId,
             text: event.text,
@@ -585,7 +820,26 @@ export class OrchestratorRunner {
       }
       case "notice": {
         lane.runtime.note(event.text);
-        bus.append({ type: "user_session.runtime", userSessionId: sessionId, payload: { sessionId, detail: event.text } });
+        bus.append({ type: "user_session.runtime.noted", userSessionId: sessionId, payload: { userSessionId: sessionId, detail: event.text } });
+        return;
+      }
+      case "retry": {
+        // Alongside the notice prose, never instead of it: the transcript keeps
+        // the human-readable line, counters read this one.
+        bus.append({ type: "user_session.retry.recorded", userSessionId: sessionId,
+          payload: { userSessionId: sessionId, agent: "orchestrator", kind: event.classification,
+            ...(event.attempt === undefined ? {} : { attempt: event.attempt }), retryInMs: event.delayMs, detail: event.detail } });
+        return;
+      }
+      case "limit": {
+        // Also journaled as a retry row so `friction.rateLimited` can never
+        // again read 0 in a run a limit killed.
+        if (event.status !== "allowed") {
+          bus.append({ type: "user_session.retry.recorded", userSessionId: sessionId,
+            payload: { userSessionId: sessionId, agent: "orchestrator", kind: "rate_limited", retryInMs: 0,
+              detail: `limit ${event.status}${event.limitType === undefined ? "" : ` (${event.limitType})`}${event.utilization === undefined ? "" : ` at ${Math.round(event.utilization * 100)}%`}` } });
+        }
+        this.#deps.capacity.noteLimit(event);
         return;
       }
       case "message": {
@@ -593,7 +847,7 @@ export class OrchestratorRunner {
         lane.state.lastAssistantText = event.text;
         const normalized = event.text.trim().replace(/\s+/g, " ");
         if (active?.trigger === "wake" && normalized !== "" && normalized === lane.lastOperatorFacingText) {
-          bus.append({ type: "user_session.runtime", userSessionId: sessionId, payload: { sessionId, detail: "suppressed an exact duplicate orchestrator message" } });
+          bus.append({ type: "user_session.runtime.noted", userSessionId: sessionId, payload: { userSessionId: sessionId, detail: "suppressed an exact duplicate orchestrator message" } });
           return;
         }
         lane.lastOperatorFacingText = normalized;
@@ -606,9 +860,9 @@ export class OrchestratorRunner {
           ...(active ? { turnId: active.turnId } : {}),
         });
         bus.append({
-          type: "user_session.message",
+          type: "user_session.message.appended",
           userSessionId: sessionId,
-          payload: { sessionId, message: toWireMessage(row) },
+          payload: { userSessionId: sessionId, message: toWireMessage(row) },
         });
         return;
       }
@@ -617,14 +871,14 @@ export class OrchestratorRunner {
         lane.toolStarts.set(event.callId, Date.now());
         lane.runtime.set("tool", event.name);
         bus.append({
-          type: "user_session.tool.call",
+          type: "user_session.tool.called",
           userSessionId: sessionId,
           payload: {
-            sessionId,
+            userSessionId: sessionId,
             turnId: active?.turnId ?? "unattributed",
             callId: event.callId,
             name: event.name,
-            input: bus.capture(event.input, { userSessionId: sessionId }),
+            input: bus.captureSized(event.input, { userSessionId: sessionId }).value,
           },
         });
         return;
@@ -635,10 +889,10 @@ export class OrchestratorRunner {
         const toolStartedAt = lane.toolStarts.get(event.callId);
         lane.toolStarts.delete(event.callId);
         bus.append({
-          type: "user_session.tool.result",
+          type: "user_session.tool.completed",
           userSessionId: sessionId,
           payload: {
-            sessionId,
+            userSessionId: sessionId,
             callId: event.callId,
             turnId: turn?.turnId,
             output: captured.value,
@@ -647,6 +901,10 @@ export class OrchestratorRunner {
             ...(event.isError ? { isError: true } : {}),
           },
         });
+        return;
+      }
+      case "context": {
+        lane.contextTokens = Math.max(lane.contextTokens, event.occupancyTokens);
         return;
       }
       case "result": {
@@ -659,18 +917,24 @@ export class OrchestratorRunner {
           repo.patchUserSession(sessionId, { sdkSessionId: event.resumeId });
         }
         if (session) {
-          const contextTokens = Math.max(session.contextTokens, event.inputTokens ?? 0);
-          repo.patchUserSession(sessionId, { sdkTurnCount: session.sdkTurnCount + 1, contextTokens });
-          if (session.sdkTurnCount + 1 >= this.#deps.config.contextTurnLimit || contextTokens >= this.#deps.config.contextTokenLimit) lane.recycleAfterTurn = true;
+          const contextTokens = Math.max(session.contextTokens, lane.contextTokens);
+          if (this.#rotationDueAfterTurn(session, contextTokens)) lane.recycleAfterTurn = true;
+          const { costUsd, apiDurationMs } = advanceUsageWatermark(lane.lastCumulative, event);
+          // One patch: turn count, context, and the advanced cumulative
+          // baseline (persisted with the provider session it belongs to, so
+          // the next process to resume it inherits the watermark).
+          repo.patchUserSession(sessionId, { sdkTurnCount: session.sdkTurnCount + 1, contextTokens,
+            cumulativeCostUsd: lane.lastCumulative.costUsd, cumulativeApiDurationMs: lane.lastCumulative.apiDurationMs });
           const usage = { id: newId("usage"), userSessionId: sessionId, agentSessionId: null, participant: "orchestrator", profileId: null,
             generation: session.sdkGeneration, turnId: turn?.turnId ?? "unattributed", inputTokens: event.inputTokens ?? 0,
             uncachedInputTokens: event.uncachedInputTokens ?? 0, cacheCreationInputTokens: event.cacheCreationInputTokens ?? 0, cacheReadInputTokens: event.cacheReadInputTokens ?? 0, outputTokens: event.outputTokens ?? 0,
-            costUsd: event.costUsd ?? null, model: event.modelId ?? this.#deps.config.model ?? null, effort: this.#deps.config.effort ?? null,
-            trigger: turn?.trigger ?? null, durationMs: turn ? Date.now() - turn.startedAt : null, apiDurationMs: event.apiDurationMs ?? null, sdkDurationMs: event.sdkDurationMs ?? null, status: "completed", stopReason: event.stopReason ?? null, createdAt: nowIso() };
+            costUsd, model: event.modelId ?? this.#modelFor(session), effort: this.#effortFor(),
+            trigger: turn?.trigger ?? null, durationMs: turn ? Date.now() - turn.startedAt : null, apiDurationMs, sdkDurationMs: event.sdkDurationMs ?? null, status: "completed", stopReason: event.stopReason ?? null, createdAt: nowIso() };
           repo.insertUsage(usage);
-          bus.append({ type: "usage.recorded", userSessionId: sessionId, payload: { sessionId, participant: "orchestrator", generation: session.sdkGeneration,
+          this.#deps.capacity.checkBudget(sessionId);
+          bus.append({ type: "usage.recorded", userSessionId: sessionId, payload: { userSessionId: sessionId, agent: "orchestrator", generation: session.sdkGeneration,
             turnId: usage.turnId, inputTokens: usage.inputTokens, uncachedInputTokens: usage.uncachedInputTokens, cacheCreationInputTokens: usage.cacheCreationInputTokens, cacheReadInputTokens: usage.cacheReadInputTokens,
-            outputTokens: usage.outputTokens, ...(event.costUsd === undefined ? {} : { costUsd: event.costUsd }), model: usage.model ?? undefined, effort: usage.effort ?? undefined,
+            outputTokens: usage.outputTokens, ...(costUsd === null ? {} : { costUsd }), model: usage.model ?? undefined, effort: usage.effort ?? undefined,
             trigger: turn?.trigger, durationMs: usage.durationMs ?? undefined, apiDurationMs: usage.apiDurationMs ?? undefined, sdkDurationMs: usage.sdkDurationMs ?? undefined,
             status: "completed", stopReason: usage.stopReason ?? undefined } });
         }
@@ -682,22 +946,31 @@ export class OrchestratorRunner {
           turn.outcome.status = event.aborted ? "aborted" : "error";
           turn.outcome.errorMessage = event.message;
         }
+        // A capacity-prose failure without a structured limit event still
+        // pauses the run instead of letting the next queued job hot-spin.
+        if (isCapacityFailure(event.message)) this.#deps.capacity.noteCapacityFailure(event.message);
         const session = repo.getUserSession(sessionId);
         if (session) {
-          const contextTokens = Math.max(session.contextTokens, event.inputTokens ?? 0);
-          repo.patchUserSession(sessionId, { sdkTurnCount: session.sdkTurnCount + 1, contextTokens });
+          const contextTokens = Math.max(session.contextTokens, lane.contextTokens);
+          const { costUsd, apiDurationMs } = advanceUsageWatermark(lane.lastCumulative, event);
+          // One patch: turn count, context, and the advanced cumulative
+          // baseline (persisted with the provider session it belongs to, so
+          // the next process to resume it inherits the watermark).
+          repo.patchUserSession(sessionId, { sdkTurnCount: session.sdkTurnCount + 1, contextTokens,
+            cumulativeCostUsd: lane.lastCumulative.costUsd, cumulativeApiDurationMs: lane.lastCumulative.apiDurationMs });
           const usage = { id: newId("usage"), userSessionId: sessionId, agentSessionId: null, participant: "orchestrator", profileId: null,
             generation: session.sdkGeneration, turnId: turn?.turnId ?? "unattributed", inputTokens: event.inputTokens ?? 0,
             uncachedInputTokens: event.uncachedInputTokens ?? 0, cacheCreationInputTokens: event.cacheCreationInputTokens ?? 0, cacheReadInputTokens: event.cacheReadInputTokens ?? 0, outputTokens: event.outputTokens ?? 0,
-            costUsd: event.costUsd ?? null, model: event.modelId ?? this.#deps.config.model ?? null, effort: this.#deps.config.effort ?? null,
-            trigger: turn?.trigger ?? null, durationMs: turn ? Date.now() - turn.startedAt : null, apiDurationMs: event.apiDurationMs ?? null, sdkDurationMs: event.sdkDurationMs ?? null, status: event.aborted ? "aborted" : "error", stopReason: event.stopReason ?? null, createdAt: nowIso() };
+            costUsd, model: event.modelId ?? this.#modelFor(session), effort: this.#effortFor(),
+            trigger: turn?.trigger ?? null, durationMs: turn ? Date.now() - turn.startedAt : null, apiDurationMs, sdkDurationMs: event.sdkDurationMs ?? null, status: event.aborted ? "aborted" : "error", stopReason: event.stopReason ?? null, createdAt: nowIso() };
           repo.insertUsage(usage);
-          bus.append({ type: "usage.recorded", userSessionId: sessionId, payload: { sessionId, participant: "orchestrator", generation: session.sdkGeneration,
+          this.#deps.capacity.checkBudget(sessionId);
+          bus.append({ type: "usage.recorded", userSessionId: sessionId, payload: { userSessionId: sessionId, agent: "orchestrator", generation: session.sdkGeneration,
             turnId: usage.turnId, inputTokens: usage.inputTokens, uncachedInputTokens: usage.uncachedInputTokens, cacheCreationInputTokens: usage.cacheCreationInputTokens, cacheReadInputTokens: usage.cacheReadInputTokens,
-            outputTokens: usage.outputTokens, ...(event.costUsd === undefined ? {} : { costUsd: event.costUsd }), model: usage.model ?? undefined, effort: usage.effort ?? undefined,
+            outputTokens: usage.outputTokens, ...(costUsd === null ? {} : { costUsd }), model: usage.model ?? undefined, effort: usage.effort ?? undefined,
             trigger: turn?.trigger, durationMs: usage.durationMs ?? undefined, apiDurationMs: usage.apiDurationMs ?? undefined, sdkDurationMs: usage.sdkDurationMs ?? undefined,
             status: event.aborted ? "aborted" : "error", stopReason: usage.stopReason ?? undefined } });
-          if (session.sdkTurnCount + 1 >= this.#deps.config.contextTurnLimit || contextTokens >= this.#deps.config.contextTokenLimit) lane.recycleAfterTurn = true;
+          if (this.#rotationDueAfterTurn(session, contextTokens)) lane.recycleAfterTurn = true;
         }
         this.#settleTurn(sessionId, lane);
         return;
@@ -706,11 +979,6 @@ export class OrchestratorRunner {
         // Authoritative turn-over backstop: settles a turn whose result was
         // lost or coalesced; a no-op when the result already settled it.
         this.#settleTurn(sessionId, lane);
-        return;
-      }
-      case "peer-message": {
-        bus.append({ type: "user_session.runtime", userSessionId: sessionId,
-          payload: { sessionId, detail: `blocked out-of-band peer message from ${event.from}; managed agents must use the Console mailbox` } });
         return;
       }
       case "task-terminal": {
@@ -725,70 +993,77 @@ export class OrchestratorRunner {
     }
   }
 
+  /**
+   * Whether the turn that just settled put the lane over a rotation limit —
+   * the process then dies at turn end and the next message respawns it fresh
+   * through #rotateContextIfNeeded. Always false with rotation off (a turn
+   * limit of 0 would otherwise recycle every turn).
+   */
+  #rotationDueAfterTurn(session: Pick<UserSessionRow, "model" | "sdkTurnCount">, contextTokens: number): boolean {
+    const { policy } = this.#deps.config;
+    if (!policy.contextRotation) return false;
+    return rotationDue({
+      turnCount: session.sdkTurnCount + 1, contextTokens,
+      turnLimit: policy.contextTurnLimit, tokenLimit: rotationTokenLimit(policy.contextTokenLimit, this.#modelFor(session)),
+    }) !== null;
+  }
+
+  /**
+   * Opt-in (`policy.contextRotation`): by default main keeps one provider
+   * session for its whole life and the CLI's native compaction manages it.
+   */
   async #rotateContextIfNeeded(sessionId: string, lane: Lane): Promise<void> {
+    if (!this.#deps.config.policy.contextRotation) return;
     const session = this.#deps.repo.getUserSession(sessionId);
     if (!session) return;
-    const hard = session.sdkTurnCount >= this.#deps.config.contextTurnLimit || session.contextTokens >= this.#deps.config.contextTokenLimit;
-    const soft = session.sdkTurnCount >= Math.ceil(this.#deps.config.contextTurnLimit * 0.8) || session.contextTokens >= Math.ceil(this.#deps.config.contextTokenLimit * 0.75);
-    if (!soft) return;
-    const threshold = hard ? "hard" as const : "soft" as const;
+    const tokenLimit = rotationTokenLimit(this.#deps.config.policy.contextTokenLimit, this.#modelFor(session));
+    const due = rotationDue({
+      turnCount: session.sdkTurnCount, contextTokens: session.contextTokens,
+      turnLimit: this.#deps.config.policy.contextTurnLimit, tokenLimit,
+    });
+    if (!due) return;
     if (lane.query) await this.#closeLane(lane, { interrupt: false });
-    let draft: HandoffDraft | null = null;
-    let failure: string | null = null;
     const started = Date.now();
-    if (session.sdkSessionId) {
-      const sdk = await this.#deps.sdk();
-      const abort = new AbortController();
-      const query = sdk.query({ prompt: "Create a lossless rotation checkpoint for the next orchestrator context. Preserve operator intent, decisions, delegated work, verified evidence pointers, uncertainty, and exact next actions. Do not perform work or call tools.", options: {
-        cwd: this.#deps.getWorkspaceRoot(session.workspaceId), systemPrompt: { type: "preset", preset: "claude_code", append: "Checkpoint faithfully. Repository files, task ledger, artifacts, and provider journal are authoritative; do not invent corrections." },
-        settingSources: [], includePartialMessages: false, permissionMode: "plan", allowedTools: [],
-        disallowedTools: ["Agent", "SendMessage", "Task", "Bash", "Edit", "Write", "WebSearch", "WebFetch"],
-        outputFormat: { type: "json_schema", schema: HANDOFF_DRAFT_JSON_SCHEMA }, maxTurns: 2,
-        sandbox: { enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: false, allowUnsandboxedCommands: false,
-          filesystem: { allowManagedReadPathsOnly: true, allowRead: [this.#deps.getWorkspaceRoot(session.workspaceId)], allowWrite: [] } },
-        env: sdkEnv(), abortController: abort, persistSession: true,
-        ...(this.#deps.sessionStore === undefined ? {} : { sessionStore: this.#deps.sessionStore as SdkOptions["sessionStore"], sessionStoreFlush: "eager" as const }),
-        resume: session.sdkSessionId, ...(this.#deps.config.model ? { model: this.#deps.config.model } : {}),
-        ...(this.#deps.config.effort ? { effort: this.#deps.config.effort as SdkOptions["effort"] } : {}),
-      } });
-      try {
-        for await (const raw of query) for (const event of mapSdkMessage(raw)) {
-          if (event.kind === "result") {
-            const parsed = HandoffDraftSchema.safeParse(event.output);
-            if (parsed.success) draft = parsed.data;
-          } else if (event.kind === "error") failure = event.message;
-        }
-      } catch (error) { failure = error instanceof Error ? error.message : String(error); }
-      finally { query.close?.(); }
-    }
-    let degraded = false;
-    if (!draft) {
-      if (!hard) {
-        this.#deps.bus.append({ type: "handoff.checkpoint.failed", userSessionId: sessionId,
-          payload: { participant: "orchestrator", reason: failure ?? "checkpoint produced no valid handoff", threshold, degraded: false } });
-        return;
-      }
-      degraded = true;
-      const latest = this.#deps.repo.latestHandoff({ userSessionId: sessionId });
-      draft = latest ? { core: { ...latest.core, action: `Recovery checkpoint: ${latest.core.action}`, status: "needs_verification", risk: "high", requestExpandedContext: true }, extension: latest.extension }
-        : { core: { schemaVersion: 1, taskId: null, status: "needs_verification", risk: "high", action: "Recover orchestrator context",
-          state: { summary: "The checkpoint query failed. Reconstruct from operator messages, task ledger, repository, provider journal, and AgentSession handoffs.", evidence: [] },
-          result: { summary: null, artifacts: [] }, uncertainty: [failure ?? "no valid checkpoint output"], nextAction: "Verify authoritative state before acting.", requestExpandedContext: true },
-          extension: { kind: "coordination", data: {} } };
-      this.#deps.bus.append({ type: "handoff.checkpoint.failed", userSessionId: sessionId,
-        payload: { participant: "orchestrator", reason: failure ?? "checkpoint produced no valid handoff", threshold, degraded: true } });
-    }
+    // No model checkpoint here — deliberate. Main's durable memory is
+    // externalized by design: decisions, the spec pointer, and working-state
+    // lines all re-enter by prompt injection, and the latest handoff carries
+    // the thread. Querying the dying context added a failure mode (4 of 12
+    // such checkpoints failed in a live run) and spend for information that
+    // is already durable, so the reconstruction IS the checkpoint.
+    const latest = this.#deps.repo.latestHandoff({ userSessionId: sessionId });
+    const draft: HandoffDraft = latest
+      ? { core: { ...latest.core, action: recoveryAction(latest.core.action), status: "needs_verification", risk: "high", requestExpandedContext: true }, extension: latest.extension }
+      : { core: { schemaVersion: 1, taskId: null, status: "needs_verification", risk: "high", action: "Recover orchestrator context",
+        state: { summary: "First rotation before any handoff existed. Reconstruct from operator messages, task ledger, repository, provider journal, and AgentSession handoffs.", evidence: [] },
+        result: { summary: null, artifacts: [] }, uncertainty: [], nextAction: "Verify authoritative state before acting.", requestExpandedContext: true },
+        extension: { kind: "coordination", data: {} } };
+    // Operator decisions ride the checkpoint into the successor generation.
+    // Without this a rotation silently forgets what the operator decided, and
+    // the next generation is free to contradict them. The spec pointer and
+    // working-state lines ride the same way — though both also re-enter via
+    // prompt injection, the checkpoint must be self-sufficiently true.
+    const decisionLines = this.#deps.decisions.lines(sessionId, { max: 12 });
+    const specPointer = this.#deps.specs.pointer(sessionId);
+    const stateLines = this.#deps.orchestrationState.lines(sessionId);
+    const extensionDefaults = {
+      ...(decisionLines.length > 0 ? { operatorDecisions: decisionLines } : {}),
+      ...(specPointer === null ? {} : { approvedSpec: specPointer }),
+      ...(stateLines.length > 0 ? { workingState: stateLines } : {}),
+    };
     const prepared = this.#deps.handoffs.prepare({ draft, userSessionId: sessionId, agentSessionId: null,
       sender: "orchestrator", recipient: "orchestrator", profileId: "main", generation: session.sdkGeneration,
-      trigger: degraded ? "recovery" : "rotation", parentHandoffId: session.latestHandoffId, checkpoint: true });
+      trigger: "rotation", parentHandoffId: session.latestHandoffId, checkpoint: true,
+      ...(Object.keys(extensionDefaults).length > 0 ? { extensionDefaults } : {}) });
     this.#deps.repo.insertCheckpointHandoff(prepared.row);
     this.#deps.handoffs.committed(prepared.record);
-    this.#deps.repo.patchUserSession(sessionId, { sdkSessionId: null, sdkGeneration: session.sdkGeneration + 1, sdkTurnCount: 0, contextTokens: 0, latestHandoffId: prepared.row.id });
+    // Rotation retires the provider session, so its cumulative baseline retires
+    // with it — the successor genuinely starts from zero.
+    this.#deps.repo.patchUserSession(sessionId, { sdkSessionId: null, sdkGeneration: session.sdkGeneration + 1, sdkTurnCount: 0, contextTokens: 0, latestHandoffId: prepared.row.id, cumulativeCostUsd: 0, cumulativeApiDurationMs: 0 });
     this.#deps.bus.append({ type: "user_session.context.rotated", userSessionId: sessionId,
-      payload: { sessionId, generation: session.sdkGeneration + 1,
-        reason: session.contextTokens >= Math.ceil(this.#deps.config.contextTokenLimit * 0.75) ? "token_limit" : "turn_limit", memoryChars: 0,
-        handoffId: prepared.row.id, threshold, checkpointBytes: prepared.row.bytes, degraded } });
-    this.#deps.bus.append({ type: "user_session.runtime", userSessionId: sessionId,
-      payload: { sessionId, detail: `checkpoint ${prepared.row.id} completed in ${Date.now() - started}ms` } });
+      payload: { userSessionId: sessionId, generation: session.sdkGeneration + 1,
+        reason: due.reason,
+        handoffId: prepared.row.id, checkpointBytes: prepared.row.bytes, degraded: false } });
+    this.#deps.bus.append({ type: "user_session.runtime.noted", userSessionId: sessionId,
+      payload: { userSessionId: sessionId, detail: `checkpoint ${prepared.row.id} completed in ${Date.now() - started}ms` } });
   }
 }

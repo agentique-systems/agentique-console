@@ -1,8 +1,7 @@
 /**
- * Animated gradient shimmer text — pure CSS rewrite of the v1 motion-based
- * component (same API, no `motion` dep). The keyframes live in globals.css
- * (`text-shimmer`): a transparent-window highlight slides across a
- * muted-foreground base via background-position.
+ * Animated gradient shimmer text — pure CSS, no `motion` dep. The keyframes
+ * live in globals.css (`text-shimmer`): a transparent-window highlight slides
+ * across a muted-foreground base via background-position.
  */
 import type { CSSProperties } from "react";
 import { memo } from "react";

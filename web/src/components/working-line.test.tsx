@@ -67,13 +67,13 @@ describe("runtime store", () => {
   it("holds `since` across detail-only updates so elapsed measures the wait", () => {
     const { ingest, clearAll } = useRuntimeStore.getState();
     clearAll();
-    const scope = { kind: "user" as const, sessionId: "us_1" };
-    ingest({ scope, participant: "orchestrator", state: "thinking" });
+    const scope = { kind: "user" as const, userSessionId: "us_1" };
+    ingest({ scope, agent: "orchestrator", state: "thinking" });
     const first = useRuntimeStore.getState().bySession["us_1"]?.["orchestrator"];
 
     ingest({
       scope,
-      participant: "orchestrator",
+      agent: "orchestrator",
       state: "thinking",
       detail: "requesting…",
     });
@@ -82,7 +82,7 @@ describe("runtime store", () => {
     expect(second?.detail).toBe("requesting…");
 
     // A real state change restarts the clock.
-    ingest({ scope, participant: "orchestrator", state: "tool", toolName: "Read" });
+    ingest({ scope, agent: "orchestrator", state: "tool", toolName: "Read" });
     const third = useRuntimeStore.getState().bySession["us_1"]?.["orchestrator"];
     expect(third?.since).toBeGreaterThanOrEqual(second?.since ?? 0);
     expect(third?.detail).toBeUndefined();

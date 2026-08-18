@@ -6,6 +6,8 @@ import { useRuntimeStore } from "@/stores/runtime";
 import { useUiStore } from "@/stores/ui";
 import { useUserSessionStreamsStore } from "@/stores/user-session-streams";
 
+import { keys } from "@/api/keys";
+
 import { createInvalidationCoalescer, routeEvent } from "./event-router";
 import { createSpine, type Spine } from "./spine";
 import { agentStreamKey, userStreamKey, watched } from "./watched";
@@ -29,20 +31,21 @@ export function bootSpine(queryClient: QueryClient): Spine {
           useAgentSessionStreamsStore
             .getState()
             .appendEvent(agentStreamKey(sessionId), streamEvent),
-        ingestAgentState: (payload) =>
+        ingestAgentActivity: (payload) =>
           useRuntimeStore.getState().ingest(payload),
         setAwaitingInput: (sessionId, awaiting) =>
           useUiStore.getState().setAwaitingInput(sessionId, awaiting),
         pulseFlow: (agentSessionId, direction, eventTs) =>
           useFlowStore.getState().pulse(agentSessionId, direction, eventTs),
         isWatched: (key) => watched.has(key),
+        setSystemPause: (state) => queryClient.setQueryData(keys.system.pause, state),
       });
     },
     onReconnect: () => {
       useUserSessionStreamsStore.getState().onReconnect();
       useAgentSessionStreamsStore.getState().onReconnect();
       // Runtime states are transient and never replayed — a reconnect must not
-      // leave a stale "thinking" seat glowing forever.
+      // leave a stale "thinking" agent glowing forever.
       useRuntimeStore.getState().clearAll();
     },
   });

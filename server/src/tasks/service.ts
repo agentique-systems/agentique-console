@@ -1,31 +1,43 @@
 /**
- * The task mirror: every SDK session's TaskCreate/TaskUpdate tool traffic
- * lands here via hooks, giving the per-UserSession global view the SDK cannot
- * provide across sessions. Keyed (sdkSessionId, sdkTaskId); attribution
- * (workspace/user session/agent session/participant) rides in from the hook
- * closure.
+ * The console-owned task ledger, written by the console MCP tools
+ * (task_create/task_update) and the journal-driven auto-transitions.
+ * Keyed (sdkSessionId, sdkTaskId) where the "session id" is the SYNTHETIC
+ * per-agent-session list id — never a provider session id, which dies at
+ * every rotation.
  */
-import { and, eq } from "drizzle-orm";
-import type { Task, TaskDependency } from "@agentique-console/shared";
-import type { Db } from "../db/client.ts";
-import { taskDependencies, tasks } from "../db/schema.ts";
+import type { Task, TaskDependency, TaskStatus, WorkspaceTasksResponse } from "@agentique-console/shared";
+import { toWireScheduledAssignment } from "../api/wire.ts";
+import type { AssignmentStore, ScheduledAssignmentRow } from "../db/stores/assignment-store.ts";
+import type { TaskDependencyRow, TaskRow, TaskStore } from "../db/stores/task-store.ts";
 import type { EventBus } from "../events/bus.ts";
+import { InvalidInputError } from "../errors.ts";
 import { newId, nowIso } from "../ids.ts";
+
+/**
+ * The console-owned task list's synthetic SDK-session key. Frozen data format:
+ * persisted in `tasks.sdk_session_id`, so the trailing literal never tracks a
+ * rename.
+ */
+export function consoleTaskListId(agentSessionId: string): string {
+  return `console:${agentSessionId}:orchestrator`;
+}
 
 export interface TaskAttribution {
   workspaceId: string;
   userSessionId: string;
   agentSessionId: string | null;
-  participant: string | null;
+  agent: string | null;
 }
 
-type TaskRow = typeof tasks.$inferSelect;
-
-type DependencyRow = typeof taskDependencies.$inferSelect;
-
-function toWire(row: TaskRow, deps: readonly DependencyRow[], allRows: readonly TaskRow[]): Task {
+function toWire(
+  row: TaskRow,
+  deps: readonly TaskDependencyRow[],
+  allRows: readonly TaskRow[],
+  liveAssignments: ReadonlyMap<string, ScheduledAssignmentRow>,
+): Task {
   const dependencyIds = deps.filter((d) => d.blockedTaskId === row.id).map((d) => d.blockerTaskId);
   const dependentIds = deps.filter((d) => d.blockerTaskId === row.id).map((d) => d.blockedTaskId);
+  const live = liveAssignments.get(row.id);
   return {
     id: row.id,
     sdkSessionId: row.sdkSessionId,
@@ -33,7 +45,7 @@ function toWire(row: TaskRow, deps: readonly DependencyRow[], allRows: readonly 
     workspaceId: row.workspaceId,
     userSessionId: row.userSessionId,
     agentSessionId: row.agentSessionId,
-    participant: row.participant,
+    agent: row.participant,
     subject: row.subject,
     description: row.description,
     activeForm: row.activeForm,
@@ -43,10 +55,13 @@ function toWire(row: TaskRow, deps: readonly DependencyRow[], allRows: readonly 
     blockedBy: row.blockedBy,
     dependencyIds,
     dependentIds,
-    unresolvedDependencies: row.blockedBy.filter((raw) => {
-      const canonical = allRows.find((candidate) => candidate.sdkSessionId === row.sdkSessionId && candidate.sdkTaskId === raw)?.id;
-      return canonical === undefined || !deps.some((d) => d.blockedTaskId === row.id && d.blockerTaskId === canonical);
-    }),
+    // Readiness is over the durable EDGES only — a raw blockedBy ref that
+    // never resolved to a task cannot hold work hostage.
+    ready: row.status === "pending"
+      && dependencyIds.every((id) => allRows.find((candidate) => candidate.id === id)?.status === "completed"),
+    scheduledAssignment: live === undefined
+      ? null
+      : { id: live.id, sender: live.sender, recipient: live.recipient, createdAt: live.createdAt },
     metadata: row.metadata,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -54,15 +69,21 @@ function toWire(row: TaskRow, deps: readonly DependencyRow[], allRows: readonly 
 }
 
 export class TaskService {
-  readonly #db: Db;
+  #onChange: ((task: Task) => void) | undefined;
+  readonly #store: TaskStore;
+  readonly #assignments: AssignmentStore;
   readonly #bus: EventBus;
+  /** Throws NotFound on an unknown workspace; the workspaces table stays owned by its service. */
+  readonly #assertWorkspace: (workspaceId: string) => void;
 
-  constructor(db: Db, bus: EventBus) {
-    this.#db = db;
+  constructor(store: TaskStore, assignments: AssignmentStore, bus: EventBus, assertWorkspace: (workspaceId: string) => void) {
+    this.#store = store;
+    this.#assignments = assignments;
     this.#bus = bus;
+    this.#assertWorkspace = assertWorkspace;
   }
 
-  /** From TaskCreated hooks and PostToolUse(TaskCreate). Idempotent. */
+  /** From the `task_create` console tool. Idempotent. */
   upsertFromCreate(input: {
     sdkSessionId: string;
     sdkTaskId: string;
@@ -70,27 +91,33 @@ export class TaskService {
     description?: string;
     activeForm?: string;
     metadata?: Record<string, unknown>;
+    /** The agent that will DO the work — not the agent writing the row. */
+    owner?: string | null;
+    /** Ledger ids this task depends on; forward references back-fill on creation. */
+    blockedBy?: string[];
     attribution: TaskAttribution;
   }): void {
-    const existing = this.#get(input.sdkSessionId, input.sdkTaskId);
+    const existing = this.#store.getByKey(input.sdkSessionId, input.sdkTaskId);
     const now = nowIso();
     if (existing) {
-      this.#db
-        .update(tasks)
-        .set({
-          subject: input.subject,
-          ...(input.description === undefined
-            ? {}
-            : { description: input.description }),
-          ...(input.activeForm === undefined
-            ? {}
-            : { activeForm: input.activeForm }),
-          updatedAt: now,
-        })
-        .where(this.#key(input.sdkSessionId, input.sdkTaskId))
-        .run();
-      const updated = this.#get(input.sdkSessionId, input.sdkTaskId);
-      if (updated) this.#emit("task.updated", updated, ["subject"]);
+      this.#store.patchByKey(input.sdkSessionId, input.sdkTaskId, {
+        subject: input.subject,
+        ...(input.description === undefined
+          ? {}
+          : { description: input.description }),
+        ...(input.activeForm === undefined
+          ? {}
+          : { activeForm: input.activeForm }),
+        ...(input.blockedBy === undefined || input.blockedBy.length === 0
+          ? {}
+          : { blockedBy: [...new Set([...existing.blockedBy, ...input.blockedBy])] }),
+        updatedAt: now,
+      });
+      const updated = this.#store.getByKey(input.sdkSessionId, input.sdkTaskId);
+      if (updated) {
+        this.#syncProviderDependencies(updated);
+        this.#emit("task.updated", updated, ["subject"]);
+      }
       return;
     }
     const row: TaskRow = {
@@ -100,25 +127,27 @@ export class TaskService {
       workspaceId: input.attribution.workspaceId,
       userSessionId: input.attribution.userSessionId,
       agentSessionId: input.attribution.agentSessionId,
-      participant: input.attribution.participant,
+      participant: input.attribution.agent,
       subject: input.subject,
       description: input.description ?? "",
       activeForm: input.activeForm ?? null,
       status: "pending",
-      owner: input.attribution.participant,
+      // NOT the writer: the owner is who will DO the work, which is what the
+      // roster, the final caveats and the run summary read.
+      owner: input.owner ?? null,
       blocks: [],
-      blockedBy: [],
+      blockedBy: input.blockedBy ?? [],
       metadata: input.metadata ?? {},
       createdAt: now,
       updatedAt: now,
     };
-    this.#db.insert(tasks).values(row).run();
+    this.#store.insert(row);
     this.#syncProviderDependencies(row);
     this.#syncProviderReferencesTo(row);
     this.#emit("task.created", row);
   }
 
-  /** From PostToolUse(TaskUpdate): the input carries every changed field. */
+  /** From the `task_update` console tool and the journal auto-transitions. */
   applyUpdate(input: {
     sdkSessionId: string;
     sdkTaskId: string;
@@ -130,12 +159,13 @@ export class TaskService {
       owner?: string;
       addBlocks?: string[];
       addBlockedBy?: string[];
+      removeBlockedBy?: string[];
       metadata?: Record<string, unknown>;
     };
     updatedFields?: string[];
   }): void {
-    const existing = this.#get(input.sdkSessionId, input.sdkTaskId);
-    if (!existing) return; // unknown task — TaskList reconciliation will repair
+    const existing = this.#store.getByKey(input.sdkSessionId, input.sdkTaskId);
+    if (!existing) return;
     const patch = input.patch;
     const merged: Partial<TaskRow> = { updatedAt: nowIso() };
     if (patch.subject !== undefined) merged.subject = patch.subject;
@@ -159,12 +189,11 @@ export class TaskService {
       }
       merged.metadata = metadata;
     }
-    this.#db
-      .update(tasks)
-      .set(merged)
-      .where(this.#key(input.sdkSessionId, input.sdkTaskId))
-      .run();
-    const updated = this.#get(input.sdkSessionId, input.sdkTaskId);
+    this.#store.patchByKey(input.sdkSessionId, input.sdkTaskId, merged);
+    if (patch.removeBlockedBy !== undefined) {
+      for (const ref of patch.removeBlockedBy) this.#removeBlockedByRef(input.sdkSessionId, existing.id, ref);
+    }
+    const updated = this.#store.getByKey(input.sdkSessionId, input.sdkTaskId);
     if (updated) {
       this.#syncProviderDependencies(updated);
       this.#emit(
@@ -175,7 +204,6 @@ export class TaskService {
     }
   }
 
-  /** From TaskCompleted hooks. */
   markCompleted(sdkSessionId: string, sdkTaskId: string): void {
     this.applyUpdate({
       sdkSessionId,
@@ -185,102 +213,87 @@ export class TaskService {
     });
   }
 
-  /** Opportunistic drift repair from TaskList/TaskGet outputs. */
-  reconcileFromList(
-    sdkSessionId: string,
-    listed: {
-      id: string;
-      subject: string;
-      status: "pending" | "in_progress" | "completed";
-      owner?: string;
-      blockedBy?: string[];
-    }[],
-    attribution: TaskAttribution,
-  ): void {
-    for (const item of listed) {
-      const existing = this.#get(sdkSessionId, item.id);
-      if (!existing) {
-        this.upsertFromCreate({
-          sdkSessionId,
-          sdkTaskId: item.id,
-          subject: item.subject,
-          attribution,
-        });
-        this.applyUpdate({
-          sdkSessionId,
-          sdkTaskId: item.id,
-          patch: {
-            status: item.status,
-            ...(item.owner === undefined ? {} : { owner: item.owner }),
-            ...(item.blockedBy === undefined
-              ? {}
-              : { addBlockedBy: item.blockedBy }),
-          },
-        });
-        continue;
-      }
-      const drift =
-        existing.status !== item.status ||
-        existing.subject !== item.subject ||
-        (item.owner !== undefined && existing.owner !== item.owner);
-      if (drift) {
-        this.applyUpdate({
-          sdkSessionId,
-          sdkTaskId: item.id,
-          patch: {
-            status: item.status,
-            subject: item.subject,
-            ...(item.owner === undefined ? {} : { owner: item.owner }),
-          },
-        });
-      }
-    }
-  }
-
   listForUserSession(userSessionId: string): Task[] {
-    const rows = this.#db
-      .select()
-      .from(tasks)
-      .where(eq(tasks.userSessionId, userSessionId))
-      .all();
-    const deps = this.#db.select().from(taskDependencies).all();
-    const allRows = this.#db.select().from(tasks).all();
-    return rows.map((row) => toWire(row, deps, allRows));
+    return this.#wireAll(this.#store.listByUserSession(userSessionId));
   }
 
   listForWorkspace(workspaceId: string, filter: { userSessionId?: string; agentSessionId?: string } = {}): Task[] {
-    const rows = this.#db.select().from(tasks).where(eq(tasks.workspaceId, workspaceId)).all()
+    const rows = this.#store.listByWorkspace(workspaceId)
       .filter((row) => filter.userSessionId === undefined || row.userSessionId === filter.userSessionId)
       .filter((row) => filter.agentSessionId === undefined || row.agentSessionId === filter.agentSessionId);
-    const deps = this.#db.select().from(taskDependencies).all();
-    const allRows = this.#db.select().from(tasks).all();
-    return rows.map((row) => toWire(row, deps, allRows));
+    return this.#wireAll(rows);
+  }
+
+  /** The workspace tasks view: tasks (optionally filtered) plus the dependency graph. */
+  workspaceView(
+    workspaceId: string,
+    filter: { userSessionId?: string; agentSessionId?: string } = {},
+  ): WorkspaceTasksResponse {
+    this.#assertWorkspace(workspaceId);
+    return {
+      tasks: this.listForWorkspace(workspaceId, filter),
+      dependencies: this.listDependencies(workspaceId),
+      scheduledAssignments: this.#assignments.listScheduledByWorkspace(workspaceId).map(toWireScheduledAssignment),
+    };
   }
 
   listDependencies(workspaceId: string): TaskDependency[] {
-    const ids = new Set(this.#db.select({ id: tasks.id }).from(tasks).where(eq(tasks.workspaceId, workspaceId)).all().map((r) => r.id));
-    return this.#db.select().from(taskDependencies).all().filter((d) => ids.has(d.blockerTaskId) || ids.has(d.blockedTaskId));
+    const ids = new Set(this.#store.listIdsByWorkspace(workspaceId).map((r) => r.id));
+    return this.#store.listAllDependencies().filter((d) => ids.has(d.blockerTaskId) || ids.has(d.blockedTaskId));
   }
 
   addDependency(blockedTaskId: string, blockerTaskId: string, source: TaskDependency["source"] = "console"): void {
-    if (blockedTaskId === blockerTaskId) throw new Error("a task cannot block itself");
-    const blocked = this.#byId(blockedTaskId); const blocker = this.#byId(blockerTaskId);
-    if (!blocked || !blocker) throw new Error("unknown task dependency endpoint");
-    if (blocked.workspaceId !== blocker.workspaceId) throw new Error("task dependencies cannot cross workspaces");
-    if (this.#reachable(blockedTaskId, blockerTaskId)) throw new Error("task dependency would create a cycle");
-    const row: DependencyRow = { blockerTaskId, blockedTaskId, source, createdAt: nowIso() };
-    this.#db.insert(taskDependencies).values(row).onConflictDoNothing().run();
-    this.#bus.append({ type: "task_dependency.created", workspaceId: blocked.workspaceId, userSessionId: blocked.userSessionId,
+    if (blockedTaskId === blockerTaskId) throw new InvalidInputError("a task cannot block itself");
+    const blocked = this.#store.getById(blockedTaskId); const blocker = this.#store.getById(blockerTaskId);
+    if (!blocked || !blocker) throw new InvalidInputError("unknown task dependency endpoint");
+    // Same list only: the scheduler releases on THIS session's ledger, and a
+    // cross-session edge would couple sessions no dispatcher watches together.
+    if (blocked.sdkSessionId !== blocker.sdkSessionId) throw new InvalidInputError("task dependencies cannot cross sessions");
+    if (this.#reachable(blockedTaskId, blockerTaskId, blocked.workspaceId)) throw new InvalidInputError("task dependency would create a cycle");
+    const row: TaskDependencyRow = { blockerTaskId, blockedTaskId, source, createdAt: nowIso() };
+    this.#store.insertDependency(row);
+    this.#bus.append({ type: "task.dependency.created", workspaceId: blocked.workspaceId, userSessionId: blocked.userSessionId,
       ...(blocked.agentSessionId ? { agentSessionId: blocked.agentSessionId } : {}), payload: { dependency: row } });
+  }
+
+  /**
+   * Delete an edge and scrub both rows' provider-projection arrays so the
+   * next sync cannot resurrect it; the release then rides the ordinary
+   * `task.updated` choke point — the scheduler needs no second signal.
+   */
+  removeDependency(blockedTaskId: string, blockerTaskId: string): void {
+    const blocked = this.#store.getById(blockedTaskId);
+    const blocker = this.#store.getById(blockerTaskId);
+    if (!blocked || !blocker) return;
+    this.#deleteEdge(blocked, blocker);
+    const updated = this.#store.getById(blockedTaskId);
+    if (updated) this.#emit("task.updated", updated, ["blockedBy"]);
+  }
+
+  /** Resolve a tool-supplied ref (ledger id first, console id second) within one list. */
+  resolveForList(sdkSessionId: string, ref: string): Task | undefined {
+    const row = this.#store.getByKey(sdkSessionId, ref) ?? this.#store.getById(ref);
+    if (!row || row.sdkSessionId !== sdkSessionId) return undefined;
+    return this.#wireAll([row])[0];
+  }
+
+  getWire(taskId: string): Task | undefined {
+    const row = this.#store.getById(taskId);
+    if (!row) return undefined;
+    return this.#wireAll([row])[0];
+  }
+
+  /** The incomplete blockers holding a task, in ledger vocabulary (sdkTaskId). */
+  awaiting(task: Task): { taskId: string; subject: string; status: TaskStatus }[] {
+    return task.dependencyIds
+      .map((id) => this.#store.getById(id))
+      .filter((row): row is TaskRow => row !== undefined && row.status !== "completed")
+      .map((row) => ({ taskId: row.sdkTaskId, subject: row.subject, status: row.status }));
   }
 
   /** Compact lines for wake digests: the live tasks of one agent session. */
   linesForAgentSession(agentSessionId: string): string[] {
-    return this.#db
-      .select()
-      .from(tasks)
-      .where(eq(tasks.agentSessionId, agentSessionId))
-      .all()
+    return this.#store.listByAgentSession(agentSessionId)
       .filter((row) => row.status !== "deleted")
       .map(
         (row) =>
@@ -288,18 +301,49 @@ export class TaskService {
       );
   }
 
-  #get(sdkSessionId: string, sdkTaskId: string): TaskRow | undefined {
-    return this.#db
-      .select()
-      .from(tasks)
-      .where(this.#key(sdkSessionId, sdkTaskId))
-      .get();
+  #wireAll(rows: readonly TaskRow[]): Task[] {
+    const deps = this.#store.listAllDependencies();
+    const allRows = this.#store.listAll();
+    const live = new Map(this.#assignments.listScheduled().map((row) => [row.taskId, row]));
+    return rows.map((row) => toWire(row, deps, allRows, live));
   }
 
-  #byId(id: string): TaskRow | undefined { return this.#db.select().from(tasks).where(eq(tasks.id, id)).get(); }
+  #deleteEdge(blocked: TaskRow, blocker: TaskRow): void {
+    this.#store.patchById(blocked.id, {
+      blockedBy: blocked.blockedBy.filter((ref) => ref !== blocker.id && ref !== blocker.sdkTaskId),
+      updatedAt: nowIso(),
+    });
+    this.#store.patchById(blocker.id, {
+      blocks: blocker.blocks.filter((ref) => ref !== blocked.id && ref !== blocked.sdkTaskId),
+      updatedAt: nowIso(),
+    });
+    const edge = this.#store.findDependency(blocker.id, blocked.id);
+    if (!edge) return;
+    this.#store.deleteDependency(blocker.id, blocked.id);
+    this.#bus.append({ type: "task.dependency.deleted", workspaceId: blocked.workspaceId, userSessionId: blocked.userSessionId,
+      ...(blocked.agentSessionId ? { agentSessionId: blocked.agentSessionId } : {}), payload: { dependency: edge } });
+  }
 
-  #reachable(from: string, target: string): boolean {
-    const deps = this.#db.select().from(taskDependencies).all(); const seen = new Set<string>(); const queue = [from];
+  /** One `removeBlockedBy` entry: scrub the raw ref, and delete the edge when it resolves. */
+  #removeBlockedByRef(sdkSessionId: string, blockedTaskId: string, ref: string): void {
+    const blocked = this.#store.getById(blockedTaskId);
+    if (!blocked) return;
+    const blocker = this.#store.getByKey(sdkSessionId, ref) ?? this.#store.getById(ref);
+    if (blocker && blocker.id !== blocked.id && blocker.sdkSessionId === sdkSessionId) {
+      this.#deleteEdge(blocked, blocker);
+      return;
+    }
+    // A forward reference that never resolved: the raw ref is all there is.
+    this.#store.patchById(blocked.id, {
+      blockedBy: blocked.blockedBy.filter((existing) => existing !== ref),
+      updatedAt: nowIso(),
+    });
+  }
+
+  #reachable(from: string, target: string, workspaceId: string): boolean {
+    const ids = new Set(this.#store.listIdsByWorkspace(workspaceId).map((r) => r.id));
+    const deps = this.#store.listAllDependencies().filter((d) => ids.has(d.blockerTaskId) && ids.has(d.blockedTaskId));
+    const seen = new Set<string>(); const queue = [from];
     while (queue.length) { const id = queue.shift()!; if (id === target) return true; if (seen.has(id)) continue; seen.add(id);
       for (const edge of deps) if (edge.blockerTaskId === id) queue.push(edge.blockedTaskId); }
     return false;
@@ -307,33 +351,44 @@ export class TaskService {
 
   #syncProviderDependencies(row: TaskRow): void {
     for (const raw of row.blockedBy) {
-      const blocker = this.#get(row.sdkSessionId, raw) ?? this.#byId(raw);
+      const blocker = this.#store.getByKey(row.sdkSessionId, raw) ?? this.#store.getById(raw);
       if (!blocker || blocker.id === row.id) continue;
-      const exists = this.#db.select().from(taskDependencies).where(and(eq(taskDependencies.blockerTaskId, blocker.id), eq(taskDependencies.blockedTaskId, row.id))).get();
-      if (!exists) this.addDependency(row.id, blocker.id, "provider");
+      if (!this.#store.findDependency(blocker.id, row.id)) {
+        // A bad projection ref (cycle, cross-session) must not fail the
+        // ledger write that carried it.
+        try { this.addDependency(row.id, blocker.id, "provider"); } catch { /* skip the edge */ }
+      }
     }
     for (const raw of row.blocks) {
-      const blocked = this.#get(row.sdkSessionId, raw) ?? this.#byId(raw);
+      const blocked = this.#store.getByKey(row.sdkSessionId, raw) ?? this.#store.getById(raw);
       if (!blocked || blocked.id === row.id) continue;
-      const exists = this.#db.select().from(taskDependencies).where(and(eq(taskDependencies.blockerTaskId, row.id), eq(taskDependencies.blockedTaskId, blocked.id))).get();
-      if (!exists) this.addDependency(blocked.id, row.id, "provider");
+      if (!this.#store.findDependency(row.id, blocked.id)) {
+        try { this.addDependency(blocked.id, row.id, "provider"); } catch { /* skip the edge */ }
+      }
     }
   }
 
   #syncProviderReferencesTo(created: TaskRow): void {
-    const candidates = this.#db.select().from(tasks).where(eq(tasks.sdkSessionId, created.sdkSessionId)).all();
+    const candidates = this.#store.listBySdkSession(created.sdkSessionId);
     for (const candidate of candidates) {
       if (candidate.id === created.id) continue;
       if (candidate.blockedBy.includes(created.sdkTaskId) || candidate.blockedBy.includes(created.id) || candidate.blocks.includes(created.sdkTaskId) || candidate.blocks.includes(created.id)) this.#syncProviderDependencies(candidate);
     }
   }
 
-  #key(sdkSessionId: string, sdkTaskId: string) {
-    return and(eq(tasks.sdkSessionId, sdkSessionId), eq(tasks.sdkTaskId, sdkTaskId));
+  /**
+   * Notified after every task write. An explicit callback rather than a bus
+   * subscription: it is synchronous and testable without a spine. Invoked
+   * AFTER the bus append, inside a catch — a throwing subscriber must not eat
+   * the ledger transition or its event.
+   */
+  onChange(handler: (task: Task) => void): void {
+    if (this.#onChange) throw new Error("onChange is already registered — wire callbacks once, in createApp");
+    this.#onChange = handler;
   }
 
   #emit(type: "task.created" | "task.updated", row: TaskRow, changed?: string[]): void {
-    const task = toWire(row, this.#db.select().from(taskDependencies).all(), this.#db.select().from(tasks).all());
+    const task = this.#wireAll([row])[0]!;
     this.#bus.append({
       type,
       workspaceId: row.workspaceId,
@@ -344,5 +399,6 @@ export class TaskService {
       payload:
         type === "task.created" ? { task } : { task, changed: changed ?? [] },
     } as Parameters<EventBus["append"]>[0]);
+    try { this.#onChange?.(task); } catch { /* the subscriber's failure is its own */ }
   }
 }

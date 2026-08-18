@@ -1,6 +1,6 @@
 import type { QueryClient } from "@tanstack/react-query";
 
-import type { AgentStatePayload, ConsoleEvent } from "@agentique-console/shared";
+import type { AgentActivityChangedPayload, ConsoleEvent, EventScope, SystemPauseState } from "@agentique-console/shared";
 
 import { keys } from "@/api/keys";
 import { agentStreamKey, userStreamKey } from "@/live/watched";
@@ -13,8 +13,8 @@ export interface RouterDeps {
   appendUserStreamEvent(sessionId: string, event: ConsoleEvent): void;
   /** Agent-session transcript sink; the agent stream store folds these. */
   appendAgentStreamEvent(sessionId: string, event: ConsoleEvent): void;
-  /** agent.state ALWAYS lands here, watched or not — it drives shimmer rows. */
-  ingestAgentState(payload: AgentStatePayload): void;
+  /** activity.changed ALWAYS lands here, watched or not — it drives shimmer rows. */
+  ingestAgentActivity(payload: AgentActivityChangedPayload): void;
   /**
    * Sidebar attention dots: the list endpoint doesn't carry "awaiting input",
    * so the router keeps a client-side map fed by question/plan events.
@@ -31,6 +31,13 @@ export interface RouterDeps {
   ): void;
   /** Transient gate: deltas for unwatched sessions are dropped here. */
   isWatched(key: string): boolean;
+  /** The whole-system pause flipped: the payload IS the state — written straight into the cache. */
+  setSystemPause(state: SystemPauseState): void;
+}
+
+/** The session id a transient frame's scope names — the owning stream. */
+function scopeSessionId(scope: EventScope): string {
+  return scope.kind === "user" ? scope.userSessionId : scope.agentSessionId;
 }
 
 /**
@@ -40,41 +47,82 @@ export interface RouterDeps {
  *  3. the runtime + attention side-tables
  */
 export function routeEvent(event: ConsoleEvent, deps: RouterDeps): void {
-  const type = event.type;
   if (event.userSessionId && event.seq !== undefined) deps.invalidate(keys.timelineAll);
 
-  // 1. Cache invalidation, by topic prefix. Agent-session invalidation is the
-  // LIFECYCLE subset on purpose: message/tool/routed events arrive in storms
+  // 1. Cache invalidation, by exact type. Agent-session invalidation is the
+  // LIFECYCLE subset on purpose: message/tool events arrive in storms
   // and already reach the strip via the stream store — refetching the list
   // for each would be waste.
-  if (type.startsWith("user_session.")) {
-    deps.invalidate(keys.userSessions.all);
-    deps.invalidate(keys.sessionTreeAll);
-  } else if (type.startsWith("workspace.")) {
-    deps.invalidate(keys.workspaces);
-  } else if (
-    type === "agent_session.created" ||
-    type === "agent_session.status" ||
-    type === "agent_session.phase" ||
-    type === "agent_session.turn.started" ||
-    type === "agent_session.turn.settled"
-  ) {
-    deps.invalidate(keys.agentSessions.all);
-    deps.invalidate(keys.sessionTreeAll);
-  } else if (type.startsWith("task.")) {
-    deps.invalidate(keys.tasks.all);
-    deps.invalidate(keys.workspaceTasksAll);
-  } else if (type.startsWith("task_dependency.")) {
-    deps.invalidate(keys.workspaceTasksAll);
-  } else if (type.startsWith("agent_profile.")) {
-    deps.invalidate(keys.profiles.all);
+  switch (event.type) {
+    case "user_session.created":
+    case "user_session.updated":
+    case "user_session.message.appended":
+    case "user_session.turn.started":
+    case "user_session.turn.settled":
+    case "user_session.context.rotated":
+    case "user_session.runtime.noted":
+    case "user_session.retry.recorded":
+    case "user_session.tool.called":
+    case "user_session.tool.completed":
+    case "user_session.question.asked":
+    case "user_session.question.answered":
+    case "user_session.plan.proposed":
+    case "user_session.plan.resolved":
+    // The orchestration surfaces (spec chip, working-state panel) live under
+    // the user-sessions prefix; these two events previously invalidated
+    // NOTHING, so the panel would sit stale until an unrelated event swept it.
+    case "user_session.spec.updated":
+    case "user_session.state.updated":
+      deps.invalidate(keys.userSessions.all);
+      deps.invalidate(keys.sessionTreeAll);
+      break;
+    case "workspace.created":
+    case "workspace.updated":
+      deps.invalidate(keys.workspaces);
+      break;
+    // Per-session pause columns (pauseReason/pausedUntil) ride the detail rows.
+    case "run.capacity.paused":
+    case "run.capacity.resumed":
+      deps.invalidate(keys.userSessions.all);
+      break;
+    case "agent_session.created":
+    case "agent_session.status.changed":
+    case "agent_session.turn.started":
+    case "agent_session.turn.settled":
+      deps.invalidate(keys.agentSessions.all);
+      deps.invalidate(keys.sessionTreeAll);
+      break;
+    case "task.created":
+    case "task.updated":
+      deps.invalidate(keys.tasks.all);
+      deps.invalidate(keys.workspaceTasksAll);
+      break;
+    case "task.dependency.created":
+    case "task.dependency.deleted":
+      deps.invalidate(keys.workspaceTasksAll);
+      break;
+    case "task.assignment.scheduled":
+    case "task.assignment.dispatched":
+    case "task.assignment.canceled":
+      deps.invalidate(keys.tasks.all);
+      deps.invalidate(keys.workspaceTasksAll);
+      break;
+    case "agent_profile.changed":
+      deps.invalidate(keys.profiles.all);
+      break;
+    default:
+      break;
   }
 
   switch (event.type) {
     // 3a. Runtime states bypass the watched gate: the sidebar/header read them
     // for sessions whose transcript may not be mounted.
-    case "agent.state":
-      deps.ingestAgentState(event.payload);
+    case "agent_session.activity.changed":
+      deps.ingestAgentActivity(event.payload);
+      return;
+    // The install-wide pause: one scopeless event, one cache write.
+    case "system.pause.changed":
+      deps.setSystemPause(event.payload);
       return;
 
     // 2a. Transient stream frames: watched sessions only — an unwatched
@@ -83,11 +131,11 @@ export function routeEvent(event: ConsoleEvent, deps: RouterDeps): void {
     case "stream.reasoning": {
       const scope = event.payload.scope;
       if (scope.kind === "user") {
-        if (deps.isWatched(userStreamKey(scope.sessionId))) {
-          deps.appendUserStreamEvent(scope.sessionId, event);
+        if (deps.isWatched(userStreamKey(scope.userSessionId))) {
+          deps.appendUserStreamEvent(scope.userSessionId, event);
         }
-      } else if (deps.isWatched(agentStreamKey(scope.sessionId))) {
-        deps.appendAgentStreamEvent(scope.sessionId, event);
+      } else if (deps.isWatched(agentStreamKey(scope.agentSessionId))) {
+        deps.appendAgentStreamEvent(scope.agentSessionId, event);
       }
       return;
     }
@@ -96,55 +144,69 @@ export function routeEvent(event: ConsoleEvent, deps: RouterDeps): void {
     // watched check on purpose: the store itself drops events for ids it holds
     // no stream for, and a LINGERING (recently unwatched) stream must keep
     // receiving persisted rows or a quick re-watch would show a gapped view.
-    case "user_session.message":
-      deps.appendUserStreamEvent(event.payload.sessionId, event);
-      // Chat while a card is pending dismisses it server-side; clearing here
-      // keeps the dot honest even before those resolution events land.
-      deps.setAwaitingInput(event.payload.sessionId, false);
+    case "user_session.message.appended":
+      deps.appendUserStreamEvent(event.payload.userSessionId, event);
+      // OPERATOR chat while a card is pending dismisses it server-side
+      // (runner.postOperatorMessage → interactions.dismissPendingForChat), so
+      // clearing here keeps the dot honest before those resolution events land.
+      //
+      // It must be gated on the speaker. Clearing on ANY appended message
+      // meant an orchestrator reply, a system notice, or the post-restart
+      // recovery notice silently cleared "needs you" while the question was
+      // still pending — the one signal the operator has that a run is waiting
+      // on them, switched off by the run talking to them.
+      if (event.payload.message.speaker.kind === "operator") {
+        deps.setAwaitingInput(event.payload.userSessionId, false);
+      }
       return;
-    case "user_session.tool.call":
-    case "user_session.tool.result":
+    case "user_session.tool.called":
+    case "user_session.tool.completed":
     case "user_session.turn.started":
     case "user_session.turn.settled":
-      deps.appendUserStreamEvent(event.payload.sessionId, event);
+    // An approved spec revision is a conversation-level fact — the fold
+    // renders it as a marker between messages.
+    case "user_session.spec.updated":
+      deps.appendUserStreamEvent(event.payload.userSessionId, event);
       return;
 
     // 2c. Persisted transcript-shaped agent_session events — same ungated
     // deviation as the user lane: the store drops unknown ids, and LINGERING
     // streams must keep receiving persisted rows to stay gapless.
-    case "agent_session.message":
-    case "agent_session.routed":
+    case "agent_session.message.appended":
     case "agent_session.turn.started":
     case "agent_session.turn.settled":
-    case "agent_session.phase":
+    case "agent_session.tool.called":
+    case "agent_session.tool.completed":
       deps.appendAgentStreamEvent(event.payload.agentSessionId, event);
-      return;
-    // Tool payloads inherit the user-lane shape: `sessionId` IS the agent
-    // session id there (the envelope's agentSessionId agrees).
-    case "agent_session.tool.call":
-    case "agent_session.tool.result":
-      deps.appendAgentStreamEvent(event.payload.sessionId, event);
       return;
 
     // 3c. Flow pulses — the store's freshness guard (via eventTs) keeps a
     // reconnect replay from animating stale hops.
-    case "flow.delegation":
+    case "agent_session.delegation.sent":
       deps.pulseFlow(event.payload.agentSessionId, "delegation", event.ts);
       return;
-    case "flow.result":
+    // Boundary hops pulse the PARENT card — the child's own card already
+    // pulses via the delegation.sent its creation emitted.
+    case "agent_session.child.spawned":
+      deps.pulseFlow(event.payload.agentSessionId, "delegation", event.ts);
+      return;
+    case "agent_session.child.reported":
+      deps.pulseFlow(event.payload.agentSessionId, "result", event.ts);
+      return;
+    case "agent_session.result.returned":
       deps.pulseFlow(event.payload.agentSessionId, "result", event.ts);
       return;
 
     // 3b. Question/plan events both append AND flip the attention map.
     case "user_session.question.asked":
     case "user_session.plan.proposed":
-      deps.appendUserStreamEvent(event.payload.sessionId, event);
-      deps.setAwaitingInput(event.payload.sessionId, true);
+      deps.appendUserStreamEvent(event.payload.userSessionId, event);
+      deps.setAwaitingInput(event.payload.userSessionId, true);
       return;
     case "user_session.question.answered":
     case "user_session.plan.resolved":
-      deps.appendUserStreamEvent(event.payload.sessionId, event);
-      deps.setAwaitingInput(event.payload.sessionId, false);
+      deps.appendUserStreamEvent(event.payload.userSessionId, event);
+      deps.setAwaitingInput(event.payload.userSessionId, false);
       return;
 
     default:

@@ -4,23 +4,13 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentProfileRegistry } from "./registry.ts";
 import { openDb } from "../db/client.ts";
+import { ArtifactStore } from "../events/artifact-store.ts";
 import { EventBus } from "../events/bus.ts";
 
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true }); });
 
 describe("AgentProfileRegistry", () => {
-  it("loads validated custom profiles without allowing built-in replacement", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agentique-profiles-")); dirs.push(dir);
-    const file = path.join(dir, "profiles.json");
-    fs.writeFileSync(file, JSON.stringify([{ id: "schema-reviewer", title: "Schema reviewer", purpose: "Review schemas", instructions: "Review only.", tools: ["Read"], permissionMode: "default", sandboxRequired: true, runtime: { shell: false, browser: false, screenshots: false } }]));
-    const registry = new AgentProfileRegistry(file);
-    expect(registry.get("schema-reviewer").purpose).toBe("Review schemas");
-    expect(registry.get("frontend-implementer").runtime.browser).toBe(true);
-
-    fs.writeFileSync(file, JSON.stringify([{ ...registry.get("explorer"), title: "replacement" }]));
-    expect(() => new AgentProfileRegistry(file)).toThrow(/cannot replace built-in/);
-  });
 
   it("discovers workspace plugin bundles and trusts only an exact revision", () => {
     const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "agentique-workspace-")); dirs.push(workspace);
@@ -29,8 +19,8 @@ describe("AgentProfileRegistry", () => {
     const manifest = { id: "schema-reviewer", title: "Schema reviewer", purpose: "Review schemas", instructions: "Review only.", tools: ["Read"], skills: ["schema-review"], permissionMode: "default", sandboxRequired: true, runtime: { shell: false, browser: false, screenshots: false } };
     fs.writeFileSync(path.join(root, "agentique.profile.json"), JSON.stringify(manifest));
     fs.writeFileSync(path.join(root, ".claude-plugin", "plugin.json"), JSON.stringify({ name: "schema-reviewer", version: "0.1.0" }));
-    const { db } = openDb(":memory:"); const bus = new EventBus(db);
-    const registry = new AgentProfileRegistry(undefined, { getWorkspaceRoot: () => workspace, db, bus });
+    const { db } = openDb(":memory:"); const bus = new EventBus(db, new ArtifactStore(db));
+    const registry = new AgentProfileRegistry({ getWorkspaceRoot: () => workspace, db, bus });
     const [profile] = registry.summaries("ws_1").filter((entry) => entry.source === "workspace");
     expect(profile).toMatchObject({ id: "schema-reviewer", valid: true, trusted: false });
     registry.trust("ws_1", profile!.id, profile!.revision);

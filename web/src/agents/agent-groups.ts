@@ -2,10 +2,10 @@
  * The agent-side twin of session/user-groups.ts: presentation grouping between
  * the fold and the renderer.
  *
- * Seats do the real work — Bash, Edit, Write, Read, Grep — so the inspector
+ * Agents do the real work — Bash, Edit, Write, Read, Grep — so the inspector
  * fills with tool cards fast. Consecutive calls collapse into one Task block
- * per seat. The participant is part of the grouping key: two seats working
- * back to back are two runs, never one, because the seat label is the whole
+ * per agent. The agent is part of the grouping key: two agents working
+ * back to back are two runs, never one, because the agent label is the whole
  * point of the inspector.
  *
  * Pure, idempotent, total over the item union — and deliberately separate from
@@ -22,7 +22,7 @@ export interface ToolRunItem {
   readonly type: "tool_run";
   /** Render identity: the first tool's uid, which is already unique. */
   readonly uid: string;
-  readonly participant: string;
+  readonly agent: string;
   readonly tools: readonly AgentToolItem[];
   /** No result yet on the last call — the run is still going. */
   readonly active: boolean;
@@ -39,14 +39,10 @@ function itemKeyOf(item: Exclude<AgentItem, AgentToolItem>): string {
   switch (item.type) {
     case "message":
       return `message:${item.seq}`;
-    case "routed":
-      return `routed:${item.messageSeq}`;
     case "turn":
       return `turn:${item.turnId}`;
     case "turn_error":
       return `turn_error:${item.turnId}`;
-    case "phase":
-      return `phase:${item.seq}`;
     case "trace":
       return `trace:${item.uid}`;
   }
@@ -64,8 +60,8 @@ export function groupAgentItems(items: readonly AgentItem[]): AgentGroup[] {
 
   for (const item of items) {
     if (item.type === "tool") {
-      // A different seat is a different run, even with nothing in between.
-      if (run !== null && run[0]?.participant !== item.participant) flush();
+      // A different agent is a different run, even with nothing in between.
+      if (run !== null && run[0]?.agent !== item.agent) flush();
       if (run === null) run = [item];
       else run.push(item);
       continue;
@@ -83,7 +79,7 @@ function runOf(tools: readonly AgentToolItem[]): ToolRunItem {
   return {
     type: "tool_run",
     uid: first?.uid ?? "run",
-    participant: first?.participant ?? "unknown",
+    agent: first?.agent ?? "unknown",
     tools: [...tools],
     active: last !== undefined && last.output === undefined && last.isError !== true,
   };

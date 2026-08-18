@@ -1,5 +1,5 @@
 /**
- * The "still working" row for a participant that is busy but silent.
+ * The "still working" row for an agent that is busy but silent.
  *
  * A turn can spend minutes inside one provider call (retry backoff, rate
  * limits, a long tool), and a bare shimmer makes that indistinguishable from a
@@ -30,7 +30,7 @@ export function formatElapsed(ms: number): string {
   return `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`;
 }
 
-/** What the seat is doing, in the operator's words rather than the SDK's. */
+/** What the agent is doing, in the operator's words rather than the SDK's. */
 export function describeRuntime(name: string, runtime: SeatRuntime): string {
   if (runtime.detail !== undefined) return `${name} · ${runtime.detail}`;
   if (runtime.state === "tool") {

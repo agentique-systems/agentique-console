@@ -1,28 +1,59 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
+import { isOrchestratorModel } from "@agentique-console/shared";
 import type { AppContext } from "../../context.ts";
-import { revivalPrompt } from "../../orchestrator/interactions.ts";
-import { badRequest } from "../errors.ts";
+import { InvalidInputError } from "../../errors.ts";
+import { buildCommissions } from "../../orchestrator/commissions.ts";
+
+/**
+ * Constrained to the offered list rather than accepting any string: an id with
+ * no `model-catalog.ts` entry silently drops the session's rotation ceiling to
+ * 68K, and a rejected request is a far better failure than a session that
+ * quietly rotates twice as often.
+ */
+const Model = z
+  .string()
+  .refine(isOrchestratorModel, { message: "unknown orchestrator model" });
 
 const CreateBody = z.object({
   workspaceId: z.string(),
   mode: z.enum(["execute", "plan_execute"]),
   message: z.string(),
+  model: Model.optional(),
 });
 
 const PatchBody = z.object({
   mode: z.enum(["execute", "plan_execute"]).optional(),
   title: z.string().optional(),
-  status: z.enum(["open", "archived"]).optional(),
+  lifecycle: z.enum(["open", "archived"]).optional(),
+  model: Model.optional(),
+  budgetUsd: z.number().positive().nullable().optional(),
+  autonomy: z.enum(["standard", "away"]).optional(),
 });
 
 const MessageBody = z.object({ text: z.string() });
 
+const SignoffBody = z.object({
+  decision: z.enum(["accept", "changes"]),
+  note: z.string().optional(),
+});
+
 const ResolveBody = z.union([
-  z.object({ answers: z.record(z.string(), z.array(z.string())) }),
+  z.object({
+    answers: z.record(z.string(), z.array(z.string())),
+    // Free text keyed by question. The service 400s if the card was not raised
+    // with `allowFreeText`. Without this the only way to say something the
+    // asker did not anticipate is to type in chat — which DISMISSES the card
+    // rather than answering it.
+    freeText: z.record(z.string(), z.string()).optional(),
+    note: z.string().optional(),
+  }),
   z.object({
     decision: z.enum(["approve", "reject"]),
     note: z.string().optional(),
+    // The operator's edited plan/spec text; on approval it becomes the
+    // governing document.
+    editedDocument: z.string().optional(),
   }),
 ]);
 
@@ -30,20 +61,20 @@ export function registerUserSessionRoutes(
   app: FastifyInstance,
   ctx: AppContext,
 ): void {
-  const sessions = ctx.userSessions;
+  const sessions = ctx.app.userSessions;
 
   app.get<{ Querystring: { workspaceId?: string } }>(
     "/api/user-sessions",
     async (request) => {
       const workspaceId = request.query.workspaceId;
-      if (!workspaceId) throw badRequest("workspaceId is required");
+      if (!workspaceId) throw new InvalidInputError("workspaceId is required");
       return sessions.list(workspaceId);
     },
   );
 
   app.post("/api/user-sessions", async (request, reply) => {
     const parsed = CreateBody.safeParse(request.body);
-    if (!parsed.success) throw badRequest(parsed.error.message);
+    if (!parsed.success) throw new InvalidInputError(parsed.error.message);
     const session = sessions.create(parsed.data);
     return reply.status(201).send({ session });
   });
@@ -53,26 +84,36 @@ export function registerUserSessionRoutes(
     async (request) => sessions.get(request.params.id),
   );
 
-  app.get<{ Params: { id: string } }>("/api/user-sessions/:id/telemetry", async (request) => {
-    sessions.get(request.params.id);
-    const samples = ctx.repo.listUsage(request.params.id);
-    return {
-      totals: samples.reduce((total, sample) => ({ inputTokens: total.inputTokens + sample.inputTokens,
-        uncachedInputTokens: total.uncachedInputTokens + sample.uncachedInputTokens,
-        cacheCreationInputTokens: total.cacheCreationInputTokens + sample.cacheCreationInputTokens,
-        cacheReadInputTokens: total.cacheReadInputTokens + sample.cacheReadInputTokens,
-        outputTokens: total.outputTokens + sample.outputTokens, costUsd: total.costUsd + (sample.costUsd ?? 0) }),
-      { inputTokens: 0, uncachedInputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0, outputTokens: 0, costUsd: 0 }),
-      samples,
-    };
-  });
-
   app.patch<{ Params: { id: string } }>(
     "/api/user-sessions/:id",
     async (request) => {
       const parsed = PatchBody.safeParse(request.body);
-      if (!parsed.success) throw badRequest(parsed.error.message);
+      if (!parsed.success) throw new InvalidInputError(parsed.error.message);
       return sessions.patch(request.params.id, parsed.data);
+    },
+  );
+
+  // Manual "resume now" for a capacity/budget pause — the operator raised
+  // the budget, bought capacity, or knows the window reset early. The pause
+  // is process-wide, so this delegates to the system switch (`:id` is not
+  // consulted); kept for older clients, `POST /api/system/resume` is the
+  // canonical route.
+  app.post<{ Params: { id: string } }>(
+    "/api/user-sessions/:id/resume-capacity",
+    async () => {
+      ctx.app.system.resume();
+      return { resumed: true };
+    },
+  );
+
+  // The operator's verdict on a proposed run completion. 409s unless the run
+  // is actually awaiting one, so a stale card cannot re-close a reopened run.
+  app.post<{ Params: { id: string } }>(
+    "/api/user-sessions/:id/signoff",
+    async (request) => {
+      const parsed = SignoffBody.safeParse(request.body);
+      if (!parsed.success) throw new InvalidInputError(parsed.error.message);
+      return sessions.signoff(request.params.id, parsed.data);
     },
   );
 
@@ -80,12 +121,47 @@ export function registerUserSessionRoutes(
     "/api/user-sessions/:id/messages",
     async (request, reply) => {
       const parsed = MessageBody.safeParse(request.body);
-      if (!parsed.success) throw badRequest(parsed.error.message);
-      const session = ctx.repo.getUserSession(request.params.id);
-      const result = session?.purpose === "profile_manager"
-        ? ctx.manager.postMessage(request.params.id, parsed.data.text)
-        : ctx.runner.postOperatorMessage(request.params.id, parsed.data.text);
-      return reply.status(202).send(result);
+      if (!parsed.success) throw new InvalidInputError(parsed.error.message);
+      return reply
+        .status(202)
+        .send(sessions.postMessage(request.params.id, parsed.data.text));
+    },
+  );
+
+  // The full run-summary document behind a sign-off card's scalars.
+  app.get<{ Params: { id: string; summaryId: string } }>(
+    "/api/user-sessions/:id/run-summaries/:summaryId",
+    async (request) =>
+      // "tail" = the unsummarized end of the run, built on demand — always
+      // readable, never persisted (statics beat params in fastify, but the
+      // sentinel keeps it one route and one response shape).
+      request.params.summaryId === "tail"
+        ? ctx.app.completion.tailSummary(request.params.id)
+        : ctx.app.completion.getSummary(request.params.id, request.params.summaryId),
+  );
+
+  // The living spec: revision history + the approved text that governs the run.
+  app.get<{ Params: { id: string } }>(
+    "/api/user-sessions/:id/spec",
+    async (request) => ({
+      revisions: ctx.app.specs.listForUserSession(request.params.id),
+      approved: ctx.app.specs.latestApproved(request.params.id) ?? null,
+    }),
+  );
+
+  // The orchestration state: current working state, its history, and every
+  // commission joined to its rationale and outcome — the review surface that
+  // distinguishes good orchestration from lucky outcomes. Joins are by
+  // stable id (buildCommissions), never by recency.
+  app.get<{ Params: { id: string } }>(
+    "/api/user-sessions/:id/orchestration",
+    async (request) => {
+      const userSessionId = request.params.id;
+      return {
+        current: ctx.app.orchestrationState.current(userSessionId) ?? null,
+        revisions: ctx.app.orchestrationState.history(userSessionId),
+        commissions: buildCommissions({ repo: ctx.app.repo, statusOf: (row) => ctx.app.host.statusOf(row) }, userSessionId),
+      };
     },
   );
 
@@ -93,44 +169,19 @@ export function registerUserSessionRoutes(
     "/api/user-sessions/:id/interactions/:interactionId",
     async (request) => {
       const parsed = ResolveBody.safeParse(request.body);
-      if (!parsed.success) throw badRequest(parsed.error.message);
-      const before = ctx.interactions.get(request.params.interactionId);
-      const resolved = ctx.interactions.resolveFromApi(
+      if (!parsed.success) throw new InvalidInputError(parsed.error.message);
+      return ctx.app.interactions.resolveAndRoute(
         request.params.id,
         request.params.interactionId,
         parsed.data,
       );
-      // A stale interaction's parked promise died with a previous process —
-      // its answer becomes a fresh resumed turn instead (M8 revival).
-      if (before.status === "stale") {
-        if (
-          before.kind === "plan_approval" &&
-          "decision" in parsed.data &&
-          parsed.data.decision === "approve"
-        ) {
-          ctx.repo.patchUserSession(request.params.id, { phase: "executing" });
-          ctx.bus.append({
-            type: "user_session.updated",
-            userSessionId: request.params.id,
-            payload: {
-              sessionId: request.params.id,
-              patch: { phase: "executing" },
-            },
-          });
-        }
-        ctx.runner.enqueueRevival(
-          request.params.id,
-          revivalPrompt(before, parsed.data),
-        );
-      }
-      return resolved;
     },
   );
 
   app.post<{ Params: { id: string } }>(
     "/api/user-sessions/:id/interrupt",
     async (request, reply) => {
-      ctx.runner.interrupt(request.params.id);
+      ctx.app.runner.interrupt(request.params.id);
       return reply.status(202).send({ ok: true });
     },
   );
@@ -139,4 +190,23 @@ export function registerUserSessionRoutes(
     "/api/user-sessions/:id/transcript",
     async (request) => sessions.transcript(request.params.id),
   );
+
+  app.get<{
+    Params: { id: string };
+    Querystring: { beforeSeq?: string; limit?: string };
+  }>("/api/user-sessions/:id/timeline", async (request) => {
+    const beforeSeq =
+      request.query.beforeSeq === undefined
+        ? undefined
+        : Number(request.query.beforeSeq);
+    const limit =
+      request.query.limit === undefined ? undefined : Number(request.query.limit);
+    if (
+      (beforeSeq !== undefined && (!Number.isInteger(beforeSeq) || beforeSeq < 1)) ||
+      (limit !== undefined && (!Number.isInteger(limit) || limit < 1))
+    ) {
+      throw new InvalidInputError("timeline cursor and limit must be positive integers");
+    }
+    return ctx.app.timeline.page(request.params.id, beforeSeq, limit);
+  });
 }

@@ -14,10 +14,11 @@ const SESSION: AgentSession = {
   id: "as_1",
   userSessionId: "us_1",
   title: "wire the strip",
-  mode: "execute",
-  phase: "executing",
-  status: "idle",
-  participants: ["scout", "coder"],
+  lifecycle: "open",
+  activity: "idle",
+  pattern: "hub_and_spoke",
+  parentAgentSessionId: null,
+  agents: ["scout", "coder"],
   createdAt: "2026-08-03T11:00:00.000Z",
   updatedAt: "2026-08-03T11:30:00.000Z",
 };
@@ -81,8 +82,8 @@ describe("AgentCard", () => {
     );
   });
 
-  it("breathes the running ring on status=working even with silent seats", () => {
-    renderCard({ status: "working" });
+  it("breathes the running ring on activity=working even with silent seats", () => {
+    renderCard({ activity: "working" });
     expect(screen.getByTestId("agent-card").className).toContain(
       "console-running-ring",
     );

@@ -22,7 +22,6 @@ interface UiState {
   readonly selectedTaskId: string | null;
   readonly selectedTimelineItemId: string | null;
   readonly selectedProfileId: string | null;
-  readonly activeManagerSessionId: string | null;
   /**
    * Sessions with a pending question/plan card. Client-side on purpose: the
    * list endpoint doesn't carry "awaiting input", and fetching GET /:id per
@@ -40,7 +39,6 @@ interface UiState {
   selectTask(id: string | null): void;
   selectTimelineItem(id: string | null): void;
   selectProfile(id: string | null): void;
-  selectManagerSession(id: string | null): void;
   setAwaitingInput(sessionId: string, awaiting: boolean): void;
 }
 
@@ -52,7 +50,6 @@ export const useUiStore = create<UiState>((set) => ({
   selectedTaskId: null,
   selectedTimelineItemId: null,
   selectedProfileId: null,
-  activeManagerSessionId: null,
   awaitingInput: new Set<string>(),
   openSession: (id) => set({ activeUserSessionId: id, activeAgentSessionId: null, draftOpen: false }),
   beginDraft: () => set({ draftOpen: true }),
@@ -68,7 +65,6 @@ export const useUiStore = create<UiState>((set) => ({
   selectTask: (selectedTaskId) => set({ selectedTaskId }),
   selectTimelineItem: (selectedTimelineItemId) => set({ selectedTimelineItemId }),
   selectProfile: (selectedProfileId) => set({ selectedProfileId }),
-  selectManagerSession: (activeManagerSessionId) => set({ activeManagerSessionId }),
   setAwaitingInput: (sessionId, awaiting) =>
     set((state) => {
       if (state.awaitingInput.has(sessionId) === awaiting) return state;

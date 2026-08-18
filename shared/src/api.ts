@@ -3,8 +3,10 @@
 
 import type {
   AgentSession,
+  AgentSessionStatus,
   AgentRunSummary,
   Interaction,
+  ScheduledAssignment,
   SessionMessage,
   SessionMode,
   Task,
@@ -14,10 +16,9 @@ import type {
   SessionTreeBranch,
   AgentProfileSummary,
   AgentProfileDetail,
-  ManagerSession,
-  ProfileProposal,
   TimelineLane,
   TimelineItem,
+  SystemPauseState,
 } from "./domain.ts";
 import type { HandoffPage } from "./handoffs.ts";
 import type { ConsoleEvent } from "./events.ts";
@@ -34,6 +35,27 @@ export interface HealthResponse {
 // GET /api/stats
 export interface StatsResponse {
   lastEventSeq: number;
+}
+
+// GET /api/system/pause · POST /api/system/pause · POST /api/system/resume
+export interface PauseSystemBody {
+  /** hard (default): interrupt in-flight turns too; soft: only mint no new ones. */
+  mode?: "hard" | "soft";
+  detail?: string;
+}
+export type PauseSystemResponse = SystemPauseState & {
+  /** Turns the hard pause interrupted; 0/0 for soft. */
+  interrupted: { main: number; seats: number };
+};
+
+// GET /api/config
+/**
+ * Server-resolved defaults the client cannot derive. Only the server knows
+ * whether `CONSOLE_MODEL` moved the orchestrator default, and the draft view
+ * has to preselect the right chip before a session exists.
+ */
+export interface ConfigResponse {
+  defaultModel: string;
 }
 
 // GET /api/fs/roots
@@ -60,13 +82,24 @@ export interface CreateWorkspaceBody {
 }
 
 // GET /api/user-sessions?workspaceId=
-export type ListUserSessionsResponse = UserSession[];
+/**
+ * `pendingInteractions` is server-authoritative attention. The client's
+ * `ui.awaitingInput` is a live overlay only — it is rebuilt from events and is
+ * therefore lossy on a cold boot, which is exactly when the operator most needs
+ * to know a run is waiting on them.
+ */
+export interface UserSessionListItem extends UserSession {
+  pendingInteractions: number;
+}
+export type ListUserSessionsResponse = UserSessionListItem[];
 
 // POST /api/user-sessions — create-on-first-message
 export interface CreateUserSessionBody {
   workspaceId: string;
   mode: SessionMode;
   message: string;
+  /** Orchestrator model; omitted means the server's configured default. */
+  model?: string;
 }
 export interface CreateUserSessionResponse {
   session: UserSession;
@@ -82,7 +115,13 @@ export interface GetUserSessionResponse {
 export interface PatchUserSessionBody {
   mode?: SessionMode;
   title?: string;
-  status?: "open" | "archived";
+  lifecycle?: "open" | "archived";
+  /** Takes effect on the next turn: the change recycles the lane. */
+  model?: string;
+  /** Spend ceiling (USD); crossing it pauses the run. null clears it. */
+  budgetUsd?: number | null;
+  /** "away" = proceed on recommendations; queue only irreversible decisions. */
+  autonomy?: "standard" | "away";
 }
 
 // POST /api/user-sessions/:id/messages → 202
@@ -96,9 +135,35 @@ export interface PostMessageResponse {
 
 // POST /api/user-sessions/:id/interactions/:interactionId
 export type ResolveInteractionBody =
-  | { answers: Record<string, string[]> }
-  | { decision: "approve" | "reject"; note?: string };
+  | {
+      /** Chosen option labels per question. May be `{}` when freeText covers every question. */
+      answers: Record<string, string[]>;
+      /**
+       * Free-text answer per question, keyed by question text. Only accepted
+       * when the card was raised with `allowFreeText`. Without this the only
+       * way to say something the asker did not anticipate was to type in chat,
+       * which DISMISSES the card rather than answering it.
+       */
+      freeText?: Record<string, string>;
+      /** Card-level note attached to any answer. */
+      note?: string;
+    }
+  | {
+      decision: "approve" | "reject";
+      note?: string;
+      /**
+       * The operator's edited version of the proposed plan/spec text. On
+       * approval this becomes the governing text — their words outrank the
+       * proposal.
+       */
+      editedDocument?: string;
+    };
 
+// POST /api/user-sessions/:id/signoff
+export interface RunSignoffBody {
+  decision: "accept" | "changes";
+  note?: string;
+}
 // GET /api/user-sessions/:id/transcript
 // GET /api/agent-sessions/:id/transcript
 export type TranscriptResponse = ConsoleEvent[];
@@ -123,22 +188,14 @@ export type SessionTreeResponse = SessionTreeBranch[];
 export interface WorkspaceTasksResponse {
   tasks: Task[];
   dependencies: TaskDependency[];
+  /** Live (`scheduled`) assignments only; tombstones stay server-side. */
+  scheduledAssignments: ScheduledAssignment[];
 }
 
 // GET /api/workspaces/:id/agent-profiles
 export type ListAgentProfilesResponse = AgentProfileSummary[];
 // GET /api/workspaces/:id/agent-profiles/:profileId
 export type GetAgentProfileResponse = AgentProfileDetail;
-
-// POST /api/workspaces/:id/manager-sessions
-export interface CreateManagerSessionBody {
-  profileId?: string;
-  sourceProfileId?: string;
-}
-export interface ManagerSessionResponse {
-  session: ManagerSession;
-  proposal: ProfileProposal | null;
-}
 
 // GET /api/user-sessions/:id/timeline
 export interface TimelinePageResponse {
@@ -157,4 +214,111 @@ export interface ImproveMessageBody {
 }
 export interface ImproveMessageResponse {
   text: string;
+}
+
+/**
+ * The end-of-run report the operator reads on the sign-off card: console-owned
+ * facts plus main's own criteria→evidence justification (null = a VISIBLE
+ * omission, deliberately never a blocker). Lives here because the card
+ * renders it; the completion service re-exports it for server code.
+ */
+export interface RunSummaryDocument {
+  seqFrom: number;
+  seqTo: number;
+  verdict: "completed" | "completed_with_caveats" | "failed";
+  headline: string;
+  durationMs: number;
+  /** Wall clock minus the UNION of every turn interval across both lanes. */
+  deadAirMs: number;
+  build: { filesChanged: number; files: string[]; source: "git" | "handoff" | "none" };
+  tasks: { completed: number; total: number; open: string[]; ledgerUpdatedAt: string | null };
+  cost: {
+    usd: number | null;
+    /** recordedTurns / observedTurns. Below 0.9 the figure is labelled partial. */
+    coverage: number;
+    recordedTurns: number;
+    observedTurns: number;
+    inputTokens: number;
+    outputTokens: number;
+    byParticipant: { participant: string; usd: number | null; turns: number }[];
+  };
+  decisions: { question: string; answer: string; askedBy: string }[];
+  /** Console-owned facts about what the run did not do as asked. */
+  deviations: string[];
+  uncertainty: string[];
+  /** Seats whose provider process the Console released when the run settled. */
+  resources: { reapedSeats: number; detail: string[] };
+  justification: {
+    revision: number;
+    criteria: { criterion: string; met: boolean; evidence: { kind: string; ref: string }[] }[];
+    knownGaps: string[];
+    nonGoals: string[];
+  } | null;
+  friction: { apiRetries: number; rateLimited: number; failedTurns: number; watchdogTrips: number; capacityPauses: number };
+}
+
+// GET /api/user-sessions/:id/run-summaries/:summaryId — the full document
+// behind the sign-off card's scalars.
+export interface GetRunSummaryResponse {
+  id: string;
+  status: "proposed" | "accepted" | "changes_requested";
+  verdict: RunSummaryDocument["verdict"];
+  note: string | null;
+  createdAt: string;
+  resolvedAt: string | null;
+  document: RunSummaryDocument;
+}
+
+// GET /api/user-sessions/:id/spec — the living specification.
+export interface SpecRevisionWire {
+  id: string;
+  revision: number;
+  document: string;
+  changeNote: string | null;
+  status: "draft" | "approved" | "superseded" | "rejected";
+  origin: "main" | "operator_edited";
+  /** The interaction card that approved this revision. */
+  interactionId: string | null;
+  createdAt: string;
+  approvedAt: string | null;
+}
+export interface GetSpecResponse {
+  revisions: SpecRevisionWire[];
+  approved: SpecRevisionWire | null;
+}
+
+// GET /api/user-sessions/:id/orchestration — the review surface: working
+// state plus every commission joined to its rationale and outcome by STABLE
+// ids (the creation briefing's handoff, never whatever main sent last).
+export interface OrchestrationStateWire {
+  revision: number;
+  trigger: string;
+  strategy: string;
+  strategyWhy: string;
+  uncertainties: string[];
+  assumptions: string[];
+  risks: string[];
+  note: string | null;
+  completion: Record<string, unknown> | null;
+  createdAt: string;
+}
+export interface CommissionSummary {
+  agentSessionId: string;
+  title: string;
+  pattern: string;
+  lifecycle: string;
+  parentAgentSessionId: string | null;
+  /** The derived live status (working/idle/reported/archived), not just the lifecycle bit. */
+  status: AgentSessionStatus;
+  /** The creation briefing — later steering never overwrites it. Null for child sessions (their controller commissions them). */
+  commission: { handoffId: string; action: string; why: string | null; expecting: string | null; briefedAt: string } | null;
+  /** Steering after the briefing is counted, not listed — the handoffs are first-class on the timeline. */
+  steering: { count: number };
+  /** The last terminal report (final/failure) to main, by stable id. */
+  outcome: { handoffId: string; trigger: string; status: string; action: string } | null;
+}
+export interface GetOrchestrationResponse {
+  current: OrchestrationStateWire | null;
+  revisions: OrchestrationStateWire[];
+  commissions: CommissionSummary[];
 }

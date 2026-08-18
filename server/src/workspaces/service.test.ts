@@ -3,8 +3,11 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { openDb } from "../db/client.ts";
+import { ArtifactStore } from "../events/artifact-store.ts";
 import { EventBus } from "../events/bus.ts";
+import { ConflictError, InvalidInputError } from "../errors.ts";
 import { WorkspaceService } from "./service.ts";
+import { WorkspaceStore } from "../db/stores/workspace-store.ts";
 
 let tmp: string;
 let service: WorkspaceService;
@@ -13,8 +16,8 @@ let bus: EventBus;
 beforeEach(() => {
   tmp = mkdtempSync(path.join(os.tmpdir(), "console-ws-"));
   const { db } = openDb(":memory:");
-  bus = new EventBus(db);
-  service = new WorkspaceService(db, bus, [tmp]);
+  bus = new EventBus(db, new ArtifactStore(db));
+  service = new WorkspaceService(new WorkspaceStore(db), bus, [tmp]);
 });
 
 afterEach(() => {
@@ -38,13 +41,13 @@ describe("WorkspaceService", () => {
   it("refuses a rootPath outside the allowed roots", async () => {
     await expect(
       service.create({ name: "x", rootPath: "/etc/nope", create: true }),
-    ).rejects.toMatchObject({ statusCode: 400 });
+    ).rejects.toBeInstanceOf(InvalidInputError);
   });
 
   it("refuses a missing rootPath without create", async () => {
     await expect(
       service.create({ name: "x", rootPath: path.join(tmp, "absent") }),
-    ).rejects.toMatchObject({ statusCode: 400 });
+    ).rejects.toBeInstanceOf(InvalidInputError);
   });
 
   it("refuses a duplicate rootPath", async () => {
@@ -52,6 +55,6 @@ describe("WorkspaceService", () => {
     await service.create({ name: "a", rootPath: target, create: true });
     await expect(
       service.create({ name: "b", rootPath: target }),
-    ).rejects.toMatchObject({ statusCode: 409 });
+    ).rejects.toBeInstanceOf(ConflictError);
   });
 });

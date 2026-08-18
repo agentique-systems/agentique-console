@@ -10,8 +10,9 @@ import { and, asc, desc, eq, gte, lt, sql, type SQL } from "drizzle-orm";
 import type { ConsoleEvent } from "@agentique-console/shared";
 import { AsyncQueue } from "../async-queue.ts";
 import type { Db } from "../db/client.ts";
-import { eventArtifacts, events } from "../db/schema.ts";
-import { newId, nowIso } from "../ids.ts";
+import { events } from "../db/schema.ts";
+import { nowIso } from "../ids.ts";
+import type { ArtifactStore } from "./artifact-store.ts";
 
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown
   ? Omit<T, K>
@@ -51,12 +52,17 @@ function matches(event: ConsoleEvent, selector: EventSelector): boolean {
   return true;
 }
 
+/** Inline JSON cap before a payload spills to the artifact store. One owner; sdk/mapping.ts imports it. */
+export const INLINE_JSON_CAP_BYTES = 16_384;
+
 export class EventBus {
   readonly #db: Db;
+  readonly #artifacts: ArtifactStore;
   readonly #subscribers = new Set<Subscriber>();
 
-  constructor(db: Db) {
+  constructor(db: Db, artifacts: ArtifactStore) {
     this.#db = db;
+    this.#artifacts = artifacts;
   }
 
   headSeq(): number {
@@ -68,31 +74,13 @@ export class EventBus {
   }
 
   /** Keep event rows bounded without losing the authoritative payload. */
-  capture(value: unknown, scope: { workspaceId?: string; userSessionId?: string; agentSessionId?: string } = {}): unknown {
-    return this.captureSized(value, scope).value;
-  }
-
   captureSized(value: unknown, scope: { workspaceId?: string; userSessionId?: string; agentSessionId?: string } = {}): { value: unknown; bytes: number } {
     let serialized: string;
     try { serialized = JSON.stringify(value) ?? "null"; } catch { serialized = JSON.stringify({ unserializable: true }); }
     const bytes = Buffer.byteLength(serialized);
-    if (serialized.length <= 16_384) return { value, bytes };
-    const artifact = this.storeArtifact(serialized, "application/json", scope);
-    return { value: { truncated: true, preview: serialized.slice(0, 16_384), ...artifact }, bytes };
-  }
-
-  storeArtifact(content: string, mediaType: string, scope: { workspaceId?: string; userSessionId?: string; agentSessionId?: string } = {}): { artifactId: string; bytes: number } {
-    const artifactId = newId("artifact");
-    const bytes = mediaType.endsWith(";base64") ? Buffer.from(content, "base64").byteLength : Buffer.byteLength(content);
-    this.#db.insert(eventArtifacts).values({ id: artifactId, eventSeq: null, workspaceId: scope.workspaceId ?? null,
-      userSessionId: scope.userSessionId ?? null, agentSessionId: scope.agentSessionId ?? null,
-      mediaType, bytes, content, createdAt: nowIso() }).run();
-    return { artifactId, bytes };
-  }
-
-  getArtifact(id: string): { id: string; mediaType: string; bytes: number; content: string; createdAt: string } | undefined {
-    return this.#db.select({ id: eventArtifacts.id, mediaType: eventArtifacts.mediaType, bytes: eventArtifacts.bytes, content: eventArtifacts.content, createdAt: eventArtifacts.createdAt })
-      .from(eventArtifacts).where(eq(eventArtifacts.id, id)).get();
+    if (serialized.length <= INLINE_JSON_CAP_BYTES) return { value, bytes };
+    const artifact = this.#artifacts.store(serialized, "application/json", scope);
+    return { value: { truncated: true, preview: serialized.slice(0, INLINE_JSON_CAP_BYTES), ...artifact }, bytes };
   }
 
   /** Persist and publish. Returns the stamped event (with seq). */

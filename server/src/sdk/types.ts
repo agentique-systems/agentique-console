@@ -31,8 +31,15 @@ export interface SdkMessage {
       content?: unknown;
       is_error?: boolean;
     }[];
+    /**
+     * Per-API-call usage on an assistant message. `input + cache_creation +
+     * cache_read` is that ONE request's prompt size — i.e. actual context
+     * occupancy. The result message's `usage` is the turn-wide SUM and is not
+     * an occupancy measure; do not use it to decide rotation.
+     */
+    usage?: { input_tokens?: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number; output_tokens?: number };
   };
-  /** B3: user-message provenance — peer = an in-process agent's SendMessage. */
+  /** User-message provenance stamped by the harness. */
   origin?: {
     kind?: string;
     from?: string;
@@ -42,6 +49,9 @@ export interface SdkMessage {
   };
   // result fields
   structured_output?: unknown;
+  /** A "success" result may still carry is_error:true when the CLI itself failed. */
+  is_error?: boolean;
+  /** CUMULATIVE across turns in a streaming session — never sum these. */
   total_cost_usd?: number;
   num_turns?: number;
   terminal_reason?: string;
@@ -77,13 +87,61 @@ export interface SdkUserMessageLike {
   shouldQuery?: boolean;
   uuid?: string;
   timestamp?: string;
-  origin?: { kind: "human" };
+  /** human = operator input; peer = a cross-session SendMessage delivery. */
+  origin?: { kind: "human" } | { kind: "peer"; from: string };
 }
 
+/**
+ * MCP's `ContentBlock`, not the Messages API's. The two differ exactly where
+ * it matters: MCP images are `{type:"image", data, mimeType}` while the
+ * Messages API nests them under `source:{type:"base64", media_type, data}`.
+ * The in-process MCP server rejects the wrong shape with `invalid_union`.
+ */
+export type SdkToolContent =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string };
+
 export interface SdkToolResult {
-  content: { type: "text"; text: string }[];
+  content: SdkToolContent[];
   isError?: boolean;
 }
+
+/**
+ * Structural hook plumbing (mirrors the SDK's HookCallbackMatcher wire shape).
+ * Options carries the real types; these exist so console middleware and the
+ * fake can construct/fire hooks without importing SDK internals. Cast at the
+ * options boundary: `hooks: fragment as SdkOptions["hooks"]`.
+ */
+export interface SdkHookInput {
+  hook_event_name?: string;
+  tool_name?: string;
+  tool_input?: unknown;
+  tool_response?: unknown;
+  session_id?: string;
+  [key: string]: unknown;
+}
+export interface SdkHookOutput {
+  decision?: "approve" | "block";
+  systemMessage?: string;
+  hookSpecificOutput?: {
+    hookEventName: string;
+    permissionDecision?: "allow" | "deny" | "ask" | "defer";
+    permissionDecisionReason?: string;
+    updatedInput?: Record<string, unknown>;
+    additionalContext?: string;
+    worktreePath?: string;
+  };
+}
+export type SdkHookCallback = (
+  input: SdkHookInput,
+  toolUseId: string | undefined,
+  extra: { signal?: AbortSignal },
+) => Promise<SdkHookOutput>;
+export interface SdkHookMatcher {
+  matcher?: string;
+  hooks: SdkHookCallback[];
+}
+export type SdkHooksFragment = Partial<Record<string, SdkHookMatcher[]>>;
 
 export interface CompiledTool {
   name: string;
@@ -95,6 +153,12 @@ export interface SdkMcpServerConfig {
   name: string;
   version?: string;
   tools: unknown[];
+  /**
+   * Keep this server's tools in the prompt instead of deferring them behind
+   * ToolSearch. The console already decided an agent's tools via its profile;
+   * making it rediscover them costs a full API round-trip each time.
+   */
+  alwaysLoad?: boolean;
 }
 
 /** The injectable module surface: real SDK in production, fake in tests/dev. */

@@ -1,18 +1,5 @@
-import type { AgentSessionHost } from "./agent-sessions/host.ts";
+import type { App } from "./app.ts";
 import type { Config } from "./config.ts";
-import type { Db } from "./db/client.ts";
-import type { Repo } from "./db/repo.ts";
-import type { EventBus } from "./events/bus.ts";
-import type { InteractionService } from "./orchestrator/interactions.ts";
-import type { HandoffService } from "./handoffs/service.ts";
-import type { OrchestratorRunner } from "./orchestrator/runner.ts";
-import type { ConsoleSdk } from "./sdk/types.ts";
-import type { UserSessionService } from "./sessions/service.ts";
-import type { TaskService } from "./tasks/service.ts";
-import type { WorkspaceService } from "./workspaces/service.ts";
-import type { TimelineService } from "./timeline/service.ts";
-import type { AgentProfileRegistry } from "./agent-profiles/registry.ts";
-import type { ManagerService } from "./agent-profiles/manager.ts";
 
 export interface Logger {
   info(...args: unknown[]): void;
@@ -20,27 +7,13 @@ export interface Logger {
   error(...args: unknown[]): void;
 }
 
-/** Everything the HTTP layer needs. */
+/**
+ * What the HTTP layer receives: the one application graph, plus transport
+ * concerns. Routes reach services as `ctx.app.<service>` — there is exactly
+ * one graph and one place it is built (`createApp`).
+ */
 export interface AppContext {
+  app: App;
   config: Config;
-  db: Db;
-  repo: Repo;
-  bus: EventBus;
   log: Logger;
-  workspaces: WorkspaceService;
-  userSessions: UserSessionService;
-  runner: OrchestratorRunner;
-  interactions: InteractionService;
-  host: AgentSessionHost;
-  tasks: TaskService;
-  handoffs: HandoffService;
-  timeline: TimelineService;
-  profiles: AgentProfileRegistry;
-  manager: ManagerService;
-  /**
-   * The SDK seam, for routes that talk to a model outside a session lane (the
-   * composer's rewrite pass). Same lazy resolver the runner and host get, so
-   * tests can inject `fakeSdk(...)` and `npm run verify` stays credential-free.
-   */
-  sdk: () => Promise<ConsoleSdk>;
 }

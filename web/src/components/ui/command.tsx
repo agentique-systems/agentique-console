@@ -1,11 +1,19 @@
 /**
- * shadcn's cmdk wrapper, trimmed to what the console uses: the workspace
- * combobox lives inside a Popover, so v1's CommandDialog variant is omitted.
+ * shadcn's cmdk wrapper, trimmed to what the console uses. The workspace
+ * combobox lives inside a Popover; CommandDialog and CommandShortcut were
+ * added later for the model selector, which is a command palette in a modal.
  */
 import * as React from "react";
 import { Command as CommandPrimitive } from "cmdk";
 import { SearchIcon } from "lucide-react";
 
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 
 function Command({
@@ -119,12 +127,67 @@ function CommandItem({
   );
 }
 
+/** The right-aligned key hint on a command row (⌘1, ⌘2, …). */
+function CommandShortcut({
+  className,
+  ...props
+}: React.ComponentProps<"span">) {
+  return (
+    <span
+      data-slot="command-shortcut"
+      className={cn(
+        "ml-auto font-mono text-2xs tracking-widest text-muted-foreground",
+        className,
+      )}
+      {...props}
+    />
+  );
+}
+
+/**
+ * A Command inside a Dialog. The title and description are screen-reader-only
+ * by default — Radix requires both, and the palette's own input is the visible
+ * heading.
+ */
+function CommandDialog({
+  title = "Command palette",
+  description = "Search for a command to run.",
+  children,
+  className,
+  showCloseButton = true,
+  ...props
+}: React.ComponentProps<typeof Dialog> & {
+  title?: string;
+  description?: string;
+  className?: string;
+  showCloseButton?: boolean;
+}) {
+  return (
+    <Dialog {...props}>
+      <DialogHeader className="sr-only">
+        <DialogTitle>{title}</DialogTitle>
+        <DialogDescription>{description}</DialogDescription>
+      </DialogHeader>
+      <DialogContent
+        className={cn("overflow-hidden p-0", className)}
+        showCloseButton={showCloseButton}
+      >
+        <Command className="[&_[data-slot=command-input-wrapper]]:h-auto">
+          {children}
+        </Command>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export {
   Command,
+  CommandDialog,
   CommandInput,
   CommandList,
   CommandEmpty,
   CommandGroup,
   CommandItem,
   CommandSeparator,
+  CommandShortcut,
 };

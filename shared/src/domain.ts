@@ -21,35 +21,112 @@ export interface UserSession {
   title: string | null;
   mode: SessionMode;
   phase: SessionPhase;
-  status: "open" | "archived";
+  /** Is this in the operator's active list. Orthogonal to `runState`. */
+  lifecycle: "open" | "archived";
+  /**
+   * Is the work done. `awaiting_signoff` is the Console asserting it believes
+   * the run is finished while the operator has not yet agreed.
+   */
+  runState: RunState;
+  /**
+   * The orchestrator model this session runs on. `null` means the server's
+   * configured default — the client renders that default rather than the word
+   * "null", so it reads `/api/config` for it.
+   */
+  model: string | null;
+  /** "away": proceed on recommendations; queue only irreversible decisions. */
+  autonomy: "standard" | "away";
+  /** Set while a provider-capacity, budget, or operator pause holds. */
+  pauseReason: PauseReason | null;
+  /** Auto-resume time for a capacity pause (ISO); null otherwise. */
+  pausedUntil: string | null;
   createdAt: string;
   updatedAt: string;
 }
 
-export type ConversationPurpose = "work" | "profile_manager";
+export type RunState = "active" | "awaiting_signoff" | "completed";
 
-export type AgentSessionStatus = "working" | "idle" | "archived";
+/**
+ * Why the system is paused. One process-wide pause covers every run:
+ * `capacity` (provider usage window; auto-resumes), `budget` (a session's
+ * spend ceiling; operator resumes), `operator` (the top-bar Pause; holds
+ * until Resume and outranks the other two).
+ */
+export type PauseReason = "capacity" | "budget" | "operator";
+
+/**
+ * The whole-system pause as the web reads it. `since` is null after a
+ * server restart restored a persisted pause (the start time is not
+ * persisted); `until` is the auto-resume time of a capacity pause.
+ */
+export interface SystemPauseState {
+  paused: boolean;
+  reason: PauseReason | null;
+  since: string | null;
+  until: string | null;
+  detail?: string;
+}
+
+/**
+ * The render-ready projection of a run summary — ONE shape shared by the
+ * `run.completion.proposed` payload and the web fold's card, so copies cannot
+ * drift.
+ */
+export interface RunSummaryStats {
+  headline: string;
+  verdict: "completed" | "completed_with_caveats" | "failed";
+  filesChanged: number;
+  tasks: { completed: number; total: number };
+  durationMs: number;
+  deadAirMs: number;
+  costUsd: number | null;
+  /** 1 = every observed turn has a usage row. Below 0.9 the cost reads "partial". */
+  costCoverage: number;
+  openUncertainty: number;
+  /** Seats whose provider process the Console released when the run settled. */
+  reaped: { seats: number };
+}
+
+
+/**
+ * `reported` is derived, not stored: the coordinator has delivered a result to
+ * main and nothing is in flight. Without it a finished session renders with the
+ * same grey dot as one that died.
+ */
+export type AgentSessionStatus = "working" | "idle" | "reported" | "archived";
+
+export type AgentSessionLifecycle = "open" | "archived";
+/** Derived busy state — never stored. */
+export type AgentSessionActivity = "working" | "idle" | "reported";
 
 export interface AgentSession {
   id: string;
   userSessionId: string;
   title: string;
-  mode: SessionMode;
-  phase: SessionPhase;
-  status: AgentSessionStatus;
-  /** Specialist seat names in seating order (excludes the orchestrator's virtual seat). */
-  participants: string[];
+  lifecycle: AgentSessionLifecycle;
+  activity: AgentSessionActivity;
+  /** Orchestration-pattern catalog id (hub_and_spoke, pipeline, …). */
+  pattern: string;
+  /** NULL = top-level; set = this is a child session nested one level down. */
+  parentAgentSessionId: string | null;
+  /** Specialist agent names in seating order (excludes the coordinator). */
+  agents: string[];
   createdAt: string;
   updatedAt: string;
 }
 export interface AgentRunSummary {
-  participant: string;
+  agent: string;
   profileId: string;
   profile: Record<string, unknown>;
   ownership: string[];
   generation: number;
+  /** Turns of the CURRENT generation only — resets at every rotation. */
   turnCount: number;
+  /** Current-generation context occupancy — resets at every rotation, never sum it. */
   contextTokens: number;
+  /** Lifetime totals across all generations, from usage samples. */
+  totalCostUsd: number;
+  totalTurns: number;
   providerSessionId: string | null;
 }
 
@@ -57,7 +134,7 @@ export type SpeakerKind = "operator" | "orchestrator" | "agent" | "system";
 
 export interface Speaker {
   kind: SpeakerKind;
-  /** "operator" | "orchestrator" | seat name | "system" */
+  /** "operator" | "orchestrator" (the main lane) | agent name | "system" */
   name: string;
 }
 
@@ -87,8 +164,8 @@ export interface Task {
   userSessionId: string;
   /** null = the orchestrator's own list. */
   agentSessionId: string | null;
-  /** Seat name whose SDK session owns the list; null for the orchestrator. */
-  participant: string | null;
+  /** Agent name whose SDK session owns the list; null for the orchestrator. */
+  agent: string | null;
   subject: string;
   description: string;
   activeForm: string | null;
@@ -98,8 +175,42 @@ export interface Task {
   blockedBy: string[];
   dependencyIds: string[];
   dependentIds: string[];
-  unresolvedDependencies: string[];
+  /** `pending` with every dependency completed — the scheduler's dispatch predicate. */
+  ready: boolean;
+  /** The live scheduled assignment awaiting this task's dependencies, if any. */
+  scheduledAssignment: {
+    id: string;
+    sender: string;
+    recipient: string;
+    createdAt: string;
+  } | null;
   metadata: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type ScheduledAssignmentStatus = "scheduled" | "dispatched" | "canceled";
+
+export type ScheduledAssignmentStatusReason =
+  | "replaced"
+  | "task_deleted"
+  | "task_completed"
+  | "session_archived"
+  | "canceled";
+
+/** A durable assignment awaiting its task's dependencies; no handoff body on the wire. */
+export interface ScheduledAssignment {
+  id: string;
+  workspaceId: string;
+  userSessionId: string;
+  agentSessionId: string;
+  taskId: string;
+  sender: string;
+  recipient: string;
+  category: string;
+  status: ScheduledAssignmentStatus;
+  statusReason: ScheduledAssignmentStatusReason | null;
+  dispatchedMessageId: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -149,34 +260,13 @@ export interface AgentProfileDetail extends AgentProfileSummary {
   model: string | null;
   effort: string | null;
   maxTurns: number;
-  sandboxRequired: boolean;
-  runtime: { shell: boolean; browser: boolean; screenshots: boolean };
+  /** Capability comes from declared MCP servers, never from console-built tools. */
+  mcpServers: Record<string, { command: string; args: string[] }>;
   handoffExtension: string | null;
   pluginPath: string | null;
   components: AgentProfileComponent[];
   files: { path: string; content: string }[];
   issues: ProfileValidationIssue[];
-}
-
-export interface ManagerSession {
-  id: string;
-  workspaceId: string;
-  profileKey: string;
-  profileId: string | null;
-  title: string;
-  phase: SessionPhase;
-  status: "open" | "archived";
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface ProfileProposal {
-  managerSessionId: string;
-  baseRevision: string | null;
-  profileId: string | null;
-  files: { path: string; before: string | null; after: string | null }[];
-  issues: ProfileValidationIssue[];
-  valid: boolean;
 }
 
 export type TimelineLaneKind = "operator" | "orchestrator" | "agent_session" | "agent";
@@ -191,7 +281,7 @@ export interface TimelineLane {
 export interface TimelineItem {
   id: string;
   laneId: string;
-  kind: "message" | "turn" | "tool" | "process" | "task" | "handoff" | "decision" | "rotation" | "runtime" | "usage";
+  kind: "message" | "turn" | "tool" | "task" | "handoff" | "decision" | "rotation" | "runtime" | "usage" | "state";
   label: string;
   start: string;
   end: string | null;
@@ -208,19 +298,52 @@ export type InteractionStatus =
   | "dismissed"
   | "stale";
 
+/**
+ * Blocking parks the asker until the operator answers; deferred renders the
+ * card immediately and hands the answer over at the asker's next delivery.
+ * A column rather than a status, because `status`'s CHECK cannot be widened on
+ * an existing database.
+ */
+export type InteractionUrgency = "blocking" | "deferred";
+/** Who raised it: an agent directly, the uncertainty classifier, or the Console. */
+export type InteractionSource = "agent" | "console";
+
 /** One AskUserQuestion question block, as the SDK tool shapes it. */
 export interface InteractionQuestion {
   question: string;
   header?: string;
   options: { label: string; description?: string }[];
   multiSelect?: boolean;
+  /**
+   * Which option the asker recommends, and why. `request_decision` accepted
+   * this and then dropped it on the blocking path, so the operator never saw
+   * the asker's own read of its own question.
+   */
+  recommendation?: string;
+  /** Why they are asking and what they already tried. Never an option. */
+  context?: string;
 }
 
 export interface Interaction {
   id: string;
   userSessionId: string;
+  /** Null = the main lane. Otherwise the AgentSession the asker sits in. */
+  agentSessionId: string | null;
+  /** Null = the main lane. Otherwise the asking agent's name. */
+  agent: string | null;
   kind: InteractionKind;
   status: InteractionStatus;
+  urgency: InteractionUrgency;
+  source: InteractionSource;
+  /** Card-level recommendation for Console-generated cards. */
+  recommendation: string | null;
+  allowFreeText: boolean;
+  /**
+   * The asker's parked promise died (park, rotation, watchdog, restart). The
+   * row is still answerable — the answer is delivered by mailbox instead of
+   * returned from the tool call.
+   */
+  detached: boolean;
   payload:
     | { questions: InteractionQuestion[] }
     | { plan: string };
@@ -228,3 +351,15 @@ export interface Interaction {
   createdAt: string;
   resolvedAt: string | null;
 }
+
+/** Orchestration-pattern catalog ids — the create-session wire vocabulary. */
+export const PATTERN_IDS = [
+  "hub_and_spoke",
+  "pipeline",
+  "evaluator_optimizer",
+  "map_reduce",
+  "peer_to_peer",
+  "plan_execute",
+  "debate",
+] as const;
+export type PatternId = (typeof PATTERN_IDS)[number];

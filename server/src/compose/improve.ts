@@ -5,7 +5,7 @@
  * Deliberately NOT `buildOrchestratorOptions` — that binds a resume id, a
  * session store, task hooks, and the console MCP server. This is a pure string
  * → string call with no tools, no persistence, and no workspace context, so it
- * gets its own minimal options and a cheaper model (config.improveModel).
+ * gets its own minimal options and a cheaper model (config.infra.improveModel).
  */
 import os from "node:os";
 import type { Config } from "../config.ts";
@@ -46,7 +46,7 @@ export function buildImproveOptions(
     includePartialMessages: false,
     maxTurns: 1,
     persistSession: false,
-    model: config.improveModel,
+    model: config.infra.improveModel,
     effort: "low" as SdkOptions["effort"],
     env: sdkEnv(),
     abortController,
