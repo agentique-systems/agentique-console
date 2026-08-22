@@ -3,6 +3,12 @@
  * verbs. "Approve & execute" resolves the interaction; "Request changes" only
  * focuses the composer — the operator's next chat message auto-rejects the
  * plan server-side with that text as the note.
+ *
+ * A REQUIREMENTS proposal rides the same card with the `requirements` marker:
+ * the preview renders the parsed outline as a tree, and the edit-in-place
+ * textarea live-parses through the SAME shared grammar the server enforces —
+ * Approve disables on a parse error, so a bad edit can never eat an approval
+ * (the server's soft-fail 400 remains the backstop).
  */
 import { FileTextIcon, PencilIcon } from "lucide-react";
 import { useState } from "react";
@@ -23,7 +29,33 @@ import {
 import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 
+import { flattenRequirementGraph, parseRequirementsDocument } from "@agentique-console/shared";
+
 import type { PlanItem } from "./user-fold";
+
+/** The parsed outline as an indented tree — the requirements preview. */
+function RequirementsPreview({ document }: { document: string }) {
+  const parsed = parseRequirementsDocument(document);
+  if (!parsed.ok) return <MessageResponse>{document}</MessageResponse>;
+  const preamble = [
+    ...(parsed.graph.title !== null ? [`# ${parsed.graph.title}`] : []),
+    ...parsed.graph.preamble.map((section) => `${section.heading === "" ? "" : `**${section.heading}** — `}${section.body}`),
+  ].join("\n\n");
+  return (
+    <div className="text-xs">
+      {preamble !== "" && <MessageResponse>{preamble}</MessageResponse>}
+      <div className="mt-2 space-y-0.5" data-testid="requirements-preview">
+        {flattenRequirementGraph(parsed.graph).map((row, index) => (
+          <div key={`${row.id ?? "new"}-${index}`} style={{ paddingLeft: `${row.depth * 14}px` }} className="flex flex-wrap items-baseline gap-1.5">
+            <span className="font-mono text-3xs text-muted-foreground">{row.id ?? "new"}</span>
+            {row.composition === "any" && <Badge variant="outline" className="text-3xs">any of</Badge>}
+            <span>{row.statement}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 export function PlanCard({
   sessionId,
@@ -43,6 +75,11 @@ export function PlanCard({
   // say "none of these" except chat, which lost the answer.)
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(item.plan);
+  const isRequirements = item.requirements !== undefined;
+  // Live parse of the operator's edit against the shared grammar; the server
+  // re-validates on resolve (400 + line errors) as the backstop.
+  const editParse = isRequirements && editing ? parseRequirementsDocument(draft) : null;
+  const editInvalid = editParse !== null && !editParse.ok;
 
   const approve = () => {
     const edited = editing && draft.trim() !== "" && draft.trim() !== item.plan.trim();
@@ -73,9 +110,11 @@ export function PlanCard({
         <CardEyebrow className={cn(!resolved && "text-attention")}>
           <FileTextIcon className="size-3.5 shrink-0" />
           <span>
-            {item.spec !== undefined ? `proposed specification (rev ${item.spec.revision})` : "proposed plan"}
-            {item.spec?.changeNote !== undefined && (
-              <span className="ml-1 normal-case text-muted-foreground">— {item.spec.changeNote}</span>
+            {item.requirements !== undefined
+              ? `proposed requirements (rev ${item.requirements.revision}, ${item.requirements.nodeCount} requirements)`
+              : item.spec !== undefined ? `proposed specification (rev ${item.spec.revision})` : "proposed plan"}
+            {(item.requirements?.changeNote ?? item.spec?.changeNote) !== undefined && (
+              <span className="ml-1 normal-case text-muted-foreground">— {item.requirements?.changeNote ?? item.spec?.changeNote}</span>
             )}
           </span>
         </CardEyebrow>
@@ -96,12 +135,23 @@ export function PlanCard({
 
       <CardContent className="pt-0">
         {editing && !resolved ? (
-          <textarea
-            className="min-h-48 w-full resize-y rounded-md border border-border bg-background p-2 font-mono text-xs"
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-            aria-label="edit the proposed text"
-          />
+          <>
+            <textarea
+              className="min-h-48 w-full resize-y rounded-md border border-border bg-background p-2 font-mono text-xs"
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              aria-label="edit the proposed text"
+            />
+            {editInvalid && editParse !== null && !editParse.ok && (
+              <ul className="mt-1 space-y-0.5 text-2xs text-status-failed" data-testid="requirements-parse-errors">
+                {editParse.errors.slice(0, 6).map((error) => (
+                  <li key={`${error.line}:${error.message}`}>line {error.line}: {error.message}</li>
+                ))}
+              </ul>
+            )}
+          </>
+        ) : isRequirements ? (
+          <RequirementsPreview document={item.plan} />
         ) : (
           <MessageResponse>{item.plan}</MessageResponse>
         )}
@@ -115,7 +165,7 @@ export function PlanCard({
       <CardFooter className="pt-0">
         <Button
           size="xs"
-          disabled={resolved || resolve.isPending}
+          disabled={resolved || resolve.isPending || (editing && editInvalid)}
           onClick={approve}
         >
           {resolve.isPending ? (

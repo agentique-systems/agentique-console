@@ -1,6 +1,8 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 
 import type {
+  OperatorRequirementStatusBody,
+  RequirementNodeWire,
   CreateUserSessionBody,
   CreateUserSessionResponse,
   CreateWorkspaceBody,
@@ -114,6 +116,26 @@ export function useResolveInteraction() {
       void queryClient.invalidateQueries({
         queryKey: keys.userSessions.detail(sessionId),
       }),
+  });
+}
+
+/** The operator's own verdict on one requirement — their word IS the gate. */
+export function useSetRequirementStatus() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ sessionId, requirementId, body }: {
+      sessionId: string;
+      requirementId: string;
+      body: OperatorRequirementStatusBody;
+    }) =>
+      apiFetch<RequirementNodeWire>(
+        `/api/user-sessions/${sessionId}/requirements/${requirementId}/status`,
+        { method: "POST", body: JSON.stringify(body) },
+      ),
+    onSuccess: (_data, { sessionId }) => {
+      void queryClient.invalidateQueries({ queryKey: keys.userSessions.requirements(sessionId) });
+      void queryClient.invalidateQueries({ queryKey: keys.userSessions.all });
+    },
   });
 }
 

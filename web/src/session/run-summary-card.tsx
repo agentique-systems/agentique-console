@@ -77,15 +77,24 @@ function JustificationDisclosure({ sessionId, summaryId }: { sessionId: string; 
         : document === undefined ? <p className="mt-1 text-2xs text-muted-foreground">Unavailable.</p>
         : (
           <div className="mt-1 space-y-2 text-2xs" data-testid="run-summary-justification">
+            {document.requirements !== null && (
+              <div>
+                <p className="font-medium">Requirements (rev {document.requirements.revision}) at proposal:</p>
+                <pre className="mt-1 overflow-x-auto whitespace-pre-wrap font-mono text-3xs text-muted-foreground">{document.requirements.outline}</pre>
+              </div>
+            )}
             {document.justification === null ? (
               <p className="text-status-waiting">main recorded no completion justification — the console's facts above stand alone.</p>
             ) : (
               <ul className="space-y-1">
-                {document.justification.criteria.map((criterion) => (
-                  <li key={criterion.criterion} className="flex items-start gap-1">
+                {document.justification.criteria.map((criterion, index) => (
+                  <li key={criterion.requirement ?? criterion.criterion ?? index} className="flex items-start gap-1">
                     {criterion.met ? <CheckIcon className="mt-0.5 size-3 shrink-0 text-status-completed" /> : <XIcon className="mt-0.5 size-3 shrink-0 text-status-failed" />}
                     <span>
-                      {criterion.criterion}
+                      {criterion.requirement !== undefined && (
+                        <span className="mr-1 font-mono text-3xs text-muted-foreground">{criterion.requirement}</span>
+                      )}
+                      {criterion.statement ?? criterion.criterion ?? criterion.requirement}
                       {criterion.evidence.length > 0 && (
                         <span className="ml-1 text-muted-foreground">
                           ({criterion.evidence.map((reference) => `${reference.kind}:${reference.ref}`).join(", ")})

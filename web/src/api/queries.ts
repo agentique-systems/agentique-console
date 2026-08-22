@@ -18,6 +18,7 @@ import type {
   ListAgentProfilesResponse,
   GetAgentProfileResponse,
   TimelinePageResponse,
+  GetRequirementsResponse,
   GetSpecResponse,
   GetOrchestrationResponse,
   GetRunSummaryResponse,
@@ -178,6 +179,9 @@ export function useAgentProfile(workspaceId: string | null, id: string | null) {
 }
 export function useSpec(id: string | null) {
   return useQuery({ queryKey: keys.userSessions.spec(id ?? ""), queryFn: () => apiFetch<GetSpecResponse>(`/api/user-sessions/${id}/spec`), enabled: id !== null });
+}
+export function useRequirements(id: string | null) {
+  return useQuery({ queryKey: keys.userSessions.requirements(id ?? ""), queryFn: () => apiFetch<GetRequirementsResponse>(`/api/user-sessions/${id}/requirements`), enabled: id !== null });
 }
 export function useOrchestration(id: string | null) {
   return useQuery({ queryKey: keys.userSessions.orchestration(id ?? ""), queryFn: () => apiFetch<GetOrchestrationResponse>(`/api/user-sessions/${id}/orchestration`), enabled: id !== null });

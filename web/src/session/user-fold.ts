@@ -58,8 +58,10 @@ export interface PlanItem {
   readonly type: "plan";
   readonly interactionId: string;
   readonly plan: string;
-  /** Present when the card proposes a SPEC revision rather than a plan. */
+  /** Present when the card proposes a legacy SPEC revision rather than a plan. */
   readonly spec?: { readonly revision: number; readonly changeNote?: string };
+  /** Present when the card proposes a REQUIREMENT revision (the canonical spec). */
+  readonly requirements?: { readonly revision: number; readonly changeNote?: string; readonly nodeCount: number };
   readonly resolution?: {
     readonly approved: boolean;
     readonly note?: string;
@@ -257,6 +259,7 @@ export function foldUserItems(events: readonly ConsoleEvent[]): UserItem[] {
           interactionId: event.payload.interactionId,
           plan: event.payload.plan,
           ...(event.payload.spec === undefined ? {} : { spec: event.payload.spec }),
+          ...(event.payload.requirements === undefined ? {} : { requirements: event.payload.requirements }),
         });
         break;
       }
@@ -305,12 +308,22 @@ export function foldUserItems(events: readonly ConsoleEvent[]): UserItem[] {
         items.push({ type: "runtime", uid: `runtime:${event.seq ?? items.length}`, label: "runtime", detail: event.payload.detail });
         break;
 
-      // The governing spec moved — a fact worth a marker in the conversation,
-      // where the operator's approval just happened.
+      // The governing document moved — a fact worth a marker in the
+      // conversation, where the operator's approval just happened.
       case "user_session.spec.updated":
         items.push({ type: "runtime", uid: `spec:${event.payload.revision}`, label: "specification",
           detail: `rev ${event.payload.revision} approved${event.payload.changeNote ? ` — ${event.payload.changeNote}` : ""}${event.payload.edited ? " (operator-edited)" : ""}` });
         break;
+
+      case "user_session.requirements.updated": {
+        const changes = [
+          ...(event.payload.added.length > 0 ? [`+${event.payload.added.length} added`] : []),
+          ...(event.payload.retired.length > 0 ? [`${event.payload.retired.length} retired`] : []),
+        ];
+        items.push({ type: "runtime", uid: `requirements:${event.payload.revision}`, label: "requirements",
+          detail: `rev ${event.payload.revision} approved (${event.payload.nodeCount} requirements${changes.length > 0 ? `, ${changes.join(", ")}` : ""})${event.payload.changeNote ? ` — ${event.payload.changeNote}` : ""}${event.payload.edited ? " (operator-edited)" : ""}` });
+        break;
+      }
 
       case "user_session.context.rotated":
         items.push({ type: "runtime", uid: `context:${event.seq ?? event.payload.generation}`, label: "context rotated", detail: `generation ${event.payload.generation} · ${event.payload.reason}` });

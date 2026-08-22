@@ -128,6 +128,25 @@ describe("routeEvent — orchestration surfaces", () => {
     } as unknown as ConsoleEvent, d);
     expect(d.invalidate).toHaveBeenCalledWith(["user-sessions"]);
   });
+
+  it("a requirement revision reaches the stream; status/decompose/delegate invalidate only", () => {
+    const d = deps();
+    routeEvent({
+      type: "user_session.requirements.updated", seq: 40, ts: "2026-08-09T10:07:00.000Z", userSessionId: "us_1",
+      payload: { userSessionId: "us_1", revision: 1, edited: false, nodeCount: 3, added: ["r1"], retired: [] },
+    } as unknown as ConsoleEvent, d);
+    expect(d.invalidate).toHaveBeenCalledWith(["user-sessions"]);
+    expect(d.appendUserStreamEvent).toHaveBeenCalledWith("us_1", expect.objectContaining({ type: "user_session.requirements.updated" }));
+
+    const quiet = deps();
+    routeEvent({
+      type: "requirement.status.changed", seq: 41, ts: "2026-08-09T10:08:00.000Z", userSessionId: "us_1",
+      payload: { userSessionId: "us_1", requirementId: "r1", from: "open", to: "satisfied",
+        verifiedBy: "self", actor: "main", evidenceCount: 1 },
+    } as unknown as ConsoleEvent, quiet);
+    expect(quiet.invalidate).toHaveBeenCalledWith(["user-sessions"]);
+    expect(quiet.appendUserStreamEvent).not.toHaveBeenCalled();
+  });
   it("system.pause.changed writes the snapshot straight into the cache; run.capacity.* refresh sessions", () => {
     const d = deps();
     const state = { paused: true, reason: "operator" as const, since: "2026-08-17T20:14:00.000Z", until: null };

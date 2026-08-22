@@ -2,19 +2,21 @@ import { useState } from "react";
 import { useAgentSession, useUserSession } from "@/api/queries";
 import { Badge } from "@/components/ui/badge";
 import { OrchestrationPanel } from "@/session/orchestration-panel";
+import { RequirementsPanel } from "@/session/requirements-panel";
 import { TaskLedger } from "@/tasks/task-ledger";
 import { useUiStore } from "@/stores/ui";
 import { cn } from "@/lib/utils";
 
 export function SessionDetails() {
-  const [tab, setTab] = useState<"overview" | "tasks" | "orchestration">("overview");
+  const [tab, setTab] = useState<"overview" | "requirements" | "tasks" | "orchestration">("overview");
   const userId = useUiStore((s) => s.activeUserSessionId); const agentId = useUiStore((s) => s.activeAgentSessionId);
   const user = useUserSession(userId); const agent = useAgentSession(agentId);
   return <div className="flex min-h-0 flex-col bg-sidebar/30">
     <div className="flex h-9 items-end gap-1 border-b border-border px-2">
-      {(["overview", "tasks", "orchestration"] as const).map((value) => <button key={value} className={cn("border-b-2 border-transparent px-2 py-2 text-2xs capitalize text-muted-foreground", tab === value && "border-primary text-foreground")} onClick={() => setTab(value)}>{value}</button>)}
+      {(["overview", "requirements", "tasks", "orchestration"] as const).map((value) => <button key={value} className={cn("border-b-2 border-transparent px-2 py-2 text-2xs capitalize text-muted-foreground", tab === value && "border-primary text-foreground")} onClick={() => setTab(value)}>{value}</button>)}
     </div>
     {tab === "orchestration" ? (userId ? <OrchestrationPanel userSessionId={userId} /> : <p className="p-4 text-xs text-muted-foreground">Select a session.</p>)
+    : tab === "requirements" ? (userId ? <RequirementsPanel userSessionId={userId} /> : <p className="p-4 text-xs text-muted-foreground">Select a session.</p>)
     : tab === "tasks" ? <TaskLedger userSessionId={userId} agentSessionId={agentId} /> : <div className="min-h-0 overflow-y-auto p-4">
       {!userId ? <p className="text-xs text-muted-foreground">Select a session for details.</p> : agentId && agent.data ? <>
         <h2 className="text-sm font-medium">{agent.data.session.title}</h2><div className="mt-2 flex gap-1"><Badge variant="outline">{agent.data.session.lifecycle === "archived" ? "archived" : agent.data.session.activity}</Badge></div>
