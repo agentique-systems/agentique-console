@@ -30,6 +30,8 @@ export function createSessionUse(
     pattern?: string;
     agents: { name: string; profileId: string; instructions?: string; owns?: string[] }[];
     briefingAction: string;
+    /** Requirement ids this session is commissioned against (the delegated sub-scope). */
+    requirements?: string[];
   },
 ) {
   return toolUseMessage(callId, "mcp__console__create_agent_session", {
@@ -37,6 +39,7 @@ export function createSessionUse(
     pattern: input.pattern ?? "hub_and_spoke",
     agents: input.agents.map((agent) => ({ owns: [], ...agent })),
     briefing: draft(input.briefingAction),
+    ...(input.requirements === undefined ? {} : { requirements: input.requirements }),
   });
 }
 

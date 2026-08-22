@@ -9,7 +9,7 @@
  */
 import type { FakeProgram } from "../../../src/sdk/fake.ts";
 import { initMessage, sendHandoffUse, successMessage, textMessage, toolUseMessage } from "../../../src/sdk/fake.ts";
-import { commissionedIndependentReviewBeforeCompletion, notSignedOffAfter, respondedToEvidence } from "../checks.ts";
+import { commissionedIndependentReviewBeforeCompletion, commissionsReferenceOpenRequirements, notSignedOffAfter, respondedToEvidence } from "../checks.ts";
 import { roleSwitch, turns } from "../programs.ts";
 import { agentRoleOf } from "../../../src/test-helpers.ts";
 import { defineScenario, type ProgramCtx } from "../scenario.ts";
@@ -91,6 +91,7 @@ export default defineScenario({
   stressedDimensions: ["verification-independence", "review-appropriateness", "spec-quality", "reopening"],
   checks: [
     commissionedIndependentReviewBeforeCompletion(),
+    commissionsReferenceOpenRequirements(),
     notSignedOffAfter(objectionMarker, "the reviewer's spec objection"),
     respondedToEvidence(objectionMarker, "the reviewer's spec objection"),
   ],
@@ -119,6 +120,7 @@ export default defineScenario({
                   { name: "checker", profileId: "reviewer" },
                 ],
                 briefingAction: "Implement config-file support per the approved spec; checker reviews against its criteria",
+                requirements: ["r1", "r2"],
               });
               yield successMessage();
               return;

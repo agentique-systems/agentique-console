@@ -6,6 +6,7 @@ import hiddenConstraint from "./hidden-constraint.ts";
 import parallelExploration from "./parallel-exploration.ts";
 import hungAgent from "./hung-agent.ts";
 import noisyContraryEvidence from "./noisy-contrary-evidence.ts";
+import requirementTraceability from "./requirement-traceability.ts";
 import restartHonesty from "./restart-honesty.ts";
 import reviewerInvalidatesSpec from "./reviewer-invalidates-spec.ts";
 import suboptimalFraming from "./suboptimal-framing.ts";
@@ -29,6 +30,7 @@ export const SCENARIOS: OrchestrationScenario[] = [
   ambiguousSignal,
   twoPerspectivesBetter,
   reviewerInvalidatesSpec,
+  requirementTraceability,
   hungAgent,
   restartHonesty,
   visualJudgment,
