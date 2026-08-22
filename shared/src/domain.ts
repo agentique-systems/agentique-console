@@ -359,7 +359,13 @@ export interface Interaction {
   detached: boolean;
   payload:
     | { questions: InteractionQuestion[] }
-    | { plan: string };
+    | {
+        plan: string;
+        /** Marks a legacy spec-revision approval. */
+        spec?: { revision: number; changeNote?: string };
+        /** Marks a requirement-revision approval (the canonical spec). */
+        requirements?: { revision: number; changeNote?: string; nodeCount: number };
+      };
   response: Record<string, unknown> | null;
   createdAt: string;
   resolvedAt: string | null;

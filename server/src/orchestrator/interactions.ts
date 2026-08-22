@@ -279,6 +279,43 @@ export class InteractionService {
     );
   }
 
+  /**
+   * A REQUIREMENT revision rides the same plan-approval machinery as the
+   * legacy spec (the interactions.kind CHECK cannot be widened): same card,
+   * same parked promise, distinguished by the `requirements` payload marker.
+   * The operator edits the canonical outline in place; the route validates
+   * their edit with the shared parser BEFORE resolving, so a bad parse can
+   * never eat an approval.
+   */
+  createRequirementsApproval(
+    userSessionId: string,
+    document: string,
+    revision: number,
+    changeNote: string | undefined,
+    nodeCount: number,
+  ): { id: string; resolution: Promise<InteractionResolution> } {
+    const requirements = {
+      revision,
+      ...(changeNote === undefined || changeNote === "" ? {} : { changeNote }),
+      nodeCount,
+    };
+    return this.#create(
+      userSessionId,
+      "plan_approval",
+      { plan: document, requirements },
+      undefined,
+      undefined,
+      {},
+      (id) => {
+        this.#bus.append({
+          type: "user_session.plan.proposed",
+          userSessionId,
+          payload: { userSessionId, interactionId: id, plan: document, requirements },
+        });
+      },
+    );
+  }
+
   createPlanApproval(
     userSessionId: string,
     plan: string,
