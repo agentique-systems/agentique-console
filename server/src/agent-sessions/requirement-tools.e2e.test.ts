@@ -1,0 +1,182 @@
+/**
+ * Seat-side requirement tools, end to end: a session commissioned against
+ * requirement ids gets the delegated block in its deliveries and scoped
+ * report/decompose tools; out-of-subtree acts are refused naming the
+ * delegated roots; a child session's sub-scope must be a subset of its
+ * parent's; a delegation-less session's prompts carry no empty block.
+ */
+import { describe, expect, it } from "vitest";
+import { initMessage, sendHandoffUse, successMessage, toolUseMessage } from "../sdk/fake.ts";
+import { agentRoleOf, collectUntil, makeDelegationHarness } from "../test-helpers.ts";
+
+const briefing = (action: string) => ({
+  core: { schemaVersion: 1 as const, taskId: null, status: "pending" as const, risk: "low" as const,
+    action, state: { summary: action, evidence: [] }, result: { summary: null, artifacts: [] },
+    uncertainty: [], nextAction: action, requestExpandedContext: false },
+  extension: { kind: "generic" as const, data: {} },
+});
+
+const DOC = `## Requirements
+- Auth works end to end
+  - Login issues a session token
+- \`npm run verify\` passes
+`;
+
+/** Approve the fixture graph: r1 (parent), r2 (leaf under r1), r3 (top leaf). */
+function approveRequirements(h: ReturnType<typeof makeDelegationHarness>, userSessionId: string): void {
+  const draft = h.app.requirements.propose(userSessionId, DOC, "initial");
+  h.app.requirements.approve(draft.id, { document: DOC, edited: false });
+}
+
+describe("seat requirement tools (fake SDK)", () => {
+  it("a commissioned session reports within its sub-scope; the delivery renders the delegated block", async () => {
+    let coordinatorTurns = 0;
+    const h = makeDelegationHarness(async function* (options) {
+      const id = agentRoleOf(options);
+      yield initMessage();
+      if (id.role === "coordinator") {
+        coordinatorTurns += 1;
+        if (coordinatorTurns === 1) {
+          // Within the sub-scope (r2 sits under the delegated r1)…
+          yield toolUseMessage("rep-ok", "mcp__console_agent__report_requirement", {
+            requirementId: "r2", status: "satisfied",
+            evidence: [{ kind: "command", ref: "curl /login" }], verifiedBy: "self" });
+          // …outside it (r3 was never delegated) — refused, named.
+          yield toolUseMessage("rep-out", "mcp__console_agent__report_requirement", {
+            requirementId: "r3", status: "satisfied",
+            evidence: [{ kind: "command", ref: "npm run verify" }] });
+          // …and refine below the delegated node, visible on the next delivery.
+          yield toolUseMessage("dec-ok", "mcp__console_agent__decompose_requirement", {
+            parentId: "r2", children: [{ statement: "Token refresh rotates" }] });
+          yield sendHandoffUse("assign-1", "scout", { action: "verify refresh", status: "pending", category: "assignment" });
+        } else {
+          yield sendHandoffUse("final-1", "main", { action: "auth done", status: "completed", category: "final" });
+        }
+      } else {
+        yield sendHandoffUse("s-1", "coordinator", { action: "refresh verified", status: "completed", category: "milestone" });
+      }
+      yield successMessage();
+    });
+    const userSessionId = h.addUserSession();
+    approveRequirements(h, userSessionId);
+    const done = collectUntil(h.bus, (event) => event.type === "agent_session.result.returned", 15_000);
+    const created = h.host.createSession({
+      userSessionId, title: "auth work", agents: [{ name: "scout", profileId: "explorer" }],
+      briefing: briefing("make auth work"), requirements: ["r1"],
+    });
+    await done;
+
+    // The delegation was journaled at creation, before the briefing.
+    const delegated = h.sqlite.prepare("SELECT payload FROM events WHERE type = 'requirement.delegated'").all()
+      .map((row) => JSON.parse(String((row as { payload: string }).payload)));
+    expect(delegated[0]).toMatchObject({ agentSessionId: created.agentSessionId, requirementIds: ["r1"], source: "commission" });
+
+    // The in-scope report landed with evidence and actor attribution.
+    const r2 = h.app.requirements.derive(userSessionId).find((node) => node.id === "r2");
+    expect(r2?.status).toBe("satisfied");
+    expect(r2?.latestChange).toMatchObject({ actor: "coordinator", verifiedBy: "self", evidenceCount: 1 });
+    // The out-of-scope report failed, naming the delegated roots.
+    const refusal = h.sqlite.prepare("SELECT payload FROM events WHERE type = 'agent_session.tool.completed'").all()
+      .map((row) => String((row as { payload: string }).payload))
+      .find((payload) => payload.includes("outside this session's delegated requirements"));
+    expect(refusal).toBeDefined();
+    expect(refusal).toContain("r1");
+    expect(h.app.requirements.derive(userSessionId).find((node) => node.id === "r3")?.status).toBe("open");
+    // The refinement is a live node attributed to this session.
+    const refined = h.app.requirements.derive(userSessionId).find((node) => node.origin === "refinement");
+    expect(refined).toMatchObject({ parentId: "r2", statement: "Token refresh rotates", refinedByAgentSessionId: created.agentSessionId });
+
+    // The coordinator's FIRST delivery carried the delegated block (statements
+    // and statuses), so the sub-scope was in hand from the briefing on.
+    const firstDelivery = h.fake.captured.prompts.find((text) => text.includes("Your delegated requirements"));
+    expect(firstDelivery).toBeDefined();
+    expect(firstDelivery).toContain("- r1 [open]: Auth works end to end");
+    expect(firstDelivery).toContain("  - r2 [open]: Login issues a session token");
+    expect(firstDelivery).not.toContain("r3");
+  });
+
+  it("a delegation-less session's prompts carry no delegated block, and specialists hold no report tool", async () => {
+    let coordinatorTurns = 0;
+    const h = makeDelegationHarness(async function* (options) {
+      const id = agentRoleOf(options);
+      yield initMessage();
+      if (id.role === "coordinator") {
+        coordinatorTurns += 1;
+        yield coordinatorTurns === 1
+          ? sendHandoffUse("a-1", "scout", { action: "look", status: "pending", category: "assignment" })
+          : sendHandoffUse("f-1", "main", { action: "done", status: "completed", category: "final" });
+      } else {
+        yield sendHandoffUse("s-1", "coordinator", { action: "seen", status: "completed", category: "milestone" });
+      }
+      yield successMessage();
+    });
+    const userSessionId = h.addUserSession();
+    approveRequirements(h, userSessionId);
+    const done = collectUntil(h.bus, (event) => event.type === "agent_session.result.returned", 15_000);
+    h.host.createSession({ userSessionId, title: "bare", agents: [{ name: "scout", profileId: "explorer" }], briefing: briefing("go") });
+    await done;
+
+    for (const prompt of h.fake.captured.prompts) {
+      expect(prompt).not.toContain("Your delegated requirements");
+    }
+    // Every seat reads; only the entry/granted roles report. The specialist's
+    // allow-list carries read_requirements but not report_requirement.
+    const scoutOptions = h.fake.captured.options.find((options) => agentRoleOf(options).role === "specialist");
+    expect(scoutOptions?.allowedTools ?? []).toContain("mcp__console_agent__read_requirements");
+    expect(scoutOptions?.allowedTools ?? []).not.toContain("mcp__console_agent__report_requirement");
+    // The coordinator holds report/decompose via its role grant.
+    const coordOptions = h.fake.captured.options.find((options) => agentRoleOf(options).role === "coordinator");
+    expect(coordOptions?.allowedTools ?? []).toContain("mcp__console_agent__report_requirement");
+  });
+
+  it("a child session's sub-scope must be a subset of its parent's", { timeout: 25_000 }, async () => {
+    let parentCoordTurns = 0;
+    const h = makeDelegationHarness(async function* (options) {
+      const id = agentRoleOf(options);
+      yield initMessage();
+      if (id.role === "coordinator" && id.depth === 0) {
+        parentCoordTurns += 1;
+        if (parentCoordTurns === 1) {
+          // Outside the parent's delegation (r3) — refused before anything spawns.
+          yield toolUseMessage("spawn-bad", "mcp__console_agent__create_child_session", {
+            pattern: "hub_and_spoke", title: "too wide", agents: [{ name: "kid", profileId: "explorer", owns: [] }],
+            briefing: briefing("overreach"), requirements: ["r3"] });
+          // A subset (r2 under the delegated r1) — spawns and delegates down.
+          yield toolUseMessage("spawn-ok", "mcp__console_agent__create_child_session", {
+            pattern: "hub_and_spoke", title: "narrow", agents: [{ name: "kid", profileId: "explorer", owns: [] }],
+            briefing: briefing("verify login"), requirements: ["r2"] });
+        } else {
+          yield sendHandoffUse("p-final", "main", { action: "done", status: "completed", category: "final" });
+        }
+      } else if (id.role === "coordinator" && id.depth === 1) {
+        yield sendHandoffUse("c-final", "main", { action: "login verified", status: "completed", category: "final" });
+      } else if (id.role === "specialist") {
+        yield sendHandoffUse("s-1", "coordinator", { action: "ok", status: "completed", category: "milestone" });
+      }
+      yield successMessage();
+    });
+    const userSessionId = h.addUserSession();
+    approveRequirements(h, userSessionId);
+    const done = collectUntil(h.bus, (event) => event.type === "run.completion.proposed", 20_000);
+    const created = h.host.createSession({
+      userSessionId, title: "mission", agents: [{ name: "aux", profileId: "explorer" }],
+      briefing: briefing("run it"), requirements: ["r1"],
+    });
+    const events = await done;
+
+    const refusal = h.sqlite.prepare("SELECT payload FROM events WHERE type = 'agent_session.tool.completed'").all()
+      .map((row) => String((row as { payload: string }).payload))
+      .find((payload) => payload.includes("must be a subset"));
+    expect(refusal).toBeDefined();
+
+    const spawned = events.find((event) => event.type === "agent_session.child.spawned");
+    expect(spawned).toBeDefined();
+    const childId = (spawned!.payload as { childAgentSessionId: string }).childAgentSessionId;
+    expect(h.app.requirements.delegationSet(childId)).toEqual(["r2"]);
+    const childDelegation = h.sqlite.prepare("SELECT payload FROM events WHERE type = 'requirement.delegated'").all()
+      .map((row) => JSON.parse(String((row as { payload: string }).payload)))
+      .find((payload) => payload.agentSessionId === childId);
+    expect(childDelegation).toMatchObject({ requirementIds: ["r2"], source: "child" });
+    expect(h.repo.getAgentSession(childId)).toMatchObject({ parentAgentSessionId: created.agentSessionId });
+  });
+});

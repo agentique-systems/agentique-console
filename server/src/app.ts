@@ -132,7 +132,7 @@ export function createApp(options: CreateAppOptions): App {
   const lateRunner = late<OrchestratorRunner>("runner");
   const lateScheduler = late<AssignmentScheduler>("scheduler");
   const host = new AgentSessionService({
-    repo, bus, artifacts, config, profiles, sdk, sessionStore, getWorkspaceRoot, specs,
+    repo, bus, artifacts, config, profiles, sdk, sessionStore, getWorkspaceRoot, requirements,
     worktrees, capacity,
     interactions, decisions, tasks, handoffs,
     scheduler: () => lateScheduler.get(),

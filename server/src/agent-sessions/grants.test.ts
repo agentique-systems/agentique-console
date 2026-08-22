@@ -35,7 +35,7 @@ function registeredNames(agent: AgentRow, profile: AgentProfile, roleName: strin
   const granted = grantedTools(hub.roles[roleName], profile, deps);
   const ctx = {
     sdk: stubSdk,
-    deps: { repo: {}, bus: {}, tasks: {}, handoffs: {}, worktrees: {}, specs: {} },
+    deps: { repo: {}, bus: {}, tasks: {}, handoffs: {}, worktrees: {}, requirements: {} },
     session: { id: "as1", userSessionId: "us1" } as AgentSessionRow,
     agent, profile,
     user: { workspaceId: "ws" } as UserSessionRow,

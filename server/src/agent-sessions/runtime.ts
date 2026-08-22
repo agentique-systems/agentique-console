@@ -41,7 +41,7 @@ import { GOVERNED_BUILTIN_TOOLS, declaredMcpServers, effectiveBuiltinTools, seat
 import { grantedTools, runtimeToolNames, type AgentToolName } from "./grants.ts";
 import type { ActiveTurn, AgentLane, AgentLanePool } from "./lanes.ts";
 import type { DispatchWorkItemsInput } from "./patterns/engine.ts";
-import type { SpecService } from "../orchestrator/spec.ts";
+import type { RequirementService } from "../orchestrator/requirements.ts";
 import type { SessionRouting } from "./routing.ts";
 import type { Deliver, Injector, RecordFailure, Transfer } from "./seams.ts";
 import { hubContract, roleOfAgent, speakerKindOf } from "./topology.ts";
@@ -100,8 +100,8 @@ export interface AgentRuntimeDeps {
   artifacts: ArtifactStore;
   tasks: TaskService;
   handoffs: HandoffService;
-  /** The living spec, for the seats' read_spec. */
-  specs: SpecService;
+  /** The governing requirements (legacy-spec fallback inside), for the seats' requirement tools. */
+  requirements: RequirementService;
   /** OS capabilities. `null` = absent, stated at the construction site. */
   worktrees: WorktreeManager | null;
   /** Lazy — the scheduler posts through the service, composed after it. */
@@ -229,7 +229,11 @@ export class AgentRuntime implements Injector, TurnTracker {
       const rolePrompt = contract.prompt(seatRole) ?? hubContract().promptPack.specialist!;
       const granted = grantedTools(contract.role(seatRole), profile, {
         tasks: Boolean(this.#deps.tasks), handoffs: Boolean(this.#deps.handoffs),
-        worktrees: Boolean(this.#deps.worktrees), user: Boolean(user), specs: Boolean(this.#deps.specs),
+        worktrees: Boolean(this.#deps.worktrees), user: Boolean(user), specs: Boolean(this.#deps.requirements),
+        // Session-delegation path: the entry agent of a session commissioned
+        // against requirement ids holds the report/decompose tools.
+        sessionHasRequirements: seatRole === contract.contract.entry.role
+          && this.#deps.requirements.delegationSet(session.id).length > 0,
         childSessions: this.#deps.config.policy.enableChildSessions !== false && session.depth < this.#deps.config.policy.maxSessionDepth,
         // Commission-time opt-in: the orchestrator flagged this session as
         // one whose ENTRY agent may nest, whatever the pattern.
@@ -754,7 +758,7 @@ export class AgentRuntime implements Injector, TurnTracker {
       const current = repo.getAgent(agentSessionId, seatName);
       // Rotated (or replaced) underneath while the query ran: stale, drop it.
       if (!current || current.generation !== seat.generation) return;
-      const specPointer = this.#deps.specs.pointer(session.userSessionId);
+      const specPointer = this.#deps.requirements.pointer(session.userSessionId);
       const prepared = this.#deps.handoffs.prepare({ draft, userSessionId: session.userSessionId, agentSessionId: session.id,
         sender: seat.name, recipient: seat.name, profileId: seat.profileId, generation: seat.generation,
         extensionKind: (seat.profileSnapshot as AgentProfile).handoffExtension,
@@ -810,7 +814,7 @@ export class AgentRuntime implements Injector, TurnTracker {
     // The spec pointer rides the seat checkpoint exactly as it rides main's:
     // the successor re-reads the digest at spawn, but the checkpoint must be
     // self-sufficiently true.
-    const specPointer = this.#deps.specs.pointer(session.userSessionId);
+    const specPointer = this.#deps.requirements.pointer(session.userSessionId);
     const prepared = this.#deps.handoffs.prepare({ draft, userSessionId: session.userSessionId, agentSessionId: session.id,
       sender: seat.name, recipient: seat.name, profileId: seat.profileId, generation: seat.generation,
       extensionKind: (seat.profileSnapshot as AgentProfile).handoffExtension,

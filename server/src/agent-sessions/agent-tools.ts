@@ -60,7 +60,7 @@ interface SendHandoffArgs {
 }
 
 import { fail, ok } from "../sdk/tool-result.ts";
-import type { SpecService } from "../orchestrator/spec.ts";
+import type { RequirementService } from "../orchestrator/requirements.ts";
 
 /** The slice of the service's deps the tool handlers read. */
 export interface AgentToolsDeps {
@@ -70,8 +70,8 @@ export interface AgentToolsDeps {
   config?: Config;
   tasks?: TaskService;
   handoffs?: HandoffService;
-  /** The living spec, for read_spec (absent in some unit harnesses). */
-  specs?: SpecService;
+  /** The governing requirements (legacy-spec fallback inside; absent in some unit harnesses). */
+  requirements?: RequirementService;
   worktrees: WorktreeManager | null;
 }
 
@@ -105,7 +105,7 @@ export interface AgentToolsContext {
   markSawSend(): void;
   agentWorkState(agent: AgentRow): string;
   dispatchWorkItems(input: { agentSessionId: string; items: { assignment: string; name?: string; owns?: string[] }[]; profileId?: string; instructions?: string; model?: string }): { joinId: string; agents: string[] };
-  createChildSession(input: { pattern: string; title: string; patternConfig?: Record<string, unknown>; agents: { name: string; profileId: string; instructions?: string; model?: string; owns: string[] }[]; briefing: HandoffDraft }): { agentSessionId: string; agents: string[]; entryAgent: string };
+  createChildSession(input: { pattern: string; title: string; patternConfig?: Record<string, unknown>; agents: { name: string; profileId: string; instructions?: string; model?: string; owns: string[] }[]; briefing: HandoffDraft; requirements?: string[] }): { agentSessionId: string; agents: string[]; entryAgent: string };
   abandonChildSession(childAgentSessionId: string, reason: string): void;
 }
 
@@ -251,18 +251,72 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
       }
       return ok({ artifactId: artifact.id, mediaType: artifact.mediaType, bytes: artifact.bytes, content: pageTail(artifact.content, args.cursor, args.maxBytes) });
     }));
-  // The injected spec digest is byte-capped; the full governing text stays a
-  // tool call away for every seat.
-  if (deps.specs) {
-    const specs = deps.specs;
-    tools.push(sdk.tool("read_spec",
-      "Read the run's governing specification (latest approved revision) in full, paged. Your work is checked against it.",
+  // The injected requirement digest is byte-capped; the full governing
+  // outline (or the legacy spec text) stays a tool call away for every seat.
+  if (deps.requirements) {
+    const requirements = deps.requirements;
+    tools.push(sdk.tool("read_requirements",
+      "Read the run's governing requirements: the outline with console-derived statuses, plus your session's delegated requirement ids. Your work is checked against it. (A legacy run returns its markdown spec instead.)",
     { cursor: z.string().optional(), maxBytes: z.number().int().min(1).max(PAGE_MAX_BYTES).default(PAGE_DEFAULT_BYTES) },
     async (args: { cursor?: string; maxBytes: number }) => {
-      const row = specs.latestApproved(ctx.session.userSessionId);
-      if (!row) return ok({ spec: null, note: "no approved specification for this run" });
-      return ok({ revision: row.revision, changeNote: row.changeNote, document: pageTail(row.document, args.cursor, args.maxBytes) });
+      const digest = requirements.digest(ctx.session.userSessionId);
+      if (digest === "") return ok({ requirements: null, note: "no approved requirements for this run" });
+      const approved = requirements.latestApproved(ctx.session.userSessionId);
+      return ok({
+        ...(approved === undefined ? { legacy: true } : { revision: approved.revision }),
+        document: pageTail(digest, args.cursor, args.maxBytes),
+        delegatedToThisSession: requirements.delegationSet(session.id),
+      });
     }));
+    if (ctx.granted.has("report_requirement")) {
+      tools.push(sdk.tool("report_requirement",
+        "Record a requirement STATUS with evidence, within this session's delegated sub-scope. Statuses are semantic claims, never scores: satisfied / violated / infeasible require evidence; open reopens a stale claim. Report LEAVES only — parents derive mechanically. verifiedBy is 'independent' only when the evidence comes from a different seat than the one that did the work (a reviewer confirming an implementer's claim).",
+        {
+          requirementId: z.string().min(1).describe("A requirement id inside your delegated sub-scope (the delivery lists it; read_requirements shows the whole graph)."),
+          status: z.enum(["satisfied", "violated", "infeasible", "open"]),
+          evidence: z.array(EvidenceRefSchema).default([]).describe("What proves the claim. Required for satisfied/violated/infeasible."),
+          verifiedBy: z.enum(["self", "independent"]).default("self"),
+          note: z.string().optional(),
+        },
+        async (args: { requirementId: string; status: "satisfied" | "violated" | "infeasible" | "open";
+          evidence: { kind: "file" | "journal" | "artifact" | "task" | "command" | "url"; ref: string; label?: string }[];
+          verifiedBy: "self" | "independent"; note?: string }) => {
+          try {
+            requirements.assertWithinDelegation(session.userSessionId, session.id, args.requirementId);
+            const wire = requirements.reportStatus({
+              userSessionId: session.userSessionId, requirementId: args.requirementId, to: args.status,
+              evidence: args.evidence, verifiedBy: args.verifiedBy, actor: agent.name, agentSessionId: session.id,
+              ...(args.note === undefined ? {} : { note: args.note }),
+            });
+            return ok({ requirementId: wire.id, status: wire.status,
+              note: "Recorded. Parents derive mechanically; main and the operator see this claim with its evidence." });
+          } catch (error) {
+            return fail(error);
+          }
+        }));
+      tools.push(sdk.tool("decompose_requirement",
+        "Refine a requirement INSIDE your delegated sub-scope by adding child requirements below it — smaller checkable statements for how the obligation is discharged. Journaled and attributed to this session; no approval needed. Changing what counts as success (editing statements, retiring nodes, new top-level obligations) is main's and the operator's — route it up.",
+        {
+          parentId: z.string().min(1).describe("A requirement id inside your delegated sub-scope."),
+          children: z.array(z.object({
+            statement: z.string().min(1),
+            composition: z.enum(["all", "any"]).default("all"),
+          })).min(1).max(8),
+        },
+        async (args: { parentId: string; children: { statement: string; composition: "all" | "any" }[] }) => {
+          try {
+            requirements.assertWithinDelegation(session.userSessionId, session.id, args.parentId);
+            const added = requirements.decompose({
+              userSessionId: session.userSessionId, parentId: args.parentId, children: args.children,
+              actor: agent.name, agentSessionId: session.id,
+            });
+            return ok({ parentId: args.parentId, added,
+              note: "Children added as refinement nodes (open) inside your sub-scope. Report them with evidence as they are discharged." });
+          } catch (error) {
+            return fail(error);
+          }
+        }));
+    }
   }
   /**
    * A place to put a long body that is NOT a JSON string parameter: a long
@@ -386,8 +440,10 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
           owns: z.array(z.string()).default([]).describe("Must not collide with any agent's scopes anywhere in this session tree."),
         })).min(1).max(20),
         briefing: HandoffDraftSchema.describe("The child's assignment: objective, evidence, risk, uncertainty, next action."),
+        requirements: z.array(z.string().min(1)).max(12).optional()
+          .describe("Requirement ids the child answers for — MUST be a subset of your own delegated requirements. The child's entry agent gets the same scoped requirement tools you hold."),
       },
-      async (args: { pattern: string; title: string; patternConfig?: Record<string, unknown>; agents: { name: string; profileId: string; instructions?: string; model?: string; owns: string[] }[]; briefing: HandoffDraft }) => {
+      async (args: { pattern: string; title: string; patternConfig?: Record<string, unknown>; agents: { name: string; profileId: string; instructions?: string; model?: string; owns: string[] }[]; briefing: HandoffDraft; requirements?: string[] }) => {
         try {
           return ok({ ...ctx.createChildSession(args), status: "launched",
             note: "The child works autonomously; its material reports arrive to you as handoffs. Do not poll it." });

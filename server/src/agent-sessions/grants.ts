@@ -20,7 +20,8 @@ import type { AgentProfile } from "../agent-profiles/registry.ts";
 
 export type AgentToolName =
   | "send_handoff" | "read_artifact" | "write_note" | "ask_operator" | "roster_status"
-  | "read_handoff" | "report_handoff_discrepancy" | "forward_message" | "read_spec"
+  | "read_handoff" | "report_handoff_discrepancy" | "forward_message" | "read_requirements"
+  | "report_requirement" | "decompose_requirement"
   | "task_list" | "task_create" | "task_update" | "assignment_cancel"
   | "dispatch_work_items" | "create_child_session" | "abandon_child_session";
 
@@ -30,8 +31,10 @@ export interface AgentGrantDeps {
   handoffs: boolean;
   worktrees: boolean;
   user: boolean;
-  /** The spec service exists — `read_spec` is registered whenever it does. */
+  /** A governing-document service exists — `read_requirements` is registered whenever it does. */
   specs: boolean;
+  /** This seat is the entry agent of a session holding delegated requirements. */
+  sessionHasRequirements?: boolean;
   /** The session was created with allowChildSessions and this seat is its entry agent. */
   sessionAllowsChildren?: boolean;
   /**
@@ -55,7 +58,13 @@ export function grantedTools(
   }
   // Every seat: the prompt points at it, so a default-permission seat must
   // hold the approval — registered-but-unapproved was a live gap.
-  if (deps.specs) tools.add("read_spec");
+  if (deps.specs) tools.add("read_requirements");
+  // Role-granted (hub coordinator, plan_execute planner) OR the session was
+  // commissioned against requirement ids and this is its entry agent — the
+  // exact mirror of the child_sessions dual path below.
+  if (deps.specs && (grants.has("requirements_report") || deps.sessionHasRequirements === true)) {
+    tools.add("report_requirement"); tools.add("decompose_requirement");
+  }
   if (deps.tasks && deps.user) {
     tools.add("task_list");
     if (grants.has("tasks_write")) { tools.add("task_create"); tools.add("task_update"); tools.add("assignment_cancel"); }

@@ -189,12 +189,10 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
             briefing,
             ...(args.allowChildSessions === true ? { allowChildSessions: true } : {}),
             ...(args.tasks === undefined ? {} : { tasks: args.tasks }),
+            // The lifecycle records the delegation BEFORE the briefing
+            // dispatches, so the very first delivery renders the sub-scope.
+            ...(args.requirements === undefined || args.requirements.length === 0 ? {} : { requirements: args.requirements }),
           });
-          // The delegation join lands right after the session exists, before
-          // this call returns — commissions are traceable from birth.
-          if (args.requirements !== undefined && args.requirements.length > 0) {
-            requirements.delegate(userSessionId, created.agentSessionId, args.requirements, "commission");
-          }
           return {
             agentSessionId: created.agentSessionId,
             agents: created.agents,

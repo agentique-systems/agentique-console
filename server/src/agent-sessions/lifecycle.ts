@@ -25,6 +25,7 @@ import type { Deliver, RecordFailure, SimpleHandoff, Transfer } from "./seams.ts
 import { sessionTree } from "./session-tree.ts";
 import { AGENT_NAME_RE, RESERVED_NAMES } from "./topology.ts";
 import { consoleTaskListId, type TaskService } from "../tasks/service.ts";
+import type { RequirementService } from "../orchestrator/requirements.ts";
 import type { WorktreeBinding } from "./worktree-binding.ts";
 
 export interface CreateAgentSessionInput {
@@ -47,6 +48,12 @@ export interface CreateAgentSessionInput {
   parent?: { agentSessionId: string; controllerAgent: string };
   /** Grants the entry agent create_child_session (depth cap still applies). */
   allowChildSessions?: boolean;
+  /**
+   * Requirement ids this session is commissioned against — its delegated
+   * sub-scope. Recorded BEFORE the briefing dispatches so the very first
+   * delivery renders the delegated block. Child sessions pass a subset down.
+   */
+  requirements?: string[];
   agents: { name: string; profileId?: string; instructions?: string; model?: string; owns?: string[]; skills?: string[] }[];
   briefing?: HandoffDraft;
   /**
@@ -73,6 +80,8 @@ export interface SessionLifecycleDeps {
   simpleHandoff: SimpleHandoff;
   /** Ledger upserts for creation-time task units. */
   tasks: TaskService;
+  /** Delegation recording for commission-time requirement sub-scopes. */
+  requirements: RequirementService;
   /** `AgentRuntime.snapshotProfile` — the runtime owns snapshot semantics. */
   snapshotProfile: (profile: AgentProfile) => AgentProfile;
   /** `Mailroom.patchDelivery`, for cancelling active deliveries at archive. */
@@ -203,6 +212,13 @@ export class SessionLifecycle {
       const seatProfile = plan.skills === undefined || plan.skills.length === 0 ? profile
         : { ...profile, skills: [...new Set([...(profile.skills ?? []), ...plan.skills])] };
       repo.insertAgent(this.agentRow(row.id, plan.name, plan.role, seatProfile, plan.instructions ?? "", plan.model, plan.owns, plan.ord, now));
+    }
+    // The delegated sub-scope lands BEFORE the briefing so the first
+    // delivery renders it; source reflects who commissioned (main or a
+    // controller spawning a child).
+    if (input.requirements !== undefined && input.requirements.length > 0) {
+      this.#deps.requirements.delegate(
+        input.userSessionId, row.id, input.requirements, parentRow ? "child" : "commission");
     }
     // Units land BEFORE the briefing so the briefing's taskId resolves and
     // syncLedgerFromHandoff can mark the entry assignment in_progress.
