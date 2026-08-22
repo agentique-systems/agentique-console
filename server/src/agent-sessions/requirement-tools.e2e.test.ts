@@ -157,7 +157,10 @@ describe("seat requirement tools (fake SDK)", () => {
     });
     const userSessionId = h.addUserSession();
     approveRequirements(h, userSessionId);
-    const done = collectUntil(h.bus, (event) => event.type === "run.completion.proposed", 20_000);
+    // The parent's final reaching main is the settle point; run COMPLETION is
+    // deliberately not awaited — the requirement oracle holds it (correctly)
+    // until a completion record lands, which is the completion suite's story.
+    const done = collectUntil(h.bus, (event) => event.type === "agent_session.result.returned", 20_000);
     const created = h.host.createSession({
       userSessionId, title: "mission", agents: [{ name: "aux", profileId: "explorer" }],
       briefing: briefing("run it"), requirements: ["r1"],
