@@ -81,8 +81,8 @@ function armOperator(harness: Harness, userSessionId: string, steps: OperatorSte
           harness.runner.postOperatorMessage(userSessionId, step.say);
         } else if ("onProposal" in step) {
           if (event.type === "user_session.plan.proposed") {
-            // The spec/plan card: resolve the parked interaction (the same
-            // path the API takes; propose_spec unblocks on it).
+            // The requirements/plan card: resolve the parked interaction (the
+            // same path the API takes; propose_requirements unblocks on it).
             const interactionId = (event.payload as { interactionId?: string }).interactionId;
             const pending = harness.interactions.listPending(userSessionId);
             const row = pending.find((entry) => entry.id === interactionId)
