@@ -155,7 +155,7 @@ export function createApp(options: CreateAppOptions): App {
   });
   lateRunner.set(runner);
   const completion = new RunCompletionService({
-    db, repo, bus, interactions, scheduler, getWorkspaceRoot, orchestrationState, specs,
+    db, repo, bus, interactions, scheduler, getWorkspaceRoot, orchestrationState, specs, requirements,
     host: () => host,
     runner: () => runner,
     quietWindowMs: config.policy.completionQuietWindowMs,

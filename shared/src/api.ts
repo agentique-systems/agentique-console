@@ -225,7 +225,7 @@ export interface ImproveMessageResponse {
 export interface RunSummaryDocument {
   seqFrom: number;
   seqTo: number;
-  verdict: "completed" | "completed_with_caveats" | "failed";
+  verdict: "completed" | "completed_with_caveats" | "failed" | "infeasible";
   headline: string;
   durationMs: number;
   /** Wall clock minus the UNION of every turn interval across both lanes. */

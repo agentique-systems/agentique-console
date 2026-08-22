@@ -30,8 +30,14 @@ export interface RunCompletionDeps {
   getWorkspaceRoot: (workspaceId: string) => string;
   /** Main's record_completion source; optional so unit harnesses stay small. */
   orchestrationState?: { latestCompletion(userSessionId: string): { revision: number; completion: import("../orchestrator/state.ts").CompletionRecord } | null };
-  /** The approved spec — the completion oracle; optional for spec-less harnesses. */
+  /** The legacy spec oracle; optional for spec-less harnesses. */
   specs?: { latestApproved(userSessionId: string): { revision: number } | undefined };
+  /**
+   * The requirement graph — the completion oracle when a revision governs;
+   * optional for pre-graph harnesses.
+   */
+  requirements?: Pick<import("../orchestrator/requirements.ts").RequirementService,
+    "latestApproved" | "summarySnapshot" | "rootStatus" | "frontier">;
   /**
    * `config.completionQuietWindowMs`. The predicate is re-evaluated when the
    * timer FIRES, not when it was scheduled, so a new turn starting inside the
@@ -127,7 +133,7 @@ export class RunCompletionService {
       try { this.#deps.host().dischargeQuietDebts(userSessionId); } catch { /* a backstop must not throw */ }
       return false;
     }
-    if (!this.#completionRecordSatisfiesSpec(userSessionId)) {
+    if (!this.#completionRecordSatisfiesGoverning(userSessionId)) {
       this.#nudgeForCompletionRecord(userSessionId);
       return false;
     }
@@ -136,13 +142,20 @@ export class RunCompletionService {
   }
 
   /**
-   * The spec is the completion oracle: with an approved spec, quiet ledgers
-   * are not enough — main must have verified THIS revision's acceptance
-   * criteria via record_completion. A live run proposed "done" for a game
-   * with no window and no renderer because the heuristic stopped at "the
-   * current wave's ledger is clean". Spec-less runs keep the old behavior.
+   * The governing document is the completion oracle: quiet ledgers are not
+   * enough — main must have verified THIS revision via record_completion. A
+   * live run proposed "done" for a game with no window and no renderer
+   * because the heuristic stopped at "the current wave's ledger is clean".
+   * A requirement revision governs when one is approved; a legacy spec
+   * otherwise; document-less runs keep the old behavior.
    */
-  #completionRecordSatisfiesSpec(userSessionId: string): boolean {
+  #completionRecordSatisfiesGoverning(userSessionId: string): boolean {
+    const governing = this.#deps.requirements?.latestApproved(userSessionId);
+    if (governing !== undefined) {
+      const record = this.#deps.orchestrationState?.latestCompletion(userSessionId);
+      return record !== null && record !== undefined
+        && record.completion.requirementsRevision === governing.revision;
+    }
     const approved = this.#deps.specs?.latestApproved(userSessionId);
     if (approved === undefined) return true;
     const record = this.#deps.orchestrationState?.latestCompletion(userSessionId);
@@ -150,20 +163,40 @@ export class RunCompletionService {
       && record.completion.specRevision === approved.revision;
   }
 
-  /** One nudge per (session, spec revision): verify-and-record, or keep working. */
+  /** One nudge per (session, governing revision): verify-and-record, or keep working. */
   readonly #nudgedForRevision = new Map<string, number>();
 
   #nudgeForCompletionRecord(userSessionId: string): void {
-    const approved = this.#deps.specs?.latestApproved(userSessionId);
-    if (approved === undefined) return;
-    if (this.#nudgedForRevision.get(userSessionId) === approved.revision) return;
+    const governing = this.#deps.requirements?.latestApproved(userSessionId);
+    const legacy = governing === undefined ? this.#deps.specs?.latestApproved(userSessionId) : undefined;
+    const revision = governing?.revision ?? legacy?.revision;
+    if (revision === undefined) return;
+    if (this.#nudgedForRevision.get(userSessionId) === revision) return;
     const anchor = this.#deps.repo.listAgentSessions(userSessionId)
       .find((row) => row.parentAgentSessionId === null);
     if (!anchor) return;
-    this.#nudgedForRevision.set(userSessionId, approved.revision);
+    this.#nudgedForRevision.set(userSessionId, revision);
+    if (governing !== undefined) {
+      // Name the open requirements: the nudge is actionable exactly when it
+      // says WHAT is unverified, not merely that something is.
+      const frontier = (this.#deps.requirements?.frontier(userSessionId) ?? []).slice(0, 6);
+      const openLine = frontier.length === 0 ? ""
+        : ` Open requirements: ${frontier.map((entry) => `${entry.requirementId} (${entry.statement.slice(0, 80)})`).join("; ")}.`;
+      this.#deps.runner().enqueueAgentMilestone(userSessionId, anchor.id, "decision",
+        `The Console sees quiet sessions and final reports, but no completion record against requirements rev ${revision}.${openLine} ` +
+        "Verify and report_requirement with evidence, then record_completion (with requirementsRevision) — or name the gap and keep working; the run will not propose completion until then.");
+      return;
+    }
     this.#deps.runner().enqueueAgentMilestone(userSessionId, anchor.id, "decision",
-      `The Console sees quiet sessions and final reports, but no completion record against spec rev ${approved.revision}. ` +
+      `The Console sees quiet sessions and final reports, but no completion record against spec rev ${revision}. ` +
       "Verify the spec's acceptance criteria and call record_completion (with specRevision), or name the gap and keep working — the run will not propose completion until then.");
+  }
+
+  /** The graph's counts/outline/root at THIS moment — persisted with the summary. */
+  #requirementsSnapshot(userSessionId: string) {
+    const snapshot = this.#deps.requirements?.summarySnapshot(userSessionId) ?? null;
+    if (snapshot === null) return null;
+    return { ...snapshot, rootStatus: this.#deps.requirements!.rootStatus(userSessionId) };
   }
 
   #propose(userSessionId: string): void {
@@ -183,6 +216,7 @@ export class RunCompletionService {
       db, repo, userSessionId, seqFrom, reaped,
       interactions: this.#deps.interactions,
       completionRecord: this.#deps.orchestrationState?.latestCompletion(userSessionId) ?? null,
+      requirements: this.#requirementsSnapshot(userSessionId),
       ...(this.#deps.getWorkspaceRoot ? { getWorkspaceRoot: this.#deps.getWorkspaceRoot } : {}),
     });
 
@@ -246,6 +280,7 @@ export class RunCompletionService {
       reaped: { seats: [] },
       interactions: this.#deps.interactions,
       completionRecord: this.#deps.orchestrationState?.latestCompletion(userSessionId) ?? null,
+      requirements: this.#requirementsSnapshot(userSessionId),
       ...(this.#deps.getWorkspaceRoot ? { getWorkspaceRoot: this.#deps.getWorkspaceRoot } : {}),
     });
     return { id: "tail", status: "proposed", verdict: document.verdict, note: null,

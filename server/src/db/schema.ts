@@ -108,7 +108,7 @@ export const runSummaries = sqliteTable(
     /** Events window covered; the next summary starts at seqTo + 1. */
     seqFrom: integer("seq_from").notNull(),
     seqTo: integer("seq_to").notNull(),
-    verdict: text("verdict", { enum: ["completed", "completed_with_caveats", "failed"] }).notNull(),
+    verdict: text("verdict", { enum: ["completed", "completed_with_caveats", "failed", "infeasible"] }).notNull(),
     document: text("document", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
     status: text("status", { enum: ["proposed", "accepted", "changes_requested"] })
       .notNull()

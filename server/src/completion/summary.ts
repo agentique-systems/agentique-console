@@ -47,6 +47,17 @@ export interface BuildRunSummaryInput {
   getWorkspaceRoot?: (workspaceId: string) => string;
   /** Main's latest record_completion, when one exists. */
   completionRecord?: { revision: number; completion: import("../orchestrator/state.ts").CompletionRecord } | null;
+  /**
+   * The requirement graph at proposal time: status counts, the rendered
+   * outline (persisted with the summary — a later amendment must not rewrite
+   * an old report), and the console-derived root status. Null = pre-graph run.
+   */
+  requirements?: {
+    revision: number;
+    counts: Record<import("@agentique-console/shared").RequirementStatus, number>;
+    outline: string;
+    rootStatus: import("@agentique-console/shared").RequirementStatus;
+  } | null;
 }
 
 /** Total covered by a set of intervals, counting overlap once. */
@@ -153,12 +164,19 @@ export function buildRunSummary(input: BuildRunSummaryInput): RunSummaryDocument
   const build = collectBuild(db, repo, userSessionId, input.getWorkspaceRoot);
   // An honestly-unmet acceptance criterion caps the verdict: the sign-off
   // card must never read "completed" over a criterion the orchestrator
-  // itself recorded as not met.
+  // itself recorded as not met. The requirement graph tightens this further:
+  // a console-derived infeasible ROOT is its own verdict (a legitimate
+  // non-success ending, not a failure to hide), and open or violated
+  // requirements cap at completed_with_caveats exactly like open tasks.
   const unmetCriteria = (input.completionRecord?.completion.criteria ?? []).some((entry) => !entry.met);
+  const requirementState = input.requirements ?? null;
+  const openRequirements = requirementState !== null
+    && (requirementState.counts.open > 0 || requirementState.counts.violated > 0);
   const verdict: RunSummaryDocument["verdict"] =
     finals.some((row) => row.core.status === "failed") ? "failed"
-      : open.length > 0 || uncertainty.length > 0 || deviations.length > 0 || unmetCriteria ? "completed_with_caveats"
-        : "completed";
+      : requirementState?.rootStatus === "infeasible" ? "infeasible"
+        : open.length > 0 || uncertainty.length > 0 || deviations.length > 0 || unmetCriteria || openRequirements ? "completed_with_caveats"
+          : "completed";
 
   return {
     seqFrom, seqTo, verdict, headline, durationMs, deadAirMs,
@@ -174,9 +192,8 @@ export function buildRunSummary(input: BuildRunSummaryInput): RunSummaryDocument
     },
     decisions, deviations, uncertainty,
     justification: input.completionRecord ? { revision: input.completionRecord.revision, ...input.completionRecord.completion } : null,
-    // Filled by the requirement-aware caller (Phase: completion); null = a
-    // pre-graph run.
-    requirements: null,
+    requirements: requirementState === null ? null
+      : { revision: requirementState.revision, counts: requirementState.counts, outline: requirementState.outline },
     resources: {
       reapedSeats: reaped.seats.length,
       detail: reaped.seats.map((seat) => `${seat.agentSessionId}:${seat.agent}`),

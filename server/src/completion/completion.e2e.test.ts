@@ -236,3 +236,102 @@ describe("run completion", () => {
     expect(h.db.select().from(runSummaries).all()[0]?.status).toBe("changes_requested");
   });
 });
+describe("the requirement graph as completion oracle", () => {
+  const DOC = "## Requirements\n- The page renders\n- Verification ran";
+
+  function approveRequirements(h: ReturnType<typeof harness>["h"], userSessionId: string): void {
+    const draftRow = h.app.requirements.propose(userSessionId, DOC, "initial");
+    h.app.requirements.approve(draftRow.id, { document: DOC, edited: false });
+  }
+
+  it("holds the proposal and nudges with the OPEN requirement ids until a record against the current revision lands", async () => {
+    const { h } = harness();
+    const userSessionId = h.addUserSession();
+    approveRequirements(h, userSessionId);
+    const created = h.host.createSession({
+      userSessionId, title: "lane runner", agents: [{ name: "check", profileId: "visual-reviewer", owns: [] }],
+      briefing: draft("verify the page"),
+    });
+    void created;
+    await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled", 10_000);
+    await send(h).handler(FINAL, {});
+    await settle();
+
+    // No proposal — and the nudge names what is unverified, by id.
+    expect(h.db.select().from(runSummaries).all()).toHaveLength(0);
+    const nudge = h.fake.captured.prompts.find((text) => text.includes("no completion record against requirements rev 1"));
+    expect(nudge).toBeDefined();
+    expect(nudge).toContain("Open requirements: r1 (The page renders); r2 (Verification ran)");
+
+    // Requirements verified with evidence, record against the CURRENT revision → proposes.
+    h.app.requirements.reportStatus({ userSessionId, requirementId: "r1", to: "satisfied",
+      evidence: [{ kind: "command", ref: "npm start" }], verifiedBy: "independent", actor: "check" });
+    h.app.requirements.reportStatus({ userSessionId, requirementId: "r2", to: "satisfied",
+      evidence: [{ kind: "artifact", ref: "artifact_screen" }], verifiedBy: "independent", actor: "check" });
+    h.app.orchestrationState.recordCompletion(userSessionId, {
+      criteria: [
+        { requirement: "r1", statement: "The page renders", met: true, evidence: [{ kind: "command", ref: "npm start" }] },
+        { requirement: "r2", statement: "Verification ran", met: true, evidence: [] },
+      ],
+      knownGaps: [], nonGoals: [], requirementsRevision: 1,
+    });
+    h.completion.schedule(userSessionId);
+    await collectUntil(h.bus, (event) => event.type === "run.completion.proposed", 10_000);
+
+    // The summary snapshots the graph: counts, outline, and requirement-keyed
+    // justification — and the verdict is clean because everything satisfied.
+    const summaryRow = h.db.select().from(runSummaries).all()[0]!;
+    const served = h.completion.getSummary(userSessionId, summaryRow.id);
+    expect(served.verdict).toBe("completed");
+    expect(served.document.requirements).toMatchObject({ revision: 1, counts: { satisfied: 2, open: 0 } });
+    expect(served.document.requirements?.outline).toContain("[✓] r1: The page renders");
+    expect(served.document.justification?.criteria[0]).toMatchObject({ requirement: "r1", statement: "The page renders", met: true });
+  });
+
+  it("a stale record (superseded revision) does not satisfy the oracle", async () => {
+    const { h } = harness();
+    const userSessionId = h.addUserSession();
+    approveRequirements(h, userSessionId);
+    await runToFinalWith(h, userSessionId);
+    h.app.orchestrationState.recordCompletion(userSessionId, {
+      criteria: [{ requirement: "r1", statement: "The page renders", met: true, evidence: [] }],
+      knownGaps: [], nonGoals: [], requirementsRevision: 1,
+    });
+    // Amend: rev 2 governs; the rev-1 record is now a stale claim.
+    const amended = "## Requirements\n- r1: The page renders\n- r2: Verification ran\n- It survives a refresh";
+    const draftRow = h.app.requirements.propose(userSessionId, amended, "one more");
+    h.app.requirements.approve(draftRow.id, { document: amended, edited: false });
+    await send(h).handler(FINAL, {});
+    await settle();
+    expect(h.db.select().from(runSummaries).all()).toHaveLength(0);
+  });
+
+  it("an infeasible root yields the infeasible verdict, not failed", async () => {
+    const { h } = harness();
+    const userSessionId = h.addUserSession();
+    approveRequirements(h, userSessionId);
+    await runToFinalWith(h, userSessionId);
+    h.app.requirements.reportStatus({ userSessionId, requirementId: "r1", to: "infeasible",
+      evidence: [{ kind: "artifact", ref: "artifact_probe" }], verifiedBy: "self", actor: "main", note: "renderer API retired" });
+    h.app.requirements.reportStatus({ userSessionId, requirementId: "r2", to: "satisfied",
+      evidence: [{ kind: "command", ref: "checked" }], verifiedBy: "self", actor: "main" });
+    h.app.orchestrationState.recordCompletion(userSessionId, {
+      criteria: [{ requirement: "r1", statement: "The page renders", met: false, evidence: [] }],
+      knownGaps: ["renderer API retired"], nonGoals: [], requirementsRevision: 1,
+    });
+    h.completion.schedule(userSessionId);
+    await collectUntil(h.bus, (event) => event.type === "run.completion.proposed", 10_000);
+    const summaryRow = h.db.select().from(runSummaries).all()[0]!;
+    expect(h.completion.getSummary(userSessionId, summaryRow.id).verdict).toBe("infeasible");
+  });
+
+  async function runToFinalWith(h: ReturnType<typeof harness>["h"], userSessionId: string) {
+    h.host.createSession({
+      userSessionId, title: "lane runner", agents: [{ name: "check", profileId: "visual-reviewer", owns: [] }],
+      briefing: draft("verify the page"),
+    });
+    await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled", 10_000);
+    await send(h).handler(FINAL, {});
+    await settle();
+  }
+});
