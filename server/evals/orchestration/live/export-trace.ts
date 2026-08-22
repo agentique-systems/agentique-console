@@ -198,6 +198,8 @@ export function exportTranscript(dbFile: string): string {
       text = `> [operator decision] ${String(p.question ?? "")} → ${String(p.answer ?? "")}`;
     } else if (event.type === "user_session.spec.updated") {
       text = `> [spec] revision ${String(p.revision)} approved${p.changeNote ? ` — ${String(p.changeNote)}` : ""}`;
+    } else if (event.type === "user_session.requirements.updated") {
+      text = `> [requirements] revision ${String(p.revision)} approved${p.changeNote ? ` — ${String(p.changeNote)}` : ""}`;
     } else if (event.type === "user_session.state.updated") {
       text = `> [state] rev ${String(p.revision)} (${String(p.trigger)}) sections=${digest(p.sections, 120)}${Array.isArray(p.incorporating) ? ` incorporating=${digest(p.incorporating, 160)}` : ""}`;
     } else if (event.type === "agent_session.liveness.tripped") {
@@ -250,7 +252,10 @@ export function exportEvidencePackets(dbFile: string): EvidencePacket[] {
       terminalSeqOf.set(row.agentSessionId, row.seq);
     }
   }
-  const specEvents = events.filter((event) => event.type === "user_session.spec.updated");
+  // The governing document's approvals — a run uses the requirement graph or
+  // the legacy spec, so both event families feed one revision-at-act series.
+  const specEvents = events.filter((event) =>
+    event.type === "user_session.spec.updated" || event.type === "user_session.requirements.updated");
   const stateEvents = events.filter((event) => event.type === "user_session.state.updated");
   const summaryOf = (row: (typeof handoffs)[number]): string => String((row.core as { action?: unknown }).action ?? "").slice(0, 160);
 
@@ -258,6 +263,7 @@ export function exportEvidencePackets(dbFile: string): EvidencePacket[] {
     event.type === "agent_session.created" ||
     event.type === "agent_session.agent.added" ||
     event.type === "user_session.spec.updated" ||
+    event.type === "user_session.requirements.updated" ||
     event.type === "run.completion.proposed" ||
     (event.type === "user_session.tool.called" &&
       ["mcp__console__interrupt_agent", "mcp__console__close_agent_session"].includes(String(event.payload.name ?? ""))));
@@ -323,6 +329,7 @@ export function exportRunToDir(dbFile: string, outDir: string): { runJson: strin
   fs.writeFileSync(path.join(outDir, "events.jsonl"), `${spine}\n`);
   fs.writeFileSync(path.join(outDir, "state-revisions.json"), `${JSON.stringify(trace.stateRevisions(), null, 2)}\n`);
   fs.writeFileSync(path.join(outDir, "spec-revisions.json"), `${JSON.stringify(trace.specRevisions(), null, 2)}\n`);
+  fs.writeFileSync(path.join(outDir, "requirement-revisions.json"), `${JSON.stringify(trace.requirementRevisions(), null, 2)}\n`);
   fs.writeFileSync(path.join(outDir, "decisions.json"), `${JSON.stringify(trace.decisions().map((event) => ({ seq: event.seq, ...event.payload })), null, 2)}\n`);
   fs.writeFileSync(path.join(outDir, "questions.json"), `${JSON.stringify(trace.questions().map((exchange) => ({
     askedSeq: exchange.asked.seq,

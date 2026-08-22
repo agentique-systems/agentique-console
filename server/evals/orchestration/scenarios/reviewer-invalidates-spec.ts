@@ -17,7 +17,7 @@ import type { Ev } from "../trace.ts";
 import { createSessionUse, steerUse } from "./shared.ts";
 
 const OBJECTION = "Criterion 2 is unachievable as specified: dateFormat cannot override anything — stored entries carry no date field";
-const SPEC_V1 = "# Config-file support\n\nAcceptance:\n1. config values override defaults\n2. dateFormat governs list output\n\n## Open uncertainties\n- none";
+const SPEC_V1 = "# Config-file support\n\n## Open uncertainties\nnone\n\n## Requirements\n- Config values override defaults\n- dateFormat governs list output";
 
 const objectionMarker = (event: Ev): boolean =>
   event.type === "handoff.created" &&
@@ -76,7 +76,7 @@ const checkerRoute = turns(async function* () {
 });
 
 function proposeSpecUse(callId: string, document: string, changeNote: string) {
-  return toolUseMessage(callId, "mcp__console__propose_spec", { document, changeNote });
+  return toolUseMessage(callId, "mcp__console__propose_requirements", { document, changeNote });
 }
 
 export default defineScenario({
@@ -131,8 +131,8 @@ export default defineScenario({
               // The reviewer falsified a criterion: amend the SPEC, then
               // redirect the work under the amended revision.
               yield proposeSpecUse("spec-2",
-                "# Config-file support (rev 2)\n\nAcceptance:\n1. config values override defaults\n\n## Out of scope\n- dateFormat (stored entries carry no dates)",
-                "drop the dateFormat criterion — the reviewer proved it unachievable");
+                "# Config-file support\n\n## Out of scope\ndateFormat (stored entries carry no dates)\n\n## Requirements\n- r1: Config values override defaults",
+                "drop the dateFormat requirement — the reviewer proved it unachievable");
               const sessionId = (ctx.harness().sqlite
                 .prepare("SELECT id FROM agent_sessions ORDER BY created_at LIMIT 1")
                 .get() as { id: string }).id;
@@ -285,8 +285,8 @@ export default defineScenario({
               yield steerUse("steer-2", { agentSessionId: sessionId, category: "update",
                 action: "Never mind criterion 2 — close it out as is" });
               yield toolUseMessage("record-1", "mcp__console__record_completion", {
-                criteria: [{ criterion: "config-file support ships", met: true, evidence: [] }],
-                specRevision: 1,
+                criteria: [{ requirement: "r1", met: true, evidence: [] }],
+                requirementsRevision: 1,
               });
             }
             yield successMessage();

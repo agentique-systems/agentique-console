@@ -52,19 +52,27 @@ export function renderAnswer(answers: Record<string, string[]>, freeText?: Recor
 }
 
 /** The spec marker a living-spec card carries in its plan_approval payload. */
-export function specMarkerOf(payload: unknown): { revision: number; changeNote?: string } | null {
-  const spec = (payload as { spec?: { revision?: unknown; changeNote?: unknown } } | null | undefined)?.spec;
-  if (!spec || typeof spec.revision !== "number") return null;
+export function specMarkerOf(payload: unknown): { revision: number; changeNote?: string; kind: "spec" | "requirements" } | null {
+  const markers = payload as {
+    spec?: { revision?: unknown; changeNote?: unknown };
+    requirements?: { revision?: unknown; changeNote?: unknown };
+  } | null | undefined;
+  const marker = markers?.requirements ?? markers?.spec;
+  if (!marker || typeof marker.revision !== "number") return null;
   return {
-    revision: spec.revision,
-    ...(typeof spec.changeNote === "string" && spec.changeNote !== "" ? { changeNote: spec.changeNote } : {}),
+    revision: marker.revision,
+    kind: markers?.requirements !== undefined ? "requirements" : "spec",
+    ...(typeof marker.changeNote === "string" && marker.changeNote !== "" ? { changeNote: marker.changeNote } : {}),
   };
 }
 
-/** One question string for a plan_approval row, spec-aware. */
+/** One question string for a plan_approval row, spec/requirements-aware. */
 export function planDecisionQuestion(payload: unknown): string {
   const marker = specMarkerOf(payload);
-  return marker ? `Specification approval (rev ${marker.revision})` : "Plan approval";
+  if (!marker) return "Plan approval";
+  return marker.kind === "requirements"
+    ? `Requirements approval (rev ${marker.revision})`
+    : `Specification approval (rev ${marker.revision})`;
 }
 
 /**
@@ -81,9 +89,10 @@ export function planDecisionStrings(payload: unknown, approved: boolean, note?: 
     return { question: "Plan approval", answer: `${approved ? "Approved the plan" : "Requested changes to the plan"}${suffix}` };
   }
   const change = marker.changeNote === undefined ? "" : ` — ${marker.changeNote}`;
+  const noun = marker.kind === "requirements" ? "requirements" : "specification";
   return {
-    question: `Specification approval (rev ${marker.revision})`,
-    answer: `${approved ? "Approved" : "Requested changes to"} specification revision ${marker.revision}${change}${suffix}`,
+    question: planDecisionQuestion(payload),
+    answer: `${approved ? "Approved" : "Requested changes to"} ${noun} revision ${marker.revision}${change}${suffix}`,
   };
 }
 

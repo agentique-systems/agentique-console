@@ -51,7 +51,10 @@ function armOperator(harness: Harness, userSessionId: string, steps: OperatorSte
         if ("afterEvent" in step) return step.afterEvent(event as unknown as Ev);
         if ("onProposal" in step) {
           if (event.type === "user_session.plan.proposed") {
-            const isSpec = (event.payload as { spec?: unknown }).spec !== undefined;
+            // "spec" matches whichever governing-document card the run uses —
+            // the requirement graph or the legacy markdown spec.
+            const isSpec = (event.payload as { spec?: unknown; requirements?: unknown }).spec !== undefined
+              || (event.payload as { requirements?: unknown }).requirements !== undefined;
             return step.kind === undefined || (step.kind === "spec" && isSpec);
           }
           if (event.type === "run.completion.proposed") {

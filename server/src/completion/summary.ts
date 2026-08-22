@@ -46,7 +46,7 @@ export interface BuildRunSummaryInput {
   reaped: ReapResult;
   getWorkspaceRoot?: (workspaceId: string) => string;
   /** Main's latest record_completion, when one exists. */
-  completionRecord?: { revision: number; completion: { criteria: { criterion: string; met: boolean; evidence: { kind: string; ref: string }[] }[]; knownGaps: string[]; nonGoals: string[] } } | null;
+  completionRecord?: { revision: number; completion: import("../orchestrator/state.ts").CompletionRecord } | null;
 }
 
 /** Total covered by a set of intervals, counting overlap once. */

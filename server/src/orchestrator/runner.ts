@@ -577,6 +577,7 @@ export class OrchestratorRunner {
         interactions,
         laneState: lane.state,
         specs: this.#deps.specs,
+        requirements: this.#deps.requirements,
       }),
       mcpServer: this.#deps.buildMcpServer?.(sessionId, sdk),
       sessionStore: this.#deps.sessionStore,

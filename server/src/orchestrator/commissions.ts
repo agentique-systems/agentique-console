@@ -13,6 +13,8 @@ import type { AgentSessionRow, HandoffRecordRow, Repo } from "../db/repo.ts";
 export interface CommissionDeps {
   repo: Pick<Repo, "listAgentSessions" | "listHandoffs">;
   statusOf: (row: AgentSessionRow) => AgentSessionStatus;
+  /** The delegated sub-scope join: agentSessionId → requirement (id, statement). */
+  delegatedRequirements?: (agentSessionId: string) => { id: string; statement: string }[];
 }
 
 const TERMINAL_TRIGGERS = new Set(["final", "failure"]);
@@ -43,6 +45,7 @@ export function buildCommissions(deps: CommissionDeps, userSessionId: string): C
         briefedAt: briefing.createdAt,
       },
       steering: { count: Math.max(0, fromMain.length - 1) },
+      requirements: deps.delegatedRequirements?.(session.id) ?? [],
       outcome: terminal === undefined ? null : {
         handoffId: terminal.id,
         trigger: terminal.trigger,

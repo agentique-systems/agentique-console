@@ -29,7 +29,7 @@ export interface RunCompletionDeps {
   runner: () => OrchestratorRunner;
   getWorkspaceRoot: (workspaceId: string) => string;
   /** Main's record_completion source; optional so unit harnesses stay small. */
-  orchestrationState?: { latestCompletion(userSessionId: string): { revision: number; completion: { criteria: { criterion: string; met: boolean; evidence: { kind: string; ref: string }[] }[]; knownGaps: string[]; nonGoals: string[]; specRevision?: number } } | null };
+  orchestrationState?: { latestCompletion(userSessionId: string): { revision: number; completion: import("../orchestrator/state.ts").CompletionRecord } | null };
   /** The approved spec — the completion oracle; optional for spec-less harnesses. */
   specs?: { latestApproved(userSessionId: string): { revision: number } | undefined };
   /**

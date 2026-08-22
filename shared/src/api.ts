@@ -365,6 +365,8 @@ export interface CommissionSummary {
   commission: { handoffId: string; action: string; why: string | null; expecting: string | null; briefedAt: string } | null;
   /** Steering after the briefing is counted, not listed — the handoffs are first-class on the timeline. */
   steering: { count: number };
+  /** The delegated sub-scope: requirement ids this session answers for. */
+  requirements: { id: string; statement: string }[];
   /** The last terminal report (final/failure) to main, by stable id. */
   outcome: { handoffId: string; trigger: string; status: string; action: string } | null;
 }

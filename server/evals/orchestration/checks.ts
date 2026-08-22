@@ -247,6 +247,8 @@ export function respondedToEvidence(marker: EvPredicate, label = "the discovery"
         .filter((event) => event.seq > at.seq)
         .filter((event) =>
           event.type === "user_session.spec.updated" ||
+          event.type === "user_session.requirements.updated" ||
+          event.type === "requirement.status.changed" ||
           event.type === "user_session.question.asked" ||
           event.type === "agent_session.created" ||
           (sessionId !== null && (toolTargets(event, sessionId) || taskTargets(event, sessionId))));
@@ -329,6 +331,7 @@ export function evidenceConsumed(): TraceCheck {
         for (const event of events) {
           if (event.seq <= firstReport.seq!) continue;
           const runLevel = event.type === "user_session.spec.updated" ||
+            event.type === "user_session.requirements.updated" ||
             event.type === "user_session.question.asked" ||
             event.type === "agent_session.created" ||
             (event.type === "run.completion.proposed" && completionRecordedAt !== undefined && completionRecordedAt < event.seq);
@@ -516,6 +519,7 @@ export function notSignedOffAfter(objection: EvPredicate, label = "the reviewer'
         .events()
         .some((event) => event.seq > at.seq && event.seq < accepted.seq &&
           (event.type === "user_session.spec.updated" ||
+           event.type === "user_session.requirements.updated" ||
            event.type === "task.created" ||
            event.type === "agent_session.created" ||
            event.type === "user_session.question.asked" ||

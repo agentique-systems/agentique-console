@@ -226,7 +226,15 @@ export function registerUserSessionRoutes(
       return {
         current: ctx.app.orchestrationState.current(userSessionId) ?? null,
         revisions: ctx.app.orchestrationState.history(userSessionId),
-        commissions: buildCommissions({ repo: ctx.app.repo, statusOf: (row) => ctx.app.host.statusOf(row) }, userSessionId),
+        commissions: buildCommissions({
+          repo: ctx.app.repo,
+          statusOf: (row) => ctx.app.host.statusOf(row),
+          delegatedRequirements: (agentSessionId) => {
+            const statements = new Map(ctx.app.requirements.derive(userSessionId).map((node) => [node.id, node.statement]));
+            return ctx.app.requirements.delegationSet(agentSessionId)
+              .map((id) => ({ id, statement: statements.get(id) ?? "" }));
+          },
+        }, userSessionId),
       };
     },
   );
