@@ -243,7 +243,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         expecting: z.string().optional()
           .describe("What evidence would count as success, or change your plan."),
         requirements: z.array(z.string().min(1)).max(12).optional()
-          .describe("Requirement ids this assignment serves — journaled as the session's delegated sub-scope and rendered into the delivery."),
+          .describe("Requirement ids this message serves (assignment or update) — journaled as the session's delegated sub-scope and rendered into the delivery. Send them to the entry agent."),
       },
       async (args: {
         agentSessionId: string; to?: string; category: "assignment" | "update";
@@ -270,9 +270,18 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
             ...(args.requirements === undefined || args.requirements.length === 0 ? {} : { requirements: args.requirements }) } },
         };
         // The delegation join is recorded BEFORE the scheduler intercept, so a
-        // dependency-parked assignment still journals what it serves.
-        if (args.requirements !== undefined && args.requirements.length > 0 && args.category === "assignment") {
-          requirements.delegate(userSessionId, args.agentSessionId, args.requirements, "assignment");
+        // dependency-parked assignment still journals what it serves — for
+        // UPDATES too (an amendment steer widening the sub-scope). Guards
+        // first: delegations are append-only, so a transfer post() would
+        // reject (non-entry recipient, archived session) must not leave a
+        // phantom sub-scope behind.
+        const delegating = args.requirements !== undefined && args.requirements.length > 0;
+        if (delegating && recipient !== entryAgent) {
+          throw new InvalidInputError(
+            `requirements delegate a session-wide sub-scope — send them to the entry agent (${entryAgent}), not ${recipient}`);
+        }
+        if (delegating && session.lifecycle === "open") {
+          requirements.delegate(userSessionId, args.agentSessionId, args.requirements!, "assignment");
         }
         // An archived session skips the intercept so post() raises its
         // Conflict instead of recording a schedule nobody can dispatch.

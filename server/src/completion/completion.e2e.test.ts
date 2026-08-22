@@ -244,6 +244,32 @@ describe("the requirement graph as completion oracle", () => {
     h.app.requirements.approve(draftRow.id, { document: DOC, edited: false });
   }
 
+  // Review regression: spec and requirement revisions number independently
+  // from 1, so the nudge dedup must carry the regime — a spec-rev-1 nudge
+  // suppressing the requirements-rev-1 nudge left a migrated run silently
+  // stalled in runState "active".
+  it("a legacy-spec nudge never suppresses the requirement-revision nudge after a mid-run migration", async () => {
+    const { h } = harness();
+    const userSessionId = h.addUserSession();
+    const spec = h.app.specs.propose(userSessionId, "# Spec\nShip it.", "initial");
+    h.app.specs.approve(spec.id, { document: "# Spec\nShip it.", edited: false });
+    h.host.createSession({
+      userSessionId, title: "lane runner", agents: [{ name: "check", profileId: "visual-reviewer", owns: [] }],
+      briefing: draft("verify the page"),
+    });
+    await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled", 10_000);
+    await send(h).handler(FINAL, {});
+    await settle();
+    expect(h.fake.captured.prompts.find((text) => text.includes("no completion record against spec rev 1"))).toBeDefined();
+
+    // Main migrates: a requirement graph (rev 1 in ITS OWN numbering) supersedes.
+    approveRequirements(h, userSessionId);
+    h.completion.schedule(userSessionId);
+    await settle();
+    expect(h.fake.captured.prompts.find((text) => text.includes("no completion record against requirements rev 1"))).toBeDefined();
+    expect(h.db.select().from(runSummaries).all()).toHaveLength(0);
+  });
+
   it("holds the proposal and nudges with the OPEN requirement ids until a record against the current revision lands", async () => {
     const { h } = harness();
     const userSessionId = h.addUserSession();

@@ -77,7 +77,8 @@ function JustificationDisclosure({ sessionId, summaryId }: { sessionId: string; 
         : document === undefined ? <p className="mt-1 text-2xs text-muted-foreground">Unavailable.</p>
         : (
           <div className="mt-1 space-y-2 text-2xs" data-testid="run-summary-justification">
-            {document.requirements !== null && (
+            {/* `!= null`: summaries persisted before this field existed have no key at all. */}
+            {document.requirements != null && (
               <div>
                 <p className="font-medium">Requirements (rev {document.requirements.revision}) at proposal:</p>
                 <pre className="mt-1 overflow-x-auto whitespace-pre-wrap font-mono text-3xs text-muted-foreground">{document.requirements.outline}</pre>

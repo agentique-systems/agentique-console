@@ -33,8 +33,14 @@ export interface AgentGrantDeps {
   user: boolean;
   /** A governing-document service exists — `read_requirements` is registered whenever it does. */
   specs: boolean;
-  /** This seat is the entry agent of a session holding delegated requirements. */
-  sessionHasRequirements?: boolean;
+  /**
+   * This seat is the session's ENTRY agent. Registration follows the seat;
+   * authorization follows the LIVE delegation set at call time
+   * (assertWithinDelegation refuses when nothing is delegated) — a delegation
+   * can arrive mid-run via send_to_coordinator after this process's tool list
+   * froze, so the tools cannot be gated on the delegation existing at spawn.
+   */
+  requirementsEntrySeat?: boolean;
   /** The session was created with allowChildSessions and this seat is its entry agent. */
   sessionAllowsChildren?: boolean;
   /**
@@ -59,10 +65,10 @@ export function grantedTools(
   // Every seat: the prompt points at it, so a default-permission seat must
   // hold the approval — registered-but-unapproved was a live gap.
   if (deps.specs) tools.add("read_requirements");
-  // Role-granted (hub coordinator, plan_execute planner) OR the session was
-  // commissioned against requirement ids and this is its entry agent — the
-  // exact mirror of the child_sessions dual path below.
-  if (deps.specs && (grants.has("requirements_report") || deps.sessionHasRequirements === true)) {
+  // Role-granted (hub coordinator, plan_execute planner) OR the session's
+  // entry agent — the seat every delegation addresses. Whether anything IS
+  // delegated is checked live per call, never frozen into the tool list.
+  if (deps.specs && (grants.has("requirements_report") || deps.requirementsEntrySeat === true)) {
     tools.add("report_requirement"); tools.add("decompose_requirement");
   }
   if (deps.tasks && deps.user) {

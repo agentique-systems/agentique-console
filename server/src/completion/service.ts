@@ -163,19 +163,25 @@ export class RunCompletionService {
       && record.completion.specRevision === approved.revision;
   }
 
-  /** One nudge per (session, governing revision): verify-and-record, or keep working. */
-  readonly #nudgedForRevision = new Map<string, number>();
+  /**
+   * One nudge per (session, governing revision). The key carries the REGIME:
+   * spec revisions and requirement revisions number independently from 1, so
+   * a bare number would let a legacy-spec nudge suppress the requirement-rev
+   * nudge of the same session after a mid-run migration — a silent stall.
+   */
+  readonly #nudgedForRevision = new Map<string, string>();
 
   #nudgeForCompletionRecord(userSessionId: string): void {
     const governing = this.#deps.requirements?.latestApproved(userSessionId);
     const legacy = governing === undefined ? this.#deps.specs?.latestApproved(userSessionId) : undefined;
     const revision = governing?.revision ?? legacy?.revision;
     if (revision === undefined) return;
-    if (this.#nudgedForRevision.get(userSessionId) === revision) return;
+    const revisionKey = governing !== undefined ? `requirements:${revision}` : `spec:${revision}`;
+    if (this.#nudgedForRevision.get(userSessionId) === revisionKey) return;
     const anchor = this.#deps.repo.listAgentSessions(userSessionId)
       .find((row) => row.parentAgentSessionId === null);
     if (!anchor) return;
-    this.#nudgedForRevision.set(userSessionId, revision);
+    this.#nudgedForRevision.set(userSessionId, revisionKey);
     if (governing !== undefined) {
       // Name the open requirements: the nudge is actionable exactly when it
       // says WHAT is unverified, not merely that something is.
@@ -290,8 +296,12 @@ export class RunCompletionService {
   getSummary(userSessionId: string, summaryId: string): { id: string; status: "proposed" | "accepted" | "changes_requested"; verdict: RunSummaryDocument["verdict"]; note: string | null; createdAt: string; resolvedAt: string | null; document: RunSummaryDocument } {
     const row = this.#deps.db.select().from(runSummaries).where(eq(runSummaries.id, summaryId)).get();
     if (!row || row.userSessionId !== userSessionId) throw new NotFoundError(`no run summary ${summaryId} in session ${userSessionId}`);
+    // Summaries persisted before the requirements section existed have no
+    // `requirements` key at all; normalize to null so old runs keep rendering.
+    const stored = row.document as unknown as RunSummaryDocument;
+    const document: RunSummaryDocument = stored.requirements === undefined ? { ...stored, requirements: null } : stored;
     return { id: row.id, status: row.status, verdict: row.verdict, note: row.note,
-      createdAt: row.createdAt, resolvedAt: row.resolvedAt, document: row.document as unknown as RunSummaryDocument };
+      createdAt: row.createdAt, resolvedAt: row.resolvedAt, document };
   }
 
   resolve(userSessionId: string, decision: "accept" | "changes", note?: string): void {

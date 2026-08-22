@@ -76,13 +76,18 @@ export function PlanCard({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(item.plan);
   const isRequirements = item.requirements !== undefined;
+  // The edit survives the Edit/Preview toggle, so EVERYTHING keys off the
+  // draft differing from the proposal — never off the editing flag: a dirty
+  // draft is what approve sends, what the preview renders, and what the
+  // parse guard protects, whichever pane is showing.
+  const dirty = draft.trim() !== "" && draft.trim() !== item.plan.trim();
   // Live parse of the operator's edit against the shared grammar; the server
   // re-validates on resolve (400 + line errors) as the backstop.
-  const editParse = isRequirements && editing ? parseRequirementsDocument(draft) : null;
+  const editParse = isRequirements && (editing || dirty) ? parseRequirementsDocument(draft) : null;
   const editInvalid = editParse !== null && !editParse.ok;
 
   const approve = () => {
-    const edited = editing && draft.trim() !== "" && draft.trim() !== item.plan.trim();
+    const edited = dirty;
     resolve.mutate(
       {
         sessionId,
@@ -135,25 +140,27 @@ export function PlanCard({
 
       <CardContent className="pt-0">
         {editing && !resolved ? (
-          <>
-            <textarea
-              className="min-h-48 w-full resize-y rounded-md border border-border bg-background p-2 font-mono text-xs"
-              value={draft}
-              onChange={(event) => setDraft(event.target.value)}
-              aria-label="edit the proposed text"
-            />
-            {editInvalid && editParse !== null && !editParse.ok && (
-              <ul className="mt-1 space-y-0.5 text-2xs text-status-failed" data-testid="requirements-parse-errors">
-                {editParse.errors.slice(0, 6).map((error) => (
-                  <li key={`${error.line}:${error.message}`}>line {error.line}: {error.message}</li>
-                ))}
-              </ul>
-            )}
-          </>
+          <textarea
+            className="min-h-48 w-full resize-y rounded-md border border-border bg-background p-2 font-mono text-xs"
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            aria-label="edit the proposed text"
+          />
         ) : isRequirements ? (
-          <RequirementsPreview document={item.plan} />
+          // A dirty draft IS what approve will send — preview it, not the
+          // superseded proposal.
+          <RequirementsPreview document={dirty ? draft : item.plan} />
         ) : (
-          <MessageResponse>{item.plan}</MessageResponse>
+          <MessageResponse>{dirty && !resolved ? draft : item.plan}</MessageResponse>
+        )}
+        {/* Outside the pane switch: a dirty invalid draft must show WHY
+            Approve is disabled from the preview too. */}
+        {!resolved && editInvalid && editParse !== null && !editParse.ok && (
+          <ul className="mt-1 space-y-0.5 text-2xs text-status-failed" data-testid="requirements-parse-errors">
+            {editParse.errors.slice(0, 6).map((error) => (
+              <li key={`${error.line}:${error.message}`}>line {error.line}: {error.message}</li>
+            ))}
+          </ul>
         )}
         {resolution?.note !== undefined && (
           <div className="mt-2 text-2xs text-muted-foreground">
@@ -165,7 +172,7 @@ export function PlanCard({
       <CardFooter className="pt-0">
         <Button
           size="xs"
-          disabled={resolved || resolve.isPending || (editing && editInvalid)}
+          disabled={resolved || resolve.isPending || editInvalid}
           onClick={approve}
         >
           {resolve.isPending ? (

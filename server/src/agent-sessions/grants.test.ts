@@ -72,6 +72,21 @@ describe("grants parity", () => {
     expect(registeredNames(agent, profile, "specialist")).toEqual(grantedNames(profile, "specialist"));
   });
 
+  // Review regression: report/decompose registration follows the ENTRY SEAT,
+  // not the delegation existing at spawn — a delegation can arrive mid-run
+  // (send_to_coordinator requirements) after the tool list froze, and
+  // authorization is checked live per call (assertWithinDelegation).
+  it("the entry seat holds report/decompose without a spawn-time delegation; other seats do not", () => {
+    const profile = makeProfile();
+    const deps: AgentGrantDeps = { tasks: true, handoffs: true, worktrees: true, user: true, specs: true, childSessions: true };
+    const entry = grantedTools({ grants: [] }, profile, { ...deps, requirementsEntrySeat: true });
+    expect(entry.has("report_requirement")).toBe(true);
+    expect(entry.has("decompose_requirement")).toBe(true);
+    const nonEntry = grantedTools({ grants: [] }, profile, { ...deps, requirementsEntrySeat: false });
+    expect(nonEntry.has("report_requirement")).toBe(false);
+    expect(nonEntry.has("read_requirements")).toBe(true);
+  });
+
   // The Console grants COORDINATION and nothing else. Capability is native
   // Bash plus whatever MCP servers a profile declares, so no console tool name
   // may ever describe a browser, a process, or an HTTP request again.

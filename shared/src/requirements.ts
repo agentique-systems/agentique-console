@@ -98,7 +98,9 @@ export function parseRequirementsDocument(text: string): RequirementParseResult 
 
   const flushSection = () => {
     if (section === null || inRequirements) return;
-    const body = sectionLines.join("\n").replace(/\s+$/, "");
+    // Blank runs collapse HERE so the parse is canonical: renderCommitted
+    // collapses them too, and parse(render(g)) must equal g (fixed point).
+    const body = sectionLines.join("\n").replace(/\s+$/, "").replace(/\n{3,}/g, "\n\n");
     if (section !== "" || body !== "") preamble.push({ heading: section, body });
     sectionLines = [];
   };
@@ -215,10 +217,14 @@ function indentWidth(indent: string): number {
 }
 
 function parseNodeText(text: string): { id: string | null; composition: RequirementComposition; statement: string } {
-  // `rN[.N…] (any of): statement` | `rN[.N…]: statement`
-  const withId = /^(r\d+(?:\.\d+)*)\s*(\(any of\))?\s*:\s*(.*)$/.exec(text);
-  if (withId && ID_PATTERN.test(withId[1] ?? "")) {
-    return { id: withId[1] ?? null, composition: withId[2] ? "any" : "all", statement: (withId[3] ?? "").trim() };
+  // `rN[.N…] (any of): statement` | `rN[.N…]: statement`. Case-insensitive on
+  // BOTH the id and the marker, normalized to lowercase: a case variant the
+  // operator retypes ("R3", "(ANY OF)") must amend r3, never silently mint a
+  // new node and retire the old one with its status history.
+  const withId = /^(r\d+(?:\.\d+)*)\s*(\(any of\))?\s*:\s*(.*)$/i.exec(text);
+  const claimedId = (withId?.[1] ?? "").toLowerCase();
+  if (withId && ID_PATTERN.test(claimedId)) {
+    return { id: claimedId, composition: withId[2] ? "any" : "all", statement: (withId[3] ?? "").trim() };
   }
   // `(any of): statement` | `(any of) statement` — a new node with alternatives.
   if (text.toLowerCase().startsWith(ANY_OF)) {

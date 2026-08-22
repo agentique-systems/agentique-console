@@ -58,9 +58,12 @@ function NodeRow({ sessionId, node, depth, isLeaf }: { sessionId: string; node: 
   // the console derives, it never lets anyone assert a parent.
   const status = node.derivedStatus;
 
-  const act = (to: "open" | "satisfied" | "infeasible") => {
+  // The note travels ONLY with the verdict it was typed for — passed in by
+  // the confirm button, never read from state, so a note left behind by a
+  // cancelled confirm can't attach to a later action (reopen posts none).
+  const act = (to: "open" | "satisfied" | "infeasible", verdictNote = "") => {
     setStatus.mutate(
-      { sessionId, requirementId: node.id, body: { status: to, ...(note.trim() === "" ? {} : { note: note.trim() }) } },
+      { sessionId, requirementId: node.id, body: { status: to, ...(verdictNote.trim() === "" ? {} : { note: verdictNote.trim() }) } },
       {
         onSuccess: () => { setConfirming(null); setNote(""); },
         onError: (error) => toast.error(`Status change failed: ${error.message}`),
@@ -94,7 +97,7 @@ function NodeRow({ sessionId, node, depth, isLeaf }: { sessionId: string; node: 
         {isLeaf && (
           <span className="hidden gap-1 group-hover:inline-flex">
             {status !== "satisfied" && (
-              <button type="button" className="text-3xs text-muted-foreground underline" onClick={() => setConfirming("satisfied")}>
+              <button type="button" className="text-3xs text-muted-foreground underline" onClick={() => { setConfirming("satisfied"); setNote(""); }}>
                 mark satisfied
               </button>
             )}
@@ -104,7 +107,7 @@ function NodeRow({ sessionId, node, depth, isLeaf }: { sessionId: string; node: 
               </button>
             )}
             {status === "open" && (
-              <button type="button" className="text-3xs text-muted-foreground underline" onClick={() => setConfirming("infeasible")}>
+              <button type="button" className="text-3xs text-muted-foreground underline" onClick={() => { setConfirming("infeasible"); setNote(""); }}>
                 mark infeasible
               </button>
             )}
@@ -119,10 +122,10 @@ function NodeRow({ sessionId, node, depth, isLeaf }: { sessionId: string; node: 
             value={note}
             onChange={(event) => setNote(event.target.value)}
           />
-          <button type="button" className="text-3xs underline" disabled={setStatus.isPending} onClick={() => act(confirming)}>
+          <button type="button" className="text-3xs underline" disabled={setStatus.isPending} onClick={() => act(confirming, note)}>
             confirm {confirming}
           </button>
-          <button type="button" className="text-3xs text-muted-foreground underline" onClick={() => setConfirming(null)}>
+          <button type="button" className="text-3xs text-muted-foreground underline" onClick={() => { setConfirming(null); setNote(""); }}>
             cancel
           </button>
         </div>

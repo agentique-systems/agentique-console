@@ -24,9 +24,10 @@ ledger) is a different object entirely; they join by reference
 
 Each node carries:
 
-- **id** — `r1`, `r2.1`, …: minted by the Console at approval, per-session
-  monotonic, never reused. The id is the stable key: status survives
-  amendments because it is keyed by id, not by revision.
+- **id** — `r1`, `r2`, …: flat ids minted by the Console at approval in
+  document order, per-session monotonic, never reused. Hierarchy lives in
+  nesting (parentId), never in the id. The id is the stable key: status
+  survives amendments because it is keyed by id, not by revision.
 - **statement** — the checkable sentence. Quantitative thresholds ("p95
   latency ≤ 200 ms") belong in the statement; measured values belong in
   evidence. Neither is ever a score.
@@ -66,19 +67,22 @@ approval path and the web card's live preview):
 
 ## Requirements
 - r1: The CLI parses every documented flag
-  - r1.1: `--help` output matches the documented flags
-  - r1.2 (any of): Config is loadable
-    - r1.4: TOML config parses
-    - r1.5: JSON config parses
-- r2: `npm run verify` passes from a clean checkout
+  - r2: `--help` output matches the documented flags
+  - r3 (any of): Config is loadable
+    - r4: TOML config parses
+    - r5: JSON config parses
+- r6: `npm run verify` passes from a clean checkout
 ```
 
 Rules: only list items under `## Requirements` are nodes; a node is
-`- [id][ (any of)]: statement`; an id must match `r<digits>(.<digits>)*` —
-any other leading token (`- latency: 200ms`) is part of a new statement; a
-line without an id mints a fresh id at approval; `(any of)` sets composition
+`- [id][ (any of)]: statement`; an id must look like `r<digits>` (the parser
+also tolerates dotted forms such as `r1.2` for compatibility, but the
+Console never mints them and rejects ids it never minted) — any other
+leading token (`- latency: 200ms`) is part of a new statement; a line
+without an id mints a fresh id at approval; `(any of)` sets composition
 `any`; nesting is by indentation (normalized on render); at most depth 8 and
-200 nodes. The parser never throws — it returns structured
+200 nodes. A retired id never comes back: reintroducing a descoped
+requirement means a fresh untagged line, minting a fresh id. The parser never throws — it returns structured
 `{line, message}` errors, the resolve route rejects invalid operator edits
 with 400 (the card stays pending), and the card disables Approve while its
 live parse fails.
@@ -86,8 +90,9 @@ live parse fails.
 `renderCommitted` (structure only — the editable approval text) is a parser
 fixed point: `renderCommitted(parse(x))` re-parses to the same graph.
 `renderStatusOutline` (glyphs `·` open, `✓` satisfied, `✗` violated, `⊘`
-infeasible, `†` retired, plus verification and evidence chips) is the
-digest/panel form and is **never parsed**.
+infeasible, plus verification and evidence chips) is the digest/panel form
+and is **never parsed**. Retired nodes are omitted from the outline
+entirely — the revision history is where descoped obligations live.
 
 ## Approval diffs, id stability, retirement
 
@@ -169,9 +174,9 @@ frontier is what the completion nudge names and what steering aims at.
 ## Termination
 
 Non-success termination is legitimate. The run verdict derives as: `failed`
-(finals failed) → `infeasible` (the derived root, or the completion record,
-marks the objective infeasible — first-class and evidence-backed, not a
-failure to be hidden) → `completed_with_caveats` (open or violated
+(finals failed) → `infeasible` (the console-derived root marks the objective
+infeasible — first-class and evidence-backed, not a failure to be hidden) →
+`completed_with_caveats` (open or violated
 requirements, open tasks, unresolved uncertainty, deviations) → `completed`.
 Budget exhaustion pauses with an honest wrap-up; a decision only a human can
 make routes through `ask_operator` — those are the other two legitimate

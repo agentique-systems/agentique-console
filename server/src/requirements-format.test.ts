@@ -184,3 +184,20 @@ describe("requirementStatusCounts", () => {
     });
   });
 });
+
+// Regressions from the pre-merge adversarial review.
+describe("review regressions", () => {
+  it("case variants of the id and the any-of marker amend the id — never a silent new node", () => {
+    // '- r3 (ANY OF): …' minting a NEW node would retire r3 (and its status
+    // history) at the next approval, on a pure case retype.
+    const flat = flattenRequirementGraph(mustParse("## Requirements\n- R3 (ANY OF): Config is loadable\n"));
+    expect(flat).toHaveLength(1);
+    expect(flat[0]).toMatchObject({ id: "r3", composition: "any", statement: "Config is loadable" });
+  });
+
+  it("preamble blank runs collapse at parse, keeping renderCommitted a fixed point", () => {
+    const graph = mustParse("## Context\npara1\n\n\npara2\n\n## Requirements\n- r1: x\n");
+    expect(graph.preamble[0]?.body).toBe("para1\n\npara2");
+    expect(mustParse(renderCommitted(graph))).toEqual(graph);
+  });
+});

@@ -362,7 +362,13 @@ export function respondedToEvidence(marker: EvPredicate, label = "the discovery"
         .filter((event) =>
           event.type === "user_session.spec.updated" ||
           event.type === "user_session.requirements.updated" ||
-          event.type === "requirement.status.changed" ||
+          // A status change is a plan response only from MAIN or the operator,
+          // or on the marker's own session — a random seat's routine
+          // report_requirement is progress chatter, not a response to this
+          // evidence (the doctrine above: acts elsewhere don't count).
+          (event.type === "requirement.status.changed" &&
+            (["main", "operator"].includes(String((event.payload as { actor?: unknown }).actor ?? "")) ||
+              (sessionId !== null && (event.payload as { agentSessionId?: unknown }).agentSessionId === sessionId))) ||
           event.type === "user_session.question.asked" ||
           event.type === "agent_session.created" ||
           (sessionId !== null && (toolTargets(event, sessionId) || taskTargets(event, sessionId))));

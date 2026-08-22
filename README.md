@@ -11,7 +11,7 @@ single npm-workspaces application backed by SQLite and the Claude Agent SDK.
 - **The requirement graph is the committed specification.** Main proposes an
   outline of declarative requirement statements (`propose_requirements`); the
   operator edits it in place and approves; the Console mints stable ids
-  (`r1`, `r2.1`, …) and derives every parent's status mechanically from its
+  (`r1`, `r2`, …) and derives every parent's status mechanically from its
   children (`all`/`any` composition). Statuses are semantic — open,
   satisfied, violated, infeasible, retired — never numeric; a terminal status
   is a journaled claim carrying evidence and who verified it (self /

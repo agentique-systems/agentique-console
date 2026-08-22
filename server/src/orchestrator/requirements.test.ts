@@ -264,3 +264,56 @@ describe("digest / pointer (the GoverningDigest contract)", () => {
     expect(digest).toContain("…(truncated — read_requirements returns the full outline)");
   });
 });
+
+// Regressions from the pre-merge adversarial review.
+describe("review regressions", () => {
+  it("a retired id in a proposed document fails validation with a line error, never a constraint crash", () => {
+    const { service } = makeHarness();
+    approveFixture(service);
+    const v2 = "## Requirements\n- r1: Auth works end to end\n  - r2: Login issues a session token\n  - r3 (any of): A config source loads\n    - r4: TOML config parses\n    - r5: JSON config parses\n";
+    const draft2 = service.propose("us1", v2, "drop verify");
+    service.approve(draft2.id, { document: v2, edited: false });
+    const restore = `${v2}- r6: \`npm run verify\` passes\n`;
+    const invalid = service.validateDocument("us1", restore);
+    expect(invalid.ok).toBe(false);
+    if (!invalid.ok) expect(invalid.errors[0]?.message).toMatch(/retired in rev 2 — omit the id tag/);
+    expect(() => service.propose("us1", restore)).toThrow(/retired in rev 2/);
+  });
+
+  it("the digest byte cap holds for multibyte outlines (bytes, not UTF-16 code units)", () => {
+    const { service } = makeHarness();
+    const doc = `## Requirements\n${Array.from({ length: 40 }, () => `- ${"要件は満たされる".repeat(30)}`).join("\n")}\n`;
+    const draft = service.propose("us1", doc);
+    service.approve(draft.id, { document: doc, edited: false });
+    const digest = service.digest("us1");
+    expect(digest).toContain("truncated");
+    expect(Buffer.byteLength(digest, "utf8")).toBeLessThanOrEqual(8 * 1024 + 300);
+  });
+
+  it("a console statement-reset reaches the event bus, not just the table journal", () => {
+    const { service, eventsOf } = makeHarness();
+    approveFixture(service);
+    service.reportStatus({ userSessionId: "us1", requirementId: "r2", to: "satisfied",
+      evidence: [{ kind: "command", ref: "npm test" }], verifiedBy: "self", actor: "main" });
+    const v2 = "## Requirements\n- r1: Auth works end to end\n  - r2: Login issues a SIGNED session token\n  - r3 (any of): A config source loads\n    - r4: TOML config parses\n    - r5: JSON config parses\n- r6: `npm run verify` passes\n";
+    const draft = service.propose("us1", v2, "sharpen r2");
+    service.approve(draft.id, { document: v2, edited: false });
+    const reset = eventsOf("requirement.status.changed")
+      .map((row) => row.payload as { requirementId?: string; from?: string; to?: string; verifiedBy?: string })
+      .find((payload) => payload.requirementId === "r2" && payload.to === "open");
+    expect(reset).toMatchObject({ from: "satisfied", verifiedBy: "console" });
+  });
+
+  it("sibling order stays deterministic when a refinement child ties a later committed sibling on ord", () => {
+    const { service } = makeHarness();
+    const doc = "## Requirements\n- Parent holds\n  - Child A\n";
+    const draft = service.propose("us1", doc);
+    service.approve(draft.id, { document: doc, edited: false }); // r1 + r2
+    service.decompose({ userSessionId: "us1", parentId: "r1", children: [{ statement: "Refined child" }], actor: "main" }); // r3, ord 1
+    const v2 = "## Requirements\n- r1: Parent holds\n  - r2: Child A\n  - Child B\n";
+    const draft2 = service.propose("us1", v2, "add B");
+    service.approve(draft2.id, { document: v2, edited: false }); // r4, document ord 1
+    // Ord tie between committed r4 and refinement r3: committed wins, always.
+    expect(service.derive("us1").map((node) => node.id)).toEqual(["r1", "r2", "r4", "r3"]);
+  });
+});

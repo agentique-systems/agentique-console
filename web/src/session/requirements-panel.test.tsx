@@ -97,6 +97,25 @@ describe("RequirementsPanel", () => {
     expect(posts[0]!.body).toEqual({ status: "infeasible", note: "no session store exists" });
   });
 
+  // Review regression: a note typed for a CANCELLED verdict must never ride a
+  // later status change — reopen posts no note, and the journal stays honest.
+  it("a cancelled confirm note does not leak into a later status post", async () => {
+    const posts: { url: string; body: unknown }[] = [];
+    stubFetch(posts);
+    const user = userEvent.setup();
+    render(<RequirementsPanel userSessionId="us_1" />, { wrapper: wrapper() });
+    await screen.findByTestId("requirements-panel");
+
+    await user.click(screen.getAllByText("mark satisfied")[0]!);
+    await user.type(screen.getByPlaceholderText(/why satisfied/), "verified by running the e2e suite");
+    await user.click(screen.getByText("cancel"));
+    // r2 is a satisfied leaf → reopen posts immediately, and must carry NO note.
+    await user.click(screen.getAllByText("reopen")[0]!);
+
+    await waitFor(() => expect(posts).toHaveLength(1));
+    expect(posts[0]!.body).toEqual({ status: "open" });
+  });
+
   it("says so plainly when no requirements govern", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => ({
       ok: true, status: 200, statusText: "",

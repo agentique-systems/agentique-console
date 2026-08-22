@@ -200,6 +200,17 @@ export function exportTranscript(dbFile: string): string {
       text = `> [spec] revision ${String(p.revision)} approved${p.changeNote ? ` — ${String(p.changeNote)}` : ""}`;
     } else if (event.type === "user_session.requirements.updated") {
       text = `> [requirements] revision ${String(p.revision)} approved${p.changeNote ? ` — ${String(p.changeNote)}` : ""}`;
+    } else if (event.type === "requirement.status.changed") {
+      // Judge-visible verification record: the delegation and verification
+      // rubrics cite claimed statuses, their tier, and their evidence — seat
+      // reports live only in the agent lane, which is never rendered.
+      text = `> [requirement] ${String(p.requirementId)} ${String(p.from)} → ${String(p.to)} `
+        + `(${String(p.verifiedBy)}, ${String(p.evidenceCount)} evidence) by ${String(p.actor)}`
+        + `${p.agentSessionId ? ` in ${String(p.agentSessionId)}` : ""}${p.note ? ` — ${String(p.note)}` : ""}`;
+    } else if (event.type === "requirement.delegated") {
+      text = `> [requirement] delegated ${((p.requirementIds as string[] | undefined) ?? []).join(", ")} → session ${String(p.agentSessionId ?? "")} (${String(p.source)})`;
+    } else if (event.type === "requirement.decomposed") {
+      text = `> [requirement] ${String(p.parentId)} decomposed into ${((p.addedIds as string[] | undefined) ?? []).join(", ")} by ${String(p.actor)}`;
     } else if (event.type === "user_session.state.updated") {
       text = `> [state] rev ${String(p.revision)} (${String(p.trigger)}) sections=${digest(p.sections, 120)}${Array.isArray(p.incorporating) ? ` incorporating=${digest(p.incorporating, 160)}` : ""}`;
     } else if (event.type === "agent_session.liveness.tripped") {

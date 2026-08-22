@@ -232,8 +232,7 @@ export class AgentRuntime implements Injector, TurnTracker {
         worktrees: Boolean(this.#deps.worktrees), user: Boolean(user), specs: Boolean(this.#deps.requirements),
         // Session-delegation path: the entry agent of a session commissioned
         // against requirement ids holds the report/decompose tools.
-        sessionHasRequirements: seatRole === contract.contract.entry.role
-          && this.#deps.requirements.delegationSet(session.id).length > 0,
+        requirementsEntrySeat: seatRole === contract.contract.entry.role,
         childSessions: this.#deps.config.policy.enableChildSessions !== false && session.depth < this.#deps.config.policy.maxSessionDepth,
         // Commission-time opt-in: the orchestrator flagged this session as
         // one whose ENTRY agent may nest, whatever the pattern.

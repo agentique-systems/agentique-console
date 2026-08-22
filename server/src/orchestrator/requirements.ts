@@ -157,7 +157,7 @@ export class RequirementService implements GoverningDigest {
     const idErrors = this.#unknownIdErrors(draft.userSessionId, parsed.graph, input.document);
     if (idErrors.length > 0) throw new RequirementParseFailure(idErrors);
 
-    const { graph, ops } = this.#computeApproval(draft.userSessionId, parsed.graph, draft.revision);
+    const { graph, ops, resets } = this.#computeApproval(draft.userSessionId, parsed.graph, draft.revision);
     const canonical = renderCommitted(graph);
     const approved = this.#store.applyApproval({
       revisionId,
@@ -181,6 +181,25 @@ export class RequirementService implements GoverningDigest {
         retired: ops.retires,
       },
     });
+    // Console statement-resets reach the BUS, not just the table journal: the
+    // event stream must replay to the statuses the store holds (journal-as-
+    // truth — the eval checkers and any live consumer replay exactly this).
+    for (const reset of resets) {
+      this.#bus.append({
+        type: "requirement.status.changed",
+        userSessionId: approved.userSessionId,
+        payload: {
+          userSessionId: approved.userSessionId,
+          requirementId: reset.id,
+          from: reset.from,
+          to: "open",
+          verifiedBy: "console",
+          actor: "console",
+          evidenceCount: 0,
+          note: `statement amended in rev ${approved.revision}`,
+        },
+      });
+    }
     return { revision: approved, added, retired: ops.retires };
   }
 
@@ -262,10 +281,14 @@ export class RequirementService implements GoverningDigest {
     const parent = this.#liveNode(input.userSessionId, input.parentId);
     if (input.children.length === 0) throw new InvalidInputError("decompose needs at least one child statement");
     const existing = this.#store.liveNodes(input.userSessionId).filter((row) => row.parentId === parent.id);
+    // Past the LAST existing sibling ord, not sibling count: an amendment
+    // renumbers committed children by document position, so count-based ords
+    // would collide with a later-approved committed sibling.
+    const baseOrd = existing.reduce((max, row) => Math.max(max, row.ord + 1), 0);
     let nextNumber = this.#store.maxNodeNumber(input.userSessionId) + 1;
     const children = input.children.map((child, index) => ({
       id: `r${nextNumber++}`,
-      ord: existing.length + index,
+      ord: baseOrd + index,
       statement: child.statement.replaceAll(/\s*\n\s*/g, " ").trim(),
       composition: child.composition ?? ("all" as const),
     }));
@@ -480,7 +503,10 @@ export class RequirementService implements GoverningDigest {
       body = this.#statusOutline(userSessionId, nodes, { collapseSatisfied: true });
     }
     if (Buffer.byteLength(body, "utf8") > DIGEST_MAX_BYTES) {
-      body = `${body.slice(0, DIGEST_MAX_BYTES)}\n…(truncated — read_requirements returns the full outline)`;
+      // BYTE-accurate truncation: String.slice counts UTF-16 code units, so a
+      // multibyte outline (CJK, emoji) would blow past the cap by up to 3x
+      // and could cut a surrogate pair in half.
+      body = `${truncateUtf8(body, DIGEST_MAX_BYTES)}\n…(truncated — read_requirements returns the full outline)`;
     }
     const trail = this.#store.listRevisions(userSessionId)
       .filter((row) => row.changeNote !== null && (row.status === "approved" || row.status === "superseded"))
@@ -532,13 +558,27 @@ export class RequirementService implements GoverningDigest {
 
   /** Ids present in a document must be ones this session minted and kept live. */
   #unknownIdErrors(userSessionId: string, graph: RequirementGraph, text: string): RequirementParseError[] {
-    const known = new Set(this.#store.listNodes(userSessionId).map((node) => node.id));
+    const all = this.#store.listNodes(userSessionId);
+    const known = new Set(all.map((node) => node.id));
+    const retired = new Map(all.filter((node) => node.retiredInRevision !== null)
+      .map((node) => [node.id, node.retiredInRevision!]));
     const lines = text.split(/\r\n|\r|\n/);
     const errors: RequirementParseError[] = [];
     for (const row of flattenRequirementGraph(graph)) {
-      if (row.id === null || known.has(row.id)) continue;
+      if (row.id === null) continue;
       const line = lines.findIndex((candidate) => candidate.includes(`${row.id}`)) + 1;
-      errors.push({ line: line > 0 ? line : 1, message: `unknown requirement id "${row.id}" — omit the id tag on a new requirement; ids are minted on approval` });
+      if (!known.has(row.id)) {
+        errors.push({ line: line > 0 ? line : 1, message: `unknown requirement id "${row.id}" — omit the id tag on a new requirement; ids are minted on approval` });
+        continue;
+      }
+      // A retired id can never come back: its row still holds the (session,
+      // id) primary key, and ids are minted once. Rejecting HERE keeps the
+      // failure at propose/validate time with a line error, instead of a
+      // constraint violation inside the approval transaction.
+      const retiredIn = retired.get(row.id);
+      if (retiredIn !== undefined) {
+        errors.push({ line: line > 0 ? line : 1, message: `requirement id "${row.id}" was retired in rev ${retiredIn} — omit the id tag to reintroduce it as a new requirement` });
+      }
     }
     return errors;
   }
@@ -548,7 +588,7 @@ export class RequirementService implements GoverningDigest {
    * a committed node retires its refinement descendants with it; a refinement
    * node named in the document is PROMOTED to committed.
    */
-  #computeApproval(userSessionId: string, parsed: RequirementGraph, revision: number): { graph: RequirementGraph; ops: ApprovalNodeOps } {
+  #computeApproval(userSessionId: string, parsed: RequirementGraph, revision: number): { graph: RequirementGraph; ops: ApprovalNodeOps; resets: { id: string; from: RequirementStatus }[] } {
     let nextNumber = this.#store.maxNodeNumber(userSessionId) + 1;
     const mint = (node: RequirementGraphNode): RequirementGraphNode => ({
       ...node,
@@ -564,6 +604,7 @@ export class RequirementService implements GoverningDigest {
     const present = new Set(flat.map((row) => row.id as string));
 
     const ops: ApprovalNodeOps = { inserts: [], updates: [], retires: [] };
+    const resets: { id: string; from: RequirementStatus }[] = [];
     for (const row of flat) {
       const id = row.id as string;
       const existing = liveById.get(id);
@@ -572,6 +613,7 @@ export class RequirementService implements GoverningDigest {
         continue;
       }
       const statementChanged = existing.statement !== row.statement;
+      if (statementChanged && existing.status !== "open") resets.push({ id, from: existing.status });
       const moved = existing.parentId !== row.parentId || existing.ord !== row.ord
         || existing.composition !== row.composition;
       const promote = existing.origin === "refinement";
@@ -605,7 +647,7 @@ export class RequirementService implements GoverningDigest {
       }
     }
     ops.retires = [...retiredIds];
-    return { graph, ops };
+    return { graph, ops, resets };
   }
 
   /** Rows in document order: depth-first over (parentId, ord). */
@@ -617,8 +659,15 @@ export class RequirementService implements GoverningDigest {
       byParent.set(node.parentId, list);
     }
     const out: RequirementNodeRow[] = [];
+    // Deterministic total order even if ords ever tie (a mid-run refinement
+    // child beside a later-renumbered committed sibling): document ord, then
+    // committed before refinement, then mint order.
+    const originRank = (node: RequirementNodeRow) => (node.origin === "committed" ? 0 : 1);
+    const mintNumber = (node: RequirementNodeRow) => Number(/^r(\d+)/.exec(node.id)?.[1] ?? 0);
     const walk = (parentId: string | null) => {
-      for (const node of (byParent.get(parentId) ?? []).slice().sort((a, b) => a.ord - b.ord)) {
+      const siblings = (byParent.get(parentId) ?? []).slice().sort((a, b) =>
+        a.ord - b.ord || originRank(a) - originRank(b) || mintNumber(a) - mintNumber(b));
+      for (const node of siblings) {
         out.push(node);
         walk(node.id);
       }
@@ -708,4 +757,12 @@ export class RequirementService implements GoverningDigest {
       };
     });
   }
+}
+
+/** Truncate to a UTF-8 byte budget without splitting a multibyte character. */
+function truncateUtf8(text: string, maxBytes: number): string {
+  const bytes = Buffer.from(text, "utf8");
+  if (bytes.length <= maxBytes) return text;
+  // A cut mid-sequence decodes as replacement characters at the tail; strip them.
+  return bytes.subarray(0, maxBytes).toString("utf8").replace(/�+$/u, "");
 }
