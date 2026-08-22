@@ -171,6 +171,8 @@ export interface Task {
   activeForm: string | null;
   status: TaskStatus;
   owner: string | null;
+  /** The requirement this unit of work discharges; null = unlinked. */
+  requirementId: string | null;
   blocks: string[];
   blockedBy: string[];
   dependencyIds: string[];

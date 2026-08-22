@@ -367,6 +367,8 @@ export const tasks = sqliteTable(
       .$type<Record<string, unknown>>()
       .notNull()
       .default({}),
+    /** The requirement this unit of work discharges; null = unlinked. */
+    requirementId: text("requirement_id"),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
   },
@@ -510,6 +512,134 @@ export const specRevisions = sqliteTable(
     index("spec_revisions_session").on(t.userSessionId, t.revision),
     check("spec_revisions_status", sql`${t.status} IN ('draft','approved','superseded','rejected')`),
     check("spec_revisions_origin", sql`${t.origin} IN ('main','operator_edited')`),
+  ],
+);
+
+/**
+ * Requirement revisions: the committed STRUCTURE history of the requirement
+ * graph — the run's canonical specification. Exactly parallel to
+ * `spec_revisions` (which remains as the read-only legacy store): draft →
+ * approved/superseded/rejected through the same plan-approval card, append-only.
+ * `document` is the canonical outline (renderCommitted output); `graph` is the
+ * parsed form with every id resolved.
+ */
+export const requirementRevisions = sqliteTable(
+  "requirement_revisions",
+  {
+    id: text("id").primaryKey(),
+    userSessionId: text("user_session_id").notNull().references(() => userSessions.id),
+    /** Monotonic per session, 1-based. */
+    revision: integer("revision").notNull(),
+    document: text("document").notNull(),
+    graph: text("graph", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
+    changeNote: text("change_note"),
+    status: text("status", { enum: ["draft", "approved", "superseded", "rejected"] }).notNull().default("draft"),
+    origin: text("origin", { enum: ["main", "operator_edited"] }).notNull().default("main"),
+    interactionId: text("interaction_id"),
+    createdAt: text("created_at").notNull(),
+    approvedAt: text("approved_at"),
+  },
+  (t) => [
+    index("requirement_revisions_session").on(t.userSessionId, t.revision),
+    check("requirement_revisions_status", sql`${t.status} IN ('draft','approved','superseded','rejected')`),
+    check("requirement_revisions_origin", sql`${t.origin} IN ('main','operator_edited')`),
+  ],
+);
+
+/**
+ * Live requirement nodes: ONE row per stable requirement id per session,
+ * carrying the CURRENT statement/shape and the recorded status. Status is
+ * keyed by the revisionless id, so it survives amendments by construction;
+ * structure history lives in `requirement_revisions`, status history in
+ * `requirement_status_changes`. Parent/root statuses are DERIVED at read time
+ * (all/any composition), never stored.
+ */
+export const requirementNodes = sqliteTable(
+  "requirement_nodes",
+  {
+    /** "r1", "r2", … — minted at approval or decomposition, per session. */
+    id: text("id").notNull(),
+    userSessionId: text("user_session_id").notNull().references(() => userSessions.id),
+    parentId: text("parent_id"),
+    ord: integer("ord").notNull(),
+    statement: text("statement").notNull(),
+    composition: text("composition", { enum: ["all", "any"] }).notNull().default("all"),
+    status: text("status", { enum: ["open", "satisfied", "violated", "infeasible", "retired"] })
+      .notNull()
+      .default("open"),
+    /** "committed" = part of an approved revision; "refinement" = decomposed during the run. */
+    origin: text("origin", { enum: ["committed", "refinement"] }).notNull().default("committed"),
+    /** 0 for refinement nodes (they belong to no committed revision yet). */
+    introducedInRevision: integer("introduced_in_revision").notNull(),
+    retiredInRevision: integer("retired_in_revision"),
+    /** The session whose entry agent authored a refinement node. */
+    refinedByAgentSessionId: text("refined_by_agent_session_id"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.userSessionId, t.id] }),
+    index("requirement_nodes_live").on(t.userSessionId, t.retiredInRevision),
+    check("requirement_nodes_status", sql`${t.status} IN ('open','satisfied','violated','infeasible','retired')`),
+    check("requirement_nodes_composition", sql`${t.composition} IN ('all','any')`),
+    check("requirement_nodes_origin", sql`${t.origin} IN ('committed','refinement')`),
+  ],
+);
+
+/**
+ * Append-only journal of requirement status transitions. Terminal statuses
+ * (satisfied/violated/infeasible) carry evidence; `verifiedBy` records who
+ * stood behind the claim — "console" only for mechanical resets (statement
+ * amended, node retired), never selectable by a model.
+ */
+export const requirementStatusChanges = sqliteTable(
+  "requirement_status_changes",
+  {
+    id: text("id").primaryKey(),
+    userSessionId: text("user_session_id").notNull(),
+    requirementId: text("requirement_id").notNull(),
+    fromStatus: text("from_status").notNull(),
+    toStatus: text("to_status").notNull(),
+    evidence: text("evidence", { mode: "json" })
+      .$type<{ kind: string; ref: string; label?: string }[]>()
+      .notNull()
+      .default([]),
+    verifiedBy: text("verified_by", { enum: ["self", "independent", "operator", "console"] }).notNull(),
+    /** "main", an agent name, "operator", or "console". */
+    actor: text("actor").notNull(),
+    agentSessionId: text("agent_session_id"),
+    /** The approved requirement revision in force when the change landed (0 = none yet). */
+    atRevision: integer("at_revision").notNull(),
+    note: text("note"),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [
+    index("requirement_status_changes_req").on(t.userSessionId, t.requirementId, t.createdAt),
+    check("requirement_status_changes_verified_by", sql`${t.verifiedBy} IN ('self','independent','operator','console')`),
+  ],
+);
+
+/**
+ * Delegations: which agent session was commissioned against which requirement
+ * — the sub-scope join behind delegation traceability AND the subtree scoping
+ * of seat-side requirement tools. Append-only; the frontier reads only OPEN
+ * sessions, so archival needs no cleanup here.
+ */
+export const requirementDelegations = sqliteTable(
+  "requirement_delegations",
+  {
+    id: text("id").primaryKey(),
+    userSessionId: text("user_session_id").notNull(),
+    agentSessionId: text("agent_session_id").notNull(),
+    requirementId: text("requirement_id").notNull(),
+    source: text("source", { enum: ["commission", "assignment", "child"] }).notNull(),
+    handoffId: text("handoff_id"),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [
+    index("requirement_delegations_session").on(t.agentSessionId),
+    uniqueIndex("requirement_delegations_pair").on(t.agentSessionId, t.requirementId),
+    check("requirement_delegations_source", sql`${t.source} IN ('commission','assignment','child')`),
   ],
 );
 

@@ -51,6 +51,7 @@ function toWire(
     activeForm: row.activeForm,
     status: row.status,
     owner: row.owner,
+    requirementId: row.requirementId,
     blocks: row.blocks,
     blockedBy: row.blockedBy,
     dependencyIds,
@@ -95,6 +96,8 @@ export class TaskService {
     owner?: string | null;
     /** Ledger ids this task depends on; forward references back-fill on creation. */
     blockedBy?: string[];
+    /** The requirement this unit discharges. */
+    requirementId?: string | null;
     attribution: TaskAttribution;
   }): void {
     const existing = this.#store.getByKey(input.sdkSessionId, input.sdkTaskId);
@@ -111,6 +114,7 @@ export class TaskService {
         ...(input.blockedBy === undefined || input.blockedBy.length === 0
           ? {}
           : { blockedBy: [...new Set([...existing.blockedBy, ...input.blockedBy])] }),
+        ...(input.requirementId === undefined ? {} : { requirementId: input.requirementId }),
         updatedAt: now,
       });
       const updated = this.#store.getByKey(input.sdkSessionId, input.sdkTaskId);
@@ -135,6 +139,7 @@ export class TaskService {
       // NOT the writer: the owner is who will DO the work, which is what the
       // roster, the final caveats and the run summary read.
       owner: input.owner ?? null,
+      requirementId: input.requirementId ?? null,
       blocks: [],
       blockedBy: input.blockedBy ?? [],
       metadata: input.metadata ?? {},
@@ -157,6 +162,7 @@ export class TaskService {
       activeForm?: string;
       status?: "pending" | "in_progress" | "completed" | "deleted";
       owner?: string;
+      requirementId?: string | null;
       addBlocks?: string[];
       addBlockedBy?: string[];
       removeBlockedBy?: string[];
@@ -173,6 +179,7 @@ export class TaskService {
     if (patch.activeForm !== undefined) merged.activeForm = patch.activeForm;
     if (patch.status !== undefined) merged.status = patch.status;
     if (patch.owner !== undefined) merged.owner = patch.owner;
+    if (patch.requirementId !== undefined) merged.requirementId = patch.requirementId;
     if (patch.addBlocks !== undefined && patch.addBlocks.length > 0) {
       merged.blocks = [...new Set([...existing.blocks, ...patch.addBlocks])];
     }

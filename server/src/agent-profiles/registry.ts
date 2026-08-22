@@ -15,6 +15,14 @@ export const ProfileSchema = z.object({
   id: z.string().regex(/^[a-z][a-z0-9-]*$/),
   title: z.string().min(1),
   purpose: z.string().min(1),
+  /**
+   * Role archetype — what kind of operator this profile is: an orchestrator
+   * decomposes and integrates, an explorer produces knowledge, a planner
+   * produces strategy, an implementer changes the artifact, a reviewer
+   * produces verification evidence. Optional so pre-archetype workspace
+   * manifests, snapshots, and minted rows keep parsing.
+   */
+  role: z.enum(["orchestrator", "explorer", "planner", "implementer", "reviewer"]).optional(),
   instructions: z.string().min(1),
   tools: z.array(z.string()).min(1),
   permissionMode: z.enum(["default", "plan", "bypassPermissions"]),
@@ -403,7 +411,7 @@ export class AgentProfileRegistry {
   #revision(files: { path: string; content: string }[]): string { const hash = crypto.createHash("sha256"); for (const file of files) hash.update(file.path).update("\0").update(file.content).update("\0"); return hash.digest("hex"); }
   #invalidPlaceholder(id: string): AgentProfile { return { id, title: id, purpose: "Invalid profile", instructions: "", tools: [], skills: [], permissionMode: "default", exemptFromOwnership: false, maxTurns: 1, mcpServers: {} }; }
   #componentCounts(files: { path: string }[]): Record<string, number> { const counts: Record<string, number> = {}; for (const file of files) { const kind = file.path.startsWith("skills/") ? "skills" : file.path.startsWith("hooks/") ? "hooks" : file.path.startsWith("agents/") ? "agents" : file.path === ".mcp.json" ? "mcp" : "files"; counts[kind] = (counts[kind] ?? 0) + 1; } return counts; }
-  #summary(profile: AgentProfile, source: "builtin" | "workspace", revision: string, trusted: boolean, valid: boolean, files: { path: string }[]): AgentProfileSummary { return { id: profile.id, title: profile.title, purpose: profile.purpose, source, revision, trusted, valid, tools: profile.tools, skills: profile.skills ?? [], componentCounts: this.#componentCounts(files) }; }
+  #summary(profile: AgentProfile, source: "builtin" | "workspace", revision: string, trusted: boolean, valid: boolean, files: { path: string }[]): AgentProfileSummary { return { id: profile.id, title: profile.title, purpose: profile.purpose, role: profile.role ?? null, source, revision, trusted, valid, tools: profile.tools, skills: profile.skills ?? [], componentCounts: this.#componentCounts(files) }; }
   #detail(profile: AgentProfile, source: "builtin" | "workspace", revision: string, trusted: boolean, issues: ProfileValidationIssue[], files: { path: string; content: string }[]): AgentProfileDetail {
     const summary = this.#summary(profile, source, revision, trusted, issues.every((i) => i.level !== "error"), files);
     const components = files.filter((file) => file.path !== "agentique.profile.json" && file.path !== ".claude-plugin/plugin.json").map((file) => { const kind = file.path.startsWith("skills/") ? "skill" : file.path.startsWith("hooks/") ? "hook" : file.path.startsWith("agents/") ? "agent" : file.path === ".mcp.json" ? "mcp" : file.path.startsWith("commands/") ? "command" : file.path.startsWith("monitors/") ? "monitor" : file.path === "settings.json" ? "settings" : "other"; return { kind, name: path.basename(file.path), path: file.path, supported: ["skill", "hook", "agent", "mcp", "command", "settings"].includes(kind), summary: file.content.slice(0, 160) } as AgentProfileDetail["components"][number]; });

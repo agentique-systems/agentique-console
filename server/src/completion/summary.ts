@@ -174,6 +174,9 @@ export function buildRunSummary(input: BuildRunSummaryInput): RunSummaryDocument
     },
     decisions, deviations, uncertainty,
     justification: input.completionRecord ? { revision: input.completionRecord.revision, ...input.completionRecord.completion } : null,
+    // Filled by the requirement-aware caller (Phase: completion); null = a
+    // pre-graph run.
+    requirements: null,
     resources: {
       reapedSeats: reaped.seats.length,
       detail: reaped.seats.map((seat) => `${seat.agentSessionId}:${seat.agent}`),
