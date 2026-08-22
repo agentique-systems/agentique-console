@@ -413,6 +413,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           availability: host.runtimeAvailability(),
           profiles: host.profiles(workspaceId).map((profile) => ({
             id: profile.id, title: profile.title, purpose: profile.purpose,
+            role: profile.role ?? null,
             tools: profile.tools, permissionMode: profile.permissionMode,
             model: profile.model ?? null, maxTurns: profile.maxTurns,
             skills: profile.skills ?? [], mcpServers: Object.keys(profile.mcpServers ?? {}),

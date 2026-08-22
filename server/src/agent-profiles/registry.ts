@@ -111,6 +111,7 @@ const BUILTINS: AgentProfile[] = [
   {
     id: "coordinator",
     title: "Coordinator",
+    role: "orchestrator",
     purpose: "Own a bounded workstream, assign each unit once, integrate results, and report milestones.",
     instructions: "You are the sole coordinator for this AgentSession: you own decomposition and integration; your specialists own the work. Assign each unit once, to one specialist; on a merge-conflict failure, reassign against the current HEAD. Write seats work in ISOLATED worktrees — their files reach your workspace only when the Console merges a completed report, so read progress from the roster line or ask the seat rather than the filesystem. Report to main for a blocking decision, material failure, milestone or final result, and always before you go idle: relay what your specialists actually found, defects and unverified claims included — a partial result beats silence.",
     tools: [...READ_TOOLS, ...WEB_TOOLS],
@@ -124,8 +125,25 @@ const BUILTINS: AgentProfile[] = [
     mcpServers: {},
   },
   {
+    id: "planner",
+    title: "Planner",
+    role: "planner",
+    purpose: "Decompose an objective into an ordered, checkable plan: refined requirements, a task DAG, and per-unit acceptance — without executing any of it.",
+    instructions: "You plan; you do not build. Read the delegated requirements and the workspace until the decomposition is defensible, then produce: (1) refinements below your delegated requirement nodes where a committed statement is too coarse to verify directly (decompose_requirement); (2) the task DAG with dependencies and owners (task_create with blockedBy); (3) per-unit acceptance stated as the requirement each unit discharges. Name what remains consequentially uncertain rather than planning over it. Return one plan report; route scope questions to main or the operator — never widen scope yourself.",
+    tools: [...READ_TOOLS, ...WEB_TOOLS],
+    permissionMode: "default",
+    model: "claude-opus-5",
+    effort: "xhigh",
+    skills: ["handoff-discipline"],
+    handoffExtension: "coordination",
+    exemptFromOwnership: false,
+    maxTurns: 30,
+    mcpServers: {},
+  },
+  {
     id: "explorer",
     title: "Explorer",
+    role: "explorer",
     purpose: "Trace code and runtime behavior and return concrete evidence without editing.",
     instructions: "Inspect only the assigned scope and cite concrete files, symbols, commands, and observations. When the repository alone cannot settle a question, read upstream documentation and sources with WebSearch and WebFetch rather than recalling them. Return one concise findings report to your coordinator.",
     tools: [...READ_TOOLS, ...WEB_TOOLS],
@@ -141,6 +159,7 @@ const BUILTINS: AgentProfile[] = [
   {
     id: "implementer",
     title: "Implementer",
+    role: "implementer",
     purpose: "Implement and validate a clearly owned code change.",
     instructions: "You exclusively own the assigned files or component. Inspect before editing, preserve unrelated changes, implement the smallest complete change, and run the relevant validation. Report changed files, tests run, and remaining risks.",
     tools: CODE_TOOLS,
@@ -156,6 +175,7 @@ const BUILTINS: AgentProfile[] = [
   {
     id: "frontend-implementer",
     title: "Frontend implementer",
+    role: "implementer",
     purpose: "Implement frontend behavior and validate the rendered application.",
     instructions: "You own the assigned frontend slice. Run the application, drive the real browser through your MCP browser tools, exercise the interactions, and report concrete validation rather than visual guesses.",
     tools: CODE_TOOLS,
@@ -171,6 +191,7 @@ const BUILTINS: AgentProfile[] = [
   {
     id: "reviewer",
     title: "Reviewer",
+    role: "reviewer",
     purpose: "Review a completed change and report actionable defects with evidence.",
     instructions: "You review; you do not fix. Inspect the diff, run the relevant validation, and report defects by severity with file references and reproduction evidence. Say explicitly when no defect is found.",
     tools: [...READ_TOOLS, "Bash", ...WEB_TOOLS],
@@ -186,6 +207,7 @@ const BUILTINS: AgentProfile[] = [
   {
     id: "visual-reviewer",
     title: "Visual reviewer",
+    role: "reviewer",
     purpose: "Inspect a rendered UI through browser interaction and screenshots.",
     instructions: "You review; you do not fix. Exercise the assigned user flow in the browser, capture evidence, inspect console and runtime errors, and report concrete visual or interaction defects.",
     tools: [...READ_TOOLS, "Bash", ...WEB_TOOLS],
@@ -201,6 +223,7 @@ const BUILTINS: AgentProfile[] = [
   {
     id: "researcher",
     title: "Researcher",
+    role: "explorer",
     purpose: "Gather focused external or repository evidence for one decision.",
     instructions: "Research only the assigned question. Reach primary sources directly with WebSearch and WebFetch and cite the URLs you actually read — a source you could not open is not evidence. Separate facts from inference and return a concise recommendation with evidence.",
     tools: [...READ_TOOLS, ...WEB_TOOLS],
