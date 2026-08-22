@@ -98,9 +98,10 @@ export function parseRequirementsDocument(text: string): RequirementParseResult 
 
   const flushSection = () => {
     if (section === null || inRequirements) return;
-    // Blank runs collapse HERE so the parse is canonical: renderCommitted
-    // collapses them too, and parse(render(g)) must equal g (fixed point).
-    const body = sectionLines.join("\n").replace(/\s+$/, "").replace(/\n{3,}/g, "\n\n");
+    // Blank runs collapse and leading blanks strip HERE so the parse is
+    // canonical: renderCommitted collapses at the joins too, and
+    // parse(render(g)) must equal g (fixed point).
+    const body = sectionLines.join("\n").replace(/\s+$/, "").replace(/^\n+/, "").replace(/\n{3,}/g, "\n\n");
     if (section !== "" || body !== "") preamble.push({ heading: section, body });
     sectionLines = [];
   };

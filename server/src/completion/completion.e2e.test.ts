@@ -244,6 +244,22 @@ describe("the requirement graph as completion oracle", () => {
     h.app.requirements.approve(draftRow.id, { document: DOC, edited: false });
   }
 
+  // Review regression: a summary persisted before the requirements field
+  // existed has no key at all — getSummary must normalize it to null so the
+  // sign-off card renders pre-branch runs.
+  it("getSummary serves a pre-branch summary (no requirements key) with requirements null", () => {
+    const { h } = harness();
+    const userSessionId = h.addUserSession();
+    h.db.insert(runSummaries).values({
+      id: "rs_legacy", userSessionId, seqFrom: 0, seqTo: 1, verdict: "completed",
+      document: { headline: "an old run", deviations: [], uncertainty: [], justification: null } as never,
+      status: "proposed", note: null, createdAt: "2026-01-01T00:00:00Z", resolvedAt: null,
+    }).run();
+    const served = h.completion.getSummary(userSessionId, "rs_legacy");
+    expect(served.document.requirements).toBeNull();
+    expect(served.document.headline).toBe("an old run");
+  });
+
   // Review regression: spec and requirement revisions number independently
   // from 1, so the nudge dedup must carry the regime — a spec-rev-1 nudge
   // suppressing the requirements-rev-1 nudge left a migrated run silently

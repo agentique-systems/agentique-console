@@ -148,8 +148,12 @@ write of truth:
 
 ## Delegation and subtrees
 
-Commissions (`create_agent_session`) and assignments (`send_to_coordinator`)
-carry `requirements: [ids]` — the open obligations the work serves. The
+Commissions (`create_agent_session`) and mid-run steers
+(`send_to_coordinator`, assignment or update alike) carry
+`requirements: [ids]` — the open obligations the work serves. The journal
+records who delegated, three ways: `commission` (at creation),
+`assignment` (main, mid-run — either message category), `child` (a
+controller passing a subset down). The
 Console journals the join (`requirement_delegations`, `requirement.delegated`)
 before the briefing dispatches, renders the delegated statements and
 statuses into the recipient's delivery, and scopes the session's requirement

@@ -281,6 +281,10 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
             `requirements delegate a session-wide sub-scope — send them to the entry agent (${entryAgent}), not ${recipient}`);
         }
         if (delegating && session.lifecycle === "open") {
+          // Source "assignment" covers BOTH categories: the label means
+          // "delegated by main mid-run" (vs. commission-time or child
+          // pass-down) — the journal's CHECK deliberately keeps that
+          // three-way split rather than one label per message category.
           requirements.delegate(userSessionId, args.agentSessionId, args.requirements!, "assignment");
         }
         // An archived session skips the intercept so post() raises its

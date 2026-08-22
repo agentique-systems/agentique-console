@@ -566,7 +566,9 @@ export class RequirementService implements GoverningDigest {
     const errors: RequirementParseError[] = [];
     for (const row of flattenRequirementGraph(graph)) {
       if (row.id === null) continue;
-      const line = lines.findIndex((candidate) => candidate.includes(`${row.id}`)) + 1;
+      // Case-insensitive: the parser lowercases a typed "R2", and the error
+      // must still point at the line the operator actually wrote.
+      const line = lines.findIndex((candidate) => candidate.toLowerCase().includes(`${row.id}`)) + 1;
       if (!known.has(row.id)) {
         errors.push({ line: line > 0 ? line : 1, message: `unknown requirement id "${row.id}" — omit the id tag on a new requirement; ids are minted on approval` });
         continue;
@@ -659,15 +661,8 @@ export class RequirementService implements GoverningDigest {
       byParent.set(node.parentId, list);
     }
     const out: RequirementNodeRow[] = [];
-    // Deterministic total order even if ords ever tie (a mid-run refinement
-    // child beside a later-renumbered committed sibling): document ord, then
-    // committed before refinement, then mint order.
-    const originRank = (node: RequirementNodeRow) => (node.origin === "committed" ? 0 : 1);
-    const mintNumber = (node: RequirementNodeRow) => Number(/^r(\d+)/.exec(node.id)?.[1] ?? 0);
     const walk = (parentId: string | null) => {
-      const siblings = (byParent.get(parentId) ?? []).slice().sort((a, b) =>
-        a.ord - b.ord || originRank(a) - originRank(b) || mintNumber(a) - mintNumber(b));
-      for (const node of siblings) {
+      for (const node of (byParent.get(parentId) ?? []).slice().sort(siblingOrder)) {
         out.push(node);
         walk(node.id);
       }
@@ -737,7 +732,7 @@ export class RequirementService implements GoverningDigest {
     const build = (parentId: string | null): RequirementGraphNode[] =>
       (byParent.get(parentId) ?? [])
         .slice()
-        .sort((a, b) => a.ord - b.ord)
+        .sort(siblingOrder)
         .map((node) => ({
           id: node.id,
           statement: node.statement,
@@ -757,6 +752,18 @@ export class RequirementService implements GoverningDigest {
       };
     });
   }
+}
+
+/**
+ * Deterministic sibling order shared by EVERY rendering of the graph
+ * (derive, digest, summary outline): document ord, then committed before
+ * refinement on a tie (a mid-run refinement child can tie a later-renumbered
+ * committed sibling), then mint order — never SQLite's insertion order.
+ */
+function siblingOrder(a: RequirementNodeRow, b: RequirementNodeRow): number {
+  const originRank = (node: RequirementNodeRow) => (node.origin === "committed" ? 0 : 1);
+  const mintNumber = (node: RequirementNodeRow) => Number(/^r(\d+)/.exec(node.id)?.[1] ?? 0);
+  return a.ord - b.ord || originRank(a) - originRank(b) || mintNumber(a) - mintNumber(b);
 }
 
 /** Truncate to a UTF-8 byte budget without splitting a multibyte character. */

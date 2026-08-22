@@ -4,7 +4,7 @@
  * verdict posts to the status route (their word IS the gate).
  */
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createElement, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -38,6 +38,9 @@ const RESPONSE: GetRequirementsResponse = {
     node({ id: "r2", parentId: "r1", statement: "Login issues a token", status: "satisfied", derivedStatus: "satisfied",
       latestChange: { status: "satisfied", verifiedBy: "independent", actor: "checker", evidenceCount: 2, at: "2026-08-22T01:00:00Z" } }),
     node({ id: "r3", parentId: "r1", ord: 1, statement: "Sessions expire", origin: "refinement", refinedByAgentSessionId: "as_1" }),
+    // A violated leaf shows BOTH "mark satisfied" and "reopen" on one row —
+    // the note-leak regression needs both actions on the same NodeRow.
+    node({ id: "r4", parentId: "r1", ord: 2, statement: "Rate limit enforced", status: "violated", derivedStatus: "violated" }),
   ],
   frontier: [{ requirementId: "r3", statement: "Sessions expire", annotations: ["in_progress", "awaiting_operator"] }],
 };
@@ -68,7 +71,7 @@ describe("RequirementsPanel", () => {
     await screen.findByTestId("requirements-panel");
 
     expect(screen.getByText("rev 1")).toBeTruthy();
-    expect(screen.getByText("1/3 satisfied")).toBeTruthy();
+    expect(screen.getByText(/1\/4 satisfied · 1 violated/)).toBeTruthy();
     expect(screen.getByText("Auth works end to end")).toBeTruthy();
     // r2's verification chip: independent, evidence count.
     expect(screen.getByText("independent · 2 evidence")).toBeTruthy();
@@ -98,21 +101,23 @@ describe("RequirementsPanel", () => {
   });
 
   // Review regression: a note typed for a CANCELLED verdict must never ride a
-  // later status change — reopen posts no note, and the journal stays honest.
-  it("a cancelled confirm note does not leak into a later status post", async () => {
+  // later status change on the SAME row — reopen posts no note, and the
+  // journal stays honest. r4 (violated leaf) shows both actions on one row.
+  it("a cancelled confirm note does not leak into a later status post on the same row", async () => {
     const posts: { url: string; body: unknown }[] = [];
     stubFetch(posts);
     const user = userEvent.setup();
     render(<RequirementsPanel userSessionId="us_1" />, { wrapper: wrapper() });
     await screen.findByTestId("requirements-panel");
 
-    await user.click(screen.getAllByText("mark satisfied")[0]!);
+    const row = within(screen.getByTestId("requirement-r4"));
+    await user.click(row.getByText("mark satisfied"));
     await user.type(screen.getByPlaceholderText(/why satisfied/), "verified by running the e2e suite");
-    await user.click(screen.getByText("cancel"));
-    // r2 is a satisfied leaf → reopen posts immediately, and must carry NO note.
-    await user.click(screen.getAllByText("reopen")[0]!);
+    await user.click(row.getByText("cancel"));
+    await user.click(row.getByText("reopen"));
 
     await waitFor(() => expect(posts).toHaveLength(1));
+    expect(posts[0]!.url).toContain("/requirements/r4/status");
     expect(posts[0]!.body).toEqual({ status: "open" });
   });
 

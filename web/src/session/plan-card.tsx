@@ -148,8 +148,9 @@ export function PlanCard({
           />
         ) : isRequirements ? (
           // A dirty draft IS what approve will send — preview it, not the
-          // superseded proposal.
-          <RequirementsPreview document={dirty ? draft : item.plan} />
+          // superseded proposal. A RESOLVED card shows what was actually
+          // decided, never a stale unsent edit.
+          <RequirementsPreview document={dirty && !resolved ? draft : item.plan} />
         ) : (
           <MessageResponse>{dirty && !resolved ? draft : item.plan}</MessageResponse>
         )}
