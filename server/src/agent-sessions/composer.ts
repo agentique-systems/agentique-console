@@ -17,7 +17,7 @@ import type { EventBus } from "../events/bus.ts";
 import type { HandoffService } from "../handoffs/service.ts";
 import { recoveryAction } from "../lane-runtime/checkpoint.ts";
 import { decisionOf, renderDecision, type DecisionLedger } from "../orchestrator/decisions.ts";
-import type { SpecService } from "../orchestrator/spec.ts";
+import type { RequirementService } from "../orchestrator/requirements.ts";
 import type { InteractionService } from "../orchestrator/interactions.ts";
 import type { WorktreeManager } from "../runtime/worktree-manager.ts";
 import type { SdkUserMessageLike } from "../sdk/types.ts";
@@ -219,8 +219,8 @@ export interface PromptComposerDeps {
   config: Config;
   handoffs: HandoffService;
   decisions: DecisionLedger;
-  /** The living spec — injected into every seat like decisions are. */
-  specs: SpecService;
+  /** The governing requirements (legacy-spec fallback inside) — injected into every seat like decisions are. */
+  requirements: RequirementService;
   tasks: TaskService;
   interactions: InteractionService;
   worktrees: WorktreeManager | null;
@@ -321,10 +321,15 @@ export class PromptComposer {
     // an amendment once, but a long-lived seat's context can scroll it away —
     // the pointer re-anchors each time work arrives. Omitted entirely when no
     // spec exists (byte-stability for spec-less sessions).
-    const specPointer = this.#deps.specs.pointer(session.userSessionId);
+    const specPointer = this.#deps.requirements.pointer(session.userSessionId);
     const specBlock = specPointer === null ? ""
-      : `Governing specification: ${specPointer}. If your system prompt shows an older revision, read_spec before continuing.\n\n`;
-    return `AgentSession ${session.id}: ${session.title}\nYou are ${seat.name}. Participants: ${roster}.\n\n${answersBlock}${freshBlock}${ledgerBlock}${specBlock}Only the following addressed handoffs are new:\n${messages}\n\nTreat handoff claims as historical context; verify risky claims against repository/task/journal evidence during normal work. Act without restating the envelope.`;
+      : `Governing requirements: ${specPointer}. If your system prompt shows an older revision, read_requirements before continuing.\n\n`;
+    // The session's delegated sub-scope on EVERY delivery, statements and
+    // statuses included — the sub-scope IS this session's success condition,
+    // and a contract buried in the briefing is one a long-lived seat forgets.
+    // Omitted entirely when the session holds no delegation (byte-stability).
+    const delegatedBlock = this.#delegatedRequirements(session);
+    return `AgentSession ${session.id}: ${session.title}\nYou are ${seat.name}. Participants: ${roster}.\n\n${answersBlock}${freshBlock}${ledgerBlock}${specBlock}${delegatedBlock}Only the following addressed handoffs are new:\n${messages}\n\nTreat handoff claims as historical context; verify risky claims against repository/task/journal evidence during normal work. Act without restating the envelope.`;
   }
 
   /**
@@ -349,8 +354,10 @@ export class PromptComposer {
     if (decisions.length > 0) facts.push(`Operator decisions (Console-recorded, authoritative — do not contradict):\n${decisions.map((line) => `- ${line}`).join("\n")}`);
     // The checkpoint must be self-sufficiently true: the successor re-reads
     // the spec digest at spawn, but the reconstruction is what it TRUSTS.
-    const specPointer = this.#deps.specs.pointer(session.userSessionId);
-    if (specPointer !== null) facts.push(`Governing specification: ${specPointer}.`);
+    const specPointer = this.#deps.requirements.pointer(session.userSessionId);
+    if (specPointer !== null) facts.push(`Governing requirements: ${specPointer}.`);
+    const delegated = this.#deps.requirements.delegationSet(session.id);
+    if (delegated.length > 0) facts.push(`Delegated requirements: ${delegated.join(", ")} (report_requirement with evidence; read_requirements for statements).`);
     const taskLines = this.#deps.tasks?.linesForAgentSession(session.id) ?? [];
     if (taskLines.length > 0) facts.push(`Task ledger:\n${taskLines.join("\n")}`);
     if (seat.worktreePath && this.#deps.worktrees && seat.worktreeBranch && seat.worktreeBaseCommit) {
@@ -462,9 +469,33 @@ export class PromptComposer {
    * empty when no spec is approved — the byte-stability rule.
    */
   #specContext(session: AgentSessionRow): string {
-    const digest = this.#deps.specs.digest(session.userSessionId);
+    const digest = this.#deps.requirements.digest(session.userSessionId);
     if (digest === "") return "";
-    return `\n\n${digest}\nYour work is checked against this specification. read_spec returns the full text.`;
+    return `\n\n${digest}\nYour work is checked against this. read_requirements returns the full outline with statuses.`;
+  }
+
+  /**
+   * The delegated-requirements delivery block: the statements this session
+   * answers for, with live statuses, scoped to its delegated subtrees.
+   * Renders "" when the session holds no delegation — byte-stability.
+   */
+  #delegatedRequirements(session: AgentSessionRow): string {
+    const roots = this.#deps.requirements.delegationSet(session.id);
+    if (roots.length === 0) return "";
+    const nodes = this.#deps.requirements.derive(session.userSessionId);
+    const inSubtree = new Set<string>();
+    const parentOf = new Map(nodes.map((node) => [node.id, node.parentId]));
+    for (const node of nodes) {
+      for (let cursor: string | null = node.id; cursor !== null; cursor = parentOf.get(cursor) ?? null) {
+        if (roots.includes(cursor)) { inSubtree.add(node.id); break; }
+      }
+    }
+    const lines = nodes.filter((node) => inSubtree.has(node.id)).map((node) => {
+      const depth = (() => { let d = 0; for (let cursor = node.parentId; cursor !== null && inSubtree.has(cursor); cursor = parentOf.get(cursor) ?? null) d += 1; return d; })();
+      const status = node.derivedStatus === node.status ? node.status : `${node.status}, derives ${node.derivedStatus}`;
+      return `${"  ".repeat(depth)}- ${node.id} [${status}]${node.composition === "any" ? " (any of)" : ""}: ${node.statement}`;
+    });
+    return `## Your delegated requirements (this session's success condition)\n${lines.join("\n")}\nStatuses are semantic and evidence-required: report_requirement (leaves only; verifiedBy 'independent' only for another seat's work), decompose_requirement to refine below these nodes. Anything outside this sub-scope routes to main.\n\n`;
   }
 
   /**

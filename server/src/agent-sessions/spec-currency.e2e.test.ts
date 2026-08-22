@@ -47,8 +47,8 @@ describe("spec currency for seats (fake SDK)", () => {
 
     const scoutPrompt = h.fake.captured.prompts.find((text) => text.includes("You are scout."));
     expect(scoutPrompt).toBeDefined();
-    expect(scoutPrompt).toContain("Governing specification: rev 1 — initial spec");
-    expect(scoutPrompt).toContain("read_spec before continuing");
+    expect(scoutPrompt).toContain("Governing requirements: spec rev 1 — initial spec");
+    expect(scoutPrompt).toContain("read_requirements before continuing");
   });
 
   it("a spec-less session's delivery prompt is unchanged — no empty block", async () => {
@@ -59,7 +59,7 @@ describe("spec currency for seats (fake SDK)", () => {
     await done;
 
     const scoutPrompt = h.fake.captured.prompts.find((text) => text.includes("You are scout."))!;
-    expect(scoutPrompt).not.toContain("Governing specification");
+    expect(scoutPrompt).not.toContain("Governing requirements");
     expect(scoutPrompt).toMatch(/Participants: [^\n]*\.\n\nOnly the following addressed handoffs are new:/);
   });
 

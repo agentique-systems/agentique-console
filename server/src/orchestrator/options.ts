@@ -40,8 +40,10 @@ export const CONSOLE_TOOL_NAMES = [
   "read_artifact",
   "add_agent",
   "specialize_profile",
-  "propose_spec",
-  "read_spec",
+  "propose_requirements",
+  "read_requirements",
+  "report_requirement",
+  "decompose_requirement",
   "update_orchestration_state",
   "record_completion",
 ] as const;

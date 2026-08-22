@@ -35,7 +35,7 @@ function registeredNames(agent: AgentRow, profile: AgentProfile, roleName: strin
   const granted = grantedTools(hub.roles[roleName], profile, deps);
   const ctx = {
     sdk: stubSdk,
-    deps: { repo: {}, bus: {}, tasks: {}, handoffs: {}, worktrees: {}, specs: {} },
+    deps: { repo: {}, bus: {}, tasks: {}, handoffs: {}, worktrees: {}, requirements: {} },
     session: { id: "as1", userSessionId: "us1" } as AgentSessionRow,
     agent, profile,
     user: { workspaceId: "ws" } as UserSessionRow,
@@ -70,6 +70,21 @@ describe("grants parity", () => {
     const agent = makeAgent({ role: "specialist" });
     const profile = makeProfile();
     expect(registeredNames(agent, profile, "specialist")).toEqual(grantedNames(profile, "specialist"));
+  });
+
+  // Review regression: report/decompose registration follows the ENTRY SEAT,
+  // not the delegation existing at spawn — a delegation can arrive mid-run
+  // (send_to_coordinator requirements) after the tool list froze, and
+  // authorization is checked live per call (assertWithinDelegation).
+  it("the entry seat holds report/decompose without a spawn-time delegation; other seats do not", () => {
+    const profile = makeProfile();
+    const deps: AgentGrantDeps = { tasks: true, handoffs: true, worktrees: true, user: true, specs: true, childSessions: true };
+    const entry = grantedTools({ grants: [] }, profile, { ...deps, requirementsEntrySeat: true });
+    expect(entry.has("report_requirement")).toBe(true);
+    expect(entry.has("decompose_requirement")).toBe(true);
+    const nonEntry = grantedTools({ grants: [] }, profile, { ...deps, requirementsEntrySeat: false });
+    expect(nonEntry.has("report_requirement")).toBe(false);
+    expect(nonEntry.has("read_requirements")).toBe(true);
   });
 
   // The Console grants COORDINATION and nothing else. Capability is native

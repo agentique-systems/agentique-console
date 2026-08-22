@@ -16,12 +16,13 @@ import { PAGE_DEFAULT_BYTES, PAGE_MAX_BYTES, pageTail } from "../paging.ts";
 import type { ConsoleSdk, SdkToolResult } from "../sdk/types.ts";
 import type { AssignmentScheduler } from "../tasks/scheduler.ts";
 import type { TaskService } from "../tasks/service.ts";
-import { PATTERN_IDS, type HandoffDraft, type PatternId } from "@agentique-console/shared";
+import { flattenRequirementGraph, PATTERN_IDS, type HandoffDraft, type PatternId, type RequirementGraph } from "@agentique-console/shared";
 import type { HandoffService } from "../handoffs/service.ts";
 import { EvidenceRefSchema, HandoffCoreSchema, HandoffDraftSchema } from "../handoffs/schema.ts";
 
 import { fail, guarded, ok } from "../sdk/tool-result.ts";
 import type { InteractionService } from "./interactions.ts";
+import { RequirementParseFailure, type RequirementService } from "./requirements.ts";
 import type { SpecService } from "./spec.ts";
 import type { CompletionRecord, OrchestrationStateService } from "./state.ts";
 import type { CapabilityCatalog } from "../agent-profiles/capability-catalog.ts";
@@ -56,6 +57,7 @@ export interface ConsoleToolsInput {
   artifacts: ArtifactStore;
   interactions: InteractionService;
   specs: SpecService;
+  requirements: RequirementService;
   state: OrchestrationStateService;
   /** Skills + attachable-server metadata, for staffing and mint validation. */
   catalog: CapabilityCatalog;
@@ -64,7 +66,7 @@ export interface ConsoleToolsInput {
 }
 
 export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
-  const { sdk, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, specs, state, catalog, registry } = input;
+  const { sdk, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, specs, requirements, state, catalog, registry } = input;
 
   /** Tools operate only on this UserSession's agent sessions. */
   const owned = (agentSessionId: string) => {
@@ -115,6 +117,8 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           .describe("Why this session, this pattern, now — one or two sentences. Journaled with the briefing; the run review reads it."),
         expecting: z.string().optional()
           .describe("What evidence or output counts as success — or would change your plan. The session READS this as its success contract."),
+        requirements: z.array(z.string().min(1)).max(12).optional()
+          .describe("Requirement ids (read_requirements) this session is commissioned against — its delegated sub-scope. The Console journals the link, renders the statements into every delivery, and grants the session's entry agent scoped requirement tools (report status with evidence; decompose below these nodes). Commission against OPEN requirements."),
         tasks: z.array(z.object({
           taskId: z.string().min(1).describe("Short stable id, e.g. \"core\""),
           subject: z.string().min(1),
@@ -140,18 +144,22 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         allowChildSessions?: boolean;
         why?: string;
         expecting?: string;
+        requirements?: string[];
         tasks?: { taskId: string; subject: string; description?: string; owner?: string; blockedBy?: string[] }[];
       }) =>
         guarded(() => {
-          // Rationale rides the briefing's extension: captured AT the act,
-          // journaled with it, and read by the recipient as its success
-          // contract — never a retrospective diary.
-          const briefing: HandoffDraft = args.why === undefined && args.expecting === undefined ? args.briefing : {
+          // Rationale AND the delegated sub-scope ride the briefing's
+          // extension: captured AT the act, journaled with it, and read by the
+          // recipient as its success contract — never a retrospective diary.
+          const extras = {
+            ...(args.why === undefined ? {} : { why: args.why }),
+            ...(args.expecting === undefined ? {} : { expecting: args.expecting }),
+            ...(args.requirements === undefined || args.requirements.length === 0 ? {} : { requirements: args.requirements }),
+          };
+          const briefing: HandoffDraft = Object.keys(extras).length === 0 ? args.briefing : {
             core: args.briefing.core,
             extension: { kind: args.briefing.extension?.kind ?? "coordination",
-              data: { ...(args.briefing.extension?.data ?? {}),
-                ...(args.why === undefined ? {} : { why: args.why }),
-                ...(args.expecting === undefined ? {} : { expecting: args.expecting }) } } as HandoffDraft["extension"],
+              data: { ...(args.briefing.extension?.data ?? {}), ...extras } } as HandoffDraft["extension"],
           };
           // A skill a seat cannot act on must not load (the deferred-tools
           // lesson): validate every commission-time skill against the
@@ -163,6 +171,15 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
             const problems = catalog.validateAssignment(agent.skills, profileTools);
             if (problems.length > 0) throw new InvalidInputError(`agent "${agent.name}": ${problems.join("; ")}`);
           }
+          // Delegated requirements validate BEFORE anything spawns — a session
+          // must never launch against ids that do not exist.
+          if (args.requirements !== undefined && args.requirements.length > 0) {
+            const live = new Set(requirements.derive(userSessionId).map((node) => node.id));
+            const unknown = args.requirements.filter((id) => !live.has(id));
+            if (unknown.length > 0) {
+              throw new InvalidInputError(`unknown requirement id(s): ${unknown.join(", ")} — read_requirements lists the current graph`);
+            }
+          }
           const created = host.createSession({
             userSessionId,
             title: args.title,
@@ -172,6 +189,9 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
             briefing,
             ...(args.allowChildSessions === true ? { allowChildSessions: true } : {}),
             ...(args.tasks === undefined ? {} : { tasks: args.tasks }),
+            // The lifecycle records the delegation BEFORE the briefing
+            // dispatches, so the very first delivery renders the sub-scope.
+            ...(args.requirements === undefined || args.requirements.length === 0 ? {} : { requirements: args.requirements }),
           });
           return {
             agentSessionId: created.agentSessionId,
@@ -222,6 +242,8 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           .describe("Why this move now (redirects and commissions deserve one; routine relays may skip it)."),
         expecting: z.string().optional()
           .describe("What evidence would count as success, or change your plan."),
+        requirements: z.array(z.string().min(1)).max(12).optional()
+          .describe("Requirement ids this message serves (assignment or update) — journaled as the session's delegated sub-scope and rendered into the delivery. Send them to the entry agent."),
       },
       async (args: {
         agentSessionId: string; to?: string; category: "assignment" | "update";
@@ -229,7 +251,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         action: string; stateSummary: string; evidence: HandoffDraft["core"]["state"]["evidence"];
         resultSummary: string | null; artifacts: HandoffDraft["core"]["result"]["artifacts"];
         uncertainty: string[]; nextAction: string | null; taskId: string | null; requestExpandedContext: boolean;
-        why?: string; expecting?: string;
+        why?: string; expecting?: string; requirements?: string[];
       }) => guarded(() => {
         const session = owned(args.agentSessionId);
         const entryAgent = host.entryAgent(args.agentSessionId);
@@ -244,8 +266,27 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           },
           extension: { kind: "coordination", data: {
             ...(args.why === undefined ? {} : { why: args.why }),
-            ...(args.expecting === undefined ? {} : { expecting: args.expecting }) } },
+            ...(args.expecting === undefined ? {} : { expecting: args.expecting }),
+            ...(args.requirements === undefined || args.requirements.length === 0 ? {} : { requirements: args.requirements }) } },
         };
+        // The delegation join is recorded BEFORE the scheduler intercept, so a
+        // dependency-parked assignment still journals what it serves — for
+        // UPDATES too (an amendment steer widening the sub-scope). Guards
+        // first: delegations are append-only, so a transfer post() would
+        // reject (non-entry recipient, archived session) must not leave a
+        // phantom sub-scope behind.
+        const delegating = args.requirements !== undefined && args.requirements.length > 0;
+        if (delegating && recipient !== entryAgent) {
+          throw new InvalidInputError(
+            `requirements delegate a session-wide sub-scope — send them to the entry agent (${entryAgent}), not ${recipient}`);
+        }
+        if (delegating && session.lifecycle === "open") {
+          // Source "assignment" covers BOTH categories: the label means
+          // "delegated by main mid-run" (vs. commission-time or child
+          // pass-down) — the journal's CHECK deliberately keeps that
+          // three-way split rather than one label per message category.
+          requirements.delegate(userSessionId, args.agentSessionId, args.requirements!, "assignment");
+        }
         // An archived session skips the intercept so post() raises its
         // Conflict instead of recording a schedule nobody can dispatch.
         // Only ENTRY traffic can be scheduled: a dependency-parked assignment
@@ -385,6 +426,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           availability: host.runtimeAvailability(),
           profiles: host.profiles(workspaceId).map((profile) => ({
             id: profile.id, title: profile.title, purpose: profile.purpose,
+            role: profile.role ?? null,
             tools: profile.tools, permissionMode: profile.permissionMode,
             model: profile.model ?? null, maxTurns: profile.maxTurns,
             skills: profile.skills ?? [], mcpServers: Object.keys(profile.mcpServers ?? {}),
@@ -447,59 +489,129 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
     ),
 
     sdk.tool(
-      "propose_spec",
-      "Put a SPECIFICATION (or an amendment to it) to the operator for approval. The spec is the shared definition of done-well: goals, constraints, the decisions that need making (with your recommendations), acceptance criteria a reviewer can check, standing uncertainties/assumptions, and the crew you propose. The operator reads it, may EDIT it in place, and approves or rejects; the approved text is injected into your prompt, every agent's prompt, and every rotation — reviews check work against it. This call BLOCKS until they respond. Amend with a new propose_spec when reality invalidates part of it; never silently diverge. Proportionality is your judgment — a toy request may not need one.",
+      "propose_requirements",
+      "Put the REQUIREMENT GRAPH (or an amendment to it) to the operator for approval. Requirements are the run's canonical definition of done: a recursive outline of what must be TRUE of the finished work — each node one declarative, checkable statement; children compose 'all' by default, '(any of)' when one sufficient alternative establishes the parent. Write the canonical form: optional prose sections (## Context, ## Goals, ## Out of scope, ## Assumptions), then '## Requirements' as a nested list. KEEP the `rN:` id tags on lines you are keeping — dropping a tag RETIRES that requirement; a new line carries no tag and gets its id on approval. Statuses and evidence survive an amendment on unchanged statements; an edited statement resets its node to open. The operator may EDIT the outline in place; their text governs and is injected into every prompt. This call BLOCKS until they respond. Amend when reality invalidates part of it; never silently diverge.",
       {
-        document: z.string().min(1).describe("The full spec text (markdown). Include '## Open uncertainties', '## Assumptions', and '## Out of scope' sections so reviews can target them."),
+        document: z.string().min(1).describe("The full outline. Example:\n## Requirements\n- The CLI parses every documented flag\n  - (any of) Config is loadable\n    - TOML config parses\n    - JSON config parses"),
         changeNote: z.string().min(1).describe("One line: what this revision is, or what changed and why (for amendments)."),
       },
       async (args: { document: string; changeNote: string }) => {
         const changeNote = clip(args.changeNote, 280);
-        const draft = specs.propose(userSessionId, args.document, changeNote);
-        const { id: approvalId, resolution } = interactions.createSpecApproval(userSessionId, args.document, draft.revision, changeNote);
+        let draft: ReturnType<RequirementService["propose"]>;
+        try {
+          draft = requirements.propose(userSessionId, args.document, changeNote);
+        } catch (error) {
+          if (error instanceof RequirementParseFailure) {
+            return fail(`the document is not a valid requirement outline — fix these lines and propose again:\n${error.errors.map((entry) => `- line ${entry.line}: ${entry.message}`).join("\n")}`);
+          }
+          return fail(error);
+        }
+        const nodeCount = flattenRequirementGraph(draft.graph as unknown as RequirementGraph).length;
+        const { id: approvalId, resolution } = interactions.createRequirementsApproval(
+          userSessionId, args.document, draft.revision, changeNote, nodeCount);
         const resolved = await resolution;
         if (resolved.kind === "decision" && resolved.approved) {
           const finalText = resolved.editedDocument?.trim() || args.document;
-          const approved = specs.approve(draft.id, { document: finalText, interactionId: approvalId,
-            edited: resolved.editedDocument !== undefined && resolved.editedDocument.trim() !== args.document.trim() });
+          let approved: ReturnType<RequirementService["approve"]>;
+          try {
+            approved = requirements.approve(draft.id, { document: finalText, interactionId: approvalId,
+              edited: resolved.editedDocument !== undefined && resolved.editedDocument.trim() !== args.document.trim() });
+          } catch (error) {
+            requirements.reject(draft.id);
+            return fail(error);
+          }
           // An AMENDMENT lands while sessions may be mid-assignment against
           // the old revision. The next delivery re-anchors each of them, but
           // whether one needs steering NOW is main's materiality call — hand
           // it the list to make that call against.
-          const running = approved.revision > 1
+          const running = approved.revision.revision > 1
             ? host.listForUserSession(userSessionId).filter((s) => s.status !== "archived")
               .map((s) => ({ agentSessionId: s.id, title: s.title, status: s.status }))
             : [];
-          return ok({ approved: true, revision: approved.revision, edited: approved.origin === "operator_edited",
-            document: finalText,
-            note: approved.origin === "operator_edited"
-              ? "The operator EDITED the spec before approving — the text above is theirs and governs. Read it fully."
-              : "Approved as proposed. This revision now governs the run.",
+          return ok({ approved: true, revision: approved.revision.revision,
+            edited: approved.revision.origin === "operator_edited",
+            document: approved.revision.document,
+            added: approved.added, retired: approved.retired,
+            note: (approved.revision.origin === "operator_edited"
+              ? "The operator EDITED the requirements before approving — the canonical text above (ids minted) is theirs and governs. Read it fully."
+              : "Approved as proposed. The canonical text above (ids minted) now governs the run.")
+              + " Reference these ids in commissions (requirements), the ledger (requirementId), and report_requirement.",
             ...(running.length === 0 ? {} : { runningSessions: running,
               amendmentNote: "These sessions were briefed under an earlier revision. They learn of the change at their next delivery; judge materiality per session — steer with send_to_coordinator (category \"update\"), interrupt_agent for urgent redirects, or let immaterial ones finish." }) });
         }
-        specs.reject(draft.id);
+        requirements.reject(draft.id);
         const note = resolved.kind === "decision" ? (resolved.note ?? "") : resolved.kind === "dismissed" ? resolved.reason : "";
-        return ok({ approved: false, note, next: "Revise the spec to address their words and propose again — or ask a sharper question first." });
+        return ok({ approved: false, note, next: "Revise the requirements to address their words and propose again — or ask a sharper question first." });
       },
     ),
 
     sdk.tool(
-      "read_spec",
-      "Read the governing specification (latest approved revision by default, or a named one). The injected digest is byte-capped; this returns the full text, paged.",
+      "read_requirements",
+      "Read the governing requirements: the live outline with console-derived statuses ([·] open, [✓] satisfied, [✗] violated, [⊘] infeasible), verification tiers and evidence counts, plus the open-requirements frontier. For a run still governed by a legacy markdown spec this returns that text with legacy: true.",
       {
-        revision: z.number().int().optional(),
         cursor: z.string().optional(),
         maxBytes: z.number().int().min(1).max(PAGE_MAX_BYTES).default(PAGE_DEFAULT_BYTES),
       },
-      async (args: { revision?: number; cursor?: string; maxBytes: number }) =>
+      async (args: { cursor?: string; maxBytes: number }) =>
         guarded(() => {
-          const row = args.revision === undefined
-            ? specs.latestApproved(userSessionId)
-            : specs.listForUserSession(userSessionId).find((entry) => entry.revision === args.revision);
-          if (!row) return { spec: null, note: "no approved specification yet — propose one with propose_spec" };
-          return { revision: row.revision, status: row.status, changeNote: row.changeNote,
-            document: pageTail(row.document, args.cursor, args.maxBytes) };
+          const approved = requirements.latestApproved(userSessionId);
+          if (approved === undefined) {
+            const legacy = specs.latestApproved(userSessionId);
+            if (!legacy) return { requirements: null, note: "no approved requirements yet — propose them with propose_requirements" };
+            return { legacy: true, revision: legacy.revision, changeNote: legacy.changeNote,
+              document: pageTail(legacy.document, args.cursor, args.maxBytes),
+              note: "This run is governed by a legacy markdown spec. A requirement graph can supersede it via propose_requirements." };
+          }
+          const digest = requirements.digest(userSessionId);
+          return { revision: approved.revision, changeNote: approved.changeNote,
+            document: pageTail(digest, args.cursor, args.maxBytes),
+            frontier: requirements.frontier(userSessionId) };
+        }),
+    ),
+
+    sdk.tool(
+      "report_requirement",
+      "Record a requirement STATUS with evidence. Statuses are semantic claims, never scores: satisfied (the statement holds — evidence required), violated (something broke it — evidence required), infeasible (cannot be achieved with available capability or authority — evidence required; route the consequence to the operator or a scope amendment), open (reopen a stale claim). Report LEAVES only — parents and the root derive mechanically from their children, and the operator remains the completion gate. verifiedBy is 'independent' only when the evidence comes from a different seat/profile than the one that did the work. Quantitative measurements belong INSIDE evidence refs, never as numbers ranking anything.",
+      {
+        requirementId: z.string().min(1).describe("A requirement id from read_requirements, e.g. \"r3\""),
+        status: z.enum(["satisfied", "violated", "infeasible", "open"]),
+        evidence: z.array(EvidenceRefSchema).default([]).describe("What proves the claim: files, artifacts, tasks, commands, urls. Required for satisfied/violated/infeasible."),
+        verifiedBy: z.enum(["self", "independent"]).default("self")
+          .describe("'independent' only when a different agent/profile than the implementer produced the evidence (a reviewer's verdict, a fresh verification)."),
+        note: z.string().optional().describe("One line of context (why infeasible, what reopened it)."),
+      },
+      async (args: { requirementId: string; status: "satisfied" | "violated" | "infeasible" | "open";
+        evidence: { kind: "file" | "journal" | "artifact" | "task" | "command" | "url"; ref: string; label?: string }[];
+        verifiedBy: "self" | "independent"; note?: string }) =>
+        guarded(() => {
+          const wire = requirements.reportStatus({
+            userSessionId, requirementId: args.requirementId, to: args.status,
+            evidence: args.evidence, verifiedBy: args.verifiedBy, actor: "main",
+            ...(args.note === undefined ? {} : { note: clip(args.note, 280) }),
+          });
+          return { requirementId: wire.id, status: wire.status, derivedRoot: requirements.rootStatus(userSessionId),
+            note: "Recorded. Parents derive mechanically; the sign-off card renders the tree with this claim and its evidence." };
+        }),
+    ),
+
+    sdk.tool(
+      "decompose_requirement",
+      "Refine a requirement by adding child requirements BELOW it — how a committed obligation is discharged, stated as smaller checkable statements. Decomposition needs no operator approval (it refines representation, never meaning) and is journaled and attributed. The LINE: editing a statement, retiring a requirement, or adding a new top-level obligation changes what counts as success — those are scope amendments and go through propose_requirements.",
+      {
+        parentId: z.string().min(1).describe("The requirement being refined"),
+        children: z.array(z.object({
+          statement: z.string().min(1).describe("One declarative, checkable statement"),
+          composition: z.enum(["all", "any"]).default("all"),
+        })).min(1).max(8),
+        why: z.string().optional().describe("Why this refinement — journaled."),
+      },
+      async (args: { parentId: string; children: { statement: string; composition: "all" | "any" }[]; why?: string }) =>
+        guarded(() => {
+          const added = requirements.decompose({
+            userSessionId, parentId: args.parentId, children: args.children, actor: "main",
+          });
+          return { parentId: args.parentId, added,
+            note: "Children added as refinement nodes (open). The parent's status now derives from them." };
         }),
     ),
 
@@ -542,35 +654,69 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
 
     sdk.tool(
       "record_completion",
-      "Record the completion justification when you believe the run is done: each acceptance criterion mapped to its EVIDENCE (met or honestly not), known gaps, and deliberate non-goals. The sign-off card shows this beside the console's own facts (git diff, ledger, uncertainty) — an absent record renders as a visible omission. Not a gate: recording it does not complete the run; the operator does.",
+      "Record the completion justification when you believe the run is done: each requirement mapped to its EVIDENCE (met or honestly not), known gaps, and deliberate non-goals. With a governing requirement graph, criteria are REQUIREMENT IDS verified against the current revision; a legacy-spec run keeps freeform criterion strings. The sign-off card shows this beside the console's own facts (git diff, ledger, requirement tree, uncertainty) — an absent record renders as a visible omission. Not a gate: recording it does not complete the run; the operator does.",
       {
         criteria: z.array(z.object({
-          criterion: z.string().describe("An acceptance criterion, ideally quoting the spec"),
+          requirement: z.string().optional().describe("A requirement id from read_requirements (required when a requirement graph governs)"),
+          criterion: z.string().optional().describe("Freeform criterion text (legacy-spec runs only)"),
           met: z.boolean(),
           evidence: z.array(EvidenceRefSchema).default([]).describe("What proves it: artifacts, files, journal refs, commands"),
-        })).min(1).describe("At most 12 survive."),
+        })).min(1).describe("At most 12 survive. Each entry names either a requirement id or a criterion string."),
         knownGaps: z.array(z.string()).default([]).describe("What is not done or not verified, and you know it. At most 8 survive."),
         nonGoals: z.array(z.string()).default([]).describe("Deliberately out of scope (incl. declined opportunities). At most 8 survive."),
+        requirementsRevision: z.number().int().min(1).optional()
+          .describe("The approved REQUIREMENTS revision verified against. REQUIRED when a requirement graph governs — the completion predicate matches it against the current approved revision."),
         specRevision: z.number().int().min(1).optional()
-          .describe("The approved spec revision these criteria verify against. REQUIRED when a spec exists — the completion predicate matches it against the current approved revision."),
+          .describe("Legacy-spec runs only: the approved spec revision verified against."),
         note: z.string().optional(),
       },
-      async (args: { criteria: CompletionRecord["criteria"]; knownGaps: string[]; nonGoals: string[]; specRevision?: number; note?: string }) =>
+      async (args: { criteria: { requirement?: string; criterion?: string; met: boolean; evidence?: { kind: "file" | "journal" | "artifact" | "task" | "command" | "url"; ref: string; label?: string }[] }[];
+        knownGaps: string[]; nonGoals: string[]; requirementsRevision?: number; specRevision?: number; note?: string }) =>
         guarded(() => {
           // Fail loudly on a stale or missing revision — a record against a
-          // superseded spec would silently never satisfy the completion gate.
-          const approved = specs.latestApproved(userSessionId);
-          if (approved !== undefined) {
-            if (args.specRevision === undefined) {
-              throw new InvalidInputError(`a spec exists (approved rev ${approved.revision}); pass specRevision after verifying the criteria against it`);
+          // superseded document would silently never satisfy the completion
+          // predicate.
+          const governing = requirements.latestApproved(userSessionId);
+          if (governing !== undefined) {
+            if (args.requirementsRevision === undefined) {
+              throw new InvalidInputError(`a requirement graph governs (approved rev ${governing.revision}); pass requirementsRevision after verifying against it`);
             }
-            if (args.specRevision !== approved.revision) {
-              throw new InvalidInputError(`specRevision ${args.specRevision} is not the current approved revision ${approved.revision}; re-verify against the current spec`);
+            if (args.requirementsRevision !== governing.revision) {
+              throw new InvalidInputError(`requirementsRevision ${args.requirementsRevision} is not the current approved revision ${governing.revision}; re-verify against the current requirements`);
+            }
+            const live = new Map(requirements.derive(userSessionId).map((node) => [node.id, node]));
+            for (const entry of args.criteria) {
+              if (entry.requirement === undefined) {
+                throw new InvalidInputError("a requirement graph governs — every criteria entry must name a requirement id (read_requirements lists them)");
+              }
+              if (!live.has(entry.requirement)) {
+                throw new InvalidInputError(`unknown or retired requirement "${entry.requirement}" — read_requirements lists the live graph`);
+              }
+            }
+          } else {
+            const approved = specs.latestApproved(userSessionId);
+            if (approved !== undefined) {
+              if (args.specRevision === undefined) {
+                throw new InvalidInputError(`a spec exists (approved rev ${approved.revision}); pass specRevision after verifying the criteria against it`);
+              }
+              if (args.specRevision !== approved.revision) {
+                throw new InvalidInputError(`specRevision ${args.specRevision} is not the current approved revision ${approved.revision}; re-verify against the current spec`);
+              }
             }
           }
+          const statements = governing === undefined
+            ? new Map<string, string>()
+            : new Map(requirements.derive(userSessionId).map((node) => [node.id, node.statement]));
           const row = state.recordCompletion(userSessionId,
-            { criteria: args.criteria.slice(0, 12).map((entry) => ({ ...entry, criterion: clip(entry.criterion, 200), evidence: entry.evidence ?? [] })),
+            { criteria: args.criteria.slice(0, 12).map((entry) => ({
+                ...(entry.requirement === undefined ? {} : { requirement: entry.requirement,
+                  // The statement joins server-side so the sign-off card shows
+                  // text, not ids — and shows the statement AS VERIFIED.
+                  statement: clip(statements.get(entry.requirement) ?? "", 200) }),
+                ...(entry.criterion === undefined ? {} : { criterion: clip(entry.criterion, 200) }),
+                met: entry.met, evidence: entry.evidence ?? [] })),
               knownGaps: clipAll(args.knownGaps ?? [], 200, 8), nonGoals: clipAll(args.nonGoals ?? [], 200, 8),
+              ...(args.requirementsRevision === undefined ? {} : { requirementsRevision: args.requirementsRevision }),
               ...(args.specRevision === undefined ? {} : { specRevision: args.specRevision }) },
             args.note === undefined ? undefined : clip(args.note, 280));
           return { revision: row.revision, recorded: true };

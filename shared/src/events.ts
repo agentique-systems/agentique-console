@@ -208,8 +208,10 @@ export interface PlanProposedPayload {
   userSessionId: string;
   interactionId: string;
   plan: string;
-  /** Present when this card proposes a SPEC revision rather than a plan. */
+  /** Present when this card proposes a legacy SPEC revision rather than a plan. */
   spec?: { revision: number; changeNote?: string };
+  /** Present when this card proposes a REQUIREMENT revision (the canonical spec). */
+  requirements?: { revision: number; changeNote?: string; nodeCount: number };
 }
 export interface PlanResolvedPayload {
   userSessionId: string;
@@ -440,6 +442,57 @@ export interface SpecUpdatedPayload {
   edited: boolean;
 }
 
+/**
+ * A requirement revision was approved (possibly operator-edited); its graph
+ * now governs the run as the committed specification.
+ */
+export interface RequirementsUpdatedPayload {
+  userSessionId: string;
+  revision: number;
+  changeNote?: string;
+  edited: boolean;
+  nodeCount: number;
+  /** Requirement ids minted by this revision. */
+  added: string[];
+  /** Requirement ids retired by this revision. */
+  retired: string[];
+}
+
+/**
+ * A requirement's recorded status changed. Terminal statuses carry evidence;
+ * `verifiedBy: "console"` marks mechanical resets (statement amended, node
+ * retired), never a model's claim.
+ */
+export interface RequirementStatusChangedPayload {
+  userSessionId: string;
+  requirementId: string;
+  from: string;
+  to: string;
+  verifiedBy: "self" | "independent" | "operator" | "console";
+  /** "main", an agent name, "operator", or "console". */
+  actor: string;
+  agentSessionId?: string;
+  evidenceCount: number;
+  note?: string;
+}
+
+/** Refinement nodes were added below a committed (or delegated) requirement. */
+export interface RequirementDecomposedPayload {
+  userSessionId: string;
+  parentId: string;
+  addedIds: string[];
+  actor: string;
+  agentSessionId?: string;
+}
+
+/** Requirement ids were delegated to an agent session (its sub-scope). */
+export interface RequirementDelegatedPayload {
+  userSessionId: string;
+  agentSessionId: string;
+  requirementIds: string[];
+  source: "commission" | "assignment" | "child";
+}
+
 /** Main revised its working state (strategy/uncertainties/assumptions/risks/completion). */
 export interface StateUpdatedPayload {
   userSessionId: string;
@@ -586,6 +639,10 @@ export type ConsoleEvent = Base &
     | { type: "user_session.plan.proposed"; payload: PlanProposedPayload }
     | { type: "user_session.plan.resolved"; payload: PlanResolvedPayload }
     | { type: "user_session.spec.updated"; payload: SpecUpdatedPayload }
+    | { type: "user_session.requirements.updated"; payload: RequirementsUpdatedPayload }
+    | { type: "requirement.status.changed"; payload: RequirementStatusChangedPayload }
+    | { type: "requirement.decomposed"; payload: RequirementDecomposedPayload }
+    | { type: "requirement.delegated"; payload: RequirementDelegatedPayload }
     | { type: "user_session.state.updated"; payload: StateUpdatedPayload }
     | { type: "agent_session.created"; payload: AgentSessionCreatedPayload }
     | { type: "agent_session.termination.tripped"; payload: AgentSessionTerminationTrippedPayload }

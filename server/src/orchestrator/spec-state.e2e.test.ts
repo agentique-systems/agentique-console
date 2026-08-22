@@ -1,9 +1,10 @@
 /**
- * The living spec + orchestration state, end to end through the real MCP
- * handlers: propose_spec parks on an approval card and returns the operator's
- * EDITED text; update_orchestration_state / record_completion persist and
- * surface; why/expecting ride a commission's briefing into the recipient's
- * delivered prompt.
+ * The governing requirements + orchestration state, end to end through the
+ * real MCP handlers: propose_requirements parks on an approval card, the
+ * operator's EDITED outline becomes the governing revision with ids minted;
+ * update_orchestration_state / record_completion persist and surface;
+ * why/expecting ride a commission's briefing into the recipient's delivered
+ * prompt.
  */
 import { describe, expect, it } from "vitest";
 import { initMessage, sendHandoffUse, successMessage, textMessage, toolUseMessage } from "../sdk/fake.ts";
@@ -11,15 +12,15 @@ import { agentRoleOf, collectUntil, makeHarness } from "../test-helpers.ts";
 
 const settled = (event: { type: string }): boolean => event.type === "user_session.turn.settled";
 
-describe("living spec (fake SDK)", () => {
-  it("propose_spec parks on the card; the operator's edited text becomes the governing revision", async () => {
+describe("governing requirements (fake SDK)", () => {
+  it("propose_requirements parks on the card; the operator's edited outline governs with ids minted", async () => {
     const h = makeHarness(async function* () {
       yield initMessage();
-      yield toolUseMessage("spec-1", "mcp__console__propose_spec", {
-        document: "# Reading tracker\n\nGoals: track books.\n\n## Open uncertainties\n- storage",
-        changeNote: "initial spec",
+      yield toolUseMessage("req-1", "mcp__console__propose_requirements", {
+        document: "# Reading tracker\n\n## Context\nTrack books.\n\n## Requirements\n- Books can be added\n- Books can be listed",
+        changeNote: "initial requirements",
       });
-      yield textMessage("Spec settled.");
+      yield textMessage("Requirements settled.");
       yield successMessage();
     });
     const sessionId = h.addUserSession();
@@ -29,29 +30,32 @@ describe("living spec (fake SDK)", () => {
     await collectUntil(h.bus, (event) => event.type === "user_session.plan.proposed");
     const pending = h.interactions.listPending(sessionId);
     expect(pending).toHaveLength(1);
-    // The card is a plan_approval with the spec marker.
-    expect((pending[0] as { payload?: { spec?: { revision: number } } }).payload?.spec?.revision).toBe(1);
+    // The card is a plan_approval with the requirements marker.
+    expect((pending[0] as { payload?: { requirements?: { revision: number; nodeCount: number } } }).payload?.requirements)
+      .toMatchObject({ revision: 1, nodeCount: 2 });
     h.interactions.resolveFromApi(sessionId, pending[0]!.id, {
       decision: "approve",
-      editedDocument: "# Reading tracker (operator's cut)\n\nGoals: track books AND articles.",
+      editedDocument: "# Reading tracker\n\n## Requirements\n- Books can be added\n- Books AND articles can be listed",
     });
     await done;
 
-    const approved = h.app.specs.latestApproved(sessionId);
+    const approved = h.app.requirements.latestApproved(sessionId);
     expect(approved?.status).toBe("approved");
     expect(approved?.origin).toBe("operator_edited");
-    expect(approved?.document).toContain("operator's cut");
+    // The canonical document stores the operator's words WITH minted ids.
+    expect(approved?.document).toContain("- r1: Books can be added");
+    expect(approved?.document).toContain("- r2: Books AND articles can be listed");
     // The revision names the interaction that approved it.
     expect(approved?.interactionId).toBe(pending[0]!.id);
     // The digest that reaches every prompt carries the operator's words.
-    expect(h.app.specs.digest(sessionId)).toContain("articles");
-    // The tool result told main the text was edited and returned it verbatim.
+    expect(h.app.requirements.digest(sessionId)).toContain("articles");
+    // The tool result told main the text was edited and returned the canonical form.
     const toolResult = h.sqlite.prepare(
       "SELECT payload FROM events WHERE type = 'user_session.tool.completed'").all()
       .map((row) => JSON.stringify(row));
-    expect(toolResult.join(" ")).toContain("operator's cut");
-    const specEvents = h.sqlite.prepare("SELECT count(*) AS n FROM events WHERE type = 'user_session.spec.updated'").get() as { n: number };
-    expect(specEvents.n).toBe(1);
+    expect(toolResult.join(" ")).toContain("operator EDITED the requirements");
+    const updated = h.sqlite.prepare("SELECT count(*) AS n FROM events WHERE type = 'user_session.requirements.updated'").get() as { n: number };
+    expect(updated.n).toBe(1);
   });
 
   it("an amendment's tool result lists sessions still running against the old revision", async () => {
@@ -70,8 +74,10 @@ describe("living spec (fake SDK)", () => {
             extension: { kind: "coordination", data: {} },
           },
         });
-        yield toolUseMessage("spec-1", "mcp__console__propose_spec", { document: "# V1", changeNote: "initial" });
-        yield toolUseMessage("spec-2", "mcp__console__propose_spec", { document: "# V2", changeNote: "drop three.js" });
+        yield toolUseMessage("req-1", "mcp__console__propose_requirements", {
+          document: "## Requirements\n- It builds", changeNote: "initial" });
+        yield toolUseMessage("req-2", "mcp__console__propose_requirements", {
+          document: "## Requirements\n- r1: It builds\n- It renders without three.js", changeNote: "drop three.js" });
         yield successMessage();
       } else {
         yield successMessage();
@@ -82,7 +88,7 @@ describe("living spec (fake SDK)", () => {
     h.runner.postOperatorMessage(sessionId, "build");
     for (let card = 1; card <= 2; card += 1) {
       await collectUntil(h.bus, (event) => event.type === "user_session.plan.proposed"
-        && (event.payload as { spec?: { revision?: number } }).spec?.revision === card);
+        && (event.payload as { requirements?: { revision?: number } }).requirements?.revision === card);
       const pending = h.interactions.listPending(sessionId);
       h.interactions.resolveFromApi(sessionId, pending[0]!.id, { decision: "approve" });
     }
@@ -99,12 +105,17 @@ describe("living spec (fake SDK)", () => {
     // against an older revision.
     const initial = results.find((payload) => payload.includes("Approved as proposed") && !payload.includes("runningSessions"));
     expect(initial).toBeDefined();
+    // The amendment kept r1 and minted r2 for the new line.
+    expect(h.app.requirements.derive(sessionId).map((node) => node.id)).toEqual(["r1", "r2"]);
   });
 
-  it("a rejected spec stays non-governing and the tool reports the operator's words", async () => {
+  it("a rejected proposal stays non-governing and a malformed outline fails with line errors", async () => {
     const h = makeHarness(async function* () {
       yield initMessage();
-      yield toolUseMessage("spec-1", "mcp__console__propose_spec", { document: "# V1", changeNote: "initial" });
+      yield toolUseMessage("bad-1", "mcp__console__propose_requirements", {
+        document: "just prose, no outline", changeNote: "oops" });
+      yield toolUseMessage("req-1", "mcp__console__propose_requirements", {
+        document: "## Requirements\n- It works", changeNote: "initial" });
       yield successMessage();
     });
     const sessionId = h.addUserSession();
@@ -114,8 +125,14 @@ describe("living spec (fake SDK)", () => {
     const pending = h.interactions.listPending(sessionId);
     h.interactions.resolveFromApi(sessionId, pending[0]!.id, { decision: "reject", note: "too thin — name acceptance criteria" });
     await done;
-    expect(h.app.specs.latestApproved(sessionId)).toBeUndefined();
-    expect(h.app.specs.digest(sessionId)).toBe("");
+    expect(h.app.requirements.latestApproved(sessionId)).toBeUndefined();
+    expect(h.app.requirements.digest(sessionId)).toBe("");
+    // The malformed proposal never reached a card — its tool result carries
+    // the parse errors for main to fix.
+    const results = h.sqlite.prepare(
+      "SELECT payload FROM events WHERE type = 'user_session.tool.completed'").all()
+      .map((row) => String((row as { payload: string }).payload));
+    expect(results.find((payload) => payload.includes("not a valid requirement outline"))).toBeDefined();
   });
 });
 

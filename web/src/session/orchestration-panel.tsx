@@ -6,7 +6,7 @@
  * deliberately not a debugging dashboard: no handoff bodies, no event lists.
  */
 import { useState } from "react";
-import { useOrchestration, useSpec } from "@/api/queries";
+import { useOrchestration, useRequirements, useSpec } from "@/api/queries";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 
@@ -42,6 +42,15 @@ function CommissionRow({ row }: { row: CommissionSummary }) {
           <span className="text-3xs text-muted-foreground">steered ×{row.steering.count}</span>
         )}
       </div>
+      {row.requirements.length > 0 && (
+        <div className="mt-1 flex flex-wrap gap-1">
+          {row.requirements.map((requirement) => (
+            <Badge key={requirement.id} variant="outline" className="text-3xs" title={requirement.statement}>
+              {requirement.id}
+            </Badge>
+          ))}
+        </div>
+      )}
       {row.commission !== null ? (
         <div className="mt-1 space-y-0.5 text-2xs text-muted-foreground">
           <div>{row.commission.action}</div>
@@ -68,18 +77,33 @@ function CommissionRow({ row }: { row: CommissionSummary }) {
 
 export function OrchestrationPanel({ userSessionId }: { userSessionId: string }) {
   const spec = useSpec(userSessionId);
+  const requirements = useRequirements(userSessionId);
   const orchestration = useOrchestration(userSessionId);
   const [showRevisions, setShowRevisions] = useState(false);
   const approved = spec.data?.approved ?? null;
+  const governing = requirements.data?.approved ?? null;
+  const nodes = requirements.data?.nodes ?? [];
   const current = orchestration.data?.current ?? null;
   const commissions = orchestration.data?.commissions ?? [];
 
   return (
     <div className="min-h-0 space-y-4 overflow-y-auto p-4">
+      {governing !== null ? (
+        <section>
+          <h3 className="text-2xs font-medium uppercase text-muted-foreground">Requirements</h3>
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-2xs">
+            <Badge variant="outline" className="text-3xs">rev {governing.revision}</Badge>
+            {governing.origin === "operator_edited" && <Badge variant="outline" className="text-3xs">operator-edited</Badge>}
+            <span className="text-muted-foreground">
+              {nodes.filter((node) => node.derivedStatus === "satisfied").length}/{nodes.length} satisfied — the requirements tab has the tree
+            </span>
+          </div>
+        </section>
+      ) : (
       <section>
         <h3 className="text-2xs font-medium uppercase text-muted-foreground">Specification</h3>
         {approved === null ? (
-          <p className="mt-1 text-2xs text-muted-foreground">No approved specification — the run is governed by the conversation.</p>
+          <p className="mt-1 text-2xs text-muted-foreground">No approved requirements — the run is governed by the conversation.</p>
         ) : (
           <div className="mt-1 text-2xs">
             <div className="flex flex-wrap items-center gap-2">
@@ -104,6 +128,7 @@ export function OrchestrationPanel({ userSessionId }: { userSessionId: string })
           </div>
         )}
       </section>
+      )}
 
       <section>
         <h3 className="text-2xs font-medium uppercase text-muted-foreground">Working state</h3>

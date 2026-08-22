@@ -13,6 +13,8 @@
  *   only by scenarios whose stakes warrant it, and there is deliberately no
  *   "reviewer count" metric anywhere.
  */
+import { flattenRequirementGraph, parseRequirementsDocument } from "@agentique-console/shared";
+
 import type { Ev, EvPredicate, HandoffRow, Trace } from "./trace.ts";
 import type { CheckResult, DimensionId, TraceCheck } from "./scenario.ts";
 
@@ -194,6 +196,118 @@ export function commissionedIndependentReviewBeforeCompletion(): TraceCheck {
 }
 
 /**
+ * Delegation traceability, the requirement-graph edition: once a requirement
+ * revision governs, every commissioned session names the open requirement(s)
+ * it serves — a requirement.delegated join precedes its agent_session.created,
+ * and the delegated ids were OPEN at delegation time. Statuses are replayed
+ * from the journal (status changes, decompositions, retirements, and the
+ * console's statement-reset at amendments, reconstructed by diffing the
+ * canonical revision documents). Passes with detail on a pre-graph trace, so
+ * legacy scenarios stay valid.
+ */
+export function commissionsReferenceOpenRequirements(): TraceCheck {
+  return {
+    id: "commissions-reference-open-requirements",
+    dimension: "delegation",
+    description: "every commission after requirements approval named open requirement ids",
+    run(trace) {
+      const firstApproval = trace.first("user_session.requirements.updated");
+      if (firstApproval === undefined) return pass("no requirement revision governs — nothing to trace");
+      // Canonical (fully id-tagged) documents by revision, for statement-reset replay.
+      const flatDocs = new Map<number, { id: string | null; statement: string }[]>();
+      for (const row of trace.requirementRevisions()) {
+        if (!["approved", "superseded"].includes(row.status)) continue;
+        const parsed = parseRequirementsDocument(row.document);
+        if (parsed.ok) flatDocs.set(row.revision, flattenRequirementGraph(parsed.graph));
+      }
+      const status = new Map<string, string>();
+      const statements = new Map<string, string>();
+      const delegatedSessions = new Set<string>();
+      const problems: { detail: string; event: Ev }[] = [];
+      for (const event of trace.events()) {
+        if (event.type === "user_session.requirements.updated") {
+          const payload = event.payload as { revision?: number; added?: string[]; retired?: string[] };
+          for (const id of payload.added ?? []) status.set(id, "open");
+          for (const id of payload.retired ?? []) status.set(id, "retired");
+          for (const node of flatDocs.get(payload.revision ?? -1) ?? []) {
+            if (node.id === null) continue;
+            const prior = statements.get(node.id);
+            // A changed statement resets status to open (the old evidence
+            // attested to different words) — journaled store-side, replayed
+            // here from the document diff.
+            if (prior !== undefined && prior !== node.statement) status.set(node.id, "open");
+            statements.set(node.id, node.statement);
+            if (!status.has(node.id)) status.set(node.id, "open");
+          }
+        } else if (event.type === "requirement.decomposed") {
+          for (const id of (event.payload as { addedIds?: string[] }).addedIds ?? []) status.set(id, "open");
+        } else if (event.type === "requirement.status.changed") {
+          const payload = event.payload as { requirementId?: string; to?: string };
+          if (typeof payload.requirementId === "string") status.set(payload.requirementId, String(payload.to ?? "open"));
+        } else if (event.type === "requirement.delegated") {
+          const payload = event.payload as { agentSessionId?: string; requirementIds?: string[] };
+          if (typeof payload.agentSessionId === "string") delegatedSessions.add(payload.agentSessionId);
+          const closed = (payload.requirementIds ?? []).filter((id) => (status.get(id) ?? "open") !== "open");
+          if (closed.length > 0) {
+            problems.push({ detail: `delegation to ${String(payload.agentSessionId)} names non-open requirement(s) ${closed.join(", ")}`, event });
+          }
+        } else if (event.type === "agent_session.created" && event.seq > firstApproval.seq) {
+          const id = (event.payload.session as { id?: unknown } | undefined)?.id;
+          if (typeof id === "string" && !delegatedSessions.has(id)) {
+            problems.push({ detail: `session ${id} commissioned with no requirement refs`, event });
+          }
+        }
+      }
+      return problems.length === 0
+        ? pass("every commission traced to open requirements", [firstApproval])
+        : fail(problems.map((problem) => problem.detail).join("; "), problems.map((problem) => problem.event));
+    },
+  };
+}
+
+/**
+ * Requirement claims carry their proof: every terminal status change
+ * (satisfied / violated / infeasible) claimed by a model carries at least one
+ * evidence ref. Operator changes are evidence-optional by design (their word
+ * IS the gate) and console resets are mechanical, so both are exempt. With
+ * `requireIndependentSatisfied`, the scenario additionally asserts at least
+ * one satisfied claim came from independent verification — selected per
+ * scenario exactly like commissionedIndependentReview, never a count metric.
+ */
+export function statusChangesCarryEvidence(opts: { requireIndependentSatisfied?: boolean } = {}): TraceCheck {
+  return {
+    id: "status-changes-carry-evidence",
+    dimension: "verification-independence",
+    description: opts.requireIndependentSatisfied === true
+      ? "terminal requirement claims carry evidence; at least one satisfied independently"
+      : "terminal requirement claims carry evidence",
+    run(trace) {
+      const terminal = trace.events("requirement.status.changed", (payload) =>
+        ["satisfied", "violated", "infeasible"].includes(String(payload.to ?? "")));
+      const bare = terminal.filter((event) =>
+        !["operator", "console"].includes(String(event.payload.verifiedBy ?? "")) &&
+        Number(event.payload.evidenceCount ?? 0) < 1);
+      if (bare.length > 0) {
+        return fail(
+          bare.map((event) => `${String(event.payload.requirementId)} → ${String(event.payload.to)} with no evidence`).join("; "),
+          bare,
+        );
+      }
+      if (opts.requireIndependentSatisfied === true) {
+        const independent = terminal.filter((event) =>
+          event.payload.to === "satisfied" && event.payload.verifiedBy === "independent");
+        return independent.length > 0
+          ? pass(`terminal claims carry evidence; ${independent.length} satisfied independently`, independent.slice(0, 3))
+          : fail("no requirement was independently verified satisfied — every claim is the maker's own", terminal.slice(0, 3));
+      }
+      return terminal.length === 0
+        ? pass("no terminal requirement claims in the trace")
+        : pass(`${terminal.length} terminal claim(s), each carrying evidence`);
+    },
+  };
+}
+
+/**
  * Main acted on a liveness alarm within `events` bus events — and acted on
  * THE ALARMED SESSION: the reacting tool call's input must name the alarm's
  * agentSessionId (and, for interrupt_agent, its agent). Inspecting or
@@ -247,6 +361,14 @@ export function respondedToEvidence(marker: EvPredicate, label = "the discovery"
         .filter((event) => event.seq > at.seq)
         .filter((event) =>
           event.type === "user_session.spec.updated" ||
+          event.type === "user_session.requirements.updated" ||
+          // A status change is a plan response only from MAIN or the operator,
+          // or on the marker's own session — a random seat's routine
+          // report_requirement is progress chatter, not a response to this
+          // evidence (the doctrine above: acts elsewhere don't count).
+          (event.type === "requirement.status.changed" &&
+            (["main", "operator"].includes(String((event.payload as { actor?: unknown }).actor ?? "")) ||
+              (sessionId !== null && (event.payload as { agentSessionId?: unknown }).agentSessionId === sessionId))) ||
           event.type === "user_session.question.asked" ||
           event.type === "agent_session.created" ||
           (sessionId !== null && (toolTargets(event, sessionId) || taskTargets(event, sessionId))));
@@ -329,6 +451,7 @@ export function evidenceConsumed(): TraceCheck {
         for (const event of events) {
           if (event.seq <= firstReport.seq!) continue;
           const runLevel = event.type === "user_session.spec.updated" ||
+            event.type === "user_session.requirements.updated" ||
             event.type === "user_session.question.asked" ||
             event.type === "agent_session.created" ||
             (event.type === "run.completion.proposed" && completionRecordedAt !== undefined && completionRecordedAt < event.seq);
@@ -516,6 +639,7 @@ export function notSignedOffAfter(objection: EvPredicate, label = "the reviewer'
         .events()
         .some((event) => event.seq > at.seq && event.seq < accepted.seq &&
           (event.type === "user_session.spec.updated" ||
+           event.type === "user_session.requirements.updated" ||
            event.type === "task.created" ||
            event.type === "agent_session.created" ||
            event.type === "user_session.question.asked" ||

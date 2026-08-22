@@ -63,7 +63,7 @@ const HUB_CONTRACT: TopologyContract = {
   roles: {
     coordinator: {
       replicable: false, min: 1, max: 1,
-      grants: ["tasks_write", "forward_message", "child_sessions"],
+      grants: ["tasks_write", "forward_message", "child_sessions", "requirements_report"],
       escalateTo: "main",
     },
     specialist: { replicable: false, min: 1, max: 20, grants: [], escalateTo: "coordinator" },

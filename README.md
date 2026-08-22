@@ -8,6 +8,19 @@ single npm-workspaces application backed by SQLite and the Claude Agent SDK.
 - A **Workspace** is a local directory.
 - A **UserSession** is the Human Operator's conversation with the main
   Orchestrator.
+- **The requirement graph is the committed specification.** Main proposes an
+  outline of declarative requirement statements (`propose_requirements`); the
+  operator edits it in place and approves; the Console mints stable ids
+  (`r1`, `r2`, …) and derives every parent's status mechanically from its
+  children (`all`/`any` composition). Statuses are semantic — open,
+  satisfied, violated, infeasible, retired — never numeric; a terminal status
+  is a journaled claim carrying evidence and who verified it (self /
+  independent / operator). Commissions name the requirement ids they serve
+  and seats report or decompose only within those delegated subtrees; the
+  run verdict can be `infeasible`, with evidence. Amendments supersede
+  revisions while unchanged statements keep their status; refinement below a
+  committed node needs no approval, changed meaning does.
+  `docs/requirements.md` has the full model.
 - An **AgentSession** is a Console-managed team of named agents running an
   **orchestration pattern**. Each agent has its own resumable provider session
   and a snapshotted agent profile. Idle agents park (process closed, resume
@@ -58,7 +71,8 @@ single npm-workspaces application backed by SQLite and the Claude Agent SDK.
   state to the provider session, which dies at every context rotation.
 - The task ledger is console-owned (`task_list`/`task_create`/`task_update`),
   keyed to the AgentSession so it survives rotation and every agent reads the
-  same list. An assignment whose task still has incomplete dependencies is
+  same list; a task may name the requirement it discharges.
+  An assignment whose task still has incomplete dependencies is
   scheduled rather than delivered, and dispatches the moment its last blocker
   completes. Main wakes itself later with the console-owned `set_deadline`
   (the native cron and wakeup tools are denied). In-process subagents
@@ -78,10 +92,15 @@ can send a closing message.
 
 ## Agent profiles
 
-Immutable built-ins are `coordinator`, `explorer`, `implementer`,
+Immutable built-ins are `coordinator`, `explorer`, `planner`, `implementer`,
 `frontend-implementer`, `reviewer`, `visual-reviewer`, and `researcher`.
 Profiles define purpose, instructions, exact tools, permission mode, model and
-effort overrides, turn limit, and any MCP servers its agents get.
+effort overrides, turn limit, and any MCP servers its agents get. Every
+profile declares a **role archetype** — `orchestrator`, `explorer`,
+`planner`, `implementer`, or `reviewer` — naming the kind of progress the
+seat produces (main is the run-level orchestrator); minted variants inherit
+their base's role, and reviewer-archetype seats are the ones whose reports
+warrant the `independent` verification tier.
 
 Every lane sees the workspace as an interactive Claude Code session would: the
 CLI's user, project and local settings load (CLAUDE.md, permissions, skills,
@@ -212,6 +231,7 @@ npm run import-legacy --workspace server -- /path/to/session.jsonl [session-id] 
 shared/  domain, REST, and event contracts
 server/
   orchestrator/runner.ts       serialized main turns + coalesced material wakes
+  orchestrator/requirements.ts the requirement graph: revisions, statuses, delegations
   agent-sessions/service.ts    managed participants, strict routing, mailbox
   agent-profiles/registry.ts   immutable built-ins + trusted workspace bundles
   events/bus.ts                replayable event journal + artifacts

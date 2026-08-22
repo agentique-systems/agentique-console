@@ -1,9 +1,40 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { isOrchestratorModel } from "@agentique-console/shared";
+import { isOrchestratorModel, type EvidenceRef, type RequirementRevisionWire } from "@agentique-console/shared";
 import type { AppContext } from "../../context.ts";
+import type { RequirementRevisionRow } from "../../db/stores/requirement-store.ts";
 import { InvalidInputError } from "../../errors.ts";
 import { buildCommissions } from "../../orchestrator/commissions.ts";
+import { flattenRequirementGraph, type RequirementGraph } from "@agentique-console/shared";
+
+function toRequirementRevisionWire(row: RequirementRevisionRow): RequirementRevisionWire {
+  return {
+    id: row.id,
+    revision: row.revision,
+    document: row.document,
+    changeNote: row.changeNote,
+    status: row.status,
+    origin: row.origin,
+    interactionId: row.interactionId,
+    nodeCount: flattenRequirementGraph(row.graph as unknown as RequirementGraph).length,
+    createdAt: row.createdAt,
+    approvedAt: row.approvedAt,
+  };
+}
+
+function mapOrNull<T, U>(value: T | undefined, map: (value: T) => U): U | null {
+  return value === undefined ? null : map(value);
+}
+
+const RequirementStatusBody = z.object({
+  status: z.enum(["open", "satisfied", "violated", "infeasible"]),
+  evidence: z.array(z.object({
+    kind: z.enum(["file", "journal", "artifact", "task", "command", "url"]),
+    ref: z.string().min(1),
+    label: z.string().optional(),
+  })).optional(),
+  note: z.string().optional(),
+});
 
 /**
  * Constrained to the offered list rather than accepting any string: an id with
@@ -149,6 +180,41 @@ export function registerUserSessionRoutes(
     }),
   );
 
+  // The requirement graph: committed revisions, live nodes with derived
+  // statuses, and the open-requirements frontier — the canonical spec.
+  app.get<{ Params: { id: string } }>(
+    "/api/user-sessions/:id/requirements",
+    async (request) => {
+      const userSessionId = request.params.id;
+      return {
+        revisions: ctx.app.requirements.listRevisions(userSessionId).map(toRequirementRevisionWire),
+        approved: mapOrNull(ctx.app.requirements.latestApproved(userSessionId), toRequirementRevisionWire),
+        nodes: ctx.app.requirements.derive(userSessionId),
+        frontier: ctx.app.requirements.frontier(userSessionId),
+      };
+    },
+  );
+
+  // The operator's own verdict on one requirement. Evidence is optional for
+  // the operator alone — their word IS the gate, recorded as verifiedBy
+  // "operator".
+  app.post<{ Params: { id: string; requirementId: string } }>(
+    "/api/user-sessions/:id/requirements/:requirementId/status",
+    async (request) => {
+      const parsed = RequirementStatusBody.safeParse(request.body);
+      if (!parsed.success) throw new InvalidInputError(parsed.error.message);
+      return ctx.app.requirements.reportStatus({
+        userSessionId: request.params.id,
+        requirementId: request.params.requirementId,
+        to: parsed.data.status,
+        evidence: (parsed.data.evidence ?? []) as EvidenceRef[],
+        verifiedBy: "operator",
+        actor: "operator",
+        ...(parsed.data.note === undefined ? {} : { note: parsed.data.note }),
+      });
+    },
+  );
+
   // The orchestration state: current working state, its history, and every
   // commission joined to its rationale and outcome — the review surface that
   // distinguishes good orchestration from lucky outcomes. Joins are by
@@ -160,16 +226,39 @@ export function registerUserSessionRoutes(
       return {
         current: ctx.app.orchestrationState.current(userSessionId) ?? null,
         revisions: ctx.app.orchestrationState.history(userSessionId),
-        commissions: buildCommissions({ repo: ctx.app.repo, statusOf: (row) => ctx.app.host.statusOf(row) }, userSessionId),
+        commissions: buildCommissions({
+          repo: ctx.app.repo,
+          statusOf: (row) => ctx.app.host.statusOf(row),
+          delegatedRequirements: (agentSessionId) => {
+            const statements = new Map(ctx.app.requirements.derive(userSessionId).map((node) => [node.id, node.statement]));
+            return ctx.app.requirements.delegationSet(agentSessionId)
+              .map((id) => ({ id, statement: statements.get(id) ?? "" }));
+          },
+        }, userSessionId),
       };
     },
   );
 
   app.post<{ Params: { id: string; interactionId: string } }>(
     "/api/user-sessions/:id/interactions/:interactionId",
-    async (request) => {
+    async (request, reply) => {
       const parsed = ResolveBody.safeParse(request.body);
       if (!parsed.success) throw new InvalidInputError(parsed.error.message);
+      // Requirement-marked approvals validate the operator's edited outline
+      // BEFORE resolving: a parse failure returns the structured line errors
+      // and leaves the card pending, so a bad edit can never eat an approval.
+      if ("editedDocument" in parsed.data && parsed.data.editedDocument !== undefined && parsed.data.decision === "approve") {
+        const interaction = ctx.app.interactions.get(request.params.interactionId);
+        if ("requirements" in interaction.payload) {
+          const validated = ctx.app.requirements.validateDocument(request.params.id, parsed.data.editedDocument);
+          if (!validated.ok) {
+            return reply.status(400).send({
+              error: { code: "invalid_requirements", message: "the edited document does not parse as a requirement outline" },
+              errors: validated.errors,
+            });
+          }
+        }
+      }
       return ctx.app.interactions.resolveAndRoute(
         request.params.id,
         request.params.interactionId,

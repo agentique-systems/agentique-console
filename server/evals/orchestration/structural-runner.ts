@@ -51,7 +51,10 @@ function armOperator(harness: Harness, userSessionId: string, steps: OperatorSte
         if ("afterEvent" in step) return step.afterEvent(event as unknown as Ev);
         if ("onProposal" in step) {
           if (event.type === "user_session.plan.proposed") {
-            const isSpec = (event.payload as { spec?: unknown }).spec !== undefined;
+            // "spec" matches whichever governing-document card the run uses —
+            // the requirement graph or the legacy markdown spec.
+            const isSpec = (event.payload as { spec?: unknown; requirements?: unknown }).spec !== undefined
+              || (event.payload as { requirements?: unknown }).requirements !== undefined;
             return step.kind === undefined || (step.kind === "spec" && isSpec);
           }
           if (event.type === "run.completion.proposed") {
@@ -78,8 +81,8 @@ function armOperator(harness: Harness, userSessionId: string, steps: OperatorSte
           harness.runner.postOperatorMessage(userSessionId, step.say);
         } else if ("onProposal" in step) {
           if (event.type === "user_session.plan.proposed") {
-            // The spec/plan card: resolve the parked interaction (the same
-            // path the API takes; propose_spec unblocks on it).
+            // The requirements/plan card: resolve the parked interaction (the
+            // same path the API takes; propose_requirements unblocks on it).
             const interactionId = (event.payload as { interactionId?: string }).interactionId;
             const pending = harness.interactions.listPending(userSessionId);
             const row = pending.find((entry) => entry.id === interactionId)

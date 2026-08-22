@@ -10,6 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { exportEvidencePackets, exportRunToDir } from "./live/export-trace.ts";
+import requirementTraceability from "./scenarios/requirement-traceability.ts";
 import reviewerInvalidatesSpec from "./scenarios/reviewer-invalidates-spec.ts";
 import vagueGreenfield from "./scenarios/vague-greenfield.ts";
 import { runScenarioVariant } from "./structural-runner.ts";
@@ -27,7 +28,7 @@ async function exportVariant(scenario: Parameters<typeof runScenarioVariant>[0],
 describe("decision-time evidence export", () => {
   it("packets reconstruct what was knowable at each major act", { timeout: 30_000 }, async () => {
     const { dbFile, out } = await exportVariant(reviewerInvalidatesSpec, "exemplary");
-    for (const file of ["events.jsonl", "state-revisions.json", "spec-revisions.json", "decisions.json", "questions.json", "tool-calls.json", "evidence/packets.json"]) {
+    for (const file of ["events.jsonl", "state-revisions.json", "spec-revisions.json", "requirement-revisions.json", "decisions.json", "questions.json", "tool-calls.json", "evidence/packets.json"]) {
       expect(fs.existsSync(path.join(out, file)), `${file} missing`).toBe(true);
     }
     const packets = exportEvidencePackets(dbFile);
@@ -35,22 +36,34 @@ describe("decision-time evidence export", () => {
     expect(created).toBeDefined();
     // The amendment act: by rev 2 the objection is inbound evidence, the
     // reviewer's output is a finding, and the rev-1 approval is a decision.
-    const amendment = packets.filter((packet) => packet.actType === "user_session.spec.updated").at(-1)!;
+    const amendment = packets.filter((packet) => packet.actType === "user_session.requirements.updated").at(-1)!;
     expect(amendment.specRevisionAtAct).toBe(2);
-    expect(amendment.decisionsAtAct.some((decision) => decision.question.includes("Specification approval (rev 1)"))).toBe(true);
+    expect(amendment.decisionsAtAct.some((decision) => decision.question.includes("Requirements approval (rev 1)"))).toBe(true);
     expect(amendment.inboundEvidence.some((row) => row.summary.includes("unachievable as specified"))).toBe(true);
     expect(amendment.reviewFindings.length).toBeGreaterThan(0);
     // The spine really is the full journal, seq-ordered.
     const spine = fs.readFileSync(path.join(out, "events.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line) as { seq: number });
     expect(spine.length).toBeGreaterThan(50);
     expect(spine.every((event, index) => index === 0 || event.seq > spine[index - 1]!.seq)).toBe(true);
-    // Spec revisions export with their full documents.
-    const specs = JSON.parse(fs.readFileSync(path.join(out, "spec-revisions.json"), "utf8")) as { revision: number; status: string }[];
-    expect(specs.map((row) => row.status)).toContain("superseded");
+    // Requirement revisions export with their full canonical documents.
+    const revisions = JSON.parse(fs.readFileSync(path.join(out, "requirement-revisions.json"), "utf8")) as { revision: number; status: string; document: string }[];
+    expect(revisions.map((row) => row.status)).toContain("superseded");
+    expect(revisions.at(-1)?.document).toContain("- r1:");
     const transcript = fs.readFileSync(path.join(out, "transcript.md"), "utf8");
-    expect(transcript).toContain("[tool] main → mcp__console__propose_spec");
-    expect(transcript).toContain("[spec] revision 2 approved");
-    expect(transcript).toContain("[operator decision] Specification approval (rev 1)");
+    expect(transcript).toContain("[tool] main → mcp__console__propose_requirements");
+    expect(transcript).toContain("[requirements] revision 2 approved");
+    expect(transcript).toContain("[operator decision] Requirements approval (rev 1)");
+  });
+
+  // Review regression: the delegation and verification-independence rubrics
+  // cite delegated ids and verification tiers — seat reports live only in the
+  // agent lane, so the requirement events must reach the judge's transcript.
+  it("the transcript renders requirement claims and delegations for the judges", { timeout: 30_000 }, async () => {
+    const { out } = await exportVariant(requirementTraceability, "exemplary");
+    const transcript = fs.readFileSync(path.join(out, "transcript.md"), "utf8");
+    expect(transcript).toContain("[requirement] delegated r1, r2 → session");
+    expect(transcript).toContain("(commission)");
+    expect(transcript).toContain("[requirement] r1 open → satisfied (independent, 1 evidence) by main");
   });
 
   it("the transcript shows question cards with their decisions", { timeout: 30_000 }, async () => {
