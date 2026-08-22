@@ -32,12 +32,14 @@ const VERDICT_LABEL: Record<RunSummaryStats["verdict"], string> = {
   completed: "completed",
   completed_with_caveats: "completed with caveats",
   failed: "failed",
+  infeasible: "infeasible",
 };
 
 const VERDICT_TONE: Record<RunSummaryStats["verdict"], string> = {
   completed: "text-status-completed",
   completed_with_caveats: "text-status-waiting",
   failed: "text-status-failed",
+  infeasible: "text-status-failed",
 };
 
 function formatDuration(ms: number): string {

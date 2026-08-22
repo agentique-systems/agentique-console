@@ -250,9 +250,27 @@ export interface RunSummaryDocument {
   resources: { reapedSeats: number; detail: string[] };
   justification: {
     revision: number;
-    criteria: { criterion: string; met: boolean; evidence: { kind: string; ref: string }[] }[];
+    criteria: {
+      /** Requirement id + statement (requirement-keyed records). */
+      requirement?: string;
+      statement?: string;
+      /** Pre-graph records: the freeform criterion string. */
+      criterion?: string;
+      met: boolean;
+      evidence: { kind: string; ref: string }[];
+    }[];
     knownGaps: string[];
     nonGoals: string[];
+  } | null;
+  /**
+   * Snapshot of the requirement graph at proposal time: status counts and the
+   * rendered status outline. Persisted with the summary so a later amendment
+   * never rewrites an old report. Null for pre-graph runs.
+   */
+  requirements: {
+    revision: number;
+    counts: Record<import("./requirements.ts").RequirementStatus, number>;
+    outline: string;
   } | null;
   friction: { apiRetries: number; rateLimited: number; failedTurns: number; watchdogTrips: number; capacityPauses: number };
 }
@@ -285,6 +303,39 @@ export interface SpecRevisionWire {
 export interface GetSpecResponse {
   revisions: SpecRevisionWire[];
   approved: SpecRevisionWire | null;
+}
+
+// GET /api/user-sessions/:id/requirements — the committed requirement graph
+// (canonical specification) plus its live state.
+export interface RequirementRevisionWire {
+  id: string;
+  revision: number;
+  /** Canonical committed outline (renderCommitted output). */
+  document: string;
+  changeNote: string | null;
+  status: "draft" | "approved" | "superseded" | "rejected";
+  origin: "main" | "operator_edited";
+  interactionId: string | null;
+  nodeCount: number;
+  createdAt: string;
+  approvedAt: string | null;
+}
+export interface GetRequirementsResponse {
+  revisions: RequirementRevisionWire[];
+  approved: RequirementRevisionWire | null;
+  /** Live nodes (committed + refinement) with recorded and derived statuses. */
+  nodes: import("./domain.ts").RequirementNodeWire[];
+  /** Open requirements whose resolution still affects the root, annotated. */
+  frontier: import("./domain.ts").RequirementFrontierEntry[];
+}
+
+// POST /api/user-sessions/:id/requirements/:requirementId/status — the
+// operator's own verdict on one requirement. Evidence is optional for the
+// operator alone: their word IS the gate, and it is recorded as such.
+export interface OperatorRequirementStatusBody {
+  status: "open" | "satisfied" | "violated" | "infeasible";
+  evidence?: { kind: string; ref: string; label?: string }[];
+  note?: string;
 }
 
 // GET /api/user-sessions/:id/orchestration — the review surface: working

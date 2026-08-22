@@ -74,7 +74,7 @@ export interface SystemPauseState {
  */
 export interface RunSummaryStats {
   headline: string;
-  verdict: "completed" | "completed_with_caveats" | "failed";
+  verdict: "completed" | "completed_with_caveats" | "failed" | "infeasible";
   filesChanged: number;
   tasks: { completed: number; total: number };
   durationMs: number;
@@ -237,6 +237,8 @@ export interface AgentProfileSummary {
   id: string;
   title: string;
   purpose: string;
+  /** Role archetype; null for profiles authored before archetypes existed. */
+  role: AgentProfileRole | null;
   source: "builtin" | "workspace";
   revision: string;
   trusted: boolean;
@@ -245,6 +247,15 @@ export interface AgentProfileSummary {
   skills: string[];
   componentCounts: Record<string, number>;
 }
+
+/**
+ * The five role archetypes. A profile's archetype names what kind of operator
+ * it is — an orchestrator decomposes and integrates, an explorer produces
+ * knowledge, a planner produces strategy, an implementer changes the artifact,
+ * a reviewer produces verification evidence. Main is the run-level
+ * orchestrator archetype.
+ */
+export type AgentProfileRole = "orchestrator" | "explorer" | "planner" | "implementer" | "reviewer";
 
 export interface AgentProfileComponent {
   kind: "prompt" | "skill" | "hook" | "mcp" | "agent" | "command" | "monitor" | "settings" | "other";
@@ -350,6 +361,50 @@ export interface Interaction {
   response: Record<string, unknown> | null;
   createdAt: string;
   resolvedAt: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Requirement graph wire shapes. The graph itself (nodes, parser, renderers)
+// lives in ./requirements.ts; these are the REST/event projections.
+
+/**
+ * One live requirement node as the API serves it. `status` is the node's own
+ * recorded status; `derivedStatus` is the console's mechanical roll-up over
+ * live children (equal to `status` on a leaf).
+ */
+export interface RequirementNodeWire {
+  id: string;
+  parentId: string | null;
+  ord: number;
+  statement: string;
+  composition: import("./requirements.ts").RequirementComposition;
+  status: import("./requirements.ts").RequirementStatus;
+  derivedStatus: import("./requirements.ts").RequirementStatus;
+  /** "committed" = part of an approved revision; "refinement" = decomposed below a delegated node during the run. */
+  origin: "committed" | "refinement";
+  introducedInRevision: number;
+  retiredInRevision: number | null;
+  /** Session that authored a refinement node; null for committed nodes. */
+  refinedByAgentSessionId: string | null;
+  /** Open agent sessions currently delegated this node. */
+  delegatedTo: string[];
+  /** The most recent status change, for verification chips. */
+  latestChange: {
+    status: import("./requirements.ts").RequirementStatus;
+    verifiedBy: import("./requirements.ts").RequirementVerifiedBy;
+    actor: string;
+    evidenceCount: number;
+    at: string;
+  } | null;
+}
+
+/** Why an open requirement is still open — derived from console-owned facts. */
+export type RequirementFrontierAnnotation = "in_progress" | "blocked" | "awaiting_operator" | "unassigned";
+
+export interface RequirementFrontierEntry {
+  requirementId: string;
+  statement: string;
+  annotations: RequirementFrontierAnnotation[];
 }
 
 /** Orchestration-pattern catalog ids — the create-session wire vocabulary. */
