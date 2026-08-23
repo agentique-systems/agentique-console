@@ -11,6 +11,29 @@ export interface SessionTreeSource {
   listChildSessions(parentAgentSessionId: string): AgentSessionRow[];
 }
 
+/**
+ * The given session and every descendant — NO walk to the true root. The
+ * commission-budget spend needs exactly this set: billing from the true root
+ * would charge a sibling branch's spend against the wrong budget.
+ */
+export function sessionSubtree(repo: SessionTreeSource, agentSessionId: string): AgentSessionRow[] {
+  const root = repo.getAgentSession(agentSessionId);
+  if (!root) return [];
+  const rows = [root];
+  const seen = new Set([root.id]);
+  const frontier = [root.id];
+  while (frontier.length > 0) {
+    const current = frontier.pop()!;
+    for (const child of repo.listChildSessions(current)) {
+      if (seen.has(child.id)) continue;
+      seen.add(child.id);
+      rows.push(child);
+      frontier.push(child.id);
+    }
+  }
+  return rows;
+}
+
 /** Walk to the true root, then BFS every descendant. Root first; includes every lifecycle — callers filter. */
 export function sessionTree(repo: SessionTreeSource, agentSessionId: string): AgentSessionRow[] {
   let root = repo.getAgentSession(agentSessionId);

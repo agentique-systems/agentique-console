@@ -99,6 +99,13 @@ export type AgentSessionLifecycle = "open" | "archived";
 /** Derived busy state — never stored. */
 export type AgentSessionActivity = "working" | "idle" | "reported";
 
+export interface AgentSessionBudget {
+  /** The commission ceiling in USD (session + children). */
+  budgetUsd: number;
+  /** Summed provider cost of the session's subtree so far. */
+  spendUsd: number;
+}
+
 export interface AgentSession {
   id: string;
   userSessionId: string;
@@ -111,6 +118,8 @@ export interface AgentSession {
   parentAgentSessionId: string | null;
   /** Specialist agent names in seating order (excludes the coordinator). */
   agents: string[];
+  /** Commission budget + subtree spend; null when no budget was set. */
+  budget: AgentSessionBudget | null;
   createdAt: string;
   updatedAt: string;
 }

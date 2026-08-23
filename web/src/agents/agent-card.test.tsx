@@ -11,6 +11,7 @@ import { useUiStore } from "@/stores/ui";
 import { AgentCard } from "./agent-card";
 
 const SESSION: AgentSession = {
+  budget: null,
   id: "as_1",
   userSessionId: "us_1",
   title: "wire the strip",

@@ -410,6 +410,22 @@ export class RequirementService implements GoverningDigest {
   }
 
   /**
+   * Subtree membership: the node or one of its ancestors was delegated to the
+   * session. False for unknown/retired nodes and delegation-less sessions.
+   */
+  withinDelegation(userSessionId: string, agentSessionId: string, requirementId: string): boolean {
+    const roots = new Set(this.delegationSet(agentSessionId));
+    if (roots.size === 0) return false;
+    const byId = new Map(this.#store.liveNodes(userSessionId).map((row) => [row.id, row]));
+    let cursor: RequirementNodeRow | undefined = byId.get(requirementId);
+    while (cursor) {
+      if (roots.has(cursor.id)) return true;
+      cursor = cursor.parentId === null ? undefined : byId.get(cursor.parentId);
+    }
+    return false;
+  }
+
+  /**
    * Subtree enforcement: a session may act on a requirement iff the node or
    * one of its ancestors was delegated to it. Anything else is main's.
    */
@@ -419,12 +435,8 @@ export class RequirementService implements GoverningDigest {
       throw new InvalidInputError("this session holds no delegated requirements");
     }
     const byId = new Map(this.#store.liveNodes(userSessionId).map((row) => [row.id, row]));
-    let cursor: RequirementNodeRow | undefined = byId.get(requirementId);
-    if (!cursor) throw new NotFoundError(`no live requirement ${requirementId}`);
-    while (cursor) {
-      if (roots.has(cursor.id)) return;
-      cursor = cursor.parentId === null ? undefined : byId.get(cursor.parentId);
-    }
+    if (!byId.has(requirementId)) throw new NotFoundError(`no live requirement ${requirementId}`);
+    if (this.withinDelegation(userSessionId, agentSessionId, requirementId)) return;
     throw new InvalidInputError(
       `${requirementId} is outside this session's delegated requirements (${[...roots].join(", ")}) — route it to main`,
     );

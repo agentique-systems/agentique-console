@@ -79,6 +79,14 @@ function PaneBody({ session, runs }: { session: AgentSession; runs: AgentRunSumm
         </div>
         <div className="mt-1 text-2xs text-muted-foreground">
           Console-managed · durable mailbox · read-only inspector
+          {session.budget !== null && (
+            <span
+              className={session.budget.spendUsd >= session.budget.budgetUsd ? " text-attention" : ""}
+              title="commission budget (session + children); crossing it notifies and escalates, never pauses"
+            >
+              {" "}· ${session.budget.spendUsd.toFixed(2)} / ${session.budget.budgetUsd.toFixed(2)} budget
+            </span>
+          )}
         </div>
         <div className="mt-1 grid gap-0.5">
           {runs.map((run) => (

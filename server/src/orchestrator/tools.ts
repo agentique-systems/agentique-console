@@ -113,6 +113,8 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           ),
         allowChildSessions: z.boolean().default(false)
           .describe("Let this session's ENTRY agent spawn child sessions (depth-capped). Give it to a session that owns a workstream with its own internal decomposition; leave it off for leaf work."),
+        budgetUsd: z.number().positive().optional()
+          .describe("Optional spend ceiling in USD for this commission (the session plus its child sessions). Crossing it tells the session to wrap up honestly and escalates to you with the delegated open requirements — it never pauses the run, never kills a lane, never blocks a final."),
         why: z.string().optional()
           .describe("Why this session, this pattern, now — one or two sentences. Journaled with the briefing; the run review reads it."),
         expecting: z.string().optional()
@@ -142,6 +144,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         }[];
         briefing: HandoffDraft;
         allowChildSessions?: boolean;
+        budgetUsd?: number;
         why?: string;
         expecting?: string;
         requirements?: string[];
@@ -188,6 +191,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
             agents: args.agents,
             briefing,
             ...(args.allowChildSessions === true ? { allowChildSessions: true } : {}),
+            ...(args.budgetUsd === undefined ? {} : { budgetUsd: args.budgetUsd }),
             ...(args.tasks === undefined ? {} : { tasks: args.tasks }),
             // The lifecycle records the delegation BEFORE the briefing
             // dispatches, so the very first delivery renders the sub-scope.

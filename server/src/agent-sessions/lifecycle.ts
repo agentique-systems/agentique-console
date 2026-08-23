@@ -49,6 +49,12 @@ export interface CreateAgentSessionInput {
   /** Grants the entry agent create_child_session (depth cap still applies). */
   allowChildSessions?: boolean;
   /**
+   * Optional commission spend ceiling in USD (this session + its children).
+   * Crossing it notifies the session and escalates to main — never a pause,
+   * never a kill. Main-only: child sessions bill their budgeted ancestor.
+   */
+  budgetUsd?: number;
+  /**
    * Requirement ids this session is commissioned against — its delegated
    * sub-scope. Recorded BEFORE the briefing dispatches so the very first
    * delivery renders the delegated block. Child sessions pass a subset down.
@@ -198,7 +204,7 @@ export class SessionLifecycle {
       parentControllerAgent: parentRow ? input.parent!.controllerAgent : null,
       depth: parentRow ? parentRow.depth + 1 : 0,
       allowChildSessions: input.allowChildSessions === true,
-      budgetUsd: null,
+      budgetUsd: input.budgetUsd ?? null,
     };
     repo.insertAgentSession(row);
     if (parentRow) {
