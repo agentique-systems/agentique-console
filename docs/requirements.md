@@ -32,6 +32,12 @@ Each node carries:
   latency ≤ 200 ms") belong in the statement; measured values belong in
   evidence. Neither is ever a score.
 - **composition** — `all` (default) or `any`.
+- **verify expectation** — optional `(verify: independent)` or
+  `(verify: operator)`: the verification this requirement's satisfaction
+  deserves, declared in the committed outline — the proof method chosen
+  before the work, not after it. Absent means the doing seat's own evidenced
+  claim suffices. A declaration covers its whole subtree (strongest ancestor
+  wins), so decomposed children inherit it.
 - **status** — `open`, `satisfied`, `violated`, `infeasible`, or `retired`.
   Semantic, never numeric.
 - **origin** — `committed` (exists in an approved revision) or `refinement`
@@ -67,7 +73,7 @@ approval path and the web card's live preview):
 
 ## Requirements
 - r1: The CLI parses every documented flag
-  - r2: `--help` output matches the documented flags
+  - r2 (verify: independent): `--help` output matches the documented flags
   - r3 (any of): Config is loadable
     - r4: TOML config parses
     - r5: JSON config parses
@@ -75,10 +81,15 @@ approval path and the web card's live preview):
 ```
 
 Rules: only list items under `## Requirements` are nodes; a node is
-`- [id][ (any of)]: statement`; an id must look like `r<digits>` (the parser
+`- [id][ markers]: statement` where the markers are `(any of)` and/or
+`(verify: independent|operator)` in any order and case (the canonical render
+emits `(any of)` first); an id must look like `r<digits>` (the parser
 also tolerates dotted forms such as `r1.2` for compatibility, but the
 Console never mints them and rejects ids it never minted) — any other
-leading token (`- latency: 200ms`) is part of a new statement; a line
+leading token (`- latency: 200ms`) is part of a new statement, but an
+unknown or duplicate paren marker AFTER a valid id (`- r4 (any off): x`) is
+a line error, never a silent fresh mint that retires the old node's status
+history; a line
 without an id mints a fresh id at approval; `(any of)` sets composition
 `any`; nesting is by indentation (normalized on render); at most depth 8 and
 200 nodes. A retired id never comes back: reintroducing a descoped
@@ -99,9 +110,13 @@ entirely — the revision history is where descoped obligations live.
 On approval the service diffs the incoming outline against the live nodes in
 one transaction:
 
-- id present in old and new → statement/composition/position update; a
+- id present in old and new → statement/composition/position/expectation
+  update; a
   **changed statement resets status to `open`** with a journaled
-  console-actor change (the old evidence attested to different words).
+  console-actor change (the old evidence attested to different words), while
+  a **changed verify expectation never resets status** — the statement the
+  evidence attested to is unchanged; the gap simply derives from the
+  standing claim.
 - committed id absent from the new outline → `retired` at that revision —
   descoped, history kept — and its refinement descendants retire with it.
 - line without an id → a new node, `introducedInRevision = N`.
@@ -135,16 +150,37 @@ write of truth:
 
 - Terminal statuses (`satisfied`, `violated`, `infeasible`) require at least
   one evidence ref; `open` (reopening) does not.
-- `verifiedBy` records the tier: `self` (the doing agent's claim plus its
-  evidence), `independent` (a different seat — typically a reviewer-archetype
-  profile, write-isolated from the work it judges — confirmed it),
-  `operator` (their word IS the gate; evidence optional), and `console`
-  (mechanical resets such as "statement amended in rev N" — never
-  model-selectable).
+- `verifiedBy` records the tier, and the Console **derives** it from who
+  stood behind the claim — the reporting model never selects it (the
+  measured party does not classify its own measurement's independence):
+  `operator` for the operator's own verdicts (their word IS the gate;
+  evidence optional); `independent` only when the claim was filed by a seat
+  whose commission-time profile snapshot is a **write-isolated reviewer**
+  (role `reviewer`, no Edit/Write) — which is why reviewer-archetype seats
+  hold `report_requirement` wherever they sit in a topology; `self` for main
+  and every write-capable seat (a read-only coordinator relaying an
+  implementer's claim records `self`: relaying is not verifying — the
+  reviewer files its own verdict); `console` for mechanical resets such as
+  "statement amended in rev N".
 - The review ladder in `docs/orchestration.md` decides which tier a given
   risk deserves. The Console records and displays the tier; it never blocks
   on it, and it never machine-gates completion — the operator remains the
   gate.
+
+Two verification read-models derive from the journal, displayed everywhere
+statuses appear (digest, `read_requirements`, the panel, the completion
+nudge, the persisted run summary and sign-off card) and never gating:
+
+- **Verification gaps** — satisfied leaves whose recorded tier falls below
+  their effective declared expectation (own or inherited `(verify: …)`
+  marker, strongest wins; an operator verdict satisfies an `independent`
+  expectation).
+- **Reversals** — terminal claims the run itself later withdrew (a status
+  CHANGE away from satisfied/violated/infeasible by anyone but the console;
+  a reviewer's same-status tier upgrade withdraws nothing; the operator's
+  own reopen counts, attributed). Each reversal carries both sides — who
+  withdrew it and the tier/actor of the original claim — the honest measure
+  of verification quality, exported to the Tier-B evaluation.
 
 ## Delegation and subtrees
 
@@ -163,6 +199,21 @@ subset down — each requested id must sit within the parent session's
 delegated subtrees — so nesting is visible as deepening decomposition of one
 graph rather than a fork of it.
 
+Two session-level annotations ride the delegation model, both derived and
+neither a gate:
+
+- **Unscoped** — an open session commissioned after requirements began
+  governing, holding zero delegations. Rendered on every read surface and in
+  the Tier-B export, with a `scopeNote` in the create tool's result — never
+  a rejection: exploration before decomposition and utility sessions are
+  legitimate, and the operator sees which is which.
+- **Commission budget** — `create_agent_session` may set a `budgetUsd`
+  ceiling covering the session and its children. Crossing it fires two
+  one-shot notices (an honest wrap-up instruction to the entry agent, an
+  escalation to main naming the delegated open frontier) — stop-and-escalate
+  like the run-level budget pause, but scoped: nothing is cancelled, the run
+  does not pause, no final is blocked. A resource cap, not a score.
+
 ## The frontier
 
 The open requirements — every requirement whose resolution can still affect
@@ -171,9 +222,10 @@ annotated from console-owned facts only: `in_progress` (live delegation to
 an open session), `blocked` (a linked task with incomplete dependencies, or
 a dependency-parked assignment), `awaiting_operator` (a pending interaction
 raised from a session holding the delegation), `unassigned` (none of the
-above). A `self`-tier `satisfied` claim renders its verification chip, so
-"awaiting independent verification" is visible without a bespoke state. The
-frontier is what the completion nudge names and what steering aims at.
+above). Verification debt is its own derived list beside the frontier — the
+verification gaps above — so "satisfied below its declared tier" is
+structural, not a display chip. The completion nudge names both, and
+steering aims at them.
 
 ## Termination
 

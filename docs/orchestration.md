@@ -156,11 +156,19 @@ uncertainty, blast radius, reversibility, and complexity; "always spawn a
 reviewer" is explicitly NOT the principle, and the evals never reward
 reviewer count. On non-trivial work at least one pass may challenge the
 requirements themselves. A requirement status change records who verified it
-(`self`, `independent`, `operator`); the ladder decides which tier a given
-risk deserves — the Console records and displays the tier, and never blocks
-on it. Review findings are evidence: they can reopen requirements, planning,
+(`self`, `independent`, `operator`) — and the Console DERIVES the tier from
+who stood behind the claim, never from the model's say-so: `independent`
+exists only where a write-isolated reviewer seat filed the verdict itself,
+so earning it means commissioning the reviewer and letting it report. A
+requirement may declare the tier it deserves in the committed outline
+(`(verify: independent)`); the ladder decides where such declarations
+belong, and the Console derives the gaps and displays them beside the
+frontier — it never blocks on them. Review findings are evidence: they can
+reopen requirements, planning,
 or implementation — understand → build → verify → critique → discover →
-improve → re-verify, where warranted.
+improve → re-verify, where warranted. A terminal claim later withdrawn is
+journaled as a reversal, attributed to the tier that stood behind the
+original claim — the honest measure the run review reads.
 
 ## Stopping
 

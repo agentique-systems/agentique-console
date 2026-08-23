@@ -14,8 +14,13 @@ single npm-workspaces application backed by SQLite and the Claude Agent SDK.
   (`r1`, `r2`, …) and derives every parent's status mechanically from its
   children (`all`/`any` composition). Statuses are semantic — open,
   satisfied, violated, infeasible, retired — never numeric; a terminal status
-  is a journaled claim carrying evidence and who verified it (self /
-  independent / operator). Commissions name the requirement ids they serve
+  is a journaled claim carrying evidence and a verification tier (self /
+  independent / operator) the Console DERIVES from who stood behind the
+  claim — never chosen by the reporting model. A committed node may declare
+  the verification its satisfaction deserves (`(verify: independent)`), and
+  the Console derives the gaps (satisfied below the declared tier) and the
+  reversals (terminal claims the run later withdrew) — displayed everywhere,
+  never a gate. Commissions name the requirement ids they serve
   and seats report or decompose only within those delegated subtrees; the
   run verdict can be `infeasible`, with evidence. Amendments supersede
   revisions while unchanged statements keep their status; refinement below a
@@ -99,8 +104,10 @@ effort overrides, turn limit, and any MCP servers its agents get. Every
 profile declares a **role archetype** — `orchestrator`, `explorer`,
 `planner`, `implementer`, or `reviewer` — naming the kind of progress the
 seat produces (main is the run-level orchestrator); minted variants inherit
-their base's role, and reviewer-archetype seats are the ones whose reports
-warrant the `independent` verification tier.
+their base's role, and a write-isolated reviewer-archetype seat is the ONE
+kind whose requirement claims the Console records as `independent` — the
+tier follows the snapshotted facts, not the model's say-so, so reviewer
+seats hold `report_requirement` wherever they sit in a topology.
 
 Every lane sees the workspace as an interactive Claude Code session would: the
 CLI's user, project and local settings load (CLAUDE.md, permissions, skills,
