@@ -11,9 +11,32 @@ import { nowIso } from "../ids.ts";
 import { ConflictError, InvalidInputError, NotFoundError } from "../errors.ts";
 import { EFFORT_LEVELS } from "../sdk/effort.ts";
 import { effectiveNativeTools } from "../sdk/native-capability-policy.ts";
+import { evaluateNativeAgent, parseNativeAgentFile } from "./native-agent-file.ts";
+
+/**
+ * One discovered workspace definition source. `profile` is non-null only
+ * when the source is Claude-valid, Agentique-compatible, and not shadowed —
+ * the three verdicts stay independently visible either way.
+ */
+interface WorkspaceProfileEntry {
+  id: string;
+  profile: AgentProfile | null;
+  revision: string;
+  claudeValid: boolean;
+  compatible: boolean;
+  incompatibilityReasons: string[];
+  issues: ProfileValidationIssue[];
+  files: { path: string; content: string }[];
+}
 
 export const ProfileSchema = z.object({
-  id: z.string().regex(/^[a-z][a-z0-9-]*$/),
+  /**
+   * For a workspace profile this is the NATIVE agent name — any native-legal
+   * identity is accepted (git/path slugs are derived where needed, never
+   * imposed on authorship). Built-ins and mints keep the strict slug shape,
+   * enforced at their own construction sites.
+   */
+  id: z.string().min(1),
   title: z.string().min(1),
   purpose: z.string().min(1),
   /**
@@ -309,6 +332,9 @@ export class AgentProfileRegistry {
     tools?: string[]; permissionMode?: "default" | "plan" | "bypassPermissions";
     model?: string; skills?: string[]; attachServers?: string[]; maxTurns?: number; why?: string;
   }): AgentProfile {
+    if (!/^[a-z][a-z0-9-]*$/.test(input.id)) {
+      throw new InvalidInputError(`mint id "${input.id}" must be a lowercase slug (a-z, 0-9, -)`);
+    }
     if (this.#minted.has(input.id) || this.#profiles.has(input.id)) {
       throw new ConflictError(`profile id "${input.id}" already exists`);
     }
@@ -396,26 +422,33 @@ export class AgentProfileRegistry {
 
   summaries(workspaceId: string): AgentProfileSummary[] {
     this.#assertWorkspace(workspaceId);
-    const builtins = [...this.#profiles.values()].map((profile) => this.#summary(profile, "builtin", `builtin:${profile.id}`, true, true, []));
-    const workspace = this.#workspaceProfiles(workspaceId).map(({ id, profile, revision, issues, files }) =>
-      this.#summary(profile ?? this.#invalidPlaceholder(id), "workspace", revision, this.isTrusted(workspaceId, id, revision), issues.every((i) => i.level !== "error"), files));
+    const builtins = [...this.#profiles.values()].map((profile) =>
+      this.#summary(profile, "builtin", `builtin:${profile.id}`, { trusted: true, claudeValid: true, compatible: true, reasons: [] }, []));
+    const workspace = this.#workspaceProfiles(workspaceId).map((entry) =>
+      this.#summary(entry.profile ?? this.#invalidPlaceholder(entry.id), "workspace", entry.revision,
+        { trusted: this.isTrusted(workspaceId, entry.id, entry.revision), claudeValid: entry.claudeValid && entry.issues.every((issue) => issue.level !== "error"),
+          compatible: entry.compatible, reasons: entry.incompatibilityReasons }, entry.files));
     return [...builtins, ...workspace];
   }
 
   detail(workspaceId: string, id: string): AgentProfileDetail | undefined {
     this.#assertWorkspace(workspaceId);
     const builtin = this.#profiles.get(id);
-    if (builtin) return this.#detail(builtin, "builtin", `builtin:${id}`, true, [], []);
+    if (builtin) return this.#detail(builtin, "builtin", `builtin:${id}`, { trusted: true, claudeValid: true, compatible: true, reasons: [] }, [], []);
     const entry = this.#workspaceProfiles(workspaceId).find((candidate) => candidate.id === id);
     if (!entry) return undefined;
-    return this.#detail(entry.profile ?? this.#invalidPlaceholder(id), "workspace", entry.revision,
-      this.isTrusted(workspaceId, id, entry.revision), entry.issues, entry.files);
+    return this.#detail(entry.profile ?? this.#invalidPlaceholder(entry.id), "workspace", entry.revision,
+      { trusted: this.isTrusted(workspaceId, entry.id, entry.revision), claudeValid: entry.claudeValid && entry.issues.every((issue) => issue.level !== "error"),
+        compatible: entry.compatible, reasons: entry.incompatibilityReasons }, entry.issues, entry.files);
   }
 
   trust(workspaceId: string, id: string, revision: string): void {
     if (!this.#options) throw new Error("workspace profiles unavailable");
     const detail = this.detail(workspaceId, id);
     if (!detail || detail.source !== "workspace") throw new NotFoundError(`no workspace profile ${id}`);
+    // A valid-but-incompatible native definition is trust-INELIGIBLE, never
+    // "invalid": the reasons name exactly what the console cannot execute.
+    if (!detail.agentiqueCompatible) throw new ConflictError(`profile is not Agentique-compatible: ${detail.incompatibilityReasons.join("; ")}`);
     if (!detail.valid || detail.revision !== revision) throw new ConflictError("profile revision is invalid or stale");
     this.#options.db.insert(agentProfileTrust).values({ workspaceId, profileId: id, revision, trustedAt: nowIso() }).onConflictDoNothing().run();
     this.#options.bus.append({ type: "agent_profile.changed", workspaceId, payload: { workspaceId, profileId: id, revision, trusted: true } });
@@ -430,22 +463,168 @@ export class AgentProfileRegistry {
     return this.#workspaceProfiles(workspaceId).find((entry) => entry.id === id)?.profile ?? this.#profiles.get(id);
   }
 
-  #workspaceProfiles(workspaceId: string): { id: string; profile: AgentProfile | null; revision: string; issues: ProfileValidationIssue[]; files: { path: string; content: string }[] }[] {
+  /**
+   * Workspace profile discovery, two sources:
+   *
+   *  1. NATIVE (canonical): `.claude/agents/**‍/*.md` — genuine project
+   *     agents, parsed by `native-agent-file.ts`. Identity is the native
+   *     `name` (filename is only the fallback), so files an operator already
+   *     has for interactive Claude are discoverable as candidate profiles;
+   *     trust gates instantiation. The native `Agent` tool stays denied by
+   *     the capability policy — the console is the execution engine for
+   *     these definitions, and running one is an AgentSession.
+   *  2. LEGACY (deprecated dual-read): `.agentique/agents/<id>/` bundles
+   *     with `agentique.profile.json`. One transition release, then removed.
+   *
+   * Shadowing: built-in ids win, then the native source selected by
+   * mirrored discovery precedence (shallower path, then lexicographic),
+   * then legacy. A shadowed source is listed — Claude-valid, but
+   * Agentique-incompatible with a "shadowed by" reason — and NEVER inherits
+   * trust: the revision binds to the semantic source (path + name + bytes),
+   * so a higher-precedence same-name file is a different revision.
+   */
+  #workspaceProfiles(workspaceId: string): WorkspaceProfileEntry[] {
     if (!this.#options) return [];
-    const base = path.join(this.#options.getWorkspaceRoot(workspaceId), ".agentique", "agents");
+    const workspaceRoot = this.#options.getWorkspaceRoot(workspaceId);
+    const entries = [...this.#nativeEntries(workspaceRoot), ...this.#legacyEntries(workspaceRoot)];
+    const seen = new Set<string>();
+    for (const entry of entries) {
+      const shadowedBy = this.#profiles.has(entry.id) ? `built-in profile "${entry.id}"`
+        : seen.has(entry.id) ? `a higher-precedence definition of "${entry.id}"` : null;
+      seen.add(entry.id);
+      if (shadowedBy !== null) {
+        entry.profile = null;
+        entry.compatible = false;
+        entry.incompatibilityReasons = [...entry.incompatibilityReasons, `shadowed by ${shadowedBy}`];
+      }
+    }
+    return entries;
+  }
+
+  /** Native `.claude/agents` definitions, in discovery-precedence order. */
+  #nativeEntries(workspaceRoot: string): WorkspaceProfileEntry[] {
+    const base = path.join(workspaceRoot, ".claude", "agents");
+    if (!fs.existsSync(base)) return [];
+    const files: string[] = [];
+    const visit = (dir: string) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const absolute = path.join(dir, entry.name);
+        const resolved = fs.realpathSync(absolute);
+        if (!resolved.startsWith(`${fs.realpathSync(base)}${path.sep}`)) continue;
+        if (entry.isDirectory()) visit(absolute);
+        else if (entry.isFile() && entry.name.endsWith(".md") && fs.statSync(absolute).size <= 256_000) files.push(absolute);
+      }
+    };
+    visit(base);
+    // Mirrored native precedence: shallower first, then lexicographic —
+    // deterministic whatever the filesystem returns.
+    files.sort((a, b) => {
+      const depth = a.split(path.sep).length - b.split(path.sep).length;
+      return depth !== 0 ? depth : a.localeCompare(b);
+    });
+    return files.map((absolute) => this.#nativeEntry(workspaceRoot, absolute));
+  }
+
+  #nativeEntry(workspaceRoot: string, absolute: string): WorkspaceProfileEntry {
+    const relPath = path.relative(workspaceRoot, absolute).split(path.sep).join("/");
+    const content = fs.readFileSync(absolute, "utf8");
+    const fallbackName = path.basename(absolute, ".md");
+    const parsed = parseNativeAgentFile(content);
+    if (!parsed.formatValid) {
+      return { id: fallbackName, profile: null, revision: this.#nativeRevision(relPath, fallbackName, content, null),
+        claudeValid: false, compatible: false, incompatibilityReasons: [],
+        issues: [{ level: "error", path: relPath, message: parsed.error }],
+        files: [{ path: relPath, content }] };
+    }
+    const name = typeof parsed.fields.name === "string" && parsed.fields.name.trim() !== "" ? parsed.fields.name.trim() : fallbackName;
+    // Overlay sidecar (the fallback home for governance metadata when the
+    // frontmatter must stay pure): when present it REPLACES the frontmatter
+    // overlay — one governance source at a time.
+    const sidecarPath = path.join(workspaceRoot, ".agentique", "agents", `${name}.overlay.json`);
+    let sidecar: { content: string } | null = null;
+    let fields = parsed.fields;
+    const issues: ProfileValidationIssue[] = [];
+    if (fs.existsSync(sidecarPath)) {
+      const sidecarContent = fs.readFileSync(sidecarPath, "utf8");
+      sidecar = { content: sidecarContent };
+      try {
+        fields = { ...parsed.fields, agentique: JSON.parse(sidecarContent) as unknown };
+      } catch (error) {
+        issues.push({ level: "error", path: `.agentique/agents/${name}.overlay.json`, message: `overlay sidecar is not valid JSON: ${error instanceof Error ? error.message : String(error)}` });
+      }
+    }
+    const revision = this.#nativeRevision(relPath, name, content, sidecar?.content ?? null);
+    const entryFiles = [{ path: relPath, content }, ...(sidecar ? [{ path: `.agentique/agents/${name}.overlay.json`, content: sidecar.content }] : [])];
+    if (issues.some((issue) => issue.level === "error")) {
+      return { id: name, profile: null, revision, claudeValid: true, compatible: false,
+        incompatibilityReasons: issues.map((issue) => issue.message), issues, files: entryFiles };
+    }
+    const evaluated = evaluateNativeAgent(fields, parsed.body, fallbackName);
+    if (!evaluated.compatible) {
+      return { id: name, profile: null, revision, claudeValid: true, compatible: false,
+        incompatibilityReasons: evaluated.reasons.map((reason) => `${reason.field}: ${reason.reason}`),
+        issues, files: entryFiles };
+    }
+    const agent = evaluated.agent;
+    const resolved = ProfileSchema.safeParse({
+      id: agent.name, title: agent.name, purpose: agent.description,
+      ...(agent.overlay.role === undefined ? {} : { role: agent.overlay.role }),
+      instructions: agent.body,
+      ...(agent.tools === undefined ? {} : { tools: agent.tools }),
+      ...(agent.disallowedTools === undefined ? {} : { disallowedTools: agent.disallowedTools }),
+      permissionMode: agent.permissionMode ?? "default",
+      ...(agent.model === undefined ? {} : { model: agent.model }),
+      ...(agent.effort === undefined ? {} : { effort: agent.effort }),
+      ...(agent.overlay.handoffExtension === undefined ? {} : { handoffExtension: agent.overlay.handoffExtension }),
+      exemptFromOwnership: agent.overlay.exemptFromOwnership ?? false,
+      ...(agent.overlay.assignmentTurnBudget === undefined ? {} : { maxTurns: agent.overlay.assignmentTurnBudget }),
+      mcpServers: agent.mcpServers,
+      ...(agent.overlay.recommendedSkills === undefined ? {} : { skills: agent.overlay.recommendedSkills }),
+      revision, source: "workspace",
+    });
+    if (!resolved.success) {
+      // Post-evaluation schema misses (e.g. an effort level the console does
+      // not execute) are compatibility findings, never "invalid Claude".
+      return { id: name, profile: null, revision, claudeValid: true, compatible: false,
+        incompatibilityReasons: resolved.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`),
+        issues, files: entryFiles };
+    }
+    return { id: name, profile: resolved.data, revision, claudeValid: true, compatible: true,
+      incompatibilityReasons: [], issues, files: entryFiles };
+  }
+
+  /** Source-identity revision: workspace-relative path + native name + bytes (+ overlay bytes). A move or rename re-requires trust. */
+  #nativeRevision(relPath: string, name: string, definition: string, overlay: string | null): string {
+    return crypto.createHash("sha256")
+      .update("agentique-profile-rev2\0").update(relPath).update("\0").update(name).update("\0")
+      .update(crypto.createHash("sha256").update(definition).digest("hex")).update("\0")
+      .update(overlay === null ? "-" : crypto.createHash("sha256").update(overlay).digest("hex"))
+      .digest("hex");
+  }
+
+  /** The deprecated bundle form — dual-read for one transition release. */
+  #legacyEntries(workspaceRoot: string): WorkspaceProfileEntry[] {
+    const base = path.join(workspaceRoot, ".agentique", "agents");
     if (!fs.existsSync(base)) return [];
     return fs.readdirSync(base, { withFileTypes: true }).filter((entry) => entry.isDirectory() && /^[a-z][a-z0-9-]*$/.test(entry.name)).map((entry) => {
-      const root = path.join(base, entry.name); const files = this.#readFiles(root); const revision = this.#revision(files); const issues: ProfileValidationIssue[] = [];
+      const root = path.join(base, entry.name); const files = this.#readFiles(root); const revision = this.#revision(files);
+      const issues: ProfileValidationIssue[] = [{ level: "warning", path: "agentique.profile.json",
+        message: "legacy bundle format — migrate to .claude/agents/<name>.md (scripts/migrate-profile.ts); this form is removed after the transition release" }];
+      const invalid = (message: string, at: string): WorkspaceProfileEntry => ({ id: entry.name, profile: null, revision,
+        claudeValid: false, compatible: false, incompatibilityReasons: [],
+        issues: [...issues, { level: "error", path: at, message }], files });
       const manifest = files.find((file) => file.path === "agentique.profile.json");
-      if (!manifest) return { id: entry.name, profile: null, revision, files, issues: [{ level: "error", path: "agentique.profile.json", message: "missing Agentique profile manifest" }] };
+      if (!manifest) return invalid("missing Agentique profile manifest", "agentique.profile.json");
       try {
         const parsed = ProfileSchema.safeParse(JSON.parse(manifest.content));
-        if (!parsed.success) return { id: entry.name, profile: null, revision, files, issues: [{ level: "error", path: manifest.path, message: parsed.error.message }] };
+        if (!parsed.success) return invalid(parsed.error.message, manifest.path);
         if (parsed.data.id !== entry.name) issues.push({ level: "error", path: manifest.path, message: "profile id must match its directory" });
         const pluginManifest = files.some((file) => file.path === ".claude-plugin/plugin.json");
         if (!pluginManifest) issues.push({ level: "warning", path: ".claude-plugin/plugin.json", message: "bundle has no Claude plugin manifest" });
-        return { id: entry.name, profile: { ...parsed.data, pluginPath: root, revision, source: "workspace" }, revision, files, issues };
-      } catch (error) { return { id: entry.name, profile: null, revision, files, issues: [{ level: "error", path: manifest.path, message: error instanceof Error ? error.message : String(error) }] }; }
+        const valid = issues.every((issue) => issue.level !== "error");
+        return { id: entry.name, profile: valid ? { ...parsed.data, pluginPath: root, revision, source: "workspace" as const } : null,
+          revision, claudeValid: valid, compatible: valid, incompatibilityReasons: [], issues, files };
+      } catch (error) { return invalid(error instanceof Error ? error.message : String(error), manifest.path); }
     });
   }
 
@@ -461,10 +640,19 @@ export class AgentProfileRegistry {
   #revision(files: { path: string; content: string }[]): string { const hash = crypto.createHash("sha256"); for (const file of files) hash.update(file.path).update("\0").update(file.content).update("\0"); return hash.digest("hex"); }
   #invalidPlaceholder(id: string): AgentProfile { return { id, title: id, purpose: "Invalid profile", instructions: "", tools: [], skills: [], permissionMode: "default", exemptFromOwnership: false, maxTurns: 1, mcpServers: {} }; }
   #componentCounts(files: { path: string }[]): Record<string, number> { const counts: Record<string, number> = {}; for (const file of files) { const kind = file.path.startsWith("skills/") ? "skills" : file.path.startsWith("hooks/") ? "hooks" : file.path.startsWith("agents/") ? "agents" : file.path === ".mcp.json" ? "mcp" : "files"; counts[kind] = (counts[kind] ?? 0) + 1; } return counts; }
-  #summary(profile: AgentProfile, source: "builtin" | "workspace", revision: string, trusted: boolean, valid: boolean, files: { path: string }[]): AgentProfileSummary { return { id: profile.id, title: profile.title, purpose: profile.purpose, role: profile.role ?? null, source, revision, trusted, valid, tools: profile.tools ?? [], skills: profile.skills ?? [], componentCounts: this.#componentCounts(files) }; }
-  #detail(profile: AgentProfile, source: "builtin" | "workspace", revision: string, trusted: boolean, issues: ProfileValidationIssue[], files: { path: string; content: string }[]): AgentProfileDetail {
-    const summary = this.#summary(profile, source, revision, trusted, issues.every((i) => i.level !== "error"), files);
-    const components = files.filter((file) => file.path !== "agentique.profile.json" && file.path !== ".claude-plugin/plugin.json").map((file) => { const kind = file.path.startsWith("skills/") ? "skill" : file.path.startsWith("hooks/") ? "hook" : file.path.startsWith("agents/") ? "agent" : file.path === ".mcp.json" ? "mcp" : file.path.startsWith("commands/") ? "command" : file.path.startsWith("monitors/") ? "monitor" : file.path === "settings.json" ? "settings" : "other"; return { kind, name: path.basename(file.path), path: file.path, supported: ["skill", "hook", "agent", "mcp", "command", "settings"].includes(kind), summary: file.content.slice(0, 160) } as AgentProfileDetail["components"][number]; });
+  #summary(profile: AgentProfile, source: "builtin" | "workspace", revision: string,
+    state: { trusted: boolean; claudeValid: boolean; compatible: boolean; reasons: string[] }, files: { path: string }[]): AgentProfileSummary {
+    return { id: profile.id, title: profile.title, purpose: profile.purpose, role: profile.role ?? null, source, revision,
+      trusted: state.trusted, valid: state.claudeValid, claudeValid: state.claudeValid,
+      agentiqueCompatible: state.compatible, incompatibilityReasons: state.reasons,
+      tools: profile.tools ?? [], skills: profile.skills ?? [], componentCounts: this.#componentCounts(files) };
+  }
+  #detail(profile: AgentProfile, source: "builtin" | "workspace", revision: string,
+    state: { trusted: boolean; claudeValid: boolean; compatible: boolean; reasons: string[] }, issues: ProfileValidationIssue[], files: { path: string; content: string }[]): AgentProfileDetail {
+    const summary = this.#summary(profile, source, revision, state, files);
+    // Bundle `agents/*.md` beyond the profile itself are VISIBLE-ONLY: the
+    // native Agent tool is denied by console policy, so nothing can run them.
+    const components = files.filter((file) => file.path !== "agentique.profile.json" && file.path !== ".claude-plugin/plugin.json").map((file) => { const kind = file.path.startsWith("skills/") ? "skill" : file.path.startsWith("hooks/") ? "hook" : file.path.startsWith("agents/") ? "agent" : file.path === ".mcp.json" ? "mcp" : file.path.startsWith("commands/") ? "command" : file.path.startsWith("monitors/") ? "monitor" : file.path === "settings.json" ? "settings" : "other"; return { kind, name: path.basename(file.path), path: file.path, supported: ["skill", "hook", "mcp", "command", "settings"].includes(kind), summary: file.content.slice(0, 160) } as AgentProfileDetail["components"][number]; });
     return { ...summary, instructions: profile.instructions, permissionMode: profile.permissionMode, model: profile.model ?? null, effort: profile.effort ?? null, maxTurns: profile.maxTurns, mcpServers: profile.mcpServers, handoffExtension: profile.handoffExtension ?? null, pluginPath: profile.pluginPath ?? null, components, files, issues };
   }
 }

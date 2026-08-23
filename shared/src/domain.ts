@@ -259,8 +259,20 @@ export interface AgentProfileSummary {
   role: AgentProfileRole | null;
   source: "builtin" | "workspace";
   revision: string;
+  /**
+   * Three independent states. `claudeValid`: parses as a legitimate native
+   * definition. `agentiqueCompatible`: the console can instantiate it with
+   * every native field's semantics preserved — a valid definition using a
+   * native feature the console cannot reproduce is compatible=false with
+   * reasons, NEVER "invalid". `trusted`: the operator approved this exact
+   * source revision. Runnable = all three.
+   */
   trusted: boolean;
+  /** Kept as the alias UIs already read; equals claudeValid. */
   valid: boolean;
+  claudeValid: boolean;
+  agentiqueCompatible: boolean;
+  incompatibilityReasons: string[];
   tools: string[];
   skills: string[];
   componentCounts: Record<string, number>;

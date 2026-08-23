@@ -13,6 +13,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { BACKGROUND_WAIT_TOOLS, WORKSPACE_TOOLS } from "../sdk/native-capability-policy.ts";
+import { parseFrontmatterDocument } from "./native-agent-file.ts";
 
 export interface SkillCatalogEntry {
   name: string;
@@ -46,21 +47,16 @@ export const MCP_CATALOG: McpCatalogEntry[] = [
   },
 ];
 
-/** Minimal YAML-frontmatter reader for the fields this catalog serves. */
+/** Real-YAML frontmatter read (native-agent-file.ts) narrowed to the fields this catalog serves. */
 function parseFrontmatter(raw: string): { fields: Record<string, string>; requiresTools: string[] } {
-  const match = /^---\n([\s\S]*?)\n---/.exec(raw);
+  const document = parseFrontmatterDocument(raw);
   const fields: Record<string, string> = {};
-  let requiresTools: string[] = [];
-  if (!match) return { fields, requiresTools };
-  for (const line of match[1]!.split("\n")) {
-    const kv = /^(\w[\w-]*):\s*(.*)$/.exec(line);
-    if (kv) {
-      fields[kv[1]!] = kv[2]!.trim();
-      continue;
-    }
-    const tools = /^\s+tools:\s*\[(.*)\]\s*$/.exec(line);
-    if (tools) requiresTools = tools[1]!.split(",").map((entry) => entry.trim()).filter((entry) => entry !== "");
+  for (const [key, value] of Object.entries(document)) {
+    if (typeof value === "string") fields[key] = value.trim();
   }
+  const requires = document.requires;
+  const tools = requires !== null && typeof requires === "object" && !Array.isArray(requires) ? (requires as { tools?: unknown }).tools : undefined;
+  const requiresTools = Array.isArray(tools) ? tools.filter((entry): entry is string => typeof entry === "string") : [];
   return { fields, requiresTools };
 }
 
