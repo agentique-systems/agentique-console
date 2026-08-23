@@ -330,19 +330,6 @@ export class AgentRuntime implements Injector, TurnTracker {
   }
 
   /**
-   * The seat's sandbox READ scope: its own tree, the workspace, and every
-   * other worktree this session holds. Deduped and order-stable so the option
-   * object stays cache-identical across a session's spawns.
-   */
-  #readScope(session: AgentSessionRow, seatRoot: string, workspaceRoot: string): string[] {
-    const roots = new Set<string>([seatRoot, workspaceRoot]);
-    for (const seat of this.#deps.repo.listAgents(session.id)) {
-      if (seat.worktreePath) roots.add(seat.worktreePath);
-    }
-    return [...roots];
-  }
-
-  /**
    * Never hands a tool `lane.abort.signal`: the pool's park nulls `lane.abort`
    * WITHOUT aborting, so a wait tied to the lane-wide signal would strand on
    * park/rotation/watchdog. Each operator ask mints its own controller,

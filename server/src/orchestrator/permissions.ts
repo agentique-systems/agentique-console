@@ -57,9 +57,8 @@ export function buildOrchestratorCanUseTool(input: CanUseToolInput): CanUseTool 
     if (["Agent", "Task"].includes(toolName)) {
       return deny(toolName, "coordination_only", "Main never forks in-process subagents — they run ungoverned context. Delegate execution to profile-bound Console AgentSessions.");
     }
-    // Native SendMessage never reaches this callback — its PreToolUse
-    // middleware decides allow/deny; task and cron tools run and are
-    // mirrored by PostToolUse hooks.
+    // Native SendMessage, task, and cron tools never reach this callback —
+    // they are denied by name in the options' disallowedTools.
     if (toolName.startsWith("mcp__console__")) {
       return { behavior: "allow" as const, updatedInput: toolInput };
     }

@@ -218,8 +218,9 @@ review profiles run at `xhigh`, coordination and evidence-gathering at `high`;
 Settings: `CONSOLE_PORT`, `CONSOLE_HOST`, `CONSOLE_MODEL`,
 `CONSOLE_IMPROVE_MODEL`, `CONSOLE_EFFORT`, `CONSOLE_FS_ROOTS`,
 `CONSOLE_MCP_DISABLED`, `CONSOLE_BROWSER_MCP`.
-Agent-residency knobs: `CONSOLE_MAX_RESIDENT_AGENTS` (default 8),
-`CONSOLE_MAX_RESIDENT_AGENTS_PER_TREE` (default 4; a parent session and its
+Agent-residency knobs: `CONSOLE_MAX_RESIDENT_AGENTS` (default sized to host
+RAM: `min(12, max(4, totalmem/1.5GiB))`),
+`CONSOLE_MAX_RESIDENT_AGENTS_PER_SESSION` (default 4; a parent session and its
 children share the budget), `CONSOLE_AGENT_IDLE_REAP_MS` (default 300000),
 `CONSOLE_AGENT_SPAWN_TIMEOUT_MS` (default 30000),
 `CONSOLE_PEER_NAME_PREFIX` (default `console-`, the session-registry

@@ -113,8 +113,6 @@ export interface OrchestratorOptionsInput {
   autonomy?: "standard" | "away";
   /** The lane's registry address (CLAUDE_CODE_SESSION_NAME). */
   peerName?: string;
-  /** Governance/mirror hooks (SendMessage middleware, task + cron mirrors). */
-  hooks?: SdkOptions["hooks"];
   /**
    * The console's skills plugin (config.infra.skillsPluginDir). Main holds
    * the same skills every seat holds — git-gud for repo surgery above all —
@@ -157,7 +155,6 @@ export function buildOrchestratorOptions(
       ...(withDelegation ? CONSOLE_TOOL_NAMES.map((name) => `mcp__console__${name}`) : []),
     ],
     disallowedTools: [...MAIN_DENIED_TOOLS, "CronCreate", "CronList", "CronDelete"],
-    ...(input.hooks === undefined ? {} : { hooks: input.hooks }),
     settings: { crossSessionInbound: "accept" } as unknown as SdkOptions["settings"],
     // In streaming mode maxTurns counts cumulatively over the whole session
     // run — any default here would kill a long-lived lane. Callers opt in.

@@ -394,21 +394,9 @@ export class AgentProfileRegistry {
     this.#options.bus.append({ type: "agent_profile.changed", workspaceId, payload: { workspaceId, profileId: id, revision, trusted: true } });
   }
 
-  untrust(workspaceId: string, id: string): void {
-    if (!this.#options) return;
-    this.#options.db.delete(agentProfileTrust).where(and(eq(agentProfileTrust.workspaceId, workspaceId), eq(agentProfileTrust.profileId, id))).run();
-    const revision = this.detail(workspaceId, id)?.revision ?? "unknown";
-    this.#options.bus.append({ type: "agent_profile.changed", workspaceId, payload: { workspaceId, profileId: id, revision, trusted: false } });
-  }
-
   isTrusted(workspaceId: string, id: string, revision: string): boolean {
     if (this.#profiles.has(id)) return true;
     return this.#options?.db.select().from(agentProfileTrust).where(and(eq(agentProfileTrust.workspaceId, workspaceId), eq(agentProfileTrust.profileId, id), eq(agentProfileTrust.revision, revision))).get() !== undefined;
-  }
-
-  profileRoot(workspaceId: string, id: string): string {
-    if (!this.#options) throw new Error("workspace profiles unavailable");
-    return path.join(this.#options.getWorkspaceRoot(workspaceId), ".agentique", "agents", id);
   }
 
   #resolvedWorkspaceProfile(workspaceId: string, id: string): AgentProfile | undefined {
