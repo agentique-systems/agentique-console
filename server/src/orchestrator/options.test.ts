@@ -65,7 +65,7 @@ describe("orchestrator options", () => {
   // The brief shapes attention; the mechanics live in tool descriptions. It
   // was 17 KB once, and every line competes with the native system prompt.
   it("keeps the standing brief within its byte budget", () => {
-    expect(Buffer.byteLength(ORCHESTRATOR_BRIEF + ORCHESTRATOR_DELEGATION_BRIEF, "utf8")).toBeLessThanOrEqual(10_000);
+    expect(Buffer.byteLength(ORCHESTRATOR_BRIEF + ORCHESTRATOR_DELEGATION_BRIEF, "utf8")).toBeLessThanOrEqual(7_000);
   });
 
   it("loads settings, CLAUDE.md and skills like the CLI", () => {

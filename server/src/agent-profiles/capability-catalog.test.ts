@@ -41,6 +41,18 @@ describe("the shipped skills library", () => {
     }
   });
 
+  it("ships the three orchestration-doctrine skills, selectable and tool-free", () => {
+    // Stage 7b: procedure moved out of the standing prompts lives here — the
+    // catalog (served through list_agent_profiles) is how it stays findable.
+    for (const name of ["orchestration-patterns", "requirements-mechanics", "wrap-up-and-landing"]) {
+      const skill = catalog.selectable().find((entry) => entry.name === name);
+      expect(skill, name).toBeDefined();
+      expect(skill!.status, name).toBe("validated");
+      expect(skill!.requiresTools, name).toEqual([]);
+      expect(skill!.whenToUse, name).not.toBe("");
+    }
+  });
+
   it("builtin profiles recommend only skills their tools can honour", () => {
     const registry = new AgentProfileRegistry();
     for (const profile of registry.list()) {
