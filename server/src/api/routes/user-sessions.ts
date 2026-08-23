@@ -175,15 +175,6 @@ export function registerUserSessionRoutes(
         : ctx.app.completion.getSummary(request.params.id, request.params.summaryId),
   );
 
-  // The living spec: revision history + the approved text that governs the run.
-  app.get<{ Params: { id: string } }>(
-    "/api/user-sessions/:id/spec",
-    async (request) => ({
-      revisions: ctx.app.specs.listForUserSession(request.params.id),
-      approved: ctx.app.specs.latestApproved(request.params.id) ?? null,
-    }),
-  );
-
   // The requirement graph: committed revisions, live nodes with derived
   // statuses, and the open-requirements frontier — the canonical spec.
   app.get<{ Params: { id: string } }>(

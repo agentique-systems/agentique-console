@@ -689,6 +689,7 @@ export type ConsoleEvent = Base &
     | { type: "user_session.question.answered"; payload: QuestionAnsweredPayload }
     | { type: "user_session.plan.proposed"; payload: PlanProposedPayload }
     | { type: "user_session.plan.resolved"; payload: PlanResolvedPayload }
+    /** @deprecated historical — the legacy spec spine was removed; rows persist in old journals. */
     | { type: "user_session.spec.updated"; payload: SpecUpdatedPayload }
     | { type: "user_session.requirements.updated"; payload: RequirementsUpdatedPayload }
     | { type: "requirement.status.changed"; payload: RequirementStatusChangedPayload }

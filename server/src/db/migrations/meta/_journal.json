@@ -120,6 +120,13 @@
       "when": 1787512057636,
       "tag": "0016_drop_pending_checkpoint",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "6",
+      "when": 1787513073374,
+      "tag": "0017_drop_spec_revisions",
+      "breakpoints": true
     }
   ]
 }

@@ -510,42 +510,9 @@ export const events = sqliteTable(
 );
 
 /**
- * The living specification: operator-approved revisions of what "done well"
- * means for a run. Approval flows through a plan_approval card; the approved
- * text briefs every agent and is the standard reviews check against. Rows are
- * append-only — an amendment supersedes, never edits.
- */
-export const specRevisions = sqliteTable(
-  "spec_revisions",
-  {
-    id: text("id").primaryKey(),
-    userSessionId: text("user_session_id").notNull().references(() => userSessions.id),
-    /** Monotonic per session, 1-based. */
-    revision: integer("revision").notNull(),
-    /** Markdown; on approval this is the operator-approved (possibly edited) text. */
-    document: text("document").notNull(),
-    /** One line: what changed and why (amendments). */
-    changeNote: text("change_note"),
-    status: text("status", { enum: ["draft", "approved", "superseded", "rejected"] }).notNull().default("draft"),
-    /** Whether the operator edited the text before approving. */
-    origin: text("origin", { enum: ["main", "operator_edited"] }).notNull().default("main"),
-    /** The approving interaction card. */
-    interactionId: text("interaction_id"),
-    createdAt: text("created_at").notNull(),
-    approvedAt: text("approved_at"),
-  },
-  (t) => [
-    index("spec_revisions_session").on(t.userSessionId, t.revision),
-    check("spec_revisions_status", sql`${t.status} IN ('draft','approved','superseded','rejected')`),
-    check("spec_revisions_origin", sql`${t.origin} IN ('main','operator_edited')`),
-  ],
-);
-
-/**
  * Requirement revisions: the committed STRUCTURE history of the requirement
- * graph — the run's canonical specification. Exactly parallel to
- * `spec_revisions` (which remains as the read-only legacy store): draft →
- * approved/superseded/rejected through the same plan-approval card, append-only.
+ * graph — the run's canonical specification. Draft →
+ * approved/superseded/rejected through the plan-approval card, append-only.
  * `document` is the canonical outline (renderCommitted output); `graph` is the
  * parsed form with every id resolved.
  */

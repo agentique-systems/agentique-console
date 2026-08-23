@@ -48,7 +48,6 @@ import { MessageStore } from "./message-store.ts";
 import { PatternStateStore } from "./pattern-state-store.ts";
 import { ProjectStore } from "./project-store.ts";
 import { RequirementStore } from "./requirement-store.ts";
-import { SpecStore } from "./spec-store.ts";
 import { OrchestrationStateStore } from "./state-store.ts";
 import { SessionStore } from "./session-store.ts";
 import { TaskStore } from "./task-store.ts";
@@ -71,7 +70,6 @@ export {
   type RequirementRevisionRow,
   type RequirementStatusChangeRow,
 } from "./requirement-store.ts";
-export { SpecStore, type SpecRevisionRow } from "./spec-store.ts";
 export { OrchestrationStateStore, type OrchestrationStateRow } from "./state-store.ts";
 export { SessionStore } from "./session-store.ts";
 export { TaskStore } from "./task-store.ts";
@@ -90,7 +88,6 @@ export interface Stores {
   usage: UsageStore;
   crons: CronStore;
   patternState: PatternStateStore;
-  specs: SpecStore;
   projects: ProjectStore;
   requirements: RequirementStore;
   assumptions: AssumptionStore;
@@ -112,7 +109,6 @@ export function createStores(db: Db, sqlite: SqliteTransactor): Stores {
     usage: new UsageStore(db),
     crons: new CronStore(db),
     patternState: new PatternStateStore(db),
-    specs: new SpecStore(db, sqlite),
     projects: new ProjectStore(db),
     requirements: new RequirementStore(db, sqlite),
     assumptions: new AssumptionStore(db),

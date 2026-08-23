@@ -1,8 +1,8 @@
 /**
  * The requirement graph service: the run's committed specification and its
- * live state, replacing SpecService as the governing document (SpecService
- * stays as the read-only legacy store; every read path here falls back to it
- * for pre-graph runs).
+ * live state — the ONE governing spine (the legacy spec store it replaced
+ * was retired by migration 0017, which converted pre-graph governing text
+ * into intent revisions).
  *
  * Two change regimes, deliberately separated:
  * - COMMITTED STRUCTURE (statements, composition, which nodes exist) moves
@@ -54,7 +54,6 @@ import type { AssumptionStore } from "../db/stores/assumption-store.ts";
 import type { ProjectStore } from "../db/stores/project-store.ts";
 import { InvalidInputError, NotFoundError } from "../errors.ts";
 import { profileWritesFiles } from "../agent-profiles/registry.ts";
-import type { SpecService } from "./spec.ts";
 
 const TERMINAL_STATUSES = new Set(["satisfied", "violated", "infeasible"]);
 
@@ -110,8 +109,7 @@ export function deriveVerifiedBy(claimant: RequirementClaimant): "self" | "indep
 
 /**
  * The two prompt-injection contracts the composer, runner, and checkpoints
- * consume. RequirementService implements them with a legacy-spec fallback, so
- * call sites keep one dependency and pre-graph runs keep their digest.
+ * consume. RequirementService implements both; call sites keep one dependency.
  */
 export interface GoverningDigest {
   digest(userSessionId: string): string;
@@ -142,7 +140,6 @@ export class RequirementService implements GoverningDigest {
   readonly #store: RequirementStore;
   readonly #projects: ProjectStore;
   readonly #assumptions: AssumptionStore;
-  readonly #legacy: SpecService;
   readonly #bus: EventBus;
   readonly #resolveProject: (userSessionId: string) => string;
   #frontierDeps: RequirementFrontierDeps | null = null;
@@ -153,14 +150,12 @@ export class RequirementService implements GoverningDigest {
     store: RequirementStore,
     projects: ProjectStore,
     assumptions: AssumptionStore,
-    legacy: SpecService,
     bus: EventBus,
     resolveProject: (userSessionId: string) => string,
   ) {
     this.#store = store;
     this.#projects = projects;
     this.#assumptions = assumptions;
-    this.#legacy = legacy;
     this.#bus = bus;
     this.#resolveProject = resolveProject;
   }
@@ -279,6 +274,55 @@ export class RequirementService implements GoverningDigest {
       }
     }
     return [];
+  }
+
+  /**
+   * The ExitPlanMode compat path: an operator-approved plan that does not
+   * parse as a requirement outline still governs — recorded as an approved
+   * INTENT revision holding the prose verbatim (leading-prose graph, no
+   * nodes; the same shape migration 0017 gave pre-graph runs), so one spine
+   * holds every governing text. Deliberately bypasses the outline parser:
+   * this path exists precisely for text the parser rejects. The caller's
+   * best-effort catch decides that plan approval itself never fails on
+   * recording (the plan text stays durable on the approval interaction
+   * either way).
+   */
+  recordIntentFallback(userSessionId: string, text: string, interactionId: string, edited: boolean): void {
+    const projectId = this.#project(userSessionId);
+    const graph: RequirementGraph = { title: null, preamble: [{ heading: "", body: text }], nodes: [] };
+    const draft = this.#store.insertDraft({
+      projectId,
+      userSessionId,
+      document: text,
+      graph: graph as unknown as Record<string, unknown>,
+      changeNote: "approved via ExitPlanMode",
+      baseRevision: this.#store.latestApproved(projectId)?.revision ?? 0,
+      kind: "intent",
+      scopeId: null,
+    });
+    const approved = this.#store.applyApproval({
+      revisionId: draft.id,
+      document: text,
+      graph: graph as unknown as Record<string, unknown>,
+      edited,
+      interactionId,
+      ops: { inserts: [], updates: [], retires: [] },
+    });
+    this.#projects.setIntentDocument(projectId, text);
+    this.#bus.append({
+      type: "user_session.requirements.updated",
+      userSessionId,
+      payload: {
+        userSessionId,
+        revision: approved.revision,
+        changeNote: "approved via ExitPlanMode",
+        edited,
+        nodeCount: 0,
+        added: [],
+        retired: [],
+        kind: "intent",
+      },
+    });
   }
 
   /**
@@ -1099,14 +1143,14 @@ export class RequirementService implements GoverningDigest {
 
   /**
    * The prompt injection. Requirement outline with live statuses when a
-   * revision governs; the legacy spec digest for pre-graph runs; EMPTY when
-   * nothing governs (prompt-cache byte-stability rule). Over the byte cap it
-   * first collapses fully-satisfied subtrees, then truncates with a marker.
+   * revision governs; EMPTY when nothing governs (prompt-cache byte-stability
+   * rule). Over the byte cap it first collapses fully-satisfied subtrees,
+   * then truncates with a marker.
    */
   digest(userSessionId: string): string {
     const projectId = this.#project(userSessionId);
     const approved = this.#store.latestApproved(projectId);
-    if (!approved) return this.#legacy.digest(userSessionId);
+    if (!approved) return "";
     const nodes = this.#store.liveNodes(projectId);
     const header = `## Requirements (rev ${approved.revision}, authoritative — statuses are console-derived; claim leaves with evidence via report_requirement)`;
     // The operator's intent prose travels with the outline: the vision is
@@ -1219,14 +1263,11 @@ export class RequirementService implements GoverningDigest {
     return roots;
   }
 
-  /** One line for checkpoints and deliveries; legacy fallback; null = nothing governs. */
+  /** One line for checkpoints and deliveries; null = nothing governs. */
   pointer(userSessionId: string): string | null {
     const projectId = this.#project(userSessionId);
     const approved = this.#store.latestApproved(projectId);
-    if (!approved) {
-      const legacy = this.#legacy.pointer(userSessionId);
-      return legacy === null ? null : `spec ${legacy}`;
-    }
+    if (!approved) return null;
     const nodes = this.#store.liveNodes(projectId);
     const derived = this.#derivedStatuses(nodes);
     const counts = requirementStatusCounts(nodes.map((node) => derived.get(node.id) ?? node.status));

@@ -127,7 +127,7 @@ export class RequirementStore {
    * Approve one revision with the operator's final text AND apply the node
    * diff in ONE transaction, superseding the previous approved revision — a
    * crash mid-approval must never leave the project with half a graph or zero
-   * approved revisions (the SpecStore.approve rationale, extended to nodes).
+   * approved revisions.
    * Status resets and retirements journal console-actor status changes so the
    * history explains every mechanical transition.
    */

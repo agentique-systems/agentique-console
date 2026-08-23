@@ -80,7 +80,7 @@ export interface CommissionRow {
   createdAt: string;
 }
 
-export interface SpecRevisionTraceRow {
+export interface RevisionTraceRow {
   id: string;
   revision: number;
   document: string;
@@ -375,26 +375,8 @@ export class Trace {
     return this.events("agent_session.result.returned", (_payload, event) => event.agentSessionId === agentSessionId);
   }
 
-  specRevisions(): SpecRevisionTraceRow[] {
-    if (!this.#tableExists("spec_revisions")) return [];
-    const rows = this.#userSessionId === null
-      ? this.#all("SELECT id, revision, document, change_note, status, origin, interaction_id, created_at, approved_at FROM spec_revisions ORDER BY revision")
-      : this.#all("SELECT id, revision, document, change_note, status, origin, interaction_id, created_at, approved_at FROM spec_revisions WHERE user_session_id = ? ORDER BY revision", this.#userSessionId);
-    return rows.map((row) => ({
-      id: row.id as string,
-      revision: row.revision as number,
-      document: row.document as string,
-      changeNote: (row.change_note as string | null) ?? null,
-      status: row.status as string,
-      origin: row.origin as string,
-      interactionId: (row.interaction_id as string | null) ?? null,
-      createdAt: row.created_at as string,
-      approvedAt: (row.approved_at as string | null) ?? null,
-    }));
-  }
-
   /** Requirement revisions — the canonical spec's committed-structure history. */
-  requirementRevisions(): SpecRevisionTraceRow[] {
+  requirementRevisions(): RevisionTraceRow[] {
     if (!this.#tableExists("requirement_revisions")) return [];
     const rows = this.#userSessionId === null
       ? this.#all("SELECT id, revision, document, change_note, status, origin, interaction_id, created_at, approved_at FROM requirement_revisions ORDER BY revision")

@@ -1,8 +1,7 @@
 /**
- * Spec currency for seats: the governing revision re-anchors every delivery
- * prompt, and rides seat rotation checkpoints — a seat that outlives an
- * amendment must not keep working from a superseded revision it has no way
- * to notice, and a checkpoint must be self-sufficiently true.
+ * Requirements currency for seats: the governing revision re-anchors every
+ * delivery prompt — a seat that outlives an amendment must not keep working
+ * from a superseded revision it has no way to notice.
  */
 import { describe, expect, it } from "vitest";
 import { initMessage, sendHandoffUse, successMessage } from "../sdk/fake.ts";
@@ -31,23 +30,24 @@ function makeFlowHarness(harnessOptions: Parameters<typeof makeDelegationHarness
   }, harnessOptions);
 }
 
-function approveSpec(h: ReturnType<typeof makeFlowHarness>, userSessionId: string): void {
-  const draft = h.app.specs.propose(userSessionId, "# Game spec\n\nDeterministic dungeons.", "initial spec");
-  h.app.specs.approve(draft.id, { document: draft.document, edited: false });
+function approveRequirements(h: ReturnType<typeof makeFlowHarness>, userSessionId: string): void {
+  const doc = "## Requirements\n- Dungeons are deterministic\n";
+  const draft = h.app.requirements.propose(userSessionId, doc, "initial requirements");
+  h.app.requirements.approve(draft.id, { document: doc, edited: false });
 }
 
 describe("spec currency for seats (fake SDK)", () => {
   it("every delivery prompt re-anchors on the governing revision", async () => {
     const h = makeFlowHarness();
     const userSessionId = h.addUserSession();
-    approveSpec(h, userSessionId);
+    approveRequirements(h, userSessionId);
     const done = collectUntil(h.bus, (event) => event.type === "agent_session.result.returned", 10_000);
     h.host.createSession({ userSessionId, title: "anchored", agents: [{ name: "scout", profileId: "explorer" }], briefing: handoff("go") });
     await done;
 
     const scoutPrompt = h.fake.captured.prompts.find((text) => text.includes("You are scout."));
     expect(scoutPrompt).toBeDefined();
-    expect(scoutPrompt).toContain("Governing requirements: spec rev 1 — initial spec");
+    expect(scoutPrompt).toContain("Governing requirements: requirements rev 1 — 0/1 satisfied, 1 open");
     expect(scoutPrompt).toContain("read_requirements before continuing");
   });
 

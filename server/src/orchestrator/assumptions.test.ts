@@ -11,7 +11,6 @@ import { createStores } from "../db/stores/index.ts";
 import { projects, userSessions, workspaces } from "../db/schema.ts";
 import { EventBus } from "../events/bus.ts";
 import { nowIso } from "../ids.ts";
-import { SpecService } from "./spec.ts";
 import { RequirementService } from "./requirements.ts";
 import { AssumptionService } from "./assumptions.ts";
 
@@ -29,7 +28,7 @@ function makeHarness() {
   db.insert(workspaces).values({ id: "ws1", name: "w", rootPath: "/tmp/assumption-test", createdAt: now, updatedAt: now }).run();
   db.insert(projects).values({ id: "proj1", workspaceId: "ws1", title: null, intentDocument: null, createdAt: now }).run();
   db.insert(userSessions).values({ id: "us1", workspaceId: "ws1", projectId: "proj1", mode: "execute", title: "t", createdAt: now, updatedAt: now } as typeof userSessions.$inferInsert).run();
-  const requirements = new RequirementService(stores.requirements, stores.projects, stores.assumptions, new SpecService(stores.specs, bus), bus, () => "proj1");
+  const requirements = new RequirementService(stores.requirements, stores.projects, stores.assumptions, bus, () => "proj1");
   const assumptions = new AssumptionService(stores.assumptions, requirements, bus, () => "proj1");
   const draft = requirements.propose("us1", DOC, "initial");
   requirements.approve(draft.id, { document: DOC, edited: false });

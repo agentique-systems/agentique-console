@@ -23,7 +23,6 @@ export const keys = {
       ["user-sessions", "list", workspaceId] as const,
     detail: (id: string) => ["user-sessions", "detail", id] as const,
     /** The governing documents + orchestration read-models — under this prefix so their invalidations reach them. */
-    spec: (id: string) => ["user-sessions", "spec", id] as const,
     requirements: (id: string) => ["user-sessions", "requirements", id] as const,
     orchestration: (id: string) => ["user-sessions", "orchestration", id] as const,
     runSummary: (id: string, summaryId: string) => ["user-sessions", "run-summary", id, summaryId] as const,

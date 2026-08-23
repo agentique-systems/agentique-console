@@ -145,12 +145,13 @@ describe("decision ledger", () => {
     expect(shown).toHaveLength(1);
   });
 
-  it("announces an approved spec revision to a busy seat at its next delivery", async () => {
-    // The decision delta is the designed spec-propagation channel: a seat
-    // that stays live through an amendment must hear WHICH revision now
-    // governs, not a generic "Approved the plan".
+  it("announces an approved requirements revision to a busy seat at its next delivery", async () => {
+    // The decision delta is the designed propagation channel: a seat that
+    // stays live through an amendment must hear WHICH revision now governs,
+    // not a generic "Approved the plan".
     const { h, userSessionId, agentSessionId } = await twoSeats();
-    const { id } = h.interactions.createSpecApproval(userSessionId, "## Spec v2", 2, "vendor three.js");
+    const { id } = h.interactions.createRequirementsApproval(
+      userSessionId, "## Requirements\n- Renders with three.js\n", 2, "vendor three.js", 1);
     h.interactions.resolveFromApi(userSessionId, id, { decision: "approve" });
 
     h.host.post({
@@ -168,8 +169,8 @@ describe("decision ledger", () => {
 
     const prompt = h.fake.captured.prompts.find((text) => text.includes("You are renderer."))!;
     expect(prompt).toContain("New operator decisions since your last delivery");
-    expect(prompt).toContain("Specification approval (rev 2)");
-    expect(prompt).toContain("Approved specification revision 2 — vendor three.js");
+    expect(prompt).toContain("Requirements approval (rev 2)");
+    expect(prompt).toContain("Approved requirements revision 2 — vendor three.js");
   });
 
   it("carries operatorDecisions on a coordination handoff", async () => {

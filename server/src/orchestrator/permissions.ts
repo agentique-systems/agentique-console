@@ -11,7 +11,6 @@ import type { EventBus } from "../events/bus.ts";
 import type { SdkOptions } from "../sdk/types.ts";
 import type { InteractionService } from "./interactions.ts";
 import type { RequirementService } from "./requirements.ts";
-import type { SpecService } from "./spec.ts";
 
 /**
  * Per-lane callback state. Lives as long as the persistent query; the runner
@@ -28,16 +27,14 @@ export interface CanUseToolInput {
   bus: EventBus;
   interactions: InteractionService;
   laneState: LaneState;
-  /** Legacy fallback: a plan that is not a requirement outline records here. */
-  specs: SpecService;
-  /** The approved plan records as the run's first REQUIREMENT revision when it parses. */
+  /** The approved plan records as the run's first requirement revision (outline) or intent revision (prose). */
   requirements: RequirementService;
 }
 
 type CanUseTool = NonNullable<SdkOptions["canUseTool"]>;
 
 export function buildOrchestratorCanUseTool(input: CanUseToolInput): CanUseTool {
-  const { userSessionId, repo, bus, interactions, laneState, specs, requirements } = input;
+  const { userSessionId, repo, bus, interactions, laneState, requirements } = input;
 
   const deny = (
     toolName: string,
@@ -125,8 +122,9 @@ export function buildOrchestratorCanUseTool(input: CanUseToolInput): CanUseTool 
         // The planning phase's deliverable IS the specification: when the
         // approved (possibly operator-edited) plan parses as a requirement
         // outline it becomes the run's first requirement revision; otherwise
-        // it records as a legacy spec (compat soft-fail) — plan approval must
-        // never fail on the recording.
+        // it records as an INTENT revision (compat soft-fail) — one spine,
+        // and plan approval must never fail on the recording (the plan text
+        // stays durable on the approval interaction regardless).
         try {
           const finalText = resolved.editedDocument?.trim() || plan;
           const edited = resolved.editedDocument !== undefined && resolved.editedDocument.trim() !== plan.trim();
@@ -134,8 +132,7 @@ export function buildOrchestratorCanUseTool(input: CanUseToolInput): CanUseTool 
             const draft = requirements.propose(userSessionId, finalText, "approved via ExitPlanMode");
             requirements.approve(draft.id, { document: finalText, interactionId: approvalId, edited });
           } else {
-            const draft = specs.propose(userSessionId, finalText, "approved via ExitPlanMode");
-            specs.approve(draft.id, { document: finalText, interactionId: approvalId, edited });
+            requirements.recordIntentFallback(userSessionId, finalText, approvalId, edited);
           }
         } catch { /* best effort — plan approval itself must not fail on spec recording */ }
         repo.patchUserSession(userSessionId, { phase: "executing" });

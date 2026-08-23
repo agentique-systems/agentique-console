@@ -11,7 +11,6 @@ import { createStores } from "../db/stores/index.ts";
 import { projects, userSessions, workspaces } from "../db/schema.ts";
 import { EventBus } from "../events/bus.ts";
 import { nowIso } from "../ids.ts";
-import { SpecService } from "./spec.ts";
 import { RequirementService } from "./requirements.ts";
 
 const DOC = `# Reading tracker
@@ -41,7 +40,7 @@ function makeHarness() {
     } as typeof userSessions.$inferInsert).run();
   }
   const service = new RequirementService(
-    stores.requirements, stores.projects, stores.assumptions, new SpecService(stores.specs, bus), bus,
+    stores.requirements, stores.projects, stores.assumptions, bus,
     (userSessionId) => projectOf[userSessionId]!,
   );
   return { service, stores };

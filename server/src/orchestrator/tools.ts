@@ -26,7 +26,6 @@ import { MAIN_TOOL_NAMES } from "./grants.ts";
 import type { InteractionService } from "./interactions.ts";
 import type { AssumptionService } from "./assumptions.ts";
 import { RequirementParseFailure, type RequirementService } from "./requirements.ts";
-import type { SpecService } from "./spec.ts";
 import type { CompletionRecord, OrchestrationStateService } from "./state.ts";
 import type { CapabilityCatalog } from "../agent-profiles/capability-catalog.ts";
 import { MCP_CATALOG } from "../agent-profiles/capability-catalog.ts";
@@ -59,7 +58,6 @@ export interface ConsoleToolsInput {
   handoffs: HandoffService;
   artifacts: ArtifactStore;
   interactions: InteractionService;
-  specs: SpecService;
   requirements: RequirementService;
   assumptions: AssumptionService;
   state: OrchestrationStateService;
@@ -70,7 +68,7 @@ export interface ConsoleToolsInput {
 }
 
 export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
-  const { sdk, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, specs, requirements, assumptions, state, catalog, registry } = input;
+  const { sdk, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, requirements, assumptions, state, catalog, registry } = input;
 
   /** Tools operate only on this UserSession's agent sessions. */
   const owned = (agentSessionId: string) => {
@@ -672,11 +670,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         guarded(() => {
           const approved = requirements.latestApproved(userSessionId);
           if (approved === undefined) {
-            const legacy = specs.latestApproved(userSessionId);
-            if (!legacy) return { requirements: null, note: "no approved requirements yet — propose them with propose_requirements" };
-            return { legacy: true, revision: legacy.revision, changeNote: legacy.changeNote,
-              document: pageTail(legacy.document, args.cursor, args.maxBytes),
-              note: "This run is governed by a legacy markdown spec. A requirement graph can supersede it via propose_requirements." };
+            return { requirements: null, note: "no approved requirements yet — propose them with propose_requirements" };
           }
           if (args.scopeId !== undefined) {
             return { revision: approved.revision, scopeId: args.scopeId,
@@ -873,12 +867,10 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         nonGoals: z.array(z.string()).default([]).describe("Deliberately out of scope (incl. declined opportunities). At most 8 survive."),
         requirementsRevision: z.number().int().min(1).optional()
           .describe("The approved REQUIREMENTS revision verified against. REQUIRED when a requirement graph governs — the completion predicate matches it against the current approved revision."),
-        specRevision: z.number().int().min(1).optional()
-          .describe("Legacy-spec runs only: the approved spec revision verified against."),
         note: z.string().optional(),
       },
       async (args: { criteria: { requirement?: string; criterion?: string; met: boolean; evidence?: { kind: "file" | "journal" | "artifact" | "task" | "command" | "url"; ref: string; label?: string }[] }[];
-        knownGaps: string[]; nonGoals: string[]; requirementsRevision?: number; specRevision?: number; note?: string }) =>
+        knownGaps: string[]; nonGoals: string[]; requirementsRevision?: number; note?: string }) =>
         guarded(() => {
           // Fail loudly on a stale or missing revision — a record against a
           // superseded document would silently never satisfy the completion
@@ -900,16 +892,6 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
                 throw new InvalidInputError(`unknown or retired requirement "${entry.requirement}" — read_requirements lists the live graph`);
               }
             }
-          } else {
-            const approved = specs.latestApproved(userSessionId);
-            if (approved !== undefined) {
-              if (args.specRevision === undefined) {
-                throw new InvalidInputError(`a spec exists (approved rev ${approved.revision}); pass specRevision after verifying the criteria against it`);
-              }
-              if (args.specRevision !== approved.revision) {
-                throw new InvalidInputError(`specRevision ${args.specRevision} is not the current approved revision ${approved.revision}; re-verify against the current spec`);
-              }
-            }
           }
           const statements = governing === undefined
             ? new Map<string, string>()
@@ -923,8 +905,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
                 ...(entry.criterion === undefined ? {} : { criterion: clip(entry.criterion, 200) }),
                 met: entry.met, evidence: entry.evidence ?? [] })),
               knownGaps: clipAll(args.knownGaps ?? [], 200, 8), nonGoals: clipAll(args.nonGoals ?? [], 200, 8),
-              ...(args.requirementsRevision === undefined ? {} : { requirementsRevision: args.requirementsRevision }),
-              ...(args.specRevision === undefined ? {} : { specRevision: args.specRevision }) },
+              ...(args.requirementsRevision === undefined ? {} : { requirementsRevision: args.requirementsRevision }) },
             args.note === undefined ? undefined : clip(args.note, 280));
           return { revision: row.revision, recorded: true };
         }),

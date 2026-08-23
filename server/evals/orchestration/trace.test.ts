@@ -77,22 +77,23 @@ describe("Trace foundation", () => {
     expect(final.seq).toBeGreaterThan(commissions[0]!.seq!);
   });
 
-  it("spec/state accessors read every column", async () => {
+  it("requirement/state accessors read every column", async () => {
     const h = makeHarness(async function* () {
       yield initMessage();
       yield successMessage();
     });
     const sessionId = h.addUserSession();
-    const draft = h.app.specs.propose(sessionId, "# The spec", "initial");
-    h.app.specs.approve(draft.id, { document: "# The spec", edited: false, interactionId: "int_x" });
+    const doc = "## Requirements\n- The page renders\n";
+    const draft = h.app.requirements.propose(sessionId, doc, "initial");
+    h.app.requirements.approve(draft.id, { document: doc, edited: false, interactionId: "int_x" });
     h.app.orchestrationState.update(sessionId, {
       trigger: "commission", strategy: "steel thread first", strategyWhy: "riskiest slice",
       uncertainties: ["storage format"], assumptions: ["node 22"], risks: ["scope creep"],
     });
 
     const trace = Trace.fromSqlite(h.sqlite, sessionId);
-    expect(trace.specRevisions()).toHaveLength(1);
-    expect(trace.specRevisions()[0]).toMatchObject({
+    expect(trace.requirementRevisions()).toHaveLength(1);
+    expect(trace.requirementRevisions()[0]).toMatchObject({
       revision: 1, status: "approved", changeNote: "initial", interactionId: "int_x",
     });
     const state = trace.stateRevisions();

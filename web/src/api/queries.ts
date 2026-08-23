@@ -19,7 +19,6 @@ import type {
   GetAgentProfileResponse,
   TimelinePageResponse,
   GetRequirementsResponse,
-  GetSpecResponse,
   GetOrchestrationResponse,
   GetRunSummaryResponse,
 } from "@agentique-console/shared";
@@ -176,9 +175,6 @@ export function useAgentProfiles(workspaceId: string | null) {
 }
 export function useAgentProfile(workspaceId: string | null, id: string | null) {
   return useQuery({ queryKey: keys.profiles.detail(workspaceId ?? "", id ?? ""), queryFn: () => apiFetch<GetAgentProfileResponse>(`/api/workspaces/${workspaceId}/agent-profiles/${id}`), enabled: workspaceId !== null && id !== null });
-}
-export function useSpec(id: string | null) {
-  return useQuery({ queryKey: keys.userSessions.spec(id ?? ""), queryFn: () => apiFetch<GetSpecResponse>(`/api/user-sessions/${id}/spec`), enabled: id !== null });
 }
 export function useRequirements(id: string | null) {
   return useQuery({ queryKey: keys.userSessions.requirements(id ?? ""), queryFn: () => apiFetch<GetRequirementsResponse>(`/api/user-sessions/${id}/requirements`), enabled: id !== null });

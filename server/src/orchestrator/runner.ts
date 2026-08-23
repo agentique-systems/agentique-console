@@ -34,7 +34,6 @@ import type {
   SdkUserMessageLike,
 } from "../sdk/types.ts";
 import { decisionPin, type DecisionLedger } from "./decisions.ts";
-import type { SpecService } from "./spec.ts";
 import type { RequirementService } from "./requirements.ts";
 import type { OrchestrationStateService } from "./state.ts";
 import type { InteractionService } from "./interactions.ts";
@@ -131,7 +130,6 @@ export interface OrchestratorDeps {
    */
   decisions: DecisionLedger;
   /** The living spec + working state, injected into every generation like decisions. */
-  specs: SpecService;
   /** The governing document (requirement graph, legacy-spec fallback). */
   requirements: RequirementService;
   orchestrationState: OrchestrationStateService;
@@ -583,7 +581,6 @@ export class OrchestratorRunner {
         bus,
         interactions,
         laneState: lane.state,
-        specs: this.#deps.specs,
         requirements: this.#deps.requirements,
       }),
       mcpServer: this.#deps.buildMcpServer?.(sessionId, sdk),
