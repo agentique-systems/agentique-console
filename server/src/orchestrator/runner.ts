@@ -35,7 +35,7 @@ import type {
   QueryHandle,
   SdkUserMessageLike,
 } from "../sdk/types.ts";
-import type { DecisionLedger } from "./decisions.ts";
+import { decisionPin, type DecisionLedger } from "./decisions.ts";
 import type { SpecService } from "./spec.ts";
 import type { RequirementService } from "./requirements.ts";
 import type { OrchestrationStateService } from "./state.ts";
@@ -584,7 +584,11 @@ export class OrchestratorRunner {
       contextMemory: session.latestHandoffId
         ? JSON.stringify(this.#deps.handoffs.get(session.latestHandoffId), null, 2)
         : session.memory,
-      decisionDigest: this.#deps.decisions.digest(sessionId),
+      decisionDigest: this.#deps.decisions.digest(sessionId, {
+        // Main pins against the whole live graph: a decision stays in the
+        // prompt while any requirement it names is still unsatisfied.
+        pinned: decisionPin(this.#deps.requirements.derive(sessionId)),
+      }),
       specDigest: this.#deps.requirements.digest(sessionId),
       stateDigest: this.#deps.orchestrationState.digest(sessionId),
       autonomy: session.autonomy,

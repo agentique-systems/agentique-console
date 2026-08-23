@@ -77,6 +77,16 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
     return session;
   };
 
+  /** Every requirement reference validates against the LIVE graph before use. */
+  const assertLiveRequirementIds = (ids: string[]) => {
+    if (ids.length === 0) return;
+    const live = new Set(requirements.derive(userSessionId).map((node) => node.id));
+    const unknown = ids.filter((id) => !live.has(id));
+    if (unknown.length > 0) {
+      throw new InvalidInputError(`unknown requirement id(s): ${unknown.join(", ")} — read_requirements lists the current graph`);
+    }
+  };
+
   const tools = [
     sdk.tool(
       "create_agent_session",
@@ -125,6 +135,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           description: z.string().optional(),
           owner: z.string().optional().describe("The agent that will do the work"),
           blockedBy: z.array(z.string()).optional().describe("taskIds this unit depends on"),
+          requirementId: z.string().min(1).optional().describe("The requirement id this unit discharges — links the ledger to the graph. Name it when one governs."),
         })).max(20).optional()
           .describe("Ledger units created WITH the session, BEFORE its briefing dispatches — so the briefing's taskId resolves and the entry assignment starts its unit. This replaces calling task_create afterwards for the initial breakdown."),
       },
@@ -145,7 +156,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         why?: string;
         expecting?: string;
         requirements?: string[];
-        tasks?: { taskId: string; subject: string; description?: string; owner?: string; blockedBy?: string[] }[];
+        tasks?: { taskId: string; subject: string; description?: string; owner?: string; blockedBy?: string[]; requirementId?: string }[];
       }) =>
         guarded(() => {
           // Rationale AND the delegated sub-scope ride the briefing's
@@ -171,15 +182,13 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
             const problems = catalog.validateAssignment(agent.skills, profileTools);
             if (problems.length > 0) throw new InvalidInputError(`agent "${agent.name}": ${problems.join("; ")}`);
           }
-          // Delegated requirements validate BEFORE anything spawns — a session
-          // must never launch against ids that do not exist.
-          if (args.requirements !== undefined && args.requirements.length > 0) {
-            const live = new Set(requirements.derive(userSessionId).map((node) => node.id));
-            const unknown = args.requirements.filter((id) => !live.has(id));
-            if (unknown.length > 0) {
-              throw new InvalidInputError(`unknown requirement id(s): ${unknown.join(", ")} — read_requirements lists the current graph`);
-            }
-          }
+          // Delegated requirements AND task-level requirement links validate
+          // BEFORE anything spawns — a session must never launch against ids
+          // that do not exist.
+          assertLiveRequirementIds(args.requirements ?? []);
+          assertLiveRequirementIds((args.tasks ?? [])
+            .map((unit) => unit.requirementId)
+            .filter((id): id is string => id !== undefined));
           const created = host.createSession({
             userSessionId,
             title: args.title,
@@ -327,13 +336,16 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         description: z.string().default(""),
         owner: z.string().min(1).describe("The agent that will DO this work — not you."),
         blockedBy: z.array(z.string()).default([]).describe("taskIds this task depends on. Forward references are fine — the edge attaches when the blocker is created."),
+        requirementId: z.string().min(1).optional().describe("The requirement id (read_requirements) this unit discharges — links the ledger to the graph and feeds the frontier's blocked annotation. Name it when one governs."),
       },
-      async (args: { agentSessionId: string; taskId: string; subject: string; description: string; owner: string; blockedBy: string[] }) =>
+      async (args: { agentSessionId: string; taskId: string; subject: string; description: string; owner: string; blockedBy: string[]; requirementId?: string }) =>
         guarded(() => {
           const session = owned(args.agentSessionId);
+          if (args.requirementId !== undefined) assertLiveRequirementIds([args.requirementId]);
           tasks?.upsertFromCreate({
             sdkSessionId: consoleTaskListId(args.agentSessionId), sdkTaskId: args.taskId,
             subject: args.subject, description: args.description, owner: args.owner, blockedBy: args.blockedBy,
+            ...(args.requirementId === undefined ? {} : { requirementId: args.requirementId }),
             attribution: { workspaceId: repo.getUserSession(userSessionId)?.workspaceId ?? "", userSessionId, agentSessionId: session.id, agent: null },
           });
           return { taskId: args.taskId, created: true, owner: args.owner };
@@ -352,10 +364,12 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         description: z.string().optional(),
         addBlockedBy: z.array(z.string()).optional(),
         removeBlockedBy: z.array(z.string()).optional(),
+        requirementId: z.string().min(1).optional().describe("Link (or re-link) this unit to the requirement it discharges."),
       },
-      async (args: { agentSessionId: string; taskId: string; status?: "pending" | "in_progress" | "completed" | "deleted"; owner?: string; subject?: string; description?: string; addBlockedBy?: string[]; removeBlockedBy?: string[] }) =>
+      async (args: { agentSessionId: string; taskId: string; status?: "pending" | "in_progress" | "completed" | "deleted"; owner?: string; subject?: string; description?: string; addBlockedBy?: string[]; removeBlockedBy?: string[]; requirementId?: string }) =>
         guarded(() => {
           owned(args.agentSessionId);
+          if (args.requirementId !== undefined) assertLiveRequirementIds([args.requirementId]);
           const { agentSessionId, taskId, ...patch } = args;
           tasks?.applyUpdate({ sdkSessionId: consoleTaskListId(agentSessionId), sdkTaskId: taskId, patch });
           return { taskId, updated: true };
@@ -394,6 +408,73 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         });
         return { deadlineId: id, dueAt, reason: args.reason };
       }),
+    ),
+
+    /**
+     * Main's requirement-TRACEABLE ask. Native AskUserQuestion stays for
+     * batched clarification (its SDK schema cannot carry requirement ids);
+     * this one records WHICH requirements a decision resolves, so the
+     * decision ledger can pin scope-relevant decisions instead of aging them
+     * out, and a question is traceable to the obligations it unblocked.
+     */
+    sdk.tool(
+      "ask_operator",
+      "Ask the Human Operator one decision that specific requirements hang on. Name those ids in requirementIds — the answer is recorded as a decision PINNED to them: it reaches every seat working under those requirements and never ages out of the prompt digest while they are open. Use native AskUserQuestion for batched clarification with no requirement anchor. urgency:'blocking' parks this call until they answer; 'deferred' returns now and their answer wakes you.",
+      {
+        question: z.string().min(1).describe("One concrete question. State the decision, not the background."),
+        header: z.string().max(24).optional().describe("Two or three words for the card's eyebrow."),
+        context: z.string().max(2_000).optional().describe("Why you are asking and what you already tried. Not an option."),
+        options: z.array(z.object({
+          label: z.string().min(1).max(60),
+          description: z.string().max(300).optional(),
+        })).min(2).max(4).describe("Real, mutually exclusive choices."),
+        recommendation: z.string().max(400).optional().describe("Which option you recommend and why. Always give one."),
+        requirementIds: z.array(z.string().min(1)).max(12).optional()
+          .describe("The requirement ids this decision resolves or gates (read_requirements). The decision is pinned to them."),
+        urgency: z.enum(["blocking", "deferred"]).default("blocking"),
+      },
+      async (args: {
+        question: string; header?: string; context?: string;
+        options: { label: string; description?: string }[];
+        recommendation?: string; requirementIds?: string[];
+        urgency: "blocking" | "deferred";
+      }) => {
+        try {
+          assertLiveRequirementIds(args.requirementIds ?? []);
+        } catch (error) {
+          return fail(error);
+        }
+        const question = {
+          question: args.question,
+          ...(args.header ? { header: args.header } : {}),
+          ...(args.context ? { context: args.context } : {}),
+          options: args.options,
+          ...(args.recommendation ? { recommendation: args.recommendation } : {}),
+        };
+        const pending = interactions.createOperatorQuestion({
+          userSessionId,
+          questions: [question],
+          urgency: args.urgency,
+          source: "agent",
+          ...(args.recommendation ? { recommendation: args.recommendation } : {}),
+          allowFreeText: true,
+          ...(args.requirementIds === undefined || args.requirementIds.length === 0
+            ? {} : { requirementIds: args.requirementIds }),
+        });
+        if (args.urgency === "deferred") {
+          return ok({ queued: true, interactionId: pending.id, urgency: "deferred",
+            note: "The operator can see this now; their answer will wake you. Keep working — do not poll." });
+        }
+        const resolved = await pending.resolution;
+        if (resolved.kind === "answers") {
+          return ok({ resolved: true, interactionId: pending.id, answers: resolved.answers,
+            ...(resolved.freeText === undefined ? {} : { freeText: resolved.freeText }),
+            ...(resolved.note === undefined ? {} : { note: resolved.note }),
+            ledger: "Recorded as an operator decision, pinned to the named requirements." });
+        }
+        return ok({ resolved: false, interactionId: pending.id,
+          reason: resolved.kind === "dismissed" ? resolved.reason : "the operator declined" });
+      },
     ),
 
     sdk.tool(

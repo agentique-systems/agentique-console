@@ -39,6 +39,8 @@ export interface AskOperatorArgs {
   recommendation?: string;
   urgency: InteractionUrgency;
   allowFreeText: boolean;
+  /** Requirement ids (inside the delegation) this decision resolves or gates. */
+  requirementIds?: string[];
 }
 
 /** The flat, provider-validated parameter surface of `send_handoff`. */
@@ -194,12 +196,21 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
           subject: z.string().min(1), description: z.string().default(""),
           owner: z.string().min(1).describe("The agent that will DO this work — not you. The roster, the final caveats and the operator's run summary all read this."),
           blockedBy: z.array(z.string()).default([]).describe("taskIds this task depends on. Forward references are fine — the edge attaches when the blocker is created."),
-        }, async (args: { taskId: string; subject: string; description: string; owner: string; blockedBy: string[] }) => {
+          requirementId: z.string().min(1).optional().describe("The requirement id (inside your delegated sub-scope) this unit discharges — links the ledger to the graph."),
+        }, async (args: { taskId: string; subject: string; description: string; owner: string; blockedBy: string[]; requirementId?: string }) => {
           const names = new Set(deps.repo.listAgents(session.id).map((row) => row.name));
           if (!names.has(args.owner)) {
             return fail(`no agent named "${args.owner}" in this session; owners are one of: ${[...names].join(", ")}`);
           }
-          deps.tasks?.upsertFromCreate({ sdkSessionId: listId, sdkTaskId: args.taskId, subject: args.subject, description: args.description, owner: args.owner, blockedBy: args.blockedBy, attribution });
+          if (args.requirementId !== undefined) {
+            try {
+              deps.requirements?.assertWithinDelegation(session.userSessionId, session.id, args.requirementId);
+            } catch (error) {
+              return fail(error);
+            }
+          }
+          deps.tasks?.upsertFromCreate({ sdkSessionId: listId, sdkTaskId: args.taskId, subject: args.subject, description: args.description, owner: args.owner, blockedBy: args.blockedBy,
+            ...(args.requirementId === undefined ? {} : { requirementId: args.requirementId }), attribution });
           return ok({ taskId: args.taskId, created: true, owner: args.owner });
         }),
         sdk.tool("task_update", "Update a ledger entry. Keep status honest as work progresses — the Console reports open tasks to the operator alongside your final, and completing a task dispatches any assignments scheduled behind it. removeBlockedBy drops a dependency that no longer holds (e.g. a deleted blocker), releasing whatever it was blocking.", {
@@ -208,7 +219,15 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
           owner: z.string().optional(), subject: z.string().optional(), description: z.string().optional(),
           addBlockedBy: z.array(z.string()).optional(),
           removeBlockedBy: z.array(z.string()).optional(),
-        }, async (args: { taskId: string; status?: "pending" | "in_progress" | "completed" | "deleted"; owner?: string; subject?: string; description?: string; addBlockedBy?: string[]; removeBlockedBy?: string[] }) => {
+          requirementId: z.string().min(1).optional().describe("Link (or re-link) this unit to the requirement it discharges — inside your delegated sub-scope."),
+        }, async (args: { taskId: string; status?: "pending" | "in_progress" | "completed" | "deleted"; owner?: string; subject?: string; description?: string; addBlockedBy?: string[]; removeBlockedBy?: string[]; requirementId?: string }) => {
+          if (args.requirementId !== undefined) {
+            try {
+              deps.requirements?.assertWithinDelegation(session.userSessionId, session.id, args.requirementId);
+            } catch (error) {
+              return fail(error);
+            }
+          }
           const { taskId, ...patch } = args;
           deps.tasks?.applyUpdate({ sdkSessionId: listId, sdkTaskId: taskId, patch });
           return ok({ taskId, updated: true });
@@ -399,6 +418,8 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
         recommendation: z.string().max(400).optional().describe("Which option you recommend and why. Always give one."),
         urgency: z.enum(["blocking", "deferred"]).default("blocking"),
         allowFreeText: z.boolean().default(true).describe("Let the operator answer outside your options."),
+        requirementIds: z.array(z.string().min(1)).max(12).optional()
+          .describe("Requirement ids inside your delegated sub-scope that this decision resolves or gates. The answer is recorded pinned to them."),
       },
       async (args: AskOperatorArgs) => {
         try {

@@ -252,3 +252,49 @@ describe("commission rationale (fake SDK)", () => {
     expect(coordinatorPrompt).toContain("Expected evidence: A per-module inventory; anything surprising changes the plan");
   });
 });
+
+describe("main's requirement-linked ask_operator (fake SDK)", () => {
+  it("records the answer as a decision pinned to the named requirements; unknown ids are refused", async () => {
+    const h = makeHarness(async function* () {
+      yield initMessage();
+      yield toolUseMessage("req-1", "mcp__console__propose_requirements", {
+        document: "## Requirements\n- Combat feels responsive\n- The world persists between sessions",
+        changeNote: "initial",
+      });
+      // Unknown id: refused before any card renders.
+      yield toolUseMessage("ask-bad", "mcp__console__ask_operator", {
+        question: "Persist to SQLite or Postgres?", options: [{ label: "SQLite" }, { label: "Postgres" }],
+        requirementIds: ["r99"], urgency: "deferred",
+      });
+      // Live id: the card carries it; deferred returns immediately.
+      yield toolUseMessage("ask-1", "mcp__console__ask_operator", {
+        question: "Real-time or turn-based combat?", options: [{ label: "Real-time" }, { label: "Turn-based" }],
+        recommendation: "Real-time — the statement implies responsiveness.",
+        requirementIds: ["r1"], urgency: "deferred",
+      });
+      yield textMessage("Asked.");
+      yield successMessage();
+    });
+    const sessionId = h.addUserSession();
+    const done = collectUntil(h.bus, settled);
+    h.runner.postOperatorMessage(sessionId, "build me a small MMO");
+    await collectUntil(h.bus, (event) => event.type === "user_session.plan.proposed");
+    const card = h.interactions.listPending(sessionId)[0]!;
+    h.interactions.resolveFromApi(sessionId, card.id, { decision: "approve" });
+    await done;
+
+    const toolEvents = h.sqlite.prepare("SELECT payload FROM events WHERE type = 'user_session.tool.completed'").all()
+      .map((row) => JSON.stringify(row)).join(" ");
+    expect(toolEvents).toContain("unknown requirement id");
+
+    const ask = h.interactions.listPending(sessionId).find((row) => row.kind === "question")!;
+    expect((ask.payload as { requirementIds?: string[] }).requirementIds).toEqual(["r1"]);
+    h.interactions.resolveFromApi(sessionId, ask.id, { answers: { "Real-time or turn-based combat?": ["Real-time"] } });
+
+    const decision = h.decisions.list(sessionId).find((d) => d.question.includes("combat"))!;
+    expect(decision.requirementIds).toEqual(["r1"]);
+    // Pinned into main's digest while r1 is open: the ledger renders it first
+    // even though the requirements approval resolved LATER than nothing else.
+    expect(h.decisions.digest(sessionId, { pinned: (ids) => ids.includes("r1") })).toMatch(/^- Real-time or turn-based combat\?/);
+  });
+});

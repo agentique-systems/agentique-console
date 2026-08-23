@@ -32,6 +32,8 @@ export function createSessionUse(
     briefingAction: string;
     /** Requirement ids this session is commissioned against (the delegated sub-scope). */
     requirements?: string[];
+    /** Commission-time ledger units, optionally requirement-linked. */
+    tasks?: { taskId: string; subject: string; owner?: string; blockedBy?: string[]; requirementId?: string }[];
   },
 ) {
   return toolUseMessage(callId, "mcp__console__create_agent_session", {
@@ -40,6 +42,7 @@ export function createSessionUse(
     agents: input.agents.map((agent) => ({ owns: [], ...agent })),
     briefing: draft(input.briefingAction),
     ...(input.requirements === undefined ? {} : { requirements: input.requirements }),
+    ...(input.tasks === undefined ? {} : { tasks: input.tasks }),
   });
 }
 

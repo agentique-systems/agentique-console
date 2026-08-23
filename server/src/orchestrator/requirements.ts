@@ -29,6 +29,7 @@ import type {
   RequirementStatus,
 } from "@agentique-console/shared";
 import {
+  REQUIREMENT_MAX_DEPTH,
   deriveComposedStatus,
   flattenRequirementGraph,
   parseRequirementsDocument,
@@ -347,6 +348,17 @@ export class RequirementService implements GoverningDigest {
     const projectId = this.#project(input.userSessionId);
     const parent = this.#liveNode(input.userSessionId, input.parentId);
     if (input.children.length === 0) throw new InvalidInputError("decompose needs at least one child statement");
+    // The parser caps outline depth (top level = 0, deepest legal = MAX-1);
+    // refinement must respect the same bound or the next canonical render
+    // would no longer round-trip through the shared grammar.
+    const byId = new Map(this.#store.liveNodes(projectId).map((row) => [row.id, row]));
+    let parentDepth = 0;
+    for (let cursor = parent.parentId; cursor !== null; cursor = byId.get(cursor)?.parentId ?? null) parentDepth += 1;
+    if (parentDepth + 1 >= REQUIREMENT_MAX_DEPTH) {
+      throw new InvalidInputError(
+        `children of ${parent.id} would exceed the maximum outline depth of ${REQUIREMENT_MAX_DEPTH} — restructure via a requirement amendment instead of refining deeper`,
+      );
+    }
     const existing = this.#store.liveNodes(projectId).filter((row) => row.parentId === parent.id);
     // Past the LAST existing sibling ord, not sibling count: an amendment
     // renumbers committed children by document position, so count-based ords

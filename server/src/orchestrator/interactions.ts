@@ -110,6 +110,11 @@ export interface CreateOperatorQuestionInput {
   dedupeKey?: string;
   toolUseId?: string;
   signal?: AbortSignal;
+  /**
+   * The requirement ids this question resolves or gates. Rides the payload;
+   * the decision ledger pins the eventual answer to them.
+   */
+  requirementIds?: string[];
 }
 
 export class InteractionService {
@@ -211,10 +216,11 @@ export class InteractionService {
   ): { id: string; resolution: Promise<InteractionResolution> } {
     const urgency = input.urgency ?? "blocking";
     const source = input.source ?? "agent";
+    const requirementIds = input.requirementIds ?? [];
     return this.#create(
       input.userSessionId,
       "question",
-      { questions: input.questions },
+      { questions: input.questions, ...(requirementIds.length === 0 ? {} : { requirementIds }) },
       input.toolUseId,
       input.signal,
       {

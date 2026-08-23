@@ -16,7 +16,7 @@ import type {
 import type { EventBus } from "../events/bus.ts";
 import type { HandoffService } from "../handoffs/service.ts";
 import { recoveryAction } from "../lane-runtime/checkpoint.ts";
-import { decisionOf, renderDecision, type DecisionLedger } from "../orchestrator/decisions.ts";
+import { decisionOf, decisionPin, renderDecision, type DecisionLedger } from "../orchestrator/decisions.ts";
 import type { RequirementService } from "../orchestrator/requirements.ts";
 import type { InteractionService } from "../orchestrator/interactions.ts";
 import type { WorktreeManager } from "../runtime/worktree-manager.ts";
@@ -458,9 +458,33 @@ export class PromptComposer {
    * turn.
    */
   #decisionContext(session: AgentSessionRow): string {
-    const digest = this.#deps.decisions.digest(session.userSessionId);
+    const digest = this.#deps.decisions.digest(session.userSessionId, {
+      pinned: decisionPin(this.#deps.requirements.derive(session.userSessionId), this.#seatDecisionScope(session)),
+    });
     if (digest === "") return "";
     return `\n\n## Operator decisions (authoritative)\nAlready decided for this run — act on them as given.\n${digest}`;
+  }
+
+  /**
+   * The requirement ids a seat's decisions pin against: its delegated
+   * subtrees PLUS their ancestors — a decision on the parent obligation
+   * governs the child's work. Undelegated sessions pin nothing extra.
+   */
+  #seatDecisionScope(session: AgentSessionRow): Set<string> {
+    const roots = this.#deps.requirements.delegationSet(session.id);
+    if (roots.length === 0) return new Set();
+    const nodes = this.#deps.requirements.derive(session.userSessionId);
+    const parentOf = new Map(nodes.map((node) => [node.id, node.parentId]));
+    const scope = new Set<string>();
+    for (const node of nodes) {
+      for (let cursor: string | null = node.id; cursor !== null; cursor = parentOf.get(cursor) ?? null) {
+        if (roots.includes(cursor)) { scope.add(node.id); break; }
+      }
+    }
+    for (const root of roots) {
+      for (let cursor: string | null = root; cursor !== null; cursor = parentOf.get(cursor) ?? null) scope.add(cursor);
+    }
+    return scope;
   }
 
   /**

@@ -8,6 +8,7 @@
 import { describe, expect, it } from "vitest";
 import { initMessage, sendHandoffUse, successMessage, toolUseMessage } from "../sdk/fake.ts";
 import { agentRoleOf, collectUntil, makeDelegationHarness } from "../test-helpers.ts";
+import { interactions as interactionRows } from "../db/schema.ts";
 
 const briefing = (action: string) => ({
   core: { schemaVersion: 1 as const, taskId: null, status: "pending" as const, risk: "low" as const,
@@ -181,5 +182,43 @@ describe("seat requirement tools (fake SDK)", () => {
       .find((payload) => payload.agentSessionId === childId);
     expect(childDelegation).toMatchObject({ requirementIds: ["r2"], source: "child" });
     expect(h.repo.getAgentSession(childId)).toMatchObject({ parentAgentSessionId: created.agentSessionId });
+  });
+});
+
+describe("requirement-linked ask_operator", () => {
+  it("carries in-scope requirement ids into the card and pins the decision; out-of-scope links are refused", async () => {
+    const h = makeDelegationHarness(async function* () {
+      yield initMessage();
+      yield successMessage();
+    });
+    const userSessionId = h.addUserSession();
+    approveRequirements(h, userSessionId);
+    h.host.createSession({
+      userSessionId, title: "asker", agents: [{ name: "scout", profileId: "explorer" }],
+      briefing: briefing("investigate"), requirements: ["r1"],
+    });
+    await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled", 10_000);
+    const ask = h.fake.captured.tools.find((t) => t.name === "ask_operator")!;
+
+    // Out of scope (r3 was never delegated): refused with the law named, and
+    // NOT as a tool error — a refusal must not feed the error-streak watchdog.
+    const denied = JSON.parse(((await ask.handler({
+      question: "Ship without the verify gate?", options: [{ label: "Yes" }, { label: "No" }],
+      urgency: "deferred", allowFreeText: true, requirementIds: ["r3"],
+    }, {})) as { content: { text?: string }[] }).content[0]!.text!) as { invalidRequirementIds?: boolean };
+    expect(denied.invalidRequirementIds).toBe(true);
+
+    // In scope: the card's payload carries the ids; the resolved answer is a
+    // decision PINNED to them, rendered with the ids for every seat.
+    await ask.handler({
+      question: "Which token lifetime?", options: [{ label: "1h" }, { label: "24h" }],
+      urgency: "deferred", allowFreeText: true, requirementIds: ["r2"],
+    }, {});
+    const row = h.db.select().from(interactionRows).all().find((r) => r.status === "pending")!;
+    expect((row.payload as { requirementIds?: string[] }).requirementIds).toEqual(["r2"]);
+    h.interactions.resolveFromApi(userSessionId, row.id, { answers: { "Which token lifetime?": ["1h"] } });
+    const decision = h.decisions.list(userSessionId).find((d) => d.question.includes("token lifetime"))!;
+    expect(decision.requirementIds).toEqual(["r2"]);
+    expect(h.decisions.digest(userSessionId)).toContain("[r2]");
   });
 });

@@ -304,7 +304,7 @@ export class TaskService {
       .filter((row) => row.status !== "deleted")
       .map(
         (row) =>
-          `- [${row.status}] ${row.subject}${row.owner === null ? "" : ` (${row.owner})`}`,
+          `- [${row.status}] ${row.subject}${row.owner === null ? "" : ` (${row.owner})`}${row.requirementId === null ? "" : ` → ${row.requirementId}`}`,
       );
   }
 

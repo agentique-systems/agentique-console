@@ -138,6 +138,7 @@ export class AgentSessionService {
     });
     this.#operator = new OperatorSurface({
       repo: deps.repo, bus: deps.bus, config: deps.config, interactions: deps.interactions,
+      requirements: deps.requirements,
       routing: this.#routing,
       lanes: this.#lanes,
       transfer: (input) => this.post(input),

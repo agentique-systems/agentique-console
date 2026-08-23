@@ -318,3 +318,24 @@ describe("review regressions", () => {
     expect(service.derive("us1").map((node) => node.id)).toEqual(["r1", "r2", "r4", "r3"]);
   });
 });
+
+describe("decompose depth guard", () => {
+  it("refuses children that would exceed the parser's maximum outline depth", () => {
+    const { service } = makeHarness();
+    approveFixture(service);
+    // r6 sits at depth 0; refine a chain one level at a time. The parser
+    // allows depths 0..7, so the child that would land at depth 8 is refused
+    // with the amendment alternative — otherwise the next canonical render
+    // would no longer round-trip through the shared grammar.
+    let parentId = "r6";
+    for (let depth = 1; depth <= 7; depth += 1) {
+      const [added] = service.decompose({
+        userSessionId: "us1", parentId, children: [{ statement: `Level ${depth} check` }], actor: "main",
+      });
+      parentId = added!;
+    }
+    expect(() => service.decompose({
+      userSessionId: "us1", parentId, children: [{ statement: "Too deep" }], actor: "main",
+    })).toThrow(/maximum outline depth/);
+  });
+});

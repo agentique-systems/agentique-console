@@ -6,7 +6,7 @@
  * keep their historical strings byte-for-byte.
  */
 import { describe, expect, it } from "vitest";
-import { decisionOf, planDecisionQuestion, planDecisionStrings, specMarkerOf, type DecisionSourceRow } from "./decisions.ts";
+import { DecisionLedger, decisionOf, decisionPin, planDecisionQuestion, planDecisionStrings, renderDecision, specMarkerOf, type DecisionSourceRow } from "./decisions.ts";
 
 const base = {
   id: "int_1",
@@ -84,5 +84,50 @@ describe("decisionOf over plan_approval rows", () => {
       question: "Plan approval",
       answer: "Approved the plan",
     });
+  });
+});
+
+describe("requirement-linked decisions", () => {
+  const questionRow = (id: string, payload: Record<string, unknown>, resolvedAt: string): DecisionSourceRow =>
+    ({ ...base, id, kind: "question", status: "answered", payload, resolvedAt,
+      response: { answers: { q: ["Yes"] } } }) as unknown as DecisionSourceRow;
+
+  it("decisionOf reads payload requirementIds and renderDecision appends them", () => {
+    const decision = decisionOf(questionRow("int_r", {
+      questions: [{ question: "Real-time or turn-based combat?", options: [] }],
+      requirementIds: ["r3", "r7"],
+    }, "2026-08-14T00:02:00.000Z"))!;
+    expect(decision.requirementIds).toEqual(["r3", "r7"]);
+    expect(renderDecision(decision)).toBe("Real-time or turn-based combat? → Yes [r3, r7]");
+    // Unlinked rows keep their historical rendering byte-for-byte.
+    const plain = decisionOf(questionRow("int_p", { questions: [{ question: "Q", options: [] }] }, "2026-08-14T00:03:00.000Z"))!;
+    expect(plain.requirementIds).toEqual([]);
+    expect(renderDecision(plain)).toBe("Q → Yes");
+  });
+
+  it("digest pins decisions whose requirements are still live and unsatisfied, ahead of recency", () => {
+    const rows = [
+      questionRow("int_old_linked", { questions: [{ question: "Combat model?", options: [] }], requirementIds: ["r1"] }, "2026-08-14T01:00:00.000Z"),
+      questionRow("int_settled", { questions: [{ question: "Palette?", options: [] }], requirementIds: ["r2"] }, "2026-08-14T02:00:00.000Z"),
+      questionRow("int_new_plain", { questions: [{ question: "Anything else?", options: [] }] }, "2026-08-14T03:00:00.000Z"),
+    ];
+    const store = { listDecisionSourceRowsForProject: () => rows.map((row) => ({ ...row, participant: null })) };
+    const ledger = new DecisionLedger(store as never, () => "proj1");
+    // r1 open (pins int_old_linked); r2 satisfied (int_settled ages normally).
+    const pinned = decisionPin([
+      { id: "r1", derivedStatus: "open" },
+      { id: "r2", derivedStatus: "satisfied" },
+    ]);
+    const digest = ledger.digest("us1", { pinned });
+    const lines = digest.split("\n");
+    expect(lines[0]).toContain("Combat model?");
+    expect(lines[0]).toContain("[r1]");
+    // The rest follow newest-first, exactly as before.
+    expect(lines[1]).toContain("Anything else?");
+    expect(lines[2]).toContain("Palette?");
+    // A seat whose scope excludes r1 does not pin it.
+    const scoped = decisionPin([{ id: "r1", derivedStatus: "open" }], new Set(["r9"]));
+    const unpinned = ledger.digest("us1", { pinned: scoped });
+    expect(unpinned.split("\n")[0]).toContain("Anything else?");
   });
 });

@@ -360,7 +360,11 @@ export interface Interaction {
    */
   detached: boolean;
   payload:
-    | { questions: InteractionQuestion[] }
+    | {
+        questions: InteractionQuestion[];
+        /** Requirement ids the question resolves or gates; the answer pins to them. */
+        requirementIds?: string[];
+      }
     | {
         plan: string;
         /** Marks a legacy spec-revision approval. */

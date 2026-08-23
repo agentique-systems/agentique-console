@@ -25,6 +25,7 @@ export const MAIN_DEFAULT_EFFORT: EffortLevel = "xhigh";
 export const CONSOLE_TOOL_NAMES = [
   "send_to_coordinator",
   "set_deadline",
+  "ask_operator",
   "task_create",
   "task_update",
   "task_list",

@@ -22,6 +22,8 @@ export interface OperatorDecision {
   question: string;
   answer: string;
   note: string | null;
+  /** The requirement ids the question named — the decision is pinned to them. */
+  requirementIds: string[];
   /** When the operator decided — the interaction's resolution time. */
   createdAt: string;
 }
@@ -123,6 +125,7 @@ export function decisionOf(row: DecisionSourceRow): OperatorDecision | null {
       ? `(in chat) ${response.chatText!.trim()}`
       : renderAnswer(response.answers ?? {}, response.freeText);
   if (question === "" && answer === "") return null;
+  const payloadIds = (row.payload as { requirementIds?: unknown } | null | undefined)?.requirementIds;
   return {
     id: row.id,
     userSessionId: row.userSessionId,
@@ -135,6 +138,7 @@ export function decisionOf(row: DecisionSourceRow): OperatorDecision | null {
     question,
     answer,
     note: isPlan ? null : (response.note ?? null),
+    requirementIds: Array.isArray(payloadIds) ? payloadIds.filter((id): id is string => typeof id === "string") : [],
     createdAt: row.resolvedAt ?? row.createdAt,
   };
 }
@@ -174,23 +178,35 @@ export class DecisionLedger {
   }
 
   /**
-   * The bounded block injected into an agent's system prompt. Newest first so a
-   * truncation drops the oldest, and capped in BYTES as well as entries — a
+   * The bounded block injected into an agent's system prompt. Newest first so
+   * a truncation drops the oldest, and capped in BYTES as well as entries — a
    * long run must not silently push the checkpoint out of the prompt.
+   *
+   * `pinned` (see `decisionPin`) partitions by RELEVANCE, not only recency:
+   * decisions whose named requirements are still live and unsatisfied in the
+   * caller's scope render first (chronological) and survive the caps
+   * preferentially — recency alone would age a foundational decision out of
+   * a long project's prompt exactly when a seat needs it most.
    */
-  digest(userSessionId: string): string {
-    const rows = this.list(userSessionId).reverse();
+  digest(userSessionId: string, opts: { pinned?: (requirementIds: string[]) => boolean } = {}): string {
+    const all = this.list(userSessionId);
+    const pinnedRows = opts.pinned === undefined
+      ? []
+      : all.filter((row) => row.requirementIds.length > 0 && opts.pinned!(row.requirementIds));
+    const pinnedIds = new Set(pinnedRows.map((row) => row.id));
+    const recent = all.filter((row) => !pinnedIds.has(row.id)).reverse();
+    const ordered = [...pinnedRows, ...recent];
     const lines: string[] = [];
     let bytes = 0;
     let dropped = 0;
-    for (const row of rows.slice(0, DIGEST_MAX_ENTRIES)) {
+    for (const row of ordered.slice(0, DIGEST_MAX_ENTRIES)) {
       const line = `- ${renderDecision(row)}`;
       const size = Buffer.byteLength(line) + 1;
       if (bytes + size > DIGEST_MAX_BYTES) { dropped += 1; continue; }
       lines.push(line);
       bytes += size;
     }
-    const omitted = dropped + Math.max(0, rows.length - DIGEST_MAX_ENTRIES);
+    const omitted = dropped + Math.max(0, ordered.length - DIGEST_MAX_ENTRIES);
     if (omitted > 0) lines.push(`- (${omitted} older decision(s) omitted; they still stand)`);
     return lines.join("\n");
   }
@@ -200,5 +216,25 @@ export class DecisionLedger {
 /** One canonical rendering, so every consumer says the same thing. */
 export function renderDecision(row: OperatorDecision): string {
   const note = row.note === null || row.note === "" ? "" : ` (${row.note})`;
-  return `${row.question} → ${row.answer}${note}`;
+  const ids = row.requirementIds.length === 0 ? "" : ` [${row.requirementIds.join(", ")}]`;
+  return `${row.question} → ${row.answer}${note}${ids}`;
+}
+
+/**
+ * The pinning predicate for `DecisionLedger.digest`: a decision stays pinned
+ * while any requirement it names is live and not yet satisfied — a settled or
+ * retired obligation lets its decisions age out like any other. `scope`
+ * narrows to a seat's world (its delegated subtrees plus their ancestors);
+ * absent, the whole graph is the scope (main).
+ */
+export function decisionPin(
+  nodes: readonly { id: string; derivedStatus: string }[],
+  scope?: ReadonlySet<string>,
+): (requirementIds: string[]) => boolean {
+  const unsatisfied = new Set(
+    nodes.filter((node) => node.derivedStatus !== "satisfied" && node.derivedStatus !== "retired")
+      .map((node) => node.id),
+  );
+  return (requirementIds) =>
+    requirementIds.some((id) => unsatisfied.has(id) && (scope === undefined || scope.has(id)));
 }

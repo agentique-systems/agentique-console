@@ -274,6 +274,38 @@ export function commissionsReferenceOpenRequirements(): TraceCheck {
  * one satisfied claim came from independent verification — selected per
  * scenario exactly like commissionedIndependentReview, never a count metric.
  */
+/**
+ * The ledger↔graph join, for requirement-heavy scenarios that opt in: once a
+ * requirement revision governs, every ledger unit created afterwards names a
+ * requirement id — an unlinked unit is work the frontier cannot see and the
+ * run review cannot trace to an obligation. Runtime records without gating
+ * (an unlinked task stays legal); this check is where the discipline is
+ * MEASURED, on scenarios whose task cards warrant it.
+ */
+export function tasksNameRequirements(): TraceCheck {
+  return {
+    id: "tasks-name-requirements",
+    dimension: "delegation",
+    description: "every ledger unit created under a governing graph names a requirement id",
+    run(trace) {
+      const firstApproval = trace.first("user_session.requirements.updated");
+      if (firstApproval === undefined) return pass("no requirement revision governs — nothing to link");
+      const problems: { detail: string; event: Ev }[] = [];
+      for (const event of trace.events()) {
+        if (event.type !== "task.created" || event.seq <= firstApproval.seq) continue;
+        const task = (event.payload as { task?: { sdkTaskId?: string; subject?: string; requirementId?: string | null } }).task;
+        if (task === undefined) continue;
+        if (task.requirementId === null || task.requirementId === undefined) {
+          problems.push({ detail: `ledger unit "${String(task.sdkTaskId)}" (${String(task.subject)}) names no requirement`, event });
+        }
+      }
+      return problems.length === 0
+        ? pass("every ledger unit under the governing graph is requirement-linked", [firstApproval])
+        : fail(problems.map((problem) => problem.detail).join("; "), problems.map((problem) => problem.event));
+    },
+  };
+}
+
 export function statusChangesCarryEvidence(opts: { requireIndependentSatisfied?: boolean } = {}): TraceCheck {
   return {
     id: "status-changes-carry-evidence",
