@@ -33,11 +33,12 @@ export interface ApprovalNodeOps {
     ord: number;
     statement: string;
     composition: "all" | "any";
+    verifyExpectation: "independent" | "operator" | null;
   }[];
-  /** Surviving nodes whose shape moved (statement/composition/parent/ord). */
+  /** Surviving nodes whose shape moved (statement/composition/parent/ord/expectation). */
   updates: {
     id: string;
-    patch: Partial<Pick<RequirementNodeRow, "parentId" | "ord" | "statement" | "composition" | "origin" | "introducedInRevision">>;
+    patch: Partial<Pick<RequirementNodeRow, "parentId" | "ord" | "statement" | "composition" | "verifyExpectation" | "origin" | "introducedInRevision">>;
     /** True when the statement text changed: status resets to open, journaled. */
     resetStatus: boolean;
   }[];
@@ -149,6 +150,7 @@ export class RequirementStore {
           ord: insert.ord,
           statement: insert.statement,
           composition: insert.composition,
+          verifyExpectation: insert.verifyExpectation,
           status: "open",
           origin: "committed",
           introducedInRevision: row.revision,
@@ -233,6 +235,9 @@ export class RequirementStore {
       ord: child.ord,
       statement: child.statement,
       composition: child.composition,
+      // Expectations are committed structure; decomposition never sets one.
+      // An inherited (ancestor) declaration still covers these leaves.
+      verifyExpectation: null,
       status: "open",
       origin: "refinement",
       introducedInRevision: 0,

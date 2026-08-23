@@ -650,22 +650,30 @@ export class RequirementService implements GoverningDigest {
       const id = row.id as string;
       const existing = liveById.get(id);
       if (!existing) {
-        ops.inserts.push({ id, parentId: row.parentId, ord: row.ord, statement: row.statement, composition: row.composition });
+        ops.inserts.push({ id, parentId: row.parentId, ord: row.ord, statement: row.statement,
+          composition: row.composition, verifyExpectation: row.verifyExpectation });
         continue;
       }
       const statementChanged = existing.statement !== row.statement;
       if (statementChanged && existing.status !== "open") resets.push({ id, from: existing.status });
+      // An expectation change updates the node WITHOUT resetting its status:
+      // the statement (what the evidence attested to) is unchanged — the gap
+      // between the recorded tier and the new declaration derives at read.
+      const expectationChanged = (existing.verifyExpectation ?? null) !== (row.verifyExpectation ?? null);
       const moved = existing.parentId !== row.parentId || existing.ord !== row.ord
         || existing.composition !== row.composition;
       const promote = existing.origin === "refinement";
-      if (statementChanged || moved || promote) {
+      if (statementChanged || moved || promote || expectationChanged) {
         ops.updates.push({
           id,
+          // The patch ALWAYS carries the expectation: a move that also drops
+          // the marker must apply both, never half of the line.
           patch: {
             parentId: row.parentId,
             ord: row.ord,
             statement: row.statement,
             composition: row.composition,
+            verifyExpectation: row.verifyExpectation,
             ...(promote ? { origin: "committed" as const, introducedInRevision: revision } : {}),
           },
           resetStatus: statementChanged,

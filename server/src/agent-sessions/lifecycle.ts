@@ -198,6 +198,7 @@ export class SessionLifecycle {
       parentControllerAgent: parentRow ? input.parent!.controllerAgent : null,
       depth: parentRow ? parentRow.depth + 1 : 0,
       allowChildSessions: input.allowChildSessions === true,
+      budgetUsd: null,
     };
     repo.insertAgentSession(row);
     if (parentRow) {
