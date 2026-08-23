@@ -62,16 +62,32 @@ investigation made unnecessary, execution unblocked, the strategy confirmed
 unchanged, or new uncertainty discovered. "Commissioned → produced → never
 used" is a named failure mode with a named checker (`evidenceConsumed`).
 
-## The specification discipline
+## The requirement discipline
 
 The first product of a non-trivial run is a shared understanding of "done
-well": goals, constraints, decisions with recommendations, acceptance
-criteria a reviewer can check, standing uncertainties and assumptions, the
-proposed crew. `propose_spec` → operator edits in place → their text
-governs → injected into every seat's system prompt, re-anchored by a
-pointer in every delivery, announced by revision in the decision delta,
-carried through rotation checkpoints → amended, never silently diverged
-from.
+well", committed as a **requirement graph**: a tree of declarative statements
+a reviewer can check — what must become true of the finished work, never
+how — composed with `all` (every child must hold) or `any` (one sufficient
+child establishes its parent). `propose_requirements` → operator edits the
+outline in place → their text governs → injected into every seat's system
+prompt, re-anchored by a pointer in every delivery, announced by revision in
+the decision delta, carried through rotation checkpoints → amended, never
+silently diverged from. `docs/requirements.md` holds the full model: outline
+grammar, id stability, derivation rules, delegation subtrees, verification
+tiers, the frontier.
+
+Two change regimes, deliberately separated. **Committed structure** —
+statements, composition, which requirements exist at the committed level —
+changes only through operator-approved, append-only revisions: the success
+condition is never silently redefined. **Live state** — statuses, evidence,
+verification records — changes continuously without approval, journaled,
+evidence-required for every terminal status. Between them sits
+**decomposition**: a session refining how a committed requirement is
+discharged adds journaled refinement children without approval, because
+refinement changes representation, not meaning. Statuses are semantic
+(`open`, `satisfied`, `violated`, `infeasible`, `retired`), never numeric;
+parent statuses are derived mechanically by the Console — a model claims,
+with evidence, only about leaves, and never asserts the roll-up.
 
 The **uncertainty map** is a per-task map, not a checklist: a dimension
 matters iff plausible answers differ in a way that changes the build.
@@ -82,7 +98,7 @@ security, maintainability, compatibility, edge cases, failure behavior,
 deployment environment, acceptance criteria, the definition of excellent.
 Consequential → resolve by the cheapest adequate route; not → record the
 default and move on. The full list lives HERE, not in the brief — a
-brief-resident list becomes a ritual every spec walks identically.
+brief-resident list becomes a ritual every proposal walks identically.
 
 ## The authority model
 
@@ -96,7 +112,7 @@ optimizations clearly inside the approved specification. Normally
 human-owned or human-ratified: changes to product vision; meaningful scope
 expansion or contraction; subjective taste with no approved direction;
 significant budget/time-envelope changes; consequential irreversible
-choices; material user-visible behavior the spec does not imply; tradeoffs
+choices; material user-visible behavior no requirement implies; tradeoffs
 that turn primarily on preferences or priorities. Expense alone does not
 interrupt the operator — the approved resource envelope, reversibility, and
 magnitude relative to the task do.
@@ -112,8 +128,8 @@ returns, prototypes, reviews, failures, operator feedback. Opportunities are
 weighed by expected value — materially improves the core outcome, removes a
 significant weakness, substantially simplifies, enables something
 disproportionate, reduces a major risk, better fulfills the underlying
-intent — never by novelty. Classification governs action: within-spec → do;
-spec-interpretation → amend with visible reasoning; scope-expanding →
+intent — never by novelty. Classification governs action: in-scope → do;
+interpretation shifts → amend with visible reasoning; scope-expanding →
 propose with honest cost, never silently adopt; low-value → record or drop.
 Ambition converges toward better outcomes, not larger ones.
 
@@ -127,7 +143,7 @@ differ, independent disagreement is signal, or a wrong choice is expensive
 to reverse. A prototype replaces prolonged reasoning when a cheap experiment
 settles what analysis only argues. Execution is also exploration: sequence
 the riskiest, most informative slice first, and treat its output as evidence
-that may reopen the spec.
+that may reopen the requirements.
 
 ## Review beyond acceptance
 
@@ -135,13 +151,16 @@ The governing rule: the confidence required before declaring completion must
 be supported by evidence sufficiently independent and rigorous for the
 consequences of being wrong. The ladder — maker self-verification →
 independent verification → adversarial review → multi-perspective review →
-holistic product critique and spec critique — is scaled by stakes, novelty,
+holistic product and requirements critique — is scaled by stakes, novelty,
 uncertainty, blast radius, reversibility, and complexity; "always spawn a
 reviewer" is explicitly NOT the principle, and the evals never reward
-reviewer count. On non-trivial work at least one pass may challenge the spec
-itself. Review findings are evidence: they can reopen specification,
-planning, or implementation — understand → build → verify → critique →
-discover → improve → re-verify, where warranted.
+reviewer count. On non-trivial work at least one pass may challenge the
+requirements themselves. A requirement status change records who verified it
+(`self`, `independent`, `operator`); the ladder decides which tier a given
+risk deserves — the Console records and displays the tier, and never blocks
+on it. Review findings are evidence: they can reopen requirements, planning,
+or implementation — understand → build → verify → critique → discover →
+improve → re-verify, where warranted.
 
 ## Stopping
 
@@ -152,9 +171,11 @@ unresolved defects, unresolved consequential uncertainty, improvements still
 worth it, diminishing-return polish, beyond-scope opportunities (propose),
 speculative ideas (record). An iteration must name its gap, why it matters,
 the closing action, and the evidence of closure before it is commissioned.
-`record_completion` maps criteria to evidence with known gaps and non-goals;
-the sign-off card renders it beside the console's facts, and its absence is
-a visible omission — deliberately never a gate a model could stall or force.
+`record_completion` maps requirements to evidence against the CURRENT
+revision, with known gaps and non-goals; the sign-off card renders it beside
+the console's facts, and its absence is a visible omission — deliberately
+never a gate a model could stall or force. `infeasible` is a first-class,
+evidence-backed run verdict, not a failure to be hidden.
 
 ## Composition: sessions are the primitive
 

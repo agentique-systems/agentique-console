@@ -37,6 +37,7 @@ import type {
 } from "../sdk/types.ts";
 import type { DecisionLedger } from "./decisions.ts";
 import type { SpecService } from "./spec.ts";
+import type { RequirementService } from "./requirements.ts";
 import type { OrchestrationStateService } from "./state.ts";
 import type { InteractionService } from "./interactions.ts";
 import { MAIN_DEFAULT_EFFORT, buildOrchestratorOptions } from "./options.ts";
@@ -133,6 +134,8 @@ export interface OrchestratorDeps {
   decisions: DecisionLedger;
   /** The living spec + working state, injected into every generation like decisions. */
   specs: SpecService;
+  /** The governing document (requirement graph, legacy-spec fallback). */
+  requirements: RequirementService;
   orchestrationState: OrchestrationStateService;
   /** Lazy — host and runner construct in either order inside `createApp`. */
   host: () => AgentSessionService;
@@ -574,6 +577,7 @@ export class OrchestratorRunner {
         interactions,
         laneState: lane.state,
         specs: this.#deps.specs,
+        requirements: this.#deps.requirements,
       }),
       mcpServer: this.#deps.buildMcpServer?.(sessionId, sdk),
       sessionStore: this.#deps.sessionStore,
@@ -581,7 +585,7 @@ export class OrchestratorRunner {
         ? JSON.stringify(this.#deps.handoffs.get(session.latestHandoffId), null, 2)
         : session.memory,
       decisionDigest: this.#deps.decisions.digest(sessionId),
-      specDigest: this.#deps.specs.digest(sessionId),
+      specDigest: this.#deps.requirements.digest(sessionId),
       stateDigest: this.#deps.orchestrationState.digest(sessionId),
       autonomy: session.autonomy,
       peerName: mainPeerName(config.policy.peerNamePrefix, sessionId),
@@ -1043,7 +1047,7 @@ export class OrchestratorRunner {
     // working-state lines ride the same way — though both also re-enter via
     // prompt injection, the checkpoint must be self-sufficiently true.
     const decisionLines = this.#deps.decisions.lines(sessionId, { max: 12 });
-    const specPointer = this.#deps.specs.pointer(sessionId);
+    const specPointer = this.#deps.requirements.pointer(sessionId);
     const stateLines = this.#deps.orchestrationState.lines(sessionId);
     const extensionDefaults = {
       ...(decisionLines.length > 0 ? { operatorDecisions: decisionLines } : {}),

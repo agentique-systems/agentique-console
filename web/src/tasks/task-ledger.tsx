@@ -78,11 +78,16 @@ function TaskRow({ task, byId }: { task: Task; byId: ReadonlyMap<string, Task> }
           {titleOf(task)}
         </QueueItemContent>
       </button>
-      {(task.agent !== null || blocked || task.scheduledAssignment !== null) && (
+      {(task.agent !== null || blocked || task.scheduledAssignment !== null || task.requirementId !== null) && (
         <QueueItemDescription completed={completed}>
           <span className="flex flex-wrap items-center gap-1.5">
             {task.agent !== null && (
               <span className="font-mono">{task.agent}</span>
+            )}
+            {task.requirementId !== null && (
+              <span className="font-mono text-muted-foreground" title="the requirement this unit discharges">
+                req:{task.requirementId}
+              </span>
             )}
             {blocked && (
               <span className="text-status-waiting">

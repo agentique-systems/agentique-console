@@ -236,3 +236,144 @@ describe("run completion", () => {
     expect(h.db.select().from(runSummaries).all()[0]?.status).toBe("changes_requested");
   });
 });
+describe("the requirement graph as completion oracle", () => {
+  const DOC = "## Requirements\n- The page renders\n- Verification ran";
+
+  function approveRequirements(h: ReturnType<typeof harness>["h"], userSessionId: string): void {
+    const draftRow = h.app.requirements.propose(userSessionId, DOC, "initial");
+    h.app.requirements.approve(draftRow.id, { document: DOC, edited: false });
+  }
+
+  // Review regression: a summary persisted before the requirements field
+  // existed has no key at all — getSummary must normalize it to null so the
+  // sign-off card renders pre-branch runs.
+  it("getSummary serves a pre-branch summary (no requirements key) with requirements null", () => {
+    const { h } = harness();
+    const userSessionId = h.addUserSession();
+    h.db.insert(runSummaries).values({
+      id: "rs_legacy", userSessionId, seqFrom: 0, seqTo: 1, verdict: "completed",
+      document: { headline: "an old run", deviations: [], uncertainty: [], justification: null } as never,
+      status: "proposed", note: null, createdAt: "2026-01-01T00:00:00Z", resolvedAt: null,
+    }).run();
+    const served = h.completion.getSummary(userSessionId, "rs_legacy");
+    expect(served.document.requirements).toBeNull();
+    expect(served.document.headline).toBe("an old run");
+  });
+
+  // Review regression: spec and requirement revisions number independently
+  // from 1, so the nudge dedup must carry the regime — a spec-rev-1 nudge
+  // suppressing the requirements-rev-1 nudge left a migrated run silently
+  // stalled in runState "active".
+  it("a legacy-spec nudge never suppresses the requirement-revision nudge after a mid-run migration", async () => {
+    const { h } = harness();
+    const userSessionId = h.addUserSession();
+    const spec = h.app.specs.propose(userSessionId, "# Spec\nShip it.", "initial");
+    h.app.specs.approve(spec.id, { document: "# Spec\nShip it.", edited: false });
+    h.host.createSession({
+      userSessionId, title: "lane runner", agents: [{ name: "check", profileId: "visual-reviewer", owns: [] }],
+      briefing: draft("verify the page"),
+    });
+    await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled", 10_000);
+    await send(h).handler(FINAL, {});
+    await settle();
+    expect(h.fake.captured.prompts.find((text) => text.includes("no completion record against spec rev 1"))).toBeDefined();
+
+    // Main migrates: a requirement graph (rev 1 in ITS OWN numbering) supersedes.
+    approveRequirements(h, userSessionId);
+    h.completion.schedule(userSessionId);
+    await settle();
+    expect(h.fake.captured.prompts.find((text) => text.includes("no completion record against requirements rev 1"))).toBeDefined();
+    expect(h.db.select().from(runSummaries).all()).toHaveLength(0);
+  });
+
+  it("holds the proposal and nudges with the OPEN requirement ids until a record against the current revision lands", async () => {
+    const { h } = harness();
+    const userSessionId = h.addUserSession();
+    approveRequirements(h, userSessionId);
+    const created = h.host.createSession({
+      userSessionId, title: "lane runner", agents: [{ name: "check", profileId: "visual-reviewer", owns: [] }],
+      briefing: draft("verify the page"),
+    });
+    void created;
+    await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled", 10_000);
+    await send(h).handler(FINAL, {});
+    await settle();
+
+    // No proposal — and the nudge names what is unverified, by id.
+    expect(h.db.select().from(runSummaries).all()).toHaveLength(0);
+    const nudge = h.fake.captured.prompts.find((text) => text.includes("no completion record against requirements rev 1"));
+    expect(nudge).toBeDefined();
+    expect(nudge).toContain("Open requirements: r1 (The page renders); r2 (Verification ran)");
+
+    // Requirements verified with evidence, record against the CURRENT revision → proposes.
+    h.app.requirements.reportStatus({ userSessionId, requirementId: "r1", to: "satisfied",
+      evidence: [{ kind: "command", ref: "npm start" }], verifiedBy: "independent", actor: "check" });
+    h.app.requirements.reportStatus({ userSessionId, requirementId: "r2", to: "satisfied",
+      evidence: [{ kind: "artifact", ref: "artifact_screen" }], verifiedBy: "independent", actor: "check" });
+    h.app.orchestrationState.recordCompletion(userSessionId, {
+      criteria: [
+        { requirement: "r1", statement: "The page renders", met: true, evidence: [{ kind: "command", ref: "npm start" }] },
+        { requirement: "r2", statement: "Verification ran", met: true, evidence: [] },
+      ],
+      knownGaps: [], nonGoals: [], requirementsRevision: 1,
+    });
+    h.completion.schedule(userSessionId);
+    await collectUntil(h.bus, (event) => event.type === "run.completion.proposed", 10_000);
+
+    // The summary snapshots the graph: counts, outline, and requirement-keyed
+    // justification — and the verdict is clean because everything satisfied.
+    const summaryRow = h.db.select().from(runSummaries).all()[0]!;
+    const served = h.completion.getSummary(userSessionId, summaryRow.id);
+    expect(served.verdict).toBe("completed");
+    expect(served.document.requirements).toMatchObject({ revision: 1, counts: { satisfied: 2, open: 0 } });
+    expect(served.document.requirements?.outline).toContain("[✓] r1: The page renders");
+    expect(served.document.justification?.criteria[0]).toMatchObject({ requirement: "r1", statement: "The page renders", met: true });
+  });
+
+  it("a stale record (superseded revision) does not satisfy the oracle", async () => {
+    const { h } = harness();
+    const userSessionId = h.addUserSession();
+    approveRequirements(h, userSessionId);
+    await runToFinalWith(h, userSessionId);
+    h.app.orchestrationState.recordCompletion(userSessionId, {
+      criteria: [{ requirement: "r1", statement: "The page renders", met: true, evidence: [] }],
+      knownGaps: [], nonGoals: [], requirementsRevision: 1,
+    });
+    // Amend: rev 2 governs; the rev-1 record is now a stale claim.
+    const amended = "## Requirements\n- r1: The page renders\n- r2: Verification ran\n- It survives a refresh";
+    const draftRow = h.app.requirements.propose(userSessionId, amended, "one more");
+    h.app.requirements.approve(draftRow.id, { document: amended, edited: false });
+    await send(h).handler(FINAL, {});
+    await settle();
+    expect(h.db.select().from(runSummaries).all()).toHaveLength(0);
+  });
+
+  it("an infeasible root yields the infeasible verdict, not failed", async () => {
+    const { h } = harness();
+    const userSessionId = h.addUserSession();
+    approveRequirements(h, userSessionId);
+    await runToFinalWith(h, userSessionId);
+    h.app.requirements.reportStatus({ userSessionId, requirementId: "r1", to: "infeasible",
+      evidence: [{ kind: "artifact", ref: "artifact_probe" }], verifiedBy: "self", actor: "main", note: "renderer API retired" });
+    h.app.requirements.reportStatus({ userSessionId, requirementId: "r2", to: "satisfied",
+      evidence: [{ kind: "command", ref: "checked" }], verifiedBy: "self", actor: "main" });
+    h.app.orchestrationState.recordCompletion(userSessionId, {
+      criteria: [{ requirement: "r1", statement: "The page renders", met: false, evidence: [] }],
+      knownGaps: ["renderer API retired"], nonGoals: [], requirementsRevision: 1,
+    });
+    h.completion.schedule(userSessionId);
+    await collectUntil(h.bus, (event) => event.type === "run.completion.proposed", 10_000);
+    const summaryRow = h.db.select().from(runSummaries).all()[0]!;
+    expect(h.completion.getSummary(userSessionId, summaryRow.id).verdict).toBe("infeasible");
+  });
+
+  async function runToFinalWith(h: ReturnType<typeof harness>["h"], userSessionId: string) {
+    h.host.createSession({
+      userSessionId, title: "lane runner", agents: [{ name: "check", profileId: "visual-reviewer", owns: [] }],
+      briefing: draft("verify the page"),
+    });
+    await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled", 10_000);
+    await send(h).handler(FINAL, {});
+    await settle();
+  }
+});

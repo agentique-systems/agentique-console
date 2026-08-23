@@ -22,10 +22,20 @@ const planRow = (payload: Record<string, unknown>, status: string, response: Rec
 
 describe("specMarkerOf", () => {
   it("reads the marker, dropping an empty changeNote", () => {
-    expect(specMarkerOf({ plan: "x", spec: { revision: 3, changeNote: "tighter" } })).toEqual({ revision: 3, changeNote: "tighter" });
-    expect(specMarkerOf({ plan: "x", spec: { revision: 3, changeNote: "" } })).toEqual({ revision: 3 });
+    expect(specMarkerOf({ plan: "x", spec: { revision: 3, changeNote: "tighter" } })).toEqual({ revision: 3, changeNote: "tighter", kind: "spec" });
+    expect(specMarkerOf({ plan: "x", spec: { revision: 3, changeNote: "" } })).toEqual({ revision: 3, kind: "spec" });
     expect(specMarkerOf({ plan: "x" })).toBeNull();
     expect(specMarkerOf(null)).toBeNull();
+  });
+
+  it("reads the requirements marker and labels its strings", () => {
+    expect(specMarkerOf({ plan: "x", requirements: { revision: 2, changeNote: "amended", nodeCount: 4 } }))
+      .toEqual({ revision: 2, changeNote: "amended", kind: "requirements" });
+    expect(planDecisionQuestion({ plan: "x", requirements: { revision: 2, nodeCount: 4 } })).toBe("Requirements approval (rev 2)");
+    expect(planDecisionStrings({ plan: "x", requirements: { revision: 2, nodeCount: 4 } }, true)).toEqual({
+      question: "Requirements approval (rev 2)",
+      answer: "Approved requirements revision 2",
+    });
   });
 });
 

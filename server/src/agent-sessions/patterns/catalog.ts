@@ -491,7 +491,7 @@ function buildPlanExecute(input: BuildInput): BuildResult {
       schemaVersion: 1,
       pattern: "plan_execute",
       roles: {
-        planner: { replicable: false, min: 1, max: 1, grants: ["tasks_write", "forward_message", "child_sessions"], extensionKind: "coordination", escalateTo: "main" },
+        planner: { replicable: false, min: 1, max: 1, grants: ["tasks_write", "forward_message", "child_sessions", "requirements_report"], extensionKind: "coordination", escalateTo: "main" },
         executor: { replicable: false, min: 1, max: 19, grants: [], escalateTo: "planner" },
       },
       edges: [

@@ -382,6 +382,31 @@ describe("foldUserItems", () => {
       detail: "rev 2 approved — drop three.js (operator-edited)",
     });
   });
+
+  it("an approved requirement revision folds to a marker with counts and changes", () => {
+    const items = foldUserItems([
+      ev("user_session.requirements.updated", { userSessionId: "us_1", revision: 2, changeNote: "drop dateFormat",
+        edited: true, nodeCount: 4, added: ["r5"], retired: ["r2", "r3"] }),
+    ]);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      type: "runtime",
+      label: "requirements",
+      detail: "rev 2 approved (4 requirements, +1 added, 2 retired) — drop dateFormat (operator-edited)",
+    });
+  });
+
+  it("a requirements-marked plan card carries the marker for the requirements rendering", () => {
+    const items = foldUserItems([
+      ev("user_session.plan.proposed", { userSessionId: "us_1", interactionId: "int_1",
+        plan: "## Requirements\n- Auth works", requirements: { revision: 1, nodeCount: 1 } }),
+    ]);
+    expect(items[0]).toMatchObject({
+      type: "plan",
+      interactionId: "int_1",
+      requirements: { revision: 1, nodeCount: 1 },
+    });
+  });
 });
 
 describe("foldBusy", () => {

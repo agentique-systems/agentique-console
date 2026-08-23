@@ -393,6 +393,25 @@ export class Trace {
     }));
   }
 
+  /** Requirement revisions — the canonical spec's committed-structure history. */
+  requirementRevisions(): SpecRevisionTraceRow[] {
+    if (!this.#tableExists("requirement_revisions")) return [];
+    const rows = this.#userSessionId === null
+      ? this.#all("SELECT id, revision, document, change_note, status, origin, interaction_id, created_at, approved_at FROM requirement_revisions ORDER BY revision")
+      : this.#all("SELECT id, revision, document, change_note, status, origin, interaction_id, created_at, approved_at FROM requirement_revisions WHERE user_session_id = ? ORDER BY revision", this.#userSessionId);
+    return rows.map((row) => ({
+      id: row.id as string,
+      revision: row.revision as number,
+      document: row.document as string,
+      changeNote: (row.change_note as string | null) ?? null,
+      status: row.status as string,
+      origin: row.origin as string,
+      interactionId: (row.interaction_id as string | null) ?? null,
+      createdAt: row.created_at as string,
+      approvedAt: (row.approved_at as string | null) ?? null,
+    }));
+  }
+
   /** ALL columns — strategyWhy, uncertainties, assumptions, risks, completion included; the decision-time evidence layer reads these. */
   stateRevisions(): StateRevisionTraceRow[] {
     if (!this.#tableExists("orchestration_state_revisions")) return [];

@@ -225,7 +225,7 @@ export interface ImproveMessageResponse {
 export interface RunSummaryDocument {
   seqFrom: number;
   seqTo: number;
-  verdict: "completed" | "completed_with_caveats" | "failed";
+  verdict: "completed" | "completed_with_caveats" | "failed" | "infeasible";
   headline: string;
   durationMs: number;
   /** Wall clock minus the UNION of every turn interval across both lanes. */
@@ -250,9 +250,27 @@ export interface RunSummaryDocument {
   resources: { reapedSeats: number; detail: string[] };
   justification: {
     revision: number;
-    criteria: { criterion: string; met: boolean; evidence: { kind: string; ref: string }[] }[];
+    criteria: {
+      /** Requirement id + statement (requirement-keyed records). */
+      requirement?: string;
+      statement?: string;
+      /** Pre-graph records: the freeform criterion string. */
+      criterion?: string;
+      met: boolean;
+      evidence: { kind: string; ref: string }[];
+    }[];
     knownGaps: string[];
     nonGoals: string[];
+  } | null;
+  /**
+   * Snapshot of the requirement graph at proposal time: status counts and the
+   * rendered status outline. Persisted with the summary so a later amendment
+   * never rewrites an old report. Null for pre-graph runs.
+   */
+  requirements: {
+    revision: number;
+    counts: Record<import("./requirements.ts").RequirementStatus, number>;
+    outline: string;
   } | null;
   friction: { apiRetries: number; rateLimited: number; failedTurns: number; watchdogTrips: number; capacityPauses: number };
 }
@@ -287,6 +305,39 @@ export interface GetSpecResponse {
   approved: SpecRevisionWire | null;
 }
 
+// GET /api/user-sessions/:id/requirements — the committed requirement graph
+// (canonical specification) plus its live state.
+export interface RequirementRevisionWire {
+  id: string;
+  revision: number;
+  /** Canonical committed outline (renderCommitted output). */
+  document: string;
+  changeNote: string | null;
+  status: "draft" | "approved" | "superseded" | "rejected";
+  origin: "main" | "operator_edited";
+  interactionId: string | null;
+  nodeCount: number;
+  createdAt: string;
+  approvedAt: string | null;
+}
+export interface GetRequirementsResponse {
+  revisions: RequirementRevisionWire[];
+  approved: RequirementRevisionWire | null;
+  /** Live nodes (committed + refinement) with recorded and derived statuses. */
+  nodes: import("./domain.ts").RequirementNodeWire[];
+  /** Open requirements whose resolution still affects the root, annotated. */
+  frontier: import("./domain.ts").RequirementFrontierEntry[];
+}
+
+// POST /api/user-sessions/:id/requirements/:requirementId/status — the
+// operator's own verdict on one requirement. Evidence is optional for the
+// operator alone: their word IS the gate, and it is recorded as such.
+export interface OperatorRequirementStatusBody {
+  status: "open" | "satisfied" | "violated" | "infeasible";
+  evidence?: { kind: string; ref: string; label?: string }[];
+  note?: string;
+}
+
 // GET /api/user-sessions/:id/orchestration — the review surface: working
 // state plus every commission joined to its rationale and outcome by STABLE
 // ids (the creation briefing's handoff, never whatever main sent last).
@@ -314,6 +365,8 @@ export interface CommissionSummary {
   commission: { handoffId: string; action: string; why: string | null; expecting: string | null; briefedAt: string } | null;
   /** Steering after the briefing is counted, not listed — the handoffs are first-class on the timeline. */
   steering: { count: number };
+  /** The delegated sub-scope: requirement ids this session answers for. */
+  requirements: { id: string; statement: string }[];
   /** The last terminal report (final/failure) to main, by stable id. */
   outcome: { handoffId: string; trigger: string; status: string; action: string } | null;
 }

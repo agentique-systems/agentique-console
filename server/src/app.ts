@@ -22,6 +22,7 @@ import { DecisionLedger } from "./orchestrator/decisions.ts";
 import { InteractionService } from "./orchestrator/interactions.ts";
 import { OrchestratorRunner } from "./orchestrator/runner.ts";
 import { buildConsoleMcpServer } from "./orchestrator/tools.ts";
+import { RequirementService } from "./orchestrator/requirements.ts";
 import { SpecService } from "./orchestrator/spec.ts";
 import { OrchestrationStateService } from "./orchestrator/state.ts";
 import type { ConsoleSdk } from "./sdk/types.ts";
@@ -76,6 +77,7 @@ export interface App {
   host: AgentSessionService;
   runner: OrchestratorRunner;
   specs: SpecService;
+  requirements: RequirementService;
   orchestrationState: OrchestrationStateService;
   completion: RunCompletionService;
   userSessions: UserSessionService;
@@ -103,6 +105,25 @@ export function createApp(options: CreateAppOptions): App {
   const tasks = new TaskService(stores.tasks, stores.assignments, bus, (workspaceId) => void workspaces.get(workspaceId));
   const handoffs = new HandoffService({ repo, bus, getWorkspaceRoot });
   const specs = new SpecService(stores.specs, bus);
+  const requirements = new RequirementService(stores.requirements, specs, bus);
+  // The frontier annotates open requirements from other aggregates' facts —
+  // narrow read closures, wired once here like every other crossing.
+  requirements.setFrontierDeps({
+    openAgentSessionIds: (userSessionId) =>
+      new Set(repo.listAgentSessions(userSessionId).filter((row) => row.lifecycle === "open").map((row) => row.id)),
+    blockedRequirementIds: (userSessionId) => {
+      const blocked = new Set<string>();
+      for (const task of tasks.listForUserSession(userSessionId)) {
+        if (task.requirementId === null || task.status === "completed" || task.status === "deleted") continue;
+        if ((task.status === "pending" && !task.ready) || task.scheduledAssignment !== null) blocked.add(task.requirementId);
+      }
+      return blocked;
+    },
+    awaitingOperatorAgentSessionIds: (userSessionId) =>
+      new Set(interactions.listPending(userSessionId)
+        .map((row) => row.agentSessionId)
+        .filter((id): id is string => id !== null)),
+  });
   const orchestrationState = new OrchestrationStateService(stores.orchestrationState, bus);
   const sessionStore = stores.providerEntries;
 
@@ -111,7 +132,7 @@ export function createApp(options: CreateAppOptions): App {
   const lateRunner = late<OrchestratorRunner>("runner");
   const lateScheduler = late<AssignmentScheduler>("scheduler");
   const host = new AgentSessionService({
-    repo, bus, artifacts, config, profiles, sdk, sessionStore, getWorkspaceRoot, specs,
+    repo, bus, artifacts, config, profiles, sdk, sessionStore, getWorkspaceRoot, requirements,
     worktrees, capacity,
     interactions, decisions, tasks, handoffs,
     scheduler: () => lateScheduler.get(),
@@ -126,15 +147,15 @@ export function createApp(options: CreateAppOptions): App {
   lateScheduler.set(scheduler);
   const runner = new OrchestratorRunner({
     repo, bus, config, sdk, interactions, decisions, handoffs, sessionStore, getWorkspaceRoot,
-    specs, orchestrationState,
+    specs, requirements, orchestrationState,
     host: () => host,
     tasks, capacity,
     buildMcpServer: (userSessionId, sdkInstance) =>
-      buildConsoleMcpServer({ sdk: sdkInstance, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, specs, state: orchestrationState, catalog, registry: profiles }),
+      buildConsoleMcpServer({ sdk: sdkInstance, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, specs, requirements, state: orchestrationState, catalog, registry: profiles }),
   });
   lateRunner.set(runner);
   const completion = new RunCompletionService({
-    db, repo, bus, interactions, scheduler, getWorkspaceRoot, orchestrationState, specs,
+    db, repo, bus, interactions, scheduler, getWorkspaceRoot, orchestrationState, specs, requirements,
     host: () => host,
     runner: () => runner,
     quietWindowMs: config.policy.completionQuietWindowMs,
@@ -178,7 +199,7 @@ export function createApp(options: CreateAppOptions): App {
   });
 
   return {
-    config, db, sqlite, bus, artifacts, repo, sdk, getWorkspaceRoot, specs, orchestrationState,
+    config, db, sqlite, bus, artifacts, repo, sdk, getWorkspaceRoot, specs, requirements, orchestrationState,
     workspaces, timeline, profiles, worktrees, capacity,
     decisions, interactions, tasks, scheduler, handoffs, sessionStore,
     host, runner, completion, userSessions, system,

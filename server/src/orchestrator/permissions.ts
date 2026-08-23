@@ -10,6 +10,7 @@ import type { Repo } from "../db/repo.ts";
 import type { EventBus } from "../events/bus.ts";
 import type { SdkOptions } from "../sdk/types.ts";
 import type { InteractionService } from "./interactions.ts";
+import type { RequirementService } from "./requirements.ts";
 import type { SpecService } from "./spec.ts";
 
 /**
@@ -27,14 +28,16 @@ export interface CanUseToolInput {
   bus: EventBus;
   interactions: InteractionService;
   laneState: LaneState;
-  /** The approved plan text is recorded as the run's first SPEC revision. */
+  /** Legacy fallback: a plan that is not a requirement outline records here. */
   specs: SpecService;
+  /** The approved plan records as the run's first REQUIREMENT revision when it parses. */
+  requirements: RequirementService;
 }
 
 type CanUseTool = NonNullable<SdkOptions["canUseTool"]>;
 
 export function buildOrchestratorCanUseTool(input: CanUseToolInput): CanUseTool {
-  const { userSessionId, repo, bus, interactions, laneState, specs } = input;
+  const { userSessionId, repo, bus, interactions, laneState, specs, requirements } = input;
 
   const deny = (
     toolName: string,
@@ -120,14 +123,21 @@ export function buildOrchestratorCanUseTool(input: CanUseToolInput): CanUseTool 
       );
       const resolved = await resolution;
       if (resolved.kind === "decision" && resolved.approved) {
-        // The planning phase's deliverable IS the specification: the approved
-        // (possibly operator-edited) plan text becomes the governing spec, so
-        // plan_execute sessions get the living-spec artifact for free.
+        // The planning phase's deliverable IS the specification: when the
+        // approved (possibly operator-edited) plan parses as a requirement
+        // outline it becomes the run's first requirement revision; otherwise
+        // it records as a legacy spec (compat soft-fail) — plan approval must
+        // never fail on the recording.
         try {
           const finalText = resolved.editedDocument?.trim() || plan;
-          const draft = specs.propose(userSessionId, finalText, "approved via ExitPlanMode");
-          specs.approve(draft.id, { document: finalText, interactionId: approvalId,
-            edited: resolved.editedDocument !== undefined && resolved.editedDocument.trim() !== plan.trim() });
+          const edited = resolved.editedDocument !== undefined && resolved.editedDocument.trim() !== plan.trim();
+          if (requirements.validateDocument(userSessionId, finalText).ok) {
+            const draft = requirements.propose(userSessionId, finalText, "approved via ExitPlanMode");
+            requirements.approve(draft.id, { document: finalText, interactionId: approvalId, edited });
+          } else {
+            const draft = specs.propose(userSessionId, finalText, "approved via ExitPlanMode");
+            specs.approve(draft.id, { document: finalText, interactionId: approvalId, edited });
+          }
         } catch { /* best effort — plan approval itself must not fail on spec recording */ }
         repo.patchUserSession(userSessionId, { phase: "executing" });
         bus.append({

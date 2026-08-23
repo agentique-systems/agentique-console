@@ -87,4 +87,25 @@ describe("send_to_coordinator", () => {
     expect(result.isError).toBe(true);
     expect((result.content[0] as { text: string }).text).toMatch(/no agent session .* in this conversation/);
   });
+
+  // Regressions from the pre-merge adversarial review: requirements delegate
+  // on UPDATES too (the amendment-steer path), and a transfer that would be
+  // refused never leaves a phantom sub-scope behind.
+  it("delegates requirements on category 'update', and refuses them aimed past the entry agent", async () => {
+    const { h, userSessionId, agentSessionId, tool } = await session();
+    const doc = "## Requirements\n- Game renders\n- Input works\n";
+    const draft = h.app.requirements.propose(userSessionId, doc, "initial");
+    h.app.requirements.approve(draft.id, { document: doc, edited: false }); // r1, r2
+
+    const ok = await tool!.handler({ agentSessionId, ...STEER, category: "update", status: "in_progress", requirements: ["r1"] }, {});
+    const okPayload = JSON.parse((ok.content[0] as { text: string }).text) as Record<string, unknown>;
+    expect(okPayload).toMatchObject({ delivered: true });
+    expect(h.app.requirements.delegationSet(agentSessionId)).toEqual(["r1"]);
+
+    const bad = await tool!.handler({ agentSessionId, ...STEER, category: "update", status: "in_progress", to: "renderer", requirements: ["r2"] }, {});
+    expect(bad.isError).toBe(true);
+    expect((bad.content[0] as { text: string }).text).toMatch(/entry agent/);
+    // r2 was NOT journaled: delegations are append-only, so the guard is the fix.
+    expect(h.app.requirements.delegationSet(agentSessionId)).toEqual(["r1"]);
+  });
 });

@@ -17,16 +17,27 @@ import type { OrchestrationStateRow, OrchestrationStateStore } from "../db/store
 const DIGEST_MAX_BYTES = 2 * 1024;
 
 export interface CompletionRecord {
-  criteria: { criterion: string; met: boolean; evidence: { kind: string; ref: string }[] }[];
+  criteria: {
+    /** Requirement id + its statement as verified (requirement-graph runs). */
+    requirement?: string;
+    statement?: string;
+    /** Freeform criterion text (legacy-spec runs and old persisted rows). */
+    criterion?: string;
+    met: boolean;
+    evidence: { kind: string; ref: string }[];
+  }[];
   knownGaps: string[];
   nonGoals: string[];
   /**
-   * The approved spec revision these criteria were verified against. The
-   * completion predicate requires it to match the CURRENT approved revision —
-   * a record against a superseded spec is a stale claim, and a run with no
-   * record at all must not propose done (a live run proposed completion of a
-   * game with no window because the heuristic was "current ledger clean").
+   * The approved revision these criteria were verified against — the
+   * requirement revision when a graph governs, the legacy spec revision
+   * otherwise. The completion predicate requires the governing one to match
+   * the CURRENT approved revision — a record against a superseded document is
+   * a stale claim, and a run with no record at all must not propose done (a
+   * live run proposed completion of a game with no window because the
+   * heuristic was "current ledger clean").
    */
+  requirementsRevision?: number;
   specRevision?: number;
 }
 

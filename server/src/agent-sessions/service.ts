@@ -1,6 +1,6 @@
 import type { AgentSessionStatus, ConsoleEvent, GetAgentSessionResponse, HandoffDraft, Interaction, PatternId } from "@agentique-console/shared";
 import fs from "node:fs";
-import { NotFoundError } from "../errors.ts";
+import { InvalidInputError, NotFoundError } from "../errors.ts";
 import type { AgentProfile, AgentProfileRegistry } from "../agent-profiles/registry.ts";
 import type { Config } from "../config.ts";
 import {
@@ -17,7 +17,7 @@ import type { CapacityService } from "../capacity/service.ts";
 import type { ConsoleSdk } from "../sdk/types.ts";
 import type { WorktreeManager } from "../runtime/worktree-manager.ts";
 import type { DecisionLedger } from "../orchestrator/decisions.ts";
-import type { SpecService } from "../orchestrator/spec.ts";
+import type { RequirementService } from "../orchestrator/requirements.ts";
 import type { InteractionService } from "../orchestrator/interactions.ts";
 import type { AssignmentScheduler } from "../tasks/scheduler.ts";
 import type { TaskService } from "../tasks/service.ts";
@@ -41,7 +41,7 @@ import { dispatchWorkItems, onPatternPost, sweep as patternSweep, type DispatchW
 
 export interface AgentSessionServiceDeps {
   repo: Repo;
-  specs: SpecService;
+  requirements: RequirementService;
   bus: EventBus;
   artifacts: ArtifactStore;
   /** Required — every knob's default lives in `loadConfig`, nowhere else. */
@@ -129,7 +129,7 @@ export class AgentSessionService {
     });
     this.#composer = new PromptComposer({
       repo: deps.repo, bus: deps.bus, config: deps.config, handoffs: deps.handoffs,
-      decisions: deps.decisions, specs: deps.specs, tasks: deps.tasks, interactions: deps.interactions,
+      decisions: deps.decisions, requirements: deps.requirements, tasks: deps.tasks, interactions: deps.interactions,
       worktrees: deps.worktrees,
       laneState: (agentSessionId, agent) => {
         const lane = this.#lanes.peek(agentSessionId, agent);
@@ -184,19 +184,36 @@ export class AgentSessionService {
     this.#runtime = new AgentRuntime({
       repo: deps.repo, bus: deps.bus, config: deps.config,
       sdk: deps.sdk, sessionStore: deps.sessionStore, getWorkspaceRoot: deps.getWorkspaceRoot,
-      artifacts: deps.artifacts, tasks: deps.tasks, handoffs: deps.handoffs, specs: deps.specs,
+      artifacts: deps.artifacts, tasks: deps.tasks, handoffs: deps.handoffs, requirements: deps.requirements,
       worktrees: deps.worktrees,
       scheduler: deps.scheduler, capacity: deps.capacity,
       lanes: this.#lanes, worktree: this.#worktreeBinding, routing: this.#routing, composer: this.#composer,
       transfer: (input) => this.post(input),
       askOperator: (session, seat, args) => this.#operator.askOperator(session, seat, args),
-      createChildSession: (session, controller, input) => this.#lifecycle.createSession({
-        userSessionId: session.userSessionId, title: input.title,
-        pattern: input.pattern as PatternId,
-        ...(input.patternConfig ? { patternConfig: input.patternConfig } : {}),
-        parent: { agentSessionId: session.id, controllerAgent: controller.name },
-        agents: input.agents, briefing: input.briefing,
-      }),
+      createChildSession: (session, controller, input) => {
+        // A child's sub-scope must be a SUBSET of its parent session's — the
+        // recursion pass-down; a controller cannot widen its own delegation.
+        // Subtree containment, not set membership: a node UNDER a delegated
+        // root is inside the parent's sub-scope.
+        if (input.requirements !== undefined && input.requirements.length > 0) {
+          for (const id of input.requirements) {
+            try {
+              deps.requirements.assertWithinDelegation(session.userSessionId, session.id, id);
+            } catch {
+              throw new InvalidInputError(
+                `requirement ${id} is outside this session's delegation (${deps.requirements.delegationSet(session.id).join(", ") || "none"}) — a child's sub-scope must be a subset of yours`);
+            }
+          }
+        }
+        return this.#lifecycle.createSession({
+          userSessionId: session.userSessionId, title: input.title,
+          pattern: input.pattern as PatternId,
+          ...(input.patternConfig ? { patternConfig: input.patternConfig } : {}),
+          parent: { agentSessionId: session.id, controllerAgent: controller.name },
+          agents: input.agents, briefing: input.briefing,
+          ...(input.requirements === undefined ? {} : { requirements: input.requirements }),
+        });
+      },
       abandonChildSession: (session, controller, childAgentSessionId, reason) =>
         this.#nesting.abandonChildSession(session.id, controller.name, childAgentSessionId, reason),
       dispatchWorkItems: (dispatcherAgent, input) => this.dispatchWorkItems(dispatcherAgent, input),
@@ -243,6 +260,7 @@ export class AgentSessionService {
       worktrees: deps.worktrees,
       routing: this.#routing, lanes: this.#lanes, worktree: this.#worktreeBinding,
       transfer: (input) => this.post(input),
+      requirements: deps.requirements,
       simpleHandoff,
       tasks: deps.tasks,
       snapshotProfile: (profile) => this.#runtime.snapshotProfile(profile),
