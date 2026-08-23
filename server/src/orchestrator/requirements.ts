@@ -44,10 +44,46 @@ import type {
   RequirementStore,
 } from "../db/stores/requirement-store.ts";
 import { InvalidInputError, NotFoundError } from "../errors.ts";
+import { profileWritesFiles } from "../agent-profiles/registry.ts";
 import type { SpecService } from "./spec.ts";
 
 /** Bound on the injected digest; the full outline stays a tool call away. */
 const DIGEST_MAX_BYTES = 8 * 1024;
+
+/**
+ * Who is standing behind a status claim, as console-owned facts. The tier
+ * (`verifiedBy`) is DERIVED from this — never chosen by the reporting model:
+ * the measured party does not get to classify its own measurement's
+ * independence. Seat facts come from the commission-time profile SNAPSHOT, so
+ * a later profile edit or rotation cannot change what a recorded tier meant.
+ */
+export type RequirementClaimant =
+  | { kind: "operator" }
+  | { kind: "main" }
+  | {
+      kind: "seat";
+      agentSessionId: string;
+      agent: string;
+      profileRole: string | undefined;
+      profileTools: readonly string[] | undefined;
+    };
+
+/**
+ * The tier derivation: `operator` for the operator's own verdicts; `self` for
+ * main and every write-capable seat; `independent` only for a seat whose
+ * snapshotted profile is a write-isolated reviewer — the archetype whose whole
+ * job is verification evidence, kept apart from the work it judges. A
+ * read-only coordinator relaying an implementer's claim records `self`:
+ * relaying is not verifying. (`console` is reserved for mechanical resets and
+ * never derives here.)
+ */
+export function deriveVerifiedBy(claimant: RequirementClaimant): "self" | "independent" | "operator" {
+  if (claimant.kind === "operator") return "operator";
+  if (claimant.kind === "main") return "self";
+  return claimant.profileRole === "reviewer" && !profileWritesFiles(claimant.profileTools)
+    ? "independent"
+    : "self";
+}
 
 /**
  * The two prompt-injection contracts the composer, runner, and checkpoints
@@ -213,15 +249,15 @@ export class RequirementService implements GoverningDigest {
    * A leaf status claim. Terminal statuses require evidence (the operator's
    * own verdicts are exempt — their word IS the gate, recorded as such).
    * Reports land on LEAVES only: a parent's status is derived, never asserted.
+   * The verification tier is DERIVED from the claimant (deriveVerifiedBy),
+   * never supplied by the reporting model.
    */
   reportStatus(input: {
     userSessionId: string;
     requirementId: string;
     to: "open" | "satisfied" | "violated" | "infeasible";
     evidence: EvidenceRef[];
-    verifiedBy: "self" | "independent" | "operator";
-    actor: string;
-    agentSessionId?: string;
+    claimant: RequirementClaimant;
     note?: string;
   }): RequirementNodeWire {
     const node = this.#liveNode(input.userSessionId, input.requirementId);
@@ -231,33 +267,36 @@ export class RequirementService implements GoverningDigest {
         `${node.id} has children — its status derives from them; report on the leaves instead: ${children.map((child) => child.id).join(", ")}`,
       );
     }
-    if (input.to !== "open" && input.evidence.length === 0 && input.verifiedBy !== "operator") {
+    if (input.to !== "open" && input.evidence.length === 0 && input.claimant.kind !== "operator") {
       throw new InvalidInputError(`marking ${node.id} ${input.to} requires at least one evidence ref`);
     }
+    const verifiedBy = deriveVerifiedBy(input.claimant);
+    const actor = input.claimant.kind === "seat" ? input.claimant.agent : input.claimant.kind;
+    const agentSessionId = input.claimant.kind === "seat" ? input.claimant.agentSessionId : undefined;
     const atRevision = this.#store.latestApproved(input.userSessionId)?.revision ?? 0;
     const { change, node: updated } = this.#store.applyStatusChange({
       userSessionId: input.userSessionId,
       requirementId: input.requirementId,
       toStatus: input.to,
       evidence: input.evidence,
-      verifiedBy: input.verifiedBy,
-      actor: input.actor,
-      agentSessionId: input.agentSessionId ?? null,
+      verifiedBy,
+      actor,
+      agentSessionId: agentSessionId ?? null,
       atRevision,
       note: input.note ?? null,
     });
     this.#bus.append({
       type: "requirement.status.changed",
       userSessionId: input.userSessionId,
-      ...(input.agentSessionId === undefined ? {} : { agentSessionId: input.agentSessionId }),
+      ...(agentSessionId === undefined ? {} : { agentSessionId }),
       payload: {
         userSessionId: input.userSessionId,
         requirementId: input.requirementId,
         from: change.fromStatus,
         to: change.toStatus,
-        verifiedBy: input.verifiedBy,
-        actor: input.actor,
-        ...(input.agentSessionId === undefined ? {} : { agentSessionId: input.agentSessionId }),
+        verifiedBy,
+        actor,
+        ...(agentSessionId === undefined ? {} : { agentSessionId }),
         evidenceCount: input.evidence.length,
         ...(input.note === undefined ? {} : { note: input.note }),
       },

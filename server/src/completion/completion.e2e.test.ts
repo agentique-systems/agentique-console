@@ -307,9 +307,9 @@ describe("the requirement graph as completion oracle", () => {
 
     // Requirements verified with evidence, record against the CURRENT revision → proposes.
     h.app.requirements.reportStatus({ userSessionId, requirementId: "r1", to: "satisfied",
-      evidence: [{ kind: "command", ref: "npm start" }], verifiedBy: "independent", actor: "check" });
+      evidence: [{ kind: "command", ref: "npm start" }], claimant: { kind: "seat", agentSessionId: "as-check", agent: "check", profileRole: "reviewer", profileTools: ["Read", "Glob", "Grep"] } });
     h.app.requirements.reportStatus({ userSessionId, requirementId: "r2", to: "satisfied",
-      evidence: [{ kind: "artifact", ref: "artifact_screen" }], verifiedBy: "independent", actor: "check" });
+      evidence: [{ kind: "artifact", ref: "artifact_screen" }], claimant: { kind: "seat", agentSessionId: "as-check", agent: "check", profileRole: "reviewer", profileTools: ["Read", "Glob", "Grep"] } });
     h.app.orchestrationState.recordCompletion(userSessionId, {
       criteria: [
         { requirement: "r1", statement: "The page renders", met: true, evidence: [{ kind: "command", ref: "npm start" }] },
@@ -354,9 +354,9 @@ describe("the requirement graph as completion oracle", () => {
     approveRequirements(h, userSessionId);
     await runToFinalWith(h, userSessionId);
     h.app.requirements.reportStatus({ userSessionId, requirementId: "r1", to: "infeasible",
-      evidence: [{ kind: "artifact", ref: "artifact_probe" }], verifiedBy: "self", actor: "main", note: "renderer API retired" });
+      evidence: [{ kind: "artifact", ref: "artifact_probe" }], claimant: { kind: "main" }, note: "renderer API retired" });
     h.app.requirements.reportStatus({ userSessionId, requirementId: "r2", to: "satisfied",
-      evidence: [{ kind: "command", ref: "checked" }], verifiedBy: "self", actor: "main" });
+      evidence: [{ kind: "command", ref: "checked" }], claimant: { kind: "main" } });
     h.app.orchestrationState.recordCompletion(userSessionId, {
       criteria: [{ requirement: "r1", statement: "The page renders", met: false, evidence: [] }],
       knownGaps: ["renderer API retired"], nonGoals: [], requirementsRevision: 1,

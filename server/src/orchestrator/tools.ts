@@ -571,22 +571,20 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
 
     sdk.tool(
       "report_requirement",
-      "Record a requirement STATUS with evidence. Statuses are semantic claims, never scores: satisfied (the statement holds — evidence required), violated (something broke it — evidence required), infeasible (cannot be achieved with available capability or authority — evidence required; route the consequence to the operator or a scope amendment), open (reopen a stale claim). Report LEAVES only — parents and the root derive mechanically from their children, and the operator remains the completion gate. verifiedBy is 'independent' only when the evidence comes from a different seat/profile than the one that did the work. Quantitative measurements belong INSIDE evidence refs, never as numbers ranking anything.",
+      "Record a requirement STATUS with evidence. Statuses are semantic claims, never scores: satisfied (the statement holds — evidence required), violated (something broke it — evidence required), infeasible (cannot be achieved with available capability or authority — evidence required; route the consequence to the operator or a scope amendment), open (reopen a stale claim). Report LEAVES only — parents and the root derive mechanically from their children, and the operator remains the completion gate. The Console derives and records who stood behind each claim: a claim by you records as self-verification — when the stakes deserve independent verification, delegate the requirement to a write-isolated reviewer seat and have IT report. Quantitative measurements belong INSIDE evidence refs, never as numbers ranking anything.",
       {
         requirementId: z.string().min(1).describe("A requirement id from read_requirements, e.g. \"r3\""),
         status: z.enum(["satisfied", "violated", "infeasible", "open"]),
         evidence: z.array(EvidenceRefSchema).default([]).describe("What proves the claim: files, artifacts, tasks, commands, urls. Required for satisfied/violated/infeasible."),
-        verifiedBy: z.enum(["self", "independent"]).default("self")
-          .describe("'independent' only when a different agent/profile than the implementer produced the evidence (a reviewer's verdict, a fresh verification)."),
         note: z.string().optional().describe("One line of context (why infeasible, what reopened it)."),
       },
       async (args: { requirementId: string; status: "satisfied" | "violated" | "infeasible" | "open";
         evidence: { kind: "file" | "journal" | "artifact" | "task" | "command" | "url"; ref: string; label?: string }[];
-        verifiedBy: "self" | "independent"; note?: string }) =>
+        note?: string }) =>
         guarded(() => {
           const wire = requirements.reportStatus({
             userSessionId, requirementId: args.requirementId, to: args.status,
-            evidence: args.evidence, verifiedBy: args.verifiedBy, actor: "main",
+            evidence: args.evidence, claimant: { kind: "main" },
             ...(args.note === undefined ? {} : { note: clip(args.note, 280) }),
           });
           return { requirementId: wire.id, status: wire.status, derivedRoot: requirements.rootStatus(userSessionId),

@@ -270,22 +270,23 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
     }));
     if (ctx.granted.has("report_requirement")) {
       tools.push(sdk.tool("report_requirement",
-        "Record a requirement STATUS with evidence, within this session's delegated sub-scope. Statuses are semantic claims, never scores: satisfied / violated / infeasible require evidence; open reopens a stale claim. Report LEAVES only — parents derive mechanically. verifiedBy is 'independent' only when the evidence comes from a different seat than the one that did the work (a reviewer confirming an implementer's claim).",
+        "Record a requirement STATUS with evidence, within this session's delegated sub-scope. Statuses are semantic claims, never scores: satisfied / violated / infeasible require evidence; open reopens a stale claim. Report LEAVES only — parents derive mechanically. The Console derives and records who stood behind each claim from what kind of seat you are — never claim more independence than your evidence carries.",
         {
           requirementId: z.string().min(1).describe("A requirement id inside your delegated sub-scope (the delivery lists it; read_requirements shows the whole graph)."),
           status: z.enum(["satisfied", "violated", "infeasible", "open"]),
           evidence: z.array(EvidenceRefSchema).default([]).describe("What proves the claim. Required for satisfied/violated/infeasible."),
-          verifiedBy: z.enum(["self", "independent"]).default("self"),
           note: z.string().optional(),
         },
         async (args: { requirementId: string; status: "satisfied" | "violated" | "infeasible" | "open";
           evidence: { kind: "file" | "journal" | "artifact" | "task" | "command" | "url"; ref: string; label?: string }[];
-          verifiedBy: "self" | "independent"; note?: string }) => {
+          note?: string }) => {
           try {
             requirements.assertWithinDelegation(session.userSessionId, session.id, args.requirementId);
             const wire = requirements.reportStatus({
               userSessionId: session.userSessionId, requirementId: args.requirementId, to: args.status,
-              evidence: args.evidence, verifiedBy: args.verifiedBy, actor: agent.name, agentSessionId: session.id,
+              evidence: args.evidence,
+              claimant: { kind: "seat", agentSessionId: session.id, agent: agent.name,
+                profileRole: profile.role, profileTools: profile.tools },
               ...(args.note === undefined ? {} : { note: args.note }),
             });
             return ok({ requirementId: wire.id, status: wire.status,

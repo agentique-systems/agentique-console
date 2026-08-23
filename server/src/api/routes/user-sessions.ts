@@ -208,8 +208,7 @@ export function registerUserSessionRoutes(
         requirementId: request.params.requirementId,
         to: parsed.data.status,
         evidence: (parsed.data.evidence ?? []) as EvidenceRef[],
-        verifiedBy: "operator",
-        actor: "operator",
+        claimant: { kind: "operator" },
         ...(parsed.data.note === undefined ? {} : { note: parsed.data.note }),
       });
     },

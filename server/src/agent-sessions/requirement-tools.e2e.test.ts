@@ -37,10 +37,12 @@ describe("seat requirement tools (fake SDK)", () => {
       if (id.role === "coordinator") {
         coordinatorTurns += 1;
         if (coordinatorTurns === 1) {
-          // Within the sub-scope (r2 sits under the delegated r1)…
+          // Within the sub-scope (r2 sits under the delegated r1)… The stale
+          // `verifiedBy` arg is passed on purpose: the tier is console-derived
+          // now, and a model still sending the old field must be ignored.
           yield toolUseMessage("rep-ok", "mcp__console_agent__report_requirement", {
             requirementId: "r2", status: "satisfied",
-            evidence: [{ kind: "command", ref: "curl /login" }], verifiedBy: "self" });
+            evidence: [{ kind: "command", ref: "curl /login" }], verifiedBy: "independent" });
           // …outside it (r3 was never delegated) — refused, named.
           yield toolUseMessage("rep-out", "mcp__console_agent__report_requirement", {
             requirementId: "r3", status: "satisfied",

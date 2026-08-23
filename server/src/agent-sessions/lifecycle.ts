@@ -8,7 +8,7 @@
  * through the nesting broker.
  */
 import type { HandoffDraft, PatternId } from "@agentique-console/shared";
-import type { AgentProfile, AgentProfileRegistry } from "../agent-profiles/registry.ts";
+import { profileWritesFiles, type AgentProfile, type AgentProfileRegistry } from "../agent-profiles/registry.ts";
 import { toWireAgentSession } from "../api/wire.ts";
 import type { ReapResult } from "../completion/summary.ts";
 import type { Config } from "../config.ts";
@@ -133,7 +133,7 @@ export class SessionLifecycle {
     // boundary for agents that never write.
     for (const agent of input.agents) {
       const profile = this.profile(agent.profileId ?? "explorer", user.workspaceId);
-      const writes = profile.tools.includes("Edit") || profile.tools.includes("Write");
+      const writes = profileWritesFiles(profile.tools);
       if (writes && (agent.owns ?? []).filter((scope) => scope.trim() !== "").length === 0) {
         throw new InvalidInputError(`agent "${agent.name}" (${profile.id}) writes files, so it must declare what it owns`);
       }
@@ -294,7 +294,7 @@ export class SessionLifecycle {
     if (!user) throw new NotFoundError("unknown user session");
     const profile = this.profile(input.profileId, user.workspaceId);
     const owns = (input.owns ?? []).map((scope) => scope.trim()).filter((scope) => scope !== "");
-    const writes = profile.tools.includes("Edit") || profile.tools.includes("Write");
+    const writes = profileWritesFiles(profile.tools);
     if (writes && owns.length === 0) {
       throw new InvalidInputError(`agent "${name}" (${profile.id}) writes files, so it must declare what it owns`);
     }
