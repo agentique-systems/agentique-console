@@ -87,6 +87,17 @@ describe("grants parity", () => {
     expect(nonEntry.has("read_requirements")).toBe(true);
   });
 
+  // The independent tier derives only from a write-isolated reviewer's own
+  // claim, so a reviewer-archetype seat holds report_requirement wherever it
+  // sits in the topology — without inheriting decompose (scoping stays with
+  // the entry seat and role grants).
+  it("a reviewer-archetype seat holds report_requirement without an entry grant", () => {
+    const deps: AgentGrantDeps = { tasks: true, handoffs: true, worktrees: true, user: true, specs: true, childSessions: true };
+    const reviewer = grantedTools({ grants: [] }, makeProfile({ role: "reviewer" }), { ...deps, requirementsEntrySeat: false });
+    expect(reviewer.has("report_requirement")).toBe(true);
+    expect(reviewer.has("decompose_requirement")).toBe(false);
+  });
+
   // The Console grants COORDINATION and nothing else. Capability is native
   // Bash plus whatever MCP servers a profile declares, so no console tool name
   // may ever describe a browser, a process, or an HTTP request again.

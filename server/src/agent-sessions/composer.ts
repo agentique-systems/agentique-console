@@ -5,7 +5,7 @@
  * literal byte-identical.
  */
 import type { HandoffDraft, Interaction, InteractionQuestion } from "@agentique-console/shared";
-import type { AgentProfile } from "../agent-profiles/registry.ts";
+import { profileWritesFiles, type AgentProfile } from "../agent-profiles/registry.ts";
 import type { Config } from "../config.ts";
 import type {
   Repo,
@@ -149,7 +149,7 @@ function capabilityBrief(profile: AgentProfile, hasWorktree: boolean): string {
   const tools = effectiveBuiltinTools(profile, hasWorktree);
   // The merge rule stays profile-based (worktree-binding.ts): only a write
   // profile's worktree lands, so an isolated read-only seat must be told.
-  const writes = profile.tools.includes("Edit") || profile.tools.includes("Write");
+  const writes = profileWritesFiles(profile.tools);
   for (const group of CAPABILITY_GROUPS) {
     if (group.tools.some((tool) => tools.includes(tool))) {
       can.push(group.can);
@@ -177,7 +177,7 @@ function capabilityBrief(profile: AgentProfile, hasWorktree: boolean): string {
 /** Compact capability tag for roster lines — what this agent can be asked to do. */
 function capabilityTag(profile: AgentProfile): string {
   const caps = [
-    ...(profile.tools.includes("Edit") || profile.tools.includes("Write") ? ["writes files"] : ["read-only"]),
+    ...(profileWritesFiles(profile.tools) ? ["writes files"] : ["read-only"]),
     ...(profile.tools.includes("Bash") ? ["runs commands"] : []),
     // Without this a coordinator reads "read-only" off a researcher's roster
     // line and assigns — or reports — as though the seat had no web access.
@@ -583,7 +583,7 @@ export class PromptComposer {
     const assumptionLines = this.#deps.assumptions.openLines(session.userSessionId, inSubtree);
     const assumptionBlock = assumptionLines.length === 0 ? "" :
       `Standing assumptions (recorded, not operator-approved — your subtree rests on them; report contradictions with resolve_assumption or to main):\n${assumptionLines.join("\n")}\n`;
-    return `## Your delegated requirements (this session's success condition)\n${ancestorBlock}${lines.join("\n")}\n${contextBlock}${assumptionBlock}Statuses are semantic and evidence-required: report_requirement (leaves only; verifiedBy 'independent' only for another seat's work), decompose_requirement to refine below these nodes. Anything outside this sub-scope routes to main.\n\n`;
+    return `## Your delegated requirements (this session's success condition)\n${ancestorBlock}${lines.join("\n")}\n${contextBlock}${assumptionBlock}Statuses are semantic and evidence-required: report_requirement (leaves only — the Console records who stood behind each claim), decompose_requirement to refine below these nodes. Anything outside this sub-scope routes to main.\n\n`;
   }
 
   /**

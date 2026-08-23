@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "b204e509-b91b-44b0-980b-f055a81fd381",
-  "prevId": "482c0256-b6a2-4fac-a520-bf121e1f3020",
+  "id": "156609b7-c72e-49e1-8408-9e9b27b6893a",
+  "prevId": "b21af19a-2aa6-4f0a-b1c4-6ecf2a390d41",
   "tables": {
     "agent_profile_trust": {
       "name": "agent_profile_trust",
@@ -390,6 +390,148 @@
       },
       "uniqueConstraints": {},
       "checkConstraints": {}
+    },
+    "assumptions": {
+      "name": "assumptions",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "project_id": {
+          "name": "project_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "text": {
+          "name": "text",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'open'"
+        },
+        "source": {
+          "name": "source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "agent_session_id": {
+          "name": "agent_session_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "interaction_id": {
+          "name": "interaction_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "actor": {
+          "name": "actor",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "resolution_note": {
+          "name": "resolution_note",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "resolution_evidence": {
+          "name": "resolution_evidence",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "resolved_ord": {
+          "name": "resolved_ord",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "resolved_at": {
+          "name": "resolved_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "assumptions_project": {
+          "name": "assumptions_project",
+          "columns": [
+            "project_id",
+            "status"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "assumptions_project_id_projects_id_fk": {
+          "name": "assumptions_project_id_projects_id_fk",
+          "tableFrom": "assumptions",
+          "tableTo": "projects",
+          "columnsFrom": [
+            "project_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "assumptions_project_id_id_pk": {
+          "columns": [
+            "project_id",
+            "id"
+          ],
+          "name": "assumptions_project_id_id_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "assumptions_status": {
+          "name": "assumptions_status",
+          "value": "\"assumptions\".\"status\" IN ('open','confirmed','falsified','retired')"
+        },
+        "assumptions_source": {
+          "name": "assumptions_source",
+          "value": "\"assumptions\".\"source\" IN ('operator','main','agent')"
+        }
+      }
     },
     "crons": {
       "name": "crons",
@@ -1755,6 +1897,122 @@
         }
       }
     },
+    "requirement_links": {
+      "name": "requirement_links",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "project_id": {
+          "name": "project_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "from_id": {
+          "name": "from_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "to_kind": {
+          "name": "to_kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "to_id": {
+          "name": "to_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_by_actor": {
+          "name": "created_by_actor",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "agent_session_id": {
+          "name": "agent_session_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "note": {
+          "name": "note",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "retired_at": {
+          "name": "retired_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "requirement_links_pair": {
+          "name": "requirement_links_pair",
+          "columns": [
+            "project_id",
+            "kind",
+            "from_id",
+            "to_kind",
+            "to_id"
+          ],
+          "isUnique": true
+        },
+        "requirement_links_project": {
+          "name": "requirement_links_project",
+          "columns": [
+            "project_id",
+            "retired_at"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "requirement_links_to_kind": {
+          "name": "requirement_links_to_kind",
+          "value": "\"requirement_links\".\"to_kind\" IN ('requirement','assumption')"
+        },
+        "requirement_links_kind": {
+          "name": "requirement_links_kind",
+          "value": "\"requirement_links\".\"kind\" IN ('depends_on','conflicts_with','rests_on')"
+        }
+      }
+    },
     "requirement_nodes": {
       "name": "requirement_nodes",
       "columns": {
@@ -1941,6 +2199,21 @@
           "notNull": true,
           "autoincrement": false
         },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'full'"
+        },
+        "scope_id": {
+          "name": "scope_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "base_revision": {
           "name": "base_revision",
           "type": "integer",
@@ -2055,6 +2328,10 @@
         "requirement_revisions_origin": {
           "name": "requirement_revisions_origin",
           "value": "\"requirement_revisions\".\"origin\" IN ('main','operator_edited')"
+        },
+        "requirement_revisions_kind": {
+          "name": "requirement_revisions_kind",
+          "value": "\"requirement_revisions\".\"kind\" IN ('full','intent','subtree')"
         }
       }
     },
@@ -2134,6 +2411,13 @@
         },
         "at_revision": {
           "name": "at_revision",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "ord": {
+          "name": "ord",
           "type": "integer",
           "primaryKey": false,
           "notNull": true,

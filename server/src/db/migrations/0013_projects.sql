@@ -90,6 +90,7 @@ CREATE TABLE `__new_requirement_nodes` (
 	`introduced_in_revision` integer NOT NULL,
 	`retired_in_revision` integer,
 	`refined_by_agent_session_id` text,
+	`verify_expectation` text,
 	`created_at` text NOT NULL,
 	`updated_at` text NOT NULL,
 	PRIMARY KEY(`project_id`, `id`),
@@ -99,8 +100,8 @@ CREATE TABLE `__new_requirement_nodes` (
 	CONSTRAINT "requirement_nodes_origin" CHECK("__new_requirement_nodes"."origin" IN ('committed','refinement'))
 );
 --> statement-breakpoint
-INSERT INTO `__new_requirement_nodes`("id", "project_id", "parent_id", "ord", "statement", "composition", "status", "origin", "introduced_in_revision", "retired_in_revision", "refined_by_agent_session_id", "created_at", "updated_at")
-	SELECT "id", 'proj_' || "user_session_id", "parent_id", "ord", "statement", "composition", "status", "origin", "introduced_in_revision", "retired_in_revision", "refined_by_agent_session_id", "created_at", "updated_at" FROM `requirement_nodes`;
+INSERT INTO `__new_requirement_nodes`("id", "project_id", "parent_id", "ord", "statement", "composition", "status", "origin", "introduced_in_revision", "retired_in_revision", "refined_by_agent_session_id", "verify_expectation", "created_at", "updated_at")
+	SELECT "id", 'proj_' || "user_session_id", "parent_id", "ord", "statement", "composition", "status", "origin", "introduced_in_revision", "retired_in_revision", "refined_by_agent_session_id", "verify_expectation", "created_at", "updated_at" FROM `requirement_nodes`;
 --> statement-breakpoint
 DROP TABLE `requirement_nodes`;--> statement-breakpoint
 ALTER TABLE `__new_requirement_nodes` RENAME TO `requirement_nodes`;--> statement-breakpoint

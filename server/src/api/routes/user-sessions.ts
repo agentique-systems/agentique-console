@@ -198,6 +198,8 @@ export function registerUserSessionRoutes(
         frontier: ctx.app.requirements.frontier(userSessionId),
         assumptions: ctx.app.assumptions.list(userSessionId),
         intent: ctx.app.requirements.intentDocument(userSessionId),
+        verificationGaps: ctx.app.requirements.verificationGaps(userSessionId),
+        reversals: ctx.app.requirements.reversals(userSessionId),
       };
     },
   );
@@ -232,8 +234,7 @@ export function registerUserSessionRoutes(
         requirementId: request.params.requirementId,
         to: parsed.data.status,
         evidence: (parsed.data.evidence ?? []) as EvidenceRef[],
-        verifiedBy: "operator",
-        actor: "operator",
+        claimant: { kind: "operator" },
         ...(parsed.data.note === undefined ? {} : { note: parsed.data.note }),
       });
     },

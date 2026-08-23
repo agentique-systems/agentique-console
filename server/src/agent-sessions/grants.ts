@@ -54,7 +54,7 @@ export interface AgentGrantDeps {
 
 export function grantedTools(
   role: Pick<RoleSpec, "grants"> | undefined,
-  _profile: AgentProfile,
+  profile: AgentProfile,
   deps: AgentGrantDeps,
 ): Set<AgentToolName> {
   const grants = new Set(role?.grants ?? []);
@@ -76,6 +76,13 @@ export function grantedTools(
     tools.add("record_assumption"); tools.add("resolve_assumption");
     tools.add("link_requirements"); tools.add("unlink_requirements");
   }
+  // A reviewer-archetype seat may file verification verdicts regardless of its
+  // role's grants: the Console derives the `independent` tier only from a
+  // write-isolated reviewer's OWN claim, so the tool must follow the
+  // archetype or independence becomes unreachable in every pattern whose
+  // entry seat is not a reviewer. Scope stays live-checked per call
+  // (assertWithinDelegation), exactly like the entry seat's registration.
+  if (deps.specs && profile.role === "reviewer") tools.add("report_requirement");
   if (deps.tasks && deps.user) {
     tools.add("task_list");
     if (grants.has("tasks_write")) { tools.add("task_create"); tools.add("task_update"); tools.add("assignment_cancel"); }

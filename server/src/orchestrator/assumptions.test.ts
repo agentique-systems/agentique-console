@@ -65,7 +65,7 @@ describe("assumption lifecycle and provenance", () => {
     const { requirements, assumptions, wakes } = makeHarness();
     const premise = assumptions.record({ userSessionId: "us1", text: "Real-time combat", source: "main", actor: "main", requirementIds: ["r1"] });
     requirements.reportStatus({ userSessionId: "us1", requirementId: "r1", to: "satisfied",
-      evidence: [{ kind: "command", ref: "npm test" }], verifiedBy: "independent", actor: "checker" });
+      evidence: [{ kind: "command", ref: "npm test" }], claimant: { kind: "seat", agentSessionId: "as1", agent: "checker", profileRole: "reviewer", profileTools: ["Read", "Glob", "Grep"] } });
 
     assumptions.resolve({ userSessionId: "us1", assumptionId: premise.id, outcome: "falsified", actor: "main",
       evidence: [{ kind: "journal", ref: "handoff_x" }] });
@@ -79,7 +79,7 @@ describe("assumption lifecycle and provenance", () => {
 
     // A NEW claim on the node clears the flag: its ord passes the resolution's.
     requirements.reportStatus({ userSessionId: "us1", requirementId: "r1", to: "satisfied",
-      evidence: [{ kind: "command", ref: "npm test -- --grep realtime" }], verifiedBy: "independent", actor: "checker" });
+      evidence: [{ kind: "command", ref: "npm test -- --grep realtime" }], claimant: { kind: "seat", agentSessionId: "as1", agent: "checker", profileRole: "reviewer", profileTools: ["Read", "Glob", "Grep"] } });
     expect(requirements.derive("us1").find((node) => node.id === "r1")!.flags).toEqual([]);
   });
 
@@ -88,7 +88,7 @@ describe("assumption lifecycle and provenance", () => {
     const premise = assumptions.record({ userSessionId: "us1", text: "SQLite suffices", source: "main", actor: "main", requirementIds: ["r2"] });
     assumptions.resolve({ userSessionId: "us1", assumptionId: premise.id, outcome: "falsified", actor: "operator" });
     requirements.reportStatus({ userSessionId: "us1", requirementId: "r2", to: "satisfied",
-      evidence: [{ kind: "file", ref: "src/persistence.ts" }], verifiedBy: "self", actor: "main" });
+      evidence: [{ kind: "file", ref: "src/persistence.ts" }], claimant: { kind: "main" } });
     // The claim postdates the falsification — whoever claimed knew.
     expect(requirements.derive("us1").find((node) => node.id === "r2")!.flags).toEqual([]);
   });
@@ -108,9 +108,9 @@ describe("requirement links", () => {
 
     // r3's claim, then r2 (its dependency) is reported violated afterwards.
     requirements.reportStatus({ userSessionId: "us1", requirementId: "r3", to: "satisfied",
-      evidence: [{ kind: "command", ref: "npm test" }], verifiedBy: "self", actor: "main" });
+      evidence: [{ kind: "command", ref: "npm test" }], claimant: { kind: "main" } });
     requirements.reportStatus({ userSessionId: "us1", requirementId: "r2", to: "violated",
-      evidence: [{ kind: "journal", ref: "handoff_y" }], verifiedBy: "independent", actor: "checker" });
+      evidence: [{ kind: "journal", ref: "handoff_y" }], claimant: { kind: "seat", agentSessionId: "as1", agent: "checker", profileRole: "reviewer", profileTools: ["Read", "Glob", "Grep"] } });
     const r3 = requirements.derive("us1").find((node) => node.id === "r3")!;
     expect(r3.flags).toContain("depends_changed");
     expect(r3.dependsOn).toEqual(["r2"]);

@@ -36,6 +36,11 @@ const coordinatorRoute = turns(
   },
   async function* () {
     yield initMessage();
+    yield sendHandoffUse("assign-2", "checker", { action: "Verify hit resolution against the delegated requirements", status: "pending", category: "assignment" });
+    yield successMessage();
+  },
+  async function* () {
+    yield initMessage();
     yield sendHandoffUse("final-1", "main", { action: "Combat implemented real-time; NOTE: the reference game was turn-based", status: "completed", category: "final" });
     yield successMessage();
   },
@@ -44,6 +49,14 @@ const coordinatorRoute = turns(
 const builderRoute = turns(async function* () {
   yield initMessage();
   yield sendHandoffUse("b-1", "coordinator", { action: "Combat done; found footage — the reference game is TURN-BASED", status: "completed", category: "milestone" });
+  yield successMessage();
+});
+
+/** The write-isolated reviewer files the claim itself — the Console derives it independent. */
+const checkerRoute = turns(async function* () {
+  yield initMessage();
+  yield toolUseMessage("cr-1", "mcp__console_agent__report_requirement", { requirementId: "r3", status: "satisfied", evidence: EVIDENCE });
+  yield sendHandoffUse("c-1", "coordinator", { action: "Re-ran the combat suite: hits resolve against armor", status: "completed", category: "milestone" });
   yield successMessage();
 });
 
@@ -70,8 +83,11 @@ function mainRoute(
       yield toolUseMessage("link-1", "mcp__console__link_requirements", { fromId: "r2", kind: "depends_on", toId: "r1", note: "persistence snapshots combat state" });
       yield createSessionUse("create-1", {
         title: "combat",
-        agents: [{ name: "builder", profileId: "implementer", owns: ["src/"] }],
-        briefingAction: "Implement combat per the delegated requirements",
+        agents: [
+          { name: "builder", profileId: "implementer", owns: ["src/"] },
+          { name: "checker", profileId: "reviewer" },
+        ],
+        briefingAction: "Implement and verify combat per the delegated requirements",
         requirements: ["r1"],
         tasks: [{ taskId: "impl", subject: "Implement hit resolution", owner: "builder", requirementId: "r3" }],
       });
@@ -83,8 +99,8 @@ function mainRoute(
       .get() as { n: number }).n > 0;
     if (finalArrived && !reported) {
       reported = true;
-      yield toolUseMessage("rep-1", "mcp__console__report_requirement", { requirementId: "r3", status: "satisfied", evidence: EVIDENCE, verifiedBy: "independent" });
-      // The discovery: the remembered combat model was wrong.
+      // The checker already filed r3 satisfied from its own seat (derived
+      // independent). The discovery: the remembered combat model was wrong.
       yield toolUseMessage("asm-2", "mcp__console__record_assumption", {
         text: "The reference game's combat was real-time", requirementIds: ["r3"],
       });
@@ -95,9 +111,9 @@ function mainRoute(
       if (opts.answerFalsification) {
         // Answer the wake: reopen the suspect claim, amend the words it was
         // verified against, and re-verify against the NEW words.
-        yield toolUseMessage("rep-2", "mcp__console__report_requirement", { requirementId: "r3", status: "open", evidence: [], verifiedBy: "self", note: "premise falsified — combat model re-decided" });
+        yield toolUseMessage("rep-2", "mcp__console__report_requirement", { requirementId: "r3", status: "open", evidence: [], note: "premise falsified — combat model re-decided" });
         yield toolUseMessage("req-3", "mcp__console__propose_requirements", { document: COMBAT_AMENDED, changeNote: "combat is turn-based like the reference", scopeId: "r1" });
-        yield toolUseMessage("rep-3", "mcp__console__report_requirement", { requirementId: "r3", status: "satisfied", evidence: EVIDENCE, verifiedBy: "independent" });
+        yield toolUseMessage("rep-3", "mcp__console__report_requirement", { requirementId: "r3", status: "satisfied", evidence: EVIDENCE });
       }
       yield successMessage();
       return;
@@ -109,7 +125,7 @@ function mainRoute(
 function variantProgram(opts: { recordPremise: boolean; answerFalsification: boolean }) {
   return (ctx: ProgramCtx) => roleSwitch({
     main: mainRoute(ctx, opts),
-    agents: { coordinator: coordinatorRoute, builder: builderRoute },
+    agents: { coordinator: coordinatorRoute, builder: builderRoute, checker: checkerRoute },
   });
 }
 

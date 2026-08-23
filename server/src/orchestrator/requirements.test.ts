@@ -12,7 +12,7 @@ import { events as eventsTable, projects, userSessions, workspaces } from "../db
 import { EventBus } from "../events/bus.ts";
 import { nowIso } from "../ids.ts";
 import { SpecService } from "./spec.ts";
-import { RequirementParseFailure, RequirementService } from "./requirements.ts";
+import { RequirementParseFailure, RequirementService, deriveVerifiedBy } from "./requirements.ts";
 
 const DOC = `## Requirements
 - Auth works end to end
@@ -70,7 +70,7 @@ describe("propose / approve", () => {
     approveFixture(service);
     service.decompose({ userSessionId: "us1", parentId: "r6", children: [{ statement: "Server tests pass" }], actor: "main" });
     service.reportStatus({ userSessionId: "us1", requirementId: "r2", to: "satisfied",
-      evidence: [{ kind: "command", ref: "curl /login" }], verifiedBy: "self", actor: "main" });
+      evidence: [{ kind: "command", ref: "curl /login" }], claimant: { kind: "main" } });
 
     const amended = `## Requirements
 - r1: Auth works end to end, including logout
@@ -95,7 +95,7 @@ describe("propose / approve", () => {
     const { service } = makeHarness();
     approveFixture(service);
     service.reportStatus({ userSessionId: "us1", requirementId: "r6", to: "satisfied",
-      evidence: [{ kind: "command", ref: "npm run verify" }], verifiedBy: "self", actor: "main" });
+      evidence: [{ kind: "command", ref: "npm run verify" }], claimant: { kind: "main" } });
     const amended = DOC.replace("`npm run verify` passes", "`npm run verify` passes from a clean checkout")
       .replace("- `npm", "- r6: `npm")
       .replace("- Auth works end to end", "- r1: Auth works end to end")
@@ -132,12 +132,12 @@ describe("reportStatus", () => {
     const { service } = makeHarness();
     approveFixture(service);
     expect(() => service.reportStatus({ userSessionId: "us1", requirementId: "r2", to: "satisfied",
-      evidence: [], verifiedBy: "self", actor: "main" })).toThrow(/requires at least one evidence ref/);
+      evidence: [], claimant: { kind: "main" } })).toThrow(/requires at least one evidence ref/);
     expect(() => service.reportStatus({ userSessionId: "us1", requirementId: "r1", to: "satisfied",
-      evidence: [{ kind: "file", ref: "x" }], verifiedBy: "self", actor: "main" })).toThrow(/report on the leaves instead: r2, r3/);
+      evidence: [{ kind: "file", ref: "x" }], claimant: { kind: "main" } })).toThrow(/report on the leaves instead: r2, r3/);
     // The operator's word is the gate — no evidence required.
     const wire = service.reportStatus({ userSessionId: "us1", requirementId: "r2", to: "satisfied",
-      evidence: [], verifiedBy: "operator", actor: "operator" });
+      evidence: [], claimant: { kind: "operator" } });
     expect(wire.latestChange).toMatchObject({ verifiedBy: "operator", evidenceCount: 0 });
   });
 
@@ -145,7 +145,7 @@ describe("reportStatus", () => {
     const { service, eventsOf } = makeHarness();
     approveFixture(service);
     const report = (id: string) => service.reportStatus({ userSessionId: "us1", requirementId: id, to: "satisfied",
-      evidence: [{ kind: "command", ref: "check" }], verifiedBy: "independent", actor: "reviewer", agentSessionId: "as1" });
+      evidence: [{ kind: "command", ref: "check" }], claimant: { kind: "seat", agentSessionId: "as1", agent: "reviewer", profileRole: "reviewer", profileTools: ["Read", "Glob", "Grep"] } });
     report("r4");
     let nodes = new Map(service.derive("us1").map((node) => [node.id, node]));
     expect(nodes.get("r3")?.derivedStatus).toBe("satisfied"); // any-of: one branch suffices
@@ -162,7 +162,7 @@ describe("reportStatus", () => {
     const { service } = makeHarness();
     approveFixture(service);
     service.reportStatus({ userSessionId: "us1", requirementId: "r2", to: "infeasible",
-      evidence: [{ kind: "artifact", ref: "artifact_probe" }], verifiedBy: "self", actor: "main", note: "provider API retired" });
+      evidence: [{ kind: "artifact", ref: "artifact_probe" }], claimant: { kind: "main" }, note: "provider API retired" });
     expect(service.derive("us1").find((node) => node.id === "r1")?.derivedStatus).toBe("infeasible");
     expect(service.rootStatus("us1")).toBe("infeasible");
   });
@@ -208,7 +208,7 @@ describe("frontier", () => {
     });
     service.delegate("us1", "as1", ["r1"], "commission");
     service.reportStatus({ userSessionId: "us1", requirementId: "r4", to: "satisfied",
-      evidence: [{ kind: "command", ref: "parse" }], verifiedBy: "self", actor: "worker", agentSessionId: "as1" });
+      evidence: [{ kind: "command", ref: "parse" }], claimant: { kind: "seat", agentSessionId: "as1", agent: "worker", profileRole: "implementer", profileTools: ["Read", "Edit", "Write"] } });
     const frontier = service.frontier("us1");
     // r4 satisfied closes the any-of r3 — r5 can no longer affect the root.
     expect(frontier.map((entry) => entry.requirementId)).toEqual(["r2", "r6"]);
@@ -240,7 +240,7 @@ describe("digest / pointer (the GoverningDigest contract)", () => {
     approveFixture(service);
     for (const id of ["r2", "r4", "r6"]) {
       service.reportStatus({ userSessionId: "us1", requirementId: id, to: "satisfied",
-        evidence: [{ kind: "command", ref: "check" }], verifiedBy: "independent", actor: "reviewer" });
+        evidence: [{ kind: "command", ref: "check" }], claimant: { kind: "seat", agentSessionId: "as1", agent: "reviewer", profileRole: "reviewer", profileTools: ["Read", "Glob", "Grep"] } });
     }
     const digest = service.digest("us1");
     expect(digest).toContain("[✓] r2: Login issues a session token — satisfied, independent, 1 evidence");
@@ -295,7 +295,7 @@ describe("review regressions", () => {
     const { service, eventsOf } = makeHarness();
     approveFixture(service);
     service.reportStatus({ userSessionId: "us1", requirementId: "r2", to: "satisfied",
-      evidence: [{ kind: "command", ref: "npm test" }], verifiedBy: "self", actor: "main" });
+      evidence: [{ kind: "command", ref: "npm test" }], claimant: { kind: "main" } });
     const v2 = "## Requirements\n- r1: Auth works end to end\n  - r2: Login issues a SIGNED session token\n  - r3 (any of): A config source loads\n    - r4: TOML config parses\n    - r5: JSON config parses\n- r6: `npm run verify` passes\n";
     const draft = service.propose("us1", v2, "sharpen r2");
     service.approve(draft.id, { document: v2, edited: false });
@@ -425,7 +425,7 @@ describe("scoped proposals (staged elaboration)", () => {
     const { service } = makeHarness();
     approveFixture(service);
     service.reportStatus({ userSessionId: "us1", requirementId: "r6", to: "satisfied",
-      evidence: [{ kind: "command", ref: "npm run verify" }], verifiedBy: "self", actor: "main" });
+      evidence: [{ kind: "command", ref: "npm run verify" }], claimant: { kind: "main" } });
     const [refined] = service.decompose({ userSessionId: "us1", parentId: "r3", children: [{ statement: "YAML config parses" }], actor: "main" });
 
     // Amend under r3: keep r4 (statement changed), drop r5, promote the
@@ -519,5 +519,235 @@ describe("scoped proposals (staged elaboration)", () => {
     // r2 changed: as-auth holds its subtree; as-verify depends on it.
     expect(service.sessionsAffectedByChange("us1", ["r2"]).sort()).toEqual(["as-auth", "as-verify"]);
     expect(service.sessionsAffectedByChange("us1", ["r4"])).toEqual(["as-auth"]);
+  });
+});
+
+describe("verification tier derivation", () => {
+  it("derives the tier from the claimant, never from the reporting model", () => {
+    expect(deriveVerifiedBy({ kind: "operator" })).toBe("operator");
+    expect(deriveVerifiedBy({ kind: "main" })).toBe("self");
+    // A write-isolated reviewer is the one seat whose claim is independent.
+    expect(deriveVerifiedBy({ kind: "seat", agentSessionId: "as1", agent: "checker",
+      profileRole: "reviewer", profileTools: ["Read", "Glob", "Grep", "Bash"] })).toBe("independent");
+    // A reviewer profile holding an editing tool is not write-isolated.
+    expect(deriveVerifiedBy({ kind: "seat", agentSessionId: "as1", agent: "checker",
+      profileRole: "reviewer", profileTools: ["Read", "Edit"] })).toBe("self");
+    // A write-capable implementer, a read-only coordinator relaying a claim,
+    // and a legacy `{}` snapshot (undefined tools) all record self.
+    expect(deriveVerifiedBy({ kind: "seat", agentSessionId: "as1", agent: "builder",
+      profileRole: "implementer", profileTools: ["Read", "Edit", "Write"] })).toBe("self");
+    expect(deriveVerifiedBy({ kind: "seat", agentSessionId: "as1", agent: "coordinator",
+      profileRole: "orchestrator", profileTools: ["Read"] })).toBe("self");
+    expect(deriveVerifiedBy({ kind: "seat", agentSessionId: "as1", agent: "ghost",
+      profileRole: "reviewer", profileTools: undefined })).toBe("self");
+  });
+
+  it("records the derived tier and claimant attribution on the journal and event", () => {
+    const { service, eventsOf } = makeHarness();
+    approveFixture(service);
+    const wire = service.reportStatus({ userSessionId: "us1", requirementId: "r2", to: "satisfied",
+      evidence: [{ kind: "command", ref: "curl /login" }],
+      claimant: { kind: "seat", agentSessionId: "as9", agent: "checker",
+        profileRole: "reviewer", profileTools: ["Read"] } });
+    expect(wire.latestChange).toMatchObject({ verifiedBy: "independent", actor: "checker", evidenceCount: 1 });
+    const event = eventsOf("requirement.status.changed")
+      .map((row) => row.payload as Record<string, unknown>)
+      .find((payload) => payload.requirementId === "r2");
+    expect(event).toMatchObject({ verifiedBy: "independent", actor: "checker", agentSessionId: "as9" });
+  });
+
+  it("the operator's verdict stays evidence-exempt; seat and main claims are not", () => {
+    const { service } = makeHarness();
+    approveFixture(service);
+    expect(() => service.reportStatus({ userSessionId: "us1", requirementId: "r2", to: "satisfied",
+      evidence: [], claimant: { kind: "seat", agentSessionId: "as1", agent: "checker",
+        profileRole: "reviewer", profileTools: ["Read"] } })).toThrow(/requires at least one evidence ref/);
+    const wire = service.reportStatus({ userSessionId: "us1", requirementId: "r2", to: "satisfied",
+      evidence: [], claimant: { kind: "operator" } });
+    expect(wire.latestChange).toMatchObject({ verifiedBy: "operator", actor: "operator", evidenceCount: 0 });
+  });
+});
+
+describe("verification expectations and gaps", () => {
+  const VDOC = `## Requirements
+- (verify: independent) Auth works end to end
+  - Login issues a session token
+- \`npm run verify\` passes
+`;
+  /** r1 (verify: independent) with leaf r2 under it; r3 a bare top leaf. */
+  function approveVerifyFixture(service: RequirementService) {
+    const draft = service.propose("us1", VDOC, "initial");
+    return service.approve(draft.id, { document: VDOC, edited: false });
+  }
+  const seatClaim = (agent: string, role: string, tools: string[]) =>
+    ({ kind: "seat", agentSessionId: "as1", agent, profileRole: role, profileTools: tools }) as const;
+
+  it("persists the marker through approval and re-renders it in the canonical document", () => {
+    const { service } = makeHarness();
+    const { revision } = approveVerifyFixture(service);
+    expect(revision.document).toContain("- r1 (verify: independent): Auth works end to end");
+    expect(service.derive("us1").find((node) => node.id === "r1")?.verifyExpectation).toBe("independent");
+    expect(service.derive("us1").find((node) => node.id === "r2")?.verifyExpectation).toBeNull();
+  });
+
+  it("an expectation-only amendment updates the node WITHOUT resetting its status", () => {
+    const { service, eventsOf } = makeHarness();
+    approveVerifyFixture(service);
+    service.reportStatus({ userSessionId: "us1", requirementId: "r3", to: "satisfied",
+      evidence: [{ kind: "command", ref: "npm run verify" }], claimant: { kind: "main" } });
+    const v2 = `## Requirements
+- r1 (verify: independent): Auth works end to end
+  - r2: Login issues a session token
+- r3 (verify: independent): \`npm run verify\` passes
+`;
+    const draft = service.propose("us1", v2, "declare verification for r3");
+    service.approve(draft.id, { document: v2, edited: false });
+    const r3 = service.derive("us1").find((node) => node.id === "r3");
+    expect(r3).toMatchObject({ status: "satisfied", verifyExpectation: "independent" });
+    const resets = eventsOf("requirement.status.changed")
+      .map((row) => row.payload as { requirementId?: string; verifiedBy?: string; to?: string })
+      .filter((payload) => payload.requirementId === "r3" && payload.verifiedBy === "console");
+    expect(resets).toEqual([]);
+    // The gap now derives from the standing self-tier claim — no reset needed.
+    expect(service.verificationGaps("us1").map((gap) => gap.requirementId)).toContain("r3");
+    // Dropping the marker clears the expectation (the document is truth).
+    const v3 = v2.replace("- r3 (verify: independent):", "- r3:");
+    const draft3 = service.propose("us1", v3, "drop it");
+    service.approve(draft3.id, { document: v3, edited: false });
+    expect(service.derive("us1").find((node) => node.id === "r3")?.verifyExpectation).toBeNull();
+    expect(service.verificationGaps("us1").map((gap) => gap.requirementId)).not.toContain("r3");
+  });
+
+  it("gaps inherit the strongest ancestor declaration and rank operator above independent", () => {
+    const { service } = makeHarness();
+    approveVerifyFixture(service);
+    // r2 sits under r1 (verify: independent). A self claim gaps; an
+    // independent claim clears; an operator verdict also clears (≥ rank).
+    service.reportStatus({ userSessionId: "us1", requirementId: "r2", to: "satisfied",
+      evidence: [{ kind: "command", ref: "curl /login" }], claimant: { kind: "main" } });
+    expect(service.verificationGaps("us1")).toMatchObject([
+      { requirementId: "r2", expected: "independent", recorded: { verifiedBy: "self", actor: "main" } },
+    ]);
+    service.reportStatus({ userSessionId: "us1", requirementId: "r2", to: "satisfied",
+      evidence: [{ kind: "journal", ref: "handoff_1" }], claimant: seatClaim("checker", "reviewer", ["Read"]) });
+    expect(service.verificationGaps("us1")).toEqual([]);
+    service.reportStatus({ userSessionId: "us1", requirementId: "r2", to: "satisfied",
+      evidence: [], claimant: { kind: "operator" } });
+    expect(service.verificationGaps("us1")).toEqual([]);
+    // Reopening removes the gap subject entirely (nothing satisfied).
+    service.reportStatus({ userSessionId: "us1", requirementId: "r2", to: "open",
+      evidence: [], claimant: { kind: "main" } });
+    expect(service.verificationGaps("us1")).toEqual([]);
+  });
+
+  it("an operator expectation is NOT satisfied by an independent claim", () => {
+    const { service } = makeHarness();
+    const doc = "## Requirements\n- (verify: operator) Release is signed off\n";
+    const draft = service.propose("us1", doc);
+    service.approve(draft.id, { document: doc, edited: false });
+    service.reportStatus({ userSessionId: "us1", requirementId: "r1", to: "satisfied",
+      evidence: [{ kind: "journal", ref: "handoff_9" }], claimant: seatClaim("checker", "reviewer", ["Read"]) });
+    expect(service.verificationGaps("us1")).toMatchObject([
+      { requirementId: "r1", expected: "operator", recorded: { verifiedBy: "independent" } },
+    ]);
+  });
+
+  it("decomposed children carry no expectation of their own but inherit the ancestor's", () => {
+    const { service } = makeHarness();
+    approveVerifyFixture(service);
+    const [child] = service.decompose({ userSessionId: "us1", parentId: "r2",
+      children: [{ statement: "Token refresh rotates" }], actor: "main" });
+    service.reportStatus({ userSessionId: "us1", requirementId: child!, to: "satisfied",
+      evidence: [{ kind: "command", ref: "check" }], claimant: { kind: "main" } });
+    expect(service.derive("us1").find((node) => node.id === child)?.verifyExpectation).toBeNull();
+    expect(service.verificationGaps("us1").map((gap) => gap.requirementId)).toContain(child);
+  });
+
+  it("the digest names gaps outside the collapsed body, bounded", () => {
+    const { service } = makeHarness();
+    // A graph big enough to trip the collapse-satisfied fallback (>8KiB).
+    const lines = ["## Requirements", "- (verify: independent) Everything holds"];
+    for (let i = 0; i < 120; i += 1) lines.push(`  - Leaf ${i} ${"x".repeat(60)}`);
+    const doc = `${lines.join("\n")}\n`;
+    const draft = service.propose("us1", doc);
+    service.approve(draft.id, { document: doc, edited: false });
+    const leaves = service.derive("us1").filter((node) => node.parentId !== null);
+    for (const leaf of leaves) {
+      service.reportStatus({ userSessionId: "us1", requirementId: leaf.id, to: "satisfied",
+        evidence: [{ kind: "command", ref: "check" }], claimant: { kind: "main" } });
+    }
+    const digest = service.digest("us1");
+    // The body collapsed the satisfied subtree, yet the gaps are named.
+    expect(digest).toContain("Verification gaps (satisfied below their declared tier):");
+    expect(digest).toContain("needs independent verification (claimed self by main)");
+    // Bounded: at most 6 entries plus the overflow line.
+    expect(digest).toContain("…and");
+    expect(service.verificationGaps("us1")).toHaveLength(leaves.length);
+  });
+
+  it("the status outline renders the marker and the needs-verification chip", () => {
+    const { service } = makeHarness();
+    approveVerifyFixture(service);
+    service.reportStatus({ userSessionId: "us1", requirementId: "r2", to: "satisfied",
+      evidence: [{ kind: "command", ref: "curl" }], claimant: { kind: "main" } });
+    const digest = service.digest("us1");
+    // r1 derives satisfied from its only child; the marker renders either way.
+    expect(digest).toContain("- [✓] r1 (verify: independent): Auth works end to end");
+    expect(digest).toContain("needs independent verification");
+  });
+});
+
+describe("reversals", () => {
+  const claim = (service: RequirementService, id: string, to: "open" | "satisfied" | "violated" | "infeasible",
+    claimant: Parameters<RequirementService["reportStatus"]>[0]["claimant"] = { kind: "main" }) =>
+    service.reportStatus({ userSessionId: "us1", requirementId: id, to,
+      evidence: to === "open" ? [] : [{ kind: "command", ref: "check" }], claimant });
+
+  it("records terminal claims the run later withdrew, attributed both ways", () => {
+    const { service } = makeHarness();
+    approveFixture(service);
+    claim(service, "r2", "satisfied");
+    claim(service, "r2", "open",
+      { kind: "seat", agentSessionId: "as1", agent: "checker", profileRole: "reviewer", profileTools: ["Read"] });
+    claim(service, "r6", "satisfied");
+    claim(service, "r6", "violated");
+    const reversals = service.reversals("us1");
+    expect(reversals).toMatchObject([
+      { requirementId: "r2", from: "satisfied", to: "open",
+        reversedBy: { actor: "checker", verifiedBy: "independent" },
+        original: { actor: "main", verifiedBy: "self", evidenceCount: 1 } },
+      { requirementId: "r6", from: "satisfied", to: "violated",
+        reversedBy: { actor: "main" }, original: { actor: "main", verifiedBy: "self" } },
+    ]);
+    // The summary snapshot carries them for the sign-off card.
+    expect(service.summarySnapshot("us1")?.reversals).toHaveLength(2);
+  });
+
+  it("excludes console resets, retirements, and same-status re-claims", () => {
+    const { service } = makeHarness();
+    approveFixture(service);
+    claim(service, "r2", "satisfied");
+    // A reviewer re-claims satisfied (tier upgrade) — withdraws nothing.
+    claim(service, "r2", "satisfied",
+      { kind: "seat", agentSessionId: "as1", agent: "checker", profileRole: "reviewer", profileTools: ["Read"] });
+    claim(service, "r6", "satisfied");
+    // Amend r6's statement (console reset) and retire r4/r5 via an amendment.
+    const amended = `## Requirements
+- r1: Auth works end to end
+  - r2: Login issues a session token
+  - r3 (any of): A config source loads
+    - r4: TOML config parses
+    - r5: JSON config parses
+- r6: \`npm run verify\` passes from a clean checkout
+`;
+    const draft = service.propose("us1", amended, "tighten r6");
+    service.approve(draft.id, { document: amended, edited: false });
+    expect(service.reversals("us1")).toEqual([]);
+    // The operator's own reopen IS a reversal, attributed to them.
+    claim(service, "r2", "open", { kind: "operator" });
+    expect(service.reversals("us1")).toMatchObject([
+      { requirementId: "r2", from: "satisfied", to: "open", reversedBy: { actor: "operator", verifiedBy: "operator" },
+        original: { actor: "checker", verifiedBy: "independent" } },
+    ]);
   });
 });

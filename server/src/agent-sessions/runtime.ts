@@ -125,6 +125,8 @@ export interface AgentRuntimeDeps {
   dispatchWorkItems: (dispatcherAgent: string, input: DispatchWorkItemsInput) => { joinId: string; agents: string[] };
   /** Turn minting marks the session working (operator status). */
   markWorking: (agentSessionId: string) => void;
+  /** Commission-budget check (session + ancestors), beside the run-level capacity check. */
+  checkCommissionBudget: (session: AgentSessionRow) => void;
   hooks: SettleHooks;
 }
 
@@ -900,6 +902,7 @@ export class AgentRuntime implements Injector, TurnTracker {
       trigger, durationMs: durationMs ?? null, apiDurationMs, sdkDurationMs: usageEvent.sdkDurationMs ?? null, status, stopReason: usageEvent.stopReason ?? null, createdAt: nowIso() };
     this.#deps.repo.insertUsage(usage);
     this.#deps.capacity.checkBudget(session.userSessionId);
+    this.#deps.checkCommissionBudget(session);
     this.#deps.bus.append({ type: "usage.recorded", userSessionId: session.userSessionId, agentSessionId: session.id,
       payload: { userSessionId: session.userSessionId, agentSessionId: session.id, agent: seat.name, profileId: seat.profileId, generation: seat.generation, turnId,
         inputTokens: usage.inputTokens, uncachedInputTokens: usage.uncachedInputTokens, cacheCreationInputTokens: usage.cacheCreationInputTokens,

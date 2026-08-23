@@ -24,7 +24,8 @@ import type { AssignmentScheduler } from "../tasks/scheduler.ts";
 import type { TaskService } from "../tasks/service.ts";
 import type { HandoffService } from "../handoffs/service.ts";
 import type { ReapResult } from "../completion/summary.ts";
-import { MAIN_RECIPIENT } from "./names.ts";
+import { CONSOLE_SENDER, MAIN_RECIPIENT } from "./names.ts";
+import { sessionSubtree } from "./session-tree.ts";
 import type { Category } from "./final-gate.ts";
 import { PromptComposer } from "./composer.ts";
 import { roleOfAgent, speakerKindOf } from "./topology.ts";
@@ -222,6 +223,7 @@ export class AgentSessionService {
         this.#nesting.abandonChildSession(session.id, controller.name, childAgentSessionId, reason),
       dispatchWorkItems: (dispatcherAgent, input) => this.dispatchWorkItems(dispatcherAgent, input),
       markWorking: (agentSessionId) => this.#operator.setStatus(agentSessionId, "working"),
+      checkCommissionBudget: (session) => this.checkCommissionBudget(session.id),
       hooks: {
         patchDelivery: (session, delivery, status) => this.#mailroom.patchDelivery(session, delivery, status),
         deliver: (agentSessionId, recipient) => this.#mailroom.deliver(agentSessionId, recipient),
@@ -297,6 +299,8 @@ export class AgentSessionService {
     if (input.limit !== undefined) rows = rows.slice(-input.limit);
     return { status: this.#operator.statusOf(session),
       agents: this.#specialists(session.id).map((p) => ({ name: p.name, profileId: p.profileId, model: p.model })),
+      budget: this.commissionBudget(session),
+      ...(this.unscoped(session) ? { unscoped: true } : {}),
       messages: rows.map(toWireMessage) };
   }
 
@@ -318,6 +322,8 @@ export class AgentSessionService {
       agentSessionId,
       pattern: session.pattern,
       status: this.#operator.statusOf(session),
+      budget: this.commissionBudget(session),
+      ...(this.unscoped(session) ? { unscoped: true } : {}),
       patternState: patternState === undefined ? null : {
         tripped: patternState.tripped ?? null,
         handoffCount: patternState.handoffCount,
@@ -356,15 +362,93 @@ export class AgentSessionService {
   }
 
   listForUserSession(userSessionId: string) {
-    return this.#deps.repo.listAgentSessions(userSessionId).map((row) => ({
-      id: row.id, title: row.title, status: this.#operator.statusOf(row),
-      agents: this.#specialists(row.id).map((p) => p.name),
-      unseenCount: this.#deps.repo.listQueuedDeliveries(row.id).filter((d) => d.recipient === MAIN_RECIPIENT).length,
-      updatedAt: row.updatedAt,
-    }));
+    return this.#deps.repo.listAgentSessions(userSessionId).map((row) => {
+      const budget = this.commissionBudget(row);
+      return {
+        id: row.id, title: row.title, status: this.#operator.statusOf(row),
+        agents: this.#specialists(row.id).map((p) => p.name),
+        unseenCount: this.#deps.repo.listQueuedDeliveries(row.id).filter((d) => d.recipient === MAIN_RECIPIENT).length,
+        ...(budget === null ? {} : { budget }),
+        ...(this.unscoped(row) ? { unscoped: true } : {}),
+        updatedAt: row.updatedAt,
+      };
+    });
   }
 
-  wireSession(row: AgentSessionRow) { return toWireAgentSession(row, this.#specialists(row.id).map((p) => p.name), this.#operator.statusOf(row) === "working"); }
+  /**
+   * Derived, never stored: an OPEN session commissioned AFTER requirements
+   * began governing, holding zero delegations — untraceable to any
+   * obligation. Rendered, never rejected: exploration before decomposition
+   * and utility sessions are legitimate, and the operator sees which is which.
+   */
+  unscoped(row: AgentSessionRow): boolean {
+    if (row.lifecycle !== "open") return false;
+    if (this.#deps.requirements.delegationSet(row.id).length > 0) return false;
+    const governedSince = this.#deps.requirements.firstApprovedAt(row.userSessionId);
+    return governedSince !== null && row.createdAt > governedSince;
+  }
+
+  /** Commission budget + subtree spend; null when no budget was set. */
+  commissionBudget(row: AgentSessionRow): { budgetUsd: number; spendUsd: number } | null {
+    if (row.budgetUsd === null) return null;
+    const spendUsd = this.#deps.repo.sumCostForAgentSessions(sessionSubtree(this.#deps.repo, row.id).map((session) => session.id));
+    return { budgetUsd: row.budgetUsd, spendUsd };
+  }
+
+  /**
+   * The commission-budget check, run on the seat usage-recording path beside
+   * the run-level capacity check. Walks UP from the recording session for
+   * budgeted ancestors (child spend bills the ancestor that was commissioned
+   * with the budget); on first crossing it posts two one-shot notices whose
+   * durable mailbox dedupe is the restart-safe latch: an honest wrap-up
+   * instruction to the session's entry agent, and an escalation milestone to
+   * main naming the delegated open frontier. Stop-and-escalate, never
+   * acceptance: nothing is cancelled, the run does not pause, no final is
+   * blocked.
+   */
+  checkCommissionBudget(agentSessionId: string): void {
+    const { repo, requirements } = this.#deps;
+    for (let row = repo.getAgentSession(agentSessionId); row; row = row.parentAgentSessionId === null ? undefined : repo.getAgentSession(row.parentAgentSessionId)) {
+      if (row.budgetUsd === null || row.lifecycle !== "open") continue;
+      const budget = this.commissionBudget(row);
+      if (budget === null || budget.spendUsd < budget.budgetUsd) continue;
+      const spent = `$${budget.spendUsd.toFixed(2)} of its $${budget.budgetUsd.toFixed(2)} commission budget`;
+      try {
+        this.post({
+          agentSessionId: row.id,
+          speaker: { kind: "system", name: CONSOLE_SENDER },
+          to: this.#lifecycle.entryAgent(row.id),
+          category: "update",
+          dedupeKey: `commission-budget:${row.id}`,
+          handoff: simpleHandoff("Commission budget exhausted", "blocked",
+            `This session (with its children) has spent ${spent}. Wrap up honestly: land what is real, report requirement statuses with evidence, and send your final report. Do not pad or rush claims to look finished.`,
+            "Report honest status with evidence and conclude."),
+        });
+      } catch { /* a notice must never take the usage path down */ }
+      try {
+        const frontier = requirements.frontier(row.userSessionId)
+          .filter((entry) => requirements.withinDelegation(row.userSessionId, row.id, entry.requirementId))
+          .slice(0, 6);
+        const frontierLine = frontier.length === 0 ? ""
+          : ` Delegated requirements still open: ${frontier.map((entry) => `${entry.requirementId} (${entry.statement.slice(0, 80)})`).join("; ")}.`;
+        this.post({
+          agentSessionId: row.id,
+          speaker: { kind: "system", name: CONSOLE_SENDER },
+          to: MAIN_RECIPIENT,
+          category: "milestone",
+          dedupeKey: `commission-budget-main:${row.id}`,
+          handoff: simpleHandoff(`Commission budget exhausted: ${row.title}`, "blocked",
+            `Session ${row.id} has spent ${spent}.${frontierLine} Nothing was cancelled and the run is not paused — the session was told to wrap up honestly.`,
+            "Decide: steer with a fresh assignment to continue (spend keeps accruing), await the final report, or close_agent_session."),
+        });
+      } catch { /* best effort — the entry-agent notice already landed */ }
+    }
+  }
+
+  wireSession(row: AgentSessionRow) {
+    return toWireAgentSession(row, this.#specialists(row.id).map((p) => p.name), this.#operator.statusOf(row) === "working",
+      this.commissionBudget(row)?.spendUsd ?? 0, this.unscoped(row));
+  }
 
   wireSessionsForUserSession(userSessionId: string) {
     return this.#deps.repo.listAgentSessions(userSessionId).map((row) => this.wireSession(row));

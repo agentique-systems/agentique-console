@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "b204e509-b91b-44b0-980b-f055a81fd381",
+  "id": "482c0256-b6a2-4fac-a520-bf121e1f3020",
   "prevId": "3ba98d6e-1cea-42a6-9d9a-626eee54aef8",
   "tables": {
     "agent_profile_trust": {
@@ -128,6 +128,13 @@
           "notNull": true,
           "autoincrement": false,
           "default": false
+        },
+        "budget_usd": {
+          "name": "budget_usd",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
         },
         "created_at": {
           "name": "created_at",
@@ -1520,65 +1527,6 @@
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
-    "projects": {
-      "name": "projects",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "workspace_id": {
-          "name": "workspace_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "title": {
-          "name": "title",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "intent_document": {
-          "name": "intent_document",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "projects_workspace_id_workspaces_id_fk": {
-          "name": "projects_workspace_id_workspaces_id_fk",
-          "tableFrom": "projects",
-          "tableTo": "workspaces",
-          "columnsFrom": [
-            "workspace_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "checkConstraints": {}
-    },
     "provider_entries": {
       "name": "provider_entries",
       "columns": {
@@ -1758,8 +1706,8 @@
           "notNull": true,
           "autoincrement": false
         },
-        "project_id": {
-          "name": "project_id",
+        "user_session_id": {
+          "name": "user_session_id",
           "type": "text",
           "primaryKey": false,
           "notNull": true,
@@ -1793,6 +1741,13 @@
           "notNull": true,
           "autoincrement": false,
           "default": "'all'"
+        },
+        "verify_expectation": {
+          "name": "verify_expectation",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
         },
         "status": {
           "name": "status",
@@ -1850,19 +1805,19 @@
         "requirement_nodes_live": {
           "name": "requirement_nodes_live",
           "columns": [
-            "project_id",
+            "user_session_id",
             "retired_in_revision"
           ],
           "isUnique": false
         }
       },
       "foreignKeys": {
-        "requirement_nodes_project_id_projects_id_fk": {
-          "name": "requirement_nodes_project_id_projects_id_fk",
+        "requirement_nodes_user_session_id_user_sessions_id_fk": {
+          "name": "requirement_nodes_user_session_id_user_sessions_id_fk",
           "tableFrom": "requirement_nodes",
-          "tableTo": "projects",
+          "tableTo": "user_sessions",
           "columnsFrom": [
-            "project_id"
+            "user_session_id"
           ],
           "columnsTo": [
             "id"
@@ -1872,12 +1827,12 @@
         }
       },
       "compositePrimaryKeys": {
-        "requirement_nodes_project_id_id_pk": {
+        "requirement_nodes_user_session_id_id_pk": {
           "columns": [
-            "project_id",
+            "user_session_id",
             "id"
           ],
-          "name": "requirement_nodes_project_id_id_pk"
+          "name": "requirement_nodes_user_session_id_id_pk"
         }
       },
       "uniqueConstraints": {},
@@ -1906,13 +1861,6 @@
           "notNull": true,
           "autoincrement": false
         },
-        "project_id": {
-          "name": "project_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
         "user_session_id": {
           "name": "user_session_id",
           "type": "text",
@@ -1922,13 +1870,6 @@
         },
         "revision": {
           "name": "revision",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "base_revision": {
-          "name": "base_revision",
           "type": "integer",
           "primaryKey": false,
           "notNull": true,
@@ -1994,29 +1935,16 @@
         }
       },
       "indexes": {
-        "requirement_revisions_project": {
-          "name": "requirement_revisions_project",
+        "requirement_revisions_session": {
+          "name": "requirement_revisions_session",
           "columns": [
-            "project_id",
+            "user_session_id",
             "revision"
           ],
           "isUnique": false
         }
       },
       "foreignKeys": {
-        "requirement_revisions_project_id_projects_id_fk": {
-          "name": "requirement_revisions_project_id_projects_id_fk",
-          "tableFrom": "requirement_revisions",
-          "tableTo": "projects",
-          "columnsFrom": [
-            "project_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        },
         "requirement_revisions_user_session_id_user_sessions_id_fk": {
           "name": "requirement_revisions_user_session_id_user_sessions_id_fk",
           "tableFrom": "requirement_revisions",
@@ -2051,13 +1979,6 @@
           "name": "id",
           "type": "text",
           "primaryKey": true,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "project_id": {
-          "name": "project_id",
-          "type": "text",
-          "primaryKey": false,
           "notNull": true,
           "autoincrement": false
         },
@@ -2144,7 +2065,7 @@
         "requirement_status_changes_req": {
           "name": "requirement_status_changes_req",
           "columns": [
-            "project_id",
+            "user_session_id",
             "requirement_id",
             "created_at"
           ],
@@ -2923,6 +2844,13 @@
             "created_at"
           ],
           "isUnique": false
+        },
+        "usage_agent_session": {
+          "name": "usage_agent_session",
+          "columns": [
+            "agent_session_id"
+          ],
+          "isUnique": false
         }
       },
       "foreignKeys": {},
@@ -2942,13 +2870,6 @@
         },
         "workspace_id": {
           "name": "workspace_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "project_id": {
-          "name": "project_id",
           "type": "text",
           "primaryKey": false,
           "notNull": true,
@@ -3135,19 +3056,6 @@
           "tableTo": "workspaces",
           "columnsFrom": [
             "workspace_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        },
-        "user_sessions_project_id_projects_id_fk": {
-          "name": "user_sessions_project_id_projects_id_fk",
-          "tableFrom": "user_sessions",
-          "tableTo": "projects",
-          "columnsFrom": [
-            "project_id"
           ],
           "columnsTo": [
             "id"

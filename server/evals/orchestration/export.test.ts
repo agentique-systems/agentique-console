@@ -63,7 +63,7 @@ describe("decision-time evidence export", () => {
     const transcript = fs.readFileSync(path.join(out, "transcript.md"), "utf8");
     expect(transcript).toContain("[requirement] delegated r1, r2 → session");
     expect(transcript).toContain("(commission)");
-    expect(transcript).toContain("[requirement] r1 open → satisfied (independent, 1 evidence) by main");
+    expect(transcript).toContain("[requirement] r1 open → satisfied (independent, 1 evidence) by checker");
   });
 
   it("the transcript shows question cards with their decisions", { timeout: 30_000 }, async () => {

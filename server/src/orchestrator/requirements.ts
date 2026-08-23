@@ -26,7 +26,11 @@ import type {
   RequirementGraphNode,
   RequirementNodeWire,
   RequirementParseError,
+  RequirementReversal,
   RequirementStatus,
+  RequirementVerificationGap,
+  RequirementVerifiedBy,
+  RequirementVerifyExpectation,
 } from "@agentique-console/shared";
 import {
   REQUIREMENT_MAX_DEPTH,
@@ -49,12 +53,60 @@ import type {
 import type { AssumptionStore } from "../db/stores/assumption-store.ts";
 import type { ProjectStore } from "../db/stores/project-store.ts";
 import { InvalidInputError, NotFoundError } from "../errors.ts";
+import { profileWritesFiles } from "../agent-profiles/registry.ts";
 import type { SpecService } from "./spec.ts";
 
 const TERMINAL_STATUSES = new Set(["satisfied", "violated", "infeasible"]);
 
 /** Bound on the injected digest; the full outline stays a tool call away. */
 const DIGEST_MAX_BYTES = 8 * 1024;
+
+/** Bound on gap/frontier enumerations riding prompts and nudges. */
+const GAP_LIST_MAX = 6;
+
+/**
+ * Ranks for comparing a claim's recorded tier against a declared expectation:
+ * self < independent ≤ operator. The operator's own verdict satisfies an
+ * `independent` expectation (their word IS the gate); `console` never sets
+ * `satisfied`, ranked top defensively.
+ */
+const TIER_RANK: Record<RequirementVerifiedBy, number> = { self: 0, independent: 1, operator: 2, console: 2 };
+const EXPECTATION_RANK: Record<RequirementVerifyExpectation, number> = { independent: 1, operator: 2 };
+
+/**
+ * Who is standing behind a status claim, as console-owned facts. The tier
+ * (`verifiedBy`) is DERIVED from this — never chosen by the reporting model:
+ * the measured party does not get to classify its own measurement's
+ * independence. Seat facts come from the commission-time profile SNAPSHOT, so
+ * a later profile edit or rotation cannot change what a recorded tier meant.
+ */
+export type RequirementClaimant =
+  | { kind: "operator" }
+  | { kind: "main" }
+  | {
+      kind: "seat";
+      agentSessionId: string;
+      agent: string;
+      profileRole: string | undefined;
+      profileTools: readonly string[] | undefined;
+    };
+
+/**
+ * The tier derivation: `operator` for the operator's own verdicts; `self` for
+ * main and every write-capable seat; `independent` only for a seat whose
+ * snapshotted profile is a write-isolated reviewer — the archetype whose whole
+ * job is verification evidence, kept apart from the work it judges. A
+ * read-only coordinator relaying an implementer's claim records `self`:
+ * relaying is not verifying. (`console` is reserved for mechanical resets and
+ * never derives here.)
+ */
+export function deriveVerifiedBy(claimant: RequirementClaimant): "self" | "independent" | "operator" {
+  if (claimant.kind === "operator") return "operator";
+  if (claimant.kind === "main") return "self";
+  return claimant.profileRole === "reviewer" && !profileWritesFiles(claimant.profileTools)
+    ? "independent"
+    : "self";
+}
 
 /**
  * The two prompt-injection contracts the composer, runner, and checkpoints
@@ -165,6 +217,18 @@ export class RequirementService implements GoverningDigest {
     if (!approved) return null;
     const graph = approved.graph as unknown as RequirementGraph;
     return renderIntentDocument(graph);
+  }
+
+  /**
+   * When the FIRST revision was approved — the moment the run became
+   * governed. Sessions commissioned before it are never branded unscoped
+   * (matching the eval checker's created-after-first-approval semantics).
+   */
+  firstApprovedAt(userSessionId: string): string | null {
+    const times = this.#store.listRevisions(this.#project(userSessionId))
+      .filter((row) => (row.status === "approved" || row.status === "superseded") && row.approvedAt !== null)
+      .map((row) => row.approvedAt!);
+    return times.length === 0 ? null : times.reduce((min, at) => (at < min ? at : min));
   }
 
   listRevisions(userSessionId: string): RequirementRevisionRow[] {
@@ -441,15 +505,15 @@ export class RequirementService implements GoverningDigest {
    * A leaf status claim. Terminal statuses require evidence (the operator's
    * own verdicts are exempt — their word IS the gate, recorded as such).
    * Reports land on LEAVES only: a parent's status is derived, never asserted.
+   * The verification tier is DERIVED from the claimant (deriveVerifiedBy),
+   * never supplied by the reporting model.
    */
   reportStatus(input: {
     userSessionId: string;
     requirementId: string;
     to: "open" | "satisfied" | "violated" | "infeasible";
     evidence: EvidenceRef[];
-    verifiedBy: "self" | "independent" | "operator";
-    actor: string;
-    agentSessionId?: string;
+    claimant: RequirementClaimant;
     note?: string;
   }): RequirementNodeWire {
     const projectId = this.#project(input.userSessionId);
@@ -460,9 +524,12 @@ export class RequirementService implements GoverningDigest {
         `${node.id} has children — its status derives from them; report on the leaves instead: ${children.map((child) => child.id).join(", ")}`,
       );
     }
-    if (input.to !== "open" && input.evidence.length === 0 && input.verifiedBy !== "operator") {
+    if (input.to !== "open" && input.evidence.length === 0 && input.claimant.kind !== "operator") {
       throw new InvalidInputError(`marking ${node.id} ${input.to} requires at least one evidence ref`);
     }
+    const verifiedBy = deriveVerifiedBy(input.claimant);
+    const actor = input.claimant.kind === "seat" ? input.claimant.agent : input.claimant.kind;
+    const agentSessionId = input.claimant.kind === "seat" ? input.claimant.agentSessionId : undefined;
     const atRevision = this.#store.latestApproved(projectId)?.revision ?? 0;
     const { change, node: updated } = this.#store.applyStatusChange({
       projectId,
@@ -470,24 +537,24 @@ export class RequirementService implements GoverningDigest {
       requirementId: input.requirementId,
       toStatus: input.to,
       evidence: input.evidence,
-      verifiedBy: input.verifiedBy,
-      actor: input.actor,
-      agentSessionId: input.agentSessionId ?? null,
+      verifiedBy,
+      actor,
+      agentSessionId: agentSessionId ?? null,
       atRevision,
       note: input.note ?? null,
     });
     this.#bus.append({
       type: "requirement.status.changed",
       userSessionId: input.userSessionId,
-      ...(input.agentSessionId === undefined ? {} : { agentSessionId: input.agentSessionId }),
+      ...(agentSessionId === undefined ? {} : { agentSessionId }),
       payload: {
         userSessionId: input.userSessionId,
         requirementId: input.requirementId,
         from: change.fromStatus,
         to: change.toStatus,
-        verifiedBy: input.verifiedBy,
-        actor: input.actor,
-        ...(input.agentSessionId === undefined ? {} : { agentSessionId: input.agentSessionId }),
+        verifiedBy,
+        actor,
+        ...(agentSessionId === undefined ? {} : { agentSessionId }),
         evidenceCount: input.evidence.length,
         ...(input.note === undefined ? {} : { note: input.note }),
       },
@@ -503,7 +570,7 @@ export class RequirementService implements GoverningDigest {
         .filter((id) => TERMINAL_STATUSES.has(latest.get(id)?.toStatus ?? ""));
       if (suspects.length > 0) {
         this.#wakeNote?.(input.userSessionId,
-          `[Console: ${node.id} was ${input.to === "open" ? "reopened" : "reported violated"} by ${input.actor}. ` +
+          `[Console: ${node.id} was ${input.to === "open" ? "reopened" : "reported violated"} by ${actor}. ` +
           `These requirements depend on it and hold terminal claims recorded BEFORE this change: ${suspects.join(", ")}. ` +
           `Judge whether their claims still stand — reopen with report_requirement, re-verify, or amend. The Console changed nothing.]`);
       }
@@ -729,6 +796,22 @@ export class RequirementService implements GoverningDigest {
   }
 
   /**
+   * Subtree membership: the node or one of its ancestors was delegated to the
+   * session. False for unknown/retired nodes and delegation-less sessions.
+   */
+  withinDelegation(userSessionId: string, agentSessionId: string, requirementId: string): boolean {
+    const roots = new Set(this.delegationSet(agentSessionId));
+    if (roots.size === 0) return false;
+    const byId = new Map(this.#store.liveNodes(this.#project(userSessionId)).map((row) => [row.id, row]));
+    let cursor: RequirementNodeRow | undefined = byId.get(requirementId);
+    while (cursor) {
+      if (roots.has(cursor.id)) return true;
+      cursor = cursor.parentId === null ? undefined : byId.get(cursor.parentId);
+    }
+    return false;
+  }
+
+  /**
    * Subtree enforcement: a session may act on a requirement iff the node or
    * one of its ancestors was delegated to it. Anything else is main's.
    */
@@ -738,12 +821,8 @@ export class RequirementService implements GoverningDigest {
       throw new InvalidInputError("this session holds no delegated requirements");
     }
     const byId = new Map(this.#store.liveNodes(this.#project(userSessionId)).map((row) => [row.id, row]));
-    let cursor: RequirementNodeRow | undefined = byId.get(requirementId);
-    if (!cursor) throw new NotFoundError(`no live requirement ${requirementId}`);
-    while (cursor) {
-      if (roots.has(cursor.id)) return;
-      cursor = cursor.parentId === null ? undefined : byId.get(cursor.parentId);
-    }
+    if (!byId.has(requirementId)) throw new NotFoundError(`no live requirement ${requirementId}`);
+    if (this.withinDelegation(userSessionId, agentSessionId, requirementId)) return;
     throw new InvalidInputError(
       `${requirementId} is outside this session's delegated requirements (${[...roots].join(", ")}) — route it to main`,
     );
@@ -791,6 +870,7 @@ export class RequirementService implements GoverningDigest {
         ord: node.ord,
         statement: node.statement,
         composition: node.composition,
+        verifyExpectation: node.verifyExpectation,
         status: node.status,
         derivedStatus: derived.get(node.id) ?? node.status,
         origin: node.origin,
@@ -926,6 +1006,95 @@ export class RequirementService implements GoverningDigest {
       });
   }
 
+  /**
+   * Satisfied leaves whose recorded tier falls below their declared
+   * verification expectation — the node's own `(verify: …)` marker or an
+   * ancestor's, strongest wins. Derived, displayed, never a gate.
+   */
+  verificationGaps(userSessionId: string): RequirementVerificationGap[] {
+    const projectId = this.#project(userSessionId);
+    const nodes = this.#store.liveNodes(projectId);
+    if (nodes.length === 0) return [];
+    return this.#verificationGaps(nodes, this.#store.latestChanges(projectId));
+  }
+
+  #verificationGaps(
+    nodes: RequirementNodeRow[],
+    latest: ReturnType<RequirementStore["latestChanges"]>,
+  ): RequirementVerificationGap[] {
+    const byId = new Map(nodes.map((node) => [node.id, node]));
+    const hasChildren = new Set(nodes.map((node) => node.parentId).filter((id) => id !== null));
+    const effective = (node: RequirementNodeRow): RequirementVerifyExpectation | null => {
+      let strongest: RequirementVerifyExpectation | null = null;
+      for (let cursor: RequirementNodeRow | undefined = node; cursor; cursor = cursor.parentId === null ? undefined : byId.get(cursor.parentId)) {
+        const declared = cursor.verifyExpectation;
+        if (declared !== null && (strongest === null || EXPECTATION_RANK[declared] > EXPECTATION_RANK[strongest])) {
+          strongest = declared;
+        }
+      }
+      return strongest;
+    };
+    const gaps: RequirementVerificationGap[] = [];
+    for (const node of this.#depthFirst(nodes)) {
+      if (hasChildren.has(node.id) || node.status !== "satisfied") continue;
+      const expected = effective(node);
+      if (expected === null) continue;
+      const change = latest.get(node.id);
+      const recordedRank = change === undefined ? TIER_RANK.self : TIER_RANK[change.verifiedBy];
+      if (recordedRank >= EXPECTATION_RANK[expected]) continue;
+      gaps.push({
+        requirementId: node.id,
+        statement: node.statement,
+        expected,
+        recorded: {
+          verifiedBy: change?.verifiedBy ?? "self",
+          actor: change?.actor ?? "unknown",
+          at: change?.createdAt ?? node.updatedAt,
+        },
+      });
+    }
+    return gaps;
+  }
+
+  /**
+   * Terminal claims the run later withdrew, oldest first — a change whose
+   * `fromStatus` was terminal, made by anyone but the console (console rows
+   * are exactly the mechanical statement-resets and retirements; an operator
+   * reopen counts, attributed). Pure journal facts: displayed in the summary
+   * and panel, exported for evaluation, never a verdict input.
+   */
+  reversals(userSessionId: string): RequirementReversal[] {
+    const projectId = this.#project(userSessionId);
+    const statements = new Map(this.#store.listNodes(projectId).map((node) => [node.id, node.statement]));
+    const out: RequirementReversal[] = [];
+    const lastTerminalClaim = new Map<string, { actor: string; verifiedBy: RequirementVerifiedBy; evidenceCount: number; at: string }>();
+    for (const change of this.#store.listStatusChanges(projectId)) {
+      const fromTerminal = change.fromStatus === "satisfied" || change.fromStatus === "violated" || change.fromStatus === "infeasible";
+      // A same-status re-claim (a reviewer upgrading a self-tier satisfied to
+      // independent) withdraws nothing — only a status CHANGE reverses.
+      if (fromTerminal && change.toStatus !== change.fromStatus && change.actor !== "console") {
+        out.push({
+          requirementId: change.requirementId,
+          statement: statements.get(change.requirementId) ?? "",
+          from: change.fromStatus as "satisfied" | "violated" | "infeasible",
+          to: change.toStatus as RequirementStatus,
+          at: change.createdAt,
+          reversedBy: { actor: change.actor, verifiedBy: change.verifiedBy },
+          original: lastTerminalClaim.get(change.requirementId) ?? null,
+        });
+      }
+      if (change.toStatus === "satisfied" || change.toStatus === "violated" || change.toStatus === "infeasible") {
+        lastTerminalClaim.set(change.requirementId, {
+          actor: change.actor, verifiedBy: change.verifiedBy,
+          evidenceCount: change.evidence.length, at: change.createdAt,
+        });
+      } else {
+        lastTerminalClaim.delete(change.requirementId);
+      }
+    }
+    return out;
+  }
+
   // ── prompt surfaces (the GoverningDigest contract) ───────────────────────
 
   /**
@@ -950,7 +1119,15 @@ export class RequirementService implements GoverningDigest {
       .slice(-5)
       .map((row) => `- rev ${row.revision}: ${row.changeNote}`);
     const trailBlock = trail.length > 0 ? `\n\nAmendment trail:\n${trail.join("\n")}` : "";
-    const assemble = (body: string) => `${header}\n${prose}${body}${trailBlock}`;
+    // Gaps ride with the trail, after the outline: the collapse-satisfied
+    // ladder erases exactly the satisfied leaves that carry them. Bounded
+    // like the trail so a pathological run cannot grow the prompt.
+    const gaps = this.verificationGaps(userSessionId);
+    const gapLines = gaps.slice(0, GAP_LIST_MAX)
+      .map((gap) => `- ${gap.requirementId} needs ${gap.expected} verification (claimed ${gap.recorded.verifiedBy} by ${gap.recorded.actor})`);
+    if (gaps.length > GAP_LIST_MAX) gapLines.push(`- …and ${gaps.length - GAP_LIST_MAX} more (read_requirements lists them)`);
+    const gapBlock = gapLines.length > 0 ? `\n\nVerification gaps (satisfied below their declared tier):\n${gapLines.join("\n")}` : "";
+    const assemble = (body: string) => `${header}\n${prose}${body}${gapBlock}${trailBlock}`;
 
     // Structural degradation before any truncation: full outline → collapse
     // satisfied subtrees → collapse subtrees delegated to OPEN sessions
@@ -984,7 +1161,7 @@ export class RequirementService implements GoverningDigest {
     // first; the prose only when even that cannot fit.
     const marker = "\n…(truncated — read_requirements returns the full outline)";
     const shallow = this.#statusOutline(userSessionId, nodes, ladder.at(-1) ?? { collapseSatisfied: true });
-    const fixed = Buffer.byteLength(`${header}\n${prose}${marker}${trailBlock}`, "utf8");
+    const fixed = Buffer.byteLength(`${header}\n${prose}${marker}${gapBlock}${trailBlock}`, "utf8");
     if (DIGEST_MAX_BYTES - fixed > 0) {
       return assemble(`${truncateUtf8(shallow, DIGEST_MAX_BYTES - fixed)}${marker}`);
     }
@@ -1061,7 +1238,13 @@ export class RequirementService implements GoverningDigest {
   }
 
   /** The status outline + counts a run summary snapshots at proposal time. */
-  summarySnapshot(userSessionId: string): { revision: number; counts: Record<RequirementStatus, number>; outline: string } | null {
+  summarySnapshot(userSessionId: string): {
+    revision: number;
+    counts: Record<RequirementStatus, number>;
+    outline: string;
+    verificationGaps: RequirementVerificationGap[];
+    reversals: RequirementReversal[];
+  } | null {
     const approved = this.#store.latestApproved(this.#project(userSessionId));
     if (!approved) return null;
     const nodes = this.#store.liveNodes(this.#project(userSessionId));
@@ -1070,6 +1253,8 @@ export class RequirementService implements GoverningDigest {
       revision: approved.revision,
       counts: requirementStatusCounts(nodes.map((node) => derived.get(node.id) ?? node.status)),
       outline: this.#statusOutline(userSessionId, nodes, { collapseSatisfied: false }),
+      verificationGaps: this.verificationGaps(userSessionId),
+      reversals: this.reversals(userSessionId),
     };
   }
 
@@ -1172,23 +1357,31 @@ export class RequirementService implements GoverningDigest {
       const id = row.id as string;
       const existing = liveById.get(id);
       if (!existing) {
-        ops.inserts.push({ id, parentId: row.parentId, ord: row.ord, statement: row.statement, composition: row.composition });
+        ops.inserts.push({ id, parentId: row.parentId, ord: row.ord, statement: row.statement,
+          composition: row.composition, verifyExpectation: row.verifyExpectation });
         continue;
       }
       const statementChanged = existing.statement !== row.statement;
       if (statementChanged) changedStatements.push(id);
       if (statementChanged && existing.status !== "open") resets.push({ id, from: existing.status });
+      // An expectation change updates the node WITHOUT resetting its status:
+      // the statement (what the evidence attested to) is unchanged — the gap
+      // between the recorded tier and the new declaration derives at read.
+      const expectationChanged = (existing.verifyExpectation ?? null) !== (row.verifyExpectation ?? null);
       const moved = existing.parentId !== row.parentId || existing.ord !== row.ord
         || existing.composition !== row.composition;
       const promote = existing.origin === "refinement";
-      if (statementChanged || moved || promote) {
+      if (statementChanged || moved || promote || expectationChanged) {
         ops.updates.push({
           id,
+          // The patch ALWAYS carries the expectation: a move that also drops
+          // the marker must apply both, never half of the line.
           patch: {
             parentId: row.parentId,
             ord: row.ord,
             statement: row.statement,
             composition: row.composition,
+            verifyExpectation: row.verifyExpectation,
             ...(promote ? { origin: "committed" as const, introducedInRevision: revision } : {}),
           },
           resetStatus: statementChanged,
@@ -1292,6 +1485,7 @@ export class RequirementService implements GoverningDigest {
   ): string {
     const derived = this.#derivedStatuses(nodes);
     const latest = this.#store.latestChanges(this.#project(userSessionId));
+    const gaps = new Map(this.#verificationGaps(nodes, latest).map((gap) => [gap.requirementId, gap.expected]));
     const byParent = new Map<string | null, RequirementNodeRow[]>();
     for (const node of nodes) {
       const list = byParent.get(node.parentId) ?? [];
@@ -1329,6 +1523,7 @@ export class RequirementService implements GoverningDigest {
               ? node.statement
               : `${node.statement} (subtree: ${counts.satisfied}/${counts.total} satisfied — read_requirements scopeId "${node.id}")`,
             composition: node.composition,
+            verifyExpectation: node.verifyExpectation,
             children: collapse ? [] : build(node.id, depth + 1),
           };
         });
@@ -1337,9 +1532,11 @@ export class RequirementService implements GoverningDigest {
       const status = derived.get(id);
       if (status === undefined) return undefined;
       const change = latest.get(id);
+      const gap = gaps.get(id);
       return {
         status,
         ...(change === undefined ? {} : { verifiedBy: change.verifiedBy, evidenceCount: change.evidence.length }),
+        ...(gap === undefined ? {} : { verifyGap: gap }),
       };
     });
   }

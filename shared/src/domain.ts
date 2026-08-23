@@ -101,6 +101,13 @@ export type AgentSessionLifecycle = "open" | "archived";
 /** Derived busy state — never stored. */
 export type AgentSessionActivity = "working" | "idle" | "reported";
 
+export interface AgentSessionBudget {
+  /** The commission ceiling in USD (session + children). */
+  budgetUsd: number;
+  /** Summed provider cost of the session's subtree so far. */
+  spendUsd: number;
+}
+
 export interface AgentSession {
   id: string;
   userSessionId: string;
@@ -113,6 +120,13 @@ export interface AgentSession {
   parentAgentSessionId: string | null;
   /** Specialist agent names in seating order (excludes the coordinator). */
   agents: string[];
+  /** Commission budget + subtree spend; null when no budget was set. */
+  budget: AgentSessionBudget | null;
+  /**
+   * Commissioned while requirements govern, with zero delegated requirement
+   * ids — untraceable to any obligation. Derived, displayed, never rejected.
+   */
+  unscoped: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -402,6 +416,8 @@ export interface RequirementNodeWire {
   ord: number;
   statement: string;
   composition: import("./requirements.ts").RequirementComposition;
+  /** The node's OWN declared expectation; ancestors' declarations inherit at gap derivation. */
+  verifyExpectation: import("./requirements.ts").RequirementVerifyExpectation | null;
   status: import("./requirements.ts").RequirementStatus;
   derivedStatus: import("./requirements.ts").RequirementStatus;
   /** "committed" = part of an approved revision; "refinement" = decomposed below a delegated node during the run. */
@@ -464,6 +480,49 @@ export interface RequirementFrontierEntry {
   requirementId: string;
   statement: string;
   annotations: RequirementFrontierAnnotation[];
+}
+
+/**
+ * A leaf recorded `satisfied` below its declared verification expectation
+ * (its own or an ancestor's `(verify: …)` marker). Derived at read time,
+ * displayed everywhere statuses appear, never a gate — the operator remains
+ * the gate.
+ */
+export interface RequirementVerificationGap {
+  requirementId: string;
+  statement: string;
+  /** The effective (own or inherited, strongest-wins) declared expectation. */
+  expected: import("./requirements.ts").RequirementVerifyExpectation;
+  /** The claim that fell short of it. */
+  recorded: {
+    verifiedBy: import("./requirements.ts").RequirementVerifiedBy;
+    actor: string;
+    at: string;
+  };
+}
+
+/**
+ * A terminal claim (satisfied / violated / infeasible) that the run itself
+ * later withdrew — derived from the status journal, excluding the console's
+ * mechanical resets. The honest measure of verification quality: a reversed
+ * `satisfied` is an acceptance that turned out wrong, attributed to the tier
+ * and actor that stood behind it.
+ */
+export interface RequirementReversal {
+  requirementId: string;
+  /** The statement at read time (amendments keep ids stable). */
+  statement: string;
+  from: "satisfied" | "violated" | "infeasible";
+  to: import("./requirements.ts").RequirementStatus;
+  at: string;
+  reversedBy: { actor: string; verifiedBy: import("./requirements.ts").RequirementVerifiedBy };
+  /** The claim being withdrawn; null when history began terminal (defensive). */
+  original: {
+    actor: string;
+    verifiedBy: import("./requirements.ts").RequirementVerifiedBy;
+    evidenceCount: number;
+    at: string;
+  } | null;
 }
 
 /** Orchestration-pattern catalog ids — the create-session wire vocabulary. */

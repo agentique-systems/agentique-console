@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "156609b7-c72e-49e1-8408-9e9b27b6893a",
-  "prevId": "b21af19a-2aa6-4f0a-b1c4-6ecf2a390d41",
+  "id": "b21af19a-2aa6-4f0a-b1c4-6ecf2a390d41",
+  "prevId": "b204e509-b91b-44b0-980b-f055a81fd381",
   "tables": {
     "agent_profile_trust": {
       "name": "agent_profile_trust",
@@ -141,6 +141,13 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true,
+          "autoincrement": false
+        },
+        "budget_usd": {
+          "name": "budget_usd",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false,
           "autoincrement": false
         }
       },
@@ -2102,6 +2109,13 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
+        },
+        "verify_expectation": {
+          "name": "verify_expectation",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
         }
       },
       "indexes": {
@@ -2183,21 +2197,6 @@
           "type": "integer",
           "primaryKey": false,
           "notNull": true,
-          "autoincrement": false
-        },
-        "kind": {
-          "name": "kind",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "'full'"
-        },
-        "scope_id": {
-          "name": "scope_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
           "autoincrement": false
         },
         "base_revision": {
@@ -2314,10 +2313,6 @@
         "requirement_revisions_origin": {
           "name": "requirement_revisions_origin",
           "value": "\"requirement_revisions\".\"origin\" IN ('main','operator_edited')"
-        },
-        "requirement_revisions_kind": {
-          "name": "requirement_revisions_kind",
-          "value": "\"requirement_revisions\".\"kind\" IN ('full','intent','subtree')"
         }
       }
     },
@@ -3205,6 +3200,13 @@
           "columns": [
             "user_session_id",
             "created_at"
+          ],
+          "isUnique": false
+        },
+        "usage_agent_session": {
+          "name": "usage_agent_session",
+          "columns": [
+            "agent_session_id"
           ],
           "isUnique": false
         }
