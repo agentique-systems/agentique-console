@@ -141,13 +141,20 @@ export function decisionOf(row: DecisionSourceRow): OperatorDecision | null {
 
 export class DecisionLedger {
   readonly #interactions: InteractionStore;
+  readonly #resolveProject: (userSessionId: string) => string;
 
-  constructor(interactions: InteractionStore) {
+  constructor(interactions: InteractionStore, resolveProject: (userSessionId: string) => string) {
     this.#interactions = interactions;
+    this.#resolveProject = resolveProject;
   }
 
+  /**
+   * Project-wide: a continued session inherits every decision recorded across
+   * the project's prior sessions — an operator decision outlives the session
+   * it was made in.
+   */
   list(userSessionId: string): OperatorDecision[] {
-    return this.#interactions.listDecisionSourceRows(userSessionId)
+    return this.#interactions.listDecisionSourceRowsForProject(this.#resolveProject(userSessionId))
       .map((row) => decisionOf({ ...row, agent: row.participant }))
       .filter((decision): decision is OperatorDecision => decision !== null)
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt));

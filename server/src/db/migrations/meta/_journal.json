@@ -85,6 +85,13 @@
       "when": 1787410046588,
       "tag": "0011_requirements",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1787481512737,
+      "tag": "0012_projects",
+      "breakpoints": true
     }
   ]
 }

@@ -16,6 +16,7 @@ import type {
 } from "@agentique-console/shared";
 import { InvalidInputError, NotFoundError } from "../errors.ts";
 import { Repo, type UserSessionRow } from "../db/repo.ts";
+import type { ProjectStore } from "../db/stores/project-store.ts";
 import { toWireUserSession } from "../api/wire.ts";
 import type { EventBus } from "../events/bus.ts";
 import { newId, nowIso } from "../ids.ts";
@@ -26,6 +27,7 @@ import type { WorkspaceService } from "../workspaces/service.ts";
 
 export class UserSessionService {
   readonly #repo: Repo;
+  readonly #projects: ProjectStore;
   readonly #bus: EventBus;
   readonly #runner: OrchestratorRunner;
   readonly #interactions: InteractionService;
@@ -39,6 +41,7 @@ export class UserSessionService {
 
   constructor(deps: {
     repo: Repo;
+    projects: ProjectStore;
     bus: EventBus;
     runner: OrchestratorRunner;
     interactions: InteractionService;
@@ -51,6 +54,7 @@ export class UserSessionService {
     wireAgentSessions: (userSessionId: string) => AgentSession[];
   }) {
     this.#repo = deps.repo;
+    this.#projects = deps.projects;
     this.#bus = deps.bus;
     this.#runner = deps.runner;
     this.#interactions = deps.interactions;
@@ -64,11 +68,13 @@ export class UserSessionService {
     const message = body.message.trim();
     if (message === "") throw new InvalidInputError("a first message is required");
     this.#workspaces.get(body.workspaceId); // 404s on unknown workspace
+    const projectId = this.#resolveProject(body);
 
     const now = nowIso();
     const row: UserSessionRow = {
       id: newId("us"),
       workspaceId: body.workspaceId,
+      projectId,
       title: titleFromFirstMessage(message),
       mode: body.mode,
       phase: body.mode === "plan_execute" ? "planning" : "executing",
@@ -101,6 +107,29 @@ export class UserSessionService {
     });
     this.#runner.postOperatorMessage(session.id, message);
     return session;
+  }
+
+  /**
+   * The project a new session attaches to. Default: a fresh project — no
+   * surprise inheritance. Continuation is explicit and SEQUENTIAL: one open
+   * session per project, so the requirement graph never has two writers.
+   */
+  #resolveProject(body: CreateUserSessionBody): string {
+    if (body.projectId === undefined) {
+      return this.#projects.insert({ workspaceId: body.workspaceId }).id;
+    }
+    const project = this.#projects.get(body.projectId);
+    if (!project) throw new NotFoundError(`no project ${body.projectId}`);
+    if (project.workspaceId !== body.workspaceId) {
+      throw new InvalidInputError(`project ${body.projectId} belongs to a different workspace`);
+    }
+    const open = this.#repo.listOpenUserSessionsForProject(body.projectId);
+    if (open.length > 0) {
+      throw new InvalidInputError(
+        `project ${body.projectId} already has an open session (${open[0]!.id}) — continuation is sequential; archive it first`,
+      );
+    }
+    return body.projectId;
   }
 
   list(workspaceId: string): UserSessionListItem[] {

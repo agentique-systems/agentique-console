@@ -100,6 +100,13 @@ export interface CreateUserSessionBody {
   message: string;
   /** Orchestrator model; omitted means the server's configured default. */
   model?: string;
+  /**
+   * Continue an existing project: the new session reads and extends its
+   * requirement graph, ids, and decision ledger. Continuation is SEQUENTIAL —
+   * rejected while the project has another open session. Omitted mints a
+   * fresh project.
+   */
+  projectId?: string;
 }
 export interface CreateUserSessionResponse {
   session: UserSession;

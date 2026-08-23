@@ -12,7 +12,7 @@ import { EventBus } from "../events/bus.ts";
 import { InteractionService } from "./interactions.ts";
 import { InteractionStore } from "../db/stores/interaction-store.ts";
 import { events, interactions as rows } from "../db/schema.ts";
-import { userSessions, workspaces } from "../db/schema.ts";
+import { projects, userSessions, workspaces } from "../db/schema.ts";
 import { newId, nowIso } from "../ids.ts";
 
 function harness() {
@@ -22,8 +22,10 @@ function harness() {
   const workspaceId = newId("ws");
   db.insert(workspaces).values({ id: workspaceId, name: "w", rootPath: `/tmp/${workspaceId}`, metadata: {}, createdAt: nowIso(), updatedAt: nowIso() }).run();
   const userSessionId = newId("us");
+  const projectId = newId("proj");
+  db.insert(projects).values({ id: projectId, workspaceId, title: null, intentDocument: null, createdAt: nowIso() }).run();
   db.insert(userSessions).values({
-    id: userSessionId, workspaceId, title: "t", mode: "execute", phase: "executing",
+    id: userSessionId, workspaceId, projectId, title: "t", mode: "execute", phase: "executing",
     lifecycle: "open", purpose: "work", subjectKey: null, sdkSessionId: null, sdkGeneration: 0,
     sdkTurnCount: 0, contextTokens: 0, memory: "", latestHandoffId: null,
     cumulativeCostUsd: 0, cumulativeApiDurationMs: 0, createdAt: nowIso(), updatedAt: nowIso(),

@@ -22,11 +22,38 @@ export const workspaces = sqliteTable("workspaces", {
   updatedAt: text("updated_at").notNull(),
 });
 
+/**
+ * A project: the durable identity for a body of intent. Requirement ids,
+ * revisions, status history, and operator decisions belong to a project, not
+ * a UserSession — a later session opened onto the same project continues the
+ * same graph, the same ids, and the same decision ledger. Sessions attach at
+ * creation; continuation is SEQUENTIAL (one open session per project), so
+ * there is never concurrent multi-session mutation of one graph.
+ */
+export const projects = sqliteTable("projects", {
+  id: text("id").primaryKey(),
+  workspaceId: text("workspace_id")
+    .notNull()
+    .references(() => workspaces.id),
+  title: text("title"),
+  /**
+   * Operator-approved intent prose (title + preamble sections of the
+   * requirement document). Written at approval of a full or intent-kind
+   * proposal; never by a subtree amendment — the vision outlives patches.
+   */
+  intentDocument: text("intent_document"),
+  createdAt: text("created_at").notNull(),
+});
+
 export const userSessions = sqliteTable("user_sessions", {
   id: text("id").primaryKey(),
   workspaceId: text("workspace_id")
     .notNull()
     .references(() => workspaces.id),
+  /** The project this session works on; minted fresh unless continuing one. */
+  projectId: text("project_id")
+    .notNull()
+    .references(() => projects.id),
   title: text("title"),
   mode: text("mode", { enum: ["execute", "plan_execute"] }).notNull(),
   phase: text("phase", { enum: ["planning", "executing"] })
@@ -527,9 +554,18 @@ export const requirementRevisions = sqliteTable(
   "requirement_revisions",
   {
     id: text("id").primaryKey(),
+    /** The project whose graph this revision patches — the revision counter's scope. */
+    projectId: text("project_id").notNull().references(() => projects.id),
+    /** The session that proposed it — attribution, never the query key. */
     userSessionId: text("user_session_id").notNull().references(() => userSessions.id),
-    /** Monotonic per session, 1-based. */
+    /** Monotonic per PROJECT, 1-based — a continued session keeps counting. */
     revision: integer("revision").notNull(),
+    /**
+     * The governing revision when this draft was proposed. Approval asserts it
+     * still matches — under the sequential-continuation and single-pending-
+     * proposal guards it always does; the assertion enforces the invariant.
+     */
+    baseRevision: integer("base_revision").notNull(),
     document: text("document").notNull(),
     graph: text("graph", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
     changeNote: text("change_note"),
@@ -540,7 +576,7 @@ export const requirementRevisions = sqliteTable(
     approvedAt: text("approved_at"),
   },
   (t) => [
-    index("requirement_revisions_session").on(t.userSessionId, t.revision),
+    index("requirement_revisions_project").on(t.projectId, t.revision),
     check("requirement_revisions_status", sql`${t.status} IN ('draft','approved','superseded','rejected')`),
     check("requirement_revisions_origin", sql`${t.origin} IN ('main','operator_edited')`),
   ],
@@ -557,9 +593,9 @@ export const requirementRevisions = sqliteTable(
 export const requirementNodes = sqliteTable(
   "requirement_nodes",
   {
-    /** "r1", "r2", … — minted at approval or decomposition, per session. */
+    /** "r1", "r2", … — minted at approval or decomposition, per PROJECT, never reused. */
     id: text("id").notNull(),
-    userSessionId: text("user_session_id").notNull().references(() => userSessions.id),
+    projectId: text("project_id").notNull().references(() => projects.id),
     parentId: text("parent_id"),
     ord: integer("ord").notNull(),
     statement: text("statement").notNull(),
@@ -578,8 +614,8 @@ export const requirementNodes = sqliteTable(
     updatedAt: text("updated_at").notNull(),
   },
   (t) => [
-    primaryKey({ columns: [t.userSessionId, t.id] }),
-    index("requirement_nodes_live").on(t.userSessionId, t.retiredInRevision),
+    primaryKey({ columns: [t.projectId, t.id] }),
+    index("requirement_nodes_live").on(t.projectId, t.retiredInRevision),
     check("requirement_nodes_status", sql`${t.status} IN ('open','satisfied','violated','infeasible','retired')`),
     check("requirement_nodes_composition", sql`${t.composition} IN ('all','any')`),
     check("requirement_nodes_origin", sql`${t.origin} IN ('committed','refinement')`),
@@ -596,6 +632,9 @@ export const requirementStatusChanges = sqliteTable(
   "requirement_status_changes",
   {
     id: text("id").primaryKey(),
+    /** The graph's scope — the query key; claims survive session boundaries. */
+    projectId: text("project_id").notNull(),
+    /** The session in which the claim landed — attribution, never the key. */
     userSessionId: text("user_session_id").notNull(),
     requirementId: text("requirement_id").notNull(),
     fromStatus: text("from_status").notNull(),
@@ -614,7 +653,7 @@ export const requirementStatusChanges = sqliteTable(
     createdAt: text("created_at").notNull(),
   },
   (t) => [
-    index("requirement_status_changes_req").on(t.userSessionId, t.requirementId, t.createdAt),
+    index("requirement_status_changes_req").on(t.projectId, t.requirementId, t.createdAt),
     check("requirement_status_changes_verified_by", sql`${t.verifiedBy} IN ('self','independent','operator','console')`),
   ],
 );

@@ -41,6 +41,7 @@ function wrapper() {
 const SESSION: UserSession = {
   id: "us_1",
   workspaceId: "ws_1",
+  projectId: "proj_1",
   title: "test",
   mode: "execute",
   phase: "executing",

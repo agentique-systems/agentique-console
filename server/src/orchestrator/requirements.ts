@@ -43,6 +43,7 @@ import type {
   RequirementRevisionRow,
   RequirementStore,
 } from "../db/stores/requirement-store.ts";
+import type { ProjectStore } from "../db/stores/project-store.ts";
 import { InvalidInputError, NotFoundError } from "../errors.ts";
 import type { SpecService } from "./spec.ts";
 
@@ -81,14 +82,25 @@ export class RequirementParseFailure extends InvalidInputError {
 
 export class RequirementService implements GoverningDigest {
   readonly #store: RequirementStore;
+  readonly #projects: ProjectStore;
   readonly #legacy: SpecService;
   readonly #bus: EventBus;
+  readonly #resolveProject: (userSessionId: string) => string;
   #frontierDeps: RequirementFrontierDeps | null = null;
+  #pendingProposalCheck: ((userSessionId: string) => boolean) | null = null;
 
-  constructor(store: RequirementStore, legacy: SpecService, bus: EventBus) {
+  constructor(
+    store: RequirementStore,
+    projects: ProjectStore,
+    legacy: SpecService,
+    bus: EventBus,
+    resolveProject: (userSessionId: string) => string,
+  ) {
     this.#store = store;
+    this.#projects = projects;
     this.#legacy = legacy;
     this.#bus = bus;
+    this.#resolveProject = resolveProject;
   }
 
   /** Wired once in createApp — the frontier reads other aggregates' facts. */
@@ -96,14 +108,48 @@ export class RequirementService implements GoverningDigest {
     this.#frontierDeps = deps;
   }
 
+  /**
+   * Wired once in createApp: is a requirements-proposal card already pending
+   * for this session? One pending proposal at a time is the concurrency
+   * model — with sequential continuation it makes a stale base revision
+   * impossible, so the approve-time assertion is enforcement, not a merge.
+   */
+  setPendingProposalCheck(check: (userSessionId: string) => boolean): void {
+    this.#pendingProposalCheck = check;
+  }
+
+  /** The project a session's graph lives in — the store's query key. */
+  #project(userSessionId: string): string {
+    return this.#resolveProject(userSessionId);
+  }
+
   // ── committed structure ──────────────────────────────────────────────────
 
   latestApproved(userSessionId: string): RequirementRevisionRow | undefined {
-    return this.#store.latestApproved(userSessionId);
+    return this.#store.latestApproved(this.#project(userSessionId));
+  }
+
+  /** The completion-currency token: the approved revision number (0 = none). */
+  governingRevision(userSessionId: string): number {
+    return this.latestApproved(userSessionId)?.revision ?? 0;
+  }
+
+  /**
+   * The operator-approved intent prose (title + preamble). Falls back to the
+   * latest approved revision's stored graph for projects from before the
+   * column existed. Null when nothing governs or the document had no prose.
+   */
+  intentDocument(userSessionId: string): string | null {
+    const stored = this.#projects.get(this.#project(userSessionId))?.intentDocument ?? null;
+    if (stored !== null) return stored === "" ? null : stored;
+    const approved = this.#store.latestApproved(this.#project(userSessionId));
+    if (!approved) return null;
+    const graph = approved.graph as unknown as RequirementGraph;
+    return renderIntentDocument(graph);
   }
 
   listRevisions(userSessionId: string): RequirementRevisionRow[] {
-    return this.#store.listRevisions(userSessionId);
+    return this.#store.listRevisions(this.#project(userSessionId));
   }
 
   getRevision(id: string): RequirementRevisionRow | undefined {
@@ -125,6 +171,11 @@ export class RequirementService implements GoverningDigest {
    * tool result carries the lines so main can fix and re-propose.
    */
   propose(userSessionId: string, document: string, changeNote?: string): RequirementRevisionRow {
+    if (this.#pendingProposalCheck?.(userSessionId)) {
+      throw new InvalidInputError(
+        "a requirements proposal is already awaiting the operator — resolve that card before proposing again",
+      );
+    }
     const parsed = parseRequirementsDocument(document);
     if (!parsed.ok) throw new RequirementParseFailure(parsed.errors);
     if (parsed.graph.nodes.length === 0) {
@@ -132,11 +183,14 @@ export class RequirementService implements GoverningDigest {
     }
     const idErrors = this.#unknownIdErrors(userSessionId, parsed.graph, document);
     if (idErrors.length > 0) throw new RequirementParseFailure(idErrors);
+    const projectId = this.#project(userSessionId);
     return this.#store.insertDraft({
+      projectId,
       userSessionId,
       document,
       graph: parsed.graph as unknown as Record<string, unknown>,
       changeNote: changeNote ?? null,
+      baseRevision: this.#store.latestApproved(projectId)?.revision ?? 0,
     });
   }
 
@@ -152,6 +206,16 @@ export class RequirementService implements GoverningDigest {
   ): { revision: RequirementRevisionRow; added: string[]; retired: string[] } {
     const draft = this.#store.getRevision(revisionId);
     if (!draft) throw new NotFoundError(`no requirement revision ${revisionId}`);
+    // The single-writer invariant's enforcement: under sequential continuation
+    // and one-pending-proposal this cannot fire; if it does, the graph moved
+    // after drafting and the old evidence attests against different words.
+    const governing = this.#store.latestApproved(draft.projectId)?.revision ?? 0;
+    if (draft.baseRevision !== governing) {
+      this.#store.reject(revisionId);
+      throw new InvalidInputError(
+        `stale proposal — the requirements moved to revision ${governing} after this proposal was drafted against revision ${draft.baseRevision}; re-propose from the current graph`,
+      );
+    }
     const parsed = parseRequirementsDocument(input.document);
     if (!parsed.ok) throw new RequirementParseFailure(parsed.errors);
     const idErrors = this.#unknownIdErrors(draft.userSessionId, parsed.graph, input.document);
@@ -224,8 +288,9 @@ export class RequirementService implements GoverningDigest {
     agentSessionId?: string;
     note?: string;
   }): RequirementNodeWire {
+    const projectId = this.#project(input.userSessionId);
     const node = this.#liveNode(input.userSessionId, input.requirementId);
-    const children = this.#store.liveNodes(input.userSessionId).filter((row) => row.parentId === node.id);
+    const children = this.#store.liveNodes(projectId).filter((row) => row.parentId === node.id);
     if (children.length > 0) {
       throw new InvalidInputError(
         `${node.id} has children — its status derives from them; report on the leaves instead: ${children.map((child) => child.id).join(", ")}`,
@@ -234,8 +299,9 @@ export class RequirementService implements GoverningDigest {
     if (input.to !== "open" && input.evidence.length === 0 && input.verifiedBy !== "operator") {
       throw new InvalidInputError(`marking ${node.id} ${input.to} requires at least one evidence ref`);
     }
-    const atRevision = this.#store.latestApproved(input.userSessionId)?.revision ?? 0;
+    const atRevision = this.#store.latestApproved(projectId)?.revision ?? 0;
     const { change, node: updated } = this.#store.applyStatusChange({
+      projectId,
       userSessionId: input.userSessionId,
       requirementId: input.requirementId,
       toStatus: input.to,
@@ -278,14 +344,15 @@ export class RequirementService implements GoverningDigest {
     actor: string;
     agentSessionId?: string;
   }): string[] {
+    const projectId = this.#project(input.userSessionId);
     const parent = this.#liveNode(input.userSessionId, input.parentId);
     if (input.children.length === 0) throw new InvalidInputError("decompose needs at least one child statement");
-    const existing = this.#store.liveNodes(input.userSessionId).filter((row) => row.parentId === parent.id);
+    const existing = this.#store.liveNodes(projectId).filter((row) => row.parentId === parent.id);
     // Past the LAST existing sibling ord, not sibling count: an amendment
     // renumbers committed children by document position, so count-based ords
     // would collide with a later-approved committed sibling.
     const baseOrd = existing.reduce((max, row) => Math.max(max, row.ord + 1), 0);
-    let nextNumber = this.#store.maxNodeNumber(input.userSessionId) + 1;
+    let nextNumber = this.#store.maxNodeNumber(projectId) + 1;
     const children = input.children.map((child, index) => ({
       id: `r${nextNumber++}`,
       ord: baseOrd + index,
@@ -296,7 +363,7 @@ export class RequirementService implements GoverningDigest {
       if (child.statement === "") throw new InvalidInputError("a child statement is empty");
     }
     this.#store.insertRefinementNodes({
-      userSessionId: input.userSessionId,
+      projectId,
       parentId: parent.id,
       agentSessionId: input.agentSessionId ?? null,
       children,
@@ -363,7 +430,7 @@ export class RequirementService implements GoverningDigest {
     if (roots.size === 0) {
       throw new InvalidInputError("this session holds no delegated requirements");
     }
-    const byId = new Map(this.#store.liveNodes(userSessionId).map((row) => [row.id, row]));
+    const byId = new Map(this.#store.liveNodes(this.#project(userSessionId)).map((row) => [row.id, row]));
     let cursor: RequirementNodeRow | undefined = byId.get(requirementId);
     if (!cursor) throw new NotFoundError(`no live requirement ${requirementId}`);
     while (cursor) {
@@ -382,9 +449,10 @@ export class RequirementService implements GoverningDigest {
    * statuses, delegation joins, and verification chips.
    */
   derive(userSessionId: string): RequirementNodeWire[] {
-    const nodes = this.#depthFirst(this.#store.liveNodes(userSessionId));
+    const projectId = this.#project(userSessionId);
+    const nodes = this.#depthFirst(this.#store.liveNodes(projectId));
     const derived = this.#derivedStatuses(nodes);
-    const latest = this.#store.latestChanges(userSessionId);
+    const latest = this.#store.latestChanges(projectId);
     const openSessions = this.#frontierDeps?.openAgentSessionIds(userSessionId) ?? new Set<string>();
     const delegatedTo = new Map<string, string[]>();
     for (const delegation of this.#store.delegationsForUserSession(userSessionId)) {
@@ -421,7 +489,7 @@ export class RequirementService implements GoverningDigest {
 
   /** The run root's derived status: every top-level requirement, composed "all". */
   rootStatus(userSessionId: string): RequirementStatus {
-    const nodes = this.#store.liveNodes(userSessionId);
+    const nodes = this.#store.liveNodes(this.#project(userSessionId));
     if (nodes.length === 0) return "open";
     const derived = this.#derivedStatuses(nodes);
     return deriveComposedStatus(
@@ -436,7 +504,7 @@ export class RequirementService implements GoverningDigest {
    * dependency-blocked task, a pending operator interaction, or nothing yet.
    */
   frontier(userSessionId: string): RequirementFrontierEntry[] {
-    const nodes = this.#store.liveNodes(userSessionId);
+    const nodes = this.#store.liveNodes(this.#project(userSessionId));
     if (nodes.length === 0) return [];
     const derived = this.#derivedStatuses(nodes);
     const byId = new Map(nodes.map((node) => [node.id, node]));
@@ -494,9 +562,10 @@ export class RequirementService implements GoverningDigest {
    * first collapses fully-satisfied subtrees, then truncates with a marker.
    */
   digest(userSessionId: string): string {
-    const approved = this.#store.latestApproved(userSessionId);
+    const projectId = this.#project(userSessionId);
+    const approved = this.#store.latestApproved(projectId);
     if (!approved) return this.#legacy.digest(userSessionId);
-    const nodes = this.#store.liveNodes(userSessionId);
+    const nodes = this.#store.liveNodes(projectId);
     const outline = this.#statusOutline(userSessionId, nodes, { collapseSatisfied: false });
     let body = outline;
     if (Buffer.byteLength(body, "utf8") > DIGEST_MAX_BYTES) {
@@ -508,7 +577,7 @@ export class RequirementService implements GoverningDigest {
       // and could cut a surrogate pair in half.
       body = `${truncateUtf8(body, DIGEST_MAX_BYTES)}\n…(truncated — read_requirements returns the full outline)`;
     }
-    const trail = this.#store.listRevisions(userSessionId)
+    const trail = this.#store.listRevisions(projectId)
       .filter((row) => row.changeNote !== null && (row.status === "approved" || row.status === "superseded"))
       .slice(-5)
       .map((row) => `- rev ${row.revision}: ${row.changeNote}`);
@@ -518,12 +587,13 @@ export class RequirementService implements GoverningDigest {
 
   /** One line for checkpoints and deliveries; legacy fallback; null = nothing governs. */
   pointer(userSessionId: string): string | null {
-    const approved = this.#store.latestApproved(userSessionId);
+    const projectId = this.#project(userSessionId);
+    const approved = this.#store.latestApproved(projectId);
     if (!approved) {
       const legacy = this.#legacy.pointer(userSessionId);
       return legacy === null ? null : `spec ${legacy}`;
     }
-    const nodes = this.#store.liveNodes(userSessionId);
+    const nodes = this.#store.liveNodes(projectId);
     const derived = this.#derivedStatuses(nodes);
     const counts = requirementStatusCounts(nodes.map((node) => derived.get(node.id) ?? node.status));
     const total = nodes.length;
@@ -535,9 +605,9 @@ export class RequirementService implements GoverningDigest {
 
   /** The status outline + counts a run summary snapshots at proposal time. */
   summarySnapshot(userSessionId: string): { revision: number; counts: Record<RequirementStatus, number>; outline: string } | null {
-    const approved = this.#store.latestApproved(userSessionId);
+    const approved = this.#store.latestApproved(this.#project(userSessionId));
     if (!approved) return null;
-    const nodes = this.#store.liveNodes(userSessionId);
+    const nodes = this.#store.liveNodes(this.#project(userSessionId));
     const derived = this.#derivedStatuses(nodes);
     return {
       revision: approved.revision,
@@ -549,7 +619,7 @@ export class RequirementService implements GoverningDigest {
   // ── internals ────────────────────────────────────────────────────────────
 
   #liveNode(userSessionId: string, requirementId: string): RequirementNodeRow {
-    const node = this.#store.getNode(userSessionId, requirementId);
+    const node = this.#store.getNode(this.#project(userSessionId), requirementId);
     if (!node || node.retiredInRevision !== null) {
       throw new NotFoundError(`no live requirement ${requirementId} — read_requirements lists the current graph`);
     }
@@ -558,7 +628,7 @@ export class RequirementService implements GoverningDigest {
 
   /** Ids present in a document must be ones this session minted and kept live. */
   #unknownIdErrors(userSessionId: string, graph: RequirementGraph, text: string): RequirementParseError[] {
-    const all = this.#store.listNodes(userSessionId);
+    const all = this.#store.listNodes(this.#project(userSessionId));
     const known = new Set(all.map((node) => node.id));
     const retired = new Map(all.filter((node) => node.retiredInRevision !== null)
       .map((node) => [node.id, node.retiredInRevision!]));
@@ -591,7 +661,7 @@ export class RequirementService implements GoverningDigest {
    * node named in the document is PROMOTED to committed.
    */
   #computeApproval(userSessionId: string, parsed: RequirementGraph, revision: number): { graph: RequirementGraph; ops: ApprovalNodeOps; resets: { id: string; from: RequirementStatus }[] } {
-    let nextNumber = this.#store.maxNodeNumber(userSessionId) + 1;
+    let nextNumber = this.#store.maxNodeNumber(this.#project(userSessionId)) + 1;
     const mint = (node: RequirementGraphNode): RequirementGraphNode => ({
       ...node,
       id: node.id ?? `r${nextNumber++}`,
@@ -600,7 +670,7 @@ export class RequirementService implements GoverningDigest {
     });
     const graph: RequirementGraph = { ...parsed, nodes: parsed.nodes.map(mint) };
 
-    const live = this.#store.liveNodes(userSessionId);
+    const live = this.#store.liveNodes(this.#project(userSessionId));
     const liveById = new Map(live.map((node) => [node.id, node]));
     const flat = flattenRequirementGraph(graph);
     const present = new Set(flat.map((row) => row.id as string));
@@ -722,7 +792,7 @@ export class RequirementService implements GoverningDigest {
     options: { collapseSatisfied: boolean },
   ): string {
     const derived = this.#derivedStatuses(nodes);
-    const latest = this.#store.latestChanges(userSessionId);
+    const latest = this.#store.latestChanges(this.#project(userSessionId));
     const byParent = new Map<string | null, RequirementNodeRow[]>();
     for (const node of nodes) {
       const list = byParent.get(node.parentId) ?? [];
@@ -764,6 +834,20 @@ function siblingOrder(a: RequirementNodeRow, b: RequirementNodeRow): number {
   const originRank = (node: RequirementNodeRow) => (node.origin === "committed" ? 0 : 1);
   const mintNumber = (node: RequirementNodeRow) => Number(/^r(\d+)/.exec(node.id)?.[1] ?? 0);
   return a.ord - b.ord || originRank(a) - originRank(b) || mintNumber(a) - mintNumber(b);
+}
+
+/**
+ * The intent prose of a parsed document: title + preamble sections, verbatim.
+ * Null when the document carried no prose — an empty section renders nothing.
+ */
+export function renderIntentDocument(graph: RequirementGraph): string | null {
+  const parts: string[] = [];
+  if (graph.title !== null && graph.title.trim() !== "") parts.push(`# ${graph.title.trim()}`);
+  for (const section of graph.preamble) {
+    const body = section.body.trim();
+    parts.push(body === "" ? `## ${section.heading}` : `## ${section.heading}\n${body}`);
+  }
+  return parts.length === 0 ? null : parts.join("\n\n");
 }
 
 /** Truncate to a UTF-8 byte budget without splitting a multibyte character. */

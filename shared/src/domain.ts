@@ -18,6 +18,8 @@ export interface Workspace {
 export interface UserSession {
   id: string;
   workspaceId: string;
+  /** The project this session works on — the requirement graph's durable scope. */
+  projectId: string;
   title: string | null;
   mode: SessionMode;
   phase: SessionPhase;

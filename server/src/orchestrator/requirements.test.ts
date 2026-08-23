@@ -8,7 +8,7 @@ import { describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { openDb } from "../db/client.ts";
 import { createStores } from "../db/stores/index.ts";
-import { events as eventsTable, userSessions, workspaces } from "../db/schema.ts";
+import { events as eventsTable, projects, userSessions, workspaces } from "../db/schema.ts";
 import { EventBus } from "../events/bus.ts";
 import { nowIso } from "../ids.ts";
 import { SpecService } from "./spec.ts";
@@ -29,9 +29,10 @@ function makeHarness() {
   const bus = new EventBus(db, stores.artifacts);
   const now = nowIso();
   db.insert(workspaces).values({ id: "ws1", name: "w", rootPath: "/tmp/req-service-test", createdAt: now, updatedAt: now }).run();
-  db.insert(userSessions).values({ id: "us1", workspaceId: "ws1", mode: "execute", title: "t", createdAt: now, updatedAt: now } as typeof userSessions.$inferInsert).run();
+  db.insert(projects).values({ id: "proj1", workspaceId: "ws1", title: null, intentDocument: null, createdAt: now }).run();
+  db.insert(userSessions).values({ id: "us1", workspaceId: "ws1", projectId: "proj1", mode: "execute", title: "t", createdAt: now, updatedAt: now } as typeof userSessions.$inferInsert).run();
   const specs = new SpecService(stores.specs, bus);
-  const service = new RequirementService(stores.requirements, specs, bus);
+  const service = new RequirementService(stores.requirements, stores.projects, specs, bus, () => "proj1");
   const eventsOf = (type: string) =>
     db.select().from(eventsTable).where(eq(eventsTable.type, type)).all();
   return { service, specs, eventsOf, stores };

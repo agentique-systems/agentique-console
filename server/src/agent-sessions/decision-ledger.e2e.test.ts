@@ -229,3 +229,23 @@ describe("decision ledger", () => {
     expect(append.indexOf("## Session protocol")).toBeLessThan(append.indexOf("## Operator decisions"));
   });
 });
+
+describe("decision ledger project continuity", () => {
+  it("a decision made in one session governs a later session on the same project", async () => {
+    const { h, userSessionId } = await twoSeats();
+    const ask = h.fake.captured.tools.find((t) => t.name === "ask_operator")!;
+    await ask.handler(MECHANIC, {});
+    const row = h.db.select().from(interactionRows).all()[0]!;
+    h.interactions.resolveFromApi(userSessionId, row.id, {
+      answers: { [MECHANIC.question]: ["Dodge obstacles"] },
+    });
+
+    // A continued session on the SAME project inherits the decision; a
+    // session on a fresh project does not.
+    const projectId = h.repo.getUserSession(userSessionId)!.projectId;
+    const continued = h.addUserSession("execute", { projectId });
+    const fresh = h.addUserSession();
+    expect(h.decisions.list(continued).map((d) => d.answer)).toContain("Dodge obstacles");
+    expect(h.decisions.list(fresh)).toHaveLength(0);
+  });
+});

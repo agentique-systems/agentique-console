@@ -6,7 +6,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { openDb } from "../client.ts";
-import { userSessions, workspaces } from "../schema.ts";
+import { projects, userSessions, workspaces } from "../schema.ts";
 import { nowIso } from "../../ids.ts";
 import { SpecStore } from "./spec-store.ts";
 
@@ -14,7 +14,8 @@ function makeStore() {
   const { db, sqlite } = openDb(":memory:");
   const now = nowIso();
   db.insert(workspaces).values({ id: "ws1", name: "w", rootPath: "/tmp/spec-store-test", createdAt: now, updatedAt: now }).run();
-  db.insert(userSessions).values({ id: "us1", workspaceId: "ws1", mode: "execute", title: "t", createdAt: now, updatedAt: now } as typeof userSessions.$inferInsert).run();
+  db.insert(projects).values({ id: "proj1", workspaceId: "ws1", title: null, intentDocument: null, createdAt: now }).run();
+  db.insert(userSessions).values({ id: "us1", workspaceId: "ws1", projectId: "proj1", mode: "execute", title: "t", createdAt: now, updatedAt: now } as typeof userSessions.$inferInsert).run();
   return new SpecStore(db, sqlite);
 }
 

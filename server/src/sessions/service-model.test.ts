@@ -16,6 +16,7 @@ import { workspaces } from "../db/schema.ts";
 import { newId, nowIso } from "../ids.ts";
 import { UserSessionService } from "./service.ts";
 import { InteractionStore } from "../db/stores/interaction-store.ts";
+import { ProjectStore } from "../db/stores/project-store.ts";
 
 function makeService() {
   const { db, sqlite } = openDb(":memory:");
@@ -36,6 +37,7 @@ function makeService() {
 
   const sessions = new UserSessionService({
     repo,
+    projects: new ProjectStore(db),
     bus,
     runner: runner as unknown as OrchestratorRunner,
     interactions,
@@ -45,7 +47,7 @@ function makeService() {
     wireAgentSessions: () => [],
   });
 
-  return { sessions, repo, runner, workspaceId };
+  return { sessions, repo, runner, workspaceId, db };
 }
 
 describe("UserSessionService model", () => {
@@ -95,5 +97,44 @@ describe("UserSessionService model", () => {
 
     expect(runner.closeSession).toHaveBeenCalledWith(session.id);
     expect(runner.recycleSession).not.toHaveBeenCalled();
+  });
+});
+
+describe("UserSessionService project attachment", () => {
+  it("mints a fresh project by default — no surprise inheritance", () => {
+    const { sessions, repo, workspaceId } = makeService();
+    const a = sessions.create({ workspaceId, mode: "execute", message: "go" });
+    const b = sessions.create({ workspaceId, mode: "execute", message: "go" });
+    const projectA = repo.getUserSession(a.id)!.projectId;
+    const projectB = repo.getUserSession(b.id)!.projectId;
+    expect(projectA).toBeTruthy();
+    expect(projectB).toBeTruthy();
+    expect(projectA).not.toBe(projectB);
+  });
+
+  it("continuation is sequential: rejected while the project has an open session", () => {
+    const { sessions, repo, workspaceId } = makeService();
+    const first = sessions.create({ workspaceId, mode: "execute", message: "go" });
+    const projectId = repo.getUserSession(first.id)!.projectId;
+    expect(() => sessions.create({ workspaceId, mode: "execute", message: "again", projectId }))
+      .toThrow(/continuation is sequential/);
+
+    // Archive the first session; the same project can then be continued.
+    sessions.patch(first.id, { lifecycle: "archived" });
+    const second = sessions.create({ workspaceId, mode: "execute", message: "again", projectId });
+    expect(second.projectId).toBe(projectId);
+  });
+
+  it("rejects an unknown project and a project from another workspace", () => {
+    const { sessions, workspaceId, db } = makeService();
+    expect(() => sessions.create({ workspaceId, mode: "execute", message: "go", projectId: "proj_missing" }))
+      .toThrow(/no project/);
+    const otherWorkspace = newId("ws");
+    db.insert(workspaces)
+      .values({ id: otherWorkspace, name: "other", rootPath: "/tmp/test-workspace-2", metadata: {}, createdAt: nowIso(), updatedAt: nowIso() })
+      .run();
+    const other = sessions.create({ workspaceId: otherWorkspace, mode: "execute", message: "go" });
+    expect(() => sessions.create({ workspaceId, mode: "execute", message: "go", projectId: other.projectId }))
+      .toThrow(/different workspace/);
   });
 });

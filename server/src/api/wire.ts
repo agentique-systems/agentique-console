@@ -65,6 +65,7 @@ export function toWireUserSession(row: UserSessionRow): UserSession {
   return {
     id: row.id,
     workspaceId: row.workspaceId,
+    projectId: row.projectId,
     title: row.title,
     mode: row.mode,
     phase: row.phase,

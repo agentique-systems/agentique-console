@@ -13,6 +13,7 @@
  *   tasks, task_dependencies              TaskStore
  *   scheduled_assignments                 AssignmentStore
  *   workspaces                            WorkspaceStore
+ *   projects                              ProjectStore
  *   interactions                          InteractionStore
  *   event_artifacts                       ArtifactStore (events/artifact-store.ts)
  *   provider_entries                      SqliteSessionStore (sdk/session-store.ts)
@@ -42,6 +43,7 @@ import { HandoffStore } from "./handoff-store.ts";
 import { InteractionStore } from "./interaction-store.ts";
 import { MessageStore } from "./message-store.ts";
 import { PatternStateStore } from "./pattern-state-store.ts";
+import { ProjectStore } from "./project-store.ts";
 import { RequirementStore } from "./requirement-store.ts";
 import { SpecStore } from "./spec-store.ts";
 import { OrchestrationStateStore } from "./state-store.ts";
@@ -56,6 +58,7 @@ export { HandoffStore } from "./handoff-store.ts";
 export { InteractionStore } from "./interaction-store.ts";
 export { MessageStore } from "./message-store.ts";
 export { PatternStateStore } from "./pattern-state-store.ts";
+export { ProjectStore, type ProjectRow } from "./project-store.ts";
 export {
   RequirementStore,
   type RequirementDelegationRow,
@@ -83,6 +86,7 @@ export interface Stores {
   crons: CronStore;
   patternState: PatternStateStore;
   specs: SpecStore;
+  projects: ProjectStore;
   requirements: RequirementStore;
   orchestrationState: OrchestrationStateStore;
   tasks: TaskStore;
@@ -103,6 +107,7 @@ export function createStores(db: Db, sqlite: SqliteTransactor): Stores {
     crons: new CronStore(db),
     patternState: new PatternStateStore(db),
     specs: new SpecStore(db, sqlite),
+    projects: new ProjectStore(db),
     requirements: new RequirementStore(db, sqlite),
     orchestrationState: new OrchestrationStateStore(db),
     tasks: new TaskStore(db),
