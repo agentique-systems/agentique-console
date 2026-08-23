@@ -82,6 +82,14 @@ function JustificationDisclosure({ sessionId, summaryId }: { sessionId: string; 
               <div>
                 <p className="font-medium">Requirements (rev {document.requirements.revision}) at proposal:</p>
                 <pre className="mt-1 overflow-x-auto whitespace-pre-wrap font-mono text-3xs text-muted-foreground">{document.requirements.outline}</pre>
+                {(document.requirements.verificationGaps ?? []).length > 0 && (
+                  <p className="mt-1 text-status-waiting">
+                    Satisfied below their declared verification:{" "}
+                    {(document.requirements.verificationGaps ?? [])
+                      .map((gap) => `${gap.requirementId} (needs ${gap.expected}, claimed ${gap.recorded.verifiedBy})`)
+                      .join("; ")}
+                  </p>
+                )}
               </div>
             )}
             {document.justification === null ? (

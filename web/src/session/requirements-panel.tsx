@@ -50,7 +50,14 @@ function depthOf(node: RequirementNodeWire, byId: Map<string, RequirementNodeWir
   return depth;
 }
 
-function NodeRow({ sessionId, node, depth, isLeaf }: { sessionId: string; node: RequirementNodeWire; depth: number; isLeaf: boolean }) {
+function NodeRow({ sessionId, node, depth, isLeaf, verifyGap }: {
+  sessionId: string;
+  node: RequirementNodeWire;
+  depth: number;
+  isLeaf: boolean;
+  /** The unmet declared expectation, when this leaf is satisfied below it. */
+  verifyGap?: "independent" | "operator";
+}) {
   const setStatus = useSetRequirementStatus();
   const [confirming, setConfirming] = useState<"satisfied" | "infeasible" | null>(null);
   const [note, setNote] = useState("");
@@ -77,6 +84,16 @@ function NodeRow({ sessionId, node, depth, isLeaf }: { sessionId: string; node: 
         <span className={cn("font-mono text-xs", STATUS_TONE[status])}>[{STATUS_GLYPH[status]}]</span>
         <span className="font-mono text-3xs text-muted-foreground">{node.id}</span>
         {node.composition === "any" && <Badge variant="outline" className="text-3xs">any of</Badge>}
+        {node.verifyExpectation !== null && (
+          <Badge variant="outline" className="text-3xs text-muted-foreground" title="declared verification expectation (committed)">
+            verify: {node.verifyExpectation}
+          </Badge>
+        )}
+        {verifyGap !== undefined && (
+          <Badge variant="outline" className="text-3xs text-attention" title="satisfied below its declared verification tier">
+            needs {verifyGap} verification
+          </Badge>
+        )}
         <span className={cn("text-xs", node.derivedStatus === "retired" && "line-through")}>{node.statement}</span>
         {node.origin === "refinement" && (
           <Badge variant="outline" className="text-3xs text-muted-foreground" title={node.refinedByAgentSessionId === null ? "decomposed during the run" : `decomposed by session ${node.refinedByAgentSessionId}`}>
@@ -167,17 +184,38 @@ export function RequirementsPanel({ userSessionId }: { userSessionId: string }) 
           </span>
         </div>
         <div className="mt-2">
-          {data.nodes.map((node) => (
-            <NodeRow
-              key={node.id}
-              sessionId={userSessionId}
-              node={node}
-              depth={depthOf(node, byId)}
-              isLeaf={!data.nodes.some((candidate) => candidate.parentId === node.id)}
-            />
-          ))}
+          {data.nodes.map((node) => {
+            const gap = data.verificationGaps.find((entry) => entry.requirementId === node.id);
+            return (
+              <NodeRow
+                key={node.id}
+                sessionId={userSessionId}
+                node={node}
+                depth={depthOf(node, byId)}
+                isLeaf={!data.nodes.some((candidate) => candidate.parentId === node.id)}
+                {...(gap === undefined ? {} : { verifyGap: gap.expected })}
+              />
+            );
+          })}
         </div>
       </section>
+
+      {data.verificationGaps.length > 0 && (
+        <section>
+          <h3 className="text-2xs font-medium uppercase text-muted-foreground">Verification gaps</h3>
+          <ul className="mt-1 space-y-1">
+            {data.verificationGaps.map((gap) => (
+              <li key={gap.requirementId} className="flex flex-wrap items-baseline gap-1.5 text-2xs">
+                <span className="font-mono text-3xs text-muted-foreground">{gap.requirementId}</span>
+                <span>{gap.statement}</span>
+                <Badge variant="outline" className="text-3xs text-attention">
+                  needs {gap.expected} · claimed {gap.recorded.verifiedBy} by {gap.recorded.actor}
+                </Badge>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       <section>
         <h3 className="text-2xs font-medium uppercase text-muted-foreground">Open requirements</h3>

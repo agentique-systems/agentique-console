@@ -363,3 +363,132 @@ describe("verification tier derivation", () => {
     expect(wire.latestChange).toMatchObject({ verifiedBy: "operator", actor: "operator", evidenceCount: 0 });
   });
 });
+
+describe("verification expectations and gaps", () => {
+  const VDOC = `## Requirements
+- (verify: independent) Auth works end to end
+  - Login issues a session token
+- \`npm run verify\` passes
+`;
+  /** r1 (verify: independent) with leaf r2 under it; r3 a bare top leaf. */
+  function approveVerifyFixture(service: RequirementService) {
+    const draft = service.propose("us1", VDOC, "initial");
+    return service.approve(draft.id, { document: VDOC, edited: false });
+  }
+  const seatClaim = (agent: string, role: string, tools: string[]) =>
+    ({ kind: "seat", agentSessionId: "as1", agent, profileRole: role, profileTools: tools }) as const;
+
+  it("persists the marker through approval and re-renders it in the canonical document", () => {
+    const { service } = makeHarness();
+    const { revision } = approveVerifyFixture(service);
+    expect(revision.document).toContain("- r1 (verify: independent): Auth works end to end");
+    expect(service.derive("us1").find((node) => node.id === "r1")?.verifyExpectation).toBe("independent");
+    expect(service.derive("us1").find((node) => node.id === "r2")?.verifyExpectation).toBeNull();
+  });
+
+  it("an expectation-only amendment updates the node WITHOUT resetting its status", () => {
+    const { service, eventsOf } = makeHarness();
+    approveVerifyFixture(service);
+    service.reportStatus({ userSessionId: "us1", requirementId: "r3", to: "satisfied",
+      evidence: [{ kind: "command", ref: "npm run verify" }], claimant: { kind: "main" } });
+    const v2 = `## Requirements
+- r1 (verify: independent): Auth works end to end
+  - r2: Login issues a session token
+- r3 (verify: independent): \`npm run verify\` passes
+`;
+    const draft = service.propose("us1", v2, "declare verification for r3");
+    service.approve(draft.id, { document: v2, edited: false });
+    const r3 = service.derive("us1").find((node) => node.id === "r3");
+    expect(r3).toMatchObject({ status: "satisfied", verifyExpectation: "independent" });
+    const resets = eventsOf("requirement.status.changed")
+      .map((row) => row.payload as { requirementId?: string; verifiedBy?: string; to?: string })
+      .filter((payload) => payload.requirementId === "r3" && payload.verifiedBy === "console");
+    expect(resets).toEqual([]);
+    // The gap now derives from the standing self-tier claim — no reset needed.
+    expect(service.verificationGaps("us1").map((gap) => gap.requirementId)).toContain("r3");
+    // Dropping the marker clears the expectation (the document is truth).
+    const v3 = v2.replace("- r3 (verify: independent):", "- r3:");
+    const draft3 = service.propose("us1", v3, "drop it");
+    service.approve(draft3.id, { document: v3, edited: false });
+    expect(service.derive("us1").find((node) => node.id === "r3")?.verifyExpectation).toBeNull();
+    expect(service.verificationGaps("us1").map((gap) => gap.requirementId)).not.toContain("r3");
+  });
+
+  it("gaps inherit the strongest ancestor declaration and rank operator above independent", () => {
+    const { service } = makeHarness();
+    approveVerifyFixture(service);
+    // r2 sits under r1 (verify: independent). A self claim gaps; an
+    // independent claim clears; an operator verdict also clears (≥ rank).
+    service.reportStatus({ userSessionId: "us1", requirementId: "r2", to: "satisfied",
+      evidence: [{ kind: "command", ref: "curl /login" }], claimant: { kind: "main" } });
+    expect(service.verificationGaps("us1")).toMatchObject([
+      { requirementId: "r2", expected: "independent", recorded: { verifiedBy: "self", actor: "main" } },
+    ]);
+    service.reportStatus({ userSessionId: "us1", requirementId: "r2", to: "satisfied",
+      evidence: [{ kind: "journal", ref: "handoff_1" }], claimant: seatClaim("checker", "reviewer", ["Read"]) });
+    expect(service.verificationGaps("us1")).toEqual([]);
+    service.reportStatus({ userSessionId: "us1", requirementId: "r2", to: "satisfied",
+      evidence: [], claimant: { kind: "operator" } });
+    expect(service.verificationGaps("us1")).toEqual([]);
+    // Reopening removes the gap subject entirely (nothing satisfied).
+    service.reportStatus({ userSessionId: "us1", requirementId: "r2", to: "open",
+      evidence: [], claimant: { kind: "main" } });
+    expect(service.verificationGaps("us1")).toEqual([]);
+  });
+
+  it("an operator expectation is NOT satisfied by an independent claim", () => {
+    const { service } = makeHarness();
+    const doc = "## Requirements\n- (verify: operator) Release is signed off\n";
+    const draft = service.propose("us1", doc);
+    service.approve(draft.id, { document: doc, edited: false });
+    service.reportStatus({ userSessionId: "us1", requirementId: "r1", to: "satisfied",
+      evidence: [{ kind: "journal", ref: "handoff_9" }], claimant: seatClaim("checker", "reviewer", ["Read"]) });
+    expect(service.verificationGaps("us1")).toMatchObject([
+      { requirementId: "r1", expected: "operator", recorded: { verifiedBy: "independent" } },
+    ]);
+  });
+
+  it("decomposed children carry no expectation of their own but inherit the ancestor's", () => {
+    const { service } = makeHarness();
+    approveVerifyFixture(service);
+    const [child] = service.decompose({ userSessionId: "us1", parentId: "r2",
+      children: [{ statement: "Token refresh rotates" }], actor: "main" });
+    service.reportStatus({ userSessionId: "us1", requirementId: child!, to: "satisfied",
+      evidence: [{ kind: "command", ref: "check" }], claimant: { kind: "main" } });
+    expect(service.derive("us1").find((node) => node.id === child)?.verifyExpectation).toBeNull();
+    expect(service.verificationGaps("us1").map((gap) => gap.requirementId)).toContain(child);
+  });
+
+  it("the digest names gaps outside the collapsed body, bounded", () => {
+    const { service } = makeHarness();
+    // A graph big enough to trip the collapse-satisfied fallback (>8KiB).
+    const lines = ["## Requirements", "- (verify: independent) Everything holds"];
+    for (let i = 0; i < 120; i += 1) lines.push(`  - Leaf ${i} ${"x".repeat(60)}`);
+    const doc = `${lines.join("\n")}\n`;
+    const draft = service.propose("us1", doc);
+    service.approve(draft.id, { document: doc, edited: false });
+    const leaves = service.derive("us1").filter((node) => node.parentId !== null);
+    for (const leaf of leaves) {
+      service.reportStatus({ userSessionId: "us1", requirementId: leaf.id, to: "satisfied",
+        evidence: [{ kind: "command", ref: "check" }], claimant: { kind: "main" } });
+    }
+    const digest = service.digest("us1");
+    // The body collapsed the satisfied subtree, yet the gaps are named.
+    expect(digest).toContain("Verification gaps (satisfied below their declared tier):");
+    expect(digest).toContain("needs independent verification (claimed self by main)");
+    // Bounded: at most 6 entries plus the overflow line.
+    expect(digest).toContain("…and");
+    expect(service.verificationGaps("us1")).toHaveLength(leaves.length);
+  });
+
+  it("the status outline renders the marker and the needs-verification chip", () => {
+    const { service } = makeHarness();
+    approveVerifyFixture(service);
+    service.reportStatus({ userSessionId: "us1", requirementId: "r2", to: "satisfied",
+      evidence: [{ kind: "command", ref: "curl" }], claimant: { kind: "main" } });
+    const digest = service.digest("us1");
+    // r1 derives satisfied from its only child; the marker renders either way.
+    expect(digest).toContain("- [✓] r1 (verify: independent): Auth works end to end");
+    expect(digest).toContain("needs independent verification");
+  });
+});

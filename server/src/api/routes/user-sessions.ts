@@ -191,6 +191,7 @@ export function registerUserSessionRoutes(
         approved: mapOrNull(ctx.app.requirements.latestApproved(userSessionId), toRequirementRevisionWire),
         nodes: ctx.app.requirements.derive(userSessionId),
         frontier: ctx.app.requirements.frontier(userSessionId),
+        verificationGaps: ctx.app.requirements.verificationGaps(userSessionId),
       };
     },
   );

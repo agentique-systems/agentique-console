@@ -386,6 +386,8 @@ export interface RequirementNodeWire {
   ord: number;
   statement: string;
   composition: import("./requirements.ts").RequirementComposition;
+  /** The node's OWN declared expectation; ancestors' declarations inherit at gap derivation. */
+  verifyExpectation: import("./requirements.ts").RequirementVerifyExpectation | null;
   status: import("./requirements.ts").RequirementStatus;
   derivedStatus: import("./requirements.ts").RequirementStatus;
   /** "committed" = part of an approved revision; "refinement" = decomposed below a delegated node during the run. */
@@ -413,6 +415,25 @@ export interface RequirementFrontierEntry {
   requirementId: string;
   statement: string;
   annotations: RequirementFrontierAnnotation[];
+}
+
+/**
+ * A leaf recorded `satisfied` below its declared verification expectation
+ * (its own or an ancestor's `(verify: …)` marker). Derived at read time,
+ * displayed everywhere statuses appear, never a gate — the operator remains
+ * the gate.
+ */
+export interface RequirementVerificationGap {
+  requirementId: string;
+  statement: string;
+  /** The effective (own or inherited, strongest-wins) declared expectation. */
+  expected: import("./requirements.ts").RequirementVerifyExpectation;
+  /** The claim that fell short of it. */
+  recorded: {
+    verifiedBy: import("./requirements.ts").RequirementVerifiedBy;
+    actor: string;
+    at: string;
+  };
 }
 
 /** Orchestration-pattern catalog ids — the create-session wire vocabulary. */

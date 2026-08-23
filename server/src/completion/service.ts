@@ -37,7 +37,7 @@ export interface RunCompletionDeps {
    * optional for pre-graph harnesses.
    */
   requirements?: Pick<import("../orchestrator/requirements.ts").RequirementService,
-    "latestApproved" | "summarySnapshot" | "rootStatus" | "frontier">;
+    "latestApproved" | "summarySnapshot" | "rootStatus" | "frontier" | "verificationGaps">;
   /**
    * `config.completionQuietWindowMs`. The predicate is re-evaluated when the
    * timer FIRES, not when it was scheduled, so a new turn starting inside the
@@ -188,8 +188,13 @@ export class RunCompletionService {
       const frontier = (this.#deps.requirements?.frontier(userSessionId) ?? []).slice(0, 6);
       const openLine = frontier.length === 0 ? ""
         : ` Open requirements: ${frontier.map((entry) => `${entry.requirementId} (${entry.statement.slice(0, 80)})`).join("; ")}.`;
+      // Verification debt is named beside the open frontier — advisory, like
+      // everything in this nudge; the completion oracle never gates on it.
+      const gaps = (this.#deps.requirements?.verificationGaps(userSessionId) ?? []).slice(0, 6);
+      const gapLine = gaps.length === 0 ? ""
+        : ` Satisfied below their declared verification: ${gaps.map((gap) => `${gap.requirementId} (needs ${gap.expected}, claimed ${gap.recorded.verifiedBy})`).join("; ")}.`;
       this.#deps.runner().enqueueAgentMilestone(userSessionId, anchor.id, "decision",
-        `The Console sees quiet sessions and final reports, but no completion record against requirements rev ${revision}.${openLine} ` +
+        `The Console sees quiet sessions and final reports, but no completion record against requirements rev ${revision}.${openLine}${gapLine} ` +
         "Verify and report_requirement with evidence, then record_completion (with requirementsRevision) — or name the gap and keep working; the run will not propose completion until then.");
       return;
     }

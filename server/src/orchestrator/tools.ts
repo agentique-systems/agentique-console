@@ -565,7 +565,8 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           const digest = requirements.digest(userSessionId);
           return { revision: approved.revision, changeNote: approved.changeNote,
             document: pageTail(digest, args.cursor, args.maxBytes),
-            frontier: requirements.frontier(userSessionId) };
+            frontier: requirements.frontier(userSessionId),
+            verificationGaps: requirements.verificationGaps(userSessionId) };
         }),
     ),
 

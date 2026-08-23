@@ -27,6 +27,9 @@ import type {
   RequirementNodeWire,
   RequirementParseError,
   RequirementStatus,
+  RequirementVerificationGap,
+  RequirementVerifiedBy,
+  RequirementVerifyExpectation,
 } from "@agentique-console/shared";
 import {
   deriveComposedStatus,
@@ -49,6 +52,18 @@ import type { SpecService } from "./spec.ts";
 
 /** Bound on the injected digest; the full outline stays a tool call away. */
 const DIGEST_MAX_BYTES = 8 * 1024;
+
+/** Bound on gap/frontier enumerations riding prompts and nudges. */
+const GAP_LIST_MAX = 6;
+
+/**
+ * Ranks for comparing a claim's recorded tier against a declared expectation:
+ * self < independent ≤ operator. The operator's own verdict satisfies an
+ * `independent` expectation (their word IS the gate); `console` never sets
+ * `satisfied`, ranked top defensively.
+ */
+const TIER_RANK: Record<RequirementVerifiedBy, number> = { self: 0, independent: 1, operator: 2, console: 2 };
+const EXPECTATION_RANK: Record<RequirementVerifyExpectation, number> = { independent: 1, operator: 2 };
 
 /**
  * Who is standing behind a status claim, as console-owned facts. The tier
@@ -440,6 +455,7 @@ export class RequirementService implements GoverningDigest {
         ord: node.ord,
         statement: node.statement,
         composition: node.composition,
+        verifyExpectation: node.verifyExpectation,
         status: node.status,
         derivedStatus: derived.get(node.id) ?? node.status,
         origin: node.origin,
@@ -524,6 +540,55 @@ export class RequirementService implements GoverningDigest {
       });
   }
 
+  /**
+   * Satisfied leaves whose recorded tier falls below their declared
+   * verification expectation — the node's own `(verify: …)` marker or an
+   * ancestor's, strongest wins. Derived, displayed, never a gate.
+   */
+  verificationGaps(userSessionId: string): RequirementVerificationGap[] {
+    const nodes = this.#store.liveNodes(userSessionId);
+    if (nodes.length === 0) return [];
+    return this.#verificationGaps(nodes, this.#store.latestChanges(userSessionId));
+  }
+
+  #verificationGaps(
+    nodes: RequirementNodeRow[],
+    latest: ReturnType<RequirementStore["latestChanges"]>,
+  ): RequirementVerificationGap[] {
+    const byId = new Map(nodes.map((node) => [node.id, node]));
+    const hasChildren = new Set(nodes.map((node) => node.parentId).filter((id) => id !== null));
+    const effective = (node: RequirementNodeRow): RequirementVerifyExpectation | null => {
+      let strongest: RequirementVerifyExpectation | null = null;
+      for (let cursor: RequirementNodeRow | undefined = node; cursor; cursor = cursor.parentId === null ? undefined : byId.get(cursor.parentId)) {
+        const declared = cursor.verifyExpectation;
+        if (declared !== null && (strongest === null || EXPECTATION_RANK[declared] > EXPECTATION_RANK[strongest])) {
+          strongest = declared;
+        }
+      }
+      return strongest;
+    };
+    const gaps: RequirementVerificationGap[] = [];
+    for (const node of this.#depthFirst(nodes)) {
+      if (hasChildren.has(node.id) || node.status !== "satisfied") continue;
+      const expected = effective(node);
+      if (expected === null) continue;
+      const change = latest.get(node.id);
+      const recordedRank = change === undefined ? TIER_RANK.self : TIER_RANK[change.verifiedBy];
+      if (recordedRank >= EXPECTATION_RANK[expected]) continue;
+      gaps.push({
+        requirementId: node.id,
+        statement: node.statement,
+        expected,
+        recorded: {
+          verifiedBy: change?.verifiedBy ?? "self",
+          actor: change?.actor ?? "unknown",
+          at: change?.createdAt ?? node.updatedAt,
+        },
+      });
+    }
+    return gaps;
+  }
+
   // ── prompt surfaces (the GoverningDigest contract) ───────────────────────
 
   /**
@@ -551,7 +616,15 @@ export class RequirementService implements GoverningDigest {
       .filter((row) => row.changeNote !== null && (row.status === "approved" || row.status === "superseded"))
       .slice(-5)
       .map((row) => `- rev ${row.revision}: ${row.changeNote}`);
+    // Gaps ride OUTSIDE the byte-capped body: the collapse-satisfied fallback
+    // erases exactly the satisfied leaves that carry them. Bounded like the
+    // trail so a pathological run cannot grow the prompt.
+    const gaps = this.verificationGaps(userSessionId);
+    const gapLines = gaps.slice(0, GAP_LIST_MAX)
+      .map((gap) => `- ${gap.requirementId} needs ${gap.expected} verification (claimed ${gap.recorded.verifiedBy} by ${gap.recorded.actor})`);
+    if (gaps.length > GAP_LIST_MAX) gapLines.push(`- …and ${gaps.length - GAP_LIST_MAX} more (read_requirements lists them)`);
     return `## Requirements (rev ${approved.revision}, authoritative — statuses are console-derived; claim leaves with evidence via report_requirement)\n${body}` +
+      (gapLines.length > 0 ? `\n\nVerification gaps (satisfied below their declared tier):\n${gapLines.join("\n")}` : "") +
       (trail.length > 0 ? `\n\nAmendment trail:\n${trail.join("\n")}` : "");
   }
 
@@ -573,7 +646,12 @@ export class RequirementService implements GoverningDigest {
   }
 
   /** The status outline + counts a run summary snapshots at proposal time. */
-  summarySnapshot(userSessionId: string): { revision: number; counts: Record<RequirementStatus, number>; outline: string } | null {
+  summarySnapshot(userSessionId: string): {
+    revision: number;
+    counts: Record<RequirementStatus, number>;
+    outline: string;
+    verificationGaps: RequirementVerificationGap[];
+  } | null {
     const approved = this.#store.latestApproved(userSessionId);
     if (!approved) return null;
     const nodes = this.#store.liveNodes(userSessionId);
@@ -582,6 +660,7 @@ export class RequirementService implements GoverningDigest {
       revision: approved.revision,
       counts: requirementStatusCounts(nodes.map((node) => derived.get(node.id) ?? node.status)),
       outline: this.#statusOutline(userSessionId, nodes, { collapseSatisfied: false }),
+      verificationGaps: this.verificationGaps(userSessionId),
     };
   }
 
@@ -770,6 +849,7 @@ export class RequirementService implements GoverningDigest {
   ): string {
     const derived = this.#derivedStatuses(nodes);
     const latest = this.#store.latestChanges(userSessionId);
+    const gaps = new Map(this.#verificationGaps(nodes, latest).map((gap) => [gap.requirementId, gap.expected]));
     const byParent = new Map<string | null, RequirementNodeRow[]>();
     for (const node of nodes) {
       const list = byParent.get(node.parentId) ?? [];
@@ -784,7 +864,7 @@ export class RequirementService implements GoverningDigest {
           id: node.id,
           statement: node.statement,
           composition: node.composition,
-          verifyExpectation: null,
+          verifyExpectation: node.verifyExpectation,
           children: options.collapseSatisfied && (derived.get(node.id) ?? node.status) === "satisfied"
             ? []
             : build(node.id),
@@ -794,9 +874,11 @@ export class RequirementService implements GoverningDigest {
       const status = derived.get(id);
       if (status === undefined) return undefined;
       const change = latest.get(id);
+      const gap = gaps.get(id);
       return {
         status,
         ...(change === undefined ? {} : { verifiedBy: change.verifiedBy, evidenceCount: change.evidence.length }),
+        ...(gap === undefined ? {} : { verifyGap: gap }),
       };
     });
   }
