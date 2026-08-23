@@ -94,12 +94,16 @@ export class RequirementStore {
     graph: Record<string, unknown>;
     changeNote?: string | null;
     baseRevision: number;
+    kind?: "full" | "intent" | "subtree";
+    scopeId?: string | null;
   }): RequirementRevisionRow {
     const row: RequirementRevisionRow = {
       id: newId("req"),
       projectId: input.projectId,
       userSessionId: input.userSessionId,
       revision: this.nextRevision(input.projectId),
+      kind: input.kind ?? "full",
+      scopeId: input.scopeId ?? null,
       baseRevision: input.baseRevision,
       document: input.document,
       graph: input.graph,

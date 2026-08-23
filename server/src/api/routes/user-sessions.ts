@@ -274,7 +274,13 @@ export function registerUserSessionRoutes(
       if ("editedDocument" in parsed.data && parsed.data.editedDocument !== undefined && parsed.data.decision === "approve") {
         const interaction = ctx.app.interactions.get(request.params.interactionId);
         if ("requirements" in interaction.payload) {
-          const validated = ctx.app.requirements.validateDocument(request.params.id, parsed.data.editedDocument);
+          // The card's kind travels in its payload: a subtree edit validates
+          // against its scope, an intent edit as prose-only.
+          const marker = interaction.payload.requirements;
+          const validated = ctx.app.requirements.validateDocument(request.params.id, parsed.data.editedDocument, {
+            ...(marker?.scope === undefined ? {} : { scopeId: marker.scope.scopeId }),
+            ...(marker?.kind === "intent" ? { intent: true } : {}),
+          });
           if (!validated.ok) {
             return reply.status(400).send({
               error: { code: "invalid_requirements", message: "the edited document does not parse as a requirement outline" },

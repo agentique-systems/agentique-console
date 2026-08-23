@@ -211,7 +211,17 @@ export interface PlanProposedPayload {
   /** Present when this card proposes a legacy SPEC revision rather than a plan. */
   spec?: { revision: number; changeNote?: string };
   /** Present when this card proposes a REQUIREMENT revision (the canonical spec). */
-  requirements?: { revision: number; changeNote?: string; nodeCount: number };
+  requirements?: {
+  revision: number;
+  changeNote?: string;
+  nodeCount: number;
+  /** What the proposal patches: prose + structure, prose alone, or one subtree. */
+  kind?: "full" | "intent" | "subtree";
+  /** Subtree context for the card: the scope node and its ancestor chain. */
+  scope?: { scopeId: string; statement: string; ancestors: { id: string; statement: string }[] };
+  /** Server-computed change summary the operator approves against. */
+  summary?: { added: string[]; changed: { id: string; statement: string }[]; retired: { id: string; statement: string }[] };
+};
 }
 export interface PlanResolvedPayload {
   userSessionId: string;
@@ -456,6 +466,10 @@ export interface RequirementsUpdatedPayload {
   added: string[];
   /** Requirement ids retired by this revision. */
   retired: string[];
+  /** What the revision patched: prose + structure, prose alone, or one subtree. */
+  kind: "full" | "intent" | "subtree";
+  /** The subtree root a `subtree` revision amended. */
+  scopeId?: string;
 }
 
 /**

@@ -299,11 +299,20 @@ export class InteractionService {
     revision: number,
     changeNote: string | undefined,
     nodeCount: number,
+    extras: {
+      /** What the proposal patches; the card renders scope and diff context. */
+      kind?: "full" | "intent" | "subtree";
+      scope?: { scopeId: string; statement: string; ancestors: { id: string; statement: string }[] };
+      summary?: { added: string[]; changed: { id: string; statement: string }[]; retired: { id: string; statement: string }[] };
+    } = {},
   ): { id: string; resolution: Promise<InteractionResolution> } {
     const requirements = {
       revision,
       ...(changeNote === undefined || changeNote === "" ? {} : { changeNote }),
       nodeCount,
+      ...(extras.kind === undefined ? {} : { kind: extras.kind }),
+      ...(extras.scope === undefined ? {} : { scope: extras.scope }),
+      ...(extras.summary === undefined ? {} : { summary: extras.summary }),
     };
     return this.#create(
       userSessionId,

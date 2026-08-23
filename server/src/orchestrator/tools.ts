@@ -573,16 +573,22 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
 
     sdk.tool(
       "propose_requirements",
-      "Put the REQUIREMENT GRAPH (or an amendment to it) to the operator for approval. Requirements are the run's canonical definition of done: a recursive outline of what must be TRUE of the finished work — each node one declarative, checkable statement; children compose 'all' by default, '(any of)' when one sufficient alternative establishes the parent. Write the canonical form: optional prose sections (## Context, ## Goals, ## Out of scope, ## Assumptions), then '## Requirements' as a nested list. KEEP the `rN:` id tags on lines you are keeping — dropping a tag RETIRES that requirement; a new line carries no tag and gets its id on approval. Statuses and evidence survive an amendment on unchanged statements; an edited statement resets its node to open. The operator may EDIT the outline in place; their text governs and is injected into every prompt. This call BLOCKS until they respond. Amend when reality invalidates part of it; never silently diverge.",
+      "Put the REQUIREMENT GRAPH (or an amendment to it) to the operator for approval. Requirements are the run's canonical definition of done: a recursive outline of what must be TRUE of the finished work — each node one declarative, checkable statement; children compose 'all' by default, '(any of)' when one sufficient alternative establishes the parent. STAGE the commitment: the first proposal is the vision prose (## Context, ## Goals, ## Out of scope) plus COARSE top-level requirements a reviewer can check — not an exhaustive enumeration; elaborate a subtree with scopeId when you commission it or when discovery lands, so each card the operator approves stays a reviewable bite. scopeId amends ONE subtree (document = that subtree's children only, structure-only); intent:true amends the prose alone (empty ## Requirements). KEEP the `rN:` id tags on lines you are keeping — dropping a tag RETIRES that requirement; a new line carries no tag and gets its id on approval. Statuses and evidence survive an amendment on unchanged statements; an edited statement resets its node to open. decompose_requirement stays the no-approval path for discharge detail below committed meaning. The operator may EDIT the outline in place; their text governs. This call BLOCKS until they respond. Amend when reality invalidates part of it; never silently diverge.",
       {
-        document: z.string().min(1).describe("The full outline. Example:\n## Requirements\n- The CLI parses every documented flag\n  - (any of) Config is loadable\n    - TOML config parses\n    - JSON config parses"),
+        document: z.string().min(1).describe("The outline. Full: prose + ## Requirements. Subtree (scopeId set): ONLY '## Requirements' listing that subtree's children. Intent (intent:true): prose + an empty '## Requirements'."),
         changeNote: z.string().min(1).describe("One line: what this revision is, or what changed and why (for amendments)."),
+        scopeId: z.string().min(1).optional().describe("Amend only the subtree under this committed requirement id. The card shows the operator that scope and a change summary."),
+        intent: z.boolean().optional().describe("Amend the intent prose alone; committed statements stay untouched."),
       },
-      async (args: { document: string; changeNote: string }) => {
+      async (args: { document: string; changeNote: string; scopeId?: string; intent?: boolean }) => {
         const changeNote = clip(args.changeNote, 280);
+        const kindOpts = {
+          ...(args.scopeId === undefined ? {} : { scopeId: args.scopeId }),
+          ...(args.intent === undefined ? {} : { intent: args.intent }),
+        };
         let draft: ReturnType<RequirementService["propose"]>;
         try {
-          draft = requirements.propose(userSessionId, args.document, changeNote);
+          draft = requirements.propose(userSessionId, args.document, changeNote, kindOpts);
         } catch (error) {
           if (error instanceof RequirementParseFailure) {
             return fail(`the document is not a valid requirement outline — fix these lines and propose again:\n${error.errors.map((entry) => `- line ${entry.line}: ${entry.message}`).join("\n")}`);
@@ -590,8 +596,17 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           return fail(error);
         }
         const nodeCount = flattenRequirementGraph(draft.graph as unknown as RequirementGraph).length;
+        // The card gets the SCOPE and a server-computed change summary — the
+        // operator approves a small view in context, never a wall of nodes.
+        const scope = draft.scopeId === null ? undefined : {
+          scopeId: draft.scopeId,
+          statement: requirements.derive(userSessionId).find((node) => node.id === draft.scopeId)?.statement ?? "",
+          ancestors: requirements.ancestorPath(userSessionId, draft.scopeId),
+        };
+        const summary = requirements.previewChanges(userSessionId, args.document, kindOpts) ?? undefined;
         const { id: approvalId, resolution } = interactions.createRequirementsApproval(
-          userSessionId, args.document, draft.revision, changeNote, nodeCount);
+          userSessionId, args.document, draft.revision, changeNote, nodeCount,
+          { kind: draft.kind, ...(scope === undefined ? {} : { scope }), ...(summary === undefined ? {} : { summary }) });
         const resolved = await resolution;
         if (resolved.kind === "decision" && resolved.approved) {
           const finalText = resolved.editedDocument?.trim() || args.document;
@@ -606,15 +621,20 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           // An AMENDMENT lands while sessions may be mid-assignment against
           // the old revision. The next delivery re-anchors each of them, but
           // whether one needs steering NOW is main's materiality call — hand
-          // it the list to make that call against.
+          // it the list, with the sessions the CHANGE actually touches marked
+          // (delegated subtrees intersecting the changed/retired ids, or
+          // holding requirements that depend on them — console facts).
+          const touched = new Set(requirements.sessionsAffectedByChange(
+            userSessionId, [...approved.changed, ...approved.retired]));
           const running = approved.revision.revision > 1
             ? host.listForUserSession(userSessionId).filter((s) => s.status !== "archived")
-              .map((s) => ({ agentSessionId: s.id, title: s.title, status: s.status }))
+              .map((s) => ({ agentSessionId: s.id, title: s.title, status: s.status,
+                ...(touched.has(s.id) ? { affectedByThisChange: true } : {}) }))
             : [];
           return ok({ approved: true, revision: approved.revision.revision,
             edited: approved.revision.origin === "operator_edited",
             document: approved.revision.document,
-            added: approved.added, retired: approved.retired,
+            added: approved.added, retired: approved.retired, changed: approved.changed,
             note: (approved.revision.origin === "operator_edited"
               ? "The operator EDITED the requirements before approving — the canonical text above (ids minted) is theirs and governs. Read it fully."
               : "Approved as proposed. The canonical text above (ids minted) now governs the run.")

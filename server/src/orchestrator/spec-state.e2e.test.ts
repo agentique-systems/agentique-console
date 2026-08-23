@@ -298,3 +298,51 @@ describe("main's requirement-linked ask_operator (fake SDK)", () => {
     expect(h.decisions.digest(sessionId, { pinned: (ids) => ids.includes("r1") })).toMatch(/^- Real-time or turn-based combat\?/);
   });
 });
+
+describe("scoped proposals through the card (fake SDK)", () => {
+  it("a subtree amendment card carries scope + change summary; approval leaves the outside untouched", async () => {
+    const h = makeHarness(async function* () {
+      yield initMessage();
+      yield toolUseMessage("req-1", "mcp__console__propose_requirements", {
+        document: "## Requirements\n- Combat works\n  - Hits register\n- The world persists",
+        changeNote: "initial epics",
+      });
+      yield toolUseMessage("rep-1", "mcp__console__report_requirement", {
+        requirementId: "r3", status: "satisfied",
+        evidence: [{ kind: "command", ref: "npm test" }], verifiedBy: "independent",
+      });
+      yield toolUseMessage("req-2", "mcp__console__propose_requirements", {
+        document: "## Requirements\n- r2: Hits register within one frame\n- Misses are telegraphed",
+        changeNote: "combat elaborated at commissioning",
+        scopeId: "r1",
+      });
+      yield textMessage("Elaborated.");
+      yield successMessage();
+    });
+    const sessionId = h.addUserSession();
+    const done = collectUntil(h.bus, settled);
+    h.runner.postOperatorMessage(sessionId, "build me a small game");
+    // First card: the coarse full proposal.
+    await collectUntil(h.bus, (event) => event.type === "user_session.plan.proposed");
+    const first = h.interactions.listPending(sessionId)[0]!;
+    h.interactions.resolveFromApi(sessionId, first.id, { decision: "approve" });
+    // Second card: the SCOPED amendment, with scope context and a summary.
+    await collectUntil(h.bus, (event) => event.type === "user_session.plan.proposed"
+      && (event.payload as { requirements?: { kind?: string } }).requirements?.kind === "subtree");
+    const card = h.interactions.listPending(sessionId).find((row) => row.kind === "plan_approval")!;
+    const marker = (card.payload as { requirements: { kind: string; scope: { scopeId: string; statement: string }; summary: { added: string[]; changed: { id: string }[]; retired: { id: string }[] } } }).requirements;
+    expect(marker.kind).toBe("subtree");
+    expect(marker.scope).toMatchObject({ scopeId: "r1", statement: "Combat works" });
+    expect(marker.summary.added).toEqual(["Misses are telegraphed"]);
+    expect(marker.summary.changed.map((entry) => entry.id)).toEqual(["r2"]);
+    h.interactions.resolveFromApi(sessionId, card.id, { decision: "approve" });
+    await done;
+
+    const nodes = h.app.requirements.derive(sessionId);
+    expect(nodes.find((node) => node.id === "r2")?.statement).toBe("Hits register within one frame");
+    expect(nodes.find((node) => node.id === "r4")).toMatchObject({ parentId: "r1", statement: "Misses are telegraphed" });
+    // Outside the scope: r3's satisfied claim survives the amendment.
+    expect(nodes.find((node) => node.id === "r3")?.status).toBe("satisfied");
+    expect(h.app.requirements.governingRevision(sessionId)).toBe(2);
+  });
+});

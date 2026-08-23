@@ -370,7 +370,17 @@ export interface Interaction {
         /** Marks a legacy spec-revision approval. */
         spec?: { revision: number; changeNote?: string };
         /** Marks a requirement-revision approval (the canonical spec). */
-        requirements?: { revision: number; changeNote?: string; nodeCount: number };
+        requirements?: {
+          revision: number;
+          changeNote?: string;
+          nodeCount: number;
+          /** What the proposal patches: prose + structure, prose alone, or one subtree. */
+          kind?: "full" | "intent" | "subtree";
+          /** Subtree context for the card: the scope node and its ancestor chain. */
+          scope?: { scopeId: string; statement: string; ancestors: { id: string; statement: string }[] };
+          /** Server-computed change summary the operator approves against. */
+          summary?: { added: string[]; changed: { id: string; statement: string }[]; retired: { id: string; statement: string }[] };
+        };
       };
   response: Record<string, unknown> | null;
   createdAt: string;

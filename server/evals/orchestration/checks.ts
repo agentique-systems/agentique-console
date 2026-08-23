@@ -374,6 +374,37 @@ export function falsificationsActedOn(): TraceCheck {
   };
 }
 
+/**
+ * Staged elaboration, for scenarios whose intent is too large to enumerate up
+ * front: after the first committed revision, growth lands as SUBTREE
+ * amendments — a small card the operator can actually review — never as
+ * whole-document re-proposals. (Intent-prose amendments add nothing and pass
+ * trivially; the runtime enforces this only past the parser bound, so the
+ * discipline below it is measured here, on scenarios that opt in.)
+ */
+export function stagedGrowth(): TraceCheck {
+  return {
+    id: "staged-growth",
+    dimension: "spec-quality",
+    description: "post-initial committed growth landed as subtree amendments, not whole-document re-proposals",
+    run(trace) {
+      const updates = trace.events().filter((event) => event.type === "user_session.requirements.updated");
+      if (updates.length === 0) return pass("no requirement revision governs");
+      const problems: { detail: string; event: Ev }[] = [];
+      for (const event of updates.slice(1)) {
+        const payload = event.payload as { revision?: number; kind?: string; added?: string[] };
+        if ((payload.added ?? []).length === 0) continue;
+        if (payload.kind !== "subtree") {
+          problems.push({ detail: `revision ${String(payload.revision)} grew the graph as a ${String(payload.kind ?? "full")} re-proposal — elaboration belongs in a scoped card`, event });
+        }
+      }
+      return problems.length === 0
+        ? pass("every post-initial growth landed as a scoped amendment", [updates[0]!])
+        : fail(problems.map((problem) => problem.detail).join("; "), problems.map((problem) => problem.event));
+    },
+  };
+}
+
 export function statusChangesCarryEvidence(opts: { requireIndependentSatisfied?: boolean } = {}): TraceCheck {
   return {
     id: "status-changes-carry-evidence",

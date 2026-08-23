@@ -419,3 +419,105 @@ Privacy over sharing; one operator.
     expect(service.ancestorPath("us1", "r1")).toEqual([]);
   });
 });
+
+describe("scoped proposals (staged elaboration)", () => {
+  it("a subtree amendment diffs ONLY inside its scope: add, change, retire, promote — outside untouched", () => {
+    const { service } = makeHarness();
+    approveFixture(service);
+    service.reportStatus({ userSessionId: "us1", requirementId: "r6", to: "satisfied",
+      evidence: [{ kind: "command", ref: "npm run verify" }], verifiedBy: "self", actor: "main" });
+    const [refined] = service.decompose({ userSessionId: "us1", parentId: "r3", children: [{ statement: "YAML config parses" }], actor: "main" });
+
+    // Amend under r3: keep r4 (statement changed), drop r5, promote the
+    // refinement, add a new child. r1/r2/r6 are outside and untouched.
+    const doc = `## Requirements
+- r4: TOML config parses from a clean checkout
+- ${refined}: YAML config parses
+- Config errors name the offending key
+`;
+    const draft = service.propose("us1", doc, "config sources refined", { scopeId: "r3" });
+    expect(draft.kind).toBe("subtree");
+    const approved = service.approve(draft.id, { document: doc, edited: false });
+    expect(approved.retired).toEqual(["r5"]);
+    expect(approved.changed).toEqual(["r4"]);
+    const nodes = service.derive("us1");
+    expect(nodes.find((node) => node.id === "r4")).toMatchObject({ statement: "TOML config parses from a clean checkout", parentId: "r3" });
+    expect(nodes.find((node) => node.id === refined)).toMatchObject({ origin: "committed", parentId: "r3" });
+    expect(nodes.find((node) => node.id === "r8")).toMatchObject({ statement: "Config errors name the offending key", parentId: "r3" });
+    expect(nodes.find((node) => node.id === "r5")).toBeUndefined();
+    // Outside the scope: r6's satisfied claim SURVIVES the scoped amendment.
+    expect(nodes.find((node) => node.id === "r6")?.status).toBe("satisfied");
+    // The canonical stored document is the SCOPED render and round-trips.
+    expect(service.latestApproved("us1")?.document).not.toContain("r1");
+    expect(service.governingRevision("us1")).toBe(2);
+  });
+
+  it("rejects out-of-scope ids, prose in a subtree patch, and structure in an intent patch", () => {
+    const { service } = makeHarness();
+    approveFixture(service);
+    expect(() => service.propose("us1", "## Requirements\n- r6: `npm run verify` passes\n", undefined, { scopeId: "r3" }))
+      .toThrow(/outside the amendment scope/);
+    expect(() => service.propose("us1", "# Title\n\n## Requirements\n- r4: TOML config parses\n", undefined, { scopeId: "r3" }))
+      .toThrow(/structure only/);
+    expect(() => service.propose("us1", "## Requirements\n- New rule\n", undefined, { intent: true }))
+      .toThrow(/prose only/);
+  });
+
+  it("an intent amendment changes the prose alone and still bumps completion currency", () => {
+    const { service } = makeHarness();
+    approveFixture(service);
+    const doc = "# Auth hardening\n\n## Context\nSecurity outranks convenience.\n\n## Requirements\n";
+    const draft = service.propose("us1", doc, "sharpen the vision", { intent: true });
+    expect(draft.kind).toBe("intent");
+    service.approve(draft.id, { document: doc, edited: false });
+    expect(service.intentDocument("us1")).toContain("Security outranks convenience.");
+    expect(service.governingRevision("us1")).toBe(2);
+    // Statements untouched, statuses untouched.
+    expect(service.derive("us1").map((node) => node.id)).toEqual(["r1", "r2", "r3", "r4", "r5", "r6"]);
+  });
+
+  it("previewChanges names adds, changes, and retirements (cascade included) without minting", () => {
+    const { service } = makeHarness();
+    approveFixture(service);
+    service.decompose({ userSessionId: "us1", parentId: "r5", children: [{ statement: "JSON5 tolerated" }], actor: "main" });
+    const preview = service.previewChanges("us1", `## Requirements
+- r4: TOML config parses strictly
+- Config errors name the offending key
+`, { scopeId: "r3" })!;
+    expect(preview.added).toEqual(["Config errors name the offending key"]);
+    expect(preview.changed).toEqual([{ id: "r4", statement: "TOML config parses strictly" }]);
+    // r5 retires and takes its refinement child with it.
+    expect(preview.retired.map((entry) => entry.id).sort()).toEqual(["r5", "r7"]);
+    // Nothing minted by the preview.
+    expect(service.derive("us1").some((node) => node.id === "r8")).toBe(false);
+  });
+
+  it("refuses a whole-document proposal once the live graph exceeds the parser bound", () => {
+    const { service } = makeHarness();
+    approveFixture(service);
+    for (let block = 0; block < 7; block += 1) {
+      const [mid] = service.decompose({ userSessionId: "us1", parentId: "r6", children: [{ statement: `Area ${block}` }], actor: "main" });
+      service.decompose({ userSessionId: "us1", parentId: mid!, children: Array.from({ length: 30 }, (_, i) => ({ statement: `Check ${block}.${i}` })), actor: "main" });
+    }
+    expect(() => service.propose("us1", DOC, "monolith")).toThrow(/amend per subtree/);
+    // The scoped path stays open at any size.
+    const scoped = service.propose("us1", "## Requirements\n- r2: Login issues a session token\n", "trim auth", { scopeId: "r1" });
+    expect(scoped.kind).toBe("subtree");
+  });
+
+  it("sessionsAffectedByChange names sessions whose delegations intersect the change or depend on it", () => {
+    const { service } = makeHarness();
+    approveFixture(service);
+    service.setFrontierDeps({
+      openAgentSessionIds: () => new Set(["as-auth", "as-verify", "as-idle"]),
+      blockedRequirementIds: () => new Set(),
+      awaitingOperatorAgentSessionIds: () => new Set(),
+    });
+    service.delegate("us1", "as-auth", ["r1"], "commission");
+    service.delegate("us1", "as-verify", ["r6"], "commission");
+    service.link({ userSessionId: "us1", fromId: "r6", kind: "depends_on", toId: "r2", actor: "main" });
+    // r2 changed: as-auth holds its subtree; as-verify depends on it.
+    expect(service.sessionsAffectedByChange("us1", ["r2"]).sort()).toEqual(["as-auth", "as-verify"]);
+    expect(service.sessionsAffectedByChange("us1", ["r4"])).toEqual(["as-auth"]);
+  });
+});

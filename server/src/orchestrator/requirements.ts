@@ -30,6 +30,7 @@ import type {
 } from "@agentique-console/shared";
 import {
   REQUIREMENT_MAX_DEPTH,
+  REQUIREMENT_MAX_NODES,
   deriveComposedStatus,
   flattenRequirementGraph,
   parseRequirementsDocument,
@@ -175,12 +176,45 @@ export class RequirementService implements GoverningDigest {
   }
 
   /** The route's soft-fail hook: structural errors, or id problems, or ok. */
-  validateDocument(userSessionId: string, text: string): { ok: true } | { ok: false; errors: RequirementParseError[] } {
+  validateDocument(
+    userSessionId: string,
+    text: string,
+    opts: { scopeId?: string; intent?: boolean } = {},
+  ): { ok: true } | { ok: false; errors: RequirementParseError[] } {
     const parsed = parseRequirementsDocument(text);
     if (!parsed.ok) return parsed;
-    const idErrors = this.#unknownIdErrors(userSessionId, parsed.graph, text);
+    const kindErrors = this.#kindErrors(userSessionId, parsed.graph, opts);
+    if (kindErrors.length > 0) return { ok: false, errors: kindErrors };
+    if (opts.intent === true) return { ok: true };
+    const idErrors = this.#unknownIdErrors(userSessionId, parsed.graph, text, opts.scopeId);
     if (idErrors.length > 0) return { ok: false, errors: idErrors };
     return { ok: true };
+  }
+
+  /** Kind-shape rules: a subtree patch is structure-only; an intent patch is prose-only. */
+  #kindErrors(
+    userSessionId: string,
+    graph: RequirementGraph,
+    opts: { scopeId?: string; intent?: boolean },
+  ): RequirementParseError[] {
+    if (opts.intent === true) {
+      if (graph.nodes.length > 0) {
+        return [{ line: 1, message: "an intent amendment carries prose only — leave ## Requirements empty; structure changes go through a subtree or full proposal" }];
+      }
+      if (graph.title === null && graph.preamble.length === 0) {
+        return [{ line: 1, message: "an intent amendment needs a title or prose sections" }];
+      }
+      return [];
+    }
+    if (opts.scopeId !== undefined) {
+      if (graph.title !== null || graph.preamble.length > 0) {
+        return [{ line: 1, message: "a subtree amendment carries structure only (## Requirements) — intent prose changes go through an intent proposal" }];
+      }
+      if (graph.nodes.length === 0) {
+        return [{ line: 1, message: "the ## Requirements section has no requirements" }];
+      }
+    }
+    return [];
   }
 
   /**
@@ -188,20 +222,46 @@ export class RequirementService implements GoverningDigest {
    * the outline does not parse or names an id this session never minted — the
    * tool result carries the lines so main can fix and re-propose.
    */
-  propose(userSessionId: string, document: string, changeNote?: string): RequirementRevisionRow {
+  propose(
+    userSessionId: string,
+    document: string,
+    changeNote?: string,
+    opts: { scopeId?: string; intent?: boolean } = {},
+  ): RequirementRevisionRow {
     if (this.#pendingProposalCheck?.(userSessionId)) {
       throw new InvalidInputError(
         "a requirements proposal is already awaiting the operator — resolve that card before proposing again",
       );
     }
+    if (opts.intent === true && opts.scopeId !== undefined) {
+      throw new InvalidInputError("a proposal is intent OR subtree, not both");
+    }
+    const projectId = this.#project(userSessionId);
+    const kind: "full" | "intent" | "subtree" = opts.intent === true ? "intent" : opts.scopeId !== undefined ? "subtree" : "full";
+    if (kind === "subtree") {
+      const scope = this.#liveNode(userSessionId, opts.scopeId!);
+      if (scope.origin !== "committed") {
+        throw new InvalidInputError(`${scope.id} is a refinement node — name it in a proposal first (promotion), or scope the amendment to its committed ancestor`);
+      }
+    }
+    // Staged elaboration is not optional at scale: a whole-document proposal
+    // over a graph past the parser bound could never re-render canonically.
+    if (kind === "full" && this.#store.liveNodes(projectId).length > REQUIREMENT_MAX_NODES) {
+      throw new InvalidInputError(
+        `the live graph exceeds ${REQUIREMENT_MAX_NODES} nodes — a whole-document proposal cannot re-render within the parser bound; amend per subtree (scopeId) or amend the prose alone (intent)`,
+      );
+    }
     const parsed = parseRequirementsDocument(document);
     if (!parsed.ok) throw new RequirementParseFailure(parsed.errors);
-    if (parsed.graph.nodes.length === 0) {
+    const kindErrors = this.#kindErrors(userSessionId, parsed.graph, opts);
+    if (kindErrors.length > 0) throw new RequirementParseFailure(kindErrors);
+    if (kind === "full" && parsed.graph.nodes.length === 0) {
       throw new RequirementParseFailure([{ line: 1, message: "the ## Requirements section has no requirements" }]);
     }
-    const idErrors = this.#unknownIdErrors(userSessionId, parsed.graph, document);
-    if (idErrors.length > 0) throw new RequirementParseFailure(idErrors);
-    const projectId = this.#project(userSessionId);
+    if (kind !== "intent") {
+      const idErrors = this.#unknownIdErrors(userSessionId, parsed.graph, document, opts.scopeId);
+      if (idErrors.length > 0) throw new RequirementParseFailure(idErrors);
+    }
     return this.#store.insertDraft({
       projectId,
       userSessionId,
@@ -209,6 +269,8 @@ export class RequirementService implements GoverningDigest {
       graph: parsed.graph as unknown as Record<string, unknown>,
       changeNote: changeNote ?? null,
       baseRevision: this.#store.latestApproved(projectId)?.revision ?? 0,
+      kind,
+      scopeId: opts.scopeId ?? null,
     });
   }
 
@@ -221,7 +283,7 @@ export class RequirementService implements GoverningDigest {
   approve(
     revisionId: string,
     input: { document: string; edited: boolean; interactionId?: string | null },
-  ): { revision: RequirementRevisionRow; added: string[]; retired: string[] } {
+  ): { revision: RequirementRevisionRow; added: string[]; retired: string[]; changed: string[] } {
     const draft = this.#store.getRevision(revisionId);
     if (!draft) throw new NotFoundError(`no requirement revision ${revisionId}`);
     // The single-writer invariant's enforcement: under sequential continuation
@@ -234,12 +296,23 @@ export class RequirementService implements GoverningDigest {
         `stale proposal — the requirements moved to revision ${governing} after this proposal was drafted against revision ${draft.baseRevision}; re-propose from the current graph`,
       );
     }
+    const kindOpts = { ...(draft.scopeId === null ? {} : { scopeId: draft.scopeId }), intent: draft.kind === "intent" };
     const parsed = parseRequirementsDocument(input.document);
     if (!parsed.ok) throw new RequirementParseFailure(parsed.errors);
-    const idErrors = this.#unknownIdErrors(draft.userSessionId, parsed.graph, input.document);
-    if (idErrors.length > 0) throw new RequirementParseFailure(idErrors);
+    const kindErrors = this.#kindErrors(draft.userSessionId, parsed.graph, kindOpts);
+    if (kindErrors.length > 0) throw new RequirementParseFailure(kindErrors);
+    if (draft.kind !== "intent") {
+      const idErrors = this.#unknownIdErrors(draft.userSessionId, parsed.graph, input.document, draft.scopeId ?? undefined);
+      if (idErrors.length > 0) throw new RequirementParseFailure(idErrors);
+    }
 
-    const { graph, ops, resets } = this.#computeApproval(draft.userSessionId, parsed.graph, draft.revision);
+    // Kind decides the op set: intent touches no nodes; subtree diffs only
+    // inside its scope (nodes outside are untouched BY CONSTRUCTION — they
+    // never enter the diff); full diffs everything, as before.
+    const computed = draft.kind === "intent"
+      ? { graph: parsed.graph, ops: { inserts: [], updates: [], retires: [] } as ApprovalNodeOps, resets: [] as { id: string; from: RequirementStatus }[], changedStatements: [] as string[] }
+      : this.#computeApproval(draft.userSessionId, parsed.graph, draft.revision, draft.scopeId ?? undefined);
+    const { graph, ops, resets, changedStatements } = computed;
     const canonical = renderCommitted(graph);
     const approved = this.#store.applyApproval({
       revisionId,
@@ -251,9 +324,12 @@ export class RequirementService implements GoverningDigest {
     });
     // The intent prose (title + preamble) is the project's durable vision:
     // stored on the project so it outlives sessions and later scoped patches.
-    // A whole-document approval with no prose CLEARS it ("" reads as null,
-    // and the pre-column fallback is skipped) — the operator removed it.
-    this.#projects.setIntentDocument(approved.projectId, renderIntentDocument(graph) ?? "");
+    // full/intent approvals write it (a proseless FULL document clears it —
+    // "" reads as null and skips the fallback); a subtree patch never touches
+    // it — the vision outlives structure edits.
+    if (draft.kind !== "subtree") {
+      this.#projects.setIntentDocument(approved.projectId, renderIntentDocument(graph) ?? "");
+    }
     const added = ops.inserts.map((insert) => insert.id);
     this.#bus.append({
       type: "user_session.requirements.updated",
@@ -266,6 +342,8 @@ export class RequirementService implements GoverningDigest {
         nodeCount: flattenRequirementGraph(graph).length,
         added,
         retired: ops.retires,
+        kind: approved.kind,
+        ...(approved.scopeId === null ? {} : { scopeId: approved.scopeId }),
       },
     });
     // Console statement-resets reach the BUS, not just the table journal: the
@@ -287,11 +365,74 @@ export class RequirementService implements GoverningDigest {
         },
       });
     }
-    return { revision: approved, added, retired: ops.retires };
+    return { revision: approved, added, retired: ops.retires, changed: changedStatements };
   }
 
   reject(revisionId: string): void {
     this.#store.reject(revisionId);
+  }
+
+  /**
+   * What an approval of this document WOULD do, for the card: added
+   * statements (ids not yet minted), changed statements (status will reset),
+   * retirements (committed ids absent, refinement descendants cascading).
+   * A pure read — nothing mints, nothing writes. Null when the text does not
+   * parse (the card's live parse reports that separately).
+   */
+  previewChanges(
+    userSessionId: string,
+    document: string,
+    opts: { scopeId?: string; intent?: boolean } = {},
+  ): { added: string[]; changed: { id: string; statement: string }[]; retired: { id: string; statement: string }[] } | null {
+    const parsed = parseRequirementsDocument(document);
+    if (!parsed.ok) return null;
+    if (opts.intent === true) return { added: [], changed: [], retired: [] };
+    const scopeSet = opts.scopeId === undefined ? null : this.#subtreeIds(userSessionId, opts.scopeId, { includeRoot: false });
+    const allLive = this.#store.liveNodes(this.#project(userSessionId));
+    const live = scopeSet === null ? allLive : allLive.filter((node) => scopeSet.has(node.id));
+    const liveById = new Map(live.map((node) => [node.id, node]));
+    const flat = flattenRequirementGraph(parsed.graph);
+    const added = flat.filter((row) => row.id === null).map((row) => row.statement);
+    const changed = flat
+      .filter((row) => row.id !== null && liveById.has(row.id) && liveById.get(row.id)!.statement !== row.statement.trim())
+      .map((row) => ({ id: row.id!, statement: row.statement.trim() }));
+    const present = new Set(flat.map((row) => row.id).filter((id): id is string => id !== null));
+    const retiredIds = new Set(live.filter((node) => node.origin === "committed" && !present.has(node.id)).map((node) => node.id));
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const node of live) {
+        if (retiredIds.has(node.id) || present.has(node.id)) continue;
+        if (node.parentId !== null && retiredIds.has(node.parentId)) { retiredIds.add(node.id); grew = true; }
+      }
+    }
+    const retired = live.filter((node) => retiredIds.has(node.id)).map((node) => ({ id: node.id, statement: node.statement }));
+    return { added, changed, retired };
+  }
+
+  /**
+   * Which OPEN sessions an amendment touches: a session is affected when its
+   * delegated subtrees intersect the changed/retired ids, sit under one, or
+   * contain a requirement that depends_on one. Console facts only — main
+   * judges materiality; this names where to look.
+   */
+  sessionsAffectedByChange(userSessionId: string, changedIds: string[]): string[] {
+    if (changedIds.length === 0) return [];
+    const projectId = this.#project(userSessionId);
+    const affected = new Set(changedIds);
+    for (const row of this.#store.liveLinks(projectId)) {
+      if (row.kind === "depends_on" && affected.has(row.toId)) affected.add(row.fromId);
+    }
+    const openSessions = this.#frontierDeps?.openAgentSessionIds(userSessionId) ?? new Set<string>();
+    const out = new Set<string>();
+    for (const delegation of this.#store.delegationsForUserSession(userSessionId)) {
+      if (!openSessions.has(delegation.agentSessionId) || out.has(delegation.agentSessionId)) continue;
+      const subtree = this.#subtreeIds(userSessionId, delegation.requirementId, { includeRoot: true });
+      const hit = [...affected].some((id) => subtree.has(id))
+        || [...affected].some((id) => this.#subtreeIds(userSessionId, id, { includeRoot: true }).has(delegation.requirementId));
+      if (hit) out.add(delegation.agentSessionId);
+    }
+    return [...out];
   }
 
   // ── live state ───────────────────────────────────────────────────────────
@@ -942,12 +1083,18 @@ export class RequirementService implements GoverningDigest {
     return node;
   }
 
-  /** Ids present in a document must be ones this session minted and kept live. */
-  #unknownIdErrors(userSessionId: string, graph: RequirementGraph, text: string): RequirementParseError[] {
+  /**
+   * Ids present in a document must be ones this project minted and kept live
+   * — and inside a SUBTREE amendment, descendants of its scope: a scoped
+   * approval cannot touch nodes outside its scope by construction, so a
+   * document that names one is a mistake to surface, never to absorb.
+   */
+  #unknownIdErrors(userSessionId: string, graph: RequirementGraph, text: string, scopeId?: string): RequirementParseError[] {
     const all = this.#store.listNodes(this.#project(userSessionId));
     const known = new Set(all.map((node) => node.id));
     const retired = new Map(all.filter((node) => node.retiredInRevision !== null)
       .map((node) => [node.id, node.retiredInRevision!]));
+    const inScope = scopeId === undefined ? null : this.#subtreeIds(userSessionId, scopeId, { includeRoot: false });
     const lines = text.split(/\r\n|\r|\n/);
     const errors: RequirementParseError[] = [];
     for (const row of flattenRequirementGraph(graph)) {
@@ -959,16 +1106,37 @@ export class RequirementService implements GoverningDigest {
         errors.push({ line: line > 0 ? line : 1, message: `unknown requirement id "${row.id}" — omit the id tag on a new requirement; ids are minted on approval` });
         continue;
       }
-      // A retired id can never come back: its row still holds the (session,
+      // A retired id can never come back: its row still holds the (project,
       // id) primary key, and ids are minted once. Rejecting HERE keeps the
       // failure at propose/validate time with a line error, instead of a
       // constraint violation inside the approval transaction.
       const retiredIn = retired.get(row.id);
       if (retiredIn !== undefined) {
         errors.push({ line: line > 0 ? line : 1, message: `requirement id "${row.id}" was retired in rev ${retiredIn} — omit the id tag to reintroduce it as a new requirement` });
+        continue;
+      }
+      if (inScope !== null && !inScope.has(row.id)) {
+        errors.push({ line: line > 0 ? line : 1, message: `requirement "${row.id}" sits outside the amendment scope (${scopeId}) — amend it in its own subtree` });
       }
     }
     return errors;
+  }
+
+  /** Live descendant ids of a scope node (optionally including the root). */
+  #subtreeIds(userSessionId: string, scopeId: string, opts: { includeRoot: boolean }): Set<string> {
+    const nodes = this.#store.liveNodes(this.#project(userSessionId));
+    const byParent = new Map<string | null, RequirementNodeRow[]>();
+    for (const node of nodes) {
+      const list = byParent.get(node.parentId) ?? [];
+      list.push(node);
+      byParent.set(node.parentId, list);
+    }
+    const out = new Set<string>(opts.includeRoot ? [scopeId] : []);
+    const walk = (id: string) => {
+      for (const child of byParent.get(id) ?? []) { out.add(child.id); walk(child.id); }
+    };
+    walk(scopeId);
+    return out;
   }
 
   /**
@@ -976,7 +1144,7 @@ export class RequirementService implements GoverningDigest {
    * a committed node retires its refinement descendants with it; a refinement
    * node named in the document is PROMOTED to committed.
    */
-  #computeApproval(userSessionId: string, parsed: RequirementGraph, revision: number): { graph: RequirementGraph; ops: ApprovalNodeOps; resets: { id: string; from: RequirementStatus }[] } {
+  #computeApproval(userSessionId: string, parsed: RequirementGraph, revision: number, scopeId?: string): { graph: RequirementGraph; ops: ApprovalNodeOps; resets: { id: string; from: RequirementStatus }[]; changedStatements: string[] } {
     let nextNumber = this.#store.maxNodeNumber(this.#project(userSessionId)) + 1;
     const mint = (node: RequirementGraphNode): RequirementGraphNode => ({
       ...node,
@@ -986,13 +1154,20 @@ export class RequirementService implements GoverningDigest {
     });
     const graph: RequirementGraph = { ...parsed, nodes: parsed.nodes.map(mint) };
 
-    const live = this.#store.liveNodes(this.#project(userSessionId));
+    // Scoped: the universe is the scope's DESCENDANTS — nodes outside never
+    // enter the diff, so a subtree approval cannot touch them by
+    // construction; the document's top-level rows parent to the scope node.
+    const allLive = this.#store.liveNodes(this.#project(userSessionId));
+    const scopeSet = scopeId === undefined ? null : this.#subtreeIds(userSessionId, scopeId, { includeRoot: false });
+    const live = scopeSet === null ? allLive : allLive.filter((node) => scopeSet.has(node.id));
     const liveById = new Map(live.map((node) => [node.id, node]));
-    const flat = flattenRequirementGraph(graph);
+    const flat = flattenRequirementGraph(graph)
+      .map((row) => (scopeId !== undefined && row.parentId === null ? { ...row, parentId: scopeId } : row));
     const present = new Set(flat.map((row) => row.id as string));
 
     const ops: ApprovalNodeOps = { inserts: [], updates: [], retires: [] };
     const resets: { id: string; from: RequirementStatus }[] = [];
+    const changedStatements: string[] = [];
     for (const row of flat) {
       const id = row.id as string;
       const existing = liveById.get(id);
@@ -1001,6 +1176,7 @@ export class RequirementService implements GoverningDigest {
         continue;
       }
       const statementChanged = existing.statement !== row.statement;
+      if (statementChanged) changedStatements.push(id);
       if (statementChanged && existing.status !== "open") resets.push({ id, from: existing.status });
       const moved = existing.parentId !== row.parentId || existing.ord !== row.ord
         || existing.composition !== row.composition;
@@ -1035,7 +1211,7 @@ export class RequirementService implements GoverningDigest {
       }
     }
     ops.retires = [...retiredIds];
-    return { graph, ops, resets };
+    return { graph, ops, resets, changedStatements };
   }
 
   /** Rows in document order: depth-first over (parentId, ord). */

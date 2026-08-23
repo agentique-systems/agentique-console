@@ -561,6 +561,18 @@ export const requirementRevisions = sqliteTable(
     /** Monotonic per PROJECT, 1-based — a continued session keeps counting. */
     revision: integer("revision").notNull(),
     /**
+     * What this revision patches: `full` = intent prose + the whole
+     * committed structure (only legal while the graph fits one parser-bounded
+     * document); `intent` = the prose alone, statements untouched; `subtree`
+     * = one subtree's committed structure (scope_id names its root), prose
+     * untouched — the staged-elaboration unit the operator approves as a
+     * small card. Every kind bumps the revision counter: a changed vision or
+     * subtree invalidates completion currency deliberately.
+     */
+    kind: text("kind", { enum: ["full", "intent", "subtree"] }).notNull().default("full"),
+    /** The subtree root a `subtree` revision amends; null otherwise. */
+    scopeId: text("scope_id"),
+    /**
      * The governing revision when this draft was proposed. Approval asserts it
      * still matches — under the sequential-continuation and single-pending-
      * proposal guards it always does; the assertion enforces the invariant.
@@ -579,6 +591,7 @@ export const requirementRevisions = sqliteTable(
     index("requirement_revisions_project").on(t.projectId, t.revision),
     check("requirement_revisions_status", sql`${t.status} IN ('draft','approved','superseded','rejected')`),
     check("requirement_revisions_origin", sql`${t.origin} IN ('main','operator_edited')`),
+    check("requirement_revisions_kind", sql`${t.kind} IN ('full','intent','subtree')`),
   ],
 );
 
