@@ -301,8 +301,12 @@ export interface AgentProfileDetail extends AgentProfileSummary {
   model: string | null;
   effort: string | null;
   maxTurns: number;
-  /** Capability comes from declared MCP servers, never from console-built tools. */
-  mcpServers: Record<string, { command: string; args: string[] }>;
+  /**
+   * Capability comes from declared MCP servers, never from console-built
+   * tools. The full native surface: console-executed stdio/sse/http forms
+   * and `ref` names the workspace's own `.mcp.json` launches.
+   */
+  mcpServers: Record<string, { transport?: "stdio" | "sse" | "http" | "ref"; command?: string; args?: string[]; env?: Record<string, string>; url?: string; headers?: Record<string, string> }>;
   handoffExtension: string | null;
   pluginPath: string | null;
   components: AgentProfileComponent[];

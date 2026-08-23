@@ -21,6 +21,7 @@ name: fixture-auditor
 description: Audits the fixture workspace
 tools: Read, Grep, Bash, Skill
 mcpServers:
+  - github
   - probe:
       command: /bin/true
 agentique:
@@ -59,6 +60,8 @@ describe("native workspace profiles end to end", () => {
     const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "agentique-native-ws-")); dirs.push(workspaceRoot);
     fs.mkdirSync(path.join(workspaceRoot, ".claude", "agents"), { recursive: true });
     fs.writeFileSync(path.join(workspaceRoot, ".claude", "agents", "fixture-auditor.md"), NATIVE);
+    // The ref target: the workspace's own native MCP config launches it.
+    fs.writeFileSync(path.join(workspaceRoot, ".mcp.json"), JSON.stringify({ mcpServers: { github: { command: "gh-mcp" } } }));
     const h = makeDelegationHarness(program(), { workspaceRoot });
     const userSessionId = h.addUserSession();
 
@@ -75,11 +78,15 @@ describe("native workspace profiles end to end", () => {
 
     const options = h.fake.captured.options.find((opts) => agentRoleOf(opts).agent === "auditor");
     expect(options).toBeDefined();
-    // The declared native surface, exactly — plus the declared MCP server,
-    // console-launched and auto-approved whole.
-    expect(options?.allowedTools).toEqual(expect.arrayContaining(["Read", "Grep", "Bash", "Skill", "mcp__probe"]));
+    // The declared native surface, exactly — plus the declared MCP servers,
+    // auto-approved whole. One launcher per declaration: the stdio form is
+    // console-launched; the `github` ref is GRANTED but launched by the
+    // workspace's own .mcp.json (SDK-owned), so the console's launch map
+    // must not carry it.
+    expect(options?.allowedTools).toEqual(expect.arrayContaining(["Read", "Grep", "Bash", "Skill", "mcp__probe", "mcp__github"]));
     expect(options?.disallowedTools).toEqual(expect.arrayContaining(["Edit", "Write", "ToolSearch", "WebSearch", "Agent", "Task", "AskUserQuestion"]));
     expect((options?.mcpServers as Record<string, { command?: string }>)?.probe).toMatchObject({ command: "/bin/true" });
+    expect((options?.mcpServers as Record<string, unknown>)?.github).toBeUndefined();
     // A single-file native profile brings no plugin of its own — only the
     // console skills plugin loads.
     expect((options?.plugins as { path: string }[]).map((plugin) => plugin.path)).toEqual([h.config.infra.skillsPluginDir]);

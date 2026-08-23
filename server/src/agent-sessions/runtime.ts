@@ -37,7 +37,7 @@ import type { ConsoleSdk, QueryHandle, SdkOptions, SdkToolResult, SdkUserMessage
 import type { AssignmentScheduler } from "../tasks/scheduler.ts";
 import type { TaskService } from "../tasks/service.ts";
 import { buildAgentTools, type AgentToolsContext, type AskOperatorArgs } from "./agent-tools.ts";
-import { declaredMcpServers, seatUserMessage, type PromptComposer } from "./composer.ts";
+import { declaredMcpServers, mcpGrantNames, seatUserMessage, type PromptComposer } from "./composer.ts";
 import { effectiveNativeTools, seatDisallowedNativeTools } from "../sdk/native-capability-policy.ts";
 import { grantedTools, runtimeToolNames, type AgentToolName } from "./grants.ts";
 import type { ActiveTurn, AgentLane, AgentLanePool } from "./lanes.ts";
@@ -263,8 +263,10 @@ export class AgentRuntime implements Injector, TurnTracker {
         allowedTools: [...native,
           // A declared server's whole surface is auto-approved — the profile
           // granting the server IS the permission decision, and there is no
-          // console-side list of its tool names to drift out of date.
-          ...Object.keys(declared).map((name) => `mcp__${name}`),
+          // console-side list of its tool names to drift out of date. The
+          // grant covers ref declarations too (natively launched, console
+          // granted); the launch map below carries only the executed forms.
+          ...mcpGrantNames(profile, this.#deps.config).map((name) => `mcp__${name}`),
           ...runtimeToolNames(granted)],
         // `allowedTools` is only an auto-approval list, so everything
         // classified that the seat does not hold is denied BY NAME — one

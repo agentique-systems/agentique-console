@@ -140,6 +140,22 @@ describe("native .claude/agents definitions", () => {
     expect(() => registry.get("plain", "ws_1")).toThrow(/not trusted/);
   });
 
+  it("a ref MCP declaration resolves against the workspace .mcp.json or the profile is incompatible", () => {
+    const { registry, write } = makeRegistry();
+    write(".claude/agents/reffy.md", "---\nname: reffy\ndescription: d\nmcpServers: [github]\n---\nbody\n");
+    // Unresolvable: the workspace configures no such server.
+    let summary = registry.summaries("ws_1").find((entry) => entry.source === "workspace")!;
+    expect(summary.agentiqueCompatible).toBe(false);
+    expect(summary.incompatibilityReasons.join(" ")).toContain(".mcp.json");
+    // The workspace's native MCP config declares it: resolvable, compatible,
+    // and the console launches NOTHING for it (grant-only — see composer).
+    write(".mcp.json", JSON.stringify({ mcpServers: { github: { command: "gh-mcp" } } }));
+    summary = registry.summaries("ws_1").find((entry) => entry.source === "workspace")!;
+    expect(summary.agentiqueCompatible).toBe(true);
+    registry.trust("ws_1", "reffy", summary.revision);
+    expect(registry.get("reffy", "ws_1").mcpServers).toEqual({ github: { transport: "ref" } });
+  });
+
   it("nested files are discovered; a legacy bundle with the same id is shadowed by the native source", () => {
     const { registry, write } = makeRegistry();
     write(".claude/agents/team/db-reviewer.md", NATIVE);

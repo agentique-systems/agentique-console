@@ -115,11 +115,42 @@ describe("evaluateNativeAgent", () => {
     expect(result.agent.ignored).toEqual(["background"]);
   });
 
-  it("MCP name references and URL transports are incompatibilities until the consolidation stage", () => {
-    const byName = evaluated("---\nname: a\ndescription: d\nmcpServers: [github]\n---\nbody");
-    expect(byName.compatible).toBe(false);
-    const byUrl = evaluated('---\nname: a\ndescription: d\nmcpServers:\n  - remote:\n      url: "https://mcp.example"\n---\nbody');
-    expect(byUrl.compatible).toBe(false);
+  it("MCP declarations round-trip losslessly per form: ref, stdio, sse, http", () => {
+    const result = evaluated(`---
+name: a
+description: d
+mcpServers:
+  - github
+  - runner:
+      command: /bin/runner
+      args: [--serve]
+      env:
+        PORT: "9"
+  - events:
+      type: sse
+      url: "https://mcp.example/sse"
+  - api:
+      type: http
+      url: "https://mcp.example/http"
+      headers:
+        Authorization: Bearer x
+---
+body`);
+    expect(result.compatible).toBe(true);
+    if (!result.compatible) return;
+    expect(result.agent.mcpServers).toEqual({
+      github: { transport: "ref" },
+      runner: { transport: "stdio", command: "/bin/runner", args: ["--serve"], env: { PORT: "9" } },
+      events: { transport: "sse", url: "https://mcp.example/sse" },
+      api: { transport: "http", url: "https://mcp.example/http", headers: { Authorization: "Bearer x" } },
+    });
+  });
+
+  it("a url declaration without an explicit type is an incompatibility — the console never guesses a transport", () => {
+    const result = evaluated('---\nname: a\ndescription: d\nmcpServers:\n  - remote:\n      url: "https://mcp.example"\n---\nbody');
+    expect(result.compatible).toBe(false);
+    if (result.compatible) return;
+    expect(result.reasons[0]?.reason).toContain("type: sse|http");
   });
 
   it("missing description or empty body fails — a native definition requires both", () => {

@@ -70,22 +70,37 @@ export const ProfileSchema = z.object({
   exemptFromOwnership: z.boolean().default(false),
   maxTurns: z.number().int().min(1).max(100).default(40),
   /**
-   * MCP servers this profile's agents get, merged with the console's own.
-   * This is where CAPABILITY lives: the Console owns coordination and supplies
-   * nothing else. Browser automation, for instance, is a declared stdio server,
-   * not a console tool — the console-built browser and process tools were
-   * deleted after a live run in which `browser_evaluate` was broken 100% of the
-   * time behind a green test suite, screenshots cost a round trip each to look
-   * at, and one keypress per call made real verification unaffordable.
+   * MCP servers this profile's agents get — the full authorable native
+   * surface, lossless. This is where CAPABILITY lives: the Console owns
+   * coordination and supplies nothing else. Browser automation, for
+   * instance, is a declared stdio server, not a console tool — the
+   * console-built browser and process tools were deleted after a live run
+   * in which `browser_evaluate` was broken 100% of the time behind a green
+   * test suite, screenshots cost a round trip each to look at, and one
+   * keypress per call made real verification unaffordable.
    *
-   * Keys become the `mcp__<key>__*` tool prefix and are auto-approved for the
-   * profile's agents. `CONSOLE_MCP_DISABLED` names servers to drop.
+   * One launcher per declaration: `stdio`/`sse`/`http` forms are
+   * console-EXECUTED (trust-gated, timeout-stamped, `CONSOLE_MCP_DISABLED`
+   * removable); a `ref` form names a server the workspace's own native MCP
+   * config launches (root `.mcp.json`, SDK-owned, native permissions) — the
+   * console only grants it. Keys become the `mcp__<key>__*` prefix,
+   * auto-approved for the profile's agents. The `transport` default keeps
+   * legacy `{command,args}` manifests and snapshots parsing as stdio.
    */
-  mcpServers: z.record(z.string(), z.object({
-    command: z.string().min(1),
-    args: z.array(z.string()).default([]),
-    env: z.record(z.string(), z.string()).optional(),
-  })).default({}),
+  mcpServers: z.record(z.string(), z.union([
+    z.object({
+      transport: z.literal("stdio").default("stdio"),
+      command: z.string().min(1),
+      args: z.array(z.string()).default([]),
+      env: z.record(z.string(), z.string()).optional(),
+    }),
+    z.object({
+      transport: z.enum(["sse", "http"]),
+      url: z.string().min(1),
+      headers: z.record(z.string(), z.string()).optional(),
+    }),
+    z.object({ transport: z.literal("ref") }),
+  ])).default({}),
   skills: z.array(z.string()).optional(),
   entryAgent: z.string().optional(),
   pluginPath: z.string().optional(),
@@ -140,6 +155,7 @@ const WEB_TOOLS = ["WebSearch", "WebFetch"];
  */
 const BROWSER_MCP = {
   browser: {
+    transport: "stdio" as const,
     command: "npx",
     args: [
       "-y", "@playwright/mcp@latest",
@@ -161,7 +177,7 @@ const BROWSER_MCP = {
  * console-owned; a mint can never supply a command — arbitrary server launch
  * stays human-only, through workspace profile bundles and the trust click.
  */
-export const ATTACHABLE_MCP_SERVERS: Record<string, { command: string; args: string[] }> = {
+export const ATTACHABLE_MCP_SERVERS: Record<string, { transport: "stdio"; command: string; args: string[] }> = {
   ...BROWSER_MCP,
 };
 
@@ -359,7 +375,7 @@ export class AgentProfileRegistry {
       if (declared === undefined) {
         throw new InvalidInputError(`"${name}" is not an attachable console-catalog MCP server (attachable: ${Object.keys(ATTACHABLE_MCP_SERVERS).join(", ")})`);
       }
-      attached[name] = { command: declared.command, args: declared.args };
+      attached[name] = { transport: "stdio", command: declared.command, args: declared.args };
     }
     const profile = ProfileSchema.parse({
       ...base,
@@ -566,6 +582,20 @@ export class AgentProfileRegistry {
         issues, files: entryFiles };
     }
     const agent = evaluated.agent;
+    // A `ref` declaration means "attach an already-configured server": it
+    // must resolve against the workspace's native MCP config (root
+    // `.mcp.json`, SDK-owned) or the definition is Agentique-incompatible —
+    // never silently unlaunched.
+    const refNames = Object.entries(agent.mcpServers).filter(([, declaration]) => declaration.transport === "ref").map(([serverName]) => serverName);
+    if (refNames.length > 0) {
+      const configured = this.#workspaceMcpNames(workspaceRoot);
+      const unresolved = refNames.filter((serverName) => !configured.has(serverName));
+      if (unresolved.length > 0) {
+        return { id: name, profile: null, revision, claudeValid: true, compatible: false,
+          incompatibilityReasons: unresolved.map((serverName) => `mcpServers: "${serverName}" references an MCP server not configured in this workspace's .mcp.json`),
+          issues, files: entryFiles };
+      }
+    }
     const resolved = ProfileSchema.safeParse({
       id: agent.name, title: agent.name, purpose: agent.description,
       ...(agent.overlay.role === undefined ? {} : { role: agent.overlay.role }),
@@ -591,6 +621,16 @@ export class AgentProfileRegistry {
     }
     return { id: name, profile: resolved.data, revision, claudeValid: true, compatible: true,
       incompatibilityReasons: [], issues, files: entryFiles };
+  }
+
+  /** Server names the workspace's native MCP config declares (root `.mcp.json` — SDK-owned; the console reads names only, never launches from it). */
+  #workspaceMcpNames(workspaceRoot: string): Set<string> {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(path.join(workspaceRoot, ".mcp.json"), "utf8")) as { mcpServers?: Record<string, unknown> };
+      return new Set(Object.keys(parsed.mcpServers ?? {}));
+    } catch {
+      return new Set();
+    }
   }
 
   /** Source-identity revision: workspace-relative path + native name + bytes (+ overlay bytes). A move or rename re-requires trust. */

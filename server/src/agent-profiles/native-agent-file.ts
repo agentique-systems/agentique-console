@@ -73,6 +73,20 @@ export interface AgentiqueOverlay {
 
 export interface FieldReason { field: string; reason: string }
 
+/**
+ * One native MCP declaration, lossless per supported form. `stdio`, `sse`
+ * and `http` are console-EXECUTED (trust-gated launch through
+ * `Options.mcpServers`); `ref` is the native name-reference form — "attach
+ * an already-configured server" — which the console never launches: the
+ * workspace's own native MCP config (root `.mcp.json`, SDK-owned) does, and
+ * the console only grants `mcp__<name>`. One launcher per declaration,
+ * always.
+ */
+export type McpDeclaration =
+  | { transport: "stdio"; command: string; args: string[]; env?: Record<string, string> }
+  | { transport: "sse" | "http"; url: string; headers?: Record<string, string> }
+  | { transport: "ref" };
+
 export interface EvaluatedNativeAgent {
   name: string;
   description: string;
@@ -82,8 +96,7 @@ export interface EvaluatedNativeAgent {
   model?: string;
   effort?: string;
   permissionMode?: string;
-  /** Stdio declarations the console can execute today (full surface: Stage 4). */
-  mcpServers: Record<string, { command: string; args: string[]; env?: Record<string, string> }>;
+  mcpServers: Record<string, McpDeclaration>;
   overlay: AgentiqueOverlay;
   /** Native fields present but provably non-semantic for AgentSession execution. */
   ignored: string[];
@@ -160,10 +173,11 @@ function evaluateOverlay(value: unknown, reasons: FieldReason[]): AgentiqueOverl
 }
 
 /**
- * MCP declarations in the native `mcpServers` field. Stage-4 scope note: the
- * console currently executes the stdio record form only; name references and
- * SSE/HTTP forms are named incompatibilities until the MCP-consolidation
- * stage teaches `declaredMcpServers` the full native surface.
+ * The full authorable `AgentMcpServerSpec` surface, lossless: a name
+ * reference, a stdio command, or an SSE/HTTP url (whose `type` must be
+ * explicit — guessing a transport would be a silent reinterpretation). The
+ * SDK/in-process form is not authorable in YAML; anything unrecognizable is
+ * a named incompatibility, never dropped or normalized into something else.
  */
 function evaluateMcpServers(value: unknown, reasons: FieldReason[]): EvaluatedNativeAgent["mcpServers"] {
   const out: EvaluatedNativeAgent["mcpServers"] = {};
@@ -171,7 +185,7 @@ function evaluateMcpServers(value: unknown, reasons: FieldReason[]): EvaluatedNa
   const entries: unknown[] = Array.isArray(value) ? value : [value];
   for (const entry of entries) {
     if (typeof entry === "string") {
-      reasons.push({ field: "mcpServers", reason: `name reference "${entry}" is not yet executed by the console (MCP consolidation stage)` });
+      out[entry] = { transport: "ref" };
       continue;
     }
     if (typeof entry !== "object" || entry === null) {
@@ -179,15 +193,21 @@ function evaluateMcpServers(value: unknown, reasons: FieldReason[]): EvaluatedNa
       continue;
     }
     for (const [name, config] of Object.entries(entry as Record<string, unknown>)) {
-      const spec = config as { command?: unknown; args?: unknown; env?: unknown; url?: unknown; type?: unknown };
+      const spec = config as { command?: unknown; args?: unknown; env?: unknown; url?: unknown; type?: unknown; headers?: unknown };
       if (typeof spec?.command === "string" && spec.command !== "") {
         out[name] = {
+          transport: "stdio",
           command: spec.command,
           args: Array.isArray(spec.args) && spec.args.every((a) => typeof a === "string") ? (spec.args as string[]) : [],
           ...(spec.env !== undefined && typeof spec.env === "object" && spec.env !== null ? { env: spec.env as Record<string, string> } : {}),
         };
       } else if (typeof spec?.url === "string") {
-        reasons.push({ field: "mcpServers", reason: `"${name}" uses a URL transport the console does not yet execute (MCP consolidation stage)` });
+        if (spec.type === "sse" || spec.type === "http") {
+          out[name] = { transport: spec.type, url: spec.url,
+            ...(spec.headers !== undefined && typeof spec.headers === "object" && spec.headers !== null ? { headers: spec.headers as Record<string, string> } : {}) };
+        } else {
+          reasons.push({ field: "mcpServers", reason: `"${name}" declares a url without an explicit type: sse|http — the console will not guess a transport` });
+        }
       } else {
         reasons.push({ field: "mcpServers", reason: `"${name}" is not a recognizable MCP declaration` });
       }

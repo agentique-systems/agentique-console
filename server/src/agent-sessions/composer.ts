@@ -27,27 +27,35 @@ import type { TaskService } from "../tasks/service.ts";
 import type { RolePrompt } from "./topology-contract.ts";
 
 /**
- * The MCP servers a seat actually gets: what its profile declared, minus what
- * the operator disabled, with the browser server swappable by name.
+ * The MCP servers the CONSOLE launches for a seat: the profile's executed
+ * declarations (stdio/sse/http), minus what the operator disabled, with the
+ * browser server swappable by name. A `ref` declaration is deliberately
+ * absent here — its native meaning is "attach an already-configured server",
+ * so the workspace's own native MCP config (root `.mcp.json`, SDK-owned)
+ * launches it and the console only grants it (`mcpGrantNames`). One launcher
+ * per declaration, by construction.
  *
  * Config-declared and console-launched — the Console vendors no capability of
  * its own. `CONSOLE_MCP_DISABLED=browser` turns a server off for a whole
  * install; `CONSOLE_BROWSER_MCP='<command> <args…>'` replaces the browser one
- * without touching a profile.
+ * without touching a profile. Both are operator-set env, never silent.
  */
-export function declaredMcpServers(profile: AgentProfile, config: Config): Record<string, { command: string; args: string[]; env?: Record<string, string>; timeout?: number }> {
+export function declaredMcpServers(profile: AgentProfile, config: Config): Record<string, Record<string, unknown>> {
   const disabled = new Set(config.infra.mcpDisabled ?? []);
-  const out: Record<string, { command: string; args: string[]; env?: Record<string, string>; timeout?: number }> = {};
-  // Per-call wall clock on every DECLARED server. Without it a wedged
+  const out: Record<string, Record<string, unknown>> = {};
+  // Per-call wall clock on every EXECUTED server. Without it a wedged
   // browser_evaluate holds a turn open forever — no watchdog counts an
   // in-flight call, and a live run died exactly this way. The console's own
   // in-process server carries no timeout: ask_operator parks legally.
   const timeout = config.policy.mcpToolTimeoutMs > 0 ? { timeout: config.policy.mcpToolTimeoutMs } : {};
-  // A profile SNAPSHOT taken before this field existed has no `mcpServers`.
-  // Snapshots are cast, never re-parsed, so the default never applies to them:
-  // a session open across the upgrade must degrade to "no servers", not crash.
+  // A profile SNAPSHOT taken before this field existed has no `mcpServers`,
+  // and one from before the transport union has bare `{command,args}` values.
+  // Snapshots are cast, never re-parsed, so BOTH degrade gracefully here: a
+  // command-shaped value launches as stdio whatever its `transport` says.
   for (const [name, spec] of Object.entries(profile.mcpServers ?? {})) {
     if (disabled.has(name)) continue;
+    const declaration = spec as { transport?: string; command?: string; args?: string[]; env?: Record<string, string>; url?: string; headers?: Record<string, string> };
+    if (declaration.transport === "ref") continue;
     const override = name === "browser" ? config.infra.browserMcp : undefined;
     if (override !== undefined) {
       const [command, ...args] = override;
@@ -55,9 +63,23 @@ export function declaredMcpServers(profile: AgentProfile, config: Config): Recor
       out[name] = { command, args, ...timeout };
       continue;
     }
-    out[name] = { ...spec, ...timeout };
+    if (typeof declaration.command === "string") {
+      out[name] = { command: declaration.command, args: declaration.args ?? [], ...(declaration.env === undefined ? {} : { env: declaration.env }), ...timeout };
+    } else if (typeof declaration.url === "string" && (declaration.transport === "sse" || declaration.transport === "http")) {
+      out[name] = { type: declaration.transport, url: declaration.url, ...(declaration.headers === undefined ? {} : { headers: declaration.headers }), ...timeout };
+    }
   }
   return out;
+}
+
+/**
+ * Every declared server name the seat is GRANTED (`mcp__<name>` prefix) —
+ * executed and ref forms alike, minus operator-disabled. The grant surface
+ * is broader than the launch surface exactly by the ref declarations.
+ */
+export function mcpGrantNames(profile: AgentProfile, config: Config): string[] {
+  const disabled = new Set(config.infra.mcpDisabled ?? []);
+  return Object.keys(profile.mcpServers ?? {}).filter((name) => !disabled.has(name));
 }
 
 /**
