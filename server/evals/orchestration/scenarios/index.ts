@@ -5,6 +5,7 @@ import ambiguousSignal from "./ambiguous-signal.ts";
 import hiddenConstraint from "./hidden-constraint.ts";
 import parallelExploration from "./parallel-exploration.ts";
 import hungAgent from "./hung-agent.ts";
+import intentLifecycle from "./intent-lifecycle.ts";
 import noisyContraryEvidence from "./noisy-contrary-evidence.ts";
 import requirementTraceability from "./requirement-traceability.ts";
 import restartHonesty from "./restart-honesty.ts";
@@ -35,6 +36,7 @@ export const SCENARIOS: OrchestrationScenario[] = [
   requirementTraceability,
   silentAssumption,
   stagedElaboration,
+  intentLifecycle,
   hungAgent,
   restartHonesty,
   visualJudgment,
