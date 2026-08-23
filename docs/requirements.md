@@ -272,7 +272,10 @@ Minted variants inherit their base's role.
 - **No separate execution-graph object** — patterns, sessions, and the task
   ledger already are the execution structure; they reference requirements,
   never duplicate them.
-- **No automatic conversion of legacy markdown specs** — that would
-  fabricate commitments the operator never approved. Legacy runs keep the
-  spec path end to end; main may *propose* a graph derived from the old spec
-  when such a run continues.
+- **No fabricated structure from legacy markdown specs.** When migration
+  0017 retired the legacy spec store, each open pre-graph run's approved
+  spec became an approved *intent* revision — the prose governs, with zero
+  requirement nodes minted, because minting statements would fabricate
+  commitments the operator never approved as statements. Main may *propose*
+  a graph derived from that prose when such a run continues; every spec
+  document was archived verbatim to `event_artifacts`.

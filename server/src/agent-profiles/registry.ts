@@ -102,7 +102,6 @@ export const ProfileSchema = z.object({
     z.object({ transport: z.literal("ref") }),
   ])).default({}),
   skills: z.array(z.string()).optional(),
-  entryAgent: z.string().optional(),
   pluginPath: z.string().optional(),
   revision: z.string().optional(),
   source: z.enum(["builtin", "workspace"]).optional(),

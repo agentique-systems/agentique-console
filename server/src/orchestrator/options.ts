@@ -3,7 +3,7 @@
  * exactly as an interactive Claude Code session would — CLAUDE.md, user and
  * project settings, skills — and adds the console MCP tools on top; every
  * messaging/task/scheduling path stays console-owned and journaled. Only the
- * checkpoint and composer-rewrite queries are hermetic.
+ * composer-rewrite queries are hermetic.
  */
 import type { SessionMode, SessionPhase } from "@agentique-console/shared";
 import type { EffortLevel } from "../sdk/effort.ts";

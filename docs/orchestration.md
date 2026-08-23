@@ -71,7 +71,7 @@ how — composed with `all` (every child must hold) or `any` (one sufficient
 child establishes its parent). `propose_requirements` → operator edits the
 outline in place → their text governs → injected into every seat's system
 prompt, re-anchored by a pointer in every delivery, announced by revision in
-the decision delta, carried through rotation checkpoints → amended, never
+the decision delta, carried through recovery checkpoints → amended, never
 silently diverged from. `docs/requirements.md` holds the full model: outline
 grammar, id stability, derivation rules, delegation subtrees, verification
 tiers, the frontier.

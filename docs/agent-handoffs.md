@@ -1,7 +1,7 @@
 # Agent handoffs
 
 Agentique Console uses one handoff protocol for assignments, updates, milestones,
-decisions, failures, final results, context rotation, and recovery. Plain-text
+decisions, failures, final results, and crash recovery. Plain-text
 managed transfers are not produced by the v2 tools; old transcript rows remain
 readable.
 
@@ -54,7 +54,7 @@ claims during normal work in proportion to risk and report contradictions with
 
 ## Size and retrieval
 
-Ordinary records have a 6 KiB soft target; reports and rotation checkpoints a
+Ordinary records have a 6 KiB soft target; reports and recovery checkpoints a
 12 KiB soft target. Targets never truncate storage. The full core and evidence manifest are
 delivered; high-risk, needs-verification, or explicitly requested context also
 gets its profile extension immediately. Other extensions remain available via
@@ -63,43 +63,27 @@ gets its profile extension immediately. Other extensions remain available via
 Missing or escaping file references are retained as warnings and elevate a
 low-risk record to medium risk. They are never silently removed.
 
-## Rotation
+## Context lifetime and crash recovery
 
-Console-side rotation is opt-in (`CONSOLE_CONTEXT_ROTATION=1`). By default a
-lane keeps one provider session for life and the CLI's native compaction
-carries continuity — the same thread an interactive session has, and none of
-the re-priming a rotation pays. Everything below describes rotation when it is
-on.
+A lane keeps one provider session for life, and the CLI's native compaction
+carries continuity — the same thread an interactive session has. The Console
+never rotates a lane onto a fresh session for context reasons (the earlier
+console-side rotation subsystem was removed; historical journals keep their
+`*.context.rotated` rows).
 
-A seat nearing its budget (80% of the token limit, or of the turn limit when
-one is set) checkpoints proactively: a tool-free pass over the still-healthy
-provider session using the same model and effort, stored for the rotation to
-consume. At the limit itself the seat rotates unconditionally: the pending
-proactive checkpoint if there is one, else a deathbed checkpoint query, else the
-Console's own reconstruction.
-
-The token limit is the configured cap, lowered — never raised — by a per-model
-context catalog whose windows are deliberate under-estimates: an unknown model
-rotates earlier rather than risking hard overflow.
-
-A checkpoint draft that parses must also pass a deterministic quality gate:
-non-blank summary, a next action and at least one resolving evidence ref for
-non-completed work, and a resolving task ref when one is claimed. A failing
-draft is retried once with the specific failures appended to the prompt; the
-attempt is journaled (`handoff.checkpoint.retried`). If both drafts fail the
-gate, the rotation accepts the better draft and records its remaining
-failures. Checks are structural only — an honest empty-work checkpoint passes,
-and length is never scored.
-
-A failed checkpoint rotates with a degraded, high-risk recovery handoff
-assembled from the latest valid envelope and durable authorities. Recent
+What remains is CRASH recovery: when a lane dies before it can report, the
+Console deterministically reconstructs a high-risk recovery checkpoint from
+state it owns — operator decisions, the governing requirements pointer, the
+task ledger, declared ownership, the worktree branch and diff (uncommitted
+work is committed first), the standing assignment, and the agent's own last
+report. The successor is told the reconstruction is Console-assembled, not
+the prior context's memory, and to re-derive anything not listed. Recent
 transcript slicing is never used.
 
 ## Observability and evaluation
 
-The event spine records creation, consumption, retrieval, discrepancies,
-checkpoint failures, and enriched rotation metadata. Usage separates uncached,
-cache-creation, and cache-read input tokens.
+The event spine records creation, consumption, retrieval, and discrepancies.
+Usage separates uncached, cache-creation, and cache-read input tokens.
 
 Credential-free tests cover schema normalization, reference warnings, lineage,
 lossless overflow, bounded retrieval, persistence, routing, and UI folding. The
