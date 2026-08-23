@@ -776,6 +776,7 @@ export class RequirementService implements GoverningDigest {
           id: node.id,
           statement: node.statement,
           composition: node.composition,
+          verifyExpectation: null,
           children: options.collapseSatisfied && (derived.get(node.id) ?? node.status) === "satisfied"
             ? []
             : build(node.id),
