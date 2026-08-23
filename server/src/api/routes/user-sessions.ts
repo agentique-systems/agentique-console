@@ -42,10 +42,9 @@ const AssumptionResolveBody = z.object({
 });
 
 /**
- * Constrained to the offered list rather than accepting any string: an id with
- * no `model-catalog.ts` entry silently drops the session's rotation ceiling to
- * 68K, and a rejected request is a far better failure than a session that
- * quietly rotates twice as often.
+ * Constrained to the offered list rather than accepting any string: a typo'd
+ * model id should be a rejected request, never a session that fails at its
+ * first provider call.
  */
 const Model = z
   .string()

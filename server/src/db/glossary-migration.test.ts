@@ -156,7 +156,7 @@ describe("0003_glossary replay over a mid-run pre-rename database", () => {
     legacy.close();
 
     const { db, sqlite } = openDb(file); // journal says 0000..0002 ran — this applies ONLY 0003
-    expect(sqlite.prepare("SELECT count(*) AS n FROM __drizzle_migrations").get()).toMatchObject({ n: 16 });
+    expect(sqlite.prepare("SELECT count(*) AS n FROM __drizzle_migrations").get()).toMatchObject({ n: 17 });
 
     // Table renames: the old names are gone, the new ones exist.
     const tables = new Set((sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map((r) => r.name));

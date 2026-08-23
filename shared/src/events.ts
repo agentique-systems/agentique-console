@@ -679,6 +679,7 @@ export type ConsoleEvent = Base &
     | { type: "user_session.message.appended"; payload: UserSessionMessagePayload }
     | { type: "user_session.turn.started"; payload: UserTurnStartedPayload }
     | { type: "user_session.turn.settled"; payload: UserTurnSettledPayload }
+    /** @deprecated historical — console-side rotation was removed; rows persist in old journals. */
     | { type: "user_session.context.rotated"; payload: UserContextRotatedPayload }
     | { type: "user_session.runtime.noted"; payload: UserRuntimePayload }
     | { type: "user_session.retry.recorded"; payload: RetryRecordedPayload }
@@ -711,6 +712,7 @@ export type ConsoleEvent = Base &
     | { type: "agent_session.delivery.updated"; payload: AgentDeliveryUpdatedPayload }
     | { type: "agent_session.runtime.noted"; payload: AgentRuntimePayload }
     | { type: "agent_session.retry.recorded"; payload: RetryRecordedPayload }
+    /** @deprecated historical — console-side rotation was removed; rows persist in old journals. */
     | { type: "agent_session.context.rotated"; payload: AgentContextRotatedPayload }
     | { type: "task.created"; payload: TaskCreatedPayload }
     | { type: "task.updated"; payload: TaskUpdatedPayload }
@@ -725,6 +727,7 @@ export type ConsoleEvent = Base &
     | { type: "handoff.created"; payload: HandoffCreatedPayload }
     | { type: "handoff.consumed"; payload: HandoffConsumedPayload }
     | { type: "handoff.discrepancy.reported"; payload: HandoffDiscrepancyPayload }
+    /** @deprecated historical — the model-queried rotation checkpoint was removed with rotation. */
     | { type: "handoff.checkpoint.failed"; payload: HandoffCheckpointFailedPayload }
     | { type: "handoff.final.caveats"; payload: HandoffFinalCaveatsPayload }
     | { type: "handoff.final.blocked"; payload: FinalBlockedPayload }

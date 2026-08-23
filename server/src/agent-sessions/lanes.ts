@@ -80,7 +80,7 @@ export interface LaneSnapshot {
  * undelivered.
  */
 export interface AgentLane {
-  state: "unspawned" | "waking" | "live" | "rotating" | "parked";
+  state: "unspawned" | "waking" | "live" | "parked";
   input: AsyncQueue<SdkUserMessageLike> | null;
   query: QueryHandle | null;
   abort: AbortController | null;
@@ -94,28 +94,23 @@ export interface AgentLane {
   redeliveryAttempts: Map<string, number>;
   /**
    * Peak context-window occupancy observed this provider session, from
-   * per-assistant-message usage. This is the rotation signal — NOT the result
+   * per-assistant-message usage. This is the occupancy signal — NOT the result
    * message's `inputTokens`, which sums every API round-trip in the turn and
    * so overstates occupancy by 5-25x on a tool-heavy turn.
    */
   contextTokens: number;
   /** Last cumulative cost/api-duration seen, for per-turn deltas. */
   lastCumulative: { costUsd: number; apiDurationMs: number };
-  /** Set while rotating/recycling; senders await it before ensureLive. */
-  rotationGate: Promise<void> | null;
-  releaseRotation: (() => void) | null;
   idleTimer: NodeJS.Timeout | null;
   /** Cumulative settled turns since the last assignment delivery. */
   assignmentTurns: number;
   /**
-   * The console CHOSE to end this lane (park, rotation, archive, shutdown).
+   * The console CHOSE to end this lane (park, archive, shutdown).
    * An aborted settle without this flag is an infrastructure death — the
    * stream/process dying under a live turn — and must escalate like an error
    * instead of vanishing silently.
    */
   deliberateStop: boolean;
-  /** In-flight proactive checkpoint guard — at most one per lane at a time. */
-  proactiveCheckpointInFlight: boolean;
   /**
    * The seat was interrupted mid-turn by an operator pause at this time; the
    * next injected prompt is prefixed with a console note saying so, so the
@@ -152,8 +147,8 @@ export class AgentLanePool implements LaneActivity {
     if (!lane) {
       lane = { state: "unspawned", input: null, query: null, abort: null, pump: null, ready: null,
         activeTurn: null, pendingDeliveries: [], redeliveryAttempts: new Map(), contextTokens: 0,
-        lastCumulative: { costUsd: 0, apiDurationMs: 0 }, rotationGate: null, releaseRotation: null,
-        idleTimer: null, assignmentTurns: 0, turnBudgetNotified: false, deliberateStop: false, proactiveCheckpointInFlight: false, pauseResumeNote: null, lastActiveAt: 0, lastStatus: null };
+        lastCumulative: { costUsd: 0, apiDurationMs: 0 },
+        idleTimer: null, assignmentTurns: 0, turnBudgetNotified: false, deliberateStop: false, pauseResumeNote: null, lastActiveAt: 0, lastStatus: null };
       lanes.set(seat, lane);
     }
     return lane;
@@ -167,7 +162,7 @@ export class AgentLanePool implements LaneActivity {
   #resident(): number {
     let count = 0;
     for (const lanes of this.#seats.values()) {
-      for (const lane of lanes.values()) if (lane.state === "live" || lane.state === "waking" || lane.state === "rotating") count += 1;
+      for (const lane of lanes.values()) if (lane.state === "live" || lane.state === "waking") count += 1;
     }
     return count;
   }
@@ -176,7 +171,7 @@ export class AgentLanePool implements LaneActivity {
     let count = 0;
     for (const [sessionId, lanes] of this.#seats) {
       if (!sessionIds.has(sessionId)) continue;
-      for (const lane of lanes.values()) if (lane.state === "live" || lane.state === "waking" || lane.state === "rotating") count += 1;
+      for (const lane of lanes.values()) if (lane.state === "live" || lane.state === "waking") count += 1;
     }
     return count;
   }

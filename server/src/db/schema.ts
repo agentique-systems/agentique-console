@@ -232,13 +232,6 @@ export const agents = sqliteTable(
      */
     salvageBranch: text("salvage_branch"),
     salvageArtifactId: text("salvage_artifact_id"),
-    /**
-     * A checkpoint handoff taken PROACTIVELY (~80% of the rotation budget)
-     * while the seat was healthy. Rotation consumes it instead of querying
-     * the dying process — the deathbed query failed 31 of 35 times in a live
-     * run. Cleared at rotation; generation-checked before use.
-     */
-    pendingCheckpointHandoffId: text("pending_checkpoint_handoff_id"),
     /** Seating order for accents and prompt listings. */
     ord: integer("ord").notNull(),
     createdAt: text("created_at").notNull(),

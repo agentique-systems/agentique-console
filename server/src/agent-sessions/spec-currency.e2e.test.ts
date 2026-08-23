@@ -63,19 +63,4 @@ describe("spec currency for seats (fake SDK)", () => {
     expect(scoutPrompt).toMatch(/Participants: [^\n]*\.\n\nOnly the following addressed handoffs are new:/);
   });
 
-  it("a seat rotation checkpoint carries the spec pointer", async () => {
-    const h = makeFlowHarness({ config: { policy: { contextRotation: true } } });
-    const userSessionId = h.addUserSession();
-    approveSpec(h, userSessionId);
-    const done = collectUntil(h.bus, (event) => event.type === "agent_session.context.rotated", 10_000);
-    const created = h.host.createSession({ userSessionId, title: "rotate", agents: [{ name: "scout", profileId: "explorer", model: "mystery-model" }], briefing: handoff("go") });
-    h.repo.patchAgent(created.agentSessionId, "scout", { contextTokens: 70_000 });
-    await done;
-
-    const checkpoint = h.sqlite.prepare(
-      "SELECT extension FROM handoff_records WHERE agent_session_id = ? AND trigger IN ('rotation','recovery')",
-    ).get(created.agentSessionId) as { extension: string } | undefined;
-    expect(checkpoint).toBeDefined();
-    expect(JSON.parse(checkpoint!.extension).data.approvedSpec).toContain("rev 1 — initial spec");
-  });
 });

@@ -330,7 +330,7 @@ export class PromptComposer {
     const freshBlock = unseen.length === 0 ? ""
       : `## New operator decisions since your last delivery\nAuthoritative — these were decided for this whole session, not just for the seat that asked.\n${unseen.map((row) => `- ${renderDecision(row)}`).join("\n")}\n\n`;
     // The shared ledger, in every delivery: a live run's units sat pending
-    // forever because agents only ever saw the ledger at rotation. Omitted
+    // forever because agents only ever saw the ledger at spawn. Omitted
     // entirely when empty (byte-stability for ledger-less sessions).
     const taskLines = this.#deps.tasks.linesForAgentSession(session.id);
     const ledgerBlock = taskLines.length === 0 ? ""
@@ -411,7 +411,7 @@ export class PromptComposer {
         risk: "high",
         action: recoveryAction(assignment?.core.action ?? own?.core.action ?? "Resume interrupted work"),
         state: {
-          summary: `Context was rotated before ${seat.name} could write a checkpoint, so this was reconstructed by the Console from authoritative state — not from the previous context's memory. Treat it as a starting point and re-derive anything not listed.\n\n${facts.join("\n")}`,
+          summary: `${seat.name}'s previous context ended before it could write a checkpoint, so this was reconstructed by the Console from authoritative state — not from that context's memory. Treat it as a starting point and re-derive anything not listed.\n\n${facts.join("\n")}`,
           evidence,
         },
         result: { summary: null, artifacts: [] },
@@ -602,14 +602,15 @@ export class PromptComposer {
   }
 
   /**
-   * Where the previous generation left off (rotation on only), as prose the
+   * Where the previous generation left off (recovery, or a historical
+   * checkpoint row), as prose the
    * successor can act on. The lossless record stays one read_handoff away.
    */
   #checkpointContext(seat: AgentRow): string {
     if (seat.latestHandoffId && this.#deps.handoffs) {
       const handoff = this.#deps.handoffs.get(seat.latestHandoffId);
       // `latestHandoffId` is the seat's inbound pointer: for a seat that has
-      // not rotated it names its briefing or last assignment, which the lane
+      // not recovered it names its briefing or last assignment, which the lane
       // already delivered — only a real checkpoint is worth a tail.
       if (!handoff.metadata.checkpoint) return "";
       const { core } = handoff;
@@ -622,7 +623,7 @@ export class PromptComposer {
         ...(core.nextAction ? [`Next: ${core.nextAction}`] : []),
         ...(evidence.length > 0 ? [`Evidence: ${evidence.join("; ")}`] : []),
       ];
-      return `\n\n## Where you left off (checkpoint ${handoff.metadata.id})\nYour previous context wrote this before rotating; read_handoff returns the full record. Treat it as a starting point and verify anything risky.\n${lines.join("\n")}`;
+      return `\n\n## Where you left off (checkpoint ${handoff.metadata.id})\nYour previous context wrote this before it ended; read_handoff returns the full record. Treat it as a starting point and verify anything risky.\n${lines.join("\n")}`;
     }
     return "";
   }
