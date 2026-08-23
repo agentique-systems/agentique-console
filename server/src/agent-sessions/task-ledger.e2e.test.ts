@@ -81,3 +81,61 @@ describe("console-owned task ledger (fake SDK)", () => {
     expect(rows.filter((task) => task.status !== "completed").map((task) => task.sdkTaskId).sort()).toEqual(["a", "b"]);
   });
 });
+
+describe("requirement-linked ledger units", () => {
+  const DOC = `## Requirements
+- Auth works end to end
+  - Login issues a session token
+- \`npm run verify\` passes
+`;
+
+  it("links units to requirements across every write path and revives the frontier's blocked annotation", async () => {
+    const h = makeDelegationHarness(async function* () {
+      yield initMessage();
+      yield successMessage();
+    });
+    const userSessionId = h.addUserSession();
+    const draft = h.app.requirements.propose(userSessionId, DOC, "initial");
+    h.app.requirements.approve(draft.id, { document: DOC, edited: false });
+
+    // Commission-time units carry the link through the lifecycle path, and
+    // the session is delegated r1 so seat-side writes can link inside it.
+    const created = h.host.createSession({
+      userSessionId, title: "linked", agents: [{ name: "scout", profileId: "explorer" }],
+      briefing: handoff("investigate", "pending"),
+      requirements: ["r1"],
+      tasks: [{ taskId: "base", subject: "Survey auth", owner: "scout", requirementId: "r2" }],
+    });
+    await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled", 10_000);
+
+    const byTaskId = (taskId: string) =>
+      h.tasks.listForUserSession(userSessionId).find((task) => task.sdkTaskId === taskId);
+    expect(byTaskId("base")?.requirementId).toBe("r2");
+
+    // Seat-side create links INSIDE the delegation; outside is refused with
+    // the delegated roots named.
+    const create = h.fake.captured.tools.find((t) => t.name === "task_create")!;
+    await create.handler({ taskId: "in", subject: "Check token", description: "", owner: "scout", requirementId: "r2" }, {});
+    expect(byTaskId("in")?.requirementId).toBe("r2");
+    const denied = await create.handler({ taskId: "out", subject: "Verify build", description: "", owner: "scout", requirementId: "r3" }, {}) as { isError?: boolean; content: { text?: string }[] };
+    expect(denied.isError).toBe(true);
+    expect(denied.content[0]?.text).toContain("outside this session's delegated requirements");
+
+    // The per-delivery ledger block anchors each unit to its requirement.
+    expect(h.tasks.linesForAgentSession(created.agentSessionId).join("\n")).toContain("Survey auth (scout) → r2");
+
+    // A linked unit waiting on an incomplete dependency makes its
+    // requirement BLOCKED on the frontier — the join the annotation reads.
+    h.tasks.upsertFromCreate({
+      sdkSessionId: consoleTaskListId(created.agentSessionId), sdkTaskId: "gate", subject: "Blocker", owner: "scout",
+      attribution: { workspaceId: h.workspaceId, userSessionId, agentSessionId: created.agentSessionId, agent: null },
+    });
+    h.tasks.upsertFromCreate({
+      sdkSessionId: consoleTaskListId(created.agentSessionId), sdkTaskId: "blocked-unit", subject: "Verify", owner: "scout",
+      blockedBy: ["gate"], requirementId: "r3",
+      attribution: { workspaceId: h.workspaceId, userSessionId, agentSessionId: created.agentSessionId, agent: null },
+    });
+    const entry = h.app.requirements.frontier(userSessionId).find((row) => row.requirementId === "r3");
+    expect(entry?.annotations).toContain("blocked");
+  });
+});

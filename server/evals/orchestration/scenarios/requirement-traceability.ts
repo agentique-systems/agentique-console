@@ -13,7 +13,7 @@
  */
 import type { FakeProgram } from "../../../src/sdk/fake.ts";
 import { initMessage, sendHandoffUse, successMessage, toolUseMessage } from "../../../src/sdk/fake.ts";
-import { commissionsReferenceOpenRequirements, statusChangesCarryEvidence } from "../checks.ts";
+import { commissionsReferenceOpenRequirements, statusChangesCarryEvidence, tasksNameRequirements } from "../checks.ts";
 import { roleSwitch, turns } from "../programs.ts";
 import { defineScenario, type ProgramCtx } from "../scenario.ts";
 import type { Ev } from "../trace.ts";
@@ -87,7 +87,7 @@ function checkerRoute(reports: boolean): FakeProgram {
  */
 function mainRoute(
   ctx: ProgramCtx,
-  opts: { requirements?: string[]; reporter: "checker" | "main"; preSatisfyR2?: boolean },
+  opts: { requirements?: string[]; reporter: "checker" | "main"; preSatisfyR2?: boolean; unlinkedTasks?: boolean },
 ): FakeProgram {
   let created = false;
   let reported = false;
@@ -105,6 +105,12 @@ function mainRoute(
         ],
         briefingAction: "Implement and verify input validation per the delegated requirements",
         ...(opts.requirements === undefined ? {} : { requirements: opts.requirements }),
+        tasks: [
+          { taskId: "impl", subject: "Implement date validation", owner: "builder",
+            ...(opts.unlinkedTasks === true ? {} : { requirementId: "r1" }) },
+          { taskId: "verify", subject: "Verify both behaviors", owner: "checker",
+            ...(opts.unlinkedTasks === true ? {} : { requirementId: "r2" }) },
+        ],
       });
       yield successMessage();
       return;
@@ -124,7 +130,7 @@ function mainRoute(
 }
 
 function variantProgram(
-  opts: { requirements?: string[]; reporter: "checker" | "main"; preSatisfyR2?: boolean },
+  opts: { requirements?: string[]; reporter: "checker" | "main"; preSatisfyR2?: boolean; unlinkedTasks?: boolean },
 ) {
   return (ctx: ProgramCtx) => roleSwitch({
     main: mainRoute(ctx, opts),
@@ -143,6 +149,7 @@ export default defineScenario({
   checks: [
     commissionsReferenceOpenRequirements(),
     statusChangesCarryEvidence({ requireIndependentSatisfied: true }),
+    tasksNameRequirements(),
   ],
   fake: {
     timeoutMs: 20_000,
@@ -172,6 +179,12 @@ export default defineScenario({
         flaggedChecks: ["commissions-reference-open-requirements"],
         doneWhen: () => statusChanged("r1"),
         program: variantProgram({ requirements: ["r1", "r2"], reporter: "checker", preSatisfyR2: true }),
+      },
+      "unlinked-ledger": {
+        expect: "flag",
+        flaggedChecks: ["tasks-name-requirements"],
+        doneWhen: () => statusChanged("r2"),
+        program: variantProgram({ requirements: ["r1", "r2"], reporter: "checker", unlinkedTasks: true }),
       },
     },
   },

@@ -68,7 +68,7 @@ export interface CreateAgentSessionInput {
    * follow (the briefing posts synchronously inside creation), so no
    * assignment could ever reference a task and the auto-sync never fired.
    */
-  tasks?: { taskId: string; subject: string; description?: string; owner?: string; blockedBy?: string[] }[];
+  tasks?: { taskId: string; subject: string; description?: string; owner?: string; blockedBy?: string[]; requirementId?: string }[];
 }
 
 export interface SessionLifecycleDeps {
@@ -239,6 +239,7 @@ export class SessionLifecycle {
         ...(unit.description === undefined ? {} : { description: unit.description }),
         ...(unit.owner === undefined ? {} : { owner: unit.owner }),
         ...(unit.blockedBy === undefined ? {} : { blockedBy: unit.blockedBy }),
+        ...(unit.requirementId === undefined ? {} : { requirementId: unit.requirementId }),
         attribution: { workspaceId: user.workspaceId, userSessionId: input.userSessionId, agentSessionId: row.id, agent: null },
       });
     }

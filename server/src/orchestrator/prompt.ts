@@ -62,7 +62,8 @@ While specifying, keep an uncertainty MAP across every dimension of the outcome
 (intent, UX, behavior, scope, architecture, constraints, performance,
 reliability, security, edge cases, environment, the definition of excellent):
 consequential → resolve by the cheapest adequate route; not → record the
-default and move on.
+default with record_assumption, linked to the requirements resting on it —
+a silent premise becomes wrong work.
 
 ## Questions and the authority line
 
@@ -191,7 +192,10 @@ deliverable of this phase IS the requirement outline.
 3. Present the requirement outline itself with ExitPlanMode: a \`## Requirements\`
    section listing declarative statements a reviewer can check (one \`- statement\`
    per line, nested where structure helps), preceded by context, decisions with
-   recommendations, and standing uncertainties. On approval the Console records
-   it as the run's governing requirements and injects it into every agent;
-   execute exactly what was approved, passing each session's ledger units at
-   creation.`;
+   recommendations, and standing uncertainties. Keep it COARSE — the vision
+   prose plus top-level requirements; a large area earns one statement here
+   and a scoped amendment (propose_requirements scopeId) when you commission
+   it, so every card the operator approves stays a reviewable bite. On
+   approval the Console records it as the run's governing requirements and
+   injects it into every agent; execute exactly what was approved, passing
+   each session's ledger units at creation.`;

@@ -274,6 +274,137 @@ export function commissionsReferenceOpenRequirements(): TraceCheck {
  * one satisfied claim came from independent verification — selected per
  * scenario exactly like commissionedIndependentReview, never a count metric.
  */
+/**
+ * The ledger↔graph join, for requirement-heavy scenarios that opt in: once a
+ * requirement revision governs, every ledger unit created afterwards names a
+ * requirement id — an unlinked unit is work the frontier cannot see and the
+ * run review cannot trace to an obligation. Runtime records without gating
+ * (an unlinked task stays legal); this check is where the discipline is
+ * MEASURED, on scenarios whose task cards warrant it.
+ */
+export function tasksNameRequirements(): TraceCheck {
+  return {
+    id: "tasks-name-requirements",
+    dimension: "delegation",
+    description: "every ledger unit created under a governing graph names a requirement id",
+    run(trace) {
+      const firstApproval = trace.first("user_session.requirements.updated");
+      if (firstApproval === undefined) return pass("no requirement revision governs — nothing to link");
+      const problems: { detail: string; event: Ev }[] = [];
+      for (const event of trace.events()) {
+        if (event.type !== "task.created" || event.seq <= firstApproval.seq) continue;
+        const task = (event.payload as { task?: { sdkTaskId?: string; subject?: string; requirementId?: string | null } }).task;
+        if (task === undefined) continue;
+        if (task.requirementId === null || task.requirementId === undefined) {
+          problems.push({ detail: `ledger unit "${String(task.sdkTaskId)}" (${String(task.subject)}) names no requirement`, event });
+        }
+      }
+      return problems.length === 0
+        ? pass("every ledger unit under the governing graph is requirement-linked", [firstApproval])
+        : fail(problems.map((problem) => problem.detail).join("; "), problems.map((problem) => problem.event));
+    },
+  };
+}
+
+/**
+ * Silent defaults, for scenarios whose task card is materially ambiguous:
+ * between requirements approval and the first commission, at least one
+ * assumption is RECORDED and linked to the requirements resting on it. The
+ * runtime never gates recording; this is where the discipline is measured,
+ * on scenarios that opt in.
+ */
+export function assumptionsRecordedBeforeCommission(): TraceCheck {
+  return {
+    id: "assumptions-recorded-before-commission",
+    dimension: "intent-development",
+    description: "ambiguous defaults were recorded as linked assumptions before commissioning",
+    run(trace) {
+      const firstApproval = trace.first("user_session.requirements.updated");
+      if (firstApproval === undefined) return pass("no requirement revision governs — nothing to premise");
+      const firstCommission = trace.first("agent_session.created");
+      if (firstCommission === undefined) return pass("nothing was commissioned");
+      const recorded = trace.events().find((event) =>
+        event.type === "assumption.recorded"
+        && event.seq > firstApproval.seq && event.seq < firstCommission.seq
+        && ((event.payload as { requirementIds?: string[] }).requirementIds ?? []).length > 0);
+      return recorded !== undefined
+        ? pass("a linked assumption was recorded before the first commission", [recorded])
+        : fail("commissioned an ambiguous task with no recorded assumption — the default was taken silently", [firstCommission]);
+    },
+  };
+}
+
+/**
+ * A falsified premise is not a fact to shelve: every falsification whose
+ * linked requirements held TERMINAL claims must be answered — a later status
+ * change on an affected requirement (reopen or a fresh, post-falsification
+ * claim) or a later requirement amendment. The Console only decorated and
+ * woke; this measures whether the wake was consumed.
+ */
+export function falsificationsActedOn(): TraceCheck {
+  return {
+    id: "falsifications-acted-on",
+    dimension: "adaptation",
+    description: "every falsified assumption with dependent terminal claims drew a re-check or an amendment",
+    run(trace) {
+      const problems: { detail: string; event: Ev }[] = [];
+      const events = trace.events();
+      for (const event of events) {
+        if (event.type !== "assumption.resolved") continue;
+        const payload = event.payload as { id?: string; outcome?: string; affected?: { requirementId: string; status: string }[] };
+        if (payload.outcome !== "falsified") continue;
+        const suspect = (payload.affected ?? []).filter((entry) => ["satisfied", "violated", "infeasible"].includes(entry.status));
+        if (suspect.length === 0) continue;
+        const answered = events.some((later) =>
+          later.seq > event.seq
+          && ((later.type === "requirement.status.changed"
+            && suspect.some((entry) => entry.requirementId === (later.payload as { requirementId?: string }).requirementId))
+            || later.type === "user_session.requirements.updated"));
+        if (!answered) {
+          problems.push({
+            detail: `assumption ${String(payload.id)} was falsified under terminal claims (${suspect.map((entry) => entry.requirementId).join(", ")}) and nothing re-checked or amended them`,
+            event,
+          });
+        }
+      }
+      return problems.length === 0
+        ? pass("every consequential falsification was answered")
+        : fail(problems.map((problem) => problem.detail).join("; "), problems.map((problem) => problem.event));
+    },
+  };
+}
+
+/**
+ * Staged elaboration, for scenarios whose intent is too large to enumerate up
+ * front: after the first committed revision, growth lands as SUBTREE
+ * amendments — a small card the operator can actually review — never as
+ * whole-document re-proposals. (Intent-prose amendments add nothing and pass
+ * trivially; the runtime enforces this only past the parser bound, so the
+ * discipline below it is measured here, on scenarios that opt in.)
+ */
+export function stagedGrowth(): TraceCheck {
+  return {
+    id: "staged-growth",
+    dimension: "spec-quality",
+    description: "post-initial committed growth landed as subtree amendments, not whole-document re-proposals",
+    run(trace) {
+      const updates = trace.events().filter((event) => event.type === "user_session.requirements.updated");
+      if (updates.length === 0) return pass("no requirement revision governs");
+      const problems: { detail: string; event: Ev }[] = [];
+      for (const event of updates.slice(1)) {
+        const payload = event.payload as { revision?: number; kind?: string; added?: string[] };
+        if ((payload.added ?? []).length === 0) continue;
+        if (payload.kind !== "subtree") {
+          problems.push({ detail: `revision ${String(payload.revision)} grew the graph as a ${String(payload.kind ?? "full")} re-proposal — elaboration belongs in a scoped card`, event });
+        }
+      }
+      return problems.length === 0
+        ? pass("every post-initial growth landed as a scoped amendment", [updates[0]!])
+        : fail(problems.map((problem) => problem.detail).join("; "), problems.map((problem) => problem.event));
+    },
+  };
+}
+
 export function statusChangesCarryEvidence(opts: { requireIndependentSatisfied?: boolean } = {}): TraceCheck {
   return {
     id: "status-changes-carry-evidence",

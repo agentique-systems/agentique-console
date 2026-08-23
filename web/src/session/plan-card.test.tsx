@@ -74,3 +74,33 @@ describe("PlanCard edit-in-place", () => {
     expect(screen.getByTestId("requirements-parse-errors")).toBeTruthy();
   });
 });
+
+describe("PlanCard scoped amendments", () => {
+  it("renders the scope chain and the server-computed change summary", () => {
+    stubFetch([]);
+    const item: PlanItem = {
+      type: "plan",
+      interactionId: "int_2",
+      plan: "## Requirements\n- r4: Hits register within one frame\n- Misses are telegraphed\n",
+      requirements: {
+        revision: 3,
+        nodeCount: 2,
+        kind: "subtree",
+        scope: { scopeId: "r1", statement: "Combat resolves hits and misses", ancestors: [] },
+        summary: {
+          added: ["Misses are telegraphed"],
+          changed: [{ id: "r4", statement: "Hits register within one frame" }],
+          retired: [{ id: "r5", statement: "Combat pauses on focus loss" }],
+        },
+      },
+    };
+    render(createElement(PlanCard, { sessionId: "us_1", item, onRequestChanges: () => {} }), { wrapper: wrapper() });
+    expect(screen.getByText(/proposed amendment under r1/i)).toBeTruthy();
+    const scope = screen.getByTestId("requirements-scope");
+    expect(scope.textContent).toContain("r1 Combat resolves hits and misses");
+    const summary = screen.getByTestId("requirements-summary");
+    expect(summary.textContent).toContain("+ new: Misses are telegraphed");
+    expect(summary.textContent).toContain("~ r4 changes (its status resets to open)");
+    expect(summary.textContent).toContain("− r5 retires (its id never returns)");
+  });
+});

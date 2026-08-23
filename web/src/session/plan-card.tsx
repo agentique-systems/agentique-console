@@ -116,7 +116,11 @@ export function PlanCard({
           <FileTextIcon className="size-3.5 shrink-0" />
           <span>
             {item.requirements !== undefined
-              ? `proposed requirements (rev ${item.requirements.revision}, ${item.requirements.nodeCount} requirements)`
+              ? item.requirements.kind === "intent"
+                ? `proposed intent amendment (rev ${item.requirements.revision})`
+                : item.requirements.scope !== undefined
+                  ? `proposed amendment under ${item.requirements.scope.scopeId} (rev ${item.requirements.revision})`
+                  : `proposed requirements (rev ${item.requirements.revision}, ${item.requirements.nodeCount} requirements)`
               : item.spec !== undefined ? `proposed specification (rev ${item.spec.revision})` : "proposed plan"}
             {(item.requirements?.changeNote ?? item.spec?.changeNote) !== undefined && (
               <span className="ml-1 normal-case text-muted-foreground">— {item.requirements?.changeNote ?? item.spec?.changeNote}</span>
@@ -139,6 +143,29 @@ export function PlanCard({
       </CardHeader>
 
       <CardContent className="pt-0">
+        {item.requirements?.scope !== undefined && (
+          <p className="mb-2 text-3xs text-muted-foreground" data-testid="requirements-scope">
+            Amends the subtree under{" "}
+            {[...item.requirements.scope.ancestors, { id: item.requirements.scope.scopeId, statement: item.requirements.scope.statement }]
+              .map((step) => `${step.id} ${step.statement}`)
+              .join(" › ")}
+            . Requirements outside it are untouched.
+          </p>
+        )}
+        {item.requirements?.summary !== undefined
+          && (item.requirements.summary.added.length > 0 || item.requirements.summary.changed.length > 0 || item.requirements.summary.retired.length > 0) && (
+          <div className="mb-2 space-y-0.5 text-3xs" data-testid="requirements-summary">
+            {item.requirements.summary.added.map((statement, index) => (
+              <p key={`add-${index}`} className="text-status-completed">+ new: {statement}</p>
+            ))}
+            {item.requirements.summary.changed.map((entry) => (
+              <p key={`chg-${entry.id}`} className="text-attention">~ {entry.id} changes (its status resets to open): {entry.statement}</p>
+            ))}
+            {item.requirements.summary.retired.map((entry) => (
+              <p key={`ret-${entry.id}`} className="text-status-failed">− {entry.id} retires (its id never returns): {entry.statement}</p>
+            ))}
+          </div>
+        )}
         {editing && !resolved ? (
           <textarea
             className="min-h-48 w-full resize-y rounded-md border border-border bg-background p-2 font-mono text-xs"

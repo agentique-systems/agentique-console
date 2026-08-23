@@ -14,6 +14,7 @@ import type { Config } from "./config.ts";
 import type { Db } from "./db/client.ts";
 import { Repo } from "./db/repo.ts";
 import { createStores } from "./db/stores/index.ts";
+import { NotFoundError } from "./errors.ts";
 import type { ArtifactStore } from "./events/artifact-store.ts";
 import { EventBus } from "./events/bus.ts";
 import { late } from "./late.ts";
@@ -22,6 +23,7 @@ import { DecisionLedger } from "./orchestrator/decisions.ts";
 import { InteractionService } from "./orchestrator/interactions.ts";
 import { OrchestratorRunner } from "./orchestrator/runner.ts";
 import { buildConsoleMcpServer } from "./orchestrator/tools.ts";
+import { AssumptionService } from "./orchestrator/assumptions.ts";
 import { RequirementService } from "./orchestrator/requirements.ts";
 import { SpecService } from "./orchestrator/spec.ts";
 import { OrchestrationStateService } from "./orchestrator/state.ts";
@@ -78,6 +80,7 @@ export interface App {
   runner: OrchestratorRunner;
   specs: SpecService;
   requirements: RequirementService;
+  assumptions: AssumptionService;
   orchestrationState: OrchestrationStateService;
   completion: RunCompletionService;
   userSessions: UserSessionService;
@@ -100,12 +103,25 @@ export function createApp(options: CreateAppOptions): App {
   const profiles = new AgentProfileRegistry({ getWorkspaceRoot, db, bus });
   const worktrees = options.runtime?.worktrees === undefined ? new WorktreeManager({ dataDir: config.infra.dataDir }) : options.runtime.worktrees;
 
-  const decisions = new DecisionLedger(stores.interactions);
+  // The session→project resolution every project-scoped aggregate shares:
+  // requirement graph, decision ledger. One closure, wired once.
+  const resolveProject = (userSessionId: string): string => {
+    const row = repo.getUserSession(userSessionId);
+    if (!row) throw new NotFoundError(`no user session ${userSessionId}`);
+    return row.projectId;
+  };
+  const decisions = new DecisionLedger(stores.interactions, resolveProject);
   const interactions = new InteractionService(stores.interactions, bus);
   const tasks = new TaskService(stores.tasks, stores.assignments, bus, (workspaceId) => void workspaces.get(workspaceId));
   const handoffs = new HandoffService({ repo, bus, getWorkspaceRoot });
   const specs = new SpecService(stores.specs, bus);
-  const requirements = new RequirementService(stores.requirements, specs, bus);
+  const requirements = new RequirementService(stores.requirements, stores.projects, stores.assumptions, specs, bus, resolveProject);
+  const assumptions = new AssumptionService(stores.assumptions, requirements, bus, resolveProject);
+  // One requirements proposal at a time: with sequential continuation this is
+  // what makes a stale base revision impossible rather than merely detected.
+  requirements.setPendingProposalCheck((userSessionId) =>
+    interactions.listPending(userSessionId).some((row) =>
+      row.kind === "plan_approval" && typeof row.payload === "object" && row.payload !== null && "requirements" in row.payload));
   // The frontier annotates open requirements from other aggregates' facts —
   // narrow read closures, wired once here like every other crossing.
   requirements.setFrontierDeps({
@@ -132,7 +148,7 @@ export function createApp(options: CreateAppOptions): App {
   const lateRunner = late<OrchestratorRunner>("runner");
   const lateScheduler = late<AssignmentScheduler>("scheduler");
   const host = new AgentSessionService({
-    repo, bus, artifacts, config, profiles, sdk, sessionStore, getWorkspaceRoot, requirements,
+    repo, bus, artifacts, config, profiles, sdk, sessionStore, getWorkspaceRoot, requirements, assumptions,
     worktrees, capacity,
     interactions, decisions, tasks, handoffs,
     scheduler: () => lateScheduler.get(),
@@ -151,9 +167,14 @@ export function createApp(options: CreateAppOptions): App {
     host: () => host,
     tasks, capacity,
     buildMcpServer: (userSessionId, sdkInstance) =>
-      buildConsoleMcpServer({ sdk: sdkInstance, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, specs, requirements, state: orchestrationState, catalog, registry: profiles }),
+      buildConsoleMcpServer({ sdk: sdkInstance, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, specs, requirements, assumptions, state: orchestrationState, catalog, registry: profiles }),
   });
   lateRunner.set(runner);
+  // Console-established facts (a falsified assumption, a dependency that
+  // moved under satisfied work) wake main with a note — record-and-display,
+  // never a status rewrite.
+  requirements.setWakeNote((userSessionId, text) => lateRunner.get().postConsoleNote(userSessionId, text));
+  assumptions.setWakeNote((userSessionId, text) => lateRunner.get().postConsoleNote(userSessionId, text));
   const completion = new RunCompletionService({
     db, repo, bus, interactions, scheduler, getWorkspaceRoot, orchestrationState, specs, requirements,
     host: () => host,
@@ -163,7 +184,7 @@ export function createApp(options: CreateAppOptions): App {
   });
   const system = new SystemPauseService({ capacity, runner, host });
   const userSessions = new UserSessionService({
-    repo, bus, runner, interactions, workspaces,
+    repo, projects: stores.projects, bus, runner, interactions, workspaces,
     archiveAgentSessions: (userSessionId) => host.archiveForUserSession(userSessionId),
     completion,
     wireAgentSessions: (userSessionId) => host.wireSessionsForUserSession(userSessionId),
@@ -199,7 +220,7 @@ export function createApp(options: CreateAppOptions): App {
   });
 
   return {
-    config, db, sqlite, bus, artifacts, repo, sdk, getWorkspaceRoot, specs, requirements, orchestrationState,
+    config, db, sqlite, bus, artifacts, repo, sdk, getWorkspaceRoot, specs, requirements, assumptions, orchestrationState,
     workspaces, timeline, profiles, worktrees, capacity,
     decisions, interactions, tasks, scheduler, handoffs, sessionStore,
     host, runner, completion, userSessions, system,

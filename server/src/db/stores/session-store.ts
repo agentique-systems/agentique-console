@@ -33,6 +33,13 @@ export class SessionStore {
     return this.#db.select().from(userSessions).where(eq(userSessions.lifecycle, "open")).all();
   }
 
+  /** Open sessions attached to one project — the sequential-continuation gate. */
+  listOpenUserSessionsForProject(projectId: string): UserSessionRow[] {
+    return this.#db.select().from(userSessions)
+      .where(and(eq(userSessions.projectId, projectId), eq(userSessions.lifecycle, "open")))
+      .all();
+  }
+
   /**
    * Open work sessions — the ones a run can complete in. The purpose filter
    * guards against legacy profile-manager rows (the authoring lane is gone;

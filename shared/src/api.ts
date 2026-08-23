@@ -100,6 +100,13 @@ export interface CreateUserSessionBody {
   message: string;
   /** Orchestrator model; omitted means the server's configured default. */
   model?: string;
+  /**
+   * Continue an existing project: the new session reads and extends its
+   * requirement graph, ids, and decision ledger. Continuation is SEQUENTIAL —
+   * rejected while the project has another open session. Omitted mints a
+   * fresh project.
+   */
+  projectId?: string;
 }
 export interface CreateUserSessionResponse {
   session: UserSession;
@@ -331,6 +338,10 @@ export interface GetRequirementsResponse {
   nodes: import("./domain.ts").RequirementNodeWire[];
   /** Open requirements whose resolution still affects the root, annotated. */
   frontier: import("./domain.ts").RequirementFrontierEntry[];
+  /** Recorded premises, rests_on-linked to the requirements built on them. */
+  assumptions: import("./domain.ts").AssumptionWire[];
+  /** The operator's approved intent prose (title + preamble); null when none. */
+  intent: string | null;
   /** Satisfied leaves still below their declared verification expectation. */
   verificationGaps: import("./domain.ts").RequirementVerificationGap[];
   /** Terminal claims the run later withdrew (journal-derived, oldest first). */

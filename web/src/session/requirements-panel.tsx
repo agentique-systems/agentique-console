@@ -10,11 +10,12 @@ import { useState } from "react";
 import { toast } from "sonner";
 
 import { useRequirements } from "@/api/queries";
-import { useSetRequirementStatus } from "@/api/mutations";
+import { useResolveAssumption, useSetRequirementStatus } from "@/api/mutations";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 
 import type {
+  AssumptionWire,
   RequirementFrontierEntry,
   RequirementNodeWire,
   RequirementStatus,
@@ -111,6 +112,29 @@ function NodeRow({ sessionId, node, depth, isLeaf, verifyGap }: {
             delegated ×{node.delegatedTo.length}
           </span>
         )}
+        {node.dependsOn.length > 0 && (
+          <span className="text-3xs text-muted-foreground" title={`cannot be satisfied before ${node.dependsOn.join(", ")}`}>
+            depends on {node.dependsOn.join(", ")}
+          </span>
+        )}
+        {node.conflictsWith.length > 0 && (
+          <Badge variant="outline" className="text-3xs text-status-failed" title="recorded conflict — resolved by an amendment or your decision">
+            conflicts {node.conflictsWith.join(", ")}
+          </Badge>
+        )}
+        {node.restsOn.length > 0 && (
+          <span className="text-3xs text-muted-foreground" title="recorded assumptions this requirement rests on">
+            rests on {node.restsOn.map((entry) => entry.id).join(", ")}
+          </span>
+        )}
+        {node.flags.map((flag) => (
+          <Badge key={flag} variant="outline" className="text-3xs text-attention"
+            title={flag === "depends_changed"
+              ? "a dependency changed AFTER this claim was recorded — the claim may be stale"
+              : "an assumption under this claim was falsified AFTER it was recorded"}>
+            {flag === "depends_changed" ? "depends changed" : "rests on falsified"}
+          </Badge>
+        ))}
         {isLeaf && (
           <span className="hidden gap-1 group-hover:inline-flex">
             {status !== "satisfied" && (
@@ -148,6 +172,44 @@ function NodeRow({ sessionId, node, depth, isLeaf, verifyGap }: {
         </div>
       )}
     </div>
+  );
+}
+
+const ASSUMPTION_TONE: Record<AssumptionWire["status"], string> = {
+  open: "text-muted-foreground",
+  confirmed: "text-status-completed",
+  falsified: "text-status-failed",
+  retired: "text-muted-foreground",
+};
+
+function AssumptionRow({ sessionId, assumption }: { sessionId: string; assumption: AssumptionWire }) {
+  const resolve = useResolveAssumption();
+  const act = (outcome: "confirmed" | "falsified" | "retired") => {
+    resolve.mutate(
+      { sessionId, assumptionId: assumption.id, body: { outcome } },
+      { onError: (error) => toast.error(`Resolve failed: ${error.message}`) },
+    );
+  };
+  return (
+    <li className="group flex flex-wrap items-baseline gap-1.5 text-2xs" data-testid={`assumption-${assumption.id}`}>
+      <span className="font-mono text-3xs text-muted-foreground">{assumption.id}</span>
+      <span className={cn(assumption.status === "retired" && "line-through")}>{assumption.text}</span>
+      <span className={cn("text-3xs", ASSUMPTION_TONE[assumption.status])} title={`recorded by ${assumption.actor}`}>
+        {assumption.status}
+      </span>
+      {assumption.requirementIds.length > 0 && (
+        <span className="text-3xs text-muted-foreground" title="requirements resting on this premise">
+          [{assumption.requirementIds.join(", ")}]
+        </span>
+      )}
+      {assumption.status === "open" && (
+        <span className="hidden gap-1 group-hover:inline-flex">
+          <button type="button" className="text-3xs text-muted-foreground underline" disabled={resolve.isPending} onClick={() => act("confirmed")}>confirm</button>
+          <button type="button" className="text-3xs text-muted-foreground underline" disabled={resolve.isPending} onClick={() => act("falsified")}>falsify</button>
+          <button type="button" className="text-3xs text-muted-foreground underline" disabled={resolve.isPending} onClick={() => act("retired")}>retire</button>
+        </span>
+      )}
+    </li>
   );
 }
 
@@ -258,6 +320,17 @@ export function RequirementsPanel({ userSessionId }: { userSessionId: string }) 
           </ul>
         )}
       </section>
+
+      {data.assumptions.length > 0 && (
+        <section data-testid="assumptions-section">
+          <h3 className="text-2xs font-medium uppercase text-muted-foreground">Assumptions</h3>
+          <ul className="mt-1 space-y-1">
+            {data.assumptions.map((assumption) => (
+              <AssumptionRow key={assumption.id} sessionId={userSessionId} assumption={assumption} />
+            ))}
+          </ul>
+        </section>
+      )}
 
       <section>
         <button type="button" className="text-3xs text-muted-foreground underline" onClick={() => setShowRevisions((value) => !value)}>

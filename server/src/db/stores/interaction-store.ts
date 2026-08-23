@@ -182,4 +182,26 @@ export class InteractionStore {
       ))
       .all();
   }
+
+  /**
+   * Decision rows across EVERY session of a project — the Decision Ledger's
+   * read under project continuity: a prior session's operator decisions still
+   * govern a continued run.
+   */
+  listDecisionSourceRowsForProject(projectId: string): InteractionRow[] {
+    return this.#db
+      .select({ interaction: interactions })
+      .from(interactions)
+      .innerJoin(userSessions, eq(interactions.userSessionId, userSessions.id))
+      .where(and(
+        eq(userSessions.projectId, projectId),
+        or(
+          eq(interactions.status, "answered"),
+          and(eq(interactions.kind, "plan_approval"), inArray(interactions.status, ["answered", "rejected"])),
+          and(eq(interactions.kind, "question"), eq(interactions.status, "dismissed")),
+        ),
+      ))
+      .all()
+      .map((row) => row.interaction);
+  }
 }

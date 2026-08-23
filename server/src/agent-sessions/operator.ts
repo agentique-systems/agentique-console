@@ -40,6 +40,8 @@ export interface OperatorSurfaceDeps {
   sweepTasks: readonly (() => void)[];
   /** The whole-system pause: a paused tick does nothing (cutoffs are wall-clock; the first tick after resume catches up). */
   paused: () => boolean;
+  /** Subtree validation for requirement-linked questions; absent in narrow tests. */
+  requirements?: { assertWithinDelegation(userSessionId: string, agentSessionId: string, requirementId: string): void };
 }
 
 export class OperatorSurface {
@@ -192,6 +194,24 @@ export class OperatorSurface {
     }
     const urgency: InteractionUrgency = args.urgency;
 
+    // A requirement-linked question must link only inside the seat's
+    // delegation — the same subtree law as report_requirement. Out-of-scope
+    // ids are the seat's mistake, reported as one (not an isError, which
+    // would feed the error-streak watchdog... except this IS actionable:
+    // the seat retries with in-scope ids or drops the link).
+    const requirementIds = [...new Set(args.requirementIds ?? [])];
+    if (requirementIds.length > 0 && this.#deps.requirements) {
+      try {
+        for (const id of requirementIds) {
+          this.#deps.requirements.assertWithinDelegation(session.userSessionId, session.id, id);
+        }
+      } catch (error) {
+        return ok({ resolved: false, invalidRequirementIds: true,
+          reason: error instanceof Error ? error.message : String(error),
+          note: "Ask again with requirement ids inside your delegated sub-scope, or omit requirementIds." });
+      }
+    }
+
     const question: InteractionQuestion = {
       question: args.question,
       ...(args.header ? { header: args.header } : {}),
@@ -213,6 +233,7 @@ export class OperatorSurface {
       allowFreeText: args.allowFreeText,
       dedupeKey,
       signal: abort.signal,
+      ...(requirementIds.length === 0 ? {} : { requirementIds }),
     });
 
     if (urgency === "deferred") {

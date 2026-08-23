@@ -22,6 +22,7 @@ import { EvidenceRefSchema, HandoffCoreSchema, HandoffDraftSchema } from "../han
 
 import { fail, guarded, ok } from "../sdk/tool-result.ts";
 import type { InteractionService } from "./interactions.ts";
+import type { AssumptionService } from "./assumptions.ts";
 import { RequirementParseFailure, type RequirementService } from "./requirements.ts";
 import type { SpecService } from "./spec.ts";
 import type { CompletionRecord, OrchestrationStateService } from "./state.ts";
@@ -58,6 +59,7 @@ export interface ConsoleToolsInput {
   interactions: InteractionService;
   specs: SpecService;
   requirements: RequirementService;
+  assumptions: AssumptionService;
   state: OrchestrationStateService;
   /** Skills + attachable-server metadata, for staffing and mint validation. */
   catalog: CapabilityCatalog;
@@ -66,7 +68,7 @@ export interface ConsoleToolsInput {
 }
 
 export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
-  const { sdk, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, specs, requirements, state, catalog, registry } = input;
+  const { sdk, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, specs, requirements, assumptions, state, catalog, registry } = input;
 
   /** Tools operate only on this UserSession's agent sessions. */
   const owned = (agentSessionId: string) => {
@@ -75,6 +77,16 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
       throw new NotFoundError(`no agent session ${agentSessionId} in this conversation`);
     }
     return session;
+  };
+
+  /** Every requirement reference validates against the LIVE graph before use. */
+  const assertLiveRequirementIds = (ids: string[]) => {
+    if (ids.length === 0) return;
+    const live = new Set(requirements.derive(userSessionId).map((node) => node.id));
+    const unknown = ids.filter((id) => !live.has(id));
+    if (unknown.length > 0) {
+      throw new InvalidInputError(`unknown requirement id(s): ${unknown.join(", ")} — read_requirements lists the current graph`);
+    }
   };
 
   const tools = [
@@ -127,6 +139,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           description: z.string().optional(),
           owner: z.string().optional().describe("The agent that will do the work"),
           blockedBy: z.array(z.string()).optional().describe("taskIds this unit depends on"),
+          requirementId: z.string().min(1).optional().describe("The requirement id this unit discharges — links the ledger to the graph. Name it when one governs."),
         })).max(20).optional()
           .describe("Ledger units created WITH the session, BEFORE its briefing dispatches — so the briefing's taskId resolves and the entry assignment starts its unit. This replaces calling task_create afterwards for the initial breakdown."),
       },
@@ -148,7 +161,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         why?: string;
         expecting?: string;
         requirements?: string[];
-        tasks?: { taskId: string; subject: string; description?: string; owner?: string; blockedBy?: string[] }[];
+        tasks?: { taskId: string; subject: string; description?: string; owner?: string; blockedBy?: string[]; requirementId?: string }[];
       }) =>
         guarded(() => {
           // Rationale AND the delegated sub-scope ride the briefing's
@@ -174,15 +187,13 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
             const problems = catalog.validateAssignment(agent.skills, profileTools);
             if (problems.length > 0) throw new InvalidInputError(`agent "${agent.name}": ${problems.join("; ")}`);
           }
-          // Delegated requirements validate BEFORE anything spawns — a session
-          // must never launch against ids that do not exist.
-          if (args.requirements !== undefined && args.requirements.length > 0) {
-            const live = new Set(requirements.derive(userSessionId).map((node) => node.id));
-            const unknown = args.requirements.filter((id) => !live.has(id));
-            if (unknown.length > 0) {
-              throw new InvalidInputError(`unknown requirement id(s): ${unknown.join(", ")} — read_requirements lists the current graph`);
-            }
-          }
+          // Delegated requirements AND task-level requirement links validate
+          // BEFORE anything spawns — a session must never launch against ids
+          // that do not exist.
+          assertLiveRequirementIds(args.requirements ?? []);
+          assertLiveRequirementIds((args.tasks ?? [])
+            .map((unit) => unit.requirementId)
+            .filter((id): id is string => id !== undefined));
           const created = host.createSession({
             userSessionId,
             title: args.title,
@@ -336,13 +347,16 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         description: z.string().default(""),
         owner: z.string().min(1).describe("The agent that will DO this work — not you."),
         blockedBy: z.array(z.string()).default([]).describe("taskIds this task depends on. Forward references are fine — the edge attaches when the blocker is created."),
+        requirementId: z.string().min(1).optional().describe("The requirement id (read_requirements) this unit discharges — links the ledger to the graph and feeds the frontier's blocked annotation. Name it when one governs."),
       },
-      async (args: { agentSessionId: string; taskId: string; subject: string; description: string; owner: string; blockedBy: string[] }) =>
+      async (args: { agentSessionId: string; taskId: string; subject: string; description: string; owner: string; blockedBy: string[]; requirementId?: string }) =>
         guarded(() => {
           const session = owned(args.agentSessionId);
+          if (args.requirementId !== undefined) assertLiveRequirementIds([args.requirementId]);
           tasks?.upsertFromCreate({
             sdkSessionId: consoleTaskListId(args.agentSessionId), sdkTaskId: args.taskId,
             subject: args.subject, description: args.description, owner: args.owner, blockedBy: args.blockedBy,
+            ...(args.requirementId === undefined ? {} : { requirementId: args.requirementId }),
             attribution: { workspaceId: repo.getUserSession(userSessionId)?.workspaceId ?? "", userSessionId, agentSessionId: session.id, agent: null },
           });
           return { taskId: args.taskId, created: true, owner: args.owner };
@@ -361,10 +375,12 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         description: z.string().optional(),
         addBlockedBy: z.array(z.string()).optional(),
         removeBlockedBy: z.array(z.string()).optional(),
+        requirementId: z.string().min(1).optional().describe("Link (or re-link) this unit to the requirement it discharges."),
       },
-      async (args: { agentSessionId: string; taskId: string; status?: "pending" | "in_progress" | "completed" | "deleted"; owner?: string; subject?: string; description?: string; addBlockedBy?: string[]; removeBlockedBy?: string[] }) =>
+      async (args: { agentSessionId: string; taskId: string; status?: "pending" | "in_progress" | "completed" | "deleted"; owner?: string; subject?: string; description?: string; addBlockedBy?: string[]; removeBlockedBy?: string[]; requirementId?: string }) =>
         guarded(() => {
           owned(args.agentSessionId);
+          if (args.requirementId !== undefined) assertLiveRequirementIds([args.requirementId]);
           const { agentSessionId, taskId, ...patch } = args;
           tasks?.applyUpdate({ sdkSessionId: consoleTaskListId(agentSessionId), sdkTaskId: taskId, patch });
           return { taskId, updated: true };
@@ -403,6 +419,73 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         });
         return { deadlineId: id, dueAt, reason: args.reason };
       }),
+    ),
+
+    /**
+     * Main's requirement-TRACEABLE ask. Native AskUserQuestion stays for
+     * batched clarification (its SDK schema cannot carry requirement ids);
+     * this one records WHICH requirements a decision resolves, so the
+     * decision ledger can pin scope-relevant decisions instead of aging them
+     * out, and a question is traceable to the obligations it unblocked.
+     */
+    sdk.tool(
+      "ask_operator",
+      "Ask the Human Operator one decision that specific requirements hang on. Name those ids in requirementIds — the answer is recorded as a decision PINNED to them: it reaches every seat working under those requirements and never ages out of the prompt digest while they are open. Use native AskUserQuestion for batched clarification with no requirement anchor. urgency:'blocking' parks this call until they answer; 'deferred' returns now and their answer wakes you.",
+      {
+        question: z.string().min(1).describe("One concrete question. State the decision, not the background."),
+        header: z.string().max(24).optional().describe("Two or three words for the card's eyebrow."),
+        context: z.string().max(2_000).optional().describe("Why you are asking and what you already tried. Not an option."),
+        options: z.array(z.object({
+          label: z.string().min(1).max(60),
+          description: z.string().max(300).optional(),
+        })).min(2).max(4).describe("Real, mutually exclusive choices."),
+        recommendation: z.string().max(400).optional().describe("Which option you recommend and why. Always give one."),
+        requirementIds: z.array(z.string().min(1)).max(12).optional()
+          .describe("The requirement ids this decision resolves or gates (read_requirements). The decision is pinned to them."),
+        urgency: z.enum(["blocking", "deferred"]).default("blocking"),
+      },
+      async (args: {
+        question: string; header?: string; context?: string;
+        options: { label: string; description?: string }[];
+        recommendation?: string; requirementIds?: string[];
+        urgency: "blocking" | "deferred";
+      }) => {
+        try {
+          assertLiveRequirementIds(args.requirementIds ?? []);
+        } catch (error) {
+          return fail(error);
+        }
+        const question = {
+          question: args.question,
+          ...(args.header ? { header: args.header } : {}),
+          ...(args.context ? { context: args.context } : {}),
+          options: args.options,
+          ...(args.recommendation ? { recommendation: args.recommendation } : {}),
+        };
+        const pending = interactions.createOperatorQuestion({
+          userSessionId,
+          questions: [question],
+          urgency: args.urgency,
+          source: "agent",
+          ...(args.recommendation ? { recommendation: args.recommendation } : {}),
+          allowFreeText: true,
+          ...(args.requirementIds === undefined || args.requirementIds.length === 0
+            ? {} : { requirementIds: args.requirementIds }),
+        });
+        if (args.urgency === "deferred") {
+          return ok({ queued: true, interactionId: pending.id, urgency: "deferred",
+            note: "The operator can see this now; their answer will wake you. Keep working — do not poll." });
+        }
+        const resolved = await pending.resolution;
+        if (resolved.kind === "answers") {
+          return ok({ resolved: true, interactionId: pending.id, answers: resolved.answers,
+            ...(resolved.freeText === undefined ? {} : { freeText: resolved.freeText }),
+            ...(resolved.note === undefined ? {} : { note: resolved.note }),
+            ledger: "Recorded as an operator decision, pinned to the named requirements." });
+        }
+        return ok({ resolved: false, interactionId: pending.id,
+          reason: resolved.kind === "dismissed" ? resolved.reason : "the operator declined" });
+      },
     ),
 
     sdk.tool(
@@ -499,16 +582,22 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
 
     sdk.tool(
       "propose_requirements",
-      "Put the REQUIREMENT GRAPH (or an amendment to it) to the operator for approval. Requirements are the run's canonical definition of done: a recursive outline of what must be TRUE of the finished work — each node one declarative, checkable statement; children compose 'all' by default, '(any of)' when one sufficient alternative establishes the parent. Write the canonical form: optional prose sections (## Context, ## Goals, ## Out of scope, ## Assumptions), then '## Requirements' as a nested list. KEEP the `rN:` id tags on lines you are keeping — dropping a tag RETIRES that requirement; a new line carries no tag and gets its id on approval. Statuses and evidence survive an amendment on unchanged statements; an edited statement resets its node to open. The operator may EDIT the outline in place; their text governs and is injected into every prompt. This call BLOCKS until they respond. Amend when reality invalidates part of it; never silently diverge.",
+      "Put the REQUIREMENT GRAPH (or an amendment to it) to the operator for approval. Requirements are the run's canonical definition of done: a recursive outline of what must be TRUE of the finished work — each node one declarative, checkable statement; children compose 'all' by default, '(any of)' when one sufficient alternative establishes the parent. STAGE the commitment: the first proposal is the vision prose (## Context, ## Goals, ## Out of scope) plus COARSE top-level requirements a reviewer can check — not an exhaustive enumeration; elaborate a subtree with scopeId when you commission it or when discovery lands, so each card the operator approves stays a reviewable bite. scopeId amends ONE subtree (document = that subtree's children only, structure-only); intent:true amends the prose alone (empty ## Requirements). KEEP the `rN:` id tags on lines you are keeping — dropping a tag RETIRES that requirement; a new line carries no tag and gets its id on approval. Statuses and evidence survive an amendment on unchanged statements; an edited statement resets its node to open. decompose_requirement stays the no-approval path for discharge detail below committed meaning. The operator may EDIT the outline in place; their text governs. This call BLOCKS until they respond. Amend when reality invalidates part of it; never silently diverge.",
       {
-        document: z.string().min(1).describe("The full outline. Example:\n## Requirements\n- The CLI parses every documented flag\n  - (any of) Config is loadable\n    - TOML config parses\n    - JSON config parses"),
+        document: z.string().min(1).describe("The outline. Full: prose + ## Requirements. Subtree (scopeId set): ONLY '## Requirements' listing that subtree's children. Intent (intent:true): prose + an empty '## Requirements'."),
         changeNote: z.string().min(1).describe("One line: what this revision is, or what changed and why (for amendments)."),
+        scopeId: z.string().min(1).optional().describe("Amend only the subtree under this committed requirement id. The card shows the operator that scope and a change summary."),
+        intent: z.boolean().optional().describe("Amend the intent prose alone; committed statements stay untouched."),
       },
-      async (args: { document: string; changeNote: string }) => {
+      async (args: { document: string; changeNote: string; scopeId?: string; intent?: boolean }) => {
         const changeNote = clip(args.changeNote, 280);
+        const kindOpts = {
+          ...(args.scopeId === undefined ? {} : { scopeId: args.scopeId }),
+          ...(args.intent === undefined ? {} : { intent: args.intent }),
+        };
         let draft: ReturnType<RequirementService["propose"]>;
         try {
-          draft = requirements.propose(userSessionId, args.document, changeNote);
+          draft = requirements.propose(userSessionId, args.document, changeNote, kindOpts);
         } catch (error) {
           if (error instanceof RequirementParseFailure) {
             return fail(`the document is not a valid requirement outline — fix these lines and propose again:\n${error.errors.map((entry) => `- line ${entry.line}: ${entry.message}`).join("\n")}`);
@@ -516,8 +605,17 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           return fail(error);
         }
         const nodeCount = flattenRequirementGraph(draft.graph as unknown as RequirementGraph).length;
+        // The card gets the SCOPE and a server-computed change summary — the
+        // operator approves a small view in context, never a wall of nodes.
+        const scope = draft.scopeId === null ? undefined : {
+          scopeId: draft.scopeId,
+          statement: requirements.derive(userSessionId).find((node) => node.id === draft.scopeId)?.statement ?? "",
+          ancestors: requirements.ancestorPath(userSessionId, draft.scopeId),
+        };
+        const summary = requirements.previewChanges(userSessionId, args.document, kindOpts) ?? undefined;
         const { id: approvalId, resolution } = interactions.createRequirementsApproval(
-          userSessionId, args.document, draft.revision, changeNote, nodeCount);
+          userSessionId, args.document, draft.revision, changeNote, nodeCount,
+          { kind: draft.kind, ...(scope === undefined ? {} : { scope }), ...(summary === undefined ? {} : { summary }) });
         const resolved = await resolution;
         if (resolved.kind === "decision" && resolved.approved) {
           const finalText = resolved.editedDocument?.trim() || args.document;
@@ -532,15 +630,20 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           // An AMENDMENT lands while sessions may be mid-assignment against
           // the old revision. The next delivery re-anchors each of them, but
           // whether one needs steering NOW is main's materiality call — hand
-          // it the list to make that call against.
+          // it the list, with the sessions the CHANGE actually touches marked
+          // (delegated subtrees intersecting the changed/retired ids, or
+          // holding requirements that depend on them — console facts).
+          const touched = new Set(requirements.sessionsAffectedByChange(
+            userSessionId, [...approved.changed, ...approved.retired]));
           const running = approved.revision.revision > 1
             ? host.listForUserSession(userSessionId).filter((s) => s.status !== "archived")
-              .map((s) => ({ agentSessionId: s.id, title: s.title, status: s.status }))
+              .map((s) => ({ agentSessionId: s.id, title: s.title, status: s.status,
+                ...(touched.has(s.id) ? { affectedByThisChange: true } : {}) }))
             : [];
           return ok({ approved: true, revision: approved.revision.revision,
             edited: approved.revision.origin === "operator_edited",
             document: approved.revision.document,
-            added: approved.added, retired: approved.retired,
+            added: approved.added, retired: approved.retired, changed: approved.changed,
             note: (approved.revision.origin === "operator_edited"
               ? "The operator EDITED the requirements before approving — the canonical text above (ids minted) is theirs and governs. Read it fully."
               : "Approved as proposed. The canonical text above (ids minted) now governs the run.")
@@ -556,12 +659,13 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
 
     sdk.tool(
       "read_requirements",
-      "Read the governing requirements: the live outline with console-derived statuses ([·] open, [✓] satisfied, [✗] violated, [⊘] infeasible), verification tiers and evidence counts, plus the open-requirements frontier. For a run still governed by a legacy markdown spec this returns that text with legacy: true.",
+      "Read the governing requirements: the live outline with console-derived statuses ([·] open, [✓] satisfied, [✗] violated, [⊘] infeasible), verification tiers and evidence counts, plus the open-requirements frontier. Pass scopeId to read ONE subtree in full — the way to pull detail the injected digest collapsed. The root read includes the operator's approved intent prose. For a run still governed by a legacy markdown spec this returns that text with legacy: true.",
       {
+        scopeId: z.string().min(1).optional().describe("Read only this requirement's subtree, in full."),
         cursor: z.string().optional(),
         maxBytes: z.number().int().min(1).max(PAGE_MAX_BYTES).default(PAGE_DEFAULT_BYTES),
       },
-      async (args: { cursor?: string; maxBytes: number }) =>
+      async (args: { scopeId?: string; cursor?: string; maxBytes: number }) =>
         guarded(() => {
           const approved = requirements.latestApproved(userSessionId);
           if (approved === undefined) {
@@ -571,9 +675,14 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
               document: pageTail(legacy.document, args.cursor, args.maxBytes),
               note: "This run is governed by a legacy markdown spec. A requirement graph can supersede it via propose_requirements." };
           }
-          const digest = requirements.digest(userSessionId);
+          if (args.scopeId !== undefined) {
+            return { revision: approved.revision, scopeId: args.scopeId,
+              document: pageTail(requirements.statusOutlineFor(userSessionId, args.scopeId), args.cursor, args.maxBytes) };
+          }
+          const intent = requirements.intentDocument(userSessionId);
           return { revision: approved.revision, changeNote: approved.changeNote,
-            document: pageTail(digest, args.cursor, args.maxBytes),
+            ...(intent === null ? {} : { intent }),
+            document: pageTail(requirements.statusOutlineFor(userSessionId), args.cursor, args.maxBytes),
             frontier: requirements.frontier(userSessionId),
             verificationGaps: requirements.verificationGaps(userSessionId) };
         }),
@@ -623,9 +732,96 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         }),
     ),
 
+    /**
+     * The premise surface: durable, id-bearing assumptions linked to the
+     * requirements that rest on them — the alternative to a default nobody
+     * wrote down. Recording is un-gated; falsification decorates and wakes,
+     * never rewrites status.
+     */
+    sdk.tool(
+      "record_assumption",
+      "Record an assumption the work proceeds on — a default you took where the operator was not asked, a belief a requirement rests on. Name the requirement ids that rest on it (requirementIds): a later falsification then FLAGS their claims and wakes you. Recording needs no approval — it is what makes the premise visible and falsifiable instead of silently invented. A boundary the operator imposed on the WORK belongs in the requirements (propose_requirements); a resolved question is a decision, not an assumption.",
+      {
+        text: z.string().min(1).describe("One declarative premise, e.g. \"WoW-like means real-time combat, not turn-based\"."),
+        requirementIds: z.array(z.string().min(1)).max(12).optional()
+          .describe("Requirements that rest on this premise (rests_on links)."),
+        interactionId: z.string().optional().describe("The ask that raised it, when one exists."),
+      },
+      async (args: { text: string; requirementIds?: string[]; interactionId?: string }) =>
+        guarded(() => {
+          assertLiveRequirementIds(args.requirementIds ?? []);
+          const wire = assumptions.record({
+            userSessionId, text: args.text, source: "main", actor: "main",
+            ...(args.interactionId === undefined ? {} : { interactionId: args.interactionId }),
+            ...(args.requirementIds === undefined ? {} : { requirementIds: args.requirementIds }),
+          });
+          return { assumptionId: wire.id, requirementIds: wire.requirementIds,
+            note: "Recorded. Seats working under the linked requirements see it; resolve_assumption closes it with provenance." };
+        }),
+    ),
+
+    sdk.tool(
+      "resolve_assumption",
+      "Resolve a recorded assumption: confirmed (evidence or an operator answer establishes it), falsified (reality contradicts it — the Console flags dependent terminal claims and wakes you; judge them yourself), or retired (it stopped mattering). confirmed/falsified need provenance: evidence refs, or the interactionId of the operator answer that settled it. An assumption that should now GOVERN success is an amendment (propose_requirements), never an automatic promotion.",
+      {
+        assumptionId: z.string().min(1).describe("An id from record_assumption, e.g. \"a2\"."),
+        outcome: z.enum(["confirmed", "falsified", "retired"]),
+        note: z.string().optional(),
+        evidence: z.array(EvidenceRefSchema).default([]),
+        interactionId: z.string().optional().describe("The operator answer that settled it, when that is the provenance."),
+      },
+      async (args: { assumptionId: string; outcome: "confirmed" | "falsified" | "retired"; note?: string;
+        evidence: { kind: "file" | "journal" | "artifact" | "task" | "command" | "url"; ref: string; label?: string }[];
+        interactionId?: string }) =>
+        guarded(() => {
+          const wire = assumptions.resolve({
+            userSessionId, assumptionId: args.assumptionId, outcome: args.outcome, actor: "main",
+            ...(args.note === undefined ? {} : { note: args.note }),
+            evidence: args.evidence,
+            ...(args.interactionId === undefined ? {} : { interactionId: args.interactionId }),
+          });
+          return { assumptionId: wire.id, status: wire.status, requirementIds: wire.requirementIds };
+        }),
+    ),
+
+    sdk.tool(
+      "link_requirements",
+      "Record a relationship between requirements: depends_on (fromId cannot be satisfied before toId is — feeds the frontier's blocked annotation and flags fromId's claim if toId later moves; acyclic), or conflicts_with (the two cannot both be satisfied as written — symmetric; recorded for the operator to see, resolved by an amendment or their decision). Links never change derived statuses — the tree alone derives.",
+      {
+        fromId: z.string().min(1),
+        kind: z.enum(["depends_on", "conflicts_with"]),
+        toId: z.string().min(1),
+        note: z.string().optional().describe("Why, in one line."),
+      },
+      async (args: { fromId: string; kind: "depends_on" | "conflicts_with"; toId: string; note?: string }) =>
+        guarded(() => {
+          const result = requirements.link({
+            userSessionId, fromId: args.fromId, kind: args.kind, toId: args.toId, actor: "main",
+            ...(args.note === undefined ? {} : { note: args.note }),
+          });
+          return { ...result, fromId: args.fromId, kind: args.kind, toId: args.toId,
+            ...(result.recorded ? {} : { note: "already recorded — links are idempotent" }) };
+        }),
+    ),
+
+    sdk.tool(
+      "unlink_requirements",
+      "Retire a recorded relationship that no longer holds (a resolved conflict, a dependency an amendment removed).",
+      {
+        fromId: z.string().min(1),
+        kind: z.enum(["depends_on", "conflicts_with", "rests_on"]),
+        toId: z.string().min(1),
+      },
+      async (args: { fromId: string; kind: "depends_on" | "conflicts_with" | "rests_on"; toId: string }) =>
+        guarded(() => {
+          requirements.unlink({ userSessionId, fromId: args.fromId, kind: args.kind, toId: args.toId, actor: "main" });
+          return { retired: true, fromId: args.fromId, kind: args.kind, toId: args.toId };
+        }),
+    ),
+
     sdk.tool(
       "update_orchestration_state",
-      "Revise YOUR working state — the durable memory your next generation reads: current strategy (and why), open uncertainties, standing assumptions, live risks. Any section you pass REPLACES that section wholly; omitted sections persist. Update on material events — commissioning, an alarm you acted on, a discovery that changes the plan, a direction change, before declaring done — never as per-turn ceremony. When you work around a coordination structure the patterns cannot express, note it with the tag 'pattern-friction:'.",
+      "Revise YOUR working state — the durable memory your next generation reads: current strategy (and why), open uncertainties, standing assumptions, live risks. Any section you pass REPLACES that section wholly; omitted sections persist. A load-bearing assumption that specific REQUIREMENTS rest on belongs in record_assumption (id-linked, falsifiable-with-consequence); this scratchpad is for strategy-level notes. Update on material events — commissioning, an alarm you acted on, a discovery that changes the plan, a direction change, before declaring done — never as per-turn ceremony. When you work around a coordination structure the patterns cannot express, note it with the tag 'pattern-friction:'.",
       {
         trigger: z.enum(["commission", "discovery", "alarm", "direction_change", "operator"])
           .describe("What occasioned this update."),

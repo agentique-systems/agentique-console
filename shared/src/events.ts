@@ -211,7 +211,17 @@ export interface PlanProposedPayload {
   /** Present when this card proposes a legacy SPEC revision rather than a plan. */
   spec?: { revision: number; changeNote?: string };
   /** Present when this card proposes a REQUIREMENT revision (the canonical spec). */
-  requirements?: { revision: number; changeNote?: string; nodeCount: number };
+  requirements?: {
+  revision: number;
+  changeNote?: string;
+  nodeCount: number;
+  /** What the proposal patches: prose + structure, prose alone, or one subtree. */
+  kind?: "full" | "intent" | "subtree";
+  /** Subtree context for the card: the scope node and its ancestor chain. */
+  scope?: { scopeId: string; statement: string; ancestors: { id: string; statement: string }[] };
+  /** Server-computed change summary the operator approves against. */
+  summary?: { added: string[]; changed: { id: string; statement: string }[]; retired: { id: string; statement: string }[] };
+};
 }
 export interface PlanResolvedPayload {
   userSessionId: string;
@@ -456,6 +466,10 @@ export interface RequirementsUpdatedPayload {
   added: string[];
   /** Requirement ids retired by this revision. */
   retired: string[];
+  /** What the revision patched: prose + structure, prose alone, or one subtree. */
+  kind: "full" | "intent" | "subtree";
+  /** The subtree root a `subtree` revision amended. */
+  scopeId?: string;
 }
 
 /**
@@ -491,6 +505,42 @@ export interface RequirementDelegatedPayload {
   agentSessionId: string;
   requirementIds: string[];
   source: "commission" | "assignment" | "child";
+}
+
+/** A premise was recorded — the alternative to a silently invented default. */
+export interface AssumptionRecordedPayload {
+  userSessionId: string;
+  id: string;
+  text: string;
+  source: "operator" | "main" | "agent";
+  actor: string;
+  agentSessionId?: string;
+  /** Requirements linked rests_on at recording time. */
+  requirementIds: string[];
+}
+
+/** A premise resolved. `affected` = linked requirements with their statuses at resolution. */
+export interface AssumptionResolvedPayload {
+  userSessionId: string;
+  id: string;
+  outcome: "confirmed" | "falsified" | "retired";
+  actor: string;
+  agentSessionId?: string;
+  note?: string;
+  evidenceCount: number;
+  affected: { requirementId: string; status: string }[];
+}
+
+/** A requirement relationship was recorded or retired. */
+export interface RequirementLinkChangedPayload {
+  userSessionId: string;
+  action: "recorded" | "retired";
+  linkKind: "depends_on" | "conflicts_with" | "rests_on";
+  fromId: string;
+  toKind: "requirement" | "assumption";
+  toId: string;
+  actor: string;
+  agentSessionId?: string;
 }
 
 /** Main revised its working state (strategy/uncertainties/assumptions/risks/completion). */
@@ -643,6 +693,9 @@ export type ConsoleEvent = Base &
     | { type: "requirement.status.changed"; payload: RequirementStatusChangedPayload }
     | { type: "requirement.decomposed"; payload: RequirementDecomposedPayload }
     | { type: "requirement.delegated"; payload: RequirementDelegatedPayload }
+    | { type: "assumption.recorded"; payload: AssumptionRecordedPayload }
+    | { type: "assumption.resolved"; payload: AssumptionResolvedPayload }
+    | { type: "requirement.link.changed"; payload: RequirementLinkChangedPayload }
     | { type: "user_session.state.updated"; payload: StateUpdatedPayload }
     | { type: "agent_session.created"; payload: AgentSessionCreatedPayload }
     | { type: "agent_session.termination.tripped"; payload: AgentSessionTerminationTrippedPayload }

@@ -1,6 +1,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 
 import type {
+  AssumptionWire,
   OperatorRequirementStatusBody,
   RequirementNodeWire,
   CreateUserSessionBody,
@@ -130,6 +131,26 @@ export function useSetRequirementStatus() {
     }) =>
       apiFetch<RequirementNodeWire>(
         `/api/user-sessions/${sessionId}/requirements/${requirementId}/status`,
+        { method: "POST", body: JSON.stringify(body) },
+      ),
+    onSuccess: (_data, { sessionId }) => {
+      void queryClient.invalidateQueries({ queryKey: keys.userSessions.requirements(sessionId) });
+      void queryClient.invalidateQueries({ queryKey: keys.userSessions.all });
+    },
+  });
+}
+
+/** The operator's verdict on one assumption — their word is its own provenance. */
+export function useResolveAssumption() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ sessionId, assumptionId, body }: {
+      sessionId: string;
+      assumptionId: string;
+      body: { outcome: "confirmed" | "falsified" | "retired"; note?: string };
+    }) =>
+      apiFetch<AssumptionWire>(
+        `/api/user-sessions/${sessionId}/assumptions/${assumptionId}/resolve`,
         { method: "POST", body: JSON.stringify(body) },
       ),
     onSuccess: (_data, { sessionId }) => {

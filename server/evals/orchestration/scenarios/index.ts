@@ -5,10 +5,13 @@ import ambiguousSignal from "./ambiguous-signal.ts";
 import hiddenConstraint from "./hidden-constraint.ts";
 import parallelExploration from "./parallel-exploration.ts";
 import hungAgent from "./hung-agent.ts";
+import intentLifecycle from "./intent-lifecycle.ts";
 import noisyContraryEvidence from "./noisy-contrary-evidence.ts";
 import requirementTraceability from "./requirement-traceability.ts";
 import restartHonesty from "./restart-honesty.ts";
 import reviewerInvalidatesSpec from "./reviewer-invalidates-spec.ts";
+import silentAssumption from "./silent-assumption.ts";
+import stagedElaboration from "./staged-elaboration.ts";
 import suboptimalFraming from "./suboptimal-framing.ts";
 import trivialNoDelegation from "./trivial-no-delegation.ts";
 import twoPerspectivesBetter from "./two-perspectives-better.ts";
@@ -31,6 +34,9 @@ export const SCENARIOS: OrchestrationScenario[] = [
   twoPerspectivesBetter,
   reviewerInvalidatesSpec,
   requirementTraceability,
+  silentAssumption,
+  stagedElaboration,
+  intentLifecycle,
   hungAgent,
   restartHonesty,
   visualJudgment,

@@ -22,6 +22,7 @@ export type AgentToolName =
   | "send_handoff" | "read_artifact" | "write_note" | "ask_operator" | "roster_status"
   | "read_handoff" | "report_handoff_discrepancy" | "forward_message" | "read_requirements"
   | "report_requirement" | "decompose_requirement"
+  | "record_assumption" | "resolve_assumption" | "link_requirements" | "unlink_requirements"
   | "task_list" | "task_create" | "task_update" | "assignment_cancel"
   | "dispatch_work_items" | "create_child_session" | "abandon_child_session";
 
@@ -70,6 +71,10 @@ export function grantedTools(
   // delegated is checked live per call, never frozen into the tool list.
   if (deps.specs && (grants.has("requirements_report") || deps.requirementsEntrySeat === true)) {
     tools.add("report_requirement"); tools.add("decompose_requirement");
+    // The premise/relationship surface travels with the requirement-write
+    // grant: the seat that reports on a subtree records what it rests on.
+    tools.add("record_assumption"); tools.add("resolve_assumption");
+    tools.add("link_requirements"); tools.add("unlink_requirements");
   }
   // A reviewer-archetype seat may file verification verdicts regardless of its
   // role's grants: the Console derives the `independent` tier only from a

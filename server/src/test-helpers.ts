@@ -6,7 +6,7 @@ import { bootApp, type BootReport } from "./boot.ts";
 import { loadConfig, type Config } from "./config.ts";
 import { openDb } from "./db/client.ts";
 import { Repo, type UserSessionRow } from "./db/repo.ts";
-import { workspaces } from "./db/schema.ts";
+import { projects, workspaces } from "./db/schema.ts";
 import { EventBus } from "./events/bus.ts";
 import { newId, nowIso } from "./ids.ts";
 import type { RunCompletionService } from "./completion/service.ts";
@@ -45,7 +45,7 @@ export interface Harness {
   config: Config;
   workspaceId: string;
   /** Inserts an open user session row and returns its id. */
-  addUserSession(mode?: "execute" | "plan_execute"): string;
+  addUserSession(mode?: "execute" | "plan_execute", opts?: { projectId?: string }): string;
 }
 
 export type DelegationHarness = Harness;
@@ -98,10 +98,19 @@ export function makeHarness(program: FakeProgram, options: HarnessOptions = {}):
     fake,
     config,
     workspaceId,
-    addUserSession(mode = "execute") {
+    addUserSession(mode = "execute", opts: { projectId?: string } = {}) {
+      // A session always sits on a project; the fixture mints one per session
+      // (the production default) unless the test passes one to continue.
+      const projectId = opts.projectId ?? newId("proj");
+      if (opts.projectId === undefined) {
+        db.insert(projects)
+          .values({ id: projectId, workspaceId, title: null, intentDocument: null, createdAt: nowIso() })
+          .run();
+      }
       const row: UserSessionRow = {
         id: newId("us"),
         workspaceId,
+        projectId,
         title: "test session",
         mode,
         phase: mode === "plan_execute" ? "planning" : "executing",

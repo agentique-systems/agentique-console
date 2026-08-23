@@ -18,6 +18,8 @@ export interface Workspace {
 export interface UserSession {
   id: string;
   workspaceId: string;
+  /** The project this session works on — the requirement graph's durable scope. */
+  projectId: string;
   title: string | null;
   mode: SessionMode;
   phase: SessionPhase;
@@ -372,13 +374,27 @@ export interface Interaction {
    */
   detached: boolean;
   payload:
-    | { questions: InteractionQuestion[] }
+    | {
+        questions: InteractionQuestion[];
+        /** Requirement ids the question resolves or gates; the answer pins to them. */
+        requirementIds?: string[];
+      }
     | {
         plan: string;
         /** Marks a legacy spec-revision approval. */
         spec?: { revision: number; changeNote?: string };
         /** Marks a requirement-revision approval (the canonical spec). */
-        requirements?: { revision: number; changeNote?: string; nodeCount: number };
+        requirements?: {
+          revision: number;
+          changeNote?: string;
+          nodeCount: number;
+          /** What the proposal patches: prose + structure, prose alone, or one subtree. */
+          kind?: "full" | "intent" | "subtree";
+          /** Subtree context for the card: the scope node and its ancestor chain. */
+          scope?: { scopeId: string; statement: string; ancestors: { id: string; statement: string }[] };
+          /** Server-computed change summary the operator approves against. */
+          summary?: { added: string[]; changed: { id: string; statement: string }[]; retired: { id: string; statement: string }[] };
+        };
       };
   response: Record<string, unknown> | null;
   createdAt: string;
@@ -420,6 +436,41 @@ export interface RequirementNodeWire {
     evidenceCount: number;
     at: string;
   } | null;
+  /** Outgoing depends_on targets (requirement ids). */
+  dependsOn: string[];
+  /** Incoming depends_on sources — who is waiting on this node. */
+  dependents: string[];
+  /** conflicts_with partners (symmetric; both directions merged). */
+  conflictsWith: string[];
+  /** Assumptions this node rests on, with their current status. */
+  restsOn: { id: string; status: AssumptionStatus }[];
+  /**
+   * Deterministic invalidation marks, computed from the shared ordinal clock
+   * — never stored, never part of derivation: `depends_changed` when a direct
+   * dependency moved after this node's latest terminal claim;
+   * `rests_on_falsified` when a linked assumption was falsified after it.
+   * Record-and-display: reopening remains a model or operator act.
+   */
+  flags: ("depends_changed" | "rests_on_falsified")[];
+}
+
+export type AssumptionStatus = "open" | "confirmed" | "falsified" | "retired";
+
+/** A recorded premise the work proceeds on — see the assumptions table. */
+export interface AssumptionWire {
+  id: string;
+  text: string;
+  status: AssumptionStatus;
+  source: "operator" | "main" | "agent";
+  actor: string;
+  agentSessionId: string | null;
+  interactionId: string | null;
+  resolutionNote: string | null;
+  resolutionEvidenceCount: number;
+  /** Requirement ids linked rests_on to this assumption. */
+  requirementIds: string[];
+  createdAt: string;
+  resolvedAt: string | null;
 }
 
 /** Why an open requirement is still open — derived from console-owned facts. */

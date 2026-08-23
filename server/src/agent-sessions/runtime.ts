@@ -41,6 +41,7 @@ import { GOVERNED_BUILTIN_TOOLS, declaredMcpServers, effectiveBuiltinTools, seat
 import { grantedTools, runtimeToolNames, type AgentToolName } from "./grants.ts";
 import type { ActiveTurn, AgentLane, AgentLanePool } from "./lanes.ts";
 import type { DispatchWorkItemsInput } from "./patterns/engine.ts";
+import type { AssumptionService } from "../orchestrator/assumptions.ts";
 import type { RequirementService } from "../orchestrator/requirements.ts";
 import type { SessionRouting } from "./routing.ts";
 import type { Deliver, Injector, RecordFailure, Transfer } from "./seams.ts";
@@ -102,6 +103,8 @@ export interface AgentRuntimeDeps {
   handoffs: HandoffService;
   /** The governing requirements (legacy-spec fallback inside), for the seats' requirement tools. */
   requirements: RequirementService;
+  /** Recorded premises, for the seats' assumption tools. */
+  assumptions: AssumptionService;
   /** OS capabilities. `null` = absent, stated at the construction site. */
   worktrees: WorktreeManager | null;
   /** Lazy — the scheduler posts through the service, composed after it. */

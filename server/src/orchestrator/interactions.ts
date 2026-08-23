@@ -110,6 +110,11 @@ export interface CreateOperatorQuestionInput {
   dedupeKey?: string;
   toolUseId?: string;
   signal?: AbortSignal;
+  /**
+   * The requirement ids this question resolves or gates. Rides the payload;
+   * the decision ledger pins the eventual answer to them.
+   */
+  requirementIds?: string[];
 }
 
 export class InteractionService {
@@ -211,10 +216,11 @@ export class InteractionService {
   ): { id: string; resolution: Promise<InteractionResolution> } {
     const urgency = input.urgency ?? "blocking";
     const source = input.source ?? "agent";
+    const requirementIds = input.requirementIds ?? [];
     return this.#create(
       input.userSessionId,
       "question",
-      { questions: input.questions },
+      { questions: input.questions, ...(requirementIds.length === 0 ? {} : { requirementIds }) },
       input.toolUseId,
       input.signal,
       {
@@ -293,11 +299,20 @@ export class InteractionService {
     revision: number,
     changeNote: string | undefined,
     nodeCount: number,
+    extras: {
+      /** What the proposal patches; the card renders scope and diff context. */
+      kind?: "full" | "intent" | "subtree";
+      scope?: { scopeId: string; statement: string; ancestors: { id: string; statement: string }[] };
+      summary?: { added: string[]; changed: { id: string; statement: string }[]; retired: { id: string; statement: string }[] };
+    } = {},
   ): { id: string; resolution: Promise<InteractionResolution> } {
     const requirements = {
       revision,
       ...(changeNote === undefined || changeNote === "" ? {} : { changeNote }),
       nodeCount,
+      ...(extras.kind === undefined ? {} : { kind: extras.kind }),
+      ...(extras.scope === undefined ? {} : { scope: extras.scope }),
+      ...(extras.summary === undefined ? {} : { summary: extras.summary }),
     };
     return this.#create(
       userSessionId,

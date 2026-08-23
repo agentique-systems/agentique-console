@@ -18,7 +18,8 @@ function node(over: Partial<RequirementNodeWire> & { id: string }): RequirementN
     parentId: null, ord: 0, statement: `statement ${over.id}`, composition: "all",
     verifyExpectation: null, status: "open", derivedStatus: "open", origin: "committed",
     introducedInRevision: 1, retiredInRevision: null, refinedByAgentSessionId: null,
-    delegatedTo: [], latestChange: null, ...over,
+    delegatedTo: [], latestChange: null,
+    dependsOn: [], dependents: [], conflictsWith: [], restsOn: [], flags: [], ...over,
   };
 }
 
@@ -43,6 +44,8 @@ const RESPONSE: GetRequirementsResponse = {
     node({ id: "r4", parentId: "r1", ord: 2, statement: "Rate limit enforced", status: "violated", derivedStatus: "violated" }),
   ],
   frontier: [{ requirementId: "r3", statement: "Sessions expire", annotations: ["in_progress", "awaiting_operator"] }],
+  assumptions: [],
+  intent: null,
   verificationGaps: [],
   reversals: [],
 };

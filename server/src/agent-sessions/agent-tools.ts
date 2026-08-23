@@ -39,6 +39,8 @@ export interface AskOperatorArgs {
   recommendation?: string;
   urgency: InteractionUrgency;
   allowFreeText: boolean;
+  /** Requirement ids (inside the delegation) this decision resolves or gates. */
+  requirementIds?: string[];
 }
 
 /** The flat, provider-validated parameter surface of `send_handoff`. */
@@ -60,6 +62,7 @@ interface SendHandoffArgs {
 }
 
 import { fail, ok } from "../sdk/tool-result.ts";
+import type { AssumptionService } from "../orchestrator/assumptions.ts";
 import type { RequirementService } from "../orchestrator/requirements.ts";
 
 /** The slice of the service's deps the tool handlers read. */
@@ -72,6 +75,8 @@ export interface AgentToolsDeps {
   handoffs?: HandoffService;
   /** The governing requirements (legacy-spec fallback inside; absent in some unit harnesses). */
   requirements?: RequirementService;
+  /** Recorded premises (absent in some unit harnesses). */
+  assumptions?: AssumptionService;
   worktrees: WorktreeManager | null;
 }
 
@@ -194,12 +199,21 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
           subject: z.string().min(1), description: z.string().default(""),
           owner: z.string().min(1).describe("The agent that will DO this work — not you. The roster, the final caveats and the operator's run summary all read this."),
           blockedBy: z.array(z.string()).default([]).describe("taskIds this task depends on. Forward references are fine — the edge attaches when the blocker is created."),
-        }, async (args: { taskId: string; subject: string; description: string; owner: string; blockedBy: string[] }) => {
+          requirementId: z.string().min(1).optional().describe("The requirement id (inside your delegated sub-scope) this unit discharges — links the ledger to the graph."),
+        }, async (args: { taskId: string; subject: string; description: string; owner: string; blockedBy: string[]; requirementId?: string }) => {
           const names = new Set(deps.repo.listAgents(session.id).map((row) => row.name));
           if (!names.has(args.owner)) {
             return fail(`no agent named "${args.owner}" in this session; owners are one of: ${[...names].join(", ")}`);
           }
-          deps.tasks?.upsertFromCreate({ sdkSessionId: listId, sdkTaskId: args.taskId, subject: args.subject, description: args.description, owner: args.owner, blockedBy: args.blockedBy, attribution });
+          if (args.requirementId !== undefined) {
+            try {
+              deps.requirements?.assertWithinDelegation(session.userSessionId, session.id, args.requirementId);
+            } catch (error) {
+              return fail(error);
+            }
+          }
+          deps.tasks?.upsertFromCreate({ sdkSessionId: listId, sdkTaskId: args.taskId, subject: args.subject, description: args.description, owner: args.owner, blockedBy: args.blockedBy,
+            ...(args.requirementId === undefined ? {} : { requirementId: args.requirementId }), attribution });
           return ok({ taskId: args.taskId, created: true, owner: args.owner });
         }),
         sdk.tool("task_update", "Update a ledger entry. Keep status honest as work progresses — the Console reports open tasks to the operator alongside your final, and completing a task dispatches any assignments scheduled behind it. removeBlockedBy drops a dependency that no longer holds (e.g. a deleted blocker), releasing whatever it was blocking.", {
@@ -208,7 +222,15 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
           owner: z.string().optional(), subject: z.string().optional(), description: z.string().optional(),
           addBlockedBy: z.array(z.string()).optional(),
           removeBlockedBy: z.array(z.string()).optional(),
-        }, async (args: { taskId: string; status?: "pending" | "in_progress" | "completed" | "deleted"; owner?: string; subject?: string; description?: string; addBlockedBy?: string[]; removeBlockedBy?: string[] }) => {
+          requirementId: z.string().min(1).optional().describe("Link (or re-link) this unit to the requirement it discharges — inside your delegated sub-scope."),
+        }, async (args: { taskId: string; status?: "pending" | "in_progress" | "completed" | "deleted"; owner?: string; subject?: string; description?: string; addBlockedBy?: string[]; removeBlockedBy?: string[]; requirementId?: string }) => {
+          if (args.requirementId !== undefined) {
+            try {
+              deps.requirements?.assertWithinDelegation(session.userSessionId, session.id, args.requirementId);
+            } catch (error) {
+              return fail(error);
+            }
+          }
           const { taskId, ...patch } = args;
           deps.tasks?.applyUpdate({ sdkSessionId: listId, sdkTaskId: taskId, patch });
           return ok({ taskId, updated: true });
@@ -256,15 +278,31 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
   if (deps.requirements) {
     const requirements = deps.requirements;
     tools.push(sdk.tool("read_requirements",
-      "Read the run's governing requirements: the outline with console-derived statuses, plus your session's delegated requirement ids. Your work is checked against it. (A legacy run returns its markdown spec instead.)",
-    { cursor: z.string().optional(), maxBytes: z.number().int().min(1).max(PAGE_MAX_BYTES).default(PAGE_DEFAULT_BYTES) },
-    async (args: { cursor?: string; maxBytes: number }) => {
-      const digest = requirements.digest(ctx.session.userSessionId);
-      if (digest === "") return ok({ requirements: null, note: "no approved requirements for this run" });
+      "Read the run's governing requirements: the outline with console-derived statuses, plus your session's delegated requirement ids. Your work is checked against it. Pass scopeId (inside your delegated sub-scope) to read one subtree in full. The root read includes the operator's approved intent prose. (A legacy run returns its markdown spec instead.)",
+    { scopeId: z.string().min(1).optional().describe("Read only this requirement's subtree — must sit inside your delegated sub-scope."),
+      cursor: z.string().optional(), maxBytes: z.number().int().min(1).max(PAGE_MAX_BYTES).default(PAGE_DEFAULT_BYTES) },
+    async (args: { scopeId?: string; cursor?: string; maxBytes: number }) => {
       const approved = requirements.latestApproved(ctx.session.userSessionId);
+      if (approved === undefined) {
+        const digest = requirements.digest(ctx.session.userSessionId);
+        if (digest === "") return ok({ requirements: null, note: "no approved requirements for this run" });
+        return ok({ legacy: true, document: pageTail(digest, args.cursor, args.maxBytes),
+          delegatedToThisSession: requirements.delegationSet(session.id) });
+      }
+      if (args.scopeId !== undefined) {
+        try {
+          requirements.assertWithinDelegation(session.userSessionId, session.id, args.scopeId);
+        } catch (error) {
+          return fail(error);
+        }
+        return ok({ revision: approved.revision, scopeId: args.scopeId,
+          document: pageTail(requirements.statusOutlineFor(ctx.session.userSessionId, args.scopeId), args.cursor, args.maxBytes) });
+      }
+      const intent = requirements.intentDocument(ctx.session.userSessionId);
       return ok({
-        ...(approved === undefined ? { legacy: true } : { revision: approved.revision }),
-        document: pageTail(digest, args.cursor, args.maxBytes),
+        revision: approved.revision,
+        ...(intent === null ? {} : { intent }),
+        document: pageTail(requirements.statusOutlineFor(ctx.session.userSessionId), args.cursor, args.maxBytes),
         delegatedToThisSession: requirements.delegationSet(session.id),
       });
     }));
@@ -317,6 +355,109 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
             return fail(error);
           }
         }));
+      // The premise/relationship surface, scoped exactly like the requirement
+      // writes: referenced requirement ids must sit inside the delegation.
+      // Registration follows the GRANT alone (the grants-parity law); a unit
+      // harness without the service gets a plain failure from the handler.
+      {
+        const assumptionService = () => {
+          if (!deps.assumptions) throw new Error("assumption service unavailable in this harness");
+          return deps.assumptions;
+        };
+        tools.push(sdk.tool("record_assumption",
+          "Record an assumption your work proceeds on — a default you took, a belief a requirement rests on. Name the requirement ids (inside your delegated sub-scope) that rest on it: a later falsification then flags their claims. Recording needs no approval; it is what makes the premise visible instead of silently invented.",
+          {
+            text: z.string().min(1).describe("One declarative premise."),
+            requirementIds: z.array(z.string().min(1)).max(12).optional()
+              .describe("Requirements in your sub-scope that rest on this premise."),
+          },
+          async (args: { text: string; requirementIds?: string[] }) => {
+            try {
+              for (const id of args.requirementIds ?? []) {
+                requirements.assertWithinDelegation(session.userSessionId, session.id, id);
+              }
+              const wire = assumptionService().record({
+                userSessionId: session.userSessionId, text: args.text, source: "agent",
+                actor: agent.name, agentSessionId: session.id,
+                ...(args.requirementIds === undefined ? {} : { requirementIds: args.requirementIds }),
+              });
+              return ok({ assumptionId: wire.id, requirementIds: wire.requirementIds,
+                note: "Recorded. Main and the operator see it; resolve_assumption closes it with provenance." });
+            } catch (error) {
+              return fail(error);
+            }
+          }));
+        tools.push(sdk.tool("resolve_assumption",
+          "Resolve a recorded assumption: confirmed / falsified (both need provenance — evidence refs or an operator answer's interactionId) or retired (stopped mattering). A falsification flags dependent terminal claims and wakes main; it never rewrites status.",
+          {
+            assumptionId: z.string().min(1),
+            outcome: z.enum(["confirmed", "falsified", "retired"]),
+            note: z.string().optional(),
+            evidence: z.array(EvidenceRefSchema).default([]),
+            interactionId: z.string().optional(),
+          },
+          async (args: { assumptionId: string; outcome: "confirmed" | "falsified" | "retired"; note?: string;
+            evidence: { kind: "file" | "journal" | "artifact" | "task" | "command" | "url"; ref: string; label?: string }[];
+            interactionId?: string }) => {
+            try {
+              const wire = assumptionService().resolve({
+                userSessionId: session.userSessionId, assumptionId: args.assumptionId, outcome: args.outcome,
+                actor: agent.name, agentSessionId: session.id,
+                ...(args.note === undefined ? {} : { note: args.note }),
+                evidence: args.evidence,
+                ...(args.interactionId === undefined ? {} : { interactionId: args.interactionId }),
+              });
+              return ok({ assumptionId: wire.id, status: wire.status, requirementIds: wire.requirementIds });
+            } catch (error) {
+              return fail(error);
+            }
+          }));
+        tools.push(sdk.tool("link_requirements",
+          "Record a relationship: depends_on (fromId cannot be satisfied before toId — both inside your sub-scope; acyclic) or conflicts_with (the two cannot both hold as written — fromId inside your sub-scope; toId MAY be outside, a conflict is exactly a cross-scope discovery; route the resolution to main). Links never change derived statuses.",
+          {
+            fromId: z.string().min(1),
+            kind: z.enum(["depends_on", "conflicts_with"]),
+            toId: z.string().min(1),
+            note: z.string().optional(),
+          },
+          async (args: { fromId: string; kind: "depends_on" | "conflicts_with"; toId: string; note?: string }) => {
+            try {
+              requirements.assertWithinDelegation(session.userSessionId, session.id, args.fromId);
+              if (args.kind === "depends_on") {
+                requirements.assertWithinDelegation(session.userSessionId, session.id, args.toId);
+              }
+              const result = requirements.link({
+                userSessionId: session.userSessionId, fromId: args.fromId, kind: args.kind, toId: args.toId,
+                actor: agent.name, agentSessionId: session.id,
+                ...(args.note === undefined ? {} : { note: args.note }),
+              });
+              return ok({ ...result, fromId: args.fromId, kind: args.kind, toId: args.toId,
+                ...(args.kind === "conflicts_with" && result.recorded
+                  ? { note: "Recorded for main and the operator. A conflict resolves by amendment or operator decision — route it to main." } : {}) });
+            } catch (error) {
+              return fail(error);
+            }
+          }));
+        tools.push(sdk.tool("unlink_requirements",
+          "Retire a recorded relationship that no longer holds. fromId must sit inside your delegated sub-scope.",
+          {
+            fromId: z.string().min(1),
+            kind: z.enum(["depends_on", "conflicts_with", "rests_on"]),
+            toId: z.string().min(1),
+          },
+          async (args: { fromId: string; kind: "depends_on" | "conflicts_with" | "rests_on"; toId: string }) => {
+            try {
+              requirements.assertWithinDelegation(session.userSessionId, session.id, args.fromId);
+              requirements.unlink({
+                userSessionId: session.userSessionId, fromId: args.fromId, kind: args.kind, toId: args.toId,
+                actor: agent.name, agentSessionId: session.id,
+              });
+              return ok({ retired: true, fromId: args.fromId, kind: args.kind, toId: args.toId });
+            } catch (error) {
+              return fail(error);
+            }
+          }));
+      }
     }
   }
   /**
@@ -400,6 +541,8 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
         recommendation: z.string().max(400).optional().describe("Which option you recommend and why. Always give one."),
         urgency: z.enum(["blocking", "deferred"]).default("blocking"),
         allowFreeText: z.boolean().default(true).describe("Let the operator answer outside your options."),
+        requirementIds: z.array(z.string().min(1)).max(12).optional()
+          .describe("Requirement ids inside your delegated sub-scope that this decision resolves or gates. The answer is recorded pinned to them."),
       },
       async (args: AskOperatorArgs) => {
         try {

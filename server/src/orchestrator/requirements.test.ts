@@ -8,7 +8,7 @@ import { describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { openDb } from "../db/client.ts";
 import { createStores } from "../db/stores/index.ts";
-import { events as eventsTable, userSessions, workspaces } from "../db/schema.ts";
+import { events as eventsTable, projects, userSessions, workspaces } from "../db/schema.ts";
 import { EventBus } from "../events/bus.ts";
 import { nowIso } from "../ids.ts";
 import { SpecService } from "./spec.ts";
@@ -29,9 +29,10 @@ function makeHarness() {
   const bus = new EventBus(db, stores.artifacts);
   const now = nowIso();
   db.insert(workspaces).values({ id: "ws1", name: "w", rootPath: "/tmp/req-service-test", createdAt: now, updatedAt: now }).run();
-  db.insert(userSessions).values({ id: "us1", workspaceId: "ws1", mode: "execute", title: "t", createdAt: now, updatedAt: now } as typeof userSessions.$inferInsert).run();
+  db.insert(projects).values({ id: "proj1", workspaceId: "ws1", title: null, intentDocument: null, createdAt: now }).run();
+  db.insert(userSessions).values({ id: "us1", workspaceId: "ws1", projectId: "proj1", mode: "execute", title: "t", createdAt: now, updatedAt: now } as typeof userSessions.$inferInsert).run();
   const specs = new SpecService(stores.specs, bus);
-  const service = new RequirementService(stores.requirements, specs, bus);
+  const service = new RequirementService(stores.requirements, stores.projects, stores.assumptions, specs, bus, () => "proj1");
   const eventsOf = (type: string) =>
     db.select().from(eventsTable).where(eq(eventsTable.type, type)).all();
   return { service, specs, eventsOf, stores };
@@ -315,6 +316,209 @@ describe("review regressions", () => {
     service.approve(draft2.id, { document: v2, edited: false }); // r4, document ord 1
     // Ord tie between committed r4 and refinement r3: committed wins, always.
     expect(service.derive("us1").map((node) => node.id)).toEqual(["r1", "r2", "r4", "r3"]);
+  });
+});
+
+describe("decompose depth guard", () => {
+  it("refuses children that would exceed the parser's maximum outline depth", () => {
+    const { service } = makeHarness();
+    approveFixture(service);
+    // r6 sits at depth 0; refine a chain one level at a time. The parser
+    // allows depths 0..7, so the child that would land at depth 8 is refused
+    // with the amendment alternative — otherwise the next canonical render
+    // would no longer round-trip through the shared grammar.
+    let parentId = "r6";
+    for (let depth = 1; depth <= 7; depth += 1) {
+      const [added] = service.decompose({
+        userSessionId: "us1", parentId, children: [{ statement: `Level ${depth} check` }], actor: "main",
+      });
+      parentId = added!;
+    }
+    expect(() => service.decompose({
+      userSessionId: "us1", parentId, children: [{ statement: "Too deep" }], actor: "main",
+    })).toThrow(/maximum outline depth/);
+  });
+});
+
+describe("vision propagation and scoped context (Stage 3)", () => {
+  const PROSE_DOC = `# Tracker
+
+## Context
+Privacy over sharing; one operator.
+
+## Requirements
+- Books can be recorded
+  - A book has a title
+- Progress is visible
+`;
+
+  it("digest carries the intent prose and prefers structural collapse over truncation", () => {
+    const { service } = makeHarness();
+    const draft = service.propose("us1", PROSE_DOC, "initial");
+    service.approve(draft.id, { document: PROSE_DOC, edited: false });
+    const small = service.digest("us1");
+    expect(small).toContain("# Tracker");
+    expect(small).toContain("Privacy over sharing");
+    expect(small).toContain("- [·] r1");
+
+    // Blow past the byte budget with deep refinement; the ladder sheds depth
+    // (leaving per-subtree counts) instead of truncating, and the prose stays.
+    for (let block = 0; block < 4; block += 1) {
+      const [mid] = service.decompose({
+        userSessionId: "us1", parentId: "r2",
+        children: [{ statement: `Deep area ${block} ${"x".repeat(120)}` }], actor: "main",
+      });
+      service.decompose({
+        userSessionId: "us1", parentId: mid!,
+        children: Array.from({ length: 8 }, (_, i) => ({ statement: `Detail ${block}.${i} ${"y".repeat(220)}` })),
+        actor: "main",
+      });
+    }
+    const big = service.digest("us1");
+    expect(Buffer.byteLength(big, "utf8")).toBeLessThanOrEqual(8 * 1024);
+    expect(big).toContain("Privacy over sharing");
+    expect(big).toContain("(subtree:");
+    expect(big).not.toContain("…(truncated");
+  });
+
+  it("collapses subtrees delegated to open sessions to one counted line", () => {
+    const { service } = makeHarness();
+    const draft = service.propose("us1", PROSE_DOC, "initial");
+    service.approve(draft.id, { document: PROSE_DOC, edited: false });
+    service.setFrontierDeps({
+      openAgentSessionIds: () => new Set(["as1"]),
+      blockedRequirementIds: () => new Set(),
+      awaitingOperatorAgentSessionIds: () => new Set(),
+    });
+    service.delegate("us1", "as1", ["r1"], "commission");
+    // Make ONLY the delegated-collapse step fit: a large unsatisfied subtree
+    // under the delegated r1, small elsewhere.
+    service.decompose({
+      userSessionId: "us1", parentId: "r2",
+      children: Array.from({ length: 30 }, (_, i) => ({ statement: `Case ${i} ${"z".repeat(300)}` })), actor: "main",
+    });
+    const digest = service.digest("us1");
+    expect(Buffer.byteLength(digest, "utf8")).toBeLessThanOrEqual(8 * 1024);
+    expect(digest).toContain('read_requirements scopeId "r1"');
+    expect(digest).not.toContain("Case 3 ");
+    // The non-delegated top-level line still renders in full.
+    expect(digest).toContain("Progress is visible");
+  });
+
+  it("statusOutlineFor scopes to one subtree with the scope at top level; ancestorPath walks to the root", () => {
+    const { service } = makeHarness();
+    approveFixture(service);
+    const scoped = service.statusOutlineFor("us1", "r3");
+    expect(scoped.split("\n")[0]).toMatch(/^- \[·\] r3/);
+    expect(scoped).toContain("r4");
+    expect(scoped).not.toContain("r6");
+    expect(service.ancestorPath("us1", "r4")).toEqual([
+      { id: "r1", statement: "Auth works end to end" },
+      { id: "r3", statement: "A config source loads" },
+    ]);
+    expect(service.ancestorPath("us1", "r1")).toEqual([]);
+  });
+});
+
+describe("scoped proposals (staged elaboration)", () => {
+  it("a subtree amendment diffs ONLY inside its scope: add, change, retire, promote — outside untouched", () => {
+    const { service } = makeHarness();
+    approveFixture(service);
+    service.reportStatus({ userSessionId: "us1", requirementId: "r6", to: "satisfied",
+      evidence: [{ kind: "command", ref: "npm run verify" }], claimant: { kind: "main" } });
+    const [refined] = service.decompose({ userSessionId: "us1", parentId: "r3", children: [{ statement: "YAML config parses" }], actor: "main" });
+
+    // Amend under r3: keep r4 (statement changed), drop r5, promote the
+    // refinement, add a new child. r1/r2/r6 are outside and untouched.
+    const doc = `## Requirements
+- r4: TOML config parses from a clean checkout
+- ${refined}: YAML config parses
+- Config errors name the offending key
+`;
+    const draft = service.propose("us1", doc, "config sources refined", { scopeId: "r3" });
+    expect(draft.kind).toBe("subtree");
+    const approved = service.approve(draft.id, { document: doc, edited: false });
+    expect(approved.retired).toEqual(["r5"]);
+    expect(approved.changed).toEqual(["r4"]);
+    const nodes = service.derive("us1");
+    expect(nodes.find((node) => node.id === "r4")).toMatchObject({ statement: "TOML config parses from a clean checkout", parentId: "r3" });
+    expect(nodes.find((node) => node.id === refined)).toMatchObject({ origin: "committed", parentId: "r3" });
+    expect(nodes.find((node) => node.id === "r8")).toMatchObject({ statement: "Config errors name the offending key", parentId: "r3" });
+    expect(nodes.find((node) => node.id === "r5")).toBeUndefined();
+    // Outside the scope: r6's satisfied claim SURVIVES the scoped amendment.
+    expect(nodes.find((node) => node.id === "r6")?.status).toBe("satisfied");
+    // The canonical stored document is the SCOPED render and round-trips.
+    expect(service.latestApproved("us1")?.document).not.toContain("r1");
+    expect(service.governingRevision("us1")).toBe(2);
+  });
+
+  it("rejects out-of-scope ids, prose in a subtree patch, and structure in an intent patch", () => {
+    const { service } = makeHarness();
+    approveFixture(service);
+    expect(() => service.propose("us1", "## Requirements\n- r6: `npm run verify` passes\n", undefined, { scopeId: "r3" }))
+      .toThrow(/outside the amendment scope/);
+    expect(() => service.propose("us1", "# Title\n\n## Requirements\n- r4: TOML config parses\n", undefined, { scopeId: "r3" }))
+      .toThrow(/structure only/);
+    expect(() => service.propose("us1", "## Requirements\n- New rule\n", undefined, { intent: true }))
+      .toThrow(/prose only/);
+  });
+
+  it("an intent amendment changes the prose alone and still bumps completion currency", () => {
+    const { service } = makeHarness();
+    approveFixture(service);
+    const doc = "# Auth hardening\n\n## Context\nSecurity outranks convenience.\n\n## Requirements\n";
+    const draft = service.propose("us1", doc, "sharpen the vision", { intent: true });
+    expect(draft.kind).toBe("intent");
+    service.approve(draft.id, { document: doc, edited: false });
+    expect(service.intentDocument("us1")).toContain("Security outranks convenience.");
+    expect(service.governingRevision("us1")).toBe(2);
+    // Statements untouched, statuses untouched.
+    expect(service.derive("us1").map((node) => node.id)).toEqual(["r1", "r2", "r3", "r4", "r5", "r6"]);
+  });
+
+  it("previewChanges names adds, changes, and retirements (cascade included) without minting", () => {
+    const { service } = makeHarness();
+    approveFixture(service);
+    service.decompose({ userSessionId: "us1", parentId: "r5", children: [{ statement: "JSON5 tolerated" }], actor: "main" });
+    const preview = service.previewChanges("us1", `## Requirements
+- r4: TOML config parses strictly
+- Config errors name the offending key
+`, { scopeId: "r3" })!;
+    expect(preview.added).toEqual(["Config errors name the offending key"]);
+    expect(preview.changed).toEqual([{ id: "r4", statement: "TOML config parses strictly" }]);
+    // r5 retires and takes its refinement child with it.
+    expect(preview.retired.map((entry) => entry.id).sort()).toEqual(["r5", "r7"]);
+    // Nothing minted by the preview.
+    expect(service.derive("us1").some((node) => node.id === "r8")).toBe(false);
+  });
+
+  it("refuses a whole-document proposal once the live graph exceeds the parser bound", () => {
+    const { service } = makeHarness();
+    approveFixture(service);
+    for (let block = 0; block < 7; block += 1) {
+      const [mid] = service.decompose({ userSessionId: "us1", parentId: "r6", children: [{ statement: `Area ${block}` }], actor: "main" });
+      service.decompose({ userSessionId: "us1", parentId: mid!, children: Array.from({ length: 30 }, (_, i) => ({ statement: `Check ${block}.${i}` })), actor: "main" });
+    }
+    expect(() => service.propose("us1", DOC, "monolith")).toThrow(/amend per subtree/);
+    // The scoped path stays open at any size.
+    const scoped = service.propose("us1", "## Requirements\n- r2: Login issues a session token\n", "trim auth", { scopeId: "r1" });
+    expect(scoped.kind).toBe("subtree");
+  });
+
+  it("sessionsAffectedByChange names sessions whose delegations intersect the change or depend on it", () => {
+    const { service } = makeHarness();
+    approveFixture(service);
+    service.setFrontierDeps({
+      openAgentSessionIds: () => new Set(["as-auth", "as-verify", "as-idle"]),
+      blockedRequirementIds: () => new Set(),
+      awaitingOperatorAgentSessionIds: () => new Set(),
+    });
+    service.delegate("us1", "as-auth", ["r1"], "commission");
+    service.delegate("us1", "as-verify", ["r6"], "commission");
+    service.link({ userSessionId: "us1", fromId: "r6", kind: "depends_on", toId: "r2", actor: "main" });
+    // r2 changed: as-auth holds its subtree; as-verify depends on it.
+    expect(service.sessionsAffectedByChange("us1", ["r2"]).sort()).toEqual(["as-auth", "as-verify"]);
+    expect(service.sessionsAffectedByChange("us1", ["r4"])).toEqual(["as-auth"]);
   });
 });
 

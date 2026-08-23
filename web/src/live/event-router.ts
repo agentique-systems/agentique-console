@@ -78,6 +78,9 @@ export function routeEvent(event: ConsoleEvent, deps: RouterDeps): void {
     case "requirement.status.changed":
     case "requirement.decomposed":
     case "requirement.delegated":
+    case "assumption.recorded":
+    case "assumption.resolved":
+    case "requirement.link.changed":
     case "user_session.state.updated":
       deps.invalidate(keys.userSessions.all);
       deps.invalidate(keys.sessionTreeAll);

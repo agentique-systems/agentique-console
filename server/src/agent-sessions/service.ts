@@ -17,6 +17,7 @@ import type { CapacityService } from "../capacity/service.ts";
 import type { ConsoleSdk } from "../sdk/types.ts";
 import type { WorktreeManager } from "../runtime/worktree-manager.ts";
 import type { DecisionLedger } from "../orchestrator/decisions.ts";
+import type { AssumptionService } from "../orchestrator/assumptions.ts";
 import type { RequirementService } from "../orchestrator/requirements.ts";
 import type { InteractionService } from "../orchestrator/interactions.ts";
 import type { AssignmentScheduler } from "../tasks/scheduler.ts";
@@ -43,6 +44,7 @@ import { dispatchWorkItems, onPatternPost, sweep as patternSweep, type DispatchW
 export interface AgentSessionServiceDeps {
   repo: Repo;
   requirements: RequirementService;
+  assumptions: AssumptionService;
   bus: EventBus;
   artifacts: ArtifactStore;
   /** Required — every knob's default lives in `loadConfig`, nowhere else. */
@@ -130,7 +132,7 @@ export class AgentSessionService {
     });
     this.#composer = new PromptComposer({
       repo: deps.repo, bus: deps.bus, config: deps.config, handoffs: deps.handoffs,
-      decisions: deps.decisions, requirements: deps.requirements, tasks: deps.tasks, interactions: deps.interactions,
+      decisions: deps.decisions, requirements: deps.requirements, assumptions: deps.assumptions, tasks: deps.tasks, interactions: deps.interactions,
       worktrees: deps.worktrees,
       laneState: (agentSessionId, agent) => {
         const lane = this.#lanes.peek(agentSessionId, agent);
@@ -139,6 +141,7 @@ export class AgentSessionService {
     });
     this.#operator = new OperatorSurface({
       repo: deps.repo, bus: deps.bus, config: deps.config, interactions: deps.interactions,
+      requirements: deps.requirements,
       routing: this.#routing,
       lanes: this.#lanes,
       transfer: (input) => this.post(input),
@@ -186,6 +189,7 @@ export class AgentSessionService {
       repo: deps.repo, bus: deps.bus, config: deps.config,
       sdk: deps.sdk, sessionStore: deps.sessionStore, getWorkspaceRoot: deps.getWorkspaceRoot,
       artifacts: deps.artifacts, tasks: deps.tasks, handoffs: deps.handoffs, requirements: deps.requirements,
+      assumptions: deps.assumptions,
       worktrees: deps.worktrees,
       scheduler: deps.scheduler, capacity: deps.capacity,
       lanes: this.#lanes, worktree: this.#worktreeBinding, routing: this.#routing, composer: this.#composer,

@@ -61,7 +61,18 @@ export interface PlanItem {
   /** Present when the card proposes a legacy SPEC revision rather than a plan. */
   readonly spec?: { readonly revision: number; readonly changeNote?: string };
   /** Present when the card proposes a REQUIREMENT revision (the canonical spec). */
-  readonly requirements?: { readonly revision: number; readonly changeNote?: string; readonly nodeCount: number };
+  readonly requirements?: {
+    readonly revision: number;
+    readonly changeNote?: string;
+    readonly nodeCount: number;
+    readonly kind?: "full" | "intent" | "subtree";
+    readonly scope?: { readonly scopeId: string; readonly statement: string; readonly ancestors: readonly { readonly id: string; readonly statement: string }[] };
+    readonly summary?: {
+      readonly added: readonly string[];
+      readonly changed: readonly { readonly id: string; readonly statement: string }[];
+      readonly retired: readonly { readonly id: string; readonly statement: string }[];
+    };
+  };
   readonly resolution?: {
     readonly approved: boolean;
     readonly note?: string;

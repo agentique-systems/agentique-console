@@ -22,11 +22,38 @@ export const workspaces = sqliteTable("workspaces", {
   updatedAt: text("updated_at").notNull(),
 });
 
+/**
+ * A project: the durable identity for a body of intent. Requirement ids,
+ * revisions, status history, and operator decisions belong to a project, not
+ * a UserSession — a later session opened onto the same project continues the
+ * same graph, the same ids, and the same decision ledger. Sessions attach at
+ * creation; continuation is SEQUENTIAL (one open session per project), so
+ * there is never concurrent multi-session mutation of one graph.
+ */
+export const projects = sqliteTable("projects", {
+  id: text("id").primaryKey(),
+  workspaceId: text("workspace_id")
+    .notNull()
+    .references(() => workspaces.id),
+  title: text("title"),
+  /**
+   * Operator-approved intent prose (title + preamble sections of the
+   * requirement document). Written at approval of a full or intent-kind
+   * proposal; never by a subtree amendment — the vision outlives patches.
+   */
+  intentDocument: text("intent_document"),
+  createdAt: text("created_at").notNull(),
+});
+
 export const userSessions = sqliteTable("user_sessions", {
   id: text("id").primaryKey(),
   workspaceId: text("workspace_id")
     .notNull()
     .references(() => workspaces.id),
+  /** The project this session works on; minted fresh unless continuing one. */
+  projectId: text("project_id")
+    .notNull()
+    .references(() => projects.id),
   title: text("title"),
   mode: text("mode", { enum: ["execute", "plan_execute"] }).notNull(),
   phase: text("phase", { enum: ["planning", "executing"] })
@@ -533,9 +560,30 @@ export const requirementRevisions = sqliteTable(
   "requirement_revisions",
   {
     id: text("id").primaryKey(),
+    /** The project whose graph this revision patches — the revision counter's scope. */
+    projectId: text("project_id").notNull().references(() => projects.id),
+    /** The session that proposed it — attribution, never the query key. */
     userSessionId: text("user_session_id").notNull().references(() => userSessions.id),
-    /** Monotonic per session, 1-based. */
+    /** Monotonic per PROJECT, 1-based — a continued session keeps counting. */
     revision: integer("revision").notNull(),
+    /**
+     * What this revision patches: `full` = intent prose + the whole
+     * committed structure (only legal while the graph fits one parser-bounded
+     * document); `intent` = the prose alone, statements untouched; `subtree`
+     * = one subtree's committed structure (scope_id names its root), prose
+     * untouched — the staged-elaboration unit the operator approves as a
+     * small card. Every kind bumps the revision counter: a changed vision or
+     * subtree invalidates completion currency deliberately.
+     */
+    kind: text("kind", { enum: ["full", "intent", "subtree"] }).notNull().default("full"),
+    /** The subtree root a `subtree` revision amends; null otherwise. */
+    scopeId: text("scope_id"),
+    /**
+     * The governing revision when this draft was proposed. Approval asserts it
+     * still matches — under the sequential-continuation and single-pending-
+     * proposal guards it always does; the assertion enforces the invariant.
+     */
+    baseRevision: integer("base_revision").notNull(),
     document: text("document").notNull(),
     graph: text("graph", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
     changeNote: text("change_note"),
@@ -546,9 +594,10 @@ export const requirementRevisions = sqliteTable(
     approvedAt: text("approved_at"),
   },
   (t) => [
-    index("requirement_revisions_session").on(t.userSessionId, t.revision),
+    index("requirement_revisions_project").on(t.projectId, t.revision),
     check("requirement_revisions_status", sql`${t.status} IN ('draft','approved','superseded','rejected')`),
     check("requirement_revisions_origin", sql`${t.origin} IN ('main','operator_edited')`),
+    check("requirement_revisions_kind", sql`${t.kind} IN ('full','intent','subtree')`),
   ],
 );
 
@@ -563,9 +612,9 @@ export const requirementRevisions = sqliteTable(
 export const requirementNodes = sqliteTable(
   "requirement_nodes",
   {
-    /** "r1", "r2", … — minted at approval or decomposition, per session. */
+    /** "r1", "r2", … — minted at approval or decomposition, per PROJECT, never reused. */
     id: text("id").notNull(),
-    userSessionId: text("user_session_id").notNull().references(() => userSessions.id),
+    projectId: text("project_id").notNull().references(() => projects.id),
     parentId: text("parent_id"),
     ord: integer("ord").notNull(),
     statement: text("statement").notNull(),
@@ -591,8 +640,8 @@ export const requirementNodes = sqliteTable(
     updatedAt: text("updated_at").notNull(),
   },
   (t) => [
-    primaryKey({ columns: [t.userSessionId, t.id] }),
-    index("requirement_nodes_live").on(t.userSessionId, t.retiredInRevision),
+    primaryKey({ columns: [t.projectId, t.id] }),
+    index("requirement_nodes_live").on(t.projectId, t.retiredInRevision),
     check("requirement_nodes_status", sql`${t.status} IN ('open','satisfied','violated','infeasible','retired')`),
     check("requirement_nodes_composition", sql`${t.composition} IN ('all','any')`),
     check("requirement_nodes_origin", sql`${t.origin} IN ('committed','refinement')`),
@@ -609,6 +658,9 @@ export const requirementStatusChanges = sqliteTable(
   "requirement_status_changes",
   {
     id: text("id").primaryKey(),
+    /** The graph's scope — the query key; claims survive session boundaries. */
+    projectId: text("project_id").notNull(),
+    /** The session in which the claim landed — attribution, never the key. */
     userSessionId: text("user_session_id").notNull(),
     requirementId: text("requirement_id").notNull(),
     fromStatus: text("from_status").notNull(),
@@ -623,12 +675,93 @@ export const requirementStatusChanges = sqliteTable(
     agentSessionId: text("agent_session_id"),
     /** The approved requirement revision in force when the change landed (0 = none yet). */
     atRevision: integer("at_revision").notNull(),
+    /**
+     * Per-project monotonic ordinal, shared with assumption resolutions —
+     * the deterministic clock invalidation flags compare (never wall time):
+     * a claim is suspect when something it depends on carries a LATER ord.
+     */
+    ord: integer("ord").notNull(),
     note: text("note"),
     createdAt: text("created_at").notNull(),
   },
   (t) => [
-    index("requirement_status_changes_req").on(t.userSessionId, t.requirementId, t.createdAt),
+    index("requirement_status_changes_req").on(t.projectId, t.requirementId, t.createdAt),
     check("requirement_status_changes_verified_by", sql`${t.verifiedBy} IN ('self','independent','operator','console')`),
+  ],
+);
+
+/**
+ * Assumptions: recorded premises the work proceeds on — a default taken
+ * where the operator was not asked, a belief about the world a requirement
+ * rests on. Recording one is what PREVENTS silent invention, so recording is
+ * never approval-gated; ids ("a1", …) are project-lifetime and never reused,
+ * exactly like requirement ids. `rests_on` rows in requirement_links join
+ * requirements to the assumptions under them; a falsified assumption
+ * decorates and wakes — it never rewrites requirement status.
+ */
+export const assumptions = sqliteTable(
+  "assumptions",
+  {
+    /** "a1", "a2", … — minted per project, never reused. */
+    id: text("id").notNull(),
+    projectId: text("project_id").notNull().references(() => projects.id),
+    text: text("text").notNull(),
+    status: text("status", { enum: ["open", "confirmed", "falsified", "retired"] })
+      .notNull()
+      .default("open"),
+    /** Who introduced it: the operator's own words, main's inference, or a seat's. */
+    source: text("source", { enum: ["operator", "main", "agent"] }).notNull(),
+    agentSessionId: text("agent_session_id"),
+    /** The ask that raised it or whose answer resolved it, when one exists. */
+    interactionId: text("interaction_id"),
+    /** "main", an agent name, or "operator". */
+    actor: text("actor").notNull(),
+    resolutionNote: text("resolution_note"),
+    resolutionEvidence: text("resolution_evidence", { mode: "json" })
+      .$type<{ kind: string; ref: string; label?: string }[]>(),
+    /** Same monotonic sequence as requirement_status_changes.ord. */
+    resolvedOrd: integer("resolved_ord"),
+    createdAt: text("created_at").notNull(),
+    resolvedAt: text("resolved_at"),
+  },
+  (t) => [
+    primaryKey({ columns: [t.projectId, t.id] }),
+    index("assumptions_project").on(t.projectId, t.status),
+    check("assumptions_status", sql`${t.status} IN ('open','confirmed','falsified','retired')`),
+    check("assumptions_source", sql`${t.source} IN ('operator','main','agent')`),
+  ],
+);
+
+/**
+ * Requirement relationships beyond the parent/child tree. NEVER part of
+ * derivation — deriveComposedStatus stays purely tree-based; links feed the
+ * frontier's blocked annotation, delegation context selection, and the
+ * invalidation flags. `depends_on` is directed and acyclic; `conflicts_with`
+ * is symmetric, stored once with the numerically smaller id as from_id (the
+ * unique index then also blocks inverse duplicates); `rests_on` points a
+ * requirement at an assumption. Requirement retirement retires its links.
+ */
+export const requirementLinks = sqliteTable(
+  "requirement_links",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id").notNull(),
+    /** Always a requirement id. */
+    fromId: text("from_id").notNull(),
+    toKind: text("to_kind", { enum: ["requirement", "assumption"] }).notNull(),
+    toId: text("to_id").notNull(),
+    kind: text("kind", { enum: ["depends_on", "conflicts_with", "rests_on"] }).notNull(),
+    createdByActor: text("created_by_actor").notNull(),
+    agentSessionId: text("agent_session_id"),
+    note: text("note"),
+    createdAt: text("created_at").notNull(),
+    retiredAt: text("retired_at"),
+  },
+  (t) => [
+    uniqueIndex("requirement_links_pair").on(t.projectId, t.kind, t.fromId, t.toKind, t.toId),
+    index("requirement_links_project").on(t.projectId, t.retiredAt),
+    check("requirement_links_to_kind", sql`${t.toKind} IN ('requirement','assumption')`),
+    check("requirement_links_kind", sql`${t.kind} IN ('depends_on','conflicts_with','rests_on')`),
   ],
 );
 
