@@ -145,6 +145,8 @@ export function createApp(options: CreateAppOptions): App {
 
   const capacity = new CapacityService({ repo, bus });
   const catalog = new CapabilityCatalog(path.join(config.infra.skillsPluginDir, "skills"));
+  // A typo'd requires.tools would silently block a skill's assignment forever.
+  for (const issue of catalog.issues) console.warn(`capability catalog: ${issue}`);
   const lateRunner = late<OrchestratorRunner>("runner");
   const lateScheduler = late<AssignmentScheduler>("scheduler");
   const host = new AgentSessionService({

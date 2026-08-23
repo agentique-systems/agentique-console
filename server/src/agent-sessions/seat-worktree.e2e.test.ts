@@ -95,12 +95,12 @@ describe("agent worktree isolation (fake SDK + real git)", () => {
     });
     expect(devOptions?.cwd).toContain(path.join("worktrees", created.agentSessionId));
     expect((devOptions?.systemPrompt as { append?: string })?.append).toContain("isolated worktree");
-    // Containment is the worktree: an isolated seat holds every governed
-    // builtin (the implementer profile grants no web tools), while the
-    // coordinator, which shares the operator's tree, keeps its profile binding.
-    expect(devOptions?.allowedTools).toEqual(expect.arrayContaining([...GOVERNED_BUILTIN_TOOLS]));
-    expect(devOptions?.disallowedTools).not.toEqual(expect.arrayContaining(["WebSearch", "WebFetch", "NotebookEdit"]));
-    expect(devOptions?.disallowedTools).toEqual(expect.arrayContaining(["Agent", "Task", "SendMessage", "TaskCreate"]));
+    // The worktree is containment, never a grant: the implementer's declared
+    // tools are its ceiling in the worktree too — the web tools its author
+    // deliberately excluded stay denied by name, isolated or not.
+    expect(devOptions?.allowedTools).toEqual(expect.arrayContaining(["Read", "Glob", "Grep", "Edit", "Write", "NotebookEdit", "Bash", "Skill", "ToolSearch", "Monitor", "EnterWorktree"]));
+    expect(devOptions?.disallowedTools).toEqual(expect.arrayContaining(["WebSearch", "WebFetch"]));
+    expect(devOptions?.disallowedTools).toEqual(expect.arrayContaining(["Agent", "Task", "SendMessage", "TaskCreate", "ScheduleWakeup", "TodoWrite", "AskUserQuestion", "Workflow"]));
     const coordinatorOptions = h.fake.captured.options.find((opts) => agentRoleOf(opts).role === "coordinator");
     expect(coordinatorOptions?.disallowedTools).toEqual(expect.arrayContaining(["Edit", "Write", "Bash"]));
     const merged = events.filter((event) => event.type === "agent_session.worktree.merged");
@@ -223,10 +223,11 @@ describe("agent worktree isolation (fake SDK + real git)", () => {
     });
     expect(seatOptions.length).toBeGreaterThan(0);
     for (const opts of seatOptions) expect(opts.cwd).toBe(plain);
-    // No worktree, no containment: the profile's tool list stays binding
+    // The profile's tool list is binding here exactly as it is in a worktree
     // (the explorer case is in seat-options.e2e).
     const implementerOptions = seatOptions.find((opts) => agentRoleOf(opts).agent === "dev");
-    expect(implementerOptions?.disallowedTools).toEqual(expect.arrayContaining(["WebSearch", "WebFetch", "NotebookEdit"]));
+    expect(implementerOptions?.disallowedTools).toEqual(expect.arrayContaining(["WebSearch", "WebFetch"]));
+    expect(implementerOptions?.allowedTools).toEqual(expect.arrayContaining(["NotebookEdit"]));
   });
 
   /**
@@ -269,13 +270,14 @@ describe("agent worktree isolation (fake SDK + real git)", () => {
 
     // The judge reviewed the actual work: its snapshot contained the file.
     expect(judgeSaw).toBe("<!doctype html>\n");
-    // Isolated, so it holds the write tools too — and is told its snapshot is
-    // discarded rather than merged, so it reports fixes instead of applying them.
+    // Review-only is structural now: the reviewer's declared tools bind in
+    // its snapshot tree too — it runs validation with Bash but cannot apply
+    // fixes, and is told its snapshot is discarded rather than merged.
     const judgeOptions = h.fake.captured.options.find((opts) => agentRoleOf(opts).role === "evaluator");
-    expect(judgeOptions?.allowedTools).toEqual(expect.arrayContaining(["Edit", "Write", "Bash"]));
-    expect(judgeOptions?.disallowedTools).not.toEqual(expect.arrayContaining(["Edit", "Write", "Bash"]));
+    expect(judgeOptions?.allowedTools).toEqual(expect.arrayContaining(["Read", "Bash"]));
+    expect(judgeOptions?.disallowedTools).toEqual(expect.arrayContaining(["Edit", "Write"]));
     const judgeAppend = (judgeOptions?.systemPrompt as { append?: string })?.append ?? "";
-    expect(judgeAppend).toContain("create and edit files");
+    expect(judgeAppend).toContain("You cannot: create or edit any file");
     expect(judgeAppend).toContain("discarded, not merged");
     // ...and the operator's workspace has it, from a seat that never once
     // reported itself completed.

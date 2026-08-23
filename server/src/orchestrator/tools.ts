@@ -21,6 +21,8 @@ import type { HandoffService } from "../handoffs/service.ts";
 import { EvidenceRefSchema, HandoffCoreSchema, HandoffDraftSchema } from "../handoffs/schema.ts";
 
 import { fail, guarded, ok } from "../sdk/tool-result.ts";
+import { effectiveNativeTools } from "../sdk/native-capability-policy.ts";
+import { MAIN_TOOL_NAMES } from "./grants.ts";
 import type { InteractionService } from "./interactions.ts";
 import type { AssumptionService } from "./assumptions.ts";
 import { RequirementParseFailure, type RequirementService } from "./requirements.ts";
@@ -183,8 +185,9 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           const workspaceIdForSkills = repo.getUserSession(userSessionId)?.workspaceId;
           for (const agent of args.agents) {
             if (agent.skills === undefined || agent.skills.length === 0) continue;
-            const profileTools = host.profiles(workspaceIdForSkills).find((profile) => profile.id === agent.profileId)?.tools ?? [];
-            const problems = catalog.validateAssignment(agent.skills, profileTools);
+            const skillProfile = host.profiles(workspaceIdForSkills).find((profile) => profile.id === agent.profileId);
+            const problems = catalog.validateAssignment(agent.skills,
+              skillProfile === undefined ? [] : effectiveNativeTools(skillProfile, "seat"));
             if (problems.length > 0) throw new InvalidInputError(`agent "${agent.name}": ${problems.join("; ")}`);
           }
           // Delegated requirements AND task-level requirement links validate
@@ -973,7 +976,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           const workspaceId = repo.getUserSession(userSessionId)?.workspaceId;
           const minted = registry.mint({ ...args, userSessionId, ...(workspaceId === undefined ? {} : { workspaceId }) });
           if (args.skills !== undefined && args.skills.length > 0) {
-            const problems = catalog.validateAssignment(args.skills, minted.tools);
+            const problems = catalog.validateAssignment(args.skills, effectiveNativeTools(minted, "seat"));
             if (problems.length > 0) throw new InvalidInputError(problems.join("; "));
           }
           return { profileId: minted.id, base: args.baseProfileId, tools: minted.tools,
@@ -1001,9 +1004,10 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         guarded(() => {
           const session = owned(args.agentSessionId);
           if (args.skills !== undefined && args.skills.length > 0) {
-            const profileTools = host.profiles(repo.getUserSession(session.userSessionId)?.workspaceId)
-              .find((profile) => profile.id === args.profileId)?.tools ?? [];
-            const problems = catalog.validateAssignment(args.skills, profileTools);
+            const skillProfile = host.profiles(repo.getUserSession(session.userSessionId)?.workspaceId)
+              .find((profile) => profile.id === args.profileId);
+            const problems = catalog.validateAssignment(args.skills,
+              skillProfile === undefined ? [] : effectiveNativeTools(skillProfile, "seat"));
             if (problems.length > 0) throw new InvalidInputError(problems.join("; "));
           }
           const added = host.addAgent(args.agentSessionId, {
@@ -1056,6 +1060,18 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
     ),
 
   ];
+
+  // Registration self-check: `MAIN_TOOL_NAMES` (orchestrator/grants.ts) is
+  // the single source of truth main's allow-list is derived from, so a tool
+  // registered here without a grants entry — or granted without being
+  // registered — throws at lane spawn instead of drifting silently.
+  const registered = new Set(tools.map((tool) => (tool as { name?: string }).name ?? ""));
+  const declared = new Set<string>(MAIN_TOOL_NAMES);
+  const drift = [
+    ...[...registered].filter((name) => !declared.has(name)).map((name) => `registered but not in MAIN_TOOL_NAMES: ${name}`),
+    ...[...declared].filter((name) => !registered.has(name)).map((name) => `in MAIN_TOOL_NAMES but never registered: ${name}`),
+  ];
+  if (drift.length > 0) throw new Error(`console tool registration drift — ${drift.join("; ")}`);
 
   return sdk.createSdkMcpServer({ name: "console", version: "1.0.0", tools, alwaysLoad: true });
 }

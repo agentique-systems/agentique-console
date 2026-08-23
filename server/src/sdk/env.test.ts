@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { sdkEnv } from "./env.ts";
+import { STRIPPED_FEATURE_FLAGS, sdkEnv } from "./env.ts";
 
 /**
  * `CLAUDE_CODE_MAX_RETRIES` is set on every child: the Console's wall-clock
@@ -51,9 +51,11 @@ describe("sdkEnv", () => {
     expect(sdkEnv({ source: { A: undefined, B: "b" } })).toEqual({ ...RETRY_CAP, B: "b" });
   });
 
-  it("drops native subagent knobs", () => {
-    const env = sdkEnv({ source: { CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION: "5" } });
-    expect(env).toEqual({ ...RETRY_CAP });
+  it("drops every flag that would widen native coordination behind the policy", () => {
+    const source = Object.fromEntries(STRIPPED_FEATURE_FLAGS.map((flag) => [flag, "5"]));
+    expect(sdkEnv({ source })).toEqual({ ...RETRY_CAP });
+    expect(STRIPPED_FEATURE_FLAGS).toContain("CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION");
+    expect(STRIPPED_FEATURE_FLAGS).toContain("CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH");
   });
 
   it("names the session, displacing any inherited name", () => {

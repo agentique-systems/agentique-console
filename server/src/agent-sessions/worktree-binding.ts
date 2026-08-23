@@ -6,7 +6,7 @@
  * seat-worktree.e2e.
  */
 import fs from "node:fs";
-import type { AgentProfile } from "../agent-profiles/registry.ts";
+import { profileWritesFiles, type AgentProfile } from "../agent-profiles/registry.ts";
 import type { Config } from "../config.ts";
 import type { Repo, AgentRow, AgentSessionRow } from "../db/repo.ts";
 import type { ArtifactStore } from "../events/artifact-store.ts";
@@ -124,7 +124,9 @@ export class WorktreeBinding {
       // neither edit files nor run commands. A write/Bash seat spawned at the
       // root is how a live run's canonical checkout grew the stray state that
       // wedged four merges — those seats fail loudly instead.
-      if (profile.tools.includes("Edit") || profile.tools.includes("Write") || profile.tools.includes("Bash")) {
+      // Undefined tools (inherit-everything) counts as writing — conservative,
+      // like profileWritesFiles.
+      if (profile.tools === undefined || profile.tools.includes("Edit") || profile.tools.includes("Write") || profile.tools.includes("Bash")) {
         try {
           this.#deps.transfer({ agentSessionId: session.id, speaker: { kind: "agent", name: seat.name },
             to: this.#deps.escalationTarget(session, seat.name),
@@ -211,7 +213,7 @@ export class WorktreeBinding {
     // discard it rather than merging incidental scratch files.
     const profile = seat.profileSnapshot as AgentProfile;
     const keepDirectory = this.#deps.laneLive(session.id, seat.name);
-    if (!profile.tools.includes("Edit") && !profile.tools.includes("Write")) {
+    if (!profileWritesFiles(profile.tools)) {
       try { worktrees.remove(workspaceRoot, seat.worktreePath, seat.worktreeBranch, { archiveBranch: false, keepDirectory }); } catch { /* best effort */ }
       release();
       bus.append({ type: "agent_session.worktree.discarded", userSessionId: session.userSessionId, agentSessionId: session.id,

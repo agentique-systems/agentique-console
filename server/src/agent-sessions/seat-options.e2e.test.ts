@@ -59,13 +59,28 @@ describe("seat spawn options", () => {
     expect(overridden.scout?.effort).toBe("low");
   });
 
-  it("a seat without a worktree keeps its profile's tool list binding", async () => {
-    // The harness runs with worktrees: null, so neither seat is isolated.
+  it("the profile's tool list is binding — worktree or not", async () => {
+    // The harness runs with worktrees: null; the isolated counterpart is in
+    // seat-worktree.e2e and holds the SAME surface: effectiveNativeTools has
+    // no worktree input at all, so containment cannot widen a grant.
     const { coordinator, scout } = await spawnHub();
     for (const options of [coordinator, scout]) {
       expect(options?.allowedTools).toEqual(expect.arrayContaining(["Read", "Glob", "Grep", "WebSearch", "WebFetch", "ToolSearch", "Skill"]));
       expect(options?.disallowedTools).toEqual(expect.arrayContaining(["Edit", "Write", "Bash", "NotebookEdit", "Agent", "Task", "SendMessage", "TaskCreate"]));
       expect(options?.allowedTools).not.toEqual(expect.arrayContaining(GOVERNED_BUILTIN_TOOLS.filter((tool) => ["Edit", "Write", "Bash", "NotebookEdit"].includes(tool))));
+    }
+  });
+
+  it("denies the scheduling, task-state, plan-mode, human-surface and host-surface natives for every seat", async () => {
+    const { coordinator, scout } = await spawnHub();
+    for (const options of [coordinator, scout]) {
+      expect(options?.disallowedTools).toEqual(expect.arrayContaining([
+        "ScheduleWakeup", "CronCreate", "RemoteTrigger",
+        "TodoWrite", "TaskCreate", "TaskList",
+        "AskUserQuestion", "EnterPlanMode", "ExitPlanMode",
+        "Workflow", "ListAgents",
+        "Artifact", "PushNotification", "REPL",
+      ]));
     }
   });
 });

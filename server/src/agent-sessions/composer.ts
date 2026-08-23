@@ -21,6 +21,7 @@ import type { AssumptionService } from "../orchestrator/assumptions.ts";
 import type { RequirementService } from "../orchestrator/requirements.ts";
 import type { InteractionService } from "../orchestrator/interactions.ts";
 import type { WorktreeManager } from "../runtime/worktree-manager.ts";
+import { effectiveNativeTools, type GovernedTool } from "../sdk/native-capability-policy.ts";
 import type { SdkUserMessageLike } from "../sdk/types.ts";
 import type { TaskService } from "../tasks/service.ts";
 import type { RolePrompt } from "./topology-contract.ts";
@@ -60,31 +61,17 @@ export function declaredMcpServers(profile: AgentProfile, config: Config): Recor
 }
 
 /**
- * The built-in tools the console governs. An ISOLATED seat — one with its own
- * worktree — holds all of them: containment is the worktree, and the
- * profile's instructions govern use. A seat WITHOUT a worktree (the
- * coordinator, or any seat in a non-git workspace) shares the operator's
- * tree, so there the profile's list stays binding: whatever it does not grant
- * is denied by name. Harness conveniences a governed agent never reaches
- * (subagent spawning, native messaging and task ledgers) are denied
- * unconditionally — see `runtime.ts`.
+ * The workspace tools the brief describes — re-exported from the capability
+ * policy so the roster and the brief read the same set the runtime enforces.
+ * A profile's declared `tools` are its ceiling for EVERY seat; the worktree
+ * is containment, never a grant (`sdk/native-capability-policy.ts`).
  *
- * Lives here, next to the brief that describes it: the two must not drift.
- * A live run lost two of four researchers to exactly that drift — they held
- * WebSearch and WebFetch while the brief told them "read files only", and
- * they dutifully reported the limit instead of using the tools.
+ * The brief lives next to this set: the two must not drift. A live run lost
+ * two of four researchers to exactly that drift — they held WebSearch and
+ * WebFetch while the brief told them "read files only", and they dutifully
+ * reported the limit instead of using the tools.
  */
-export const GOVERNED_BUILTIN_TOOLS = [
-  "Bash", "Edit", "Write", "NotebookEdit", "Read", "Glob", "Grep",
-  "WebFetch", "WebSearch",
-] as const;
-
-type GovernedTool = (typeof GOVERNED_BUILTIN_TOOLS)[number];
-
-/** The builtins a seat actually holds — see `GOVERNED_BUILTIN_TOOLS`. */
-export function effectiveBuiltinTools(profile: AgentProfile, isolated: boolean): string[] {
-  return isolated ? [...new Set([...profile.tools, ...GOVERNED_BUILTIN_TOOLS])] : [...profile.tools];
-}
+export { WORKSPACE_TOOLS as GOVERNED_BUILTIN_TOOLS } from "../sdk/native-capability-policy.ts";
 
 /**
  * How each governed tool is described to the agent holding (or lacking) it.
@@ -138,35 +125,40 @@ type AssertNone<T extends never> = T;
 export type _AllGovernedToolsDescribed = AssertNone<Undescribed>;
 
 /**
- * What the seat holds, said once and positively. The "cannot" line exists
- * only for a seat whose profile is binding (no worktree): an isolated seat
- * holds every builtin, so there is nothing to deny it.
+ * What the seat holds, said once and positively. The set described is the
+ * SAME intersection the runtime enforces (`effectiveNativeTools`): the
+ * author's ceiling under console policy, identical with or without a
+ * worktree. The "cannot" line renders whenever a whole group is absent.
  */
 function capabilityBrief(profile: AgentProfile, hasWorktree: boolean): string {
   const can: string[] = [];
   const cannot: string[] = [];
   const deferred: string[] = [];
-  const tools = effectiveBuiltinTools(profile, hasWorktree);
+  const tools = effectiveNativeTools(profile, "seat");
   // The merge rule stays profile-based (worktree-binding.ts): only a write
   // profile's worktree lands, so an isolated read-only seat must be told.
   const writes = profileWritesFiles(profile.tools);
   for (const group of CAPABILITY_GROUPS) {
-    if (group.tools.some((tool) => tools.includes(tool))) {
+    if (group.tools.some((tool) => tools.has(tool))) {
       can.push(group.can);
-      if ("deferred" in group) deferred.push(...group.deferred);
+      // Only the deferred names the seat actually holds — naming an
+      // ungranted tool would send it hunting for a denied capability.
+      if ("deferred" in group) deferred.push(...group.deferred.filter((tool) => tools.has(tool)));
     } else cannot.push(group.cannot);
   }
   // `?? {}`: a snapshot from before this field existed is cast, not parsed.
   const servers = Object.keys(profile.mcpServers ?? {});
   if (servers.length > 0) can.push(`use your MCP server(s) — ${servers.join(", ")}, tools named mcp__<server>__<tool>`);
   // The deferred-tools lesson, applied to skills: a capability nobody names
-  // goes unused. Byte-stable when the list is empty.
+  // goes unused. Byte-stable when the list is empty; silent for a profile
+  // that grants no Skill/ToolSearch — an instruction to call a denied tool
+  // would be worse than saying nothing.
   const skills = profile.skills ?? [];
   const lines = [
     `You can: ${can.join("; ")}.`,
     ...(cannot.length > 0 ? [`You cannot: ${cannot.join("; ")}. If an assignment needs one of those, say so in a handoff rather than working around it — the limit is real for this run.`] : []),
-    ...(deferred.length > 0 ? [`${deferred.join(", ")} may be missing from your tool list at the start of a turn — deferred, not absent: load them once with ToolSearch {"query": "select:${deferred.join(",")}"} and use them normally.`] : []),
-    ...(skills.length > 0 ? [`Recommended skills: ${skills.join(", ")}. Invoke one with the Skill tool before starting work it covers.`] : []),
+    ...(deferred.length > 0 && tools.has("ToolSearch") ? [`${deferred.join(", ")} may be missing from your tool list at the start of a turn — deferred, not absent: load them once with ToolSearch {"query": "select:${deferred.join(",")}"} and use them normally.`] : []),
+    ...(skills.length > 0 && tools.has("Skill") ? [`Recommended skills: ${skills.join(", ")}. Invoke one with the Skill tool before starting work it covers.`] : []),
     ...(hasWorktree ? [writes
       ? "Your cwd is an isolated worktree; teammates cannot see your files until the Console merges them when you report completed."
       : "Your cwd is an isolated worktree — a stable snapshot for your review. It is discarded, not merged, when you report: describe defects and fixes in your report rather than applying them."] : []),
@@ -176,12 +168,13 @@ function capabilityBrief(profile: AgentProfile, hasWorktree: boolean): string {
 
 /** Compact capability tag for roster lines — what this agent can be asked to do. */
 function capabilityTag(profile: AgentProfile): string {
+  const tools = effectiveNativeTools(profile, "seat");
   const caps = [
     ...(profileWritesFiles(profile.tools) ? ["writes files"] : ["read-only"]),
-    ...(profile.tools.includes("Bash") ? ["runs commands"] : []),
+    ...(tools.has("Bash") ? ["runs commands"] : []),
     // Without this a coordinator reads "read-only" off a researcher's roster
     // line and assigns — or reports — as though the seat had no web access.
-    ...(profile.tools.includes("WebSearch") || profile.tools.includes("WebFetch") ? ["reads the web"] : []),
+    ...(tools.has("WebSearch") || tools.has("WebFetch") ? ["reads the web"] : []),
     ...Object.keys(profile.mcpServers ?? {}),
   ];
   return `can: ${caps.join(", ")}`;

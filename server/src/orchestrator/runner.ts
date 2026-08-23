@@ -160,6 +160,8 @@ export class OrchestratorRunner {
   readonly #lanes = new Map<string, Lane>();
   /** Notified after every turn settle; the completion predicate re-evaluates. */
   #onSettled: ((userSessionId: string) => void) | undefined;
+  /** Terminal: set by closeAll; no drain mints another turn after it. */
+  #closed = false;
   /** Notified before an operator message is processed; reopens a signed-off run. */
   #onOperatorMessage: ((userSessionId: string) => void) | undefined;
 
@@ -322,6 +324,7 @@ export class OrchestratorRunner {
 
   /** Shutdown: no CLI subprocess may outlive the server. */
   async closeAll(): Promise<void> {
+    this.#closed = true;
     await Promise.all(
       [...this.#lanes.values()].map((lane) =>
         this.#closeLane(lane, { interrupt: true }),
@@ -408,6 +411,10 @@ export class OrchestratorRunner {
     lane.draining = true;
     try {
       for (;;) {
+        // Shutdown: no new turn may mint once closeAll has run — a turn
+        // started here would settle its journal writes into a database the
+        // caller is already free to close.
+        if (this.#closed) break;
         // Capacity pause: jobs stay queued, no turn is minted, nothing is
         // coalesced away. `resumeQueued()` re-enters this loop on resume.
         if (this.#deps.capacity.paused) break;
@@ -692,6 +699,11 @@ export class OrchestratorRunner {
     if (lane.pump) await Promise.race([lane.pump, sleep(CLOSE_GRACE_MS)]);
     lane.abort?.abort();
     query.close?.();
+    // The abort/close above ends the stream, so the pump is now bounded:
+    // await it FULLY. Returning while a settle is still writing lets the
+    // caller (shutdownApp → main.ts/tests) close SQLite under an in-flight
+    // journal append.
+    if (lane.pump) await lane.pump.catch(() => undefined);
     lane.query = null;
     lane.input = null;
     lane.pump = null;

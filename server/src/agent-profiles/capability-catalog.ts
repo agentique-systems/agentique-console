@@ -12,6 +12,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import { BACKGROUND_WAIT_TOOLS, WORKSPACE_TOOLS } from "../sdk/native-capability-policy.ts";
 
 export interface SkillCatalogEntry {
   name: string;
@@ -63,12 +64,26 @@ function parseFrontmatter(raw: string): { fields: Record<string, string>; requir
   return { fields, requiresTools };
 }
 
+/** The names a skill's `requires.tools` may reference. */
+const KNOWN_REQUIRABLE_TOOLS: ReadonlySet<string> = new Set([...WORKSPACE_TOOLS, ...BACKGROUND_WAIT_TOOLS]);
+
 export class CapabilityCatalog {
   readonly #skills: SkillCatalogEntry[];
+
+  /**
+   * Load-time findings — a `requires.tools` entry naming a tool the policy
+   * has never heard of would otherwise block the skill's assignment forever
+   * without anyone noticing the typo.
+   */
+  readonly issues: readonly string[];
 
   /** `skillsDir` = the console plugin's `skills/` directory; missing = empty catalog. */
   constructor(skillsDir: string) {
     this.#skills = this.#read(skillsDir);
+    this.issues = this.#skills.flatMap((skill) =>
+      skill.requiresTools
+        .filter((tool) => !KNOWN_REQUIRABLE_TOOLS.has(tool) && !tool.startsWith("mcp__"))
+        .map((tool) => `skill "${skill.name}" requires unknown tool "${tool}" — fix the frontmatter or classify the tool`));
   }
 
   #read(skillsDir: string): SkillCatalogEntry[] {
@@ -111,9 +126,12 @@ export class CapabilityCatalog {
   /**
    * The commission-time gate: a skill a seat cannot act on must not load —
    * guidance that says "use Bash" on a seat without Bash is the deferred-
-   * tools failure in a new coat. Returns the problems, empty = assignable.
+   * tools failure in a new coat. Validates against the EFFECTIVE native set
+   * the seat will actually hold (`effectiveNativeTools`), never a broader or
+   * narrower roster. Returns the problems, empty = assignable.
    */
-  validateAssignment(skillNames: readonly string[], profileTools: readonly string[]): string[] {
+  validateAssignment(skillNames: readonly string[], effectiveTools: ReadonlySet<string> | readonly string[]): string[] {
+    const tools = effectiveTools instanceof Set ? effectiveTools : new Set(effectiveTools);
     const problems: string[] = [];
     for (const name of skillNames) {
       const skill = this.get(name);
@@ -125,9 +143,9 @@ export class CapabilityCatalog {
         problems.push(`skill "${name}" is deprecated and cannot be assigned`);
         continue;
       }
-      const missing = skill.requiresTools.filter((tool) => !profileTools.includes(tool));
+      const missing = skill.requiresTools.filter((tool) => !tools.has(tool));
       if (missing.length > 0) {
-        problems.push(`skill "${name}" requires tools the profile does not grant: ${missing.join(", ")}`);
+        problems.push(`skill "${name}" requires tools the seat will not hold: ${missing.join(", ")}`);
       }
     }
     return problems;

@@ -10,6 +10,7 @@ import type { EventBus } from "../events/bus.ts";
 import { nowIso } from "../ids.ts";
 import { ConflictError, InvalidInputError, NotFoundError } from "../errors.ts";
 import { EFFORT_LEVELS } from "../sdk/effort.ts";
+import { effectiveNativeTools } from "../sdk/native-capability-policy.ts";
 
 export const ProfileSchema = z.object({
   id: z.string().regex(/^[a-z][a-z0-9-]*$/),
@@ -24,7 +25,15 @@ export const ProfileSchema = z.object({
    */
   role: z.enum(["orchestrator", "explorer", "planner", "implementer", "reviewer"]).optional(),
   instructions: z.string().min(1),
-  tools: z.array(z.string()).min(1),
+  /**
+   * The author's native tool ceiling. OMITTED preserves the native meaning —
+   * "inherits all tools" (bounded by the capability policy) — and is never
+   * normalized into a list; an explicit list is binding across the whole
+   * native surface, meta tools included (`sdk/native-capability-policy.ts`).
+   */
+  tools: z.array(z.string()).min(1).optional(),
+  /** The author's restrictions — honored whether or not `tools` is spelled out. */
+  disallowedTools: z.array(z.string()).optional(),
   permissionMode: z.enum(["default", "plan", "bypassPermissions"]),
   model: z.string().optional(),
   /** Reasoning effort for the profile's agents; CONSOLE_EFFORT overrides it. */
@@ -75,8 +84,22 @@ export function profileWritesFiles(tools: readonly string[] | undefined): boolea
   return tools === undefined || tools.includes("Edit") || tools.includes("Write");
 }
 
+/**
+ * A profile's `tools` list is its ceiling across the WHOLE native surface —
+ * nothing is auto-added at spawn — so every built-in declares its meta tools
+ * explicitly: Skill and ToolSearch for every profile (skill bodies and
+ * deferred schemas are how a seat reaches its own capabilities), the
+ * background-wait trio wherever Bash is granted, and the native worktree
+ * pair wherever Edit/Write are. These used to be appended by the runtime;
+ * now the author is the only one who grants.
+ */
+const DISCOVERY_TOOLS = ["Skill", "ToolSearch"];
+const BACKGROUND_TOOLS = ["Monitor", "TaskOutput", "TaskStop"];
+const WORKTREE_NATIVE_TOOLS = ["EnterWorktree", "ExitWorktree"];
 const READ_TOOLS = ["Read", "Glob", "Grep"];
-const CODE_TOOLS = [...READ_TOOLS, "Edit", "Write", "Bash"];
+// NotebookEdit rides with the editors: a notebook is a code file, and
+// isolated implementers held it in practice under the old runtime widening.
+const CODE_TOOLS = [...READ_TOOLS, "Edit", "Write", "NotebookEdit", "Bash"];
 /**
  * Every evidence-gathering profile reaches the web. A reviewer checking an API
  * against its upstream docs and an explorer tracing a dependency's behavior
@@ -126,7 +149,7 @@ const BUILTINS: AgentProfile[] = [
     role: "orchestrator",
     purpose: "Own a bounded workstream, assign each unit once, integrate results, and report milestones.",
     instructions: "You are the sole coordinator for this AgentSession: you own decomposition and integration; your specialists own the work. Assign each unit once, to one specialist; on a merge-conflict failure, reassign against the current HEAD. Write seats work in ISOLATED worktrees — their files reach your workspace only when the Console merges a completed report, so read progress from the roster line or ask the seat rather than the filesystem. Report to main for a blocking decision, material failure, milestone or final result, and always before you go idle: relay what your specialists actually found, defects and unverified claims included — a partial result beats silence.",
-    tools: [...READ_TOOLS, ...WEB_TOOLS],
+    tools: [...READ_TOOLS, ...WEB_TOOLS, ...DISCOVERY_TOOLS],
     permissionMode: "default",
     model: "claude-opus-5",
     effort: "high",
@@ -142,7 +165,7 @@ const BUILTINS: AgentProfile[] = [
     role: "planner",
     purpose: "Decompose an objective into an ordered, checkable plan: refined requirements, a task DAG, and per-unit acceptance — without executing any of it.",
     instructions: "You plan; you do not build. Read the delegated requirements and the workspace until the decomposition is defensible, then produce: (1) refinements below your delegated requirement nodes where a committed statement is too coarse to verify directly (decompose_requirement); (2) the task DAG with dependencies and owners (task_create with blockedBy); (3) per-unit acceptance stated as the requirement each unit discharges. Name what remains consequentially uncertain rather than planning over it. Return one plan report; route scope questions to main or the operator — never widen scope yourself.",
-    tools: [...READ_TOOLS, ...WEB_TOOLS],
+    tools: [...READ_TOOLS, ...WEB_TOOLS, ...DISCOVERY_TOOLS],
     permissionMode: "default",
     model: "claude-opus-5",
     effort: "xhigh",
@@ -158,7 +181,7 @@ const BUILTINS: AgentProfile[] = [
     role: "explorer",
     purpose: "Trace code and runtime behavior and return concrete evidence without editing.",
     instructions: "Inspect only the assigned scope and cite concrete files, symbols, commands, and observations. When the repository alone cannot settle a question, read upstream documentation and sources with WebSearch and WebFetch rather than recalling them. Return one concise findings report to your coordinator.",
-    tools: [...READ_TOOLS, ...WEB_TOOLS],
+    tools: [...READ_TOOLS, ...WEB_TOOLS, ...DISCOVERY_TOOLS],
     permissionMode: "default",
     model: "claude-opus-5",
     effort: "high",
@@ -174,7 +197,7 @@ const BUILTINS: AgentProfile[] = [
     role: "implementer",
     purpose: "Implement and validate a clearly owned code change.",
     instructions: "You exclusively own the assigned files or component. Inspect before editing, preserve unrelated changes, implement the smallest complete change, and run the relevant validation. Report changed files, tests run, and remaining risks.",
-    tools: CODE_TOOLS,
+    tools: [...CODE_TOOLS, ...DISCOVERY_TOOLS, ...BACKGROUND_TOOLS, ...WORKTREE_NATIVE_TOOLS],
     permissionMode: "bypassPermissions",
     model: "claude-opus-5",
     effort: "xhigh",
@@ -190,7 +213,7 @@ const BUILTINS: AgentProfile[] = [
     role: "implementer",
     purpose: "Implement frontend behavior and validate the rendered application.",
     instructions: "You own the assigned frontend slice. Run the application, drive the real browser through your MCP browser tools, exercise the interactions, and report concrete validation rather than visual guesses.",
-    tools: CODE_TOOLS,
+    tools: [...CODE_TOOLS, ...DISCOVERY_TOOLS, ...BACKGROUND_TOOLS, ...WORKTREE_NATIVE_TOOLS],
     permissionMode: "bypassPermissions",
     model: "claude-opus-5",
     effort: "xhigh",
@@ -206,7 +229,7 @@ const BUILTINS: AgentProfile[] = [
     role: "reviewer",
     purpose: "Review a completed change and report actionable defects with evidence.",
     instructions: "You review; you do not fix. Inspect the diff, run the relevant validation, and report defects by severity with file references and reproduction evidence. Say explicitly when no defect is found.",
-    tools: [...READ_TOOLS, "Bash", ...WEB_TOOLS],
+    tools: [...READ_TOOLS, "Bash", ...WEB_TOOLS, ...DISCOVERY_TOOLS, ...BACKGROUND_TOOLS],
     permissionMode: "default",
     model: "claude-opus-5",
     effort: "xhigh",
@@ -222,7 +245,7 @@ const BUILTINS: AgentProfile[] = [
     role: "reviewer",
     purpose: "Inspect a rendered UI through browser interaction and screenshots.",
     instructions: "You review; you do not fix. Exercise the assigned user flow in the browser, capture evidence, inspect console and runtime errors, and report concrete visual or interaction defects.",
-    tools: [...READ_TOOLS, "Bash", ...WEB_TOOLS],
+    tools: [...READ_TOOLS, "Bash", ...WEB_TOOLS, ...DISCOVERY_TOOLS, ...BACKGROUND_TOOLS],
     permissionMode: "default",
     model: "claude-opus-5",
     effort: "xhigh",
@@ -238,7 +261,7 @@ const BUILTINS: AgentProfile[] = [
     role: "explorer",
     purpose: "Gather focused external or repository evidence for one decision.",
     instructions: "Research only the assigned question. Reach primary sources directly with WebSearch and WebFetch and cite the URLs you actually read — a source you could not open is not evidence. Separate facts from inference and return a concise recommendation with evidence.",
-    tools: [...READ_TOOLS, ...WEB_TOOLS],
+    tools: [...READ_TOOLS, ...WEB_TOOLS, ...DISCOVERY_TOOLS],
     permissionMode: "default",
     model: "claude-opus-5",
     effort: "high",
@@ -290,8 +313,12 @@ export class AgentProfileRegistry {
       throw new ConflictError(`profile id "${input.id}" already exists`);
     }
     const base = this.get(input.baseProfileId, input.workspaceId);
-    const tools = input.tools ?? base.tools;
-    const widened = tools.filter((tool) => !base.tools.includes(tool));
+    // A mint is an Agentique-derived EXECUTION set, not a native definition:
+    // an inherit-mode base materializes to its effective surface here, so the
+    // subset rule always compares against what the base's seats actually hold.
+    const baseCeiling = [...effectiveNativeTools(base, "seat")];
+    const tools = input.tools ?? baseCeiling;
+    const widened = tools.filter((tool) => !baseCeiling.includes(tool));
     if (widened.length > 0) {
       throw new InvalidInputError(`a mint may only narrow — tools not in base "${base.id}": ${widened.join(", ")}`);
     }
@@ -333,7 +360,7 @@ export class AgentProfileRegistry {
       type: "agent_profile.minted",
       userSessionId: input.userSessionId,
       payload: { userSessionId: input.userSessionId, profileId: profile.id, baseProfileId: base.id,
-        baseRevision: base.revision ?? `builtin:${base.id}`, tools: profile.tools,
+        baseRevision: base.revision ?? `builtin:${base.id}`, tools: profile.tools ?? [],
         permissionMode: profile.permissionMode, ...(input.why === undefined ? {} : { why: input.why }) },
     });
     return profile;
@@ -434,7 +461,7 @@ export class AgentProfileRegistry {
   #revision(files: { path: string; content: string }[]): string { const hash = crypto.createHash("sha256"); for (const file of files) hash.update(file.path).update("\0").update(file.content).update("\0"); return hash.digest("hex"); }
   #invalidPlaceholder(id: string): AgentProfile { return { id, title: id, purpose: "Invalid profile", instructions: "", tools: [], skills: [], permissionMode: "default", exemptFromOwnership: false, maxTurns: 1, mcpServers: {} }; }
   #componentCounts(files: { path: string }[]): Record<string, number> { const counts: Record<string, number> = {}; for (const file of files) { const kind = file.path.startsWith("skills/") ? "skills" : file.path.startsWith("hooks/") ? "hooks" : file.path.startsWith("agents/") ? "agents" : file.path === ".mcp.json" ? "mcp" : "files"; counts[kind] = (counts[kind] ?? 0) + 1; } return counts; }
-  #summary(profile: AgentProfile, source: "builtin" | "workspace", revision: string, trusted: boolean, valid: boolean, files: { path: string }[]): AgentProfileSummary { return { id: profile.id, title: profile.title, purpose: profile.purpose, role: profile.role ?? null, source, revision, trusted, valid, tools: profile.tools, skills: profile.skills ?? [], componentCounts: this.#componentCounts(files) }; }
+  #summary(profile: AgentProfile, source: "builtin" | "workspace", revision: string, trusted: boolean, valid: boolean, files: { path: string }[]): AgentProfileSummary { return { id: profile.id, title: profile.title, purpose: profile.purpose, role: profile.role ?? null, source, revision, trusted, valid, tools: profile.tools ?? [], skills: profile.skills ?? [], componentCounts: this.#componentCounts(files) }; }
   #detail(profile: AgentProfile, source: "builtin" | "workspace", revision: string, trusted: boolean, issues: ProfileValidationIssue[], files: { path: string; content: string }[]): AgentProfileDetail {
     const summary = this.#summary(profile, source, revision, trusted, issues.every((i) => i.level !== "error"), files);
     const components = files.filter((file) => file.path !== "agentique.profile.json" && file.path !== ".claude-plugin/plugin.json").map((file) => { const kind = file.path.startsWith("skills/") ? "skill" : file.path.startsWith("hooks/") ? "hook" : file.path.startsWith("agents/") ? "agent" : file.path === ".mcp.json" ? "mcp" : file.path.startsWith("commands/") ? "command" : file.path.startsWith("monitors/") ? "monitor" : file.path === "settings.json" ? "settings" : "other"; return { kind, name: path.basename(file.path), path: file.path, supported: ["skill", "hook", "agent", "mcp", "command", "settings"].includes(kind), summary: file.content.slice(0, 160) } as AgentProfileDetail["components"][number]; });

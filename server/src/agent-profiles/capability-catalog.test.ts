@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { CapabilityCatalog } from "./capability-catalog.ts";
 import { AgentProfileRegistry } from "./registry.ts";
+import { effectiveNativeTools } from "../sdk/native-capability-policy.ts";
 
 const SKILLS_DIR = fileURLToPath(new URL("../../skills/skills", import.meta.url));
 const GIT_GUD = ["git-gud-commits", "git-gud-conflicts", "git-gud-coordinate", "git-gud-recover", "git-gud-sync", "git-gud-worktrees"];
@@ -43,7 +44,7 @@ describe("the shipped skills library", () => {
   it("builtin profiles recommend only skills their tools can honour", () => {
     const registry = new AgentProfileRegistry();
     for (const profile of registry.list()) {
-      expect(catalog.validateAssignment(profile.skills ?? [], profile.tools), profile.id).toEqual([]);
+      expect(catalog.validateAssignment(profile.skills ?? [], effectiveNativeTools(profile, "seat")), profile.id).toEqual([]);
     }
   });
 });

@@ -8,7 +8,9 @@
 import type { SessionMode, SessionPhase } from "@agentique-console/shared";
 import type { EffortLevel } from "../sdk/effort.ts";
 import { sdkEnv } from "../sdk/env.ts";
+import { WORKSPACE_TOOLS, mainDisallowedNativeTools } from "../sdk/native-capability-policy.ts";
 import type { SdkOptions } from "../sdk/types.ts";
+import { MAIN_TOOL_NAMES } from "./grants.ts";
 import {
   ORCHESTRATOR_BRIEF,
   ORCHESTRATOR_DELEGATION_BRIEF,
@@ -22,68 +24,24 @@ import {
  */
 export const MAIN_DEFAULT_EFFORT: EffortLevel = "xhigh";
 
-export const CONSOLE_TOOL_NAMES = [
-  "send_to_coordinator",
-  "set_deadline",
-  "ask_operator",
-  "task_create",
-  "task_update",
-  "task_list",
-  "create_agent_session",
-  "read_agent_session",
-  "list_agent_sessions",
-  "list_agent_profiles",
-  "read_handoff",
-  "report_handoff_discrepancy",
-  "session_activity",
-  "interrupt_agent",
-  "close_agent_session",
-  "read_artifact",
-  "add_agent",
-  "specialize_profile",
-  "propose_requirements",
-  "read_requirements",
-  "report_requirement",
-  "decompose_requirement",
-  "record_assumption",
-  "resolve_assumption",
-  "link_requirements",
-  "unlink_requirements",
-  "update_orchestration_state",
-  "record_completion",
-] as const;
-
 /**
- * Never available to main, in any configuration. `Agent`/`Task` fork
- * ungoverned context; `SendMessage` bypasses the journal;
- * `ScheduleWakeup`/`Monitor`/`TaskStop` wake a console-owned lane with no
- * mailbox row, no handoff and no turn attribution.
+ * Main's work tools are the full workspace set, by operator directive: two
+ * live runs wedged on one-command git blockers (a stray uncommitted edit; a
+ * leaked seat branch) that main had diagnosed exactly and could not fix —
+ * one ended in the operator running git by hand, the other in a blocking
+ * question whose own recommendation read "it is one safe command". Write and
+ * Edit followed Bash for the same reason: an operator deliverable or a
+ * one-line unblock is not worth a commissioned session. The charter bounds
+ * usage (unblock, verify, small fixes, deliverables — never a seat's
+ * implementation work); every call is journaled as a tool event.
+ *
+ * Everything else classified by the capability policy is either denied by
+ * name (`mainDisallowedNativeTools` — coordination, task state, scheduling,
+ * host surfaces, plan-mode entry, and the background waits that would wake a
+ * console-owned lane with no mailbox row) or deliberately left in the
+ * MIDDLE: AskUserQuestion and ExitPlanMode are neither auto-approved nor
+ * denied, so they reach `canUseTool`, which turns them into operator cards.
  */
-const MAIN_DENIED_TOOLS = ["Agent", "Task", "SendMessage", "ScheduleWakeup", "Monitor", "TaskStop",
-  // The native ledger is keyed on the provider session id, which changes at
-  // every rotation.
-  "TaskCreate", "TaskUpdate", "TaskGet", "TaskList"];
-
-const MAIN_WORK_TOOLS = [
-  "Read",
-  "Glob",
-  "Grep",
-  "WebFetch",
-  "WebSearch",
-  // The workshop's tools, by operator directive: two live runs wedged on
-  // one-command git blockers (a stray uncommitted edit; a leaked seat
-  // branch) that main had diagnosed exactly and could not fix — one ended
-  // in the operator running git by hand, the other in a blocking question
-  // whose own recommendation read "it is one safe command". Write/Edit
-  // followed Bash for the same reason: an operator deliverable or a
-  // one-line unblock is not worth a commissioned session. The charter
-  // bounds usage (unblock, verify, small fixes, deliverables — never a
-  // seat's implementation work); every call is journaled as a tool event.
-  "Bash",
-  "Write",
-  "Edit",
-  "NotebookEdit",
-];
 
 export interface OrchestratorOptionsInput {
   workspaceRoot: string;
@@ -151,10 +109,10 @@ export function buildOrchestratorOptions(
     permissionMode: planning ? "plan" : "default",
     ...(planning ? { planModeInstructions: PLAN_MODE_BODY } : {}),
     allowedTools: [
-      ...MAIN_WORK_TOOLS,
-      ...(withDelegation ? CONSOLE_TOOL_NAMES.map((name) => `mcp__console__${name}`) : []),
+      ...WORKSPACE_TOOLS,
+      ...(withDelegation ? MAIN_TOOL_NAMES.map((name) => `mcp__console__${name}`) : []),
     ],
-    disallowedTools: [...MAIN_DENIED_TOOLS, "CronCreate", "CronList", "CronDelete"],
+    disallowedTools: mainDisallowedNativeTools(),
     settings: { crossSessionInbound: "accept" } as unknown as SdkOptions["settings"],
     // In streaming mode maxTurns counts cumulatively over the whole session
     // run — any default here would kill a long-lived lane. Callers opt in.
