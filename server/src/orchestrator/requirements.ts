@@ -40,13 +40,17 @@ import {
 import type { EventBus } from "../events/bus.ts";
 import type {
   ApprovalNodeOps,
+  RequirementLinkRow,
   RequirementNodeRow,
   RequirementRevisionRow,
   RequirementStore,
 } from "../db/stores/requirement-store.ts";
+import type { AssumptionStore } from "../db/stores/assumption-store.ts";
 import type { ProjectStore } from "../db/stores/project-store.ts";
 import { InvalidInputError, NotFoundError } from "../errors.ts";
 import type { SpecService } from "./spec.ts";
+
+const TERMINAL_STATUSES = new Set(["satisfied", "violated", "infeasible"]);
 
 /** Bound on the injected digest; the full outline stays a tool call away. */
 const DIGEST_MAX_BYTES = 8 * 1024;
@@ -84,24 +88,37 @@ export class RequirementParseFailure extends InvalidInputError {
 export class RequirementService implements GoverningDigest {
   readonly #store: RequirementStore;
   readonly #projects: ProjectStore;
+  readonly #assumptions: AssumptionStore;
   readonly #legacy: SpecService;
   readonly #bus: EventBus;
   readonly #resolveProject: (userSessionId: string) => string;
   #frontierDeps: RequirementFrontierDeps | null = null;
   #pendingProposalCheck: ((userSessionId: string) => boolean) | null = null;
+  #wakeNote: ((userSessionId: string, text: string) => void) | null = null;
 
   constructor(
     store: RequirementStore,
     projects: ProjectStore,
+    assumptions: AssumptionStore,
     legacy: SpecService,
     bus: EventBus,
     resolveProject: (userSessionId: string) => string,
   ) {
     this.#store = store;
     this.#projects = projects;
+    this.#assumptions = assumptions;
     this.#legacy = legacy;
     this.#bus = bus;
     this.#resolveProject = resolveProject;
+  }
+
+  /**
+   * Wired once in createApp: how a console-established fact (a dependency
+   * that moved under satisfied work) wakes main. Record-and-display doctrine:
+   * the wake carries the fact; reopening stays a model or operator act.
+   */
+  setWakeNote(wake: (userSessionId: string, text: string) => void): void {
+    this.#wakeNote = wake;
   }
 
   /** Wired once in createApp — the frontier reads other aggregates' facts. */
@@ -334,6 +351,22 @@ export class RequirementService implements GoverningDigest {
         ...(input.note === undefined ? {} : { note: input.note }),
       },
     });
+    // A dependency moving out from under terminal claims is a fact main must
+    // judge: wake it naming the suspect dependents. Record-and-display — no
+    // status is rewritten here.
+    if (input.to === "open" || input.to === "violated") {
+      const latest = this.#store.latestChanges(projectId);
+      const suspects = this.#store.liveLinks(projectId)
+        .filter((row) => row.kind === "depends_on" && row.toId === node.id)
+        .map((row) => row.fromId)
+        .filter((id) => TERMINAL_STATUSES.has(latest.get(id)?.toStatus ?? ""));
+      if (suspects.length > 0) {
+        this.#wakeNote?.(input.userSessionId,
+          `[Console: ${node.id} was ${input.to === "open" ? "reopened" : "reported violated"} by ${input.actor}. ` +
+          `These requirements depend on it and hold terminal claims recorded BEFORE this change: ${suspects.join(", ")}. ` +
+          `Judge whether their claims still stand — reopen with report_requirement, re-verify, or amend. The Console changed nothing.]`);
+      }
+    }
     return this.derive(input.userSessionId).find((wire) => wire.id === updated.id)!;
   }
 
@@ -399,6 +432,122 @@ export class RequirementService implements GoverningDigest {
       },
     });
     return addedIds;
+  }
+
+  // ── links ────────────────────────────────────────────────────────────────
+
+  /**
+   * Record one relationship. Never part of derivation — links feed the
+   * frontier's blocked annotation, delegation context, and the invalidation
+   * flags. depends_on is acyclic (checked here); conflicts_with is symmetric
+   * and normalizes to the numerically smaller id first, so the unique pair
+   * index also blocks inverse duplicates; rests_on targets an assumption.
+   * Idempotent: recording an existing link is a no-op, reported as such.
+   */
+  link(input: {
+    userSessionId: string;
+    fromId: string;
+    kind: "depends_on" | "conflicts_with" | "rests_on";
+    toId: string;
+    actor: string;
+    agentSessionId?: string;
+    note?: string;
+  }): { recorded: boolean } {
+    const projectId = this.#project(input.userSessionId);
+    const from = this.#liveNode(input.userSessionId, input.fromId);
+    let fromId = from.id;
+    let toId = input.toId;
+    let toKind: "requirement" | "assumption" = "requirement";
+    if (input.kind === "rests_on") {
+      toKind = "assumption";
+      if (!this.#assumptions.get(projectId, input.toId)) {
+        throw new NotFoundError(`no assumption ${input.toId} — record_assumption mints one`);
+      }
+    } else {
+      const to = this.#liveNode(input.userSessionId, input.toId);
+      if (from.id === to.id) throw new InvalidInputError("a requirement cannot link to itself");
+      if (input.kind === "conflicts_with" && mintNumberOf(to.id) < mintNumberOf(from.id)) {
+        fromId = to.id;
+        toId = from.id;
+      }
+      if (input.kind === "depends_on") this.#assertAcyclicDependsOn(projectId, from.id, to.id);
+    }
+    const row = this.#store.insertLink({
+      projectId, fromId, toKind, toId, kind: input.kind,
+      createdByActor: input.actor, agentSessionId: input.agentSessionId ?? null,
+      note: input.note ?? null,
+    });
+    if (row === null) return { recorded: false };
+    this.#bus.append({
+      type: "requirement.link.changed",
+      userSessionId: input.userSessionId,
+      ...(input.agentSessionId === undefined ? {} : { agentSessionId: input.agentSessionId }),
+      payload: {
+        userSessionId: input.userSessionId, action: "recorded", linkKind: input.kind,
+        fromId, toKind, toId, actor: input.actor,
+        ...(input.agentSessionId === undefined ? {} : { agentSessionId: input.agentSessionId }),
+      },
+    });
+    return { recorded: true };
+  }
+
+  unlink(input: {
+    userSessionId: string;
+    fromId: string;
+    kind: "depends_on" | "conflicts_with" | "rests_on";
+    toId: string;
+    actor: string;
+    agentSessionId?: string;
+  }): void {
+    const projectId = this.#project(input.userSessionId);
+    const match = this.#store.liveLinks(projectId).find((row) =>
+      row.kind === input.kind
+      && ((row.fromId === input.fromId && row.toId === input.toId)
+        || (input.kind === "conflicts_with" && row.fromId === input.toId && row.toId === input.fromId)));
+    if (!match) throw new NotFoundError(`no live ${input.kind} link ${input.fromId} → ${input.toId}`);
+    this.#store.retireLink(projectId, match.id);
+    this.#bus.append({
+      type: "requirement.link.changed",
+      userSessionId: input.userSessionId,
+      ...(input.agentSessionId === undefined ? {} : { agentSessionId: input.agentSessionId }),
+      payload: {
+        userSessionId: input.userSessionId, action: "retired", linkKind: match.kind,
+        fromId: match.fromId, toKind: match.toKind, toId: match.toId, actor: input.actor,
+        ...(input.agentSessionId === undefined ? {} : { agentSessionId: input.agentSessionId }),
+      },
+    });
+  }
+
+  /** Live links for a project's session — read surface for composer and API. */
+  liveLinks(userSessionId: string): RequirementLinkRow[] {
+    return this.#store.liveLinks(this.#project(userSessionId));
+  }
+
+  /** One tick of the shared invalidation clock (status changes ∪ assumption resolutions). */
+  allocateChangeOrd(userSessionId: string): number {
+    return this.#store.nextChangeOrd(this.#project(userSessionId));
+  }
+
+  /** Adding from→to must not close a cycle: reject if `from` is reachable FROM `to`. */
+  #assertAcyclicDependsOn(projectId: string, fromId: string, toId: string): void {
+    const edges = new Map<string, string[]>();
+    for (const row of this.#store.liveLinks(projectId)) {
+      if (row.kind !== "depends_on") continue;
+      const list = edges.get(row.fromId) ?? [];
+      list.push(row.toId);
+      edges.set(row.fromId, list);
+    }
+    const seen = new Set<string>([toId]);
+    const queue = [toId];
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      if (current === fromId) {
+        throw new InvalidInputError(`${fromId} depends_on ${toId} would create a dependency cycle`);
+      }
+      for (const next of edges.get(current) ?? []) {
+        if (!seen.has(next)) { seen.add(next); queue.push(next); }
+      }
+    }
   }
 
   // ── delegation ───────────────────────────────────────────────────────────
@@ -478,8 +627,23 @@ export class RequirementService implements GoverningDigest {
       list.push(delegation.agentSessionId);
       delegatedTo.set(delegation.requirementId, list);
     }
+    const links = this.#linkViews(projectId);
     return nodes.map((node) => {
       const change = latest.get(node.id);
+      const dependsOn = links.dependsOn.get(node.id) ?? [];
+      const restsOn = links.restsOn.get(node.id) ?? [];
+      // The invalidation flags: deterministic ordinal comparisons on the
+      // shared clock — a terminal claim is suspect when something under it
+      // carries a LATER ord. Self-clearing: any new claim on the node.
+      const flags: RequirementNodeWire["flags"] = [];
+      if (change !== undefined && TERMINAL_STATUSES.has(change.toStatus)) {
+        if (dependsOn.some((target) => (latest.get(target)?.ord ?? 0) > change.ord)) {
+          flags.push("depends_changed");
+        }
+        if (restsOn.some((entry) => entry.status === "falsified" && (entry.resolvedOrd ?? 0) > change.ord)) {
+          flags.push("rests_on_falsified");
+        }
+      }
       return {
         id: node.id,
         parentId: node.parentId,
@@ -500,8 +664,47 @@ export class RequirementService implements GoverningDigest {
           evidenceCount: change.evidence.length,
           at: change.createdAt,
         },
+        dependsOn,
+        dependents: links.dependents.get(node.id) ?? [],
+        conflictsWith: links.conflictsWith.get(node.id) ?? [],
+        restsOn: restsOn.map((entry) => ({ id: entry.id, status: entry.status })),
+        flags,
       };
     });
+  }
+
+  /** Live links folded into per-node views (conflicts merged symmetric). */
+  #linkViews(projectId: string): {
+    dependsOn: Map<string, string[]>;
+    dependents: Map<string, string[]>;
+    conflictsWith: Map<string, string[]>;
+    restsOn: Map<string, { id: string; status: "open" | "confirmed" | "falsified" | "retired"; resolvedOrd: number | null }[]>;
+  } {
+    const push = <T>(map: Map<string, T[]>, key: string, value: T) => {
+      const list = map.get(key) ?? [];
+      list.push(value);
+      map.set(key, list);
+    };
+    const views = {
+      dependsOn: new Map<string, string[]>(),
+      dependents: new Map<string, string[]>(),
+      conflictsWith: new Map<string, string[]>(),
+      restsOn: new Map<string, { id: string; status: "open" | "confirmed" | "falsified" | "retired"; resolvedOrd: number | null }[]>(),
+    };
+    const assumptionById = new Map(this.#assumptions.list(projectId).map((row) => [row.id, row]));
+    for (const row of this.#store.liveLinks(projectId)) {
+      if (row.kind === "depends_on") {
+        push(views.dependsOn, row.fromId, row.toId);
+        push(views.dependents, row.toId, row.fromId);
+      } else if (row.kind === "conflicts_with") {
+        push(views.conflictsWith, row.fromId, row.toId);
+        push(views.conflictsWith, row.toId, row.fromId);
+      } else {
+        const assumption = assumptionById.get(row.toId);
+        if (assumption) push(views.restsOn, row.fromId, { id: assumption.id, status: assumption.status, resolvedOrd: assumption.resolvedOrd });
+      }
+    }
+    return views;
   }
 
   /** The run root's derived status: every top-level requirement, composed "all". */
@@ -555,15 +758,27 @@ export class RequirementService implements GoverningDigest {
       return out;
     };
 
+    // Requirement-level dependency blocking: an open leaf whose depends_on
+    // target is not yet satisfied is blocked, whatever the task ledger says.
+    const dependsOn = new Map<string, string[]>();
+    for (const row of this.#store.liveLinks(this.#project(userSessionId))) {
+      if (row.kind !== "depends_on") continue;
+      const list = dependsOn.get(row.fromId) ?? [];
+      list.push(row.toId);
+      dependsOn.set(row.fromId, list);
+    }
+
     return nodes
       .filter((node) => (children.get(node.id) ?? []).length === 0)
       .filter((node) => (derived.get(node.id) ?? node.status) === "open")
       .filter((node) => this.#affectsRoot(node, byId, children, derived))
       .map((node) => {
         const sessions = sessionsFor(node.id);
+        const linkBlocked = (dependsOn.get(node.id) ?? [])
+          .some((target) => (derived.get(target) ?? byId.get(target)?.status ?? "open") !== "satisfied");
         const annotations: RequirementFrontierEntry["annotations"] = [];
         if (sessions.length > 0) annotations.push("in_progress");
-        if (blockedIds.has(node.id)) annotations.push("blocked");
+        if (blockedIds.has(node.id) || linkBlocked) annotations.push("blocked");
         if (sessions.some((sessionId) => awaitingSessions.has(sessionId))) annotations.push("awaiting_operator");
         if (annotations.length === 0) annotations.push("unassigned");
         return { requirementId: node.id, statement: node.statement, annotations };
@@ -962,8 +1177,12 @@ export class RequirementService implements GoverningDigest {
  */
 function siblingOrder(a: RequirementNodeRow, b: RequirementNodeRow): number {
   const originRank = (node: RequirementNodeRow) => (node.origin === "committed" ? 0 : 1);
-  const mintNumber = (node: RequirementNodeRow) => Number(/^r(\d+)/.exec(node.id)?.[1] ?? 0);
-  return a.ord - b.ord || originRank(a) - originRank(b) || mintNumber(a) - mintNumber(b);
+  return a.ord - b.ord || originRank(a) - originRank(b) || mintNumberOf(a.id) - mintNumberOf(b.id);
+}
+
+/** The numeric part of a minted id ("r7" → 7) — normalization and ordering. */
+function mintNumberOf(id: string): number {
+  return Number(/^r(\d+)/.exec(id)?.[1] ?? 0);
 }
 
 /**

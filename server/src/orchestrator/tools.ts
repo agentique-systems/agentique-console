@@ -22,6 +22,7 @@ import { EvidenceRefSchema, HandoffCoreSchema, HandoffDraftSchema } from "../han
 
 import { fail, guarded, ok } from "../sdk/tool-result.ts";
 import type { InteractionService } from "./interactions.ts";
+import type { AssumptionService } from "./assumptions.ts";
 import { RequirementParseFailure, type RequirementService } from "./requirements.ts";
 import type { SpecService } from "./spec.ts";
 import type { CompletionRecord, OrchestrationStateService } from "./state.ts";
@@ -58,6 +59,7 @@ export interface ConsoleToolsInput {
   interactions: InteractionService;
   specs: SpecService;
   requirements: RequirementService;
+  assumptions: AssumptionService;
   state: OrchestrationStateService;
   /** Skills + attachable-server metadata, for staffing and mint validation. */
   catalog: CapabilityCatalog;
@@ -66,7 +68,7 @@ export interface ConsoleToolsInput {
 }
 
 export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
-  const { sdk, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, specs, requirements, state, catalog, registry } = input;
+  const { sdk, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, specs, requirements, assumptions, state, catalog, registry } = input;
 
   /** Tools operate only on this UserSession's agent sessions. */
   const owned = (agentSessionId: string) => {
@@ -702,9 +704,96 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         }),
     ),
 
+    /**
+     * The premise surface: durable, id-bearing assumptions linked to the
+     * requirements that rest on them — the alternative to a default nobody
+     * wrote down. Recording is un-gated; falsification decorates and wakes,
+     * never rewrites status.
+     */
+    sdk.tool(
+      "record_assumption",
+      "Record an assumption the work proceeds on — a default you took where the operator was not asked, a belief a requirement rests on. Name the requirement ids that rest on it (requirementIds): a later falsification then FLAGS their claims and wakes you. Recording needs no approval — it is what makes the premise visible and falsifiable instead of silently invented. A boundary the operator imposed on the WORK belongs in the requirements (propose_requirements); a resolved question is a decision, not an assumption.",
+      {
+        text: z.string().min(1).describe("One declarative premise, e.g. \"WoW-like means real-time combat, not turn-based\"."),
+        requirementIds: z.array(z.string().min(1)).max(12).optional()
+          .describe("Requirements that rest on this premise (rests_on links)."),
+        interactionId: z.string().optional().describe("The ask that raised it, when one exists."),
+      },
+      async (args: { text: string; requirementIds?: string[]; interactionId?: string }) =>
+        guarded(() => {
+          assertLiveRequirementIds(args.requirementIds ?? []);
+          const wire = assumptions.record({
+            userSessionId, text: args.text, source: "main", actor: "main",
+            ...(args.interactionId === undefined ? {} : { interactionId: args.interactionId }),
+            ...(args.requirementIds === undefined ? {} : { requirementIds: args.requirementIds }),
+          });
+          return { assumptionId: wire.id, requirementIds: wire.requirementIds,
+            note: "Recorded. Seats working under the linked requirements see it; resolve_assumption closes it with provenance." };
+        }),
+    ),
+
+    sdk.tool(
+      "resolve_assumption",
+      "Resolve a recorded assumption: confirmed (evidence or an operator answer establishes it), falsified (reality contradicts it — the Console flags dependent terminal claims and wakes you; judge them yourself), or retired (it stopped mattering). confirmed/falsified need provenance: evidence refs, or the interactionId of the operator answer that settled it. An assumption that should now GOVERN success is an amendment (propose_requirements), never an automatic promotion.",
+      {
+        assumptionId: z.string().min(1).describe("An id from record_assumption, e.g. \"a2\"."),
+        outcome: z.enum(["confirmed", "falsified", "retired"]),
+        note: z.string().optional(),
+        evidence: z.array(EvidenceRefSchema).default([]),
+        interactionId: z.string().optional().describe("The operator answer that settled it, when that is the provenance."),
+      },
+      async (args: { assumptionId: string; outcome: "confirmed" | "falsified" | "retired"; note?: string;
+        evidence: { kind: "file" | "journal" | "artifact" | "task" | "command" | "url"; ref: string; label?: string }[];
+        interactionId?: string }) =>
+        guarded(() => {
+          const wire = assumptions.resolve({
+            userSessionId, assumptionId: args.assumptionId, outcome: args.outcome, actor: "main",
+            ...(args.note === undefined ? {} : { note: args.note }),
+            evidence: args.evidence,
+            ...(args.interactionId === undefined ? {} : { interactionId: args.interactionId }),
+          });
+          return { assumptionId: wire.id, status: wire.status, requirementIds: wire.requirementIds };
+        }),
+    ),
+
+    sdk.tool(
+      "link_requirements",
+      "Record a relationship between requirements: depends_on (fromId cannot be satisfied before toId is — feeds the frontier's blocked annotation and flags fromId's claim if toId later moves; acyclic), or conflicts_with (the two cannot both be satisfied as written — symmetric; recorded for the operator to see, resolved by an amendment or their decision). Links never change derived statuses — the tree alone derives.",
+      {
+        fromId: z.string().min(1),
+        kind: z.enum(["depends_on", "conflicts_with"]),
+        toId: z.string().min(1),
+        note: z.string().optional().describe("Why, in one line."),
+      },
+      async (args: { fromId: string; kind: "depends_on" | "conflicts_with"; toId: string; note?: string }) =>
+        guarded(() => {
+          const result = requirements.link({
+            userSessionId, fromId: args.fromId, kind: args.kind, toId: args.toId, actor: "main",
+            ...(args.note === undefined ? {} : { note: args.note }),
+          });
+          return { ...result, fromId: args.fromId, kind: args.kind, toId: args.toId,
+            ...(result.recorded ? {} : { note: "already recorded — links are idempotent" }) };
+        }),
+    ),
+
+    sdk.tool(
+      "unlink_requirements",
+      "Retire a recorded relationship that no longer holds (a resolved conflict, a dependency an amendment removed).",
+      {
+        fromId: z.string().min(1),
+        kind: z.enum(["depends_on", "conflicts_with", "rests_on"]),
+        toId: z.string().min(1),
+      },
+      async (args: { fromId: string; kind: "depends_on" | "conflicts_with" | "rests_on"; toId: string }) =>
+        guarded(() => {
+          requirements.unlink({ userSessionId, fromId: args.fromId, kind: args.kind, toId: args.toId, actor: "main" });
+          return { retired: true, fromId: args.fromId, kind: args.kind, toId: args.toId };
+        }),
+    ),
+
     sdk.tool(
       "update_orchestration_state",
-      "Revise YOUR working state — the durable memory your next generation reads: current strategy (and why), open uncertainties, standing assumptions, live risks. Any section you pass REPLACES that section wholly; omitted sections persist. Update on material events — commissioning, an alarm you acted on, a discovery that changes the plan, a direction change, before declaring done — never as per-turn ceremony. When you work around a coordination structure the patterns cannot express, note it with the tag 'pattern-friction:'.",
+      "Revise YOUR working state — the durable memory your next generation reads: current strategy (and why), open uncertainties, standing assumptions, live risks. Any section you pass REPLACES that section wholly; omitted sections persist. A load-bearing assumption that specific REQUIREMENTS rest on belongs in record_assumption (id-linked, falsifiable-with-consequence); this scratchpad is for strategy-level notes. Update on material events — commissioning, an alarm you acted on, a discovery that changes the plan, a direction change, before declaring done — never as per-turn ceremony. When you work around a coordination structure the patterns cannot express, note it with the tag 'pattern-friction:'.",
       {
         trigger: z.enum(["commission", "discovery", "alarm", "direction_change", "operator"])
           .describe("What occasioned this update."),

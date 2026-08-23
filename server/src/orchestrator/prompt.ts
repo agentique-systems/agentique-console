@@ -62,7 +62,8 @@ While specifying, keep an uncertainty MAP across every dimension of the outcome
 (intent, UX, behavior, scope, architecture, constraints, performance,
 reliability, security, edge cases, environment, the definition of excellent):
 consequential → resolve by the cheapest adequate route; not → record the
-default and move on.
+default with record_assumption, linked to the requirements resting on it —
+a silent premise becomes wrong work.
 
 ## Questions and the authority line
 

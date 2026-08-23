@@ -649,12 +649,93 @@ export const requirementStatusChanges = sqliteTable(
     agentSessionId: text("agent_session_id"),
     /** The approved requirement revision in force when the change landed (0 = none yet). */
     atRevision: integer("at_revision").notNull(),
+    /**
+     * Per-project monotonic ordinal, shared with assumption resolutions —
+     * the deterministic clock invalidation flags compare (never wall time):
+     * a claim is suspect when something it depends on carries a LATER ord.
+     */
+    ord: integer("ord").notNull(),
     note: text("note"),
     createdAt: text("created_at").notNull(),
   },
   (t) => [
     index("requirement_status_changes_req").on(t.projectId, t.requirementId, t.createdAt),
     check("requirement_status_changes_verified_by", sql`${t.verifiedBy} IN ('self','independent','operator','console')`),
+  ],
+);
+
+/**
+ * Assumptions: recorded premises the work proceeds on — a default taken
+ * where the operator was not asked, a belief about the world a requirement
+ * rests on. Recording one is what PREVENTS silent invention, so recording is
+ * never approval-gated; ids ("a1", …) are project-lifetime and never reused,
+ * exactly like requirement ids. `rests_on` rows in requirement_links join
+ * requirements to the assumptions under them; a falsified assumption
+ * decorates and wakes — it never rewrites requirement status.
+ */
+export const assumptions = sqliteTable(
+  "assumptions",
+  {
+    /** "a1", "a2", … — minted per project, never reused. */
+    id: text("id").notNull(),
+    projectId: text("project_id").notNull().references(() => projects.id),
+    text: text("text").notNull(),
+    status: text("status", { enum: ["open", "confirmed", "falsified", "retired"] })
+      .notNull()
+      .default("open"),
+    /** Who introduced it: the operator's own words, main's inference, or a seat's. */
+    source: text("source", { enum: ["operator", "main", "agent"] }).notNull(),
+    agentSessionId: text("agent_session_id"),
+    /** The ask that raised it or whose answer resolved it, when one exists. */
+    interactionId: text("interaction_id"),
+    /** "main", an agent name, or "operator". */
+    actor: text("actor").notNull(),
+    resolutionNote: text("resolution_note"),
+    resolutionEvidence: text("resolution_evidence", { mode: "json" })
+      .$type<{ kind: string; ref: string; label?: string }[]>(),
+    /** Same monotonic sequence as requirement_status_changes.ord. */
+    resolvedOrd: integer("resolved_ord"),
+    createdAt: text("created_at").notNull(),
+    resolvedAt: text("resolved_at"),
+  },
+  (t) => [
+    primaryKey({ columns: [t.projectId, t.id] }),
+    index("assumptions_project").on(t.projectId, t.status),
+    check("assumptions_status", sql`${t.status} IN ('open','confirmed','falsified','retired')`),
+    check("assumptions_source", sql`${t.source} IN ('operator','main','agent')`),
+  ],
+);
+
+/**
+ * Requirement relationships beyond the parent/child tree. NEVER part of
+ * derivation — deriveComposedStatus stays purely tree-based; links feed the
+ * frontier's blocked annotation, delegation context selection, and the
+ * invalidation flags. `depends_on` is directed and acyclic; `conflicts_with`
+ * is symmetric, stored once with the numerically smaller id as from_id (the
+ * unique index then also blocks inverse duplicates); `rests_on` points a
+ * requirement at an assumption. Requirement retirement retires its links.
+ */
+export const requirementLinks = sqliteTable(
+  "requirement_links",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id").notNull(),
+    /** Always a requirement id. */
+    fromId: text("from_id").notNull(),
+    toKind: text("to_kind", { enum: ["requirement", "assumption"] }).notNull(),
+    toId: text("to_id").notNull(),
+    kind: text("kind", { enum: ["depends_on", "conflicts_with", "rests_on"] }).notNull(),
+    createdByActor: text("created_by_actor").notNull(),
+    agentSessionId: text("agent_session_id"),
+    note: text("note"),
+    createdAt: text("created_at").notNull(),
+    retiredAt: text("retired_at"),
+  },
+  (t) => [
+    uniqueIndex("requirement_links_pair").on(t.projectId, t.kind, t.fromId, t.toKind, t.toId),
+    index("requirement_links_project").on(t.projectId, t.retiredAt),
+    check("requirement_links_to_kind", sql`${t.toKind} IN ('requirement','assumption')`),
+    check("requirement_links_kind", sql`${t.kind} IN ('depends_on','conflicts_with','rests_on')`),
   ],
 );
 

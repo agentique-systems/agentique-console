@@ -12,10 +12,12 @@
  * `user_session_id` on revisions and status changes is attribution only
  * (which session proposed/claimed), never a WHERE clause.
  */
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import type { Db } from "../client.ts";
 import {
+  assumptions,
   requirementDelegations,
+  requirementLinks,
   requirementNodes,
   requirementRevisions,
   requirementStatusChanges,
@@ -26,6 +28,7 @@ export type RequirementRevisionRow = typeof requirementRevisions.$inferSelect;
 export type RequirementNodeRow = typeof requirementNodes.$inferSelect;
 export type RequirementStatusChangeRow = typeof requirementStatusChanges.$inferSelect;
 export type RequirementDelegationRow = typeof requirementDelegations.$inferSelect;
+export type RequirementLinkRow = typeof requirementLinks.$inferSelect;
 
 export type RequirementNodeStatus = RequirementNodeRow["status"];
 
@@ -193,6 +196,9 @@ export class RequirementStore {
           atRevision: row.revision, note: `retired by rev ${row.revision}`, createdAt: now,
         });
       }
+      // A retired node takes its links with it, in the same transaction — a
+      // dangling edge would decorate live nodes with dead relationships.
+      this.retireLinksTouching(projectId, input.ops.retires);
       return this.getRevision(input.revisionId)!;
     })();
   }
@@ -297,10 +303,85 @@ export class RequirementStore {
     })();
   }
 
-  #insertStatusChangeRow(row: Omit<RequirementStatusChangeRow, "id">): RequirementStatusChangeRow {
-    const full: RequirementStatusChangeRow = { id: newId("rqs"), ...row };
+  #insertStatusChangeRow(row: Omit<RequirementStatusChangeRow, "id" | "ord">): RequirementStatusChangeRow {
+    const full: RequirementStatusChangeRow = { id: newId("rqs"), ord: this.nextChangeOrd(row.projectId), ...row };
     this.#db.insert(requirementStatusChanges).values(full).run();
     return full;
+  }
+
+  /**
+   * The shared invalidation clock: one monotonic sequence per project across
+   * requirement status changes AND assumption resolutions, so "X changed
+   * after Y's claim" is a deterministic integer comparison, never wall time.
+   * The MAX over assumptions.resolved_ord is a sanctioned read-model crossing
+   * — the sequence spans both aggregates by design.
+   */
+  nextChangeOrd(projectId: string): number {
+    const changes = this.#db.select({ ord: requirementStatusChanges.ord }).from(requirementStatusChanges)
+      .where(eq(requirementStatusChanges.projectId, projectId))
+      .orderBy(desc(requirementStatusChanges.ord)).limit(1).get();
+    const resolutions = this.#db.select({ ord: assumptions.resolvedOrd }).from(assumptions)
+      .where(eq(assumptions.projectId, projectId))
+      .orderBy(desc(assumptions.resolvedOrd)).limit(1).get();
+    return Math.max(changes?.ord ?? 0, resolutions?.ord ?? 0) + 1;
+  }
+
+  // ── links ────────────────────────────────────────────────────────────────
+
+  /** Live (unretired) links for a project. */
+  liveLinks(projectId: string): RequirementLinkRow[] {
+    return this.#db.select().from(requirementLinks)
+      .where(and(eq(requirementLinks.projectId, projectId), isNull(requirementLinks.retiredAt)))
+      .orderBy(requirementLinks.createdAt).all();
+  }
+
+  /** Insert one link; the unique pair index makes duplicates a no-op (returns null). */
+  insertLink(input: {
+    projectId: string;
+    fromId: string;
+    toKind: "requirement" | "assumption";
+    toId: string;
+    kind: "depends_on" | "conflicts_with" | "rests_on";
+    createdByActor: string;
+    agentSessionId?: string | null;
+    note?: string | null;
+  }): RequirementLinkRow | null {
+    const row: RequirementLinkRow = {
+      id: newId("rql"),
+      projectId: input.projectId,
+      fromId: input.fromId,
+      toKind: input.toKind,
+      toId: input.toId,
+      kind: input.kind,
+      createdByActor: input.createdByActor,
+      agentSessionId: input.agentSessionId ?? null,
+      note: input.note ?? null,
+      createdAt: nowIso(),
+      retiredAt: null,
+    };
+    const result = this.#db.insert(requirementLinks).values(row).onConflictDoNothing().run();
+    return result.changes > 0 ? row : null;
+  }
+
+  retireLink(projectId: string, linkId: string): void {
+    this.#db.update(requirementLinks).set({ retiredAt: nowIso() })
+      .where(and(eq(requirementLinks.projectId, projectId), eq(requirementLinks.id, linkId))).run();
+  }
+
+  /** Retire every live link touching the given requirement ids (node retirement cascade). */
+  retireLinksTouching(projectId: string, requirementIds: string[]): void {
+    if (requirementIds.length === 0) return;
+    const now = nowIso();
+    this.#db.update(requirementLinks).set({ retiredAt: now })
+      .where(and(
+        eq(requirementLinks.projectId, projectId), isNull(requirementLinks.retiredAt),
+        inArray(requirementLinks.fromId, requirementIds),
+      )).run();
+    this.#db.update(requirementLinks).set({ retiredAt: now })
+      .where(and(
+        eq(requirementLinks.projectId, projectId), isNull(requirementLinks.retiredAt),
+        eq(requirementLinks.toKind, "requirement"), inArray(requirementLinks.toId, requirementIds),
+      )).run();
   }
 
   listStatusChanges(projectId: string, requirementId?: string): RequirementStatusChangeRow[] {

@@ -9,6 +9,7 @@ import noisyContraryEvidence from "./noisy-contrary-evidence.ts";
 import requirementTraceability from "./requirement-traceability.ts";
 import restartHonesty from "./restart-honesty.ts";
 import reviewerInvalidatesSpec from "./reviewer-invalidates-spec.ts";
+import silentAssumption from "./silent-assumption.ts";
 import suboptimalFraming from "./suboptimal-framing.ts";
 import trivialNoDelegation from "./trivial-no-delegation.ts";
 import twoPerspectivesBetter from "./two-perspectives-better.ts";
@@ -31,6 +32,7 @@ export const SCENARIOS: OrchestrationScenario[] = [
   twoPerspectivesBetter,
   reviewerInvalidatesSpec,
   requirementTraceability,
+  silentAssumption,
   hungAgent,
   restartHonesty,
   visualJudgment,

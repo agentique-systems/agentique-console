@@ -276,6 +276,19 @@ export class OrchestratorRunner {
   }
 
   /**
+   * A console-authored wake: a fact the Console established (a falsified
+   * assumption, a dependency that moved under satisfied work) that main must
+   * judge. Coalesces with an identical pending note — repeated sweeps of the
+   * same fact earn one wake, not a queue of them.
+   */
+  postConsoleNote(userSessionId: string, text: string): void {
+    const lane = this.#lane(userSessionId);
+    if (lane.queue.some((job) => job.kind === "console-note" && job.text === text)) return;
+    lane.queue.push({ kind: "console-note", text });
+    if (!lane.draining) void this.#drain(userSessionId);
+  }
+
+  /**
    * Interrupts the in-flight turn. The lane survives: the CLI aborts the turn
    * and emits an interrupted result, which settles it through the normal path.
    */

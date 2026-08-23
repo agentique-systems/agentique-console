@@ -306,6 +306,74 @@ export function tasksNameRequirements(): TraceCheck {
   };
 }
 
+/**
+ * Silent defaults, for scenarios whose task card is materially ambiguous:
+ * between requirements approval and the first commission, at least one
+ * assumption is RECORDED and linked to the requirements resting on it. The
+ * runtime never gates recording; this is where the discipline is measured,
+ * on scenarios that opt in.
+ */
+export function assumptionsRecordedBeforeCommission(): TraceCheck {
+  return {
+    id: "assumptions-recorded-before-commission",
+    dimension: "intent-development",
+    description: "ambiguous defaults were recorded as linked assumptions before commissioning",
+    run(trace) {
+      const firstApproval = trace.first("user_session.requirements.updated");
+      if (firstApproval === undefined) return pass("no requirement revision governs — nothing to premise");
+      const firstCommission = trace.first("agent_session.created");
+      if (firstCommission === undefined) return pass("nothing was commissioned");
+      const recorded = trace.events().find((event) =>
+        event.type === "assumption.recorded"
+        && event.seq > firstApproval.seq && event.seq < firstCommission.seq
+        && ((event.payload as { requirementIds?: string[] }).requirementIds ?? []).length > 0);
+      return recorded !== undefined
+        ? pass("a linked assumption was recorded before the first commission", [recorded])
+        : fail("commissioned an ambiguous task with no recorded assumption — the default was taken silently", [firstCommission]);
+    },
+  };
+}
+
+/**
+ * A falsified premise is not a fact to shelve: every falsification whose
+ * linked requirements held TERMINAL claims must be answered — a later status
+ * change on an affected requirement (reopen or a fresh, post-falsification
+ * claim) or a later requirement amendment. The Console only decorated and
+ * woke; this measures whether the wake was consumed.
+ */
+export function falsificationsActedOn(): TraceCheck {
+  return {
+    id: "falsifications-acted-on",
+    dimension: "adaptation",
+    description: "every falsified assumption with dependent terminal claims drew a re-check or an amendment",
+    run(trace) {
+      const problems: { detail: string; event: Ev }[] = [];
+      const events = trace.events();
+      for (const event of events) {
+        if (event.type !== "assumption.resolved") continue;
+        const payload = event.payload as { id?: string; outcome?: string; affected?: { requirementId: string; status: string }[] };
+        if (payload.outcome !== "falsified") continue;
+        const suspect = (payload.affected ?? []).filter((entry) => ["satisfied", "violated", "infeasible"].includes(entry.status));
+        if (suspect.length === 0) continue;
+        const answered = events.some((later) =>
+          later.seq > event.seq
+          && ((later.type === "requirement.status.changed"
+            && suspect.some((entry) => entry.requirementId === (later.payload as { requirementId?: string }).requirementId))
+            || later.type === "user_session.requirements.updated"));
+        if (!answered) {
+          problems.push({
+            detail: `assumption ${String(payload.id)} was falsified under terminal claims (${suspect.map((entry) => entry.requirementId).join(", ")}) and nothing re-checked or amended them`,
+            event,
+          });
+        }
+      }
+      return problems.length === 0
+        ? pass("every consequential falsification was answered")
+        : fail(problems.map((problem) => problem.detail).join("; "), problems.map((problem) => problem.event));
+    },
+  };
+}
+
 export function statusChangesCarryEvidence(opts: { requireIndependentSatisfied?: boolean } = {}): TraceCheck {
   return {
     id: "status-changes-carry-evidence",

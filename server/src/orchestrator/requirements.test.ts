@@ -32,7 +32,7 @@ function makeHarness() {
   db.insert(projects).values({ id: "proj1", workspaceId: "ws1", title: null, intentDocument: null, createdAt: now }).run();
   db.insert(userSessions).values({ id: "us1", workspaceId: "ws1", projectId: "proj1", mode: "execute", title: "t", createdAt: now, updatedAt: now } as typeof userSessions.$inferInsert).run();
   const specs = new SpecService(stores.specs, bus);
-  const service = new RequirementService(stores.requirements, stores.projects, specs, bus, () => "proj1");
+  const service = new RequirementService(stores.requirements, stores.projects, stores.assumptions, specs, bus, () => "proj1");
   const eventsOf = (type: string) =>
     db.select().from(eventsTable).where(eq(eventsTable.type, type)).all();
   return { service, specs, eventsOf, stores };

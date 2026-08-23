@@ -62,6 +62,7 @@ interface SendHandoffArgs {
 }
 
 import { fail, ok } from "../sdk/tool-result.ts";
+import type { AssumptionService } from "../orchestrator/assumptions.ts";
 import type { RequirementService } from "../orchestrator/requirements.ts";
 
 /** The slice of the service's deps the tool handlers read. */
@@ -74,6 +75,8 @@ export interface AgentToolsDeps {
   handoffs?: HandoffService;
   /** The governing requirements (legacy-spec fallback inside; absent in some unit harnesses). */
   requirements?: RequirementService;
+  /** Recorded premises (absent in some unit harnesses). */
+  assumptions?: AssumptionService;
   worktrees: WorktreeManager | null;
 }
 
@@ -351,6 +354,109 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
             return fail(error);
           }
         }));
+      // The premise/relationship surface, scoped exactly like the requirement
+      // writes: referenced requirement ids must sit inside the delegation.
+      // Registration follows the GRANT alone (the grants-parity law); a unit
+      // harness without the service gets a plain failure from the handler.
+      {
+        const assumptionService = () => {
+          if (!deps.assumptions) throw new Error("assumption service unavailable in this harness");
+          return deps.assumptions;
+        };
+        tools.push(sdk.tool("record_assumption",
+          "Record an assumption your work proceeds on — a default you took, a belief a requirement rests on. Name the requirement ids (inside your delegated sub-scope) that rest on it: a later falsification then flags their claims. Recording needs no approval; it is what makes the premise visible instead of silently invented.",
+          {
+            text: z.string().min(1).describe("One declarative premise."),
+            requirementIds: z.array(z.string().min(1)).max(12).optional()
+              .describe("Requirements in your sub-scope that rest on this premise."),
+          },
+          async (args: { text: string; requirementIds?: string[] }) => {
+            try {
+              for (const id of args.requirementIds ?? []) {
+                requirements.assertWithinDelegation(session.userSessionId, session.id, id);
+              }
+              const wire = assumptionService().record({
+                userSessionId: session.userSessionId, text: args.text, source: "agent",
+                actor: agent.name, agentSessionId: session.id,
+                ...(args.requirementIds === undefined ? {} : { requirementIds: args.requirementIds }),
+              });
+              return ok({ assumptionId: wire.id, requirementIds: wire.requirementIds,
+                note: "Recorded. Main and the operator see it; resolve_assumption closes it with provenance." });
+            } catch (error) {
+              return fail(error);
+            }
+          }));
+        tools.push(sdk.tool("resolve_assumption",
+          "Resolve a recorded assumption: confirmed / falsified (both need provenance — evidence refs or an operator answer's interactionId) or retired (stopped mattering). A falsification flags dependent terminal claims and wakes main; it never rewrites status.",
+          {
+            assumptionId: z.string().min(1),
+            outcome: z.enum(["confirmed", "falsified", "retired"]),
+            note: z.string().optional(),
+            evidence: z.array(EvidenceRefSchema).default([]),
+            interactionId: z.string().optional(),
+          },
+          async (args: { assumptionId: string; outcome: "confirmed" | "falsified" | "retired"; note?: string;
+            evidence: { kind: "file" | "journal" | "artifact" | "task" | "command" | "url"; ref: string; label?: string }[];
+            interactionId?: string }) => {
+            try {
+              const wire = assumptionService().resolve({
+                userSessionId: session.userSessionId, assumptionId: args.assumptionId, outcome: args.outcome,
+                actor: agent.name, agentSessionId: session.id,
+                ...(args.note === undefined ? {} : { note: args.note }),
+                evidence: args.evidence,
+                ...(args.interactionId === undefined ? {} : { interactionId: args.interactionId }),
+              });
+              return ok({ assumptionId: wire.id, status: wire.status, requirementIds: wire.requirementIds });
+            } catch (error) {
+              return fail(error);
+            }
+          }));
+        tools.push(sdk.tool("link_requirements",
+          "Record a relationship: depends_on (fromId cannot be satisfied before toId — both inside your sub-scope; acyclic) or conflicts_with (the two cannot both hold as written — fromId inside your sub-scope; toId MAY be outside, a conflict is exactly a cross-scope discovery; route the resolution to main). Links never change derived statuses.",
+          {
+            fromId: z.string().min(1),
+            kind: z.enum(["depends_on", "conflicts_with"]),
+            toId: z.string().min(1),
+            note: z.string().optional(),
+          },
+          async (args: { fromId: string; kind: "depends_on" | "conflicts_with"; toId: string; note?: string }) => {
+            try {
+              requirements.assertWithinDelegation(session.userSessionId, session.id, args.fromId);
+              if (args.kind === "depends_on") {
+                requirements.assertWithinDelegation(session.userSessionId, session.id, args.toId);
+              }
+              const result = requirements.link({
+                userSessionId: session.userSessionId, fromId: args.fromId, kind: args.kind, toId: args.toId,
+                actor: agent.name, agentSessionId: session.id,
+                ...(args.note === undefined ? {} : { note: args.note }),
+              });
+              return ok({ ...result, fromId: args.fromId, kind: args.kind, toId: args.toId,
+                ...(args.kind === "conflicts_with" && result.recorded
+                  ? { note: "Recorded for main and the operator. A conflict resolves by amendment or operator decision — route it to main." } : {}) });
+            } catch (error) {
+              return fail(error);
+            }
+          }));
+        tools.push(sdk.tool("unlink_requirements",
+          "Retire a recorded relationship that no longer holds. fromId must sit inside your delegated sub-scope.",
+          {
+            fromId: z.string().min(1),
+            kind: z.enum(["depends_on", "conflicts_with", "rests_on"]),
+            toId: z.string().min(1),
+          },
+          async (args: { fromId: string; kind: "depends_on" | "conflicts_with" | "rests_on"; toId: string }) => {
+            try {
+              requirements.assertWithinDelegation(session.userSessionId, session.id, args.fromId);
+              requirements.unlink({
+                userSessionId: session.userSessionId, fromId: args.fromId, kind: args.kind, toId: args.toId,
+                actor: agent.name, agentSessionId: session.id,
+              });
+              return ok({ retired: true, fromId: args.fromId, kind: args.kind, toId: args.toId });
+            } catch (error) {
+              return fail(error);
+            }
+          }));
+      }
     }
   }
   /**

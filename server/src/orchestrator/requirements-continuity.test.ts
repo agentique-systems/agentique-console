@@ -41,7 +41,7 @@ function makeHarness() {
     } as typeof userSessions.$inferInsert).run();
   }
   const service = new RequirementService(
-    stores.requirements, stores.projects, new SpecService(stores.specs, bus), bus,
+    stores.requirements, stores.projects, stores.assumptions, new SpecService(stores.specs, bus), bus,
     (userSessionId) => projectOf[userSessionId]!,
   );
   return { service, stores };

@@ -17,6 +17,7 @@ import type { EventBus } from "../events/bus.ts";
 import type { HandoffService } from "../handoffs/service.ts";
 import { recoveryAction } from "../lane-runtime/checkpoint.ts";
 import { decisionOf, decisionPin, renderDecision, type DecisionLedger } from "../orchestrator/decisions.ts";
+import type { AssumptionService } from "../orchestrator/assumptions.ts";
 import type { RequirementService } from "../orchestrator/requirements.ts";
 import type { InteractionService } from "../orchestrator/interactions.ts";
 import type { WorktreeManager } from "../runtime/worktree-manager.ts";
@@ -221,6 +222,8 @@ export interface PromptComposerDeps {
   decisions: DecisionLedger;
   /** The governing requirements (legacy-spec fallback inside) — injected into every seat like decisions are. */
   requirements: RequirementService;
+  /** Recorded premises — the delegated block surfaces the ones under a seat's subtrees. */
+  assumptions: AssumptionService;
   tasks: TaskService;
   interactions: InteractionService;
   worktrees: WorktreeManager | null;
@@ -564,7 +567,23 @@ export class PromptComposer {
       return `${"  ".repeat(depth)}- ${node.id} [${status}]${node.composition === "any" ? " (any of)" : ""}: ${node.statement}`;
     });
     const ancestorBlock = ancestors.length === 0 ? "" : `${ancestors.join("\n")}\n`;
-    return `## Your delegated requirements (this session's success condition)\n${ancestorBlock}${lines.join("\n")}\nStatuses are semantic and evidence-required: report_requirement (leaves only; verifiedBy 'independent' only for another seat's work), decompose_requirement to refine below these nodes. Anything outside this sub-scope routes to main.\n\n`;
+    // Link-driven context selection: what this subtree DEPENDS ON outside
+    // itself (read-only — its statements and statuses, not its work), and the
+    // recorded premises it rests on. Both empty-render to "" (byte stability).
+    const byNodeId = new Map(nodes.map((node) => [node.id, node]));
+    const outsideDeps = [...new Set(nodes.filter((node) => inSubtree.has(node.id))
+      .flatMap((node) => node.dependsOn)
+      .filter((target) => !inSubtree.has(target)))];
+    const contextBlock = outsideDeps.length === 0 ? "" :
+      `Context requirements (outside your scope, read-only — your subtree depends on them):\n${
+        outsideDeps.map((id) => {
+          const node = byNodeId.get(id);
+          return node === undefined ? `- ${id}` : `- ${id} [${node.derivedStatus}]: ${node.statement}`;
+        }).join("\n")}\n`;
+    const assumptionLines = this.#deps.assumptions.openLines(session.userSessionId, inSubtree);
+    const assumptionBlock = assumptionLines.length === 0 ? "" :
+      `Standing assumptions (recorded, not operator-approved — your subtree rests on them; report contradictions with resolve_assumption or to main):\n${assumptionLines.join("\n")}\n`;
+    return `## Your delegated requirements (this session's success condition)\n${ancestorBlock}${lines.join("\n")}\n${contextBlock}${assumptionBlock}Statuses are semantic and evidence-required: report_requirement (leaves only; verifiedBy 'independent' only for another seat's work), decompose_requirement to refine below these nodes. Anything outside this sub-scope routes to main.\n\n`;
   }
 
   /**

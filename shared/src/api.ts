@@ -334,6 +334,10 @@ export interface GetRequirementsResponse {
   nodes: import("./domain.ts").RequirementNodeWire[];
   /** Open requirements whose resolution still affects the root, annotated. */
   frontier: import("./domain.ts").RequirementFrontierEntry[];
+  /** Recorded premises, rests_on-linked to the requirements built on them. */
+  assumptions: import("./domain.ts").AssumptionWire[];
+  /** The operator's approved intent prose (title + preamble); null when none. */
+  intent: string | null;
 }
 
 // POST /api/user-sessions/:id/requirements/:requirementId/status — the

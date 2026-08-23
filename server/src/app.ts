@@ -23,6 +23,7 @@ import { DecisionLedger } from "./orchestrator/decisions.ts";
 import { InteractionService } from "./orchestrator/interactions.ts";
 import { OrchestratorRunner } from "./orchestrator/runner.ts";
 import { buildConsoleMcpServer } from "./orchestrator/tools.ts";
+import { AssumptionService } from "./orchestrator/assumptions.ts";
 import { RequirementService } from "./orchestrator/requirements.ts";
 import { SpecService } from "./orchestrator/spec.ts";
 import { OrchestrationStateService } from "./orchestrator/state.ts";
@@ -79,6 +80,7 @@ export interface App {
   runner: OrchestratorRunner;
   specs: SpecService;
   requirements: RequirementService;
+  assumptions: AssumptionService;
   orchestrationState: OrchestrationStateService;
   completion: RunCompletionService;
   userSessions: UserSessionService;
@@ -113,7 +115,8 @@ export function createApp(options: CreateAppOptions): App {
   const tasks = new TaskService(stores.tasks, stores.assignments, bus, (workspaceId) => void workspaces.get(workspaceId));
   const handoffs = new HandoffService({ repo, bus, getWorkspaceRoot });
   const specs = new SpecService(stores.specs, bus);
-  const requirements = new RequirementService(stores.requirements, stores.projects, specs, bus, resolveProject);
+  const requirements = new RequirementService(stores.requirements, stores.projects, stores.assumptions, specs, bus, resolveProject);
+  const assumptions = new AssumptionService(stores.assumptions, requirements, bus, resolveProject);
   // One requirements proposal at a time: with sequential continuation this is
   // what makes a stale base revision impossible rather than merely detected.
   requirements.setPendingProposalCheck((userSessionId) =>
@@ -145,7 +148,7 @@ export function createApp(options: CreateAppOptions): App {
   const lateRunner = late<OrchestratorRunner>("runner");
   const lateScheduler = late<AssignmentScheduler>("scheduler");
   const host = new AgentSessionService({
-    repo, bus, artifacts, config, profiles, sdk, sessionStore, getWorkspaceRoot, requirements,
+    repo, bus, artifacts, config, profiles, sdk, sessionStore, getWorkspaceRoot, requirements, assumptions,
     worktrees, capacity,
     interactions, decisions, tasks, handoffs,
     scheduler: () => lateScheduler.get(),
@@ -164,9 +167,14 @@ export function createApp(options: CreateAppOptions): App {
     host: () => host,
     tasks, capacity,
     buildMcpServer: (userSessionId, sdkInstance) =>
-      buildConsoleMcpServer({ sdk: sdkInstance, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, specs, requirements, state: orchestrationState, catalog, registry: profiles }),
+      buildConsoleMcpServer({ sdk: sdkInstance, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, specs, requirements, assumptions, state: orchestrationState, catalog, registry: profiles }),
   });
   lateRunner.set(runner);
+  // Console-established facts (a falsified assumption, a dependency that
+  // moved under satisfied work) wake main with a note — record-and-display,
+  // never a status rewrite.
+  requirements.setWakeNote((userSessionId, text) => lateRunner.get().postConsoleNote(userSessionId, text));
+  assumptions.setWakeNote((userSessionId, text) => lateRunner.get().postConsoleNote(userSessionId, text));
   const completion = new RunCompletionService({
     db, repo, bus, interactions, scheduler, getWorkspaceRoot, orchestrationState, specs, requirements,
     host: () => host,
@@ -212,7 +220,7 @@ export function createApp(options: CreateAppOptions): App {
   });
 
   return {
-    config, db, sqlite, bus, artifacts, repo, sdk, getWorkspaceRoot, specs, requirements, orchestrationState,
+    config, db, sqlite, bus, artifacts, repo, sdk, getWorkspaceRoot, specs, requirements, assumptions, orchestrationState,
     workspaces, timeline, profiles, worktrees, capacity,
     decisions, interactions, tasks, scheduler, handoffs, sessionStore,
     host, runner, completion, userSessions, system,

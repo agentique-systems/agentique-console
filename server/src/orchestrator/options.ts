@@ -45,6 +45,10 @@ export const CONSOLE_TOOL_NAMES = [
   "read_requirements",
   "report_requirement",
   "decompose_requirement",
+  "record_assumption",
+  "resolve_assumption",
+  "link_requirements",
+  "unlink_requirements",
   "update_orchestration_state",
   "record_completion",
 ] as const;

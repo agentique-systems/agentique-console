@@ -14,6 +14,7 @@
  *   scheduled_assignments                 AssignmentStore
  *   workspaces                            WorkspaceStore
  *   projects                              ProjectStore
+ *   assumptions                           AssumptionStore
  *   interactions                          InteractionStore
  *   event_artifacts                       ArtifactStore (events/artifact-store.ts)
  *   provider_entries                      SqliteSessionStore (sdk/session-store.ts)
@@ -23,7 +24,8 @@
  *   agent_profile_trust                   AgentProfileRegistry (agent-profiles/registry.ts)
  *   requirement_revisions, requirement_nodes,
  *   requirement_status_changes,
- *   requirement_delegations               RequirementStore
+ *   requirement_delegations,
+ *   requirement_links                     RequirementStore
  *
  * The one sanctioned crossing: transactional appends anchored on a row the
  * store owns (MessageStore.appendHandoffMailbox writes the handoff row with
@@ -38,6 +40,7 @@ import type { Db } from "../client.ts";
 import { ArtifactStore } from "../../events/artifact-store.ts";
 import { SqliteSessionStore } from "../../sdk/session-store.ts";
 import { AssignmentStore } from "./assignment-store.ts";
+import { AssumptionStore } from "./assumption-store.ts";
 import { CronStore } from "./cron-store.ts";
 import { HandoffStore } from "./handoff-store.ts";
 import { InteractionStore } from "./interaction-store.ts";
@@ -53,6 +56,7 @@ import { UsageStore } from "./usage-store.ts";
 import { WorkspaceStore } from "./workspace-store.ts";
 
 export { AssignmentStore } from "./assignment-store.ts";
+export { AssumptionStore, type AssumptionRow } from "./assumption-store.ts";
 export { CronStore } from "./cron-store.ts";
 export { HandoffStore } from "./handoff-store.ts";
 export { InteractionStore } from "./interaction-store.ts";
@@ -62,6 +66,7 @@ export { ProjectStore, type ProjectRow } from "./project-store.ts";
 export {
   RequirementStore,
   type RequirementDelegationRow,
+  type RequirementLinkRow,
   type RequirementNodeRow,
   type RequirementRevisionRow,
   type RequirementStatusChangeRow,
@@ -88,6 +93,7 @@ export interface Stores {
   specs: SpecStore;
   projects: ProjectStore;
   requirements: RequirementStore;
+  assumptions: AssumptionStore;
   orchestrationState: OrchestrationStateStore;
   tasks: TaskStore;
   assignments: AssignmentStore;
@@ -109,6 +115,7 @@ export function createStores(db: Db, sqlite: SqliteTransactor): Stores {
     specs: new SpecStore(db, sqlite),
     projects: new ProjectStore(db),
     requirements: new RequirementStore(db, sqlite),
+    assumptions: new AssumptionStore(db),
     orchestrationState: new OrchestrationStateStore(db),
     tasks: new TaskStore(db),
     assignments: new AssignmentStore(db),

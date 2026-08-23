@@ -36,6 +36,11 @@ const RequirementStatusBody = z.object({
   note: z.string().optional(),
 });
 
+const AssumptionResolveBody = z.object({
+  outcome: z.enum(["confirmed", "falsified", "retired"]),
+  note: z.string().optional(),
+});
+
 /**
  * Constrained to the offered list rather than accepting any string: an id with
  * no `model-catalog.ts` entry silently drops the session's rotation ceiling to
@@ -191,7 +196,26 @@ export function registerUserSessionRoutes(
         approved: mapOrNull(ctx.app.requirements.latestApproved(userSessionId), toRequirementRevisionWire),
         nodes: ctx.app.requirements.derive(userSessionId),
         frontier: ctx.app.requirements.frontier(userSessionId),
+        assumptions: ctx.app.assumptions.list(userSessionId),
+        intent: ctx.app.requirements.intentDocument(userSessionId),
       };
+    },
+  );
+
+  // The operator's verdict on one assumption. Their word is its own
+  // provenance — evidence optional, exactly like requirement verdicts.
+  app.post<{ Params: { id: string; assumptionId: string } }>(
+    "/api/user-sessions/:id/assumptions/:assumptionId/resolve",
+    async (request) => {
+      const parsed = AssumptionResolveBody.safeParse(request.body);
+      if (!parsed.success) throw new InvalidInputError(parsed.error.message);
+      return ctx.app.assumptions.resolve({
+        userSessionId: request.params.id,
+        assumptionId: request.params.assumptionId,
+        outcome: parsed.data.outcome,
+        actor: "operator",
+        ...(parsed.data.note === undefined ? {} : { note: parsed.data.note }),
+      });
     },
   );
 
