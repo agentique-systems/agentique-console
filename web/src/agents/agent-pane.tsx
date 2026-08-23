@@ -79,6 +79,11 @@ function PaneBody({ session, runs }: { session: AgentSession; runs: AgentRunSumm
         </div>
         <div className="mt-1 text-2xs text-muted-foreground">
           Console-managed · durable mailbox · read-only inspector
+          {session.unscoped && (
+            <span className="text-attention" title="commissioned without requirement ids while requirements govern — untraceable to any obligation">
+              {" "}· unscoped
+            </span>
+          )}
           {session.budget !== null && (
             <span
               className={session.budget.spendUsd >= session.budget.budgetUsd ? " text-attention" : ""}

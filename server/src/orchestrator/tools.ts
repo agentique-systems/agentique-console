@@ -207,6 +207,11 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
             entryAgent: created.entryAgent,
             ...(created.coordinatorName ? { coordinator: created.coordinatorName } : {}),
             status: "launched",
+            // Soft traceability: never a rejection — exploration before
+            // decomposition is legitimate — but the omission is visible.
+            ...((args.requirements === undefined || args.requirements.length === 0) && requirements.latestApproved(userSessionId) !== undefined
+              ? { scopeNote: `Commissioned without requirement ids while requirements rev ${requirements.latestApproved(userSessionId)!.revision} governs — this session renders as unscoped. Pass \`requirements\` to delegate a sub-scope and grant scoped reporting tools.` }
+              : {}),
           };
         }),
     ),

@@ -243,8 +243,13 @@ export class SessionLifecycle {
       });
     }
     const specialists = input.agents.map((agent) => agent.name);
+    // Unscoped at creation = requirements already govern and no ids were
+    // delegated — the same derivation the read surfaces use, computed here so
+    // the created event and later reads agree.
+    const unscoped = (input.requirements ?? []).length === 0
+      && this.#deps.requirements.firstApprovedAt(input.userSessionId) !== null;
     bus.append({ type: "agent_session.created", userSessionId: row.userSessionId, agentSessionId: row.id,
-      payload: { session: toWireAgentSession(row, specialists, false), agents: specialists } });
+      payload: { session: toWireAgentSession(row, specialists, false, 0, unscoped), agents: specialists } });
     bus.append({ type: "agent_session.delegation.sent", userSessionId: row.userSessionId, agentSessionId: row.id,
       payload: { userSessionId: row.userSessionId, agentSessionId: row.id, kind: "created", preview: title } });
     const entry = this.#deps.routing.contractOf(row).contract.entry;

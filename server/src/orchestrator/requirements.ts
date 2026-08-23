@@ -154,6 +154,18 @@ export class RequirementService implements GoverningDigest {
     return this.#store.latestApproved(userSessionId);
   }
 
+  /**
+   * When the FIRST revision was approved — the moment the run became
+   * governed. Sessions commissioned before it are never branded unscoped
+   * (matching the eval checker's created-after-first-approval semantics).
+   */
+  firstApprovedAt(userSessionId: string): string | null {
+    const times = this.#store.listRevisions(userSessionId)
+      .filter((row) => (row.status === "approved" || row.status === "superseded") && row.approvedAt !== null)
+      .map((row) => row.approvedAt!);
+    return times.length === 0 ? null : times.reduce((min, at) => (at < min ? at : min));
+  }
+
   listRevisions(userSessionId: string): RequirementRevisionRow[] {
     return this.#store.listRevisions(userSessionId);
   }

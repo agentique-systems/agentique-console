@@ -296,6 +296,7 @@ export class AgentSessionService {
     return { status: this.#operator.statusOf(session),
       agents: this.#specialists(session.id).map((p) => ({ name: p.name, profileId: p.profileId, model: p.model })),
       budget: this.commissionBudget(session),
+      ...(this.unscoped(session) ? { unscoped: true } : {}),
       messages: rows.map(toWireMessage) };
   }
 
@@ -318,6 +319,7 @@ export class AgentSessionService {
       pattern: session.pattern,
       status: this.#operator.statusOf(session),
       budget: this.commissionBudget(session),
+      ...(this.unscoped(session) ? { unscoped: true } : {}),
       patternState: patternState === undefined ? null : {
         tripped: patternState.tripped ?? null,
         handoffCount: patternState.handoffCount,
@@ -363,9 +365,23 @@ export class AgentSessionService {
         agents: this.#specialists(row.id).map((p) => p.name),
         unseenCount: this.#deps.repo.listQueuedDeliveries(row.id).filter((d) => d.recipient === MAIN_RECIPIENT).length,
         ...(budget === null ? {} : { budget }),
+        ...(this.unscoped(row) ? { unscoped: true } : {}),
         updatedAt: row.updatedAt,
       };
     });
+  }
+
+  /**
+   * Derived, never stored: an OPEN session commissioned AFTER requirements
+   * began governing, holding zero delegations — untraceable to any
+   * obligation. Rendered, never rejected: exploration before decomposition
+   * and utility sessions are legitimate, and the operator sees which is which.
+   */
+  unscoped(row: AgentSessionRow): boolean {
+    if (row.lifecycle !== "open") return false;
+    if (this.#deps.requirements.delegationSet(row.id).length > 0) return false;
+    const governedSince = this.#deps.requirements.firstApprovedAt(row.userSessionId);
+    return governedSince !== null && row.createdAt > governedSince;
   }
 
   /** Commission budget + subtree spend; null when no budget was set. */
@@ -425,7 +441,10 @@ export class AgentSessionService {
     }
   }
 
-  wireSession(row: AgentSessionRow) { return toWireAgentSession(row, this.#specialists(row.id).map((p) => p.name), this.#operator.statusOf(row) === "working", this.commissionBudget(row)?.spendUsd ?? 0); }
+  wireSession(row: AgentSessionRow) {
+    return toWireAgentSession(row, this.#specialists(row.id).map((p) => p.name), this.#operator.statusOf(row) === "working",
+      this.commissionBudget(row)?.spendUsd ?? 0, this.unscoped(row));
+  }
 
   wireSessionsForUserSession(userSessionId: string) {
     return this.#deps.repo.listAgentSessions(userSessionId).map((row) => this.wireSession(row));

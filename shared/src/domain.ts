@@ -120,6 +120,11 @@ export interface AgentSession {
   agents: string[];
   /** Commission budget + subtree spend; null when no budget was set. */
   budget: AgentSessionBudget | null;
+  /**
+   * Commissioned while requirements govern, with zero delegated requirement
+   * ids — untraceable to any obligation. Derived, displayed, never rejected.
+   */
+  unscoped: boolean;
   createdAt: string;
   updatedAt: string;
 }

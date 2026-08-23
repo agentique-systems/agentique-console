@@ -128,7 +128,11 @@ export function exportRun(dbFile: string): RunExport {
 
   const sessions = all(
     `SELECT s.id, s.title, s.pattern, s.lifecycle, s.parent_agent_session_id AS parent, s.created_at,
-       (SELECT count(*) FROM agents a WHERE a.agent_session_id = s.id) AS seats
+       (SELECT count(*) FROM agents a WHERE a.agent_session_id = s.id) AS seats,
+       (SELECT count(*) = 0 FROM requirement_delegations d WHERE d.agent_session_id = s.id)
+         AND s.created_at > (SELECT min(approved_at) FROM requirement_revisions r
+           WHERE r.user_session_id = s.user_session_id AND r.status IN ('approved','superseded') AND r.approved_at IS NOT NULL)
+         AS unscoped
      FROM agent_sessions s ORDER BY s.created_at`);
 
   // EVERY column — strategyWhy, uncertainties, assumptions, risks, and the
@@ -152,6 +156,7 @@ export function exportRun(dbFile: string): RunExport {
     // Same-status re-claims (a reviewer upgrading a tier) withdraw nothing;
     // console rows are the mechanical statement-resets and retirements.
     { metric: "terminal claims later reversed", value: one(`SELECT count(*) AS n FROM requirement_status_changes WHERE from_status IN ('satisfied','violated','infeasible') AND to_status != from_status AND actor != 'console'`), note: "a claim the run itself later withdrew — the honest measure of verification quality" },
+    { metric: "unscoped commissions", value: one(`SELECT count(*) AS n FROM agent_sessions s WHERE (SELECT count(*) FROM requirement_delegations d WHERE d.agent_session_id = s.id) = 0 AND s.created_at > (SELECT min(approved_at) FROM requirement_revisions r WHERE r.user_session_id = s.user_session_id AND r.status IN ('approved','superseded') AND r.approved_at IS NOT NULL)`), note: "sessions commissioned under a governing graph with no delegated requirement ids" },
   ];
 
   const parallelism = trace.parallelism();
