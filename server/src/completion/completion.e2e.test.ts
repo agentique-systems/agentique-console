@@ -307,9 +307,9 @@ describe("the requirement graph as completion oracle", () => {
 
     // Requirements verified with evidence, record against the CURRENT revision → proposes.
     h.app.requirements.reportStatus({ userSessionId, requirementId: "r1", to: "satisfied",
-      evidence: [{ kind: "command", ref: "npm start" }], verifiedBy: "independent", actor: "check" });
+      evidence: [{ kind: "command", ref: "npm start" }], claimant: { kind: "seat", agentSessionId: "as-check", agent: "check", profileRole: "reviewer", profileTools: ["Read", "Glob", "Grep"] } });
     h.app.requirements.reportStatus({ userSessionId, requirementId: "r2", to: "satisfied",
-      evidence: [{ kind: "artifact", ref: "artifact_screen" }], verifiedBy: "independent", actor: "check" });
+      evidence: [{ kind: "artifact", ref: "artifact_screen" }], claimant: { kind: "seat", agentSessionId: "as-check", agent: "check", profileRole: "reviewer", profileTools: ["Read", "Glob", "Grep"] } });
     h.app.orchestrationState.recordCompletion(userSessionId, {
       criteria: [
         { requirement: "r1", statement: "The page renders", met: true, evidence: [{ kind: "command", ref: "npm start" }] },
@@ -328,6 +328,44 @@ describe("the requirement graph as completion oracle", () => {
     expect(served.document.requirements).toMatchObject({ revision: 1, counts: { satisfied: 2, open: 0 } });
     expect(served.document.requirements?.outline).toContain("[✓] r1: The page renders");
     expect(served.document.justification?.criteria[0]).toMatchObject({ requirement: "r1", statement: "The page renders", met: true });
+  });
+
+  it("names verification gaps in the nudge and persists them with the summary — never gating", async () => {
+    const { h } = harness();
+    const userSessionId = h.addUserSession();
+    const doc = "## Requirements\n- (verify: independent) The page renders\n- Verification ran";
+    const draftRow = h.app.requirements.propose(userSessionId, doc, "initial");
+    h.app.requirements.approve(draftRow.id, { document: doc, edited: false });
+
+    // Main satisfies both itself BEFORE the run settles: r1 (verify:
+    // independent) records self → a gap the one-shot nudge must name.
+    h.app.requirements.reportStatus({ userSessionId, requirementId: "r1", to: "satisfied",
+      evidence: [{ kind: "command", ref: "npm start" }], claimant: { kind: "main" } });
+    h.app.requirements.reportStatus({ userSessionId, requirementId: "r2", to: "satisfied",
+      evidence: [{ kind: "artifact", ref: "artifact_screen" }], claimant: { kind: "main" } });
+    await runToFinalWith(h, userSessionId);
+    h.completion.schedule(userSessionId);
+    await settle();
+    const nudge = h.fake.captured.prompts.find((text) => text.includes("no completion record against requirements rev 1"));
+    expect(nudge).toBeDefined();
+    expect(nudge).toContain("Satisfied below their declared verification: r1 (needs independent, claimed self)");
+
+    // A completion record still proposes — the gap is advisory, never a gate —
+    // and the summary carries it for the sign-off card.
+    h.app.orchestrationState.recordCompletion(userSessionId, {
+      criteria: [
+        { requirement: "r1", statement: "The page renders", met: true, evidence: [{ kind: "command", ref: "npm start" }] },
+        { requirement: "r2", statement: "Verification ran", met: true, evidence: [] },
+      ],
+      knownGaps: [], nonGoals: [], requirementsRevision: 1,
+    });
+    h.completion.schedule(userSessionId);
+    await collectUntil(h.bus, (event) => event.type === "run.completion.proposed", 10_000);
+    const summaryRow = h.db.select().from(runSummaries).all()[0]!;
+    const served = h.completion.getSummary(userSessionId, summaryRow.id);
+    expect(served.document.requirements?.verificationGaps).toMatchObject([
+      { requirementId: "r1", expected: "independent", recorded: { verifiedBy: "self", actor: "main" } },
+    ]);
   });
 
   it("a stale record (superseded revision) does not satisfy the oracle", async () => {
@@ -354,9 +392,9 @@ describe("the requirement graph as completion oracle", () => {
     approveRequirements(h, userSessionId);
     await runToFinalWith(h, userSessionId);
     h.app.requirements.reportStatus({ userSessionId, requirementId: "r1", to: "infeasible",
-      evidence: [{ kind: "artifact", ref: "artifact_probe" }], verifiedBy: "self", actor: "main", note: "renderer API retired" });
+      evidence: [{ kind: "artifact", ref: "artifact_probe" }], claimant: { kind: "main" }, note: "renderer API retired" });
     h.app.requirements.reportStatus({ userSessionId, requirementId: "r2", to: "satisfied",
-      evidence: [{ kind: "command", ref: "checked" }], verifiedBy: "self", actor: "main" });
+      evidence: [{ kind: "command", ref: "checked" }], claimant: { kind: "main" } });
     h.app.orchestrationState.recordCompletion(userSessionId, {
       criteria: [{ requirement: "r1", statement: "The page renders", met: false, evidence: [] }],
       knownGaps: ["renderer API retired"], nonGoals: [], requirementsRevision: 1,

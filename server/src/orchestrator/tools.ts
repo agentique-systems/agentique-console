@@ -113,6 +113,8 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           ),
         allowChildSessions: z.boolean().default(false)
           .describe("Let this session's ENTRY agent spawn child sessions (depth-capped). Give it to a session that owns a workstream with its own internal decomposition; leave it off for leaf work."),
+        budgetUsd: z.number().positive().optional()
+          .describe("Optional spend ceiling in USD for this commission (the session plus its child sessions). Crossing it tells the session to wrap up honestly and escalates to you with the delegated open requirements — it never pauses the run, never kills a lane, never blocks a final."),
         why: z.string().optional()
           .describe("Why this session, this pattern, now — one or two sentences. Journaled with the briefing; the run review reads it."),
         expecting: z.string().optional()
@@ -142,6 +144,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         }[];
         briefing: HandoffDraft;
         allowChildSessions?: boolean;
+        budgetUsd?: number;
         why?: string;
         expecting?: string;
         requirements?: string[];
@@ -188,6 +191,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
             agents: args.agents,
             briefing,
             ...(args.allowChildSessions === true ? { allowChildSessions: true } : {}),
+            ...(args.budgetUsd === undefined ? {} : { budgetUsd: args.budgetUsd }),
             ...(args.tasks === undefined ? {} : { tasks: args.tasks }),
             // The lifecycle records the delegation BEFORE the briefing
             // dispatches, so the very first delivery renders the sub-scope.
@@ -203,6 +207,11 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
             entryAgent: created.entryAgent,
             ...(created.coordinatorName ? { coordinator: created.coordinatorName } : {}),
             status: "launched",
+            // Soft traceability: never a rejection — exploration before
+            // decomposition is legitimate — but the omission is visible.
+            ...((args.requirements === undefined || args.requirements.length === 0) && requirements.latestApproved(userSessionId) !== undefined
+              ? { scopeNote: `Commissioned without requirement ids while requirements rev ${requirements.latestApproved(userSessionId)!.revision} governs — this session renders as unscoped. Pass \`requirements\` to delegate a sub-scope and grant scoped reporting tools.` }
+              : {}),
           };
         }),
     ),
@@ -565,28 +574,27 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           const digest = requirements.digest(userSessionId);
           return { revision: approved.revision, changeNote: approved.changeNote,
             document: pageTail(digest, args.cursor, args.maxBytes),
-            frontier: requirements.frontier(userSessionId) };
+            frontier: requirements.frontier(userSessionId),
+            verificationGaps: requirements.verificationGaps(userSessionId) };
         }),
     ),
 
     sdk.tool(
       "report_requirement",
-      "Record a requirement STATUS with evidence. Statuses are semantic claims, never scores: satisfied (the statement holds — evidence required), violated (something broke it — evidence required), infeasible (cannot be achieved with available capability or authority — evidence required; route the consequence to the operator or a scope amendment), open (reopen a stale claim). Report LEAVES only — parents and the root derive mechanically from their children, and the operator remains the completion gate. verifiedBy is 'independent' only when the evidence comes from a different seat/profile than the one that did the work. Quantitative measurements belong INSIDE evidence refs, never as numbers ranking anything.",
+      "Record a requirement STATUS with evidence. Statuses are semantic claims, never scores: satisfied (the statement holds — evidence required), violated (something broke it — evidence required), infeasible (cannot be achieved with available capability or authority — evidence required; route the consequence to the operator or a scope amendment), open (reopen a stale claim). Report LEAVES only — parents and the root derive mechanically from their children, and the operator remains the completion gate. The Console derives and records who stood behind each claim: a claim by you records as self-verification — when the stakes deserve independent verification, delegate the requirement to a write-isolated reviewer seat and have IT report. Quantitative measurements belong INSIDE evidence refs, never as numbers ranking anything.",
       {
         requirementId: z.string().min(1).describe("A requirement id from read_requirements, e.g. \"r3\""),
         status: z.enum(["satisfied", "violated", "infeasible", "open"]),
         evidence: z.array(EvidenceRefSchema).default([]).describe("What proves the claim: files, artifacts, tasks, commands, urls. Required for satisfied/violated/infeasible."),
-        verifiedBy: z.enum(["self", "independent"]).default("self")
-          .describe("'independent' only when a different agent/profile than the implementer produced the evidence (a reviewer's verdict, a fresh verification)."),
         note: z.string().optional().describe("One line of context (why infeasible, what reopened it)."),
       },
       async (args: { requirementId: string; status: "satisfied" | "violated" | "infeasible" | "open";
         evidence: { kind: "file" | "journal" | "artifact" | "task" | "command" | "url"; ref: string; label?: string }[];
-        verifiedBy: "self" | "independent"; note?: string }) =>
+        note?: string }) =>
         guarded(() => {
           const wire = requirements.reportStatus({
             userSessionId, requirementId: args.requirementId, to: args.status,
-            evidence: args.evidence, verifiedBy: args.verifiedBy, actor: "main",
+            evidence: args.evidence, claimant: { kind: "main" },
             ...(args.note === undefined ? {} : { note: clip(args.note, 280) }),
           });
           return { requirementId: wire.id, status: wire.status, derivedRoot: requirements.rootStatus(userSessionId),

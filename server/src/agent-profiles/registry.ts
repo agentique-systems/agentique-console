@@ -63,6 +63,18 @@ export const ProfileSchema = z.object({
 
 export type AgentProfile = z.infer<typeof ProfileSchema>;
 
+/**
+ * THE write-capability definition — the one the ownership rule and the
+ * verification-tier derivation both key off. Bash can technically write too;
+ * the ownership rule deliberately keys off the editing tools only, and the
+ * tier derivation follows the same line so the two facts cannot fork.
+ * Undefined tools (a pre-schema `{}` snapshot) count as writing — conservative
+ * in both consumers.
+ */
+export function profileWritesFiles(tools: readonly string[] | undefined): boolean {
+  return tools === undefined || tools.includes("Edit") || tools.includes("Write");
+}
+
 const READ_TOOLS = ["Read", "Glob", "Grep"];
 const CODE_TOOLS = [...READ_TOOLS, "Edit", "Write", "Bash"];
 /**

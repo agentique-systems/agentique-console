@@ -82,6 +82,7 @@ export class Repo {
   // --- Usage, crons, pattern state ------------------------------------------
 
   insertUsage(row: UsageSampleRow): void { this.#s.usage.insertUsage(row); }
+  sumCostForAgentSessions(agentSessionIds: readonly string[]): number { return this.#s.usage.sumCostForAgentSessions(agentSessionIds); }
   listUsage(userSessionId: string): UsageSampleRow[] { return this.#s.usage.listUsage(userSessionId); }
   aggregateUsageByParticipant(agentSessionId: string): Map<string, { costUsd: number; turns: number; outputTokens: number }> { return this.#s.usage.aggregateByParticipant(agentSessionId); }
   insertCron(row: CronRow): void { this.#s.crons.insertCron(row); }

@@ -1,5 +1,5 @@
 /** usage_samples — one row per settled provider turn. */
-import { asc, eq } from "drizzle-orm";
+import { asc, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "../client.ts";
 import { usageSamples } from "../schema.ts";
 
@@ -13,6 +13,18 @@ export class UsageStore {
   }
 
   insertUsage(row: UsageSampleRow): void { this.#db.insert(usageSamples).values(row).run(); }
+
+  /**
+   * Summed cost across sessions (the commission-budget spend). Counts every
+   * row — checkpoint pseudo-turns included, matching capacity.checkBudget:
+   * they cost real dollars, unlike the summary's display-cost filter.
+   */
+  sumCostForAgentSessions(agentSessionIds: readonly string[]): number {
+    if (agentSessionIds.length === 0) return 0;
+    const [row] = this.#db.select({ total: sql<number>`coalesce(sum(${usageSamples.costUsd}), 0)` })
+      .from(usageSamples).where(inArray(usageSamples.agentSessionId, [...agentSessionIds])).all();
+    return row?.total ?? 0;
+  }
   listUsage(userSessionId: string): UsageSampleRow[] { return this.#db.select().from(usageSamples).where(eq(usageSamples.userSessionId, userSessionId)).orderBy(asc(usageSamples.createdAt)).all(); }
 
   /**

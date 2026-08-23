@@ -14,6 +14,9 @@ export function toWireAgentSession(
   row: AgentSessionRow,
   specialists: string[],
   working: boolean,
+  /** Subtree spend in USD; only rendered when the row carries a budget. */
+  spendUsd = 0,
+  unscoped = false,
 ): AgentSession {
   return {
     id: row.id,
@@ -24,6 +27,8 @@ export function toWireAgentSession(
     pattern: row.pattern,
     parentAgentSessionId: row.parentAgentSessionId,
     agents: specialists,
+    budget: row.budgetUsd === null ? null : { budgetUsd: row.budgetUsd, spendUsd },
+    unscoped,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };

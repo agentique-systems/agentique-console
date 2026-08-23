@@ -37,10 +37,12 @@ describe("seat requirement tools (fake SDK)", () => {
       if (id.role === "coordinator") {
         coordinatorTurns += 1;
         if (coordinatorTurns === 1) {
-          // Within the sub-scope (r2 sits under the delegated r1)…
+          // Within the sub-scope (r2 sits under the delegated r1)… The stale
+          // `verifiedBy` arg is passed on purpose: the tier is console-derived
+          // now, and a model still sending the old field must be ignored.
           yield toolUseMessage("rep-ok", "mcp__console_agent__report_requirement", {
             requirementId: "r2", status: "satisfied",
-            evidence: [{ kind: "command", ref: "curl /login" }], verifiedBy: "self" });
+            evidence: [{ kind: "command", ref: "curl /login" }], verifiedBy: "independent" });
           // …outside it (r3 was never delegated) — refused, named.
           yield toolUseMessage("rep-out", "mcp__console_agent__report_requirement", {
             requirementId: "r3", status: "satisfied",
@@ -86,6 +88,10 @@ describe("seat requirement tools (fake SDK)", () => {
     const refined = h.app.requirements.derive(userSessionId).find((node) => node.origin === "refinement");
     expect(refined).toMatchObject({ parentId: "r2", statement: "Token refresh rotates", refinedByAgentSessionId: created.agentSessionId });
 
+    // A delegated session is never branded unscoped.
+    expect(h.host.unscoped(h.repo.getAgentSession(created.agentSessionId)!)).toBe(false);
+    expect(h.host.listForUserSession(userSessionId)[0]?.unscoped).toBeUndefined();
+
     // The coordinator's FIRST delivery carried the delegated block (statements
     // and statuses), so the sub-scope was in hand from the briefing on.
     const firstDelivery = h.fake.captured.prompts.find((text) => text.includes("Your delegated requirements"));
@@ -119,6 +125,17 @@ describe("seat requirement tools (fake SDK)", () => {
     for (const prompt of h.fake.captured.prompts) {
       expect(prompt).not.toContain("Your delegated requirements");
     }
+    // Commissioned under a governing graph with zero delegations → the
+    // session renders as UNSCOPED on every read surface (soft annotation,
+    // derived, never a rejection — the session launched fine).
+    const bare = h.repo.listAgentSessions(userSessionId)[0]!;
+    expect(h.host.unscoped(bare)).toBe(true);
+    expect(h.host.listForUserSession(userSessionId)[0]).toMatchObject({ unscoped: true });
+    expect(h.host.activity(bare.id)).toMatchObject({ unscoped: true });
+    expect(h.host.wireSession(bare).unscoped).toBe(true);
+    // A session from BEFORE the first approval is never retroactively branded
+    // (matching the eval checker's created-after-first-approval semantics).
+    expect(h.host.unscoped({ ...bare, createdAt: "2000-01-01T00:00:00.000Z" })).toBe(false);
     // Every seat reads; only the entry/granted roles report. The specialist's
     // allow-list carries read_requirements but not report_requirement.
     const scoutOptions = h.fake.captured.options.find((options) => agentRoleOf(options).role === "specialist");

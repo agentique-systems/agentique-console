@@ -8,7 +8,7 @@
  * through the nesting broker.
  */
 import type { HandoffDraft, PatternId } from "@agentique-console/shared";
-import type { AgentProfile, AgentProfileRegistry } from "../agent-profiles/registry.ts";
+import { profileWritesFiles, type AgentProfile, type AgentProfileRegistry } from "../agent-profiles/registry.ts";
 import { toWireAgentSession } from "../api/wire.ts";
 import type { ReapResult } from "../completion/summary.ts";
 import type { Config } from "../config.ts";
@@ -48,6 +48,12 @@ export interface CreateAgentSessionInput {
   parent?: { agentSessionId: string; controllerAgent: string };
   /** Grants the entry agent create_child_session (depth cap still applies). */
   allowChildSessions?: boolean;
+  /**
+   * Optional commission spend ceiling in USD (this session + its children).
+   * Crossing it notifies the session and escalates to main — never a pause,
+   * never a kill. Main-only: child sessions bill their budgeted ancestor.
+   */
+  budgetUsd?: number;
   /**
    * Requirement ids this session is commissioned against — its delegated
    * sub-scope. Recorded BEFORE the briefing dispatches so the very first
@@ -133,7 +139,7 @@ export class SessionLifecycle {
     // boundary for agents that never write.
     for (const agent of input.agents) {
       const profile = this.profile(agent.profileId ?? "explorer", user.workspaceId);
-      const writes = profile.tools.includes("Edit") || profile.tools.includes("Write");
+      const writes = profileWritesFiles(profile.tools);
       if (writes && (agent.owns ?? []).filter((scope) => scope.trim() !== "").length === 0) {
         throw new InvalidInputError(`agent "${agent.name}" (${profile.id}) writes files, so it must declare what it owns`);
       }
@@ -198,6 +204,7 @@ export class SessionLifecycle {
       parentControllerAgent: parentRow ? input.parent!.controllerAgent : null,
       depth: parentRow ? parentRow.depth + 1 : 0,
       allowChildSessions: input.allowChildSessions === true,
+      budgetUsd: input.budgetUsd ?? null,
     };
     repo.insertAgentSession(row);
     if (parentRow) {
@@ -236,8 +243,13 @@ export class SessionLifecycle {
       });
     }
     const specialists = input.agents.map((agent) => agent.name);
+    // Unscoped at creation = requirements already govern and no ids were
+    // delegated — the same derivation the read surfaces use, computed here so
+    // the created event and later reads agree.
+    const unscoped = (input.requirements ?? []).length === 0
+      && this.#deps.requirements.firstApprovedAt(input.userSessionId) !== null;
     bus.append({ type: "agent_session.created", userSessionId: row.userSessionId, agentSessionId: row.id,
-      payload: { session: toWireAgentSession(row, specialists, false), agents: specialists } });
+      payload: { session: toWireAgentSession(row, specialists, false, 0, unscoped), agents: specialists } });
     bus.append({ type: "agent_session.delegation.sent", userSessionId: row.userSessionId, agentSessionId: row.id,
       payload: { userSessionId: row.userSessionId, agentSessionId: row.id, kind: "created", preview: title } });
     const entry = this.#deps.routing.contractOf(row).contract.entry;
@@ -294,7 +306,7 @@ export class SessionLifecycle {
     if (!user) throw new NotFoundError("unknown user session");
     const profile = this.profile(input.profileId, user.workspaceId);
     const owns = (input.owns ?? []).map((scope) => scope.trim()).filter((scope) => scope !== "");
-    const writes = profile.tools.includes("Edit") || profile.tools.includes("Write");
+    const writes = profileWritesFiles(profile.tools);
     if (writes && owns.length === 0) {
       throw new InvalidInputError(`agent "${name}" (${profile.id}) writes files, so it must declare what it owns`);
     }

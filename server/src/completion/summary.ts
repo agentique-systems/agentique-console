@@ -56,6 +56,10 @@ export interface BuildRunSummaryInput {
     revision: number;
     counts: Record<import("@agentique-console/shared").RequirementStatus, number>;
     outline: string;
+    /** Satisfied leaves below their declared verification tier — journal facts, display only. */
+    verificationGaps: import("@agentique-console/shared").RequirementVerificationGap[];
+    /** Terminal claims the run later withdrew — journal facts, display only, never a verdict input. */
+    reversals: import("@agentique-console/shared").RequirementReversal[];
     rootStatus: import("@agentique-console/shared").RequirementStatus;
   } | null;
 }
@@ -193,7 +197,8 @@ export function buildRunSummary(input: BuildRunSummaryInput): RunSummaryDocument
     decisions, deviations, uncertainty,
     justification: input.completionRecord ? { revision: input.completionRecord.revision, ...input.completionRecord.completion } : null,
     requirements: requirementState === null ? null
-      : { revision: requirementState.revision, counts: requirementState.counts, outline: requirementState.outline },
+      : { revision: requirementState.revision, counts: requirementState.counts, outline: requirementState.outline,
+        verificationGaps: requirementState.verificationGaps, reversals: requirementState.reversals },
     resources: {
       reapedSeats: reaped.seats.length,
       detail: reaped.seats.map((seat) => `${seat.agentSessionId}:${seat.agent}`),

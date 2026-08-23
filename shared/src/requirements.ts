@@ -24,12 +24,24 @@ export type RequirementStatus = "open" | "satisfied" | "violated" | "infeasible"
 /** Who stood behind a status change; "console" marks mechanical resets only. */
 export type RequirementVerifiedBy = "self" | "independent" | "operator" | "console";
 
+/**
+ * The verification a requirement's satisfaction deserves, declared in the
+ * COMMITTED outline (`(verify: independent)` / `(verify: operator)`) — the
+ * proof method chosen before the work, not after it. Absent means the doing
+ * seat's own evidenced claim is acceptable. The declaration is never a gate:
+ * the console derives and displays the gap between a claim's recorded tier
+ * and the declared expectation; the operator remains the gate.
+ */
+export type RequirementVerifyExpectation = "independent" | "operator";
+
 export interface RequirementGraphNode {
   /** Stable per-session id ("r1", "r2", …). null = a new line awaiting mint. */
   id: string | null;
   statement: string;
   /** How the node's children combine; leaves carry "all" harmlessly. */
   composition: RequirementComposition;
+  /** Declared verification expectation; null = the maker's claim suffices. */
+  verifyExpectation: RequirementVerifyExpectation | null;
   children: RequirementGraphNode[];
 }
 
@@ -59,6 +71,7 @@ export interface FlatRequirementNode {
   depth: number;
   statement: string;
   composition: RequirementComposition;
+  verifyExpectation: RequirementVerifyExpectation | null;
 }
 
 export const REQUIREMENT_MAX_DEPTH = 8;
@@ -173,6 +186,10 @@ export function parseRequirementsDocument(text: string): RequirementParseResult 
     }
 
     const parsed = parseNodeText(rest.trim());
+    if ("error" in parsed) {
+      errors.push({ line: line.number, message: parsed.error });
+      continue;
+    }
     if (parsed.id !== null) {
       if (seenIds.has(parsed.id)) {
         errors.push({ line: line.number, message: `duplicate requirement id "${parsed.id}"` });
@@ -194,6 +211,7 @@ export function parseRequirementsDocument(text: string): RequirementParseResult 
       id: parsed.id,
       statement: parsed.statement,
       composition: parsed.composition,
+      verifyExpectation: parsed.verifyExpectation,
       children: [],
     };
     stack.length = depth;
@@ -217,23 +235,86 @@ function indentWidth(indent: string): number {
   return width;
 }
 
-function parseNodeText(text: string): { id: string | null; composition: RequirementComposition; statement: string } {
-  // `rN[.N…] (any of): statement` | `rN[.N…]: statement`. Case-insensitive on
-  // BOTH the id and the marker, normalized to lowercase: a case variant the
-  // operator retypes ("R3", "(ANY OF)") must amend r3, never silently mint a
-  // new node and retire the old one with its status history.
-  const withId = /^(r\d+(?:\.\d+)*)\s*(\(any of\))?\s*:\s*(.*)$/i.exec(text);
+interface ParsedMarkers {
+  composition: RequirementComposition;
+  verifyExpectation: RequirementVerifyExpectation | null;
+}
+
+/**
+ * Parse one paren token from the marker slot: "(any of)" or
+ * "(verify: independent|operator)", case-insensitive, interior whitespace
+ * collapsed. Returns null for anything else.
+ */
+function parseMarkerToken(token: string): { kind: "any" } | { kind: "verify"; value: RequirementVerifyExpectation } | null {
+  const normalized = token.toLowerCase().replace(/\s+/g, " ").trim();
+  if (normalized === "any of") return { kind: "any" };
+  const verify = /^verify:\s*(independent|operator)$/.exec(normalized);
+  if (verify) return { kind: "verify", value: verify[1] as RequirementVerifyExpectation };
+  return null;
+}
+
+/**
+ * Fold a sequence of marker tokens into the node's composition and
+ * expectation. Any unknown or duplicate marker is an error: after a valid id
+ * a mistyped marker ("(any off)", "(verify: peer)") must fail the line, never
+ * silently fall through to a fresh statement that remints the node and
+ * retires its status history.
+ */
+function foldMarkers(tokens: string[]): ParsedMarkers | { error: string } {
+  let composition: RequirementComposition | null = null;
+  let verifyExpectation: RequirementVerifyExpectation | null = null;
+  for (const token of tokens) {
+    const marker = parseMarkerToken(token);
+    if (marker === null) {
+      return { error: `unknown marker "(${token.trim()})" — expected (any of) or (verify: independent|operator)` };
+    }
+    if (marker.kind === "any") {
+      if (composition !== null) return { error: "duplicate (any of) marker" };
+      composition = "any";
+    } else {
+      if (verifyExpectation !== null) return { error: "duplicate (verify: …) marker" };
+      verifyExpectation = marker.value;
+    }
+  }
+  return { composition: composition ?? "all", verifyExpectation };
+}
+
+function parseNodeText(text: string):
+  | { id: string | null; composition: RequirementComposition; verifyExpectation: RequirementVerifyExpectation | null; statement: string }
+  | { error: string } {
+  // `rN[.N…] [markers]: statement` where markers are any order/case of
+  // `(any of)` and `(verify: independent|operator)`, normalized on render.
+  // Case-insensitive on the id too: a case variant the operator retypes
+  // ("R3") must amend r3, never silently mint a new node and retire the old
+  // one with its status history.
+  const withId = /^(r\d+(?:\.\d+)*)\s*((?:\([^)]*\)\s*)*):\s*(.*)$/i.exec(text);
   const claimedId = (withId?.[1] ?? "").toLowerCase();
   if (withId && ID_PATTERN.test(claimedId)) {
-    return { id: claimedId, composition: withId[2] ? "any" : "all", statement: (withId[3] ?? "").trim() };
+    const tokens = [...(withId[2] ?? "").matchAll(/\(([^)]*)\)/g)].map((match) => match[1] ?? "");
+    const markers = foldMarkers(tokens);
+    if ("error" in markers) return markers;
+    return { id: claimedId, ...markers, statement: (withId[3] ?? "").trim() };
   }
-  // `(any of): statement` | `(any of) statement` — a new node with alternatives.
-  if (text.toLowerCase().startsWith(ANY_OF)) {
-    const rest = text.slice(ANY_OF.length).replace(/^\s*:?\s*/, "");
-    return { id: null, composition: "any", statement: rest.trim() };
+  // Id-less line: consume LEADING known markers ((any of), (verify: …), any
+  // order), then the statement — `- (any of) (verify: independent) New thing`.
+  // A leading paren that is NOT a known marker stays part of a plain
+  // statement ("(draft) figure out X"), because without an id claim there is
+  // no history to protect.
+  let rest = text;
+  const tokens: string[] = [];
+  for (;;) {
+    const match = /^\(([^)]*)\)\s*/.exec(rest);
+    if (!match || parseMarkerToken(match[1] ?? "") === null) break;
+    tokens.push(match[1] ?? "");
+    rest = rest.slice(match[0].length);
   }
-  // Anything else — colons and all — is a plain statement of a new node.
-  return { id: null, composition: "all", statement: text };
+  if (tokens.length === 0) {
+    // Anything else — colons and all — is a plain statement of a new node.
+    return { id: null, composition: "all", verifyExpectation: null, statement: text };
+  }
+  const markers = foldMarkers(tokens);
+  if ("error" in markers) return markers;
+  return { id: null, ...markers, statement: rest.replace(/^:?\s*/, "").trim() };
 }
 
 /**
@@ -254,10 +335,14 @@ export function renderCommitted(graph: RequirementGraph): string {
   const walk = (nodes: RequirementGraphNode[], depth: number) => {
     for (const node of nodes) {
       const indent = "  ".repeat(depth);
-      const anyOf = node.composition === "any" ? " (any of)" : "";
+      // Canonical marker order, always: (any of) then (verify: …).
+      const markers = [
+        ...(node.composition === "any" ? [ANY_OF] : []),
+        ...(node.verifyExpectation === null ? [] : [`(verify: ${node.verifyExpectation})`]),
+      ];
       out.push(node.id === null
-        ? `${indent}- ${anyOf === "" ? "" : `${ANY_OF} `}${node.statement}`
-        : `${indent}- ${node.id}${anyOf}: ${node.statement}`);
+        ? `${indent}- ${markers.map((marker) => `${marker} `).join("")}${node.statement}`
+        : `${indent}- ${node.id}${markers.map((marker) => ` ${marker}`).join("")}: ${node.statement}`);
       walk(node.children, depth + 1);
     }
   };
@@ -270,6 +355,12 @@ export interface RequirementStatusInfo {
   status: RequirementStatus;
   verifiedBy?: RequirementVerifiedBy;
   evidenceCount?: number;
+  /**
+   * The declared expectation this node's satisfied claim has not yet met —
+   * computed by the caller (own + inherited declarations vs the recorded
+   * tier), rendered as a "needs …" chip. Display only, never a gate.
+   */
+  verifyGap?: RequirementVerifyExpectation;
 }
 
 const STATUS_GLYPH: Record<RequirementStatus, string> = {
@@ -296,9 +387,12 @@ export function renderStatusOutline(
       if (nodeInfo?.status === "retired") continue;
       const status = nodeInfo?.status ?? "open";
       const glyph = STATUS_GLYPH[status];
-      const anyOf = node.composition === "any" ? " (any of)" : "";
+      const markers = [
+        ...(node.composition === "any" ? [" (any of)"] : []),
+        ...(node.verifyExpectation === null ? [] : [` (verify: ${node.verifyExpectation})`]),
+      ].join("");
       const trail = statusTrail(nodeInfo);
-      out.push(`${"  ".repeat(depth)}- [${glyph}] ${node.id ?? "new"}${anyOf}: ${node.statement}${trail}`);
+      out.push(`${"  ".repeat(depth)}- [${glyph}] ${node.id ?? "new"}${markers}: ${node.statement}${trail}`);
       walk(node.children, depth + 1);
     }
   };
@@ -313,6 +407,7 @@ function statusTrail(info: RequirementStatusInfo | undefined): string {
   if (info.evidenceCount !== undefined && info.evidenceCount > 0) {
     parts.push(`${info.evidenceCount} evidence`);
   }
+  if (info.verifyGap !== undefined) parts.push(`needs ${info.verifyGap} verification`);
   return ` — ${parts.join(", ")}`;
 }
 
@@ -321,7 +416,10 @@ export function flattenRequirementGraph(graph: RequirementGraph): FlatRequiremen
   const rows: FlatRequirementNode[] = [];
   const walk = (nodes: RequirementGraphNode[], parentId: string | null, depth: number) => {
     nodes.forEach((node, ord) => {
-      rows.push({ id: node.id, parentId, ord, depth, statement: node.statement, composition: node.composition });
+      rows.push({ id: node.id, parentId, ord, depth, statement: node.statement, composition: node.composition,
+        // `?? null` tolerates a revision-row graph serialized before the field
+        // existed; re-parsing the stored document is what actually revives it.
+        verifyExpectation: node.verifyExpectation ?? null });
       walk(node.children, node.id, depth + 1);
     });
   };

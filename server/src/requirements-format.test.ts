@@ -201,3 +201,68 @@ describe("review regressions", () => {
     expect(mustParse(renderCommitted(graph))).toEqual(graph);
   });
 });
+
+// The (verify: …) marker: declared verification expectations in the committed
+// grammar. Same paren slot as (any of); canonical order (any of) then
+// (verify: …); parser accepts either order and case variants; unknown or
+// duplicate markers after a valid id are LINE ERRORS (the silent-remint
+// hazard: "- r4 (any off): x" must never quietly mint a fresh node).
+describe("(verify:) markers", () => {
+  const CANONICAL_VERIFY = `## Requirements
+- r1: The CLI parses every documented flag
+  - r2 (verify: independent): \`--help\` output matches the documented flags
+  - r3 (any of) (verify: operator): Config is loadable
+    - r4: TOML config parses
+- r5: \`npm run verify\` passes
+`;
+
+  it("parses expectations and keeps the canonical form a fixed point", () => {
+    const graph = mustParse(CANONICAL_VERIFY);
+    const flat = flattenRequirementGraph(graph);
+    expect(flat.find((row) => row.id === "r2")?.verifyExpectation).toBe("independent");
+    expect(flat.find((row) => row.id === "r3")).toMatchObject({ composition: "any", verifyExpectation: "operator" });
+    expect(flat.find((row) => row.id === "r4")?.verifyExpectation).toBeNull();
+    expect(renderCommitted(graph)).toBe(CANONICAL_VERIFY);
+    expect(mustParse(renderCommitted(graph))).toEqual(graph);
+  });
+
+  it("normalizes marker order and case to the canonical form", () => {
+    const messy = `## Requirements
+- r1 (VERIFY: Independent) (Any Of): Config is loadable
+`;
+    const graph = mustParse(messy);
+    expect(flattenRequirementGraph(graph)[0]).toMatchObject({ id: "r1", composition: "any", verifyExpectation: "independent" });
+    expect(renderCommitted(graph)).toContain("- r1 (any of) (verify: independent): Config is loadable");
+    expect(mustParse(renderCommitted(graph))).toEqual(graph);
+  });
+
+  it("rejects unknown and duplicate markers after a valid id, with line numbers", () => {
+    const unknown = parseRequirementsDocument("## Requirements\n- r4 (any off): x\n");
+    expect(unknown.ok).toBe(false);
+    if (!unknown.ok) expect(unknown.errors[0]).toMatchObject({ line: 2 });
+    if (!unknown.ok) expect(unknown.errors[0]?.message).toContain('unknown marker "(any off)"');
+    const badValue = parseRequirementsDocument("## Requirements\n- r4 (verify: peer): x\n");
+    expect(badValue.ok).toBe(false);
+    const duplicate = parseRequirementsDocument("## Requirements\n- r4 (verify: independent) (verify: operator): x\n");
+    expect(duplicate.ok).toBe(false);
+    if (!duplicate.ok) expect(duplicate.errors[0]?.message).toContain("duplicate (verify: …) marker");
+  });
+
+  it("id-less lines take leading markers; unrecognized parens stay statements", () => {
+    const graph = mustParse("## Requirements\n- (any of) (verify: independent) A config source loads\n- (draft) figure out X\n");
+    const [first, second] = graph.nodes;
+    expect(first).toMatchObject({ id: null, composition: "any", verifyExpectation: "independent", statement: "A config source loads" });
+    expect(second).toMatchObject({ id: null, composition: "all", verifyExpectation: null, statement: "(draft) figure out X" });
+    expect(mustParse(renderCommitted(graph))).toEqual(graph);
+  });
+
+  it("renders the expectation marker and the needs-verification chip in the status outline", () => {
+    const graph = mustParse(CANONICAL_VERIFY);
+    const outline = renderStatusOutline(graph, (id) =>
+      id === "r2"
+        ? { status: "satisfied", verifiedBy: "self", evidenceCount: 1, verifyGap: "independent" }
+        : { status: "open" });
+    expect(outline).toContain("- [✓] r2 (verify: independent): `--help` output matches the documented flags — satisfied, self, 1 evidence, needs independent verification");
+    expect(outline).toContain("- [·] r3 (any of) (verify: operator): Config is loadable");
+  });
+});

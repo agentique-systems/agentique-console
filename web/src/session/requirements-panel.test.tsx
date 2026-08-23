@@ -16,7 +16,7 @@ import { RequirementsPanel } from "./requirements-panel";
 function node(over: Partial<RequirementNodeWire> & { id: string }): RequirementNodeWire {
   return {
     parentId: null, ord: 0, statement: `statement ${over.id}`, composition: "all",
-    status: "open", derivedStatus: "open", origin: "committed",
+    verifyExpectation: null, status: "open", derivedStatus: "open", origin: "committed",
     introducedInRevision: 1, retiredInRevision: null, refinedByAgentSessionId: null,
     delegatedTo: [], latestChange: null, ...over,
   };
@@ -43,6 +43,8 @@ const RESPONSE: GetRequirementsResponse = {
     node({ id: "r4", parentId: "r1", ord: 2, statement: "Rate limit enforced", status: "violated", derivedStatus: "violated" }),
   ],
   frontier: [{ requirementId: "r3", statement: "Sessions expire", annotations: ["in_progress", "awaiting_operator"] }],
+  verificationGaps: [],
+  reversals: [],
 };
 
 function stubFetch(posts: { url: string; body: unknown }[]) {
@@ -129,4 +131,31 @@ describe("RequirementsPanel", () => {
     render(<RequirementsPanel userSessionId="us_1" />, { wrapper: wrapper() });
     await screen.findByText(/No approved requirements/);
   });
+});
+
+// Verification gaps: a satisfied leaf below its declared (verify: …) tier
+// renders the expectation badge, the amber gap chip, and the gaps section.
+it("renders declared expectations and verification gaps", async () => {
+  const gapped: GetRequirementsResponse = {
+    ...RESPONSE,
+    nodes: [
+      node({ id: "r1", statement: "Payment flow passes E2E", verifyExpectation: "independent",
+        status: "satisfied", derivedStatus: "satisfied",
+        latestChange: { status: "satisfied", verifiedBy: "self", actor: "main", evidenceCount: 1, at: "2026-08-22T01:00:00Z" } }),
+    ],
+    frontier: [],
+    verificationGaps: [{
+      requirementId: "r1", statement: "Payment flow passes E2E", expected: "independent",
+      recorded: { verifiedBy: "self", actor: "main", at: "2026-08-22T01:00:00Z" },
+    }],
+  };
+  vi.stubGlobal("fetch", vi.fn(async () =>
+    ({ ok: true, status: 200, statusText: "", json: () => Promise.resolve(gapped) }) as Response));
+  render(<RequirementsPanel userSessionId="us_1" />, { wrapper: wrapper() });
+  await screen.findByTestId("requirements-panel");
+
+  expect(screen.getByText("verify: independent")).toBeTruthy();
+  expect(screen.getByText("needs independent verification")).toBeTruthy();
+  expect(screen.getByText("Verification gaps")).toBeTruthy();
+  expect(screen.getByText("needs independent · claimed self by main")).toBeTruthy();
 });

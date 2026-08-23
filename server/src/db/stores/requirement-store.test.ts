@@ -24,9 +24,9 @@ function approveInitial(store: RequirementStore) {
     revisionId: draft.id, document: "doc v1", graph: {}, edited: false,
     ops: {
       inserts: [
-        { id: "r1", parentId: null, ord: 0, statement: "Parent", composition: "all" },
-        { id: "r2", parentId: "r1", ord: 0, statement: "Child A", composition: "all" },
-        { id: "r3", parentId: "r1", ord: 1, statement: "Child B", composition: "all" },
+        { id: "r1", parentId: null, ord: 0, statement: "Parent", composition: "all", verifyExpectation: null },
+        { id: "r2", parentId: "r1", ord: 0, statement: "Child A", composition: "all", verifyExpectation: null },
+        { id: "r3", parentId: "r1", ord: 1, statement: "Child B", composition: "all", verifyExpectation: null },
       ],
       updates: [], retires: [],
     },
@@ -59,7 +59,7 @@ describe("RequirementStore.applyApproval", () => {
     store.applyApproval({
       revisionId: second.id, document: "doc v2", graph: {}, edited: true,
       ops: {
-        inserts: [{ id: "r4", parentId: null, ord: 1, statement: "New obligation", composition: "all" }],
+        inserts: [{ id: "r4", parentId: null, ord: 1, statement: "New obligation", composition: "all", verifyExpectation: null }],
         updates: [
           { id: "r2", patch: { statement: "Child A, stricter" }, resetStatus: true },
           { id: "r1", patch: { ord: 0 }, resetStatus: false },

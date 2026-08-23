@@ -150,6 +150,12 @@ export const agentSessions = sqliteTable("agent_sessions", {
    * depth cap allows). Off by default so nesting stays a deliberate choice.
    */
   allowChildSessions: integer("allow_child_sessions", { mode: "boolean" }).notNull().default(false),
+  /**
+   * Optional commission spend ceiling in USD, covering this session and its
+   * child sessions. Crossing it notifies the session and escalates to main —
+   * it never pauses the run, never kills a lane, never blocks a final.
+   */
+  budgetUsd: real("budget_usd"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 }, (t) => [check("agent_sessions_lifecycle", sql`${t.lifecycle} IN ('open','archived')`)]);
@@ -564,6 +570,13 @@ export const requirementNodes = sqliteTable(
     ord: integer("ord").notNull(),
     statement: text("statement").notNull(),
     composition: text("composition", { enum: ["all", "any"] }).notNull().default("all"),
+    /**
+     * Declared verification expectation from the committed outline's
+     * `(verify: …)` marker; NULL = the maker's evidenced claim suffices.
+     * Enum rides the column type + the shared parser (a new CHECK would
+     * force a table rebuild); gaps derive at read time, never stored.
+     */
+    verifyExpectation: text("verify_expectation", { enum: ["independent", "operator"] }),
     status: text("status", { enum: ["open", "satisfied", "violated", "infeasible", "retired"] })
       .notNull()
       .default("open"),
@@ -765,7 +778,11 @@ export const usageSamples = sqliteTable("usage_samples", {
   status: text("status"),
   stopReason: text("stop_reason"),
   createdAt: text("created_at").notNull(),
-}, (t) => [index("usage_user_session").on(t.userSessionId, t.createdAt)]);
+}, (t) => [
+  index("usage_user_session").on(t.userSessionId, t.createdAt),
+  /** The commission-budget SUM keys off the agent session alone. */
+  index("usage_agent_session").on(t.agentSessionId),
+]);
 
 /** Lossless canonical handoffs. Transcript messages carry only a compact projection. */
 export const handoffRecords = sqliteTable(
