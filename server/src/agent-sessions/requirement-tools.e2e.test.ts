@@ -222,3 +222,47 @@ describe("requirement-linked ask_operator", () => {
     expect(h.decisions.digest(userSessionId)).toContain("[r2]");
   });
 });
+
+describe("vision propagation to seats", () => {
+  const PROSE_DOC = `# Auth hardening
+
+## Context
+Session security outranks convenience.
+
+## Requirements
+- Auth works end to end
+  - Login issues a session token
+- \`npm run verify\` passes
+`;
+
+  it("seats get the intent prose + top-level shape at spawn, and ancestor chains on delegated subtrees", async () => {
+    const h = makeDelegationHarness(async function* () {
+      yield initMessage();
+      yield successMessage();
+    });
+    const userSessionId = h.addUserSession();
+    const draft = h.app.requirements.propose(userSessionId, PROSE_DOC, "initial");
+    h.app.requirements.approve(draft.id, { document: PROSE_DOC, edited: false });
+
+    // Delegate a CHILD node (r2): the delivery must name the chain above it.
+    h.host.createSession({
+      userSessionId, title: "token work", agents: [{ name: "scout", profileId: "explorer" }],
+      briefing: briefing("harden token issuance"), requirements: ["r2"],
+    });
+    await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled", 10_000);
+
+    // System prompt: the vision prose and the top-level shape, NOT the whole
+    // outline — the subtree arrives with the delivery instead.
+    const spawnOptions = h.fake.captured.options
+      .map((options) => (typeof options.systemPrompt === "object" && !Array.isArray(options.systemPrompt) ? options.systemPrompt.append ?? "" : ""))
+      .join("\n");
+    expect(spawnOptions).toContain("Session security outranks convenience.");
+    expect(spawnOptions).toContain("Top-level requirements:");
+    expect(spawnOptions).toContain("(subtree: 0/1 satisfied)");
+
+    // Delivery prompt: ancestor chain above the delegated subtree.
+    const delivery = h.fake.captured.prompts.find((text) => text.includes("Your delegated requirements"))!;
+    expect(delivery).toContain("Under: r1 Auth works end to end › r2");
+    expect(delivery).toContain("- r2 [open]: Login issues a session token");
+  });
+});

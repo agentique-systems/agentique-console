@@ -491,11 +491,48 @@ export class PromptComposer {
    * The approved spec, after decisions (both authoritative) and before the
    * checkpoint (the spec outranks a model-authored summary of state). Renders
    * empty when no spec is approved — the byte-stability rule.
+   *
+   * A seat gets the VISION plus the top-level shape, not the whole outline:
+   * its delegated subtree arrives in full with every delivery, and detail
+   * outside it is one read_requirements away — injecting the entire graph
+   * into every seat is exactly what stops scaling. Legacy (pre-graph) runs
+   * keep the old digest injection.
    */
   #specContext(session: AgentSessionRow): string {
-    const digest = this.#deps.requirements.digest(session.userSessionId);
-    if (digest === "") return "";
-    return `\n\n${digest}\nYour work is checked against this. read_requirements returns the full outline with statuses.`;
+    const approved = this.#deps.requirements.latestApproved(session.userSessionId);
+    if (approved === undefined) {
+      const digest = this.#deps.requirements.digest(session.userSessionId);
+      if (digest === "") return "";
+      return `\n\n${digest}\nYour work is checked against this. read_requirements returns the full outline with statuses.`;
+    }
+    const intent = this.#deps.requirements.intentDocument(session.userSessionId);
+    const nodes = this.#deps.requirements.derive(session.userSessionId);
+    const subtreeCounts = (rootId: string): { satisfied: number; total: number } => {
+      const parentOf = new Map(nodes.map((node) => [node.id, node.parentId]));
+      let satisfied = 0;
+      let total = 0;
+      for (const node of nodes) {
+        if (node.id === rootId) continue;
+        for (let cursor: string | null = node.parentId; cursor !== null; cursor = parentOf.get(cursor) ?? null) {
+          if (cursor === rootId) {
+            total += 1;
+            if (node.derivedStatus === "satisfied") satisfied += 1;
+            break;
+          }
+        }
+      }
+      return { satisfied, total };
+    };
+    const glyph: Record<string, string> = { open: "·", satisfied: "✓", violated: "✗", infeasible: "⊘", retired: "†" };
+    const top = nodes.filter((node) => node.parentId === null).map((node) => {
+      const counts = subtreeCounts(node.id);
+      const suffix = counts.total === 0 ? "" : ` (subtree: ${counts.satisfied}/${counts.total} satisfied)`;
+      return `- [${glyph[node.derivedStatus] ?? "·"}] ${node.id}${node.composition === "any" ? " (any of)" : ""}: ${node.statement}${suffix}`;
+    });
+    return `\n\n## Requirements (rev ${approved.revision}, authoritative — statuses are console-derived)\n` +
+      `${intent === null ? "" : `${intent}\n\n`}` +
+      `Top-level requirements:\n${top.join("\n")}\n` +
+      `Your work is checked against this. Your delegated subtree arrives in full with each delivery; read_requirements (scopeId) returns any subtree with statuses.`;
   }
 
   /**
@@ -506,6 +543,13 @@ export class PromptComposer {
   #delegatedRequirements(session: AgentSessionRow): string {
     const roots = this.#deps.requirements.delegationSet(session.id);
     if (roots.length === 0) return "";
+    // Vision continuity at depth: each delegated root carries its chain from
+    // the top of the graph, so a seat three levels down still sees WHICH
+    // larger obligation its subtree serves.
+    const ancestors = roots
+      .map((root) => ({ root, path: this.#deps.requirements.ancestorPath(session.userSessionId, root) }))
+      .filter((entry) => entry.path.length > 0)
+      .map((entry) => `Under: ${entry.path.map((step) => `${step.id} ${step.statement}`).join(" › ")} › ${entry.root}`);
     const nodes = this.#deps.requirements.derive(session.userSessionId);
     const inSubtree = new Set<string>();
     const parentOf = new Map(nodes.map((node) => [node.id, node.parentId]));
@@ -519,7 +563,8 @@ export class PromptComposer {
       const status = node.derivedStatus === node.status ? node.status : `${node.status}, derives ${node.derivedStatus}`;
       return `${"  ".repeat(depth)}- ${node.id} [${status}]${node.composition === "any" ? " (any of)" : ""}: ${node.statement}`;
     });
-    return `## Your delegated requirements (this session's success condition)\n${lines.join("\n")}\nStatuses are semantic and evidence-required: report_requirement (leaves only; verifiedBy 'independent' only for another seat's work), decompose_requirement to refine below these nodes. Anything outside this sub-scope routes to main.\n\n`;
+    const ancestorBlock = ancestors.length === 0 ? "" : `${ancestors.join("\n")}\n`;
+    return `## Your delegated requirements (this session's success condition)\n${ancestorBlock}${lines.join("\n")}\nStatuses are semantic and evidence-required: report_requirement (leaves only; verifiedBy 'independent' only for another seat's work), decompose_requirement to refine below these nodes. Anything outside this sub-scope routes to main.\n\n`;
   }
 
   /**

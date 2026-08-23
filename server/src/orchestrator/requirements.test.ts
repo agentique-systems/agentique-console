@@ -339,3 +339,83 @@ describe("decompose depth guard", () => {
     })).toThrow(/maximum outline depth/);
   });
 });
+
+describe("vision propagation and scoped context (Stage 3)", () => {
+  const PROSE_DOC = `# Tracker
+
+## Context
+Privacy over sharing; one operator.
+
+## Requirements
+- Books can be recorded
+  - A book has a title
+- Progress is visible
+`;
+
+  it("digest carries the intent prose and prefers structural collapse over truncation", () => {
+    const { service } = makeHarness();
+    const draft = service.propose("us1", PROSE_DOC, "initial");
+    service.approve(draft.id, { document: PROSE_DOC, edited: false });
+    const small = service.digest("us1");
+    expect(small).toContain("# Tracker");
+    expect(small).toContain("Privacy over sharing");
+    expect(small).toContain("- [·] r1");
+
+    // Blow past the byte budget with deep refinement; the ladder sheds depth
+    // (leaving per-subtree counts) instead of truncating, and the prose stays.
+    for (let block = 0; block < 4; block += 1) {
+      const [mid] = service.decompose({
+        userSessionId: "us1", parentId: "r2",
+        children: [{ statement: `Deep area ${block} ${"x".repeat(120)}` }], actor: "main",
+      });
+      service.decompose({
+        userSessionId: "us1", parentId: mid!,
+        children: Array.from({ length: 8 }, (_, i) => ({ statement: `Detail ${block}.${i} ${"y".repeat(220)}` })),
+        actor: "main",
+      });
+    }
+    const big = service.digest("us1");
+    expect(Buffer.byteLength(big, "utf8")).toBeLessThanOrEqual(8 * 1024);
+    expect(big).toContain("Privacy over sharing");
+    expect(big).toContain("(subtree:");
+    expect(big).not.toContain("…(truncated");
+  });
+
+  it("collapses subtrees delegated to open sessions to one counted line", () => {
+    const { service } = makeHarness();
+    const draft = service.propose("us1", PROSE_DOC, "initial");
+    service.approve(draft.id, { document: PROSE_DOC, edited: false });
+    service.setFrontierDeps({
+      openAgentSessionIds: () => new Set(["as1"]),
+      blockedRequirementIds: () => new Set(),
+      awaitingOperatorAgentSessionIds: () => new Set(),
+    });
+    service.delegate("us1", "as1", ["r1"], "commission");
+    // Make ONLY the delegated-collapse step fit: a large unsatisfied subtree
+    // under the delegated r1, small elsewhere.
+    service.decompose({
+      userSessionId: "us1", parentId: "r2",
+      children: Array.from({ length: 30 }, (_, i) => ({ statement: `Case ${i} ${"z".repeat(300)}` })), actor: "main",
+    });
+    const digest = service.digest("us1");
+    expect(Buffer.byteLength(digest, "utf8")).toBeLessThanOrEqual(8 * 1024);
+    expect(digest).toContain('read_requirements scopeId "r1"');
+    expect(digest).not.toContain("Case 3 ");
+    // The non-delegated top-level line still renders in full.
+    expect(digest).toContain("Progress is visible");
+  });
+
+  it("statusOutlineFor scopes to one subtree with the scope at top level; ancestorPath walks to the root", () => {
+    const { service } = makeHarness();
+    approveFixture(service);
+    const scoped = service.statusOutlineFor("us1", "r3");
+    expect(scoped.split("\n")[0]).toMatch(/^- \[·\] r3/);
+    expect(scoped).toContain("r4");
+    expect(scoped).not.toContain("r6");
+    expect(service.ancestorPath("us1", "r4")).toEqual([
+      { id: "r1", statement: "Auth works end to end" },
+      { id: "r3", statement: "A config source loads" },
+    ]);
+    expect(service.ancestorPath("us1", "r1")).toEqual([]);
+  });
+});

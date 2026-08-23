@@ -628,12 +628,13 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
 
     sdk.tool(
       "read_requirements",
-      "Read the governing requirements: the live outline with console-derived statuses ([·] open, [✓] satisfied, [✗] violated, [⊘] infeasible), verification tiers and evidence counts, plus the open-requirements frontier. For a run still governed by a legacy markdown spec this returns that text with legacy: true.",
+      "Read the governing requirements: the live outline with console-derived statuses ([·] open, [✓] satisfied, [✗] violated, [⊘] infeasible), verification tiers and evidence counts, plus the open-requirements frontier. Pass scopeId to read ONE subtree in full — the way to pull detail the injected digest collapsed. The root read includes the operator's approved intent prose. For a run still governed by a legacy markdown spec this returns that text with legacy: true.",
       {
+        scopeId: z.string().min(1).optional().describe("Read only this requirement's subtree, in full."),
         cursor: z.string().optional(),
         maxBytes: z.number().int().min(1).max(PAGE_MAX_BYTES).default(PAGE_DEFAULT_BYTES),
       },
-      async (args: { cursor?: string; maxBytes: number }) =>
+      async (args: { scopeId?: string; cursor?: string; maxBytes: number }) =>
         guarded(() => {
           const approved = requirements.latestApproved(userSessionId);
           if (approved === undefined) {
@@ -643,9 +644,14 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
               document: pageTail(legacy.document, args.cursor, args.maxBytes),
               note: "This run is governed by a legacy markdown spec. A requirement graph can supersede it via propose_requirements." };
           }
-          const digest = requirements.digest(userSessionId);
+          if (args.scopeId !== undefined) {
+            return { revision: approved.revision, scopeId: args.scopeId,
+              document: pageTail(requirements.statusOutlineFor(userSessionId, args.scopeId), args.cursor, args.maxBytes) };
+          }
+          const intent = requirements.intentDocument(userSessionId);
           return { revision: approved.revision, changeNote: approved.changeNote,
-            document: pageTail(digest, args.cursor, args.maxBytes),
+            ...(intent === null ? {} : { intent }),
+            document: pageTail(requirements.statusOutlineFor(userSessionId), args.cursor, args.maxBytes),
             frontier: requirements.frontier(userSessionId) };
         }),
     ),

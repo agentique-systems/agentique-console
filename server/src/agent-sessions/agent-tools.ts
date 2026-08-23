@@ -275,15 +275,31 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
   if (deps.requirements) {
     const requirements = deps.requirements;
     tools.push(sdk.tool("read_requirements",
-      "Read the run's governing requirements: the outline with console-derived statuses, plus your session's delegated requirement ids. Your work is checked against it. (A legacy run returns its markdown spec instead.)",
-    { cursor: z.string().optional(), maxBytes: z.number().int().min(1).max(PAGE_MAX_BYTES).default(PAGE_DEFAULT_BYTES) },
-    async (args: { cursor?: string; maxBytes: number }) => {
-      const digest = requirements.digest(ctx.session.userSessionId);
-      if (digest === "") return ok({ requirements: null, note: "no approved requirements for this run" });
+      "Read the run's governing requirements: the outline with console-derived statuses, plus your session's delegated requirement ids. Your work is checked against it. Pass scopeId (inside your delegated sub-scope) to read one subtree in full. The root read includes the operator's approved intent prose. (A legacy run returns its markdown spec instead.)",
+    { scopeId: z.string().min(1).optional().describe("Read only this requirement's subtree — must sit inside your delegated sub-scope."),
+      cursor: z.string().optional(), maxBytes: z.number().int().min(1).max(PAGE_MAX_BYTES).default(PAGE_DEFAULT_BYTES) },
+    async (args: { scopeId?: string; cursor?: string; maxBytes: number }) => {
       const approved = requirements.latestApproved(ctx.session.userSessionId);
+      if (approved === undefined) {
+        const digest = requirements.digest(ctx.session.userSessionId);
+        if (digest === "") return ok({ requirements: null, note: "no approved requirements for this run" });
+        return ok({ legacy: true, document: pageTail(digest, args.cursor, args.maxBytes),
+          delegatedToThisSession: requirements.delegationSet(session.id) });
+      }
+      if (args.scopeId !== undefined) {
+        try {
+          requirements.assertWithinDelegation(session.userSessionId, session.id, args.scopeId);
+        } catch (error) {
+          return fail(error);
+        }
+        return ok({ revision: approved.revision, scopeId: args.scopeId,
+          document: pageTail(requirements.statusOutlineFor(ctx.session.userSessionId, args.scopeId), args.cursor, args.maxBytes) });
+      }
+      const intent = requirements.intentDocument(ctx.session.userSessionId);
       return ok({
-        ...(approved === undefined ? { legacy: true } : { revision: approved.revision }),
-        document: pageTail(digest, args.cursor, args.maxBytes),
+        revision: approved.revision,
+        ...(intent === null ? {} : { intent }),
+        document: pageTail(requirements.statusOutlineFor(ctx.session.userSessionId), args.cursor, args.maxBytes),
         delegatedToThisSession: requirements.delegationSet(session.id),
       });
     }));

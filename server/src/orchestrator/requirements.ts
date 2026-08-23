@@ -232,6 +232,11 @@ export class RequirementService implements GoverningDigest {
       interactionId: input.interactionId ?? null,
       ops,
     });
+    // The intent prose (title + preamble) is the project's durable vision:
+    // stored on the project so it outlives sessions and later scoped patches.
+    // A whole-document approval with no prose CLEARS it ("" reads as null,
+    // and the pre-column fallback is skipped) — the operator removed it.
+    this.#projects.setIntentDocument(approved.projectId, renderIntentDocument(graph) ?? "");
     const added = ops.inserts.map((insert) => insert.id);
     this.#bus.append({
       type: "user_session.requirements.updated",
@@ -578,23 +583,107 @@ export class RequirementService implements GoverningDigest {
     const approved = this.#store.latestApproved(projectId);
     if (!approved) return this.#legacy.digest(userSessionId);
     const nodes = this.#store.liveNodes(projectId);
-    const outline = this.#statusOutline(userSessionId, nodes, { collapseSatisfied: false });
-    let body = outline;
-    if (Buffer.byteLength(body, "utf8") > DIGEST_MAX_BYTES) {
-      body = this.#statusOutline(userSessionId, nodes, { collapseSatisfied: true });
-    }
-    if (Buffer.byteLength(body, "utf8") > DIGEST_MAX_BYTES) {
-      // BYTE-accurate truncation: String.slice counts UTF-16 code units, so a
-      // multibyte outline (CJK, emoji) would blow past the cap by up to 3x
-      // and could cut a surrogate pair in half.
-      body = `${truncateUtf8(body, DIGEST_MAX_BYTES)}\n…(truncated — read_requirements returns the full outline)`;
-    }
+    const header = `## Requirements (rev ${approved.revision}, authoritative — statuses are console-derived; claim leaves with evidence via report_requirement)`;
+    // The operator's intent prose travels with the outline: the vision is
+    // what keeps distributed work aligned, so it degrades LAST. A prose-less
+    // run renders byte-identically to before (cache stability).
+    const intent = this.intentDocument(userSessionId);
+    const prose = intent === null ? "" : `${intent}\n\n`;
     const trail = this.#store.listRevisions(projectId)
       .filter((row) => row.changeNote !== null && (row.status === "approved" || row.status === "superseded"))
       .slice(-5)
       .map((row) => `- rev ${row.revision}: ${row.changeNote}`);
-    return `## Requirements (rev ${approved.revision}, authoritative — statuses are console-derived; claim leaves with evidence via report_requirement)\n${body}` +
-      (trail.length > 0 ? `\n\nAmendment trail:\n${trail.join("\n")}` : "");
+    const trailBlock = trail.length > 0 ? `\n\nAmendment trail:\n${trail.join("\n")}` : "";
+    const assemble = (body: string) => `${header}\n${prose}${body}${trailBlock}`;
+
+    // Structural degradation before any truncation: full outline → collapse
+    // satisfied subtrees → collapse subtrees delegated to OPEN sessions
+    // (their seats carry the detail already) → shed depth from the bottom,
+    // leaving per-subtree counts. Every step deterministic.
+    const delegated = this.#openDelegationRoots(userSessionId);
+    const depthOf = new Map<string, number>();
+    const byId = new Map(nodes.map((node) => [node.id, node]));
+    let treeDepth = 0;
+    for (const node of nodes) {
+      let depth = 0;
+      for (let cursor = node.parentId; cursor !== null; cursor = byId.get(cursor)?.parentId ?? null) depth += 1;
+      depthOf.set(node.id, depth);
+      treeDepth = Math.max(treeDepth, depth);
+    }
+    const ladder: { collapseSatisfied: boolean; collapseSubtreesOf?: ReadonlySet<string>; maxDepth?: number }[] = [
+      { collapseSatisfied: false },
+      { collapseSatisfied: true },
+      ...(delegated.size > 0 ? [{ collapseSatisfied: true, collapseSubtreesOf: delegated }] : []),
+    ];
+    for (let depth = treeDepth; depth >= 1; depth -= 1) {
+      ladder.push({ collapseSatisfied: true, collapseSubtreesOf: delegated, maxDepth: depth });
+    }
+    for (const step of ladder) {
+      const body = this.#statusOutline(userSessionId, nodes, step);
+      if (Buffer.byteLength(assemble(body), "utf8") <= DIGEST_MAX_BYTES) return assemble(body);
+    }
+    // Last resorts. BYTE-accurate truncation: String.slice counts UTF-16 code
+    // units, so a multibyte outline (CJK, emoji) would blow past the cap by
+    // up to 3x and could cut a surrogate pair in half. The outline truncates
+    // first; the prose only when even that cannot fit.
+    const marker = "\n…(truncated — read_requirements returns the full outline)";
+    const shallow = this.#statusOutline(userSessionId, nodes, ladder.at(-1) ?? { collapseSatisfied: true });
+    const fixed = Buffer.byteLength(`${header}\n${prose}${marker}${trailBlock}`, "utf8");
+    if (DIGEST_MAX_BYTES - fixed > 0) {
+      return assemble(`${truncateUtf8(shallow, DIGEST_MAX_BYTES - fixed)}${marker}`);
+    }
+    const proseBudget = Math.max(0, DIGEST_MAX_BYTES - Buffer.byteLength(`${header}\n${marker}${trailBlock}`, "utf8"));
+    return `${header}\n${truncateUtf8(prose, proseBudget)}${marker}${trailBlock}`;
+  }
+
+  /**
+   * The full status outline, unbudgeted — the read_requirements surface
+   * (paging happens at the tool). `scopeId` narrows to one subtree, rendered
+   * with the scope node at the top level.
+   */
+  statusOutlineFor(userSessionId: string, scopeId?: string): string {
+    const projectId = this.#project(userSessionId);
+    let nodes = this.#store.liveNodes(projectId);
+    if (scopeId !== undefined) {
+      const scope = this.#liveNode(userSessionId, scopeId);
+      const byParent = new Map<string | null, RequirementNodeRow[]>();
+      for (const node of nodes) {
+        const list = byParent.get(node.parentId) ?? [];
+        list.push(node);
+        byParent.set(node.parentId, list);
+      }
+      const keep = new Set<string>([scope.id]);
+      const walk = (id: string) => {
+        for (const child of byParent.get(id) ?? []) { keep.add(child.id); walk(child.id); }
+      };
+      walk(scope.id);
+      nodes = nodes.filter((node) => keep.has(node.id))
+        .map((node) => (node.id === scope.id ? { ...node, parentId: null } : node));
+    }
+    return this.#statusOutline(userSessionId, nodes, { collapseSatisfied: false });
+  }
+
+  /** Root→node ancestor statements (excluding the node) — vision continuity at depth. */
+  ancestorPath(userSessionId: string, id: string): { id: string; statement: string }[] {
+    const byId = new Map(this.#store.liveNodes(this.#project(userSessionId)).map((row) => [row.id, row]));
+    const out: { id: string; statement: string }[] = [];
+    for (let cursor = byId.get(id)?.parentId ?? null; cursor !== null;) {
+      const row = byId.get(cursor);
+      if (!row) break;
+      out.unshift({ id: row.id, statement: row.statement });
+      cursor = row.parentId;
+    }
+    return out;
+  }
+
+  /** Requirement ids delegated to OPEN agent sessions — the digest's collapse set. */
+  #openDelegationRoots(userSessionId: string): Set<string> {
+    const openSessions = this.#frontierDeps?.openAgentSessionIds(userSessionId) ?? new Set<string>();
+    const roots = new Set<string>();
+    for (const row of this.#store.delegationsForUserSession(userSessionId)) {
+      if (openSessions.has(row.agentSessionId)) roots.add(row.requirementId);
+    }
+    return roots;
   }
 
   /** One line for checkpoints and deliveries; legacy fallback; null = nothing governs. */
@@ -797,11 +886,18 @@ export class RequirementService implements GoverningDigest {
     return true;
   }
 
-  /** Rebuild a render graph from node rows (title from the approved revision). */
+  /**
+   * Rebuild a render graph from node rows. Beyond the satisfied-subtree
+   * collapse, two STRUCTURAL reductions serve the digest's degradation
+   * ladder: collapsing named subtrees (those delegated to open sessions —
+   * their seats already carry the detail) and shedding depth from the bottom.
+   * A collapsed unsatisfied subtree renders a per-subtree count suffix — a
+   * display summary in the pointer() idiom, never a model-reported value.
+   */
   #statusOutline(
     userSessionId: string,
     nodes: RequirementNodeRow[],
-    options: { collapseSatisfied: boolean },
+    options: { collapseSatisfied: boolean; collapseSubtreesOf?: ReadonlySet<string>; maxDepth?: number },
   ): string {
     const derived = this.#derivedStatuses(nodes);
     const latest = this.#store.latestChanges(this.#project(userSessionId));
@@ -811,19 +907,41 @@ export class RequirementService implements GoverningDigest {
       list.push(node);
       byParent.set(node.parentId, list);
     }
-    const build = (parentId: string | null): RequirementGraphNode[] =>
+    const subtreeCounts = (id: string): { satisfied: number; total: number } => {
+      let satisfied = 0;
+      let total = 0;
+      const walk = (parentId: string) => {
+        for (const child of byParent.get(parentId) ?? []) {
+          total += 1;
+          if ((derived.get(child.id) ?? child.status) === "satisfied") satisfied += 1;
+          walk(child.id);
+        }
+      };
+      walk(id);
+      return { satisfied, total };
+    };
+    const build = (parentId: string | null, depth: number): RequirementGraphNode[] =>
       (byParent.get(parentId) ?? [])
         .slice()
         .sort(siblingOrder)
-        .map((node) => ({
-          id: node.id,
-          statement: node.statement,
-          composition: node.composition,
-          children: options.collapseSatisfied && (derived.get(node.id) ?? node.status) === "satisfied"
-            ? []
-            : build(node.id),
-        }));
-    const graph: RequirementGraph = { title: null, preamble: [], nodes: build(null) };
+        .map((node) => {
+          const satisfied = (derived.get(node.id) ?? node.status) === "satisfied";
+          const hasChildren = (byParent.get(node.id) ?? []).length > 0;
+          const structural = hasChildren && !satisfied
+            && (options.collapseSubtreesOf?.has(node.id) === true
+              || (options.maxDepth !== undefined && depth + 1 >= options.maxDepth));
+          const collapse = (options.collapseSatisfied && satisfied) || structural;
+          const counts = structural ? subtreeCounts(node.id) : null;
+          return {
+            id: node.id,
+            statement: counts === null
+              ? node.statement
+              : `${node.statement} (subtree: ${counts.satisfied}/${counts.total} satisfied — read_requirements scopeId "${node.id}")`,
+            composition: node.composition,
+            children: collapse ? [] : build(node.id, depth + 1),
+          };
+        });
+    const graph: RequirementGraph = { title: null, preamble: [], nodes: build(null, 0) };
     return renderStatusOutline(graph, (id) => {
       const status = derived.get(id);
       if (status === undefined) return undefined;
