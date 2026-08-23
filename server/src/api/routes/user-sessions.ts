@@ -192,6 +192,7 @@ export function registerUserSessionRoutes(
         nodes: ctx.app.requirements.derive(userSessionId),
         frontier: ctx.app.requirements.frontier(userSessionId),
         verificationGaps: ctx.app.requirements.verificationGaps(userSessionId),
+        reversals: ctx.app.requirements.reversals(userSessionId),
       };
     },
   );

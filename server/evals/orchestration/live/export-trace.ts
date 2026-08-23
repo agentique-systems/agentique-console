@@ -149,6 +149,9 @@ export function exportRun(dbFile: string): RunExport {
     // Only true COMMISSIONS (the first main assignment per session) — the old
     // query counted every steering assignment and inflated the omission rate.
     { metric: "commissions without why", value: trace.commissions().filter((commission) => commission.why === null).length, note: "rationale absent at the act (visible omission)" },
+    // Same-status re-claims (a reviewer upgrading a tier) withdraw nothing;
+    // console rows are the mechanical statement-resets and retirements.
+    { metric: "terminal claims later reversed", value: one(`SELECT count(*) AS n FROM requirement_status_changes WHERE from_status IN ('satisfied','violated','infeasible') AND to_status != from_status AND actor != 'console'`), note: "a claim the run itself later withdrew — the honest measure of verification quality" },
   ];
 
   const parallelism = trace.parallelism();

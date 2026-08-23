@@ -26,6 +26,7 @@ import type {
   RequirementGraphNode,
   RequirementNodeWire,
   RequirementParseError,
+  RequirementReversal,
   RequirementStatus,
   RequirementVerificationGap,
   RequirementVerifiedBy,
@@ -589,6 +590,44 @@ export class RequirementService implements GoverningDigest {
     return gaps;
   }
 
+  /**
+   * Terminal claims the run later withdrew, oldest first — a change whose
+   * `fromStatus` was terminal, made by anyone but the console (console rows
+   * are exactly the mechanical statement-resets and retirements; an operator
+   * reopen counts, attributed). Pure journal facts: displayed in the summary
+   * and panel, exported for evaluation, never a verdict input.
+   */
+  reversals(userSessionId: string): RequirementReversal[] {
+    const statements = new Map(this.#store.listNodes(userSessionId).map((node) => [node.id, node.statement]));
+    const out: RequirementReversal[] = [];
+    const lastTerminalClaim = new Map<string, { actor: string; verifiedBy: RequirementVerifiedBy; evidenceCount: number; at: string }>();
+    for (const change of this.#store.listStatusChanges(userSessionId)) {
+      const fromTerminal = change.fromStatus === "satisfied" || change.fromStatus === "violated" || change.fromStatus === "infeasible";
+      // A same-status re-claim (a reviewer upgrading a self-tier satisfied to
+      // independent) withdraws nothing — only a status CHANGE reverses.
+      if (fromTerminal && change.toStatus !== change.fromStatus && change.actor !== "console") {
+        out.push({
+          requirementId: change.requirementId,
+          statement: statements.get(change.requirementId) ?? "",
+          from: change.fromStatus as "satisfied" | "violated" | "infeasible",
+          to: change.toStatus as RequirementStatus,
+          at: change.createdAt,
+          reversedBy: { actor: change.actor, verifiedBy: change.verifiedBy },
+          original: lastTerminalClaim.get(change.requirementId) ?? null,
+        });
+      }
+      if (change.toStatus === "satisfied" || change.toStatus === "violated" || change.toStatus === "infeasible") {
+        lastTerminalClaim.set(change.requirementId, {
+          actor: change.actor, verifiedBy: change.verifiedBy,
+          evidenceCount: change.evidence.length, at: change.createdAt,
+        });
+      } else {
+        lastTerminalClaim.delete(change.requirementId);
+      }
+    }
+    return out;
+  }
+
   // ── prompt surfaces (the GoverningDigest contract) ───────────────────────
 
   /**
@@ -651,6 +690,7 @@ export class RequirementService implements GoverningDigest {
     counts: Record<RequirementStatus, number>;
     outline: string;
     verificationGaps: RequirementVerificationGap[];
+    reversals: RequirementReversal[];
   } | null {
     const approved = this.#store.latestApproved(userSessionId);
     if (!approved) return null;
@@ -661,6 +701,7 @@ export class RequirementService implements GoverningDigest {
       counts: requirementStatusCounts(nodes.map((node) => derived.get(node.id) ?? node.status)),
       outline: this.#statusOutline(userSessionId, nodes, { collapseSatisfied: false }),
       verificationGaps: this.verificationGaps(userSessionId),
+      reversals: this.reversals(userSessionId),
     };
   }
 

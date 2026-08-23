@@ -217,6 +217,27 @@ export function RequirementsPanel({ userSessionId }: { userSessionId: string }) 
         </section>
       )}
 
+      {data.reversals.length > 0 && (
+        <section>
+          <h3 className="text-2xs font-medium uppercase text-muted-foreground">
+            Claims later reversed ({data.reversals.length})
+          </h3>
+          <ul className="mt-1 space-y-1">
+            {data.reversals.map((reversal, index) => (
+              <li key={`${reversal.requirementId}-${index}`} className="flex flex-wrap items-baseline gap-1.5 text-2xs">
+                <span className="font-mono text-3xs text-muted-foreground">{reversal.requirementId}</span>
+                <span>
+                  {reversal.from} → {reversal.to} by {reversal.reversedBy.actor}
+                  {reversal.original !== null
+                    ? ` (original claim ${reversal.original.verifiedBy} by ${reversal.original.actor})`
+                    : ""}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
       <section>
         <h3 className="text-2xs font-medium uppercase text-muted-foreground">Open requirements</h3>
         {data.frontier.length === 0 ? (

@@ -273,6 +273,8 @@ export interface RunSummaryDocument {
     outline: string;
     /** Absent on summaries persisted before verification gaps existed. */
     verificationGaps?: import("./domain.ts").RequirementVerificationGap[];
+    /** Terminal claims the run later withdrew; absent on older summaries. */
+    reversals?: import("./domain.ts").RequirementReversal[];
   } | null;
   friction: { apiRetries: number; rateLimited: number; failedTurns: number; watchdogTrips: number; capacityPauses: number };
 }
@@ -331,6 +333,8 @@ export interface GetRequirementsResponse {
   frontier: import("./domain.ts").RequirementFrontierEntry[];
   /** Satisfied leaves still below their declared verification expectation. */
   verificationGaps: import("./domain.ts").RequirementVerificationGap[];
+  /** Terminal claims the run later withdrew (journal-derived, oldest first). */
+  reversals: import("./domain.ts").RequirementReversal[];
 }
 
 // POST /api/user-sessions/:id/requirements/:requirementId/status — the

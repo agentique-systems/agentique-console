@@ -44,6 +44,7 @@ const RESPONSE: GetRequirementsResponse = {
   ],
   frontier: [{ requirementId: "r3", statement: "Sessions expire", annotations: ["in_progress", "awaiting_operator"] }],
   verificationGaps: [],
+  reversals: [],
 };
 
 function stubFetch(posts: { url: string; body: unknown }[]) {

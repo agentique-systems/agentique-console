@@ -90,6 +90,14 @@ function JustificationDisclosure({ sessionId, summaryId }: { sessionId: string; 
                       .join("; ")}
                   </p>
                 )}
+                {(document.requirements.reversals ?? []).length > 0 && (
+                  <p className="mt-1 text-status-waiting">
+                    Claims later reversed:{" "}
+                    {(document.requirements.reversals ?? [])
+                      .map((reversal) => `${reversal.requirementId} (${reversal.from} → ${reversal.to}${reversal.original !== null ? `, original ${reversal.original.verifiedBy} by ${reversal.original.actor}` : ""})`)
+                      .join("; ")}
+                  </p>
+                )}
               </div>
             )}
             {document.justification === null ? (

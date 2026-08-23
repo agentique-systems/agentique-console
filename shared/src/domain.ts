@@ -436,6 +436,30 @@ export interface RequirementVerificationGap {
   };
 }
 
+/**
+ * A terminal claim (satisfied / violated / infeasible) that the run itself
+ * later withdrew — derived from the status journal, excluding the console's
+ * mechanical resets. The honest measure of verification quality: a reversed
+ * `satisfied` is an acceptance that turned out wrong, attributed to the tier
+ * and actor that stood behind it.
+ */
+export interface RequirementReversal {
+  requirementId: string;
+  /** The statement at read time (amendments keep ids stable). */
+  statement: string;
+  from: "satisfied" | "violated" | "infeasible";
+  to: import("./requirements.ts").RequirementStatus;
+  at: string;
+  reversedBy: { actor: string; verifiedBy: import("./requirements.ts").RequirementVerifiedBy };
+  /** The claim being withdrawn; null when history began terminal (defensive). */
+  original: {
+    actor: string;
+    verifiedBy: import("./requirements.ts").RequirementVerifiedBy;
+    evidenceCount: number;
+    at: string;
+  } | null;
+}
+
 /** Orchestration-pattern catalog ids — the create-session wire vocabulary. */
 export const PATTERN_IDS = [
   "hub_and_spoke",

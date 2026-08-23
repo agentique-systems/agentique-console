@@ -492,3 +492,58 @@ describe("verification expectations and gaps", () => {
     expect(digest).toContain("needs independent verification");
   });
 });
+
+describe("reversals", () => {
+  const claim = (service: RequirementService, id: string, to: "open" | "satisfied" | "violated" | "infeasible",
+    claimant: Parameters<RequirementService["reportStatus"]>[0]["claimant"] = { kind: "main" }) =>
+    service.reportStatus({ userSessionId: "us1", requirementId: id, to,
+      evidence: to === "open" ? [] : [{ kind: "command", ref: "check" }], claimant });
+
+  it("records terminal claims the run later withdrew, attributed both ways", () => {
+    const { service } = makeHarness();
+    approveFixture(service);
+    claim(service, "r2", "satisfied");
+    claim(service, "r2", "open",
+      { kind: "seat", agentSessionId: "as1", agent: "checker", profileRole: "reviewer", profileTools: ["Read"] });
+    claim(service, "r6", "satisfied");
+    claim(service, "r6", "violated");
+    const reversals = service.reversals("us1");
+    expect(reversals).toMatchObject([
+      { requirementId: "r2", from: "satisfied", to: "open",
+        reversedBy: { actor: "checker", verifiedBy: "independent" },
+        original: { actor: "main", verifiedBy: "self", evidenceCount: 1 } },
+      { requirementId: "r6", from: "satisfied", to: "violated",
+        reversedBy: { actor: "main" }, original: { actor: "main", verifiedBy: "self" } },
+    ]);
+    // The summary snapshot carries them for the sign-off card.
+    expect(service.summarySnapshot("us1")?.reversals).toHaveLength(2);
+  });
+
+  it("excludes console resets, retirements, and same-status re-claims", () => {
+    const { service } = makeHarness();
+    approveFixture(service);
+    claim(service, "r2", "satisfied");
+    // A reviewer re-claims satisfied (tier upgrade) — withdraws nothing.
+    claim(service, "r2", "satisfied",
+      { kind: "seat", agentSessionId: "as1", agent: "checker", profileRole: "reviewer", profileTools: ["Read"] });
+    claim(service, "r6", "satisfied");
+    // Amend r6's statement (console reset) and retire r4/r5 via an amendment.
+    const amended = `## Requirements
+- r1: Auth works end to end
+  - r2: Login issues a session token
+  - r3 (any of): A config source loads
+    - r4: TOML config parses
+    - r5: JSON config parses
+- r6: \`npm run verify\` passes from a clean checkout
+`;
+    const draft = service.propose("us1", amended, "tighten r6");
+    service.approve(draft.id, { document: amended, edited: false });
+    expect(service.reversals("us1")).toEqual([]);
+    // The operator's own reopen IS a reversal, attributed to them.
+    claim(service, "r2", "open", { kind: "operator" });
+    expect(service.reversals("us1")).toMatchObject([
+      { requirementId: "r2", from: "satisfied", to: "open", reversedBy: { actor: "operator", verifiedBy: "operator" },
+        original: { actor: "checker", verifiedBy: "independent" } },
+    ]);
+  });
+});
