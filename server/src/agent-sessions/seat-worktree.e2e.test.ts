@@ -53,7 +53,7 @@ function makeWorld(devStatus: "completed" | "failed", options: { conflict?: bool
       yield successMessage();
       return;
     }
-    if (append.includes("exclusively own the assigned files")) {
+    if (append.includes("own the assigned files or component")) {
       yield initMessage("dev-1");
       const cwd = opts.cwd ?? "";
       if (options.conflict) {
@@ -91,7 +91,7 @@ describe("agent worktree isolation (fake SDK + real git)", () => {
     expect(createdEvents[0]?.payload).toMatchObject({ agent: "dev" });
     const devOptions = h.fake.captured.options.find((opts) => {
       const append = typeof opts.systemPrompt === "object" && !Array.isArray(opts.systemPrompt) ? opts.systemPrompt.append ?? "" : "";
-      return append.includes("exclusively own the assigned files");
+      return append.includes("own the assigned files or component");
     });
     expect(devOptions?.cwd).toContain(path.join("worktrees", created.agentSessionId));
     expect((devOptions?.systemPrompt as { append?: string })?.append).toContain("isolated worktree");
@@ -144,7 +144,7 @@ describe("agent worktree isolation (fake SDK + real git)", () => {
         yield successMessage();
         return;
       }
-      if (append.includes("exclusively own the assigned files")) {
+      if (append.includes("own the assigned files or component")) {
         yield initMessage("dev-1");
         fs.writeFileSync(path.join(opts.cwd ?? "", "widget.txt"), "half implemented\n");
         yield toolUseMessage("w-1", "Write", { file_path: "widget.txt" });
@@ -219,7 +219,7 @@ describe("agent worktree isolation (fake SDK + real git)", () => {
     expect(events.some((event) => event.type === "agent_session.worktree.created")).toBe(false);
     const seatOptions = h.fake.captured.options.filter((opts) => {
       const append = typeof opts.systemPrompt === "object" && !Array.isArray(opts.systemPrompt) ? opts.systemPrompt.append ?? "" : "";
-      return append.includes("exclusively own the assigned files") || append.includes("Inspect only the assigned scope");
+      return append.includes("own the assigned files or component") || append.includes("Inspect only the assigned scope");
     });
     expect(seatOptions.length).toBeGreaterThan(0);
     for (const opts of seatOptions) expect(opts.cwd).toBe(plain);

@@ -92,11 +92,11 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
   const tools = [
     sdk.tool(
       "create_agent_session",
-      "Create and immediately launch a Console-managed AgentSession running an orchestration pattern over profile-bound agents (max 20). Choose the shape the WORK has — never the smallest crew out of thrift, never an inflated one for show: path known in advance, stages that each ADD information → pipeline (the agents ARE the stages; a relay that adds nothing loses quality); one deliverable judged against a rubric and revised until it passes → evaluator_optimizer (exactly 2 agents; pass patternConfig.rubric); many INDEPENDENT items of runtime-decided count, results synthesized → map_reduce (seat only the reducer; it fans out with dispatch_work_items); the same question argued independently, disagreement as signal → debate (2-8 debaters, one blind round, the Console seats the judge); decomposition unknown or evolving, a conductor should sequence → hub_and_spoke (the default), or plan_execute when the units deserve an explicit task DAG the Console dispatches on; a small crew that must hand work directly to each other → peer_to_peer, rarely. Pass the initial ledger units in `tasks` (they land before the briefing) and say WHY you are commissioning (`why`) and what evidence counts as success (`expecting`) — the session reads that as its contract. The Console owns every provider session, mailbox delivery, retry, and event.",
+      "Create and immediately launch a Console-managed AgentSession running an orchestration pattern over profile-bound agents. Choose the shape the WORK has — never the smallest crew out of thrift, never an inflated one for show: path known in advance, stages that each ADD information → pipeline (the agents ARE the stages; a relay that adds nothing loses quality); one deliverable judged against a rubric and revised until it passes → evaluator_optimizer (pass patternConfig.rubric); many INDEPENDENT items of runtime-decided count, results synthesized → map_reduce (seat only the reducer; it fans out with dispatch_work_items); the same question argued independently, disagreement as signal → debate (one blind round, the Console seats the judge); decomposition unknown or evolving, a conductor should sequence → hub_and_spoke (the default), or plan_execute when the units deserve an explicit task DAG the Console dispatches on; a small crew that must hand work directly to each other → peer_to_peer, rarely. Pass the initial ledger units in `tasks` (they land before the briefing) and say WHY you are commissioning (`why`) and what evidence counts as success (`expecting`) — the session reads that as its contract. The Console owns every provider session, mailbox delivery, retry, and event.",
       {
         title: z.string().describe("Short working title for the session"),
         pattern: z.enum(PATTERN_IDS).default("hub_and_spoke")
-          .describe("Orchestration pattern; the tool description says when each fits. hub_and_spoke: coordinator + specialists. pipeline: agents ARE the stages in order. evaluator_optimizer: exactly 2 (generator, evaluator). map_reduce: seat ONLY the reducer. debate: 2-8 debaters, judge auto-seated — a single BLIND round: each debater argues once and never sees the others, so agent instructions must not promise rebuttals or exchanges. peer_to_peer: bounded mesh, use rarely. plan_execute: planner + executors over a task DAG the Console dispatches on."),
+          .describe("Orchestration pattern; the tool description says when each fits. debate runs a single BLIND round — each debater argues once and never sees the others, so agent instructions must not promise rebuttals or exchanges."),
         patternConfig: z.record(z.string(), z.unknown()).optional()
           .describe("Pattern-specific config. evaluator_optimizer: {rubric, maxRounds?, generatorAgent?, requireDistinctModels?}. map_reduce: {maxMappers?}. debate: {rubric?, judgeProfileId?, judgeModel?}. peer_to_peer: {closerAgent?, maxHandoffs?, oscillationWindow?}. plan_execute: {plannerAgent?}."),
         agents: z
@@ -238,8 +238,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
     sdk.tool(
       "send_to_coordinator",
       "Send a typed handoff to an AgentSession's entry agent — its coordinator in a hub session, the first stage of a pipeline, the generator of an evaluator loop. This is how you steer a running session after its briefing: assign more work, redirect, or relay an operator decision. The fields ARE the handoff; the Console builds, journals and carries the envelope. " +
-      "Set `to` to reach ANY agent in the session directly with a category:\"update\" steering message (a correction, a discovery, a binding redirect) — assignments still enter only through the entry agent. " +
-      "An assignment whose taskId still has incomplete dependencies is SCHEDULED, not delivered — {scheduled:true} comes back and the Console dispatches it when the dependencies complete; never re-send it.",
+      "Set `to` to reach ANY agent in the session directly with a category:\"update\" steering message (a correction, a discovery, a binding redirect) — assignments still enter only through the entry agent.",
       {
         agentSessionId: z.string().min(1),
         to: z.string().min(1).optional()
@@ -335,8 +334,8 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
     ),
 
     /**
-     * Main's ledger, console-owned and keyed to the AgentSession — never the
-     * provider session id, which changes at every rotation.
+     * Main's ledger, console-owned and keyed to the AgentSession — never a
+     * provider session id.
      */
     sdk.tool(
       "task_create",
@@ -366,7 +365,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
 
     sdk.tool(
       "task_update",
-      "Update a ledger entry. Keep statuses honest: in_progress when started, completed only when verified — completing a task dispatches any assignments scheduled behind it. removeBlockedBy drops a dependency that no longer holds.",
+      "Update a ledger entry. Completing a task dispatches any assignments scheduled behind it; removeBlockedBy drops a dependency that no longer holds.",
       {
         agentSessionId: z.string().min(1),
         taskId: z.string().min(1),
@@ -390,7 +389,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
 
     sdk.tool(
       "task_list",
-      "Read the ledger for this conversation. Authoritative, shared with every agent, and it survives context rotation.",
+      "Read the ledger for this conversation. Authoritative and shared with every agent.",
       { agentSessionId: z.string().optional() },
       async (args: { agentSessionId?: string }) =>
         guarded(() => ({
@@ -660,7 +659,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
 
     sdk.tool(
       "read_requirements",
-      "Read the governing requirements: the live outline with console-derived statuses ([·] open, [✓] satisfied, [✗] violated, [⊘] infeasible), verification tiers and evidence counts, plus the open-requirements frontier. Pass scopeId to read ONE subtree in full — the way to pull detail the injected digest collapsed. The root read includes the operator's approved intent prose. For a run still governed by a legacy markdown spec this returns that text with legacy: true.",
+      "Read the governing requirements: the live outline with console-derived statuses ([·] open, [✓] satisfied, [✗] violated, [⊘] infeasible), verification tiers and evidence counts, plus the open-requirements frontier. Pass scopeId to read ONE subtree in full — the way to pull detail the injected digest collapsed. The root read includes the operator's approved intent prose.",
       {
         scopeId: z.string().min(1).optional().describe("Read only this requirement's subtree, in full."),
         cursor: z.string().optional(),
@@ -855,11 +854,11 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
 
     sdk.tool(
       "record_completion",
-      "Record the completion justification when you believe the run is done: each requirement mapped to its EVIDENCE (met or honestly not), known gaps, and deliberate non-goals. With a governing requirement graph, criteria are REQUIREMENT IDS verified against the current revision; a legacy-spec run keeps freeform criterion strings. The sign-off card shows this beside the console's own facts (git diff, ledger, requirement tree, uncertainty) — an absent record renders as a visible omission. Not a gate: recording it does not complete the run; the operator does.",
+      "Record the completion justification when you believe the run is done: each requirement mapped to its EVIDENCE (met or honestly not), known gaps, and deliberate non-goals. With a governing requirement graph, criteria are REQUIREMENT IDS verified against the current revision; a run with no approved requirements uses freeform criterion strings. The sign-off card shows this beside the console's own facts (git diff, ledger, requirement tree, uncertainty) — an absent record renders as a visible omission. Not a gate: recording it does not complete the run; the operator does.",
       {
         criteria: z.array(z.object({
           requirement: z.string().optional().describe("A requirement id from read_requirements (required when a requirement graph governs)"),
-          criterion: z.string().optional().describe("Freeform criterion text (legacy-spec runs only)"),
+          criterion: z.string().optional().describe("Freeform criterion text (runs with no approved requirements only)"),
           met: z.boolean(),
           evidence: z.array(EvidenceRefSchema).default([]).describe("What proves it: artifacts, files, journal refs, commands"),
         })).min(1).describe("At most 12 survive. Each entry names either a requirement id or a criterion string."),

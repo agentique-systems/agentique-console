@@ -87,7 +87,7 @@ export interface CompletionSpec {
 }
 
 export interface RolePrompt {
-  /** The role's addressing sentence inside the messaging brief ("You may address …"). */
+  /** The role's addressing sentence inside the messaging brief ("Address participants by bare name …"). */
   addressing: string;
   /** The pattern-specific half of the session protocol; the operator-path core is invariant. */
   protocol: string;

@@ -58,12 +58,12 @@ export interface OrchestratorOptionsInput {
   sessionStore?: unknown;
   contextMemory?: string;
   /**
-   * The operator's decisions, appended AFTER the rotation checkpoint. Main
+   * The operator's decisions, appended after the inherited memory. Main
    * must not contradict a call the operator already made, and must not relay
    * one — every agent has it already.
    */
   decisionDigest?: string;
-  /** The approved living spec, injected AFTER decisions (both authoritative). */
+  /** The governing requirements digest, injected AFTER decisions (both authoritative). */
   specDigest?: string;
   /** Main's own working state — the durable memory of the orchestration loop. */
   stateDigest?: string;
@@ -91,8 +91,8 @@ export function buildOrchestratorOptions(
       type: "preset",
       preset: "claude_code",
       append: (withDelegation
-        ? ORCHESTRATOR_BRIEF + ORCHESTRATOR_DELEGATION_BRIEF + (input.contextMemory ? `\n\n## Rotation checkpoint (or read-only legacy memory)\n${input.contextMemory}` : "")
-        : ORCHESTRATOR_BRIEF + (input.contextMemory ? `\n\n## Rotation checkpoint (or read-only legacy memory)\n${input.contextMemory}` : ""))
+        ? ORCHESTRATOR_BRIEF + ORCHESTRATOR_DELEGATION_BRIEF + (input.contextMemory ? `\n\n## Inherited memory (from an earlier generation, read-only)\n${input.contextMemory}` : "")
+        : ORCHESTRATOR_BRIEF + (input.contextMemory ? `\n\n## Inherited memory (from an earlier generation, read-only)\n${input.contextMemory}` : ""))
         + (input.decisionDigest ? `\n\n## Operator decisions (authoritative)\nThe operator made these. Do not re-litigate them, do not contradict them, and do not relay them to seats — they already have them.\n${input.decisionDigest}` : "")
         + (input.specDigest ? `\n\n${input.specDigest}` : "")
         + (input.stateDigest ? `\n\n${input.stateDigest}` : "")

@@ -84,11 +84,11 @@ const HUB_CONTRACT: TopologyContract = {
   completion: { finalFrom: "coordinator", voice: "coordinator" },
   promptPack: {
     coordinator: {
-      addressing: `Address participants by bare name (e.g. "coordinator"); "main" reaches the Orchestrator. You may address your specialists and main.`,
+      addressing: `Address participants by bare name (e.g. "coordinator"); "main" reaches the Orchestrator.`,
       protocol: SESSION_PROTOCOL,
     },
     specialist: {
-      addressing: `Address participants by bare name (e.g. "coordinator"); "main" reaches the Orchestrator. You may address only coordinator.`,
+      addressing: `Address participants by bare name (e.g. "coordinator"); "main" reaches the Orchestrator.`,
       protocol: SESSION_PROTOCOL,
     },
   },

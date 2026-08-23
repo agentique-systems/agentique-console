@@ -214,7 +214,7 @@ export function seatUserMessage(text: string): SdkUserMessageLike {
  */
 function seatMessagingBrief(roster: string, addressing: string): string {
   return `## Working with the team\nParticipants: ${roster}.\n${addressing}\n` +
-    `Everything you transfer — an assignment, progress, findings, a failure, a result — goes through send_handoff; your plain text output reaches no one. Put the substance itself in stateSummary and long material in write_note. The Human Operator is reachable directly with ask_operator.`;
+    `Everything you transfer — an assignment, progress, findings, a failure, a result — goes through send_handoff; your plain text output reaches no one. The Human Operator is reachable directly with ask_operator.`;
 }
 
 /** The question text of an interaction, for prompts and operator-facing lines. */
@@ -235,7 +235,7 @@ export interface PromptComposerDeps {
   config: Config;
   handoffs: HandoffService;
   decisions: DecisionLedger;
-  /** The governing requirements (legacy-spec fallback inside) — injected into every seat like decisions are. */
+  /** The governing requirements — injected into every seat like decisions are. */
   requirements: RequirementService;
   /** Recorded premises — the delegated block surfaces the ones under a seat's subtrees. */
   assumptions: AssumptionService;
@@ -261,8 +261,7 @@ export class PromptComposer {
    */
   systemPromptAppend(session: AgentSessionRow, seat: AgentRow, profile: AgentProfile, rolePrompt: RolePrompt): string {
     const identity = rolePrompt.brief === undefined ? seat.instructions : `${seat.instructions}\n\n${rolePrompt.brief}`;
-    const worktree = seat.worktreePath ? "\nThe Console commits and lands your work when you report; do not run git commit yourself." : "";
-    return `${identity}\n\n${capabilityBrief(profile, seat.worktreePath !== null)}${worktree}\n\n${seatMessagingBrief(this.rosterLine(session), rolePrompt.addressing)}\n${rolePrompt.protocol}${this.#decisionContext(session)}${this.#specContext(session)}${this.#checkpointContext(seat)}`;
+    return `${identity}\n\n${capabilityBrief(profile, seat.worktreePath !== null)}\n\n${seatMessagingBrief(this.rosterLine(session), rolePrompt.addressing)}\n${rolePrompt.protocol}${this.#decisionContext(session)}${this.#specContext(session)}${this.#checkpointContext(seat)}`;
   }
 
   /**
@@ -513,16 +512,11 @@ export class PromptComposer {
    * A seat gets the VISION plus the top-level shape, not the whole outline:
    * its delegated subtree arrives in full with every delivery, and detail
    * outside it is one read_requirements away — injecting the entire graph
-   * into every seat is exactly what stops scaling. Legacy (pre-graph) runs
-   * keep the old digest injection.
+   * into every seat is exactly what stops scaling.
    */
   #specContext(session: AgentSessionRow): string {
     const approved = this.#deps.requirements.latestApproved(session.userSessionId);
-    if (approved === undefined) {
-      const digest = this.#deps.requirements.digest(session.userSessionId);
-      if (digest === "") return "";
-      return `\n\n${digest}\nYour work is checked against this. read_requirements returns the full outline with statuses.`;
-    }
+    if (approved === undefined) return "";
     const intent = this.#deps.requirements.intentDocument(session.userSessionId);
     const nodes = this.#deps.requirements.derive(session.userSessionId);
     const subtreeCounts = (rootId: string): { satisfied: number; total: number } => {

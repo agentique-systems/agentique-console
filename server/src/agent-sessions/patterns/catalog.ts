@@ -15,7 +15,7 @@ import type { PatternId } from "@agentique-console/shared";
 import type { RolePrompt, RoleSpec, TopologyContract } from "../topology-contract.ts";
 import { InvalidInputError } from "../../errors.ts";
 import type { AgentProfile } from "../../agent-profiles/registry.ts";
-import { OPERATOR_PATH_BULLETS, PROTOCOL_INTRO } from "../presets.ts";
+import { OPERATOR_PATH_BULLETS, PROTOCOL_INTRO, TERMINAL_REPORT_BULLET } from "../presets.ts";
 import { hubContract } from "../topology.ts";
 
 export interface BuildAgent {
@@ -48,7 +48,18 @@ export interface BuildResult {
 }
 
 export function buildContract(pattern: PatternId, input: BuildInput): BuildResult {
-  const result = builderOf(pattern)(input);
+  const built = builderOf(pattern)(input);
+  // The terminal-report rule is appended HERE, once, to every role — never
+  // restated per pattern. A fresh promptPack object each call: builders may
+  // return shared contract singletons (hubContract), which must not mutate.
+  const result: BuildResult = {
+    ...built,
+    contract: {
+      ...built.contract,
+      promptPack: Object.fromEntries(Object.entries(built.contract.promptPack)
+        .map(([role, prompt]) => [role, { ...prompt, protocol: `${prompt.protocol}${TERMINAL_REPORT_BULLET}` }])),
+    },
+  };
   for (const [role, prompt] of Object.entries(result.contract.promptPack)) {
     if (!prompt.protocol.includes(OPERATOR_PATH_BULLETS)) {
       throw new Error(`pattern ${pattern}: role ${role} drops the operator-path protocol bullets`);
@@ -104,13 +115,9 @@ function buildHub(input: BuildInput): BuildResult {
 
 const PIPELINE_WORK_BULLET = `
 - You are one stage in a pipeline: take what the previous stage handed you,
-  ADD your stage's work, and pass the augmented result forward. If your stage
-  has nothing to add, say exactly that and name the gap when you pass it on.`;
-
-const PIPELINE_DONE_BULLET = `
-- When your stage is done, send the FULL result onward with a terminal status
-  (completed or failed) and your ledger taskId — the Console closes the unit
-  from that handoff. Include what you could not verify; then stop.`;
+  ADD your stage's work, and pass the FULL augmented result forward with your
+  ledger taskId. If your stage has nothing to add, say exactly that and name
+  the gap when you pass it on.`;
 
 function buildPipeline(input: BuildInput): BuildResult {
   const names = input.agents.map((agent) => agent.name);
@@ -120,7 +127,7 @@ function buildPipeline(input: BuildInput): BuildResult {
   const last = names.length - 1;
   const roles: Record<string, RoleSpec> = {};
   const promptPack: Record<string, RolePrompt> = {};
-  const protocol = `${PROTOCOL_INTRO}${PIPELINE_WORK_BULLET}${OPERATOR_PATH_BULLETS}${PIPELINE_DONE_BULLET}`;
+  const protocol = `${PROTOCOL_INTRO}${PIPELINE_WORK_BULLET}${OPERATOR_PATH_BULLETS}`;
   names.forEach((name, index) => {
     // tasks_write: the evaluator learned this the hard way (a live run ended
     // with both its units still pending — see the evaluator's grant comment);
@@ -129,8 +136,8 @@ function buildPipeline(input: BuildInput): BuildResult {
     const position = `You are stage ${index + 1} of ${names.length} in a pipeline.`;
     promptPack[roleOf(index)] = {
       addressing: index === last
-        ? `Address participants by bare name; "main" reaches the Orchestrator. ${position} You are the FINAL stage: send the finished result to "main" with category "final", and failures to "main" with category "failure".`
-        : `Address participants by bare name; "main" reaches the Orchestrator. ${position} Send your completed stage work only to "${names[index + 1]}"; report failures to "main" with category "failure".`,
+        ? `Address participants by bare name; "main" reaches the Orchestrator. ${position} You are the FINAL stage: send the finished result to "main"; failures go to "main" too.`
+        : `Address participants by bare name; "main" reaches the Orchestrator. ${position} Send your completed stage work to "${names[index + 1]}"; failures go to "main".`,
       protocol,
     };
   });
@@ -186,11 +193,8 @@ const LOOP_WORK_BULLET = `
 - You are one half of a generate-evaluate loop: the generator produces and
   revises the deliverable, the evaluator judges it against the rubric and
   either sends a concrete critique back or accepts by reporting the result to
-  main. The Console bounds the loop; make each round count.`;
-
-const LOOP_DONE_BULLET = `
-- Send the FULL work product each round — the actual content, including what
-  you could not verify.`;
+  main. Send the FULL work product each round. The Console bounds the loop;
+  make each round count.`;
 
 function buildEvaluatorOptimizer(input: BuildInput): BuildResult {
   if (input.agents.length !== 2) throw new InvalidInputError("evaluator_optimizer seats exactly 2 agents: a generator and an evaluator");
@@ -209,7 +213,7 @@ function buildEvaluatorOptimizer(input: BuildInput): BuildResult {
       throw new InvalidInputError(`generator and evaluator both resolve to ${generatorModel}; same-model loops collude — override one agent's model, or pass patternConfig.requireDistinctModels: false`);
     }
   }
-  const protocol = `${PROTOCOL_INTRO}${LOOP_WORK_BULLET}${OPERATOR_PATH_BULLETS}${LOOP_DONE_BULLET}`;
+  const protocol = `${PROTOCOL_INTRO}${LOOP_WORK_BULLET}${OPERATOR_PATH_BULLETS}`;
   const rubric = config.rubric === undefined ? "" : `\n\nRubric to judge against:\n${config.rubric}`;
   return buildEvaluatorContract(input, generator, evaluator, config, protocol, rubric);
 }
@@ -241,14 +245,14 @@ function buildEvaluatorContract(input: BuildInput, generator: BuildAgent, evalua
       completion: { finalFrom: "evaluator", voice: "evaluator" },
       promptPack: {
         generator: {
-          addressing: `Address participants by bare name. You may address only "${evaluator.name}" — send every draft and revision there.`,
+          addressing: `Address participants by bare name. Send every draft and revision to "${evaluator.name}".`,
           protocol,
           brief: `You are the GENERATOR. Produce the deliverable; when "${evaluator.name}" returns a critique, revise against every point and resend. Judging is the evaluator's job.`,
         },
         evaluator: {
-          addressing: `Address participants by bare name; "main" reaches the Orchestrator. You may address "${generator.name}" and "main".`,
+          addressing: `Address participants by bare name; "main" reaches the Orchestrator.`,
           protocol,
-          brief: `You are the EVALUATOR. Judge each submission from "${generator.name}" against the rubric with concrete, actionable findings. If it falls short, send the critique back as a decision handoff; when it meets the bar, report the result to "main" with category "final" (forward_message forwards the generator's report verbatim). Hold the bar exactly where the rubric puts it.${rubric}`,
+          brief: `You are the EVALUATOR. Judge each submission from "${generator.name}" against the rubric with concrete, actionable findings. If it falls short, send the critique back as a decision handoff; when it meets the bar, report the result to "main" (forward_message forwards the generator's report verbatim). Hold the bar exactly where the rubric puts it.${rubric}`,
         },
       },
       routeSummary: `main → ${generator.name} ⇄ ${evaluator.name} → main`,
@@ -271,18 +275,15 @@ const MAP_REDUCE_CONFIG = z.object({
 const MAP_REDUCE_WORK_BULLET = `
 - You are part of a map-reduce: the reducer splits the work into independent
   items with dispatch_work_items, one minted mapper agent does exactly one item,
-  and the Console holds every mapper report until the join is met — then they
-  all arrive at the reducer in ONE turn for synthesis.`;
-
-const MAP_REDUCE_DONE_BULLET = `
-- Report your item with a terminal status (completed or failed) — the join
-  counts terminal reports. Include what you could not verify.`;
+  and the Console holds every mapper report until the join is met — the join
+  counts terminal reports, then they all arrive at the reducer in ONE turn
+  for synthesis.`;
 
 function buildMapReduce(input: BuildInput): BuildResult {
   if (input.agents.length !== 1) throw new InvalidInputError("map_reduce seats exactly 1 agent at creation: the reducer (mappers are minted per work item by dispatch_work_items)");
   const config = MAP_REDUCE_CONFIG.parse(input.config ?? {});
   const reducer = input.agents[0]!;
-  const protocol = `${PROTOCOL_INTRO}${MAP_REDUCE_WORK_BULLET}${OPERATOR_PATH_BULLETS}${MAP_REDUCE_DONE_BULLET}`;
+  const protocol = `${PROTOCOL_INTRO}${MAP_REDUCE_WORK_BULLET}${OPERATOR_PATH_BULLETS}`;
   return {
     contract: {
       schemaVersion: 1,
@@ -304,12 +305,12 @@ function buildMapReduce(input: BuildInput): BuildResult {
       completion: { finalFrom: "reducer", voice: "reducer" },
       promptPack: {
         reducer: {
-          addressing: `Address participants by bare name; "main" reaches the Orchestrator. You may address your mappers and "main".`,
+          addressing: `Address participants by bare name; "main" reaches the Orchestrator.`,
           protocol,
-          brief: `You are the REDUCER. Split the briefing into independent work items and fan them out with dispatch_work_items — one item per mapper, width decided by the work. The Console delivers every mapper report to you in one turn once all have reported; synthesize them and report the combined result to "main" with category "final". The mappers do the items; you own the split and the synthesis.`,
+          brief: `You are the REDUCER. Split the briefing into independent work items and fan them out with dispatch_work_items — one item per mapper, width decided by the work. The Console delivers every mapper report to you in one turn once all have reported; synthesize them and report the combined result to "main". The mappers do the items; you own the split and the synthesis.`,
         },
         mapper: {
-          addressing: `Address participants by bare name. You may address only your reducer — the agent that dispatched your item.`,
+          addressing: `Address participants by bare name. Your report goes to your reducer — the agent that dispatched your item.`,
           protocol,
         },
       },
@@ -335,20 +336,16 @@ const DEBATE_CONFIG = z.object({
 const DEBATE_WORK_BULLET = `
 - You are in a debate: every debater received the SAME briefing and argues its
   own independent position to the judge in exactly ONE turn — one blind round,
-  no rebuttal, and the other positions stay unseen. Independent disagreement
+  no rebuttal, and the other positions stay unseen. Make your position complete
+  and self-contained this turn; the Console holds every position until all
+  have argued, then the judge reads them together. Independent disagreement
   is the signal the judge needs.`;
-
-const DEBATE_DONE_BULLET = `
-- Make your position complete and self-contained this turn and send it with a
-  terminal status (completed) — the Console holds every position until all
-  have argued, then the judge reads them together. Include what you could not
-  verify.`;
 
 function buildDebate(input: BuildInput): BuildResult {
   if (input.agents.length < 2 || input.agents.length > 8) throw new InvalidInputError("a debate seats 2 to 8 debaters (the judge is seated by the console)");
   if (input.agents.some((agent) => agent.name === ARBITER_NAME)) throw new InvalidInputError(`"${ARBITER_NAME}" is the console-seated arbiter's name; pick another agent name`);
   const config = DEBATE_CONFIG.parse(input.config ?? {});
-  const protocol = `${PROTOCOL_INTRO}${DEBATE_WORK_BULLET}${OPERATOR_PATH_BULLETS}${DEBATE_DONE_BULLET}`;
+  const protocol = `${PROTOCOL_INTRO}${DEBATE_WORK_BULLET}${OPERATOR_PATH_BULLETS}`;
   const rubric = config.rubric === undefined ? "" : `\n\nJudge against this rubric:\n${config.rubric}`;
   return {
     contract: {
@@ -370,13 +367,13 @@ function buildDebate(input: BuildInput): BuildResult {
       completion: { finalFrom: "judge", voice: "judge" },
       promptPack: {
         debater: {
-          addressing: `Address participants by bare name. You may address only "judge" — send your finished position there.`,
+          addressing: `Address participants by bare name. Send your finished position to "judge".`,
           protocol,
         },
         judge: {
-          addressing: `Address participants by bare name; "main" reaches the Orchestrator. You may address "main".`,
+          addressing: `Address participants by bare name; "main" reaches the Orchestrator.`,
           protocol,
-          brief: `You are the JUDGE. Every debater's position arrives in one turn once all have argued. Weigh them on substance — evidence over length, correctness over agreement. Report the winning answer (or your synthesis of the strongest parts) to "main" with category "final", naming what each position got right or wrong.${rubric}`,
+          brief: `You are the JUDGE. Every debater's position arrives in one turn once all have argued. Weigh them on substance — evidence over length, correctness over agreement. Report the winning answer (or your synthesis of the strongest parts) to "main", naming what each position got right or wrong.${rubric}`,
         },
       },
       routeSummary: `main → debaters → judge → main`,
@@ -403,12 +400,8 @@ const P2P_WORK_BULLET = `
 - You are a peer in a bounded mesh: any agent may hand work to any other, and
   nobody sequences you. The Console caps total handoffs and stops ping-pong,
   so every send should MOVE the work. The closer owns the ending: keep it able
-  to compile the result.`;
-
-const P2P_DONE_BULLET = `
-- Send whole contributions: what you did, what you could not verify, and what
-  remains. When your part is done, say so to the closer and stop — an idle
-  peer is a finished peer.`;
+  to compile the result, and tell it when your part is done — an idle peer is
+  a finished peer.`;
 
 function buildPeerToPeer(input: BuildInput): BuildResult {
   if (input.agents.length < 2 || input.agents.length > 8) throw new InvalidInputError("peer_to_peer seats 2 to 8 peers");
@@ -418,8 +411,8 @@ function buildPeerToPeer(input: BuildInput): BuildResult {
     : input.agents.find((agent) => agent.name === config.closerAgent)
       ?? (() => { throw new InvalidInputError(`closerAgent "${config.closerAgent}" is not one of the agents`); })();
   const peers = input.agents.filter((agent) => agent.name !== closer.name);
-  const protocol = `${PROTOCOL_INTRO}${P2P_WORK_BULLET}${OPERATOR_PATH_BULLETS}${P2P_DONE_BULLET}`;
-  const addressing = `Address participants by bare name; "main" reaches the Orchestrator (closer only). You may address any peer directly.`;
+  const protocol = `${PROTOCOL_INTRO}${P2P_WORK_BULLET}${OPERATOR_PATH_BULLETS}`;
+  const addressing = `Address participants by bare name; "main" reaches the Orchestrator (closer only).`;
   return {
     contract: {
       schemaVersion: 1,
@@ -445,7 +438,7 @@ function buildPeerToPeer(input: BuildInput): BuildResult {
         closer: {
           addressing,
           protocol,
-          brief: `You are the CLOSER: a working peer that also owns the ending. Distribute the briefing, contribute like any peer, and when the work converges — or the Console says the budget tripped — compile the combined result and report it to "main" with category "final".`,
+          brief: `You are the CLOSER: a working peer that also owns the ending. Distribute the briefing, contribute like any peer, and when the work converges — or the Console says the budget tripped — compile the combined result and report it to "main".`,
         },
       },
       routeSummary: `peers ⇄ peers, ${closer.name} → main`,
@@ -472,11 +465,6 @@ const PLAN_WORK_BULLET = `
   an assignment whose dependencies are incomplete ({scheduled: true}) until
   they complete. Keep the ledger true as reality diverges.`;
 
-const PLAN_DONE_BULLET = `
-- Executors: finish your task with a terminal report to the planner — the
-  actual content, including what you could not verify. Planner: when the DAG
-  is done (or provably stuck), report the result to "main".`;
-
 function buildPlanExecute(input: BuildInput): BuildResult {
   if (input.agents.length < 2 || input.agents.length > 20) throw new InvalidInputError("plan_execute seats a planner plus 1-19 executors");
   const config = PLAN_EXECUTE_CONFIG.parse(input.config ?? {});
@@ -485,7 +473,7 @@ function buildPlanExecute(input: BuildInput): BuildResult {
     : input.agents.find((agent) => agent.name === config.plannerAgent)
       ?? (() => { throw new InvalidInputError(`plannerAgent "${config.plannerAgent}" is not one of the agents`); })();
   const executors = input.agents.filter((agent) => agent.name !== planner.name);
-  const protocol = `${PROTOCOL_INTRO}${PLAN_WORK_BULLET}${OPERATOR_PATH_BULLETS}${PLAN_DONE_BULLET}`;
+  const protocol = `${PROTOCOL_INTRO}${PLAN_WORK_BULLET}${OPERATOR_PATH_BULLETS}`;
   return {
     contract: {
       schemaVersion: 1,
@@ -507,12 +495,12 @@ function buildPlanExecute(input: BuildInput): BuildResult {
       completion: { finalFrom: "planner", voice: "planner" },
       promptPack: {
         planner: {
-          addressing: `Address participants by bare name; "main" reaches the Orchestrator. You may address your executors and "main".`,
+          addressing: `Address participants by bare name; "main" reaches the Orchestrator.`,
           protocol,
-          brief: `You are the PLANNER. First decompose the objective into task_create entries — every unit gets a taskId, an owner, and blockedBy naming its real dependencies (forward references are fine) — then assign EVERY task by taskId immediately with send_handoff category "assignment"; a scheduled one ({scheduled: true}) dispatches itself when its dependencies complete. A deleted dependency stays unsatisfied until you remove the edge (task_update removeBlockedBy) or cancel the assignment. When reality diverges, re-plan by updating the ledger.`,
+          brief: `You are the PLANNER. First decompose the objective into task_create entries — every unit gets a taskId, an owner, and blockedBy naming its real dependencies (forward references are fine) — then assign EVERY task by taskId immediately with send_handoff category "assignment". When reality diverges, re-plan by updating the ledger. When the DAG is done (or provably stuck), report the result to "main".`,
         },
         executor: {
-          addressing: `Address participants by bare name. You may address only your planner.`,
+          addressing: `Address participants by bare name. Your reports go to your planner.`,
           protocol,
         },
       },
