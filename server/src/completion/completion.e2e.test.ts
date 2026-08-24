@@ -405,6 +405,43 @@ describe("the requirement graph as completion oracle", () => {
     expect(h.db.select().from(runSummaries).all()).toHaveLength(1);
   });
 
+  it("holds the proposal while a broken workstream link's consumer is open; releasing it proposes", async () => {
+    const { h } = harness();
+    const userSessionId = h.addUserSession();
+    // A producer/consumer pair: the producer is abandoned mid-run, so its
+    // link breaks — a quiet, fully-reported run must NOT reach sign-off over
+    // a stale producer/consumer relationship nobody has judged.
+    const producer = h.host.createSession({
+      userSessionId, title: "auth-core", agents: [{ name: "dev", profileId: "explorer" }],
+      briefing: draft("build the token API"),
+    });
+    const consumer = h.host.createSession({
+      userSessionId, title: "ui", agents: [{ name: "check", profileId: "visual-reviewer", owns: [] }],
+      briefing: draft("verify the page"),
+    });
+    const link = h.app.workstreams.link({
+      userSessionId, consumerAgentSessionId: consumer.agentSessionId,
+      producerAgentSessionId: producer.agentSessionId, subject: "token API", createdBy: "main",
+    });
+    await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled", 10_000);
+    h.host.closeSession(producer.agentSessionId, "reprioritized");
+    // The consumer session reports; the run is otherwise quiet and done.
+    const finals = h.fake.captured.tools.filter((tool) => tool.name === "send_handoff");
+    await finals[finals.length - 1]!.handler(FINAL, {});
+    await settle();
+    expect(h.db.select().from(runSummaries).all()).toHaveLength(0);
+    const nudge = h.fake.captured.prompts.find((text) => text.includes("workstream dependency link(s) are broken"));
+    expect(nudge).toBeDefined();
+    expect(nudge).toContain(link.id);
+    expect(nudge).toContain("token API");
+
+    // Judgment recorded (no successor will produce it) → the same quiet run proposes.
+    h.app.workstreams.release({ userSessionId, linkId: link.id, by: "main", note: "auth work moved into the ui session itself" });
+    h.completion.schedule(userSessionId);
+    await collectUntil(h.bus, (event) => event.type === "run.completion.proposed", 10_000);
+    expect(h.db.select().from(runSummaries).all()).toHaveLength(1);
+  });
+
   it("an infeasible root yields the infeasible verdict, not failed", async () => {
     const { h } = harness();
     const userSessionId = h.addUserSession();

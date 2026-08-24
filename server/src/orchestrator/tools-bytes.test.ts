@@ -50,6 +50,9 @@ function describeBytes(schema: z.ZodType): number {
 describe("console tool byte budget", () => {
   // Bumped 12000 → 12600 with reconcile_change_impact — a new tool surface
   // (the change-impact ledger's judgment recorder), not creep on existing ones.
+  // Bumped 12600 → 14200 with link_workstreams/unlink_workstreams and the
+  // portfolio fields on create_agent_session/add_agent — the workstream
+  // dependency layer's authoring surface, not creep on existing ones.
   it("keeps total description + parameter-describe bytes within the budget", () => {
     const tools = captureTools();
     expect(tools.length).toBeGreaterThan(20);
@@ -58,6 +61,6 @@ describe("console tool byte budget", () => {
       + Buffer.byteLength(tool.description, "utf8")
       + Object.values(tool.schema).reduce((inner, schema) => inner + describeBytes(schema), 0),
     0);
-    expect(total).toBeLessThanOrEqual(12_600);
+    expect(total).toBeLessThanOrEqual(14_200);
   });
 });

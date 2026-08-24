@@ -15,7 +15,8 @@
  */
 import type { HandoffDraft, Speaker } from "@agentique-console/shared";
 import type { TerminationPolicy, TopologyContract } from "../topology-contract.ts";
-import type { AgentProfile } from "../../agent-profiles/registry.ts";
+import { profileWritesFiles, type AgentProfile } from "../../agent-profiles/registry.ts";
+import { assertOwnershipClaims } from "../../portfolio/ownership.ts";
 import { InvalidInputError } from "../../errors.ts";
 import type { Config } from "../../config.ts";
 import type { AgentSessionRow, MessageRow, AgentRow, Repo } from "../../db/repo.ts";
@@ -41,7 +42,7 @@ export interface PatternContext {
   // Agent minting, for replicable roles — the attempts.ts precedent.
   profile(id: string, workspaceId?: string): AgentProfile;
   snapshotProfile(profile: AgentProfile): AgentProfile;
-  agent(agentSessionId: string, name: string, role: string, profile: AgentProfile, extra: string, model: string | undefined, ownership: string[], ord: number, createdAt: string): AgentRow;
+  agent(agentSessionId: string, name: string, role: string, profile: AgentProfile, extra: string, model: string | undefined, ownership: string[], sharedOwnership: { scope: string; why: string }[], ord: number, createdAt: string): AgentRow;
 }
 
 export interface PatternHop {
@@ -194,7 +195,7 @@ function roleOf(ctx: PatternContext, session: AgentSessionRow, name: string): st
 
 export interface DispatchWorkItemsInput {
   agentSessionId: string;
-  items: { assignment: string; name?: string; owns?: string[] }[];
+  items: { assignment: string; name?: string; owns?: string[]; sharedOwns?: { scope: string; why: string }[] }[];
   profileId?: string;
   instructions?: string;
   model?: string;
@@ -234,9 +235,18 @@ export function dispatchWorkItems(ctx: PatternContext, session: AgentSessionRow,
     existing.add(name);
     return { name, item };
   });
+  // THE ownership rule (portfolio/ownership.ts) — the same project-wide check
+  // every creation path runs. Dispatch used to be the one door write
+  // responsibility could enter unchecked and unowned.
+  const claims = assertOwnershipClaims(repo, session.userSessionId, minted.map((mint) => ({
+    agent: mint.name, profileId: profile.id,
+    writes: profileWritesFiles(profile.tools), exempt: profile.exemptFromOwnership,
+    owns: mint.item.owns ?? [], sharedOwns: mint.item.sharedOwns ?? [],
+  })));
   for (const [index, mint] of minted.entries()) {
+    const claim = claims.get(mint.name)!;
     repo.insertAgent(ctx.agent(session.id, mint.name, mapperRole, profile,
-      input.instructions ?? "", input.model, mint.item.owns ?? [], baseOrd + index, now));
+      input.instructions ?? "", input.model, claim.ownership, claim.sharedOwnership, baseOrd + index, now));
   }
   const joinId = `${mapperRole}#${dispatchOrdinal}`;
   joins[joinId] = { over: mapperRole,

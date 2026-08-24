@@ -41,6 +41,12 @@ export interface ChangeImpactDeps {
   listTasks(userSessionId: string): Task[];
   /** Latest status change per requirement — the mechanical-clearance read. */
   latestChanges(userSessionId: string): Map<string, RequirementStatusChangeRow>;
+  /**
+   * Live workstream dependency edges (WorkstreamService.liveEdges) — how a
+   * change that touches a producer reaches the open workstreams consuming its
+   * interface, transitively.
+   */
+  liveWorkstreamEdges(userSessionId: string): { consumerAgentSessionId: string; producerAgentSessionId: string; subject: string }[];
 }
 
 export class ChangeImpactService {
@@ -92,6 +98,22 @@ export class ChangeImpactService {
     for (const task of tasks) {
       if (task.agentSessionId !== null) sessionIds.add(task.agentSessionId);
     }
+    // Consumer expansion over workstream links, to a fixed point: an affected
+    // producer's open consumers work against its interface, and THEIR open
+    // consumers in turn — the coupling main used to have to remember.
+    const via = new Map<string, string>();
+    const edges = deps.liveWorkstreamEdges(input.userSessionId);
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const edge of edges) {
+        if (!sessionIds.has(edge.producerAgentSessionId) || sessionIds.has(edge.consumerAgentSessionId)) continue;
+        if (!openSessions.has(edge.consumerAgentSessionId)) continue;
+        sessionIds.add(edge.consumerAgentSessionId);
+        via.set(edge.consumerAgentSessionId, `consumes from ${edge.producerAgentSessionId}: ${edge.subject}`);
+        grew = true;
+      }
+    }
     const suspects = input.closure.suspectClaims;
     if (suspects.length === 0 && (input.sourceKind === "claim_withdrawn" || sessionIds.size === 0)) return null;
 
@@ -102,6 +124,7 @@ export class ChangeImpactService {
       sessions: [...sessionIds].sort().map((agentSessionId) => ({
         agentSessionId,
         title: deps.sessionTitle(agentSessionId) ?? "",
+        ...(via.has(agentSessionId) ? { via: via.get(agentSessionId)! } : {}),
       })),
       tasks: tasks.map((task) => ({
         taskId: task.id, subject: task.subject, status: task.status, agentSessionId: task.agentSessionId,

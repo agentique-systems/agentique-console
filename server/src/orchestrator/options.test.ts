@@ -66,8 +66,10 @@ describe("orchestrator options", () => {
   // was 17 KB once, and every line competes with the native system prompt.
   // Bumped 7000 → 7300 with the change-impact reconciliation invariant — one
   // durable-policy sentence; the mechanics live on reconcile_change_impact.
+  // Bumped 7300 → 7700 with the ownership rule and workstream links — two
+  // durable-policy sentences; the mechanics live on the portfolio tools.
   it("keeps the standing brief within its byte budget", () => {
-    expect(Buffer.byteLength(ORCHESTRATOR_BRIEF + ORCHESTRATOR_DELEGATION_BRIEF, "utf8")).toBeLessThanOrEqual(7_300);
+    expect(Buffer.byteLength(ORCHESTRATOR_BRIEF + ORCHESTRATOR_DELEGATION_BRIEF, "utf8")).toBeLessThanOrEqual(7_700);
   });
 
   it("loads settings, CLAUDE.md and skills like the CLI", () => {

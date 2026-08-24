@@ -30,6 +30,8 @@ export const MAIN_TOOL_NAMES = [
   "propose_requirements",
   "read_requirements",
   "reconcile_change_impact",
+  "link_workstreams",
+  "unlink_workstreams",
   "report_requirement",
   "decompose_requirement",
   "record_assumption",

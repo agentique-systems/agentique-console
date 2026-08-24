@@ -574,6 +574,36 @@ export interface ChangeImpactReconciledPayload {
   status: "open" | "reconciled";
 }
 
+/** A workstream dependency link was declared: `consumer` depends on `producer` for `subject`. */
+export interface WorkstreamLinkCreatedPayload {
+  userSessionId: string;
+  linkId: string;
+  consumerAgentSessionId: string;
+  producerAgentSessionId: string;
+  subject: string;
+  createdBy: string;
+  note?: string;
+  /** The link's derived status at creation ("satisfied" when the producer already reported). */
+  status: "pending" | "satisfied";
+}
+
+/** Main released a workstream link with a judgment note (superseded, re-pointed, no longer holds). */
+export interface WorkstreamLinkReleasedPayload {
+  userSessionId: string;
+  linkId: string;
+  by: string;
+  note: string;
+}
+
+/** A producer was archived without ever reporting; each live link on it is now visibly broken. */
+export interface WorkstreamLinkBrokenPayload {
+  userSessionId: string;
+  linkId: string;
+  producerAgentSessionId: string;
+  consumerAgentSessionId: string;
+  subject: string;
+}
+
 /** Main revised its working state (strategy/uncertainties/assumptions/risks/completion). */
 export interface StateUpdatedPayload {
   userSessionId: string;
@@ -731,6 +761,9 @@ export type ConsoleEvent = Base &
     | { type: "requirement.link.changed"; payload: RequirementLinkChangedPayload }
     | { type: "change_impact.recorded"; payload: ChangeImpactRecordedPayload }
     | { type: "change_impact.reconciled"; payload: ChangeImpactReconciledPayload }
+    | { type: "workstream.link.created"; payload: WorkstreamLinkCreatedPayload }
+    | { type: "workstream.link.released"; payload: WorkstreamLinkReleasedPayload }
+    | { type: "workstream.link.broken"; payload: WorkstreamLinkBrokenPayload }
     | { type: "user_session.state.updated"; payload: StateUpdatedPayload }
     | { type: "agent_session.created"; payload: AgentSessionCreatedPayload }
     | { type: "agent_session.termination.tripped"; payload: AgentSessionTerminationTrippedPayload }

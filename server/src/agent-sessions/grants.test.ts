@@ -21,7 +21,7 @@ function makeProfile(over: Partial<AgentProfile> = {}): AgentProfile {
 
 function makeAgent(over: Partial<AgentRow>): AgentRow {
   return { agentSessionId: "as1", name: "agent", role: "specialist", instructions: "", model: null,
-    profileId: "p", profileSnapshot: {}, ownership: [], sdkSessionId: null, lastActiveAt: null,
+    profileId: "p", profileSnapshot: {}, ownership: [], sharedOwnership: [], sdkSessionId: null, lastActiveAt: null,
     generation: 0, turnCount: 0, contextTokens: 0, latestHandoffId: null,
     cumulativeCostUsd: 0, cumulativeApiDurationMs: 0, lastDecisionAt: null,
     worktreePath: null, worktreeBaseCommit: null, worktreeBranch: null,

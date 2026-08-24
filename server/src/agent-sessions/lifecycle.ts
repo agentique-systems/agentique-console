@@ -1,7 +1,8 @@
 /**
  * Session lifecycle: creation and teardown. Every creation-time validation —
- * roster names, ownership disjointness, the child cap — lives in
- * `createSession`, so a session that exists is one that passed them all.
+ * roster names, the project-wide ownership rule (portfolio/ownership.ts),
+ * the child cap — lives in `createSession`, so a session that exists is one
+ * that passed them all.
  * `archiveOne` is the ONE teardown path and `#forget` the ONE cleanup point
  * for per-session in-memory structures. Boot redrive is restart-time
  * lifecycle: queued deliveries wake lanes; child-boundary rows re-cross
@@ -9,6 +10,7 @@
  */
 import type { HandoffDraft, PatternId } from "@agentique-console/shared";
 import { profileWritesFiles, type AgentProfile, type AgentProfileRegistry } from "../agent-profiles/registry.ts";
+import { assertOwnershipClaims, type SeatClaimInput } from "../portfolio/ownership.ts";
 import { toWireAgentSession } from "../api/wire.ts";
 import type { ReapResult } from "../completion/summary.ts";
 import type { Config } from "../config.ts";
@@ -22,7 +24,6 @@ import { CHILD_SENDER_PREFIX, CONSOLE_SENDER, COORDINATOR_AGENT, MAIN_RECIPIENT 
 import { buildContract } from "./patterns/catalog.ts";
 import type { SessionRouting } from "./routing.ts";
 import type { Deliver, RecordFailure, SimpleHandoff, Transfer } from "./seams.ts";
-import { sessionTree } from "./session-tree.ts";
 import { AGENT_NAME_RE, RESERVED_NAMES } from "./topology.ts";
 import { consoleTaskListId, type TaskService } from "../tasks/service.ts";
 import type { RequirementService } from "../orchestrator/requirements.ts";
@@ -60,7 +61,7 @@ export interface CreateAgentSessionInput {
    * delivery renders the delegated block. Child sessions pass a subset down.
    */
   requirements?: string[];
-  agents: { name: string; profileId?: string; instructions?: string; model?: string; owns?: string[]; skills?: string[] }[];
+  agents: { name: string; profileId?: string; instructions?: string; model?: string; owns?: string[]; sharedOwns?: { scope: string; why: string }[]; skills?: string[] }[];
   briefing?: HandoffDraft;
   /**
    * Ledger units created WITH the session, before its briefing dispatches —
@@ -99,6 +100,11 @@ export interface SessionLifecycleDeps {
   /** `OperatorSurface.forget` — part of the ONE cleanup fan-out. */
   forgetOperator: (agentSessionId: string) => void;
   recordFailure: RecordFailure;
+  /**
+   * `WorkstreamService.noteSessionArchived` — the portfolio learns a producer
+   * left. Optional: unit harnesses without the portfolio simply skip it.
+   */
+  noteSessionArchived?: (session: AgentSessionRow) => void;
 }
 
 export class SessionLifecycle {
@@ -133,52 +139,22 @@ export class SessionLifecycle {
       if (names.has(agent.name)) throw new InvalidInputError(`duplicate agent name \"${agent.name}\"`);
       names.add(agent.name);
     }
-    // Ownership is mandatory for an agent that WRITES, and optional for one
-    // that does not. Deliberately NOT symmetric: a read-only agent may still
-    // declare a scope, because `owns` doubles as the assignment/review
-    // boundary for agents that never write.
-    for (const agent of input.agents) {
-      const profile = this.profile(agent.profileId ?? "explorer", user.workspaceId);
-      const writes = profileWritesFiles(profile.tools);
-      if (writes && (agent.owns ?? []).filter((scope) => scope.trim() !== "").length === 0) {
-        throw new InvalidInputError(`agent "${agent.name}" (${profile.id}) writes files, so it must declare what it owns`);
-      }
-    }
-    const ownedScopes = new Map<string, string>();
-    if (parentRow) {
-      // LINEAGE-scoped disjointness: the ancestor chain (whose scopes are
-      // being delegated from) and open SIBLINGS (concurrent writers under the
-      // same parent). Cousins under other branches are deliberately not
-      // consulted — flat sibling sessions never were, and the old whole-tree
-      // scan made a child session strictly harder to create than the flat
-      // session it replaced (one of five structural reasons a 12-hour live
-      // run created zero child sessions).
-      const lineage: AgentSessionRow[] = [];
-      for (let cursor: AgentSessionRow | null = parentRow; cursor !== null;
-        cursor = cursor.parentAgentSessionId === null ? null : repo.getAgentSession(cursor.parentAgentSessionId) ?? null) {
-        lineage.push(cursor);
-      }
-      const siblings = repo.listChildSessions(parentRow.id);
-      const treeSessions = [...lineage, ...siblings].filter((row) => row.lifecycle === "open");
-      for (const treeSession of treeSessions) {
-        for (const seat of repo.listAgents(treeSession.id)) {
-          if ((seat.profileSnapshot as AgentProfile | undefined)?.exemptFromOwnership === true) continue;
-          for (const scope of seat.ownership) {
-            const normalized = scope.trim(); if (!normalized) continue;
-            ownedScopes.set(normalized, `${seat.name} (in ${treeSession.id})`);
-          }
-        }
-      }
-    }
-    for (const agent of input.agents) {
-      if (this.profile(agent.profileId ?? "explorer", user.workspaceId).exemptFromOwnership) continue;
-      for (const scope of agent.owns ?? []) {
-        const normalized = scope.trim(); if (!normalized) continue;
-        const owner = ownedScopes.get(normalized);
-        if (owner) throw new InvalidInputError(`ownership scope \"${normalized}\" is assigned to both ${owner} and ${agent.name}`);
-        ownedScopes.set(normalized, agent.name);
-      }
-    }
+    // THE ownership rule (portfolio/ownership.ts): one project-wide check for
+    // every path that adds write responsibility — top-level, child, late add,
+    // and dispatch all run the same rule, so a top-level session and a cousin
+    // branch collide exactly like siblings do. Intentional co-ownership is a
+    // sharedOwns declaration (with why) on every claimant, never a topology
+    // exception. Checked over the PLANNED roster (pattern-added seats
+    // included), joined with the caller's shared declarations by name.
+    const sharedByName = new Map(input.agents.map((agent) => [agent.name, agent.sharedOwns ?? []]));
+    const claims = assertOwnershipClaims(repo, input.userSessionId, build.agents.map((plan): SeatClaimInput => {
+      const profile = this.profile(plan.profileId, user.workspaceId);
+      return {
+        agent: plan.name, profileId: profile.id,
+        writes: profileWritesFiles(profile.tools), exempt: profile.exemptFromOwnership,
+        owns: plan.owns, sharedOwns: sharedByName.get(plan.name) ?? [],
+      };
+    }));
     // Worktree isolation needs a repository; ensured at session creation, not
     // lazily at agent spawn.
     this.#deps.worktree.ensureWorkspaceRepo(user.workspaceId, input.userSessionId);
@@ -218,7 +194,8 @@ export class SessionLifecycle {
       // respawns the same skill set; the base profile is untouched.
       const seatProfile = plan.skills === undefined || plan.skills.length === 0 ? profile
         : { ...profile, skills: [...new Set([...(profile.skills ?? []), ...plan.skills])] };
-      repo.insertAgent(this.agentRow(row.id, plan.name, plan.role, seatProfile, plan.instructions ?? "", plan.model, plan.owns, plan.ord, now));
+      const claim = claims.get(plan.name) ?? { ownership: plan.owns, sharedOwnership: [] };
+      repo.insertAgent(this.agentRow(row.id, plan.name, plan.role, seatProfile, plan.instructions ?? "", plan.model, claim.ownership, claim.sharedOwnership, plan.ord, now));
     }
     // The delegated sub-scope lands BEFORE the briefing so the first
     // delivery renders it; source reflects who commissioned (main or a
@@ -281,7 +258,7 @@ export class SessionLifecycle {
    * shape, and mappers are the reducer's to mint. The contract stays frozen;
    * `agents.role` is the binding, which is what makes a late seat honest.
    */
-  addAgent(agentSessionId: string, input: { name: string; profileId: string; instructions?: string; model?: string; owns?: string[]; skills?: string[]; why?: string }): { agent: string; role: string } {
+  addAgent(agentSessionId: string, input: { name: string; profileId: string; instructions?: string; model?: string; owns?: string[]; sharedOwns?: { scope: string; why: string }[]; skills?: string[]; why?: string }): { agent: string; role: string } {
     const { repo, bus } = this.#deps;
     const session = repo.getAgentSession(agentSessionId);
     if (!session) throw new NotFoundError(`no agent session ${agentSessionId}`);
@@ -306,31 +283,19 @@ export class SessionLifecycle {
     const user = repo.getUserSession(session.userSessionId);
     if (!user) throw new NotFoundError("unknown user session");
     const profile = this.profile(input.profileId, user.workspaceId);
-    const owns = (input.owns ?? []).map((scope) => scope.trim()).filter((scope) => scope !== "");
-    const writes = profileWritesFiles(profile.tools);
-    if (writes && owns.length === 0) {
-      throw new InvalidInputError(`agent "${name}" (${profile.id}) writes files, so it must declare what it owns`);
-    }
-    // Ownership disjointness across the whole TRUE-root session tree, same
-    // rule as creation: every seat merges into one workspace.
-    if (!profile.exemptFromOwnership) {
-      const treeSessions = sessionTree(repo, session.id).filter((row) => row.lifecycle === "open");
-      for (const treeSession of treeSessions) {
-        for (const seat of repo.listAgents(treeSession.id)) {
-          if ((seat.profileSnapshot as AgentProfile | undefined)?.exemptFromOwnership === true) continue;
-          for (const scope of seat.ownership) {
-            if (owns.includes(scope.trim()) && scope.trim() !== "") {
-              throw new InvalidInputError(`ownership scope "${scope.trim()}" is assigned to both ${seat.name} and ${name}`);
-            }
-          }
-        }
-      }
-    }
+    // THE ownership rule — same project-wide check as every creation path.
+    const claims = assertOwnershipClaims(repo, session.userSessionId, [{
+      agent: name, profileId: profile.id,
+      writes: profileWritesFiles(profile.tools), exempt: profile.exemptFromOwnership,
+      owns: input.owns ?? [], sharedOwns: input.sharedOwns ?? [],
+    }]);
+    const claim = claims.get(name)!;
+    const owns = claim.ownership;
     const ord = existing.reduce((max, seat) => Math.max(max, seat.ord), -1) + 1;
     const snapshot = this.#deps.snapshotProfile(profile);
     const seatSnapshot = input.skills === undefined || input.skills.length === 0 ? snapshot
       : { ...snapshot, skills: [...new Set([...(snapshot.skills ?? []), ...input.skills])] };
-    repo.insertAgent(this.agentRow(agentSessionId, name, role, seatSnapshot, input.instructions ?? "", input.model, owns, ord, nowIso()));
+    repo.insertAgent(this.agentRow(agentSessionId, name, role, seatSnapshot, input.instructions ?? "", input.model, owns, claim.sharedOwnership, ord, nowIso()));
     const why = input.why?.trim();
     bus.append({ type: "agent_session.agent.added", userSessionId: session.userSessionId, agentSessionId,
       payload: { agentSessionId, agent: name, role, profileId: profile.id, ...(why ? { why } : {}) } });
@@ -393,6 +358,7 @@ export class SessionLifecycle {
 
   /** The ONE teardown path — the nesting broker archives through this too. */
   archiveOne(session: AgentSessionRow): void {
+    const wasOpen = session.lifecycle === "open";
     this.interrupt(session.id);
     this.#deps.worktree.removeForSession(session);
     for (const delivery of this.#deps.repo.listActiveDeliveries(session.id)) this.#deps.patchDelivery(session, delivery, "cancelled");
@@ -400,6 +366,11 @@ export class SessionLifecycle {
     this.#forget(session.id);
     this.#deps.bus.append({ type: "agent_session.status.changed", userSessionId: session.userSessionId, agentSessionId: session.id,
       payload: { agentSessionId: session.id, status: "archived" } });
+    // AFTER the patch, on the open→archived transition only: an abandoned
+    // producer's live links are now visibly broken, never silently satisfied.
+    if (wasOpen) {
+      try { this.#deps.noteSessionArchived?.(session); } catch (error) { this.#deps.recordFailure(session.id, error); }
+    }
   }
 
   /** The ONE cleanup point for every per-session in-memory structure. */
@@ -425,10 +396,10 @@ export class SessionLifecycle {
     }
   }
 
-  agentRow(agentSessionId: string, name: string, role: string, profile: AgentProfile, extra: string, model: string | undefined, ownership: string[], ord: number, createdAt: string): AgentRow {
+  agentRow(agentSessionId: string, name: string, role: string, profile: AgentProfile, extra: string, model: string | undefined, ownership: string[], sharedOwnership: { scope: string; why: string }[], ord: number, createdAt: string): AgentRow {
     const instructions = [profile.instructions, extra.trim()].filter(Boolean).join("\n\nAssigned role context:\n");
     return { agentSessionId, name, role, instructions, model: model ?? profile.model ?? null,
-      profileId: profile.id, profileSnapshot: profile, ownership, sdkSessionId: null, lastActiveAt: null,
+      profileId: profile.id, profileSnapshot: profile, ownership, sharedOwnership, sdkSessionId: null, lastActiveAt: null,
       generation: 0, turnCount: 0,
       contextTokens: 0, latestHandoffId: null,
       cumulativeCostUsd: 0, cumulativeApiDurationMs: 0, lastDecisionAt: null,

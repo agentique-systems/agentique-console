@@ -108,6 +108,14 @@ independent ones in parallel, pass results between them by artifact and
 handoff ids. Keep the shared ledger honest with task_create and
 task_update: owner = the agent doing the work, completed only when verified.
 
+Ownership is one project-wide rule at every door (creation, children,
+add_agent, dispatch): a write scope any open workstream holds is rejected
+unless every claimant declares it shared with a why (sharedOwns). When one
+workstream needs another's interface, RECORD it (dependsOn at commission,
+link_workstreams later) instead of carrying it in memory — the Console
+derives pending/satisfied/broken and list_agent_sessions answers who owns
+what and who awaits whom.
+
 ## Supervision
 
 The Console wakes you for material events, and reports reach you on their own

@@ -69,6 +69,17 @@ export interface AgentSessionServiceDeps {
   worktrees: WorktreeManager | null;
   /** Pause/resume on provider capacity and budget ceilings. */
   capacity: CapacityService;
+  /**
+   * The project-portfolio workstream layer (portfolio/workstreams.ts): link
+   * lines for seat deliveries, unmet-dependency caveats on finals, and the
+   * archive-time broken-producer hook. Optional so unit harnesses without
+   * the portfolio stay small; production always wires it.
+   */
+  workstreams?: {
+    promptLines(agentSessionId: string): string[];
+    finalCaveats(agentSessionId: string): string[];
+    noteSessionArchived(session: AgentSessionRow): void;
+  };
 }
 
 /**
@@ -138,6 +149,7 @@ export class AgentSessionService {
         const lane = this.#lanes.peek(agentSessionId, agent);
         return lane ? { activeTurn: lane.activeTurn !== null, live: lane.state === "live" } : null;
       },
+      ...(deps.workstreams === undefined ? {} : { workstreamLines: (agentSessionId: string) => deps.workstreams!.promptLines(agentSessionId) }),
     });
     this.#operator = new OperatorSurface({
       repo: deps.repo, bus: deps.bus, config: deps.config, interactions: deps.interactions,
@@ -259,6 +271,7 @@ export class AgentSessionService {
       boundary: this.#nesting,
       onPatternPost: (session, hop) => onPatternPost(this.#patternCtx(), session, hop),
       recordFailure: (agentSessionId, error) => this.#recordFailure(agentSessionId, error),
+      ...(deps.workstreams === undefined ? {} : { workstreamCaveats: (agentSessionId: string) => deps.workstreams!.finalCaveats(agentSessionId) }),
     });
     this.#lifecycle = new SessionLifecycle({
       repo: deps.repo, bus: deps.bus, config: deps.config, profiles: deps.profiles,
@@ -275,6 +288,7 @@ export class AgentSessionService {
       redriveChildBoundary: (session, delivery) => this.#nesting.redriveChildBoundary(session, delivery),
       forgetOperator: (agentSessionId) => this.#operator.forget(agentSessionId),
       recordFailure: (agentSessionId, error) => this.#recordFailure(agentSessionId, error),
+      ...(deps.workstreams === undefined ? {} : { noteSessionArchived: (session: AgentSessionRow) => deps.workstreams!.noteSessionArchived(session) }),
     });
   }
 
@@ -521,7 +535,7 @@ export class AgentSessionService {
   }
 
   /** Mid-run roster growth (`SessionLifecycle.addAgent`); patterns with fixed rosters refuse. */
-  addAgent(agentSessionId: string, input: { name: string; profileId: string; instructions?: string; model?: string; owns?: string[]; skills?: string[]; why?: string }): { agent: string; role: string } {
+  addAgent(agentSessionId: string, input: { name: string; profileId: string; instructions?: string; model?: string; owns?: string[]; sharedOwns?: { scope: string; why: string }[]; skills?: string[]; why?: string }): { agent: string; role: string } {
     return this.#lifecycle.addAgent(agentSessionId, input);
   }
 
@@ -611,8 +625,8 @@ export class AgentSessionService {
       sessionReported: (session) => this.#operator.statusOf(session) === "reported",
       profile: (id, workspaceId) => this.#lifecycle.profile(id, workspaceId),
       snapshotProfile: (profile) => this.#runtime.snapshotProfile(profile),
-      agent: (agentSessionId, name, role, profile, extra, model, ownership, ord, createdAt) =>
-        this.#lifecycle.agentRow(agentSessionId, name, role, profile, extra, model, ownership, ord, createdAt),
+      agent: (agentSessionId, name, role, profile, extra, model, ownership, sharedOwnership, ord, createdAt) =>
+        this.#lifecycle.agentRow(agentSessionId, name, role, profile, extra, model, ownership, sharedOwnership, ord, createdAt),
     };
   }
 
