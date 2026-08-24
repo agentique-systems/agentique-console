@@ -21,10 +21,11 @@ import type { HandoffService } from "../handoffs/service.ts";
 import { EvidenceRefSchema, HandoffCoreSchema, HandoffDraftSchema } from "../handoffs/schema.ts";
 
 import { fail, guarded, ok } from "../sdk/tool-result.ts";
+import { effectiveNativeTools } from "../sdk/native-capability-policy.ts";
+import { MAIN_TOOL_NAMES } from "./grants.ts";
 import type { InteractionService } from "./interactions.ts";
 import type { AssumptionService } from "./assumptions.ts";
 import { RequirementParseFailure, type RequirementService } from "./requirements.ts";
-import type { SpecService } from "./spec.ts";
 import type { CompletionRecord, OrchestrationStateService } from "./state.ts";
 import type { CapabilityCatalog } from "../agent-profiles/capability-catalog.ts";
 import { MCP_CATALOG } from "../agent-profiles/capability-catalog.ts";
@@ -57,7 +58,6 @@ export interface ConsoleToolsInput {
   handoffs: HandoffService;
   artifacts: ArtifactStore;
   interactions: InteractionService;
-  specs: SpecService;
   requirements: RequirementService;
   assumptions: AssumptionService;
   state: OrchestrationStateService;
@@ -68,7 +68,7 @@ export interface ConsoleToolsInput {
 }
 
 export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
-  const { sdk, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, specs, requirements, assumptions, state, catalog, registry } = input;
+  const { sdk, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, requirements, assumptions, state, catalog, registry } = input;
 
   /** Tools operate only on this UserSession's agent sessions. */
   const owned = (agentSessionId: string) => {
@@ -92,56 +92,47 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
   const tools = [
     sdk.tool(
       "create_agent_session",
-      "Create and immediately launch a Console-managed AgentSession running an orchestration pattern over profile-bound agents (max 20). Choose the shape the WORK has — never the smallest crew out of thrift, never an inflated one for show: path known in advance, stages that each ADD information → pipeline (the agents ARE the stages; a relay that adds nothing loses quality); one deliverable judged against a rubric and revised until it passes → evaluator_optimizer (exactly 2 agents; pass patternConfig.rubric); many INDEPENDENT items of runtime-decided count, results synthesized → map_reduce (seat only the reducer; it fans out with dispatch_work_items); the same question argued independently, disagreement as signal → debate (2-8 debaters, one blind round, the Console seats the judge); decomposition unknown or evolving, a conductor should sequence → hub_and_spoke (the default), or plan_execute when the units deserve an explicit task DAG the Console dispatches on; a small crew that must hand work directly to each other → peer_to_peer, rarely. Pass the initial ledger units in `tasks` (they land before the briefing) and say WHY you are commissioning (`why`) and what evidence counts as success (`expecting`) — the session reads that as its contract. The Console owns every provider session, mailbox delivery, retry, and event.",
+      "Create and immediately launch a Console-managed AgentSession running an orchestration pattern over profile-bound agents. Choose the shape the WORK has: hub_and_spoke — a coordinator sequences specialists (the default); pipeline — stages that each ADD information; evaluator_optimizer — a deliverable revised against a rubric; map_reduce — independent items fanned out, synthesized; debate — one blind round of independent argument; peer_to_peer — a direct-handoff mesh, rarely; plan_execute — an explicit task DAG. The orchestration-patterns skill carries sizing, briefing craft, and failure modes. Pass the initial ledger units in `tasks`, WHY you are commissioning (`why`), and what evidence counts as success (`expecting`).",
       {
         title: z.string().describe("Short working title for the session"),
         pattern: z.enum(PATTERN_IDS).default("hub_and_spoke")
-          .describe("Orchestration pattern; the tool description says when each fits. hub_and_spoke: coordinator + specialists. pipeline: agents ARE the stages in order. evaluator_optimizer: exactly 2 (generator, evaluator). map_reduce: seat ONLY the reducer. debate: 2-8 debaters, judge auto-seated — a single BLIND round: each debater argues once and never sees the others, so agent instructions must not promise rebuttals or exchanges. peer_to_peer: bounded mesh, use rarely. plan_execute: planner + executors over a task DAG the Console dispatches on."),
+          .describe("debate is a single BLIND round — agent instructions must not promise rebuttals or exchanges."),
         patternConfig: z.record(z.string(), z.unknown()).optional()
-          .describe("Pattern-specific config. evaluator_optimizer: {rubric, maxRounds?, generatorAgent?, requireDistinctModels?}. map_reduce: {maxMappers?}. debate: {rubric?, judgeProfileId?, judgeModel?}. peer_to_peer: {closerAgent?, maxHandoffs?, oscillationWindow?}. plan_execute: {plannerAgent?}."),
+          .describe("Pattern config: evaluator_optimizer {rubric, maxRounds, generatorAgent}; map_reduce {maxMappers}; debate {rubric, judgeProfileId, judgeModel}; peer_to_peer {closerAgent, maxHandoffs}; plan_execute {plannerAgent}."),
         agents: z
           .array(
             z.object({
-              name: z
-                .string()
-                .describe("Agent name, e.g. 'scout' — addressable via @name"),
+              name: z.string().describe("Agent name, e.g. 'scout'"),
               profileId: z.string().describe("A profile id returned by list_agent_profiles"),
-              instructions: z
-                .string()
-                .optional()
-                .describe(
-                  "Agent brief appended to the profile instructions",
-                ),
+              instructions: z.string().optional().describe("Agent brief appended to the profile instructions"),
               model: z.string().optional().describe("Model override"),
-              skills: z.array(z.string()).optional().describe("Extra skills to RECOMMEND to this seat, from list_agent_profiles' catalog — union'd with the profile's defaults, named in the seat's brief and pinned into its snapshot. Every discovered skill is visible to every seat; this decides which ones it is told to use."),
-              owns: z.array(z.string()).default([]).describe("Files or directories this agent exclusively owns. Required for an agent that writes; leave empty for a read-only agent such as a reviewer — it owns no files."),
+              skills: z.array(z.string()).optional().describe("Extra skills to RECOMMEND to this seat, union'd with the profile's defaults."),
+              owns: z.array(z.string()).default([]).describe("Exclusive write scope. Required for a writing agent; empty for a read-only one."),
             }),
           )
           .min(1)
           .max(20),
         briefing: HandoffDraftSchema
-          .describe(
-            "Typed coordinator assignment: objective, current evidence, risk, uncertainty, and next action",
-          ),
+          .describe("The entry assignment: objective, evidence, risk, uncertainty, next action"),
         allowChildSessions: z.boolean().default(false)
-          .describe("Let this session's ENTRY agent spawn child sessions (depth-capped). Give it to a session that owns a workstream with its own internal decomposition; leave it off for leaf work."),
+          .describe("Let the ENTRY agent spawn child sessions, for a workstream with its own decomposition."),
         budgetUsd: z.number().positive().optional()
-          .describe("Optional spend ceiling in USD for this commission (the session plus its child sessions). Crossing it tells the session to wrap up honestly and escalates to you with the delegated open requirements — it never pauses the run, never kills a lane, never blocks a final."),
+          .describe("Spend ceiling in USD (session plus children); crossing it makes the session wrap up and escalates to you."),
         why: z.string().optional()
-          .describe("Why this session, this pattern, now — one or two sentences. Journaled with the briefing; the run review reads it."),
+          .describe("Why this session, this pattern, now. Journaled; the run review reads it."),
         expecting: z.string().optional()
-          .describe("What evidence or output counts as success — or would change your plan. The session READS this as its success contract."),
+          .describe("What evidence counts as success or would change your plan — the session's success contract."),
         requirements: z.array(z.string().min(1)).max(12).optional()
-          .describe("Requirement ids (read_requirements) this session is commissioned against — its delegated sub-scope. The Console journals the link, renders the statements into every delivery, and grants the session's entry agent scoped requirement tools (report status with evidence; decompose below these nodes). Commission against OPEN requirements."),
+          .describe("Requirement ids this session answers for — its delegated sub-scope; the entry agent gets scoped reporting tools. Delegate OPEN requirements."),
         tasks: z.array(z.object({
           taskId: z.string().min(1).describe("Short stable id, e.g. \"core\""),
           subject: z.string().min(1),
           description: z.string().optional(),
           owner: z.string().optional().describe("The agent that will do the work"),
           blockedBy: z.array(z.string()).optional().describe("taskIds this unit depends on"),
-          requirementId: z.string().min(1).optional().describe("The requirement id this unit discharges — links the ledger to the graph. Name it when one governs."),
+          requirementId: z.string().min(1).optional().describe("The requirement this unit discharges."),
         })).max(20).optional()
-          .describe("Ledger units created WITH the session, BEFORE its briefing dispatches — so the briefing's taskId resolves and the entry assignment starts its unit. This replaces calling task_create afterwards for the initial breakdown."),
+          .describe("Ledger units created WITH the session — the briefing's taskId resolves."),
       },
       async (args: {
         title: string;
@@ -183,8 +174,9 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           const workspaceIdForSkills = repo.getUserSession(userSessionId)?.workspaceId;
           for (const agent of args.agents) {
             if (agent.skills === undefined || agent.skills.length === 0) continue;
-            const profileTools = host.profiles(workspaceIdForSkills).find((profile) => profile.id === agent.profileId)?.tools ?? [];
-            const problems = catalog.validateAssignment(agent.skills, profileTools);
+            const skillProfile = host.profiles(workspaceIdForSkills).find((profile) => profile.id === agent.profileId);
+            const problems = catalog.validateAssignment(agent.skills,
+              skillProfile === undefined ? [] : effectiveNativeTools(skillProfile, "seat"));
             if (problems.length > 0) throw new InvalidInputError(`agent "${agent.name}": ${problems.join("; ")}`);
           }
           // Delegated requirements AND task-level requirement links validate
@@ -236,34 +228,32 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
      */
     sdk.tool(
       "send_to_coordinator",
-      "Send a typed handoff to an AgentSession's entry agent — its coordinator in a hub session, the first stage of a pipeline, the generator of an evaluator loop. This is how you steer a running session after its briefing: assign more work, redirect, or relay an operator decision. The fields ARE the handoff; the Console builds, journals and carries the envelope. " +
-      "Set `to` to reach ANY agent in the session directly with a category:\"update\" steering message (a correction, a discovery, a binding redirect) — assignments still enter only through the entry agent. " +
-      "An assignment whose taskId still has incomplete dependencies is SCHEDULED, not delivered — {scheduled:true} comes back and the Console dispatches it when the dependencies complete; never re-send it.",
+      "Send a typed handoff to an AgentSession's entry agent — how you steer a running session after its briefing. The fields ARE the handoff; the Console builds, journals and carries the envelope. " +
+      "Set `to` to reach ANY agent directly with a category:\"update\" steering message — assignments still enter only through the entry agent.",
       {
         agentSessionId: z.string().min(1),
         to: z.string().min(1).optional()
-          .describe("Recipient agent name (session_activity lists them). Omit for the entry agent. Non-entry recipients accept category \"update\" only."),
+          .describe("Recipient agent name. Omit for the entry agent. Non-entry recipients accept \"update\" only."),
         category: z.enum(["assignment", "update"])
-          .describe("\"assignment\" is new work the session owes you back; \"update\" is steering or context for work already assigned."),
+          .describe("\"assignment\" is new work owed back; \"update\" is steering for work already assigned."),
         status: HandoffCoreSchema.shape.status,
         risk: HandoffCoreSchema.shape.risk.default("medium"),
         action: z.string().min(1).describe("The request, in one line."),
         stateSummary: z.string().min(1).describe("What is true now — the substance, not a description of it."),
-        evidence: z.array(EvidenceRefSchema).default([]).describe("Pointers backing the state: files, artifacts, tasks, commands, urls."),
+        evidence: z.array(EvidenceRefSchema).default([]).describe("Pointers backing the state."),
         resultSummary: z.string().nullable().default(null)
-          .describe("Anything already produced that the session should build on, and where it is."),
-        artifacts: z.array(EvidenceRefSchema).default([]).describe("Outputs you are handing over, distinct from the evidence backing them."),
-        uncertainty: z.array(z.string()).default([]).describe("What you could not verify. State it rather than omitting it."),
-        nextAction: z.string().nullable().default(null).describe("The exact next step for the recipient, or null when nothing is owed."),
+          .describe("Anything already produced that the session should build on."),
+        artifacts: z.array(EvidenceRefSchema).default([]).describe("Outputs handed over, distinct from evidence."),
+        uncertainty: z.array(z.string()).default([]).describe("What you could not verify."),
+        nextAction: z.string().nullable().default(null).describe("The exact next step, or null."),
         taskId: z.string().nullable().default(null)
-          .describe("The ledger taskId this assignment covers. The Console starts that entry on delivery and holds the assignment until its dependencies complete."),
+          .describe("The ledger taskId this assignment covers."),
         requestExpandedContext: z.boolean().default(false),
-        why: z.string().optional()
-          .describe("Why this move now (redirects and commissions deserve one; routine relays may skip it)."),
+        why: z.string().optional().describe("Why this move now."),
         expecting: z.string().optional()
           .describe("What evidence would count as success, or change your plan."),
         requirements: z.array(z.string().min(1)).max(12).optional()
-          .describe("Requirement ids this message serves (assignment or update) — journaled as the session's delegated sub-scope and rendered into the delivery. Send them to the entry agent."),
+          .describe("Requirement ids this message serves — journaled as the delegated sub-scope; entry agent only."),
       },
       async (args: {
         agentSessionId: string; to?: string; category: "assignment" | "update";
@@ -334,20 +324,20 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
     ),
 
     /**
-     * Main's ledger, console-owned and keyed to the AgentSession — never the
-     * provider session id, which changes at every rotation.
+     * Main's ledger, console-owned and keyed to the AgentSession — never a
+     * provider session id.
      */
     sdk.tool(
       "task_create",
-      "Add a unit of work to the ledger. Track every unit you delegate; the Console reports open units to the operator alongside any final report. Declare dependencies as blockedBy here — the Console dispatches assignments on that DAG.",
+      "Add a unit of work to the ledger; open units are reported to the operator alongside any final. Declare dependencies as blockedBy — the Console dispatches assignments on that DAG.",
       {
-        agentSessionId: z.string().min(1).describe("The session that will do the work."),
-        taskId: z.string().min(1).describe("Short stable id you choose, e.g. \"1\" or \"interface\"."),
+        agentSessionId: z.string().min(1).describe("The session doing the work."),
+        taskId: z.string().min(1).describe("Short stable id, e.g. \"1\"."),
         subject: z.string().min(1),
         description: z.string().default(""),
         owner: z.string().min(1).describe("The agent that will DO this work — not you."),
-        blockedBy: z.array(z.string()).default([]).describe("taskIds this task depends on. Forward references are fine — the edge attaches when the blocker is created."),
-        requirementId: z.string().min(1).optional().describe("The requirement id (read_requirements) this unit discharges — links the ledger to the graph and feeds the frontier's blocked annotation. Name it when one governs."),
+        blockedBy: z.array(z.string()).default([]).describe("taskIds this depends on; forward references fine."),
+        requirementId: z.string().min(1).optional().describe("The requirement this unit discharges."),
       },
       async (args: { agentSessionId: string; taskId: string; subject: string; description: string; owner: string; blockedBy: string[]; requirementId?: string }) =>
         guarded(() => {
@@ -365,7 +355,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
 
     sdk.tool(
       "task_update",
-      "Update a ledger entry. Keep statuses honest: in_progress when started, completed only when verified — completing a task dispatches any assignments scheduled behind it. removeBlockedBy drops a dependency that no longer holds.",
+      "Update a ledger entry. Completing a task dispatches any assignments scheduled behind it; removeBlockedBy drops a dependency that no longer holds.",
       {
         agentSessionId: z.string().min(1),
         taskId: z.string().min(1),
@@ -389,7 +379,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
 
     sdk.tool(
       "task_list",
-      "Read the ledger for this conversation. Authoritative, shared with every agent, and it survives context rotation.",
+      "Read the ledger for this conversation. Authoritative and shared with every agent.",
       { agentSessionId: z.string().optional() },
       async (args: { agentSessionId?: string }) =>
         guarded(() => ({
@@ -404,7 +394,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
      */
     sdk.tool(
       "set_deadline",
-      "Wake yourself later. Use it when you are waiting on something the Console cannot notify you about; you do NOT need it for agent reports, which wake you automatically.",
+      "Wake yourself later, for things the Console cannot notify you about. You do NOT need it for agent reports — they wake you automatically.",
       {
         delaySeconds: z.number().int().min(30).max(86_400),
         reason: z.string().min(1).describe("What you want to check when it fires. You will be handed this text."),
@@ -430,18 +420,18 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
      */
     sdk.tool(
       "ask_operator",
-      "Ask the Human Operator one decision that specific requirements hang on. Name those ids in requirementIds — the answer is recorded as a decision PINNED to them: it reaches every seat working under those requirements and never ages out of the prompt digest while they are open. Use native AskUserQuestion for batched clarification with no requirement anchor. urgency:'blocking' parks this call until they answer; 'deferred' returns now and their answer wakes you.",
+      "Ask the Human Operator one decision that specific requirements hang on; the answer records as a decision PINNED to those ids — it reaches every seat under them and never ages out while they are open. Native AskUserQuestion covers batched clarification with no requirement anchor. 'blocking' parks this call until they answer; 'deferred' returns now and the answer wakes you.",
       {
         question: z.string().min(1).describe("One concrete question. State the decision, not the background."),
-        header: z.string().max(24).optional().describe("Two or three words for the card's eyebrow."),
-        context: z.string().max(2_000).optional().describe("Why you are asking and what you already tried. Not an option."),
+        header: z.string().max(24).optional().describe("Card eyebrow, two or three words."),
+        context: z.string().max(2_000).optional().describe("Why you are asking and what you already tried."),
         options: z.array(z.object({
           label: z.string().min(1).max(60),
           description: z.string().max(300).optional(),
         })).min(2).max(4).describe("Real, mutually exclusive choices."),
-        recommendation: z.string().max(400).optional().describe("Which option you recommend and why. Always give one."),
+        recommendation: z.string().max(400).optional().describe("Your recommended option and why. Always give one."),
         requirementIds: z.array(z.string().min(1)).max(12).optional()
-          .describe("The requirement ids this decision resolves or gates (read_requirements). The decision is pinned to them."),
+          .describe("The requirement ids this decision resolves or gates."),
         urgency: z.enum(["blocking", "deferred"]).default("blocking"),
       },
       async (args: {
@@ -490,7 +480,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
 
     sdk.tool(
       "read_handoff",
-      "Retrieve one lossless handoff section using bounded cursor pagination.",
+      "Retrieve one lossless handoff section with cursor pagination.",
       { handoffId: z.string(), section: z.enum(["core", "extension"]).default("core"), cursor: z.string().optional(), maxBytes: z.number().int().min(1).max(PAGE_MAX_BYTES).default(PAGE_DEFAULT_BYTES) },
       async (args: { handoffId: string; section: "core" | "extension"; cursor?: string; maxBytes: number }) => guarded(() => handoffs.read(args.handoffId, args.section, args.cursor, args.maxBytes)),
     ),
@@ -536,7 +526,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
 
     sdk.tool(
       "read_agent_session",
-      "Read an agent session's transcript. Returns the newest window (default 8KiB) of the serialized messages plus cursors — retrieval is paged; never assume one call returned everything. Use afterSeq/limit to narrow before paging.",
+      "Read an agent session's transcript — the newest window plus cursors; paged, never assume one call returned everything. Narrow with afterSeq/limit first.",
       {
         agentSessionId: z.string(),
         afterSeq: z.number().int().optional(),
@@ -571,7 +561,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
 
     sdk.tool(
       "session_activity",
-      "LIVE state of a session's agents — what they are DOING right now, not what they said: lane posture, the current turn's age, the in-flight tool call with its name/input-preview/elapsed time, last-stream-event age, queued deliveries, context tokens, last handoff, and pattern-state facts. Use this to diagnose before intervening: 'working' in list_agent_sessions covers both healthy work and a wedged call; this tool tells them apart.",
+      "LIVE state of a session's agents — what they are DOING now: lane posture, turn age, in-flight tool call with elapsed time, queued deliveries, context tokens, last handoff. Diagnose before intervening; list_agent_sessions cannot tell healthy work from a wedged call.",
       { agentSessionId: z.string().min(1) },
       async (args: { agentSessionId: string }) =>
         guarded(() => {
@@ -582,12 +572,12 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
 
     sdk.tool(
       "propose_requirements",
-      "Put the REQUIREMENT GRAPH (or an amendment to it) to the operator for approval. Requirements are the run's canonical definition of done: a recursive outline of what must be TRUE of the finished work — each node one declarative, checkable statement; children compose 'all' by default, '(any of)' when one sufficient alternative establishes the parent. STAGE the commitment: the first proposal is the vision prose (## Context, ## Goals, ## Out of scope) plus COARSE top-level requirements a reviewer can check — not an exhaustive enumeration; elaborate a subtree with scopeId when you commission it or when discovery lands, so each card the operator approves stays a reviewable bite. scopeId amends ONE subtree (document = that subtree's children only, structure-only); intent:true amends the prose alone (empty ## Requirements). KEEP the `rN:` id tags on lines you are keeping — dropping a tag RETIRES that requirement; a new line carries no tag and gets its id on approval. Statuses and evidence survive an amendment on unchanged statements; an edited statement resets its node to open. decompose_requirement stays the no-approval path for discharge detail below committed meaning. The operator may EDIT the outline in place; their text governs. This call BLOCKS until they respond. Amend when reality invalidates part of it; never silently diverge.",
+      "Put the REQUIREMENT GRAPH (or an amendment to it) to the operator for approval. STAGE the commitment: coarse vision-plus-top-level first, one subtree at a time with scopeId as you commission, intent:true for prose-only changes — the requirements-mechanics skill carries the grammar and staging discipline. KEEP the `rN:` id tags on lines you are keeping — dropping a tag RETIRES that requirement. The operator may EDIT the outline; their text governs. BLOCKS until they respond. Amend when reality invalidates part of it; never silently diverge.",
       {
-        document: z.string().min(1).describe("The outline. Full: prose + ## Requirements. Subtree (scopeId set): ONLY '## Requirements' listing that subtree's children. Intent (intent:true): prose + an empty '## Requirements'."),
-        changeNote: z.string().min(1).describe("One line: what this revision is, or what changed and why (for amendments)."),
-        scopeId: z.string().min(1).optional().describe("Amend only the subtree under this committed requirement id. The card shows the operator that scope and a change summary."),
-        intent: z.boolean().optional().describe("Amend the intent prose alone; committed statements stay untouched."),
+        document: z.string().min(1).describe("The outline. Full: prose + ## Requirements. Subtree (scopeId set): ONLY that subtree's children under '## Requirements'. Intent (intent:true): prose + an empty '## Requirements'."),
+        changeNote: z.string().min(1).describe("One line: what this revision is, or what changed and why."),
+        scopeId: z.string().min(1).optional().describe("Amend only the subtree under this committed requirement id."),
+        intent: z.boolean().optional().describe("Amend the intent prose alone."),
       },
       async (args: { document: string; changeNote: string; scopeId?: string; intent?: boolean }) => {
         const changeNote = clip(args.changeNote, 280);
@@ -659,7 +649,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
 
     sdk.tool(
       "read_requirements",
-      "Read the governing requirements: the live outline with console-derived statuses ([·] open, [✓] satisfied, [✗] violated, [⊘] infeasible), verification tiers and evidence counts, plus the open-requirements frontier. Pass scopeId to read ONE subtree in full — the way to pull detail the injected digest collapsed. The root read includes the operator's approved intent prose. For a run still governed by a legacy markdown spec this returns that text with legacy: true.",
+      "Read the governing requirements: the live outline with console-derived statuses, verification tiers and evidence counts, plus the open-requirements frontier. Pass scopeId to read ONE subtree in full. The root read includes the operator's approved intent prose.",
       {
         scopeId: z.string().min(1).optional().describe("Read only this requirement's subtree, in full."),
         cursor: z.string().optional(),
@@ -669,11 +659,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         guarded(() => {
           const approved = requirements.latestApproved(userSessionId);
           if (approved === undefined) {
-            const legacy = specs.latestApproved(userSessionId);
-            if (!legacy) return { requirements: null, note: "no approved requirements yet — propose them with propose_requirements" };
-            return { legacy: true, revision: legacy.revision, changeNote: legacy.changeNote,
-              document: pageTail(legacy.document, args.cursor, args.maxBytes),
-              note: "This run is governed by a legacy markdown spec. A requirement graph can supersede it via propose_requirements." };
+            return { requirements: null, note: "no approved requirements yet — propose them with propose_requirements" };
           }
           if (args.scopeId !== undefined) {
             return { revision: approved.revision, scopeId: args.scopeId,
@@ -690,12 +676,12 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
 
     sdk.tool(
       "report_requirement",
-      "Record a requirement STATUS with evidence. Statuses are semantic claims, never scores: satisfied (the statement holds — evidence required), violated (something broke it — evidence required), infeasible (cannot be achieved with available capability or authority — evidence required; route the consequence to the operator or a scope amendment), open (reopen a stale claim). Report LEAVES only — parents and the root derive mechanically from their children, and the operator remains the completion gate. The Console derives and records who stood behind each claim: a claim by you records as self-verification — when the stakes deserve independent verification, delegate the requirement to a write-isolated reviewer seat and have IT report. Quantitative measurements belong INSIDE evidence refs, never as numbers ranking anything.",
+      "Record a requirement STATUS with evidence. Statuses are semantic claims, never scores: satisfied / violated / infeasible require evidence; open reopens a stale claim; infeasible routes its consequence to the operator or an amendment. Report LEAVES only — parents derive. The Console records who stood behind each claim: yours records as self-verification; independent tiers need a write-isolated reviewer seat reporting. Measurements go INSIDE evidence refs, never as ranking numbers.",
       {
         requirementId: z.string().min(1).describe("A requirement id from read_requirements, e.g. \"r3\""),
         status: z.enum(["satisfied", "violated", "infeasible", "open"]),
-        evidence: z.array(EvidenceRefSchema).default([]).describe("What proves the claim: files, artifacts, tasks, commands, urls. Required for satisfied/violated/infeasible."),
-        note: z.string().optional().describe("One line of context (why infeasible, what reopened it)."),
+        evidence: z.array(EvidenceRefSchema).default([]).describe("What proves the claim. Required for satisfied/violated/infeasible."),
+        note: z.string().optional().describe("One line of context."),
       },
       async (args: { requirementId: string; status: "satisfied" | "violated" | "infeasible" | "open";
         evidence: { kind: "file" | "journal" | "artifact" | "task" | "command" | "url"; ref: string; label?: string }[];
@@ -713,7 +699,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
 
     sdk.tool(
       "decompose_requirement",
-      "Refine a requirement by adding child requirements BELOW it — how a committed obligation is discharged, stated as smaller checkable statements. Decomposition needs no operator approval (it refines representation, never meaning) and is journaled and attributed. The LINE: editing a statement, retiring a requirement, or adding a new top-level obligation changes what counts as success — those are scope amendments and go through propose_requirements.",
+      "Refine a requirement by adding child requirements BELOW it — smaller checkable statements for how the obligation is discharged; no operator approval, journaled. Editing statements, retiring nodes, or new top-level obligations change what counts as success — those go through propose_requirements.",
       {
         parentId: z.string().min(1).describe("The requirement being refined"),
         children: z.array(z.object({
@@ -740,11 +726,11 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
      */
     sdk.tool(
       "record_assumption",
-      "Record an assumption the work proceeds on — a default you took where the operator was not asked, a belief a requirement rests on. Name the requirement ids that rest on it (requirementIds): a later falsification then FLAGS their claims and wakes you. Recording needs no approval — it is what makes the premise visible and falsifiable instead of silently invented. A boundary the operator imposed on the WORK belongs in the requirements (propose_requirements); a resolved question is a decision, not an assumption.",
+      "Record an assumption the work proceeds on, naming the requirement ids that rest on it — a later falsification FLAGS their claims and wakes you. No approval needed. Not for operator-imposed boundaries (requirements) or resolved questions (decisions).",
       {
-        text: z.string().min(1).describe("One declarative premise, e.g. \"WoW-like means real-time combat, not turn-based\"."),
+        text: z.string().min(1).describe("One declarative premise."),
         requirementIds: z.array(z.string().min(1)).max(12).optional()
-          .describe("Requirements that rest on this premise (rests_on links)."),
+          .describe("Requirements that rest on this premise."),
         interactionId: z.string().optional().describe("The ask that raised it, when one exists."),
       },
       async (args: { text: string; requirementIds?: string[]; interactionId?: string }) =>
@@ -762,13 +748,13 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
 
     sdk.tool(
       "resolve_assumption",
-      "Resolve a recorded assumption: confirmed (evidence or an operator answer establishes it), falsified (reality contradicts it — the Console flags dependent terminal claims and wakes you; judge them yourself), or retired (it stopped mattering). confirmed/falsified need provenance: evidence refs, or the interactionId of the operator answer that settled it. An assumption that should now GOVERN success is an amendment (propose_requirements), never an automatic promotion.",
+      "Resolve a recorded assumption: confirmed, falsified (dependent terminal claims are flagged and you wake; judge them yourself), or retired. confirmed/falsified need provenance: evidence refs or the settling answer's interactionId. An assumption that should now GOVERN success is an amendment.",
       {
         assumptionId: z.string().min(1).describe("An id from record_assumption, e.g. \"a2\"."),
         outcome: z.enum(["confirmed", "falsified", "retired"]),
         note: z.string().optional(),
         evidence: z.array(EvidenceRefSchema).default([]),
-        interactionId: z.string().optional().describe("The operator answer that settled it, when that is the provenance."),
+        interactionId: z.string().optional().describe("The operator answer that settled it."),
       },
       async (args: { assumptionId: string; outcome: "confirmed" | "falsified" | "retired"; note?: string;
         evidence: { kind: "file" | "journal" | "artifact" | "task" | "command" | "url"; ref: string; label?: string }[];
@@ -786,7 +772,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
 
     sdk.tool(
       "link_requirements",
-      "Record a relationship between requirements: depends_on (fromId cannot be satisfied before toId is — feeds the frontier's blocked annotation and flags fromId's claim if toId later moves; acyclic), or conflicts_with (the two cannot both be satisfied as written — symmetric; recorded for the operator to see, resolved by an amendment or their decision). Links never change derived statuses — the tree alone derives.",
+      "Record a relationship: depends_on (fromId needs toId first; acyclic; feeds the frontier), or conflicts_with (both cannot hold as written — resolved by amendment or operator decision). Links never change derived statuses.",
       {
         fromId: z.string().min(1),
         kind: z.enum(["depends_on", "conflicts_with"]),
@@ -821,18 +807,18 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
 
     sdk.tool(
       "update_orchestration_state",
-      "Revise YOUR working state — the durable memory your next generation reads: current strategy (and why), open uncertainties, standing assumptions, live risks. Any section you pass REPLACES that section wholly; omitted sections persist. A load-bearing assumption that specific REQUIREMENTS rest on belongs in record_assumption (id-linked, falsifiable-with-consequence); this scratchpad is for strategy-level notes. Update on material events — commissioning, an alarm you acted on, a discovery that changes the plan, a direction change, before declaring done — never as per-turn ceremony. When you work around a coordination structure the patterns cannot express, note it with the tag 'pattern-friction:'.",
+      "Revise YOUR working state — the durable memory your next generation reads. Sections you pass REPLACE wholly; omitted sections persist. A premise specific REQUIREMENTS rest on belongs in record_assumption. When you work around a coordination structure the patterns cannot express, tag it 'pattern-friction:'.",
       {
         trigger: z.enum(["commission", "discovery", "alarm", "direction_change", "operator"])
           .describe("What occasioned this update."),
         strategy: z.string().optional().describe("Current approach, one or two sentences."),
-        strategyWhy: z.string().optional().describe("Why this strategy over its live alternatives."),
-        uncertainties: z.array(z.string()).optional().describe("Open CONSEQUENTIAL uncertainties (whose answers would change the build). At most 8 survive."),
-        assumptions: z.array(z.string()).optional().describe("Load-bearing assumptions the plan rests on. At most 8 survive."),
-        risks: z.array(z.string()).optional().describe("Live risks that currently matter. At most 8 survive."),
-        note: z.string().optional().describe("What occasioned THIS update, one line."),
+        strategyWhy: z.string().optional().describe("Why this strategy."),
+        uncertainties: z.array(z.string()).optional().describe("Open CONSEQUENTIAL uncertainties. Max 8."),
+        assumptions: z.array(z.string()).optional().describe("Load-bearing assumptions. Max 8."),
+        risks: z.array(z.string()).optional().describe("Live risks. Max 8."),
+        note: z.string().optional().describe("What occasioned this update, one line."),
         incorporating: z.array(z.string().min(1)).max(8).optional()
-          .describe("When this update incorporates specific returned results or evidence, name them (handoff / agent-session / artifact ids). Optional — skip when the update isn't about a returned result."),
+          .describe("Results or evidence this update incorporates, by id."),
       },
       async (args: { trigger: "commission" | "discovery" | "alarm" | "direction_change" | "operator";
         strategy?: string; strategyWhy?: string; uncertainties?: string[]; assumptions?: string[]; risks?: string[]; note?: string;
@@ -858,24 +844,22 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
 
     sdk.tool(
       "record_completion",
-      "Record the completion justification when you believe the run is done: each requirement mapped to its EVIDENCE (met or honestly not), known gaps, and deliberate non-goals. With a governing requirement graph, criteria are REQUIREMENT IDS verified against the current revision; a legacy-spec run keeps freeform criterion strings. The sign-off card shows this beside the console's own facts (git diff, ledger, requirement tree, uncertainty) — an absent record renders as a visible omission. Not a gate: recording it does not complete the run; the operator does.",
+      "Record the completion justification when you believe the run is done: each requirement mapped to its EVIDENCE (met or honestly not), known gaps, deliberate non-goals — the wrap-up-and-landing skill carries the ladder and sequence. Criteria are REQUIREMENT IDS verified against the current revision (freeform criterion strings only when no requirements govern). Not a gate: the operator completes the run.",
       {
         criteria: z.array(z.object({
-          requirement: z.string().optional().describe("A requirement id from read_requirements (required when a requirement graph governs)"),
-          criterion: z.string().optional().describe("Freeform criterion text (legacy-spec runs only)"),
+          requirement: z.string().optional().describe("A requirement id (required when a graph governs)"),
+          criterion: z.string().optional().describe("Freeform criterion text (no-requirements runs only)"),
           met: z.boolean(),
-          evidence: z.array(EvidenceRefSchema).default([]).describe("What proves it: artifacts, files, journal refs, commands"),
+          evidence: z.array(EvidenceRefSchema).default([]).describe("What proves it"),
         })).min(1).describe("At most 12 survive. Each entry names either a requirement id or a criterion string."),
-        knownGaps: z.array(z.string()).default([]).describe("What is not done or not verified, and you know it. At most 8 survive."),
-        nonGoals: z.array(z.string()).default([]).describe("Deliberately out of scope (incl. declined opportunities). At most 8 survive."),
+        knownGaps: z.array(z.string()).default([]).describe("What is not done or not verified. At most 8 survive."),
+        nonGoals: z.array(z.string()).default([]).describe("Deliberately out of scope. At most 8 survive."),
         requirementsRevision: z.number().int().min(1).optional()
-          .describe("The approved REQUIREMENTS revision verified against. REQUIRED when a requirement graph governs — the completion predicate matches it against the current approved revision."),
-        specRevision: z.number().int().min(1).optional()
-          .describe("Legacy-spec runs only: the approved spec revision verified against."),
+          .describe("The approved revision verified against. REQUIRED when a graph governs."),
         note: z.string().optional(),
       },
       async (args: { criteria: { requirement?: string; criterion?: string; met: boolean; evidence?: { kind: "file" | "journal" | "artifact" | "task" | "command" | "url"; ref: string; label?: string }[] }[];
-        knownGaps: string[]; nonGoals: string[]; requirementsRevision?: number; specRevision?: number; note?: string }) =>
+        knownGaps: string[]; nonGoals: string[]; requirementsRevision?: number; note?: string }) =>
         guarded(() => {
           // Fail loudly on a stale or missing revision — a record against a
           // superseded document would silently never satisfy the completion
@@ -897,16 +881,6 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
                 throw new InvalidInputError(`unknown or retired requirement "${entry.requirement}" — read_requirements lists the live graph`);
               }
             }
-          } else {
-            const approved = specs.latestApproved(userSessionId);
-            if (approved !== undefined) {
-              if (args.specRevision === undefined) {
-                throw new InvalidInputError(`a spec exists (approved rev ${approved.revision}); pass specRevision after verifying the criteria against it`);
-              }
-              if (args.specRevision !== approved.revision) {
-                throw new InvalidInputError(`specRevision ${args.specRevision} is not the current approved revision ${approved.revision}; re-verify against the current spec`);
-              }
-            }
           }
           const statements = governing === undefined
             ? new Map<string, string>()
@@ -920,8 +894,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
                 ...(entry.criterion === undefined ? {} : { criterion: clip(entry.criterion, 200) }),
                 met: entry.met, evidence: entry.evidence ?? [] })),
               knownGaps: clipAll(args.knownGaps ?? [], 200, 8), nonGoals: clipAll(args.nonGoals ?? [], 200, 8),
-              ...(args.requirementsRevision === undefined ? {} : { requirementsRevision: args.requirementsRevision }),
-              ...(args.specRevision === undefined ? {} : { specRevision: args.specRevision }) },
+              ...(args.requirementsRevision === undefined ? {} : { requirementsRevision: args.requirementsRevision }) },
             args.note === undefined ? undefined : clip(args.note, 280));
           return { revision: row.revision, recorded: true };
         }),
@@ -929,7 +902,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
 
     sdk.tool(
       "read_artifact",
-      "Read an artifact by id — a landed or archived worktree diff, a screenshot, a note, a captured payload. Artifacts are the EVIDENCE behind reports (worktree events, salvage pointers, handoff refs carry the ids); read them before deciding on the work they describe. Images return as viewable content.",
+      "Read an artifact by id — a worktree diff, screenshot, note, or captured payload. Artifacts are the EVIDENCE behind reports; read them before deciding on the work they describe. Images return viewable.",
       { artifactId: z.string().min(1), cursor: z.string().optional(), maxBytes: z.number().int().min(1).max(PAGE_MAX_BYTES).default(PAGE_DEFAULT_BYTES) },
       async (args: { artifactId: string; cursor?: string; maxBytes: number }) => {
         const artifact = artifacts.get(args.artifactId);
@@ -951,20 +924,20 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
 
     sdk.tool(
       "specialize_profile",
-      "Mint a run-scoped profile VARIANT from a trusted base, then seat it like any profile. Narrow-only by construction: tools must be a subset of the base's, permissionMode may only stay or drop, instructions are ADDITIVE, MCP servers attach by catalog name only (never a command), skills come from the catalog. Use it when the fixed profiles miscast a role — a cheaper implementer for mechanical work, an implementer with the browser for visual verification, a reviewer scoped to one subsystem. Journaled; no operator approval needed because a mint grants strictly less than the per-seat overrides you already hold.",
+      "Mint a run-scoped profile VARIANT from a trusted base. Narrow-only by construction: tools a subset of the base's, permissionMode same or lower, instructions ADDITIVE, MCP servers by catalog name only, skills from the catalog. Use it when the fixed profiles miscast a role. Journaled; no approval needed (narrow-only).",
       {
         id: z.string().regex(/^[a-z][a-z0-9-]*$/).describe("New profile id, e.g. 'render-implementer'"),
         baseProfileId: z.string().min(1).describe("A trusted base from list_agent_profiles"),
         title: z.string().optional(),
         purpose: z.string().optional(),
-        instructionsAppend: z.string().optional().describe("Appended to the base instructions as a Specialization section"),
+        instructionsAppend: z.string().optional().describe("Appended to the base instructions"),
         tools: z.array(z.string()).optional().describe("Subset of the base's tools; omit to keep them all"),
         permissionMode: z.enum(["default", "plan", "bypassPermissions"]).optional().describe("Same or lower than the base's"),
         model: z.string().optional(),
-        skills: z.array(z.string()).optional().describe("From the catalog; validated against the mint's tools"),
-        attachServers: z.array(z.string()).optional().describe("Attachable console-catalog MCP servers, by name (e.g. 'browser')"),
+        skills: z.array(z.string()).optional().describe("From the catalog"),
+        attachServers: z.array(z.string()).optional().describe("Attachable catalog MCP servers, by name"),
         maxTurns: z.number().int().min(1).max(100).optional(),
-        why: z.string().optional().describe("Why this variant — journaled with the mint"),
+        why: z.string().optional().describe("Why this variant — journaled"),
       },
       async (args: { id: string; baseProfileId: string; title?: string; purpose?: string; instructionsAppend?: string;
         tools?: string[]; permissionMode?: "default" | "plan" | "bypassPermissions"; model?: string;
@@ -973,7 +946,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           const workspaceId = repo.getUserSession(userSessionId)?.workspaceId;
           const minted = registry.mint({ ...args, userSessionId, ...(workspaceId === undefined ? {} : { workspaceId }) });
           if (args.skills !== undefined && args.skills.length > 0) {
-            const problems = catalog.validateAssignment(args.skills, minted.tools);
+            const problems = catalog.validateAssignment(args.skills, effectiveNativeTools(minted, "seat"));
             if (problems.length > 0) throw new InvalidInputError(problems.join("; "));
           }
           return { profileId: minted.id, base: args.baseProfileId, tools: minted.tools,
@@ -985,7 +958,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
 
     sdk.tool(
       "add_agent",
-      "Add ONE agent to an open session mid-run — an emergent need the original roster did not anticipate (a security pass, a second perspective, more capacity). Works for open multi-seat roles only: hub specialists, plan_execute executors, peer_to_peer peers. Fixed-roster patterns (pipeline, debate, evaluator, map_reduce) refuse — spawn a follow-up session for those. The entry agent is told immediately; assign the new seat work through it.",
+      "Add ONE agent to an open session mid-run — an emergent need the original roster did not anticipate. Open multi-seat roles only (hub specialists, plan_execute executors, peer_to_peer peers); fixed-roster patterns refuse. The entry agent is told immediately; assign the new seat work through it.",
       {
         agentSessionId: z.string().min(1),
         name: z.string().min(1).describe("Agent name, e.g. 'auditor'"),
@@ -993,17 +966,17 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         instructions: z.string().optional().describe("Brief appended to the profile instructions"),
         model: z.string().optional(),
         owns: z.array(z.string()).default([]).describe("Exclusive write scope; required for a writing profile"),
-        skills: z.array(z.string()).optional().describe("Extra skills for this seat, from the catalog — pinned into its snapshot."),
-        why: z.string().optional()
-          .describe("Why this seat now — the emergent need the roster did not anticipate. Journaled with the addition; the entry agent and the run review read it."),
+        skills: z.array(z.string()).optional().describe("Extra skills, from the catalog"),
+        why: z.string().optional().describe("Why this seat now — journaled."),
       },
       async (args: { agentSessionId: string; name: string; profileId: string; instructions?: string; model?: string; owns: string[]; skills?: string[]; why?: string }) =>
         guarded(() => {
           const session = owned(args.agentSessionId);
           if (args.skills !== undefined && args.skills.length > 0) {
-            const profileTools = host.profiles(repo.getUserSession(session.userSessionId)?.workspaceId)
-              .find((profile) => profile.id === args.profileId)?.tools ?? [];
-            const problems = catalog.validateAssignment(args.skills, profileTools);
+            const skillProfile = host.profiles(repo.getUserSession(session.userSessionId)?.workspaceId)
+              .find((profile) => profile.id === args.profileId);
+            const problems = catalog.validateAssignment(args.skills,
+              skillProfile === undefined ? [] : effectiveNativeTools(skillProfile, "seat"));
             if (problems.length > 0) throw new InvalidInputError(problems.join("; "));
           }
           const added = host.addAgent(args.agentSessionId, {
@@ -1021,7 +994,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
 
     sdk.tool(
       "close_agent_session",
-      "Terminate a whole session that is no longer productive (superseded strategy, wedged past saving, obsoleted by a discovery). Lanes close, pending deliveries cancel, unlanded worktree branches ARCHIVE (nothing merges, nothing is destroyed), and the session stops blocking run completion. A child session's controller is told via a journaled failure. Returns the session's still-open ledger units so you can re-own them in a successor session. Prefer close+create over deforming a running session past its briefing.",
+      "Terminate a whole session that is no longer productive. Lanes close, pending deliveries cancel, unlanded worktree branches ARCHIVE (nothing merges, nothing is destroyed), and the session stops blocking run completion. Returns the still-open ledger units so you can re-own them in a successor.",
       {
         agentSessionId: z.string().min(1),
         reason: z.string().min(1).describe("Why — journaled; a child's controller reads it"),
@@ -1037,7 +1010,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
 
     sdk.tool(
       "interrupt_agent",
-      "Stop ONE agent's in-flight turn (a wedged tool call, a runaway loop, work a discovery just invalidated). The turn dies; the agent, its lane and its inbox survive. The interrupted turn's delivered rows are cancelled — they do NOT redeliver — while QUEUED deliveries deliver next, so a correction you post right after the interrupt arrives with them. The seat's uncommitted work is preserved (archived branch + diff artifact) by the failure path. No-op error if the agent has no turn in flight.",
+      "Stop ONE agent's in-flight turn. The turn dies; the agent, its lane and its inbox survive. Delivered rows do NOT redeliver; QUEUED deliveries deliver next — post a correction right after and it arrives with them. Uncommitted work is preserved by the failure path.",
       {
         agentSessionId: z.string().min(1),
         agent: z.string().min(1).describe("The agent name shown by session_activity"),
@@ -1056,6 +1029,18 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
     ),
 
   ];
+
+  // Registration self-check: `MAIN_TOOL_NAMES` (orchestrator/grants.ts) is
+  // the single source of truth main's allow-list is derived from, so a tool
+  // registered here without a grants entry — or granted without being
+  // registered — throws at lane spawn instead of drifting silently.
+  const registered = new Set(tools.map((tool) => (tool as { name?: string }).name ?? ""));
+  const declared = new Set<string>(MAIN_TOOL_NAMES);
+  const drift = [
+    ...[...registered].filter((name) => !declared.has(name)).map((name) => `registered but not in MAIN_TOOL_NAMES: ${name}`),
+    ...[...declared].filter((name) => !registered.has(name)).map((name) => `in MAIN_TOOL_NAMES but never registered: ${name}`),
+  ];
+  if (drift.length > 0) throw new Error(`console tool registration drift — ${drift.join("; ")}`);
 
   return sdk.createSdkMcpServer({ name: "console", version: "1.0.0", tools, alwaysLoad: true });
 }

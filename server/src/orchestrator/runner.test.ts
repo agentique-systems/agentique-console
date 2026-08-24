@@ -369,10 +369,11 @@ describe("OrchestratorRunner", () => {
     ).toMatchObject({ approved: true });
     expect(h.repo.getUserSession(sessionId)?.phase).toBe("executing");
     expect(h.fake.captured.options[0]?.permissionMode).toBe("plan");
-    // The approved plan IS the governing spec, LINKED to the card that
-    // approved it — the lineage the schema always promised.
-    const approvedSpec = h.app.specs.latestApproved(sessionId);
-    expect(approvedSpec?.interactionId).toBe(pending[0]!.id);
+    // The approved plan IS the governing document, LINKED to the card that
+    // approved it — recorded as an intent revision when it isn't an outline.
+    const approved = h.app.requirements.latestApproved(sessionId);
+    expect(approved?.interactionId).toBe(pending[0]!.id);
+    expect(h.app.requirements.intentDocument(sessionId)).toBe("Here is my plan: do the thing.");
   });
 
   it("interrupt settles the turn aborted and the lane survives for the next", async () => {

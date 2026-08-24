@@ -143,33 +143,11 @@ export interface PolicyConfig {
    */
   blockingAskEscalateMs: number;
   /**
-   * Rotation blocks every sender to the agent; a checkpoint may not run
-   * forever. Sized for a checkpoint over a ~120k-token context, which
-   * routinely needs minutes: a live run whose cap was 90s aborted 31 of 35
-   * seat checkpoints mid-query and paid ~$62 re-deriving what they knew.
-   * (Rotation on only.)
-   */
-  checkpointTimeoutMs: number;
-  /**
    * Debounce before the run-completion predicate re-evaluates. Long enough
    * that a settle followed 1ms later by the next turn is a non-event, short
    * enough that the operator does not notice it.
    */
   completionQuietWindowMs: number;
-  /**
-   * Console-side context rotation. OFF (default): a lane keeps one provider
-   * session for its whole life and the CLI's native auto-compaction manages
-   * context — the same continuity an interactive session has. ON: the lane
-   * is rotated onto a fresh provider session, with a checkpoint handoff, the
-   * moment it reaches either limit below. Rotation was the default until a
-   * live series showed every mid-work rotation paying re-priming for state
-   * the thread had for free. CONSOLE_CONTEXT_ROTATION=1.
-   */
-  contextRotation: boolean;
-  /** Rotation on: measured context occupancy (largest single request) at which a lane rotates. */
-  contextTokenLimit: number;
-  /** Rotation on: model turns at which a lane rotates; 0 = no turn limit. */
-  contextTurnLimit: number;
   /**
    * Agent-authored handoffs per session before the console asks MAIN to
    * re-brief (which resets the budgets) or close. Sized for a real multi-seat
@@ -198,11 +176,17 @@ export interface Config {
 }
 
 /**
- * Env names retired by THE RENAME. A retired name that is still set fails the
- * boot loudly: the alternative is the knob silently falling back to its
- * default, which is indistinguishable from working until it matters.
+ * Env names retired by THE RENAME — and by the removal of console-side
+ * context rotation (native auto-compaction manages context; there is no
+ * replacement knob). A retired name that is still set fails the boot loudly:
+ * the alternative is the knob silently falling back to its default, which is
+ * indistinguishable from working until it matters.
  */
 const RETIRED_ENV_NAMES: Record<string, string> = {
+  CONSOLE_CONTEXT_ROTATION: "nothing — removed; native compaction manages context",
+  CONSOLE_CONTEXT_TOKEN_LIMIT: "nothing — removed; native compaction manages context",
+  CONSOLE_CONTEXT_TURN_LIMIT: "nothing — removed; native compaction manages context",
+  CONSOLE_CHECKPOINT_TIMEOUT_MS: "nothing — removed with console-side rotation",
   CONSOLE_SEAT_IDLE_REAP_MS: "CONSOLE_AGENT_IDLE_REAP_MS",
   CONSOLE_MAX_RESIDENT_SEATS: "CONSOLE_MAX_RESIDENT_AGENTS",
   CONSOLE_MAX_RESIDENT_SEATS_PER_TREE: "CONSOLE_MAX_RESIDENT_AGENTS_PER_SESSION",
@@ -300,11 +284,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       governanceSweepIntervalMs: Number(env.CONSOLE_GOVERNANCE_SWEEP_MS ?? 30_000),
       deferredAutoProceedMs: Number(env.CONSOLE_DEFERRED_AUTO_PROCEED_MS ?? 900_000),
       blockingAskEscalateMs: Number(env.CONSOLE_BLOCKING_ASK_ESCALATE_MS ?? 900_000),
-      checkpointTimeoutMs: Number(env.CONSOLE_CHECKPOINT_TIMEOUT_MS ?? 300_000),
       completionQuietWindowMs: Number(env.CONSOLE_COMPLETION_QUIET_MS ?? 2_000),
-      contextRotation: env.CONSOLE_CONTEXT_ROTATION === "1",
-      contextTokenLimit: Number(env.CONSOLE_CONTEXT_TOKEN_LIMIT ?? 120_000),
-      contextTurnLimit: Number(env.CONSOLE_CONTEXT_TURN_LIMIT ?? 0),
       patternHandoffCap: Number(env.CONSOLE_PATTERN_HANDOFF_CAP ?? 120),
       patternStallMs: Number(env.CONSOLE_PATTERN_STALL_MS ?? 600_000),
       enableChildSessions: env.CONSOLE_CHILD_SESSIONS !== "0",

@@ -42,10 +42,9 @@ const AssumptionResolveBody = z.object({
 });
 
 /**
- * Constrained to the offered list rather than accepting any string: an id with
- * no `model-catalog.ts` entry silently drops the session's rotation ceiling to
- * 68K, and a rejected request is a far better failure than a session that
- * quietly rotates twice as often.
+ * Constrained to the offered list rather than accepting any string: a typo'd
+ * model id should be a rejected request, never a session that fails at its
+ * first provider call.
  */
 const Model = z
   .string()
@@ -174,15 +173,6 @@ export function registerUserSessionRoutes(
       request.params.summaryId === "tail"
         ? ctx.app.completion.tailSummary(request.params.id)
         : ctx.app.completion.getSummary(request.params.id, request.params.summaryId),
-  );
-
-  // The living spec: revision history + the approved text that governs the run.
-  app.get<{ Params: { id: string } }>(
-    "/api/user-sessions/:id/spec",
-    async (request) => ({
-      revisions: ctx.app.specs.listForUserSession(request.params.id),
-      approved: ctx.app.specs.latestApproved(request.params.id) ?? null,
-    }),
   );
 
   // The requirement graph: committed revisions, live nodes with derived

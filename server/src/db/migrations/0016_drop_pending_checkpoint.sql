@@ -1,0 +1,1 @@
+ALTER TABLE `agents` DROP COLUMN `pending_checkpoint_handoff_id`;

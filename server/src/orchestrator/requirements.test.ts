@@ -2,7 +2,7 @@
  * RequirementService: the approval diff (mint / retire-cascade / promote /
  * statement-reset), console-owned derivation, leaf-only reporting with
  * evidence, delegated-subtree enforcement, the frontier, and the digest and
- * pointer contracts with their legacy-spec fallback.
+ * pointer contracts.
  */
 import { describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
@@ -11,7 +11,6 @@ import { createStores } from "../db/stores/index.ts";
 import { events as eventsTable, projects, userSessions, workspaces } from "../db/schema.ts";
 import { EventBus } from "../events/bus.ts";
 import { nowIso } from "../ids.ts";
-import { SpecService } from "./spec.ts";
 import { RequirementParseFailure, RequirementService, deriveVerifiedBy } from "./requirements.ts";
 
 const DOC = `## Requirements
@@ -31,11 +30,10 @@ function makeHarness() {
   db.insert(workspaces).values({ id: "ws1", name: "w", rootPath: "/tmp/req-service-test", createdAt: now, updatedAt: now }).run();
   db.insert(projects).values({ id: "proj1", workspaceId: "ws1", title: null, intentDocument: null, createdAt: now }).run();
   db.insert(userSessions).values({ id: "us1", workspaceId: "ws1", projectId: "proj1", mode: "execute", title: "t", createdAt: now, updatedAt: now } as typeof userSessions.$inferInsert).run();
-  const specs = new SpecService(stores.specs, bus);
-  const service = new RequirementService(stores.requirements, stores.projects, stores.assumptions, specs, bus, () => "proj1");
+  const service = new RequirementService(stores.requirements, stores.projects, stores.assumptions, bus, () => "proj1");
   const eventsOf = (type: string) =>
     db.select().from(eventsTable).where(eq(eventsTable.type, type)).all();
-  return { service, specs, eventsOf, stores };
+  return { service, eventsOf, stores };
 }
 
 /** Propose + approve the fixture; ids come back minted r1..r6 in outline order. */
@@ -217,16 +215,31 @@ describe("frontier", () => {
   });
 });
 
+describe("recordIntentFallback (the ExitPlanMode compat path)", () => {
+  it("records prose the outline parser rejects as an approved intent revision", () => {
+    const { service, eventsOf } = makeHarness();
+    const prose = "Here is my plan: do the thing.";
+    expect(service.validateDocument("us1", prose).ok).toBe(false);
+    service.recordIntentFallback("us1", prose, "int_1", false);
+    expect(service.latestApproved("us1")).toMatchObject({
+      revision: 1, kind: "intent", interactionId: "int_1", document: prose, status: "approved",
+    });
+    expect(service.intentDocument("us1")).toBe(prose);
+    expect(service.derive("us1")).toEqual([]);
+    expect(service.pointer("us1")).toBe("requirements rev 1 — 0/0 satisfied, 0 open");
+    expect(service.digest("us1")).toContain(prose);
+    expect(eventsOf("user_session.requirements.updated")).toHaveLength(1);
+    // A later outline proposal continues the same revision counter.
+    const draft = service.propose("us1", DOC, "structure lands");
+    expect(draft.revision).toBe(2);
+  });
+});
+
 describe("digest / pointer (the GoverningDigest contract)", () => {
-  it("renders empty with nothing governing, falls back to the legacy spec, and prefers the graph", () => {
-    const { service, specs } = makeHarness();
+  it("renders empty with nothing governing and fills in once the graph is approved", () => {
+    const { service } = makeHarness();
     expect(service.digest("us1")).toBe("");
     expect(service.pointer("us1")).toBeNull();
-
-    const legacy = specs.propose("us1", "# Legacy spec\nacceptance prose");
-    specs.approve(legacy.id, { document: "# Legacy spec\nacceptance prose", edited: false });
-    expect(service.digest("us1")).toContain("Approved specification (rev 1");
-    expect(service.pointer("us1")).toContain("spec rev 1");
 
     approveFixture(service);
     const digest = service.digest("us1");

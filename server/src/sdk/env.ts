@@ -32,6 +32,12 @@ const HOST_SESSION_VARS: ReadonlySet<string> = new Set([
   "CLAUDE_EFFORT",
 ]);
 
+/** Inherited flags that would enable native coordination behind the capability policy's back. */
+export const STRIPPED_FEATURE_FLAGS: readonly string[] = [
+  "CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION",
+  "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH",
+];
+
 export function sdkEnv(
   options: { sessionName?: string; source?: NodeJS.ProcessEnv } = {},
 ): Record<string, string> {
@@ -41,8 +47,12 @@ export function sdkEnv(
     if (value === undefined || HOST_SESSION_VARS.has(key)) continue;
     env[key] = value;
   }
-  // In-process subagents stay console-disabled; never propagate their knobs.
-  delete env.CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION;
+  // Feature flags that widen native coordination surface (in-process
+  // subagents, nested spawning) never propagate: the capability policy denies
+  // those tools by name, and no inherited flag may argue with it. The CLI
+  // ships as a platform binary, so this list is maintained by policy rather
+  // than derived — extend it when a new coordination flag is documented.
+  for (const flag of STRIPPED_FEATURE_FLAGS) delete env[flag];
   // Attempts 7-10 of the observed schedule were flat ~34s each and bought
   // nothing; the console's own wall-clock budget is the real control, and this
   // stops the CLI from spending three minutes before that budget can act.

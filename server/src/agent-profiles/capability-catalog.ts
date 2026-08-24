@@ -12,6 +12,8 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import { BACKGROUND_WAIT_TOOLS, WORKSPACE_TOOLS } from "../sdk/native-capability-policy.ts";
+import { parseFrontmatterDocument } from "./native-agent-file.ts";
 
 export interface SkillCatalogEntry {
   name: string;
@@ -45,30 +47,39 @@ export const MCP_CATALOG: McpCatalogEntry[] = [
   },
 ];
 
-/** Minimal YAML-frontmatter reader for the fields this catalog serves. */
+/** Real-YAML frontmatter read (native-agent-file.ts) narrowed to the fields this catalog serves. */
 function parseFrontmatter(raw: string): { fields: Record<string, string>; requiresTools: string[] } {
-  const match = /^---\n([\s\S]*?)\n---/.exec(raw);
+  const document = parseFrontmatterDocument(raw);
   const fields: Record<string, string> = {};
-  let requiresTools: string[] = [];
-  if (!match) return { fields, requiresTools };
-  for (const line of match[1]!.split("\n")) {
-    const kv = /^(\w[\w-]*):\s*(.*)$/.exec(line);
-    if (kv) {
-      fields[kv[1]!] = kv[2]!.trim();
-      continue;
-    }
-    const tools = /^\s+tools:\s*\[(.*)\]\s*$/.exec(line);
-    if (tools) requiresTools = tools[1]!.split(",").map((entry) => entry.trim()).filter((entry) => entry !== "");
+  for (const [key, value] of Object.entries(document)) {
+    if (typeof value === "string") fields[key] = value.trim();
   }
+  const requires = document.requires;
+  const tools = requires !== null && typeof requires === "object" && !Array.isArray(requires) ? (requires as { tools?: unknown }).tools : undefined;
+  const requiresTools = Array.isArray(tools) ? tools.filter((entry): entry is string => typeof entry === "string") : [];
   return { fields, requiresTools };
 }
+
+/** The names a skill's `requires.tools` may reference. */
+const KNOWN_REQUIRABLE_TOOLS: ReadonlySet<string> = new Set([...WORKSPACE_TOOLS, ...BACKGROUND_WAIT_TOOLS]);
 
 export class CapabilityCatalog {
   readonly #skills: SkillCatalogEntry[];
 
+  /**
+   * Load-time findings — a `requires.tools` entry naming a tool the policy
+   * has never heard of would otherwise block the skill's assignment forever
+   * without anyone noticing the typo.
+   */
+  readonly issues: readonly string[];
+
   /** `skillsDir` = the console plugin's `skills/` directory; missing = empty catalog. */
   constructor(skillsDir: string) {
     this.#skills = this.#read(skillsDir);
+    this.issues = this.#skills.flatMap((skill) =>
+      skill.requiresTools
+        .filter((tool) => !KNOWN_REQUIRABLE_TOOLS.has(tool) && !tool.startsWith("mcp__"))
+        .map((tool) => `skill "${skill.name}" requires unknown tool "${tool}" — fix the frontmatter or classify the tool`));
   }
 
   #read(skillsDir: string): SkillCatalogEntry[] {
@@ -111,9 +122,12 @@ export class CapabilityCatalog {
   /**
    * The commission-time gate: a skill a seat cannot act on must not load —
    * guidance that says "use Bash" on a seat without Bash is the deferred-
-   * tools failure in a new coat. Returns the problems, empty = assignable.
+   * tools failure in a new coat. Validates against the EFFECTIVE native set
+   * the seat will actually hold (`effectiveNativeTools`), never a broader or
+   * narrower roster. Returns the problems, empty = assignable.
    */
-  validateAssignment(skillNames: readonly string[], profileTools: readonly string[]): string[] {
+  validateAssignment(skillNames: readonly string[], effectiveTools: ReadonlySet<string> | readonly string[]): string[] {
+    const tools = effectiveTools instanceof Set ? effectiveTools : new Set(effectiveTools);
     const problems: string[] = [];
     for (const name of skillNames) {
       const skill = this.get(name);
@@ -125,9 +139,9 @@ export class CapabilityCatalog {
         problems.push(`skill "${name}" is deprecated and cannot be assigned`);
         continue;
       }
-      const missing = skill.requiresTools.filter((tool) => !profileTools.includes(tool));
+      const missing = skill.requiresTools.filter((tool) => !tools.has(tool));
       if (missing.length > 0) {
-        problems.push(`skill "${name}" requires tools the profile does not grant: ${missing.join(", ")}`);
+        problems.push(`skill "${name}" requires tools the seat will not hold: ${missing.join(", ")}`);
       }
     }
     return problems;

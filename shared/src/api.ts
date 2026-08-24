@@ -298,24 +298,6 @@ export interface GetRunSummaryResponse {
   document: RunSummaryDocument;
 }
 
-// GET /api/user-sessions/:id/spec — the living specification.
-export interface SpecRevisionWire {
-  id: string;
-  revision: number;
-  document: string;
-  changeNote: string | null;
-  status: "draft" | "approved" | "superseded" | "rejected";
-  origin: "main" | "operator_edited";
-  /** The interaction card that approved this revision. */
-  interactionId: string | null;
-  createdAt: string;
-  approvedAt: string | null;
-}
-export interface GetSpecResponse {
-  revisions: SpecRevisionWire[];
-  approved: SpecRevisionWire | null;
-}
-
 // GET /api/user-sessions/:id/requirements — the committed requirement graph
 // (canonical specification) plus its live state.
 export interface RequirementRevisionWire {

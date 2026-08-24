@@ -73,7 +73,7 @@ export interface AgentToolsDeps {
   config?: Config;
   tasks?: TaskService;
   handoffs?: HandoffService;
-  /** The governing requirements (legacy-spec fallback inside; absent in some unit harnesses). */
+  /** The governing requirements (absent in some unit harnesses). */
   requirements?: RequirementService;
   /** Recorded premises (absent in some unit harnesses). */
   assumptions?: AssumptionService;
@@ -124,8 +124,7 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
   // the provider enforces the shape and there is nothing to hand-serialize.
   // Console-carried, so there is no peer ref handshake to lose.
   tools.push(sdk.tool("send_handoff",
-    "Send a typed handoff to another participant. This is the preferred way to transfer anything — assignments, progress, findings, failures, final results. Fill the fields; the console builds and journals the envelope. Your plain text output reaches no one. " +
-    "An assignment whose taskId still has incomplete dependencies is SCHEDULED, not delivered: you get {scheduled:true} back and the Console dispatches it the moment the dependencies complete — never re-send it.",
+    "Send a typed handoff to another participant. This is the preferred way to transfer anything — assignments, progress, findings, failures, final results. Fill the fields; the console builds and journals the envelope.",
     {
       to: z.string().min(1).describe("Recipient's bare agent name, or \"main\" to reach the Orchestrator."),
       // No default. A defaulted category once turned an ACCEPT verdict into an
@@ -185,12 +184,12 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
       return ok({ delivered: true, messageSeq: message.seq, to: args.to, category: args.category });
     }));
   // Console-owned ledger, keyed on a synthetic id derived from the agent
-  // session, so it survives context rotation and is shared by every agent —
-  // the native Task* tools are per-provider-session.
+  // session and shared by every agent — the native Task* tools are
+  // per-provider-session.
   if (deps.tasks && user) {
     const listId = consoleTaskListId(session.id);
     const attribution = { workspaceId: user.workspaceId, userSessionId: session.userSessionId, agentSessionId: session.id, agent: agent.name };
-    tools.push(sdk.tool("task_list", "Read the AgentSession's task ledger. Authoritative and shared by every agent; it survives context rotation.", {},
+    tools.push(sdk.tool("task_list", "Read the AgentSession's task ledger. Authoritative and shared by every agent.", {},
       async () => ok({ tasks: deps.tasks?.listForUserSession(session.userSessionId).filter((task) => task.agentSessionId === session.id) ?? [] })));
     if (ctx.granted.has("task_create")) {
       tools.push(
@@ -216,7 +215,7 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
             ...(args.requirementId === undefined ? {} : { requirementId: args.requirementId }), attribution });
           return ok({ taskId: args.taskId, created: true, owner: args.owner });
         }),
-        sdk.tool("task_update", "Update a ledger entry. Keep status honest as work progresses — the Console reports open tasks to the operator alongside your final, and completing a task dispatches any assignments scheduled behind it. removeBlockedBy drops a dependency that no longer holds (e.g. a deleted blocker), releasing whatever it was blocking.", {
+        sdk.tool("task_update", "Update a ledger entry. Completing a task dispatches any assignments scheduled behind it; removeBlockedBy drops a dependency that no longer holds (e.g. a deleted blocker), releasing whatever it was blocking.", {
           taskId: z.string().min(1),
           status: z.enum(["pending", "in_progress", "completed", "deleted"]).optional(),
           owner: z.string().optional(), subject: z.string().optional(), description: z.string().optional(),
@@ -274,20 +273,17 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
       return ok({ artifactId: artifact.id, mediaType: artifact.mediaType, bytes: artifact.bytes, content: pageTail(artifact.content, args.cursor, args.maxBytes) });
     }));
   // The injected requirement digest is byte-capped; the full governing
-  // outline (or the legacy spec text) stays a tool call away for every seat.
+  // outline stays a tool call away for every seat.
   if (deps.requirements) {
     const requirements = deps.requirements;
     tools.push(sdk.tool("read_requirements",
-      "Read the run's governing requirements: the outline with console-derived statuses, plus your session's delegated requirement ids. Your work is checked against it. Pass scopeId (inside your delegated sub-scope) to read one subtree in full. The root read includes the operator's approved intent prose. (A legacy run returns its markdown spec instead.)",
+      "Read the run's governing requirements: the outline with console-derived statuses, plus your session's delegated requirement ids. Your work is checked against it. Pass scopeId (inside your delegated sub-scope) to read one subtree in full. The root read includes the operator's approved intent prose.",
     { scopeId: z.string().min(1).optional().describe("Read only this requirement's subtree — must sit inside your delegated sub-scope."),
       cursor: z.string().optional(), maxBytes: z.number().int().min(1).max(PAGE_MAX_BYTES).default(PAGE_DEFAULT_BYTES) },
     async (args: { scopeId?: string; cursor?: string; maxBytes: number }) => {
       const approved = requirements.latestApproved(ctx.session.userSessionId);
       if (approved === undefined) {
-        const digest = requirements.digest(ctx.session.userSessionId);
-        if (digest === "") return ok({ requirements: null, note: "no approved requirements for this run" });
-        return ok({ legacy: true, document: pageTail(digest, args.cursor, args.maxBytes),
-          delegatedToThisSession: requirements.delegationSet(session.id) });
+        return ok({ requirements: null, note: "no approved requirements for this run" });
       }
       if (args.scopeId !== undefined) {
         try {

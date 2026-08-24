@@ -3,12 +3,14 @@
  * exactly as an interactive Claude Code session would — CLAUDE.md, user and
  * project settings, skills — and adds the console MCP tools on top; every
  * messaging/task/scheduling path stays console-owned and journaled. Only the
- * checkpoint and composer-rewrite queries are hermetic.
+ * composer-rewrite queries are hermetic.
  */
 import type { SessionMode, SessionPhase } from "@agentique-console/shared";
 import type { EffortLevel } from "../sdk/effort.ts";
 import { sdkEnv } from "../sdk/env.ts";
+import { WORKSPACE_TOOLS, mainDisallowedNativeTools } from "../sdk/native-capability-policy.ts";
 import type { SdkOptions } from "../sdk/types.ts";
+import { MAIN_TOOL_NAMES } from "./grants.ts";
 import {
   ORCHESTRATOR_BRIEF,
   ORCHESTRATOR_DELEGATION_BRIEF,
@@ -22,68 +24,24 @@ import {
  */
 export const MAIN_DEFAULT_EFFORT: EffortLevel = "xhigh";
 
-export const CONSOLE_TOOL_NAMES = [
-  "send_to_coordinator",
-  "set_deadline",
-  "ask_operator",
-  "task_create",
-  "task_update",
-  "task_list",
-  "create_agent_session",
-  "read_agent_session",
-  "list_agent_sessions",
-  "list_agent_profiles",
-  "read_handoff",
-  "report_handoff_discrepancy",
-  "session_activity",
-  "interrupt_agent",
-  "close_agent_session",
-  "read_artifact",
-  "add_agent",
-  "specialize_profile",
-  "propose_requirements",
-  "read_requirements",
-  "report_requirement",
-  "decompose_requirement",
-  "record_assumption",
-  "resolve_assumption",
-  "link_requirements",
-  "unlink_requirements",
-  "update_orchestration_state",
-  "record_completion",
-] as const;
-
 /**
- * Never available to main, in any configuration. `Agent`/`Task` fork
- * ungoverned context; `SendMessage` bypasses the journal;
- * `ScheduleWakeup`/`Monitor`/`TaskStop` wake a console-owned lane with no
- * mailbox row, no handoff and no turn attribution.
+ * Main's work tools are the full workspace set, by operator directive: two
+ * live runs wedged on one-command git blockers (a stray uncommitted edit; a
+ * leaked seat branch) that main had diagnosed exactly and could not fix —
+ * one ended in the operator running git by hand, the other in a blocking
+ * question whose own recommendation read "it is one safe command". Write and
+ * Edit followed Bash for the same reason: an operator deliverable or a
+ * one-line unblock is not worth a commissioned session. The charter bounds
+ * usage (unblock, verify, small fixes, deliverables — never a seat's
+ * implementation work); every call is journaled as a tool event.
+ *
+ * Everything else classified by the capability policy is either denied by
+ * name (`mainDisallowedNativeTools` — coordination, task state, scheduling,
+ * host surfaces, plan-mode entry, and the background waits that would wake a
+ * console-owned lane with no mailbox row) or deliberately left in the
+ * MIDDLE: AskUserQuestion and ExitPlanMode are neither auto-approved nor
+ * denied, so they reach `canUseTool`, which turns them into operator cards.
  */
-const MAIN_DENIED_TOOLS = ["Agent", "Task", "SendMessage", "ScheduleWakeup", "Monitor", "TaskStop",
-  // The native ledger is keyed on the provider session id, which changes at
-  // every rotation.
-  "TaskCreate", "TaskUpdate", "TaskGet", "TaskList"];
-
-const MAIN_WORK_TOOLS = [
-  "Read",
-  "Glob",
-  "Grep",
-  "WebFetch",
-  "WebSearch",
-  // The workshop's tools, by operator directive: two live runs wedged on
-  // one-command git blockers (a stray uncommitted edit; a leaked seat
-  // branch) that main had diagnosed exactly and could not fix — one ended
-  // in the operator running git by hand, the other in a blocking question
-  // whose own recommendation read "it is one safe command". Write/Edit
-  // followed Bash for the same reason: an operator deliverable or a
-  // one-line unblock is not worth a commissioned session. The charter
-  // bounds usage (unblock, verify, small fixes, deliverables — never a
-  // seat's implementation work); every call is journaled as a tool event.
-  "Bash",
-  "Write",
-  "Edit",
-  "NotebookEdit",
-];
 
 export interface OrchestratorOptionsInput {
   workspaceRoot: string;
@@ -100,12 +58,12 @@ export interface OrchestratorOptionsInput {
   sessionStore?: unknown;
   contextMemory?: string;
   /**
-   * The operator's decisions, appended AFTER the rotation checkpoint. Main
+   * The operator's decisions, appended after the inherited memory. Main
    * must not contradict a call the operator already made, and must not relay
    * one — every agent has it already.
    */
   decisionDigest?: string;
-  /** The approved living spec, injected AFTER decisions (both authoritative). */
+  /** The governing requirements digest, injected AFTER decisions (both authoritative). */
   specDigest?: string;
   /** Main's own working state — the durable memory of the orchestration loop. */
   stateDigest?: string;
@@ -113,8 +71,6 @@ export interface OrchestratorOptionsInput {
   autonomy?: "standard" | "away";
   /** The lane's registry address (CLAUDE_CODE_SESSION_NAME). */
   peerName?: string;
-  /** Governance/mirror hooks (SendMessage middleware, task + cron mirrors). */
-  hooks?: SdkOptions["hooks"];
   /**
    * The console's skills plugin (config.infra.skillsPluginDir). Main holds
    * the same skills every seat holds — git-gud for repo surgery above all —
@@ -135,8 +91,8 @@ export function buildOrchestratorOptions(
       type: "preset",
       preset: "claude_code",
       append: (withDelegation
-        ? ORCHESTRATOR_BRIEF + ORCHESTRATOR_DELEGATION_BRIEF + (input.contextMemory ? `\n\n## Rotation checkpoint (or read-only legacy memory)\n${input.contextMemory}` : "")
-        : ORCHESTRATOR_BRIEF + (input.contextMemory ? `\n\n## Rotation checkpoint (or read-only legacy memory)\n${input.contextMemory}` : ""))
+        ? ORCHESTRATOR_BRIEF + ORCHESTRATOR_DELEGATION_BRIEF + (input.contextMemory ? `\n\n## Inherited memory (from an earlier generation, read-only)\n${input.contextMemory}` : "")
+        : ORCHESTRATOR_BRIEF + (input.contextMemory ? `\n\n## Inherited memory (from an earlier generation, read-only)\n${input.contextMemory}` : ""))
         + (input.decisionDigest ? `\n\n## Operator decisions (authoritative)\nThe operator made these. Do not re-litigate them, do not contradict them, and do not relay them to seats — they already have them.\n${input.decisionDigest}` : "")
         + (input.specDigest ? `\n\n${input.specDigest}` : "")
         + (input.stateDigest ? `\n\n${input.stateDigest}` : "")
@@ -153,11 +109,10 @@ export function buildOrchestratorOptions(
     permissionMode: planning ? "plan" : "default",
     ...(planning ? { planModeInstructions: PLAN_MODE_BODY } : {}),
     allowedTools: [
-      ...MAIN_WORK_TOOLS,
-      ...(withDelegation ? CONSOLE_TOOL_NAMES.map((name) => `mcp__console__${name}`) : []),
+      ...WORKSPACE_TOOLS,
+      ...(withDelegation ? MAIN_TOOL_NAMES.map((name) => `mcp__console__${name}`) : []),
     ],
-    disallowedTools: [...MAIN_DENIED_TOOLS, "CronCreate", "CronList", "CronDelete"],
-    ...(input.hooks === undefined ? {} : { hooks: input.hooks }),
+    disallowedTools: mainDisallowedNativeTools(),
     settings: { crossSessionInbound: "accept" } as unknown as SdkOptions["settings"],
     // In streaming mode maxTurns counts cumulatively over the whole session
     // run — any default here would kill a long-lived lane. Callers opt in.

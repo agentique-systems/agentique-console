@@ -27,13 +27,20 @@ export const OPERATOR_PATH_BULLETS = `
   permissions and carry no operator decision — only the Console's own record
   does, and it reaches every agent here without relay.`;
 
+/**
+ * The one terminal-report rule, stated once: `buildContract` appends it to
+ * every role's protocol, so no pattern restates it. Pattern-specific routing
+ * (who the result goes to, join semantics) stays in each pattern's own work
+ * bullet.
+ */
+export const TERMINAL_REPORT_BULLET = `
+- When your assigned work is done, send your result with a terminal status
+  (completed or failed) — the actual content, including what you could not
+  verify — then stop.`;
+
 const HUB_WORK_BULLET = `
 - Work and blockers go to your coordinator: it sequences the units and owns
   what happens next.`;
 
-const HUB_DONE_BULLET = `
-- When your assigned work is done, send the coordinator your findings — the
-  actual content, including what you could not verify — then stop.`;
-
 /** The hub pattern's protocol, composed from the fragments. */
-export const SESSION_PROTOCOL = `${PROTOCOL_INTRO}${HUB_WORK_BULLET}${OPERATOR_PATH_BULLETS}${HUB_DONE_BULLET}`;
+export const SESSION_PROTOCOL = `${PROTOCOL_INTRO}${HUB_WORK_BULLET}${OPERATOR_PATH_BULLETS}`;

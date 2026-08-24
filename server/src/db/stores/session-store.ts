@@ -175,7 +175,7 @@ export class SessionStore {
     patch: Partial<Pick<AgentRow,
       "sdkSessionId" | "generation" |
       "turnCount" | "contextTokens" | "profileSnapshot" | "profileId"
-      |  "latestHandoffId" | "pendingCheckpointHandoffId"
+      |  "latestHandoffId"
       | "worktreePath" | "worktreeBaseCommit" | "worktreeBranch"
       | "salvageBranch" | "salvageArtifactId"
       | "lastActiveAt" | "cumulativeCostUsd" | "cumulativeApiDurationMs" | "lastDecisionAt"

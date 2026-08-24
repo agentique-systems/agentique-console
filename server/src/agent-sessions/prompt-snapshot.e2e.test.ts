@@ -10,7 +10,7 @@ import { initMessage, sendHandoffUse, successMessage } from "../sdk/fake.ts";
 import { collectUntil, makeDelegationHarness } from "../test-helpers.ts";
 
 describe("hub prompt byte-identity", () => {
-  it("coordinator and specialist appends are unchanged by the contract refactor", async () => {
+  it("coordinator and specialist appends match the pinned bytes", async () => {
     const h = makeDelegationHarness(async function* (options) {
       const append = typeof options.systemPrompt === "object" && !Array.isArray(options.systemPrompt) ? options.systemPrompt.append ?? "" : "";
       const coordinator = append.includes("sole coordinator");

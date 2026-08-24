@@ -31,7 +31,6 @@ export interface RunCompletionDeps {
   /** Main's record_completion source; optional so unit harnesses stay small. */
   orchestrationState?: { latestCompletion(userSessionId: string): { revision: number; completion: import("../orchestrator/state.ts").CompletionRecord } | null };
   /** The legacy spec oracle; optional for spec-less harnesses. */
-  specs?: { latestApproved(userSessionId: string): { revision: number } | undefined };
   /**
    * The requirement graph — the completion oracle when a revision governs;
    * optional for pre-graph harnesses.
@@ -146,37 +145,26 @@ export class RunCompletionService {
    * enough — main must have verified THIS revision via record_completion. A
    * live run proposed "done" for a game with no window and no renderer
    * because the heuristic stopped at "the current wave's ledger is clean".
-   * A requirement revision governs when one is approved; a legacy spec
-   * otherwise; document-less runs keep the old behavior.
+   * A requirement revision governs when one is approved (migration 0017
+   * converted every legacy governing spec into an intent revision);
+   * document-less runs keep the old behavior.
    */
   #completionRecordSatisfiesGoverning(userSessionId: string): boolean {
     const governing = this.#deps.requirements?.latestApproved(userSessionId);
-    if (governing !== undefined) {
-      const record = this.#deps.orchestrationState?.latestCompletion(userSessionId);
-      return record !== null && record !== undefined
-        && record.completion.requirementsRevision === governing.revision;
-    }
-    const approved = this.#deps.specs?.latestApproved(userSessionId);
-    if (approved === undefined) return true;
+    if (governing === undefined) return true;
     const record = this.#deps.orchestrationState?.latestCompletion(userSessionId);
     return record !== null && record !== undefined
-      && record.completion.specRevision === approved.revision;
+      && record.completion.requirementsRevision === governing.revision;
   }
 
-  /**
-   * One nudge per (session, governing revision). The key carries the REGIME:
-   * spec revisions and requirement revisions number independently from 1, so
-   * a bare number would let a legacy-spec nudge suppress the requirement-rev
-   * nudge of the same session after a mid-run migration — a silent stall.
-   */
+  /** One nudge per (session, governing revision). */
   readonly #nudgedForRevision = new Map<string, string>();
 
   #nudgeForCompletionRecord(userSessionId: string): void {
     const governing = this.#deps.requirements?.latestApproved(userSessionId);
-    const legacy = governing === undefined ? this.#deps.specs?.latestApproved(userSessionId) : undefined;
-    const revision = governing?.revision ?? legacy?.revision;
+    const revision = governing?.revision;
     if (revision === undefined) return;
-    const revisionKey = governing !== undefined ? `requirements:${revision}` : `spec:${revision}`;
+    const revisionKey = `requirements:${revision}`;
     if (this.#nudgedForRevision.get(userSessionId) === revisionKey) return;
     const anchor = this.#deps.repo.listAgentSessions(userSessionId)
       .find((row) => row.parentAgentSessionId === null);
@@ -198,9 +186,6 @@ export class RunCompletionService {
         "Verify and report_requirement with evidence, then record_completion (with requirementsRevision) — or name the gap and keep working; the run will not propose completion until then.");
       return;
     }
-    this.#deps.runner().enqueueAgentMilestone(userSessionId, anchor.id, "decision",
-      `The Console sees quiet sessions and final reports, but no completion record against spec rev ${revision}. ` +
-      "Verify the spec's acceptance criteria and call record_completion (with specRevision), or name the gap and keep working — the run will not propose completion until then.");
   }
 
   /** The graph's counts/outline/root at THIS moment — persisted with the summary. */

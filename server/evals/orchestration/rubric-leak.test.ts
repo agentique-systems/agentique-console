@@ -25,9 +25,18 @@ describe("rubric leak", () => {
       .filter((line) => line.length >= 30);
     expect(anchorLines.length).toBeGreaterThan(20);
 
-    const promptSources = ["../../src/orchestrator/prompt.ts", "../../src/orchestrator/tools.ts"]
-      .map((file) => normalize(fs.readFileSync(path.join(here, file), "utf8")));
+    // Skills are injected surfaces too: their bodies load into a lane's
+    // context on invocation, so rubric text there is the same Goodhart leak.
+    const skillsDir = path.join(here, "../../skills/skills");
+    const skillFiles = fs.readdirSync(skillsDir)
+      .map((dir) => path.join(skillsDir, dir, "SKILL.md"))
+      .filter((file) => fs.existsSync(file));
+    expect(skillFiles.length).toBeGreaterThanOrEqual(15);
+    const promptSources = [
+      ...["../../src/orchestrator/prompt.ts", "../../src/orchestrator/tools.ts"].map((file) => path.join(here, file)),
+      ...skillFiles,
+    ].map((file) => normalize(fs.readFileSync(file, "utf8")));
     const leaks = anchorLines.filter((line) => promptSources.some((source) => source.includes(line)));
-    expect(leaks, `rubric text leaked into an orchestrator prompt: ${leaks.slice(0, 3).join(" | ")}`).toEqual([]);
+    expect(leaks, `rubric text leaked into an injected surface: ${leaks.slice(0, 3).join(" | ")}`).toEqual([]);
   });
 });

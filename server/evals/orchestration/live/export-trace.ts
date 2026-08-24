@@ -347,7 +347,6 @@ export function exportRunToDir(dbFile: string, outDir: string): { runJson: strin
   const spine = trace.events().map((event) => JSON.stringify(event)).join("\n");
   fs.writeFileSync(path.join(outDir, "events.jsonl"), `${spine}\n`);
   fs.writeFileSync(path.join(outDir, "state-revisions.json"), `${JSON.stringify(trace.stateRevisions(), null, 2)}\n`);
-  fs.writeFileSync(path.join(outDir, "spec-revisions.json"), `${JSON.stringify(trace.specRevisions(), null, 2)}\n`);
   fs.writeFileSync(path.join(outDir, "requirement-revisions.json"), `${JSON.stringify(trace.requirementRevisions(), null, 2)}\n`);
   fs.writeFileSync(path.join(outDir, "decisions.json"), `${JSON.stringify(trace.decisions().map((event) => ({ seq: event.seq, ...event.payload })), null, 2)}\n`);
   fs.writeFileSync(path.join(outDir, "questions.json"), `${JSON.stringify(trace.questions().map((exchange) => ({

@@ -259,8 +259,20 @@ export interface AgentProfileSummary {
   role: AgentProfileRole | null;
   source: "builtin" | "workspace";
   revision: string;
+  /**
+   * Three independent states. `claudeValid`: parses as a legitimate native
+   * definition. `agentiqueCompatible`: the console can instantiate it with
+   * every native field's semantics preserved — a valid definition using a
+   * native feature the console cannot reproduce is compatible=false with
+   * reasons, NEVER "invalid". `trusted`: the operator approved this exact
+   * source revision. Runnable = all three.
+   */
   trusted: boolean;
+  /** Kept as the alias UIs already read; equals claudeValid. */
   valid: boolean;
+  claudeValid: boolean;
+  agentiqueCompatible: boolean;
+  incompatibilityReasons: string[];
   tools: string[];
   skills: string[];
   componentCounts: Record<string, number>;
@@ -289,8 +301,12 @@ export interface AgentProfileDetail extends AgentProfileSummary {
   model: string | null;
   effort: string | null;
   maxTurns: number;
-  /** Capability comes from declared MCP servers, never from console-built tools. */
-  mcpServers: Record<string, { command: string; args: string[] }>;
+  /**
+   * Capability comes from declared MCP servers, never from console-built
+   * tools. The full native surface: console-executed stdio/sse/http forms
+   * and `ref` names the workspace's own `.mcp.json` launches.
+   */
+  mcpServers: Record<string, { transport?: "stdio" | "sse" | "http" | "ref"; command?: string; args?: string[]; env?: Record<string, string>; url?: string; headers?: Record<string, string> }>;
   handoffExtension: string | null;
   pluginPath: string | null;
   components: AgentProfileComponent[];

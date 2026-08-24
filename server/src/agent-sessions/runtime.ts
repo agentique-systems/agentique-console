@@ -3,7 +3,7 @@
  * One machine — the pump dispatches every mapped SDK event, the watchdog trips
  * inside it, and settle closes the turn. Everything a settle touches beyond
  * the lane itself (mailroom delivery transitions, escalation and relay posts,
- * operator-status refresh, the rotation check) arrives as the typed
+ * operator-status refresh) arrives as the typed
  * `SettleHooks` bundle wired by the composition root — the mailroom↔runtime
  * dependency is a cycle only that root may close, and this module never
  * imports the service.
@@ -22,10 +22,7 @@ import type { EventBus } from "../events/bus.ts";
 import { RuntimeBroadcaster } from "../events/runtime.ts";
 import type { HandoffService } from "../handoffs/service.ts";
 import { newId, nowIso } from "../ids.ts";
-import { checkpointQuery } from "../lane-runtime/checkpoint.ts";
-import { rotationDue, type RotationReason } from "../lane-runtime/rotation.ts";
 import { advanceUsageWatermark } from "../lane-runtime/usage.ts";
-import { rotationTokenLimit } from "../model-catalog.ts";
 import type { WorktreeManager } from "../runtime/worktree-manager.ts";
 import type { EffortLevel } from "../sdk/effort.ts";
 import { sdkEnv } from "../sdk/env.ts";
@@ -37,7 +34,8 @@ import type { ConsoleSdk, QueryHandle, SdkOptions, SdkToolResult, SdkUserMessage
 import type { AssignmentScheduler } from "../tasks/scheduler.ts";
 import type { TaskService } from "../tasks/service.ts";
 import { buildAgentTools, type AgentToolsContext, type AskOperatorArgs } from "./agent-tools.ts";
-import { GOVERNED_BUILTIN_TOOLS, declaredMcpServers, effectiveBuiltinTools, seatUserMessage, type PromptComposer } from "./composer.ts";
+import { declaredMcpServers, mcpGrantNames, seatUserMessage, type PromptComposer } from "./composer.ts";
+import { effectiveNativeTools, seatDisallowedNativeTools } from "../sdk/native-capability-policy.ts";
 import { grantedTools, runtimeToolNames, type AgentToolName } from "./grants.ts";
 import type { ActiveTurn, AgentLane, AgentLanePool } from "./lanes.ts";
 import type { DispatchWorkItemsInput } from "./patterns/engine.ts";
@@ -184,7 +182,6 @@ export class AgentRuntime implements Injector, TurnTracker {
     const { repo } = this.#deps;
     const until = deadline ?? Date.now() + (this.#deps.config.policy.agentSpawnTimeoutMs ?? 30_000);
     const lane = this.#deps.lanes.laneOf(agentSessionId, seat);
-    while (lane.rotationGate) await lane.rotationGate;
     if (lane.state === "live" || lane.state === "waking") { await lane.ready; return; }
     const session = repo.getAgentSession(agentSessionId);
     if (!session || session.lifecycle !== "open") throw new ConflictError(`agent session ${agentSessionId} is not open`);
@@ -215,7 +212,7 @@ export class AgentRuntime implements Injector, TurnTracker {
     // query(), and a RESUMED session continues its running total across the
     // process boundary — the baseline belongs to the PROVIDER SESSION, not
     // the lane. An agent with no `sdkSessionId` is genuinely starting fresh
-    // (rotation does that in #rotateNow), so its baseline is zero.
+    // (a fresh seat has none), so its baseline is zero.
     lane.lastCumulative = seatRow.sdkSessionId === null
       ? { costUsd: 0, apiDurationMs: 0 }
       : { costUsd: seatRow.cumulativeCostUsd, apiDurationMs: seatRow.cumulativeApiDurationMs };
@@ -245,10 +242,12 @@ export class AgentRuntime implements Injector, TurnTracker {
       });
       const mcp = this.#buildParticipantMcp(sdk, session, latestSeat, granted);
       const declared = declaredMcpServers(profile, this.#deps.config);
-      // Containment is the worktree: an isolated seat holds every governed
-      // builtin; one sharing the operator's tree keeps its profile binding.
-      const isolated = latestSeat.worktreePath !== null;
-      const builtins = effectiveBuiltinTools(profile, isolated);
+      // Four separate layers, combined only here: (1) the author's native
+      // ceiling ∩ (2) console policy = `native`; (3) console tool grants from
+      // the topology contract; (4) the worktree, which is containment and
+      // never widens a grant — the same profile spawns with the same surface
+      // isolated or not.
+      const native = effectiveNativeTools(profile, "seat");
       const options: SdkOptions = {
         cwd: seatRoot,
         systemPrompt: { type: "preset", preset: "claude_code", append: this.#deps.composer.systemPromptAppend(session, latestSeat, profile, rolePrompt) },
@@ -257,34 +256,20 @@ export class AgentRuntime implements Injector, TurnTracker {
         settingSources: ["user", "project", "local"], includePartialMessages: true,
         permissionMode: profile.permissionMode,
         ...(profile.permissionMode === "bypassPermissions" ? { allowDangerouslySkipPermissions: true } : {}),
-        allowedTools: [...builtins,
-          // Deferred tools (the web pair among them) are absent from the
-          // turn-1 list and load only through ToolSearch, which the capability
-          // brief tells the seat to call. Granted explicitly rather than left
-          // to work by being permission-free.
-          "ToolSearch",
-          // Skill bodies load through the Skill tool; without this a seat
-          // told "invoke your skills" has no approved way to do it.
-          "Skill",
-          ...(builtins.includes("Edit") || builtins.includes("Write") ? ["EnterWorktree", "ExitWorktree"] : []),
-          // Background work is native: a seat starts a dev server with Bash and
-          // reads it back, where it used to call console process tools.
-          ...(builtins.includes("Bash") ? ["TaskOutput", "TaskStop", "Monitor"] : []),
+        allowedTools: [...native,
           // A declared server's whole surface is auto-approved — the profile
           // granting the server IS the permission decision, and there is no
-          // console-side list of its tool names to drift out of date.
-          ...Object.keys(declared).map((name) => `mcp__${name}`),
+          // console-side list of its tool names to drift out of date. The
+          // grant covers ref declarations too (natively launched, console
+          // granted); the launch map below carries only the executed forms.
+          ...mcpGrantNames(profile, this.#deps.config).map((name) => `mcp__${name}`),
           ...runtimeToolNames(granted)],
-        // Without a worktree the profile's tool list is BINDING: `allowedTools`
-        // is only an auto-approval list, so everything the profile did not
-        // grant is denied by name. The native Task* tools are scoped to the
-        // provider session; agents use the console-owned task ledger instead.
-        disallowedTools: [...new Set([
-          // One transport: `send_handoff` is console-carried, so there is no
-          // second wire whose delivery semantics can diverge from it.
-          "Agent", "Task", "SendMessage", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet",
-          ...(isolated ? [] : GOVERNED_BUILTIN_TOOLS.filter((name) => !profile.tools.includes(name))),
-        ])],
+        // `allowedTools` is only an auto-approval list, so everything
+        // classified that the seat does not hold is denied BY NAME — one
+        // formula covering console policy (native coordination, task state,
+        // scheduling, human/host surfaces), the author's disallowedTools, and
+        // every tool an explicit `tools:` list left out.
+        disallowedTools: seatDisallowedNativeTools(native),
         // Agent identity rides the ENV, not the prompt: visible to process
         // forensics and the test discriminator without perturbing the
         // cache-invariant system-prompt head above.
@@ -330,22 +315,9 @@ export class AgentRuntime implements Injector, TurnTracker {
   }
 
   /**
-   * The seat's sandbox READ scope: its own tree, the workspace, and every
-   * other worktree this session holds. Deduped and order-stable so the option
-   * object stays cache-identical across a session's spawns.
-   */
-  #readScope(session: AgentSessionRow, seatRoot: string, workspaceRoot: string): string[] {
-    const roots = new Set<string>([seatRoot, workspaceRoot]);
-    for (const seat of this.#deps.repo.listAgents(session.id)) {
-      if (seat.worktreePath) roots.add(seat.worktreePath);
-    }
-    return [...roots];
-  }
-
-  /**
    * Never hands a tool `lane.abort.signal`: the pool's park nulls `lane.abort`
    * WITHOUT aborting, so a wait tied to the lane-wide signal would strand on
-   * park/rotation/watchdog. Each operator ask mints its own controller,
+   * park/watchdog. Each operator ask mints its own controller,
    * bound to the CURRENT turn through the LaneActivity seam.
    */
   #buildParticipantMcp(sdk: ConsoleSdk, session: AgentSessionRow, seat: AgentRow, granted: ReadonlySet<AgentToolName>): unknown {
@@ -672,198 +644,6 @@ export class AgentRuntime implements Injector, TurnTracker {
     }
     hooks.refreshStatus(session.id);
     this.#deps.lanes.armIdleTimer(session.id, seatName, lane);
-    // Both are no-ops unless the operator turned rotation on. Rotation first;
-    // if it happened the seat starts fresh and the proactive checkpoint is a
-    // no-op. Otherwise a seat nearing its budget checkpoints NOW, while
-    // healthy — not from its deathbed.
-    void this.#maybeRotate(session.id, seatName)
-      .then(() => this.#maybeProactiveCheckpoint(session.id, seatName))
-      .catch((error) => hooks.recordFailure(session.id, error));
-  }
-
-  // ── Context rotation ─────────────────────────────────────────────────────
-
-  /**
-   * Context rotation at a turn boundary, under a gate that blocks senders:
-   * checkpoint the old process, close it, respawn the same peer name on a
-   * fresh provider session, then re-carry anything unacknowledged. Opt-in
-   * (`policy.contextRotation`): by default a seat keeps one provider session
-   * for life and the CLI's native compaction manages its context.
-   */
-  async #maybeRotate(agentSessionId: string, seatName: string): Promise<void> {
-    const config = this.#deps.config;
-    if (!config?.policy.contextRotation || !this.#deps.handoffs || !this.#deps.sdk) return;
-    // A paused system spawns no queries; the next settle re-evaluates.
-    if (this.#deps.capacity.paused) return;
-    const lane = this.#deps.lanes.laneOf(agentSessionId, seatName);
-    if (lane.state !== "live" || lane.activeTurn !== null || lane.rotationGate !== null) return;
-    const { repo } = this.#deps;
-    const session = repo.getAgentSession(agentSessionId);
-    const seat = repo.getAgent(agentSessionId, seatName);
-    if (!session || session.lifecycle !== "open" || !seat) return;
-    const tokenLimit = rotationTokenLimit(config.policy.contextTokenLimit, seat.model ?? config.infra.model);
-    const due = rotationDue({
-      turnCount: seat.turnCount, contextTokens: seat.contextTokens,
-      turnLimit: config.policy.contextTurnLimit, tokenLimit,
-    });
-    if (!due) return;
-    lane.state = "rotating";
-    lane.deliberateStop = true;
-    lane.rotationGate = new Promise((resolve) => { lane.releaseRotation = resolve; });
-    try {
-      lane.input?.close(); lane.input = null;
-      const closing = lane.pump;
-      lane.query?.close?.(); lane.query = null;
-      await closing?.catch(() => undefined);
-      const sdk = await this.#deps.sdk();
-      const rotated = await this.#rotateNow(session, repo.getAgent(agentSessionId, seatName) ?? seat, sdk, due.reason);
-      this.#spawnSeat(session, rotated, lane);
-      await lane.ready;
-    } finally {
-      const release = lane.releaseRotation;
-      lane.rotationGate = null; lane.releaseRotation = null;
-      if (lane.state === "rotating") lane.state = lane.query ? "live" : "parked";
-      release?.();
-      const stale = repo.listUnackedDeliveries(agentSessionId, seatName).filter((row) => row.status === "delivered");
-      for (const row of stale) repo.patchDelivery(row.id, { status: "queued", deliveredAt: null });
-      void this.#deps.hooks.deliver(agentSessionId, seatName).catch((error) => this.#deps.hooks.recordFailure(agentSessionId, error));
-    }
-  }
-
-  /**
-   * Checkpoint a seat nearing its rotation budget (≥80%) while it is still
-   * healthy — a separate resumed query over the live provider session, no
-   * gate, no abort pressure. Rotation then consumes the stored handoff
-   * instead of interrogating a dying process (which failed 31 of 35 times
-   * in a live run and cost ~$62 of re-priming).
-   */
-  async #maybeProactiveCheckpoint(agentSessionId: string, seatName: string): Promise<void> {
-    const config = this.#deps.config;
-    if (!config?.policy.contextRotation || !this.#deps.handoffs || !this.#deps.sdk) return;
-    if (this.#deps.capacity.paused) return;
-    const lane = this.#deps.lanes.laneOf(agentSessionId, seatName);
-    if (lane.state !== "live" || lane.activeTurn !== null || lane.rotationGate !== null || lane.proactiveCheckpointInFlight) return;
-    const { repo } = this.#deps;
-    const session = repo.getAgentSession(agentSessionId);
-    const seat = repo.getAgent(agentSessionId, seatName);
-    if (!session || session.lifecycle !== "open" || !seat || !seat.sdkSessionId) return;
-    if (seat.pendingCheckpointHandoffId !== null) return;
-    const tokenLimit = rotationTokenLimit(config.policy.contextTokenLimit, seat.model ?? config.infra.model);
-    const nearing = seat.contextTokens >= 0.8 * tokenLimit
-      || (config.policy.contextTurnLimit > 0 && seat.turnCount >= 0.8 * config.policy.contextTurnLimit);
-    // Due-now is the rotation path's job; this only covers the 80–100% band.
-    if (!nearing || rotationDue({ turnCount: seat.turnCount, contextTokens: seat.contextTokens,
-      turnLimit: config.policy.contextTurnLimit, tokenLimit }) !== null) return;
-    lane.proactiveCheckpointInFlight = true;
-    try {
-      const sdk = await this.#deps.sdk();
-      const { draft } = await this.#checkpointQuery(session, seat, sdk);
-      if (!draft) return; // silent — the rotation path keeps its own floor
-      const current = repo.getAgent(agentSessionId, seatName);
-      // Rotated (or replaced) underneath while the query ran: stale, drop it.
-      if (!current || current.generation !== seat.generation) return;
-      const specPointer = this.#deps.requirements.pointer(session.userSessionId);
-      const prepared = this.#deps.handoffs.prepare({ draft, userSessionId: session.userSessionId, agentSessionId: session.id,
-        sender: seat.name, recipient: seat.name, profileId: seat.profileId, generation: seat.generation,
-        extensionKind: (seat.profileSnapshot as AgentProfile).handoffExtension,
-        trigger: "rotation", parentHandoffId: current.latestHandoffId, checkpoint: true,
-        ...(specPointer === null ? {} : { extensionDefaults: { approvedSpec: specPointer } }) });
-      repo.insertCheckpointHandoff(prepared.row);
-      this.#deps.handoffs.committed(prepared.record);
-      repo.patchAgent(agentSessionId, seatName, { pendingCheckpointHandoffId: prepared.row.id });
-      this.#deps.bus.append({ type: "agent_session.runtime.noted", userSessionId: session.userSessionId, agentSessionId: session.id,
-        payload: { agentSessionId: session.id, agent: seat.name,
-          detail: `proactive checkpoint ${prepared.row.id} taken at ${seat.contextTokens.toLocaleString()} tokens / ${seat.turnCount} turns` } });
-    } finally {
-      lane.proactiveCheckpointInFlight = false;
-    }
-  }
-
-  /**
-   * The checkpoint-and-rotate body, run by #maybeRotate under its gate after
-   * the agent's process has closed. Returns the successor participant row.
-   * Preference order: the proactive checkpoint (taken healthy, already
-   * journaled) → one deathbed model attempt → the Console's reconstruction,
-   * which is true by construction and always available.
-   */
-  async #rotateNow(session: AgentSessionRow, seat: AgentRow, sdk: ConsoleSdk, reason: RotationReason): Promise<AgentRow> {
-    const config = this.#deps.config;
-    if (!config || !this.#deps.handoffs) return seat;
-    const started = Date.now();
-    const pending = seat.pendingCheckpointHandoffId === null ? undefined
-      : this.#deps.repo.getHandoff(seat.pendingCheckpointHandoffId);
-    if (pending !== undefined) {
-      // The proactive checkpoint is already a journaled handoff for THIS
-      // generation; point the successor at it directly — no dying-process
-      // query, no second row.
-      this.#deps.repo.patchAgent(session.id, seat.name, { sdkSessionId: null, generation: seat.generation + 1,
-        turnCount: 0, contextTokens: 0, latestHandoffId: pending.id, pendingCheckpointHandoffId: null,
-        cumulativeCostUsd: 0, cumulativeApiDurationMs: 0 });
-      const fresh = this.#deps.repo.getAgent(session.id, seat.name) ?? seat;
-      this.#deps.bus.append({ type: "agent_session.context.rotated", userSessionId: session.userSessionId, agentSessionId: session.id,
-        payload: { agentSessionId: session.id, agent: seat.name, generation: seat.generation + 1,
-          reason, handoffId: pending.id, checkpointBytes: pending.bytes, degraded: false } });
-      this.#deps.bus.append({ type: "agent_session.runtime.noted", userSessionId: session.userSessionId, agentSessionId: session.id,
-        payload: { agentSessionId: session.id, agent: seat.name,
-          detail: `rotation consumed proactive checkpoint ${pending.id} (taken ${Math.max(0, Date.now() - Date.parse(pending.createdAt))}ms earlier)` } });
-      return fresh;
-    }
-    const { draft: attempted, failure } = await this.#checkpointQuery(session, seat, sdk);
-    const degraded = attempted === null;
-    const draft = attempted ?? this.#deps.composer.reconstructCheckpoint(session, seat);
-    if (degraded) {
-      this.#deps.bus.append({ type: "handoff.checkpoint.failed", userSessionId: session.userSessionId, agentSessionId: session.id,
-        payload: { agent: seat.name, reason: failure ?? "checkpoint produced no valid handoff", degraded: true } });
-    }
-    // The spec pointer rides the seat checkpoint exactly as it rides main's:
-    // the successor re-reads the digest at spawn, but the checkpoint must be
-    // self-sufficiently true.
-    const specPointer = this.#deps.requirements.pointer(session.userSessionId);
-    const prepared = this.#deps.handoffs.prepare({ draft, userSessionId: session.userSessionId, agentSessionId: session.id,
-      sender: seat.name, recipient: seat.name, profileId: seat.profileId, generation: seat.generation,
-      extensionKind: (seat.profileSnapshot as AgentProfile).handoffExtension,
-      trigger: degraded ? "recovery" : "rotation", parentHandoffId: seat.latestHandoffId, checkpoint: true,
-      ...(specPointer === null ? {} : { extensionDefaults: { approvedSpec: specPointer } }) });
-    this.#deps.repo.insertCheckpointHandoff(prepared.row);
-    this.#deps.handoffs.committed(prepared.record);
-    // Rotation retires the provider session, so its cumulative baseline retires
-    // with it — the successor genuinely starts from zero.
-    this.#deps.repo.patchAgent(session.id, seat.name, { sdkSessionId: null, generation: seat.generation + 1, turnCount: 0, contextTokens: 0, latestHandoffId: prepared.row.id, pendingCheckpointHandoffId: null, cumulativeCostUsd: 0, cumulativeApiDurationMs: 0 });
-    const fresh = this.#deps.repo.getAgent(session.id, seat.name) ?? seat;
-    this.#deps.bus.append({ type: "agent_session.context.rotated", userSessionId: session.userSessionId, agentSessionId: session.id,
-      payload: { agentSessionId: session.id, agent: seat.name, generation: seat.generation + 1,
-        reason,
-        handoffId: prepared.row.id, checkpointBytes: prepared.row.bytes, degraded } });
-    this.#deps.bus.append({ type: "agent_session.runtime.noted", userSessionId: session.userSessionId, agentSessionId: session.id,
-      payload: { agentSessionId: session.id, agent: seat.name, detail: `checkpoint ${prepared.row.id} completed in ${Date.now() - started}ms` } });
-    return fresh;
-  }
-
-  /** The host side of the shared checkpoint query: seat context in, params out. */
-  async #checkpointQuery(session: AgentSessionRow, seat: AgentRow, sdk: ConsoleSdk): Promise<{ draft: HandoffDraft | null; failure: string | null }> {
-    if (!seat.sdkSessionId) return { draft: null, failure: null };
-    const profile = seat.profileSnapshot as AgentProfile;
-    const user = this.#deps.repo.getUserSession(session.userSessionId);
-    if (!user || !this.#deps.getWorkspaceRoot) return { draft: null, failure: null };
-    const workspaceRoot = this.#deps.getWorkspaceRoot(user.workspaceId);
-    const checkpointRoot = seat.worktreePath ?? workspaceRoot;
-    // A separate process, but `resume: seat.sdkSessionId` means it is the SAME
-    // provider session — its cumulative totals continue the agent's, and its
-    // baseline is the agent's. Starting from zero here would bill the whole
-    // session-to-date to one checkpoint pseudo-turn.
-    const cumulative = { costUsd: seat.cumulativeCostUsd, apiDurationMs: seat.cumulativeApiDurationMs };
-    return checkpointQuery(sdk, {
-      prompt: `Create a lossless rotation checkpoint for your successor context. Capture only durable task state, verified evidence pointers, results, uncertainty, and the exact next action. Do not perform work or call tools.`,
-      systemPromptAppend: "You are checkpointing your own context. Report faithfully; do not correct or embellish uncertain state.",
-      cwd: checkpointRoot,
-      readPaths: seat.worktreePath ? [checkpointRoot, workspaceRoot] : [checkpointRoot],
-      resume: seat.sdkSessionId,
-      model: seat.model,
-      effort: this.#seatEffort(profile),
-      sessionStore: this.#deps.sessionStore as SdkOptions["sessionStore"],
-      timeoutMs: this.#deps.config.policy.checkpointTimeoutMs,
-      onResult: (event) => this.#recordUsage(session, seat, cumulative, `checkpoint:${newId("turn")}`, event, "completed", undefined, "checkpoint"),
-    });
   }
 
   /** CONSOLE_EFFORT (operator override) > the profile's own pin > SDK default. */

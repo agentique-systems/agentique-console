@@ -90,36 +90,18 @@ describe("orchestrator lane model", () => {
     expect(low.repo.listUsage(lowSession)[0]?.effort).toBe("low");
   });
 
-  it("with rotation off (the default) main keeps one provider session at any occupancy", async () => {
+  it("main keeps one provider session at any occupancy — context lifetime is native compaction's", async () => {
     const h = makeModelHarness();
     const sessionId = h.addUserSession();
     h.runner.postOperatorMessage(sessionId, "first");
     await collectUntil(h.bus, nthSettled(1));
-    // A context far past every limit; nothing rotates and nothing recycles.
+    // A context far past any historical limit; nothing rotates, nothing recycles.
     h.repo.patchUserSession(sessionId, { sdkTurnCount: 100, contextTokens: 500_000 });
     h.runner.postOperatorMessage(sessionId, "second");
     const events = await collectUntil(h.bus, nthSettled(2));
     expect(events.some((event) => event.type === "user_session.context.rotated")).toBe(false);
     expect(h.fake.captured.options).toHaveLength(1);
     expect(h.repo.getUserSession(sessionId)?.sdkGeneration).toBe(0);
-  });
-
-  it("with rotation on, main rotates onto a fresh provider session at the token limit", async () => {
-    const h = makeHarness(async function* () {
-      yield initMessage("sdk-sess-r");
-      yield textMessage("ok");
-      yield successMessage(undefined, { session_id: "sdk-sess-r" });
-    }, { config: { policy: { contextRotation: true } } });
-    const sessionId = h.addUserSession();
-    h.runner.postOperatorMessage(sessionId, "first");
-    await collectUntil(h.bus, nthSettled(1));
-    h.repo.patchUserSession(sessionId, { contextTokens: 120_000 });
-    h.runner.postOperatorMessage(sessionId, "second");
-    const events = await collectUntil(h.bus, nthSettled(2));
-    expect(events.filter((event) => event.type === "user_session.context.rotated")).toHaveLength(1);
-    expect(h.fake.captured.options).toHaveLength(2);
-    expect(h.fake.captured.options.at(-1)?.resume).toBeUndefined();
-    expect(h.repo.getUserSession(sessionId)?.sdkGeneration).toBe(1);
   });
 
   /**

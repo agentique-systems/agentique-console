@@ -190,7 +190,7 @@ describe("mapSdkMessage", () => {
   });
 
   it("emits context occupancy from an assistant message's own usage", () => {
-    // Per-call prompt size — the rotation signal. The result message's usage is
+    // Per-call prompt size — the occupancy signal. The result message's usage is
     // the turn-wide sum and would overstate occupancy several-fold.
     const events = mapSdkMessage({
       type: "assistant",

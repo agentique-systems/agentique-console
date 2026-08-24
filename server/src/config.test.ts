@@ -41,14 +41,10 @@ describe("loadConfig agent-lane knobs", () => {
     expect(() => loadConfig({ CONSOLE_EFFORT: "turbo" })).toThrow(/CONSOLE_EFFORT "turbo".*low, medium, high, xhigh, max/);
   });
 
-  it("context rotation is off by default; the limits keep their meaning when it is on", () => {
-    const config = loadConfig({});
-    expect(config.policy.contextRotation).toBe(false);
-    expect(config.policy.contextTokenLimit).toBe(120_000);
-    expect(config.policy.contextTurnLimit).toBe(0);
-    const on = loadConfig({ CONSOLE_CONTEXT_ROTATION: "1", CONSOLE_CONTEXT_TURN_LIMIT: "30" });
-    expect(on.policy.contextRotation).toBe(true);
-    expect(on.policy.contextTurnLimit).toBe(30);
+  it("the removed rotation knobs fail the boot loudly instead of silently doing nothing", () => {
+    for (const name of ["CONSOLE_CONTEXT_ROTATION", "CONSOLE_CONTEXT_TOKEN_LIMIT", "CONSOLE_CONTEXT_TURN_LIMIT", "CONSOLE_CHECKPOINT_TIMEOUT_MS"]) {
+      expect(() => loadConfig({ [name]: "1" }), name).toThrow(/native compaction|removed/);
+    }
   });
 
   it("rejects every retired env name loudly, naming the replacement", () => {

@@ -253,42 +253,11 @@ export class InteractionService {
     );
   }
 
-  /** Creates a pending plan-approval card and parks its resolution promise. */
   /**
-   * A SPEC revision rides the plan-approval machinery (the interactions.kind
-   * CHECK cannot be widened on an existing SQLite database): same card, same
-   * parked promise, same chat-dismissal note-attachment — distinguished by
-   * the `spec` payload marker. The operator can edit the text in place;
-   * their version becomes the governing document.
-   */
-  createSpecApproval(
-    userSessionId: string,
-    document: string,
-    specRevision: number,
-    changeNote?: string,
-  ): { id: string; resolution: Promise<InteractionResolution> } {
-    const spec = { revision: specRevision, ...(changeNote === undefined || changeNote === "" ? {} : { changeNote }) };
-    return this.#create(
-      userSessionId,
-      "plan_approval",
-      { plan: document, spec },
-      undefined,
-      undefined,
-      {},
-      (id) => {
-        this.#bus.append({
-          type: "user_session.plan.proposed",
-          userSessionId,
-          payload: { userSessionId, interactionId: id, plan: document, spec },
-        });
-      },
-    );
-  }
-
-  /**
-   * A REQUIREMENT revision rides the same plan-approval machinery as the
-   * legacy spec (the interactions.kind CHECK cannot be widened): same card,
-   * same parked promise, distinguished by the `requirements` payload marker.
+   * A REQUIREMENT revision rides the plan-approval machinery (the
+   * interactions.kind CHECK cannot be widened on an existing SQLite
+   * database): same card, same parked promise, same chat-dismissal
+   * note-attachment — distinguished by the `requirements` payload marker.
    * The operator edits the canonical outline in place; the route validates
    * their edit with the shared parser BEFORE resolving, so a bad parse can
    * never eat an approval.

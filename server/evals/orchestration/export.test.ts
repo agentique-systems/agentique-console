@@ -28,7 +28,7 @@ async function exportVariant(scenario: Parameters<typeof runScenarioVariant>[0],
 describe("decision-time evidence export", () => {
   it("packets reconstruct what was knowable at each major act", { timeout: 30_000 }, async () => {
     const { dbFile, out } = await exportVariant(reviewerInvalidatesSpec, "exemplary");
-    for (const file of ["events.jsonl", "state-revisions.json", "spec-revisions.json", "requirement-revisions.json", "decisions.json", "questions.json", "tool-calls.json", "evidence/packets.json"]) {
+    for (const file of ["events.jsonl", "state-revisions.json", "requirement-revisions.json", "decisions.json", "questions.json", "tool-calls.json", "evidence/packets.json"]) {
       expect(fs.existsSync(path.join(out, file)), `${file} missing`).toBe(true);
     }
     const packets = exportEvidencePackets(dbFile);

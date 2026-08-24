@@ -9,6 +9,7 @@
  * journaled like every other transfer.
  */
 import { describe, expect, it } from "vitest";
+import { MAIN_TOOL_NAMES } from "./grants.ts";
 import { buildOrchestratorOptions } from "./options.ts";
 import { ORCHESTRATOR_BRIEF, ORCHESTRATOR_DELEGATION_BRIEF } from "./prompt.ts";
 
@@ -64,7 +65,7 @@ describe("orchestrator options", () => {
   // The brief shapes attention; the mechanics live in tool descriptions. It
   // was 17 KB once, and every line competes with the native system prompt.
   it("keeps the standing brief within its byte budget", () => {
-    expect(Buffer.byteLength(ORCHESTRATOR_BRIEF + ORCHESTRATOR_DELEGATION_BRIEF, "utf8")).toBeLessThanOrEqual(10_000);
+    expect(Buffer.byteLength(ORCHESTRATOR_BRIEF + ORCHESTRATOR_DELEGATION_BRIEF, "utf8")).toBeLessThanOrEqual(7_000);
   });
 
   it("loads settings, CLAUDE.md and skills like the CLI", () => {
@@ -102,6 +103,20 @@ describe("orchestrator options", () => {
     // The two that must reach canUseTool to become operator cards.
     expect(allowed).not.toContain("AskUserQuestion");
     expect(allowed).not.toContain("ExitPlanMode");
+  });
+
+  it("derives the console allow-list from MAIN_TOOL_NAMES, one entry each", () => {
+    const allowed = options().allowedTools ?? [];
+    for (const name of MAIN_TOOL_NAMES) expect(allowed).toContain(`mcp__console__${name}`);
+  });
+
+  it("denies the policy's task-state, plan-entry and host-surface natives", () => {
+    const disallowed = options().disallowedTools ?? [];
+    expect(disallowed).toEqual(expect.arrayContaining([
+      "TodoWrite", "Workflow", "ListAgents", "EnterPlanMode", "RemoteTrigger", "Artifact", "PushNotification", "REPL",
+    ]));
+    expect(disallowed).not.toContain("AskUserQuestion");
+    expect(disallowed).not.toContain("ExitPlanMode");
   });
 
   it("withholds delegation and native messaging until the console MCP server is wired", () => {

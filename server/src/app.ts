@@ -25,7 +25,6 @@ import { OrchestratorRunner } from "./orchestrator/runner.ts";
 import { buildConsoleMcpServer } from "./orchestrator/tools.ts";
 import { AssumptionService } from "./orchestrator/assumptions.ts";
 import { RequirementService } from "./orchestrator/requirements.ts";
-import { SpecService } from "./orchestrator/spec.ts";
 import { OrchestrationStateService } from "./orchestrator/state.ts";
 import type { ConsoleSdk } from "./sdk/types.ts";
 import type { SqliteSessionStore } from "./sdk/session-store.ts";
@@ -78,7 +77,6 @@ export interface App {
   sessionStore: SqliteSessionStore;
   host: AgentSessionService;
   runner: OrchestratorRunner;
-  specs: SpecService;
   requirements: RequirementService;
   assumptions: AssumptionService;
   orchestrationState: OrchestrationStateService;
@@ -114,8 +112,7 @@ export function createApp(options: CreateAppOptions): App {
   const interactions = new InteractionService(stores.interactions, bus);
   const tasks = new TaskService(stores.tasks, stores.assignments, bus, (workspaceId) => void workspaces.get(workspaceId));
   const handoffs = new HandoffService({ repo, bus, getWorkspaceRoot });
-  const specs = new SpecService(stores.specs, bus);
-  const requirements = new RequirementService(stores.requirements, stores.projects, stores.assumptions, specs, bus, resolveProject);
+  const requirements = new RequirementService(stores.requirements, stores.projects, stores.assumptions, bus, resolveProject);
   const assumptions = new AssumptionService(stores.assumptions, requirements, bus, resolveProject);
   // One requirements proposal at a time: with sequential continuation this is
   // what makes a stale base revision impossible rather than merely detected.
@@ -145,6 +142,8 @@ export function createApp(options: CreateAppOptions): App {
 
   const capacity = new CapacityService({ repo, bus });
   const catalog = new CapabilityCatalog(path.join(config.infra.skillsPluginDir, "skills"));
+  // A typo'd requires.tools would silently block a skill's assignment forever.
+  for (const issue of catalog.issues) console.warn(`capability catalog: ${issue}`);
   const lateRunner = late<OrchestratorRunner>("runner");
   const lateScheduler = late<AssignmentScheduler>("scheduler");
   const host = new AgentSessionService({
@@ -163,11 +162,11 @@ export function createApp(options: CreateAppOptions): App {
   lateScheduler.set(scheduler);
   const runner = new OrchestratorRunner({
     repo, bus, config, sdk, interactions, decisions, handoffs, sessionStore, getWorkspaceRoot,
-    specs, requirements, orchestrationState,
+    requirements, orchestrationState,
     host: () => host,
     tasks, capacity,
     buildMcpServer: (userSessionId, sdkInstance) =>
-      buildConsoleMcpServer({ sdk: sdkInstance, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, specs, requirements, assumptions, state: orchestrationState, catalog, registry: profiles }),
+      buildConsoleMcpServer({ sdk: sdkInstance, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, requirements, assumptions, state: orchestrationState, catalog, registry: profiles }),
   });
   lateRunner.set(runner);
   // Console-established facts (a falsified assumption, a dependency that
@@ -176,7 +175,7 @@ export function createApp(options: CreateAppOptions): App {
   requirements.setWakeNote((userSessionId, text) => lateRunner.get().postConsoleNote(userSessionId, text));
   assumptions.setWakeNote((userSessionId, text) => lateRunner.get().postConsoleNote(userSessionId, text));
   const completion = new RunCompletionService({
-    db, repo, bus, interactions, scheduler, getWorkspaceRoot, orchestrationState, specs, requirements,
+    db, repo, bus, interactions, scheduler, getWorkspaceRoot, orchestrationState, requirements,
     host: () => host,
     runner: () => runner,
     quietWindowMs: config.policy.completionQuietWindowMs,
@@ -220,7 +219,7 @@ export function createApp(options: CreateAppOptions): App {
   });
 
   return {
-    config, db, sqlite, bus, artifacts, repo, sdk, getWorkspaceRoot, specs, requirements, assumptions, orchestrationState,
+    config, db, sqlite, bus, artifacts, repo, sdk, getWorkspaceRoot, requirements, assumptions, orchestrationState,
     workspaces, timeline, profiles, worktrees, capacity,
     decisions, interactions, tasks, scheduler, handoffs, sessionStore,
     host, runner, completion, userSessions, system,

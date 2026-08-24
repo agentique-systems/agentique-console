@@ -31,7 +31,12 @@ function ProfileCard() {
   const workspace = useScopeStore((s) => s.selectedWorkspaceId); const id = useUiStore((s) => s.selectedProfileId); const profile = useAgentProfile(workspace, id); const trust = useTrustProfile();
   if (!profile.data || !workspace) return <div className="flex h-full items-center justify-center text-xs text-muted-foreground">Select a profile.</div>;
   const p = profile.data; return <aside className="min-h-0 h-full overflow-y-auto bg-sidebar/30 p-4"><div className="flex items-start gap-3"><div className="min-w-0 flex-1"><h2 className="text-base font-medium">{p.title}</h2><p className="mt-1 text-xs text-muted-foreground">{p.purpose}</p></div><Badge variant="outline">{p.source}</Badge></div>
-    {p.source !== "builtin" && <div className="mt-3 flex gap-2">{!p.trusted ? <Button size="sm" disabled={!p.valid || trust.isPending} onClick={() => trust.mutate({ workspaceId: workspace, profileId: p.id, revision: p.revision })}><ShieldCheck className="size-3" />Enable revision</Button> : <Badge className="gap-1"><ShieldCheck className="size-3" />trusted</Badge>}</div>}
+    {p.source !== "builtin" && <div className="mt-3 flex flex-wrap items-center gap-2">
+      <Badge variant="outline" className={cn(p.claudeValid ? "text-status-completed" : "text-status-failed")}>{p.claudeValid ? "Claude-valid" : "not Claude-valid"}</Badge>
+      <Badge variant="outline" className={cn(p.agentiqueCompatible ? "text-status-completed" : "text-status-waiting")}>{p.agentiqueCompatible ? "compatible" : "incompatible"}</Badge>
+      {!p.trusted ? <Button size="sm" disabled={!p.valid || !p.agentiqueCompatible || trust.isPending} onClick={() => trust.mutate({ workspaceId: workspace, profileId: p.id, revision: p.revision })}><ShieldCheck className="size-3" />Enable revision</Button> : <Badge className="gap-1"><ShieldCheck className="size-3" />trusted</Badge>}
+    </div>}
+    {p.incompatibilityReasons.length > 0 && <Section title="Not runnable by Agentique">{p.incompatibilityReasons.map((reason, i) => <p key={i} className="text-2xs text-status-waiting">{reason}</p>)}</Section>}
     <Section title="Prompt"><pre className="whitespace-pre-wrap font-sans text-2xs text-muted-foreground">{p.instructions}</pre></Section>
     <Section title="Runtime"><div className="flex flex-wrap gap-1">{[p.permissionMode, p.model ?? "default model", p.effort ?? "default effort", `${p.maxTurns} turns`, ...Object.keys(p.mcpServers ?? {}).map((n) => `mcp: ${n}`)].map((x) => <Badge key={x} variant="outline">{x}</Badge>)}</div></Section>
     <Section title={`Tools · ${p.tools.length}`}><div className="flex flex-wrap gap-1">{p.tools.map((tool) => <Badge key={tool} variant="secondary">{tool}</Badge>)}</div></Section>

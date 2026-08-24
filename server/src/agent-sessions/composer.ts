@@ -21,32 +21,41 @@ import type { AssumptionService } from "../orchestrator/assumptions.ts";
 import type { RequirementService } from "../orchestrator/requirements.ts";
 import type { InteractionService } from "../orchestrator/interactions.ts";
 import type { WorktreeManager } from "../runtime/worktree-manager.ts";
+import { effectiveNativeTools, type GovernedTool } from "../sdk/native-capability-policy.ts";
 import type { SdkUserMessageLike } from "../sdk/types.ts";
 import type { TaskService } from "../tasks/service.ts";
 import type { RolePrompt } from "./topology-contract.ts";
 
 /**
- * The MCP servers a seat actually gets: what its profile declared, minus what
- * the operator disabled, with the browser server swappable by name.
+ * The MCP servers the CONSOLE launches for a seat: the profile's executed
+ * declarations (stdio/sse/http), minus what the operator disabled, with the
+ * browser server swappable by name. A `ref` declaration is deliberately
+ * absent here — its native meaning is "attach an already-configured server",
+ * so the workspace's own native MCP config (root `.mcp.json`, SDK-owned)
+ * launches it and the console only grants it (`mcpGrantNames`). One launcher
+ * per declaration, by construction.
  *
  * Config-declared and console-launched — the Console vendors no capability of
  * its own. `CONSOLE_MCP_DISABLED=browser` turns a server off for a whole
  * install; `CONSOLE_BROWSER_MCP='<command> <args…>'` replaces the browser one
- * without touching a profile.
+ * without touching a profile. Both are operator-set env, never silent.
  */
-export function declaredMcpServers(profile: AgentProfile, config: Config): Record<string, { command: string; args: string[]; env?: Record<string, string>; timeout?: number }> {
+export function declaredMcpServers(profile: AgentProfile, config: Config): Record<string, Record<string, unknown>> {
   const disabled = new Set(config.infra.mcpDisabled ?? []);
-  const out: Record<string, { command: string; args: string[]; env?: Record<string, string>; timeout?: number }> = {};
-  // Per-call wall clock on every DECLARED server. Without it a wedged
+  const out: Record<string, Record<string, unknown>> = {};
+  // Per-call wall clock on every EXECUTED server. Without it a wedged
   // browser_evaluate holds a turn open forever — no watchdog counts an
   // in-flight call, and a live run died exactly this way. The console's own
   // in-process server carries no timeout: ask_operator parks legally.
   const timeout = config.policy.mcpToolTimeoutMs > 0 ? { timeout: config.policy.mcpToolTimeoutMs } : {};
-  // A profile SNAPSHOT taken before this field existed has no `mcpServers`.
-  // Snapshots are cast, never re-parsed, so the default never applies to them:
-  // a session open across the upgrade must degrade to "no servers", not crash.
+  // A profile SNAPSHOT taken before this field existed has no `mcpServers`,
+  // and one from before the transport union has bare `{command,args}` values.
+  // Snapshots are cast, never re-parsed, so BOTH degrade gracefully here: a
+  // command-shaped value launches as stdio whatever its `transport` says.
   for (const [name, spec] of Object.entries(profile.mcpServers ?? {})) {
     if (disabled.has(name)) continue;
+    const declaration = spec as { transport?: string; command?: string; args?: string[]; env?: Record<string, string>; url?: string; headers?: Record<string, string> };
+    if (declaration.transport === "ref") continue;
     const override = name === "browser" ? config.infra.browserMcp : undefined;
     if (override !== undefined) {
       const [command, ...args] = override;
@@ -54,37 +63,37 @@ export function declaredMcpServers(profile: AgentProfile, config: Config): Recor
       out[name] = { command, args, ...timeout };
       continue;
     }
-    out[name] = { ...spec, ...timeout };
+    if (typeof declaration.command === "string") {
+      out[name] = { command: declaration.command, args: declaration.args ?? [], ...(declaration.env === undefined ? {} : { env: declaration.env }), ...timeout };
+    } else if (typeof declaration.url === "string" && (declaration.transport === "sse" || declaration.transport === "http")) {
+      out[name] = { type: declaration.transport, url: declaration.url, ...(declaration.headers === undefined ? {} : { headers: declaration.headers }), ...timeout };
+    }
   }
   return out;
 }
 
 /**
- * The built-in tools the console governs. An ISOLATED seat — one with its own
- * worktree — holds all of them: containment is the worktree, and the
- * profile's instructions govern use. A seat WITHOUT a worktree (the
- * coordinator, or any seat in a non-git workspace) shares the operator's
- * tree, so there the profile's list stays binding: whatever it does not grant
- * is denied by name. Harness conveniences a governed agent never reaches
- * (subagent spawning, native messaging and task ledgers) are denied
- * unconditionally — see `runtime.ts`.
- *
- * Lives here, next to the brief that describes it: the two must not drift.
- * A live run lost two of four researchers to exactly that drift — they held
- * WebSearch and WebFetch while the brief told them "read files only", and
- * they dutifully reported the limit instead of using the tools.
+ * Every declared server name the seat is GRANTED (`mcp__<name>` prefix) —
+ * executed and ref forms alike, minus operator-disabled. The grant surface
+ * is broader than the launch surface exactly by the ref declarations.
  */
-export const GOVERNED_BUILTIN_TOOLS = [
-  "Bash", "Edit", "Write", "NotebookEdit", "Read", "Glob", "Grep",
-  "WebFetch", "WebSearch",
-] as const;
-
-type GovernedTool = (typeof GOVERNED_BUILTIN_TOOLS)[number];
-
-/** The builtins a seat actually holds — see `GOVERNED_BUILTIN_TOOLS`. */
-export function effectiveBuiltinTools(profile: AgentProfile, isolated: boolean): string[] {
-  return isolated ? [...new Set([...profile.tools, ...GOVERNED_BUILTIN_TOOLS])] : [...profile.tools];
+export function mcpGrantNames(profile: AgentProfile, config: Config): string[] {
+  const disabled = new Set(config.infra.mcpDisabled ?? []);
+  return Object.keys(profile.mcpServers ?? {}).filter((name) => !disabled.has(name));
 }
+
+/**
+ * The workspace tools the brief describes — re-exported from the capability
+ * policy so the roster and the brief read the same set the runtime enforces.
+ * A profile's declared `tools` are its ceiling for EVERY seat; the worktree
+ * is containment, never a grant (`sdk/native-capability-policy.ts`).
+ *
+ * The brief lives next to this set: the two must not drift. A live run lost
+ * two of four researchers to exactly that drift — they held WebSearch and
+ * WebFetch while the brief told them "read files only", and they dutifully
+ * reported the limit instead of using the tools.
+ */
+export { WORKSPACE_TOOLS as GOVERNED_BUILTIN_TOOLS } from "../sdk/native-capability-policy.ts";
 
 /**
  * How each governed tool is described to the agent holding (or lacking) it.
@@ -138,35 +147,40 @@ type AssertNone<T extends never> = T;
 export type _AllGovernedToolsDescribed = AssertNone<Undescribed>;
 
 /**
- * What the seat holds, said once and positively. The "cannot" line exists
- * only for a seat whose profile is binding (no worktree): an isolated seat
- * holds every builtin, so there is nothing to deny it.
+ * What the seat holds, said once and positively. The set described is the
+ * SAME intersection the runtime enforces (`effectiveNativeTools`): the
+ * author's ceiling under console policy, identical with or without a
+ * worktree. The "cannot" line renders whenever a whole group is absent.
  */
 function capabilityBrief(profile: AgentProfile, hasWorktree: boolean): string {
   const can: string[] = [];
   const cannot: string[] = [];
   const deferred: string[] = [];
-  const tools = effectiveBuiltinTools(profile, hasWorktree);
+  const tools = effectiveNativeTools(profile, "seat");
   // The merge rule stays profile-based (worktree-binding.ts): only a write
   // profile's worktree lands, so an isolated read-only seat must be told.
   const writes = profileWritesFiles(profile.tools);
   for (const group of CAPABILITY_GROUPS) {
-    if (group.tools.some((tool) => tools.includes(tool))) {
+    if (group.tools.some((tool) => tools.has(tool))) {
       can.push(group.can);
-      if ("deferred" in group) deferred.push(...group.deferred);
+      // Only the deferred names the seat actually holds — naming an
+      // ungranted tool would send it hunting for a denied capability.
+      if ("deferred" in group) deferred.push(...group.deferred.filter((tool) => tools.has(tool)));
     } else cannot.push(group.cannot);
   }
   // `?? {}`: a snapshot from before this field existed is cast, not parsed.
   const servers = Object.keys(profile.mcpServers ?? {});
   if (servers.length > 0) can.push(`use your MCP server(s) — ${servers.join(", ")}, tools named mcp__<server>__<tool>`);
   // The deferred-tools lesson, applied to skills: a capability nobody names
-  // goes unused. Byte-stable when the list is empty.
+  // goes unused. Byte-stable when the list is empty; silent for a profile
+  // that grants no Skill/ToolSearch — an instruction to call a denied tool
+  // would be worse than saying nothing.
   const skills = profile.skills ?? [];
   const lines = [
     `You can: ${can.join("; ")}.`,
     ...(cannot.length > 0 ? [`You cannot: ${cannot.join("; ")}. If an assignment needs one of those, say so in a handoff rather than working around it — the limit is real for this run.`] : []),
-    ...(deferred.length > 0 ? [`${deferred.join(", ")} may be missing from your tool list at the start of a turn — deferred, not absent: load them once with ToolSearch {"query": "select:${deferred.join(",")}"} and use them normally.`] : []),
-    ...(skills.length > 0 ? [`Recommended skills: ${skills.join(", ")}. Invoke one with the Skill tool before starting work it covers.`] : []),
+    ...(deferred.length > 0 && tools.has("ToolSearch") ? [`${deferred.join(", ")} may be missing from your tool list at the start of a turn — deferred, not absent: load them once with ToolSearch {"query": "select:${deferred.join(",")}"} and use them normally.`] : []),
+    ...(skills.length > 0 && tools.has("Skill") ? [`Recommended skills: ${skills.join(", ")}. Invoke one with the Skill tool before starting work it covers.`] : []),
     ...(hasWorktree ? [writes
       ? "Your cwd is an isolated worktree; teammates cannot see your files until the Console merges them when you report completed."
       : "Your cwd is an isolated worktree — a stable snapshot for your review. It is discarded, not merged, when you report: describe defects and fixes in your report rather than applying them."] : []),
@@ -176,12 +190,13 @@ function capabilityBrief(profile: AgentProfile, hasWorktree: boolean): string {
 
 /** Compact capability tag for roster lines — what this agent can be asked to do. */
 function capabilityTag(profile: AgentProfile): string {
+  const tools = effectiveNativeTools(profile, "seat");
   const caps = [
     ...(profileWritesFiles(profile.tools) ? ["writes files"] : ["read-only"]),
-    ...(profile.tools.includes("Bash") ? ["runs commands"] : []),
+    ...(tools.has("Bash") ? ["runs commands"] : []),
     // Without this a coordinator reads "read-only" off a researcher's roster
     // line and assigns — or reports — as though the seat had no web access.
-    ...(profile.tools.includes("WebSearch") || profile.tools.includes("WebFetch") ? ["reads the web"] : []),
+    ...(tools.has("WebSearch") || tools.has("WebFetch") ? ["reads the web"] : []),
     ...Object.keys(profile.mcpServers ?? {}),
   ];
   return `can: ${caps.join(", ")}`;
@@ -199,7 +214,7 @@ export function seatUserMessage(text: string): SdkUserMessageLike {
  */
 function seatMessagingBrief(roster: string, addressing: string): string {
   return `## Working with the team\nParticipants: ${roster}.\n${addressing}\n` +
-    `Everything you transfer — an assignment, progress, findings, a failure, a result — goes through send_handoff; your plain text output reaches no one. Put the substance itself in stateSummary and long material in write_note. The Human Operator is reachable directly with ask_operator.`;
+    `Everything you transfer — an assignment, progress, findings, a failure, a result — goes through send_handoff; your plain text output reaches no one. The Human Operator is reachable directly with ask_operator.`;
 }
 
 /** The question text of an interaction, for prompts and operator-facing lines. */
@@ -220,7 +235,7 @@ export interface PromptComposerDeps {
   config: Config;
   handoffs: HandoffService;
   decisions: DecisionLedger;
-  /** The governing requirements (legacy-spec fallback inside) — injected into every seat like decisions are. */
+  /** The governing requirements — injected into every seat like decisions are. */
   requirements: RequirementService;
   /** Recorded premises — the delegated block surfaces the ones under a seat's subtrees. */
   assumptions: AssumptionService;
@@ -246,8 +261,7 @@ export class PromptComposer {
    */
   systemPromptAppend(session: AgentSessionRow, seat: AgentRow, profile: AgentProfile, rolePrompt: RolePrompt): string {
     const identity = rolePrompt.brief === undefined ? seat.instructions : `${seat.instructions}\n\n${rolePrompt.brief}`;
-    const worktree = seat.worktreePath ? "\nThe Console commits and lands your work when you report; do not run git commit yourself." : "";
-    return `${identity}\n\n${capabilityBrief(profile, seat.worktreePath !== null)}${worktree}\n\n${seatMessagingBrief(this.rosterLine(session), rolePrompt.addressing)}\n${rolePrompt.protocol}${this.#decisionContext(session)}${this.#specContext(session)}${this.#checkpointContext(seat)}`;
+    return `${identity}\n\n${capabilityBrief(profile, seat.worktreePath !== null)}\n\n${seatMessagingBrief(this.rosterLine(session), rolePrompt.addressing)}\n${rolePrompt.protocol}${this.#decisionContext(session)}${this.#specContext(session)}${this.#checkpointContext(seat)}`;
   }
 
   /**
@@ -315,7 +329,7 @@ export class PromptComposer {
     const freshBlock = unseen.length === 0 ? ""
       : `## New operator decisions since your last delivery\nAuthoritative — these were decided for this whole session, not just for the seat that asked.\n${unseen.map((row) => `- ${renderDecision(row)}`).join("\n")}\n\n`;
     // The shared ledger, in every delivery: a live run's units sat pending
-    // forever because agents only ever saw the ledger at rotation. Omitted
+    // forever because agents only ever saw the ledger at spawn. Omitted
     // entirely when empty (byte-stability for ledger-less sessions).
     const taskLines = this.#deps.tasks.linesForAgentSession(session.id);
     const ledgerBlock = taskLines.length === 0 ? ""
@@ -396,7 +410,7 @@ export class PromptComposer {
         risk: "high",
         action: recoveryAction(assignment?.core.action ?? own?.core.action ?? "Resume interrupted work"),
         state: {
-          summary: `Context was rotated before ${seat.name} could write a checkpoint, so this was reconstructed by the Console from authoritative state — not from the previous context's memory. Treat it as a starting point and re-derive anything not listed.\n\n${facts.join("\n")}`,
+          summary: `${seat.name}'s previous context ended before it could write a checkpoint, so this was reconstructed by the Console from authoritative state — not from that context's memory. Treat it as a starting point and re-derive anything not listed.\n\n${facts.join("\n")}`,
           evidence,
         },
         result: { summary: null, artifacts: [] },
@@ -498,16 +512,11 @@ export class PromptComposer {
    * A seat gets the VISION plus the top-level shape, not the whole outline:
    * its delegated subtree arrives in full with every delivery, and detail
    * outside it is one read_requirements away — injecting the entire graph
-   * into every seat is exactly what stops scaling. Legacy (pre-graph) runs
-   * keep the old digest injection.
+   * into every seat is exactly what stops scaling.
    */
   #specContext(session: AgentSessionRow): string {
     const approved = this.#deps.requirements.latestApproved(session.userSessionId);
-    if (approved === undefined) {
-      const digest = this.#deps.requirements.digest(session.userSessionId);
-      if (digest === "") return "";
-      return `\n\n${digest}\nYour work is checked against this. read_requirements returns the full outline with statuses.`;
-    }
+    if (approved === undefined) return "";
     const intent = this.#deps.requirements.intentDocument(session.userSessionId);
     const nodes = this.#deps.requirements.derive(session.userSessionId);
     const subtreeCounts = (rootId: string): { satisfied: number; total: number } => {
@@ -587,14 +596,15 @@ export class PromptComposer {
   }
 
   /**
-   * Where the previous generation left off (rotation on only), as prose the
+   * Where the previous generation left off (recovery, or a historical
+   * checkpoint row), as prose the
    * successor can act on. The lossless record stays one read_handoff away.
    */
   #checkpointContext(seat: AgentRow): string {
     if (seat.latestHandoffId && this.#deps.handoffs) {
       const handoff = this.#deps.handoffs.get(seat.latestHandoffId);
       // `latestHandoffId` is the seat's inbound pointer: for a seat that has
-      // not rotated it names its briefing or last assignment, which the lane
+      // not recovered it names its briefing or last assignment, which the lane
       // already delivered — only a real checkpoint is worth a tail.
       if (!handoff.metadata.checkpoint) return "";
       const { core } = handoff;
@@ -607,7 +617,7 @@ export class PromptComposer {
         ...(core.nextAction ? [`Next: ${core.nextAction}`] : []),
         ...(evidence.length > 0 ? [`Evidence: ${evidence.join("; ")}`] : []),
       ];
-      return `\n\n## Where you left off (checkpoint ${handoff.metadata.id})\nYour previous context wrote this before rotating; read_handoff returns the full record. Treat it as a starting point and verify anything risky.\n${lines.join("\n")}`;
+      return `\n\n## Where you left off (checkpoint ${handoff.metadata.id})\nYour previous context wrote this before it ended; read_handoff returns the full record. Treat it as a starting point and verify anything risky.\n${lines.join("\n")}`;
     }
     return "";
   }
