@@ -24,6 +24,7 @@ import { InteractionService } from "./orchestrator/interactions.ts";
 import { OrchestratorRunner } from "./orchestrator/runner.ts";
 import { buildConsoleMcpServer } from "./orchestrator/tools.ts";
 import { AssumptionService } from "./orchestrator/assumptions.ts";
+import { ChangeImpactService } from "./orchestrator/change-impact.ts";
 import { RequirementService } from "./orchestrator/requirements.ts";
 import { OrchestrationStateService } from "./orchestrator/state.ts";
 import type { ConsoleSdk } from "./sdk/types.ts";
@@ -79,6 +80,7 @@ export interface App {
   runner: OrchestratorRunner;
   requirements: RequirementService;
   assumptions: AssumptionService;
+  changeImpacts: ChangeImpactService;
   orchestrationState: OrchestrationStateService;
   completion: RunCompletionService;
   userSessions: UserSessionService;
@@ -114,6 +116,17 @@ export function createApp(options: CreateAppOptions): App {
   const handoffs = new HandoffService({ repo, bus, getWorkspaceRoot });
   const requirements = new RequirementService(stores.requirements, stores.projects, stores.assumptions, bus, resolveProject);
   const assumptions = new AssumptionService(stores.assumptions, requirements, bus, resolveProject);
+  // The change-impact ledger: the graph computes each change's transitive
+  // closure; this persists it durably and derives reconciliation state.
+  const changeImpacts = new ChangeImpactService(stores.changeImpacts, bus, resolveProject);
+  changeImpacts.setDeps({
+    openAgentSessionIds: (userSessionId) =>
+      new Set(repo.listAgentSessions(userSessionId).filter((row) => row.lifecycle === "open").map((row) => row.id)),
+    sessionTitle: (agentSessionId) => repo.getAgentSession(agentSessionId)?.title ?? null,
+    listTasks: (userSessionId) => tasks.listForUserSession(userSessionId),
+    latestChanges: (userSessionId) => stores.requirements.latestChanges(resolveProject(userSessionId)),
+  });
+  requirements.setImpactRecorder((input) => changeImpacts.record(input));
   // One requirements proposal at a time: with sequential continuation this is
   // what makes a stale base revision impossible rather than merely detected.
   requirements.setPendingProposalCheck((userSessionId) =>
@@ -166,7 +179,7 @@ export function createApp(options: CreateAppOptions): App {
     host: () => host,
     tasks, capacity,
     buildMcpServer: (userSessionId, sdkInstance) =>
-      buildConsoleMcpServer({ sdk: sdkInstance, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, requirements, assumptions, state: orchestrationState, catalog, registry: profiles }),
+      buildConsoleMcpServer({ sdk: sdkInstance, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, requirements, assumptions, changeImpacts, state: orchestrationState, catalog, registry: profiles }),
   });
   lateRunner.set(runner);
   // Console-established facts (a falsified assumption, a dependency that
@@ -175,7 +188,7 @@ export function createApp(options: CreateAppOptions): App {
   requirements.setWakeNote((userSessionId, text) => lateRunner.get().postConsoleNote(userSessionId, text));
   assumptions.setWakeNote((userSessionId, text) => lateRunner.get().postConsoleNote(userSessionId, text));
   const completion = new RunCompletionService({
-    db, repo, bus, interactions, scheduler, getWorkspaceRoot, orchestrationState, requirements,
+    db, repo, bus, interactions, scheduler, getWorkspaceRoot, orchestrationState, requirements, changeImpacts,
     host: () => host,
     runner: () => runner,
     quietWindowMs: config.policy.completionQuietWindowMs,
@@ -219,7 +232,7 @@ export function createApp(options: CreateAppOptions): App {
   });
 
   return {
-    config, db, sqlite, bus, artifacts, repo, sdk, getWorkspaceRoot, requirements, assumptions, orchestrationState,
+    config, db, sqlite, bus, artifacts, repo, sdk, getWorkspaceRoot, requirements, assumptions, changeImpacts, orchestrationState,
     workspaces, timeline, profiles, worktrees, capacity,
     decisions, interactions, tasks, scheduler, handoffs, sessionStore,
     host, runner, completion, userSessions, system,

@@ -48,6 +48,7 @@ const RESPONSE: GetRequirementsResponse = {
   intent: null,
   verificationGaps: [],
   reversals: [],
+  changeImpacts: [],
 };
 
 function stubFetch(posts: { url: string; body: unknown }[]) {

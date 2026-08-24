@@ -190,6 +190,7 @@ export function registerUserSessionRoutes(
         intent: ctx.app.requirements.intentDocument(userSessionId),
         verificationGaps: ctx.app.requirements.verificationGaps(userSessionId),
         reversals: ctx.app.requirements.reversals(userSessionId),
+        changeImpacts: ctx.app.changeImpacts.list(userSessionId),
       };
     },
   );

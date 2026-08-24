@@ -136,13 +136,40 @@ export class AssumptionService {
       },
     });
     if (input.outcome === "falsified") {
-      const terminal = affected.filter((entry) => ["satisfied", "violated", "infeasible"].includes(entry.status));
-      if (terminal.length > 0) {
+      // The durable transitive record: requirements resting on the premise,
+      // their descendants and dependents, the terminal claims among them, and
+      // the open sessions working any of it. The recorder declines when
+      // nothing stale or active is touched.
+      const impact = this.#requirements.recordImpact({
+        userSessionId: input.userSessionId,
+        sourceKind: "assumption_falsified",
+        sourceRef: row.id,
+        note: `assumption ${row.id} falsified by ${input.actor}`,
+        seeds: linked.map((requirementId) => ({ id: requirementId, basis: "falsified" as const })),
+      });
+      if (impact !== null) {
+        const suspects = impact.affected.suspectClaims
+          .map((claim) => `${claim.requirementId} (${claim.status})`);
+        const claimsLine = suspects.length === 0
+          ? "No terminal claims are affected, but open sessions are working inside the affected set."
+          : `These requirements rest on it (directly or transitively) and hold terminal claims recorded before the falsification: ${suspects.join(", ")}.`;
         this.#wakeNote?.(input.userSessionId,
           `[Console: assumption ${row.id} ("${row.text}") was FALSIFIED by ${input.actor}. ` +
-          `These requirements rest on it and hold terminal claims recorded before the falsification: ` +
-          `${terminal.map((entry) => `${entry.requirementId} (${entry.status})`).join(", ")}. ` +
-          `Judge whether their claims still stand — reopen with report_requirement, re-verify, or amend. The Console changed nothing.]`);
+          `${claimsLine} ` +
+          `Change impact ${impact.id} records the affected set durably. Judge whether claims still stand and whether affected sessions need steering — ` +
+          `then record your judgment with reconcile_change_impact; completion holds while the impact is open. The Console changed nothing.]`);
+      } else {
+        // No recorder wired (unit harnesses) or nothing recorded: keep the
+        // direct-link wake so a falsification under terminal claims is never
+        // silent.
+        const terminal = affected.filter((entry) => ["satisfied", "violated", "infeasible"].includes(entry.status));
+        if (terminal.length > 0) {
+          this.#wakeNote?.(input.userSessionId,
+            `[Console: assumption ${row.id} ("${row.text}") was FALSIFIED by ${input.actor}. ` +
+            `These requirements rest on it and hold terminal claims recorded before the falsification: ` +
+            `${terminal.map((entry) => `${entry.requirementId} (${entry.status})`).join(", ")}. ` +
+            `Judge whether their claims still stand — reopen with report_requirement, re-verify, or amend. The Console changed nothing.]`);
+        }
       }
     }
     return this.#toWire(input.userSessionId, resolved);

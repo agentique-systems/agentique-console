@@ -38,6 +38,12 @@ export interface RunCompletionDeps {
   requirements?: Pick<import("../orchestrator/requirements.ts").RequirementService,
     "latestApproved" | "summarySnapshot" | "rootStatus" | "frontier" | "verificationGaps">;
   /**
+   * The change-impact ledger — an OPEN impact (stale evidence or affected
+   * work nobody has judged) holds the completion proposal exactly like a
+   * missing completion record; optional for pre-ledger harnesses.
+   */
+  changeImpacts?: Pick<import("../orchestrator/change-impact.ts").ChangeImpactService, "listOpen">;
+  /**
    * `config.completionQuietWindowMs`. The predicate is re-evaluated when the
    * timer FIRES, not when it was scheduled, so a new turn starting inside the
    * window simply makes it false again.
@@ -132,12 +138,53 @@ export class RunCompletionService {
       try { this.#deps.host().dischargeQuietDebts(userSessionId); } catch { /* a backstop must not throw */ }
       return false;
     }
+    if (!this.#reconciledChangeImpacts(userSessionId)) {
+      this.#nudgeForChangeImpacts(userSessionId);
+      return false;
+    }
     if (!this.#completionRecordSatisfiesGoverning(userSessionId)) {
       this.#nudgeForCompletionRecord(userSessionId);
       return false;
     }
     this.#propose(userSessionId);
     return true;
+  }
+
+  /**
+   * No unreconciled change impact may reach sign-off: an open impact is
+   * console-owned proof that a revision, falsification, or withdrawn claim
+   * touched evidence or work nobody has judged yet. The judgment itself stays
+   * main's/the operator's — reopening, re-verifying, steering, or an explicit
+   * stands/superseded/unaffected disposition all clear it.
+   */
+  #reconciledChangeImpacts(userSessionId: string): boolean {
+    return (this.#deps.changeImpacts?.listOpen(userSessionId) ?? []).length === 0;
+  }
+
+  /** One nudge per (session, open-impact set). */
+  readonly #nudgedForImpacts = new Map<string, string>();
+
+  #nudgeForChangeImpacts(userSessionId: string): void {
+    const open = this.#deps.changeImpacts?.listOpen(userSessionId) ?? [];
+    if (open.length === 0) return;
+    const key = open.map((impact) => impact.id).sort().join(",");
+    if (this.#nudgedForImpacts.get(userSessionId) === key) return;
+    const anchor = this.#deps.repo.listAgentSessions(userSessionId)
+      .find((row) => row.parentAgentSessionId === null);
+    if (!anchor) return;
+    this.#nudgedForImpacts.set(userSessionId, key);
+    const lines = open.slice(0, 4).map((impact) => {
+      const parts: string[] = [];
+      if (impact.outstanding.claims.length > 0) parts.push(`stale terminal claims: ${impact.outstanding.claims.join(", ")}`);
+      if (impact.outstanding.sessions.length > 0) parts.push(`affected sessions: ${impact.outstanding.sessions.join(", ")}`);
+      return `${impact.id} (${impact.sourceKind} ${impact.sourceRef} — ${parts.join("; ")})`;
+    });
+    if (open.length > 4) lines.push(`…and ${open.length - 4} more (read_requirements lists them)`);
+    this.#deps.runner().enqueueAgentMilestone(userSessionId, anchor.id, "decision",
+      `The Console sees quiet sessions, but ${open.length} change impact(s) remain unreconciled: ${lines.join("; ")}. ` +
+      "Judge each item: reopen or re-verify stale claims with report_requirement, steer or archive affected sessions, " +
+      "and record every other judgment with reconcile_change_impact (stands / superseded / unaffected / steered / interrupted, with why). " +
+      "The run will not propose completion until every impact is reconciled.");
   }
 
   /**

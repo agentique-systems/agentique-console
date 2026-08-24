@@ -227,6 +227,37 @@ verification gaps above — so "satisfied below its declared tier" is
 structural, not a display chip. The completion nudge names both, and
 steering aims at them.
 
+## Revision currency and change impacts
+
+Claims already carry currency: every status change stamps the governing
+revision (`atRevision`) and a per-project monotonic ordinal (`ord`, shared
+with assumption resolutions), the revision pointer re-anchors every seat
+delivery, and `record_completion` must match the current revision. The
+change-impact ledger (`change_impacts`, `ChangeImpactService`) closes the
+remaining gap: when an approved amendment, a falsified assumption, or a
+withdrawn terminal claim can make prior evidence or active work stale, the
+Console computes the **transitive closure** — changed/retired seeds, their
+descendants, dependents through `depends_on` (edges onto an *ancestor* of an
+affected node fire too, since depending on a node means depending on the
+subtree that composes it), and the dependents' descendants, to a fixed
+point; amendments compute against pre-approval state so dependents of
+retired nodes are captured before retirement removes their links — and
+persists it as one impact row: suspect terminal claims, affected open
+sessions, requirement-linked incomplete tasks, live scheduled assignments.
+Idempotent per source event and per still-open seed set.
+
+Reconciliation is **derived, never stored**: a suspect claim clears when a
+strictly later claim lands on its requirement (reopen, re-verify,
+retirement — acting through the normal tools IS reconciliation); an affected
+session clears when archived; everything else needs a recorded judgment via
+`reconcile_change_impact` (claims: `stands`/`superseded`; sessions:
+`unaffected`/`steered`/`interrupted`/`superseded`; each with a why,
+journaled as `change_impact.reconciled`). The Console computes consequences;
+main and the operator judge meaning — nothing is auto-reopened. An open
+impact holds the completion **proposal** (the nudge names its outstanding
+items), so stale evidence and un-steered work cannot silently reach
+sign-off, across restarts included; the operator's verdict remains theirs.
+
 ## Termination
 
 Non-success termination is legitimate. The run verdict derives as: `failed`
@@ -268,7 +299,10 @@ Minted variants inherit their base's role.
   ("3/9 satisfied") summarize; they are never optimized against. Thresholds
   live in statements; measurements live in evidence.
 - **No machine completion gate** — the Console derives and displays; the
-  operator decides.
+  operator decides. The Console does hold the *proposal* until run-level
+  bookkeeping exists — a completion record against the current revision, no
+  unreconciled change impacts — but those demand recorded judgment, never a
+  particular verdict.
 - **No separate execution-graph object** — patterns, sessions, and the task
   ledger already are the execution structure; they reference requirements,
   never duplicate them.

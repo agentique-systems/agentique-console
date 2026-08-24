@@ -541,6 +541,79 @@ export interface RequirementReversal {
   } | null;
 }
 
+// ---------------------------------------------------------------------------
+// Change-impact ledger wire shapes. A change impact is the console-computed
+// blast radius of one meaning-changing event — an approved amendment, a
+// falsified assumption, a withdrawn terminal claim — persisted at the moment
+// of the change so affected work and prior evidence cannot silently drop out
+// of attention. The console computes consequences; main and the operator
+// judge meaning (reopen, steer, waive) and record that judgment as
+// dispositions. Reconciliation state is DERIVED, never stored: a later claim
+// on a suspect requirement or an archived session clears its item
+// mechanically.
+
+export type ChangeImpactSourceKind = "amendment" | "assumption_falsified" | "claim_withdrawn";
+
+/** How a requirement entered the affected set (with `via` naming the cause). */
+export type ChangeImpactBasis = "changed" | "retired" | "reopened" | "falsified" | "descendant" | "dependent";
+
+/** The affected set snapshotted at computation time — console facts only. */
+export interface ChangeImpactAffected {
+  /** The ids whose meaning/validity changed — the closure's starting set. */
+  seedIds: string[];
+  /** The transitive closure: seeds, their descendants, dependents (via depends_on, including edges onto ancestors of affected nodes), and the dependents' descendants. */
+  requirements: { id: string; basis: ChangeImpactBasis; via: string }[];
+  /** Terminal claims inside the affected set recorded BEFORE the change — prior evidence the change may have invalidated. */
+  suspectClaims: {
+    requirementId: string;
+    status: "satisfied" | "violated" | "infeasible";
+    verifiedBy: import("./requirements.ts").RequirementVerifiedBy;
+    actor: string;
+    ord: number;
+    at: string;
+  }[];
+  /** Open agent sessions whose delegations or requirement-linked tasks intersect the affected set. */
+  sessions: { agentSessionId: string; title: string }[];
+  /** Incomplete requirement-linked tasks inside the affected set (visibility for the judge; their session's disposition covers them). */
+  tasks: { taskId: string; subject: string; status: string; agentSessionId: string | null }[];
+  /** Live scheduled assignments waiting on affected tasks. */
+  scheduledAssignments: { id: string; taskId: string; agentSessionId: string; recipient: string }[];
+}
+
+/** For a suspect claim: it still holds under the change, or stopped mattering. Reopening/re-verifying is an ACT (report_requirement) and clears mechanically. */
+export type ChangeImpactClaimDisposition = "stands" | "superseded";
+/** For an affected session: judged untouched, steered with an update, interrupted, or overtaken by events. Archiving clears mechanically. */
+export type ChangeImpactSessionDisposition = "unaffected" | "steered" | "interrupted" | "superseded";
+
+/** One recorded judgment on one affected item — journaled, last-wins per item. */
+export interface ChangeImpactDispositionEntry {
+  kind: "claim" | "session";
+  /** Requirement id (claim) or agent session id (session). */
+  id: string;
+  disposition: ChangeImpactClaimDisposition | ChangeImpactSessionDisposition;
+  note: string;
+  actor: string;
+  at: string;
+}
+
+export interface ChangeImpactWire {
+  id: string;
+  sourceKind: ChangeImpactSourceKind;
+  /** "rev:<n>" for amendments, the assumption id, or the status-change id. */
+  sourceRef: string;
+  /** The governing requirement revision when the impact was computed. */
+  atRevision: number;
+  /** The shared invalidation-clock ordinal at computation; claims with a later ord postdate the change. */
+  computedAtOrd: number;
+  note: string | null;
+  affected: ChangeImpactAffected;
+  dispositions: ChangeImpactDispositionEntry[];
+  /** Items still holding the impact open: standing suspect claims and open sessions without a disposition or mechanical clearance. */
+  outstanding: { claims: string[]; sessions: string[] };
+  status: "open" | "reconciled";
+  createdAt: string;
+}
+
 /** Orchestration-pattern catalog ids — the create-session wire vocabulary. */
 export const PATTERN_IDS = [
   "hub_and_spoke",

@@ -360,6 +360,51 @@ describe("the requirement graph as completion oracle", () => {
     expect(h.db.select().from(runSummaries).all()).toHaveLength(0);
   });
 
+  it("holds the proposal while a change impact is open, nudges with the impact id, and proposes once reconciled", async () => {
+    const { h } = harness();
+    const userSessionId = h.addUserSession();
+    approveRequirements(h, userSessionId);
+    // Claims land, r2 depends on r1, then r1's claim is withdrawn: the
+    // Console records the transitive impact — r2's prior evidence is suspect.
+    h.app.requirements.reportStatus({ userSessionId, requirementId: "r1", to: "satisfied",
+      evidence: [{ kind: "command", ref: "npm start" }], claimant: { kind: "main" } });
+    h.app.requirements.reportStatus({ userSessionId, requirementId: "r2", to: "satisfied",
+      evidence: [{ kind: "artifact", ref: "artifact_screen" }], claimant: { kind: "main" } });
+    h.app.requirements.link({ userSessionId, fromId: "r2", kind: "depends_on", toId: "r1", actor: "main" });
+    h.app.requirements.reportStatus({ userSessionId, requirementId: "r1", to: "open",
+      evidence: [], claimant: { kind: "main" }, note: "page regressed" });
+    const [impact] = h.app.changeImpacts.listOpen(userSessionId);
+    expect(impact!.outstanding.claims).toEqual(["r2"]);
+
+    // The regressed work is redone and re-verified; r2's suspect evidence
+    // still awaits judgment — quiet ledgers and a current completion record
+    // must NOT be enough to reach sign-off over it.
+    h.app.requirements.reportStatus({ userSessionId, requirementId: "r1", to: "satisfied",
+      evidence: [{ kind: "command", ref: "npm start again" }], claimant: { kind: "main" } });
+    await runToFinalWith(h, userSessionId);
+    h.app.orchestrationState.recordCompletion(userSessionId, {
+      criteria: [
+        { requirement: "r1", statement: "The page renders", met: true, evidence: [{ kind: "command", ref: "npm start" }] },
+        { requirement: "r2", statement: "Verification ran", met: true, evidence: [] },
+      ],
+      knownGaps: [], nonGoals: [], requirementsRevision: 1,
+    });
+    h.completion.schedule(userSessionId);
+    await settle();
+    expect(h.db.select().from(runSummaries).all()).toHaveLength(0);
+    const nudge = h.fake.captured.prompts.find((text) => text.includes("change impact(s) remain unreconciled"));
+    expect(nudge).toBeDefined();
+    expect(nudge).toContain(impact!.id);
+    expect(nudge).toContain("r2");
+
+    // Judgment recorded → the same quiet run proposes.
+    h.app.changeImpacts.reconcile({ userSessionId, impactId: impact!.id, actor: "operator",
+      items: [{ kind: "claim", id: "r2", disposition: "stands", note: "verification did not exercise the regressed path" }] });
+    h.completion.schedule(userSessionId);
+    await collectUntil(h.bus, (event) => event.type === "run.completion.proposed", 10_000);
+    expect(h.db.select().from(runSummaries).all()).toHaveLength(1);
+  });
+
   it("an infeasible root yields the infeasible verdict, not failed", async () => {
     const { h } = harness();
     const userSessionId = h.addUserSession();

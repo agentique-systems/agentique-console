@@ -44,6 +44,9 @@ over any summary of them.
   beyond-scope → proposed to the operator with honest cost.
 - Any further iteration must first name the gap, why it matters, the
   action, and the evidence that will show closure.
+- Every change impact is reconciled (read_requirements lists open ones):
+  suspect claims re-verified, reopened, or judged with
+  reconcile_change_impact — an open impact holds the completion proposal.
 - Then record_completion against the CURRENT requirements revision — the
   sign-off card shows your record beside the console's own facts.
 

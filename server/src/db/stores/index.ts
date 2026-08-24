@@ -26,6 +26,7 @@
  *   requirement_status_changes,
  *   requirement_delegations,
  *   requirement_links                     RequirementStore
+ *   change_impacts                        ChangeImpactStore
  *
  * The one sanctioned crossing: transactional appends anchored on a row the
  * store owns (MessageStore.appendHandoffMailbox writes the handoff row with
@@ -41,6 +42,7 @@ import { ArtifactStore } from "../../events/artifact-store.ts";
 import { SqliteSessionStore } from "../../sdk/session-store.ts";
 import { AssignmentStore } from "./assignment-store.ts";
 import { AssumptionStore } from "./assumption-store.ts";
+import { ChangeImpactStore } from "./change-impact-store.ts";
 import { CronStore } from "./cron-store.ts";
 import { HandoffStore } from "./handoff-store.ts";
 import { InteractionStore } from "./interaction-store.ts";
@@ -56,6 +58,7 @@ import { WorkspaceStore } from "./workspace-store.ts";
 
 export { AssignmentStore } from "./assignment-store.ts";
 export { AssumptionStore, type AssumptionRow } from "./assumption-store.ts";
+export { ChangeImpactStore, type ChangeImpactRow } from "./change-impact-store.ts";
 export { CronStore } from "./cron-store.ts";
 export { HandoffStore } from "./handoff-store.ts";
 export { InteractionStore } from "./interaction-store.ts";
@@ -91,6 +94,7 @@ export interface Stores {
   projects: ProjectStore;
   requirements: RequirementStore;
   assumptions: AssumptionStore;
+  changeImpacts: ChangeImpactStore;
   orchestrationState: OrchestrationStateStore;
   tasks: TaskStore;
   assignments: AssignmentStore;
@@ -112,6 +116,7 @@ export function createStores(db: Db, sqlite: SqliteTransactor): Stores {
     projects: new ProjectStore(db),
     requirements: new RequirementStore(db, sqlite),
     assumptions: new AssumptionStore(db),
+    changeImpacts: new ChangeImpactStore(db),
     orchestrationState: new OrchestrationStateStore(db),
     tasks: new TaskStore(db),
     assignments: new AssignmentStore(db),

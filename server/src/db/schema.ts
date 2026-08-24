@@ -750,6 +750,49 @@ export const requirementDelegations = sqliteTable(
 );
 
 /**
+ * The change-impact ledger: one row per meaning-changing event (approved
+ * amendment, falsified assumption, withdrawn terminal claim) whose computed
+ * transitive blast radius touched prior evidence or active work. `affected`
+ * snapshots console facts AT THE MOMENT of the change (links and delegations
+ * move later, so recomputation would not be faithful); `dispositions` records
+ * main/operator judgment per affected item. Open/reconciled is DERIVED at
+ * read time — a later claim on a suspect requirement or an archived session
+ * clears its item mechanically, so nothing here ever rewrites a status.
+ * Project-scoped like requirements; rows persist for the project's lifetime.
+ */
+export const changeImpacts = sqliteTable(
+  "change_impacts",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id").notNull(),
+    /** The session in which the change landed — attribution, never the key. */
+    userSessionId: text("user_session_id").notNull(),
+    sourceKind: text("source_kind", { enum: ["amendment", "assumption_falsified", "claim_withdrawn"] }).notNull(),
+    /** "rev:<n>" | assumption id | status-change id — the idempotency key with sourceKind. */
+    sourceRef: text("source_ref").notNull(),
+    /** Governing requirement revision when the impact was computed. */
+    atRevision: integer("at_revision").notNull(),
+    /** The shared invalidation-clock ordinal at computation (see requirement_status_changes.ord). */
+    computedAtOrd: integer("computed_at_ord").notNull(),
+    note: text("note"),
+    affected: text("affected", { mode: "json" })
+      .$type<import("@agentique-console/shared").ChangeImpactAffected>()
+      .notNull(),
+    dispositions: text("dispositions", { mode: "json" })
+      .$type<import("@agentique-console/shared").ChangeImpactDispositionEntry[]>()
+      .notNull()
+      .default([]),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (t) => [
+    uniqueIndex("change_impacts_source").on(t.projectId, t.sourceKind, t.sourceRef),
+    index("change_impacts_project").on(t.projectId),
+    check("change_impacts_source_kind", sql`${t.sourceKind} IN ('amendment','assumption_falsified','claim_withdrawn')`),
+  ],
+);
+
+/**
  * The orchestrator's model-authored working state: strategy, uncertainties,
  * assumptions, risks — section-replace revisions updated on material events
  * (never per-turn ceremony). Append-only: the history is the review surface,
