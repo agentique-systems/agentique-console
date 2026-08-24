@@ -29,6 +29,7 @@ export const MAIN_TOOL_NAMES = [
   "specialize_profile",
   "propose_requirements",
   "read_requirements",
+  "reconcile_change_impact",
   "report_requirement",
   "decompose_requirement",
   "record_assumption",

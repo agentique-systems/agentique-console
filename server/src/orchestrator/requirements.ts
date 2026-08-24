@@ -19,6 +19,10 @@
  * never takes a model's word for a roll-up.
  */
 import type {
+  ChangeImpactAffected,
+  ChangeImpactBasis,
+  ChangeImpactSourceKind,
+  ChangeImpactWire,
   EvidenceRef,
   RequirementComposition,
   RequirementFrontierEntry,
@@ -125,6 +129,34 @@ export interface RequirementFrontierDeps {
   awaitingOperatorAgentSessionIds(userSessionId: string): Set<string>;
 }
 
+/** One id whose meaning/validity changed — a starting point of the impact closure. */
+export interface ImpactSeed {
+  id: string;
+  basis: "changed" | "retired" | "reopened" | "falsified";
+}
+
+/** The graph-side transitive closure of one change — console facts only. */
+export interface ImpactClosureResult {
+  /** Seeds, their descendants, dependents (edges onto affected nodes OR their ancestors), and the dependents' descendants — to a fixed point. */
+  requirements: { id: string; basis: ChangeImpactBasis; via: string }[];
+  /** Terminal claims inside the affected set recorded before the change. */
+  suspectClaims: ChangeImpactAffected["suspectClaims"];
+  /** Open sessions whose delegated subtrees intersect the affected set. */
+  sessionIds: string[];
+}
+
+/** What the wired recorder (ChangeImpactService) receives — everything the graph side computed. */
+export interface ImpactRecordInput {
+  userSessionId: string;
+  sourceKind: ChangeImpactSourceKind;
+  sourceRef: string;
+  note: string | null;
+  seedIds: string[];
+  closure: ImpactClosureResult;
+  atRevision: number;
+  computedAtOrd: number;
+}
+
 export class RequirementParseFailure extends InvalidInputError {
   readonly errors: RequirementParseError[];
   constructor(errors: RequirementParseError[]) {
@@ -145,6 +177,7 @@ export class RequirementService implements GoverningDigest {
   #frontierDeps: RequirementFrontierDeps | null = null;
   #pendingProposalCheck: ((userSessionId: string) => boolean) | null = null;
   #wakeNote: ((userSessionId: string, text: string) => void) | null = null;
+  #impactRecorder: ((input: ImpactRecordInput) => ChangeImpactWire | null) | null = null;
 
   constructor(
     store: RequirementStore,
@@ -172,6 +205,17 @@ export class RequirementService implements GoverningDigest {
   /** Wired once in createApp — the frontier reads other aggregates' facts. */
   setFrontierDeps(deps: RequirementFrontierDeps): void {
     this.#frontierDeps = deps;
+  }
+
+  /**
+   * Wired once in createApp: how a computed impact closure becomes a durable
+   * change-impact row (ChangeImpactService.record). The graph side computes
+   * the closure; the recorder enriches with task/assignment facts, persists
+   * idempotently, and may decline (returns null) when nothing stale or active
+   * is touched. Unwired (unit harnesses): impacts are simply not recorded.
+   */
+  setImpactRecorder(record: (input: ImpactRecordInput) => ChangeImpactWire | null): void {
+    this.#impactRecorder = record;
   }
 
   /**
@@ -391,7 +435,7 @@ export class RequirementService implements GoverningDigest {
   approve(
     revisionId: string,
     input: { document: string; edited: boolean; interactionId?: string | null },
-  ): { revision: RequirementRevisionRow; added: string[]; retired: string[]; changed: string[] } {
+  ): { revision: RequirementRevisionRow; added: string[]; retired: string[]; changed: string[]; impact: ChangeImpactWire | null } {
     const draft = this.#store.getRevision(revisionId);
     if (!draft) throw new NotFoundError(`no requirement revision ${revisionId}`);
     // The single-writer invariant's enforcement: under sequential continuation
@@ -421,6 +465,20 @@ export class RequirementService implements GoverningDigest {
       ? { graph: parsed.graph, ops: { inserts: [], updates: [], retires: [] } as ApprovalNodeOps, resets: [] as { id: string; from: RequirementStatus }[], changedStatements: [] as string[] }
       : this.#computeApproval(draft.userSessionId, parsed.graph, draft.revision, draft.scopeId ?? undefined);
     const { graph, ops, resets, changedStatements } = computed;
+    // The impact closure runs against PRE-approval state, deliberately:
+    // applyApproval retires a dropped node's links in its transaction, so a
+    // post-approval pass could no longer see who depended on a retired
+    // requirement. Statement-changed and retired nodes are excluded from the
+    // suspect set — their claims are mechanically reset/retired by the very
+    // approval, journaled as console status changes; what remains suspect is
+    // the untouched evidence downstream of the change.
+    const impactSeeds: ImpactSeed[] = [
+      ...changedStatements.map((id) => ({ id, basis: "changed" as const })),
+      ...ops.retires.map((id) => ({ id, basis: "retired" as const })),
+    ];
+    const impactClosure = impactSeeds.length === 0 ? null : this.#impactClosure(draft.userSessionId, impactSeeds, {
+      excludeFromSuspects: new Set(impactSeeds.map((seed) => seed.id)),
+    });
     const canonical = renderCommitted(graph);
     const approved = this.#store.applyApproval({
       revisionId,
@@ -473,7 +531,20 @@ export class RequirementService implements GoverningDigest {
         },
       });
     }
-    return { revision: approved, added, retired: ops.retires, changed: changedStatements };
+    // Persist the impact AFTER the approval committed (a failed approval must
+    // record nothing), stamped with the post-approval clock so a claim made
+    // against the new revision always reads as later than the change.
+    const impact = impactClosure === null ? null : (this.#impactRecorder?.({
+      userSessionId: approved.userSessionId,
+      sourceKind: "amendment",
+      sourceRef: `rev:${approved.revision}`,
+      note: approved.changeNote,
+      seedIds: impactSeeds.map((seed) => seed.id),
+      closure: impactClosure,
+      atRevision: approved.revision,
+      computedAtOrd: this.#store.nextChangeOrd(approved.projectId) - 1,
+    }) ?? null);
+    return { revision: approved, added, retired: ops.retires, changed: changedStatements, impact };
   }
 
   reject(revisionId: string): void {
@@ -520,27 +591,150 @@ export class RequirementService implements GoverningDigest {
 
   /**
    * Which OPEN sessions an amendment touches: a session is affected when its
-   * delegated subtrees intersect the changed/retired ids, sit under one, or
-   * contain a requirement that depends_on one. Console facts only — main
-   * judges materiality; this names where to look.
+   * delegated subtrees intersect the change's transitive closure. Console
+   * facts only — main judges materiality; this names where to look.
    */
   sessionsAffectedByChange(userSessionId: string, changedIds: string[]): string[] {
     if (changedIds.length === 0) return [];
+    return this.#impactClosure(userSessionId, changedIds.map((id) => ({ id, basis: "changed" as const }))).sessionIds;
+  }
+
+  /**
+   * The transitive impact closure of a set of changed/retired/withdrawn ids —
+   * a deterministic fixed point, unlike the single link pass it replaced:
+   * - a changed node's DESCENDANTS are affected (they refine how it is
+   *   discharged, so a changed parent meaning reaches them);
+   * - a `depends_on` edge fires when its target is an affected node OR an
+   *   ancestor of one (depending on a node means depending on the subtree
+   *   that composes it), making the dependent and ITS descendants affected;
+   * - iterate until nothing grows (depends_on is acyclic; the loop is bounded
+   *   by the node count either way).
+   * Suspect claims are terminal claims inside the closure — prior evidence
+   * the change may have invalidated; sessions are the open delegations whose
+   * subtrees intersect it. Amendments call this against PRE-approval state so
+   * dependents of retired nodes are captured before retirement removes their
+   * links.
+   */
+  #impactClosure(
+    userSessionId: string,
+    seeds: ImpactSeed[],
+    opts: {
+      /** Ids whose claims are mechanically handled elsewhere (statement resets, retirements, the withdrawn claim itself). */
+      excludeFromSuspects?: ReadonlySet<string>;
+      /** Ids not counted for session matching (a withdrawal's own subtree — those sessions made the change, they are not downstream of it). */
+      excludeFromSessionMatching?: ReadonlySet<string>;
+    } = {},
+  ): ImpactClosureResult {
     const projectId = this.#project(userSessionId);
-    const affected = new Set(changedIds);
-    for (const row of this.#store.liveLinks(projectId)) {
-      if (row.kind === "depends_on" && affected.has(row.toId)) affected.add(row.fromId);
+    const nodes = this.#store.liveNodes(projectId);
+    const byId = new Map(nodes.map((node) => [node.id, node]));
+    const byParent = new Map<string | null, RequirementNodeRow[]>();
+    for (const node of nodes) {
+      const list = byParent.get(node.parentId) ?? [];
+      list.push(node);
+      byParent.set(node.parentId, list);
     }
+    const affected = new Map<string, { basis: ChangeImpactBasis; via: string }>();
+    // affected ∪ their live ancestors: an edge onto an ancestor of a changed
+    // node depends on the subtree that contains the change.
+    const ancestorTouched = new Set<string>();
+    const touch = (id: string) => {
+      for (let cursor: string | null | undefined = id; cursor != null && !ancestorTouched.has(cursor); cursor = byId.get(cursor)?.parentId) {
+        ancestorTouched.add(cursor);
+      }
+    };
+    const addAffected = (id: string, basis: ChangeImpactBasis, via: string): void => {
+      if (affected.has(id)) return;
+      affected.set(id, { basis, via });
+      touch(id);
+    };
+    const addDescendants = (rootId: string, via: string): void => {
+      for (const child of byParent.get(rootId) ?? []) {
+        addAffected(child.id, "descendant", via);
+        addDescendants(child.id, via);
+      }
+    };
+    for (const seed of seeds) {
+      addAffected(seed.id, seed.basis, seed.id);
+      addDescendants(seed.id, seed.id);
+    }
+    const dependsEdges = this.#store.liveLinks(projectId).filter((row) => row.kind === "depends_on");
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const edge of dependsEdges) {
+        if (affected.has(edge.fromId) || !ancestorTouched.has(edge.toId)) continue;
+        addAffected(edge.fromId, "dependent", edge.toId);
+        addDescendants(edge.fromId, edge.fromId);
+        grew = true;
+      }
+    }
+
+    const latest = this.#store.latestChanges(projectId);
+    const suspectClaims: ImpactClosureResult["suspectClaims"] = [];
+    for (const id of affected.keys()) {
+      if (opts.excludeFromSuspects?.has(id) === true) continue;
+      const change = latest.get(id);
+      if (change === undefined || !TERMINAL_STATUSES.has(change.toStatus)) continue;
+      suspectClaims.push({
+        requirementId: id,
+        status: change.toStatus as "satisfied" | "violated" | "infeasible",
+        verifiedBy: change.verifiedBy,
+        actor: change.actor,
+        ord: change.ord,
+        at: change.createdAt,
+      });
+    }
+    suspectClaims.sort((a, b) => mintNumberOf(a.requirementId) - mintNumberOf(b.requirementId));
+
     const openSessions = this.#frontierDeps?.openAgentSessionIds(userSessionId) ?? new Set<string>();
-    const out = new Set<string>();
+    const matchable = [...affected.keys()].filter((id) => opts.excludeFromSessionMatching?.has(id) !== true);
+    const sessionIds = new Set<string>();
     for (const delegation of this.#store.delegationsForUserSession(userSessionId)) {
-      if (!openSessions.has(delegation.agentSessionId) || out.has(delegation.agentSessionId)) continue;
+      if (!openSessions.has(delegation.agentSessionId) || sessionIds.has(delegation.agentSessionId)) continue;
       const subtree = this.#subtreeIds(userSessionId, delegation.requirementId, { includeRoot: true });
-      const hit = [...affected].some((id) => subtree.has(id))
-        || [...affected].some((id) => this.#subtreeIds(userSessionId, id, { includeRoot: true }).has(delegation.requirementId));
-      if (hit) out.add(delegation.agentSessionId);
+      if (matchable.some((id) => subtree.has(id))) sessionIds.add(delegation.agentSessionId);
     }
-    return [...out];
+
+    const requirements = [...affected.entries()]
+      .map(([id, meta]) => ({ id, basis: meta.basis, via: meta.via }))
+      .sort((a, b) => mintNumberOf(a.id) - mintNumberOf(b.id));
+    return { requirements, suspectClaims, sessionIds: [...sessionIds].sort() };
+  }
+
+  /**
+   * Compute the closure for one change event and hand it to the wired
+   * recorder — the path for changes that leave the graph's rows as they were
+   * (a withdrawn claim, a falsified assumption). Amendments compute inside
+   * approve() instead, against pre-approval state. Returns the durable impact
+   * (null when no recorder is wired, the seeds are empty, or the recorder
+   * declined because nothing stale or active was touched).
+   */
+  recordImpact(input: {
+    userSessionId: string;
+    sourceKind: ChangeImpactSourceKind;
+    sourceRef: string;
+    note?: string;
+    seeds: ImpactSeed[];
+    excludeFromSuspects?: ReadonlySet<string>;
+    excludeFromSessionMatching?: ReadonlySet<string>;
+  }): ChangeImpactWire | null {
+    if (this.#impactRecorder === null || input.seeds.length === 0) return null;
+    const projectId = this.#project(input.userSessionId);
+    const closure = this.#impactClosure(input.userSessionId, input.seeds, {
+      ...(input.excludeFromSuspects === undefined ? {} : { excludeFromSuspects: input.excludeFromSuspects }),
+      ...(input.excludeFromSessionMatching === undefined ? {} : { excludeFromSessionMatching: input.excludeFromSessionMatching }),
+    });
+    return this.#impactRecorder({
+      userSessionId: input.userSessionId,
+      sourceKind: input.sourceKind,
+      sourceRef: input.sourceRef,
+      note: input.note ?? null,
+      seedIds: input.seeds.map((seed) => seed.id),
+      closure,
+      atRevision: this.#store.latestApproved(projectId)?.revision ?? 0,
+      computedAtOrd: this.#store.nextChangeOrd(projectId) - 1,
+    });
   }
 
   // ── live state ───────────────────────────────────────────────────────────
@@ -604,19 +798,36 @@ export class RequirementService implements GoverningDigest {
       },
     });
     // A dependency moving out from under terminal claims is a fact main must
-    // judge: wake it naming the suspect dependents. Record-and-display — no
-    // status is rewritten here.
+    // judge: record the transitive impact durably and wake main naming the
+    // suspect dependents. Record-and-display — no status is rewritten here.
+    // The withdrawal's own subtree is excluded from session matching (those
+    // sessions made or own the change; they are not downstream of it). An
+    // impact is recorded only when downstream terminal claims exist — the
+    // status change itself is already visible structurally. The wake fires on
+    // the closure regardless of whether a recorder is wired.
     if (input.to === "open" || input.to === "violated") {
-      const latest = this.#store.latestChanges(projectId);
-      const suspects = this.#store.liveLinks(projectId)
-        .filter((row) => row.kind === "depends_on" && row.toId === node.id)
-        .map((row) => row.fromId)
-        .filter((id) => TERMINAL_STATUSES.has(latest.get(id)?.toStatus ?? ""));
-      if (suspects.length > 0) {
+      const closure = this.#impactClosure(input.userSessionId, [{ id: node.id, basis: "reopened" }], {
+        excludeFromSuspects: new Set([node.id]),
+        excludeFromSessionMatching: this.#subtreeIds(input.userSessionId, node.id, { includeRoot: true }),
+      });
+      if (closure.suspectClaims.length > 0) {
+        const impact = this.#impactRecorder?.({
+          userSessionId: input.userSessionId,
+          sourceKind: "claim_withdrawn",
+          sourceRef: change.id,
+          note: `${node.id} ${input.to === "open" ? "reopened" : "reported violated"} by ${actor}`,
+          seedIds: [node.id],
+          closure,
+          atRevision,
+          computedAtOrd: change.ord,
+        }) ?? null;
+        const suspects = closure.suspectClaims.map((claim) => claim.requirementId);
+        const impactLine = impact === null ? "" :
+          `Change impact ${impact.id} records the affected set durably — record your judgment with reconcile_change_impact; completion holds while it is open. `;
         this.#wakeNote?.(input.userSessionId,
           `[Console: ${node.id} was ${input.to === "open" ? "reopened" : "reported violated"} by ${actor}. ` +
-          `These requirements depend on it and hold terminal claims recorded BEFORE this change: ${suspects.join(", ")}. ` +
-          `Judge whether their claims still stand — reopen with report_requirement, re-verify, or amend. The Console changed nothing.]`);
+          `These requirements depend on it (directly or transitively) and hold terminal claims recorded BEFORE this change: ${suspects.join(", ")}. ` +
+          `${impactLine}Judge whether their claims still stand — reopen with report_requirement, re-verify, or amend. The Console changed nothing.]`);
       }
     }
     return this.derive(input.userSessionId).find((wire) => wire.id === updated.id)!;

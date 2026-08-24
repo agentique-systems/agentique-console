@@ -25,6 +25,7 @@ import { effectiveNativeTools } from "../sdk/native-capability-policy.ts";
 import { MAIN_TOOL_NAMES } from "./grants.ts";
 import type { InteractionService } from "./interactions.ts";
 import type { AssumptionService } from "./assumptions.ts";
+import type { ChangeImpactService } from "./change-impact.ts";
 import { RequirementParseFailure, type RequirementService } from "./requirements.ts";
 import type { CompletionRecord, OrchestrationStateService } from "./state.ts";
 import type { CapabilityCatalog } from "../agent-profiles/capability-catalog.ts";
@@ -60,6 +61,7 @@ export interface ConsoleToolsInput {
   interactions: InteractionService;
   requirements: RequirementService;
   assumptions: AssumptionService;
+  changeImpacts: ChangeImpactService;
   state: OrchestrationStateService;
   /** Skills + attachable-server metadata, for staffing and mint validation. */
   catalog: CapabilityCatalog;
@@ -68,7 +70,7 @@ export interface ConsoleToolsInput {
 }
 
 export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
-  const { sdk, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, requirements, assumptions, state, catalog, registry } = input;
+  const { sdk, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, requirements, assumptions, changeImpacts, state, catalog, registry } = input;
 
   /** Tools operate only on this UserSession's agent sessions. */
   const owned = (agentSessionId: string) => {
@@ -621,10 +623,15 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           // the old revision. The next delivery re-anchors each of them, but
           // whether one needs steering NOW is main's materiality call — hand
           // it the list, with the sessions the CHANGE actually touches marked
-          // (delegated subtrees intersecting the changed/retired ids, or
-          // holding requirements that depend on them — console facts).
-          const touched = new Set(requirements.sessionsAffectedByChange(
-            userSessionId, [...approved.changed, ...approved.retired]));
+          // (the transitive closure over changed/retired ids, descendants and
+          // depends_on — console facts). When the change touched prior
+          // evidence or active work, the Console persisted it as a change
+          // impact; that record, not this tool result, is what holds the
+          // affected set in attention until each item is reconciled.
+          const touched = approved.impact !== null
+            ? new Set(approved.impact.affected.sessions.map((entry) => entry.agentSessionId))
+            : new Set(requirements.sessionsAffectedByChange(
+              userSessionId, [...approved.changed, ...approved.retired]));
           const running = approved.revision.revision > 1
             ? host.listForUserSession(userSessionId).filter((s) => s.status !== "archived")
               .map((s) => ({ agentSessionId: s.id, title: s.title, status: s.status,
@@ -638,6 +645,13 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
               ? "The operator EDITED the requirements before approving — the canonical text above (ids minted) is theirs and governs. Read it fully."
               : "Approved as proposed. The canonical text above (ids minted) now governs the run.")
               + " Reference these ids in commissions (requirements), the ledger (requirementId), and report_requirement.",
+            ...(approved.impact === null ? {} : { changeImpact: {
+              id: approved.impact.id,
+              suspectClaims: approved.impact.affected.suspectClaims.map((claim) => ({ requirementId: claim.requirementId, status: claim.status, actor: claim.actor })),
+              affectedSessions: approved.impact.affected.sessions.map((entry) => entry.agentSessionId),
+              affectedTasks: approved.impact.affected.tasks.map((task) => task.taskId),
+              note: "This amendment touched prior evidence or active work; the Console recorded the transitive affected set durably. Suspect claims clear when reopened or re-verified via report_requirement; sessions clear when archived; record every other judgment (stands / superseded / unaffected / steered / interrupted) with reconcile_change_impact. Completion holds while the impact is open.",
+            } }),
             ...(running.length === 0 ? {} : { runningSessions: running,
               amendmentNote: "These sessions were briefed under an earlier revision. They learn of the change at their next delivery; judge materiality per session — steer with send_to_coordinator (category \"update\"), interrupt_agent for urgent redirects, or let immaterial ones finish." }) });
         }
@@ -666,11 +680,43 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
               document: pageTail(requirements.statusOutlineFor(userSessionId, args.scopeId), args.cursor, args.maxBytes) };
           }
           const intent = requirements.intentDocument(userSessionId);
+          const openImpacts = changeImpacts.listOpen(userSessionId).map((impact) => ({
+            id: impact.id, sourceKind: impact.sourceKind, sourceRef: impact.sourceRef,
+            atRevision: impact.atRevision, note: impact.note,
+            outstanding: impact.outstanding,
+          }));
           return { revision: approved.revision, changeNote: approved.changeNote,
             ...(intent === null ? {} : { intent }),
             document: pageTail(requirements.statusOutlineFor(userSessionId), args.cursor, args.maxBytes),
             frontier: requirements.frontier(userSessionId),
-            verificationGaps: requirements.verificationGaps(userSessionId) };
+            verificationGaps: requirements.verificationGaps(userSessionId),
+            ...(openImpacts.length === 0 ? {} : { openChangeImpacts: openImpacts,
+              openChangeImpactsNote: "Unreconciled change impacts — stale evidence or affected work awaiting your judgment; reconcile_change_impact records it. Completion holds while any is open." }) };
+        }),
+    ),
+
+    sdk.tool(
+      "reconcile_change_impact",
+      "Record your judgment on a change impact — the Console-computed blast radius of an amendment, falsified assumption, or withdrawn claim (read_requirements lists open ones; an open impact holds completion). Suspect claims: reopen or re-verify via report_requirement (clears mechanically), or record stands/superseded here. Affected sessions: steer, interrupt, or archive (archival clears), or record unaffected/superseded here.",
+      {
+        impactId: z.string().min(1).describe("A change impact id (chg_…)."),
+        items: z.array(z.object({
+          kind: z.enum(["claim", "session"]),
+          id: z.string().min(1).describe("Requirement id (claim) or agent session id (session)."),
+          disposition: z.enum(["stands", "superseded", "unaffected", "steered", "interrupted"]),
+          note: z.string().min(1).describe("Why — journaled."),
+        })).min(1).max(40),
+      },
+      async (args: { impactId: string; items: { kind: "claim" | "session"; id: string; disposition: string; note: string }[] }) =>
+        guarded(() => {
+          const wire = changeImpacts.reconcile({
+            userSessionId, impactId: args.impactId, actor: "main",
+            items: args.items.map((item) => ({ ...item, note: clip(item.note, 280) })),
+          });
+          return { impactId: wire.id, status: wire.status, outstanding: wire.outstanding,
+            note: wire.status === "reconciled"
+              ? "Reconciled — every affected item is dispositioned or mechanically cleared."
+              : "Recorded. Items still outstanding are listed; the impact stays open (and holds completion) until each is dispositioned or clears mechanically." };
         }),
     ),
 

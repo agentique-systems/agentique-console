@@ -328,6 +328,8 @@ export interface GetRequirementsResponse {
   verificationGaps: import("./domain.ts").RequirementVerificationGap[];
   /** Terminal claims the run later withdrew (journal-derived, oldest first). */
   reversals: import("./domain.ts").RequirementReversal[];
+  /** The change-impact ledger: durable blast radii of amendments, falsifications, and withdrawn claims, with derived reconciliation state. */
+  changeImpacts: import("./domain.ts").ChangeImpactWire[];
 }
 
 // POST /api/user-sessions/:id/requirements/:requirementId/status — the

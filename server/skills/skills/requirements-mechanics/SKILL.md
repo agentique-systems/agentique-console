@@ -66,3 +66,17 @@ Running sessions were briefed under the old revision. The approval result
 marks which sessions the change actually touches; judge materiality per
 session — steer with send_to_coordinator (category "update"), interrupt for
 urgent redirects, or let immaterial ones finish.
+
+When the change touches prior evidence or active work, the Console also
+persists the transitive affected set — dependents (through depends_on,
+ancestors included), descendants, suspect terminal claims, affected sessions
+and requirement-linked tasks — as a durable change impact (the approval
+result and read_requirements carry it). The Console computed WHAT; you judge
+MEANING per item: reopening or re-verifying a suspect claim through
+report_requirement clears it mechanically, archiving a session clears it,
+and every other judgment is recorded with reconcile_change_impact (stands /
+superseded for claims; unaffected / steered / interrupted / superseded for
+sessions, each with why). The run will not propose completion while an
+impact is open — reconciliation is part of landing the amendment, not
+optional bookkeeping. The same ledger records falsified assumptions and
+withdrawn terminal claims that leave stale dependents behind.

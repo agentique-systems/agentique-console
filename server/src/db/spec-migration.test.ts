@@ -34,11 +34,13 @@ function tmpDbFile(): string {
 const T = "2026-08-01T10:00:00.000Z";
 const T2 = "2026-08-02T10:00:00.000Z";
 
-/** Executes 0000..0016 and stamps their journal rows, so `openDb` applies ONLY 0017. */
+/** Executes 0000..0016 and stamps their journal rows, so `openDb` applies 0017 onward. */
 function buildPreDropDb(file: string): Database.Database {
   const sqlite = new Database(file);
   const migrations = readMigrationFiles({ migrationsFolder: MIGRATIONS_FOLDER });
-  const prior = migrations.slice(0, migrations.length - 1);
+  // Everything BEFORE 0017 — sliced by position, not "all but the last", so
+  // later migrations (0018…) do not silently join the pre-drop universe.
+  const prior = migrations.slice(0, 17);
   expect(prior).toHaveLength(17);
   for (const migration of prior) for (const statement of migration.sql) sqlite.exec(statement);
   sqlite.exec('CREATE TABLE IF NOT EXISTS "__drizzle_migrations" (id SERIAL PRIMARY KEY, hash text NOT NULL, created_at numeric)');
@@ -93,7 +95,7 @@ describe("0017_drop_spec_revisions replay over a pre-drop database", () => {
     legacy.close();
 
     const { db, sqlite } = openDb(file); // journal says 0000..0016 ran — this applies ONLY 0017
-    expect(sqlite.prepare("SELECT count(*) AS n FROM __drizzle_migrations").get()).toMatchObject({ n: 18 });
+    expect(sqlite.prepare("SELECT count(*) AS n FROM __drizzle_migrations").get()).toMatchObject({ n: 19 });
     const tables = new Set((sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map((r) => r.name));
     expect(tables.has("spec_revisions")).toBe(false);
 

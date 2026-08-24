@@ -543,6 +543,37 @@ export interface RequirementLinkChangedPayload {
   agentSessionId?: string;
 }
 
+/**
+ * A meaning-changing event (approved amendment, falsified assumption,
+ * withdrawn terminal claim) touched prior evidence or active work: its
+ * console-computed transitive blast radius was persisted as a change impact.
+ * Judgment stays with main/operator — nothing was reopened or rewritten.
+ */
+export interface ChangeImpactRecordedPayload {
+  userSessionId: string;
+  impactId: string;
+  sourceKind: "amendment" | "assumption_falsified" | "claim_withdrawn";
+  sourceRef: string;
+  atRevision: number;
+  /** The ids whose meaning/validity changed — the closure's seeds. */
+  seedIds: string[];
+  /** Terminal claims recorded before the change that may now be stale. */
+  suspectClaims: { requirementId: string; status: string }[];
+  /** Open agent sessions whose delegated or task-linked work is affected. */
+  sessionIds: string[];
+  /** Incomplete requirement-linked tasks inside the affected set. */
+  taskIds: string[];
+}
+
+/** Main/operator judgment landed on change-impact items; `status` is the impact's derived state after this call. */
+export interface ChangeImpactReconciledPayload {
+  userSessionId: string;
+  impactId: string;
+  actor: string;
+  items: { kind: "claim" | "session"; id: string; disposition: string; note: string }[];
+  status: "open" | "reconciled";
+}
+
 /** Main revised its working state (strategy/uncertainties/assumptions/risks/completion). */
 export interface StateUpdatedPayload {
   userSessionId: string;
@@ -698,6 +729,8 @@ export type ConsoleEvent = Base &
     | { type: "assumption.recorded"; payload: AssumptionRecordedPayload }
     | { type: "assumption.resolved"; payload: AssumptionResolvedPayload }
     | { type: "requirement.link.changed"; payload: RequirementLinkChangedPayload }
+    | { type: "change_impact.recorded"; payload: ChangeImpactRecordedPayload }
+    | { type: "change_impact.reconciled"; payload: ChangeImpactReconciledPayload }
     | { type: "user_session.state.updated"; payload: StateUpdatedPayload }
     | { type: "agent_session.created"; payload: AgentSessionCreatedPayload }
     | { type: "agent_session.termination.tripped"; payload: AgentSessionTerminationTrippedPayload }

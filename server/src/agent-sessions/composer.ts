@@ -570,11 +570,19 @@ export class PromptComposer {
         if (roots.includes(cursor)) { inSubtree.add(node.id); break; }
       }
     }
-    const lines = nodes.filter((node) => inSubtree.has(node.id)).map((node) => {
+    const subtreeNodes = nodes.filter((node) => inSubtree.has(node.id));
+    const lines = subtreeNodes.map((node) => {
       const depth = (() => { let d = 0; for (let cursor = node.parentId; cursor !== null && inSubtree.has(cursor); cursor = parentOf.get(cursor) ?? null) d += 1; return d; })();
       const status = node.derivedStatus === node.status ? node.status : `${node.status}, derives ${node.derivedStatus}`;
-      return `${"  ".repeat(depth)}- ${node.id} [${status}]${node.composition === "any" ? " (any of)" : ""}: ${node.statement}`;
+      // The console-derived invalidation marks ride the line: a seat holding a
+      // flagged terminal claim must see its evidence is suspect, not a clean
+      // [satisfied]. Byte-stable when nothing is flagged.
+      const flagged = node.flags.length === 0 ? "" : ` ⚠ ${node.flags.join(", ")}`;
+      return `${"  ".repeat(depth)}- ${node.id} [${status}${flagged}]${node.composition === "any" ? " (any of)" : ""}: ${node.statement}`;
     });
+    const flagLegend = subtreeNodes.some((node) => node.flags.length > 0)
+      ? "⚠ marks a terminal claim whose dependency or premise changed AFTER it was recorded (console-derived): re-verify or reopen before relying on it; report_requirement with a fresh claim clears the mark.\n"
+      : "";
     const ancestorBlock = ancestors.length === 0 ? "" : `${ancestors.join("\n")}\n`;
     // Link-driven context selection: what this subtree DEPENDS ON outside
     // itself (read-only — its statements and statuses, not its work), and the
@@ -592,7 +600,7 @@ export class PromptComposer {
     const assumptionLines = this.#deps.assumptions.openLines(session.userSessionId, inSubtree);
     const assumptionBlock = assumptionLines.length === 0 ? "" :
       `Standing assumptions (recorded, not operator-approved — your subtree rests on them; report contradictions with resolve_assumption or to main):\n${assumptionLines.join("\n")}\n`;
-    return `## Your delegated requirements (this session's success condition)\n${ancestorBlock}${lines.join("\n")}\n${contextBlock}${assumptionBlock}Statuses are semantic and evidence-required: report_requirement (leaves only — the Console records who stood behind each claim), decompose_requirement to refine below these nodes. Anything outside this sub-scope routes to main.\n\n`;
+    return `## Your delegated requirements (this session's success condition)\n${ancestorBlock}${lines.join("\n")}\n${flagLegend}${contextBlock}${assumptionBlock}Statuses are semantic and evidence-required: report_requirement (leaves only — the Console records who stood behind each claim), decompose_requirement to refine below these nodes. Anything outside this sub-scope routes to main.\n\n`;
   }
 
   /**

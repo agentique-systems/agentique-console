@@ -51,6 +51,33 @@ describe("spec currency for seats (fake SDK)", () => {
     expect(scoutPrompt).toContain("read_requirements before continuing");
   });
 
+  it("a suspect terminal claim in the delegated block carries the console-derived flag", async () => {
+    const h = makeFlowHarness();
+    const userSessionId = h.addUserSession();
+    const doc = "## Requirements\n- Dungeons are deterministic\n- Seed input is stable\n";
+    const initial = h.app.requirements.propose(userSessionId, doc, "initial requirements");
+    h.app.requirements.approve(initial.id, { document: doc, edited: false });
+    // r1's satisfied claim depends on r2; r2's claim is then withdrawn —
+    // the seat that owns r1 must see the suspect mark, not a clean status.
+    h.app.requirements.link({ userSessionId, fromId: "r1", kind: "depends_on", toId: "r2", actor: "main" });
+    h.app.requirements.reportStatus({ userSessionId, requirementId: "r1", to: "satisfied",
+      evidence: [{ kind: "command", ref: "ran the dungeon twice" }], claimant: { kind: "main" } });
+    h.app.requirements.reportStatus({ userSessionId, requirementId: "r2", to: "satisfied",
+      evidence: [{ kind: "command", ref: "seed check" }], claimant: { kind: "main" } });
+    h.app.requirements.reportStatus({ userSessionId, requirementId: "r2", to: "open",
+      evidence: [], claimant: { kind: "main" }, note: "seed drift found" });
+
+    const done = collectUntil(h.bus, (event) => event.type === "agent_session.result.returned", 10_000);
+    h.host.createSession({ userSessionId, title: "flagged", agents: [{ name: "scout", profileId: "explorer" }],
+      briefing: handoff("go"), requirements: ["r1"] });
+    await done;
+
+    const scoutPrompt = h.fake.captured.prompts.find((text) => text.includes("Your delegated requirements"));
+    expect(scoutPrompt).toBeDefined();
+    expect(scoutPrompt).toContain("- r1 [satisfied ⚠ depends_changed]");
+    expect(scoutPrompt).toContain("re-verify or reopen before relying on it");
+  });
+
   it("a spec-less session's delivery prompt is unchanged — no empty block", async () => {
     const h = makeFlowHarness();
     const userSessionId = h.addUserSession();
