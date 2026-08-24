@@ -346,6 +346,15 @@ export class Mailroom {
     // overwrite: repo.patchDelivery coalesces it against whatever is already
     // stored, so an ack only fills the field in when delivery never stamped it.
     this.#deps.repo.patchDelivery(delivery.id, { status, ...(status === "delivered" ? { deliveredAt: now } : {}), ...(status === "acknowledged" ? { acknowledgedAt: now, deliveredAt: now } : {}) });
+    // Seat context cursors ride the delivery lifecycle: an ACK is the one
+    // point the runtime knows the composed prompt was processed, so the
+    // decision watermark and answer flush advance HERE — and a requeue or
+    // cancellation clears the composer's staging so the unacknowledged delta
+    // renders again. At-least-once, never silently dropped.
+    if (delivery.recipient !== MAIN_RECIPIENT) {
+      if (status === "acknowledged") this.#deps.composer.noteDeliveryAcknowledged(session, delivery.recipient, delivery.id);
+      else if (status === "queued" || status === "cancelled") this.#deps.composer.noteDeliveryRequeued(session.id, delivery.recipient);
+    }
     const message = this.#deps.repo.getMessageById(delivery.messageId);
     this.#deps.bus.append({ type: "agent_session.delivery.updated", userSessionId: session.userSessionId, agentSessionId: session.id,
       payload: { agentSessionId: session.id, deliveryId: delivery.id, messageSeq: message?.seq ?? 0, sender: delivery.sender, recipient: delivery.recipient, category: delivery.category, status } });

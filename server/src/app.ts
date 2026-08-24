@@ -175,6 +175,9 @@ export function createApp(options: CreateAppOptions): App {
       finalCaveats: (agentSessionId) => workstreams.finalCaveats(agentSessionId),
       noteSessionArchived: (session) => workstreams.noteSessionArchived(session),
     },
+    changeImpacts: {
+      listOpen: (userSessionId) => changeImpacts.listOpen(userSessionId),
+    },
     scheduler: () => lateScheduler.get(),
     wake: (userSessionId, agentSessionId, category, text) =>
       lateRunner.get().enqueueAgentMilestone(userSessionId, agentSessionId, category, text),

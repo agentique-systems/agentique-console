@@ -40,6 +40,7 @@ import { grantedTools, runtimeToolNames, type AgentToolName } from "./grants.ts"
 import type { ActiveTurn, AgentLane, AgentLanePool } from "./lanes.ts";
 import type { DispatchWorkItemsInput } from "./patterns/engine.ts";
 import type { AssumptionService } from "../orchestrator/assumptions.ts";
+import type { DecisionLedger } from "../orchestrator/decisions.ts";
 import type { RequirementService } from "../orchestrator/requirements.ts";
 import type { SessionRouting } from "./routing.ts";
 import type { Deliver, Injector, RecordFailure, Transfer } from "./seams.ts";
@@ -103,6 +104,8 @@ export interface AgentRuntimeDeps {
   requirements: RequirementService;
   /** Recorded premises, for the seats' assumption tools. */
   assumptions: AssumptionService;
+  /** The operator decision ledger, for the seats' `list_decisions` read tool. */
+  decisions: DecisionLedger;
   /** OS capabilities. `null` = absent, stated at the construction site. */
   worktrees: WorktreeManager | null;
   /** Lazy — the scheduler posts through the service, composed after it. */
