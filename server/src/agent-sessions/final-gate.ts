@@ -26,6 +26,12 @@ export interface FinalGateDeps {
   handoffs?: HandoffService;
   /** Lazy: the scheduler is composed after the host in createApp. */
   scheduler: () => AssignmentScheduler;
+  /**
+   * `WorkstreamService.finalCaveats` — declared cross-workstream dependencies
+   * this session consumes that are still pending or broken. A final that
+   * precedes its declared inputs travels with that fact; it is never blocked.
+   */
+  workstreamCaveats?: (agentSessionId: string) => string[];
 }
 
 /**
@@ -122,5 +128,8 @@ export function finalReportCaveats(deps: FinalGateDeps, session: AgentSessionRow
   // only the operator can resolve", and a scheduled assignment is not one.
   const scheduled = deps.scheduler().countScheduledForAgentSession(session.id);
   if (scheduled > 0) caveats.push(`${scheduled} assignment(s) still scheduled behind incomplete dependencies`);
+  // Console-owned workstream facts: a declared dependency this session
+  // consumes that has not been produced (or whose producer was abandoned).
+  caveats.push(...(deps.workstreamCaveats?.(session.id) ?? []));
   return caveats;
 }

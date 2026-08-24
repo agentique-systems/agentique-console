@@ -206,6 +206,18 @@ export const agents = sqliteTable(
       .notNull()
       .default({}),
     ownership: text("ownership", { mode: "json" }).$type<string[]>().notNull().default([]),
+    /**
+     * The subset of `ownership` this seat holds as DECLARED-SHARED write
+     * responsibility, each with its why. The one ownership rule
+     * (portfolio/ownership.ts) lets write claims on one scope coexist only
+     * when EVERY claimant declared sharing — this column is what makes an
+     * intentional overlap structurally visible instead of a prompt fact.
+     * Absent scopes are exclusive; old rows ('[]') read as all-exclusive.
+     */
+    sharedOwnership: text("shared_ownership", { mode: "json" })
+      .$type<{ scope: string; why: string }[]>()
+      .notNull()
+      .default([]),
     sdkSessionId: text("sdk_session_id"),
     /** Last turn activity; park/reap bookkeeping that survives restarts. */
     lastActiveAt: text("last_active_at"),
@@ -789,6 +801,46 @@ export const changeImpacts = sqliteTable(
     uniqueIndex("change_impacts_source").on(t.projectId, t.sourceKind, t.sourceRef),
     index("change_impacts_project").on(t.projectId),
     check("change_impacts_source_kind", sql`${t.sourceKind} IN ('amendment','assumption_falsified','claim_withdrawn')`),
+  ],
+);
+
+/**
+ * Workstream dependency links: the project-portfolio claim that one open
+ * AgentSession (the consumer) depends on another (the producer) for a named
+ * interface or artifact. Workstream granularity only — AgentSession task DAGs
+ * stay local; these edges never schedule anything. Status is DERIVED at read
+ * time from console-owned facts (producer open → pending, producer reported
+ * final → satisfied, producer archived without reporting → broken), never
+ * stored. Released rows are historical records of a judgment (superseded,
+ * re-pointed at a successor) and keep their note; rows persist for the
+ * project's lifetime.
+ */
+export const workstreamLinks = sqliteTable(
+  "workstream_links",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id").notNull(),
+    /** The session in which the link was authored — attribution, never the key. */
+    userSessionId: text("user_session_id").notNull(),
+    consumerAgentSessionId: text("consumer_agent_session_id").notNull(),
+    producerAgentSessionId: text("producer_agent_session_id").notNull(),
+    /** The interface/artifact that crosses the boundary, in one line. */
+    subject: text("subject").notNull(),
+    /** "main" today; a future controller path would name the seat. */
+    createdBy: text("created_by").notNull(),
+    note: text("note"),
+    createdAt: text("created_at").notNull(),
+    releasedAt: text("released_at"),
+    releasedBy: text("released_by"),
+    releaseNote: text("release_note"),
+  },
+  (t) => [
+    uniqueIndex("workstream_links_live_pair")
+      .on(t.consumerAgentSessionId, t.producerAgentSessionId, t.subject)
+      .where(sql`released_at IS NULL`),
+    index("workstream_links_project").on(t.projectId, t.releasedAt),
+    index("workstream_links_producer").on(t.producerAgentSessionId),
+    index("workstream_links_consumer").on(t.consumerAgentSessionId),
   ],
 );
 

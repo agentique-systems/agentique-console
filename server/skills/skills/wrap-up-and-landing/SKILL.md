@@ -47,6 +47,10 @@ over any summary of them.
 - Every change impact is reconciled (read_requirements lists open ones):
   suspect claims re-verified, reopened, or judged with
   reconcile_change_impact — an open impact holds the completion proposal.
+- No broken workstream link with an open consumer (list_agent_sessions
+  surfaces them under attention): link a successor producer, release the
+  link with unlink_workstreams (with why), or close the consumer — a broken
+  link also holds the completion proposal.
 - Then record_completion against the CURRENT requirements revision — the
   sign-off card shows your record beside the console's own facts.
 

@@ -44,6 +44,14 @@ export interface RunCompletionDeps {
    */
   changeImpacts?: Pick<import("../orchestrator/change-impact.ts").ChangeImpactService, "listOpen">;
   /**
+   * The workstream-link layer — a BROKEN link (producer abandoned) whose
+   * consumer is still open holds the completion proposal the same way: the
+   * relationship went stale and nobody has judged it. Releasing the link (with
+   * why), re-pointing it at a successor, or archiving the consumer clears it;
+   * optional for pre-portfolio harnesses.
+   */
+  workstreams?: Pick<import("../portfolio/workstreams.ts").WorkstreamService, "brokenOpen">;
+  /**
    * `config.completionQuietWindowMs`. The predicate is re-evaluated when the
    * timer FIRES, not when it was scheduled, so a new turn starting inside the
    * window simply makes it false again.
@@ -142,6 +150,11 @@ export class RunCompletionService {
       this.#nudgeForChangeImpacts(userSessionId);
       return false;
     }
+    const broken = this.#deps.workstreams?.brokenOpen(userSessionId) ?? [];
+    if (broken.length > 0) {
+      this.#nudgeForBrokenLinks(userSessionId, broken);
+      return false;
+    }
     if (!this.#completionRecordSatisfiesGoverning(userSessionId)) {
       this.#nudgeForCompletionRecord(userSessionId);
       return false;
@@ -185,6 +198,25 @@ export class RunCompletionService {
       "Judge each item: reopen or re-verify stale claims with report_requirement, steer or archive affected sessions, " +
       "and record every other judgment with reconcile_change_impact (stands / superseded / unaffected / steered / interrupted, with why). " +
       "The run will not propose completion until every impact is reconciled.");
+  }
+
+  /** One nudge per (session, broken-link set). */
+  readonly #nudgedForBrokenLinks = new Map<string, string>();
+
+  #nudgeForBrokenLinks(userSessionId: string, broken: import("@agentique-console/shared").WorkstreamLinkWire[]): void {
+    const key = broken.map((wire) => wire.id).sort().join(",");
+    if (this.#nudgedForBrokenLinks.get(userSessionId) === key) return;
+    const anchor = this.#deps.repo.listAgentSessions(userSessionId)
+      .find((row) => row.parentAgentSessionId === null);
+    if (!anchor) return;
+    this.#nudgedForBrokenLinks.set(userSessionId, key);
+    const lines = broken.slice(0, 4).map((wire) =>
+      `${wire.id}: "${wire.consumerTitle}" (${wire.consumerAgentSessionId}) still awaits "${wire.subject}" from abandoned producer ${wire.producerAgentSessionId}`);
+    if (broken.length > 4) lines.push(`…and ${broken.length - 4} more`);
+    this.#deps.runner().enqueueAgentMilestone(userSessionId, anchor.id, "decision",
+      `The Console sees quiet sessions, but ${broken.length} workstream dependency link(s) are broken — their producer was archived without reporting: ${lines.join("; ")}. ` +
+      "Judge each: link the consumer to a successor with link_workstreams, release the stale link with unlink_workstreams (with why), or close the consumer if its work no longer matters. " +
+      "The run will not propose completion while a broken link's consumer stays open.");
   }
 
   /**

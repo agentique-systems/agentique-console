@@ -110,7 +110,7 @@ export interface AgentToolsContext {
   markSawSend(): void;
   agentWorkState(agent: AgentRow): string;
   dispatchWorkItems(input: { agentSessionId: string; items: { assignment: string; name?: string; owns?: string[] }[]; profileId?: string; instructions?: string; model?: string }): { joinId: string; agents: string[] };
-  createChildSession(input: { pattern: string; title: string; patternConfig?: Record<string, unknown>; agents: { name: string; profileId: string; instructions?: string; model?: string; owns: string[] }[]; briefing: HandoffDraft; requirements?: string[] }): { agentSessionId: string; agents: string[]; entryAgent: string };
+  createChildSession(input: { pattern: string; title: string; patternConfig?: Record<string, unknown>; agents: { name: string; profileId: string; instructions?: string; model?: string; owns: string[]; sharedOwns?: { scope: string; why: string }[] }[]; briefing: HandoffDraft; requirements?: string[] }): { agentSessionId: string; agents: string[]; entryAgent: string };
   abandonChildSession(childAgentSessionId: string, reason: string): void;
 }
 
@@ -577,13 +577,15 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
         patternConfig: z.record(z.string(), z.unknown()).optional(),
         agents: z.array(z.object({
           name: z.string(), profileId: z.string(), instructions: z.string().optional(), model: z.string().optional(),
-          owns: z.array(z.string()).default([]).describe("Must not collide with any agent's scopes anywhere in this session tree."),
+          owns: z.array(z.string()).default([]).describe("Exclusive write scope. One project-wide rule: a scope any open workstream already owns is rejected unless every claimant declares it shared."),
+          sharedOwns: z.array(z.object({ scope: z.string().min(1), why: z.string().min(1) })).optional()
+            .describe("Scopes deliberately co-owned with another workstream; each needs a why. Sharing must be declared by EVERY claimant."),
         })).min(1).max(20),
         briefing: HandoffDraftSchema.describe("The child's assignment: objective, evidence, risk, uncertainty, next action."),
         requirements: z.array(z.string().min(1)).max(12).optional()
           .describe("Requirement ids the child answers for — MUST be a subset of your own delegated requirements. The child's entry agent gets the same scoped requirement tools you hold."),
       },
-      async (args: { pattern: string; title: string; patternConfig?: Record<string, unknown>; agents: { name: string; profileId: string; instructions?: string; model?: string; owns: string[] }[]; briefing: HandoffDraft; requirements?: string[] }) => {
+      async (args: { pattern: string; title: string; patternConfig?: Record<string, unknown>; agents: { name: string; profileId: string; instructions?: string; model?: string; owns: string[]; sharedOwns?: { scope: string; why: string }[] }[]; briefing: HandoffDraft; requirements?: string[] }) => {
         try {
           return ok({ ...ctx.createChildSession(args), status: "launched",
             note: "The child works autonomously; its material reports arrive to you as handoffs. Do not poll it." });
@@ -610,13 +612,15 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
         items: z.array(z.object({
           assignment: z.string().min(1).describe("The complete, self-contained work item — the mapper sees nothing else."),
           name: z.string().optional().describe("Optional agent name; default map.<dispatch>.<n>."),
-          owns: z.array(z.string()).optional().describe("Ownership scopes if the item writes files."),
+          owns: z.array(z.string()).optional().describe("Exclusive write scope — REQUIRED when the mapper profile writes files; the same project-wide ownership rule as every other seat."),
+          sharedOwns: z.array(z.object({ scope: z.string().min(1), why: z.string().min(1) })).optional()
+            .describe("Scopes deliberately co-owned with another workstream; each needs a why."),
         })).min(1).max(8),
         profileId: z.string().optional().describe("Mapper profile; default explorer."),
         instructions: z.string().optional(),
         model: z.string().optional(),
       },
-      async (args: { items: { assignment: string; name?: string; owns?: string[] }[]; profileId?: string; instructions?: string; model?: string }) => {
+      async (args: { items: { assignment: string; name?: string; owns?: string[]; sharedOwns?: { scope: string; why: string }[] }[]; profileId?: string; instructions?: string; model?: string }) => {
         try {
           return ok(ctx.dispatchWorkItems({ agentSessionId: session.id, items: args.items,
             ...(args.profileId ? { profileId: args.profileId } : {}),

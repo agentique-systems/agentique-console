@@ -27,6 +27,7 @@
  *   requirement_delegations,
  *   requirement_links                     RequirementStore
  *   change_impacts                        ChangeImpactStore
+ *   workstream_links                      WorkstreamStore
  *
  * The one sanctioned crossing: transactional appends anchored on a row the
  * store owns (MessageStore.appendHandoffMailbox writes the handoff row with
@@ -55,6 +56,7 @@ import { SessionStore } from "./session-store.ts";
 import { TaskStore } from "./task-store.ts";
 import { UsageStore } from "./usage-store.ts";
 import { WorkspaceStore } from "./workspace-store.ts";
+import { WorkstreamStore } from "./workstream-store.ts";
 
 export { AssignmentStore } from "./assignment-store.ts";
 export { AssumptionStore, type AssumptionRow } from "./assumption-store.ts";
@@ -78,6 +80,7 @@ export { SessionStore } from "./session-store.ts";
 export { TaskStore } from "./task-store.ts";
 export { UsageStore } from "./usage-store.ts";
 export { WorkspaceStore } from "./workspace-store.ts";
+export { WorkstreamStore, type WorkstreamLinkRow } from "./workstream-store.ts";
 
 /** better-sqlite3's synchronous transaction wrapper — the only handle stores need. */
 export interface SqliteTransactor {
@@ -95,6 +98,7 @@ export interface Stores {
   requirements: RequirementStore;
   assumptions: AssumptionStore;
   changeImpacts: ChangeImpactStore;
+  workstreams: WorkstreamStore;
   orchestrationState: OrchestrationStateStore;
   tasks: TaskStore;
   assignments: AssignmentStore;
@@ -117,6 +121,7 @@ export function createStores(db: Db, sqlite: SqliteTransactor): Stores {
     requirements: new RequirementStore(db, sqlite),
     assumptions: new AssumptionStore(db),
     changeImpacts: new ChangeImpactStore(db),
+    workstreams: new WorkstreamStore(db),
     orchestrationState: new OrchestrationStateStore(db),
     tasks: new TaskStore(db),
     assignments: new AssignmentStore(db),

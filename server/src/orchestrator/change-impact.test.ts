@@ -44,11 +44,13 @@ function makeHarness() {
   const impacts = new ChangeImpactService(stores.changeImpacts, bus, () => "proj1");
   const open = new Set<string>();
   const tasks: Task[] = [];
+  const edges: { consumerAgentSessionId: string; producerAgentSessionId: string; subject: string }[] = [];
   const wireImpacts = (service: ChangeImpactService) => service.setDeps({
     openAgentSessionIds: () => new Set(open),
     sessionTitle: (id) => `title of ${id}`,
     listTasks: () => [...tasks],
     latestChanges: () => stores.requirements.latestChanges("proj1"),
+    liveWorkstreamEdges: () => [...edges],
   });
   wireImpacts(impacts);
   requirements.setImpactRecorder((input) => impacts.record(input));
@@ -63,7 +65,7 @@ function makeHarness() {
   const eventsOf = (type: string) =>
     db.select().from(eventsTable).where(eq(eventsTable.type, type)).all();
   const impactRows = () => db.select().from(changeImpactsTable).all();
-  return { db, sqlite, stores, bus, requirements, assumptions, impacts, open, tasks, wakes, eventsOf, impactRows, wireImpacts };
+  return { db, sqlite, stores, bus, requirements, assumptions, impacts, open, tasks, edges, wakes, eventsOf, impactRows, wireImpacts };
 }
 
 type Harness = ReturnType<typeof makeHarness>;
@@ -150,6 +152,32 @@ describe("transitive impact closure", () => {
     expect(impact!.affected.suspectClaims.map((claim) => claim.requirementId)).toEqual(["r4"]);
     expect(impact!.affected.requirements.map((entry) => entry.id)).not.toContain("r6");
     expect(impact!.affected.sessions.map((entry) => entry.agentSessionId)).toEqual(["as-auth"]);
+  });
+
+  it("workstream links extend the affected sessions to open consumers, transitively, with a via note", () => {
+    const h = makeHarness();
+    approveFixture(h);
+    // as-auth is delegated the changed subtree; as-ui consumes as-auth's
+    // interface and as-e2e consumes as-ui's — both must be discoverable
+    // through the portfolio layer, not main's memory. The archived consumer
+    // and the unrelated session stay out.
+    h.open.add("as-auth").add("as-ui").add("as-e2e").add("as-unrelated");
+    h.requirements.delegate("us1", "as-auth", ["r1"], "commission");
+    h.edges.push(
+      { consumerAgentSessionId: "as-ui", producerAgentSessionId: "as-auth", subject: "token API" },
+      { consumerAgentSessionId: "as-e2e", producerAgentSessionId: "as-ui", subject: "rendered login flow" },
+      { consumerAgentSessionId: "as-archived", producerAgentSessionId: "as-auth", subject: "old copy" },
+    );
+    satisfy(h, "r2");
+    const amended = "## Requirements\n- r2: Login issues a ROTATING session token\n- r3 (any of): A config source loads\n  - r4: TOML config parses\n  - r5: JSON config parses\n";
+    const draft = h.requirements.propose("us1", amended, "rotate tokens", { scopeId: "r1" });
+    const { impact } = h.requirements.approve(draft.id, { document: amended, edited: false });
+    expect(impact).not.toBeNull();
+    expect(impact!.affected.sessions.map((entry) => entry.agentSessionId)).toEqual(["as-auth", "as-e2e", "as-ui"]);
+    const via = new Map(impact!.affected.sessions.map((entry) => [entry.agentSessionId, entry.via]));
+    expect(via.get("as-auth")).toBeUndefined();
+    expect(via.get("as-ui")).toBe("consumes from as-auth: token API");
+    expect(via.get("as-e2e")).toBe("consumes from as-ui: rendered login flow");
   });
 
   it("dependents of a RETIRED node are captured — the closure runs pre-approval", () => {

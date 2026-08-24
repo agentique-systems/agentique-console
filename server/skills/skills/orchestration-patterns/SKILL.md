@@ -43,6 +43,17 @@ The briefing is the session's contract, not a greeting:
   scoped reporting tools.
 - `tasks` — the initial ledger units, created WITH the session so the
   briefing's taskId resolves and the entry assignment starts its unit.
+- `owns` / `sharedOwns` — write responsibility, checked by ONE project-wide
+  rule at every door (creation, children, add_agent, dispatch): a scope any
+  open workstream holds rejects unless every claimant declares it shared
+  with a why. Scopes are responsibility labels, not file paths — plan
+  deliberate co-ownership at commission time, on both sides.
+- `dependsOn` — what this session awaits from other workstreams, by producer
+  session id and subject. The Console derives pending/satisfied/broken from
+  producer state, shows the link to both sessions and in
+  list_agent_sessions, routes change impacts to consumers, and holds
+  completion on a broken link until you release it (unlink_workstreams) or
+  link a successor. Record the coupling; do not carry it in memory.
 - Make the assignment self-contained: the seat sees the briefing and the
   workspace, not your context.
 

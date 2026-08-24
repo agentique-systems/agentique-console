@@ -26,6 +26,7 @@ import { MAIN_TOOL_NAMES } from "./grants.ts";
 import type { InteractionService } from "./interactions.ts";
 import type { AssumptionService } from "./assumptions.ts";
 import type { ChangeImpactService } from "./change-impact.ts";
+import type { WorkstreamService } from "../portfolio/workstreams.ts";
 import { RequirementParseFailure, type RequirementService } from "./requirements.ts";
 import type { CompletionRecord, OrchestrationStateService } from "./state.ts";
 import type { CapabilityCatalog } from "../agent-profiles/capability-catalog.ts";
@@ -62,6 +63,7 @@ export interface ConsoleToolsInput {
   requirements: RequirementService;
   assumptions: AssumptionService;
   changeImpacts: ChangeImpactService;
+  workstreams: WorkstreamService;
   state: OrchestrationStateService;
   /** Skills + attachable-server metadata, for staffing and mint validation. */
   catalog: CapabilityCatalog;
@@ -70,7 +72,7 @@ export interface ConsoleToolsInput {
 }
 
 export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
-  const { sdk, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, requirements, assumptions, changeImpacts, state, catalog, registry } = input;
+  const { sdk, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, requirements, assumptions, changeImpacts, workstreams, state, catalog, registry } = input;
 
   /** Tools operate only on this UserSession's agent sessions. */
   const owned = (agentSessionId: string) => {
@@ -109,7 +111,9 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
               instructions: z.string().optional().describe("Agent brief appended to the profile instructions"),
               model: z.string().optional().describe("Model override"),
               skills: z.array(z.string()).optional().describe("Extra skills to RECOMMEND to this seat, union'd with the profile's defaults."),
-              owns: z.array(z.string()).default([]).describe("Exclusive write scope. Required for a writing agent; empty for a read-only one."),
+              owns: z.array(z.string()).default([]).describe("Exclusive write scope. Required for a writing agent. One project-wide rule: a scope any open workstream owns is rejected unless every claimant declares it shared."),
+              sharedOwns: z.array(z.object({ scope: z.string().min(1), why: z.string().min(1) })).optional()
+                .describe("Scopes deliberately co-owned with another workstream, each with a why; EVERY claimant must declare the share."),
             }),
           )
           .min(1)
@@ -126,6 +130,11 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           .describe("What evidence counts as success or would change your plan — the session's success contract."),
         requirements: z.array(z.string().min(1)).max(12).optional()
           .describe("Requirement ids this session answers for — its delegated sub-scope; the entry agent gets scoped reporting tools. Delegate OPEN requirements."),
+        dependsOn: z.array(z.object({
+          agentSessionId: z.string().min(1).describe("The producer workstream."),
+          subject: z.string().min(1).describe("What it awaits, one line."),
+        })).max(8).optional()
+          .describe("Dependencies on other workstreams, declared at commission: this session cannot safely complete until each producer delivers its subject. Use link_workstreams for links discovered later."),
         tasks: z.array(z.object({
           taskId: z.string().min(1).describe("Short stable id, e.g. \"core\""),
           subject: z.string().min(1),
@@ -147,6 +156,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           model?: string;
           skills?: string[];
           owns: string[];
+          sharedOwns?: { scope: string; why: string }[];
         }[];
         briefing: HandoffDraft;
         allowChildSessions?: boolean;
@@ -154,6 +164,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         why?: string;
         expecting?: string;
         requirements?: string[];
+        dependsOn?: { agentSessionId: string; subject: string }[];
         tasks?: { taskId: string; subject: string; description?: string; owner?: string; blockedBy?: string[]; requirementId?: string }[];
       }) =>
         guarded(() => {
@@ -188,6 +199,15 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           assertLiveRequirementIds((args.tasks ?? [])
             .map((unit) => unit.requirementId)
             .filter((id): id is string => id !== undefined));
+          // Declared dependencies validate BEFORE anything spawns: each
+          // producer must exist in this conversation and must not already be
+          // abandoned — a session must never launch waiting on nothing.
+          for (const dep of args.dependsOn ?? []) {
+            const producer = owned(dep.agentSessionId);
+            if (producer.lifecycle !== "open" && !host.reportedFinal(producer)) {
+              throw new InvalidInputError(`dependsOn producer ${dep.agentSessionId} was archived without reporting — it will never produce; name the successor session instead`);
+            }
+          }
           const created = host.createSession({
             userSessionId,
             title: args.title,
@@ -202,10 +222,19 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
             // dispatches, so the very first delivery renders the sub-scope.
             ...(args.requirements === undefined || args.requirements.length === 0 ? {} : { requirements: args.requirements }),
           });
+          // Commission-time dependency links land right after creation, so
+          // the very first delivery renders them to the new session's seats.
+          const declaredLinks = (args.dependsOn ?? []).map((dep) => workstreams.link({
+            userSessionId, consumerAgentSessionId: created.agentSessionId,
+            producerAgentSessionId: dep.agentSessionId, subject: dep.subject, createdBy: "main",
+          }));
           return {
             agentSessionId: created.agentSessionId,
             agents: created.agents,
             pattern: args.pattern,
+            ...(declaredLinks.length === 0 ? {} : {
+              dependsOn: declaredLinks.map((wire) => ({ linkId: wire.id, producerAgentSessionId: wire.producerAgentSessionId, subject: wire.subject, status: wire.status })),
+            }),
             // Steer it with `send_to_coordinator`, not with a peer address:
             // the native mesh is gone and a peer name is only live while the
             // agent's process is. The tool reaches this session's entry agent.
@@ -556,9 +585,45 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
 
     sdk.tool(
       "list_agent_sessions",
-      "List this conversation's agent sessions with status and unseen message counts.",
+      "List this conversation's agent sessions — the portfolio view: status, unseen counts, each open session's ownership scopes (shared claims marked with their why), and its workstream links with derived status. Broken dependencies surface under `attention`.",
       {},
-      async () => guarded(() => ({ sessions: host.listForUserSession(userSessionId) })),
+      async () => guarded(() => {
+        const links = workstreams.list(userSessionId).filter((wire) => wire.status !== "released");
+        const sessions = host.listForUserSession(userSessionId).map((session) => {
+          const dependsOn = links.filter((wire) => wire.consumerAgentSessionId === session.id)
+            .map((wire) => ({ linkId: wire.id, producerAgentSessionId: wire.producerAgentSessionId, subject: wire.subject, status: wire.status }));
+          const consumers = links.filter((wire) => wire.producerAgentSessionId === session.id)
+            .map((wire) => ({ linkId: wire.id, consumerAgentSessionId: wire.consumerAgentSessionId, subject: wire.subject, status: wire.status }));
+          const owns: string[] = [];
+          if (session.status !== "archived") {
+            for (const seat of repo.listAgents(session.id)) {
+              const sharedWhys = new Map(seat.sharedOwnership.map((entry) => [entry.scope, entry.why]));
+              for (const scope of seat.ownership) {
+                owns.push(sharedWhys.has(scope) ? `${scope} (shared: ${sharedWhys.get(scope)!})` : scope);
+              }
+            }
+          }
+          return {
+            ...session,
+            ...(owns.length === 0 ? {} : { owns: owns.slice(0, 12), ...(owns.length > 12 ? { ownsElided: owns.length - 12 } : {}) }),
+            ...(dependsOn.length === 0 ? {} : { dependsOn }),
+            ...(consumers.length === 0 ? {} : { consumers }),
+          };
+        });
+        const broken = links.filter((wire) => wire.status === "broken");
+        return {
+          sessions,
+          ...(broken.length === 0 ? {} : {
+            attention: {
+              brokenDependencies: broken.map((wire) => ({
+                linkId: wire.id, consumerAgentSessionId: wire.consumerAgentSessionId,
+                producerAgentSessionId: wire.producerAgentSessionId, subject: wire.subject,
+              })),
+              note: "These consumers await a producer that was archived without reporting. Link a successor with link_workstreams or release the link with unlink_workstreams (with why).",
+            },
+          }),
+        };
+      }),
     ),
 
     sdk.tool(
@@ -717,6 +782,47 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
             note: wire.status === "reconciled"
               ? "Reconciled — every affected item is dispositioned or mechanically cleared."
               : "Recorded. Items still outstanding are listed; the impact stays open (and holds completion) until each is dispositioned or clears mechanically." };
+        }),
+    ),
+
+    sdk.tool(
+      "link_workstreams",
+      "Declare a workstream dependency: the consumer session cannot safely complete until the producer delivers the named subject. Status is console-derived — pending while the producer works, satisfied when it reports, BROKEN if it is archived unreported (a broken link with an open consumer holds completion). Links are visibility and change-impact routing, never scheduling.",
+      {
+        consumerAgentSessionId: z.string().min(1).describe("The depending workstream."),
+        producerAgentSessionId: z.string().min(1).describe("The producing workstream; already-reported is fine (born satisfied), abandoned is rejected."),
+        subject: z.string().min(1).describe("The interface/artifact crossing the boundary, one line."),
+        note: z.string().optional().describe("Optional context — journaled."),
+      },
+      async (args: { consumerAgentSessionId: string; producerAgentSessionId: string; subject: string; note?: string }) =>
+        guarded(() => {
+          const wire = workstreams.link({
+            userSessionId,
+            consumerAgentSessionId: args.consumerAgentSessionId,
+            producerAgentSessionId: args.producerAgentSessionId,
+            subject: clip(args.subject, 280),
+            createdBy: "main",
+            ...(args.note === undefined ? {} : { note: clip(args.note, 280) }),
+          });
+          return { linkId: wire.id, status: wire.status,
+            consumer: { agentSessionId: wire.consumerAgentSessionId, title: wire.consumerTitle },
+            producer: { agentSessionId: wire.producerAgentSessionId, title: wire.producerTitle },
+            subject: wire.subject,
+            note: "Recorded durably. Both sessions see the link on their deliveries; list_agent_sessions shows it with live status." };
+        }),
+    ),
+
+    sdk.tool(
+      "unlink_workstreams",
+      "Release a workstream dependency link with a judgment note (superseded, re-pointed, no longer holds). The row stays as history; releasing a broken link is how it stops holding completion.",
+      {
+        linkId: z.string().min(1).describe("A wl_… id from list_agent_sessions."),
+        note: z.string().min(1).describe("Why it no longer stands — journaled."),
+      },
+      async (args: { linkId: string; note: string }) =>
+        guarded(() => {
+          const wire = workstreams.release({ userSessionId, linkId: args.linkId, by: "main", note: clip(args.note, 280) });
+          return { linkId: wire.id, status: wire.status, releaseNote: wire.releaseNote };
         }),
     ),
 
@@ -1011,11 +1117,13 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         profileId: z.string().min(1).describe("A profile id from list_agent_profiles"),
         instructions: z.string().optional().describe("Brief appended to the profile instructions"),
         model: z.string().optional(),
-        owns: z.array(z.string()).default([]).describe("Exclusive write scope; required for a writing profile"),
+        owns: z.array(z.string()).default([]).describe("Exclusive write scope; required for a writing profile. Same project-wide rule as creation."),
+        sharedOwns: z.array(z.object({ scope: z.string().min(1), why: z.string().min(1) })).optional()
+          .describe("Scopes co-owned with another workstream, each with a why."),
         skills: z.array(z.string()).optional().describe("Extra skills, from the catalog"),
         why: z.string().optional().describe("Why this seat now — journaled."),
       },
-      async (args: { agentSessionId: string; name: string; profileId: string; instructions?: string; model?: string; owns: string[]; skills?: string[]; why?: string }) =>
+      async (args: { agentSessionId: string; name: string; profileId: string; instructions?: string; model?: string; owns: string[]; sharedOwns?: { scope: string; why: string }[]; skills?: string[]; why?: string }) =>
         guarded(() => {
           const session = owned(args.agentSessionId);
           if (args.skills !== undefined && args.skills.length > 0) {
@@ -1030,6 +1138,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
             ...(args.instructions === undefined ? {} : { instructions: args.instructions }),
             ...(args.model === undefined ? {} : { model: args.model }),
             owns: args.owns,
+            ...(args.sharedOwns === undefined ? {} : { sharedOwns: args.sharedOwns }),
             ...(args.skills === undefined ? {} : { skills: args.skills }),
             ...(args.why === undefined ? {} : { why: args.why }),
           });

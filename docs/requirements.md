@@ -244,6 +244,9 @@ point; amendments compute against pre-approval state so dependents of
 retired nodes are captured before retirement removes their links — and
 persists it as one impact row: suspect terminal claims, affected open
 sessions, requirement-linked incomplete tasks, live scheduled assignments.
+Affected sessions extend through live workstream dependency links to their
+open consumers, transitively (`via` names the coupling), so an amendment
+that touches a producer reaches the workstreams consuming its interface.
 Idempotent per source event and per still-open seed set.
 
 Reconciliation is **derived, never stored**: a suspect claim clears when a

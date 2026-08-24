@@ -196,6 +196,38 @@ reopen by re-briefing (hub/plan_execute — budgets reset on a fresh briefing)
 or a fresh invocation (debate/map_reduce — joins settle once). Prefer
 close-and-create over deforming a running session past its briefing.
 
+### The project portfolio: ownership and workstream links
+
+What used to live only in main's conversational memory — who answers for
+which responsibility, and which workstream awaits which other's output — is
+durable and console-checked:
+
+- **One ownership rule** (`portfolio/ownership.ts`) runs at every door write
+  responsibility can enter: top-level creation, child creation, `add_agent`,
+  and map/reduce dispatch. A write scope any open workstream in the project
+  holds is rejected — top-level sessions and cousin branches exactly like
+  siblings — unless EVERY claimant declared the scope shared with a why
+  (`sharedOwns`, persisted on the seat row), so intentional co-ownership is
+  structurally visible and accidental overlap is an error naming the holder.
+  Scopes are responsibility labels, never file paths: worktrees isolate
+  files, ownership names who answers for meaning. Read-only participation
+  never conflicts; exempt profiles (reviewers) are skipped; archival
+  releases claims while the rows keep the history.
+- **Workstream dependency links** (`workstream_links`,
+  `WorkstreamService`) record "this session cannot safely complete until
+  that one delivers X" — authored by main (`dependsOn` at commission,
+  `link_workstreams`/`unlink_workstreams` later), workstream-granular, never
+  a scheduler: task DAGs stay session-local. Status is derived, never
+  stored: pending while the producer works, satisfied when its final voice
+  reports (and regresses if it resumes), BROKEN when the producer is
+  archived unreported — an abandoned producer wakes main, its consumers'
+  finals carry the fact as caveats, and a broken link with an open consumer
+  holds the completion proposal until judged (release with a why, link a
+  successor, or close the consumer). Change impacts follow live links to
+  open consumers transitively, so a revision that touches a producer reaches
+  the workstreams consuming its interface. `list_agent_sessions` is the
+  portfolio read: who owns what, who awaits whom, what needs attention.
+
 **Pattern sufficiency is an empirical hypothesis, not a settled fact.** When
 the orchestrator works around an inexpressible coordination structure it
 tags its working state with `pattern-friction:`; the Tier-B export surfaces

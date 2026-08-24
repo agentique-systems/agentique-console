@@ -27,6 +27,7 @@ import { AssumptionService } from "./orchestrator/assumptions.ts";
 import { ChangeImpactService } from "./orchestrator/change-impact.ts";
 import { RequirementService } from "./orchestrator/requirements.ts";
 import { OrchestrationStateService } from "./orchestrator/state.ts";
+import { WorkstreamService } from "./portfolio/workstreams.ts";
 import type { ConsoleSdk } from "./sdk/types.ts";
 import type { SqliteSessionStore } from "./sdk/session-store.ts";
 import { WorktreeManager } from "./runtime/worktree-manager.ts";
@@ -81,6 +82,7 @@ export interface App {
   requirements: RequirementService;
   assumptions: AssumptionService;
   changeImpacts: ChangeImpactService;
+  workstreams: WorkstreamService;
   orchestrationState: OrchestrationStateService;
   completion: RunCompletionService;
   userSessions: UserSessionService;
@@ -116,6 +118,10 @@ export function createApp(options: CreateAppOptions): App {
   const handoffs = new HandoffService({ repo, bus, getWorkspaceRoot });
   const requirements = new RequirementService(stores.requirements, stores.projects, stores.assumptions, bus, resolveProject);
   const assumptions = new AssumptionService(stores.assumptions, requirements, bus, resolveProject);
+  // The project-portfolio workstream layer: durable cross-session dependency
+  // links with console-derived status; ownership claims live on seat rows and
+  // are checked by portfolio/ownership.ts inside the lifecycle paths.
+  const workstreams = new WorkstreamService(stores.workstreams, bus, resolveProject);
   // The change-impact ledger: the graph computes each change's transitive
   // closure; this persists it durably and derives reconciliation state.
   const changeImpacts = new ChangeImpactService(stores.changeImpacts, bus, resolveProject);
@@ -125,6 +131,7 @@ export function createApp(options: CreateAppOptions): App {
     sessionTitle: (agentSessionId) => repo.getAgentSession(agentSessionId)?.title ?? null,
     listTasks: (userSessionId) => tasks.listForUserSession(userSessionId),
     latestChanges: (userSessionId) => stores.requirements.latestChanges(resolveProject(userSessionId)),
+    liveWorkstreamEdges: (userSessionId) => workstreams.liveEdges(userSessionId),
   });
   requirements.setImpactRecorder((input) => changeImpacts.record(input));
   // One requirements proposal at a time: with sequential continuation this is
@@ -163,9 +170,20 @@ export function createApp(options: CreateAppOptions): App {
     repo, bus, artifacts, config, profiles, sdk, sessionStore, getWorkspaceRoot, requirements, assumptions,
     worktrees, capacity,
     interactions, decisions, tasks, handoffs,
+    workstreams: {
+      promptLines: (agentSessionId) => workstreams.promptLines(agentSessionId),
+      finalCaveats: (agentSessionId) => workstreams.finalCaveats(agentSessionId),
+      noteSessionArchived: (session) => workstreams.noteSessionArchived(session),
+    },
     scheduler: () => lateScheduler.get(),
     wake: (userSessionId, agentSessionId, category, text) =>
       lateRunner.get().enqueueAgentMilestone(userSessionId, agentSessionId, category, text),
+  });
+  // The link layer reads session facts through the host's ONE predicates.
+  workstreams.setDeps({
+    getAgentSession: (agentSessionId) => repo.getAgentSession(agentSessionId),
+    reportedFinal: (session) => host.reportedFinal(session),
+    userSessionOpen: (userSessionId) => repo.getUserSession(userSessionId)?.lifecycle === "open",
   });
   const scheduler = new AssignmentScheduler({
     store: stores.assignments, tasks, sessions: stores.sessions, messages: stores.messages, bus,
@@ -179,16 +197,17 @@ export function createApp(options: CreateAppOptions): App {
     host: () => host,
     tasks, capacity,
     buildMcpServer: (userSessionId, sdkInstance) =>
-      buildConsoleMcpServer({ sdk: sdkInstance, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, requirements, assumptions, changeImpacts, state: orchestrationState, catalog, registry: profiles }),
+      buildConsoleMcpServer({ sdk: sdkInstance, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, requirements, assumptions, changeImpacts, workstreams, state: orchestrationState, catalog, registry: profiles }),
   });
   lateRunner.set(runner);
+  workstreams.setWakeNote((userSessionId, text) => lateRunner.get().postConsoleNote(userSessionId, text));
   // Console-established facts (a falsified assumption, a dependency that
   // moved under satisfied work) wake main with a note — record-and-display,
   // never a status rewrite.
   requirements.setWakeNote((userSessionId, text) => lateRunner.get().postConsoleNote(userSessionId, text));
   assumptions.setWakeNote((userSessionId, text) => lateRunner.get().postConsoleNote(userSessionId, text));
   const completion = new RunCompletionService({
-    db, repo, bus, interactions, scheduler, getWorkspaceRoot, orchestrationState, requirements, changeImpacts,
+    db, repo, bus, interactions, scheduler, getWorkspaceRoot, orchestrationState, requirements, changeImpacts, workstreams,
     host: () => host,
     runner: () => runner,
     quietWindowMs: config.policy.completionQuietWindowMs,
@@ -232,7 +251,7 @@ export function createApp(options: CreateAppOptions): App {
   });
 
   return {
-    config, db, sqlite, bus, artifacts, repo, sdk, getWorkspaceRoot, requirements, assumptions, changeImpacts, orchestrationState,
+    config, db, sqlite, bus, artifacts, repo, sdk, getWorkspaceRoot, requirements, assumptions, changeImpacts, workstreams, orchestrationState,
     workspaces, timeline, profiles, worktrees, capacity,
     decisions, interactions, tasks, scheduler, handoffs, sessionStore,
     host, runner, completion, userSessions, system,

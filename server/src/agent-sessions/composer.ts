@@ -244,6 +244,12 @@ export interface PromptComposerDeps {
   worktrees: WorktreeManager | null;
   /** Live lane facts for the roster work-state line — a host capability, injected. */
   laneState: (agentSessionId: string, agent: string) => { activeTurn: boolean; live: boolean } | null;
+  /**
+   * `WorkstreamService.promptLines` — this session's declared cross-workstream
+   * links with their derived status. Optional: harnesses without the
+   * portfolio render no block.
+   */
+  workstreamLines?: (agentSessionId: string) => string[];
 }
 
 export class PromptComposer {
@@ -341,12 +347,19 @@ export class PromptComposer {
     const specPointer = this.#deps.requirements.pointer(session.userSessionId);
     const specBlock = specPointer === null ? ""
       : `Governing requirements: ${specPointer}. If your system prompt shows an older revision, read_requirements before continuing.\n\n`;
+    // Declared cross-workstream links on EVERY delivery: what this session
+    // awaits from other workstreams (with the console-derived status) and
+    // which workstreams consume its output — the interface is a contract, not
+    // an implementation detail. Omitted entirely when none (byte-stability).
+    const workstreamLines = this.#deps.workstreamLines?.(session.id) ?? [];
+    const workstreamBlock = workstreamLines.length === 0 ? ""
+      : `## Workstream links (declared by main, console-derived status)\n${workstreamLines.map((line) => `- ${line}`).join("\n")}\nA pending or broken dependency is a fact to plan around and report, not to assume away.\n\n`;
     // The session's delegated sub-scope on EVERY delivery, statements and
     // statuses included — the sub-scope IS this session's success condition,
     // and a contract buried in the briefing is one a long-lived seat forgets.
     // Omitted entirely when the session holds no delegation (byte-stability).
     const delegatedBlock = this.#delegatedRequirements(session);
-    return `AgentSession ${session.id}: ${session.title}\nYou are ${seat.name}. Participants: ${roster}.\n\n${answersBlock}${freshBlock}${ledgerBlock}${specBlock}${delegatedBlock}Only the following addressed handoffs are new:\n${messages}\n\nTreat handoff claims as historical context; verify risky claims against repository/task/journal evidence during normal work. Act without restating the envelope.`;
+    return `AgentSession ${session.id}: ${session.title}\nYou are ${seat.name}. Participants: ${roster}.\n\n${answersBlock}${freshBlock}${ledgerBlock}${specBlock}${workstreamBlock}${delegatedBlock}Only the following addressed handoffs are new:\n${messages}\n\nTreat handoff claims as historical context; verify risky claims against repository/task/journal evidence during normal work. Act without restating the envelope.`;
   }
 
   /**

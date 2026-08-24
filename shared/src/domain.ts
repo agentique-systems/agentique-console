@@ -572,8 +572,8 @@ export interface ChangeImpactAffected {
     ord: number;
     at: string;
   }[];
-  /** Open agent sessions whose delegations or requirement-linked tasks intersect the affected set. */
-  sessions: { agentSessionId: string; title: string }[];
+  /** Open agent sessions whose delegations or requirement-linked tasks intersect the affected set — plus, via workstream links, open consumers of any affected session (`via` says which producer coupled them in). */
+  sessions: { agentSessionId: string; title: string; via?: string }[];
   /** Incomplete requirement-linked tasks inside the affected set (visibility for the judge; their session's disposition covers them). */
   tasks: { taskId: string; subject: string; status: string; agentSessionId: string | null }[];
   /** Live scheduled assignments waiting on affected tasks. */
@@ -612,6 +612,37 @@ export interface ChangeImpactWire {
   outstanding: { claims: string[]; sessions: string[] };
   status: "open" | "reconciled";
   createdAt: string;
+}
+
+/**
+ * A workstream dependency link's DERIVED status — computed from console-owned
+ * facts at read time, never stored:
+ * - `pending`: the producer session is open and has not reported its final.
+ * - `satisfied`: the producer's final voice has reported terminally (a later
+ *   non-terminal report from it regresses the link to pending — satisfaction
+ *   is a current projection, not a ratchet).
+ * - `broken`: the producer was archived without ever reporting — abandoned or
+ *   closed; the consumer is visibly stale, never silently satisfied.
+ * - `released`: main recorded a judgment (superseded, re-pointed) and the row
+ *   is a historical record.
+ */
+export type WorkstreamLinkStatus = "pending" | "satisfied" | "broken" | "released";
+
+export interface WorkstreamLinkWire {
+  id: string;
+  consumerAgentSessionId: string;
+  consumerTitle: string;
+  producerAgentSessionId: string;
+  producerTitle: string;
+  /** The interface/artifact that crosses the boundary, in one line. */
+  subject: string;
+  status: WorkstreamLinkStatus;
+  createdBy: string;
+  note: string | null;
+  createdAt: string;
+  releasedAt: string | null;
+  releasedBy: string | null;
+  releaseNote: string | null;
 }
 
 /** Orchestration-pattern catalog ids — the create-session wire vocabulary. */
