@@ -2,7 +2,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { initMessage, successMessage } from "../sdk/fake.ts";
 import { collectUntil, makeDelegationHarness } from "../test-helpers.ts";
-import { interactions as interactionRows, runSummaries } from "../db/schema.ts";
+import { events as eventRows, interactions as interactionRows, runSummaries } from "../db/schema.ts";
+import { computeCoverageReport } from "./coverage.ts";
+import { RunCompletionService } from "./service.ts";
 
 const draft = (action: string, status: "pending" | "completed" = "pending") => ({
   core: {
@@ -470,4 +472,194 @@ describe("the requirement graph as completion oracle", () => {
     await send(h).handler(FINAL, {});
     await settle();
   }
+});
+
+describe("completion coverage and exception-oriented sign-off", () => {
+  const approveDoc = (h: ReturnType<typeof harness>["h"], userSessionId: string, doc: string) => {
+    const draftRow = h.app.requirements.propose(userSessionId, doc, "initial");
+    h.app.requirements.approve(draftRow.id, { document: doc, edited: false });
+  };
+
+  async function quietRunToFinal(h: ReturnType<typeof harness>["h"], userSessionId: string) {
+    h.host.createSession({
+      userSessionId, title: "lane runner", agents: [{ name: "check", profileId: "visual-reviewer", owns: [] }],
+      briefing: draft("verify the page"),
+    });
+    await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled", 10_000);
+    await send(h).handler(FINAL, {});
+    await settle();
+  }
+
+  const satisfy = (h: ReturnType<typeof harness>["h"], userSessionId: string, id: string) =>
+    h.app.requirements.reportStatus({ userSessionId, requirementId: id, to: "satisfied",
+      evidence: [{ kind: "command", ref: "npm test" }], claimant: { kind: "main" } });
+
+  const record = (h: ReturnType<typeof harness>["h"], userSessionId: string) =>
+    h.app.orchestrationState.recordCompletion(userSessionId, {
+      criteria: [{ requirement: "r1", statement: "s", met: true, evidence: [{ kind: "command", ref: "npm test" }] }],
+      knownGaps: [], nonGoals: [], requirementsRevision: 1,
+    });
+
+  /** verify:independent satisfied self → exactly one coverage exception. */
+  async function proposeWithGap(h: ReturnType<typeof harness>["h"]) {
+    const userSessionId = h.addUserSession();
+    approveDoc(h, userSessionId, "## Requirements\n- (verify: independent) The page renders\n- Verification ran");
+    satisfy(h, userSessionId, "r1");
+    satisfy(h, userSessionId, "r2");
+    await quietRunToFinal(h, userSessionId);
+    record(h, userSessionId);
+    h.completion.schedule(userSessionId);
+    await collectUntil(h.bus, (event) => event.type === "run.completion.proposed", 10_000);
+    return userSessionId;
+  }
+
+  it("proposes with the full coverage report, refuses one-click accept, and persists scoped typed waivers", async () => {
+    const { h } = harness();
+    const userSessionId = await proposeWithGap(h);
+
+    // The event carries the scalars; the persisted document the full report.
+    const summaryRow = h.db.select().from(runSummaries).all()[0]!;
+    const served = h.completion.getSummary(userSessionId, summaryRow.id);
+    expect(served.document.coverage).toMatchObject({
+      revision: 1, policy: "waiver_required", readiness: "ready_with_exceptions",
+      exceptions: [{ kind: "verification_below_declared", ref: "r1" }],
+    });
+    // Every obligation is accounted — never truncated to stay card-sized.
+    expect(served.document.coverage?.obligations.map((entry) => entry.requirementId)).toEqual(["r1", "r2"]);
+    // An exception caps the verdict: "completed" must mean zero exceptions.
+    expect(served.verdict).toBe("completed_with_caveats");
+
+    // One-click accept refuses: the unmet condition needs explicit acceptance.
+    expect(() => h.completion.resolve(userSessionId, "accept")).toThrow(/explicit waiver/);
+    expect(h.repo.getUserSession(userSessionId)?.runState).toBe("awaiting_signoff");
+
+    // A waiver targeting a condition that does not exist is dropped, never
+    // recorded; the matching one lands scoped to revision and policy.
+    h.completion.resolve(userSessionId, "accept", undefined, [
+      { kind: "verification_below_declared", ref: "r1", note: "demo risk accepted" },
+      { kind: "requirement_unsatisfied", ref: "r99" },
+    ]);
+    expect(h.repo.getUserSession(userSessionId)?.runState).toBe("completed");
+    const resolved = h.completion.getSummary(userSessionId, summaryRow.id);
+    expect(resolved.waivers).toMatchObject([
+      { kind: "verification_below_declared", ref: "r1", revision: 1, policy: "waiver_required",
+        decidedBy: "operator", note: "demo risk accepted" },
+    ]);
+    expect(resolved.waivers[0]!.detail).toContain("independent");
+
+    // Duplicate sign-off stays a conflict — acceptance is not repeatable.
+    expect(() => h.completion.resolve(userSessionId, "accept")).toThrow(/not awaiting sign-off/);
+  });
+
+  it("accepts a fully-satisfied frontier without waivers — machines prove compliance, humans accept exceptions", async () => {
+    const { h } = harness();
+    const userSessionId = h.addUserSession();
+    approveDoc(h, userSessionId, "## Requirements\n- The page renders\n- Verification ran");
+    satisfy(h, userSessionId, "r1");
+    satisfy(h, userSessionId, "r2");
+    await quietRunToFinal(h, userSessionId);
+    record(h, userSessionId);
+    h.completion.schedule(userSessionId);
+    await collectUntil(h.bus, (event) => event.type === "run.completion.proposed", 10_000);
+    const summaryRow = h.db.select().from(runSummaries).all()[0]!;
+    expect(h.completion.getSummary(userSessionId, summaryRow.id).document.coverage)
+      .toMatchObject({ readiness: "ready", exceptions: [] });
+    h.completion.resolve(userSessionId, "accept");
+    expect(h.repo.getUserSession(userSessionId)?.runState).toBe("completed");
+    expect(h.completion.getSummary(userSessionId, summaryRow.id).waivers).toEqual([]);
+  });
+
+  it("under the advisory policy, exceptions are enumerated but one-click accept stays legal", async () => {
+    const h = makeDelegationHarness(async function* () {
+      yield initMessage();
+      yield successMessage();
+    }, { config: { policy: { completionPolicy: "advisory" } } });
+    const userSessionId = await proposeWithGap(h);
+    const summaryRow = h.db.select().from(runSummaries).all()[0]!;
+    expect(h.completion.getSummary(userSessionId, summaryRow.id).document.coverage)
+      .toMatchObject({ policy: "advisory", exceptions: [{ kind: "verification_below_declared" }] });
+    h.completion.resolve(userSessionId, "accept");
+    expect(h.repo.getUserSession(userSessionId)?.runState).toBe("completed");
+  });
+
+  it("supersedes a pending proposal when the governing revision moves — old acceptance cannot close new meaning", async () => {
+    const { h } = harness();
+    const userSessionId = await proposeWithGap(h);
+    const amended = "## Requirements\n- r1: The page renders\n- r2: Verification ran\n- It survives a refresh";
+    const draftRow = h.app.requirements.propose(userSessionId, amended, "one more");
+    h.app.requirements.approve(draftRow.id, { document: amended, edited: false });
+
+    expect(() => h.completion.resolve(userSessionId, "accept", undefined,
+      [{ kind: "verification_below_declared", ref: "r1" }])).toThrow(/superseded/);
+    expect(h.repo.getUserSession(userSessionId)?.runState).toBe("active");
+    const summaryRow = h.db.select().from(runSummaries).all()[0]!;
+    expect(summaryRow.status).toBe("changes_requested");
+    expect(summaryRow.note).toContain("superseded");
+    const reopened = h.db.select().from(eventRows).all().map(
+      (row) => ({ type: row.type, payload: row.payload as { reason?: string } }));
+    expect(reopened.some((event) => event.type === "run.reopened" && event.payload.reason === "superseded")).toBe(true);
+  });
+
+  it("withdraws a pending proposal on an operator verdict and re-proposes against fresh coverage", async () => {
+    const { h } = harness();
+    const userSessionId = h.addUserSession();
+    approveDoc(h, userSessionId, "## Requirements\n- The page renders\n- Verification ran");
+    satisfy(h, userSessionId, "r1");
+    satisfy(h, userSessionId, "r2");
+    await quietRunToFinal(h, userSessionId);
+    record(h, userSessionId);
+    h.completion.schedule(userSessionId);
+    await collectUntil(h.bus, (event) => event.type === "run.completion.proposed", 10_000);
+
+    // The operator reopens r2 during sign-off (the API route reports the
+    // verdict, then notes the meaning change).
+    h.app.requirements.reportStatus({ userSessionId, requirementId: "r2", to: "open",
+      evidence: [], claimant: { kind: "operator" } });
+    // collectUntil replays from seq 1, so the predicate must count PAST the
+    // first (already-superseded) proposal to the fresh one.
+    let proposals = 0;
+    const reproposed = collectUntil(h.bus,
+      (event) => event.type === "run.completion.proposed" && ++proposals === 2, 10_000);
+    expect(h.completion.noteMeaningChanged(userSessionId, "the operator marked r2 open")).toBe(true);
+    expect(h.db.select().from(runSummaries).all()[0]!.status).toBe("changes_requested");
+
+    // Still quiet and the record still matches the revision: a FRESH proposal
+    // fires, now carrying the reopened requirement as a typed exception.
+    await reproposed;
+    const rows = h.db.select().from(runSummaries).all();
+    expect(rows).toHaveLength(2);
+    const fresh = h.completion.getSummary(userSessionId, rows[1]!.id);
+    expect(fresh.document.coverage?.exceptions).toMatchObject([{ kind: "requirement_unsatisfied", ref: "r2" }]);
+  });
+
+  it("a restarted completion service enforces and grants waivers from durable rows alone", async () => {
+    const { h } = harness();
+    const userSessionId = await proposeWithGap(h);
+
+    // "Restart": a fresh service instance over the same database and services
+    // — nothing in-memory from the proposing instance survives.
+    const second = new RunCompletionService({
+      db: h.db, repo: h.repo, bus: h.bus, interactions: h.interactions, scheduler: h.app.scheduler,
+      getWorkspaceRoot: () => "/tmp", orchestrationState: h.app.orchestrationState,
+      requirements: h.app.requirements, changeImpacts: h.app.changeImpacts, workstreams: h.app.workstreams,
+      coverage: (id) => computeCoverageReport({
+        governingRevision: (sid) => h.app.requirements.latestApproved(sid)?.revision ?? null,
+        obligations: (sid) => h.app.requirements.completionObligations(sid),
+        liveRequirementIds: (sid) => new Set(h.app.requirements.derive(sid).map((node) => node.id)),
+        listTasks: (sid) => h.app.tasks.listForUserSession(sid),
+        listOpenDecisionIssues: (sid) => h.app.decisionIssues.listOpenForProject(sid),
+        listOpenChangeImpacts: (sid) => h.app.changeImpacts.listOpen(sid),
+        brokenWorkstreamLinks: (sid) => h.app.workstreams.brokenOpen(sid),
+        isAgentSessionOpen: (agentSessionId) => h.repo.getAgentSession(agentSessionId)?.lifecycle === "open",
+        policy: "waiver_required",
+      }, id),
+      host: () => h.host, runner: () => h.runner, quietWindowMs: 25,
+    });
+    expect(() => second.resolve(userSessionId, "accept")).toThrow(/explicit waiver/);
+    second.resolve(userSessionId, "accept", undefined, [{ kind: "verification_below_declared", ref: "r1" }]);
+    expect(h.repo.getUserSession(userSessionId)?.runState).toBe("completed");
+    const summaryRow = h.db.select().from(runSummaries).all()[0]!;
+    expect(h.completion.getSummary(userSessionId, summaryRow.id).waivers)
+      .toMatchObject([{ kind: "verification_below_declared", ref: "r1", revision: 1 }]);
+  });
 });

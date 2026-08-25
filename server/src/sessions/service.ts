@@ -37,7 +37,7 @@ export class UserSessionService {
   readonly #archiveAgentSessions: (userSessionId: string) => void;
   readonly #completion: {
     schedule(userSessionId: string): void;
-    resolve(userSessionId: string, decision: "accept" | "changes", note?: string): void;
+    resolve(userSessionId: string, decision: "accept" | "changes", note?: string, waivers?: import("../completion/service.ts").SubmittedWaiver[]): void;
   };
   readonly #wireAgentSessions: (userSessionId: string) => AgentSession[];
 
@@ -52,7 +52,7 @@ export class UserSessionService {
     archiveAgentSessions: (userSessionId: string) => void;
     completion: {
       schedule(userSessionId: string): void;
-      resolve(userSessionId: string, decision: "accept" | "changes", note?: string): void;
+      resolve(userSessionId: string, decision: "accept" | "changes", note?: string, waivers?: import("../completion/service.ts").SubmittedWaiver[]): void;
     };
     wireAgentSessions: (userSessionId: string) => AgentSession[];
   }) {
@@ -225,7 +225,7 @@ export class UserSessionService {
    * the response.
    */
   signoff(id: string, body: RunSignoffBody): UserSession {
-    this.#completion.resolve(id, body.decision, body.note);
+    this.#completion.resolve(id, body.decision, body.note, body.waivers ?? []);
     return this.get(id).session;
   }
 

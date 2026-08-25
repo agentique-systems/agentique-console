@@ -10,7 +10,7 @@ import { useState } from "react";
 import { CheckCircle2Icon, CheckIcon, XIcon } from "lucide-react";
 import { toast } from "sonner";
 
-import { ApiError } from "@/api/client";
+import { ApiError, apiFetch } from "@/api/client";
 import { useResolveSignoff } from "@/api/mutations";
 import { useRunSummaryDocument } from "@/api/queries";
 import { Badge } from "@/components/ui/badge";
@@ -25,7 +25,7 @@ import {
 import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 
-import type { RunSummaryStats } from "@agentique-console/shared";
+import type { GetRunSummaryResponse, RunSummaryStats } from "@agentique-console/shared";
 import type { RunSummaryItem } from "./user-fold";
 
 const VERDICT_LABEL: Record<RunSummaryStats["verdict"], string> = {
@@ -67,6 +67,7 @@ function JustificationDisclosure({ sessionId, summaryId }: { sessionId: string; 
   const [open, setOpen] = useState(false);
   const summary = useRunSummaryDocument(sessionId, summaryId, open);
   const document = summary.data?.document;
+  const waivers = summary.data?.waivers ?? [];
   return (
     <div className="mt-2">
       <button type="button" className="text-3xs text-muted-foreground underline" onClick={() => setOpen((value) => !value)}>
@@ -77,6 +78,55 @@ function JustificationDisclosure({ sessionId, summaryId }: { sessionId: string; 
         : document === undefined ? <p className="mt-1 text-2xs text-muted-foreground">Unavailable.</p>
         : (
           <div className="mt-1 space-y-2 text-2xs" data-testid="run-summary-justification">
+            {/* The Console-derived completion coverage: what is structurally
+                satisfied, the typed exceptions accepting the run will waive,
+                and non-blocking advisories. `!= null`: pre-coverage summaries
+                and graph-less runs have no report. */}
+            {document.coverage != null && (
+              <div data-testid="run-summary-coverage">
+                <p className="font-medium">
+                  Coverage (rev {document.coverage.revision}, {document.coverage.policy === "waiver_required" ? "exceptions require acceptance" : "advisory"}):{" "}
+                  {document.coverage.counts.satisfied} satisfied
+                  {document.coverage.counts.open > 0 && `, ${document.coverage.counts.open} open`}
+                  {document.coverage.counts.violated > 0 && `, ${document.coverage.counts.violated} violated`}
+                  {document.coverage.counts.infeasible > 0 && `, ${document.coverage.counts.infeasible} infeasible`}
+                  {document.coverage.counts.moot > 0 && `, ${document.coverage.counts.moot} moot`}
+                  {document.coverage.counts.stale > 0 && `, ${document.coverage.counts.stale} stale`}
+                </p>
+                {document.coverage.exceptions.length > 0 && (
+                  <ul className="mt-1 space-y-0.5">
+                    {document.coverage.exceptions.map((exception) => (
+                      <li key={`${exception.kind}:${exception.ref}`} className="flex items-start gap-1 text-status-waiting">
+                        <XIcon className="mt-0.5 size-3 shrink-0" />
+                        <span>
+                          <span className="mr-1 font-mono text-3xs">{exception.kind}</span>
+                          {exception.detail}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {document.coverage.exceptions.length === 0 && (
+                  <p className="mt-1 text-status-completed">Every obligation satisfies the completion policy — nothing to waive.</p>
+                )}
+                {document.coverage.advisories.length > 0 && (
+                  <p className="mt-1 text-muted-foreground">Advisory: {document.coverage.advisories.join("; ")}</p>
+                )}
+                {waivers.length > 0 && (
+                  <div className="mt-1" data-testid="run-summary-waivers">
+                    <p className="font-medium">Waived at acceptance:</p>
+                    <ul className="space-y-0.5">
+                      {waivers.map((waiver) => (
+                        <li key={`${waiver.kind}:${waiver.ref}`} className="text-muted-foreground">
+                          <span className="mr-1 font-mono text-3xs">{waiver.kind}</span>
+                          {waiver.detail} (rev {waiver.revision}{waiver.note !== undefined ? `; note: ${waiver.note}` : ""})
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
             {/* `!= null`: summaries persisted before this field existed have no key at all. */}
             {document.requirements != null && (
               <div>
@@ -155,15 +205,31 @@ export function RunSummaryCard({
   const resolution = item.resolution;
   const resolved = resolution !== undefined;
   const { stats } = item;
+  const exceptionCount = stats.coverage?.exceptions ?? 0;
 
-  const accept = () => {
+  const accept = async () => {
+    // Exception-oriented sign-off: accepting a run whose coverage carries
+    // exceptions submits one typed waiver per exception, so the acceptance is
+    // enumerable and durable — never a blanket click over prose caveats. The
+    // exception list comes from the persisted document; the server validates
+    // against freshly recomputed coverage and 409s if the card went stale.
+    let waivers: { kind: NonNullable<GetRunSummaryResponse["document"]["coverage"]>["exceptions"][number]["kind"]; ref: string }[] | undefined;
+    if (exceptionCount > 0) {
+      try {
+        const summary = await apiFetch<GetRunSummaryResponse>(`/api/user-sessions/${sessionId}/run-summaries/${item.summaryId}`);
+        waivers = (summary.document.coverage?.exceptions ?? []).map((exception) => ({ kind: exception.kind, ref: exception.ref }));
+      } catch (error) {
+        toast.error(`Accept failed: ${error instanceof Error ? error.message : String(error)}`);
+        return;
+      }
+    }
     signoff.mutate(
-      { sessionId, body: { decision: "accept" } },
+      { sessionId, body: { decision: "accept", ...(waivers === undefined ? {} : { waivers }) } },
       {
         onError: (error) => {
           toast.error(
             error instanceof ApiError && error.status === 409
-              ? "Already resolved elsewhere."
+              ? error.message
               : `Accept failed: ${error.message}`,
           );
         },
@@ -201,6 +267,11 @@ export function RunSummaryCard({
               {stats.openUncertainty} open item{stats.openUncertainty === 1 ? "" : "s"}
             </span>
           )}
+          {exceptionCount > 0 && (
+            <span className="text-status-waiting" data-testid="run-summary-exception-count">
+              {exceptionCount} exception{exceptionCount === 1 ? "" : "s"} require{exceptionCount === 1 ? "s" : ""} acceptance
+            </span>
+          )}
           {stats.reaped.seats > 0 && (
             <span>
               released {stats.reaped.seats} agent{stats.reaped.seats === 1 ? "" : "s"}
@@ -226,9 +297,9 @@ export function RunSummaryCard({
           </Badge>
         ) : (
           <>
-            <Button type="button" size="xs" onClick={accept} disabled={signoff.isPending}>
+            <Button type="button" size="xs" onClick={() => void accept()} disabled={signoff.isPending}>
               {signoff.isPending && <Spinner className="size-3" />}
-              Accept
+              {exceptionCount > 0 ? `Accept with ${exceptionCount} waiver${exceptionCount === 1 ? "" : "s"}` : "Accept"}
             </Button>
             <Button type="button" size="xs" variant="ghost" onClick={onRequestChanges} disabled={signoff.isPending}>
               Request changes

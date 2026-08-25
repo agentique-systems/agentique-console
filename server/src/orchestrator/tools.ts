@@ -71,10 +71,12 @@ export interface ConsoleToolsInput {
   catalog: CapabilityCatalog;
   /** The profile registry — the mint path lives on it. */
   registry: AgentProfileRegistry;
+  /** The completion coverage evaluator (createApp's closure) — record_completion returns its outstanding exceptions. */
+  coverage: (userSessionId: string) => import("@agentique-console/shared").CompletionCoverageReport | null;
 }
 
 export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
-  const { sdk, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, decisionIssues, requirements, assumptions, changeImpacts, workstreams, state, catalog, registry } = input;
+  const { sdk, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, decisionIssues, requirements, assumptions, changeImpacts, workstreams, state, catalog, registry, coverage } = input;
 
   /** Tools operate only on this UserSession's agent sessions. */
   const owned = (agentSessionId: string) => {
@@ -1076,7 +1078,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
 
     sdk.tool(
       "record_completion",
-      "Record the completion justification when you believe the run is done: each requirement mapped to its EVIDENCE (met or honestly not), known gaps, deliberate non-goals — the wrap-up-and-landing skill carries the ladder and sequence. Criteria are REQUIREMENT IDS verified against the current revision (freeform criterion strings only when no requirements govern). Not a gate: the operator completes the run.",
+      "Record the completion justification when the run looks done: each requirement mapped to its EVIDENCE (met or honestly not), known gaps, non-goals — the wrap-up-and-landing skill carries the sequence. Criteria are REQUIREMENT IDS against the current revision (freeform strings when none govern). Your record is synthesis: the Console derives coverage and returns outstanding exceptions — resolve them, or the operator waives each at sign-off. Not a gate: the operator completes the run.",
       {
         criteria: z.array(z.object({
           requirement: z.string().optional().describe("A requirement id (required when a graph governs)"),
@@ -1128,7 +1130,18 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
               knownGaps: clipAll(args.knownGaps ?? [], 200, 8), nonGoals: clipAll(args.nonGoals ?? [], 200, 8),
               ...(args.requirementsRevision === undefined ? {} : { requirementsRevision: args.requirementsRevision }) },
             args.note === undefined ? undefined : clip(args.note, 280));
-          return { revision: row.revision, recorded: true };
+          // The Console-derived coverage exceptions, returned structurally:
+          // what the operator will be asked to explicitly waive at sign-off.
+          // Bounded here (this is a tool result, not the durable report — the
+          // full accounting persists with the proposal).
+          const report = coverage(userSessionId);
+          const outstanding = report?.exceptions ?? [];
+          return { revision: row.revision, recorded: true,
+            coverage: report === null ? null : {
+              readiness: report.readiness, policy: report.policy,
+              exceptions: outstanding.slice(0, 20).map((entry) => ({ kind: entry.kind, ref: entry.ref, detail: entry.detail })),
+              ...(outstanding.length > 20 ? { more: outstanding.length - 20 } : {}),
+            } };
         }),
     ),
 

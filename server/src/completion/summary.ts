@@ -62,6 +62,12 @@ export interface BuildRunSummaryInput {
     reversals: import("@agentique-console/shared").RequirementReversal[];
     rootStatus: import("@agentique-console/shared").RequirementStatus;
   } | null;
+  /**
+   * The completion coverage report at proposal time — persisted COMPLETE with
+   * the summary (obligations are never truncated to stay card-sized; the card
+   * bounds its display). Null when no requirement graph governs.
+   */
+  coverage?: import("@agentique-console/shared").CompletionCoverageReport | null;
 }
 
 /** Total covered by a set of intervals, counting overlap once. */
@@ -176,10 +182,15 @@ export function buildRunSummary(input: BuildRunSummaryInput): RunSummaryDocument
   const requirementState = input.requirements ?? null;
   const openRequirements = requirementState !== null
     && (requirementState.counts.open > 0 || requirementState.counts.violated > 0);
+  // Coverage exceptions cap the verdict too: "completed" must mean ready with
+  // ZERO exceptions — a stale claim or an under-verified satisfied leaf is a
+  // caveat even when every requirement reads terminal.
+  const coverage = input.coverage ?? null;
+  const coverageExceptions = coverage !== null && coverage.exceptions.length > 0;
   const verdict: RunSummaryDocument["verdict"] =
     finals.some((row) => row.core.status === "failed") ? "failed"
       : requirementState?.rootStatus === "infeasible" ? "infeasible"
-        : open.length > 0 || uncertainty.length > 0 || deviations.length > 0 || unmetCriteria || openRequirements ? "completed_with_caveats"
+        : open.length > 0 || uncertainty.length > 0 || deviations.length > 0 || unmetCriteria || openRequirements || coverageExceptions ? "completed_with_caveats"
           : "completed";
 
   return {
@@ -199,6 +210,7 @@ export function buildRunSummary(input: BuildRunSummaryInput): RunSummaryDocument
     requirements: requirementState === null ? null
       : { revision: requirementState.revision, counts: requirementState.counts, outline: requirementState.outline,
         verificationGaps: requirementState.verificationGaps, reversals: requirementState.reversals },
+    coverage,
     resources: {
       reapedSeats: reaped.seats.length,
       detail: reaped.seats.map((seat) => `${seat.agentSessionId}:${seat.agent}`),

@@ -764,3 +764,89 @@ describe("reversals", () => {
     ]);
   });
 });
+
+describe("completionObligations (the coverage frontier)", () => {
+  const claim = (service: RequirementService, id: string, to: "open" | "satisfied" | "violated" | "infeasible",
+    claimant: Parameters<RequirementService["reportStatus"]>[0]["claimant"] = { kind: "main" },
+    evidence: { kind: "file" | "journal" | "artifact" | "task" | "command" | "url"; ref: string }[] = [{ kind: "command", ref: "check" }]) =>
+    service.reportStatus({ userSessionId: "us1", requirementId: id, to,
+      evidence: to === "open" ? [] : evidence, claimant });
+
+  it("accounts every live LEAF exactly once — parents never appear", () => {
+    const { service } = makeHarness();
+    approveFixture(service);
+    const obligations = service.completionObligations("us1");
+    expect(obligations.map((entry) => entry.requirementId)).toEqual(["r2", "r4", "r5", "r6"]);
+    expect(obligations.every((entry) => entry.state === "open")).toBe(true);
+  });
+
+  it("classifies the unchosen alternative under a satisfied any-parent as moot, never open", () => {
+    const { service } = makeHarness();
+    approveFixture(service);
+    claim(service, "r4", "satisfied");
+    const byId = new Map(service.completionObligations("us1").map((entry) => [entry.requirementId, entry]));
+    expect(byId.get("r4")).toMatchObject({ state: "satisfied", stale: false });
+    // r5 can no longer affect the root — the TOML alternative closed r3.
+    expect(byId.get("r5")).toMatchObject({ state: "moot" });
+    expect(byId.get("r2")?.state).toBe("open");
+  });
+
+  it("carries the actual evidence refs of the latest terminal claim", () => {
+    const { service } = makeHarness();
+    approveFixture(service);
+    claim(service, "r2", "satisfied", { kind: "main" }, [{ kind: "artifact", ref: "artifact_login" }]);
+    const r2 = service.completionObligations("us1").find((entry) => entry.requirementId === "r2");
+    expect(r2?.claim).toMatchObject({ verifiedBy: "self", actor: "main",
+      evidence: [{ kind: "artifact", ref: "artifact_login" }] });
+  });
+
+  it("marks a terminal claim stale when a dependency moved after it on the shared clock", () => {
+    const { service } = makeHarness();
+    approveFixture(service);
+    service.link({ userSessionId: "us1", fromId: "r6", kind: "depends_on", toId: "r2", actor: "main" });
+    claim(service, "r2", "satisfied");
+    claim(service, "r6", "satisfied");
+    expect(service.completionObligations("us1").find((entry) => entry.requirementId === "r6"))
+      .toMatchObject({ state: "satisfied", stale: false });
+    // The dependency reopens AFTER r6's claim: r6 stays satisfied but stale.
+    claim(service, "r2", "open");
+    const byId = new Map(service.completionObligations("us1").map((entry) => [entry.requirementId, entry]));
+    expect(byId.get("r6")).toMatchObject({ state: "satisfied", stale: true });
+    expect(byId.get("r2")).toMatchObject({ state: "open", stale: false });
+  });
+
+  it("derives declared-vs-recorded verification per satisfied leaf, inherited strongest-wins", () => {
+    const { service } = makeHarness();
+    const doc = "## Requirements\n- (verify: independent) The page renders\n- Logs are clean\n";
+    const draft = service.propose("us1", doc, "initial");
+    service.approve(draft.id, { document: doc, edited: false });
+    claim(service, "r1", "satisfied"); // main = self, below the declared tier
+    claim(service, "r2", "satisfied");
+    const byId = new Map(service.completionObligations("us1").map((entry) => [entry.requirementId, entry]));
+    expect(byId.get("r1")?.verification).toEqual({ expected: "independent", met: false });
+    expect(byId.get("r2")?.verification).toBeNull();
+    // A write-isolated reviewer re-claims: the expectation is met.
+    claim(service, "r1", "satisfied",
+      { kind: "seat", agentSessionId: "as1", agent: "checker", profileRole: "reviewer", profileTools: ["Read"] });
+    expect(new Map(service.completionObligations("us1").map((entry) => [entry.requirementId, entry])).get("r1")?.verification)
+      .toEqual({ expected: "independent", met: true });
+  });
+
+  it("drops retired leaves from the frontier and accounts infeasible distinctly", () => {
+    const { service } = makeHarness();
+    approveFixture(service);
+    claim(service, "r2", "infeasible");
+    const amended = `## Requirements
+- r1: Auth works end to end
+  - r2: Login issues a session token
+  - r3 (any of): A config source loads
+    - r4: TOML config parses
+    - r5: JSON config parses
+`;
+    const draft = service.propose("us1", amended, "drop verify");
+    service.approve(draft.id, { document: amended, edited: false });
+    const obligations = service.completionObligations("us1");
+    expect(obligations.map((entry) => entry.requirementId)).toEqual(["r2", "r4", "r5"]);
+    expect(obligations.find((entry) => entry.requirementId === "r2")?.state).toBe("infeasible");
+  });
+});

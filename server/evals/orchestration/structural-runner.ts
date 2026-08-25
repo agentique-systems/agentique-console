@@ -95,8 +95,16 @@ function armOperator(harness: Harness, userSessionId: string, steps: OperatorSte
             }
           } else {
             // The sign-off is run state, not an interaction — resolve through
-            // the completion service, exactly as the API route does.
-            harness.completion.resolve(userSessionId, step.onProposal === "approve" ? "accept" : "changes", step.note);
+            // the completion service, exactly as the API route does. A
+            // scripted accept waives every outstanding exception, the same
+            // shape as the card's "Accept with N waivers" — a negligent
+            // acceptance the checkers can still flag.
+            const summaryId = (event.payload as { summaryId?: string }).summaryId;
+            const waivers = step.onProposal === "approve" && summaryId !== undefined
+              ? (harness.completion.getSummary(userSessionId, summaryId).document.coverage?.exceptions ?? [])
+                  .map((exception) => ({ kind: exception.kind, ref: exception.ref }))
+              : [];
+            harness.completion.resolve(userSessionId, step.onProposal === "approve" ? "accept" : "changes", step.note, waivers);
           }
         }
       } catch {

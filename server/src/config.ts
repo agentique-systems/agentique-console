@@ -149,6 +149,14 @@ export interface PolicyConfig {
    */
   completionQuietWindowMs: number;
   /**
+   * How strictly sign-off consumes the completion coverage report.
+   * `waiver_required` (default): accepting a run whose coverage carries
+   * exceptions requires a typed waiver per exception. `advisory`: exceptions
+   * are enumerated on the card but one-click accept stays legal. Snapshotted
+   * into every report, so changing this never reinterprets an old acceptance.
+   */
+  completionPolicy: import("@agentique-console/shared").CompletionPolicy;
+  /**
    * Agent-authored handoffs per session before the console asks MAIN to
    * re-brief (which resets the budgets) or close. Sized for a real multi-seat
    * session: 40 counted every assignment, update, and report, and three
@@ -236,6 +244,15 @@ function validatedModel(id: string | undefined): string {
   return id;
 }
 
+/** Same rule for CONSOLE_COMPLETION_POLICY: a typo fails at boot, never as a silently-default gate. */
+function validatedCompletionPolicy(raw: string | undefined): import("@agentique-console/shared").CompletionPolicy {
+  if (raw === undefined) return "waiver_required";
+  if (raw !== "advisory" && raw !== "waiver_required") {
+    throw new Error(`CONSOLE_COMPLETION_POLICY "${raw}" is not a completion policy (expected "advisory" or "waiver_required")`);
+  }
+  return raw;
+}
+
 /** Same rule for CONSOLE_EFFORT: a typo fails at boot, not silently at the CLI. */
 function validatedEffort(raw: string | undefined): EffortLevel | undefined {
   if (raw === undefined) return undefined;
@@ -285,6 +302,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       deferredAutoProceedMs: Number(env.CONSOLE_DEFERRED_AUTO_PROCEED_MS ?? 900_000),
       blockingAskEscalateMs: Number(env.CONSOLE_BLOCKING_ASK_ESCALATE_MS ?? 900_000),
       completionQuietWindowMs: Number(env.CONSOLE_COMPLETION_QUIET_MS ?? 2_000),
+      completionPolicy: validatedCompletionPolicy(env.CONSOLE_COMPLETION_POLICY),
       patternHandoffCap: Number(env.CONSOLE_PATTERN_HANDOFF_CAP ?? 120),
       patternStallMs: Number(env.CONSOLE_PATTERN_STALL_MS ?? 600_000),
       enableChildSessions: env.CONSOLE_CHILD_SESSIONS !== "0",

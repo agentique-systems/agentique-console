@@ -1273,26 +1273,28 @@ export class RequirementService implements GoverningDigest {
     return this.#verificationGaps(nodes, this.#store.latestChanges(projectId));
   }
 
+  /** Effective declared expectation: the node's own `(verify: …)` marker or an ancestor's, strongest wins. */
+  #effectiveExpectation(node: RequirementNodeRow, byId: Map<string, RequirementNodeRow>): RequirementVerifyExpectation | null {
+    let strongest: RequirementVerifyExpectation | null = null;
+    for (let cursor: RequirementNodeRow | undefined = node; cursor; cursor = cursor.parentId === null ? undefined : byId.get(cursor.parentId)) {
+      const declared = cursor.verifyExpectation;
+      if (declared !== null && (strongest === null || EXPECTATION_RANK[declared] > EXPECTATION_RANK[strongest])) {
+        strongest = declared;
+      }
+    }
+    return strongest;
+  }
+
   #verificationGaps(
     nodes: RequirementNodeRow[],
     latest: ReturnType<RequirementStore["latestChanges"]>,
   ): RequirementVerificationGap[] {
     const byId = new Map(nodes.map((node) => [node.id, node]));
     const hasChildren = new Set(nodes.map((node) => node.parentId).filter((id) => id !== null));
-    const effective = (node: RequirementNodeRow): RequirementVerifyExpectation | null => {
-      let strongest: RequirementVerifyExpectation | null = null;
-      for (let cursor: RequirementNodeRow | undefined = node; cursor; cursor = cursor.parentId === null ? undefined : byId.get(cursor.parentId)) {
-        const declared = cursor.verifyExpectation;
-        if (declared !== null && (strongest === null || EXPECTATION_RANK[declared] > EXPECTATION_RANK[strongest])) {
-          strongest = declared;
-        }
-      }
-      return strongest;
-    };
     const gaps: RequirementVerificationGap[] = [];
     for (const node of this.#depthFirst(nodes)) {
       if (hasChildren.has(node.id) || node.status !== "satisfied") continue;
-      const expected = effective(node);
+      const expected = this.#effectiveExpectation(node, byId);
       if (expected === null) continue;
       const change = latest.get(node.id);
       const recordedRank = change === undefined ? TIER_RANK.self : TIER_RANK[change.verifiedBy];
@@ -1309,6 +1311,70 @@ export class RequirementService implements GoverningDigest {
       });
     }
     return gaps;
+  }
+
+  /**
+   * The completion coverage frontier: every live LEAF, exactly once, with the
+   * console-owned facts sign-off accounting needs — state, invalidation
+   * staleness, the actual evidence refs behind the latest terminal claim, and
+   * the declared-vs-recorded verification tier. Parents never appear (their
+   * status is derived, so counting leaves counts each obligation once);
+   * retired nodes are out of scope entirely.
+   *
+   * `moot` classifies a leaf under a satisfied `any` ancestor whose own chain
+   * did not produce that satisfaction: the chosen alternative discharged the
+   * obligation, so the leaf is accounted for but can never be an exception.
+   */
+  completionObligations(userSessionId: string): import("@agentique-console/shared").CoverageObligation[] {
+    const projectId = this.#project(userSessionId);
+    const nodes = this.#store.liveNodes(projectId);
+    if (nodes.length === 0) return [];
+    const derived = this.#derivedStatuses(nodes);
+    const latest = this.#store.latestChanges(projectId);
+    const byId = new Map(nodes.map((node) => [node.id, node]));
+    const hasChildren = new Set(nodes.map((node) => node.parentId).filter((id): id is string => id !== null));
+    const links = this.#linkViews(projectId);
+    const statusOf = (id: string): RequirementStatus => derived.get(id) ?? byId.get(id)?.status ?? "open";
+
+    /** Moot iff some satisfied `any` ancestor was NOT satisfied through this leaf's chain. */
+    const isMoot = (leaf: RequirementNodeRow): boolean => {
+      let chainSatisfied = statusOf(leaf.id) === "satisfied";
+      for (let cursor = leaf.parentId; cursor !== null; ) {
+        const ancestor = byId.get(cursor);
+        if (!ancestor) break;
+        if (ancestor.composition === "any" && statusOf(ancestor.id) === "satisfied" && !chainSatisfied) return true;
+        chainSatisfied = chainSatisfied && statusOf(ancestor.id) === "satisfied";
+        cursor = ancestor.parentId;
+      }
+      return false;
+    };
+
+    return this.#depthFirst(nodes)
+      .filter((node) => !hasChildren.has(node.id))
+      .map((node) => {
+        const change = latest.get(node.id);
+        const terminal = change !== undefined && TERMINAL_STATUSES.has(change.toStatus);
+        // The same deterministic invalidation marks derive() renders: a
+        // terminal claim is stale when something under it moved LATER on the
+        // shared ordinal clock. Self-clearing via any new claim on the node.
+        const stale = terminal
+          && ((links.dependsOn.get(node.id) ?? []).some((target) => (latest.get(target)?.ord ?? 0) > change.ord)
+            || (links.restsOn.get(node.id) ?? []).some((entry) => entry.status === "falsified" && (entry.resolvedOrd ?? 0) > change.ord));
+        const state = isMoot(node) ? "moot" : (statusOf(node.id) as Exclude<RequirementStatus, "retired">);
+        const expected = this.#effectiveExpectation(node, byId);
+        return {
+          requirementId: node.id,
+          statement: node.statement,
+          state,
+          stale,
+          claim: terminal
+            ? { verifiedBy: change.verifiedBy, actor: change.actor, at: change.createdAt, evidence: change.evidence }
+            : null,
+          verification: state === "satisfied" && expected !== null
+            ? { expected, met: TIER_RANK[change?.verifiedBy ?? "self"] >= EXPECTATION_RANK[expected] }
+            : null,
+        };
+      });
   }
 
   /**
