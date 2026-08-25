@@ -53,6 +53,12 @@ over any summary of them.
   link also holds the completion proposal.
 - Then record_completion against the CURRENT requirements revision — the
   sign-off card shows your record beside the console's own facts.
+- record_completion returns the Console-derived coverage exceptions
+  (unsatisfied or stale requirements, under-verified claims, missing
+  evidence, live task debt, provisional decisions). Sign-off is
+  exception-oriented: each one the operator accepts becomes a typed waiver.
+  Resolve what you can before proposing; never restate the coverage from
+  memory — the Console derives it.
 
 ## When the operator asks to wrap up
 

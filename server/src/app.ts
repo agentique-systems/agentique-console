@@ -18,6 +18,7 @@ import { NotFoundError } from "./errors.ts";
 import type { ArtifactStore } from "./events/artifact-store.ts";
 import { EventBus } from "./events/bus.ts";
 import { late } from "./late.ts";
+import { computeCoverageReport } from "./completion/coverage.ts";
 import { RunCompletionService } from "./completion/service.ts";
 import { DecisionIssueService } from "./orchestrator/decision-issues.ts";
 import { DecisionLedger } from "./orchestrator/decisions.ts";
@@ -197,6 +198,21 @@ export function createApp(options: CreateAppOptions): App {
     reportedFinal: (session) => host.reportedFinal(session),
     userSessionOpen: (userSessionId) => repo.getUserSession(userSessionId)?.lifecycle === "open",
   });
+  // The completion coverage evaluator: ONE closure, consumed by the
+  // completion service (proposal snapshot + accept-time guard) and by main's
+  // record_completion tool result (so main sees the outstanding exceptions
+  // structurally instead of reconstructing them from memory).
+  const coverage = (userSessionId: string) => computeCoverageReport({
+    governingRevision: (id) => requirements.latestApproved(id)?.revision ?? null,
+    obligations: (id) => requirements.completionObligations(id),
+    liveRequirementIds: (id) => new Set(requirements.derive(id).map((node) => node.id)),
+    listTasks: (id) => tasks.listForUserSession(id),
+    listOpenDecisionIssues: (id) => decisionIssues.listOpenForProject(id),
+    listOpenChangeImpacts: (id) => changeImpacts.listOpen(id),
+    brokenWorkstreamLinks: (id) => workstreams.brokenOpen(id),
+    isAgentSessionOpen: (agentSessionId) => repo.getAgentSession(agentSessionId)?.lifecycle === "open",
+    policy: config.policy.completionPolicy,
+  }, userSessionId);
   const scheduler = new AssignmentScheduler({
     store: stores.assignments, tasks, sessions: stores.sessions, messages: stores.messages, bus,
     post: (input) => host.post(input),
@@ -209,7 +225,7 @@ export function createApp(options: CreateAppOptions): App {
     host: () => host,
     tasks, capacity,
     buildMcpServer: (userSessionId, sdkInstance) =>
-      buildConsoleMcpServer({ sdk: sdkInstance, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, decisionIssues, requirements, assumptions, changeImpacts, workstreams, state: orchestrationState, catalog, registry: profiles }),
+      buildConsoleMcpServer({ sdk: sdkInstance, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, decisionIssues, requirements, assumptions, changeImpacts, workstreams, state: orchestrationState, catalog, registry: profiles, coverage }),
   });
   lateRunner.set(runner);
   workstreams.setWakeNote((userSessionId, text) => lateRunner.get().postConsoleNote(userSessionId, text));
@@ -219,7 +235,7 @@ export function createApp(options: CreateAppOptions): App {
   requirements.setWakeNote((userSessionId, text) => lateRunner.get().postConsoleNote(userSessionId, text));
   assumptions.setWakeNote((userSessionId, text) => lateRunner.get().postConsoleNote(userSessionId, text));
   const completion = new RunCompletionService({
-    db, repo, bus, interactions, scheduler, getWorkspaceRoot, orchestrationState, requirements, changeImpacts, workstreams,
+    db, repo, bus, interactions, scheduler, getWorkspaceRoot, orchestrationState, requirements, changeImpacts, workstreams, coverage,
     host: () => host,
     runner: () => runner,
     quietWindowMs: config.policy.completionQuietWindowMs,

@@ -184,6 +184,15 @@ export type ResolveInteractionBody =
 export interface RunSignoffBody {
   decision: "accept" | "changes";
   note?: string;
+  /**
+   * Typed acceptances of the proposal's outstanding coverage exceptions —
+   * required (one per exception, matched by kind+ref) to accept a run whose
+   * coverage report carries exceptions under the `waiver_required` policy.
+   * The server validates against FRESHLY recomputed coverage, so a stale card
+   * cannot waive conditions the operator never saw; submitted waivers that no
+   * longer match an outstanding exception are dropped, not recorded.
+   */
+  waivers?: { kind: import("./domain.ts").CoverageExceptionKind; ref: string; note?: string }[];
 }
 // GET /api/user-sessions/:id/transcript
 // GET /api/agent-sessions/:id/transcript
@@ -297,6 +306,13 @@ export interface RunSummaryDocument {
     /** Terminal claims the run later withdrew; absent on older summaries. */
     reversals?: import("./domain.ts").RequirementReversal[];
   } | null;
+  /**
+   * The machine-checkable completion accounting at proposal time: every live
+   * root-affecting requirement leaf exactly once, typed exceptions, and the
+   * policy snapshot. Persisted complete — never truncated to stay card-sized.
+   * Null for graph-less runs and summaries persisted before coverage existed.
+   */
+  coverage: import("./domain.ts").CompletionCoverageReport | null;
   friction: { apiRetries: number; rateLimited: number; failedTurns: number; watchdogTrips: number; capacityPauses: number };
 }
 
@@ -310,6 +326,8 @@ export interface GetRunSummaryResponse {
   createdAt: string;
   resolvedAt: string | null;
   document: RunSummaryDocument;
+  /** Typed waivers granted at acceptance — empty until accepted, and for runs accepted before waivers existed. */
+  waivers: import("./domain.ts").CompletionWaiver[];
 }
 
 // GET /api/user-sessions/:id/requirements — the committed requirement graph

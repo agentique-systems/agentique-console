@@ -182,8 +182,13 @@ the closing action, and the evidence of closure before it is commissioned.
 `record_completion` maps requirements to evidence against the CURRENT
 revision, with known gaps and non-goals; the sign-off card renders it beside
 the console's facts, and its absence is a visible omission — deliberately
-never a gate a model could stall or force. `infeasible` is a first-class,
-evidence-backed run verdict, not a failure to be hidden.
+never a gate a model could stall or force. The Console derives the
+authoritative coverage itself (every live root-affecting leaf, task debt,
+provisional decisions) and returns the outstanding typed exceptions from
+`record_completion`; each one the operator accepts at sign-off becomes a
+durable, revision-scoped waiver (see `docs/requirements.md`, Termination).
+`infeasible` is a first-class, evidence-backed run verdict, not a failure
+to be hidden.
 
 ## Composition: sessions are the primitive
 

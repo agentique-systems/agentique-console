@@ -164,12 +164,16 @@ write of truth:
   "statement amended in rev N".
 - The review ladder in `docs/orchestration.md` decides which tier a given
   risk deserves. The Console records and displays the tier; it never blocks
-  on it, and it never machine-gates completion — the operator remains the
-  gate.
+  work on it. An unmet declared expectation reaches sign-off as a typed
+  coverage exception for the operator to explicitly waive — the operator
+  remains the gate.
 
 Two verification read-models derive from the journal, displayed everywhere
 statuses appear (digest, `read_requirements`, the panel, the completion
-nudge, the persisted run summary and sign-off card) and never gating:
+nudge, the persisted run summary and sign-off card). Neither blocks work or
+the completion proposal; a verification gap does surface at sign-off as a
+typed coverage exception the operator must explicitly waive to accept
+(under the default `waiver_required` completion policy — see Termination):
 
 - **Verification gaps** — satisfied leaves whose recorded tier falls below
   their effective declared expectation (own or inherited `(verify: …)`
@@ -267,13 +271,36 @@ Non-success termination is legitimate. The run verdict derives as: `failed`
 (finals failed) → `infeasible` (the console-derived root marks the objective
 infeasible — first-class and evidence-backed, not a failure to be hidden) →
 `completed_with_caveats` (open or violated
-requirements, open tasks, unresolved uncertainty, deviations) → `completed`.
+requirements, open tasks, unresolved uncertainty, deviations, or any
+coverage exception below) → `completed`.
 Budget exhaustion pauses with an honest wrap-up; a decision only a human can
 make routes through `ask_operator` — those are the other two legitimate
 non-success stops, and both already exist outside the graph.
 `record_completion` maps requirement ids to evidence against the **current**
-revision (a stale `requirementsRevision` is rejected); it is advisory to the
-sign-off card, deliberately never a gate.
+revision (a stale `requirementsRevision` is rejected); it is main's
+synthesis beside the console's facts, deliberately never the authoritative
+coverage.
+
+The authoritative accounting is the **completion coverage report**
+(`completion/coverage.ts`), derived from durable state at proposal time and
+persisted complete with the run summary: every live root-affecting leaf
+exactly once (parents derive; unchosen alternatives under a satisfied
+`any` classify as `moot`), each with its state, staleness (the invalidation
+flags above), actual evidence refs, and declared-vs-recorded verification
+tier — plus live requirement-linked task debt and provisionally-proceeded
+decision issues. Anything unmet is a **typed exception**
+(`requirement_unsatisfied`, `requirement_stale`,
+`verification_below_declared`, `evidence_missing`, `task_debt`,
+`decision_provisional`). Sign-off is exception-oriented: under the default
+`waiver_required` policy (`CONSOLE_COMPLETION_POLICY`), accepting a run
+with outstanding exceptions requires one typed waiver per exception —
+recorded durably on the summary, scoped to the exception's object and the
+revision accepted; under `advisory`, exceptions are enumerated but
+one-click accept stays legal. The accept path recomputes coverage as a
+staleness guard: if the governing revision or reconciliation state moved
+while the proposal was pending, the proposal is visibly superseded and
+re-proposed rather than silently accepted. The operator remains the gate —
+the report changes what they are asked to accept, not who decides.
 
 ## The five archetypes
 

@@ -168,7 +168,8 @@ export interface RunSignoffResolvedPayload {
 export interface RunReopenedPayload {
   userSessionId: string;
   runId: string;
-  reason: "changes_requested" | "operator_message";
+  /** "superseded" = the project's meaning moved while the proposal was pending; the Console withdrew it and will re-propose against fresh coverage. */
+  reason: "changes_requested" | "operator_message" | "superseded";
 }
 
 /**

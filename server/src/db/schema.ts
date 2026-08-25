@@ -140,6 +140,17 @@ export const runSummaries = sqliteTable(
     status: text("status", { enum: ["proposed", "accepted", "changes_requested"] })
       .notNull()
       .default("proposed"),
+    /**
+     * Typed operator acceptances of the proposal's coverage exceptions,
+     * written at accept. Resolution-time facts, deliberately NOT inside
+     * `document` (the proposal-time snapshot): what was proposed and what the
+     * operator accepted are different records. [] until accepted, and for
+     * runs accepted before waivers existed.
+     */
+    waivers: text("waivers", { mode: "json" })
+      .$type<import("@agentique-console/shared").CompletionWaiver[]>()
+      .notNull()
+      .default([]),
     note: text("note"),
     createdAt: text("created_at").notNull(),
     resolvedAt: text("resolved_at"),

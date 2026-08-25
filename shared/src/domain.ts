@@ -87,6 +87,12 @@ export interface RunSummaryStats {
   openUncertainty: number;
   /** Seats whose provider process the Console released when the run settled. */
   reaped: { seats: number };
+  /**
+   * The coverage report's scalars, so the collapsed card can say "N
+   * exceptions require acceptance" without a fetch. Absent on events emitted
+   * before coverage existed; null when no requirement graph governs.
+   */
+  coverage?: { readiness: "ready" | "ready_with_exceptions"; exceptions: number } | null;
 }
 
 
@@ -708,6 +714,119 @@ export interface WorkstreamLinkWire {
   releasedAt: string | null;
   releasedBy: string | null;
   releaseNote: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Completion coverage. Before a run reaches sign-off the Console derives — from
+// durable state only, never from a model's claim — how the current objective is
+// accounted for: every live root-affecting requirement leaf exactly once, plus
+// execution debt and defaulted human choices. Anything unmet becomes a TYPED
+// exception the operator must explicitly waive (under the waiver_required
+// policy) rather than a prose caveat. The operator remains the gate; the report
+// changes what they are asked to accept, not who decides.
+
+/**
+ * How strictly sign-off consumes the coverage report. `waiver_required`
+ * (default): accepting a run with outstanding exceptions requires a typed
+ * waiver per exception. `advisory`: exceptions are enumerated on the card but
+ * one-click accept remains legal. Snapshotted into every report so a later
+ * configuration change cannot reinterpret why a completed run was accepted.
+ */
+export type CompletionPolicy = "advisory" | "waiver_required";
+
+/**
+ * One obligation's state. `moot` marks a leaf under a satisfied `any` ancestor
+ * whose own chain did not produce that satisfaction — accounted for exactly
+ * once, classified, never an exception (the chosen alternative discharged it).
+ */
+export type CoverageObligationState = "satisfied" | "open" | "violated" | "infeasible" | "moot";
+
+/**
+ * One live requirement LEAF the current objective still answers for. Parents
+ * are derived, so counting leaves counts every obligation exactly once;
+ * retired nodes are out of scope entirely.
+ */
+export interface CoverageObligation {
+  requirementId: string;
+  statement: string;
+  state: CoverageObligationState;
+  /** True when the terminal claim carries a deterministic invalidation flag (depends_changed / rests_on_falsified) — terminal but revalidation-required. */
+  stale: boolean;
+  /** The latest terminal claim behind the state, with its actual evidence refs; null while open/moot-without-claim. */
+  claim: {
+    verifiedBy: import("./requirements.ts").RequirementVerifiedBy;
+    actor: string;
+    at: string;
+    evidence: { kind: string; ref: string; label?: string }[];
+  } | null;
+  /** The effective declared verification expectation (own or inherited, strongest wins) and whether the recorded tier meets it. Only set on satisfied leaves with a declaration. */
+  verification: { expected: import("./requirements.ts").RequirementVerifyExpectation; met: boolean } | null;
+}
+
+/** The typed unmet-condition vocabulary — each kind is a distinct waiver target. */
+export type CoverageExceptionKind =
+  /** A required frontier leaf is open or violated. */
+  | "requirement_unsatisfied"
+  /** A terminal claim is flagged stale (dependency moved / assumption falsified after it). */
+  | "requirement_stale"
+  /** Satisfied below its declared verification expectation. */
+  | "verification_below_declared"
+  /** A non-operator terminal claim carries no evidence ref. */
+  | "evidence_missing"
+  /** An open task in an open session still discharges a live requirement. */
+  | "task_debt"
+  /** An open decision issue proceeded provisionally on a recommendation — not a human answer. */
+  | "decision_provisional";
+
+export interface CoverageException {
+  kind: CoverageExceptionKind;
+  /** The semantic object waived: requirement id, task id, or decision issue id by kind. */
+  ref: string;
+  /** The concrete condition, human-readable — becomes the waiver's accepted consequence. */
+  detail: string;
+}
+
+/**
+ * The machine-checkable completion accounting, derived from durable state and
+ * persisted verbatim with the run summary (never truncated — the card bounds
+ * its DISPLAY, not this object).
+ */
+export interface CompletionCoverageReport {
+  /** The governing requirement revision this coverage was computed against. */
+  revision: number;
+  policy: CompletionPolicy;
+  computedAt: string;
+  /** Every live root-affecting leaf, exactly once. */
+  obligations: CoverageObligation[];
+  counts: { satisfied: number; open: number; violated: number; infeasible: number; moot: number; stale: number };
+  /** Unmet conditions requiring explicit operator acceptance under waiver_required. */
+  exceptions: CoverageException[];
+  /** Non-blocking findings (e.g. unresolved decision issues nobody can act on). */
+  advisories: string[];
+  /** Reconciliation preconditions — held to zero at proposal time by the completion predicate; recorded for audit and for mid-run (tail) reads. */
+  reconciliation: { openChangeImpacts: number; brokenWorkstreamLinks: number };
+  readiness: "ready" | "ready_with_exceptions";
+}
+
+/**
+ * A typed operator acceptance of one specific unmet completion condition,
+ * recorded at sign-off. Scoped to the exception's semantic object AND the
+ * revision accepted: a waiver never outlives the meaning it was granted
+ * against — a later proposal recomputes coverage and asks again.
+ */
+export interface CompletionWaiver {
+  kind: CoverageExceptionKind;
+  ref: string;
+  /** The exception detail as accepted — the consequence the operator took on. */
+  detail: string;
+  /** The governing requirement revision the waiver was granted against. */
+  revision: number;
+  /** The policy in force when it was granted. */
+  policy: CompletionPolicy;
+  decidedBy: "operator";
+  at: string;
+  /** Optional operator-supplied reason. */
+  note?: string;
 }
 
 /** Orchestration-pattern catalog ids — the create-session wire vocabulary. */

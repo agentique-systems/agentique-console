@@ -71,6 +71,17 @@ const MessageBody = z.object({ text: z.string() });
 const SignoffBody = z.object({
   decision: z.enum(["accept", "changes"]),
   note: z.string().optional(),
+  // Typed acceptances of outstanding coverage exceptions — required, one per
+  // exception, to accept a run whose coverage carries exceptions under the
+  // waiver_required policy. Validated server-side against FRESH coverage.
+  waivers: z.array(z.object({
+    kind: z.enum([
+      "requirement_unsatisfied", "requirement_stale", "verification_below_declared",
+      "evidence_missing", "task_debt", "decision_provisional",
+    ]),
+    ref: z.string().min(1),
+    note: z.string().optional(),
+  })).optional(),
 });
 
 const ResolveBody = z.union([
@@ -202,13 +213,22 @@ export function registerUserSessionRoutes(
     async (request) => {
       const parsed = AssumptionResolveBody.safeParse(request.body);
       if (!parsed.success) throw new InvalidInputError(parsed.error.message);
-      return ctx.app.assumptions.resolve({
+      const resolved = ctx.app.assumptions.resolve({
         userSessionId: request.params.id,
         assumptionId: request.params.assumptionId,
         outcome: parsed.data.outcome,
         actor: "operator",
         ...(parsed.data.note === undefined ? {} : { note: parsed.data.note }),
       });
+      // A falsified premise during sign-off can invalidate accounted claims:
+      // withdraw the pending proposal and let fresh coverage re-propose.
+      if (parsed.data.outcome === "falsified") {
+        ctx.app.completion.noteMeaningChanged(
+          request.params.id,
+          `the operator falsified assumption ${request.params.assumptionId}`,
+        );
+      }
+      return resolved;
     },
   );
 
@@ -220,7 +240,7 @@ export function registerUserSessionRoutes(
     async (request) => {
       const parsed = RequirementStatusBody.safeParse(request.body);
       if (!parsed.success) throw new InvalidInputError(parsed.error.message);
-      return ctx.app.requirements.reportStatus({
+      const wire = ctx.app.requirements.reportStatus({
         userSessionId: request.params.id,
         requirementId: request.params.requirementId,
         to: parsed.data.status,
@@ -228,6 +248,14 @@ export function registerUserSessionRoutes(
         claimant: { kind: "operator" },
         ...(parsed.data.note === undefined ? {} : { note: parsed.data.note }),
       });
+      // An operator verdict during sign-off changes what the pending proposal
+      // accounts for: the proposal is superseded visibly and re-proposes
+      // against fresh coverage, rather than staying silently actionable.
+      ctx.app.completion.noteMeaningChanged(
+        request.params.id,
+        `the operator marked ${request.params.requirementId} ${parsed.data.status}`,
+      );
+      return wire;
     },
   );
 

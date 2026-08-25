@@ -18,6 +18,14 @@ import { runSummaries } from "../db/schema.ts";
 import type { Db } from "../db/client.ts";
 import { and, desc, eq } from "drizzle-orm";
 import { ConflictError, NotFoundError } from "../errors.ts";
+import type { CompletionCoverageReport, CompletionWaiver, CoverageExceptionKind } from "@agentique-console/shared";
+
+/** One typed acceptance the operator submits with an accept decision. */
+export interface SubmittedWaiver {
+  kind: CoverageExceptionKind;
+  ref: string;
+  note?: string;
+}
 
 export interface RunCompletionDeps {
   db: Db;
@@ -51,6 +59,13 @@ export interface RunCompletionDeps {
    * optional for pre-portfolio harnesses.
    */
   workstreams?: Pick<import("../portfolio/workstreams.ts").WorkstreamService, "brokenOpen">;
+  /**
+   * The coverage evaluator (completion/coverage.ts, wired in createApp) — the
+   * machine-checkable accounting persisted with every proposal and RECOMPUTED
+   * at accept as the staleness guard. Optional for pre-graph unit harnesses;
+   * unwired, proposals carry no coverage and accept keeps the legacy shape.
+   */
+  coverage?: (userSessionId: string) => CompletionCoverageReport | null;
   /**
    * `config.completionQuietWindowMs`. The predicate is re-evaluated when the
    * timer FIRES, not when it was scheduled, so a new turn starting inside the
@@ -292,6 +307,7 @@ export class RunCompletionService {
       interactions: this.#deps.interactions,
       completionRecord: this.#deps.orchestrationState?.latestCompletion(userSessionId) ?? null,
       requirements: this.#requirementsSnapshot(userSessionId),
+      coverage: this.#deps.coverage?.(userSessionId) ?? null,
       ...(this.#deps.getWorkspaceRoot ? { getWorkspaceRoot: this.#deps.getWorkspaceRoot } : {}),
     });
 
@@ -317,6 +333,8 @@ export class RunCompletionService {
         costCoverage: document.cost.coverage,
         openUncertainty: document.uncertainty.length,
         reaped: { seats: reaped.seats.length },
+        coverage: document.coverage === null ? null
+          : { readiness: document.coverage.readiness, exceptions: document.coverage.exceptions.length },
       },
     });
     bus.append({
@@ -344,7 +362,7 @@ export class RunCompletionService {
    * readable. A live run died with its last 6,900 events unsummarized
    * because summaries were only ever built inside a completion proposal.
    */
-  tailSummary(userSessionId: string): { id: "tail"; status: "proposed"; verdict: RunSummaryDocument["verdict"]; note: null; createdAt: string; resolvedAt: null; document: RunSummaryDocument } {
+  tailSummary(userSessionId: string): { id: "tail"; status: "proposed"; verdict: RunSummaryDocument["verdict"]; note: null; createdAt: string; resolvedAt: null; document: RunSummaryDocument; waivers: CompletionWaiver[] } {
     const { db, repo } = this.#deps;
     if (!repo.getUserSession(userSessionId)) throw new NotFoundError(`no user session ${userSessionId}`);
     const previous = db.select().from(runSummaries)
@@ -356,24 +374,29 @@ export class RunCompletionService {
       interactions: this.#deps.interactions,
       completionRecord: this.#deps.orchestrationState?.latestCompletion(userSessionId) ?? null,
       requirements: this.#requirementsSnapshot(userSessionId),
+      coverage: this.#deps.coverage?.(userSessionId) ?? null,
       ...(this.#deps.getWorkspaceRoot ? { getWorkspaceRoot: this.#deps.getWorkspaceRoot } : {}),
     });
     return { id: "tail", status: "proposed", verdict: document.verdict, note: null,
-      createdAt: nowIso(), resolvedAt: null, document };
+      createdAt: nowIso(), resolvedAt: null, document, waivers: [] };
   }
 
-  getSummary(userSessionId: string, summaryId: string): { id: string; status: "proposed" | "accepted" | "changes_requested"; verdict: RunSummaryDocument["verdict"]; note: string | null; createdAt: string; resolvedAt: string | null; document: RunSummaryDocument } {
+  getSummary(userSessionId: string, summaryId: string): { id: string; status: "proposed" | "accepted" | "changes_requested"; verdict: RunSummaryDocument["verdict"]; note: string | null; createdAt: string; resolvedAt: string | null; document: RunSummaryDocument; waivers: CompletionWaiver[] } {
     const row = this.#deps.db.select().from(runSummaries).where(eq(runSummaries.id, summaryId)).get();
     if (!row || row.userSessionId !== userSessionId) throw new NotFoundError(`no run summary ${summaryId} in session ${userSessionId}`);
-    // Summaries persisted before the requirements section existed have no
-    // `requirements` key at all; normalize to null so old runs keep rendering.
+    // Summaries persisted before the requirements/coverage sections existed
+    // have no key at all; normalize to null so old runs keep rendering.
     const stored = row.document as unknown as RunSummaryDocument;
-    const document: RunSummaryDocument = stored.requirements === undefined ? { ...stored, requirements: null } : stored;
+    const document: RunSummaryDocument = {
+      ...stored,
+      requirements: stored.requirements === undefined ? null : stored.requirements,
+      coverage: stored.coverage === undefined ? null : stored.coverage,
+    };
     return { id: row.id, status: row.status, verdict: row.verdict, note: row.note,
-      createdAt: row.createdAt, resolvedAt: row.resolvedAt, document };
+      createdAt: row.createdAt, resolvedAt: row.resolvedAt, document, waivers: row.waivers ?? [] };
   }
 
-  resolve(userSessionId: string, decision: "accept" | "changes", note?: string): void {
+  resolve(userSessionId: string, decision: "accept" | "changes", note?: string, waivers: SubmittedWaiver[] = []): void {
     const { db, repo, bus } = this.#deps;
     const session = repo.getUserSession(userSessionId);
     if (!session) throw new NotFoundError(`no user session ${userSessionId}`);
@@ -384,9 +407,15 @@ export class RunCompletionService {
       .where(and(eq(runSummaries.userSessionId, userSessionId), eq(runSummaries.status, "proposed")))
       .orderBy(desc(runSummaries.createdAt)).get();
     const now = nowIso();
+    // The exception gate runs BEFORE any write: a refused accept (missing
+    // waivers) or a superseded proposal (meaning moved) must leave no
+    // half-resolved row behind. Throws ConflictError on either.
+    const granted = decision === "accept" ? this.#grantWaivers(userSessionId, summary, waivers, now) : [];
     if (summary) {
       db.update(runSummaries)
-        .set({ status: decision === "accept" ? "accepted" : "changes_requested", ...(note === undefined ? {} : { note }), resolvedAt: now })
+        .set({ status: decision === "accept" ? "accepted" : "changes_requested",
+          ...(decision === "accept" ? { waivers: granted } : {}),
+          ...(note === undefined ? {} : { note }), resolvedAt: now })
         .where(eq(runSummaries.id, summary.id)).run();
     }
 
@@ -431,6 +460,96 @@ export class RunCompletionService {
     if (session?.runState !== "awaiting_signoff") return false;
     this.resolve(userSessionId, "changes");
     return true;
+  }
+
+  /**
+   * The project's meaning moved while a proposal was pending — an operator
+   * requirement verdict, a falsified assumption, an amendment. The proposal
+   * becomes visibly superseded rather than remaining silently actionable: the
+   * card resolves as changes-requested with a superseded note, the run
+   * reopens, and (still being quiet) it re-proposes against fresh coverage.
+   * The accept-time recompute in #grantWaivers backstops any path not wired
+   * through here. Returns whether a pending proposal was withdrawn.
+   */
+  noteMeaningChanged(userSessionId: string, why: string): boolean {
+    const session = this.#deps.repo.getUserSession(userSessionId);
+    if (session?.runState !== "awaiting_signoff") return false;
+    const summary = this.#deps.db.select().from(runSummaries)
+      .where(and(eq(runSummaries.userSessionId, userSessionId), eq(runSummaries.status, "proposed")))
+      .orderBy(desc(runSummaries.createdAt)).get();
+    this.#supersede(userSessionId, summary?.id, why);
+    return true;
+  }
+
+  /**
+   * Accept-time exception gate. Recomputes coverage FRESH (the persisted
+   * report is what the operator read; the recomputation is what they are
+   * accepting) and:
+   * - supersedes the proposal and throws when the governing revision moved or
+   *   reconciliation state reopened under it — an old acceptance must never
+   *   close a changed objective;
+   * - under waiver_required, refuses (409) unless every outstanding exception
+   *   has a submitted waiver — typed, per condition, never blanket;
+   * - returns the granted waivers: submitted entries matched to outstanding
+   *   exceptions, stamped with the exception's detail (the accepted
+   *   consequence), the revision, and the policy in force at proposal.
+   *   Submitted waivers matching nothing are dropped, not recorded — a waiver
+   *   is scoped to a condition that actually exists.
+   * Legacy summaries (no coverage) gate nothing — old rows stay acceptable.
+   */
+  #grantWaivers(
+    userSessionId: string,
+    summary: { id: string; document: Record<string, unknown> } | undefined,
+    submitted: SubmittedWaiver[],
+    now: string,
+  ): CompletionWaiver[] {
+    const stored = (summary?.document as unknown as RunSummaryDocument | undefined)?.coverage ?? null;
+    if (stored === null) return [];
+    const fresh = this.#deps.coverage?.(userSessionId) ?? stored;
+    if (fresh === null || fresh.revision !== stored.revision
+      || fresh.reconciliation.openChangeImpacts > 0 || fresh.reconciliation.brokenWorkstreamLinks > 0) {
+      this.#supersede(userSessionId, summary?.id, "the project changed after this proposal (requirements revision or reconciliation state moved); a fresh proposal will follow");
+      throw new ConflictError("completion proposal superseded — the project changed after it was proposed; a fresh proposal will follow");
+    }
+    const submittedByKey = new Map(submitted.map((waiver) => [`${waiver.kind}:${waiver.ref}`, waiver]));
+    const missing = fresh.exceptions.filter((exception) => !submittedByKey.has(`${exception.kind}:${exception.ref}`));
+    if (stored.policy === "waiver_required" && missing.length > 0) {
+      const lines = missing.slice(0, 6).map((exception) => `${exception.kind} ${exception.ref}`);
+      if (missing.length > 6) lines.push(`…and ${missing.length - 6} more`);
+      throw new ConflictError(
+        `accepting this run requires an explicit waiver for each outstanding exception — missing: ${lines.join("; ")} (GET the run summary for details)`,
+      );
+    }
+    return fresh.exceptions.flatMap((exception) => {
+      const match = submittedByKey.get(`${exception.kind}:${exception.ref}`);
+      if (match === undefined) return [];
+      return [{
+        kind: exception.kind, ref: exception.ref, detail: exception.detail,
+        revision: fresh.revision, policy: stored.policy, decidedBy: "operator" as const, at: now,
+        ...(match.note === undefined || match.note.trim() === "" ? {} : { note: match.note.trim() }),
+      }];
+    });
+  }
+
+  /** Withdraw a pending proposal visibly: card resolves superseded, run reopens, coverage recomputes on the next quiet evaluation. */
+  #supersede(userSessionId: string, summaryId: string | undefined, why: string): void {
+    const { db, repo, bus } = this.#deps;
+    const note = `superseded — ${why}`;
+    if (summaryId !== undefined) {
+      db.update(runSummaries)
+        .set({ status: "changes_requested", note, resolvedAt: nowIso() })
+        .where(eq(runSummaries.id, summaryId)).run();
+    }
+    repo.patchUserSession(userSessionId, { runState: "active" });
+    bus.append({ type: "run.signoff.resolved", userSessionId,
+      payload: { userSessionId, runId: summaryId ?? "", decision: "changes", note } });
+    bus.append({ type: "run.reopened", userSessionId,
+      payload: { userSessionId, runId: summaryId ?? "", reason: "superseded" } });
+    bus.append({ type: "user_session.updated", userSessionId,
+      payload: { userSessionId, patch: { runState: "active" } } });
+    // Deliberately NO operator message is synthesized — the cause is already
+    // on the record. A still-quiet run simply re-proposes with fresh coverage.
+    this.schedule(userSessionId);
   }
 
 }
