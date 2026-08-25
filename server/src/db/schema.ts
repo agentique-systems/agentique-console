@@ -910,6 +910,46 @@ export const workstreamLinks = sqliteTable(
 );
 
 /**
+ * Continuation checkpoints: the project-level operational handoff written at a
+ * run boundary — when a UserSession is archived — for the NEXT session on the
+ * same project. `facts` is console-derived from durable rows (references and
+ * bounded summaries: unreported workstreams, standing suspect claims, open
+ * decision issues, granted waivers, salvage pointers); `synthesis` is the
+ * source main's own last recorded working state, snapshotted verbatim and
+ * labeled model-authored at every read. Immutable once written; ONE row per
+ * source session (the unique index is the idempotency substrate), so retried
+ * archival and the attach-time backstop can both record safely. Project truth
+ * (requirements, decisions, assumptions) stays authoritative in its own
+ * stores — a checkpoint is context, never governing meaning.
+ */
+export const continuationCheckpoints = sqliteTable(
+  "continuation_checkpoints",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id").notNull(),
+    /** The archived session this checkpoint snapshots — also the idempotency key. */
+    sourceUserSessionId: text("source_user_session_id").notNull(),
+    /** Governing requirement revision at record time (0 = none governed) — the currency watermark. */
+    atRevision: integer("at_revision").notNull(),
+    /** Decision-ledger length at record time — a second currency hint. */
+    decisionCount: integer("decision_count").notNull().default(0),
+    /** The source session's runState at the boundary: completed = accepted sign-off. */
+    runState: text("run_state", { enum: ["active", "awaiting_signoff", "completed"] }).notNull(),
+    synthesis: text("synthesis", { mode: "json" })
+      .$type<import("@agentique-console/shared").ContinuationSynthesis | null>(),
+    facts: text("facts", { mode: "json" })
+      .$type<import("@agentique-console/shared").ContinuationFacts>()
+      .notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [
+    uniqueIndex("continuation_checkpoints_source").on(t.sourceUserSessionId),
+    index("continuation_checkpoints_project").on(t.projectId),
+    check("continuation_checkpoints_run_state", sql`${t.runState} IN ('active','awaiting_signoff','completed')`),
+  ],
+);
+
+/**
  * The orchestrator's model-authored working state: strategy, uncertainties,
  * assumptions, risks — section-replace revisions updated on material events
  * (never per-turn ceremony). Append-only: the history is the review surface,

@@ -20,6 +20,7 @@ import { EventBus } from "./events/bus.ts";
 import { late } from "./late.ts";
 import { computeCoverageReport } from "./completion/coverage.ts";
 import { RunCompletionService } from "./completion/service.ts";
+import { ContinuationCheckpointService } from "./continuation/service.ts";
 import { DecisionIssueService } from "./orchestrator/decision-issues.ts";
 import { DecisionLedger } from "./orchestrator/decisions.ts";
 import { InteractionService } from "./orchestrator/interactions.ts";
@@ -87,6 +88,7 @@ export interface App {
   changeImpacts: ChangeImpactService;
   workstreams: WorkstreamService;
   orchestrationState: OrchestrationStateService;
+  continuation: ContinuationCheckpointService;
   completion: RunCompletionService;
   userSessions: UserSessionService;
   capacity: CapacityService;
@@ -168,6 +170,10 @@ export function createApp(options: CreateAppOptions): App {
         .filter((id): id is string => id !== null)),
   });
   const orchestrationState = new OrchestrationStateService(stores.orchestrationState, bus);
+  // Continuation checkpoints: the run-boundary handoff a later session on the
+  // same project inherits. Constructed here (the runner injects its digest);
+  // deps wire below once host and completion exist.
+  const continuation = new ContinuationCheckpointService(stores.continuation, bus);
   const sessionStore = stores.providerEntries;
 
   const capacity = new CapacityService({ repo, bus });
@@ -221,11 +227,11 @@ export function createApp(options: CreateAppOptions): App {
   lateScheduler.set(scheduler);
   const runner = new OrchestratorRunner({
     repo, bus, config, sdk, interactions, decisions, handoffs, sessionStore, getWorkspaceRoot,
-    requirements, orchestrationState,
+    requirements, orchestrationState, continuation,
     host: () => host,
     tasks, capacity,
     buildMcpServer: (userSessionId, sdkInstance) =>
-      buildConsoleMcpServer({ sdk: sdkInstance, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, decisionIssues, requirements, assumptions, changeImpacts, workstreams, state: orchestrationState, catalog, registry: profiles, coverage }),
+      buildConsoleMcpServer({ sdk: sdkInstance, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, decisionIssues, requirements, assumptions, changeImpacts, workstreams, state: orchestrationState, continuation, catalog, registry: profiles, coverage }),
   });
   lateRunner.set(runner);
   workstreams.setWakeNote((userSessionId, text) => lateRunner.get().postConsoleNote(userSessionId, text));
@@ -241,11 +247,31 @@ export function createApp(options: CreateAppOptions): App {
     quietWindowMs: config.policy.completionQuietWindowMs,
     paused: () => capacity.paused,
   });
+  // The checkpoint builder reads other aggregates' durable facts — narrow
+  // closures, wired once here like every other crossing. Wired AFTER host and
+  // completion exist; the service itself was constructed before the runner.
+  continuation.setDeps({
+    getUserSession: (userSessionId) => repo.getUserSession(userSessionId),
+    listUserSessionsForProject: (projectId) => repo.listUserSessionsForProject(projectId),
+    listAgentSessions: (userSessionId) => repo.listAgentSessions(userSessionId),
+    listAgents: (agentSessionId) => repo.listAgents(agentSessionId),
+    reportedFinal: (session) => host.reportedFinal(session),
+    listTasks: (userSessionId) => tasks.listForUserSession(userSessionId),
+    governingRevision: (userSessionId) => requirements.latestApproved(userSessionId)?.revision ?? 0,
+    decisionCount: (userSessionId) => decisions.list(userSessionId).length,
+    listOpenChangeImpacts: (userSessionId) => changeImpacts.listOpen(userSessionId),
+    listOpenDecisionIssues: (userSessionId) => decisionIssues.listOpenForProject(userSessionId),
+    listWorkstreamLinks: (userSessionId) => workstreams.list(userSessionId),
+    latestState: (userSessionId) => orchestrationState.current(userSessionId),
+    latestCompletion: (userSessionId) => orchestrationState.latestCompletion(userSessionId),
+    latestSummaryFacts: (userSessionId) => completion.latestSummaryFacts(userSessionId),
+  });
   const system = new SystemPauseService({ capacity, runner, host });
   const userSessions = new UserSessionService({
     repo, projects: stores.projects, bus, runner, interactions, decisionIssues, workspaces,
     archiveAgentSessions: (userSessionId) => host.archiveForUserSession(userSessionId),
     completion,
+    continuation,
     wireAgentSessions: (userSessionId) => host.wireSessionsForUserSession(userSessionId),
   });
 
@@ -280,7 +306,7 @@ export function createApp(options: CreateAppOptions): App {
   });
 
   return {
-    config, db, sqlite, bus, artifacts, repo, sdk, getWorkspaceRoot, requirements, assumptions, changeImpacts, workstreams, orchestrationState,
+    config, db, sqlite, bus, artifacts, repo, sdk, getWorkspaceRoot, requirements, assumptions, changeImpacts, workstreams, orchestrationState, continuation,
     workspaces, timeline, profiles, worktrees, capacity,
     decisions, decisionIssues, interactions, tasks, scheduler, handoffs, sessionStore,
     host, runner, completion, userSessions, system,

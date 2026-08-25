@@ -67,6 +67,12 @@ export interface OrchestratorOptionsInput {
   specDigest?: string;
   /** Main's own working state — the durable memory of the orchestration loop. */
   stateDigest?: string;
+  /**
+   * The prior run's continuation checkpoint on a continued project — advisory
+   * operational context, injected AFTER the authoritative digests so its
+   * placement mirrors its authority. Empty on a fresh project.
+   */
+  continuationDigest?: string;
   /** "away" injects one line: prefer proceeding on recommendations. */
   autonomy?: "standard" | "away";
   /** The lane's registry address (CLAUDE_CODE_SESSION_NAME). */
@@ -96,6 +102,7 @@ export function buildOrchestratorOptions(
         + (input.decisionDigest ? `\n\n## Operator decisions (authoritative)\nThe operator made these. Do not re-litigate them, do not contradict them, and do not relay them to seats — they already have them.\n${input.decisionDigest}` : "")
         + (input.specDigest ? `\n\n${input.specDigest}` : "")
         + (input.stateDigest ? `\n\n${input.stateDigest}` : "")
+        + (input.continuationDigest ? `\n\n${input.continuationDigest}` : "")
         + (input.autonomy === "away" ? "\n\nThe operator is AWAY: prefer proceeding on recommendations and provisional decisions; queue only irreversible choices for their return." : ""),
     },
     // CLI parity: without "project" the CLI never loads CLAUDE.md, and the

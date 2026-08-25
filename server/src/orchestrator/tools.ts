@@ -30,6 +30,7 @@ import type { ChangeImpactService } from "./change-impact.ts";
 import type { WorkstreamService } from "../portfolio/workstreams.ts";
 import { RequirementParseFailure, type RequirementService } from "./requirements.ts";
 import type { CompletionRecord, OrchestrationStateService } from "./state.ts";
+import type { ContinuationCheckpointService } from "../continuation/service.ts";
 import type { CapabilityCatalog } from "../agent-profiles/capability-catalog.ts";
 import { MCP_CATALOG } from "../agent-profiles/capability-catalog.ts";
 import type { AgentProfileRegistry } from "../agent-profiles/registry.ts";
@@ -67,6 +68,8 @@ export interface ConsoleToolsInput {
   changeImpacts: ChangeImpactService;
   workstreams: WorkstreamService;
   state: OrchestrationStateService;
+  /** Continuation checkpoints — the prior-run operational handoff on a continued project. */
+  continuation: ContinuationCheckpointService;
   /** Skills + attachable-server metadata, for staffing and mint validation. */
   catalog: CapabilityCatalog;
   /** The profile registry — the mint path lives on it. */
@@ -76,7 +79,7 @@ export interface ConsoleToolsInput {
 }
 
 export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
-  const { sdk, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, decisionIssues, requirements, assumptions, changeImpacts, workstreams, state, catalog, registry, coverage } = input;
+  const { sdk, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, decisionIssues, requirements, assumptions, changeImpacts, workstreams, state, continuation, catalog, registry, coverage } = input;
 
   /** Tools operate only on this UserSession's agent sessions. */
   const owned = (agentSessionId: string) => {
@@ -839,6 +842,33 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
             verificationGaps: requirements.verificationGaps(userSessionId),
             ...(openImpacts.length === 0 ? {} : { openChangeImpacts: openImpacts,
               openChangeImpactsNote: "Unreconciled change impacts — stale evidence or affected work awaiting your judgment; reconcile_change_impact records it. Completion holds while any is open." }) };
+        }),
+    ),
+
+    sdk.tool(
+      "read_continuation",
+      "Read this project's continuation checkpoints — the operational handoff a previous run left at archival: its strategy/risks (that run's MODEL-AUTHORED working state, advisory), unfinished workstreams (their AgentSessions stay archived — recommission what still matters), accepted gaps/waivers, standing suspect claims, salvage pointers. Current requirements, decisions, and reconciliation state outrank a checkpoint. Default: latest prior checkpoint + history.",
+      {
+        checkpointId: z.string().min(1).optional().describe("A ckpt_… id from the history; omit for the latest prior checkpoint."),
+      },
+      async (args: { checkpointId?: string }) =>
+        guarded(() => {
+          const history = continuation.listForSession(userSessionId)
+            .map((entry) => ({ id: entry.id, sourceUserSessionId: entry.sourceUserSessionId,
+              sourceTitle: entry.sourceTitle, runState: entry.runState, atRevision: entry.atRevision, createdAt: entry.createdAt }));
+          const checkpoint = args.checkpointId !== undefined
+            ? continuation.get(userSessionId, args.checkpointId)
+            : continuation.latestForSession(userSessionId);
+          if (checkpoint === null) {
+            return { checkpoint: null, history,
+              note: "No prior-run continuation checkpoint exists for this project — continue from the current requirements and decisions." };
+          }
+          const currentRevision = requirements.latestApproved(userSessionId)?.revision ?? 0;
+          return { checkpoint, history,
+            currency: currentRevision > checkpoint.atRevision
+              ? `STALE: written at requirements rev ${checkpoint.atRevision}; rev ${currentRevision} now governs — reconcile before relying on it.`
+              : "current: no requirement revision has been approved since this checkpoint was written.",
+            note: "Synthesis fields are the prior main's model-authored working state — context to reconcile, never operator-approved meaning. Nothing referenced here resumes on its own." };
         }),
     ),
 
