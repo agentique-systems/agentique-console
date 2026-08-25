@@ -181,12 +181,15 @@ speculative ideas (record). An iteration must name its gap, why it matters,
 the closing action, and the evidence of closure before it is commissioned.
 `record_completion` maps requirements to evidence against the CURRENT
 revision, with known gaps and non-goals; the sign-off card renders it beside
-the console's facts, and its absence is a visible omission — deliberately
-never a gate a model could stall or force. The Console derives the
-authoritative coverage itself (every live root-affecting leaf, task debt,
-provisional decisions) and returns the outstanding typed exceptions from
-`record_completion`; each one the operator accepts at sign-off becomes a
-durable, revision-scoped waiver (see `docs/requirements.md`, Termination).
+the console's facts. When a requirement revision governs, the Console holds
+the completion PROPOSAL until a completion record against that revision
+exists (nudging main to write one) — run-level bookkeeping, exactly as
+`docs/requirements.md` (Termination) states it. What the record can never do
+is force sign-off: the Console derives the authoritative coverage itself
+(every live root-affecting leaf, task debt, provisional decisions) and
+returns the outstanding typed exceptions from `record_completion`; each one
+the operator accepts at sign-off becomes a durable, revision-scoped waiver
+(see `docs/requirements.md`, Termination). The operator remains the gate.
 `infeasible` is a first-class, evidence-backed run verdict, not a failure
 to be hidden.
 

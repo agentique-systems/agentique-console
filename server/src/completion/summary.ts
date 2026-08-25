@@ -114,7 +114,13 @@ export function buildRunSummary(input: BuildRunSummaryInput): RunSummaryDocument
   }
   const deadAirMs = Math.max(0, durationMs - unionDuration(intervals));
 
+  // Top-level finals only, newest first: a child session's journal also
+  // addresses "main" (the literal stays; only the sink differs at the
+  // boundary), so an all-sessions pick could headline the operator's sign-off
+  // card with a grandchild sub-task's summary instead of the run's.
   const finals = repo.listAgentSessions(userSessionId)
+    .filter((session) => session.parentAgentSessionId === null)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id))
     .map((session) => repo.latestHandoff({ userSessionId, agentSessionId: session.id, recipient: "main", excludeCheckpoints: true }))
     .filter((row): row is NonNullable<typeof row> => row !== undefined && row.trigger === "final");
   const headline = finals[0]?.core.result.summary ?? finals[0]?.core.state.summary ?? "The run reported a result.";

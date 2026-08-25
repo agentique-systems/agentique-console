@@ -775,7 +775,15 @@ export type AgentRuntimeState =
   | "responding"
   | "tool"
   | "waiting"
-  | "idle";
+  | "idle"
+  /**
+   * The seat's provider process is closed (idle reap or capacity eviction);
+   * the resume handle is retained and the next delivery wakes it. Distinct
+   * from `idle`: a parked seat still EXISTS as a durable participant but is
+   * not resident — the difference between "team member between tasks" and
+   * "process slot released", which is what resident-lane capacity counts.
+   */
+  | "parked";
 
 export interface AgentActivityChangedPayload {
   scope: EventScope;

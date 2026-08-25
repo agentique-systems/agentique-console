@@ -13,7 +13,7 @@ import { cn } from "@/lib/utils";
 import type { CommissionSummary } from "@agentique-console/shared";
 
 const STATUS_TONE: Record<CommissionSummary["status"], string> = {
-  working: "text-status-working",
+  working: "text-status-running",
   idle: "text-muted-foreground",
   reported: "text-status-completed",
   archived: "text-muted-foreground",
@@ -33,7 +33,7 @@ function Bullets({ title, items }: { title: string; items: string[] }) {
 
 function CommissionRow({ row }: { row: CommissionSummary }) {
   return (
-    <div className={cn("rounded-md border border-border p-2", row.parentAgentSessionId !== null && "ml-4")}>
+    <div className="rounded-md border border-border p-2" style={row.depth > 0 ? { marginLeft: `${row.depth}rem` } : undefined}>
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-xs font-medium">{row.title}</span>
         <Badge variant="outline" className="text-3xs">{row.pattern}</Badge>
@@ -59,7 +59,7 @@ function CommissionRow({ row }: { row: CommissionSummary }) {
         </div>
       ) : (
         <div className="mt-1 text-2xs text-muted-foreground">
-          {row.parentAgentSessionId !== null ? "child session — commissioned by its controller" : "no briefing recorded"}
+          {row.parentAgentSessionId !== null ? `nested session (depth ${row.depth}) — commissioned by its parent's controller` : "no briefing recorded"}
         </div>
       )}
       <div className="mt-1 text-2xs">

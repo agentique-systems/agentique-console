@@ -16,6 +16,7 @@ import { MATERIAL_CATEGORIES } from "./mailroom.ts";
 import { CHILD_SENDER_PREFIX, CONSOLE_SENDER } from "./names.ts";
 import type { SessionRouting } from "./routing.ts";
 import type { BoundaryBroker, RecordFailure, SimpleHandoff, Transfer } from "./seams.ts";
+import { sessionSubtree } from "./session-tree.ts";
 
 export interface NestingBrokerDeps {
   repo: Repo;
@@ -104,14 +105,21 @@ export class NestingBroker implements BoundaryBroker {
 
   /**
    * The escape hatch for a wedged child: archive it and hand the parent's
-   * controller a console failure so the tree can still conclude.
+   * controller a console failure so the tree can still conclude. Archival
+   * covers the child's WHOLE open subtree, deepest first — its descendants'
+   * report sink is going away with it, and a stranded open grandchild blocks
+   * run completion until the next boot's orphan sweep.
    */
   abandonChildSession(parentAgentSessionId: string, controllerAgent: string, childAgentSessionId: string, reason: string): void {
     const child = this.#deps.repo.getAgentSession(childAgentSessionId);
     if (!child || child.parentAgentSessionId !== parentAgentSessionId) {
       throw new InvalidInputError(`${childAgentSessionId} is not a child of this session`);
     }
-    if (child.lifecycle === "open") this.#deps.archiveSession(child);
+    for (const row of sessionSubtree(this.#deps.repo, childAgentSessionId)
+      .filter((row) => row.lifecycle === "open")
+      .sort((a, b) => b.depth - a.depth)) {
+      this.#deps.archiveSession(row);
+    }
     const parent = this.#deps.repo.getAgentSession(parentAgentSessionId);
     if (!parent || parent.lifecycle !== "open") return;
     try {
@@ -128,18 +136,27 @@ export class NestingBroker implements BoundaryBroker {
 
   /**
    * Boot sweep: children whose parent is archived or gone can never report to
-   * anyone.
+   * anyone. Each orphan takes its whole open subtree with it, deepest first,
+   * so the sweep converges in one pass whatever order the rows arrive in — a
+   * grandchild visited before its stranded parent must not survive to the
+   * next boot.
    */
   archiveOrphanChildren(): number {
     let archived = 0;
     for (const session of this.#deps.repo.listOpenAgentSessions()) {
       if (session.parentAgentSessionId === null) continue;
+      // An earlier orphan's subtree sweep may already have archived this row.
+      if (this.#deps.repo.getAgentSession(session.id)?.lifecycle !== "open") continue;
       const parent = this.#deps.repo.getAgentSession(session.parentAgentSessionId);
       if (parent && parent.lifecycle === "open") continue;
-      this.#deps.archiveSession(session);
-      archived += 1;
-      this.#deps.bus.append({ type: "agent_session.runtime.noted", userSessionId: session.userSessionId, agentSessionId: session.id,
-        payload: { agentSessionId: session.id, agent: "system", detail: "archived: parent session is no longer open" } });
+      for (const row of sessionSubtree(this.#deps.repo, session.id)
+        .filter((row) => row.lifecycle === "open")
+        .sort((a, b) => b.depth - a.depth)) {
+        this.#deps.archiveSession(row);
+        archived += 1;
+        this.#deps.bus.append({ type: "agent_session.runtime.noted", userSessionId: row.userSessionId, agentSessionId: row.id,
+          payload: { agentSessionId: row.id, agent: "system", detail: "archived: parent session is no longer open" } });
+      }
     }
     return archived;
   }

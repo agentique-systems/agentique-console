@@ -13,7 +13,13 @@ import type { AgentSessionRow, UserSessionRow } from "../db/stores/session-store
 export function toWireAgentSession(
   row: AgentSessionRow,
   specialists: string[],
-  working: boolean,
+  /**
+   * The derived live status. `reported` must survive to the wire: a session
+   * whose final landed is a different operator fact from one sitting idle,
+   * and collapsing them re-created the "finished renders like died" bug the
+   * domain type exists to prevent.
+   */
+  activity: "working" | "idle" | "reported",
   /** Subtree spend in USD; only rendered when the row carries a budget. */
   spendUsd = 0,
   unscoped = false,
@@ -23,9 +29,10 @@ export function toWireAgentSession(
     userSessionId: row.userSessionId,
     title: row.title,
     lifecycle: row.lifecycle,
-    activity: working ? "working" : "idle",
+    activity,
     pattern: row.pattern,
     parentAgentSessionId: row.parentAgentSessionId,
+    depth: row.depth,
     agents: specialists,
     budget: row.budgetUsd === null ? null : { budgetUsd: row.budgetUsd, spendUsd },
     unscoped,

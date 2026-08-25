@@ -1108,7 +1108,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
 
     sdk.tool(
       "record_completion",
-      "Record the completion justification when the run looks done: each requirement mapped to its EVIDENCE (met or honestly not), known gaps, non-goals — the wrap-up-and-landing skill carries the sequence. Criteria are REQUIREMENT IDS against the current revision (freeform strings when none govern). Your record is synthesis: the Console derives coverage and returns outstanding exceptions — resolve them, or the operator waives each at sign-off. Not a gate: the operator completes the run.",
+      "Record the completion justification when the run looks done: each requirement mapped to its EVIDENCE (met or honestly not), known gaps, non-goals — the wrap-up-and-landing skill carries the sequence. Criteria are REQUIREMENT IDS against the current revision (freeform strings when none govern). While requirements govern, the completion PROPOSAL waits for a current-revision record; it never forces sign-off — the Console derives coverage and returns outstanding exceptions: resolve them or the operator waives each at sign-off; the operator completes the run.",
       {
         criteria: z.array(z.object({
           requirement: z.string().optional().describe("A requirement id (required when a graph governs)"),

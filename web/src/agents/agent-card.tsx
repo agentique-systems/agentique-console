@@ -17,6 +17,9 @@ const SEAT_DOT: Record<AgentRuntimeState, string> = {
   tool: "bg-status-waiting",
   waiting: "bg-status-pending",
   idle: "bg-status-cancelled",
+  // Parked = durable seat, no resident process (resume handle kept). A ring
+  // instead of a fill: the seat exists, its lane does not.
+  parked: "border border-status-cancelled bg-transparent",
 };
 
 const BUSY_STATES: ReadonlySet<AgentRuntimeState> = new Set([

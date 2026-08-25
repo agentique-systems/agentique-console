@@ -122,8 +122,10 @@ export interface AgentSession {
   activity: AgentSessionActivity;
   /** Orchestration-pattern catalog id (hub_and_spoke, pipeline, …). */
   pattern: string;
-  /** NULL = top-level; set = this is a child session nested one level down. */
+  /** NULL = top-level; set = a child session nested under that parent (any depth the configured cap permits). */
   parentAgentSessionId: string | null;
+  /** Nesting level: 0 = top-level, each child one deeper, bounded by CONSOLE_MAX_SESSION_DEPTH. */
+  depth: number;
   /** Specialist agent names in seating order (excludes the coordinator). */
   agents: string[];
   /** Commission budget + subtree spend; null when no budget was set. */

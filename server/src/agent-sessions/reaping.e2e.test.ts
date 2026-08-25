@@ -40,7 +40,15 @@ describe("agent park releases the agent's runtime", () => {
     });
 
     await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled", 10_000);
-    const events = await collectUntil(h.bus, parkNotice, 10_000);
+    // Wait for the TYPED park state, which lands right after the prose notice:
+    // the UI's seat dot renders from this, so "parked seat, resume handle
+    // kept" must be a wire fact, not only a sentence.
+    const events = await collectUntil(h.bus, (event) => event.type === "agent_session.activity.changed"
+      && (event.payload as { state?: string }).state === "parked", 10_000);
+    const typedPark = events.filter((event) => event.type === "agent_session.activity.changed"
+      && (event.payload as { state?: string }).state === "parked");
+    expect(typedPark.length).toBeGreaterThan(0);
+    expect((typedPark[0]?.payload as { agent?: string }).agent).toBe("coordinator");
 
     // The notice must name what happened. A silent close turns "my server
     // vanished" into a forensic exercise.

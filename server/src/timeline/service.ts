@@ -1,4 +1,5 @@
 import type { ConsoleEvent, TimelineItem, TimelineLane, TimelinePageResponse } from "@agentique-console/shared";
+import { orderedSessionForest } from "../agent-sessions/session-tree.ts";
 import type { Repo } from "../db/repo.ts";
 import type { EventBus } from "../events/bus.ts";
 import { NotFoundError } from "../errors.ts";
@@ -67,11 +68,12 @@ export class TimelineService {
       { id: "orchestrator", kind: "orchestrator", label: "Orchestrator Agent", parentId: null, order: 1 },
     ];
     let order = 2;
-    // Children lane directly under their parent, with REAL depth: a child
-    // session's lane parents on the parent session's, not on the root.
-    const all = this.repo.listAgentSessions(userSessionId);
-    const ordered = all.filter((row) => row.parentAgentSessionId === null)
-      .flatMap((root) => [root, ...all.filter((row) => row.parentAgentSessionId === root.id)]);
+    // One lane per session at EVERY depth the runtime permits, each lane
+    // parenting on its actual parent's lane, in the deterministic pre-order
+    // the session-tree module owns — an event that names a session must
+    // always find its lane, or the deepest work silently vanishes from the
+    // operator's review surface.
+    const ordered = orderedSessionForest(this.repo.listAgentSessions(userSessionId));
     for (const agentSession of ordered) {
       const parent = `agent-session:${agentSession.id}`;
       lanes.push({ id: parent, kind: "agent_session", label: agentSession.title,
@@ -81,6 +83,17 @@ export class TimelineService {
       }
     }
 
+    // Every item must land on a lane that EXISTS: an unknown or absent seat
+    // name (console-authored annotations, boundary senders like
+    // "child:<id>", "system") attributes to the session's own lane rather
+    // than fabricating a seat lane no consumer can resolve.
+    const laneIds = new Set(lanes.map((lane) => lane.id));
+    const laneFor = (agentSessionId: unknown, agent: unknown): string => {
+      const sessionId = typeof agentSessionId === "string" ? agentSessionId : "";
+      const seatLane = typeof agent === "string" && agent !== "" ? `agent:${sessionId}:${agent}` : null;
+      if (seatLane !== null && laneIds.has(seatLane)) return seatLane;
+      return laneIds.has(`agent-session:${sessionId}`) ? `agent-session:${sessionId}` : "orchestrator";
+    };
     const starts = new Map<string, TimelineItem>();
     const items: TimelineItem[] = [];
     const finish = (key: string, event: ConsoleEvent, status: string | null) => {
@@ -96,13 +109,13 @@ export class TimelineService {
       }
       if (event.type === "user_session.turn.settled") { finish(`turn:${str(p.turnId)}`, event, str(p.status)); continue; }
       if (event.type === "agent_session.turn.started") {
-        const lane = `agent:${str(p.agentSessionId)}:${str(p.agent)}`;
+        const lane = laneFor(p.agentSessionId, p.agent);
         const item: TimelineItem = { id: `agent-turn:${str(p.turnId)}`, laneId: lane, kind: "turn", label: "agent turn", start: event.ts, end: null, status: "running", eventSeqs: seqs, detail: p };
         starts.set(item.id, item); items.push(item); continue;
       }
       if (event.type === "agent_session.turn.settled") { finish(`agent-turn:${str(p.turnId)}`, event, str(p.status)); continue; }
       if (event.type === "user_session.tool.called" || event.type === "agent_session.tool.called") {
-        const lane = event.type === "agent_session.tool.called" ? `agent:${event.agentSessionId ?? ""}:${str(p.agent)}` : "orchestrator";
+        const lane = event.type === "agent_session.tool.called" ? laneFor(event.agentSessionId, p.agent) : "orchestrator";
         const item: TimelineItem = { id: `tool:${str(p.callId)}`, laneId: lane, kind: "tool", label: str(p.name, "tool"), start: event.ts, end: null, status: "running", eventSeqs: seqs, detail: p };
         starts.set(item.id, item); items.push(item); continue;
       }
@@ -115,11 +128,11 @@ export class TimelineService {
       }
       if (event.type === "agent_session.message.appended" && message) {
         const speaker = message.speaker as Record<string, unknown> | undefined;
-        items.push({ id: `event:${event.seq}`, laneId: `agent:${event.agentSessionId ?? ""}:${str(speaker?.name)}`, kind: "message", label: str(message.text, "message").slice(0, 80), start: event.ts, end: null, status: null, eventSeqs: seqs, detail: p }); continue;
+        items.push({ id: `event:${event.seq}`, laneId: laneFor(event.agentSessionId, speaker?.name), kind: "message", label: str(message.text, "message").slice(0, 80), start: event.ts, end: null, status: null, eventSeqs: seqs, detail: p }); continue;
       }
       const mapped = classify(event.type);
       if (mapped) {
-        const lane = event.agentSessionId ? `agent:${event.agentSessionId}:${str(p.agent, "orchestrator")}` : "orchestrator";
+        const lane = event.agentSessionId ? laneFor(event.agentSessionId, p.agent) : "orchestrator";
         items.push({ id: `event:${event.seq}`, laneId: lane, kind: mapped, label: event.type.replaceAll("_", " "), start: event.ts, end: null, status: null, eventSeqs: seqs, detail: p });
       }
     }

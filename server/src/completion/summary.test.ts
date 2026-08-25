@@ -46,6 +46,44 @@ describe("run summary build source", () => {
     expect(document.build.filesChanged).toBe(2);
   });
 
+  it("headlines the sign-off card from a TOP-LEVEL final, never a nested session's", () => {
+    const h = makeHarness(async function* () { yield undefined as never; });
+    const userSessionId = h.addUserSession();
+    const addSession = (title: string, parent: string | null, depth: number, createdAt: string) => {
+      const id = `as_${title}`;
+      h.repo.insertAgentSession({ id, userSessionId, title, lifecycle: "open",
+        pattern: "hub_and_spoke", topology: {}, parentAgentSessionId: parent,
+        parentControllerAgent: parent === null ? null : "coordinator", depth,
+        allowChildSessions: false, budgetUsd: null, createdAt, updatedAt: createdAt });
+      return id;
+    };
+    const root = addSession("root", null, 0, "2026-08-01T10:00:00.000Z");
+    const child = addSession("child", root, 1, "2026-08-01T11:00:00.000Z");
+    const final = (agentSessionId: string, summary: string) => {
+      // A child's journal also addresses the literal "main" — only the sink
+      // differs at the boundary — which is exactly what made an all-sessions
+      // pick wrong.
+      const prepared = h.handoffs.prepare({
+        draft: { core: { schemaVersion: 1, taskId: null, status: "completed", risk: "low",
+          action: summary, state: { summary, evidence: [] }, result: { summary, artifacts: [] },
+          uncertainty: [], nextAction: "none", requestExpandedContext: false },
+          extension: { kind: "generic", data: {} } },
+        userSessionId, agentSessionId, sender: "coordinator", recipient: "main",
+        profileId: null, generation: 0, trigger: "final", parentHandoffId: null });
+      h.repo.appendHandoffMailbox({ sessionKind: "agent", sessionId: agentSessionId, userSessionId,
+        agentSessionId, speaker: { kind: "agent", name: "coordinator" }, to: "main", recipient: "main",
+        kind: "message", text: prepared.text, category: "final", handoff: prepared.row, summary: prepared.summary });
+    };
+    final(root, "the run's actual result");
+    final(child, "a nested sub-task detail"); // newer, deeper — must not win
+    const document = buildRunSummary({
+      db: h.db, repo: h.repo, interactions: h.interactions,
+      userSessionId, seqFrom: 0, reaped: NO_REAP,
+      getWorkspaceRoot: () => "/tmp/does-not-exist",
+    });
+    expect(document.headline).toBe("the run's actual result");
+  });
+
   it("falls back to handoff claims when no base commit was captured", () => {
     const h = makeHarness(async function* () { yield undefined as never; });
     const userSessionId = h.addUserSession();

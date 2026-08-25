@@ -7,12 +7,26 @@ import { timeAgo } from "@/lib/status";
 import { useScopeStore } from "@/stores/scope";
 import { useUiStore } from "@/stores/ui";
 
-/** Each top-level session followed by its children, indented one level. */
-function orderTree(agentSessions: AgentSession[]): AgentSession[] {
-  const roots = agentSessions.filter((agent) => agent.parentAgentSessionId === null);
-  return roots.flatMap((root) => [root,
-    ...agentSessions.filter((agent) => agent.parentAgentSessionId === root.id)
-      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))]);
+/**
+ * Depth-first pre-order over the whole forest — every session directly after
+ * its parent, at ANY depth the runtime permits (a grandchild must never
+ * vanish from the tree). Siblings by (createdAt, id); a row whose parent is
+ * missing from the list renders as a root rather than disappearing.
+ */
+function orderTree(agentSessions: AgentSession[]): { session: AgentSession; depth: number }[] {
+  const ids = new Set(agentSessions.map((agent) => agent.id));
+  const childrenOf = (parentId: string | null) => agentSessions
+    .filter((agent) => parentId === null
+      ? agent.parentAgentSessionId === null || !ids.has(agent.parentAgentSessionId)
+      : agent.parentAgentSessionId === parentId)
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+  const rows: { session: AgentSession; depth: number }[] = [];
+  const visit = (session: AgentSession, depth: number) => {
+    rows.push({ session, depth });
+    for (const child of childrenOf(session.id)) visit(child, depth + 1);
+  };
+  for (const root of childrenOf(null)) visit(root, 0);
+  return rows;
 }
 
 export function SessionTree({ showAll = false, allSelected = false, onSelectAll, onSelectUser, onSelectAgent, allowNew = false }: {
@@ -32,11 +46,11 @@ export function SessionTree({ showAll = false, allSelected = false, onSelectAll,
       {showAll && <button role="treeitem" aria-selected={allSelected} className={cn("flex w-full items-center gap-2 border-b border-border/50 px-3 py-2 text-left text-xs hover:bg-accent", allSelected && "bg-accent")} onClick={onSelectAll}><MessagesSquare className="size-3.5" />All sessions</button>}
       {branches.length === 0 ? <div className="px-3 py-8 text-center text-2xs text-muted-foreground">No sessions yet</div> : branches.map(({ session, agentSessions }) => <div key={session.id} role="treeitem" aria-expanded="true" aria-selected={!allSelected && session.id === activeUser && activeAgent === null}>
         <button data-session-row={session.id} className={cn("flex w-full flex-col border-b border-border/50 px-3 py-2 text-left hover:bg-accent", !allSelected && session.id === activeUser && activeAgent === null && "bg-accent")} onClick={() => onSelectUser ? onSelectUser(session) : openUser(session.id)}>
-          <span className="truncate text-xs">{session.title ?? "untitled"}</span><span className="text-3xs text-muted-foreground">{timeAgo(session.updatedAt)} · {agentSessions.length} agents</span>
+          <span className="truncate text-xs">{session.title ?? "untitled"}</span><span className="text-3xs text-muted-foreground">{timeAgo(session.updatedAt)} · {agentSessions.length} agent session{agentSessions.length === 1 ? "" : "s"}</span>
         </button>
         <div role="group" className="border-b border-border/50 bg-background/20 py-1">
-          {orderTree(agentSessions).map((agent) => <button key={agent.id} role="treeitem" aria-selected={!allSelected && agent.id === activeAgent} className={cn("flex w-full items-center gap-2 border-l pr-3 py-1.5 text-left hover:bg-accent", agent.parentAgentSessionId === null ? "pl-6" : "pl-9", !allSelected && agent.id === activeAgent && "border-l-primary bg-accent")} onClick={() => onSelectAgent ? onSelectAgent(agent) : openAgent(agent.userSessionId, agent.id)}>
-            <Bot className={cn("size-3 shrink-0", agent.activity === "working" ? "text-status-running" : "text-muted-foreground")} />
+          {orderTree(agentSessions).map(({ session: agent, depth }) => <button key={agent.id} role="treeitem" aria-selected={!allSelected && agent.id === activeAgent} className={cn("flex w-full items-center gap-2 border-l pr-3 py-1.5 text-left hover:bg-accent", !allSelected && agent.id === activeAgent && "border-l-primary bg-accent")} style={{ paddingLeft: `${1.5 + depth * 0.75}rem` }} onClick={() => onSelectAgent ? onSelectAgent(agent) : openAgent(agent.userSessionId, agent.id)}>
+            <Bot className={cn("size-3 shrink-0", agent.activity === "working" ? "text-status-running" : agent.activity === "reported" ? "text-status-completed" : "text-muted-foreground")} />
             <span className="min-w-0 flex-1 truncate text-2xs">{agent.title}</span><span className="text-3xs text-muted-foreground">{agent.agents.length}</span>
           </button>)}
         </div>
