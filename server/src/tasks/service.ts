@@ -29,6 +29,15 @@ export interface TaskAttribution {
   agent: string | null;
 }
 
+/**
+ * THE ledger line — every prompt surface that renders a task (full ledgers,
+ * bounded delivery views, reconstruction checkpoints) formats through this,
+ * so the bounded view is byte-identical to the unbounded one line-for-line.
+ */
+export function taskLedgerLine(task: { status: string; subject: string; owner: string | null; requirementId: string | null }): string {
+  return `- [${task.status}] ${task.subject}${task.owner === null ? "" : ` (${task.owner})`}${task.requirementId === null ? "" : ` → ${task.requirementId}`}`;
+}
+
 function toWire(
   row: TaskRow,
   deps: readonly TaskDependencyRow[],
@@ -302,10 +311,15 @@ export class TaskService {
   linesForAgentSession(agentSessionId: string): string[] {
     return this.#store.listByAgentSession(agentSessionId)
       .filter((row) => row.status !== "deleted")
-      .map(
-        (row) =>
-          `- [${row.status}] ${row.subject}${row.owner === null ? "" : ` (${row.owner})`}${row.requirementId === null ? "" : ` → ${row.requirementId}`}`,
-      );
+      .map((row) => taskLedgerLine(row));
+  }
+
+  /**
+   * The live wire tasks of one agent session, ledger order — the bounded
+   * delivery view's input (dependencyIds/ready ride the wire shape).
+   */
+  listForAgentSession(agentSessionId: string): Task[] {
+    return this.#wireAll(this.#store.listByAgentSession(agentSessionId).filter((row) => row.status !== "deleted"));
   }
 
   #wireAll(rows: readonly TaskRow[]): Task[] {

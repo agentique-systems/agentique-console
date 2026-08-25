@@ -4,7 +4,7 @@
  * checkpoints. Prompt bytes are pinned by prompt-snapshot.e2e; keep every
  * literal byte-identical.
  */
-import type { HandoffDraft, Interaction, InteractionQuestion } from "@agentique-console/shared";
+import type { ChangeImpactWire, HandoffDraft, Interaction, InteractionQuestion } from "@agentique-console/shared";
 import { profileWritesFiles, type AgentProfile } from "../agent-profiles/registry.ts";
 import type { Config } from "../config.ts";
 import type {
@@ -23,7 +23,16 @@ import type { InteractionService } from "../orchestrator/interactions.ts";
 import type { WorktreeManager } from "../runtime/worktree-manager.ts";
 import { effectiveNativeTools, type GovernedTool } from "../sdk/native-capability-policy.ts";
 import type { SdkUserMessageLike } from "../sdk/types.ts";
-import type { TaskService } from "../tasks/service.ts";
+import { taskLedgerLine, type TaskService } from "../tasks/service.ts";
+import {
+  selectDecisionDelta,
+  selectDelegatedView,
+  selectRosterSeats,
+  selectSessionImpacts,
+  selectTaskView,
+  type DelegatedViewNode,
+  type TaskView,
+} from "./delivery-view.ts";
 import type { RolePrompt } from "./topology-contract.ts";
 
 /**
@@ -250,14 +259,69 @@ export interface PromptComposerDeps {
    * portfolio render no block.
    */
   workstreamLines?: (agentSessionId: string) => string[];
+  /**
+   * `ChangeImpactService.listOpen` — the durable revision-currency ledger.
+   * An open impact naming this session pins a reconciliation block into its
+   * deliveries. Optional: harnesses without the ledger render no block.
+   */
+  openImpacts?: (userSessionId: string) => ChangeImpactWire[];
 }
 
 export class PromptComposer {
   readonly #deps: PromptComposerDeps;
   /** Roster work-state diff lines, memoized 15s — see `agentWorkState`. */
   readonly #workStateDiffCache = new Map<string, { at: number; line: string }>();
+  /**
+   * Delta-cursor staging, keyed `agentSessionId:seat`. The DURABLE cursors
+   * (`agents.last_decision_at`, `interactions.flushed_at`) advance only when
+   * a delivery is ACKNOWLEDGED — a turn that dies re-renders its delta on
+   * redelivery instead of losing it. These in-memory entries stage what the
+   * current process already composed, so a steer into an open turn does not
+   * duplicate the block; they are deliberately volatile — a restart forgets
+   * them and the unacknowledged delta re-renders. At-least-once, never lost.
+   */
+  readonly #pendingDecisionAt = new Map<string, string>();
+  readonly #pendingFlushedIds = new Map<string, Set<string>>();
 
   constructor(deps: PromptComposerDeps) { this.#deps = deps; }
+
+  static #seatKey(agentSessionId: string, seat: string): string { return `${agentSessionId}:${seat}`; }
+
+  /**
+   * A delivery reached acknowledged: the recipient's turn settled cleanly, so
+   * everything composed into it is processed. Advance the durable cursors to
+   * the delivery's `deliveredAt` — stamped in the same synchronous block as
+   * composition (mailroom.deliver), so every decision/answer that existed at
+   * composition is at or before it. Idempotent; retried acks re-derive.
+   */
+  noteDeliveryAcknowledged(session: AgentSessionRow, seatName: string, deliveryId: string): void {
+    const row = this.#deps.repo.getDeliveryById(deliveryId);
+    const deliveredAt = row?.deliveredAt ?? null;
+    if (deliveredAt === null) return;
+    const seat = this.#deps.repo.getAgent(session.id, seatName);
+    if (!seat) return;
+    if (seat.lastDecisionAt === null || seat.lastDecisionAt < deliveredAt) {
+      this.#deps.repo.patchAgent(session.id, seatName, { lastDecisionAt: deliveredAt });
+    }
+    const flushed = this.#deps.interactions.listAnsweredUnflushed(session.id, seatName)
+      .filter((answer) => (answer.resolvedAt ?? answer.createdAt) <= deliveredAt);
+    if (flushed.length > 0) {
+      this.#deps.interactions.markFlushed(flushed.map((answer) => answer.id));
+      const pending = this.#pendingFlushedIds.get(PromptComposer.#seatKey(session.id, seatName));
+      if (pending) for (const answer of flushed) pending.delete(answer.id);
+    }
+  }
+
+  /**
+   * A delivery went back to queued (failed turn, pause) or was cancelled: the
+   * composed prompt may never have been processed. Drop the staged cursors so
+   * the next composition renders the unacknowledged delta again.
+   */
+  noteDeliveryRequeued(agentSessionId: string, seatName: string): void {
+    const key = PromptComposer.#seatKey(agentSessionId, seatName);
+    this.#pendingDecisionAt.delete(key);
+    this.#pendingFlushedIds.delete(key);
+  }
 
   /**
    * The spawn-time system-prompt tail. Order matters for prompt caching: the
@@ -267,7 +331,7 @@ export class PromptComposer {
    */
   systemPromptAppend(session: AgentSessionRow, seat: AgentRow, profile: AgentProfile, rolePrompt: RolePrompt): string {
     const identity = rolePrompt.brief === undefined ? seat.instructions : `${seat.instructions}\n\n${rolePrompt.brief}`;
-    return `${identity}\n\n${capabilityBrief(profile, seat.worktreePath !== null)}\n\n${seatMessagingBrief(this.rosterLine(session), rolePrompt.addressing)}\n${rolePrompt.protocol}${this.#decisionContext(session)}${this.#specContext(session)}${this.#checkpointContext(seat)}`;
+    return `${identity}\n\n${capabilityBrief(profile, seat.worktreePath !== null)}\n\n${seatMessagingBrief(this.rosterLine(session, seat.name), rolePrompt.addressing)}\n${rolePrompt.protocol}${this.#decisionContext(session)}${this.#specContext(session)}${this.#checkpointContext(seat)}`;
   }
 
   /**
@@ -281,19 +345,43 @@ export class PromptComposer {
     return `${p.name} (${p.profileId}; ${capabilityTag(p.profileSnapshot as AgentProfile)}; owns: ${scopes || "coordination"}${workState === undefined ? "" : `; ${workState}`})`;
   }
 
-  rosterLine(session: AgentSessionRow): string {
-    return this.#deps.repo.listAgents(session.id).map((p) => this.#seatLine(p)).join("; ");
+  /**
+   * The roster's bounded seat selection: all of them within the cap
+   * (byte-identical rendering), the relevant ones plus a counted remainder
+   * over it — the full roster stays one roster_status call away.
+   */
+  #rosterSeats(session: AgentSessionRow, self: string | null): { agents: AgentRow[]; suffix: string } {
+    const agents = this.#deps.repo.listAgents(session.id);
+    const selection = selectRosterSeats(agents.map((p) => {
+      const lane = this.#deps.laneState(session.id, p.name);
+      return { name: p.name, live: lane !== null && (lane.live || lane.activeTurn), lastActiveAt: p.lastActiveAt };
+    }), self);
+    if (selection === null) return { agents, suffix: "" };
+    return {
+      agents: agents.filter((p) => selection.names.has(p.name)),
+      suffix: `; …and ${selection.omitted} more seat(s) — roster_status lists them all`,
+    };
+  }
+
+  rosterLine(session: AgentSessionRow, self: string | null = null): string {
+    const { agents, suffix } = this.#rosterSeats(session, self);
+    return agents.map((p) => this.#seatLine(p)).join("; ") + suffix;
   }
 
   /**
-   * The delivery prompt for a batch of queued journal rows. Call once per
-   * delivery — it MUTATES as it renders: answered interactions are marked
-   * flushed and the agent's decision watermark (`lastDecisionAt`) advances.
+   * The delivery prompt for a batch of queued journal rows. Selection is the
+   * delivery-view layer's (bounded, deterministic); rendering here stays
+   * byte-identical to the unbounded form whenever everything fits. Durable
+   * cursors advance at ACKNOWLEDGEMENT (`noteDeliveryAcknowledged`), not
+   * here — composition only stages what it rendered.
    */
   deliveryPrompt(session: AgentSessionRow, seat: AgentRow, rows: MessageRow[]): string {
+    const seatKey = PromptComposer.#seatKey(session.id, seat.name);
     // Agent worktree state on every line: the coordinator otherwise has no
-    // way to see in-progress work.
-    const roster = this.#deps.repo.listAgents(session.id).map((p) => this.#seatLine(p, this.agentWorkState(p))).join("; ");
+    // way to see in-progress work. Work states (git diffs included) are
+    // computed for the SELECTED seats only.
+    const rosterView = this.#rosterSeats(session, seat.name);
+    const roster = rosterView.agents.map((p) => this.#seatLine(p, this.agentWorkState(p))).join("; ") + rosterView.suffix;
     const messages = rows.map((row) => {
       const id = (row.payload?.handoff as { id?: string } | undefined)?.id;
       if (!id || !this.#deps.handoffs) return `[${row.speakerName} → ${row.toName} | ${row.createdAt}] ${row.text}`;
@@ -315,10 +403,16 @@ export class PromptComposer {
     }).join("\n\n");
     // The operator's answers to THIS agent's own questions. Rendered before
     // the handoffs because it outranks them — an operator decision is not a
-    // claim to be verified.
-    const answered = this.#deps.interactions.listAnsweredUnflushed(session.id, seat.name);
+    // claim to be verified. Flushed durably at ACK; the staged ids only stop
+    // a steered same-process recomposition from repeating the block.
+    const stagedFlush = this.#pendingFlushedIds.get(seatKey) ?? new Set<string>();
+    const answered = this.#deps.interactions.listAnsweredUnflushed(session.id, seat.name)
+      .filter((row) => !stagedFlush.has(row.id));
     const decisions = answered.map((row) => summarizeAnswer(row)).filter((line) => line !== "");
-    if (decisions.length > 0) this.#deps.interactions.markFlushed(answered.map((row) => row.id));
+    if (decisions.length > 0) {
+      for (const row of answered) stagedFlush.add(row.id);
+      this.#pendingFlushedIds.set(seatKey, stagedFlush);
+    }
     const answersBlock = decisions.length === 0 ? ""
       : `## The operator answered your question(s)\nAuthoritative — act on these and do not ask again.\n${decisions.map((line) => `- ${line}`).join("\n")}\n\n`;
     // Decisions made since this agent's last delivery — including ones it
@@ -326,18 +420,29 @@ export class PromptComposer {
     // prompt's spawn-time digest is stale for exactly the agents that are
     // busy. The DELTA only, never the whole list, and omitted entirely when
     // empty: a block that renders empty would change every prompt and destroy
-    // prompt caching (asserted in decision-ledger.e2e.test.ts).
-    const fresh = this.#deps.decisions.since(session.userSessionId, seat.lastDecisionAt);
+    // prompt caching (asserted in decision-ledger.e2e.test.ts). Bounded: over
+    // the caps, decisions pinned to this seat's live requirement scope render
+    // ahead of recency, and the remainder is counted with its read path.
+    const staged = this.#pendingDecisionAt.get(seatKey);
+    const watermark = staged !== undefined && (seat.lastDecisionAt === null || staged > seat.lastDecisionAt) ? staged : seat.lastDecisionAt;
+    const fresh = this.#deps.decisions.since(session.userSessionId, watermark);
     const unseen = fresh.filter((row) => row.askedBy !== seat.name);
-    if (fresh.length > 0) {
-      this.#deps.repo.patchAgent(session.id, seat.name, { lastDecisionAt: fresh[fresh.length - 1]!.createdAt });
+    if (fresh.length > 0) this.#pendingDecisionAt.set(seatKey, fresh[fresh.length - 1]!.createdAt);
+    let freshBlock = "";
+    if (unseen.length > 0) {
+      const pin = decisionPin(this.#deps.requirements.derive(session.userSessionId), this.#seatDecisionScope(session));
+      const delta = selectDecisionDelta(unseen.map((row) => ({ line: `- ${renderDecision(row)}`, pinned: row.requirementIds.length > 0 && pin(row.requirementIds) })));
+      const omittedLine = delta.omitted === 0 ? ""
+        : `\n- (${delta.omitted} more decision(s) since your last delivery — they still stand; list_decisions returns the full ledger)`;
+      freshBlock = `## New operator decisions since your last delivery\nAuthoritative — these were decided for this whole session, not just for the seat that asked.\n${delta.lines.join("\n")}${omittedLine}\n\n`;
     }
-    const freshBlock = unseen.length === 0 ? ""
-      : `## New operator decisions since your last delivery\nAuthoritative — these were decided for this whole session, not just for the seat that asked.\n${unseen.map((row) => `- ${renderDecision(row)}`).join("\n")}\n\n`;
     // The shared ledger, in every delivery: a live run's units sat pending
     // forever because agents only ever saw the ledger at spawn. Omitted
-    // entirely when empty (byte-stability for ledger-less sessions).
-    const taskLines = this.#deps.tasks.linesForAgentSession(session.id);
+    // entirely when empty (byte-stability for ledger-less sessions). Bounded:
+    // a large ledger keeps this seat's active units and their blockers and
+    // counts the rest — the full ledger stays one task_list call away.
+    const taskView = this.#taskView(session.id, seat.name);
+    const taskLines = [...taskView.lines, ...(taskView.omittedLine === null ? [] : [taskView.omittedLine])];
     const ledgerBlock = taskLines.length === 0 ? ""
       : `## Task ledger (console-owned, authoritative)\n${taskLines.join("\n")}\nKeep your unit's status honest with task_update: in_progress when you start, completed only when verified.\n\n`;
     // The governing revision on EVERY delivery: the decision delta announces
@@ -347,6 +452,13 @@ export class PromptComposer {
     const specPointer = this.#deps.requirements.pointer(session.userSessionId);
     const specBlock = specPointer === null ? ""
       : `Governing requirements: ${specPointer}. If your system prompt shows an older revision, read_requirements before continuing.\n\n`;
+    // Revision currency, pinned: an open change impact that names this
+    // session as affected-and-unreconciled renders on EVERY delivery until it
+    // clears — a meaning change must not be buried by whatever else arrived.
+    // Derived from the durable ledger (change-impact.ts), so it survives
+    // restart and clears mechanically when the session acts or is reconciled.
+    // Omitted entirely when none (byte-stability).
+    const impactBlock = this.#impactBlock(session);
     // Declared cross-workstream links on EVERY delivery: what this session
     // awaits from other workstreams (with the console-derived status) and
     // which workstreams consume its output — the interface is a contract, not
@@ -359,7 +471,31 @@ export class PromptComposer {
     // and a contract buried in the briefing is one a long-lived seat forgets.
     // Omitted entirely when the session holds no delegation (byte-stability).
     const delegatedBlock = this.#delegatedRequirements(session);
-    return `AgentSession ${session.id}: ${session.title}\nYou are ${seat.name}. Participants: ${roster}.\n\n${answersBlock}${freshBlock}${ledgerBlock}${specBlock}${workstreamBlock}${delegatedBlock}Only the following addressed handoffs are new:\n${messages}\n\nTreat handoff claims as historical context; verify risky claims against repository/task/journal evidence during normal work. Act without restating the envelope.`;
+    return `AgentSession ${session.id}: ${session.title}\nYou are ${seat.name}. Participants: ${roster}.\n\n${answersBlock}${freshBlock}${ledgerBlock}${specBlock}${impactBlock}${workstreamBlock}${delegatedBlock}Only the following addressed handoffs are new:\n${messages}\n\nTreat handoff claims as historical context; verify risky claims against repository/task/journal evidence during normal work. Act without restating the envelope.`;
+  }
+
+  /** The bounded ledger view for one seat, over the canonical wire tasks. */
+  #taskView(agentSessionId: string, seat: string): TaskView {
+    return selectTaskView(this.#deps.tasks.listForAgentSession(agentSessionId).map((task) => ({
+      id: task.id, status: task.status, owner: task.owner, dependencyIds: task.dependencyIds, ready: task.ready,
+      line: taskLedgerLine(task),
+    })), seat);
+  }
+
+  /** The pinned reconciliation block — see the call site in `deliveryPrompt`. */
+  #impactBlock(session: AgentSessionRow): string {
+    if (this.#deps.openImpacts === undefined) return "";
+    const impacts = selectSessionImpacts(this.#deps.openImpacts(session.userSessionId), session.id);
+    if (impacts.shown.length === 0) return "";
+    const lines = impacts.shown.map((impact) => {
+      const seeds = impact.affected.seedIds.slice(0, 8).join(", ")
+        + (impact.affected.seedIds.length > 8 ? ` +${impact.affected.seedIds.length - 8} more` : "");
+      const note = impact.note === null ? "" : ` — ${[...impact.note].length > 160 ? `${[...impact.note].slice(0, 160).join("")}…` : impact.note}`;
+      return `- ${impact.id} (rev ${impact.atRevision}, ${impact.sourceKind}): ${seeds} changed${note}`;
+    });
+    if (impacts.omitted > 0) lines.push(`- (+${impacts.omitted} more open impact(s) affecting this session)`);
+    return `## Requirement changes pending reconciliation (console-derived)\n${lines.join("\n")}\n` +
+      `The Console lists this session as affected and not yet reconciled: re-check active work against the current revision (read_requirements) before relying on earlier conclusions, and report what you re-verified — or the conflict — to your coordinator.\n\n`;
   }
 
   /**
@@ -388,7 +524,11 @@ export class PromptComposer {
     if (specPointer !== null) facts.push(`Governing requirements: ${specPointer}.`);
     const delegated = this.#deps.requirements.delegationSet(session.id);
     if (delegated.length > 0) facts.push(`Delegated requirements: ${delegated.join(", ")} (report_requirement with evidence; read_requirements for statements).`);
-    const taskLines = this.#deps.tasks?.linesForAgentSession(session.id) ?? [];
+    // The seat-scoped BOUNDED view, not the whole ledger: a reconstruction
+    // over hundreds of units must still fit in a checkpoint the successor can
+    // read; the remainder is counted and stays one task_list call away.
+    const taskView = this.#taskView(session.id, seat.name);
+    const taskLines = [...taskView.lines, ...(taskView.omittedLine === null ? [] : [taskView.omittedLine])];
     if (taskLines.length > 0) facts.push(`Task ledger:\n${taskLines.join("\n")}`);
     if (seat.worktreePath && this.#deps.worktrees && seat.worktreeBranch && seat.worktreeBaseCommit) {
       try {
@@ -584,15 +724,27 @@ export class PromptComposer {
       }
     }
     const subtreeNodes = nodes.filter((node) => inSubtree.has(node.id));
-    const lines = subtreeNodes.map((node) => {
+    const viewNodes: DelegatedViewNode[] = subtreeNodes.map((node) => {
       const depth = (() => { let d = 0; for (let cursor = node.parentId; cursor !== null && inSubtree.has(cursor); cursor = parentOf.get(cursor) ?? null) d += 1; return d; })();
       const status = node.derivedStatus === node.status ? node.status : `${node.status}, derives ${node.derivedStatus}`;
       // The console-derived invalidation marks ride the line: a seat holding a
       // flagged terminal claim must see its evidence is suspect, not a clean
       // [satisfied]. Byte-stable when nothing is flagged.
       const flagged = node.flags.length === 0 ? "" : ` ⚠ ${node.flags.join(", ")}`;
-      return `${"  ".repeat(depth)}- ${node.id} [${status}${flagged}]${node.composition === "any" ? " (any of)" : ""}: ${node.statement}`;
+      return {
+        id: node.id,
+        parentId: node.parentId !== null && inSubtree.has(node.parentId) ? node.parentId : null,
+        line: `${"  ".repeat(depth)}- ${node.id} [${status}${flagged}]${node.composition === "any" ? " (any of)" : ""}: ${node.statement}`,
+        derivedStatus: node.derivedStatus,
+        flagged: node.flags.length > 0,
+      };
     });
+    // Bounded: within budget the full subtree renders byte-identically; over
+    // it, satisfied stable subtrees collapse first, then the view falls back
+    // to the flagged/open skeleton with its governing boundary — a suspect
+    // claim survives every rung (delivery-view.ts).
+    const view = selectDelegatedView(viewNodes);
+    const lines = view.omittedLine === null ? view.lines : [...view.lines, view.omittedLine];
     const flagLegend = subtreeNodes.some((node) => node.flags.length > 0)
       ? "⚠ marks a terminal claim whose dependency or premise changed AFTER it was recorded (console-derived): re-verify or reopen before relying on it; report_requirement with a fresh claim clears the mark.\n"
       : "";

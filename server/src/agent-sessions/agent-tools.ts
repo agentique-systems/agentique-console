@@ -63,6 +63,7 @@ interface SendHandoffArgs {
 
 import { fail, ok } from "../sdk/tool-result.ts";
 import type { AssumptionService } from "../orchestrator/assumptions.ts";
+import type { DecisionLedger } from "../orchestrator/decisions.ts";
 import type { RequirementService } from "../orchestrator/requirements.ts";
 
 /** The slice of the service's deps the tool handlers read. */
@@ -77,6 +78,8 @@ export interface AgentToolsDeps {
   requirements?: RequirementService;
   /** Recorded premises (absent in some unit harnesses). */
   assumptions?: AssumptionService;
+  /** The operator decision ledger — `list_decisions` reads it (absent in some unit harnesses). */
+  decisions?: DecisionLedger;
   worktrees: WorktreeManager | null;
 }
 
@@ -548,6 +551,19 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
         }
       }));
   }
+  // The full decision ledger, on demand. Deliveries carry a BOUNDED decision
+  // delta (relevance-pinned, counted when over its caps), and the spawn
+  // digest is capped the same way — this is the deterministic read path for
+  // everything those views omit. Registration follows the GRANT alone (the
+  // grants-parity law); a unit harness without the ledger gets a plain
+  // failure from the handler.
+  tools.push(sdk.tool("list_decisions",
+    "Read the project's full operator decision ledger, oldest first, with cursor paging. Deliveries carry only new or scope-relevant decisions; when one says decisions were omitted, this returns them all. Every entry is authoritative — already decided for this run.",
+    { cursor: z.string().optional(), maxBytes: z.number().int().min(1).max(PAGE_MAX_BYTES).default(PAGE_DEFAULT_BYTES) },
+    async (args: { cursor?: string; maxBytes: number }) => {
+      if (!deps.decisions) return fail("decision ledger unavailable in this harness");
+      return ok({ decisions: pageTail(deps.decisions.lines(session.userSessionId).join("\n"), args.cursor, args.maxBytes) });
+    }));
   // Who is doing what, on demand. The roster carries this on every delivery
   // already; this is for the agent that is ABOUT to start something and can
   // check first.

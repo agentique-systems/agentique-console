@@ -19,7 +19,7 @@ import type { RoleSpec } from "./topology-contract.ts";
 import type { AgentProfile } from "../agent-profiles/registry.ts";
 
 export type AgentToolName =
-  | "send_handoff" | "read_artifact" | "write_note" | "ask_operator" | "roster_status"
+  | "send_handoff" | "read_artifact" | "write_note" | "ask_operator" | "roster_status" | "list_decisions"
   | "read_handoff" | "report_handoff_discrepancy" | "forward_message" | "read_requirements"
   | "report_requirement" | "decompose_requirement"
   | "record_assumption" | "resolve_assumption" | "link_requirements" | "unlink_requirements"
@@ -58,7 +58,10 @@ export function grantedTools(
   deps: AgentGrantDeps,
 ): Set<AgentToolName> {
   const grants = new Set(role?.grants ?? []);
-  const tools = new Set<AgentToolName>(["send_handoff", "read_artifact", "write_note", "ask_operator", "roster_status"]);
+  // `list_decisions` is the read path behind every bounded decision delta:
+  // a delivery that omits decisions counts them and points here, so the tool
+  // must exist wherever the delta can render — which is every seat.
+  const tools = new Set<AgentToolName>(["send_handoff", "read_artifact", "write_note", "ask_operator", "roster_status", "list_decisions"]);
   if (deps.handoffs) {
     tools.add("read_handoff"); tools.add("report_handoff_discrepancy");
     if (grants.has("forward_message")) tools.add("forward_message");

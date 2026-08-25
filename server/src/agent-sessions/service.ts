@@ -1,4 +1,4 @@
-import type { AgentSessionStatus, ConsoleEvent, GetAgentSessionResponse, HandoffDraft, Interaction, PatternId } from "@agentique-console/shared";
+import type { AgentSessionStatus, ChangeImpactWire, ConsoleEvent, GetAgentSessionResponse, HandoffDraft, Interaction, PatternId } from "@agentique-console/shared";
 import fs from "node:fs";
 import { InvalidInputError, NotFoundError } from "../errors.ts";
 import type { AgentProfile, AgentProfileRegistry } from "../agent-profiles/registry.ts";
@@ -80,6 +80,15 @@ export interface AgentSessionServiceDeps {
     finalCaveats(agentSessionId: string): string[];
     noteSessionArchived(session: AgentSessionRow): void;
   };
+  /**
+   * The revision-currency ledger (orchestrator/change-impact.ts): open
+   * impacts naming a session render as a pinned reconciliation block in its
+   * seats' deliveries. Optional so unit harnesses without the ledger stay
+   * small; production always wires it.
+   */
+  changeImpacts?: {
+    listOpen(userSessionId: string): ChangeImpactWire[];
+  };
 }
 
 /**
@@ -150,6 +159,7 @@ export class AgentSessionService {
         return lane ? { activeTurn: lane.activeTurn !== null, live: lane.state === "live" } : null;
       },
       ...(deps.workstreams === undefined ? {} : { workstreamLines: (agentSessionId: string) => deps.workstreams!.promptLines(agentSessionId) }),
+      ...(deps.changeImpacts === undefined ? {} : { openImpacts: (userSessionId: string) => deps.changeImpacts!.listOpen(userSessionId) }),
     });
     this.#operator = new OperatorSurface({
       repo: deps.repo, bus: deps.bus, config: deps.config, interactions: deps.interactions,
@@ -201,7 +211,7 @@ export class AgentSessionService {
       repo: deps.repo, bus: deps.bus, config: deps.config,
       sdk: deps.sdk, sessionStore: deps.sessionStore, getWorkspaceRoot: deps.getWorkspaceRoot,
       artifacts: deps.artifacts, tasks: deps.tasks, handoffs: deps.handoffs, requirements: deps.requirements,
-      assumptions: deps.assumptions,
+      assumptions: deps.assumptions, decisions: deps.decisions,
       worktrees: deps.worktrees,
       scheduler: deps.scheduler, capacity: deps.capacity,
       lanes: this.#lanes, worktree: this.#worktreeBinding, routing: this.#routing, composer: this.#composer,
