@@ -95,7 +95,7 @@ describe("0017_drop_spec_revisions replay over a pre-drop database", () => {
     legacy.close();
 
     const { db, sqlite } = openDb(file); // journal says 0000..0016 ran — this applies ONLY 0017
-    expect(sqlite.prepare("SELECT count(*) AS n FROM __drizzle_migrations").get()).toMatchObject({ n: 22 });
+    expect(sqlite.prepare("SELECT count(*) AS n FROM __drizzle_migrations").get()).toMatchObject({ n: 23 });
     const tables = new Set((sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map((r) => r.name));
     expect(tables.has("spec_revisions")).toBe(false);
 

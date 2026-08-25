@@ -40,6 +40,14 @@ export class SessionStore {
       .all();
   }
 
+  /** Every session ever attached to one project, in creation (= run) order. */
+  listUserSessionsForProject(projectId: string): UserSessionRow[] {
+    return this.#db.select().from(userSessions)
+      .where(eq(userSessions.projectId, projectId))
+      .orderBy(asc(userSessions.createdAt))
+      .all();
+  }
+
   /**
    * Open work sessions — the ones a run can complete in. The purpose filter
    * guards against legacy profile-manager rows (the authoring lane is gone;

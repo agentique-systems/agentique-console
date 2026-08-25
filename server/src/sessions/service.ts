@@ -17,7 +17,8 @@ import type {
 import { InvalidInputError, NotFoundError } from "../errors.ts";
 import { Repo, type UserSessionRow } from "../db/repo.ts";
 import type { ProjectStore } from "../db/stores/project-store.ts";
-import { toWireUserSession } from "../api/wire.ts";
+import type { ContinuationCheckpointService } from "../continuation/service.ts";
+import { toWireMessage, toWireUserSession } from "../api/wire.ts";
 import type { EventBus } from "../events/bus.ts";
 import { newId, nowIso } from "../ids.ts";
 import type { DecisionIssueService } from "../orchestrator/decision-issues.ts";
@@ -39,6 +40,7 @@ export class UserSessionService {
     schedule(userSessionId: string): void;
     resolve(userSessionId: string, decision: "accept" | "changes", note?: string, waivers?: import("../completion/service.ts").SubmittedWaiver[]): void;
   };
+  readonly #continuation: Pick<ContinuationCheckpointService, "record" | "ensureForProject" | "latestForSession">;
   readonly #wireAgentSessions: (userSessionId: string) => AgentSession[];
 
   constructor(deps: {
@@ -54,6 +56,7 @@ export class UserSessionService {
       schedule(userSessionId: string): void;
       resolve(userSessionId: string, decision: "accept" | "changes", note?: string, waivers?: import("../completion/service.ts").SubmittedWaiver[]): void;
     };
+    continuation: Pick<ContinuationCheckpointService, "record" | "ensureForProject" | "latestForSession">;
     wireAgentSessions: (userSessionId: string) => AgentSession[];
   }) {
     this.#repo = deps.repo;
@@ -65,6 +68,7 @@ export class UserSessionService {
     this.#workspaces = deps.workspaces;
     this.#archiveAgentSessions = deps.archiveAgentSessions;
     this.#completion = deps.completion;
+    this.#continuation = deps.continuation;
     this.#wireAgentSessions = deps.wireAgentSessions;
   }
 
@@ -109,8 +113,38 @@ export class UserSessionService {
       workspaceId: session.workspaceId,
       payload: { session },
     });
+    if (body.projectId !== undefined) this.#noteContinuation(session.id);
     this.#runner.postOperatorMessage(session.id, message);
     return session;
+  }
+
+  /**
+   * The operator-facing trace that knowledge crossed the run boundary: a
+   * transcript notice naming the prior run and its checkpoint. The checkpoint
+   * itself reaches the orchestrator through its prompt digest — this is
+   * display. Best-effort: a continued session without a checkpoint (empty
+   * prior run, failed generation) simply continues from project truth.
+   */
+  #noteContinuation(userSessionId: string): void {
+    try {
+      const checkpoint = this.#continuation.latestForSession(userSessionId);
+      if (checkpoint === null) return;
+      const from = checkpoint.sourceTitle === null ? checkpoint.sourceUserSessionId : `"${checkpoint.sourceTitle}"`;
+      const row = this.#repo.appendMessage({
+        sessionKind: "user",
+        sessionId: userSessionId,
+        speaker: { kind: "system", name: "system" },
+        kind: "notice",
+        text: `Continuing this project from the previous run ${from}. Its continuation checkpoint (${checkpoint.id}, requirements rev ${checkpoint.atRevision}) is in the orchestrator's context: prior strategy, unfinished workstreams, and accepted gaps carry over as advisory context — no prior agents or tasks resume.`,
+      });
+      this.#bus.append({
+        type: "user_session.message.appended",
+        userSessionId,
+        payload: { userSessionId, message: toWireMessage(row) },
+      });
+    } catch {
+      // Continuation must survive a display failure.
+    }
   }
 
   /**
@@ -132,6 +166,15 @@ export class UserSessionService {
       throw new InvalidInputError(
         `project ${body.projectId} already has an open session (${open[0]!.id}) — continuation is sequential; archive it first`,
       );
+    }
+    // The attach-time backstop: if the latest archived run predates
+    // checkpoints or its archive-time record was interrupted, build it now
+    // from durable rows. A failure here degrades continuation to project
+    // truth — it must never block attaching.
+    try {
+      this.#continuation.ensureForProject(body.projectId);
+    } catch (error) {
+      console.warn(`continuation checkpoint backstop failed for project ${body.projectId}:`, error);
     }
     return body.projectId;
   }
@@ -195,6 +238,15 @@ export class UserSessionService {
     // mode or model change recycles it so the next message respawns with fresh
     // options. A turn already in flight finishes on what it started with.
     if (changes.lifecycle === "archived") {
+      // The run boundary: snapshot the continuation checkpoint BEFORE agent
+      // sessions archive, while workstream-link statuses still read as they
+      // stood. Idempotent per source session; a failure degrades the next
+      // run's context and must never block archival.
+      try {
+        this.#continuation.record(id);
+      } catch (error) {
+        console.warn(`continuation checkpoint record failed for session ${id}:`, error);
+      }
       this.#completion.schedule(id);
       this.#archiveAgentSessions(id);
       void this.#runner.closeSession(id);

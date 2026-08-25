@@ -657,6 +657,25 @@ export interface WorkstreamLinkBrokenPayload {
   subject: string;
 }
 
+/**
+ * A project continuation checkpoint was recorded at a run boundary — the
+ * operational handoff the next UserSession on this project inherits. Emitted
+ * once per source session (recording is idempotent).
+ */
+export interface ContinuationCheckpointRecordedPayload {
+  /** The SOURCE session the checkpoint snapshots (also the envelope's session). */
+  userSessionId: string;
+  projectId: string;
+  checkpointId: string;
+  /** The governing requirement revision at record time (0 = none governed). */
+  atRevision: number;
+  /** The source session's runState at the boundary. */
+  runState: "active" | "awaiting_signoff" | "completed";
+  /** Whether model-authored synthesis (strategy et al.) was available to snapshot. */
+  hasSynthesis: boolean;
+  counts: { unfinishedWorkstreams: number; openChangeImpacts: number; openDecisionIssues: number; waivers: number };
+}
+
 /** Main revised its working state (strategy/uncertainties/assumptions/risks/completion). */
 export interface StateUpdatedPayload {
   userSessionId: string;
@@ -822,6 +841,7 @@ export type ConsoleEvent = Base &
     | { type: "workstream.link.released"; payload: WorkstreamLinkReleasedPayload }
     | { type: "workstream.link.broken"; payload: WorkstreamLinkBrokenPayload }
     | { type: "user_session.state.updated"; payload: StateUpdatedPayload }
+    | { type: "project.continuation.recorded"; payload: ContinuationCheckpointRecordedPayload }
     | { type: "agent_session.created"; payload: AgentSessionCreatedPayload }
     | { type: "agent_session.termination.tripped"; payload: AgentSessionTerminationTrippedPayload }
     | { type: "agent_session.join.completed"; payload: AgentSessionJoinCompletedPayload }

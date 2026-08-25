@@ -133,6 +133,12 @@ export interface OrchestratorDeps {
   /** The governing document (requirement graph, legacy-spec fallback). */
   requirements: RequirementService;
   orchestrationState: OrchestrationStateService;
+  /**
+   * The prior-run continuation checkpoint on a continued project, injected
+   * like the working state but labeled advisory. Required like decisions —
+   * an optional dep would let a missing wire typecheck.
+   */
+  continuation: { digest(userSessionId: string): string };
   /** Lazy — host and runner construct in either order inside `createApp`. */
   host: () => AgentSessionService;
   /** Console task-ledger tools for the lane. */
@@ -606,6 +612,7 @@ export class OrchestratorRunner {
       }),
       specDigest: this.#deps.requirements.digest(sessionId),
       stateDigest: this.#deps.orchestrationState.digest(sessionId),
+      continuationDigest: this.#deps.continuation.digest(sessionId),
       autonomy: session.autonomy,
       peerName: mainPeerName(config.policy.peerNamePrefix, sessionId),
       skillsPluginDir: config.infra.skillsPluginDir,

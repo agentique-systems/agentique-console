@@ -56,6 +56,8 @@ describe("console tool byte budget", () => {
   // Bumped 14200 → 15300 with list_decision_issues/resolve_decision_issue/
   // merge_decision_issues and ask_operator's issueKey — the decision-issue
   // layer's binding surface, not creep on existing ones.
+  // Bumped 15300 → 15900 with read_continuation — the project continuation
+  // checkpoint's read surface, not creep on existing ones.
   it("keeps total description + parameter-describe bytes within the budget", () => {
     const tools = captureTools();
     expect(tools.length).toBeGreaterThan(20);
@@ -64,6 +66,6 @@ describe("console tool byte budget", () => {
       + Buffer.byteLength(tool.description, "utf8")
       + Object.values(tool.schema).reduce((inner, schema) => inner + describeBytes(schema), 0),
     0);
-    expect(total).toBeLessThanOrEqual(15_300);
+    expect(total).toBeLessThanOrEqual(15_900);
   });
 });

@@ -29,6 +29,7 @@
  *   change_impacts                        ChangeImpactStore
  *   decision_issues                       DecisionIssueStore
  *   workstream_links                      WorkstreamStore
+ *   continuation_checkpoints              ContinuationCheckpointStore
  *
  * The one sanctioned crossing: transactional appends anchored on a row the
  * store owns (MessageStore.appendHandoffMailbox writes the handoff row with
@@ -45,6 +46,7 @@ import { SqliteSessionStore } from "../../sdk/session-store.ts";
 import { AssignmentStore } from "./assignment-store.ts";
 import { AssumptionStore } from "./assumption-store.ts";
 import { ChangeImpactStore } from "./change-impact-store.ts";
+import { ContinuationCheckpointStore } from "./continuation-store.ts";
 import { CronStore } from "./cron-store.ts";
 import { DecisionIssueStore } from "./decision-issue-store.ts";
 import { HandoffStore } from "./handoff-store.ts";
@@ -63,6 +65,7 @@ import { WorkstreamStore } from "./workstream-store.ts";
 export { AssignmentStore } from "./assignment-store.ts";
 export { AssumptionStore, type AssumptionRow } from "./assumption-store.ts";
 export { ChangeImpactStore, type ChangeImpactRow } from "./change-impact-store.ts";
+export { ContinuationCheckpointStore, type ContinuationCheckpointRow } from "./continuation-store.ts";
 export { CronStore } from "./cron-store.ts";
 export { DecisionIssueStore, type DecisionIssueRow } from "./decision-issue-store.ts";
 export { HandoffStore } from "./handoff-store.ts";
@@ -101,6 +104,7 @@ export interface Stores {
   requirements: RequirementStore;
   assumptions: AssumptionStore;
   changeImpacts: ChangeImpactStore;
+  continuation: ContinuationCheckpointStore;
   decisionIssues: DecisionIssueStore;
   workstreams: WorkstreamStore;
   orchestrationState: OrchestrationStateStore;
@@ -125,6 +129,7 @@ export function createStores(db: Db, sqlite: SqliteTransactor): Stores {
     requirements: new RequirementStore(db, sqlite),
     assumptions: new AssumptionStore(db),
     changeImpacts: new ChangeImpactStore(db),
+    continuation: new ContinuationCheckpointStore(db),
     decisionIssues: new DecisionIssueStore(db),
     workstreams: new WorkstreamStore(db),
     orchestrationState: new OrchestrationStateStore(db),

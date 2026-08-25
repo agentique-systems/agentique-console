@@ -829,6 +829,73 @@ export interface CompletionWaiver {
   note?: string;
 }
 
+// ---------------------------------------------------------------------------
+// Continuation checkpoints. When a UserSession is archived, the Console
+// persists one project-level operational handoff for the NEXT session on the
+// same project: what strategy was in force and why (copied from the prior
+// main's own last recorded working state — model-authored, advisory), plus
+// console-derived facts about what was left unresolved (unreported
+// workstreams, standing suspect claims, open decision issues, accepted
+// waivers, salvage pointers). Project truth — requirements, decisions,
+// assumptions — stays authoritative in its own stores; the checkpoint carries
+// only references and bounded summaries, never copies of governing meaning.
+// One immutable checkpoint per source session; the latest prior one is
+// injected (bounded) into a continued session's orchestrator context.
+
+/**
+ * The model-authored slice, snapshotted verbatim from the source session's
+ * latest orchestration-state revision. Null when that run never recorded
+ * working state — the checkpoint degrades to facts, it never invents strategy.
+ */
+export interface ContinuationSynthesis {
+  /** The orchestration-state revision the snapshot was taken from. */
+  stateRevision: number;
+  strategy: string;
+  strategyWhy: string;
+  uncertainties: string[];
+  /** Main's informal working assumptions — durable assumption ROWS continue on their own. */
+  assumptions: string[];
+  risks: string[];
+}
+
+/** Console-derived facts at the run boundary — references and bounded summaries only. */
+export interface ContinuationFacts {
+  /** The latest run-summary proposal, when one exists. */
+  completion: { summaryId: string; status: "proposed" | "accepted" | "changes_requested"; verdict: string; headline: string } | null;
+  /** Typed operator waivers granted at accept — accepted gaps, not future obligations. */
+  waivers: { kind: CoverageExceptionKind; ref: string; detail: string; note?: string }[];
+  /** From main's latest record_completion, when one exists (model-authored, recorded in-run). */
+  knownGaps: string[];
+  nonGoals: string[];
+  /** AgentSessions of the source run that never reported a final — unfinished or abandoned workstreams. */
+  unfinishedWorkstreams: { agentSessionId: string; title: string; openTasks: number }[];
+  /** Live workstream links not satisfied at the boundary — declared couplings the next run should know. */
+  pendingWorkstreamLinks: { linkId: string; subject: string; consumerTitle: string; producerTitle: string; status: WorkstreamLinkStatus }[];
+  /** Change impacts whose suspect terminal claims still stand — prior evidence awaiting judgment. */
+  openChangeImpacts: { id: string; sourceKind: ChangeImpactSourceKind; sourceRef: string; suspectClaims: string[] }[];
+  /** Open project decision issues at the boundary (ids + subjects; list_decision_issues has detail). */
+  openDecisionIssues: { id: string; subject: string }[];
+  /** Unlanded work preserved at archival: renamed branches and diff artifacts. */
+  salvage: { agentSessionId: string; agent: string; branch: string | null; artifactId: string | null }[];
+}
+
+export interface ContinuationCheckpointWire {
+  id: string;
+  projectId: string;
+  sourceUserSessionId: string;
+  /** The source session's title at record time — how the operator knows the run. */
+  sourceTitle: string | null;
+  /** The source session's runState at the boundary: completed = accepted sign-off; anything else ended early. */
+  runState: "active" | "awaiting_signoff" | "completed";
+  /** The governing requirement revision when the checkpoint was written (0 = none governed). */
+  atRevision: number;
+  /** Ledger length at record time — a currency hint beside atRevision. */
+  decisionCount: number;
+  synthesis: ContinuationSynthesis | null;
+  facts: ContinuationFacts;
+  createdAt: string;
+}
+
 /** Orchestration-pattern catalog ids — the create-session wire vocabulary. */
 export const PATTERN_IDS = [
   "hub_and_spoke",

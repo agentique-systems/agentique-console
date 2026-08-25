@@ -53,6 +53,7 @@ function makeService() {
     workspaces: { get: () => undefined } as never,
     archiveAgentSessions: vi.fn(),
     completion: { schedule: vi.fn(), resolve: vi.fn() },
+    continuation: { record: vi.fn(() => null), ensureForProject: vi.fn(), latestForSession: vi.fn(() => null) },
     wireAgentSessions: () => [],
   });
 

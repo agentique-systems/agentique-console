@@ -381,6 +381,23 @@ export class RunCompletionService {
       createdAt: nowIso(), resolvedAt: null, document, waivers: [] };
   }
 
+  /**
+   * The latest persisted summary's scalar facts plus granted waivers — the
+   * continuation checkpoint's completion reference. Null when the run never
+   * reached a proposal. A read, never a build: an abandoned run's absence of
+   * a summary is itself the fact.
+   */
+  latestSummaryFacts(userSessionId: string): { summaryId: string; status: "proposed" | "accepted" | "changes_requested"; verdict: RunSummaryDocument["verdict"]; headline: string; waivers: CompletionWaiver[] } | null {
+    const row = this.#deps.db.select().from(runSummaries)
+      .where(eq(runSummaries.userSessionId, userSessionId))
+      .orderBy(desc(runSummaries.createdAt)).get();
+    if (!row) return null;
+    const document = row.document as unknown as RunSummaryDocument;
+    return { summaryId: row.id, status: row.status, verdict: row.verdict,
+      headline: typeof document.headline === "string" ? document.headline : "",
+      waivers: row.waivers ?? [] };
+  }
+
   getSummary(userSessionId: string, summaryId: string): { id: string; status: "proposed" | "accepted" | "changes_requested"; verdict: RunSummaryDocument["verdict"]; note: string | null; createdAt: string; resolvedAt: string | null; document: RunSummaryDocument; waivers: CompletionWaiver[] } {
     const row = this.#deps.db.select().from(runSummaries).where(eq(runSummaries.id, summaryId)).get();
     if (!row || row.userSessionId !== userSessionId) throw new NotFoundError(`no run summary ${summaryId} in session ${userSessionId}`);
