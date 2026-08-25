@@ -162,6 +162,13 @@
       "when": 1787679126810,
       "tag": "0022_continuation_checkpoints",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "6",
+      "when": 1787681424305,
+      "tag": "0023_hot_read_models",
+      "breakpoints": true
     }
   ]
 }

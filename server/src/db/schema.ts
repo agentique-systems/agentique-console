@@ -117,6 +117,8 @@ export const userSessions = sqliteTable("user_sessions", {
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 }, (t) => [
+  /** Project-wide reads (decision ledger, continuation, session attach) join through this. */
+  index("user_sessions_project").on(t.projectId),
   check("user_sessions_mode", sql`${t.mode} IN ('execute','plan_execute')`),
   check("user_sessions_phase", sql`${t.phase} IN ('planning','executing')`),
   check("user_sessions_lifecycle", sql`${t.lifecycle} IN ('open','archived')`),
@@ -666,6 +668,17 @@ export const requirementNodes = sqliteTable(
     status: text("status", { enum: ["open", "satisfied", "violated", "infeasible", "retired"] })
       .notNull()
       .default("open"),
+    /**
+     * Projection of the node's newest journal row (`requirement_status_changes`),
+     * maintained in the SAME transaction as every journal insert — like
+     * `status` above, a current-state pointer the journal can always rebuild
+     * (RequirementStore.rebuildCurrentState). NULL = no change ever
+     * journaled (status has been "open" since insertion). Holds a reference,
+     * never copies: tier/actor/evidence/revision stay on the journal row.
+     */
+    latestChangeId: text("latest_change_id"),
+    /** The pointed-at row's ord — the shared invalidation clock, join-free. */
+    latestChangeOrd: integer("latest_change_ord"),
     /** "committed" = part of an approved revision; "refinement" = decomposed during the run. */
     origin: text("origin", { enum: ["committed", "refinement"] }).notNull().default("committed"),
     /** 0 for refinement nodes (they belong to no committed revision yet). */
@@ -722,7 +735,17 @@ export const requirementStatusChanges = sqliteTable(
     createdAt: text("created_at").notNull(),
   },
   (t) => [
-    index("requirement_status_changes_req").on(t.projectId, t.requirementId, t.createdAt),
+    /** Per-requirement history in clock order — `ord` IS the ordering identity, wall time is display. */
+    index("requirement_status_changes_req").on(t.projectId, t.requirementId, t.ord),
+    /** The clock allocator's MAX(ord) seek and whole-project folds in clock order. */
+    index("requirement_status_changes_project_ord").on(t.projectId, t.ord),
+    /**
+     * Reversal rows only — a withdrawal of a terminal claim by anyone but the
+     * console. Keeps `reversals()` proportional to actual reversals instead
+     * of the whole journal; the query's WHERE must match this predicate.
+     */
+    index("requirement_status_changes_reversals").on(t.projectId, t.ord)
+      .where(sql`from_status IN ('satisfied','violated','infeasible') AND to_status != from_status AND actor != 'console'`),
     check("requirement_status_changes_verified_by", sql`${t.verifiedBy} IN ('self','independent','operator','console')`),
   ],
 );

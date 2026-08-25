@@ -67,6 +67,19 @@ export class WorkstreamStore {
       .orderBy(workstreamLinks.createdAt).all();
   }
 
+  /**
+   * Live (unreleased) links only — the portfolio's current-state read.
+   * Released rows are history: they stay queryable via listByProject but
+   * never ride the hot reads (impact expansion, seat prompt lines, the
+   * completion hold), so a project can accumulate released claims without
+   * growing its current-state scans.
+   */
+  listLiveByProject(projectId: string): WorkstreamLinkRow[] {
+    return this.#db.select().from(workstreamLinks)
+      .where(and(eq(workstreamLinks.projectId, projectId), isNull(workstreamLinks.releasedAt)))
+      .orderBy(workstreamLinks.createdAt).all();
+  }
+
   /** Live (unreleased) links whose producer is the given session. */
   listLiveByProducer(producerAgentSessionId: string): WorkstreamLinkRow[] {
     return this.#db.select().from(workstreamLinks)
