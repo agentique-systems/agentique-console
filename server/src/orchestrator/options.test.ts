@@ -68,8 +68,10 @@ describe("orchestrator options", () => {
   // durable-policy sentence; the mechanics live on reconcile_change_impact.
   // Bumped 7300 → 7700 with the ownership rule and workstream links — two
   // durable-policy sentences; the mechanics live on the portfolio tools.
+  // Bumped 7700 → 7850 with the decision-issue chat-binding rule — one
+  // durable-policy sentence; the mechanics live on resolve_decision_issue.
   it("keeps the standing brief within its byte budget", () => {
-    expect(Buffer.byteLength(ORCHESTRATOR_BRIEF + ORCHESTRATOR_DELEGATION_BRIEF, "utf8")).toBeLessThanOrEqual(7_700);
+    expect(Buffer.byteLength(ORCHESTRATOR_BRIEF + ORCHESTRATOR_DELEGATION_BRIEF, "utf8")).toBeLessThanOrEqual(7_850);
   });
 
   it("loads settings, CLAUDE.md and skills like the CLI", () => {

@@ -15,7 +15,7 @@ import { toast } from "sonner";
 
 import { ApiError } from "@/api/client";
 import { useResolveInteraction } from "@/api/mutations";
-import type { InteractionStatus } from "@agentique-console/shared";
+import type { DecisionIssueWire, InteractionStatus } from "@agentique-console/shared";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardEyebrow, CardHeader } from "@/components/ui/card";
 import { Spinner } from "@/components/ui/spinner";
@@ -27,11 +27,14 @@ export function QuestionCard({
   sessionId,
   item,
   pendingStatus,
+  issue,
 }: {
   sessionId: string;
   item: QuestionItem;
   /** Authoritative live status from GET /:id pendingInteractions, if pending. */
   pendingStatus?: InteractionStatus | undefined;
+  /** The open decision issue this ask participates in, when it shares one. */
+  issue?: DecisionIssueWire | undefined;
 }) {
   const resolve = useResolveInteraction();
   const [selections, setSelections] = useState<Record<string, string[]>>({});
@@ -44,6 +47,10 @@ export function QuestionCard({
   const stale = !answered && pendingStatus === "stale";
   const busy = resolve.isPending;
   const allowFreeText = item.allowFreeText === true;
+  // Sibling asks of the SAME issue, so the operator sees that one answer here
+  // resolves every listed asker's question — not just this card.
+  const coAskers = (issue?.asks ?? []).filter((ask) => ask.interactionId !== item.interactionId);
+  const shared = !answered && coAskers.length > 0;
 
   const typedNow = (question: string) => (freeTexts[question] ?? "").trim();
   const anyTyped = item.questions.some((question) => typedNow(question.question) !== "");
@@ -112,6 +119,16 @@ export function QuestionCard({
         {stale && (
           <span className="text-2xs normal-case text-muted-foreground">
             predates a restart — answer anyway if still relevant
+          </span>
+        )}
+        {shared && (
+          <span
+            data-testid="shared-issue"
+            className="text-2xs normal-case text-muted-foreground"
+          >
+            shared decision — also asked by{" "}
+            {[...new Set(coAskers.map((ask) => ask.asker))].join(", ")}; one
+            answer resolves all {(issue?.asks.length ?? 0)} asks
           </span>
         )}
       </CardHeader>
@@ -217,6 +234,11 @@ export function QuestionCard({
       {dismissed && (
         <div className="mt-1 text-2xs text-muted-foreground">
           dismissed — you answered in chat instead
+        </div>
+      )}
+      {item.answer?.viaIssue === true && (
+        <div className="mt-1 text-2xs text-muted-foreground">
+          resolved with its shared decision issue — answered on another card
         </div>
       )}
       </CardContent>

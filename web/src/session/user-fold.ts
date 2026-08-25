@@ -48,10 +48,14 @@ export interface QuestionItem {
   readonly askedBy?: string;
   /** The card accepts a typed answer alongside (or instead of) the options. */
   readonly allowFreeText?: boolean;
+  /** The project decision issue this ask participates in, when it has one. */
+  readonly issueId?: string;
   readonly answer?: {
     readonly answers?: Record<string, string[]>;
     readonly freeText?: Record<string, string>;
     readonly dismissed?: boolean;
+    /** Resolved together with its shared issue by a sibling card's answer. */
+    readonly viaIssue?: boolean;
   };
 }
 export interface PlanItem {
@@ -211,6 +215,7 @@ export function foldUserItems(events: readonly ConsoleEvent[]): UserItem[] {
           questions: event.payload.questions,
           ...(event.payload.agent === undefined ? {} : { askedBy: event.payload.agent }),
           ...(event.payload.allowFreeText === true ? { allowFreeText: true } : {}),
+          ...(event.payload.issueId === undefined ? {} : { issueId: event.payload.issueId }),
         });
         break;
       }
@@ -230,6 +235,7 @@ export function foldUserItems(events: readonly ConsoleEvent[]): UserItem[] {
               ? {}
               : { freeText: event.payload.freeText }),
             ...(event.payload.dismissed === true ? { dismissed: true } : {}),
+            ...(event.payload.viaInteractionId === undefined ? {} : { viaIssue: true }),
           },
         };
         break;

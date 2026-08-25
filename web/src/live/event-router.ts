@@ -82,6 +82,13 @@ export function routeEvent(event: ConsoleEvent, deps: RouterDeps): void {
     case "assumption.resolved":
     case "requirement.link.changed":
     case "user_session.state.updated":
+    // Decision-issue transitions change the detail response's
+    // openDecisionIssues (the shared-issue line on question cards) — panel
+    // facts like the requirement trio, never a stream append of their own.
+    case "decision_issue.created":
+    case "decision_issue.ask_attached":
+    case "decision_issue.resolved":
+    case "decision_issue.merged":
       deps.invalidate(keys.userSessions.all);
       deps.invalidate(keys.sessionTreeAll);
       break;

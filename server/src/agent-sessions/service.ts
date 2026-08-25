@@ -16,6 +16,7 @@ import type { SqliteSessionStore } from "../sdk/session-store.ts";
 import type { CapacityService } from "../capacity/service.ts";
 import type { ConsoleSdk } from "../sdk/types.ts";
 import type { WorktreeManager } from "../runtime/worktree-manager.ts";
+import type { DecisionIssueService } from "../orchestrator/decision-issues.ts";
 import type { DecisionLedger } from "../orchestrator/decisions.ts";
 import type { AssumptionService } from "../orchestrator/assumptions.ts";
 import type { RequirementService } from "../orchestrator/requirements.ts";
@@ -62,6 +63,12 @@ export interface AgentSessionServiceDeps {
    * wire typecheck.
    */
   decisions: DecisionLedger;
+  /**
+   * The project decision-issue registry: ask attachment (`ask_operator
+   * issueKey`), the seats' `list_decision_issues` read, and the supersede
+   * fan-out. Optional so unit harnesses stay small; production always wires it.
+   */
+  decisionIssues?: DecisionIssueService;
   tasks: TaskService;
   handoffs: HandoffService;
   /** Lazy — the scheduler posts through this host, so it is composed after it. */
@@ -164,6 +171,7 @@ export class AgentSessionService {
     this.#operator = new OperatorSurface({
       repo: deps.repo, bus: deps.bus, config: deps.config, interactions: deps.interactions,
       requirements: deps.requirements,
+      ...(deps.decisionIssues === undefined ? {} : { decisionIssues: deps.decisionIssues }),
       routing: this.#routing,
       lanes: this.#lanes,
       transfer: (input) => this.post(input),
@@ -212,6 +220,7 @@ export class AgentSessionService {
       sdk: deps.sdk, sessionStore: deps.sessionStore, getWorkspaceRoot: deps.getWorkspaceRoot,
       artifacts: deps.artifacts, tasks: deps.tasks, handoffs: deps.handoffs, requirements: deps.requirements,
       assumptions: deps.assumptions, decisions: deps.decisions,
+      ...(deps.decisionIssues === undefined ? {} : { decisionIssues: deps.decisionIssues }),
       worktrees: deps.worktrees,
       scheduler: deps.scheduler, capacity: deps.capacity,
       lanes: this.#lanes, worktree: this.#worktreeBinding, routing: this.#routing, composer: this.#composer,
@@ -619,6 +628,10 @@ export class AgentSessionService {
 
   deliverOperatorAnswer(interaction: Interaction): void {
     this.#operator.deliverOperatorAnswer(interaction);
+  }
+
+  deliverIssueUpdate(interaction: Interaction, text: string, dedupeKey: string): void {
+    this.#operator.deliverIssueUpdate(interaction, text, dedupeKey);
   }
 
 

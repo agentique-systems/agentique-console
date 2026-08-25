@@ -27,6 +27,7 @@
  *   requirement_delegations,
  *   requirement_links                     RequirementStore
  *   change_impacts                        ChangeImpactStore
+ *   decision_issues                       DecisionIssueStore
  *   workstream_links                      WorkstreamStore
  *
  * The one sanctioned crossing: transactional appends anchored on a row the
@@ -45,6 +46,7 @@ import { AssignmentStore } from "./assignment-store.ts";
 import { AssumptionStore } from "./assumption-store.ts";
 import { ChangeImpactStore } from "./change-impact-store.ts";
 import { CronStore } from "./cron-store.ts";
+import { DecisionIssueStore } from "./decision-issue-store.ts";
 import { HandoffStore } from "./handoff-store.ts";
 import { InteractionStore } from "./interaction-store.ts";
 import { MessageStore } from "./message-store.ts";
@@ -62,6 +64,7 @@ export { AssignmentStore } from "./assignment-store.ts";
 export { AssumptionStore, type AssumptionRow } from "./assumption-store.ts";
 export { ChangeImpactStore, type ChangeImpactRow } from "./change-impact-store.ts";
 export { CronStore } from "./cron-store.ts";
+export { DecisionIssueStore, type DecisionIssueRow } from "./decision-issue-store.ts";
 export { HandoffStore } from "./handoff-store.ts";
 export { InteractionStore } from "./interaction-store.ts";
 export { MessageStore } from "./message-store.ts";
@@ -98,6 +101,7 @@ export interface Stores {
   requirements: RequirementStore;
   assumptions: AssumptionStore;
   changeImpacts: ChangeImpactStore;
+  decisionIssues: DecisionIssueStore;
   workstreams: WorkstreamStore;
   orchestrationState: OrchestrationStateStore;
   tasks: TaskStore;
@@ -121,6 +125,7 @@ export function createStores(db: Db, sqlite: SqliteTransactor): Stores {
     requirements: new RequirementStore(db, sqlite),
     assumptions: new AssumptionStore(db),
     changeImpacts: new ChangeImpactStore(db),
+    decisionIssues: new DecisionIssueStore(db),
     workstreams: new WorkstreamStore(db),
     orchestrationState: new OrchestrationStateStore(db),
     tasks: new TaskStore(db),

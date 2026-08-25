@@ -7,6 +7,7 @@
  * there durably. One source of truth, one mapper (`decisionOf`), one renderer
  * (`renderDecision`), read back into every agent's prompt.
  */
+import type { DecisionIssueStore } from "../db/stores/decision-issue-store.ts";
 import type { InteractionStore } from "../db/stores/interaction-store.ts";
 import type { InteractionQuestion } from "@agentique-console/shared";
 
@@ -111,6 +112,7 @@ export function decisionOf(row: DecisionSourceRow): OperatorDecision | null {
   const response = (row.response ?? {}) as {
     answers?: Record<string, string[]>; freeText?: Record<string, string>;
     note?: string; decision?: string; chatText?: string;
+    issueEcho?: boolean; answer?: string;
   };
   const chatAnswered = !isPlan && row.status === "dismissed" &&
     typeof response.chatText === "string" && response.chatText.trim() !== "";
@@ -119,11 +121,18 @@ export function decisionOf(row: DecisionSourceRow): OperatorDecision | null {
   const question = planStrings
     ? planStrings.question
     : ((row.payload as { questions?: InteractionQuestion[] }).questions ?? []).map((q) => q.question).join(" | ");
+  // An issue ECHO: this ask was resolved together with its shared decision
+  // issue; the stored `answer` is the operator's words from the card that
+  // carried them. Rendered here so the ASKER's delivery reads "its own
+  // question → the answer"; the ledger keeps one entry per issue by
+  // filtering echoes (see DecisionLedger.list).
   const answer = planStrings
     ? planStrings.answer
-    : chatAnswered
-      ? `(in chat) ${response.chatText!.trim()}`
-      : renderAnswer(response.answers ?? {}, response.freeText);
+    : response.issueEcho === true && typeof response.answer === "string"
+      ? response.answer
+      : chatAnswered
+        ? `(in chat) ${response.chatText!.trim()}`
+        : renderAnswer(response.answers ?? {}, response.freeText);
   if (question === "" && answer === "") return null;
   const payloadIds = (row.payload as { requirementIds?: unknown } | null | undefined)?.requirementIds;
   return {
@@ -146,22 +155,62 @@ export function decisionOf(row: DecisionSourceRow): OperatorDecision | null {
 export class DecisionLedger {
   readonly #interactions: InteractionStore;
   readonly #resolveProject: (userSessionId: string) => string;
+  /** Issue rows, for SUPERSEDING resolutions that have no interaction row of their own. */
+  readonly #issues: DecisionIssueStore | undefined;
 
-  constructor(interactions: InteractionStore, resolveProject: (userSessionId: string) => string) {
+  constructor(
+    interactions: InteractionStore,
+    resolveProject: (userSessionId: string) => string,
+    issues?: DecisionIssueStore,
+  ) {
     this.#interactions = interactions;
     this.#resolveProject = resolveProject;
+    this.#issues = issues;
   }
 
   /**
    * Project-wide: a continued session inherits every decision recorded across
    * the project's prior sessions — an operator decision outlives the session
    * it was made in.
+   *
+   * One entry per DECISION, not per ask: an issue's sibling echoes are
+   * filtered (the card that carried the answer is the entry), and an issue's
+   * SUPERSEDING resolutions — answers revised after every ask had resolved,
+   * so no interaction row exists for them — fold in from the issue history in
+   * their chronological place.
    */
   list(userSessionId: string): OperatorDecision[] {
-    return this.#interactions.listDecisionSourceRowsForProject(this.#resolveProject(userSessionId))
+    const fromRows = this.#interactions.listDecisionSourceRowsForProject(this.#resolveProject(userSessionId))
+      .filter((row) => (row.response as { issueEcho?: boolean } | null)?.issueEcho !== true)
       .map((row) => decisionOf({ ...row, agent: row.participant }))
-      .filter((decision): decision is OperatorDecision => decision !== null)
+      .filter((decision): decision is OperatorDecision => decision !== null);
+    return [...fromRows, ...this.#supersedeDecisions(userSessionId)]
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+
+  /** Ledger entries for revised issue answers — history stays, the revision announces itself. */
+  #supersedeDecisions(userSessionId: string): OperatorDecision[] {
+    if (this.#issues === undefined) return [];
+    const decisions: OperatorDecision[] = [];
+    for (const issue of this.#issues.listByProject(this.#resolveProject(userSessionId))) {
+      issue.resolutions.forEach((entry, index) => {
+        if (entry.supersedes !== true) return;
+        decisions.push({
+          id: `${issue.id}#${index}`,
+          userSessionId: issue.userSessionId,
+          agentSessionId: null,
+          interactionId: entry.interactionId ?? issue.id,
+          askedBy: issue.createdBy,
+          source: "interaction",
+          question: issue.subject,
+          answer: `(revised — supersedes the earlier answer) ${entry.answer}`,
+          note: entry.note ?? null,
+          requirementIds: issue.requirementIds,
+          createdAt: entry.at,
+        });
+      });
+    }
+    return decisions;
   }
 
   /** Decisions made strictly after an ISO watermark. Feeds the per-delivery delta. */

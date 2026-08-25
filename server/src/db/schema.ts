@@ -336,11 +336,14 @@ export const interactions = sqliteTable("interactions", {
     .notNull(),
   response: text("response", { mode: "json" }).$type<Record<string, unknown>>(),
   toolUseId: text("tool_use_id"),
+  /** The decision issue this ask participates in; null for pre-issue rows, native cards, and plan approvals. */
+  issueId: text("issue_id"),
   createdAt: text("created_at").notNull(),
   resolvedAt: text("resolved_at"),
 }, (t) => [
   index("interactions_session_status").on(t.userSessionId, t.status),
   index("interactions_agent_open").on(t.agentSessionId, t.status, t.urgency),
+  index("interactions_issue").on(t.issueId),
   check("interactions_kind", sql`${t.kind} IN ('question','plan_approval')`),
   check("interactions_status", sql`${t.status} IN ('pending','answered','rejected','dismissed','stale')`),
   check("interactions_urgency", sql`${t.urgency} IN ('blocking','deferred')`),
@@ -351,6 +354,57 @@ export const interactions = sqliteTable("interactions", {
 // row, and `orchestrator/decisions.ts` is a read-model over them. (A legacy
 // `operator_decisions` table may exist in older databases; it is simply
 // unused.)
+
+/**
+ * Decision issues: the project-level unresolved human choice one or more asks
+ * (interaction rows, linked by `interactions.issue_id`) refer to. The ask is a
+ * session-scoped attempt to get the answer; the issue is the durable shared
+ * question — it survives asker termination, restarts, and project
+ * continuation. Identity is EXPLICIT: askers attach by `issue_key` (or main
+ * merges duplicates); nothing here infers semantic equivalence from wording.
+ * `resolutions` is append-only history — the last entry is the current answer,
+ * earlier entries are retained reversals, never rewritten. Blocking weight and
+ * provisional state are DERIVED at read time from the participating asks, so a
+ * terminated asker never leaves a zombie "blocking" issue.
+ */
+export const decisionIssues = sqliteTable(
+  "decision_issues",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id").notNull(),
+    /** The session in which the issue was raised — attribution, never the key. */
+    userSessionId: text("user_session_id").notNull(),
+    /** Normalized explicit attach key; null = unkeyed (single-ask issue unless merged into). */
+    issueKey: text("issue_key"),
+    /** The shared human question, in the first asker's words. */
+    subject: text("subject").notNull(),
+    status: text("status", { enum: ["open", "resolved", "superseded"] })
+      .notNull()
+      .default("open"),
+    /** Union of the participating asks' requirement ids. */
+    requirementIds: text("requirement_ids", { mode: "json" })
+      .$type<string[]>()
+      .notNull()
+      .default([]),
+    /** Append-only resolution history; last entry = current answer. */
+    resolutions: text("resolutions", { mode: "json" })
+      .$type<import("@agentique-console/shared").DecisionIssueResolution[]>()
+      .notNull()
+      .default([]),
+    /** Set when merged into another issue, which carries the asks from then on. */
+    supersededById: text("superseded_by_id"),
+    createdBy: text("created_by").notNull(),
+    createdAt: text("created_at").notNull(),
+    resolvedAt: text("resolved_at"),
+  },
+  (t) => [
+    uniqueIndex("decision_issues_open_key")
+      .on(t.projectId, t.issueKey)
+      .where(sql`status = 'open' AND issue_key IS NOT NULL`),
+    index("decision_issues_project").on(t.projectId, t.status),
+    check("decision_issues_status", sql`${t.status} IN ('open','resolved','superseded')`),
+  ],
+);
 
 /** Mirror of native CronCreate jobs; the CLI's schedule is authoritative. */
 export const crons = sqliteTable(

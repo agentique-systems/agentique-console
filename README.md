@@ -240,6 +240,15 @@ decisions travel as coalesced milestones. Product scope, fidelity, licensing,
 budget, security, and irreversible choices belong to the operator; routine
 technical sequencing and local integration do not.
 
+Each ask participates in a project-level **decision issue** — the durable
+human choice it refers to. Asks from different agents or sessions sharing an
+explicit `issueKey` become one issue: the operator sees one question, and one
+answer resolves every attached ask. A chat reply binds automatically only
+while a single issue is open; with several open, the orchestrator binds the
+operator's words to the named issue explicitly, so one message can never
+resolve unrelated questions. Issues outlive their askers and their session,
+carry every asker's recommendation, and keep superseded answers as history.
+
 ## Running
 
 ```bash

@@ -19,6 +19,7 @@ import type { ArtifactStore } from "./events/artifact-store.ts";
 import { EventBus } from "./events/bus.ts";
 import { late } from "./late.ts";
 import { RunCompletionService } from "./completion/service.ts";
+import { DecisionIssueService } from "./orchestrator/decision-issues.ts";
 import { DecisionLedger } from "./orchestrator/decisions.ts";
 import { InteractionService } from "./orchestrator/interactions.ts";
 import { OrchestratorRunner } from "./orchestrator/runner.ts";
@@ -72,6 +73,7 @@ export interface App {
   profiles: AgentProfileRegistry;
   worktrees: WorktreeManager | null;
   decisions: DecisionLedger;
+  decisionIssues: DecisionIssueService;
   interactions: InteractionService;
   tasks: TaskService;
   scheduler: AssignmentScheduler;
@@ -112,8 +114,15 @@ export function createApp(options: CreateAppOptions): App {
     if (!row) throw new NotFoundError(`no user session ${userSessionId}`);
     return row.projectId;
   };
-  const decisions = new DecisionLedger(stores.interactions, resolveProject);
-  const interactions = new InteractionService(stores.interactions, bus);
+  // The decision-issue registry: the project-level unresolved human choices
+  // that asks (interaction rows) attach to. The ledger reads the issue store
+  // too, for SUPERSEDING resolutions that have no interaction row.
+  const decisionIssues = new DecisionIssueService(stores.decisionIssues, stores.interactions, bus, resolveProject);
+  decisionIssues.setDeps({
+    isAgentSessionOpen: (agentSessionId) => repo.getAgentSession(agentSessionId)?.lifecycle === "open",
+  });
+  const decisions = new DecisionLedger(stores.interactions, resolveProject, stores.decisionIssues);
+  const interactions = new InteractionService(stores.interactions, bus, decisionIssues);
   const tasks = new TaskService(stores.tasks, stores.assignments, bus, (workspaceId) => void workspaces.get(workspaceId));
   const handoffs = new HandoffService({ repo, bus, getWorkspaceRoot });
   const requirements = new RequirementService(stores.requirements, stores.projects, stores.assumptions, bus, resolveProject);
@@ -169,7 +178,7 @@ export function createApp(options: CreateAppOptions): App {
   const host = new AgentSessionService({
     repo, bus, artifacts, config, profiles, sdk, sessionStore, getWorkspaceRoot, requirements, assumptions,
     worktrees, capacity,
-    interactions, decisions, tasks, handoffs,
+    interactions, decisions, decisionIssues, tasks, handoffs,
     workstreams: {
       promptLines: (agentSessionId) => workstreams.promptLines(agentSessionId),
       finalCaveats: (agentSessionId) => workstreams.finalCaveats(agentSessionId),
@@ -200,7 +209,7 @@ export function createApp(options: CreateAppOptions): App {
     host: () => host,
     tasks, capacity,
     buildMcpServer: (userSessionId, sdkInstance) =>
-      buildConsoleMcpServer({ sdk: sdkInstance, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, requirements, assumptions, changeImpacts, workstreams, state: orchestrationState, catalog, registry: profiles }),
+      buildConsoleMcpServer({ sdk: sdkInstance, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, decisionIssues, requirements, assumptions, changeImpacts, workstreams, state: orchestrationState, catalog, registry: profiles }),
   });
   lateRunner.set(runner);
   workstreams.setWakeNote((userSessionId, text) => lateRunner.get().postConsoleNote(userSessionId, text));
@@ -218,7 +227,7 @@ export function createApp(options: CreateAppOptions): App {
   });
   const system = new SystemPauseService({ capacity, runner, host });
   const userSessions = new UserSessionService({
-    repo, projects: stores.projects, bus, runner, interactions, workspaces,
+    repo, projects: stores.projects, bus, runner, interactions, decisionIssues, workspaces,
     archiveAgentSessions: (userSessionId) => host.archiveForUserSession(userSessionId),
     completion,
     wireAgentSessions: (userSessionId) => host.wireSessionsForUserSession(userSessionId),
@@ -251,12 +260,13 @@ export function createApp(options: CreateAppOptions): App {
     deliverToAgent: (interaction) => host.deliverOperatorAnswer(interaction),
     reviveMain: (userSessionId, prompt) => runner.enqueueRevival(userSessionId, prompt),
     beginExecuting: (userSessionId) => userSessions.beginExecuting(userSessionId),
+    deliverIssueUpdate: (interaction, text, dedupeKey) => host.deliverIssueUpdate(interaction, text, dedupeKey),
   });
 
   return {
     config, db, sqlite, bus, artifacts, repo, sdk, getWorkspaceRoot, requirements, assumptions, changeImpacts, workstreams, orchestrationState,
     workspaces, timeline, profiles, worktrees, capacity,
-    decisions, interactions, tasks, scheduler, handoffs, sessionStore,
+    decisions, decisionIssues, interactions, tasks, scheduler, handoffs, sessionStore,
     host, runner, completion, userSessions, system,
   };
 }

@@ -5,6 +5,7 @@ import type {
   AgentSession,
   AgentSessionStatus,
   AgentRunSummary,
+  DecisionIssueWire,
   Interaction,
   ScheduledAssignment,
   SessionMessage,
@@ -116,6 +117,19 @@ export interface CreateUserSessionResponse {
 export interface GetUserSessionResponse {
   session: UserSession;
   pendingInteractions: Interaction[];
+  /**
+   * Open project-level decision issues (a continued project inherits its
+   * predecessors' unresolved questions). The full list, resolved history
+   * included, lives at GET /:id/decision-issues.
+   */
+  openDecisionIssues: DecisionIssueWire[];
+}
+
+// GET /api/user-sessions/:id/decision-issues — the project decision-issue
+// registry, deterministically ordered by structural consequence: open before
+// resolved; open issues by (active blocking asks, requirement breadth, age).
+export interface ListDecisionIssuesResponse {
+  issues: DecisionIssueWire[];
 }
 
 // PATCH /api/user-sessions/:id

@@ -41,6 +41,12 @@ export interface AskOperatorArgs {
   allowFreeText: boolean;
   /** Requirement ids (inside the delegation) this decision resolves or gates. */
   requirementIds?: string[];
+  /**
+   * Stable key naming the underlying human decision. Asks from any seat or
+   * session sharing this key land on ONE project-level issue: the operator
+   * sees one question, and one answer resolves every attached ask.
+   */
+  issueKey?: string;
 }
 
 /** The flat, provider-validated parameter surface of `send_handoff`. */
@@ -63,6 +69,7 @@ interface SendHandoffArgs {
 
 import { fail, ok } from "../sdk/tool-result.ts";
 import type { AssumptionService } from "../orchestrator/assumptions.ts";
+import { renderDecisionIssue, type DecisionIssueService } from "../orchestrator/decision-issues.ts";
 import type { DecisionLedger } from "../orchestrator/decisions.ts";
 import type { RequirementService } from "../orchestrator/requirements.ts";
 
@@ -80,6 +87,8 @@ export interface AgentToolsDeps {
   assumptions?: AssumptionService;
   /** The operator decision ledger — `list_decisions` reads it (absent in some unit harnesses). */
   decisions?: DecisionLedger;
+  /** The project decision-issue registry — `list_decision_issues` and ask attachment (absent in some unit harnesses). */
+  decisionIssues?: DecisionIssueService;
   worktrees: WorktreeManager | null;
 }
 
@@ -542,6 +551,8 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
         allowFreeText: z.boolean().default(true).describe("Let the operator answer outside your options."),
         requirementIds: z.array(z.string().min(1)).max(12).optional()
           .describe("Requirement ids inside your delegated sub-scope that this decision resolves or gates. The answer is recorded pinned to them."),
+        issueKey: z.string().min(1).max(64).optional()
+          .describe("Stable key naming the underlying human decision (e.g. 'auth-identity-provider'). Asks sharing a key — from any seat or session — become ONE operator question; one answer resolves them all. Reuse an existing key (list_decision_issues) only for genuinely the same human choice."),
       },
       async (args: AskOperatorArgs) => {
         try {
@@ -563,6 +574,20 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
     async (args: { cursor?: string; maxBytes: number }) => {
       if (!deps.decisions) return fail("decision ledger unavailable in this harness");
       return ok({ decisions: pageTail(deps.decisions.lines(session.userSessionId).join("\n"), args.cursor, args.maxBytes) });
+    }));
+  // The unresolved side of the same coin: what the operator has been asked
+  // and has NOT yet decided, project-wide. Check before ask_operator — an
+  // existing issue's key attaches your ask to it instead of minting a
+  // duplicate card for the same human choice.
+  tools.push(sdk.tool("list_decision_issues",
+    "List the project's decision issues — human choices put to the operator across every session, with keys, askers, and recommendations. Before ask_operator: if your question is the same human choice as an open issue, pass its issueKey so one answer resolves both. 'provisional' = proceeded on a recommendation, NOT yet a human decision.",
+    { status: z.enum(["open", "all"]).default("open"), cursor: z.string().optional(), maxBytes: z.number().int().min(1).max(PAGE_MAX_BYTES).default(PAGE_DEFAULT_BYTES) },
+    async (args: { status: "open" | "all"; cursor?: string; maxBytes: number }) => {
+      if (!deps.decisionIssues) return fail("decision issues unavailable in this harness");
+      const issues = args.status === "open"
+        ? deps.decisionIssues.listOpenForProject(session.userSessionId)
+        : deps.decisionIssues.listForProject(session.userSessionId);
+      return ok({ issues: pageTail(issues.map((issue) => renderDecisionIssue(issue)).join("\n"), args.cursor, args.maxBytes) });
     }));
   // Who is doing what, on demand. The roster carries this on every delivery
   // already; this is for the agent that is ABOUT to start something and can

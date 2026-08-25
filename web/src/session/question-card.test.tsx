@@ -99,6 +99,26 @@ describe("QuestionCard", () => {
     expect(no.className).not.toContain("border-status-completed");
   });
 
+  it("names its co-askers when the ask shares a decision issue — one answer resolves all", () => {
+    const issue = {
+      id: "di_1", issueKey: "auth", subject: "Should auth use SSO?", status: "open" as const,
+      provisional: false, requirementIds: [],
+      asks: [
+        { interactionId: "int_1", agentSessionId: "as_1", asker: "auth-dev", question: "Deploy?", status: "pending" as const, urgency: "blocking" as const, autoProceeded: false, recommendation: null, createdAt: "2026-01-01T00:00:00Z" },
+        { interactionId: "int_2", agentSessionId: "as_2", asker: "api-dev", question: "Enterprise identity?", status: "pending" as const, urgency: "blocking" as const, autoProceeded: false, recommendation: null, createdAt: "2026-01-01T00:01:00Z" },
+      ],
+      blockingAsksActive: 2, pendingAsksActive: 2, resolutions: [], resolution: null,
+      supersededById: null, createdBy: "auth-dev", createdAt: "2026-01-01T00:00:00Z", resolvedAt: null,
+    };
+    render(createElement(QuestionCard, { sessionId: "us_1", item: ITEM, issue }), {
+      wrapper: wrapper(),
+    });
+
+    const banner = screen.getByTestId("shared-issue");
+    expect(banner.textContent).toContain("also asked by api-dev");
+    expect(banner.textContent).toContain("one answer resolves all 2 asks");
+  });
+
   it("a 409 (answered elsewhere) settles the card locally", async () => {
     stubRoutes([
       {

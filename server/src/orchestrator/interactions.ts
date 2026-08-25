@@ -15,10 +15,21 @@ import type {
   ResolveInteractionBody,
 } from "@agentique-console/shared";
 import type { InteractionRow, InteractionStore } from "../db/stores/interaction-store.ts";
+import type { DecisionIssueService } from "./decision-issues.ts";
 import { planDecisionQuestion, planDecisionStrings, renderAnswer } from "./decisions.ts";
 import type { EventBus } from "../events/bus.ts";
 import { newId, nowIso } from "../ids.ts";
 import { ConflictError, NotFoundError, InvalidInputError } from "../errors.ts";
+
+/** One pending decision the chat message was NOT applied to — main binds it explicitly. */
+export interface HeldPendingQuestion {
+  /** Null only for a legacy ask that predates the issue layer. */
+  issueId: string | null;
+  /** The oldest participating ask — the bind target for issueless legacy rows. */
+  interactionId: string;
+  subject: string;
+  askers: string[];
+}
 
 export type InteractionResolution =
   | {
@@ -42,6 +53,13 @@ export interface StaleAnswerRouting {
   reviveMain(userSessionId: string, prompt: string): void;
   /** An approved-but-stale plan still moves the session into execution. */
   beginExecuting(userSessionId: string): void;
+  /**
+   * A resolved issue's answer was SUPERSEDED after this asker already moved
+   * on: the revision reaches it as a targeted mailbox note. Optional — narrow
+   * unit harnesses may not wire it; the ledger's supersede entry still
+   * reaches every seat through the bounded decision delta.
+   */
+  deliverIssueUpdate?(interaction: Interaction, text: string, dedupeKey: string): void;
 }
 
 function toWire(row: InteractionRow): Interaction {
@@ -59,9 +77,23 @@ function toWire(row: InteractionRow): Interaction {
     detached: row.detached,
     payload: row.payload as Interaction["payload"],
     response: row.response ?? null,
+    issueId: row.issueId,
     createdAt: row.createdAt,
     resolvedAt: row.resolvedAt,
   };
+}
+
+/** An ask the operator still owes an answer: pending/stale, or a provisional auto-proceed a human answer overrides. */
+function awaitsHumanAnswer(row: InteractionRow): boolean {
+  if (row.status === "pending" || row.status === "stale") return true;
+  return row.status === "answered"
+    && (row.response as { autoProceeded?: boolean } | null)?.autoProceeded === true;
+}
+
+/** The first question's text — the freeText key an issue answer is delivered under. */
+function firstQuestionOf(row: InteractionRow): string {
+  const questions = (row.payload as { questions?: InteractionQuestion[] }).questions ?? [];
+  return questions[0]?.question ?? "";
 }
 
 /** Collapses whitespace and case so a re-asked question is recognisably the same one. */
@@ -115,11 +147,19 @@ export interface CreateOperatorQuestionInput {
    * the decision ledger pins the eventual answer to them.
    */
   requirementIds?: string[];
+  /**
+   * The decision issue this ask participates in (DecisionIssueService
+   * `openForAsk` chose or minted it). `created` distinguishes the journal
+   * entry: first ask of a fresh issue vs an attach to an existing one.
+   */
+  issue?: { id: string; created: boolean };
 }
 
 export class InteractionService {
   readonly #store: InteractionStore;
   readonly #bus: EventBus;
+  /** The project decision-issue registry; absent only in narrow unit harnesses. */
+  readonly #issues: DecisionIssueService | undefined;
   readonly #pending = new Map<string, (res: InteractionResolution) => void>();
   /** Fired when a session's last unresolved BLOCKING row resolves — see the final gate. */
   #onBlockingCleared: ((userSessionId: string, agentSessionId: string) => void) | undefined;
@@ -127,9 +167,10 @@ export class InteractionService {
   #onResolved: ((userSessionId: string) => void) | undefined;
   #staleRouting: StaleAnswerRouting | undefined;
 
-  constructor(store: InteractionStore, bus: EventBus) {
+  constructor(store: InteractionStore, bus: EventBus, issues?: DecisionIssueService) {
     this.#store = store;
     this.#bus = bus;
+    this.#issues = issues;
   }
 
   /**
@@ -217,7 +258,7 @@ export class InteractionService {
     const urgency = input.urgency ?? "blocking";
     const source = input.source ?? "agent";
     const requirementIds = input.requirementIds ?? [];
-    return this.#create(
+    const pending = this.#create(
       input.userSessionId,
       "question",
       { questions: input.questions, ...(requirementIds.length === 0 ? {} : { requirementIds }) },
@@ -231,6 +272,7 @@ export class InteractionService {
         recommendation: input.recommendation ?? null,
         dedupeKey: input.dedupeKey ?? null,
         allowFreeText: input.allowFreeText ?? false,
+        issueId: input.issue?.id ?? null,
       },
       (id) => {
         this.#bus.append({
@@ -247,10 +289,16 @@ export class InteractionService {
             source,
             ...(input.recommendation === undefined ? {} : { recommendation: input.recommendation }),
             allowFreeText: input.allowFreeText ?? false,
+            ...(input.issue === undefined ? {} : { issueId: input.issue.id }),
           },
         });
       },
     );
+    if (input.issue !== undefined && this.#issues) {
+      const row = this.#store.get(pending.id);
+      if (row) this.#issues.recordAsk(input.issue.id, row, input.issue.created);
+    }
+    return pending;
   }
 
   /**
@@ -429,6 +477,14 @@ export class InteractionService {
       });
       this.#pending.delete(interactionId);
       this.#notifyIfBlockingCleared(row);
+      // One answer resolves the ISSUE — and with it every sibling ask, so no
+      // other asker's card stays open for a question the human just settled.
+      this.#completeIssueResolution(row, {
+        answer: renderAnswer(body.answers, body.freeText),
+        note: body.note,
+        via: "card",
+        interactionId: row.id,
+      });
     } else {
       if (row.kind !== "plan_approval") {
         throw new InvalidInputError("decisions apply to plan_approval interactions");
@@ -468,49 +524,237 @@ export class InteractionService {
   }
 
   /**
+   * The entry ask was answered by its card: record the answer on the OPEN
+   * issue and resolve every sibling ask (pending, stale, or provisionally
+   * auto-proceeded) with the same human answer. Idempotent: once the issue is
+   * resolved every participating ask is resolved with it, so a retried card
+   * submit meets the ordinary 409 and never re-enters here.
+   */
+  #completeIssueResolution(
+    entry: InteractionRow,
+    res: { answer: string; note?: string | undefined; via: "card" | "chat" | "main"; interactionId?: string },
+  ): void {
+    if (!this.#issues || entry.issueId === null) return;
+    let issue;
+    try { issue = this.#issues.rowFor(entry.userSessionId, entry.issueId); } catch { return; }
+    if (issue.status !== "open") return;
+    const siblings = this.#store.listByIssue(issue.id)
+      .filter((row) => row.id !== entry.id && awaitsHumanAnswer(row));
+    this.#issues.resolve({
+      userSessionId: entry.userSessionId,
+      issueId: issue.id,
+      answer: res.answer,
+      note: res.note,
+      via: res.via,
+      interactionId: res.interactionId,
+      resolvedAskIds: [entry.id, ...siblings.map((row) => row.id)],
+    });
+    for (const sibling of siblings) this.#resolveIssueSibling(sibling, res);
+  }
+
+  /**
+   * One sibling ask of a resolved issue. The row records an ECHO — the answer
+   * text plus the pointer to the card that carried it — so the asker's
+   * delivery renders "its question → the operator's words" while the decision
+   * ledger keeps ONE entry per issue (echoes are filtered there). Routing is
+   * the same trio as everywhere else: parked promise, else mailbox for a
+   * seat, else main-lane revival for a stale main row.
+   */
+  #resolveIssueSibling(
+    row: InteractionRow,
+    res: { answer: string; note?: string | undefined; via: "card" | "chat" | "main"; interactionId?: string },
+  ): void {
+    const wasStaleMain = row.participant === null && row.status === "stale";
+    this.#markResolved(row.id, "answered", {
+      issueEcho: true,
+      issueId: row.issueId,
+      ...(res.interactionId === undefined ? {} : { viaInteractionId: res.interactionId }),
+      answer: res.answer,
+      ...(res.note === undefined ? {} : { note: res.note }),
+    });
+    const freeText = { [firstQuestionOf(row)]: res.answer };
+    this.#bus.append({
+      type: "user_session.question.answered",
+      userSessionId: row.userSessionId,
+      ...(row.agentSessionId ? { agentSessionId: row.agentSessionId } : {}),
+      payload: {
+        userSessionId: row.userSessionId,
+        interactionId: row.id,
+        freeText,
+        ...(res.note === undefined ? {} : { note: res.note }),
+        issueId: row.issueId ?? "",
+        ...(res.interactionId === undefined ? {} : { viaInteractionId: res.interactionId }),
+      },
+    });
+    const parked = this.#pending.get(row.id);
+    if (parked) {
+      parked({ kind: "answers", answers: {}, freeText, ...(res.note === undefined ? {} : { note: res.note }) });
+      this.#pending.delete(row.id);
+    } else if (this.#staleRouting && row.participant !== null) {
+      try { this.#staleRouting.deliverToAgent(this.get(row.id)); } catch { /* journaled above regardless */ }
+    } else if (this.#staleRouting && wasStaleMain) {
+      this.#staleRouting.reviveMain(
+        row.userSessionId,
+        revivalPrompt(toWire(row), { answers: {}, freeText }),
+      );
+    }
+    this.#notifyIfBlockingCleared(row);
+  }
+
+  /**
+   * Bind an answer to ONE issue explicitly — the chat path (exactly one open
+   * issue pending) and main's `resolve_decision_issue` (the operator answered
+   * in chat while several issues were open; main names which one the words
+   * settle). On an OPEN issue: the oldest awaiting ask becomes the decision
+   * row (chat-answer shape, so ledger rendering matches the clicked path) and
+   * every other ask resolves as an echo. On a RESOLVED issue: the answer
+   * SUPERSEDES — history retained, the ledger announces the revision, and
+   * every participating seat gets a targeted mailbox note. Re-binding the
+   * unchanged answer is a no-op.
+   */
+  bindIssueResolution(input: {
+    userSessionId: string;
+    issueId: string;
+    answer: string;
+    note?: string | undefined;
+    via: "chat" | "main";
+  }): { issueId: string; subject: string; outcome: "resolved" | "superseded" | "unchanged"; resolvedAskIds: string[] } {
+    if (!this.#issues) throw new Error("decision issues are not wired — bindIssueResolution needs the DecisionIssueService");
+    let issue;
+    try {
+      issue = this.#issues.rowFor(input.userSessionId, input.issueId);
+    } catch (error) {
+      // A held LEGACY ask (predates the issue layer) is addressed by its
+      // interaction id — same tool, same semantics, no second bind path.
+      const legacy = this.#store.get(input.issueId);
+      if (legacy && legacy.userSessionId === input.userSessionId && legacy.kind === "question"
+        && legacy.issueId === null && awaitsHumanAnswer(legacy)) {
+        this.#resolveAskWithChatText(legacy, input.answer, input.via === "chat" ? "chat" : "main");
+        return { issueId: legacy.id, subject: firstQuestionOf(legacy), outcome: "resolved", resolvedAskIds: [legacy.id] };
+      }
+      throw error;
+    }
+    if (issue.status === "superseded") {
+      throw new ConflictError(
+        `decision issue ${issue.id} was merged${issue.supersededById === null ? "" : ` into ${issue.supersededById}`} — bind the surviving issue`,
+      );
+    }
+    if (issue.status === "resolved") {
+      const { issue: updated, changed } = this.#issues.appendSupersede({
+        userSessionId: input.userSessionId,
+        issueId: issue.id,
+        answer: input.answer,
+        note: input.note,
+        via: input.via === "chat" ? "main" : input.via,
+      });
+      if (!changed) return { issueId: issue.id, subject: issue.subject, outcome: "unchanged", resolvedAskIds: [] };
+      const revision = updated.resolutions.length;
+      const text =
+        `The operator REVISED their decision on "${issue.subject}". The answer is now: ${JSON.stringify(input.answer)}. ` +
+        "The earlier answer no longer stands — reconcile in-flight work with the new decision and report anything it invalidates.";
+      for (const ask of this.#store.listByIssue(issue.id)) {
+        if (ask.participant === null) continue;
+        try {
+          this.#staleRouting?.deliverIssueUpdate?.(this.get(ask.id), text, `issue-supersede:${issue.id}:${revision}`);
+        } catch { /* the ledger's supersede entry still reaches every seat */ }
+      }
+      return { issueId: issue.id, subject: issue.subject, outcome: "superseded", resolvedAskIds: [] };
+    }
+    const awaiting = this.#store.listByIssue(issue.id).filter(awaitsHumanAnswer);
+    if (awaiting.length === 0) {
+      // An open issue with no awaiting ask (every asker withdrew): record the
+      // answer directly so the choice still lands in the registry.
+      this.#issues.resolve({
+        userSessionId: input.userSessionId, issueId: issue.id, answer: input.answer,
+        note: input.note, via: input.via, resolvedAskIds: [],
+      });
+      return { issueId: issue.id, subject: issue.subject, outcome: "resolved", resolvedAskIds: [] };
+    }
+    const [primary, ...rest] = awaiting;
+    this.#resolveAskWithChatText(primary!, input.answer, input.via);
+    this.#issues.resolve({
+      userSessionId: input.userSessionId,
+      issueId: issue.id,
+      answer: input.answer,
+      note: input.note,
+      via: input.via,
+      interactionId: primary!.id,
+      resolvedAskIds: awaiting.map((row) => row.id),
+    });
+    for (const sibling of rest) {
+      this.#resolveIssueSibling(sibling, { answer: input.answer, note: input.note, via: input.via, interactionId: primary!.id });
+    }
+    return { issueId: issue.id, subject: issue.subject, outcome: "resolved", resolvedAskIds: awaiting.map((row) => row.id) };
+  }
+
+  /**
+   * One ask answered by the operator's CHAT words — the byte-shape the
+   * pre-issue chat path established: a `dismissed` row whose stored
+   * `chatText` IS the answer (`decisionOf` renders it "(in chat) …"), a
+   * hedged release for a parked asker, and a mailbox delivery for a detached
+   * one. `boundBy: "main"` marks provenance when main, not proximity, chose
+   * the issue.
+   */
+  #resolveAskWithChatText(row: InteractionRow, chatText: string, via: "chat" | "main"): void {
+    this.#markResolved(row.id, "dismissed", {
+      reason: "chat",
+      chatText,
+      ...(via === "main" ? { boundBy: "main" } : {}),
+      ...(row.issueId === null ? {} : { issueId: row.issueId }),
+    });
+    this.#bus.append({
+      type: "user_session.question.answered",
+      userSessionId: row.userSessionId,
+      ...(row.agentSessionId ? { agentSessionId: row.agentSessionId } : {}),
+      payload: {
+        userSessionId: row.userSessionId, interactionId: row.id, dismissed: true, note: chatText,
+        ...(row.issueId === null ? {} : { issueId: row.issueId }),
+      },
+    });
+    this.#recordDecision(row, { answer: `(answered in chat) ${chatText}`, source: "interaction" });
+    const hedge = via === "chat"
+      ? `The operator typed in chat while your question card was open. Their words: ${JSON.stringify(chatText)}. ` +
+        "Treat this as their answer if it addresses your question; if it clearly does not, proceed on your stated recommendation or re-ask once."
+      : `The operator answered in chat and the orchestrator bound their words to your question: ${JSON.stringify(chatText)}. ` +
+        "Act on this as their answer; if it clearly does not address your question, re-ask once.";
+    const parked = this.#pending.get(row.id);
+    if (parked) {
+      parked({ kind: "dismissed", reason: hedge });
+      this.#pending.delete(row.id);
+    } else if (this.#staleRouting && row.participant !== null) {
+      try { this.#staleRouting.deliverToAgent(this.get(row.id)); } catch { /* journaled above regardless */ }
+    }
+    this.#notifyIfBlockingCleared(row);
+  }
+
+  /**
    * Operator chatted while cards were pending.
    *
-   * MAIN-LANE cards are dismissed: the model is about to read the operator's
-   * actual message, which is a better answer than the card would have been.
+   * MAIN-LANE cards (native AskUserQuestion, plan approvals — no decision
+   * issue) are dismissed/rejected with the words attached: the model about to
+   * read the operator's actual message IS the asker, so nothing is misrouted.
    *
-   * AGENT cards resolve too, with the words ATTACHED. This once held agent
-   * cards ("chatting does not answer them; use their cards") on the theory
-   * that an agent cannot read the chat lane — but the resolution now carries
-   * the operator's words to the agent itself, so the theory no longer holds,
-   * and a live run showed what holding buys: the operator typed answers in
-   * chat three times, was refused three times, and four questions aged 5–7.5
-   * hours. The delivery is hedged: one chat message may address only some of
-   * several open cards.
+   * DECISION asks (anything carrying an issue, main-lane included, plus
+   * legacy issueless agent cards) group BY ISSUE, and the words bind only
+   * when exactly ONE issue is pending: a live run showed holding everything
+   * loses answers (the operator typed answers in chat three times, was
+   * refused three times, and four questions aged 5–7.5 hours), while the old
+   * resolve-everything rule made the same words the recorded answer to every
+   * unrelated question. With several distinct issues open, ambiguity HOLDS
+   * them open — the returned descriptors let the runner tell main to bind the
+   * words to the right issue explicitly (`resolve_decision_issue`) instead of
+   * the console guessing.
    */
-  dismissPendingForChat(userSessionId: string, chatText: string): void {
+  dismissPendingForChat(userSessionId: string, chatText: string): { held: HeldPendingQuestion[] } {
     const rows = this.#listByStatus(userSessionId, "pending");
     let deliveredToAgents = 0;
+    const decisionGroups = new Map<string, InteractionRow[]>();
     for (const row of rows) {
-      if (row.participant !== null) {
-        this.#markResolved(row.id, "dismissed", { reason: "chat", chatText });
-        this.#bus.append({
-          type: "user_session.question.answered",
-          userSessionId,
-          ...(row.agentSessionId ? { agentSessionId: row.agentSessionId } : {}),
-          payload: { userSessionId, interactionId: row.id, dismissed: true, note: chatText },
-        });
-        this.#recordDecision(row, {
-          answer: `(answered in chat) ${chatText}`,
-          source: "interaction",
-        });
-        const hedge =
-          `The operator typed in chat while your question card was open. Their words: ${JSON.stringify(chatText)}. ` +
-          "Treat this as their answer if it addresses your question; if it clearly does not, proceed on your stated recommendation or re-ask once.";
-        const parked = this.#pending.get(row.id);
-        if (parked) {
-          parked({ kind: "dismissed", reason: hedge });
-          this.#pending.delete(row.id);
-        } else if (this.#staleRouting) {
-          // Detached asker: the answer arrives as a mailbox delivery.
-          try { this.#staleRouting.deliverToAgent(this.get(row.id)); } catch { /* journaled above regardless */ }
-        }
-        this.#notifyIfBlockingCleared(row);
-        deliveredToAgents += 1;
+      if (row.kind === "question" && (row.issueId !== null || row.participant !== null)) {
+        const key = row.issueId ?? `ask:${row.id}`;
+        const group = decisionGroups.get(key) ?? [];
+        group.push(row);
+        decisionGroups.set(key, group);
         continue;
       }
       if (row.kind === "plan_approval") {
@@ -571,6 +815,39 @@ export class InteractionService {
       }
       this.#pending.delete(row.id);
     }
+
+    // The safety line: ONE pending issue means the words can only be meant for
+    // it; several distinct issues mean guessing, and a wrong guess records the
+    // operator's words as the answer to a question they never read. Ambiguity
+    // holds every issue open.
+    if (decisionGroups.size > 1) {
+      const held = [...decisionGroups.values()].map((group) => this.#heldDescriptor(group));
+      this.#bus.append({
+        type: "user_session.runtime.noted",
+        userSessionId,
+        payload: {
+          userSessionId,
+          detail: `operator chatted while ${held.length} distinct decision issues were pending; nothing was auto-resolved — main binds the answer to the right issue`,
+        },
+      });
+      return { held };
+    }
+    const only = [...decisionGroups.values()][0];
+    if (only !== undefined) {
+      const issueId = only[0]!.issueId;
+      if (issueId !== null && this.#issues) {
+        const bound = this.bindIssueResolution({ userSessionId, issueId, answer: chatText, via: "chat" });
+        deliveredToAgents += bound.resolvedAskIds
+          .filter((id) => this.#store.get(id)?.participant !== null).length;
+      } else {
+        // Legacy issueless agent ask (predates the issue layer): the original
+        // single-card chat behavior, byte-identical shapes.
+        for (const row of only) {
+          this.#resolveAskWithChatText(row, chatText, "chat");
+          if (row.participant !== null) deliveredToAgents += 1;
+        }
+      }
+    }
     if (deliveredToAgents > 0) {
       this.#bus.append({
         type: "user_session.runtime.noted",
@@ -581,6 +858,22 @@ export class InteractionService {
         },
       });
     }
+    return { held: [] };
+  }
+
+  /** The operator-legible shape of one held group, for main's binding turn. */
+  #heldDescriptor(group: InteractionRow[]): HeldPendingQuestion {
+    const oldest = group[0]!;
+    let subject = firstQuestionOf(oldest);
+    if (oldest.issueId !== null && this.#issues) {
+      try { subject = this.#issues.rowFor(oldest.userSessionId, oldest.issueId).subject; } catch { /* the ask's own wording stands in */ }
+    }
+    return {
+      issueId: oldest.issueId,
+      interactionId: oldest.id,
+      subject,
+      askers: [...new Set(group.map((row) => row.participant ?? "main"))],
+    };
   }
 
   /** Escalations already sent, so a blocking ask wakes main once, not per sweep. */
@@ -665,6 +958,11 @@ export class InteractionService {
       ...this.#listByStatus(userSessionId, "pending"),
       ...this.#listByStatus(userSessionId, "stale"),
     ].map(toWire);
+  }
+
+  /** Every ask participating in one decision issue, oldest first. */
+  listAsksForIssue(issueId: string): Interaction[] {
+    return this.#store.listByIssue(issueId).map(toWire);
   }
 
   /** An unresolved row with the same normalized question from the same asker. */

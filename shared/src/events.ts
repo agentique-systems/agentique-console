@@ -117,6 +117,8 @@ export interface QuestionAskedPayload {
   source: InteractionSource;
   recommendation?: string;
   allowFreeText: boolean;
+  /** The decision issue this ask participates in, when it has one. */
+  issueId?: string;
 }
 export interface QuestionAnsweredPayload {
   userSessionId: string;
@@ -128,6 +130,10 @@ export interface QuestionAnsweredPayload {
   /** The sweep resolved this to the asker's recommendation (provisional). */
   autoProceeded?: boolean;
   recommendation?: string;
+  /** Resolved together with its shared decision issue, not by its own card. */
+  issueId?: string;
+  /** The sibling card whose answer resolved the shared issue. */
+  viaInteractionId?: string;
 }
 /**
  * A `final` report was withheld because questions this session put to the
@@ -574,6 +580,52 @@ export interface ChangeImpactReconciledPayload {
   status: "open" | "reconciled";
 }
 
+/** A project-level decision issue was created for an operator ask. */
+export interface DecisionIssueCreatedPayload {
+  userSessionId: string;
+  issueId: string;
+  issueKey: string | null;
+  subject: string;
+  createdBy: string;
+  interactionId: string;
+  requirementIds: string[];
+}
+
+/** A later ask attached to an existing open issue — one card now answers for several askers. */
+export interface DecisionIssueAskAttachedPayload {
+  userSessionId: string;
+  issueId: string;
+  interactionId: string;
+  asker: string;
+  agentSessionId: string | null;
+  /** Participating asks after the attach. */
+  askCount: number;
+}
+
+/**
+ * An issue got an answer. `supersedes` marks a reversal: the earlier
+ * resolution stays in the history and the new entry becomes current.
+ */
+export interface DecisionIssueResolvedPayload {
+  userSessionId: string;
+  issueId: string;
+  subject: string;
+  answer: string;
+  via: "card" | "chat" | "main";
+  /** Asks resolved together with the issue (empty on a supersede — they were already resolved). */
+  resolvedAskIds: string[];
+  supersedes: boolean;
+}
+
+/** Main merged a duplicate issue into another; the source's asks now participate in the target. */
+export interface DecisionIssueMergedPayload {
+  userSessionId: string;
+  fromIssueId: string;
+  intoIssueId: string;
+  movedAskIds: string[];
+  why: string;
+}
+
 /** A workstream dependency link was declared: `consumer` depends on `producer` for `subject`. */
 export interface WorkstreamLinkCreatedPayload {
   userSessionId: string;
@@ -761,6 +813,10 @@ export type ConsoleEvent = Base &
     | { type: "requirement.link.changed"; payload: RequirementLinkChangedPayload }
     | { type: "change_impact.recorded"; payload: ChangeImpactRecordedPayload }
     | { type: "change_impact.reconciled"; payload: ChangeImpactReconciledPayload }
+    | { type: "decision_issue.created"; payload: DecisionIssueCreatedPayload }
+    | { type: "decision_issue.ask_attached"; payload: DecisionIssueAskAttachedPayload }
+    | { type: "decision_issue.resolved"; payload: DecisionIssueResolvedPayload }
+    | { type: "decision_issue.merged"; payload: DecisionIssueMergedPayload }
     | { type: "workstream.link.created"; payload: WorkstreamLinkCreatedPayload }
     | { type: "workstream.link.released"; payload: WorkstreamLinkReleasedPayload }
     | { type: "workstream.link.broken"; payload: WorkstreamLinkBrokenPayload }

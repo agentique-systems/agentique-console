@@ -20,7 +20,7 @@ import {
   WrenchIcon,
 } from "lucide-react";
 
-import type { Interaction } from "@agentique-console/shared";
+import type { DecisionIssueWire, Interaction } from "@agentique-console/shared";
 import {
   ChainOfThought,
   ChainOfThoughtContent,
@@ -167,12 +167,15 @@ export function UserPart({
   sessionId,
   item,
   pendingById,
+  issuesById,
   onRequestChanges,
 }: {
   sessionId: string;
   item: UserGroup;
   /** Live interaction rows from GET /:id — carries the "stale" status. */
   pendingById: ReadonlyMap<string, Interaction>;
+  /** Open decision issues from GET /:id — a shared-issue card names its co-askers. */
+  issuesById?: ReadonlyMap<string, DecisionIssueWire>;
   onRequestChanges: () => void;
 }) {
   switch (item.type) {
@@ -206,6 +209,7 @@ export function UserPart({
           sessionId={sessionId}
           item={item}
           pendingStatus={pendingById.get(item.interactionId)?.status}
+          issue={item.issueId === undefined ? undefined : issuesById?.get(item.issueId)}
         />
       );
 

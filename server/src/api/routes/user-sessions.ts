@@ -255,6 +255,17 @@ export function registerUserSessionRoutes(
     },
   );
 
+  // The project decision-issue registry: every unresolved (and resolved)
+  // human choice with its participating asks, deterministically ordered by
+  // structural consequence — open first, then blocking weight, requirement
+  // breadth, and age.
+  app.get<{ Params: { id: string } }>(
+    "/api/user-sessions/:id/decision-issues",
+    async (request) => ({
+      issues: ctx.app.decisionIssues.listForProject(request.params.id),
+    }),
+  );
+
   app.post<{ Params: { id: string; interactionId: string } }>(
     "/api/user-sessions/:id/interactions/:interactionId",
     async (request, reply) => {
