@@ -52,6 +52,7 @@ import type {
   RequirementLinkRow,
   RequirementNodeRow,
   RequirementRevisionRow,
+  RequirementStatusChangeRow,
   RequirementStore,
 } from "../db/stores/requirement-store.ts";
 import type { AssumptionStore } from "../db/stores/assumption-store.ts";
@@ -155,6 +156,13 @@ export interface ImpactRecordInput {
   closure: ImpactClosureResult;
   atRevision: number;
   computedAtOrd: number;
+}
+
+/** Shared per-call reads for outline rendering (see #outlineContext). */
+interface OutlineContext {
+  derived: Map<string, RequirementStatus>;
+  latest: Map<string, RequirementStatusChangeRow>;
+  gaps: RequirementVerificationGap[];
 }
 
 export class RequirementParseFailure extends InvalidInputError {
@@ -264,7 +272,7 @@ export class RequirementService implements GoverningDigest {
    * (matching the eval checker's created-after-first-approval semantics).
    */
   firstApprovedAt(userSessionId: string): string | null {
-    const times = this.#store.listRevisions(this.#project(userSessionId))
+    const times = this.#store.listRevisionMetas(this.#project(userSessionId))
       .filter((row) => (row.status === "approved" || row.status === "superseded") && row.approvedAt !== null)
       .map((row) => row.approvedAt!);
     return times.length === 0 ? null : times.reduce((min, at) => (at < min ? at : min));
@@ -1386,34 +1394,28 @@ export class RequirementService implements GoverningDigest {
    */
   reversals(userSessionId: string): RequirementReversal[] {
     const projectId = this.#project(userSessionId);
+    const rows = this.#store.listReversalChanges(projectId);
+    if (rows.length === 0) return [];
     const statements = new Map(this.#store.listNodes(projectId).map((node) => [node.id, node.statement]));
-    const out: RequirementReversal[] = [];
-    const lastTerminalClaim = new Map<string, { actor: string; verifiedBy: RequirementVerifiedBy; evidenceCount: number; at: string }>();
-    for (const change of this.#store.listStatusChanges(projectId)) {
-      const fromTerminal = change.fromStatus === "satisfied" || change.fromStatus === "violated" || change.fromStatus === "infeasible";
-      // A same-status re-claim (a reviewer upgrading a self-tier satisfied to
-      // independent) withdraws nothing — only a status CHANGE reverses.
-      if (fromTerminal && change.toStatus !== change.fromStatus && change.actor !== "console") {
-        out.push({
-          requirementId: change.requirementId,
-          statement: statements.get(change.requirementId) ?? "",
-          from: change.fromStatus as "satisfied" | "violated" | "infeasible",
-          to: change.toStatus as RequirementStatus,
-          at: change.createdAt,
-          reversedBy: { actor: change.actor, verifiedBy: change.verifiedBy },
-          original: lastTerminalClaim.get(change.requirementId) ?? null,
-        });
-      }
-      if (change.toStatus === "satisfied" || change.toStatus === "violated" || change.toStatus === "infeasible") {
-        lastTerminalClaim.set(change.requirementId, {
-          actor: change.actor, verifiedBy: change.verifiedBy,
-          evidenceCount: change.evidence.length, at: change.createdAt,
-        });
-      } else {
-        lastTerminalClaim.delete(change.requirementId);
-      }
-    }
-    return out;
+    return rows.map((change) => {
+      // The withdrawn claim: the change immediately before this one on the
+      // requirement's chain. The journal chains fromStatus to the prior
+      // toStatus inside one transaction, so a terminal fromStatus always has
+      // a prior terminal row — the `?? null` is defensive, not semantic.
+      const prior = this.#store.changeBefore(projectId, change.requirementId, change.ord);
+      const original = prior !== undefined && TERMINAL_STATUSES.has(prior.toStatus)
+        ? { actor: prior.actor, verifiedBy: prior.verifiedBy, evidenceCount: prior.evidence.length, at: prior.createdAt }
+        : null;
+      return {
+        requirementId: change.requirementId,
+        statement: statements.get(change.requirementId) ?? "",
+        from: change.fromStatus as "satisfied" | "violated" | "infeasible",
+        to: change.toStatus as RequirementStatus,
+        at: change.createdAt,
+        reversedBy: { actor: change.actor, verifiedBy: change.verifiedBy },
+        original,
+      };
+    });
   }
 
   // ── prompt surfaces (the GoverningDigest contract) ───────────────────────
@@ -1435,15 +1437,18 @@ export class RequirementService implements GoverningDigest {
     // run renders byte-identically to before (cache stability).
     const intent = this.intentDocument(userSessionId);
     const prose = intent === null ? "" : `${intent}\n\n`;
-    const trail = this.#store.listRevisions(projectId)
+    const trail = this.#store.listRevisionMetas(projectId)
       .filter((row) => row.changeNote !== null && (row.status === "approved" || row.status === "superseded"))
       .slice(-5)
       .map((row) => `- rev ${row.revision}: ${row.changeNote}`);
     const trailBlock = trail.length > 0 ? `\n\nAmendment trail:\n${trail.join("\n")}` : "";
+    // One read set for the whole ladder: latest claims, derived statuses and
+    // gaps are computed once here and shared by every degradation step below.
+    const context = this.#outlineContext(nodes, this.#store.latestChanges(projectId));
     // Gaps ride with the trail, after the outline: the collapse-satisfied
     // ladder erases exactly the satisfied leaves that carry them. Bounded
     // like the trail so a pathological run cannot grow the prompt.
-    const gaps = this.verificationGaps(userSessionId);
+    const gaps = context.gaps;
     const gapLines = gaps.slice(0, GAP_LIST_MAX)
       .map((gap) => `- ${gap.requirementId} needs ${gap.expected} verification (claimed ${gap.recorded.verifiedBy} by ${gap.recorded.actor})`);
     if (gaps.length > GAP_LIST_MAX) gapLines.push(`- …and ${gaps.length - GAP_LIST_MAX} more (read_requirements lists them)`);
@@ -1473,7 +1478,7 @@ export class RequirementService implements GoverningDigest {
       ladder.push({ collapseSatisfied: true, collapseSubtreesOf: delegated, maxDepth: depth });
     }
     for (const step of ladder) {
-      const body = this.#statusOutline(userSessionId, nodes, step);
+      const body = this.#statusOutline(nodes, context, step);
       if (Buffer.byteLength(assemble(body), "utf8") <= DIGEST_MAX_BYTES) return assemble(body);
     }
     // Last resorts. BYTE-accurate truncation: String.slice counts UTF-16 code
@@ -1481,7 +1486,7 @@ export class RequirementService implements GoverningDigest {
     // up to 3x and could cut a surrogate pair in half. The outline truncates
     // first; the prose only when even that cannot fit.
     const marker = "\n…(truncated — read_requirements returns the full outline)";
-    const shallow = this.#statusOutline(userSessionId, nodes, ladder.at(-1) ?? { collapseSatisfied: true });
+    const shallow = this.#statusOutline(nodes, context, ladder.at(-1) ?? { collapseSatisfied: true });
     const fixed = Buffer.byteLength(`${header}\n${prose}${marker}${gapBlock}${trailBlock}`, "utf8");
     if (DIGEST_MAX_BYTES - fixed > 0) {
       return assemble(`${truncateUtf8(shallow, DIGEST_MAX_BYTES - fixed)}${marker}`);
@@ -1514,7 +1519,8 @@ export class RequirementService implements GoverningDigest {
       nodes = nodes.filter((node) => keep.has(node.id))
         .map((node) => (node.id === scope.id ? { ...node, parentId: null } : node));
     }
-    return this.#statusOutline(userSessionId, nodes, { collapseSatisfied: false });
+    const context = this.#outlineContext(nodes, this.#store.latestChanges(projectId));
+    return this.#statusOutline(nodes, context, { collapseSatisfied: false });
   }
 
   /** Root→node ancestor statements (excluding the node) — vision continuity at depth. */
@@ -1563,15 +1569,16 @@ export class RequirementService implements GoverningDigest {
     verificationGaps: RequirementVerificationGap[];
     reversals: RequirementReversal[];
   } | null {
-    const approved = this.#store.latestApproved(this.#project(userSessionId));
+    const projectId = this.#project(userSessionId);
+    const approved = this.#store.latestApproved(projectId);
     if (!approved) return null;
-    const nodes = this.#store.liveNodes(this.#project(userSessionId));
-    const derived = this.#derivedStatuses(nodes);
+    const nodes = this.#store.liveNodes(projectId);
+    const context = this.#outlineContext(nodes, this.#store.latestChanges(projectId));
     return {
       revision: approved.revision,
-      counts: requirementStatusCounts(nodes.map((node) => derived.get(node.id) ?? node.status)),
-      outline: this.#statusOutline(userSessionId, nodes, { collapseSatisfied: false }),
-      verificationGaps: this.verificationGaps(userSessionId),
+      counts: requirementStatusCounts(nodes.map((node) => context.derived.get(node.id) ?? node.status)),
+      outline: this.#statusOutline(nodes, context, { collapseSatisfied: false }),
+      verificationGaps: context.gaps,
       reversals: this.reversals(userSessionId),
     };
   }
@@ -1789,6 +1796,19 @@ export class RequirementService implements GoverningDigest {
   }
 
   /**
+   * The precomputed reads one outline rendering consumes — computed ONCE per
+   * public call and shared across the digest's degradation-ladder steps, so a
+   * ladder walk does not re-read latest claims or re-derive statuses per step.
+   */
+  #outlineContext(nodes: RequirementNodeRow[], latest: ReturnType<RequirementStore["latestChanges"]>): OutlineContext {
+    return {
+      derived: this.#derivedStatuses(nodes),
+      latest,
+      gaps: this.#verificationGaps(nodes, latest),
+    };
+  }
+
+  /**
    * Rebuild a render graph from node rows. Beyond the satisfied-subtree
    * collapse, two STRUCTURAL reductions serve the digest's degradation
    * ladder: collapsing named subtrees (those delegated to open sessions —
@@ -1797,13 +1817,12 @@ export class RequirementService implements GoverningDigest {
    * display summary in the pointer() idiom, never a model-reported value.
    */
   #statusOutline(
-    userSessionId: string,
     nodes: RequirementNodeRow[],
+    context: OutlineContext,
     options: { collapseSatisfied: boolean; collapseSubtreesOf?: ReadonlySet<string>; maxDepth?: number },
   ): string {
-    const derived = this.#derivedStatuses(nodes);
-    const latest = this.#store.latestChanges(this.#project(userSessionId));
-    const gaps = new Map(this.#verificationGaps(nodes, latest).map((gap) => [gap.requirementId, gap.expected]));
+    const { derived, latest } = context;
+    const gaps = new Map(context.gaps.map((gap) => [gap.requirementId, gap.expected]));
     const byParent = new Map<string | null, RequirementNodeRow[]>();
     for (const node of nodes) {
       const list = byParent.get(node.parentId) ?? [];

@@ -12,7 +12,7 @@
  * `user_session_id` on revisions and status changes is attribution only
  * (which session proposed/claimed), never a WHERE clause.
  */
-import { and, desc, eq, inArray, isNull } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, lt, sql } from "drizzle-orm";
 import type { Db } from "../client.ts";
 import {
   assumptions,
@@ -71,6 +71,27 @@ export class RequirementStore {
 
   listRevisions(projectId: string): RequirementRevisionRow[] {
     return this.#db.select().from(requirementRevisions)
+      .where(eq(requirementRevisions.projectId, projectId))
+      .orderBy(requirementRevisions.revision).all();
+  }
+
+  /**
+   * Revision metadata WITHOUT document/graph hydration — the per-turn reads
+   * (digest's amendment trail, first-approval time) need change notes and
+   * lifecycle, never every historical document body.
+   */
+  listRevisionMetas(projectId: string): {
+    revision: number;
+    changeNote: string | null;
+    status: RequirementRevisionRow["status"];
+    approvedAt: string | null;
+  }[] {
+    return this.#db.select({
+      revision: requirementRevisions.revision,
+      changeNote: requirementRevisions.changeNote,
+      status: requirementRevisions.status,
+      approvedAt: requirementRevisions.approvedAt,
+    }).from(requirementRevisions)
       .where(eq(requirementRevisions.projectId, projectId))
       .orderBy(requirementRevisions.revision).all();
   }
@@ -258,6 +279,8 @@ export class RequirementStore {
       // An inherited (ancestor) declaration still covers these leaves.
       verifyExpectation: null,
       status: "open",
+      latestChangeId: null,
+      latestChangeOrd: null,
       origin: "refinement",
       introducedInRevision: 0,
       retiredInRevision: null,
@@ -315,6 +338,14 @@ export class RequirementStore {
   #insertStatusChangeRow(row: Omit<RequirementStatusChangeRow, "id" | "ord">): RequirementStatusChangeRow {
     const full: RequirementStatusChangeRow = { id: newId("rqs"), ord: this.nextChangeOrd(row.projectId), ...row };
     this.#db.insert(requirementStatusChanges).values(full).run();
+    // The latest-claim projection write: the node row's pointer at its newest
+    // journal row moves in the SAME transaction as the journal insert (every
+    // caller — claims, statement resets, retirements — runs inside one), so
+    // history and its current-state pointer cannot diverge across a crash.
+    this.#db.update(requirementNodes)
+      .set({ latestChangeId: full.id, latestChangeOrd: full.ord })
+      .where(and(eq(requirementNodes.projectId, row.projectId), eq(requirementNodes.id, row.requirementId)))
+      .run();
     return full;
   }
 
@@ -393,19 +424,126 @@ export class RequirementStore {
       )).run();
   }
 
+  /** Full history in clock (`ord`) order — the deterministic ordering identity; wall time is display. */
   listStatusChanges(projectId: string, requirementId?: string): RequirementStatusChangeRow[] {
     const where = requirementId === undefined
       ? eq(requirementStatusChanges.projectId, projectId)
       : and(eq(requirementStatusChanges.projectId, projectId), eq(requirementStatusChanges.requirementId, requirementId));
     return this.#db.select().from(requirementStatusChanges).where(where)
-      .orderBy(requirementStatusChanges.createdAt).all();
+      .orderBy(requirementStatusChanges.ord).all();
   }
 
-  /** Latest change per requirement, for verification chips. */
+  /**
+   * Latest change per requirement — the hot current-state read behind derive,
+   * verification chips, invalidation flags, impact clearance, and completion
+   * obligations. A keyed join through the node rows' latest-change pointers:
+   * cost is proportional to the GRAPH (nodes, retired included — a suspect
+   * claim's clearance may be the retirement itself), never to journal length.
+   * Nodes with no pointer have no changes and simply do not appear, exactly
+   * like the fold this replaced.
+   */
   latestChanges(projectId: string): Map<string, RequirementStatusChangeRow> {
-    const latest = new Map<string, RequirementStatusChangeRow>();
-    for (const change of this.listStatusChanges(projectId)) latest.set(change.requirementId, change);
-    return latest;
+    const rows = this.#db.select({ change: requirementStatusChanges })
+      .from(requirementNodes)
+      .innerJoin(requirementStatusChanges, eq(requirementNodes.latestChangeId, requirementStatusChanges.id))
+      .where(eq(requirementNodes.projectId, projectId))
+      .all();
+    return new Map(rows.map(({ change }) => [change.requirementId, change]));
+  }
+
+  /**
+   * The journal rows that ARE reversals — a terminal claim withdrawn by
+   * anyone but the console — in clock order. The literal predicate matches
+   * the partial index `requirement_status_changes_reversals` exactly, so the
+   * read is proportional to actual reversals, not journal length.
+   */
+  listReversalChanges(projectId: string): RequirementStatusChangeRow[] {
+    return this.#db.select().from(requirementStatusChanges)
+      .where(and(
+        eq(requirementStatusChanges.projectId, projectId),
+        sql`from_status IN ('satisfied','violated','infeasible') AND to_status != from_status AND actor != 'console'`,
+      ))
+      .orderBy(requirementStatusChanges.ord).all();
+  }
+
+  /** The change immediately before `beforeOrd` on one requirement's chain (keyed lookup). */
+  changeBefore(projectId: string, requirementId: string, beforeOrd: number): RequirementStatusChangeRow | undefined {
+    return this.#db.select().from(requirementStatusChanges)
+      .where(and(
+        eq(requirementStatusChanges.projectId, projectId),
+        eq(requirementStatusChanges.requirementId, requirementId),
+        lt(requirementStatusChanges.ord, beforeOrd),
+      ))
+      .orderBy(desc(requirementStatusChanges.ord)).limit(1).get();
+  }
+
+  /**
+   * The reference derivation of every node's current-state columns from the
+   * authoritative journal alone: pointer = the max-`ord` change of the
+   * (project, requirement); status = that change's toStatus, "open" when no
+   * change was ever journaled. Deliberately a full-journal fold — this is the
+   * repair/verification path, not a hot read.
+   */
+  #deriveCurrentState(projectId: string): Map<string, { changeId: string | null; ord: number | null; status: RequirementNodeStatus }> {
+    const derived = new Map<string, { changeId: string | null; ord: number | null; status: RequirementNodeStatus }>();
+    for (const node of this.listNodes(projectId)) {
+      derived.set(node.id, { changeId: null, ord: null, status: "open" });
+    }
+    for (const change of this.listStatusChanges(projectId)) {
+      derived.set(change.requirementId, {
+        changeId: change.id,
+        ord: change.ord,
+        status: change.toStatus as RequirementNodeStatus,
+      });
+    }
+    return derived;
+  }
+
+  /**
+   * Compare the live projection (node pointer + status columns) against the
+   * journal derivation. Empty = consistent. The verification half of the
+   * repair pair; never mutates.
+   */
+  verifyCurrentState(projectId: string): {
+    requirementId: string;
+    stored: { changeId: string | null; ord: number | null; status: RequirementNodeStatus };
+    derived: { changeId: string | null; ord: number | null; status: RequirementNodeStatus };
+  }[] {
+    const derived = this.#deriveCurrentState(projectId);
+    const mismatches: ReturnType<RequirementStore["verifyCurrentState"]> = [];
+    for (const node of this.listNodes(projectId)) {
+      const expect = derived.get(node.id)!;
+      if (node.latestChangeId !== expect.changeId || node.latestChangeOrd !== expect.ord || node.status !== expect.status) {
+        mismatches.push({
+          requirementId: node.id,
+          stored: { changeId: node.latestChangeId, ord: node.latestChangeOrd, status: node.status },
+          derived: expect,
+        });
+      }
+    }
+    return mismatches;
+  }
+
+  /**
+   * Restore the projection from the journal — one transaction, the same
+   * derivation `verifyCurrentState` checks, no semantics of its own. Returns
+   * the repaired requirement ids.
+   */
+  rebuildCurrentState(projectId: string): string[] {
+    return this.#sqlite.transaction(() => {
+      const mismatches = this.verifyCurrentState(projectId);
+      for (const mismatch of mismatches) {
+        this.#db.update(requirementNodes)
+          .set({
+            latestChangeId: mismatch.derived.changeId,
+            latestChangeOrd: mismatch.derived.ord,
+            status: mismatch.derived.status,
+          })
+          .where(and(eq(requirementNodes.projectId, projectId), eq(requirementNodes.id, mismatch.requirementId)))
+          .run();
+      }
+      return mismatches.map((mismatch) => mismatch.requirementId);
+    })();
   }
 
   // ── delegations ──────────────────────────────────────────────────────────

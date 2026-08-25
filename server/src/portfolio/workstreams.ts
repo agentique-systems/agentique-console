@@ -151,8 +151,7 @@ export class WorkstreamService {
   listForAgentSession(agentSessionId: string): { asConsumer: WorkstreamLinkWire[]; asProducer: WorkstreamLinkWire[] } {
     const session = this.#requireDeps().getAgentSession(agentSessionId);
     if (!session) return { asConsumer: [], asProducer: [] };
-    const live = this.#store.listByProject(this.#resolveProject(session.userSessionId))
-      .filter((row) => row.releasedAt === null);
+    const live = this.#store.listLiveByProject(this.#resolveProject(session.userSessionId));
     return {
       asConsumer: live.filter((row) => row.consumerAgentSessionId === agentSessionId).map((row) => this.#toWire(row)),
       asProducer: live.filter((row) => row.producerAgentSessionId === agentSessionId).map((row) => this.#toWire(row)),
@@ -161,8 +160,7 @@ export class WorkstreamService {
 
   /** Live edges for the change-impact consumer expansion — raw endpoints only. */
   liveEdges(userSessionId: string): { consumerAgentSessionId: string; producerAgentSessionId: string; subject: string }[] {
-    return this.#store.listByProject(this.#resolveProject(userSessionId))
-      .filter((row) => row.releasedAt === null)
+    return this.#store.listLiveByProject(this.#resolveProject(userSessionId))
       .map((row) => ({
         consumerAgentSessionId: row.consumerAgentSessionId,
         producerAgentSessionId: row.producerAgentSessionId,
@@ -177,11 +175,15 @@ export class WorkstreamService {
    */
   brokenOpen(userSessionId: string): WorkstreamLinkWire[] {
     const deps = this.#requireDeps();
-    return this.list(userSessionId).filter((wire) => {
-      if (wire.status !== "broken") return false;
-      const consumer = deps.getAgentSession(wire.consumerAgentSessionId);
-      return consumer !== undefined && consumer.lifecycle === "open";
-    });
+    // Live rows only: a released link is "released" by definition, so the
+    // broken set can never contain one — history stays out of the hold check.
+    return this.#store.listLiveByProject(this.#resolveProject(userSessionId))
+      .map((row) => this.#toWire(row))
+      .filter((wire) => {
+        if (wire.status !== "broken") return false;
+        const consumer = deps.getAgentSession(wire.consumerAgentSessionId);
+        return consumer !== undefined && consumer.lifecycle === "open";
+      });
   }
 
   /**

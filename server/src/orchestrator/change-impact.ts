@@ -31,6 +31,12 @@ import { nowIso } from "../ids.ts";
 import type { ImpactRecordInput } from "./requirements.ts";
 
 const TERMINAL_STATUSES = new Set(["satisfied", "violated", "infeasible"]);
+
+/** See ChangeImpactService.#ctx — one read of project-level facts per derivation pass. */
+interface ImpactReadCtx {
+  latest: Map<string, RequirementStatusChangeRow>;
+  open: Set<string>;
+}
 const CLAIM_DISPOSITIONS = new Set(["stands", "superseded"]);
 const SESSION_DISPOSITIONS = new Set(["unaffected", "steered", "interrupted", "superseded"]);
 
@@ -139,11 +145,12 @@ export class ChangeImpactService {
         })),
     };
 
+    const ctx: ImpactReadCtx = { latest: deps.latestChanges(input.userSessionId), open: openSessions };
     const duplicate = this.#store.listByProject(projectId).find((row) =>
       row.sourceKind === input.sourceKind
       && sameIds(row.affected.seedIds, affected.seedIds)
-      && this.#status(input.userSessionId, row) === "open");
-    if (duplicate !== undefined) return this.#toWire(input.userSessionId, duplicate);
+      && this.#status(row, ctx) === "open");
+    if (duplicate !== undefined) return this.#toWire(duplicate, ctx);
 
     const { row, inserted } = this.#store.insert({
       projectId,
@@ -172,7 +179,7 @@ export class ChangeImpactService {
         },
       });
     }
-    return this.#toWire(input.userSessionId, row);
+    return this.#toWire(row, ctx);
   }
 
   /**
@@ -235,7 +242,7 @@ export class ChangeImpactService {
       else next.push(entry);
     }
     this.#store.setDispositions(row.id, next);
-    const wire = this.#toWire(input.userSessionId, this.#store.get(row.id)!);
+    const wire = this.#toWire(this.#store.get(row.id)!, this.#ctx(input.userSessionId));
     this.#bus.append({
       type: "change_impact.reconciled",
       userSessionId: input.userSessionId,
@@ -251,8 +258,9 @@ export class ChangeImpactService {
   }
 
   list(userSessionId: string): ChangeImpactWire[] {
+    const ctx = this.#ctx(userSessionId);
     return this.#store.listByProject(this.#resolveProject(userSessionId))
-      .map((row) => this.#toWire(userSessionId, row));
+      .map((row) => this.#toWire(row, ctx));
   }
 
   listOpen(userSessionId: string): ChangeImpactWire[] {
@@ -264,7 +272,20 @@ export class ChangeImpactService {
     if (!row || row.projectId !== this.#resolveProject(userSessionId)) {
       throw new NotFoundError(`no change impact ${impactId} in this project`);
     }
-    return this.#toWire(userSessionId, row);
+    return this.#toWire(row, this.#ctx(userSessionId));
+  }
+
+  /**
+   * The read set one derivation pass shares: latest claims and open sessions
+   * are project-level facts, so a list over N impacts reads them ONCE — never
+   * once per row (whole-history amplification on a mature project).
+   */
+  #ctx(userSessionId: string): ImpactReadCtx {
+    const deps = this.#requireDeps();
+    return {
+      latest: deps.latestChanges(userSessionId),
+      open: deps.openAgentSessionIds(userSessionId),
+    };
   }
 
   /**
@@ -275,10 +296,8 @@ export class ChangeImpactService {
    * construction and clears it. A session is outstanding while it is still
    * open without a disposition; archival clears it.
    */
-  #outstanding(userSessionId: string, row: ChangeImpactRow): { claims: string[]; sessions: string[] } {
-    const deps = this.#requireDeps();
-    const latest = deps.latestChanges(userSessionId);
-    const open = deps.openAgentSessionIds(userSessionId);
+  #outstanding(row: ChangeImpactRow, ctx: ImpactReadCtx): { claims: string[]; sessions: string[] } {
+    const { latest, open } = ctx;
     const disposed = new Set(row.dispositions.map((entry) => `${entry.kind}:${entry.id}`));
     const claims = row.affected.suspectClaims
       .filter((claim) => {
@@ -296,13 +315,13 @@ export class ChangeImpactService {
     return { claims, sessions };
   }
 
-  #status(userSessionId: string, row: ChangeImpactRow): "open" | "reconciled" {
-    const outstanding = this.#outstanding(userSessionId, row);
+  #status(row: ChangeImpactRow, ctx: ImpactReadCtx): "open" | "reconciled" {
+    const outstanding = this.#outstanding(row, ctx);
     return outstanding.claims.length + outstanding.sessions.length > 0 ? "open" : "reconciled";
   }
 
-  #toWire(userSessionId: string, row: ChangeImpactRow): ChangeImpactWire {
-    const outstanding = this.#outstanding(userSessionId, row);
+  #toWire(row: ChangeImpactRow, ctx: ImpactReadCtx): ChangeImpactWire {
+    const outstanding = this.#outstanding(row, ctx);
     return {
       id: row.id,
       sourceKind: row.sourceKind,
