@@ -26,7 +26,7 @@ import type { TaskService } from "../tasks/service.ts";
 import type { HandoffService } from "../handoffs/service.ts";
 import type { ReapResult } from "../completion/summary.ts";
 import { CONSOLE_SENDER, MAIN_RECIPIENT } from "./names.ts";
-import { sessionSubtree } from "./session-tree.ts";
+import { orderedSessionForest, sessionSubtree } from "./session-tree.ts";
 import type { Category } from "./final-gate.ts";
 import { PromptComposer } from "./composer.ts";
 import { roleOfAgent, speakerKindOf } from "./topology.ts";
@@ -136,6 +136,11 @@ export class AgentSessionService {
         if (!session) return;
         deps.bus.append({ type: "agent_session.runtime.noted", userSessionId: session.userSessionId, agentSessionId,
           payload: { agentSessionId, agent: seatName, detail: `agent parked (${reason}); provider session retained` } });
+        // The typed twin of the prose notice: the UI's seat dot must show
+        // parked-but-durable differently from idle-and-resident — resident
+        // lanes are the scarce resource, seats are not.
+        deps.bus.append({ type: "agent_session.activity.changed", userSessionId: session.userSessionId, agentSessionId,
+          payload: { scope: { kind: "agent", agentSessionId }, agent: seatName, state: "parked" } });
       },
     });
     this.#worktreeBinding = new WorktreeBinding({
@@ -395,10 +400,14 @@ export class AgentSessionService {
   }
 
   listForUserSession(userSessionId: string) {
-    return this.#deps.repo.listAgentSessions(userSessionId).map((row) => {
+    // Pre-order, parent before child: main's portfolio must show the tree it
+    // actually commissioned — a grandchild rendered indistinguishable from a
+    // top-level workstream misled the integrator about who reports to whom.
+    return orderedSessionForest(this.#deps.repo.listAgentSessions(userSessionId)).map((row) => {
       const budget = this.commissionBudget(row);
       return {
         id: row.id, title: row.title, status: this.#operator.statusOf(row),
+        ...(row.parentAgentSessionId === null ? {} : { parentAgentSessionId: row.parentAgentSessionId, depth: row.depth }),
         agents: this.#specialists(row.id).map((p) => p.name),
         unseenCount: this.#deps.repo.listQueuedDeliveries(row.id).filter((d) => d.recipient === MAIN_RECIPIENT).length,
         ...(budget === null ? {} : { budget }),
@@ -479,12 +488,14 @@ export class AgentSessionService {
   }
 
   wireSession(row: AgentSessionRow) {
-    return toWireAgentSession(row, this.#specialists(row.id).map((p) => p.name), this.#operator.statusOf(row) === "working",
+    const status = this.#operator.statusOf(row);
+    return toWireAgentSession(row, this.#specialists(row.id).map((p) => p.name),
+      status === "archived" ? "idle" : status,
       this.commissionBudget(row)?.spendUsd ?? 0, this.unscoped(row));
   }
 
   wireSessionsForUserSession(userSessionId: string) {
-    return this.#deps.repo.listAgentSessions(userSessionId).map((row) => this.wireSession(row));
+    return orderedSessionForest(this.#deps.repo.listAgentSessions(userSessionId)).map((row) => this.wireSession(row));
   }
 
   /** Post-capacity-resume kick: every queued delivery starts moving again. */

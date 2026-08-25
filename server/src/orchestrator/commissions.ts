@@ -8,6 +8,7 @@
  * routine relay didn't carry.
  */
 import type { AgentSessionStatus, CommissionSummary } from "@agentique-console/shared";
+import { orderedSessionForest } from "../agent-sessions/session-tree.ts";
 import type { AgentSessionRow, HandoffRecordRow, Repo } from "../db/repo.ts";
 
 export interface CommissionDeps {
@@ -20,7 +21,9 @@ export interface CommissionDeps {
 const TERMINAL_TRIGGERS = new Set(["final", "failure"]);
 
 export function buildCommissions(deps: CommissionDeps, userSessionId: string): CommissionSummary[] {
-  return deps.repo.listAgentSessions(userSessionId).map((session): CommissionSummary => {
+  // Pre-order, parent before child at every depth — the review surface shows
+  // the tree main actually built, in the one deterministic order.
+  return orderedSessionForest(deps.repo.listAgentSessions(userSessionId)).map((session): CommissionSummary => {
     const fromMain = deps.repo.listHandoffs({
       userSessionId, agentSessionId: session.id, sender: "main", excludeCheckpoints: true, excludeSynthetic: true,
     });
@@ -36,6 +39,7 @@ export function buildCommissions(deps: CommissionDeps, userSessionId: string): C
       pattern: session.pattern,
       lifecycle: session.lifecycle,
       parentAgentSessionId: session.parentAgentSessionId,
+      depth: session.depth,
       status: deps.statusOf(session),
       commission: briefing === undefined ? null : {
         handoffId: briefing.id,

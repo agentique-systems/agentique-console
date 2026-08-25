@@ -394,6 +394,8 @@ export interface CommissionSummary {
   pattern: string;
   lifecycle: string;
   parentAgentSessionId: string | null;
+  /** Nesting level: 0 = top-level, each child one deeper, bounded by the configured depth cap. */
+  depth: number;
   /** The derived live status (working/idle/reported/archived), not just the lifecycle bit. */
   status: AgentSessionStatus;
   /** The creation briefing — later steering never overwrites it. Null for child sessions (their controller commissions them). */

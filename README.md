@@ -42,12 +42,18 @@ single npm-workspaces application backed by SQLite and the Claude Agent SDK.
   (independent positions, console-seated judge), `peer_to_peer` (a bounded
   mesh: hard handoff cap, oscillation detection, a designated closer), and
   `plan_execute` (a planner over the task DAG the Console dispatches on).
-- **One level of nesting.** A controller agent (hub coordinator, planner) may
+- **Depth-capped nesting.** A controller agent (hub coordinator, planner —
+  or the entry agent of a session commissioned with `allowChildSessions`) may
   spawn a child AgentSession running any pattern with
   `create_child_session`. The child's `main` resolves to that controller — its
   final crosses the boundary as a milestone — and a parent's own final is
-  withheld until every child has reported (or is abandoned). Child agents never
-  receive the spawn tools, so the depth cap is the granting itself.
+  withheld until every child has reported (or is abandoned).
+  `CONSOLE_MAX_SESSION_DEPTH` bounds ancestry depth (0 = top-level): only
+  seats in sessions BELOW the cap receive the spawn tools, so the cap is the
+  granting itself — a controller in a child session below the cap can nest
+  again. Lifecycle follows the tree: closing or abandoning a session archives
+  its whole subtree, and inspection (timeline, portfolio, UI) renders every
+  depth the runtime permits.
 - Agents transfer work with one console-owned tool, `send_handoff`. Its
   parameters *are* the handoff core, so the provider validates the shape and
   nothing is serialized by hand. Every transfer is route-checked against the
@@ -275,10 +281,15 @@ Settings (`server/src/config.ts` is authoritative): `CONSOLE_DATA_DIR`,
 `CONSOLE_PORT`, `CONSOLE_HOST`, `CONSOLE_SKILLS_DIR`, `CONSOLE_FS_ROOTS`,
 `CONSOLE_MODEL`, `CONSOLE_IMPROVE_MODEL`, `CONSOLE_EFFORT`,
 `CONSOLE_AUTO_INIT_GIT=0`, `CONSOLE_MCP_DISABLED`, `CONSOLE_BROWSER_MCP`.
-Agent-residency knobs: `CONSOLE_MAX_RESIDENT_AGENTS` (default sized to host
-RAM: `min(12, max(4, totalmem/1.5GiB))`),
-`CONSOLE_MAX_RESIDENT_AGENTS_PER_SESSION` (default 4; a parent session and its
-children share the budget), `CONSOLE_AGENT_IDLE_REAP_MS` (default 300000),
+Agent-residency knobs — these bound RESIDENT LANES (live provider
+processes), never durable seats: a parked seat still exists, and an
+AgentSession's roster may exceed what is resident.
+`CONSOLE_MAX_RESIDENT_AGENTS` (the machine-wide lane cap, default sized to
+host RAM: `min(12, max(4, totalmem/1.5GiB))`),
+`CONSOLE_MAX_RESIDENT_AGENTS_PER_SESSION` (the per-AgentSession lane cap,
+default 4 — per session, deliberately NOT shared across a parent and its
+children: each child session brings its own residency under the global cap,
+so nesting adds parallel capacity), `CONSOLE_AGENT_IDLE_REAP_MS` (default 300000),
 `CONSOLE_AGENT_SPAWN_TIMEOUT_MS` (default 30000),
 `CONSOLE_PEER_NAME_PREFIX` (default `console-`, the session-registry
 namespace), and `CONSOLE_AGENT_WORKTREES=0` to disable agent worktree

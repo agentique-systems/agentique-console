@@ -227,7 +227,7 @@ export class SessionLifecycle {
     const unscoped = (input.requirements ?? []).length === 0
       && this.#deps.requirements.firstApprovedAt(input.userSessionId) !== null;
     bus.append({ type: "agent_session.created", userSessionId: row.userSessionId, agentSessionId: row.id,
-      payload: { session: toWireAgentSession(row, specialists, false, 0, unscoped), agents: specialists } });
+      payload: { session: toWireAgentSession(row, specialists, "idle", 0, unscoped), agents: specialists } });
     bus.append({ type: "agent_session.delegation.sent", userSessionId: row.userSessionId, agentSessionId: row.id,
       payload: { userSessionId: row.userSessionId, agentSessionId: row.id, kind: "created", preview: title } });
     const entry = this.#deps.routing.contractOf(row).contract.entry;

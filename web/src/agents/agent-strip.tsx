@@ -26,26 +26,34 @@ export function AgentStrip() {
   );
 
   // Top-level sessions createdAt desc (a stable order that never reshuffles
-  // mid-glance when updatedAt churns); each followed by its children,
-  // createdAt asc, indented one level under their parent.
+  // mid-glance when updatedAt churns); under each root the WHOLE subtree in
+  // pre-order, createdAt asc within siblings, indented by real depth — the
+  // runtime nests deeper than one level and a grandchild card must exist.
   const cards = useMemo(() => {
     const all = agentSessions.data ?? [];
+    const ids = new Set(all.map((session) => session.id));
     const children = new Map<string, typeof all>();
+    const roots: typeof all = [];
     for (const session of all) {
-      if (session.parentAgentSessionId === null) continue;
-      const siblings = children.get(session.parentAgentSessionId) ?? [];
-      siblings.push(session);
-      children.set(session.parentAgentSessionId, siblings);
+      if (session.parentAgentSessionId !== null && ids.has(session.parentAgentSessionId)) {
+        const siblings = children.get(session.parentAgentSessionId) ?? [];
+        siblings.push(session);
+        children.set(session.parentAgentSessionId, siblings);
+      } else {
+        roots.push(session);
+      }
     }
-    const roots = all
-      .filter((session) => session.parentAgentSessionId === null)
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id));
-    return roots.flatMap((root) => [
-      { session: root, nested: false },
-      ...(children.get(root.id) ?? [])
-        .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))
-        .map((child) => ({ session: child, nested: true })),
-    ]);
+    roots.sort((a, b) => b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id));
+    for (const siblings of children.values()) {
+      siblings.sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+    }
+    const rows: { session: (typeof all)[number]; depth: number }[] = [];
+    const visit = (session: (typeof all)[number], depth: number) => {
+      rows.push({ session, depth });
+      for (const child of children.get(session.id) ?? []) visit(child, depth + 1);
+    };
+    for (const root of roots) visit(root, 0);
+    return rows;
   }, [agentSessions.data]);
 
   const taskRows = tasks.data ?? [];
@@ -74,8 +82,12 @@ export function AgentStrip() {
           </div>
         ) : (
           <div className="flex flex-col gap-2 border-l border-border">
-            {cards.map(({ session, nested }) => (
-              <div key={session.id} className={nested ? "border-l border-border-subtle pl-4" : undefined}>
+            {cards.map(({ session, depth }) => (
+              <div
+                key={session.id}
+                className={depth > 0 ? "border-l border-border-subtle" : undefined}
+                style={depth > 0 ? { paddingLeft: `${depth}rem` } : undefined}
+              >
                 <FlowStem agentSessionId={session.id}>
                   <AgentCard
                     session={session}

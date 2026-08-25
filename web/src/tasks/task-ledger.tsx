@@ -137,7 +137,7 @@ export function TaskLedger({ userSessionId, agentSessionId }: { userSessionId: s
     }
     for (const [status, bucket] of groups) groups.set(status, sortTasks(bucket));
     return groups;
-  }, [tasks.data]);
+  }, [tasks.data, agentSessionId]);
 
   const total = [...byStatus.values()].reduce(
     (sum, bucket) => sum + bucket.length,

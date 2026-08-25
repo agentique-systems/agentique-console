@@ -25,7 +25,9 @@ export interface SessionStateInput {
  * and the thing the operator can act on outranks the thing they cannot.
  */
 export function deriveSessionState(input: SessionStateInput): SessionState {
-  if (input.runState === "completed") return "done";
+  // An archived session is over whatever its run state says — it must not
+  // keep rendering as "ready"/"working" in the sidebar.
+  if (input.archived || input.runState === "completed") return "done";
   if (input.needsYou || input.runState === "awaiting_signoff" || input.posture.blocked) return "needs_you";
   if (input.lastTurnErrored || !input.spineOpen) return "blocked";
   if (input.posture.busy) return "working";

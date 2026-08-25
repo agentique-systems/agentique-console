@@ -333,9 +333,17 @@ export class OperatorSurface {
     // A child settling into `reported` may be the LAST hold on its parent's
     // withheld final — the delivery acks that gate the flip land after the
     // boundary hop itself, so this recompute is the reliable release point.
+    // Recomputing the PARENT then continues the walk: at a depth cap above
+    // one, a grandchild's settle can complete its parent too, and without the
+    // recursive hop the grandparent's withheld final waited for an unrelated
+    // event to poke the middle session. Strictly upward, so the walk ends at
+    // the root.
     if (computed === "reported" && row.parentAgentSessionId !== null) {
       const parent = this.#deps.repo.getAgentSession(row.parentAgentSessionId);
-      if (parent && parent.lifecycle === "open") this.#deps.maybeReleaseParentFinal(parent);
+      if (parent && parent.lifecycle === "open") {
+        this.#deps.maybeReleaseParentFinal(parent);
+        this.refreshStatus(parent.id);
+      }
     }
     if (status === "idle") this.#dischargeOperatorDebt(row);
   }

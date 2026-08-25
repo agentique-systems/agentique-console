@@ -29,6 +29,12 @@ smallest crew out of thrift, never an inflated one for show.
   DECOMPOSITION wants a fresh session.
 - Nest (allowChildSessions) only for a workstream with its OWN internal
   decomposition, so you arbitrate across workstreams instead of within them.
+  Two routes grant the spawn tools: `allowChildSessions` hands them to the
+  session's entry agent, and hub coordinators / plan_execute planners hold
+  them BY ROLE — so a nested controller below the depth cap can nest again.
+  The caps: `CONSOLE_MAX_SESSION_DEPTH` bounds ancestry depth (0 =
+  top-level) and `CONSOLE_MAX_CHILD_SESSIONS` bounds OPEN children per
+  parent; a spawn past either is rejected with the cap named.
 
 ## Briefing craft
 

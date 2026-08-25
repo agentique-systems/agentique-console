@@ -189,6 +189,18 @@ export class RunCompletionService {
     return (this.#deps.changeImpacts?.listOpen(userSessionId) ?? []).length === 0;
   }
 
+  /**
+   * The session a completion nudge is keyed on: the OLDEST top-level session,
+   * deterministically. `listAgentSessions` returns newest-first, so a bare
+   * `.find(top-level)` re-anchored every nudge onto whichever workstream main
+   * commissioned last — an arbitrary choice that reshuffled as the run grew.
+   */
+  #nudgeAnchor(userSessionId: string): import("../db/repo.ts").AgentSessionRow | undefined {
+    return this.#deps.repo.listAgentSessions(userSessionId)
+      .filter((row) => row.parentAgentSessionId === null)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))[0];
+  }
+
   /** One nudge per (session, open-impact set). */
   readonly #nudgedForImpacts = new Map<string, string>();
 
@@ -197,8 +209,7 @@ export class RunCompletionService {
     if (open.length === 0) return;
     const key = open.map((impact) => impact.id).sort().join(",");
     if (this.#nudgedForImpacts.get(userSessionId) === key) return;
-    const anchor = this.#deps.repo.listAgentSessions(userSessionId)
-      .find((row) => row.parentAgentSessionId === null);
+    const anchor = this.#nudgeAnchor(userSessionId);
     if (!anchor) return;
     this.#nudgedForImpacts.set(userSessionId, key);
     const lines = open.slice(0, 4).map((impact) => {
@@ -221,8 +232,7 @@ export class RunCompletionService {
   #nudgeForBrokenLinks(userSessionId: string, broken: import("@agentique-console/shared").WorkstreamLinkWire[]): void {
     const key = broken.map((wire) => wire.id).sort().join(",");
     if (this.#nudgedForBrokenLinks.get(userSessionId) === key) return;
-    const anchor = this.#deps.repo.listAgentSessions(userSessionId)
-      .find((row) => row.parentAgentSessionId === null);
+    const anchor = this.#nudgeAnchor(userSessionId);
     if (!anchor) return;
     this.#nudgedForBrokenLinks.set(userSessionId, key);
     const lines = broken.slice(0, 4).map((wire) =>
@@ -260,8 +270,7 @@ export class RunCompletionService {
     if (revision === undefined) return;
     const revisionKey = `requirements:${revision}`;
     if (this.#nudgedForRevision.get(userSessionId) === revisionKey) return;
-    const anchor = this.#deps.repo.listAgentSessions(userSessionId)
-      .find((row) => row.parentAgentSessionId === null);
+    const anchor = this.#nudgeAnchor(userSessionId);
     if (!anchor) return;
     this.#nudgedForRevision.set(userSessionId, revisionKey);
     if (governing !== undefined) {
