@@ -121,6 +121,27 @@ export class InteractionStore {
     this.#db.update(interactions).set({ detached: true }).where(eq(interactions.id, id)).run();
   }
 
+  /** Every ask participating in one decision issue, oldest first. */
+  listByIssue(issueId: string): InteractionRow[] {
+    return this.#db
+      .select()
+      .from(interactions)
+      .where(eq(interactions.issueId, issueId))
+      .orderBy(interactions.createdAt)
+      .all();
+  }
+
+  /** Merge relink: the source issue's asks now participate in the target. */
+  reassignIssue(fromIssueId: string, toIssueId: string): string[] {
+    const moved = this.listByIssue(fromIssueId).map((row) => row.id);
+    this.#db
+      .update(interactions)
+      .set({ issueId: toIssueId })
+      .where(eq(interactions.issueId, fromIssueId))
+      .run();
+    return moved;
+  }
+
   markPendingMainStale(): void {
     this.#db
       .update(interactions)

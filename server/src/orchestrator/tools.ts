@@ -23,6 +23,7 @@ import { EvidenceRefSchema, HandoffCoreSchema, HandoffDraftSchema } from "../han
 import { fail, guarded, ok } from "../sdk/tool-result.ts";
 import { effectiveNativeTools } from "../sdk/native-capability-policy.ts";
 import { MAIN_TOOL_NAMES } from "./grants.ts";
+import { renderDecisionIssue, type DecisionIssueService } from "./decision-issues.ts";
 import type { InteractionService } from "./interactions.ts";
 import type { AssumptionService } from "./assumptions.ts";
 import type { ChangeImpactService } from "./change-impact.ts";
@@ -60,6 +61,7 @@ export interface ConsoleToolsInput {
   handoffs: HandoffService;
   artifacts: ArtifactStore;
   interactions: InteractionService;
+  decisionIssues: DecisionIssueService;
   requirements: RequirementService;
   assumptions: AssumptionService;
   changeImpacts: ChangeImpactService;
@@ -72,7 +74,7 @@ export interface ConsoleToolsInput {
 }
 
 export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
-  const { sdk, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, requirements, assumptions, changeImpacts, workstreams, state, catalog, registry } = input;
+  const { sdk, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, decisionIssues, requirements, assumptions, changeImpacts, workstreams, state, catalog, registry } = input;
 
   /** Tools operate only on this UserSession's agent sessions. */
   const owned = (agentSessionId: string) => {
@@ -464,15 +466,30 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         requirementIds: z.array(z.string().min(1)).max(12).optional()
           .describe("The requirement ids this decision resolves or gates."),
         urgency: z.enum(["blocking", "deferred"]).default("blocking"),
+        issueKey: z.string().min(1).max(64).optional()
+          .describe("Stable key naming the underlying human decision; asks sharing a key become ONE issue, resolved by one answer. Check list_decision_issues first."),
       },
       async (args: {
         question: string; header?: string; context?: string;
         options: { label: string; description?: string }[];
         recommendation?: string; requirementIds?: string[];
-        urgency: "blocking" | "deferred";
+        urgency: "blocking" | "deferred"; issueKey?: string;
       }) => {
         try {
           assertLiveRequirementIds(args.requirementIds ?? []);
+        } catch (error) {
+          return fail(error);
+        }
+        let issue: { id: string; created: boolean };
+        try {
+          const opened = decisionIssues.openForAsk({
+            userSessionId,
+            issueKey: args.issueKey,
+            subject: args.question,
+            requirementIds: args.requirementIds ?? [],
+            createdBy: "main",
+          });
+          issue = { id: opened.issue.id, created: !opened.attachedToExisting };
         } catch (error) {
           return fail(error);
         }
@@ -492,21 +509,84 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           allowFreeText: true,
           ...(args.requirementIds === undefined || args.requirementIds.length === 0
             ? {} : { requirementIds: args.requirementIds }),
+          issue,
         });
+        const attachNote = issue.created ? "" :
+          ` This question joined open decision issue ${issue.id} — one operator answer resolves every attached ask.`;
         if (args.urgency === "deferred") {
-          return ok({ queued: true, interactionId: pending.id, urgency: "deferred",
-            note: "The operator can see this now; their answer will wake you. Keep working — do not poll." });
+          return ok({ queued: true, interactionId: pending.id, issueId: issue.id, urgency: "deferred",
+            note: `The operator can see this now; their answer will wake you. Keep working — do not poll.${attachNote}` });
         }
         const resolved = await pending.resolution;
         if (resolved.kind === "answers") {
-          return ok({ resolved: true, interactionId: pending.id, answers: resolved.answers,
+          return ok({ resolved: true, interactionId: pending.id, issueId: issue.id, answers: resolved.answers,
             ...(resolved.freeText === undefined ? {} : { freeText: resolved.freeText }),
             ...(resolved.note === undefined ? {} : { note: resolved.note }),
             ledger: "Recorded as an operator decision, pinned to the named requirements." });
         }
-        return ok({ resolved: false, interactionId: pending.id,
+        return ok({ resolved: false, interactionId: pending.id, issueId: issue.id,
           reason: resolved.kind === "dismissed" ? resolved.reason : "the operator declined" });
       },
+    ),
+
+    /**
+     * The decision-issue registry, main's side: read it, bind a chat answer
+     * to exactly one issue, and merge duplicates it discovers. Human
+     * resolution stays operator authority — resolve_decision_issue RELAYS the
+     * operator's words with main-bound provenance; it is never main's own
+     * judgment.
+     */
+    sdk.tool(
+      "list_decision_issues",
+      "List the project's decision issues — unresolved human choices with keys, askers, competing recommendations, and blocking weight, ordered by structural consequence. 'provisional' = proceeded on an asker's recommendation; the operator still owes the answer.",
+      { status: z.enum(["open", "all"]).default("open") },
+      async (args: { status: "open" | "all" }) =>
+        guarded(() => ({
+          issues: (args.status === "open"
+            ? decisionIssues.listOpenForProject(userSessionId)
+            : decisionIssues.listForProject(userSessionId)
+          ).map((issue) => renderDecisionIssue(issue)),
+        })),
+    ),
+
+    sdk.tool(
+      "resolve_decision_issue",
+      "Bind the operator's chat answer to ONE decision issue (the console holds open issues rather than guessing which a message meant). Pass their words, not a paraphrase — recorded as THEIR decision, it resolves every participating ask and wakes the askers. On a resolved issue it records a revision: history kept, seats notified. Never invent an answer they did not give.",
+      {
+        issueId: z.string().min(1).describe("The issue id (di_…) from the held-questions note or list_decision_issues."),
+        answer: z.string().min(1).describe("The operator's answer, in their words."),
+        note: z.string().optional(),
+      },
+      async (args: { issueId: string; answer: string; note?: string }) =>
+        guarded(() => {
+          const bound = interactions.bindIssueResolution({
+            userSessionId, issueId: args.issueId, answer: args.answer,
+            ...(args.note === undefined ? {} : { note: args.note }), via: "main",
+          });
+          return {
+            ...bound,
+            note: bound.outcome === "superseded"
+              ? "Recorded as a revision — the earlier answer stays in the history; affected seats are being notified. If this changes committed requirements, propose the amendment through the normal requirement machinery."
+              : bound.outcome === "unchanged"
+                ? "The issue already carries exactly this answer — nothing changed."
+                : "Recorded as the operator's decision; every participating ask is resolved and its asker woken.",
+          };
+        }),
+    ),
+
+    sdk.tool(
+      "merge_decision_issues",
+      "Merge two OPEN decision issues that are one human choice: the source's asks move to the target; one answer then resolves them all. Prefer leaving different choices split — a wrong merge applies one answer to a question the operator never read.",
+      {
+        fromIssueId: z.string().min(1),
+        intoIssueId: z.string().min(1),
+        why: z.string().min(1).describe("Why these are one human choice."),
+      },
+      async (args: { fromIssueId: string; intoIssueId: string; why: string }) =>
+        guarded(() => {
+          const merged = decisionIssues.merge({ userSessionId, ...args });
+          return { merged: true, intoIssueId: merged.id, askCount: interactions.listAsksForIssue(merged.id).length };
+        }),
     ),
 
     sdk.tool(

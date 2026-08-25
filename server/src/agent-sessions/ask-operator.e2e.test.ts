@@ -145,6 +145,54 @@ describe("ask_operator", () => {
     expect(h.interactions.listAnsweredUnflushed(agentSessionId, "coordinator")).toHaveLength(0);
   });
 
+  it("asks from two AgentSessions sharing an issueKey become ONE issue; one answer resolves both", async () => {
+    const h = makeDelegationHarness(async function* () {
+      yield initMessage();
+      yield successMessage();
+    });
+    const userSessionId = h.addUserSession();
+    h.host.createSession({
+      userSessionId, title: "auth stream", agents: [{ name: "auth-dev", profileId: "implementer", owns: ["src/auth"] }],
+      briefing: handoff("build auth"),
+    });
+    await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled", 10_000);
+    const authAsk = h.fake.captured.tools.filter((t) => t.name === "ask_operator").at(-1)!;
+    h.host.createSession({
+      userSessionId, title: "api stream", agents: [{ name: "api-dev", profileId: "implementer", owns: ["src/api"] }],
+      briefing: handoff("build api"),
+    });
+    await collectUntil(h.bus, (event) => event.type === "agent_session.turn.settled", 10_000);
+    const apiAsk = h.fake.captured.tools.filter((t) => t.name === "ask_operator").at(-1)!;
+
+    const askedOnce = collectUntil(h.bus, (event) => event.type === "user_session.question.asked", 10_000);
+    const authCall = authAsk.handler({ ...ASK, question: "Should authentication use organization-wide SSO?", issueKey: "auth-identity" }, {});
+    await askedOnce;
+    const askedTwice = collectUntil(h.bus, (event) => event.type === "decision_issue.ask_attached", 10_000);
+    const apiCall = apiAsk.handler({ ...ASK, question: "Can this flow assume enterprise identity?", issueKey: "auth-identity" }, {});
+    await askedTwice;
+
+    // One durable project-level issue, two participating asks from two sessions.
+    const rows = h.db.select().from(interactionRows).all();
+    expect(rows).toHaveLength(2);
+    const issueIds = new Set(rows.map((row) => row.issueId));
+    expect(issueIds.size).toBe(1);
+    expect(new Set(rows.map((row) => row.agentSessionId)).size).toBe(2);
+
+    // One operator answer, on either card, resolves the issue AND both parked askers.
+    const first = rows.find((row) => (row.payload as { questions: { question: string }[] }).questions[0]!.question.includes("SSO"))!;
+    h.interactions.resolveFromApi(userSessionId, first.id, {
+      answers: {}, freeText: { "Should authentication use organization-wide SSO?": "Yes — SSO everywhere" },
+    });
+    const authResult = parse(await authCall);
+    expect(authResult.resolved).toBe(true);
+    const apiResult = parse(await apiCall);
+    expect(apiResult.resolved).toBe(true);
+    expect(JSON.stringify(apiResult)).toContain("SSO everywhere");
+    const issue = h.app.decisionIssues.get(userSessionId, [...issueIds][0]! as string);
+    expect(issue.status).toBe("resolved");
+    expect(issue.resolution?.answer).toContain("SSO everywhere");
+  });
+
   it("never reports a dismissal as a tool error", async () => {
     const { h, userSessionId } = await session();
     const tool = h.fake.captured.tools.find((t) => t.name === "ask_operator")!;

@@ -20,6 +20,7 @@ import type { ProjectStore } from "../db/stores/project-store.ts";
 import { toWireUserSession } from "../api/wire.ts";
 import type { EventBus } from "../events/bus.ts";
 import { newId, nowIso } from "../ids.ts";
+import type { DecisionIssueService } from "../orchestrator/decision-issues.ts";
 import type { InteractionService } from "../orchestrator/interactions.ts";
 import type { OrchestratorRunner } from "../orchestrator/runner.ts";
 import { titleFromFirstMessage } from "../orchestrator/titler.ts";
@@ -31,6 +32,7 @@ export class UserSessionService {
   readonly #bus: EventBus;
   readonly #runner: OrchestratorRunner;
   readonly #interactions: InteractionService;
+  readonly #decisionIssues: DecisionIssueService;
   readonly #workspaces: WorkspaceService;
   readonly #archiveAgentSessions: (userSessionId: string) => void;
   readonly #completion: {
@@ -45,6 +47,7 @@ export class UserSessionService {
     bus: EventBus;
     runner: OrchestratorRunner;
     interactions: InteractionService;
+    decisionIssues: DecisionIssueService;
     workspaces: WorkspaceService;
     archiveAgentSessions: (userSessionId: string) => void;
     completion: {
@@ -58,6 +61,7 @@ export class UserSessionService {
     this.#bus = deps.bus;
     this.#runner = deps.runner;
     this.#interactions = deps.interactions;
+    this.#decisionIssues = deps.decisionIssues;
     this.#workspaces = deps.workspaces;
     this.#archiveAgentSessions = deps.archiveAgentSessions;
     this.#completion = deps.completion;
@@ -147,6 +151,10 @@ export class UserSessionService {
     return {
       session: toWireUserSession(row),
       pendingInteractions: this.#interactions.listPending(id),
+      // Open project-level issues ride the session read: the transcript's
+      // question cards look their shared-issue context up here, and a
+      // continued project surfaces its predecessors' unresolved choices.
+      openDecisionIssues: this.#decisionIssues.listOpenForProject(id),
     };
   }
 

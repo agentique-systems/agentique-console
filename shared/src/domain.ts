@@ -413,6 +413,71 @@ export interface Interaction {
         };
       };
   response: Record<string, unknown> | null;
+  /** The project-level decision issue this ask participates in; null for asks that predate the issue layer, native AskUserQuestion cards, and plan approvals. */
+  issueId: string | null;
+  createdAt: string;
+  resolvedAt: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Decision issues: the project-level unresolved human choice that one or more
+// asks refer to. An ask (an interaction row) is one agent's attempt to get the
+// answer; the issue is the durable shared question — it outlives its askers,
+// carries the resolution history, and is what one operator answer resolves.
+
+export type DecisionIssueStatus = "open" | "resolved" | "superseded";
+
+/** One entry in an issue's resolution history. The LAST entry is the current answer; earlier entries are retained history, never rewritten. */
+export interface DecisionIssueResolution {
+  /** What the operator actually said — free text is preserved verbatim, never normalized to an option. */
+  answer: string;
+  note?: string;
+  /** How the answer arrived: an answered card, chat bound to the single open issue, or main explicitly binding the operator's chat words. */
+  via: "card" | "chat" | "main";
+  /** The answered card (card path) or the ask whose card carried the binding. */
+  interactionId?: string;
+  /** True when this entry replaced an earlier resolution — a reversal, not the first answer. */
+  supersedes?: boolean;
+  at: string;
+}
+
+/** One participating ask, projected from its interaction row. */
+export interface DecisionIssueAskWire {
+  interactionId: string;
+  /** Null = the main lane. */
+  agentSessionId: string | null;
+  asker: string;
+  question: string;
+  status: InteractionStatus;
+  urgency: InteractionUrgency;
+  /** The ask provisionally proceeded on its own recommendation — visible as NOT a human answer. */
+  autoProceeded: boolean;
+  recommendation: string | null;
+  createdAt: string;
+}
+
+export interface DecisionIssueWire {
+  id: string;
+  /** Normalized explicit key askers use to attach to the same issue; null = unkeyed. */
+  issueKey: string | null;
+  /** The shared human question — the first asker's wording until merged/edited. */
+  subject: string;
+  status: DecisionIssueStatus;
+  /** Derived: open, and at least one ask auto-proceeded on its recommendation. */
+  provisional: boolean;
+  /** Union of the participating asks' requirement ids. */
+  requirementIds: string[];
+  asks: DecisionIssueAskWire[];
+  /** Pending blocking asks whose asker's session is still open (main-lane counts) — the live blocking weight. */
+  blockingAsksActive: number;
+  /** All pending asks whose asker's session is still open. */
+  pendingAsksActive: number;
+  resolutions: DecisionIssueResolution[];
+  /** The current answer (last resolution entry), null while open. */
+  resolution: DecisionIssueResolution | null;
+  /** Set when this issue was merged into another; the target carries the asks now. */
+  supersededById: string | null;
+  createdBy: string;
   createdAt: string;
   resolvedAt: string | null;
 }

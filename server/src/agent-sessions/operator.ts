@@ -10,6 +10,7 @@ import type { Config } from "../config.ts";
 import type { Repo, AgentRow, AgentSessionRow } from "../db/repo.ts";
 import type { EventBus } from "../events/bus.ts";
 import { decisionOf, renderDecision } from "../orchestrator/decisions.ts";
+import type { DecisionIssueService } from "../orchestrator/decision-issues.ts";
 import { dedupeKeyFor, type InteractionService } from "../orchestrator/interactions.ts";
 import { ok } from "../sdk/tool-result.ts";
 import type { SdkToolResult } from "../sdk/types.ts";
@@ -42,6 +43,8 @@ export interface OperatorSurfaceDeps {
   paused: () => boolean;
   /** Subtree validation for requirement-linked questions; absent in narrow tests. */
   requirements?: { assertWithinDelegation(userSessionId: string, agentSessionId: string, requirementId: string): void };
+  /** The project decision-issue registry; absent in narrow tests. */
+  decisionIssues?: DecisionIssueService;
 }
 
 export class OperatorSurface {
@@ -119,6 +122,32 @@ export class OperatorSurface {
       ),
       category: "decision",
       dedupeKey: `answer:${interaction.id}`,
+    });
+  }
+
+  /**
+   * A decision issue this asker participated in was REVISED after its asks
+   * had resolved — the targeted half of the supersede fan-out (the ledger's
+   * revision entry reaches everyone else through the bounded decision delta).
+   * The dedupe key carries the issue's resolution ordinal, so retried binds
+   * cannot stack duplicate notices.
+   */
+  deliverIssueUpdate(interaction: Interaction, text: string, dedupeKey: string): void {
+    if (!interaction.agentSessionId || !interaction.agent) return;
+    const session = this.#deps.repo.getAgentSession(interaction.agentSessionId);
+    if (!session || session.lifecycle !== "open") return;
+    this.#deps.transfer({
+      agentSessionId: interaction.agentSessionId,
+      speaker: { kind: "system", name: CONSOLE_SENDER },
+      to: interaction.agent,
+      handoff: this.#deps.simpleHandoff(
+        "Operator revised a decision you depend on",
+        "pending",
+        text,
+        "Reconcile your work with the revised decision.",
+      ),
+      category: "decision",
+      dedupeKey: `${dedupeKey}:${interaction.agent}`,
     });
   }
 
@@ -212,6 +241,34 @@ export class OperatorSurface {
       }
     }
 
+    // The project-level identity of the DECISION, distinct from this ask: an
+    // explicit issueKey attaches to the open issue other seats already raised;
+    // otherwise this ask is a fresh single-ask issue main can merge later.
+    let issue: { id: string; created: boolean } | undefined;
+    let attachedAskCount = 0;
+    if (this.#deps.decisionIssues) {
+      try {
+        const opened = this.#deps.decisionIssues.openForAsk({
+          userSessionId: session.userSessionId,
+          issueKey: args.issueKey,
+          subject: args.question,
+          requirementIds,
+          createdBy: seat.name,
+        });
+        issue = { id: opened.issue.id, created: !opened.attachedToExisting };
+        if (opened.attachedToExisting) {
+          attachedAskCount = this.#deps.interactions.listAsksForIssue(opened.issue.id).length;
+        }
+      } catch (error) {
+        return ok({ resolved: false, invalidIssueKey: true,
+          reason: error instanceof Error ? error.message : String(error),
+          note: "Ask again with a valid issueKey (letters/digits), or omit issueKey." });
+      }
+    }
+    const attachNote = issue !== undefined && !issue.created
+      ? ` Your question joined open decision issue ${issue.id} (${attachedAskCount + 1} ask(s) now share it) — one operator answer resolves all of them.`
+      : "";
+
     const question: InteractionQuestion = {
       question: args.question,
       ...(args.header ? { header: args.header } : {}),
@@ -234,11 +291,13 @@ export class OperatorSurface {
       dedupeKey,
       signal: abort.signal,
       ...(requirementIds.length === 0 ? {} : { requirementIds }),
+      ...(issue === undefined ? {} : { issue }),
     });
 
     if (urgency === "deferred") {
       return ok({ queued: true, interactionId: pending.id, urgency: "deferred",
-        note: "The operator can see this now. Their answer will be handed to you at your next delivery — keep working; do not poll." });
+        ...(issue === undefined ? {} : { issueId: issue.id }),
+        note: `The operator can see this now. Their answer will be handed to you at your next delivery — keep working; do not poll.${attachNote}` });
     }
 
     const clearWait = this.#deps.lanes.bindOperatorWait(session.id, seat.name, { interactionId: pending.id, since: Date.now(), abort });

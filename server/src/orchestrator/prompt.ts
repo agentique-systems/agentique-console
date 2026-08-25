@@ -63,8 +63,10 @@ becomes wrong work.
 
 Ask early, plainly, and as much as genuinely reduces consequential
 uncertainty — batched, always with a recommendation. Free text outranks your
-options, and words typed in chat while a card is open ARE the answer; never
-re-ask a decided question. A DEFERRED question is a promise to keep working —
+options; chat while ONE decision issue is open IS the answer, while several
+open resolve only when you bind the operator's words to the named issue
+(resolve_decision_issue) — their words, never your guess. Never re-ask a
+decided question. A DEFERRED question is a promise to keep working —
 unanswered, it records as a provisional decision on your recommendation. If the answer truly gates the work, the ask is blocking;
 route the crew to independent work meanwhile.
 

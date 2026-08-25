@@ -180,7 +180,7 @@ export class OrchestratorRunner {
     const trimmed = text.trim();
     if (trimmed === "") throw new InvalidInputError("message text is required");
 
-    interactions.dismissPendingForChat(sessionId, trimmed);
+    const { held } = interactions.dismissPendingForChat(sessionId, trimmed);
 
     const row = repo.appendMessage({
       sessionKind: "user",
@@ -195,15 +195,26 @@ export class OrchestratorRunner {
       payload: { userSessionId: sessionId, message: toWireMessage(row) },
     });
     repo.touchUserSession(sessionId);
+    // Several DISTINCT decision issues were pending, so the console applied
+    // the words to none of them (a wrong guess records the operator's words
+    // as the answer to a question they never read). Main reads the actual
+    // message next — the annotation names what is open so main can bind the
+    // answer to the right issue, once, explicitly. The stored message row
+    // stays the operator's clean text.
+    const heldNote = held.length === 0 ? "" :
+      `\n\n[console] ${held.length} separate decision issues are awaiting the operator; this message was NOT auto-applied to any of them:\n` +
+      held.map((entry) => `- ${entry.issueId ?? entry.interactionId}: ${entry.subject} (asked by ${entry.askers.join(", ")})`).join("\n") +
+      `\nIf this message answers one of them, call resolve_decision_issue with that id and the operator's answer (their words, not a paraphrase). If it answers none, leave them open.`;
+    const prompt = `${trimmed}${heldNote}`;
     // A message landing mid-turn steers the live turn instead of queueing
     // behind it — pushed straight into the stream, exactly like typing into
     // the CLI while it works.
     const lane = this.#lane(sessionId);
     if (lane.activeTurn && lane.input) {
       lane.steeredMidTurn += 1;
-      lane.input.push(this.#userMessage(trimmed, { kind: "human" }));
+      lane.input.push(this.#userMessage(prompt, { kind: "human" }));
     } else {
-      this.#enqueue(sessionId, { kind: "operator", text: trimmed });
+      this.#enqueue(sessionId, { kind: "operator", text: prompt });
     }
     return { messageId: row.id, seq: row.seq };
   }

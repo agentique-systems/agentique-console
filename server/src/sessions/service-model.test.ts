@@ -15,6 +15,8 @@ import { Repo } from "../db/repo.ts";
 import { workspaces } from "../db/schema.ts";
 import { newId, nowIso } from "../ids.ts";
 import { UserSessionService } from "./service.ts";
+import { DecisionIssueStore } from "../db/stores/decision-issue-store.ts";
+import { DecisionIssueService } from "../orchestrator/decision-issues.ts";
 import { InteractionStore } from "../db/stores/interaction-store.ts";
 import { ProjectStore } from "../db/stores/project-store.ts";
 
@@ -22,7 +24,13 @@ function makeService() {
   const { db, sqlite } = openDb(":memory:");
   const bus = new EventBus(db, new ArtifactStore(db));
   const repo = new Repo(db, sqlite);
-  const interactions = new InteractionService(new InteractionStore(db), bus);
+  const interactionStore = new InteractionStore(db);
+  const interactions = new InteractionService(interactionStore, bus);
+  const decisionIssues = new DecisionIssueService(new DecisionIssueStore(db), interactionStore, bus, (userSessionId) => {
+    const row = repo.getUserSession(userSessionId);
+    if (!row) throw new Error(`no user session ${userSessionId}`);
+    return row.projectId;
+  });
 
   const workspaceId = newId("ws");
   db.insert(workspaces)
@@ -41,6 +49,7 @@ function makeService() {
     bus,
     runner: runner as unknown as OrchestratorRunner,
     interactions,
+    decisionIssues,
     workspaces: { get: () => undefined } as never,
     archiveAgentSessions: vi.fn(),
     completion: { schedule: vi.fn(), resolve: vi.fn() },

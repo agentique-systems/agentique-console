@@ -83,6 +83,17 @@ export function UserTranscript({
       ),
     [detail.data],
   );
+  // Open decision issues, for cards that share one: the card names its
+  // co-askers so the operator sees ONE answer resolves all of them.
+  const issuesById = useMemo(
+    () =>
+      new Map(
+        (detail.data?.openDecisionIssues ?? []).map(
+          (issue) => [issue.id, issue] as const,
+        ),
+      ),
+    [detail.data],
+  );
 
   const events = stream?.items ?? EMPTY_EVENTS;
   // Fold to items, then collapse tool runs into chains. Trimming happens on
@@ -141,6 +152,7 @@ export function UserTranscript({
             sessionId={id}
             item={item}
             pendingById={pendingById}
+            issuesById={issuesById}
             onRequestChanges={onRequestChanges}
           />
         ))}
