@@ -659,7 +659,7 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
         patternConfig: z.record(z.string(), z.unknown()).optional(),
         agents: z.array(z.object({
           name: z.string(), profileId: z.string(), instructions: z.string().optional(), model: z.string().optional(),
-          owns: z.array(z.string()).default([]).describe("Exclusive write scope. One project-wide rule: a scope any open workstream already owns is rejected unless every claimant declares it shared."),
+          owns: z.array(z.string()).default([]).describe("Exclusive write scope. Required for a writing agent; rejected for a read-only profile. One project-wide rule: a scope any open workstream already owns is rejected unless every claimant declares it shared."),
           sharedOwns: z.array(z.object({ scope: z.string().min(1), why: z.string().min(1) })).optional()
             .describe("Scopes deliberately co-owned with another workstream; each needs a why. Sharing must be declared by EVERY claimant."),
         })).min(1).max(20),
@@ -694,7 +694,7 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
         items: z.array(z.object({
           assignment: z.string().min(1).describe("The complete, self-contained work item — the mapper sees nothing else."),
           name: z.string().optional().describe("Optional agent name; default map.<dispatch>.<n>."),
-          owns: z.array(z.string()).optional().describe("Exclusive write scope — REQUIRED when the mapper profile writes files; the same project-wide ownership rule as every other seat."),
+          owns: z.array(z.string()).optional().describe("Exclusive write scope — REQUIRED when the mapper profile writes files, rejected when it is read-only; the same project-wide ownership rule as every other seat."),
           sharedOwns: z.array(z.object({ scope: z.string().min(1), why: z.string().min(1) })).optional()
             .describe("Scopes deliberately co-owned with another workstream; each needs a why."),
         })).min(1).max(8),

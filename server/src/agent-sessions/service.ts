@@ -16,6 +16,7 @@ import type { SqliteSessionStore } from "../sdk/session-store.ts";
 import type { CapacityService } from "../capacity/service.ts";
 import type { ConsoleSdk } from "../sdk/types.ts";
 import type { WorktreeManager } from "../runtime/worktree-manager.ts";
+import type { LandingLedger } from "../workspaces/landings.ts";
 import type { DecisionIssueService } from "../orchestrator/decision-issues.ts";
 import type { DecisionLedger } from "../orchestrator/decisions.ts";
 import type { AssumptionService } from "../orchestrator/assumptions.ts";
@@ -75,6 +76,8 @@ export interface AgentSessionServiceDeps {
   /** Lazy — the scheduler posts through this host, so it is composed after it. */
   scheduler: () => AssignmentScheduler;
   worktrees: WorktreeManager | null;
+  /** Canonical-landing truth (workspaces/landings.ts): the binding records merges through it. */
+  landings: LandingLedger;
   /** Pause/resume on provider capacity and budget ceilings. */
   capacity: CapacityService;
   /**
@@ -167,6 +170,7 @@ export class AgentSessionService {
       },
       transfer: (input) => this.post(input),
       simpleHandoff,
+      landings: deps.landings,
     });
     this.#composer = new PromptComposer({
       repo: deps.repo, bus: deps.bus, config: deps.config, handoffs: deps.handoffs,

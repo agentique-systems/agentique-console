@@ -191,7 +191,7 @@ function capabilityBrief(profile: AgentProfile, hasWorktree: boolean): string {
     ...(deferred.length > 0 && tools.has("ToolSearch") ? [`${deferred.join(", ")} may be missing from your tool list at the start of a turn — deferred, not absent: load them once with ToolSearch {"query": "select:${deferred.join(",")}"} and use them normally.`] : []),
     ...(skills.length > 0 && tools.has("Skill") ? [`Recommended skills: ${skills.join(", ")}. Invoke one with the Skill tool before starting work it covers.`] : []),
     ...(hasWorktree ? [writes
-      ? "Your cwd is an isolated worktree; teammates cannot see your files until the Console merges them when you report completed."
+      ? "Your cwd is an isolated worktree; teammates cannot see your files until the Console merges them when you report completed. Landing compares your actual changed paths with declared ownership: an edit inside ANOTHER seat's declared scope blocks the merge unless the scope is declared shared — coordinate through your coordinator before writing outside your own scope."
       : "Your cwd is an isolated worktree — a stable snapshot for your review. It is discarded, not merged, when you report: describe defects and fixes in your report rather than applying them."] : []),
   ];
   return `## Your capabilities\n${lines.join("\n")}`;

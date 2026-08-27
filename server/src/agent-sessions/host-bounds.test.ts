@@ -7,7 +7,7 @@ import { initMessage, successMessage } from "../sdk/fake.ts";
 import { makeDelegationHarness } from "../test-helpers.ts";
 
 const agents = (count: number) =>
-  Array.from({ length: count }, (_, i) => ({ name: `seat${i + 1}`, profileId: "explorer", owns: [`scope-${i + 1}`] }));
+  Array.from({ length: count }, (_, i) => ({ name: `seat${i + 1}`, profileId: "implementer", owns: [`scope-${i + 1}`] }));
 
 describe("createSession roster bounds", () => {
   it("seats up to 20 specialists and rejects 21", () => {
@@ -53,15 +53,21 @@ describe("createSession ownership invariant", () => {
     expect(created.agents).toContain("check");
   });
 
-  it("still lets a read-only agent carry a review scope", () => {
-    // `owns` doubles as the assignment boundary for agents that never write, so
-    // forbidding it outright would break a legitimate use.
+  it("rejects a read-only non-reviewer claiming a scope, and keeps review scopes on reviewer profiles", () => {
+    // `owns` used to double as a silent read/assignment boundary — which is
+    // how a live run assigned a read-only seat "ownership" of a document it
+    // could never write. Ownership now means write responsibility only; a
+    // reviewer profile (exemptFromOwnership) still declares its review
+    // boundary explicitly.
     const h = harness();
     const userSessionId = h.addUserSession();
+    expect(() => h.host.createSession({
+      userSessionId, title: "scoped scout", agents: [{ name: "scout", profileId: "explorer", owns: ["docs/"] }],
+    })).toThrow(/read-only and cannot own writable scope/);
     const created = h.host.createSession({
-      userSessionId, title: "scoped reviewer", agents: [{ name: "scout", profileId: "explorer", owns: ["docs/"] }],
+      userSessionId, title: "scoped reviewer", agents: [{ name: "check", profileId: "reviewer", owns: ["docs/"] }],
     });
-    expect(created.agents).toContain("scout");
+    expect(created.agents).toContain("check");
   });
 });
 

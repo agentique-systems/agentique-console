@@ -778,7 +778,9 @@ export type CoverageExceptionKind =
   /** An open task in an open session still discharges a live requirement. */
   | "task_debt"
   /** An open decision issue proceeded provisionally on a recommendation — not a human answer. */
-  | "decision_provisional";
+  | "decision_provisional"
+  /** A previously landed worktree result is no longer reachable from the canonical workspace HEAD. */
+  | "landing_invalidated";
 
 export interface CoverageException {
   kind: CoverageExceptionKind;

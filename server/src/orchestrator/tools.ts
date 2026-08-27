@@ -118,7 +118,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
               instructions: z.string().optional().describe("Agent brief appended to the profile instructions"),
               model: z.string().optional().describe("Model override"),
               skills: z.array(z.string()).optional().describe("Extra skills to RECOMMEND to this seat, union'd with the profile's defaults."),
-              owns: z.array(z.string()).default([]).describe("Exclusive write scope. Required for a writing agent. One project-wide rule: a scope any open workstream owns is rejected unless every claimant declares it shared."),
+              owns: z.array(z.string()).default([]).describe("Exclusive write scope. Required for a writing agent; rejected for a read-only profile. One project-wide rule: a scope any open workstream owns is rejected unless every claimant declares it shared. Changed paths are checked against scopes at landing."),
               sharedOwns: z.array(z.object({ scope: z.string().min(1), why: z.string().min(1) })).optional()
                 .describe("Scopes deliberately co-owned with another workstream, each with a why; EVERY claimant must declare the share."),
             }),
@@ -1272,7 +1272,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         profileId: z.string().min(1).describe("A profile id from list_agent_profiles"),
         instructions: z.string().optional().describe("Brief appended to the profile instructions"),
         model: z.string().optional(),
-        owns: z.array(z.string()).default([]).describe("Exclusive write scope; required for a writing profile. Same project-wide rule as creation."),
+        owns: z.array(z.string()).default([]).describe("Exclusive write scope; required for a writing profile, rejected for a read-only one. Same project-wide rule as creation."),
         sharedOwns: z.array(z.object({ scope: z.string().min(1), why: z.string().min(1) })).optional()
           .describe("Scopes co-owned with another workstream, each with a why."),
         skills: z.array(z.string()).optional().describe("Extra skills, from the catalog"),

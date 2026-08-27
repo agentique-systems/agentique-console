@@ -44,7 +44,7 @@ function mailroomWith(h: Harness, selector: DeliverySelector, sink: {
     worktree: new WorktreeBinding({ repo: h.repo, bus: h.bus, artifacts: h.app.artifacts, config: h.config,
       worktrees: null, getWorkspaceRoot: () => "/tmp/test-workspace",
       escalationTarget: () => "main", isReviewRole: () => false, laneBusy: () => false, laneLive: () => false,
-      transfer: () => { throw new Error("unused"); }, simpleHandoff }),
+      transfer: () => { throw new Error("unused"); }, simpleHandoff, landings: h.app.landings }),
     composer: new PromptComposer({ repo: h.repo, bus: h.bus, config: h.config, handoffs: h.handoffs,
       decisions: h.decisions, requirements: h.app.requirements, assumptions: h.app.assumptions, tasks: h.tasks, interactions: h.interactions, worktrees: null, laneState: () => null }),
     lanes: { hasBusyTurnExcludingOperatorWaits: () => false, operatorWaits: () => [],

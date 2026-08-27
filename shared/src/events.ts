@@ -466,6 +466,52 @@ export interface AgentWorktreeDiscardedPayload {
   archivedBranch?: string | null;
 }
 
+/**
+ * A completed seat's actual changed paths fell inside ANOTHER active seat's
+ * declared write scope without shared ownership — the landing was blocked
+ * before the merge, with the work preserved. The structured twin of the
+ * failure handoff the seat's escalation target receives.
+ */
+export interface AgentWorktreeOwnershipViolationPayload {
+  agentSessionId: string;
+  agent: string;
+  violations: {
+    path: string;
+    /** The holder's declared scope that covers the path. */
+    scope: string;
+    ownerAgent: string;
+    ownerAgentSessionId: string;
+    ownerSessionTitle: string;
+  }[];
+  /** The landing seat's own declared write scopes at the time. */
+  declaredScopes: string[];
+  artifactId: string | null;
+  archivedBranch: string | null;
+}
+
+/**
+ * A previously landed merge commit is no longer reachable from the canonical
+ * workspace HEAD (branch reset, rollback, out-of-band git). The landing row
+ * keeps its historical fact; current truth is invalidated, with a salvage
+ * ref minted while the commit object still existed.
+ */
+export interface AgentWorktreeLandingInvalidatedPayload {
+  agentSessionId: string;
+  agent: string;
+  landingId: string;
+  mergeCommit: string;
+  reason: string;
+  salvageRef: string | null;
+}
+
+/** An invalidated landing's merge commit became reachable again; current truth recovers. */
+export interface AgentWorktreeLandingRestoredPayload {
+  agentSessionId: string;
+  agent: string;
+  landingId: string;
+  mergeCommit: string;
+}
+
 /** A spec revision was approved (possibly operator-edited); it now governs the run. */
 export interface SpecUpdatedPayload {
   userSessionId: string;
@@ -937,6 +983,9 @@ export type ConsoleEvent = Base &
     | { type: "agent_session.worktree.created"; payload: AgentWorktreeCreatedPayload }
     | { type: "agent_session.worktree.merged"; payload: AgentWorktreeMergedPayload }
     | { type: "agent_session.worktree.merge_failed"; payload: AgentWorktreeMergeFailedPayload }
+    | { type: "agent_session.worktree.ownership_violation"; payload: AgentWorktreeOwnershipViolationPayload }
+    | { type: "agent_session.worktree.landing_invalidated"; payload: AgentWorktreeLandingInvalidatedPayload }
+    | { type: "agent_session.worktree.landing_restored"; payload: AgentWorktreeLandingRestoredPayload }
     | { type: "agent_session.worktree.discarded"; payload: AgentWorktreeDiscardedPayload }
     | { type: "agent_session.delegation.sent"; payload: DelegationSentPayload }
     | { type: "agent_session.result.returned"; payload: ResultReturnedPayload }

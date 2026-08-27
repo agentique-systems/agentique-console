@@ -49,6 +49,7 @@ function makeDeps(overrides: Partial<CoverageDeps> = {}): CoverageDeps {
     listOpenDecisionIssues: () => [],
     listOpenChangeImpacts: () => [],
     brokenWorkstreamLinks: () => [],
+    invalidatedLandings: () => [],
     isAgentSessionOpen: () => true,
     policy: "waiver_required",
     ...overrides,
@@ -171,6 +172,19 @@ describe("computeCoverageReport", () => {
     expect(report.exceptions).toMatchObject([{ kind: "decision_provisional", ref: "di1" }]);
     expect(report.advisories).toHaveLength(1);
     expect(report.advisories[0]).toContain("di2");
+  });
+
+  it("types an unreachable landed result as landing_invalidated — 'landed' must not outlive the reset", () => {
+    const report = computeCoverageReport(makeDeps({
+      invalidatedLandings: () => [{
+        id: "land_1", agentSessionId: "as1", agent: "canon", mergeCommit: "abcdef1234567890",
+        invalidatedReason: "merge commit abcdef123456 is no longer reachable from workspace HEAD 987654321000",
+        salvageRef: "agentique/archive/landing/as1/canon",
+      }],
+    }), "us1")!;
+    expect(report.exceptions).toMatchObject([{ kind: "landing_invalidated", ref: "land_1" }]);
+    expect(report.exceptions[0]!.detail).toContain("no longer in the canonical workspace");
+    expect(report.exceptions[0]!.detail).toContain("agentique/archive/landing/as1/canon");
   });
 
   it("records reconciliation state for audit and tail reads", () => {
