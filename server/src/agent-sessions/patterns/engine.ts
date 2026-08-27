@@ -35,6 +35,13 @@ export interface PatternContext {
   simpleHandoff(action: string, status: HandoffDraft["core"]["status"], summary: string, nextAction: string | null): HandoffDraft;
   /** Deliver every queued row for `recipient` in one minted turn (#deliverConsole). */
   deliverNow(agentSessionId: string, recipient: string): void;
+  /**
+   * Rewrite these senders' queued join-held rows to ordinary "wake" rows —
+   * the engine's one flush decision, made durable BEFORE deliverNow so a
+   * capacity pause or a busy collector cannot strand a met join: any later
+   * boundary, resume, or boot delivery carries the released rows.
+   */
+  releaseHeld(agentSessionId: string, recipient: string, senders: string[]): void;
   /** Any lane of this session has a turn in flight right now. */
   hasActivity(agentSessionId: string): boolean;
   /** The session already delivered its report to main (#statusOf === "reported"). */
@@ -155,7 +162,7 @@ function advanceJoinHop(ctx: PatternContext, session: AgentSessionRow, hop: Patt
   const senderRole = roleOf(ctx, session, hop.sender);
   const recipientRole = roleOf(ctx, session, hop.recipient);
   const spec = ctx.contract(session).joins.find((join) => join.over === senderRole && join.deliverTo === recipientRole);
-  if (!spec) { ctx.deliverNow(session.id, hop.recipient); return; }
+  if (!spec) { ctx.releaseHeld(session.id, hop.recipient, [hop.sender]); ctx.deliverNow(session.id, hop.recipient); return; }
 
   const state = repo.getPatternState(session.id);
   const joins = { ...(state?.joins ?? {}) } as Record<string, JoinState>;
@@ -163,6 +170,7 @@ function advanceJoinHop(ctx: PatternContext, session: AgentSessionRow, hop: Patt
   if (!joinId) {
     if (Object.values(joins).some((join) => join.over === senderRole && join.settled)) {
       // The join already settled — a straggler; deliver it on its own.
+      ctx.releaseHeld(session.id, hop.recipient, [hop.sender]);
       ctx.deliverNow(session.id, hop.recipient);
       return;
     }
@@ -183,6 +191,7 @@ function advanceJoinHop(ctx: PatternContext, session: AgentSessionRow, hop: Patt
   if (met) {
     bus.append({ type: "agent_session.join.completed", userSessionId: session.userSessionId, agentSessionId: session.id,
       payload: { agentSessionId: session.id, joinId, arrived: Object.keys(join.reports), of: join.expected.length, failed } });
+    ctx.releaseHeld(session.id, join.deliverTo, join.expected);
     ctx.deliverNow(session.id, join.deliverTo);
   }
 }

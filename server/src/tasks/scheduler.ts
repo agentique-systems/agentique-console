@@ -297,7 +297,12 @@ export class AssignmentScheduler {
       `Remove the dependency with task_update {removeBlockedBy: ["${blocker.sdkTaskId}"]} to release the assignment, or cancel it (assignment id ${row.id}).`);
   }
 
-  /** Journaled console decision to the assigner; MATERIAL, so a main assigner wakes. */
+  /**
+   * Journaled console decision to the assigner. Status "blocked" is literal —
+   * the scheduled assignment cannot dispatch without the assigner's action —
+   * and it is also what makes the notice wake a main assigner under the
+   * attention policy (a pending/in_progress decision RECORD would not).
+   */
   #notice(row: ScheduledAssignmentRow, dedupeKey: string, action: string, summary: string, nextAction: string): void {
     try {
       this.#deps.post({
@@ -306,7 +311,7 @@ export class AssignmentScheduler {
         to: row.sender,
         handoff: {
           core: {
-            schemaVersion: 1, taskId: null, status: "pending", risk: "medium", action,
+            schemaVersion: 1, taskId: null, status: "blocked", risk: "medium", action,
             state: { summary, evidence: [] }, result: { summary: null, artifacts: [] },
             uncertainty: [], nextAction, requestExpandedContext: false,
           },

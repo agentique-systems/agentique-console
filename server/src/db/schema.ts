@@ -1024,6 +1024,17 @@ export const mailboxDeliveries = sqliteTable(
     status: text("status", {
       enum: ["queued", "delivered", "acknowledged", "cancelled"],
     }).notNull().default("queued"),
+    /**
+     * Console-computed attention disposition, stamped at journal time
+     * (agent-sessions/attention.ts): interrupt = may steer an active turn;
+     * wake = earns a turn at the next boundary; defer = durable, rides the
+     * next composed delivery, never causes a turn itself; hold = join-held,
+     * flushed only by the pattern engine. The default keeps every
+     * pre-migration row on the historical deliver-at-next-boundary path.
+     */
+    attention: text("attention", {
+      enum: ["interrupt", "wake", "defer", "hold"],
+    }).notNull().default("wake"),
     /** Idempotence key for console-authored deliveries (answers, notices, redrives). */
     dedupeKey: text("dedupe_key"),
     deliveredAt: text("delivered_at"),

@@ -120,8 +120,9 @@ what and who awaits whom.
 
 ## Supervision
 
-The Console wakes you for material events, and reports reach you on their own
-— never poll healthy sessions or set deadlines to check on them. Diagnose from
+The Console wakes you for material events and journals routine progress
+without waking you — never poll healthy sessions or set deadlines to check on
+them. Diagnose from
 LIVE data before intervening: session_activity shows what agents are DOING; an
 alarm is a signal to verify (it names the levers); a long call is normal
 work. A coordinator's final is WITHHELD while its blocking operator questions

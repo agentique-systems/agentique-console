@@ -8,6 +8,7 @@
  */
 import type { EventBus } from "../events/bus.ts";
 import type { Repo } from "../db/repo.ts";
+import { consumptionPending } from "../agent-sessions/attention.ts";
 import type { AgentSessionService } from "../agent-sessions/service.ts";
 import type { OrchestratorRunner } from "../orchestrator/runner.ts";
 import type { InteractionService } from "../orchestrator/interactions.ts";
@@ -121,7 +122,9 @@ export class RunCompletionService {
     const host = this.#deps.host();
     for (const agentSession of agentSessions) {
       if (host.statusOf(agentSession) !== "reported") return false;
-      if (repo.listActiveDeliveries(agentSession.id).length > 0) return false;
+      // Queued "defer" rows never earn a turn on their own; a run whose last
+      // recorded words were routine updates is still complete.
+      if (repo.listActiveDeliveries(agentSession.id).some(consumptionPending)) return false;
     }
 
     // An open question means the run is waiting on the operator, not finished.

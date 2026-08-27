@@ -42,7 +42,8 @@ export const TERMINAL_REPORT_BULLET = `
 
 const HUB_WORK_BULLET = `
 - Work and blockers go to your coordinator: it sequences the units and owns
-  what happens next.`;
+  what happens next. Routine progress does not wake it — send handoffs for
+  results and blockers, not to prove activity.`;
 
 /** The hub pattern's protocol, composed from the fragments. */
 export const SESSION_PROTOCOL = `${PROTOCOL_INTRO}${HUB_WORK_BULLET}${OPERATOR_PATH_BULLETS}`;

@@ -76,7 +76,10 @@ const HUB_CONTRACT: TopologyContract = {
     { from: "main", to: "specialist", advance: "immediate", categories: ["update"] },
     { from: "coordinator", to: "main", advance: "immediate" },
     { from: "coordinator", to: "specialist", advance: "immediate" },
-    { from: "specialist", to: "coordinator", advance: "immediate" },
+    // The report lane: routine specialist progress accumulates durably and
+    // batches into the coordinator's next turn instead of minting one each —
+    // the hub behaves as an integration boundary, not a live chat.
+    { from: "specialist", to: "coordinator", advance: "immediate", attention: "material" },
   ],
   joins: [],
   entry: { role: "coordinator", broadcast: false },

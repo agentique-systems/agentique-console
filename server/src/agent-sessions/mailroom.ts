@@ -35,6 +35,7 @@ import {
   WithheldFinalError,
   type Category,
 } from "./final-gate.ts";
+import { attentionOf, demandsTurn, wakesMain, type AttentionDisposition } from "./attention.ts";
 import { syncLedgerFromHandoff } from "./ledger-sync.ts";
 import { MAIN_RECIPIENT } from "./names.ts";
 import type { PatternHop } from "./patterns/engine.ts";
@@ -49,8 +50,8 @@ import type {
 } from "./seams.ts";
 import type { WorktreeBinding } from "./worktree-binding.ts";
 
-/** Categories that wake main (or cross a child boundary) on arrival. */
-export const MATERIAL_CATEGORIES = new Set(["milestone", "failure", "final", "decision"]);
+/** Re-exported from attention.ts, where the whole wake policy now lives. */
+export { MATERIAL_CATEGORIES } from "./attention.ts";
 
 /** The default DeliverySelector: every queued row goes. */
 export const identitySelector: DeliverySelector = { select: (_session, _agent, queuedRows) => queuedRows };
@@ -123,6 +124,14 @@ export class Mailroom {
         payload: { agentSessionId: session.id, sender: input.speaker.name, from: requested, to: category, status: input.handoff.core.status } });
     }
     const edge = this.#deps.routing.assertRoute(session, input.speaker.name, input.to, category);
+    // The attention disposition, decided ONCE here — where the edge, the
+    // category, and the handoff's own status/risk are all in hand — and
+    // stamped on the delivery row so every later consumer (delivery, status
+    // derivation, residency, restart sweeps) reads the same verdict. Main has
+    // no seat lane, so its rows carry the main-sink gate's verdict directly.
+    const attention: AttentionDisposition = input.to === MAIN_RECIPIENT
+      ? (wakesMain(category, input.handoff.core.status) ? "wake" : "defer")
+      : attentionOf(edge, category, input.handoff.core.status, input.handoff.core.risk);
     if (input.dedupeKey) {
       const prior = repo.findDeliveryByDedupe(session.id, input.speaker.name, input.to, input.dedupeKey);
       const priorMessage = prior ? repo.getMessageById(prior.messageId) : undefined;
@@ -186,7 +195,7 @@ export class Mailroom {
       this.#deps.bus.append({ type: "task.sync.failed", userSessionId: session.userSessionId, agentSessionId: session.id,
         payload: { agentSessionId: session.id, sender: input.speaker.name, taskRef: taskSync.taskRef, reason: taskSync.reason, detail: taskSync.detail } });
     }
-    const { message, delivery, text } = this.#journal(session, input.speaker, input.to, input.handoff, category, {
+    const { message, delivery, text } = this.#journal(session, input.speaker, input.to, input.handoff, category, attention, {
       ...(input.dedupeKey ? { dedupeKey: input.dedupeKey } : {}), ...(input.turnId ? { turnId: input.turnId } : {}),
     });
     if (input.to === MAIN_RECIPIENT) {
@@ -208,8 +217,10 @@ export class Mailroom {
         // (its own record, mailbox row, and lane wake), then ack child-side.
         // The dedupe key makes a crash between re-post and ack replay-safe.
         // The parent's release check runs AFTER the ack — before it, this very
-        // delivery still counts the child as unsettled.
-        if (MATERIAL_CATEGORIES.has(category)) this.#deps.boundary.crossBoundary(session, message, input.handoff, category);
+        // delivery still counts the child as unsettled. The child's "main" IS
+        // its parent's controller, so the same attention gate applies: a
+        // routine decision record stays in the child's journal.
+        if (attention === "wake") this.#deps.boundary.crossBoundary(session, message, input.handoff, category);
         this.patchDelivery(session, delivery, "acknowledged");
         if (category === "final" || category === "failure") {
           const parent = session.parentAgentSessionId === null ? undefined : this.#deps.repo.getAgentSession(session.parentAgentSessionId);
@@ -217,7 +228,7 @@ export class Mailroom {
         }
       } else {
       this.patchDelivery(session, delivery, "acknowledged");
-      if (MATERIAL_CATEGORIES.has(category)) {
+      if (attention === "wake") {
         // Answered operator questions ride along with the next material wake.
         // Not marked flushed here: `flushed_at` means the ASKING AGENT has
         // been told, and main is not the asker.
@@ -229,9 +240,14 @@ export class Mailroom {
           .filter((row) => row.agent !== null);
         const withAsks = openAsks.length === 0 ? wakeText
           : `${wakeText}\n\nStill waiting on the operator (you cannot answer these; only they can):\n${openAsks.map((row) => `- ${row.agent}: ${questionTextOf(row)}`).join("\n")}`;
+        // Reports recorded without a wake since main's last one stay
+        // discoverable: the next wake carries their count and the read path.
+        const deferred = this.#deps.repo.countMainDeferredSinceLastWake(session.id, MAIN_RECIPIENT, delivery.id);
+        const withDeferred = deferred === 0 ? withAsks
+          : `${withAsks}\n\n[Console: ${deferred} earlier report(s) from this session were recorded without waking you — routine progress; read_agent_session shows them.]`;
         this.#deps.bus.append({ type: "agent_session.result.returned", userSessionId: session.userSessionId, agentSessionId: session.id,
           payload: { userSessionId: session.userSessionId, agentSessionId: session.id, digestPreview: text.slice(0, 140) } });
-        this.#deps.wake?.(session.userSessionId, session.id, category, withAsks);
+        this.#deps.wake?.(session.userSessionId, session.id, category, withDeferred);
       }
       }
     } else {
@@ -267,7 +283,7 @@ export class Mailroom {
   }
 
   /** Journal core: persist the handoff and mint its mailbox delivery. */
-  #journal(session: AgentSessionRow, speaker: Speaker, to: string, handoff: HandoffDraft, category: Category, opts: {
+  #journal(session: AgentSessionRow, speaker: Speaker, to: string, handoff: HandoffDraft, category: Category, attention: AttentionDisposition, opts: {
     dedupeKey?: string; turnId?: string;
   }): { message: MessageRow; delivery: MailboxDeliveryRow; text: string; handoffId: string } {
     const { repo, bus } = this.#deps;
@@ -291,7 +307,7 @@ export class Mailroom {
       sessionKind: "agent", sessionId: session.id, userSessionId: session.userSessionId,
       agentSessionId: session.id, speaker, to, recipient: to,
       kind: "message" as const,
-      text, category, handoff: prepared.row, summary: prepared.summary,
+      text, category, attention, handoff: prepared.row, summary: prepared.summary,
       ...(opts.turnId ? { turnId: opts.turnId } : {}), ...(opts.dedupeKey ? { dedupeKey: opts.dedupeKey } : {}),
     });
     // Latest-handoff pointers, chosen HERE where the recipient is known — the
@@ -317,7 +333,7 @@ export class Mailroom {
     bus.append({ type: "agent_session.message.appended", userSessionId: session.userSessionId, agentSessionId: session.id,
       payload: { agentSessionId: session.id, message: toWireMessage(message) } });
     bus.append({ type: "agent_session.delivery.updated", userSessionId: session.userSessionId, agentSessionId: session.id,
-      payload: { agentSessionId: session.id, deliveryId: delivery.id, messageSeq: message.seq, sender: speaker.name, recipient: to, category, status: "queued" } });
+      payload: { agentSessionId: session.id, deliveryId: delivery.id, messageSeq: message.seq, sender: speaker.name, recipient: to, category, status: "queued", attention } });
     return { message, delivery, text, handoffId: prepared.row.id };
   }
 
@@ -325,22 +341,43 @@ export class Mailroom {
    * Console-path delivery: render queued journal rows into the lane input.
    * Selection, marking, and composition live here; the mint-or-steer push is
    * the Injector's.
+   *
+   * The attention gate lives HERE, so every caller — a fresh post, the turn
+   * settle, the boot sweep, the capacity resume — reads one policy:
+   * - "defer" rows never cause a delivery; they ride along when something
+   *   attention-bearing goes (a batch is ONE composed prompt either way);
+   * - "hold" rows belong to the pattern engine — its join release rewrites
+   *   them to "wake" when the join is met, so an unrelated delivery, a boot,
+   *   or a settle cannot leak a join early;
+   * - an open turn is steered only for "interrupt" rows; everything else
+   *   waits for the settle path to re-call this.
+   * All gates run BEFORE `ensureLive`: a routine update must not spawn or
+   * unpark a seat, let alone mint it a turn.
    */
   async deliver(agentSessionId: string, recipient: string): Promise<void> {
     // Capacity pause: deliveries stay queued (never cancelled) and redeliver
     // on resume; not even the recipient's process is spawned.
     if (this.#deps.capacityPaused()) return;
+    const { repo } = this.#deps;
+    const eligibleRows = (): MailboxDeliveryRow[] => repo.listUnackedDeliveries(agentSessionId, recipient)
+      .filter((row) => row.status === "queued" && row.attention !== "hold");
+    const busy = (): boolean => this.#deps.lanes.namesWithActiveTurn(agentSessionId).includes(recipient);
+    const pending = eligibleRows();
+    if (pending.length === 0) return;
+    if (!pending.some((row) => demandsTurn(row.attention))) return;
+    if (busy() && !pending.some((row) => row.attention === "interrupt")) return;
     await this.#deps.ensureLive(agentSessionId, recipient);
     // Re-check after the spawn wait: a pause pressed while the seat was
     // waking must not slip a delivery through (rows flip to `delivered`
     // only below, so nothing is lost by returning here).
     if (this.#deps.capacityPaused()) return;
-    const { repo } = this.#deps;
     const session = repo.getAgentSession(agentSessionId);
     const seatRow = repo.getAgent(agentSessionId, recipient);
     if (!session || !this.#deps.injector.ready(agentSessionId, recipient) || !seatRow) return;
-    const queued = repo.listUnackedDeliveries(agentSessionId, recipient).filter((row) => row.status === "queued");
+    const queued = eligibleRows();
     if (queued.length === 0) return;
+    // A turn minted while the seat was waking gets the same steering rule.
+    if (busy() && !queued.some((row) => row.attention === "interrupt")) return;
     const rows = this.#deps.selector.select(session, seatRow, queued);
     if (rows.length === 0) return;
     const messages = rows.map((row) => repo.getMessageById(row.messageId)).filter((row): row is MessageRow => row !== undefined);
@@ -352,10 +389,13 @@ export class Mailroom {
 
   patchDelivery(session: AgentSessionRow, delivery: MailboxDeliveryRow, status: "queued" | "delivered" | "acknowledged" | "cancelled"): void {
     const now = nowIso();
+    // A "hold" row goes back to queued only after it was delivered — its join
+    // flush is spent, so ordinary boundary delivery owns the redelivery.
+    const spentHold = status === "queued" && delivery.attention === "hold";
     // `deliveredAt: now` on the acknowledged path is a FLOOR, not an
     // overwrite: repo.patchDelivery coalesces it against whatever is already
     // stored, so an ack only fills the field in when delivery never stamped it.
-    this.#deps.repo.patchDelivery(delivery.id, { status, ...(status === "delivered" ? { deliveredAt: now } : {}), ...(status === "acknowledged" ? { acknowledgedAt: now, deliveredAt: now } : {}) });
+    this.#deps.repo.patchDelivery(delivery.id, { status, ...(spentHold ? { attention: "wake" } : {}), ...(status === "delivered" ? { deliveredAt: now } : {}), ...(status === "acknowledged" ? { acknowledgedAt: now, deliveredAt: now } : {}) });
     // Seat context cursors ride the delivery lifecycle: an ACK is the one
     // point the runtime knows the composed prompt was processed, so the
     // decision watermark and answer flush advance HERE — and a requeue or
@@ -367,6 +407,6 @@ export class Mailroom {
     }
     const message = this.#deps.repo.getMessageById(delivery.messageId);
     this.#deps.bus.append({ type: "agent_session.delivery.updated", userSessionId: session.userSessionId, agentSessionId: session.id,
-      payload: { agentSessionId: session.id, deliveryId: delivery.id, messageSeq: message?.seq ?? 0, sender: delivery.sender, recipient: delivery.recipient, category: delivery.category, status } });
+      payload: { agentSessionId: session.id, deliveryId: delivery.id, messageSeq: message?.seq ?? 0, sender: delivery.sender, recipient: delivery.recipient, category: delivery.category, status, attention: spentHold ? "wake" : delivery.attention } });
   }
 }

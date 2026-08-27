@@ -33,6 +33,7 @@ import { roleOfAgent, speakerKindOf } from "./topology.ts";
 import { SessionRouting } from "./routing.ts";
 import { WorktreeBinding } from "./worktree-binding.ts";
 import { OperatorSurface } from "./operator.ts";
+import { demandsTurn } from "./attention.ts";
 import { Mailroom, identitySelector, simpleHandoff } from "./mailroom.ts";
 import { sweepLiveness } from "./liveness.ts";
 import { AgentLanePool, type ActiveTurn } from "./lanes.ts";
@@ -127,7 +128,12 @@ export class AgentSessionService {
     this.#routing = new SessionRouting({ repo: deps.repo });
     this.#lanes = new AgentLanePool({
       config: deps.config,
-      hasQueuedWork: (agentSessionId, seat) => deps.repo.listUnackedDeliveries(agentSessionId, seat).length > 0,
+      // Residency is pinned only by work that will demand a turn: delivered
+      // rows are mid-consumption; queued interrupt/wake rows are due. Deferred
+      // routine progress and join-held rows must not keep a seat resident —
+      // the delivery that eventually carries them respawns it.
+      hasQueuedWork: (agentSessionId, seat) => deps.repo.listUnackedDeliveries(agentSessionId, seat)
+        .some((row) => row.status === "delivered" || demandsTurn(row.attention)),
       // Closing the lane closes the seat's CLI subprocess, and everything the
       // agent started is a child of it: a background Bash server, an MCP
       // server's browser. The Console owns no capability, so it sweeps none.
@@ -654,6 +660,18 @@ export class AgentSessionService {
       post: (input) => this.post(input),
       simpleHandoff,
       deliverNow: (agentSessionId, recipient) => void this.#mailroom.deliver(agentSessionId, recipient).catch((error) => this.#recordFailure(agentSessionId, error)),
+      // The engine's join release: held rows from these senders become
+      // ordinary "wake" rows, so the flush that follows — or, if a pause or a
+      // busy collector intervenes, ANY later boundary/resume/boot delivery —
+      // carries them without re-waiting on the already-met join.
+      releaseHeld: (agentSessionId, recipient, senders) => {
+        const from = new Set(senders);
+        for (const row of this.#deps.repo.listUnackedDeliveries(agentSessionId, recipient)) {
+          if (row.status === "queued" && row.attention === "hold" && from.has(row.sender)) {
+            this.#deps.repo.patchDelivery(row.id, { attention: "wake" });
+          }
+        }
+      },
       hasActivity: (agentSessionId) => this.#lanes.namesWithActiveTurn(agentSessionId).length > 0,
       sessionReported: (session) => this.#operator.statusOf(session) === "reported",
       profile: (id, workspaceId) => this.#lifecycle.profile(id, workspaceId),

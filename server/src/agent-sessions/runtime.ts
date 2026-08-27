@@ -200,8 +200,11 @@ export class AgentRuntime implements Injector, TurnTracker {
     await lane.ready;
     // A respawn may inherit rows the previous process took delivery of but
     // never consumed; requeue them so the console path re-carries exactly once.
+    // A delivered "hold" row's join flush is spent — it requeues as "wake" so
+    // ordinary boundary delivery owns the redelivery (mailroom.patchDelivery
+    // applies the same flip on its requeue path).
     const stale = repo.listUnackedDeliveries(agentSessionId, seat).filter((row) => row.status === "delivered");
-    for (const row of stale) repo.patchDelivery(row.id, { status: "queued", deliveredAt: null });
+    for (const row of stale) repo.patchDelivery(row.id, { status: "queued", deliveredAt: null, ...(row.attention === "hold" ? { attention: "wake" } : {}) });
   }
 
   #spawnSeat(session: AgentSessionRow, seatRow: AgentRow, lane: AgentLane): void {
@@ -644,8 +647,13 @@ export class AgentRuntime implements Injector, TurnTracker {
     this.#deps.worktree.snapshotTurn(session.id, seatName, turn.turnId);
     this.#deps.worktree.flushDeferredLanding(session, seatName);
     runtime.idle();
-    // Paused seats wait for the resume hook's redelivery sweep instead.
-    if (requeued && !pausedMidTurn && repo.getAgentSession(session.id)?.lifecycle === "open") {
+    // The turn boundary is where queued attention-bearing work is carried in:
+    // requeued rows from this turn, plus anything that arrived while it ran
+    // and did not merit a mid-turn steer. deliver() itself decides — it
+    // no-ops unless a queued row demands a turn, and defer rows only ride
+    // along. Paused seats wait for the resume hook's redelivery sweep, and a
+    // deliberately-closed lane (park, archive, shutdown) must not respawn.
+    if (!pausedMidTurn && !lane.deliberateStop && repo.getAgentSession(session.id)?.lifecycle === "open") {
       void hooks.deliver(session.id, seatName).catch((error) => hooks.recordFailure(session.id, error));
     }
     hooks.refreshStatus(session.id);

@@ -11,8 +11,8 @@ import type { AgentSessionRow, MailboxDeliveryRow, MessageRow, Repo } from "../d
 import { InvalidInputError } from "../errors.ts";
 import type { EventBus } from "../events/bus.ts";
 import type { HandoffService } from "../handoffs/service.ts";
+import { wakesMain } from "./attention.ts";
 import type { Category } from "./final-gate.ts";
-import { MATERIAL_CATEGORIES } from "./mailroom.ts";
 import { CHILD_SENDER_PREFIX, CONSOLE_SENDER } from "./names.ts";
 import type { SessionRouting } from "./routing.ts";
 import type { BoundaryBroker, RecordFailure, SimpleHandoff, Transfer } from "./seams.ts";
@@ -96,9 +96,13 @@ export class NestingBroker implements BoundaryBroker {
       const message = this.#deps.repo.getMessageById(delivery.messageId);
       const summary = message?.payload?.handoff as { id?: string } | undefined;
       if (!message) return;
-      if (summary?.id && this.#deps.handoffs && MATERIAL_CATEGORIES.has(delivery.category)) {
+      if (summary?.id && this.#deps.handoffs) {
         const record = this.#deps.handoffs.get(summary.id);
-        this.crossBoundary(session, message, { core: record.core, extension: record.extension }, delivery.category);
+        // The same gate the live path applies (mailroom's child branch): a
+        // routine record stays in the child's journal, even on redrive.
+        if (wakesMain(delivery.category, record.core.status)) {
+          this.crossBoundary(session, message, { core: record.core, extension: record.extension }, delivery.category);
+        }
       }
       this.#deps.patchDelivery(session, delivery, "acknowledged");
       const parent = session.parentAgentSessionId === null ? undefined : this.#deps.repo.getAgentSession(session.parentAgentSessionId);

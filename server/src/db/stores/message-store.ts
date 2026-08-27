@@ -73,6 +73,7 @@ export class MessageStore {
     agentSessionId: string;
     recipient: string;
     category: MailboxDeliveryRow["category"];
+    attention?: MailboxDeliveryRow["attention"];
     dedupeKey?: string;
   }): { message: MessageRow; delivery: MailboxDeliveryRow } {
     const run = this.#sqlite.transaction(() => {
@@ -86,6 +87,7 @@ export class MessageStore {
         recipient: input.recipient,
         category: input.category,
         status: "queued",
+        attention: input.attention ?? "wake",
         dedupeKey: input.dedupeKey ?? null,
         deliveredAt: null,
         acknowledgedAt: null,
@@ -109,6 +111,7 @@ export class MessageStore {
     agentSessionId: string;
     recipient: string;
     category: MailboxDeliveryRow["category"];
+    attention?: MailboxDeliveryRow["attention"];
     handoff: HandoffRecordRow;
     summary: HandoffSummary;
     dedupeKey?: string;
@@ -162,7 +165,7 @@ export class MessageStore {
    * the real timestamp. The one legitimate reset — rotation requeueing a
    * delivery — passes `deliveredAt: null` explicitly and is honoured.
    */
-  patchDelivery(id: string, patch: Partial<Pick<MailboxDeliveryRow, "status" | "deliveredAt" | "acknowledgedAt">>): void {
+  patchDelivery(id: string, patch: Partial<Pick<MailboxDeliveryRow, "status" | "attention" | "deliveredAt" | "acknowledgedAt">>): void {
     const preserveDelivered = patch.deliveredAt !== undefined && patch.deliveredAt !== null;
     this.#db.update(mailboxDeliveries)
       .set(preserveDelivered
@@ -200,8 +203,38 @@ export class MessageStore {
   }
 
   requeueUnacknowledgedDeliveries(): number {
-    return this.#db.update(mailboxDeliveries).set({ status: "queued", deliveredAt: null })
+    // A delivered "hold" row means its join already flushed; requeueing it as
+    // "wake" hands it to ordinary boundary delivery — the engine's one flush
+    // is spent and must not be waited on again.
+    return this.#db.update(mailboxDeliveries).set({ status: "queued", deliveredAt: null,
+      attention: sql`CASE WHEN ${mailboxDeliveries.attention} = 'hold' THEN 'wake' ELSE ${mailboxDeliveries.attention} END` })
       .where(eq(mailboxDeliveries.status, "delivered")).run().changes;
+  }
+
+  /**
+   * How many main-bound rows were recorded WITHOUT waking main since its last
+   * woken delivery in this session — the counted breadcrumb the next wake
+   * carries so deferred records stay discoverable (read_agent_session shows
+   * them in full). `excludeId` is the wake being composed right now.
+   */
+  countMainDeferredSinceLastWake(agentSessionId: string, recipient: string, excludeId: string): number {
+    const lastWake = this.#db.select({ createdAt: sql<string | null>`max(${mailboxDeliveries.createdAt})` })
+      .from(mailboxDeliveries)
+      .where(and(
+        eq(mailboxDeliveries.agentSessionId, agentSessionId),
+        eq(mailboxDeliveries.recipient, recipient),
+        inArray(mailboxDeliveries.attention, ["wake", "interrupt"]),
+        sql`${mailboxDeliveries.id} != ${excludeId}`,
+      )).get()?.createdAt ?? "";
+    const row = this.#db.select({ count: sql<number>`count(*)` })
+      .from(mailboxDeliveries)
+      .where(and(
+        eq(mailboxDeliveries.agentSessionId, agentSessionId),
+        eq(mailboxDeliveries.recipient, recipient),
+        eq(mailboxDeliveries.attention, "defer"),
+        sql`${mailboxDeliveries.createdAt} > ${lastWake}`,
+      )).get();
+    return row?.count ?? 0;
   }
 
   /**

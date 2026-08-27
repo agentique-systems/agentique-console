@@ -40,7 +40,8 @@ export class Repo {
   listActiveDeliveries(agentSessionId: string): MailboxDeliveryRow[] { return this.#s.messages.listActiveDeliveries(agentSessionId); }
   findDeliveryByDedupe(agentSessionId: string, sender: string, recipient: string, dedupeKey: string): MailboxDeliveryRow | undefined { return this.#s.messages.findDeliveryByDedupe(agentSessionId, sender, recipient, dedupeKey); }
   getMessageById(id: string): MessageRow | undefined { return this.#s.messages.getMessageById(id); }
-  patchDelivery(id: string, patch: Partial<Pick<MailboxDeliveryRow, "status" | "deliveredAt" | "acknowledgedAt">>): void { this.#s.messages.patchDelivery(id, patch); }
+  patchDelivery(id: string, patch: Partial<Pick<MailboxDeliveryRow, "status" | "attention" | "deliveredAt" | "acknowledgedAt">>): void { this.#s.messages.patchDelivery(id, patch); }
+  countMainDeferredSinceLastWake(agentSessionId: string, recipient: string, excludeId: string): number { return this.#s.messages.countMainDeferredSinceLastWake(agentSessionId, recipient, excludeId); }
   getDeliveryById(id: string): MailboxDeliveryRow | undefined { return this.#s.messages.getDeliveryById(id); }
   latestAssignmentDelivery(agentSessionId: string, recipient: string): MailboxDeliveryRow | undefined { return this.#s.messages.latestAssignmentDelivery(agentSessionId, recipient); }
   listUnackedDeliveries(agentSessionId: string, recipient: string): MailboxDeliveryRow[] { return this.#s.messages.listUnackedDeliveries(agentSessionId, recipient); }

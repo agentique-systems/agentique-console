@@ -314,6 +314,13 @@ export interface AgentDeliveryUpdatedPayload {
   recipient: string;
   category: "assignment" | "update" | "milestone" | "failure" | "final" | "decision";
   status: "queued" | "delivered" | "acknowledged" | "cancelled";
+  /**
+   * Console-computed attention disposition stamped on the row: interrupt (may
+   * steer an active turn), wake (a turn at the next boundary), defer (durable,
+   * never causes a turn itself), hold (join-held until the engine's flush).
+   * Absent on events journaled before the disposition existed.
+   */
+  attention?: "interrupt" | "wake" | "defer" | "hold";
 }
 export interface AgentRuntimePayload {
   agentSessionId: string;
