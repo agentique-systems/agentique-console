@@ -15,7 +15,7 @@ import type {
 } from "../db/repo.ts";
 import type { EventBus } from "../events/bus.ts";
 import type { HandoffService } from "../handoffs/service.ts";
-import { recoveryAction } from "../lane-runtime/checkpoint.ts";
+import { recoveryAction, rotationAction } from "../lane-runtime/checkpoint.ts";
 import { decisionOf, decisionPin, renderDecision, type DecisionLedger } from "../orchestrator/decisions.ts";
 import type { AssumptionService } from "../orchestrator/assumptions.ts";
 import type { RequirementService } from "../orchestrator/requirements.ts";
@@ -499,13 +499,18 @@ export class PromptComposer {
   }
 
   /**
-   * The successor's inheritance when the model could not produce a checkpoint.
-   * Built from facts the console owns — the task ledger, the agent's declared
-   * ownership, its worktree branch and diff, the assignment it is working, and
-   * its own last report — so it always exists and is always true. A failed
-   * model checkpoint costs fidelity, not truth.
+   * The successor's inheritance, built from facts the console owns — the task
+   * ledger, the agent's declared ownership, its worktree branch and diff, the
+   * assignment it is working, and its own last report — so it always exists
+   * and is always true. Two sources share it, differing only in framing and
+   * quality flags: "recovery" (the lane died before it could report — facts
+   * may trail unreported work, so the successor re-verifies) and "rotation"
+   * (a planned generation boundary retired the provider session — the seat's
+   * own last report was written healthy at a natural boundary, so the facts
+   * are current). The seat's last report IS the model-authored share of the
+   * checkpoint; nothing here interrogates a dying or absent process.
    */
-  reconstructCheckpoint(session: AgentSessionRow, seat: AgentRow): HandoffDraft {
+  reconstructCheckpoint(session: AgentSessionRow, seat: AgentRow, source: "recovery" | "rotation" = "recovery"): HandoffDraft {
     const { repo } = this.#deps;
     const evidence: HandoffDraft["core"]["state"]["evidence"] = [];
     const facts: string[] = [];
@@ -555,23 +560,34 @@ export class PromptComposer {
       evidence.push({ kind: "journal", ref: own.id, label: "your last report" });
     }
 
+    const rotation = source === "rotation";
+    const baseAction = assignment?.core.action ?? own?.core.action ?? "Resume interrupted work";
+    const preamble = rotation
+      ? `${seat.name}'s provider session was retired at a planned context boundary, so this continuation snapshot was assembled by the Console from authoritative state — not from that context's memory. You are the same seat continuing the same assignment, worktree and task truth; do not redo work listed as done.`
+      : `${seat.name}'s previous context ended before it could write a checkpoint, so this was reconstructed by the Console from authoritative state — not from that context's memory. Treat it as a starting point and re-derive anything not listed.`;
     return {
       core: {
         schemaVersion: 1,
         taskId: own?.core.taskId ?? assignment?.core.taskId ?? null,
-        status: "needs_verification",
-        risk: "high",
-        action: recoveryAction(assignment?.core.action ?? own?.core.action ?? "Resume interrupted work"),
+        // A planned rotation is not a failure and its facts were captured at a
+        // healthy boundary; only a crash reconstruction is suspect enough to
+        // demand re-verification of everything.
+        status: rotation ? "in_progress" : "needs_verification",
+        risk: rotation ? "medium" : "high",
+        action: rotation ? rotationAction(baseAction) : recoveryAction(baseAction),
         state: {
-          summary: `${seat.name}'s previous context ended before it could write a checkpoint, so this was reconstructed by the Console from authoritative state — not from that context's memory. Treat it as a starting point and re-derive anything not listed.\n\n${facts.join("\n")}`,
+          summary: `${preamble}\n\n${facts.join("\n")}`,
           evidence,
         },
         result: { summary: null, artifacts: [] },
-        uncertainty: ["Reconstructed checkpoint: the prior context's reasoning and any unreported findings were lost. Re-verify before reporting completion."],
+        uncertainty: [rotation
+          ? "Planned context rotation: the retired context's unreported local reasoning was not carried over. Read historical detail through read_handoff/read_artifact and the repository instead of re-deriving what is listed."
+          : "Reconstructed checkpoint: the prior context's reasoning and any unreported findings were lost. Re-verify before reporting completion."],
         nextAction: assignment?.core.nextAction ?? own?.core.nextAction ?? "Re-read the assignment and continue.",
         requestExpandedContext: true,
       },
-      extension: { kind: (seat.profileSnapshot as AgentProfile).handoffExtension ?? "generic", data: { source: "reconstructed" } },
+      extension: { kind: (seat.profileSnapshot as AgentProfile).handoffExtension ?? "generic",
+        data: rotation ? { source: "rotation", consoleSynthesized: true } : { source: "reconstructed" } },
     };
   }
 
@@ -790,7 +806,7 @@ export class PromptComposer {
         ...(core.nextAction ? [`Next: ${core.nextAction}`] : []),
         ...(evidence.length > 0 ? [`Evidence: ${evidence.join("; ")}`] : []),
       ];
-      return `\n\n## Where you left off (checkpoint ${handoff.metadata.id})\nYour previous context wrote this before it ended; read_handoff returns the full record. Treat it as a starting point and verify anything risky.\n${lines.join("\n")}`;
+      return `\n\n## Where you left off (checkpoint ${handoff.metadata.id})\nA bounded continuation snapshot recorded when your previous provider context ended — you are the same seat continuing the same work; read_handoff returns the full record. Authoritative repository/task/requirement state outranks its prose. Treat it as a starting point, verify anything risky, and do not redo investigation it records as done.\n${lines.join("\n")}`;
     }
     return "";
   }

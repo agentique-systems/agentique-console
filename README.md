@@ -222,19 +222,24 @@ fact rather than something to discover by failing.
 
 ## Context and decisions
 
-A lane — main or any agent — keeps one provider session for its whole life,
-and the CLI's native auto-compaction manages its context exactly as it does
-for an interactive session; the Console never rotates a lane for context
-reasons (the earlier console-side rotation subsystem and its four
-`CONSOLE_CONTEXT_*`/`CONSOLE_CHECKPOINT_*` knobs were removed — setting one
-is now a boot error, and historical journals keep their `*.context.rotated`
-rows). What remains is CRASH recovery: when a lane dies before it can
-report, the Console deterministically reconstructs a checkpoint from state
-it owns (operator decisions, the governing requirements, the task ledger,
-ownership, the worktree branch and diff, the agent's own last report), so a
-successor always inherits something true. The occupancy figure the UI shows
-is a per-process high-water mark; after a native compaction it stays at the
-peak.
+Within a generation, a lane keeps one provider session and the CLI's native
+auto-compaction manages its context exactly as it does for an interactive
+session. Native compaction bounds the context WINDOW, not replay: a resumed
+provider session replays its whole retained history on every later API call,
+so a seat whose parked provider session has carried occupancy at or above
+`CONSOLE_AGENT_CONTEXT_RETIRE_TOKENS` (default 150K; 0 disables) is not
+resumed at its next wake — the Console journals a deterministic continuation
+checkpoint and the SAME seat (assignment, tasks, ownership, worktree)
+continues as a fresh generation. The retired transcript stays journaled for
+audit; it just never taxes a future turn. (The old settle-time rotation
+subsystem and its `CONSOLE_CONTEXT_*`/`CONSOLE_CHECKPOINT_*` knobs remain
+removed — setting one is a boot error.) CRASH recovery shares the same
+reconstruction: when a lane dies before it can report, the Console rebuilds
+a checkpoint from state it owns (operator decisions, the governing
+requirements, the task ledger, ownership, the worktree branch and diff, the
+agent's own last report), so a successor always inherits something true. The
+occupancy figure the UI shows is a per-provider-session high-water mark;
+after a native compaction it stays at the peak.
 
 An AgentSession owes the operator a reply. If it goes idle without its
 coordinator reporting, the Console closes the loop itself from the journal —

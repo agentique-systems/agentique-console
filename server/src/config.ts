@@ -91,6 +91,23 @@ export interface PolicyConfig {
    */
   agentWorktrees: boolean;
   /**
+   * Wake-boundary generation retirement: a parked seat whose provider session
+   * has carried context occupancy at or above this many tokens is NOT resumed
+   * — the Console journals a deterministic continuation checkpoint and the
+   * seat continues as a fresh generation (same seat, assignment, worktree and
+   * task truth; fresh provider cognition). Occupancy is the per-API-call
+   * prompt size (`input + cache_creation + cache_read`), i.e. what every
+   * later call in that session replays: a live run's seats retained up to
+   * ~551K tokens this way and 94% of its 279M input tokens was cache replay.
+   * The default sits below the CLI's native auto-compaction band, so
+   * retirement normally replaces the in-session compaction cliff with a
+   * structured checkpoint at a park boundary — compaction still manages the
+   * window WITHIN a session; this bounds replay ACROSS a seat's lifetime.
+   * Generous by design: rotation is for genuinely large retained histories,
+   * not a cadence. CONSOLE_AGENT_CONTEXT_RETIRE_TOKENS overrides; 0 disables.
+   */
+  agentContextRetireTokens: number;
+  /**
    * How long an agent may sit parked inside `ask_operator` before the Console
    * detaches the wait. The question stays open and answerable; only the held
    * process is released, so a worst case is an agent idle for this long rather
@@ -184,17 +201,17 @@ export interface Config {
 }
 
 /**
- * Env names retired by THE RENAME — and by the removal of console-side
- * context rotation (native auto-compaction manages context; there is no
- * replacement knob). A retired name that is still set fails the boot loudly:
- * the alternative is the knob silently falling back to its default, which is
- * indistinguishable from working until it matters.
+ * Env names retired by THE RENAME — and by the removal of the old settle-time
+ * rotation subsystem (its successor, wake-boundary generation retirement, has
+ * different semantics and its own knob). A retired name that is still set
+ * fails the boot loudly: the alternative is the knob silently falling back to
+ * its default, which is indistinguishable from working until it matters.
  */
 const RETIRED_ENV_NAMES: Record<string, string> = {
-  CONSOLE_CONTEXT_ROTATION: "nothing — removed; native compaction manages context",
-  CONSOLE_CONTEXT_TOKEN_LIMIT: "nothing — removed; native compaction manages context",
-  CONSOLE_CONTEXT_TURN_LIMIT: "nothing — removed; native compaction manages context",
-  CONSOLE_CHECKPOINT_TIMEOUT_MS: "nothing — removed with console-side rotation",
+  CONSOLE_CONTEXT_ROTATION: "CONSOLE_AGENT_CONTEXT_RETIRE_TOKENS — settle-time rotation was removed; wake-boundary generation retirement replaced it",
+  CONSOLE_CONTEXT_TOKEN_LIMIT: "CONSOLE_AGENT_CONTEXT_RETIRE_TOKENS — settle-time rotation was removed; wake-boundary generation retirement replaced it",
+  CONSOLE_CONTEXT_TURN_LIMIT: "nothing — removed; retirement has no turn-count trigger",
+  CONSOLE_CHECKPOINT_TIMEOUT_MS: "nothing — removed with the model-queried checkpoint; retirement checkpoints are Console-reconstructed",
   CONSOLE_SEAT_IDLE_REAP_MS: "CONSOLE_AGENT_IDLE_REAP_MS",
   CONSOLE_MAX_RESIDENT_SEATS: "CONSOLE_MAX_RESIDENT_AGENTS",
   CONSOLE_MAX_RESIDENT_SEATS_PER_TREE: "CONSOLE_MAX_RESIDENT_AGENTS_PER_SESSION",
@@ -290,6 +307,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       agentMaxResidentPerSession: Number(env.CONSOLE_MAX_RESIDENT_AGENTS_PER_SESSION ?? 4),
       agentSpawnTimeoutMs: Number(env.CONSOLE_AGENT_SPAWN_TIMEOUT_MS ?? 30_000),
       agentWorktrees: env.CONSOLE_AGENT_WORKTREES !== "0",
+      agentContextRetireTokens: Number(env.CONSOLE_AGENT_CONTEXT_RETIRE_TOKENS ?? 150_000),
       operatorAskDetachMs: Number(env.CONSOLE_OPERATOR_ASK_DETACH_MS ?? 300_000),
       peerNamePrefix: env.CONSOLE_PEER_NAME_PREFIX ?? "console-",
       mcpToolTimeoutMs: Number(env.CONSOLE_MCP_TOOL_TIMEOUT_MS ?? 300_000),

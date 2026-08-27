@@ -193,10 +193,16 @@ export class AgentRuntime implements Injector, TurnTracker {
     if (!session || session.lifecycle !== "open") throw new ConflictError(`agent session ${agentSessionId} is not open`);
     const seatRow = repo.getAgent(agentSessionId, seat);
     if (!seatRow) throw new NotFoundError(`no agent ${seat} in ${agentSessionId}`);
+    // Wake IS the generation boundary: a parked seat's provider session is
+    // resumed only here, so this is the one place its retained history can be
+    // retired before another spawn replays it. Synchronous, before any
+    // capacity wait — the durable transition lands whole, and a crash or
+    // timeout after it just leaves the successor generation for the next wake.
+    const current = this.#maybeRetireGeneration(session, seatRow, lane);
     await this.#deps.lanes.reserveCapacity(agentSessionId, until);
     const raced = lane.state as AgentLane["state"];
     if (raced === "live" || raced === "waking") { await lane.ready; return; }
-    this.#spawnSeat(session, seatRow, lane);
+    this.#spawnSeat(session, current, lane);
     await lane.ready;
     // A respawn may inherit rows the previous process took delivery of but
     // never consumed; requeue them so the console path re-carries exactly once.
@@ -205,6 +211,69 @@ export class AgentRuntime implements Injector, TurnTracker {
     // applies the same flip on its requeue path).
     const stale = repo.listUnackedDeliveries(agentSessionId, seat).filter((row) => row.status === "delivered");
     for (const row of stale) repo.patchDelivery(row.id, { status: "queued", deliveredAt: null, ...(row.attention === "hold" ? { attention: "wake" } : {}) });
+  }
+
+  /**
+   * Wake-boundary generation retirement — the bound on retained provider
+   * history that bounded DELIVERY cannot provide. Delivery envelopes cap what
+   * new Console state enters a turn, but a resumed provider session replays
+   * its whole retained history on every later API call: a live run's seats
+   * reached ~551K retained context tokens and 94% of its 279M input tokens
+   * was cache replay of exactly that history. When a parked seat's provider
+   * session has carried occupancy at or above the retirement threshold, the
+   * Console journals a deterministic continuation checkpoint (the same
+   * reconstruction crash recovery trusts, flagged as a planned rotation) and
+   * retires the provider session in one synchronous step: same seat, same
+   * assignment, same worktree and task truth — fresh cognition. The retired
+   * transcript stays journaled under its session id (audit, postmortems); it
+   * is simply never resumed again.
+   *
+   * This runs only between generations — the lane is parked or unspawned, so
+   * no turn is in flight and queued deliveries flow to the successor
+   * unchanged. The contextTokens reset doubles as the idempotence guard: a
+   * crash anywhere after the patch converges on the successor at the next
+   * wake, and a duplicate wake finds nothing left to retire. Native
+   * compaction is untouched — it manages the window WITHIN one provider
+   * session; this bounds replay ACROSS a seat's lifetime. A planned rotation
+   * is not a failure: nothing escalates, no retry budget is spent, and main
+   * is not woken — the rotated event is observability, not a decision point.
+   */
+  #maybeRetireGeneration(session: AgentSessionRow, seat: AgentRow, lane: AgentLane): AgentRow {
+    const threshold = this.#deps.config.policy.agentContextRetireTokens;
+    if (threshold <= 0 || seat.sdkSessionId === null || seat.contextTokens < threshold) return seat;
+    // A pause-cut turn was promised its provider session intact ("CONTINUE
+    // the work in progress"): its cognition still holds mid-turn working
+    // state no fact checkpoint captures. Honor the promise and retire at the
+    // next boundary instead.
+    if (lane.pauseResumeNote !== null) return seat;
+    const specPointer = this.#deps.requirements.pointer(session.userSessionId);
+    const prepared = this.#deps.handoffs.prepare({
+      draft: this.#deps.composer.reconstructCheckpoint(session, seat, "rotation"),
+      userSessionId: session.userSessionId, agentSessionId: session.id,
+      sender: seat.name, recipient: seat.name, profileId: seat.profileId, generation: seat.generation,
+      extensionKind: (seat.profileSnapshot as AgentProfile).handoffExtension,
+      trigger: "rotation", parentHandoffId: seat.latestHandoffId, checkpoint: true,
+      // The spec pointer rides the checkpoint: the successor re-reads the
+      // digest at spawn, but the checkpoint must be self-sufficiently true.
+      ...(specPointer === null ? {} : { extensionDefaults: { approvedSpec: specPointer } }),
+    });
+    this.#deps.repo.insertCheckpointHandoff(prepared.row);
+    this.#deps.handoffs.committed(prepared.record);
+    // Retiring the provider session retires its cumulative baseline with it —
+    // the successor's counters genuinely restart from zero. Lifetime truth
+    // lives in the per-generation usage samples, summed across generations by
+    // aggregateUsageByParticipant.
+    this.#deps.repo.patchAgent(session.id, seat.name, { sdkSessionId: null, generation: seat.generation + 1,
+      turnCount: 0, contextTokens: 0, latestHandoffId: prepared.row.id,
+      cumulativeCostUsd: 0, cumulativeApiDurationMs: 0 });
+    this.#deps.bus.append({ type: "agent_session.context.rotated", userSessionId: session.userSessionId, agentSessionId: session.id,
+      payload: { agentSessionId: session.id, agent: seat.name, generation: seat.generation + 1, reason: "token_limit",
+        handoffId: prepared.row.id, checkpointBytes: prepared.row.bytes,
+        contextTokens: seat.contextTokens, retiredSdkSessionId: seat.sdkSessionId } });
+    this.#deps.bus.append({ type: "agent_session.runtime.noted", userSessionId: session.userSessionId, agentSessionId: session.id,
+      payload: { agentSessionId: session.id, agent: seat.name,
+        detail: `provider session retired at ${seat.contextTokens.toLocaleString()} retained context tokens (threshold ${threshold.toLocaleString()}): generation ${seat.generation + 1} continues from checkpoint ${prepared.row.id}` } });
+    return this.#deps.repo.getAgent(session.id, seat.name) ?? seat;
   }
 
   #spawnSeat(session: AgentSessionRow, seatRow: AgentRow, lane: AgentLane): void {
