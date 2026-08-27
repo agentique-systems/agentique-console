@@ -63,22 +63,38 @@ gets its profile extension immediately. Other extensions remain available via
 Missing or escaping file references are retained as warnings and elevate a
 low-risk record to medium risk. They are never silently removed.
 
-## Context lifetime and crash recovery
+## Context lifetime, generation retirement, and crash recovery
 
-A lane keeps one provider session for life, and the CLI's native compaction
-carries continuity — the same thread an interactive session has. The Console
-never rotates a lane onto a fresh session for context reasons (the earlier
-console-side rotation subsystem was removed; historical journals keep their
-`*.context.rotated` rows).
+Within a generation a lane keeps one provider session, and the CLI's native
+compaction carries continuity — the same thread an interactive session has.
+Native compaction manages the context WINDOW, but a resumed provider session
+still replays its whole retained history on every later API call, so a
+long-lived seat's per-turn input otherwise grows with its lifetime (a live
+run's seats retained up to ~551K tokens; 94% of its 279M input tokens was
+cache replay). Retained history is therefore bounded at the WAKE boundary:
+when a parked seat's provider session has carried context occupancy at or
+above `CONSOLE_AGENT_CONTEXT_RETIRE_TOKENS` (default 150K; 0 disables), the
+Console does not resume it. It journals a deterministic continuation
+checkpoint (trigger `rotation`, checkpoint-flagged, recipient self), bumps
+the seat's generation, and the next spawn starts a fresh provider session
+whose system-prompt tail carries the checkpoint. The seat identity —
+assignment, task truth, ownership, worktree — is untouched; only the
+provider conversation changes. The retired transcript stays journaled under
+its session id and the `agent_session.context.rotated` event records the
+provenance (retired session id, peak occupancy, checkpoint id). A planned
+rotation is not a failure: nothing escalates and main is not woken.
 
-What remains is CRASH recovery: when a lane dies before it can report, the
-Console deterministically reconstructs a high-risk recovery checkpoint from
-state it owns — operator decisions, the governing requirements pointer, the
-task ledger, declared ownership, the worktree branch and diff (uncommitted
-work is committed first), the standing assignment, and the agent's own last
-report. The successor is told the reconstruction is Console-assembled, not
-the prior context's memory, and to re-derive anything not listed. Recent
-transcript slicing is never used.
+CRASH recovery shares the same reconstruction: when a lane dies before it can
+report, the Console deterministically rebuilds a high-risk recovery
+checkpoint from state it owns — operator decisions, the governing
+requirements pointer, the task ledger, declared ownership, the worktree
+branch and diff (uncommitted work is committed first), the standing
+assignment, and the agent's own last report. A rotation checkpoint is built
+from the same facts but flagged as planned (in-progress, medium risk) — its
+facts were captured at a healthy boundary. Either way the successor is told
+the snapshot is Console-assembled, not the prior context's memory, and that
+authoritative state outranks its prose. Recent transcript slicing is never
+used.
 
 ## Observability and evaluation
 

@@ -331,9 +331,17 @@ export interface AgentRuntimePayload {
 export interface AgentContextRotatedPayload {
   agentSessionId: string;
   agent: string;
+  /** The SUCCESSOR generation now active for this seat. */
   generation: number;
   reason: "token_limit" | "turn_limit";
   handoffId?: string; checkpointBytes?: number; degraded?: boolean;
+  /** Peak context occupancy the retired provider session had carried, in tokens. */
+  contextTokens?: number;
+  /**
+   * The retired provider session id — no longer resumed, but its transcript
+   * stays journaled under this key for audit and postmortems.
+   */
+  retiredSdkSessionId?: string;
 }
 export interface UsageRecordedPayload {
   userSessionId: string;
@@ -886,7 +894,13 @@ export type ConsoleEvent = Base &
     | { type: "agent_session.delivery.updated"; payload: AgentDeliveryUpdatedPayload }
     | { type: "agent_session.runtime.noted"; payload: AgentRuntimePayload }
     | { type: "agent_session.retry.recorded"; payload: RetryRecordedPayload }
-    /** @deprecated historical — console-side rotation was removed; rows persist in old journals. */
+    /**
+     * A seat's provider session was retired at a wake boundary (context
+     * burden crossed the retirement threshold) and the seat continues as a
+     * fresh generation seeded by a Console-reconstructed checkpoint.
+     * Historical rows from the removed settle-time rotation subsystem share
+     * this type and still render.
+     */
     | { type: "agent_session.context.rotated"; payload: AgentContextRotatedPayload }
     | { type: "task.created"; payload: TaskCreatedPayload }
     | { type: "task.updated"; payload: TaskUpdatedPayload }

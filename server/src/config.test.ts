@@ -41,6 +41,12 @@ describe("loadConfig agent-lane knobs", () => {
     expect(() => loadConfig({ CONSOLE_EFFORT: "turbo" })).toThrow(/CONSOLE_EFFORT "turbo".*low, medium, high, xhigh, max/);
   });
 
+  it("generation retirement defaults to 150K retained tokens; the env overrides and 0 disables", () => {
+    expect(loadConfig({}).policy.agentContextRetireTokens).toBe(150_000);
+    expect(loadConfig({ CONSOLE_AGENT_CONTEXT_RETIRE_TOKENS: "80000" }).policy.agentContextRetireTokens).toBe(80_000);
+    expect(loadConfig({ CONSOLE_AGENT_CONTEXT_RETIRE_TOKENS: "0" }).policy.agentContextRetireTokens).toBe(0);
+  });
+
   it("the removed rotation knobs fail the boot loudly instead of silently doing nothing", () => {
     for (const name of ["CONSOLE_CONTEXT_ROTATION", "CONSOLE_CONTEXT_TOKEN_LIMIT", "CONSOLE_CONTEXT_TURN_LIMIT", "CONSOLE_CHECKPOINT_TIMEOUT_MS"]) {
       expect(() => loadConfig({ [name]: "1" }), name).toThrow(/native compaction|removed/);
