@@ -181,7 +181,9 @@ export class CapacityService {
   warningLine(): string | null {
     if (this.#warning === null || this.#warning.utilization < WARNING_THRESHOLD) return null;
     const resets = this.#warning.resetsAt === undefined ? "" : `, resets ${new Date(this.#warning.resetsAt * 1000).toISOString()}`;
-    return `[Provider usage window at ${Math.round(this.#warning.utilization * 100)}%${resets} — sequence landing in-flight work before opening new scope.]`;
+    return `[Provider usage window at ${Math.round(this.#warning.utilization * 100)}%${resets} — sequence landing in-flight work before opening new scope. `
+      + "If the window closes, the run pauses durably and the operator can continue this project in a fresh session from its continuation checkpoint — "
+      + "an incomplete but durable handoff is acceptable; do not rush merges or mark unfinished work complete to beat the limit.]";
   }
 
   /** Boot: restore a persisted pause and re-arm (or expire) its timer. */

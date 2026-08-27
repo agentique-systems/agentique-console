@@ -53,8 +53,10 @@ function makeService() {
     workspaces: { get: () => undefined } as never,
     archiveAgentSessions: vi.fn(),
     completion: { schedule: vi.fn(), resolve: vi.fn() },
-    continuation: { record: vi.fn(() => null), ensureForProject: vi.fn(), latestForSession: vi.fn(() => null) },
+    continuation: { record: vi.fn(() => null), ensureForProject: vi.fn(), latestForSession: vi.fn(() => null), latestForProject: vi.fn(() => null) },
     wireAgentSessions: () => [],
+    pauseSnapshot: () => ({ paused: false, reason: null, since: null, until: null }),
+    openRequirementCount: () => 0,
   });
 
   return { sessions, repo, runner, workspaceId, db };

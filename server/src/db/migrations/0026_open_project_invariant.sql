@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX `user_sessions_open_project` ON `user_sessions` (`project_id`) WHERE lifecycle = 'open';

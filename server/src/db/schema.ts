@@ -119,6 +119,13 @@ export const userSessions = sqliteTable("user_sessions", {
 }, (t) => [
   /** Project-wide reads (decision ledger, continuation, session attach) join through this. */
   index("user_sessions_project").on(t.projectId),
+  /**
+   * The sequential-continuation invariant, durable: at most one OPEN session
+   * per project, so a retried or raced "continue project" can never mint two
+   * successors. The session service checks first and maps this constraint's
+   * violation to the same actionable error.
+   */
+  uniqueIndex("user_sessions_open_project").on(t.projectId).where(sql`lifecycle = 'open'`),
   check("user_sessions_mode", sql`${t.mode} IN ('execute','plan_execute')`),
   check("user_sessions_phase", sql`${t.phase} IN ('planning','executing')`),
   check("user_sessions_lifecycle", sql`${t.lifecycle} IN ('open','archived')`),

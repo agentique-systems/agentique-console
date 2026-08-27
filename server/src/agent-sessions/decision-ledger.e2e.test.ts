@@ -242,8 +242,10 @@ describe("decision ledger project continuity", () => {
     });
 
     // A continued session on the SAME project inherits the decision; a
-    // session on a fresh project does not.
+    // session on a fresh project does not. Continuation is sequential (a DB
+    // invariant), so the predecessor archives before the successor attaches.
     const projectId = h.repo.getUserSession(userSessionId)!.projectId;
+    h.repo.patchUserSession(userSessionId, { lifecycle: "archived" });
     const continued = h.addUserSession("execute", { projectId });
     const fresh = h.addUserSession();
     expect(h.decisions.list(continued).map((d) => d.answer)).toContain("Dodge obstacles");

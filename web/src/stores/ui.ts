@@ -14,6 +14,14 @@ interface UiState {
    */
   readonly draftOpen: boolean;
   /**
+   * A continuation pre-seed for the draft: the project the new session should
+   * continue, set by a session's "continue in a fresh session" affordance.
+   * `handoffSessionId` names the still-open session the send will hand off
+   * (archive with its checkpoint); null when the predecessor is already
+   * archived. Cleared whenever the draft closes.
+   */
+  readonly draftContinuation: { projectId: string; handoffSessionId: string | null } | null;
+  /**
    * Which agent session each user session's inspector reads. Per-user-session
    * memory on purpose: switching user sessions restores that session's pick.
    */
@@ -32,7 +40,7 @@ interface UiState {
    */
   readonly awaitingInput: ReadonlySet<string>;
   openSession(id: string): void;
-  beginDraft(): void;
+  beginDraft(continuation?: { projectId: string; handoffSessionId: string | null }): void;
   cancelDraft(): void;
   selectAgentSession(userSessionId: string, agentSessionId: string | null): void;
   openAgentSession(userSessionId: string, agentSessionId: string): void;
@@ -45,15 +53,16 @@ interface UiState {
 export const useUiStore = create<UiState>((set) => ({
   activeUserSessionId: null,
   draftOpen: false,
+  draftContinuation: null,
   selectedAgentSessionByUserSession: {},
   activeAgentSessionId: null,
   selectedTaskId: null,
   selectedTimelineItemId: null,
   selectedProfileId: null,
   awaitingInput: new Set<string>(),
-  openSession: (id) => set({ activeUserSessionId: id, activeAgentSessionId: null, draftOpen: false }),
-  beginDraft: () => set({ draftOpen: true }),
-  cancelDraft: () => set({ draftOpen: false }),
+  openSession: (id) => set({ activeUserSessionId: id, activeAgentSessionId: null, draftOpen: false, draftContinuation: null }),
+  beginDraft: (continuation) => set({ draftOpen: true, draftContinuation: continuation ?? null }),
+  cancelDraft: () => set({ draftOpen: false, draftContinuation: null }),
   selectAgentSession: (userSessionId, agentSessionId) =>
     set((state) => {
       const next = { ...state.selectedAgentSessionByUserSession };

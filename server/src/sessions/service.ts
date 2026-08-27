@@ -5,12 +5,15 @@
 import type {
   AgentSession,
   ConsoleEvent,
+  ContinueUserSessionBody,
   CreateUserSessionBody,
   GetUserSessionResponse,
   PatchUserSessionBody,
   PostMessageResponse,
+  ProjectContinuationItem,
   RunSignoffBody,
   SessionTreeResponse,
+  SystemPauseState,
   UserSession,
   UserSessionListItem,
 } from "@agentique-console/shared";
@@ -40,8 +43,12 @@ export class UserSessionService {
     schedule(userSessionId: string): void;
     resolve(userSessionId: string, decision: "accept" | "changes", note?: string, waivers?: import("../completion/service.ts").SubmittedWaiver[]): void;
   };
-  readonly #continuation: Pick<ContinuationCheckpointService, "record" | "ensureForProject" | "latestForSession">;
+  readonly #continuation: Pick<ContinuationCheckpointService, "record" | "ensureForProject" | "latestForSession" | "latestForProject">;
   readonly #wireAgentSessions: (userSessionId: string) => AgentSession[];
+  /** The live whole-system pause — a session created mid-pause inherits its stamp. */
+  readonly #pauseSnapshot: () => SystemPauseState;
+  /** Open requirement frontier size for one session's project — discovery's "unresolved work" count. */
+  readonly #openRequirementCount: (userSessionId: string) => number;
 
   constructor(deps: {
     repo: Repo;
@@ -56,8 +63,10 @@ export class UserSessionService {
       schedule(userSessionId: string): void;
       resolve(userSessionId: string, decision: "accept" | "changes", note?: string, waivers?: import("../completion/service.ts").SubmittedWaiver[]): void;
     };
-    continuation: Pick<ContinuationCheckpointService, "record" | "ensureForProject" | "latestForSession">;
+    continuation: Pick<ContinuationCheckpointService, "record" | "ensureForProject" | "latestForSession" | "latestForProject">;
     wireAgentSessions: (userSessionId: string) => AgentSession[];
+    pauseSnapshot: () => SystemPauseState;
+    openRequirementCount: (userSessionId: string) => number;
   }) {
     this.#repo = deps.repo;
     this.#projects = deps.projects;
@@ -70,6 +79,8 @@ export class UserSessionService {
     this.#completion = deps.completion;
     this.#continuation = deps.continuation;
     this.#wireAgentSessions = deps.wireAgentSessions;
+    this.#pauseSnapshot = deps.pauseSnapshot;
+    this.#openRequirementCount = deps.openRequirementCount;
   }
 
   create(body: CreateUserSessionBody): UserSession {
@@ -78,6 +89,13 @@ export class UserSessionService {
     this.#workspaces.get(body.workspaceId); // 404s on unknown workspace
     const projectId = this.#resolveProject(body);
 
+    // A session born under a whole-system pause inherits its stamp: the pause
+    // columns are the RESTART persistence (capacity.armFromBoot scans open
+    // sessions), and a continuation handoff can archive the only stamped row —
+    // without this a restart would forget the pause and spin on a spent quota.
+    // A capacity/budget pause does NOT block creation itself: the first
+    // message queues and redelivers on resume, exactly like steering.
+    const pause = this.#pauseSnapshot();
     const now = nowIso();
     const row: UserSessionRow = {
       id: newId("us"),
@@ -98,14 +116,32 @@ export class UserSessionService {
       cumulativeCostUsd: 0,
       cumulativeApiDurationMs: 0,
       runState: "active",
-      runBaseCommit: null, pausedUntil: null, pauseReason: null, budgetUsd: null, autonomy: "standard" as const,
+      runBaseCommit: null,
+      pausedUntil: pause.paused ? pause.until : null,
+      pauseReason: pause.paused ? pause.reason : null,
+      budgetUsd: null, autonomy: "standard" as const,
       // Null is a real value here, not a placeholder: it means "track the
       // configured default".
       model: body.model ?? null,
       createdAt: now,
       updatedAt: now,
     };
-    this.#repo.insertUserSession(row);
+    try {
+      this.#repo.insertUserSession(row);
+    } catch (error) {
+      // The durable form of the sequential invariant: the partial unique index
+      // on open sessions per project (user_sessions_open_project — SQLite
+      // reports the violation by column). The check in #resolveProject answers
+      // first in every ordinary path; this maps the constraint's last word to
+      // the same actionable error instead of a raw SQLITE_CONSTRAINT.
+      if (error instanceof Error && error.message.includes("user_sessions.project_id")) {
+        const open = this.#repo.listOpenUserSessionsForProject(projectId)[0];
+        throw new InvalidInputError(
+          `project ${projectId} already has an open session${open === undefined ? "" : ` (${open.id})`} — continuation is sequential; archive it first`,
+        );
+      }
+      throw error;
+    }
     const session = toWireUserSession(row);
     this.#bus.append({
       type: "user_session.created",
@@ -177,6 +213,103 @@ export class UserSessionService {
       console.warn(`continuation checkpoint backstop failed for project ${body.projectId}:`, error);
     }
     return body.projectId;
+  }
+
+  /**
+   * The explicit run-boundary handoff: continue the source session's PROJECT
+   * in a fresh UserSession. An open source (quota-paused, idle, awaiting
+   * sign-off) is archived first through the SAME transition as the archive
+   * button — its continuation checkpoint records, its agents stop, and its
+   * lane closes, so it can never execute again — then exactly one successor
+   * is created on the same project. Knowledge transfer only: `runState` is
+   * untouched (an interrupted run stays honestly incomplete), no AgentSession
+   * or task reactivates, and the provider conversation is not resumed.
+   *
+   * Recovery and retries converge: a crash after the archive leaves a clean
+   * "archived predecessor, no successor" state this same call completes from;
+   * a duplicate call finds the successor open and is rejected by the
+   * sequential-continuation gate, naming it.
+   */
+  continueFrom(sourceUserSessionId: string, body: ContinueUserSessionBody): UserSession {
+    const source = this.#repo.getUserSession(sourceUserSessionId);
+    if (!source) throw new NotFoundError(`no user session ${sourceUserSessionId}`);
+    if (source.purpose !== "work") {
+      throw new InvalidInputError(`session ${sourceUserSessionId} is not a work session`);
+    }
+    // Validate BEFORE the handoff transition: a bad message must not archive.
+    if (body.message.trim() === "") throw new InvalidInputError("a first message is required");
+    if (source.lifecycle === "open") {
+      this.patch(sourceUserSessionId, { lifecycle: "archived" });
+    }
+    const model = body.model ?? source.model ?? undefined;
+    const session = this.create({
+      workspaceId: source.workspaceId,
+      mode: body.mode ?? source.mode,
+      message: body.message,
+      projectId: source.projectId,
+      ...(model === undefined ? {} : { model }),
+    });
+    this.#noteHandoff(sourceUserSessionId, session);
+    return session;
+  }
+
+  /** The predecessor's transcript trace: where its project went. Display only, best-effort. */
+  #noteHandoff(sourceUserSessionId: string, successor: UserSession): void {
+    try {
+      const row = this.#repo.appendMessage({
+        sessionKind: "user",
+        sessionId: sourceUserSessionId,
+        speaker: { kind: "system", name: "system" },
+        kind: "notice",
+        text: `Handed off: this project continues in a fresh session${successor.title === null ? "" : ` "${successor.title}"`} (${successor.id}). This session stays archived as the historical record of its run.`,
+      });
+      this.#bus.append({
+        type: "user_session.message.appended",
+        userSessionId: sourceUserSessionId,
+        payload: { userSessionId: sourceUserSessionId, message: toWireMessage(row) },
+      });
+    } catch {
+      // The handoff must survive a display failure.
+    }
+  }
+
+  /**
+   * Continuation discovery: every project in the workspace that has carried
+   * work sessions, with the facts an operator needs to pick a continuation
+   * target — which session it left off in, whether one is still open (and
+   * paused why), whether a checkpoint exists, and how much requirement
+   * frontier remains. Facts only: status WORDS are derived client-side, so
+   * there is no second status vocabulary to drift.
+   */
+  listProjects(workspaceId: string): ProjectContinuationItem[] {
+    this.#workspaces.get(workspaceId); // 404s on unknown workspace
+    const items = this.#projects.listByWorkspace(workspaceId).flatMap((project) => {
+      const sessions = this.#repo.listUserSessionsForProject(project.id)
+        .filter((row) => row.purpose === "work");
+      const last = sessions[sessions.length - 1];
+      if (last === undefined) return [];
+      const open = sessions.find((row) => row.lifecycle === "open");
+      const intentLine = (project.intentDocument ?? "")
+        .split("\n").map((line) => line.replace(/^#+\s*/, "").trim()).find((line) => line !== "") ?? null;
+      const item: ProjectContinuationItem = {
+        id: project.id,
+        name: last.title,
+        intentPreview: intentLine === null ? null : intentLine.length <= 160 ? intentLine : `${intentLine.slice(0, 159)}…`,
+        openSession: open === undefined ? null
+          : { id: open.id, title: open.title, pauseReason: open.pauseReason },
+        lastSession: {
+          id: last.id, title: last.title, lifecycle: last.lifecycle, runState: last.runState,
+          pauseReason: last.pauseReason, updatedAt: last.updatedAt,
+        },
+        sessionCount: sessions.length,
+        hasCheckpoint: this.#continuation.latestForProject(project.id) !== null,
+        openRequirements: this.#openRequirementCount(last.id),
+        createdAt: project.createdAt,
+      };
+      return [item];
+    });
+    // Most recently touched first — the picker's "where was I" order.
+    return items.sort((a, b) => (a.lastSession!.updatedAt < b.lastSession!.updatedAt ? 1 : -1));
   }
 
   list(workspaceId: string): UserSessionListItem[] {

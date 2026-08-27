@@ -7,6 +7,8 @@ import type {
   AgentRunSummary,
   DecisionIssueWire,
   Interaction,
+  PauseReason,
+  RunState,
   ScheduledAssignment,
   SessionMessage,
   SessionMode,
@@ -112,6 +114,58 @@ export interface CreateUserSessionBody {
 export interface CreateUserSessionResponse {
   session: UserSession;
 }
+
+// POST /api/user-sessions/:id/continue — the explicit run-boundary handoff.
+/**
+ * Continue the source session's PROJECT in a fresh UserSession. If the source
+ * is still open (quota-paused, idle, awaiting sign-off) it is archived first —
+ * the same transition as the archive button, which records its continuation
+ * checkpoint and stops its agents — then exactly one successor is created on
+ * the same project. Never a resume: the old provider conversation stays
+ * closed, no AgentSession or task reactivates, and `runState` is untouched
+ * (an interrupted run stays honestly incomplete). Rejected while the project
+ * has a DIFFERENT open session — continuation is sequential.
+ */
+export interface ContinueUserSessionBody {
+  message: string;
+  /** Omitted inherits the source session's mode. */
+  mode?: SessionMode;
+  /** Omitted inherits the source session's model choice. */
+  model?: string;
+}
+
+// GET /api/workspaces/:id/projects — continuation discovery
+/**
+ * One row per project that has carried work sessions: the facts an operator
+ * needs to pick a continuation target. Status words are DERIVED client-side
+ * from the session facts here — the server ships no second status vocabulary.
+ */
+export interface ProjectContinuationItem {
+  id: string;
+  /** The workspace-visible name: the latest session's title (projects are unnamed). */
+  name: string | null;
+  /** First line(s) of the operator-approved intent document, clipped. */
+  intentPreview: string | null;
+  /** The project's open session, when one exists — continuing then requires handing it off. */
+  openSession: { id: string; title: string | null; pauseReason: PauseReason | null } | null;
+  /** The most recent session, open or archived — the "where it left off" row. */
+  lastSession: {
+    id: string;
+    title: string | null;
+    lifecycle: "open" | "archived";
+    runState: RunState;
+    /** Frozen at archival for archived rows — why the run stopped, when it was paused. */
+    pauseReason: PauseReason | null;
+    updatedAt: string;
+  } | null;
+  sessionCount: number;
+  /** A continuation checkpoint exists for the next session to inherit. */
+  hasCheckpoint: boolean;
+  /** Open requirement frontier size — unresolved work, cheaply derived. */
+  openRequirements: number;
+  createdAt: string;
+}
+export type ListWorkspaceProjectsResponse = ProjectContinuationItem[];
 
 // GET /api/user-sessions/:id
 export interface GetUserSessionResponse {

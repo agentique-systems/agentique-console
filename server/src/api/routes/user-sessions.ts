@@ -55,6 +55,17 @@ const CreateBody = z.object({
   mode: z.enum(["execute", "plan_execute"]),
   message: z.string(),
   model: Model.optional(),
+  // Explicit continuation of an existing project. Zod strips unknown keys, so
+  // omitting this here silently minted a fresh project for every client that
+  // sent it — the schema must carry every documented CreateUserSessionBody key.
+  projectId: z.string().optional(),
+});
+
+// POST /:id/continue — the explicit run-boundary handoff (see the service).
+const ContinueBody = z.object({
+  message: z.string(),
+  mode: z.enum(["execute", "plan_execute"]).optional(),
+  model: Model.optional(),
 });
 
 const PatchBody = z.object({
@@ -128,6 +139,20 @@ export function registerUserSessionRoutes(
   app.get<{ Params: { id: string } }>(
     "/api/user-sessions/:id",
     async (request) => sessions.get(request.params.id),
+  );
+
+  // Continue this session's project in a fresh session. Archives the source
+  // first when it is still open (the same transition as the archive button),
+  // then creates exactly one successor on the same project — never a resume
+  // of the old session, and rejected while a different session is open.
+  app.post<{ Params: { id: string } }>(
+    "/api/user-sessions/:id/continue",
+    async (request, reply) => {
+      const parsed = ContinueBody.safeParse(request.body);
+      if (!parsed.success) throw new InvalidInputError(parsed.error.message);
+      const session = sessions.continueFrom(request.params.id, parsed.data);
+      return reply.status(201).send({ session });
+    },
   );
 
   app.patch<{ Params: { id: string } }>(

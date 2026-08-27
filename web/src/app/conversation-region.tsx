@@ -60,7 +60,7 @@ export function ConversationRegion() {
         <p className="text-sm text-muted-foreground">
           Nothing in flight — start a session.
         </p>
-        <Button size="sm" onClick={beginDraft}>
+        <Button size="sm" onClick={() => beginDraft()}>
           New session
         </Button>
       </div>

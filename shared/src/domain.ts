@@ -891,6 +891,14 @@ export interface ContinuationCheckpointWire {
   sourceTitle: string | null;
   /** The source session's runState at the boundary: completed = accepted sign-off; anything else ended early. */
   runState: "active" | "awaiting_signoff" | "completed";
+  /**
+   * Why the source run stopped, when a pause held at its archival. Derived at
+   * read time from the archived session row (resume never touches archived
+   * rows, so the value is frozen at the boundary): "capacity" = the provider
+   * usage window closed on it; "budget" = its spend ceiling; "operator" = the
+   * operator's own pause. Null = archived without a pause holding.
+   */
+  sourcePauseReason: PauseReason | null;
   /** The governing requirement revision when the checkpoint was written (0 = none governed). */
   atRevision: number;
   /** Ledger length at record time — a currency hint beside atRevision. */

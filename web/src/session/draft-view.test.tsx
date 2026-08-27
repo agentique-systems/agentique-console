@@ -10,11 +10,13 @@ import userEvent from "@testing-library/user-event";
 import { createElement, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { ProjectContinuationItem } from "@agentique-console/shared";
 import { useScopeStore } from "@/stores/scope";
+import { useUiStore } from "@/stores/ui";
 
 import { DraftView } from "./draft-view";
 
-function stubFetch() {
+function stubFetch(projects: ProjectContinuationItem[] = []) {
   const spy = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => ({
     ok: true,
     status: 200,
@@ -23,11 +25,32 @@ function stubFetch() {
       Promise.resolve(
         String(input).endsWith("/api/config")
           ? { defaultModel: "claude-opus-5" }
-          : { session: { id: "us_new" } },
+          : String(input).endsWith("/projects")
+            ? projects
+            : { session: { id: "us_new" } },
       ),
   }) as Response);
   vi.stubGlobal("fetch", spy);
   return spy;
+}
+
+/** A continuation candidate row as the discovery endpoint ships it. */
+function projectItem(overrides: Partial<ProjectContinuationItem> = {}): ProjectContinuationItem {
+  return {
+    id: "proj_1",
+    name: "Straf3 movement wave",
+    intentPreview: "Canonical movement plus measured responsiveness",
+    openSession: null,
+    lastSession: {
+      id: "us_old", title: "Straf3 movement wave", lifecycle: "archived",
+      runState: "active", pauseReason: "capacity", updatedAt: "2026-08-26T19:09:38Z",
+    },
+    sessionCount: 1,
+    hasCheckpoint: true,
+    openRequirements: 14,
+    createdAt: "2026-08-26T17:33:39Z",
+    ...overrides,
+  };
 }
 
 function wrapper() {
@@ -49,7 +72,10 @@ function mount() {
 }
 
 describe("DraftView", () => {
-  beforeEach(() => useScopeStore.setState({ selectedWorkspaceId: "ws_1" }));
+  beforeEach(() => {
+    useScopeStore.setState({ selectedWorkspaceId: "ws_1" });
+    useUiStore.setState({ draftOpen: true, draftContinuation: null });
+  });
   afterEach(() => vi.unstubAllGlobals());
 
   it("Enter creates the session with the typed message", async () => {
@@ -130,5 +156,93 @@ describe("DraftView", () => {
         "model",
       ),
     );
+  });
+
+  it("with no continuable projects there is no picker and create is unchanged", async () => {
+    const spy = stubFetch([]);
+    const user = userEvent.setup();
+    mount();
+
+    await user.type(screen.getByRole("textbox"), "fresh work");
+    await user.keyboard("{Enter}");
+
+    expect(screen.queryByTestId("draft-project-picker")).toBeNull();
+    await waitFor(() =>
+      expect(JSON.parse(String(created(spy)?.[1]?.body))).not.toHaveProperty("projectId"),
+    );
+  });
+
+  it("selecting a project sends projectId — explicit continuation, never silent attachment", async () => {
+    const spy = stubFetch([projectItem()]);
+    const user = userEvent.setup();
+    mount();
+
+    // The default stays "start a new project" until the operator picks.
+    const newProject = await screen.findByRole("radio", { name: "Start a new project" });
+    expect(newProject).toHaveAttribute("aria-checked", "true");
+    await screen.findByText(/stopped by provider quota/);
+    await screen.findByText(/14 open requirements/);
+
+    await user.click(screen.getByRole("radio", { name: /Straf3 movement wave/ }));
+    await screen.findByTestId("draft-continuation-consequence");
+    await user.type(screen.getByRole("textbox"), "continue the movement work, land maps first");
+    await user.keyboard("{Enter}");
+
+    await waitFor(() =>
+      expect(JSON.parse(String(created(spy)?.[1]?.body))).toMatchObject({
+        workspaceId: "ws_1",
+        message: "continue the movement work, land maps first",
+        projectId: "proj_1",
+      }),
+    );
+  });
+
+  it("a paused-open project routes through the continue endpoint — a handoff, not a plain create", async () => {
+    const spy = stubFetch([
+      projectItem({
+        openSession: { id: "us_paused", title: "Straf3 movement wave", pauseReason: "capacity" },
+      }),
+    ]);
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("radio", { name: /Straf3 movement wave/ }));
+    // The consequence is on screen before the send: the old session is handed off.
+    await screen.findByText(/hands off the paused session/);
+    await user.type(screen.getByRole("textbox"), "close this iteration; continue fresh");
+    await user.keyboard("{Enter}");
+
+    await waitFor(() => {
+      const call = spy.mock.calls.find(
+        ([url, init]) =>
+          String(url).endsWith("/api/user-sessions/us_paused/continue") &&
+          init?.method === "POST",
+      );
+      expect(JSON.parse(String(call?.[1]?.body))).toMatchObject({
+        message: "close this iteration; continue fresh",
+      });
+    });
+    expect(created(spy)).toBeUndefined();
+  });
+
+  it("an open project that is NOT paused is not offered for continuation", async () => {
+    stubFetch([
+      projectItem({
+        openSession: { id: "us_running", title: "Straf3 movement wave", pauseReason: null },
+      }),
+    ]);
+    mount();
+
+    await screen.findByRole("textbox");
+    expect(screen.queryByTestId("draft-project-picker")).toBeNull();
+  });
+
+  it("a session's 'continue in a fresh session' pre-seeds the picker", async () => {
+    stubFetch([projectItem()]);
+    useUiStore.setState({ draftContinuation: { projectId: "proj_1", handoffSessionId: null } });
+    mount();
+
+    const row = await screen.findByRole("radio", { name: /Straf3 movement wave/ });
+    await waitFor(() => expect(row).toHaveAttribute("aria-checked", "true"));
   });
 });
