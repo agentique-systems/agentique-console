@@ -103,7 +103,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
   const tools = [
     sdk.tool(
       "create_agent_session",
-      "Create and immediately launch a Console-managed AgentSession running an orchestration pattern over profile-bound agents. Choose the shape the WORK has: hub_and_spoke — a coordinator sequences specialists (the default); pipeline — stages that each ADD information; evaluator_optimizer — a deliverable revised against a rubric; map_reduce — independent items fanned out, synthesized; debate — one blind round of independent argument; peer_to_peer — a direct-handoff mesh, rarely; plan_execute — an explicit task DAG. The orchestration-patterns skill carries sizing, briefing craft, and failure modes. Pass the initial ledger units in `tasks`, WHY you are commissioning (`why`), and what evidence counts as success (`expecting`).",
+      "Create and immediately launch a Console-managed AgentSession running an orchestration pattern over profile-bound agents. Choose the shape the WORK has: hub_and_spoke — a console-seated coordinator sequences your specialists (the default); pipeline — stages that each ADD information; evaluator_optimizer — a deliverable revised against a rubric; map_reduce — independent items fanned out, synthesized; debate — one blind round of independent argument; peer_to_peer — a direct-handoff mesh, rarely; plan_execute — an explicit task DAG. The orchestration-patterns skill carries sizing, briefing craft, and failure modes. Pass the initial ledger units in `tasks`, WHY you are commissioning (`why`), and what evidence counts as success (`expecting`).",
       {
         title: z.string().describe("Short working title for the session"),
         pattern: z.enum(PATTERN_IDS).default("hub_and_spoke")
@@ -124,7 +124,8 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
             }),
           )
           .min(1)
-          .max(20),
+          .max(20)
+          .describe("The specialist seats. hub_and_spoke seats its coordinator ITSELF — an orchestrator-archetype profile here is rejected as a second coordinator, under any seat name."),
         briefing: HandoffDraftSchema
           .describe("The entry assignment: objective, evidence, risk, uncertainty, next action"),
         allowChildSessions: z.boolean().default(false)
@@ -629,6 +630,13 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
             model: profile.model ?? null, maxTurns: profile.maxTurns,
             skills: profile.skills ?? [], mcpServers: Object.keys(profile.mcpServers ?? {}),
             handoffExtension: profile.handoffExtension ?? "generic",
+            // Derived from the archetype, at the moment of choosing: a live
+            // run seated this profile as a hub "specialist" (renamed twice
+            // past the reserved-name check) and paid for two management
+            // layers per session.
+            ...(profile.role === "orchestrator" ? {
+              seating: "Auto-coordinated patterns (hub_and_spoke) seat their coordinator themselves — this orchestrator-archetype profile is rejected as one of their specialists, under any name. Seat it only where the pattern expects an explicit controller (e.g. plan_execute's planner).",
+            } : {}),
           })),
           catalog: {
             skills: catalog.selectable().map(({ name, version, status, description, whenToUse, requiresTools, costNote }) =>
@@ -1233,7 +1241,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
 
     sdk.tool(
       "add_agent",
-      "Add ONE agent to an open session mid-run — an emergent need the original roster did not anticipate. Open multi-seat roles only (hub specialists, plan_execute executors, peer_to_peer peers); fixed-roster patterns refuse. The entry agent is told immediately; assign the new seat work through it.",
+      "Add ONE agent to an open session mid-run — an emergent need the original roster did not anticipate. Open multi-seat roles only (hub specialists, plan_execute executors, peer_to_peer peers); fixed-roster patterns refuse; an auto-coordinated session refuses a second coordinator-archetype seat. The entry agent is told immediately; assign the new seat work through it.",
       {
         agentSessionId: z.string().min(1),
         name: z.string().min(1).describe("Agent name, e.g. 'auditor'"),
