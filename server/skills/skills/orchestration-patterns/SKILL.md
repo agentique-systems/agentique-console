@@ -65,9 +65,13 @@ The briefing is the session's contract, not a greeting:
 
 ## Per-pattern failure modes
 
-- hub_and_spoke — the default when decomposition is unknown or evolving. A
-  coordinator that relays without sequencing adds a lossy hop: brief it on
-  what to integrate, not just what to distribute.
+- hub_and_spoke — the default when decomposition is unknown or evolving.
+  The Console seats the coordinator ITSELF: your `agents` are its
+  specialists, so never spend a seat on a coordinator-archetype profile —
+  the commission rejects it (a broad-scope reviewer or planner specialist
+  is fine; a second dispatcher is not). A coordinator that relays without
+  sequencing adds a lossy hop: brief it on what to integrate, not just what
+  to distribute.
 - pipeline — the agents ARE the stages; a relay stage that adds nothing
   loses quality. Steer a specific stage with send_to_coordinator `to`
   (update-only); assignments still enter through stage 1.

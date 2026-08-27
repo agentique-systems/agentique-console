@@ -58,6 +58,11 @@ describe("console tool byte budget", () => {
   // layer's binding surface, not creep on existing ones.
   // Bumped 15300 → 15900 with read_continuation — the project continuation
   // checkpoint's read surface, not creep on existing ones.
+  // Bumped 15900 → 16200 to state the auto-coordination contract AT the
+  // commission affordance (create_agent_session/add_agent): a live run read
+  // "hub_and_spoke" as "supply a coordinator too", renamed the coordinator
+  // profile past the reserved-name check, and paid for two management layers
+  // per session — the one-line invariant belongs where the mistake happens.
   it("keeps total description + parameter-describe bytes within the budget", () => {
     const tools = captureTools();
     expect(tools.length).toBeGreaterThan(20);
@@ -66,6 +71,6 @@ describe("console tool byte budget", () => {
       + Buffer.byteLength(tool.description, "utf8")
       + Object.values(tool.schema).reduce((inner, schema) => inner + describeBytes(schema), 0),
     0);
-    expect(total).toBeLessThanOrEqual(15_900);
+    expect(total).toBeLessThanOrEqual(16_200);
   });
 });

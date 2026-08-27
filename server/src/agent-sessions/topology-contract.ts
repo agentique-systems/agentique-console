@@ -104,6 +104,16 @@ export interface TopologyContract {
   joins: JoinSpec[];
   /** Who receives the creation briefing; broadcast = every agent of that role. */
   entry: { role: string; broadcast: boolean };
+  /**
+   * Set when the Console itself seats this pattern's coordination authority
+   * at creation (the hub's coordinator). The named role is console-supplied
+   * and singular; every seat-creation door then rejects caller-chosen
+   * orchestrator-archetype profiles in other roles
+   * (`assertSoleCoordinationAuthority`), so a second coordinator cannot be
+   * commissioned — under any seat name. Absent for patterns whose controller
+   * is caller-supplied (plan_execute) or that have none (debate, peers).
+   */
+  autoCoordinatorRole?: string;
   termination: TerminationPolicy;
   completion: CompletionSpec;
   promptPack: Record<string, RolePrompt>;

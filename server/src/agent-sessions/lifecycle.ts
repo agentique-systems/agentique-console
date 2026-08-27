@@ -21,7 +21,7 @@ import { newId, nowIso } from "../ids.ts";
 import type { WorktreeManager } from "../runtime/worktree-manager.ts";
 import type { AgentLanePool } from "./lanes.ts";
 import { CHILD_SENDER_PREFIX, CONSOLE_SENDER, COORDINATOR_AGENT, MAIN_RECIPIENT } from "./names.ts";
-import { buildContract } from "./patterns/catalog.ts";
+import { assertSoleCoordinationAuthority, buildContract } from "./patterns/catalog.ts";
 import type { SessionRouting } from "./routing.ts";
 import type { Deliver, RecordFailure, SimpleHandoff, Transfer } from "./seams.ts";
 import { AGENT_NAME_RE, RESERVED_NAMES } from "./topology.ts";
@@ -283,6 +283,10 @@ export class SessionLifecycle {
     const user = repo.getUserSession(session.userSessionId);
     if (!user) throw new NotFoundError("unknown user session");
     const profile = this.profile(input.profileId, user.workspaceId);
+    // The same sole-coordination-authority rule as creation: a late seat in
+    // an auto-coordinated session must not duplicate the console-seated
+    // coordinator, whatever the seat is named.
+    assertSoleCoordinationAuthority(contract, [{ name, profile }]);
     // THE ownership rule — same project-wide check as every creation path.
     const claims = assertOwnershipClaims(repo, session.userSessionId, [{
       agent: name, profileId: profile.id,

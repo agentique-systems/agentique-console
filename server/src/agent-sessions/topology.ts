@@ -80,6 +80,7 @@ const HUB_CONTRACT: TopologyContract = {
   ],
   joins: [],
   entry: { role: "coordinator", broadcast: false },
+  autoCoordinatorRole: "coordinator",
   termination: {},
   completion: { finalFrom: "coordinator", voice: "coordinator" },
   promptPack: {

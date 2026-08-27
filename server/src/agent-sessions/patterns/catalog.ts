@@ -47,8 +47,42 @@ export interface BuildResult {
   coordinatorName?: string;
 }
 
+/**
+ * The sole-coordination-authority guard, shared by every door that seats a
+ * caller-chosen profile (commission and child creation via `buildContract`,
+ * late add_agent). Contract-derived and structural, never nominal: when the
+ * contract says the Console seats the coordination authority itself
+ * (`autoCoordinatorRole`), a caller-supplied seat must not carry an
+ * orchestrator-archetype profile — renaming the seat changes nothing,
+ * because the check reads the profile's role archetype. (A live run renamed
+ * the coordinator profile to "movelead" past the reserved-NAME check and ran
+ * two management layers per hub.) Broad-scope planner/reviewer/explorer
+ * profiles pass: intellectual scope is not dispatch authority.
+ */
+export function assertSoleCoordinationAuthority(
+  contract: Pick<TopologyContract, "pattern" | "autoCoordinatorRole">,
+  seats: { name: string; profile: AgentProfile }[],
+): void {
+  const autoRole = contract.autoCoordinatorRole;
+  if (autoRole === undefined) return;
+  for (const seat of seats) {
+    if (seat.profile.role !== "orchestrator") continue;
+    throw new InvalidInputError(
+      `agent "${seat.name}" uses profile "${seat.profile.id}", an orchestrator-archetype (coordination) profile — but ${contract.pattern} seats its ${autoRole} automatically, so whatever this seat is named it would be a second coordination authority relaying state with the console-seated one instead of producing. Commission a productive specialist instead (implementer / explorer / reviewer / planner — an independent reviewer may cover the whole domain without being a controller), or choose a pattern that expects an explicit controller, like plan_execute.`,
+    );
+  }
+}
+
 export function buildContract(pattern: PatternId, input: BuildInput): BuildResult {
   const built = builderOf(pattern)(input);
+  // Structural, before anything downstream spends a resource: a commission
+  // into an auto-coordinated contract must not smuggle in a second
+  // coordinator under a fresh seat name.
+  if (built.contract.autoCoordinatorRole !== undefined) {
+    assertSoleCoordinationAuthority(built.contract, input.agents.map((agent) => ({
+      name: agent.name, profile: input.resolveProfile(agent.profileId ?? "explorer"),
+    })));
+  }
   // The terminal-report rule is appended HERE, once, to every role — never
   // restated per pattern. A fresh promptPack object each call: builders may
   // return shared contract singletons (hubContract), which must not mutate.
@@ -100,7 +134,7 @@ function agentPlans(agents: BuildAgent[], roleOf: (index: number) => string, fir
 // ── hub_and_spoke ──────────────────────────────────────────────────────────
 
 function buildHub(input: BuildInput): BuildResult {
-  if (input.agents.length < 1 || input.agents.length > 20) throw new InvalidInputError("an agent session seats 1 to 20 specialists");
+  if (input.agents.length < 1 || input.agents.length > 20) throw new InvalidInputError("hub_and_spoke seats 1 to 20 specialists — the Console seats the coordinator itself, so supply at least one productive specialist");
   return {
     contract: hubContract(),
     agents: [
