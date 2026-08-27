@@ -4,6 +4,7 @@ import type {
   AssumptionWire,
   OperatorRequirementStatusBody,
   RequirementNodeWire,
+  ContinueUserSessionBody,
   CreateUserSessionBody,
   CreateUserSessionResponse,
   CreateWorkspaceBody,
@@ -44,6 +45,24 @@ export function useCreateUserSession() {
   return useMutation({
     mutationFn: (body: CreateUserSessionBody) =>
       apiFetch<CreateUserSessionResponse>("/api/user-sessions", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    onSuccess: () =>
+      void queryClient.invalidateQueries({ queryKey: keys.userSessions.all }),
+  });
+}
+
+/**
+ * The explicit run-boundary handoff: continue the source session's project in
+ * a fresh session. An open source is archived first (checkpoint recorded,
+ * agents stopped) — never resumed under a new label.
+ */
+export function useContinueUserSession() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, ...body }: { id: string } & ContinueUserSessionBody) =>
+      apiFetch<CreateUserSessionResponse>(`/api/user-sessions/${id}/continue`, {
         method: "POST",
         body: JSON.stringify(body),
       }),

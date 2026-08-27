@@ -293,6 +293,8 @@ export function createApp(options: CreateAppOptions): App {
     completion,
     continuation,
     wireAgentSessions: (userSessionId) => host.wireSessionsForUserSession(userSessionId),
+    pauseSnapshot: () => capacity.snapshot(),
+    openRequirementCount: (userSessionId) => requirements.frontier(userSessionId).length,
   });
 
   // Every cross-service callback, registered once. The completion predicate

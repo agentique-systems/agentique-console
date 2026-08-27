@@ -192,6 +192,16 @@ export class ContinuationCheckpointService {
     return latest === undefined ? null : this.#toWire(latest);
   }
 
+  /**
+   * The latest checkpoint in a project, run-ordered — continuation discovery
+   * reads existence through this without needing a successor session to exist.
+   */
+  latestForProject(projectId: string): ContinuationCheckpointWire | null {
+    const rows = this.#rowsInRunOrder(projectId);
+    const latest = rows[rows.length - 1];
+    return latest === undefined ? null : this.#toWire(latest);
+  }
+
   /** Every checkpoint in the session's project, run-ordered — the read tool's history listing. */
   listForSession(userSessionId: string): ContinuationCheckpointWire[] {
     const deps = this.#requireDeps();
@@ -224,8 +234,13 @@ export class ContinuationCheckpointService {
     if (wire === null) return "";
     const currentRevision = this.#requireDeps().governingRevision(userSessionId);
 
+    // The stopping reason, so the successor knows WHY work stopped without
+    // parsing the prior transcript: a run archived while a pause held names
+    // the pause (frozen on the archived row) instead of a bare "archived".
     const ended = wire.runState === "completed" ? "accepted at sign-off"
       : wire.runState === "awaiting_signoff" ? "archived while awaiting sign-off"
+      : wire.sourcePauseReason === "capacity" ? "stopped by a provider-capacity pause before completion"
+      : wire.sourcePauseReason === "budget" ? "stopped at its budget ceiling before completion"
       : "archived before completion";
     const title = wire.sourceTitle === null ? wire.sourceUserSessionId : `"${wire.sourceTitle}"`;
     const header =
@@ -412,6 +427,10 @@ export class ContinuationCheckpointService {
       sourceUserSessionId: row.sourceUserSessionId,
       sourceTitle: source?.title ?? null,
       runState: row.runState,
+      // Derived, not stored: archived rows keep their pause columns frozen
+      // (resume touches only OPEN sessions), so this reads the same at an
+      // eager record, the attach-time backstop, and every later read.
+      sourcePauseReason: source?.pauseReason ?? null,
       atRevision: row.atRevision,
       decisionCount: row.decisionCount,
       synthesis: row.synthesis,

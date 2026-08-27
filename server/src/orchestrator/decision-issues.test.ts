@@ -35,6 +35,11 @@ function harness(opts: { openSessions?: Set<string> } = {}) {
   };
   const addUserSession = (): string => {
     const id = newId("us");
+    // Sequential continuation is a DB invariant (one OPEN session per
+    // project): a later session on the shared project continues from the
+    // archived previous one, exactly the production shape.
+    db.update(userSessions).set({ lifecycle: "archived" })
+      .where(eq(userSessions.projectId, projectId)).run();
     db.insert(userSessions).values({
       id, workspaceId, projectId, title: "t", mode: "execute", phase: "executing",
       lifecycle: "open", purpose: "work", subjectKey: null, sdkSessionId: null, sdkGeneration: 0,

@@ -9,6 +9,7 @@ import type {
   ListAgentSessionsResponse,
   ListTasksResponse,
   ListUserSessionsResponse,
+  ListWorkspaceProjectsResponse,
   StatsResponse,
   SystemPauseState,
   TranscriptResponse,
@@ -159,6 +160,20 @@ export function useTasks(userSessionId: string | null) {
     queryFn: () =>
       apiFetch<ListTasksResponse>(`/api/user-sessions/${userSessionId}/tasks`),
     enabled: userSessionId !== null,
+  });
+}
+
+/**
+ * Continuation discovery: the workspace's projects with last-session facts,
+ * checkpoint existence, and open-requirement counts — the draft view's
+ * "continue an existing project" corpus.
+ */
+export function useWorkspaceProjects(workspaceId: string | null) {
+  return useQuery({
+    queryKey: keys.userSessions.projects(workspaceId ?? ""),
+    queryFn: () =>
+      apiFetch<ListWorkspaceProjectsResponse>(`/api/workspaces/${workspaceId}/projects`),
+    enabled: workspaceId !== null,
   });
 }
 

@@ -46,4 +46,12 @@ export function registerWorkspaceRoutes(
     "/api/workspaces/:id/session-tree",
     async (request) => ctx.app.userSessions.sessionTree(request.params.id),
   );
+
+  // Continuation discovery: the workspace's projects with the facts needed to
+  // pick one to continue (last session, open session + pause, checkpoint
+  // existence, open requirement count).
+  app.get<{ Params: { id: string } }>(
+    "/api/workspaces/:id/projects",
+    async (request) => ctx.app.userSessions.listProjects(request.params.id),
+  );
 }

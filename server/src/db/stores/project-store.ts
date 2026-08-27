@@ -22,6 +22,13 @@ export class ProjectStore {
     return this.#db.select().from(projects).where(eq(projects.id, id)).get();
   }
 
+  /** Every project in one workspace, creation-ordered — continuation discovery's corpus. */
+  listByWorkspace(workspaceId: string): ProjectRow[] {
+    return this.#db.select().from(projects)
+      .where(eq(projects.workspaceId, workspaceId))
+      .orderBy(projects.createdAt).all();
+  }
+
   insert(input: { workspaceId: string; title?: string | null }): ProjectRow {
     const row: ProjectRow = {
       id: newId("proj"),

@@ -358,6 +358,129 @@ describe("continuation checkpoints (real composition root)", () => {
     expect(checkpoint!.synthesis?.strategy).toBe("Land the parser before any rendering work");
   });
 
+  it("the live-run regression: a quota-paused run is handed off into a fresh session on the same project", async () => {
+    const h = makeHarness(trivialProgram);
+    const { userSessionId: runA, projectId, unfinished } = seedPriorRun(h);
+    approveRequirements(h, runA, DOC);
+    h.tasks.upsertFromCreate({
+      sdkSessionId: "sdk-a", sdkTaskId: "1", subject: "finish the parser",
+      attribution: { workspaceId: h.workspaceId, userSessionId: runA, agentSessionId: unfinished.id, agent: "builder" },
+    });
+    // The provider's usage window closes on the run — the straf3 live ending.
+    h.app.capacity.noteLimit({ status: "rejected", resetsAt: Math.floor(Date.now() / 1000) + 3600, limitType: "five_hour" });
+    expect(h.repo.getUserSession(runA)?.pauseReason).toBe("capacity");
+
+    const runB = h.app.userSessions.continueFrom(runA, { message: "continue the unfinished parser work" });
+
+    // The handoff is a real ownership transfer: the old session is archived,
+    // cannot take messages, and its agents are archived — never reopened.
+    const oldRow = h.repo.getUserSession(runA)!;
+    expect(oldRow.lifecycle).toBe("archived");
+    // Honest lifecycle: an interrupted run is NOT completed.
+    expect(oldRow.runState).toBe("active");
+    expect(() => h.app.userSessions.postMessage(runA, "hello?")).toThrow(/archived/);
+    for (const session of h.repo.listAgentSessions(runA)) expect(session.lifecycle).toBe("archived");
+    expect(h.repo.listAgentSessions(runB.id)).toEqual([]);
+    expect(h.scheduler.countScheduled(runB.id)).toBe(0);
+
+    // The successor is a fresh session on the SAME project, sequentially legal.
+    expect(runB.projectId).toBe(projectId);
+    expect(h.repo.listOpenUserSessionsForProject(projectId).map((row) => row.id)).toEqual([runB.id]);
+
+    // Project truth flows: the same requirement graph governs the successor.
+    expect(h.app.requirements.derive(runB.id).map((node) => node.id)).toEqual(["r1", "r2"]);
+
+    // The checkpoint records the boundary WITH its stopping reason, derived
+    // from the archived row's frozen pause columns.
+    const checkpoint = h.app.continuation.latestForSession(runB.id)!;
+    expect(checkpoint.sourceUserSessionId).toBe(runA);
+    expect(checkpoint.sourcePauseReason).toBe("capacity");
+    expect(checkpoint.facts.unfinishedWorkstreams).toEqual([
+      expect.objectContaining({ agentSessionId: unfinished.id, openTasks: 1 }),
+    ]);
+    const digest = h.app.continuation.digest(runB.id);
+    expect(digest).toContain("stopped by a provider-capacity pause before completion");
+    expect(digest).toContain("Strategy then: Land the parser before any rendering work");
+
+    // Quota is account-wide, not per-session: the successor inherits the live
+    // pause stamp, so it waits like everything else and a restart remembers.
+    const newRow = h.repo.getUserSession(runB.id)!;
+    expect(newRow.pauseReason).toBe("capacity");
+    expect(newRow.pausedUntil).not.toBeNull();
+
+    // The operator-facing traces on both sides of the boundary.
+    const oldNotices = h.repo.listMessages("user", runA).filter((row) => row.kind === "notice");
+    expect(oldNotices.some((row) => row.text.includes("Handed off: this project continues"))).toBe(true);
+    const newNotices = h.repo.listMessages("user", runB.id).filter((row) => row.kind === "notice");
+    expect(newNotices.some((row) => row.text.includes("Continuing this project from the previous run"))).toBe(true);
+
+    // A duplicate continue (double-click, API retry) cannot mint a second
+    // successor: the sequential gate rejects it, naming the open session.
+    expect(() => h.app.userSessions.continueFrom(runA, { message: "continue again" }))
+      .toThrow(new RegExp(`continuation is sequential`));
+    expect(h.repo.listOpenUserSessionsForProject(projectId).length).toBe(1);
+  });
+
+  it("a crash between handoff and successor recovers: continue from the already-archived source just creates", () => {
+    const h = makeHarness(trivialProgram);
+    const { userSessionId: runA, projectId } = seedPriorRun(h);
+    // The crash shape: the archive transition committed (checkpoint recorded),
+    // the process died before the successor row existed.
+    h.app.userSessions.patch(runA, { lifecycle: "archived" });
+    expect(h.repo.listOpenUserSessionsForProject(projectId)).toEqual([]);
+
+    const runB = h.app.userSessions.continueFrom(runA, { message: "pick it back up" });
+    expect(runB.projectId).toBe(projectId);
+    expect(h.app.continuation.latestForSession(runB.id)!.sourceUserSessionId).toBe(runA);
+    // Still exactly one checkpoint: the retry converged on the archived record.
+    expect(h.sqlite.prepare("SELECT count(*) AS n FROM continuation_checkpoints").get()).toMatchObject({ n: 1 });
+  });
+
+  it("a bad continue request archives nothing, and a non-work source is rejected", () => {
+    const h = makeHarness(trivialProgram);
+    const { userSessionId: runA } = seedPriorRun(h);
+    expect(() => h.app.userSessions.continueFrom(runA, { message: "   " })).toThrow(/first message/);
+    expect(h.repo.getUserSession(runA)?.lifecycle).toBe("open");
+    expect(() => h.app.userSessions.continueFrom("us_missing", { message: "go" })).toThrow(/no user session/);
+  });
+
+  it("a restart mid-pause after the handoff still knows the system is paused", async () => {
+    const h = makeHarness(trivialProgram);
+    const { userSessionId: runA } = seedPriorRun(h);
+    h.app.capacity.noteLimit({ status: "rejected", resetsAt: Math.floor(Date.now() / 1000) + 3600 });
+    const runB = h.app.userSessions.continueFrom(runA, { message: "continue" });
+    // The handoff archived the only previously-stamped open session; the
+    // successor's inherited stamp is what survives the restart.
+    const restarted = await restartHarness(h);
+    expect(restarted.app.capacity.paused).toBe(true);
+    expect(restarted.app.capacity.snapshot().reason).toBe("capacity");
+    expect(restarted.repo.getUserSession(runB.id)?.pauseReason).toBe("capacity");
+  });
+
+  it("ordinary same-session resume is untouched: a pause without a handoff clears in place", () => {
+    const h = makeHarness(trivialProgram);
+    const { userSessionId: runA } = seedPriorRun(h);
+    h.app.capacity.noteLimit({ status: "rejected", resetsAt: Math.floor(Date.now() / 1000) + 3600 });
+    expect(h.repo.getUserSession(runA)?.pauseReason).toBe("capacity");
+    h.app.capacity.resume({ manual: true });
+    const row = h.repo.getUserSession(runA)!;
+    expect(row.lifecycle).toBe("open");
+    expect(row.pauseReason).toBeNull();
+    expect(row.pausedUntil).toBeNull();
+  });
+
+  it("the sequential invariant is durable: the database itself rejects a second open session on one project", () => {
+    const h = makeHarness(trivialProgram);
+    const runA = h.addUserSession();
+    const projectId = h.repo.getUserSession(runA)!.projectId;
+    // Bypass the service's check-first path — this is the raced-writer shape.
+    // (SQLite names the column, not the index, in the violation message.)
+    expect(() => h.addUserSession("execute", { projectId })).toThrow(/UNIQUE constraint failed: user_sessions\.project_id/);
+    // Archived rows never collide: history accumulates freely.
+    h.repo.patchUserSession(runA, { lifecycle: "archived" });
+    expect(() => h.addUserSession("execute", { projectId })).not.toThrow();
+  });
+
   it("restart preserves checkpoint creation and selection", async () => {
     const h = makeHarness(trivialProgram);
     const { userSessionId: runA, projectId } = seedPriorRun(h);

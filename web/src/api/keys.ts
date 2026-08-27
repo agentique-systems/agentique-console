@@ -22,6 +22,12 @@ export const keys = {
     list: (workspaceId: string) =>
       ["user-sessions", "list", workspaceId] as const,
     detail: (id: string) => ["user-sessions", "detail", id] as const,
+    /**
+     * Continuation discovery (workspace projects). Deliberately under the
+     * user-sessions prefix: the listing is derived from session rows, so
+     * `user_session.*` invalidations are exactly its liveness.
+     */
+    projects: (workspaceId: string) => ["user-sessions", "projects", workspaceId] as const,
     /** The governing documents + orchestration read-models — under this prefix so their invalidations reach them. */
     requirements: (id: string) => ["user-sessions", "requirements", id] as const,
     orchestration: (id: string) => ["user-sessions", "orchestration", id] as const,

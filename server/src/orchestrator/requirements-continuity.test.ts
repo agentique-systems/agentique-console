@@ -37,6 +37,9 @@ function makeHarness() {
   for (const [id, projectId] of Object.entries(projectOf)) {
     db.insert(userSessions).values({
       id, workspaceId: "ws1", projectId, mode: "execute", title: "t", createdAt: now, updatedAt: now,
+      // Sequential continuation is now a DB invariant (one OPEN session per
+      // project): us1 is the archived predecessor us2 continued from.
+      lifecycle: id === "us1" ? "archived" : "open",
     } as typeof userSessions.$inferInsert).run();
   }
   const service = new RequirementService(

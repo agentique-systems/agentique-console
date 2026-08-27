@@ -40,7 +40,7 @@ export function SessionTree({ showAll = false, allSelected = false, onSelectAll,
   return <aside data-testid="session-tree" className="flex min-h-0 flex-col border-r border-border bg-sidebar">
     <div className="flex h-9 items-center justify-between border-b border-border px-3">
       <span className="text-3xs uppercase tracking-wider text-muted-foreground">Sessions</span>
-      {allowNew && <Button size="sm" variant="ghost" className="h-6 gap-1 px-2 text-2xs" onClick={beginDraft}><Plus className="size-3" /> new</Button>}
+      {allowNew && <Button size="sm" variant="ghost" className="h-6 gap-1 px-2 text-2xs" onClick={() => beginDraft()}><Plus className="size-3" /> new</Button>}
     </div>
     <div className="min-h-0 flex-1 overflow-y-auto" role="tree" aria-label="Workspace sessions">
       {showAll && <button role="treeitem" aria-selected={allSelected} className={cn("flex w-full items-center gap-2 border-b border-border/50 px-3 py-2 text-left text-xs hover:bg-accent", allSelected && "bg-accent")} onClick={onSelectAll}><MessagesSquare className="size-3.5" />All sessions</button>}

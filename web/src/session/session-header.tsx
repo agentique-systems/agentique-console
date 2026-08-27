@@ -5,7 +5,7 @@
  * "blocked", "done" and "ready" stopped being the same pixels. Mode switching
  * and interrupting live in the composer, next to the textarea they act on.
  */
-import { ArchiveIcon, BellIcon, DownloadIcon, MoonIcon } from "lucide-react";
+import { ArchiveIcon, BellIcon, DownloadIcon, MoonIcon, SkipForwardIcon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
@@ -29,6 +29,7 @@ import {
 } from "@/components/ui/tooltip";
 import { userStreamKey } from "@/live/watched";
 import { cn } from "@/lib/utils";
+import { useUiStore } from "@/stores/ui";
 import { useUserSessionStreamsStore } from "@/stores/user-session-streams";
 
 import { foldUserItems } from "./user-fold";
@@ -280,6 +281,37 @@ export function SessionHeader({
           </TooltipTrigger>
           <TooltipContent>export transcript as markdown</TooltipContent>
         </Tooltip>
+
+        {/* The continuation affordance: shown once this run is over (archived)
+            or held by a pause — the two states where "continue the project in
+            a FRESH session" is a meaningful alternative to resuming this one.
+            It only opens the draft pre-seeded with this project; nothing
+            happens until the operator sends the continuation message there. */}
+        {(session.lifecycle === "archived" || session.pauseReason !== null) && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                aria-label="continue this project in a fresh session"
+                onClick={() => {
+                  useUiStore.getState().beginDraft({
+                    projectId: session.projectId,
+                    handoffSessionId: session.lifecycle === "open" ? session.id : null,
+                  });
+                }}
+              >
+                <SkipForwardIcon className="size-3" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              {session.lifecycle === "open"
+                ? "continue this project in a fresh session: this paused one is handed off — archived with its continuation checkpoint — when you send. Resume instead keeps this session going."
+                : "continue this project in a fresh session: same requirements and decisions, plus this run's continuation checkpoint"}
+            </TooltipContent>
+          </Tooltip>
+        )}
 
         {session.lifecycle === "open" && (
           <Tooltip>

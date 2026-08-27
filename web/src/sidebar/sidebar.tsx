@@ -41,7 +41,7 @@ export function Sidebar() {
           variant="ghost"
           className="h-6 gap-1 px-2 text-2xs"
           data-testid="new-session"
-          onClick={beginDraft}
+          onClick={() => beginDraft()}
         >
           <Plus className="size-3" /> new
         </Button>
