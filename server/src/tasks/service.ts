@@ -33,9 +33,52 @@ export interface TaskAttribution {
  * THE ledger line — every prompt surface that renders a task (full ledgers,
  * bounded delivery views, reconstruction checkpoints) formats through this,
  * so the bounded view is byte-identical to the unbounded one line-for-line.
+ * It leads with the canonical model-facing task id (the ledger id): every
+ * surface that shows a task teaches the one id handoffs and task_update take.
  */
-export function taskLedgerLine(task: { status: string; subject: string; owner: string | null; requirementId: string | null }): string {
-  return `- [${task.status}] ${task.subject}${task.owner === null ? "" : ` (${task.owner})`}${task.requirementId === null ? "" : ` → ${task.requirementId}`}`;
+export function taskLedgerLine(task: { sdkTaskId: string; status: string; subject: string; owner: string | null; requirementId: string | null }): string {
+  return `- ${task.sdkTaskId} [${task.status}] ${task.subject}${task.owner === null ? "" : ` (${task.owner})`}${task.requirementId === null ? "" : ` → ${task.requirementId}`}`;
+}
+
+/**
+ * One ledger entry as MODELS see it: keyed by the canonical taskId alone.
+ * Internal row ids stay server-side — exposing both ids is how a live run
+ * ended up addressing a handoff by database row id, which then failed to
+ * sync. `blockedBy` renders in the same canonical vocabulary.
+ */
+export interface TaskModelView {
+  taskId: string;
+  subject: string;
+  description: string;
+  status: TaskStatus;
+  owner: string | null;
+  requirementId: string | null;
+  /** Canonical taskIds of this unit's durable dependencies. */
+  blockedBy: string[];
+  ready: boolean;
+  scheduledAssignment: { assignmentId: string; recipient: string } | null;
+}
+
+/**
+ * Resolve a model-supplied task reference against ONE session's ledger, or
+ * say exactly why it does not resolve. The canonical id is the ledger id; an
+ * internal row id resolves as an explicit compatibility path and is reported
+ * back (`resolvedFrom`) so the caller learns the canonical id. Never guesses:
+ * exact ledger-id match wins, then exact row-id match scoped to this list.
+ */
+export function resolveTaskRefOrThrow(tasks: TaskService, agentSessionId: string, ref: string): { task: Task; canonicalId: string; resolvedFrom: string | null } {
+  const task = tasks.resolveForList(consoleTaskListId(agentSessionId), ref);
+  if (task === undefined) {
+    const known = tasks.listForAgentSession(agentSessionId);
+    const shown = known.slice(0, 12).map((row) => `${row.sdkTaskId} [${row.status}]`).join(", ");
+    const more = known.length > 12 ? ` (+${known.length - 12} more — task_list shows all)` : "";
+    throw new InvalidInputError(
+      `task reference "${ref}" does not match any task in this session's ledger. `
+      + (known.length === 0
+        ? "The ledger is empty — task_create adds units."
+        : `Valid taskIds: ${shown}${more}. Use the taskId the ledger shows, never an internal row id.`));
+  }
+  return { task, canonicalId: task.sdkTaskId, resolvedFrom: task.sdkTaskId === ref ? null : ref };
 }
 
 function toWire(
@@ -308,10 +351,42 @@ export class TaskService {
   }
 
   /** Compact lines for wake digests: the live tasks of one agent session. */
-  linesForAgentSession(agentSessionId: string): string[] {
+  linesForAgentSession(agentSessionId: string, filter: { openOnly?: boolean } = {}): string[] {
     return this.#store.listByAgentSession(agentSessionId)
       .filter((row) => row.status !== "deleted")
+      .filter((row) => filter.openOnly !== true || row.status !== "completed")
       .map((row) => taskLedgerLine(row));
+  }
+
+  /** The model-facing ledger of one agent session — canonical taskIds only. */
+  modelViewForAgentSession(agentSessionId: string): TaskModelView[] {
+    return this.listForAgentSession(agentSessionId).map((task) => this.#modelView(task));
+  }
+
+  /** Main's model-facing ledger across sessions, each entry naming its session. */
+  modelViewForUserSession(userSessionId: string, agentSessionId?: string): (TaskModelView & { agentSessionId: string | null })[] {
+    return this.listForUserSession(userSessionId)
+      .filter((task) => agentSessionId === undefined || task.agentSessionId === agentSessionId)
+      .filter((task) => task.status !== "deleted")
+      .map((task) => ({ agentSessionId: task.agentSessionId, ...this.#modelView(task) }));
+  }
+
+  #modelView(task: Task): TaskModelView {
+    return {
+      taskId: task.sdkTaskId,
+      subject: task.subject,
+      description: task.description,
+      status: task.status,
+      owner: task.owner,
+      requirementId: task.requirementId,
+      // Durable edges rendered in ledger vocabulary; dependencies are
+      // same-list by construction, so every row id resolves.
+      blockedBy: task.dependencyIds.map((id) => this.#store.getById(id)?.sdkTaskId ?? id),
+      ready: task.ready,
+      scheduledAssignment: task.scheduledAssignment === null
+        ? null
+        : { assignmentId: task.scheduledAssignment.id, recipient: task.scheduledAssignment.recipient },
+    };
   }
 
   /**

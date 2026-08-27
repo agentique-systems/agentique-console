@@ -745,6 +745,21 @@ export interface TaskUpdatedPayload {
 export interface TaskAssignmentPayload {
   assignment: ScheduledAssignment;
 }
+/**
+ * A handoff's ledger transition could not be applied — the task's state did
+ * NOT change. Structural, so callers, tests and recovery tooling can tell
+ * "report journaled + ledger updated" from "report journaled + ledger update
+ * failed" without reading server logs. The same fact rides the journaled
+ * handoff as a Console uncertainty line.
+ */
+export interface TaskSyncFailedPayload {
+  agentSessionId: string;
+  sender: string;
+  /** The task reference the handoff carried. */
+  taskRef: string | null;
+  reason: "unknown_task_ref" | "completed_without_result";
+  detail: string;
+}
 
 export interface DelegationSentPayload {
   userSessionId: string;
@@ -873,6 +888,7 @@ export type ConsoleEvent = Base &
     | { type: "task.assignment.scheduled"; payload: TaskAssignmentPayload }
     | { type: "task.assignment.dispatched"; payload: TaskAssignmentPayload }
     | { type: "task.assignment.canceled"; payload: TaskAssignmentPayload }
+    | { type: "task.sync.failed"; payload: TaskSyncFailedPayload }
     | { type: "agent_profile.changed"; payload: AgentProfileChangedPayload }
     | { type: "agent_profile.minted"; payload: AgentProfileMintedPayload }
     | { type: "usage.recorded"; payload: UsageRecordedPayload }

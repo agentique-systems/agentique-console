@@ -67,7 +67,10 @@ describe("assignment scheduling e2e (fake SDK)", () => {
         }
       } else if (identity.role === "executor") {
         const taskId = invocation === 1 ? "t1" : "t2";
-        yield sendHandoffUse(`done-${taskId}`, "architect", { action: `${taskId} done`, stateSummary: `${taskId} finished`, status: "completed", category: "milestone", taskId });
+        // A completed report naming a unit must state its deliverable — a
+        // null resultSummary is structurally "nothing to hand over" and the
+        // boundary refuses to complete the task on it.
+        yield sendHandoffUse(`done-${taskId}`, "architect", { action: `${taskId} done`, stateSummary: `${taskId} finished`, resultSummary: `${taskId} landed`, status: "completed", category: "milestone", taskId });
       }
       yield successMessage();
     });

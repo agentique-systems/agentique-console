@@ -444,7 +444,7 @@ export class PromptComposer {
     const taskView = this.#taskView(session.id, seat.name);
     const taskLines = [...taskView.lines, ...(taskView.omittedLine === null ? [] : [taskView.omittedLine])];
     const ledgerBlock = taskLines.length === 0 ? ""
-      : `## Task ledger (console-owned, authoritative)\n${taskLines.join("\n")}\nKeep your unit's status honest with task_update: in_progress when you start, completed only when verified.\n\n`;
+      : `## Task ledger (console-owned, authoritative)\n${taskLines.join("\n")}\nEach line starts with the unit's taskId — the one id send_handoff and task_update take. Keep your unit's status honest: in_progress when you start; completed only when the promised output exists and your report states it; report blocked/failed plainly — the unit stays open for the remaining work.\n\n`;
     // The governing revision on EVERY delivery: the decision delta announces
     // an amendment once, but a long-lived seat's context can scroll it away —
     // the pointer re-anchors each time work arrives. Omitted entirely when no

@@ -97,6 +97,47 @@ describe("nesting e2e (fake SDK)", () => {
     expect(child && h.host.statusOf(child!)).toBe("reported");
   });
 
+  /**
+   * Ledger ids are session-local: a child's "1" is not the parent's "1". The
+   * boundary strips the child's taskId as the report crosses, so a colliding
+   * id can never move the WRONG task in the parent's ledger.
+   */
+  it("a child's final cannot move a colliding taskId in the parent ledger", async () => {
+    const h = makeDelegationHarness(async function* (options) {
+      const id = agentRoleOf(options);
+      yield initMessage();
+      if (id.role === "coordinator" && id.depth === 0) {
+        yield toolUseMessage("spawn", "mcp__console_agent__create_child_session", {
+          pattern: "hub_and_spoke", title: "recon", agents: [{ name: "scout", profileId: "explorer", owns: [] }],
+          briefing: briefing("scout the area") });
+      } else if (id.role === "coordinator" && id.depth === 1) {
+        yield toolUseMessage("t1", "mcp__console_agent__task_create", { taskId: "1", subject: "child unit", description: "", owner: "scout" });
+        yield sendHandoffUse("c-final", "main", { action: "child work done", stateSummary: "unit done",
+          resultSummary: "child unit landed", status: "completed", category: "final", taskId: "1" });
+      }
+      yield successMessage();
+    });
+    const userSessionId = h.addUserSession();
+    const done = collectUntil(h.bus, (event) => event.type === "agent_session.child.reported", 15_000);
+    const created = h.host.createSession({ userSessionId, title: "mission", agents: [{ name: "aux", profileId: "explorer" }], briefing: briefing("run the mission") });
+    // The parent's own ledger holds a unit with the SAME id the child uses.
+    h.tasks.upsertFromCreate({
+      sdkSessionId: `console:${created.agentSessionId}:orchestrator`, sdkTaskId: "1", subject: "parent unit", owner: "aux",
+      attribution: { workspaceId: h.workspaceId, userSessionId, agentSessionId: created.agentSessionId, agent: null },
+    });
+    const events = await done;
+    const childId = (events.find((event) => event.type === "agent_session.child.spawned")?.payload as { childAgentSessionId: string }).childAgentSessionId;
+
+    // The child closed ITS unit; the parent's colliding unit did not move.
+    expect(h.tasks.resolveForList(`console:${childId}:orchestrator`, "1")?.status).toBe("completed");
+    expect(h.tasks.resolveForList(`console:${created.agentSessionId}:orchestrator`, "1")?.status).toBe("pending");
+    // The crossed report reached the parent's controller without the child's taskId.
+    const crossed = h.repo.listMessages("agent", created.agentSessionId)
+      .find((row) => row.speakerName === `child:${childId}` && row.kind === "message");
+    expect(crossed).toBeDefined();
+    expect(h.handoffs.get((crossed!.payload as { handoff: { id: string } }).handoff.id).core.taskId).toBeNull();
+  });
+
   it("abandon_child_session archives the child and closes the wait with a failure", async () => {
     let parentCoordTurns = 0;
     let childIdSeen: string | undefined;

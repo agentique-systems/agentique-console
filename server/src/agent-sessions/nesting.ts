@@ -56,7 +56,10 @@ export class NestingBroker implements BoundaryBroker {
     const mapped: Category = category === "final" ? "milestone" : category === "failure" ? "failure" : "update";
     const handoffId = (message.payload?.handoff as { id?: string } | undefined)?.id ?? message.id;
     const boundaryDraft: HandoffDraft = {
-      core: { ...draft.core, state: { ...draft.core.state,
+      // The child's ledger ids mean nothing in the parent's ledger — carried
+      // across, a colliding id would move the WRONG task, so the boundary
+      // strips it and the parent's own units stay the parent's to close.
+      core: { ...draft.core, taskId: null, state: { ...draft.core.state,
         summary: `Child session "${child.title}" (${child.id}) reports:\n${draft.core.state.summary}` } },
       extension: draft.extension,
     };
