@@ -88,8 +88,8 @@ describe("bounded task ledger view", () => {
     expect(prompt).toBeDefined();
     // The seat's own unit and its direct blocker survive 300 unrelated tasks.
     // (The assignment's ledger sync may have already started the unit.)
-    expect(prompt).toMatch(/- \[(pending|in_progress)\] wire the renderer loop \(renderer\)/);
-    expect(prompt).toContain("- [pending] land the asset pipeline (page)");
+    expect(prompt).toMatch(/- mine \[(pending|in_progress)\] wire the renderer loop \(renderer\)/);
+    expect(prompt).toContain("- blocker [pending] land the asset pipeline (page)");
     expect(prompt).toMatch(/\d+ more task\(s\) not shown/);
     expect(prompt).toContain("task_list returns the full ledger");
     // The ledger did not ride along wholesale.
@@ -101,7 +101,7 @@ describe("bounded task ledger view", () => {
     // over this ledger stays readable and still names the seat's own unit.
     const checkpoint = freshComposer(h).reconstructCheckpoint(
       h.repo.getAgentSession(created.agentSessionId)!, h.repo.getAgent(created.agentSessionId, "renderer")!);
-    expect(checkpoint.core.state.summary).toMatch(/- \[(pending|in_progress)\] wire the renderer loop \(renderer\)/);
+    expect(checkpoint.core.state.summary).toMatch(/- mine \[(pending|in_progress)\] wire the renderer loop \(renderer\)/);
     expect(checkpoint.core.state.summary).toMatch(/more task\(s\) not shown/);
     expect(checkpoint.core.state.summary).not.toContain("filler-299-unit");
   });

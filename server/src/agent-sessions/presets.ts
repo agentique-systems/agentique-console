@@ -36,7 +36,9 @@ export const OPERATOR_PATH_BULLETS = `
 export const TERMINAL_REPORT_BULLET = `
 - When your assigned work is done, send your result with a terminal status
   (completed or failed) — the actual content, including what you could not
-  verify — then stop.`;
+  verify — then stop. completed means the promised output exists: state it in
+  resultSummary. Stopped short? Report blocked — the task stays open, and that
+  honesty is a good report.`;
 
 const HUB_WORK_BULLET = `
 - Work and blockers go to your coordinator: it sequences the units and owns

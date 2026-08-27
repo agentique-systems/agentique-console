@@ -16,7 +16,7 @@ import type { WorktreeManager } from "../runtime/worktree-manager.ts";
 import type { TaskService } from "../tasks/service.ts";
 import type { HandoffService } from "../handoffs/service.ts";
 import { EvidenceRefSchema, HandoffCoreSchema, HandoffDraftSchema } from "../handoffs/schema.ts";
-import { consoleTaskListId } from "../tasks/service.ts";
+import { consoleTaskListId, resolveTaskRefOrThrow } from "../tasks/service.ts";
 import { PAGE_DEFAULT_BYTES, PAGE_MAX_BYTES, pageTail } from "../paging.ts";
 import { speakerKindOf } from "./topology.ts";
 import { MAIN_RECIPIENT } from "./names.ts";
@@ -143,7 +143,8 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
       // `update`: main never woke and the run ended in silence. State it.
       category: z.enum(["assignment", "update", "milestone", "failure", "final", "decision"])
         .describe("What this transfer IS, and it decides who is woken. \"final\" is the report that ends this session's obligation to the operator — send it when your work is concluded. \"failure\" concludes it unsuccessfully. \"milestone\", \"decision\" and \"failure\" wake the Orchestrator; \"update\" and \"assignment\" do not."),
-      status: HandoffCoreSchema.shape.status,
+      status: HandoffCoreSchema.shape.status
+        .describe("YOUR work outcome — synced to the named ledger unit. \"completed\" only when the promised output exists (state it in resultSummary); \"blocked\"/\"failed\" reopen the unit for reassignment. A final report with an honest non-completed status is normal: finishing your assignment is not the same as the task succeeding."),
       risk: HandoffCoreSchema.shape.risk.default("medium"),
       action: z.string().min(1).describe("The request or the work this handoff is about, in one line."),
       stateSummary: z.string().min(1).describe("What is true now — the substance. Write the findings themselves, not a description of having found them."),
@@ -158,17 +159,47 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
       uncertainty: z.array(z.string()).default([]).describe("What you could not verify. Say so plainly rather than omitting it."),
       nextAction: z.string().nullable().default(null).describe("The exact next step for the recipient, or null when nothing is owed."),
       taskId: z.string().nullable().default(null)
-        .describe("The ledger taskId this handoff is about, from task_list. The Console moves that entry on it: an assignment starts it, a terminal report closes it. Omit only when the work is not a ledger unit."),
+        .describe("The canonical taskId of the ledger unit this handoff is about — the id the ledger lines and task_list show. The Console moves that entry on it: an assignment starts it, a terminal report closes it. Omit only when the work is not a ledger unit."),
       requestExpandedContext: z.boolean().default(false),
       dedupeKey: z.string().optional(),
     },
     async (args: SendHandoffArgs) => {
+      // Task identity is settled HERE, before anything durable happens: an
+      // unresolvable reference is a visible tool error (a live run left a
+      // task pending forever because its final named a database row id and
+      // the sync silently missed), and a resolvable legacy row id is
+      // normalized so the journal, the ledger sync and every downstream
+      // consumer see the one canonical id.
+      let resolution: ReturnType<typeof resolveTaskRefOrThrow> | null = null;
+      const rawRef = args.taskId === "" ? null : args.taskId;
+      if (rawRef !== null && deps.tasks) {
+        try { resolution = resolveTaskRefOrThrow(deps.tasks, session.id, rawRef); }
+        catch (error) { return fail(error); }
+        // The completion contract, enforced where the claim is made: a task
+        // must not turn terminal-success on a report that structurally says
+        // its promised output is absent.
+        if (args.status === "completed" && args.resultSummary === null) {
+          return fail(`status "completed" claims task ${resolution.canonicalId} ("${resolution.task.subject}") delivered its promised output, but resultSummary is null — null means the work produced nothing to hand over. Either state the deliverable and where it is in resultSummary, or report the honest status ("blocked", "failed", or "needs_verification") so the task stays open for the remaining work.`);
+        }
+      }
       const draft: HandoffDraft = { core: {
-        schemaVersion: 1, taskId: args.taskId, status: args.status, risk: args.risk, action: args.action,
+        schemaVersion: 1, taskId: resolution === null ? rawRef : resolution.canonicalId, status: args.status, risk: args.risk, action: args.action,
         state: { summary: args.stateSummary, evidence: args.evidence },
         result: { summary: args.resultSummary, artifacts: args.artifacts },
         uncertainty: args.uncertainty, nextAction: args.nextAction, requestExpandedContext: args.requestExpandedContext,
       }, extension: { kind: profile.handoffExtension ?? "generic", data: {} } };
+      // Read-back confirmation for the ledger unit this handoff named: the
+      // caller can tell "report journaled + ledger updated" apart from
+      // "unchanged" without trusting its own intent.
+      const taskSyncReadback = () => {
+        if (resolution === null || !deps.tasks) return {};
+        const after = deps.tasks.resolveForList(consoleTaskListId(session.id), resolution.canonicalId);
+        return { taskSync: {
+          taskId: resolution.canonicalId, from: resolution.task.status, to: after?.status ?? resolution.task.status,
+          ...(resolution.resolvedFrom === null ? {} : { resolvedFrom: resolution.resolvedFrom,
+            note: `"${resolution.resolvedFrom}" is an internal row id — reference this unit as taskId "${resolution.canonicalId}"` }),
+        } };
+      };
       // `post()` throws for a forbidden route (a genuine agent mistake → tool
       // error) and for a withheld final (a Console-imposed HOLD → a structured
       // NON-error: error results feed the error-streak watchdog, and the turn
@@ -180,6 +211,7 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
         if (scheduled) {
           ctx.markSawSend();
           return ok({ delivered: false, scheduled: true, assignmentId: scheduled.assignmentId, awaiting: scheduled.awaiting,
+            ...(resolution === null ? {} : { taskId: resolution.canonicalId }),
             note: "This assignment is recorded and will dispatch the moment its dependencies complete. Do not re-send it; re-sending the same taskId only re-targets the recipient." });
         }
         const turnId = ctx.currentTurnId();
@@ -193,7 +225,7 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
         return fail(error);
       }
       ctx.markSawSend();
-      return ok({ delivered: true, messageSeq: message.seq, to: args.to, category: args.category });
+      return ok({ delivered: true, messageSeq: message.seq, to: args.to, category: args.category, ...taskSyncReadback() });
     }));
   // Console-owned ledger, keyed on a synthetic id derived from the agent
   // session and shared by every agent — the native Task* tools are
@@ -201,8 +233,8 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
   if (deps.tasks && user) {
     const listId = consoleTaskListId(session.id);
     const attribution = { workspaceId: user.workspaceId, userSessionId: session.userSessionId, agentSessionId: session.id, agent: agent.name };
-    tools.push(sdk.tool("task_list", "Read the AgentSession's task ledger. Authoritative and shared by every agent.", {},
-      async () => ok({ tasks: deps.tasks?.listForUserSession(session.userSessionId).filter((task) => task.agentSessionId === session.id) ?? [] })));
+    tools.push(sdk.tool("task_list", "Read the AgentSession's task ledger. Authoritative and shared by every agent. Entries are keyed by taskId — the one id send_handoff and task_update take.", {},
+      async () => ok({ tasks: deps.tasks?.modelViewForAgentSession(session.id) ?? [] })));
     if (ctx.granted.has("task_create")) {
       tools.push(
         sdk.tool("task_create", "Add a unit of work to the ledger. Track every unit you delegate. Declare its dependencies as blockedBy HERE, at creation — the Console dispatches assignments on that DAG.", {
@@ -242,9 +274,17 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
               return fail(error);
             }
           }
+          // An update that names no known unit must not answer "updated" — a
+          // live run's ledger went stale exactly this way.
+          let resolution: ReturnType<typeof resolveTaskRefOrThrow>;
+          try { resolution = resolveTaskRefOrThrow(deps.tasks!, session.id, args.taskId); }
+          catch (error) { return fail(error); }
           const { taskId, ...patch } = args;
-          deps.tasks?.applyUpdate({ sdkSessionId: listId, sdkTaskId: taskId, patch });
-          return ok({ taskId, updated: true });
+          deps.tasks?.applyUpdate({ sdkSessionId: listId, sdkTaskId: resolution.canonicalId, patch });
+          const after = deps.tasks?.resolveForList(listId, resolution.canonicalId);
+          return ok({ taskId: resolution.canonicalId, updated: true, status: after?.status,
+            ...(resolution.resolvedFrom === null ? {} : { resolvedFrom: resolution.resolvedFrom,
+              note: `"${resolution.resolvedFrom}" is an internal row id — reference this unit as taskId "${resolution.canonicalId}"` }) });
         }),
       );
     }

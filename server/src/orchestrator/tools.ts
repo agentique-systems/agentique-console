@@ -49,7 +49,7 @@ const clip = (value: string, limit: number): string =>
   value.length > limit ? `${value.slice(0, limit)} …[truncated]` : value;
 const clipAll = (values: string[], limit: number, maxItems: number): string[] =>
   values.slice(0, maxItems).map((value) => clip(value, limit));
-import { consoleTaskListId } from "../tasks/service.ts";
+import { consoleTaskListId, resolveTaskRefOrThrow } from "../tasks/service.ts";
 
 export interface ConsoleToolsInput {
   sdk: ConsoleSdk;
@@ -286,7 +286,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         uncertainty: z.array(z.string()).default([]).describe("What you could not verify."),
         nextAction: z.string().nullable().default(null).describe("The exact next step, or null."),
         taskId: z.string().nullable().default(null)
-          .describe("The ledger taskId this assignment covers."),
+          .describe("The canonical ledger taskId this assignment covers."),
         requestExpandedContext: z.boolean().default(false),
         why: z.string().optional().describe("Why this move now."),
         expecting: z.string().optional()
@@ -305,9 +305,18 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         const session = owned(args.agentSessionId);
         const entryAgent = host.entryAgent(args.agentSessionId);
         const recipient = args.to ?? entryAgent;
+        // Task identity is settled before anything durable happens: unknown
+        // references fail visibly with the valid ids named, and a legacy row
+        // id normalizes to the canonical ledger id the journal and the
+        // scheduler store.
+        const rawRef = args.taskId === "" ? null : args.taskId;
+        const resolution = rawRef === null ? null : resolveTaskRefOrThrow(tasks, args.agentSessionId, rawRef);
+        if (resolution !== null && args.status === "completed" && args.resultSummary === null) {
+          throw new InvalidInputError(`status "completed" claims task ${resolution.canonicalId} ("${resolution.task.subject}") delivered its promised output, but resultSummary is null — state the deliverable in resultSummary, or use an honest non-completed status so the task stays open.`);
+        }
         const handoff: HandoffDraft = {
           core: {
-            schemaVersion: 1, taskId: args.taskId, status: args.status, risk: args.risk, action: args.action,
+            schemaVersion: 1, taskId: resolution === null ? null : resolution.canonicalId, status: args.status, risk: args.risk, action: args.action,
             state: { summary: args.stateSummary, evidence: args.evidence },
             result: { summary: args.resultSummary, artifacts: args.artifacts },
             uncertainty: args.uncertainty, nextAction: args.nextAction,
@@ -348,6 +357,7 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           });
           if (scheduled) {
             return { delivered: false, scheduled: true, assignmentId: scheduled.assignmentId, awaiting: scheduled.awaiting,
+              ...(resolution === null ? {} : { taskId: resolution.canonicalId }),
               note: "This assignment is recorded and will dispatch the moment its dependencies complete. Do not re-send it; re-sending the same taskId only re-targets the recipient." };
           }
         }
@@ -358,7 +368,15 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
           handoff,
           category: args.category,
         });
-        return { delivered: true, messageSeq: message.seq, to: recipient, category: args.category };
+        // Read-back on the unit this message named: intent confirmed against
+        // the ledger, not assumed.
+        const after = resolution === null ? undefined : tasks.resolveForList(consoleTaskListId(args.agentSessionId), resolution.canonicalId);
+        return { delivered: true, messageSeq: message.seq, to: recipient, category: args.category,
+          ...(resolution === null ? {} : { taskSync: {
+            taskId: resolution.canonicalId, from: resolution.task.status, to: after?.status ?? resolution.task.status,
+            ...(resolution.resolvedFrom === null ? {} : { resolvedFrom: resolution.resolvedFrom,
+              note: `"${resolution.resolvedFrom}" is an internal row id — reference this unit as taskId "${resolution.canonicalId}"` }),
+          } }) };
       }),
     ),
 
@@ -410,20 +428,24 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
         guarded(() => {
           owned(args.agentSessionId);
           if (args.requirementId !== undefined) assertLiveRequirementIds([args.requirementId]);
+          // An update naming no known unit must not answer "updated".
+          const resolution = resolveTaskRefOrThrow(tasks, args.agentSessionId, args.taskId);
           const { agentSessionId, taskId, ...patch } = args;
-          tasks?.applyUpdate({ sdkSessionId: consoleTaskListId(agentSessionId), sdkTaskId: taskId, patch });
-          return { taskId, updated: true };
+          tasks.applyUpdate({ sdkSessionId: consoleTaskListId(agentSessionId), sdkTaskId: resolution.canonicalId, patch });
+          const after = tasks.resolveForList(consoleTaskListId(agentSessionId), resolution.canonicalId);
+          return { taskId: resolution.canonicalId, updated: true, status: after?.status,
+            ...(resolution.resolvedFrom === null ? {} : { resolvedFrom: resolution.resolvedFrom,
+              note: `"${resolution.resolvedFrom}" is an internal row id — reference this unit as taskId "${resolution.canonicalId}"` }) };
         }),
     ),
 
     sdk.tool(
       "task_list",
-      "Read the ledger for this conversation. Authoritative and shared with every agent.",
+      "Read the ledger for this conversation. Authoritative and shared with every agent. Keyed by taskId.",
       { agentSessionId: z.string().optional() },
       async (args: { agentSessionId?: string }) =>
         guarded(() => ({
-          tasks: (tasks?.listForUserSession(userSessionId) ?? [])
-            .filter((task) => args.agentSessionId === undefined || task.agentSessionId === args.agentSessionId),
+          tasks: tasks.modelViewForUserSession(userSessionId, args.agentSessionId),
         })),
     ),
 

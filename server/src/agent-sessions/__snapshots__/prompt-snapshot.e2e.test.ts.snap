@@ -31,7 +31,9 @@ of a human operator.
   does, and it reaches every agent here without relay.
 - When your assigned work is done, send your result with a terminal status
   (completed or failed) — the actual content, including what you could not
-  verify — then stop."
+  verify — then stop. completed means the promised output exists: state it in
+  resultSummary. Stopped short? Report blocked — the task stays open, and that
+  honesty is a good report."
 `;
 
 exports[`hub prompt byte-identity > coordinator and specialist appends match the pinned bytes > hub researcher append 1`] = `
@@ -65,7 +67,9 @@ of a human operator.
   does, and it reaches every agent here without relay.
 - When your assigned work is done, send your result with a terminal status
   (completed or failed) — the actual content, including what you could not
-  verify — then stop."
+  verify — then stop. completed means the promised output exists: state it in
+  resultSummary. Stopped short? Report blocked — the task stays open, and that
+  honesty is a good report."
 `;
 
 exports[`hub prompt byte-identity > coordinator and specialist appends match the pinned bytes > hub specialist append 1`] = `
@@ -99,5 +103,7 @@ of a human operator.
   does, and it reaches every agent here without relay.
 - When your assigned work is done, send your result with a terminal status
   (completed or failed) — the actual content, including what you could not
-  verify — then stop."
+  verify — then stop. completed means the promised output exists: state it in
+  resultSummary. Stopped short? Report blocked — the task stays open, and that
+  honesty is a good report."
 `;

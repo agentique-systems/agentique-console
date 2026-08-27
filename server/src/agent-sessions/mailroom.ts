@@ -174,8 +174,18 @@ export class Mailroom {
       this.#deps.bus.append({ type: "handoff.final.caveats", userSessionId: session.userSessionId, agentSessionId: session.id,
         payload: { agentSessionId: session.id, sender: input.speaker.name, caveats } });
     }
-    // The ledger follows the journal, not a coordinator's memory.
-    syncLedgerFromHandoff(this.#deps, session, input.speaker.name, input.to, input.handoff, category);
+    // The ledger follows the journal, not a coordinator's memory. A
+    // transition that could not be applied is journaled ON the handoff and
+    // emitted as an event — never swallowed: downstream orchestration treats
+    // task state as authoritative, and a live run burned a whole stream's
+    // attention re-deriving from prose what a silently-dropped sync knew.
+    const taskSync = syncLedgerFromHandoff(this.#deps, session, input.speaker.name, input.to, input.handoff, category);
+    if (taskSync !== null && !taskSync.applied) {
+      input = { ...input, handoff: { ...input.handoff, core: { ...input.handoff.core,
+        uncertainty: [...input.handoff.core.uncertainty, `Console: ledger sync failed — ${taskSync.detail}. Repair the ledger with task_update once the right unit is known.`] } } };
+      this.#deps.bus.append({ type: "task.sync.failed", userSessionId: session.userSessionId, agentSessionId: session.id,
+        payload: { agentSessionId: session.id, sender: input.speaker.name, taskRef: taskSync.taskRef, reason: taskSync.reason, detail: taskSync.detail } });
+    }
     const { message, delivery, text } = this.#journal(session, input.speaker, input.to, input.handoff, category, {
       ...(input.dedupeKey ? { dedupeKey: input.dedupeKey } : {}), ...(input.turnId ? { turnId: input.turnId } : {}),
     });

@@ -583,8 +583,7 @@ export class AgentSessionService {
     const session = this.#deps.repo.getAgentSession(agentSessionId);
     if (!session) throw new NotFoundError(`no agent session ${agentSessionId}`);
     if (session.lifecycle !== "open") throw new NotFoundError(`agent session ${agentSessionId} is already archived`);
-    const openTasks = this.#deps.tasks.linesForAgentSession(agentSessionId)
-      .filter((line) => !line.startsWith("- [completed]"));
+    const openTasks = this.#deps.tasks.linesForAgentSession(agentSessionId, { openOnly: true });
     this.#deps.bus.append({ type: "agent_session.runtime.noted", userSessionId: session.userSessionId, agentSessionId,
       payload: { agentSessionId, agent: MAIN_RECIPIENT, detail: `session closed by main: ${reason}` } });
     if (session.parentAgentSessionId !== null) {
