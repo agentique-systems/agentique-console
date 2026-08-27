@@ -178,6 +178,52 @@ export class WorktreeManager {
     return this.#git(workspaceRoot, ["rev-parse", "HEAD"]).trim();
   }
 
+  /** The commit a ref currently points at; null when it does not resolve. */
+  commitOf(workspaceRoot: string, ref: string): string | null {
+    try { return this.#git(workspaceRoot, ["rev-parse", "--verify", `${ref}^{commit}`]).trim(); } catch { return null; }
+  }
+
+  /**
+   * Whether `commit` is reachable from the canonical workspace HEAD — THE
+   * landed-result reachability predicate. Branches are movable references,
+   * so landing truth is asked of the immutable commit id, never a branch
+   * name. False for an unknown/garbage-collected commit too: unreachable is
+   * unreachable, whatever destroyed it.
+   */
+  isAncestorOfHead(workspaceRoot: string, commit: string): boolean {
+    try {
+      this.#git(workspaceRoot, ["merge-base", "--is-ancestor", commit, "HEAD"]);
+      return true;
+    } catch { return false; }
+  }
+
+  /**
+   * Point a stable `agentique/archive/…` branch at a commit so it survives gc
+   * and stays findable — the salvage reference for a landed result that a
+   * later reset made unreachable. Returns the branch name, or null when the
+   * commit object no longer exists (nothing left to preserve).
+   */
+  mintArchiveBranch(workspaceRoot: string, name: string, commit: string): string | null {
+    if (this.commitOf(workspaceRoot, commit) === null) return null;
+    const base = `agentique/archive/${name}`;
+    let target = base;
+    for (let n = 2; this.#resolvable(workspaceRoot, target) && n < 20; n += 1) target = `${base}-${n}`;
+    try {
+      this.#git(workspaceRoot, ["branch", target, commit]);
+      return target;
+    } catch { return null; }
+  }
+
+  /**
+   * The seat's actual changed paths, base..branch, from git — never from an
+   * agent-authored list. No rename detection on purpose: a rename reports
+   * both its old and new path, and both are compared against declared scopes.
+   */
+  changedPaths(workspaceRoot: string, baseCommit: string, branch: string): string[] {
+    const out = this.#git(workspaceRoot, ["diff", "--name-only", `${baseCommit}..${branch}`]).trim();
+    return out === "" ? [] : out.split("\n");
+  }
+
   /**
    * Creates a worktree + branch. `dirName` and `branchPath` must be
    * server-generated (the branch becomes `agentique/<branchPath>`). Throws

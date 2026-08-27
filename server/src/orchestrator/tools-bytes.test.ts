@@ -63,6 +63,10 @@ describe("console tool byte budget", () => {
   // "hub_and_spoke" as "supply a coordinator too", renamed the coordinator
   // profile past the reserved-name check, and paid for two management layers
   // per session — the one-line invariant belongs where the mistake happens.
+  // Bumped 16200 → 16350 to state the capability-bound ownership contract AT
+  // the same affordances: a live run assigned a read-only coordinator-profile
+  // seat "ownership" of a document it could never write, and only discovered
+  // it at the end of the run — not creep on existing surfaces.
   it("keeps total description + parameter-describe bytes within the budget", () => {
     const tools = captureTools();
     expect(tools.length).toBeGreaterThan(20);
@@ -71,6 +75,6 @@ describe("console tool byte budget", () => {
       + Buffer.byteLength(tool.description, "utf8")
       + Object.values(tool.schema).reduce((inner, schema) => inner + describeBytes(schema), 0),
     0);
-    expect(total).toBeLessThanOrEqual(16_200);
+    expect(total).toBeLessThanOrEqual(16_350);
   });
 });

@@ -11,7 +11,9 @@ import type { Config } from "../config.ts";
 import type { Repo, AgentRow, AgentSessionRow } from "../db/repo.ts";
 import type { ArtifactStore } from "../events/artifact-store.ts";
 import type { EventBus } from "../events/bus.ts";
+import { collectActiveWriteClaims, findCrossScopeWrites, scopeCoversPath, type ActiveScopeClaim } from "../portfolio/ownership.ts";
 import type { WorktreeManager } from "../runtime/worktree-manager.ts";
+import type { LandingLedger } from "../workspaces/landings.ts";
 import type { SimpleHandoff, Transfer } from "./seams.ts";
 
 /** Agent names may contain chars git refs forbid; branch components drop them. */
@@ -42,6 +44,8 @@ export interface WorktreeBindingDeps {
   laneLive: (agentSessionId: string, agent: string) => boolean;
   transfer: Transfer;
   simpleHandoff: SimpleHandoff;
+  /** Canonical-landing truth (workspaces/landings.ts): records each merge, verifies reachability. */
+  landings: LandingLedger;
 }
 
 export class WorktreeBinding {
@@ -96,11 +100,26 @@ export class WorktreeBinding {
       // A dangling pointer (crash between removal and release, or an
       // out-of-band deletion) used to spawn the SDK into a nonexistent cwd —
       // 13 "Path does not exist" scheduler failures in one live run. Clear it,
-      // keep a salvage pointer to the branch (it may still exist), re-provision.
-      repo.patchAgent(session.id, seat.name, { worktreePath: null, worktreeBaseCommit: null, worktreeBranch: null,
-        ...(seat.salvageBranch === null && seat.worktreeBranch !== null ? { salvageBranch: seat.worktreeBranch } : {}) });
+      // preserve any surviving work, re-provision.
+      //
+      // Preservation must happen BEFORE re-provisioning: the fresh worktree is
+      // created with `-B` on the same branch name, which force-resets it — the
+      // old code recorded `salvageBranch: seat.worktreeBranch` and then reset
+      // that very branch, orphaning the commits its own salvage pointer named
+      // (a live run's canon commits went dangling exactly this way). Archive-
+      // rename the branch while it still has the work, so the salvage pointer
+      // stays true past the reset.
+      let salvage: { salvageBranch: string } | Record<string, never> = {};
+      if (seat.salvageBranch === null && seat.worktreeBranch !== null) {
+        const branchCommit = worktrees.commitOf(workspaceRoot, seat.worktreeBranch);
+        if (branchCommit !== null && branchCommit !== seat.worktreeBaseCommit) {
+          const archived = worktrees.remove(workspaceRoot, seat.worktreePath, seat.worktreeBranch, { archiveBranch: true }).archivedBranch;
+          if (archived !== null) salvage = { salvageBranch: archived };
+        }
+      }
+      repo.patchAgent(session.id, seat.name, { worktreePath: null, worktreeBaseCommit: null, worktreeBranch: null, ...salvage });
       bus.append({ type: "agent_session.runtime.noted", userSessionId: session.userSessionId, agentSessionId: session.id,
-        payload: { agentSessionId: session.id, agent: seat.name, detail: `worktree path ${seat.worktreePath} no longer exists; re-provisioning a fresh worktree` } });
+        payload: { agentSessionId: session.id, agent: seat.name, detail: `worktree path ${seat.worktreePath} no longer exists; re-provisioning a fresh worktree${"salvageBranch" in salvage ? ` (previous work preserved on ${salvage.salvageBranch})` : ""}` } });
       seat = repo.getAgent(session.id, seat.name) ?? seat;
     }
     try {
@@ -239,6 +258,42 @@ export class WorktreeBinding {
             artifactId, archivedBranch: removed.archivedBranch } });
         return;
       }
+      // The declared-responsibility gate, at the one boundary where git
+      // already knows the truth. An unplanned write into ANOTHER active
+      // seat's declared scope must not silently land — the live latency/
+      // pacing collision surfaced only as a raw merge conflict, after the
+      // fact. The check is deliberately narrow (portfolio/ownership.ts):
+      // own-scope and unclaimed paths always land, identical shared claims
+      // pass by construction — authorized overlap is explicit coordination,
+      // not automatic merge success; git still decides mergeability below.
+      const claims = profile.exemptFromOwnership === true
+        ? new Map<string, ActiveScopeClaim[]>()
+        : collectActiveWriteClaims(repo, session.userSessionId);
+      const crossScope = findCrossScopeWrites({
+        changedPaths: worktrees.changedPaths(workspaceRoot, seat.worktreeBaseCommit, seat.worktreeBranch),
+        seat: { agentSessionId: session.id, agent: seat.name, scopes: seat.ownership },
+        claims,
+      });
+      if (crossScope.length > 0) {
+        const removed = worktrees.remove(workspaceRoot, seat.worktreePath, seat.worktreeBranch, { archiveBranch: true, keepDirectory });
+        release({ salvageBranch: removed.archivedBranch, salvageArtifactId: artifactId });
+        const capped = crossScope.slice(0, 20);
+        bus.append({ type: "agent_session.worktree.ownership_violation", userSessionId: session.userSessionId, agentSessionId: session.id,
+          payload: { agentSessionId: session.id, agent: seat.name,
+            violations: capped.map((violation) => ({ path: violation.path, scope: violation.scope,
+              ownerAgent: violation.holder.agent, ownerAgentSessionId: violation.holder.agentSessionId, ownerSessionTitle: violation.holder.sessionTitle })),
+            declaredScopes: [...seat.ownership], artifactId, archivedBranch: removed.archivedBranch } });
+        const lines = capped.map((violation) =>
+          `${violation.path} — declared owner ${violation.holder.agent} in ${violation.holder.agentSessionId} ("${violation.holder.sessionTitle}"), scope "${violation.scope}"${violation.holder.shared ? " (held shared, but not by this seat)" : ""}`);
+        this.#deps.transfer({ agentSessionId: session.id, speaker: { kind: "agent", name: seat.name }, to: this.#deps.escalationTarget(session, seat.name),
+          handoff: this.#deps.simpleHandoff("Completed work blocked from landing: writes outside declared ownership", "failed",
+            `${seat.name} changed path(s) inside another active seat's declared write scope without shared ownership: ${lines.join("; ")}${crossScope.length > capped.length ? `; and ${crossScope.length - capped.length} more` : ""}. ` +
+            `${seat.name}'s declared write scope: ${seat.ownership.join(", ") || "(none)"}. The workspace is untouched; the work is preserved on branch ${removed.archivedBranch ?? "n/a"} and as diff artifact ${artifactId ?? "n/a"}.`,
+            `Make the overlap an explicit decision — ownership is NOT changed automatically. Either route these files through their owner (send the owner the diff to apply); ` +
+            `or re-commission the seat with the scope declared in sharedOwns (with why) on EVERY claimant, then reapply from the salvage branch; ` +
+            `or reassign against the current HEAD without the cross-scope changes.`), category: "failure" });
+        return;
+      }
       const outcome = worktrees.mergeBranch(workspaceRoot, seat.worktreeBranch,
         `Merge seat ${seat.name} (session ${session.id})\n\nSeat-Worktree: ${seat.worktreeBranch}`);
       const removed = worktrees.remove(workspaceRoot, seat.worktreePath, seat.worktreeBranch, { archiveBranch: !outcome.merged, keepDirectory });
@@ -246,6 +301,17 @@ export class WorktreeBinding {
       if (outcome.merged) {
         bus.append({ type: "agent_session.worktree.merged", userSessionId: session.userSessionId, agentSessionId: session.id,
           payload: { agentSessionId: session.id, agent: seat.name, mergeCommit: outcome.commit, filesChanged: diff.filesChanged, artifactId } });
+        // The durable distinction between "committed in a worktree" and
+        // "canonically landed": the merge commit is recorded by immutable id
+        // and re-verified at later boundaries (workspaces/landings.ts).
+        try {
+          this.#deps.landings.record({ userSessionId: session.userSessionId, agentSessionId: session.id, agent: seat.name,
+            branch: seat.worktreeBranch, baseCommit: seat.worktreeBaseCommit, mergeCommit: outcome.commit,
+            filesChanged: diff.filesChanged, artifactId });
+        } catch (error) {
+          bus.append({ type: "agent_session.runtime.noted", userSessionId: session.userSessionId, agentSessionId: session.id,
+            payload: { agentSessionId: session.id, agent: seat.name, detail: `landing record failed: ${error instanceof Error ? error.message : String(error)}` } });
+        }
         return;
       }
       bus.append({ type: "agent_session.worktree.merge_failed", userSessionId: session.userSessionId, agentSessionId: session.id,
@@ -253,8 +319,18 @@ export class WorktreeBinding {
       // The remedy depends on WHAT blocked. A live run's orchestrator was told
       // "reassign against HEAD" for a dirty canonical checkout and burned five
       // seats across four sessions re-attempting a land no seat could fix.
+      // Conflicting paths carry their declared owners so the orchestrator gets
+      // structural context instead of reconstructing ownership from reports.
+      const conflictOwners = outcome.kind !== "conflict" ? [] : outcome.conflicts.flatMap((conflictPath) => {
+        for (const [scope, holders] of claims) {
+          if (!scopeCoversPath(scope, conflictPath)) continue;
+          const holder = holders.find((entry) => entry.agentSessionId !== session.id || entry.agent !== seat.name);
+          if (holder) return [`${conflictPath} is declared-owned by ${holder.agent} in ${holder.agentSessionId} ("${holder.sessionTitle}")`];
+        }
+        return [];
+      });
       const explanation = outcome.kind === "conflict"
-        ? `The workspace advanced past this seat's base; merging its changes conflicts in: ${outcome.conflicts.join(", ") || "unknown files"}.`
+        ? `The workspace advanced past this seat's base; merging its changes conflicts in: ${outcome.conflicts.join(", ") || "unknown files"}.${conflictOwners.length > 0 ? ` ${conflictOwners.join("; ")}.` : ""}`
         : outcome.kind === "dirty_tree"
           ? `The canonical checkout has local changes the Console could not stash aside, so git refused the merge before it started. This is workspace state, not a defect in the seat's work — retrying the seat will not fix it. Detail: ${outcome.detail}`
           : `The merge failed: ${outcome.detail}`;

@@ -4,8 +4,9 @@
  * late add_agent, and map/reduce dispatch. One project-wide invariant —
  * write claims on one scope conflict wherever they enter, top-level sessions
  * and cousin branches included, unless EVERY claimant declared the scope
- * shared (with why). Read participation never conflicts; archival releases
- * claims; the rule survives restart because claims live on seat rows.
+ * shared (with why). Ownership is capability-bound (a read-only non-reviewer
+ * seat cannot claim a scope); archival releases claims; the rule survives
+ * restart because claims live on seat rows.
  *
  * Ownership is responsibility, never filesystem isolation: this harness runs
  * with worktrees: null — no file ever overlaps — and conflicts are still
@@ -113,20 +114,31 @@ describe("the one ownership rule (e2e, fake SDK)", () => {
       .toThrow(/needs a why/);
   });
 
-  it("read-only participation never conflicts: an explorer may declare a writer's scope as its boundary", () => {
+  it("ownership is capability-bound: a read-only non-reviewer cannot claim a scope; reviewer boundaries never occupy one", () => {
+    // The live-run failure this pins: a read-only lead-profile seat was
+    // assigned "ownership" of docs/responsiveness.md, the claim was silently
+    // accepted as a read boundary, and the deliverable never landed. A scope
+    // claim from a seat that cannot write is now an early, actionable
+    // commission error — before worktrees, provider sessions or capacity are
+    // spent on an owner that can never produce. (The coordinator-profile
+    // variant of the same live seat is already rejected earlier, by the
+    // sole-coordination-authority rule.)
     const { h, userSessionId } = makeTree();
-    // Read seat over an owned scope: allowed (participation, not ownership).
-    const survey = h.host.createSession({ userSessionId, title: "survey",
-      agents: [{ name: "scout", profileId: "explorer", owns: ["area/root"] }] });
-    expect(survey.agentSessionId).toBeTruthy();
-    // And the read claim does not OCCUPY the scope against a later writer.
-    const later = h.host.createSession({ userSessionId, title: "later-writer",
-      agents: [writer("w-x", "area/x")] });
-    expect(later.agentSessionId).toBeTruthy();
-    const readClaimed = h.host.createSession({ userSessionId, title: "reader-first",
-      agents: [{ name: "scout2", profileId: "explorer", owns: ["area/y"] }] });
-    expect(readClaimed.agentSessionId).toBeTruthy();
-    expect(h.host.createSession({ userSessionId, title: "writer-after-reader",
+    expect(() => h.host.createSession({ userSessionId, title: "responsiveness",
+      agents: [{ name: "perflead", profileId: "planner", owns: ["docs/responsiveness.md"] }] }))
+      .toThrow(/read-only and cannot own writable scope.*docs\/responsiveness\.md.*write-capable profile/s);
+    expect(() => h.host.createSession({ userSessionId, title: "survey",
+      agents: [{ name: "scout", profileId: "explorer", sharedOwns: [{ scope: "area/root", why: "wants to co-own" }] }] }))
+      .toThrow(/read-only and cannot own writable scope/);
+    // The same deliverable with a write-capable owner is valid.
+    expect(h.host.createSession({ userSessionId, title: "responsiveness take 2",
+      agents: [writer("perfwriter", "docs/responsiveness.md")] }).agentSessionId).toBeTruthy();
+    // A reviewer profile (exemptFromOwnership) keeps its explicit review
+    // boundary, and that boundary never OCCUPIES the scope against a writer.
+    const review = h.host.createSession({ userSessionId, title: "review",
+      agents: [{ name: "critic", profileId: "reviewer", owns: ["area/y"] }] });
+    expect(review.agentSessionId).toBeTruthy();
+    expect(h.host.createSession({ userSessionId, title: "writer-after-reviewer",
       agents: [writer("w-y", "area/y")] }).agentSessionId).toBeTruthy();
   });
 

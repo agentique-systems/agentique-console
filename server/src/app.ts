@@ -43,6 +43,7 @@ import { SystemPauseService } from "./system/pause.ts";
 import { CapabilityCatalog } from "./agent-profiles/capability-catalog.ts";
 import path from "node:path";
 import { HandoffService } from "./handoffs/service.ts";
+import { LandingLedger } from "./workspaces/landings.ts";
 import { WorkspaceService } from "./workspaces/service.ts";
 
 export interface CreateAppOptions {
@@ -90,6 +91,8 @@ export interface App {
   orchestrationState: OrchestrationStateService;
   continuation: ContinuationCheckpointService;
   completion: RunCompletionService;
+  /** Canonical-landing truth: records merges by immutable commit id, verifies reachability at boundaries. */
+  landings: LandingLedger;
   userSessions: UserSessionService;
   capacity: CapacityService;
   /** The operator's whole-system Pause/Resume over `capacity`. */
@@ -176,6 +179,15 @@ export function createApp(options: CreateAppOptions): App {
   const continuation = new ContinuationCheckpointService(stores.continuation, bus);
   const sessionStore = stores.providerEntries;
 
+  // The landing ledger: the durable line between "committed in a worktree"
+  // and "canonically landed". The worktree binding records each merge through
+  // it; verification re-runs at every subsequent landing and every coverage
+  // evaluation, so a reset that drops landed commits becomes a visible,
+  // salvageable invalidation instead of a stale "landed" claim.
+  const landings = new LandingLedger({
+    store: stores.landings, bus, worktrees, getWorkspaceRoot,
+    getUserSession: (userSessionId) => repo.getUserSession(userSessionId),
+  });
   const capacity = new CapacityService({ repo, bus });
   const catalog = new CapabilityCatalog(path.join(config.infra.skillsPluginDir, "skills"));
   // A typo'd requires.tools would silently block a skill's assignment forever.
@@ -184,7 +196,7 @@ export function createApp(options: CreateAppOptions): App {
   const lateScheduler = late<AssignmentScheduler>("scheduler");
   const host = new AgentSessionService({
     repo, bus, artifacts, config, profiles, sdk, sessionStore, getWorkspaceRoot, requirements, assumptions,
-    worktrees, capacity,
+    worktrees, landings, capacity,
     interactions, decisions, decisionIssues, tasks, handoffs,
     workstreams: {
       promptLines: (agentSessionId) => workstreams.promptLines(agentSessionId),
@@ -208,17 +220,24 @@ export function createApp(options: CreateAppOptions): App {
   // completion service (proposal snapshot + accept-time guard) and by main's
   // record_completion tool result (so main sees the outstanding exceptions
   // structurally instead of reconstructing them from memory).
-  const coverage = (userSessionId: string) => computeCoverageReport({
-    governingRevision: (id) => requirements.latestApproved(id)?.revision ?? null,
-    obligations: (id) => requirements.completionObligations(id),
-    liveRequirementIds: (id) => new Set(requirements.derive(id).map((node) => node.id)),
-    listTasks: (id) => tasks.listForUserSession(id),
-    listOpenDecisionIssues: (id) => decisionIssues.listOpenForProject(id),
-    listOpenChangeImpacts: (id) => changeImpacts.listOpen(id),
-    brokenWorkstreamLinks: (id) => workstreams.brokenOpen(id),
-    isAgentSessionOpen: (agentSessionId) => repo.getAgentSession(agentSessionId)?.lifecycle === "open",
-    policy: config.policy.completionPolicy,
-  }, userSessionId);
+  const coverage = (userSessionId: string) => {
+    // Landing reachability is re-verified against git BEFORE the rows-only
+    // computation, so a coverage read always reflects the workspace as it is
+    // now — the accept-time guard recomputes through this same closure.
+    try { landings.verify(userSessionId); } catch { /* a git hiccup must not block coverage */ }
+    return computeCoverageReport({
+      governingRevision: (id) => requirements.latestApproved(id)?.revision ?? null,
+      obligations: (id) => requirements.completionObligations(id),
+      liveRequirementIds: (id) => new Set(requirements.derive(id).map((node) => node.id)),
+      listTasks: (id) => tasks.listForUserSession(id),
+      listOpenDecisionIssues: (id) => decisionIssues.listOpenForProject(id),
+      listOpenChangeImpacts: (id) => changeImpacts.listOpen(id),
+      brokenWorkstreamLinks: (id) => workstreams.brokenOpen(id),
+      invalidatedLandings: (id) => landings.invalidated(id),
+      isAgentSessionOpen: (agentSessionId) => repo.getAgentSession(agentSessionId)?.lifecycle === "open",
+      policy: config.policy.completionPolicy,
+    }, userSessionId);
+  };
   const scheduler = new AssignmentScheduler({
     store: stores.assignments, tasks, sessions: stores.sessions, messages: stores.messages, bus,
     post: (input) => host.post(input),
@@ -240,6 +259,7 @@ export function createApp(options: CreateAppOptions): App {
   // never a status rewrite.
   requirements.setWakeNote((userSessionId, text) => lateRunner.get().postConsoleNote(userSessionId, text));
   assumptions.setWakeNote((userSessionId, text) => lateRunner.get().postConsoleNote(userSessionId, text));
+  landings.setWakeNote((userSessionId, text) => lateRunner.get().postConsoleNote(userSessionId, text));
   const completion = new RunCompletionService({
     db, repo, bus, interactions, scheduler, getWorkspaceRoot, orchestrationState, requirements, changeImpacts, workstreams, coverage,
     host: () => host,
@@ -306,7 +326,7 @@ export function createApp(options: CreateAppOptions): App {
   });
 
   return {
-    config, db, sqlite, bus, artifacts, repo, sdk, getWorkspaceRoot, requirements, assumptions, changeImpacts, workstreams, orchestrationState, continuation,
+    config, db, sqlite, bus, artifacts, repo, sdk, getWorkspaceRoot, requirements, assumptions, changeImpacts, workstreams, orchestrationState, continuation, landings,
     workspaces, timeline, profiles, worktrees, capacity,
     decisions, decisionIssues, interactions, tasks, scheduler, handoffs, sessionStore,
     host, runner, completion, userSessions, system,

@@ -266,6 +266,46 @@ export const agents = sqliteTable(
 
 
 /**
+ * One row per successful worktree landing: the durable, immutable-identity
+ * record that a seat's produced work reached the canonical workspace. A
+ * worker's commit is evidence of PRODUCED work; this row is the distinct
+ * fact that the canonical project CONTAINED it — recorded by merge-commit
+ * SHA, never branch name, because branches are movable references.
+ *
+ * `invalidated_at` is the current-truth marker: a later reset that makes the
+ * merge commit unreachable from workspace HEAD flips it (with a reason and a
+ * minted salvage ref) instead of leaving a stale "landed" claim standing; a
+ * reachability recovery clears it. The historical fact — this commit landed
+ * at `landed_at` — never changes; the transitions live in events.
+ */
+export const worktreeLandings = sqliteTable(
+  "worktree_landings",
+  {
+    id: text("id").primaryKey(),
+    userSessionId: text("user_session_id")
+      .notNull()
+      .references(() => userSessions.id),
+    agentSessionId: text("agent_session_id")
+      .notNull()
+      .references(() => agentSessions.id),
+    /** The logical seat that landed — stable across provider generations. */
+    agent: text("agent").notNull(),
+    branch: text("branch").notNull(),
+    baseCommit: text("base_commit").notNull(),
+    mergeCommit: text("merge_commit").notNull(),
+    filesChanged: integer("files_changed").notNull(),
+    /** The captured diff artifact, when one was stored. */
+    artifactId: text("artifact_id"),
+    landedAt: text("landed_at").notNull(),
+    invalidatedAt: text("invalidated_at"),
+    invalidatedReason: text("invalidated_reason"),
+    /** `agentique/archive/…` branch minted at invalidation, when the commit still existed. */
+    salvageRef: text("salvage_ref"),
+  },
+  (t) => [index("idx_worktree_landings_user").on(t.userSessionId)],
+);
+
+/**
  * Per-session pattern progression: counters and join arrivals. Written
  * only by the pattern-progression module.
  */

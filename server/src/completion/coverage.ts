@@ -41,6 +41,19 @@ export interface CoverageDeps {
   listOpenDecisionIssues(userSessionId: string): DecisionIssueWire[];
   listOpenChangeImpacts(userSessionId: string): ChangeImpactWire[];
   brokenWorkstreamLinks(userSessionId: string): WorkstreamLinkWire[];
+  /**
+   * Previously landed worktree results whose merge commit is no longer
+   * reachable from the canonical workspace HEAD (workspaces/landings.ts —
+   * verified against git BEFORE coverage runs, so this read is rows-only).
+   */
+  invalidatedLandings(userSessionId: string): {
+    id: string;
+    agentSessionId: string;
+    agent: string;
+    mergeCommit: string;
+    invalidatedReason: string | null;
+    salvageRef: string | null;
+  }[];
   isAgentSessionOpen(agentSessionId: string): boolean;
   policy: CompletionPolicy;
 }
@@ -115,6 +128,19 @@ export function computeCoverageReport(deps: CoverageDeps, userSessionId: string)
       kind: "task_debt",
       ref: task.id,
       detail: `open task "${clip(task.subject)}" (${task.agentSessionId === null ? "main ledger" : `session ${task.agentSessionId}`}) still discharges live requirement ${task.requirementId}`,
+    });
+  }
+
+  // Invalidated landings: a result this run recorded as canonically landed is
+  // no longer reachable from the workspace HEAD. "landed = true" must not
+  // survive the reset that dropped the commits — accepting the run means
+  // accepting that loss explicitly (or re-landing from the salvage ref).
+  for (const landing of deps.invalidatedLandings(userSessionId)) {
+    exceptions.push({
+      kind: "landing_invalidated",
+      ref: landing.id,
+      detail: `seat ${landing.agent}'s landed result (merge ${landing.mergeCommit.slice(0, 12)}, session ${landing.agentSessionId}) is no longer in the canonical workspace` +
+        `${landing.invalidatedReason === null ? "" : ` — ${landing.invalidatedReason}`}${landing.salvageRef === null ? "" : `; preserved on branch ${landing.salvageRef}`}`,
     });
   }
 

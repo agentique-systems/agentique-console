@@ -650,6 +650,7 @@ describe("completion coverage and exception-oriented sign-off", () => {
         listOpenDecisionIssues: (sid) => h.app.decisionIssues.listOpenForProject(sid),
         listOpenChangeImpacts: (sid) => h.app.changeImpacts.listOpen(sid),
         brokenWorkstreamLinks: (sid) => h.app.workstreams.brokenOpen(sid),
+        invalidatedLandings: (sid) => h.app.landings.invalidated(sid),
         isAgentSessionOpen: (agentSessionId) => h.repo.getAgentSession(agentSessionId)?.lifecycle === "open",
         policy: "waiver_required",
       }, id),

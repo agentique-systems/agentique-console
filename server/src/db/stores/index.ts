@@ -29,6 +29,7 @@
  *   change_impacts                        ChangeImpactStore
  *   decision_issues                       DecisionIssueStore
  *   workstream_links                      WorkstreamStore
+ *   worktree_landings                     LandingStore
  *   continuation_checkpoints              ContinuationCheckpointStore
  *
  * The one sanctioned crossing: transactional appends anchored on a row the
@@ -51,6 +52,7 @@ import { CronStore } from "./cron-store.ts";
 import { DecisionIssueStore } from "./decision-issue-store.ts";
 import { HandoffStore } from "./handoff-store.ts";
 import { InteractionStore } from "./interaction-store.ts";
+import { LandingStore } from "./landing-store.ts";
 import { MessageStore } from "./message-store.ts";
 import { PatternStateStore } from "./pattern-state-store.ts";
 import { ProjectStore } from "./project-store.ts";
@@ -70,6 +72,7 @@ export { CronStore } from "./cron-store.ts";
 export { DecisionIssueStore, type DecisionIssueRow } from "./decision-issue-store.ts";
 export { HandoffStore } from "./handoff-store.ts";
 export { InteractionStore } from "./interaction-store.ts";
+export { LandingStore, type WorktreeLandingRow } from "./landing-store.ts";
 export { MessageStore } from "./message-store.ts";
 export { PatternStateStore } from "./pattern-state-store.ts";
 export { ProjectStore, type ProjectRow } from "./project-store.ts";
@@ -107,6 +110,7 @@ export interface Stores {
   continuation: ContinuationCheckpointStore;
   decisionIssues: DecisionIssueStore;
   workstreams: WorkstreamStore;
+  landings: LandingStore;
   orchestrationState: OrchestrationStateStore;
   tasks: TaskStore;
   assignments: AssignmentStore;
@@ -132,6 +136,7 @@ export function createStores(db: Db, sqlite: SqliteTransactor): Stores {
     continuation: new ContinuationCheckpointStore(db),
     decisionIssues: new DecisionIssueStore(db),
     workstreams: new WorkstreamStore(db),
+    landings: new LandingStore(db),
     orchestrationState: new OrchestrationStateStore(db),
     tasks: new TaskStore(db),
     assignments: new AssignmentStore(db),
