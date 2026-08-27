@@ -53,6 +53,17 @@ export interface EdgeSpec {
   advance: "immediate" | "join";
   /** Categories this edge carries; omitted = all six. */
   categories?: ("assignment" | "update" | "milestone" | "failure" | "final" | "decision")[];
+  /**
+   * "material": routine progress on this edge (update/decision with a
+   * pending/in_progress status) is journaled WITHOUT waking the recipient —
+   * it rides along with the recipient's next composed delivery. Builders set
+   * it on report lanes into a controller (hub specialist→coordinator,
+   * plan_execute executor→planner), never on loop or conversation edges whose
+   * convergence depends on every hop delivering. Omitted (every pre-existing
+   * contract snapshot): every delivery earns recipient attention, the
+   * historical semantics.
+   */
+  attention?: "material";
   /** Traversing this edge completes one pattern round (an evaluator critique). */
   countsRound?: boolean;
 }

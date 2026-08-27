@@ -142,10 +142,11 @@ export function buildAgentTools(ctx: AgentToolsContext): unknown[] {
       // No default. A defaulted category once turned an ACCEPT verdict into an
       // `update`: main never woke and the run ended in silence. State it.
       category: z.enum(["assignment", "update", "milestone", "failure", "final", "decision"])
-        .describe("What this transfer IS, and it decides who is woken. \"final\" is the report that ends this session's obligation to the operator — send it when your work is concluded. \"failure\" concludes it unsuccessfully. \"milestone\", \"decision\" and \"failure\" wake the Orchestrator; \"update\" and \"assignment\" do not."),
+        .describe("What this transfer IS. Category and status together decide attention: an \"update\" or \"decision\" with status pending/in_progress is routine progress — journaled durably and shown with the recipient's next delivery WITHOUT waking it, so never send one merely to prove activity. A terminal or blocked status, a \"milestone\" (a consumable result worth integration attention), an \"assignment\", or a \"failure\" earns the recipient a turn. \"final\" is the report that ends this session's obligation to the operator — send it when your work is concluded; \"failure\" concludes it unsuccessfully."),
       status: HandoffCoreSchema.shape.status
         .describe("YOUR work outcome — synced to the named ledger unit. \"completed\" only when the promised output exists (state it in resultSummary); \"blocked\"/\"failed\" reopen the unit for reassignment. A final report with an honest non-completed status is normal: finishing your assignment is not the same as the task succeeding."),
-      risk: HandoffCoreSchema.shape.risk.default("medium"),
+      risk: HandoffCoreSchema.shape.risk.default("medium")
+        .describe("\"high\" interrupts the recipient's active turn — reserve it for information that invalidates work in flight; everything else waits for the recipient's turn boundary."),
       action: z.string().min(1).describe("The request or the work this handoff is about, in one line."),
       stateSummary: z.string().min(1).describe("What is true now — the substance. Write the findings themselves, not a description of having found them."),
       evidence: z.array(EvidenceRefSchema).default([]).describe("Pointers backing the state: files, artifacts, tasks, commands, urls."),

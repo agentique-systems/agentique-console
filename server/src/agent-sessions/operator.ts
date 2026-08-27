@@ -15,6 +15,7 @@ import { dedupeKeyFor, type InteractionService } from "../orchestrator/interacti
 import { ok } from "../sdk/tool-result.ts";
 import type { SdkToolResult } from "../sdk/types.ts";
 import type { AskOperatorArgs } from "./agent-tools.ts";
+import { consumptionPending } from "./attention.ts";
 import { questionTextOf } from "./composer.ts";
 import { TERMINAL_REPORT_TRIGGERS } from "./final-gate.ts";
 import { CONSOLE_SENDER, MAIN_RECIPIENT } from "./names.ts";
@@ -110,16 +111,20 @@ export class OperatorSurface {
     const answer = decision === null ? `${asked} → (no answer recorded)` : renderDecision(decision);
     const session = this.#deps.repo.getAgentSession(interaction.agentSessionId);
     if (!session) return;
+    // risk "high" is the declared-urgency lever: an operator's answer may
+    // invalidate whatever the agent is doing around its own open question, so
+    // it steers an active turn rather than waiting for the boundary.
+    const draft = this.#deps.simpleHandoff(
+      `Operator answered: ${asked}`,
+      "pending",
+      `${answer}\n\nThis answer was recorded by the Console, not relayed by your coordinator. It is authoritative — do not re-litigate it, and do not ask again.`,
+      "Continue from the operator's decision.",
+    );
     this.#deps.transfer({
       agentSessionId: interaction.agentSessionId,
       speaker: { kind: "system", name: CONSOLE_SENDER },
       to: interaction.agent,
-      handoff: this.#deps.simpleHandoff(
-        `Operator answered: ${asked}`,
-        "pending",
-        `${answer}\n\nThis answer was recorded by the Console, not relayed by your coordinator. It is authoritative — do not re-litigate it, and do not ask again.`,
-        "Continue from the operator's decision.",
-      ),
+      handoff: { ...draft, core: { ...draft.core, risk: "high" } },
       category: "decision",
       dedupeKey: `answer:${interaction.id}`,
     });
@@ -136,16 +141,19 @@ export class OperatorSurface {
     if (!interaction.agentSessionId || !interaction.agent) return;
     const session = this.#deps.repo.getAgentSession(interaction.agentSessionId);
     if (!session || session.lifecycle !== "open") return;
+    // A revised decision the work rests on may invalidate the work in flight
+    // — declared urgent, so it steers an active turn (see deliverOperatorAnswer).
+    const draft = this.#deps.simpleHandoff(
+      "Operator revised a decision you depend on",
+      "pending",
+      text,
+      "Reconcile your work with the revised decision.",
+    );
     this.#deps.transfer({
       agentSessionId: interaction.agentSessionId,
       speaker: { kind: "system", name: CONSOLE_SENDER },
       to: interaction.agent,
-      handoff: this.#deps.simpleHandoff(
-        "Operator revised a decision you depend on",
-        "pending",
-        text,
-        "Reconcile your work with the revised decision.",
-      ),
+      handoff: { ...draft, core: { ...draft.core, risk: "high" } },
       category: "decision",
       dedupeKey: `${dedupeKey}:${interaction.agent}`,
     });
@@ -374,7 +382,10 @@ export class OperatorSurface {
   #dischargeOperatorDebt(session: AgentSessionRow): void {
     if (this.#operatorDebtSettled.has(session.id)) return;
     const { repo } = this.#deps;
-    if (repo.listActiveDeliveries(session.id).length > 0) return;
+    // Queued deferred rows never wake anyone, so they cannot be waited on —
+    // a session whose last words were routine updates must still close its
+    // operator loop instead of deadlocking behind its own unread progress.
+    if (repo.listActiveDeliveries(session.id).some(consumptionPending)) return;
     // The SAME predicate the status derivation uses. Reading "any handoff to
     // main" here is what let a non-final update settle the obligation while
     // run completion still considered the run unfinished.
@@ -457,8 +468,14 @@ export class OperatorSurface {
   statusOf(row: AgentSessionRow): AgentSessionStatus {
     if (row.lifecycle === "archived") return "archived";
     if (this.#deps.lanes.hasBusyTurnExcludingOperatorWaits(row.id)) return "working";
-    if (this.#deps.repo.listQueuedDeliveries(row.id).some((d) => d.recipient !== MAIN_RECIPIENT)) return "working";
-    if (this.reportedFinal(row) && this.#deps.repo.listActiveDeliveries(row.id).length === 0) {
+    // Deferred routine progress is durable context, not pending work — it must
+    // not hold a session at "working" forever (which would also starve the
+    // operator-debt discharge below). Join-held rows DO count: a pending join
+    // is work the engine will deliver.
+    if (this.#deps.repo.listQueuedDeliveries(row.id).some((d) => d.recipient !== MAIN_RECIPIENT && d.attention !== "defer")) return "working";
+    // Deferred rows do not gate "reported" either: they were routine when
+    // sent, and the reporting agent's final has already superseded them.
+    if (this.reportedFinal(row) && !this.#deps.repo.listActiveDeliveries(row.id).some(consumptionPending)) {
       // Bottom-up settling: a parent has not truly reported while an open
       // child still owes its final — the parent's report could not have
       // reflected work that has not concluded.

@@ -267,16 +267,18 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
      */
     sdk.tool(
       "send_to_coordinator",
-      "Send a typed handoff to an AgentSession's entry agent — how you steer a running session after its briefing. The fields ARE the handoff; the Console builds, journals and carries the envelope. " +
+      "Send a typed handoff to an AgentSession's entry agent — how you steer a running session after its briefing. The fields ARE the handoff; the Console carries the envelope. " +
       "Set `to` to reach ANY agent directly with a category:\"update\" steering message — assignments still enter only through the entry agent.",
       {
         agentSessionId: z.string().min(1),
         to: z.string().min(1).optional()
           .describe("Recipient agent name. Omit for the entry agent. Non-entry recipients accept \"update\" only."),
         category: z.enum(["assignment", "update"])
-          .describe("\"assignment\" is new work owed back; \"update\" is steering for work already assigned."),
+          .describe("\"assignment\" is new work owed back; \"update\" steers work already assigned."),
         status: HandoffCoreSchema.shape.status,
-        risk: HandoffCoreSchema.shape.risk.default("medium"),
+        // A busy recipient otherwise reads the send when its turn settles.
+        risk: HandoffCoreSchema.shape.risk.default("medium")
+          .describe("\"high\" steers a busy recipient mid-turn."),
         action: z.string().min(1).describe("The request, in one line."),
         stateSummary: z.string().min(1).describe("What is true now — the substance, not a description of it."),
         evidence: z.array(EvidenceRefSchema).default([]).describe("Pointers backing the state."),

@@ -521,7 +521,9 @@ function buildPlanExecute(input: BuildInput): BuildResult {
         { from: "main", to: "executor", advance: "immediate", categories: ["update"] },
         { from: "planner", to: "main", advance: "immediate" },
         { from: "planner", to: "executor", advance: "immediate" },
-        { from: "executor", to: "planner", advance: "immediate" },
+        // Report lane into a controller — routine executor progress batches
+        // into the planner's next turn (the hub specialist→coordinator rule).
+        { from: "executor", to: "planner", advance: "immediate", attention: "material" },
       ],
       joins: [],
       entry: { role: "planner", broadcast: false },
