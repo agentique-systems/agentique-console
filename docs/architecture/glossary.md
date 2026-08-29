@@ -619,7 +619,10 @@ the creation time, the release time, and the status (`active`,
 the child becomes runnable, and only from the parent's unconsumed,
 unreserved capacity; it is released with its final consumed amounts when
 the child reaches a terminal state, returning the remainder to the parent.
-A plan revision whose allocations cannot all be reserved is rejected.
+The consumed amounts are the child's complete actual consumption and may
+exceed the reserved amounts; the reserved amounts are kept unchanged
+alongside them. A plan revision whose allocations cannot all be reserved
+is rejected.
 
 - Id prefix: `bres_`
 - Owned by: the runtime

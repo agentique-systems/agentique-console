@@ -1,6 +1,8 @@
 import { eq } from "drizzle-orm";
 import {
+  ConflictError,
   consumedAllocation,
+  INVOCATION_MACHINE,
   parseOrThrow,
   sumUsage,
   usageInputSchema,
@@ -8,6 +10,7 @@ import {
   type Allocation,
   type AttemptId,
   type InvocationId,
+  type InvocationStatus,
   type PlanNodeId,
   type RunId,
   type Usage,
@@ -15,7 +18,7 @@ import {
   type UsageTotals,
 } from "@agentique-console/core";
 import type { PersistenceContext } from "../context.ts";
-import { attempts, usage } from "../schema.ts";
+import { attempts, invocations, usage } from "../schema.ts";
 import { loadRunRef, requireRow, runScope, writeMeta, type WriteOptions } from "./support.ts";
 
 function toDomain(row: typeof usage.$inferSelect): Usage {
@@ -30,18 +33,33 @@ function toDomain(row: typeof usage.$inferSelect): Usage {
 export class UsageStore {
   constructor(private readonly ctx: PersistenceContext) {}
 
+  /**
+   * Records one Usage row. Usage is accepted while the owning Invocation is
+   * non-terminal — including after its Attempt has ended — and rejected once
+   * the Invocation is terminal, because its reservation was released with
+   * the consumption known at that moment and must never go stale. The
+   * runtime therefore records final Usage, then ends the Attempt, then ends
+   * the Invocation.
+   */
   record(input: UsageInput, options?: WriteOptions): Usage {
     const valid = parseOrThrow(usageInputSchema, input, "Usage input");
     return this.ctx.tx.write(() => {
       const attempt = requireRow(
         this.ctx.db
-          .select({ runId: attempts.runId, planNodeId: attempts.planNodeId, invocationId: attempts.invocationId })
+          .select({ runId: attempts.runId, planNodeId: attempts.planNodeId, invocationId: attempts.invocationId, invocationStatus: invocations.status })
           .from(attempts)
+          .innerJoin(invocations, eq(invocations.id, attempts.invocationId))
           .where(eq(attempts.id, valid.attemptId))
           .get(),
         "Attempt",
         valid.attemptId,
       );
+      if (INVOCATION_MACHINE.isTerminal(attempt.invocationStatus as InvocationStatus)) {
+        throw new ConflictError(
+          `Invocation ${attempt.invocationId} is ${attempt.invocationStatus}; its reservation is released and no further Usage can be attributed to it`,
+          { invocationId: attempt.invocationId, attemptId: valid.attemptId, status: attempt.invocationStatus },
+        );
+      }
       const run = loadRunRef(this.ctx, attempt.runId);
       const row: Usage = {
         id: this.ctx.ids("usage"),

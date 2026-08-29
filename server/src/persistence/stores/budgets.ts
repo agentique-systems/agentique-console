@@ -135,7 +135,9 @@ export class BudgetReservationStore {
 
   /**
    * Unreserved capacity = limit − Σ active reserved − Σ released consumed −
-   * the parent's own direct consumption (an Invocation's Attempts).
+   * the parent's own direct consumption (an Invocation's Attempts). Released
+   * consumption is actual, not clamped, so `available` is signed: a
+   * negative value is a visible overrun and rejects every new reservation.
    */
   capacity(parent: ReservationParentRef): CapacityAccount {
     const limit = this.limitOf(parent);
@@ -177,19 +179,21 @@ export class BudgetReservationStore {
     });
   }
 
-  /** Releases an active reservation once, recording consumption and reason. */
+  /**
+   * Releases an active reservation once, recording the child's complete
+   * actual consumption and the reason. A reservation gates whether work may
+   * start; it is not a cap on what is recorded afterwards. Actual
+   * consumption may exceed the reserved amounts (a provider overran its
+   * estimate), in which case the parent's available capacity goes negative
+   * and no further reservation fits until capacity is raised. The reserved
+   * amounts are never altered.
+   */
   release(id: BudgetReservationId, reason: ReservationReleaseReason, consumed: Allocation, options?: WriteOptions): BudgetReservation {
     const finalConsumed = parseOrThrow(allocationSchema, consumed, "consumed allocation");
     return this.ctx.tx.write(() => {
       const current = this.get(id);
       if (current.status !== "active") {
         throw new ConflictError(`BudgetReservation ${id} is already released`, { id, releaseReason: current.releaseReason });
-      }
-      if (!allocationFits(finalConsumed, current.reserved)) {
-        throw new InvariantViolationError(`BudgetReservation ${id} consumption exceeds its reserved amount`, {
-          reserved: current.reserved,
-          consumed: finalConsumed,
-        });
       }
       const run = loadRunRef(this.ctx, current.runId);
       const releasedAt = this.ctx.clock();

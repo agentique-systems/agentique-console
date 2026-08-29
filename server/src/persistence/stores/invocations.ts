@@ -218,17 +218,8 @@ export class InvocationStore {
       if (INVOCATION_MACHINE.isTerminal(next.status)) {
         const reservation = this.reservations.activeForChild({ type: "invocation", id });
         if (reservation) {
-          const consumed = this.usage.consumedByInvocation(id);
-          this.reservations.release(
-            reservation.id,
-            "child_terminal",
-            {
-              costUsd: Math.min(consumed.costUsd, reservation.reserved.costUsd),
-              tokens: Math.min(consumed.tokens, reservation.reserved.tokens),
-              attempts: Math.min(consumed.attempts, reservation.reserved.attempts),
-            },
-            options,
-          );
+          // Complete actual consumption from Usage and Attempt rows; never clamped to the reservation.
+          this.reservations.release(reservation.id, "child_terminal", this.usage.consumedByInvocation(id), options);
         }
       }
       return next;

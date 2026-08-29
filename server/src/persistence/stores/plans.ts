@@ -455,15 +455,11 @@ export class ExecutionPlanStore {
       if (PLAN_NODE_MACHINE.isTerminal(next.status) && next.kind === "pattern") {
         const reservation = this.reservations.activeForChild({ type: "plan_node", id });
         if (reservation) {
-          const consumed = this.usage.consumedByPlanNode(id);
+          // Complete actual consumption of every Invocation of the node; never clamped to the reservation.
           this.reservations.release(
             reservation.id,
             transition.to === "cancelled" ? "plan_revision_cancelled" : "child_terminal",
-            {
-              costUsd: Math.min(consumed.costUsd, reservation.reserved.costUsd),
-              tokens: Math.min(consumed.tokens, reservation.reserved.tokens),
-              attempts: Math.min(consumed.attempts, reservation.reserved.attempts),
-            },
+            this.usage.consumedByPlanNode(id),
             options,
           );
         }

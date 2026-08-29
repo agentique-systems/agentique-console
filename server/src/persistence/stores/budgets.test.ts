@@ -48,7 +48,7 @@ describe("budget reservations", () => {
       const reservation = h.stores.reservations.activeForChild({ type: "invocation", id: invocation.id })!;
       const nodeBefore = h.stores.reservations.capacity({ type: "plan_node", id: s.root.id });
       expect(nodeBefore.available).toEqual({ costUsd: 6, tokens: 60_000, attempts: 3 });
-      expect(() => h.stores.reservations.release(reservation.id, "child_terminal", { costUsd: 5, tokens: 0, attempts: 0 })).toThrow(InvariantViolationError);
+      expect(() => h.stores.reservations.release(reservation.id, "child_terminal", { costUsd: -1, tokens: 0, attempts: 0 })).toThrow(ValidationError);
       const released = h.stores.reservations.release(reservation.id, "child_terminal", { costUsd: 1, tokens: 10_000, attempts: 1 });
       expect(released.status).toBe("released");
       expect(released.consumed).toEqual({ costUsd: 1, tokens: 10_000, attempts: 1 });
@@ -154,6 +154,120 @@ describe("budget reservations", () => {
       expect(runAccount.consumed).toEqual({ costUsd: 0.4, tokens: 4000, attempts: 1 });
       expect(runAccount.reserved).toEqual({ costUsd: 0, tokens: 0, attempts: 0 });
       expect(runAccount.available).toEqual({ costUsd: 19.6, tokens: 196_000, attempts: 9 });
+    } finally {
+      h.close();
+    }
+  });
+});
+
+describe("reservation overrun", () => {
+  it("records complete actual consumption above the reservation and propagates it to node and Run capacity", () => {
+    const h = openHarness();
+    try {
+      // Run Budget equals the root node allocation, so any overrun shows at every level.
+      const s = seedRun(h, { budget: { maxCostUsd: 10, maxTokens: 100_000, maxAttempts: 5, maxWallClockMs: null, maxConcurrency: null } });
+      const reserved = { costUsd: 1, tokens: 1000, attempts: 1 };
+      const invocation = seedInvocation(h, s, { allocation: reserved });
+      seedManifest(h, s, invocation);
+      const attempt = h.stores.invocations.createAttempt({ invocationId: invocation.id, startMode: "fresh", resumedFromAttemptId: null });
+      h.stores.invocations.transitionAttempt(attempt.id, { to: "running", capacityLeaseId: null });
+      h.stores.usage.record({ attemptId: attempt.id, model: "m", effort: null, inputTokensUncached: 1000, cacheCreationTokens: 0, cacheReadTokens: 0, outputTokens: 500, costUsd: 10.5, wallClockMs: 5, providerMs: null });
+      h.stores.invocations.transitionAttempt(attempt.id, { to: "succeeded", result: { status: "completed", artifactIds: [], tasks: [], evidence: [], summary: "", openItems: [], blocker: null, runOutcome: null }, transcriptArtifactId: null });
+      h.stores.invocations.transition(invocation.id, { to: "running" });
+      h.stores.invocations.transition(invocation.id, { to: "cancelled" });
+
+      const released = h.stores.reservations.listByChild({ type: "invocation", id: invocation.id })[0]!;
+      expect(released.status).toBe("released");
+      expect(released.reserved).toEqual(reserved);
+      expect(released.consumed).toEqual({ costUsd: 10.5, tokens: 1500, attempts: 1 });
+      const releaseEvent = h.ctx.journal.read({ runId: s.run.id, type: "budget_reservation.released" }).at(-1)!;
+      expect(releaseEvent.payload).toEqual({ reservationId: released.id, releaseReason: "child_terminal", consumed: { costUsd: 10.5, tokens: 1500, attempts: 1 } });
+      expect(() => h.database.sqlite.prepare("UPDATE budget_reservations SET consumed_cost_usd = 1 WHERE id = ?").run(released.id)).toThrow(/never changes again/);
+
+      const node = h.stores.reservations.capacity({ type: "plan_node", id: s.root.id });
+      expect(node.consumed).toEqual({ costUsd: 10.5, tokens: 1500, attempts: 1 });
+      expect(node.available).toEqual({ costUsd: -0.5, tokens: 98_500, attempts: 4 });
+      expect(() => seedInvocation(h, s, { allocation: { costUsd: 0.01, tokens: 1, attempts: 1 } })).toThrow(InsufficientCapacityError);
+
+      h.stores.plans.transitionNode(s.root.id, { to: "running" });
+      h.stores.plans.transitionNode(s.root.id, { to: "cancelled" });
+      const nodeReservation = h.stores.reservations.listByChild({ type: "plan_node", id: s.root.id })[0]!;
+      expect(nodeReservation.reserved).toEqual(SMALL_ALLOCATION);
+      expect(nodeReservation.consumed).toEqual({ costUsd: 10.5, tokens: 1500, attempts: 1 });
+      const run = h.stores.reservations.capacity({ type: "run", id: s.run.id });
+      expect(run.consumed.costUsd).toBe(h.stores.usage.totalsForRun(s.run.id).costUsd);
+      expect(run.available).toEqual({ costUsd: -0.5, tokens: 98_500, attempts: 4 });
+      const late = patternNode(h, s.run, { agentDefinitionRevisionId: s.definition.id, sourcePath: "9", allocation: { costUsd: 0.01, tokens: 1, attempts: 1 } });
+      expect(() => h.stores.plans.insertCompiledGraph({ runId: s.run.id, revisionNumber: 1, nodes: [late], edges: [], requirements: [] })).toThrow(InsufficientCapacityError);
+    } finally {
+      h.close();
+    }
+  });
+
+  it("treats tokens and Attempts like cost: release never clamps, and reserved values are kept", () => {
+    const h = openHarness();
+    try {
+      const s = seedRun(h);
+      const task = h.stores.tasks.create({ runId: s.run.id, planNodeId: s.root.id, origin: "orchestrator", subject: "t", requirementIds: [], requirementRevisionId: null, inputArtifactIds: [], requiredOutputs: [], replacesTaskId: null });
+      const reservation = h.stores.reservations.reserve({ runId: s.run.id, parent: { type: "plan_node", id: s.root.id }, child: { type: "task", id: task.id }, amount: { costUsd: 1, tokens: 100, attempts: 1 } });
+      const released = h.stores.reservations.release(reservation.id, "task_cancelled", { costUsd: 2.5, tokens: 250, attempts: 3 });
+      expect(released.reserved).toEqual({ costUsd: 1, tokens: 100, attempts: 1 });
+      expect(released.consumed).toEqual({ costUsd: 2.5, tokens: 250, attempts: 3 });
+      const account = h.stores.reservations.capacity({ type: "plan_node", id: s.root.id });
+      expect(account.consumed).toEqual({ costUsd: 2.5, tokens: 250, attempts: 3 });
+      expect(account.available).toEqual({ costUsd: 7.5, tokens: 99_750, attempts: 2 });
+      expect(() => h.stores.reservations.release(reservation.id, "task_cancelled", { costUsd: 0, tokens: 0, attempts: 0 })).toThrow(ConflictError);
+    } finally {
+      h.close();
+    }
+  });
+
+  it("keeps under-budget releases unchanged", () => {
+    const h = openHarness();
+    try {
+      const s = seedRun(h);
+      const invocation = seedInvocation(h, s, { allocation: { costUsd: 4, tokens: 40_000, attempts: 2 } });
+      seedManifest(h, s, invocation);
+      const attempt = h.stores.invocations.createAttempt({ invocationId: invocation.id, startMode: "fresh", resumedFromAttemptId: null });
+      h.stores.usage.record({ attemptId: attempt.id, model: "m", effort: null, inputTokensUncached: 100, cacheCreationTokens: 0, cacheReadTokens: 0, outputTokens: 100, costUsd: 0.5, wallClockMs: 1, providerMs: null });
+      h.stores.invocations.transition(invocation.id, { to: "running" });
+      h.stores.invocations.transition(invocation.id, { to: "cancelled" });
+      const released = h.stores.reservations.listByChild({ type: "invocation", id: invocation.id })[0]!;
+      expect(released.consumed).toEqual({ costUsd: 0.5, tokens: 200, attempts: 1 });
+      expect(h.stores.reservations.capacity({ type: "plan_node", id: s.root.id }).available).toEqual({ costUsd: 9.5, tokens: 99_800, attempts: 4 });
+    } finally {
+      h.close();
+    }
+  });
+});
+
+describe("usage ordering", () => {
+  const record = (h: ReturnType<typeof openHarness>, attemptId: string, costUsd: number) =>
+    h.stores.usage.record({ attemptId: attemptId as never, model: "m", effort: null, inputTokensUncached: 10, cacheCreationTokens: 0, cacheReadTokens: 0, outputTokens: 10, costUsd, wallClockMs: 1, providerMs: null });
+
+  it("accepts Usage after the Attempt ends but before the Invocation ends, and rejects it afterwards", () => {
+    const h = openHarness();
+    try {
+      const s = seedRun(h);
+      const invocation = seedInvocation(h, s);
+      seedManifest(h, s, invocation);
+      const attempt = h.stores.invocations.createAttempt({ invocationId: invocation.id, startMode: "fresh", resumedFromAttemptId: null });
+      h.stores.invocations.transitionAttempt(attempt.id, { to: "running", capacityLeaseId: null });
+      h.stores.invocations.transitionAttempt(attempt.id, { to: "interrupted", transcriptArtifactId: null });
+      // Final Usage lands after the Attempt is terminal; the Invocation is still live.
+      expect(record(h, attempt.id, 0.25).costUsd).toBe(0.25);
+      h.stores.invocations.transition(invocation.id, { to: "running" });
+      h.stores.invocations.transition(invocation.id, { to: "failed", failureReason: "attempts_exhausted", result: null });
+      const released = h.stores.reservations.listByChild({ type: "invocation", id: invocation.id })[0]!;
+      expect(released.consumed).toEqual({ costUsd: 0.25, tokens: 20, attempts: 1 });
+
+      const seqBefore = h.ctx.journal.lastSeq();
+      const totalsBefore = h.stores.usage.totalsForRun(s.run.id);
+      expect(() => record(h, attempt.id, 99)).toThrow(ConflictError);
+      expect(h.ctx.journal.lastSeq()).toBe(seqBefore);
+      expect(h.stores.usage.totalsForRun(s.run.id)).toEqual(totalsBefore);
+      expect(h.stores.usage.listByAttempt(attempt.id)).toHaveLength(1);
+      expect(h.stores.reservations.capacity({ type: "plan_node", id: s.root.id }).consumed).toEqual({ costUsd: 0.25, tokens: 20, attempts: 1 });
     } finally {
       h.close();
     }

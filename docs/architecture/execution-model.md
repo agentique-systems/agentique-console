@@ -858,8 +858,22 @@ the resource governor; they are not reserved quantities.
 - When the child reaches a terminal state, its reservation is `released`
   with its final consumed amounts recorded; the unused remainder returns to
   the parent's unreserved capacity.
-- Consumption by a child never exceeds its reservation; reaching the
-  reserved amount is the child's local allocation exhaustion.
+- Reaching the reserved amount is the child's local allocation exhaustion
+  and the runtime's signal to stop starting work for it. A reservation
+  gates whether work may start; it is not permission to discard real
+  Usage once a provider has exceeded its estimate. The consumption
+  recorded on release is the complete actual consumption from the
+  canonical Usage and Attempt rows, never clamped to the reserved
+  amounts, so a released reservation may show `consumed` above
+  `reserved`. The parent's unreserved capacity then goes negative: the
+  overrun is visible, Run Usage totals and reservation accounting agree,
+  and every further reservation request is rejected until the operator
+  raises the limit.
+- Usage is attributed while the owning Invocation is non-terminal, which
+  includes the interval after its Attempt has ended; once the Invocation
+  is terminal its reservation has been released and further Usage for it
+  is rejected. The runtime records final Usage, then ends the Attempt,
+  then ends the Invocation.
 
 **Plan Node allocation.** Each `pattern` Plan Node receives an explicit
 allocation reserved from the Run Budget when its source revision is
@@ -1365,9 +1379,11 @@ by a test.
     Node and every Invocation has an `active` or `released`
     `budget_reservations` row created before it becomes runnable; the root
     node's allocation is an explicit initial amount, never the Run Budget;
-    the sum of active reservations plus released consumption never exceeds
-    the parent's limit; Budget exhaustion places a Run in `waiting`, never
-    `failed`.
+    a reservation is created only when the parent's limit minus its active
+    reservations and released actual consumption covers it, and released
+    consumption is actual — never clamped — so an overrun is recorded as
+    negative available capacity rather than hidden; Budget exhaustion
+    places a Run in `waiting`, never `failed`.
 23. **Task states are complete and runtime-owned.** A Task is always in
     exactly one of `pending`, `ready`, `running`, `blocked`, `completed`,
     `failed`, `cancelled`; only the runtime transitions it; a `failed` Task

@@ -1,22 +1,36 @@
-import { InvariantViolationError, ValidationError } from "@agentique-console/core";
-import { describe, expect, it } from "vitest";
+import { InvariantViolationError, NotFoundError, ValidationError, type ArtifactInput } from "@agentique-console/core";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { BlobCorruptedError, BlobMissingError, sha256Hex } from "../blob-store.ts";
-import { openHarness, seedArtifact, seedInvocation, seedRun } from "../test-support.ts";
+import { openHarness, seedArtifact, seedInvocation, seedManifest, seedRun, type Harness, type Seeded } from "../test-support.ts";
+
+afterEach(() => vi.restoreAllMocks());
+
+const encode = (text: string) => new TextEncoder().encode(text);
+
+function runtimeInput(s: Seeded, overrides: Partial<ArtifactInput> = {}): ArtifactInput {
+  return { runId: s.run.id, mediaType: "text/plain", producer: { kind: "runtime", component: "command" }, taskId: null, title: null, ...overrides };
+}
+
+/** Deterministic metadata-insert failure: the next Artifact id collides with an existing row. */
+function collideNextArtifactId(h: Harness, existingId: string): void {
+  const original = h.ctx.ids;
+  h.ctx.ids = ((kind) => (kind === "artifact" ? existingId : original(kind))) as typeof h.ctx.ids;
+}
 
 describe("artifacts", () => {
-  it("writes content-addressed metadata and deduplicates identical bytes", () => {
+  it("writes content-addressed metadata and deduplicates identical bytes into one blob", () => {
     const h = openHarness();
     try {
       const s = seedRun(h);
-      const bytes = new TextEncoder().encode("same content");
+      const bytes = encode("same content");
       const first = seedArtifact(h, s, "same content");
       const second = seedArtifact(h, s, "same content");
       expect(first.id).not.toBe(second.id);
       expect(first.digest).toBe(sha256Hex(bytes));
       expect(second.digest).toBe(first.digest);
       expect(first.byteSize).toBe(bytes.byteLength);
+      expect(h.blobs.size).toBe(1);
       expect(h.stores.artifacts.findByDigest(s.run.id, first.digest).map((a) => a.id)).toEqual([first.id, second.id]);
-      expect(h.blobs.put(bytes).written).toBe(false);
       expect(h.stores.artifacts.read(second.id).bytes).toEqual(bytes);
       expect(h.ctx.journal.read({ runId: s.run.id, type: "artifact.created" })).toHaveLength(2);
     } finally {
@@ -24,16 +38,165 @@ describe("artifacts", () => {
     }
   });
 
-  it("verifies digest and size on read and reports missing or corrupted blobs", () => {
+  it("writes no blob for invalid input", () => {
     const h = openHarness();
     try {
       const s = seedRun(h);
-      const artifact = seedArtifact(h, s, "payload");
-      h.blobs.corrupt(artifact.digest, new TextEncoder().encode("payloadX"));
-      expect(() => h.stores.artifacts.read(artifact.id)).toThrow(BlobCorruptedError);
-      h.blobs.delete(artifact.digest);
-      expect(() => h.stores.artifacts.read(artifact.id)).toThrow(BlobMissingError);
-      expect(h.stores.artifacts.get(artifact.id)).toEqual(artifact);
+      const bytes = encode("never stored");
+      expect(() => h.stores.artifacts.create(runtimeInput(s, { mediaType: "not a media type" }), bytes)).toThrow(ValidationError);
+      expect(() => h.stores.artifacts.create(runtimeInput(s, { producer: { kind: "runtime", component: "mailbox" as never } }), bytes)).toThrow(ValidationError);
+      expect(() => h.stores.artifacts.create(runtimeInput(s, { title: "" }), bytes)).toThrow(ValidationError);
+      expect(h.blobs.size).toBe(0);
+      expect(h.blobs.has(sha256Hex(bytes))).toBe(false);
+    } finally {
+      h.close();
+    }
+  });
+
+  it("writes no blob when the Run, Invocation, Attempt, or Task is foreign or missing", () => {
+    const h = openHarness();
+    try {
+      const s = seedRun(h);
+      const other = seedRun(h);
+      const bytes = encode("never stored either");
+      const foreignInvocation = seedInvocation(h, other);
+      seedManifest(h, other, foreignInvocation);
+      const foreignAttempt = h.stores.invocations.createAttempt({ invocationId: foreignInvocation.id, startMode: "fresh", resumedFromAttemptId: null });
+      const ownInvocation = seedInvocation(h, s);
+      const foreignTask = h.stores.tasks.create({ runId: other.run.id, planNodeId: null, origin: "orchestrator", subject: "t", requirementIds: [], requirementRevisionId: null, inputArtifactIds: [], requiredOutputs: [], replacesTaskId: null });
+
+      expect(() => h.stores.artifacts.create(runtimeInput(s, { runId: "run_000000000000000000000000" }), bytes)).toThrow(NotFoundError);
+      expect(() => h.stores.artifacts.create(runtimeInput(s, { producer: { kind: "invocation", invocationId: foreignInvocation.id, attemptId: null } }), bytes)).toThrow(InvariantViolationError);
+      expect(() => h.stores.artifacts.create(runtimeInput(s, { producer: { kind: "invocation", invocationId: ownInvocation.id, attemptId: foreignAttempt.id } }), bytes)).toThrow(InvariantViolationError);
+      expect(() => h.stores.artifacts.create(runtimeInput(s, { producer: { kind: "invocation", invocationId: ownInvocation.id, attemptId: "att_000000000000000000000000" } }), bytes)).toThrow(NotFoundError);
+      expect(() => h.stores.artifacts.create(runtimeInput(s, { taskId: foreignTask.id }), bytes)).toThrow(InvariantViolationError);
+      expect(h.blobs.size).toBe(0);
+      expect(h.stores.artifacts.listByRun(s.run.id)).toEqual([]);
+    } finally {
+      h.close();
+    }
+  });
+
+  it("a failed Event append after a new blob write leaves no row, no Event, and no blob", () => {
+    const h = openHarness();
+    try {
+      const s = seedRun(h);
+      const before = h.ctx.journal.lastSeq();
+      vi.spyOn(h.ctx.journal, "append").mockImplementationOnce(() => {
+        throw new Error("injected journal failure");
+      });
+      expect(() => h.stores.artifacts.create(runtimeInput(s), encode("orphan candidate"))).toThrow("injected journal failure");
+      expect(h.ctx.journal.lastSeq()).toBe(before);
+      expect(h.stores.artifacts.listByRun(s.run.id)).toEqual([]);
+      expect(h.blobs.size).toBe(0);
+      expect(h.diagnostics).toEqual([]);
+      expect(h.ctx.tx.inTransaction).toBe(false);
+    } finally {
+      h.close();
+    }
+  });
+
+  it("a failed metadata insert after a new blob write performs the same cleanup", () => {
+    const h = openHarness();
+    try {
+      const s = seedRun(h);
+      const existing = seedArtifact(h, s, "existing");
+      const before = h.ctx.journal.lastSeq();
+      collideNextArtifactId(h, existing.id);
+      const bytes = encode("new content");
+      expect(() => h.stores.artifacts.create(runtimeInput(s), bytes)).toThrow(/UNIQUE|PRIMARY KEY/);
+      expect(h.ctx.journal.lastSeq()).toBe(before);
+      expect(h.stores.artifacts.listByRun(s.run.id).map((a) => a.id)).toEqual([existing.id]);
+      expect(h.blobs.has(sha256Hex(bytes))).toBe(false);
+      expect(h.blobs.has(existing.digest)).toBe(true);
+      expect(h.stores.artifacts.read(existing.id).bytes).toEqual(encode("existing"));
+    } finally {
+      h.close();
+    }
+  });
+
+  it("never deletes a shared, pre-existing blob when a later metadata creation for the same content fails", () => {
+    const h = openHarness();
+    try {
+      const s = seedRun(h);
+      const first = seedArtifact(h, s, "shared bytes");
+      vi.spyOn(h.ctx.journal, "append").mockImplementationOnce(() => {
+        throw new Error("injected");
+      });
+      expect(() => h.stores.artifacts.create(runtimeInput(s), encode("shared bytes"))).toThrow("injected");
+      expect(h.blobs.has(first.digest)).toBe(true);
+      expect(h.stores.artifacts.read(first.id).bytes).toEqual(encode("shared bytes"));
+      expect(h.stores.artifacts.listByRun(s.run.id).map((a) => a.id)).toEqual([first.id]);
+    } finally {
+      h.close();
+    }
+  });
+
+  it("does not remove a blob that another committed Artifact references, even if cleanup would otherwise run", () => {
+    const h = openHarness();
+    try {
+      const s = seedRun(h);
+      const bytes = encode("referenced elsewhere");
+      // The first create fails after writing the blob; its cleanup removes the blob (unreferenced).
+      vi.spyOn(h.ctx.journal, "append").mockImplementationOnce(() => {
+        throw new Error("injected");
+      });
+      expect(() => h.stores.artifacts.create(runtimeInput(s), bytes)).toThrow("injected");
+      expect(h.blobs.has(sha256Hex(bytes))).toBe(false);
+      // A committed Artifact now references the digest; a second failure must keep the blob.
+      const committed = h.stores.artifacts.create(runtimeInput(s), bytes);
+      h.blobs.remove(committed.digest);
+      expect(h.blobs.size).toBe(0);
+      collideNextArtifactId(h, committed.id);
+      expect(() => h.stores.artifacts.create(runtimeInput(s), bytes)).toThrow(/UNIQUE|PRIMARY KEY/);
+      // The put re-wrote the blob (written: true) but the committed row references it, so it stays.
+      expect(h.blobs.has(committed.digest)).toBe(true);
+      expect(h.stores.artifacts.read(committed.id).bytes).toEqual(bytes);
+    } finally {
+      h.close();
+    }
+  });
+
+  it("rejects corrupted existing content during put and creates no metadata for it", () => {
+    const h = openHarness();
+    try {
+      const s = seedRun(h);
+      const first = seedArtifact(h, s, "payload");
+      h.blobs.corrupt(first.digest, encode("payloadX"));
+      const before = h.ctx.journal.lastSeq();
+      expect(() => h.stores.artifacts.create(runtimeInput(s), encode("payload"))).toThrow(BlobCorruptedError);
+      expect(h.ctx.journal.lastSeq()).toBe(before);
+      expect(h.stores.artifacts.listByRun(s.run.id).map((a) => a.id)).toEqual([first.id]);
+      expect(() => h.stores.artifacts.read(first.id)).toThrow(BlobCorruptedError);
+      h.blobs.remove(first.digest);
+      expect(() => h.stores.artifacts.read(first.id)).toThrow(BlobMissingError);
+      expect(h.stores.artifacts.get(first.id)).toEqual(first);
+    } finally {
+      h.close();
+    }
+  });
+
+  it("a cleanup failure is reported as a diagnostic and attached, and the database error is rethrown", () => {
+    const h = openHarness();
+    try {
+      const s = seedRun(h);
+      vi.spyOn(h.ctx.journal, "append").mockImplementationOnce(() => {
+        throw new Error("original database failure");
+      });
+      vi.spyOn(h.blobs, "remove").mockImplementationOnce(() => {
+        throw new Error("filesystem is read-only");
+      });
+      const bytes = encode("stuck orphan");
+      let caught: unknown;
+      try {
+        h.stores.artifacts.create(runtimeInput(s), bytes);
+      } catch (error) {
+        caught = error;
+      }
+      expect((caught as Error).message).toBe("original database failure");
+      expect((caught as { blobCleanupFailure?: { digest: string; message: string } }).blobCleanupFailure).toEqual({ digest: sha256Hex(bytes), message: "filesystem is read-only" });
+      expect(h.diagnostics).toEqual([{ kind: "blob_cleanup_failed", digest: sha256Hex(bytes), message: "filesystem is read-only" }]);
+      expect(h.stores.artifacts.listByRun(s.run.id)).toEqual([]);
     } finally {
       h.close();
     }
@@ -54,21 +217,18 @@ describe("artifacts", () => {
     }
   });
 
-  it("validates provenance: producing Invocations, Attempts, and Tasks belong to the Run", () => {
+  it("records producer provenance for an Invocation and its Attempt", () => {
     const h = openHarness();
     try {
       const s = seedRun(h);
-      const other = seedRun(h);
-      const foreignInvocation = seedInvocation(h, other);
-      const bytes = new TextEncoder().encode("x");
-      expect(() => h.stores.artifacts.create({ runId: s.run.id, mediaType: "text/plain", producer: { kind: "invocation", invocationId: foreignInvocation.id, attemptId: null }, taskId: null, title: null }, bytes)).toThrow(InvariantViolationError);
-      expect(() => h.stores.artifacts.create({ runId: s.run.id, mediaType: "text/plain", producer: { kind: "runtime", component: "mailbox" as never }, taskId: null, title: null }, bytes)).toThrow(ValidationError);
-      expect(() => h.stores.artifacts.create({ runId: s.run.id, mediaType: "not a media type", producer: { kind: "runtime", component: "command" }, taskId: null, title: null }, bytes)).toThrow(ValidationError);
-      const foreignTask = h.stores.tasks.create({ runId: other.run.id, planNodeId: null, origin: "orchestrator", subject: "t", requirementIds: [], requirementRevisionId: null, inputArtifactIds: [], requiredOutputs: [], replacesTaskId: null });
-      expect(() => h.stores.artifacts.create({ runId: s.run.id, mediaType: "text/plain", producer: { kind: "runtime", component: "command" }, taskId: foreignTask.id, title: null }, bytes)).toThrow(InvariantViolationError);
       const invocation = seedInvocation(h, s);
-      const artifact = h.stores.artifacts.create({ runId: s.run.id, mediaType: "text/plain", producer: { kind: "invocation", invocationId: invocation.id, attemptId: null }, taskId: null, title: "report" }, bytes);
-      expect(artifact.producer).toEqual({ kind: "invocation", invocationId: invocation.id, attemptId: null });
+      seedManifest(h, s, invocation);
+      const attempt = h.stores.invocations.createAttempt({ invocationId: invocation.id, startMode: "fresh", resumedFromAttemptId: null });
+      const artifact = h.stores.artifacts.create(runtimeInput(s, { producer: { kind: "invocation", invocationId: invocation.id, attemptId: attempt.id }, title: "report" }), encode("x"));
+      expect(artifact.producer).toEqual({ kind: "invocation", invocationId: invocation.id, attemptId: attempt.id });
+      const event = h.ctx.journal.read({ runId: s.run.id, type: "artifact.created" })[0]!;
+      expect(event.scope.attemptId).toBe(attempt.id);
+      expect(event.actor).toEqual({ kind: "invocation", invocationId: invocation.id });
     } finally {
       h.close();
     }

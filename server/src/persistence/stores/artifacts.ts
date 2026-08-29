@@ -9,7 +9,7 @@ import {
   type ArtifactInput,
   type RunId,
 } from "@agentique-console/core";
-import { BlobCorruptedError } from "../blob-store.ts";
+import { BlobCorruptedError, sha256Hex } from "../blob-store.ts";
 import type { PersistenceContext } from "../context.ts";
 import { artifacts, attempts, invocations, tasks } from "../schema.ts";
 import { assertSameRun, loadRunRef, requireRow, runScope, writeMeta, type WriteOptions } from "./support.ts";
@@ -34,73 +34,117 @@ function toDomain(row: Row): Artifact {
   );
 }
 
+/** Attached (non-enumerably) to a database error whose compensating blob cleanup also failed. */
+export interface BlobCleanupFailure {
+  digest: string;
+  message: string;
+}
+
 /**
- * Immutable, content-addressed Artifacts. Bytes go to the blob store first
- * (idempotent by digest); metadata is then written with its Event in one
- * transaction. If the metadata write fails the blob remains as an orphan
- * with no metadata pointing at it, which is harmless and reusable. Reads
- * verify the digest and the byte size before returning content.
+ * Immutable, content-addressed Artifacts.
+ *
+ * `create` validates everything it can — input shape, Run, producer
+ * Invocation and Attempt ownership, Task ownership, the final metadata —
+ * inside the write transaction before a single byte is stored. Only then
+ * are the bytes put in the blob store (which verifies any existing blob of
+ * the same digest), and the Event and metadata row are written in the same
+ * transaction. If anything after a *new* blob write fails, the transaction
+ * rolls back and the blob is removed unless a committed Artifact references
+ * its digest; a reused, pre-existing blob is never removed. Reads verify
+ * the digest and the byte size before returning content.
  */
 export class ArtifactStore {
   constructor(private readonly ctx: PersistenceContext) {}
 
   create(input: ArtifactInput, bytes: Uint8Array, options?: WriteOptions): Artifact {
     const valid = parseOrThrow(artifactInputSchema, input, "Artifact input");
-    const blob = this.ctx.blobs.put(bytes);
-    return this.ctx.tx.write(() => {
-      const run = loadRunRef(this.ctx, valid.runId);
-      let invocationId: string | null = null;
-      let attemptId: string | null = null;
-      if (valid.producer.kind === "invocation") {
-        const invocation = requireRow(
-          this.ctx.db.select({ runId: invocations.runId }).from(invocations).where(eq(invocations.id, valid.producer.invocationId)).get(),
-          "Invocation",
-          valid.producer.invocationId,
-        );
-        assertSameRun("Invocation", valid.producer.invocationId, invocation.runId, run.id);
-        invocationId = valid.producer.invocationId;
-        if (valid.producer.attemptId !== null) {
-          const attempt = requireRow(
-            this.ctx.db.select({ invocationId: attempts.invocationId }).from(attempts).where(eq(attempts.id, valid.producer.attemptId)).get(),
-            "Attempt",
-            valid.producer.attemptId,
+    const digest = sha256Hex(bytes);
+    let newlyWrittenDigest: string | null = null;
+    try {
+      return this.ctx.tx.write(() => {
+        const run = loadRunRef(this.ctx, valid.runId);
+        let invocationId: string | null = null;
+        let attemptId: string | null = null;
+        if (valid.producer.kind === "invocation") {
+          const invocation = requireRow(
+            this.ctx.db.select({ runId: invocations.runId }).from(invocations).where(eq(invocations.id, valid.producer.invocationId)).get(),
+            "Invocation",
+            valid.producer.invocationId,
           );
-          if (attempt.invocationId !== valid.producer.invocationId) {
-            throw new InvariantViolationError(`Attempt ${valid.producer.attemptId} does not belong to Invocation ${valid.producer.invocationId}`);
+          assertSameRun("Invocation", valid.producer.invocationId, invocation.runId, run.id);
+          invocationId = valid.producer.invocationId;
+          if (valid.producer.attemptId !== null) {
+            const attempt = requireRow(
+              this.ctx.db.select({ invocationId: attempts.invocationId }).from(attempts).where(eq(attempts.id, valid.producer.attemptId)).get(),
+              "Attempt",
+              valid.producer.attemptId,
+            );
+            if (attempt.invocationId !== valid.producer.invocationId) {
+              throw new InvariantViolationError(`Attempt ${valid.producer.attemptId} does not belong to Invocation ${valid.producer.invocationId}`);
+            }
+            attemptId = valid.producer.attemptId;
           }
-          attemptId = valid.producer.attemptId;
         }
-      }
-      if (valid.taskId !== null) {
-        const task = requireRow(this.ctx.db.select({ runId: tasks.runId }).from(tasks).where(eq(tasks.id, valid.taskId)).get(), "Task", valid.taskId);
-        assertSameRun("Task", valid.taskId, task.runId, run.id);
-      }
-      const artifact: Artifact = {
-        id: this.ctx.ids("artifact"),
-        runId: run.id,
-        mediaType: valid.mediaType,
-        byteSize: blob.byteSize,
-        digest: blob.digest,
-        producer: valid.producer,
-        taskId: valid.taskId,
-        title: valid.title,
-        createdAt: this.ctx.clock(),
-      };
-      parseOrThrow(artifactSchema, artifact, "Artifact");
-      this.ctx.journal.append({
-        type: "artifact.created",
-        scope: runScope(run, { invocationId: invocationId as never, attemptId: attemptId as never }),
-        subjectType: "artifact",
-        subjectId: artifact.id,
-        payload: artifact,
-        ...writeMeta(options, invocationId ? { kind: "invocation", invocationId: invocationId as never } : undefined),
+        if (valid.taskId !== null) {
+          const task = requireRow(this.ctx.db.select({ runId: tasks.runId }).from(tasks).where(eq(tasks.id, valid.taskId)).get(), "Task", valid.taskId);
+          assertSameRun("Task", valid.taskId, task.runId, run.id);
+        }
+        const artifact: Artifact = {
+          id: this.ctx.ids("artifact"),
+          runId: run.id,
+          mediaType: valid.mediaType,
+          byteSize: bytes.byteLength,
+          digest,
+          producer: valid.producer,
+          taskId: valid.taskId,
+          title: valid.title,
+          createdAt: this.ctx.clock(),
+        };
+        parseOrThrow(artifactSchema, artifact, "Artifact");
+
+        // Every validation has passed; only now are bytes stored.
+        const blob = this.ctx.blobs.put(bytes);
+        if (blob.written) newlyWrittenDigest = digest;
+
+        this.ctx.journal.append({
+          type: "artifact.created",
+          scope: runScope(run, { invocationId: invocationId as never, attemptId: attemptId as never }),
+          subjectType: "artifact",
+          subjectId: artifact.id,
+          payload: artifact,
+          ...writeMeta(options, invocationId ? { kind: "invocation", invocationId: invocationId as never } : undefined),
+        });
+        this.ctx.db
+          .insert(artifacts)
+          .values({ ...artifact, invocationId, attemptId })
+          .run();
+        return artifact;
       });
-      this.ctx.db
-        .insert(artifacts)
-        .values({ ...artifact, invocationId, attemptId })
-        .run();
-      return artifact;
-    });
+    } catch (error) {
+      if (newlyWrittenDigest !== null) this.discardUnreferencedBlob(newlyWrittenDigest, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Compensation after a failed metadata transaction: removes the blob this
+   * `create` newly wrote unless an Artifact row references its digest. When
+   * `create` ran inside an outer, still-open transaction the check also sees
+   * that transaction's uncommitted rows, which errs on keeping the blob. A
+   * cleanup failure never replaces the database error: it is reported to
+   * the diagnostics sink and attached to the error as `blobCleanupFailure`.
+   */
+  private discardUnreferencedBlob(digest: string, cause: unknown): void {
+    try {
+      const referenced = this.ctx.db.select({ id: artifacts.id }).from(artifacts).where(eq(artifacts.digest, digest)).get();
+      if (!referenced) this.ctx.blobs.remove(digest);
+    } catch (cleanupError) {
+      const failure: BlobCleanupFailure = { digest, message: cleanupError instanceof Error ? cleanupError.message : String(cleanupError) };
+      this.ctx.diagnostics({ kind: "blob_cleanup_failed", ...failure });
+      if (cause !== null && typeof cause === "object") {
+        Object.defineProperty(cause, "blobCleanupFailure", { value: failure, enumerable: false, configurable: true });
+      }
+    }
   }
 
   get(id: ArtifactId): Artifact {

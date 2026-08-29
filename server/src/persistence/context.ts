@@ -7,9 +7,19 @@ import { EventJournal } from "./journal.ts";
 import { Transactor } from "./transactions.ts";
 
 /**
+ * A non-sensitive operational diagnostic from the persistence layer: a
+ * condition that did not fail the caller's operation but that an operator
+ * should see. Never carries payload bytes, provider state, or secrets.
+ */
+export type PersistenceDiagnostic = { kind: "blob_cleanup_failed"; digest: string; message: string };
+
+export type DiagnosticSink = (diagnostic: PersistenceDiagnostic) => void;
+
+/**
  * Everything a store needs: the query builder, the raw connection, the
- * re-entrant Transactor, the Event journal bound to it, the blob store, and
- * injectable clock and id minting for deterministic tests.
+ * re-entrant Transactor, the Event journal bound to it, the blob store, the
+ * diagnostics sink, and injectable clock and id minting for deterministic
+ * tests.
  */
 export interface PersistenceContext {
   db: PersistenceDb;
@@ -17,6 +27,7 @@ export interface PersistenceContext {
   tx: Transactor;
   journal: EventJournal;
   blobs: BlobStore;
+  diagnostics: DiagnosticSink;
   clock: () => Timestamp;
   ids: <K extends IdKind>(kind: K) => ReturnType<typeof newId<K>>;
 }
@@ -24,7 +35,12 @@ export interface PersistenceContext {
 export interface PersistenceContextOptions {
   clock?: () => Timestamp;
   ids?: PersistenceContext["ids"];
+  diagnostics?: DiagnosticSink;
 }
+
+const defaultDiagnostics: DiagnosticSink = (diagnostic) => {
+  console.warn(`[persistence] ${diagnostic.kind}: ${diagnostic.message} (digest ${diagnostic.digest})`);
+};
 
 export function createPersistenceContext(
   database: Pick<OpenedDatabase, "db" | "sqlite">,
@@ -39,6 +55,7 @@ export function createPersistenceContext(
     tx,
     journal: new EventJournal(database.db, tx, clock),
     blobs,
+    diagnostics: options.diagnostics ?? defaultDiagnostics,
     clock,
     ids: options.ids ?? ((kind) => newId(kind)),
   };

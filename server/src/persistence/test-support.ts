@@ -19,7 +19,7 @@ import {
   type Workspace,
 } from "@agentique-console/core";
 import { MemoryBlobStore } from "./blob-store.ts";
-import { createPersistenceContext, type PersistenceContext } from "./context.ts";
+import { createPersistenceContext, type PersistenceContext, type PersistenceDiagnostic } from "./context.ts";
 import { openDatabase, type OpenedDatabase } from "./database.ts";
 import { createStores, type Stores } from "./stores/index.ts";
 import type { CompiledPlanNode } from "./stores/plans.ts";
@@ -52,6 +52,8 @@ export interface Harness {
   stores: Stores;
   blobs: MemoryBlobStore;
   clock: TestClock;
+  /** Every diagnostic the persistence layer reported, in order. */
+  diagnostics: PersistenceDiagnostic[];
   close(): void;
 }
 
@@ -59,9 +61,10 @@ export function openHarness(): Harness {
   const database = openDatabase(":memory:");
   const blobs = new MemoryBlobStore();
   const clock = testClock();
-  const ctx = createPersistenceContext(database, blobs, { clock: clock.now });
+  const diagnostics: PersistenceDiagnostic[] = [];
+  const ctx = createPersistenceContext(database, blobs, { clock: clock.now, diagnostics: (d) => diagnostics.push(d) });
   const stores = createStores(ctx);
-  return { database, ctx, stores, blobs, clock, close: () => database.close() };
+  return { database, ctx, stores, blobs, clock, diagnostics, close: () => database.close() };
 }
 
 export const DEFAULT_BUDGET: BudgetLimits = {
