@@ -6,14 +6,21 @@
  */
 import { spawn } from "node:child_process";
 
-const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+// npm exposes the path to its JS entry point to lifecycle scripts. Invoking it
+// through Node avoids spawning the npm.cmd shim, which fails with EINVAL on
+// some Windows/Node combinations.
+const npmExecPath = process.env.npm_execpath;
+const npm = npmExecPath ? process.execPath : "npm";
+const npmArgs = npmExecPath ? [npmExecPath] : [];
 const targets = [
   { name: "server", color: "[36m", args: ["run", "dev", "--workspace", "server"] },
   { name: "web   ", color: "[35m", args: ["run", "dev", "--workspace", "web"] },
 ];
 
 const children = targets.map(({ name, color, args }) => {
-  const child = spawn(npm, args, { stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(npm, [...npmArgs, ...args], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
   const prefix = `${color}${name}[0m │ `;
   const relay = (stream, sink) => {
     let carry = "";
