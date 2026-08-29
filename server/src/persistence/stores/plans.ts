@@ -496,8 +496,8 @@ export class ExecutionPlanStore {
       // Run capacity; a reused node keeps its reservation and a join reserves nothing.
       for (const node of created.values()) {
         if (node.kind === "pattern") {
-          this.reservations.reserve(
-            { runId: input.runId, parent: { type: "run", id: input.runId }, child: { type: "plan_node", id: node.id }, amount: node.allocation, capacitySource: "ordinary" },
+          this.reservations.reserveOrdinary(
+            { runId: input.runId, parent: { type: "run", id: input.runId }, child: { type: "plan_node", id: node.id }, amount: node.allocation },
             options,
           );
         }
@@ -669,11 +669,12 @@ export class ExecutionPlanStore {
       if (PLAN_NODE_MACHINE.isTerminal(next.status) && next.kind === "pattern") {
         const reservation = this.reservations.activeForChild({ type: "plan_node", id });
         if (reservation) {
-          // Complete actual consumption of every Invocation of the node; never clamped to the reservation.
+          // Complete actual consumption of the Invocations funded from this node, never clamped to the
+          // reservation; final-reserve Invocations attributed to the root are charged on their own reservation.
           this.reservations.release(
             reservation.id,
             transition.to === "cancelled" ? releaseReasonOf(transition.reason) : "child_terminal",
-            this.usage.consumedByPlanNode(id),
+            this.usage.consumedFromPlanNodeAllocation(id),
             options,
           );
         }

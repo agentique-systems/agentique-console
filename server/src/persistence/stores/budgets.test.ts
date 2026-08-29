@@ -24,31 +24,24 @@ describe("budget reservations", () => {
     }
   });
 
-  it("partitions Run capacity into the ordinary pool and the persisted final reserve, never double-counting (invariant 22)", () => {
+  it("partitions Run capacity into the ordinary pool and the persisted final reserve, bounded by the global Budget (invariant 22)", () => {
     const h = openHarness();
     try {
       const finalReserve = { costUsd: 5, tokens: 50_000, attempts: 3 };
       const s = seedRun(h, { budget: { maxCostUsd: 30, maxTokens: 1_000_000, maxAttempts: 50, maxWallClockMs: null, maxConcurrency: null }, finalReserve });
-      let capacity = h.stores.reservations.runCapacity(s.run.id);
+      const capacity = h.stores.reservations.runCapacity(s.run.id);
       expect(capacity.limit).toEqual({ costUsd: 30, tokens: 1_000_000, attempts: 50 });
       expect(capacity.finalReserve).toEqual(finalReserve);
-      expect(capacity.ordinary.limit).toEqual({ costUsd: 25, tokens: 950_000, attempts: 47 });
-      expect(capacity.ordinary.reserved).toEqual(SMALL_ALLOCATION);
-      expect(capacity.final).toEqual({ limit: finalReserve, reserved: { costUsd: 0, tokens: 0, attempts: 0 }, consumed: { costUsd: 0, tokens: 0, attempts: 0 }, available: finalReserve });
+      expect(capacity.global).toMatchObject({ limit: capacity.limit, reserved: SMALL_ALLOCATION, committed: SMALL_ALLOCATION, available: { costUsd: 20, tokens: 900_000, attempts: 45 } });
+      expect(capacity.ordinary).toMatchObject({ limit: { costUsd: 25, tokens: 950_000, attempts: 47 }, reserved: SMALL_ALLOCATION, available: { costUsd: 15, tokens: 850_000, attempts: 42 }, effectiveAvailable: { costUsd: 15, tokens: 850_000, attempts: 42 } });
+      expect(capacity.final).toEqual({ limit: finalReserve, reserved: { costUsd: 0, tokens: 0, attempts: 0 }, consumed: { costUsd: 0, tokens: 0, attempts: 0 }, committed: { costUsd: 0, tokens: 0, attempts: 0 }, available: finalReserve, effectiveAvailable: finalReserve });
       // `capacity` of the Run is the ordinary partition: the reserve is never available to compiled nodes.
       expect(h.stores.reservations.capacity({ type: "run", id: s.run.id })).toEqual(capacity.ordinary);
-      const node = nodeInput(h, patternDefinition(s.definition.id, { sourcePath: "e1", allocation: { costUsd: 1, tokens: 1, attempts: 1 } }));
-      extendPlan(h, s, [node]);
-      h.stores.plans.transitionNode(node.id, { to: "cancelled", reason: "operator" });
-      // An explicitly authorized final-reserve consumer draws from the reserve partition alone.
-      expect(() => h.stores.reservations.reserve({ runId: s.run.id, parent: { type: "run", id: s.run.id }, child: { type: "plan_node", id: node.id }, amount: { costUsd: 6, tokens: 1, attempts: 1 }, capacitySource: "final_reserve" })).toThrow(InsufficientCapacityError);
-      const fromReserve = h.stores.reservations.reserve({ runId: s.run.id, parent: { type: "run", id: s.run.id }, child: { type: "plan_node", id: node.id }, amount: { costUsd: 3, tokens: 30_000, attempts: 2 }, capacitySource: "final_reserve" });
-      expect(fromReserve.capacitySource).toBe("final_reserve");
-      capacity = h.stores.reservations.runCapacity(s.run.id);
-      expect(capacity.final.available).toEqual({ costUsd: 2, tokens: 20_000, attempts: 1 });
-      expect(capacity.ordinary.available).toEqual({ costUsd: 15, tokens: 850_000, attempts: 42 });
-      // The reserve is a partition of the Run, never of a node.
-      expect(() => h.stores.reservations.reserve({ runId: s.run.id, parent: { type: "plan_node", id: s.root.id }, child: { type: "invocation", id: seedInvocation(h, s, { allocation: { costUsd: 0.5, tokens: 1, attempts: 1 } }).id }, amount: { costUsd: 0.1, tokens: 1, attempts: 1 }, capacitySource: "final_reserve" })).toThrow(ValidationError);
+      // The ordinary entry point cannot name final capacity: there is no such parameter, and run → invocation is not an ordinary pair.
+      const invocation = seedInvocation(h, s, { allocation: { costUsd: 0.5, tokens: 1, attempts: 1 } });
+      expect(() => h.stores.reservations.reserveOrdinary({ runId: s.run.id, parent: { type: "run", id: s.run.id }, child: { type: "invocation", id: invocation.id }, amount: { costUsd: 0.1, tokens: 1, attempts: 1 } })).toThrow(ValidationError);
+      expect(() => h.stores.reservations.reserveOrdinary({ runId: s.run.id, parent: { type: "run", id: s.run.id }, child: { type: "plan_node", id: s.root.id }, amount: { costUsd: 16, tokens: 1, attempts: 1 }, capacitySource: "final_reserve" } as never)).toThrow();
+      expect(h.stores.reservations.runCapacity(s.run.id).final.reserved).toEqual({ costUsd: 0, tokens: 0, attempts: 0 });
     } finally {
       h.close();
     }
@@ -59,11 +52,11 @@ describe("budget reservations", () => {
     try {
       const s = seedRun(h);
       const invocation = seedInvocation(h, s);
-      expect(() => h.stores.reservations.reserve({ runId: s.run.id, parent: { type: "run", id: s.run.id }, child: { type: "invocation", id: invocation.id }, amount: { costUsd: 1, tokens: 1, attempts: 1 } })).toThrow(ValidationError);
-      expect(() => h.stores.reservations.reserve({ runId: s.run.id, parent: { type: "plan_node", id: s.root.id }, child: { type: "invocation", id: invocation.id }, amount: { costUsd: 1, tokens: 1, attempts: 1 } })).toThrow(ConflictError);
+      expect(() => h.stores.reservations.reserveOrdinary({ runId: s.run.id, parent: { type: "run", id: s.run.id }, child: { type: "invocation", id: invocation.id }, amount: { costUsd: 1, tokens: 1, attempts: 1 } })).toThrow(ValidationError);
+      expect(() => h.stores.reservations.reserveOrdinary({ runId: s.run.id, parent: { type: "plan_node", id: s.root.id }, child: { type: "invocation", id: invocation.id }, amount: { costUsd: 1, tokens: 1, attempts: 1 } })).toThrow(ConflictError);
       const other = seedRun(h);
-      expect(() => h.stores.reservations.reserve({ runId: s.run.id, parent: { type: "plan_node", id: other.root.id }, child: { type: "task", id: "task_000000000000000000000000" }, amount: { costUsd: 1, tokens: 1, attempts: 1 } })).toThrow(InvariantViolationError);
-      expect(() => h.stores.reservations.reserve({ runId: s.run.id, parent: { type: "plan_node", id: s.root.id }, child: { type: "task", id: "task_000000000000000000000000" }, amount: { costUsd: -1, tokens: 1, attempts: 1 } })).toThrow(ValidationError);
+      expect(() => h.stores.reservations.reserveOrdinary({ runId: s.run.id, parent: { type: "plan_node", id: other.root.id }, child: { type: "task", id: "task_000000000000000000000000" }, amount: { costUsd: 1, tokens: 1, attempts: 1 } })).toThrow(InvariantViolationError);
+      expect(() => h.stores.reservations.reserveOrdinary({ runId: s.run.id, parent: { type: "plan_node", id: s.root.id }, child: { type: "task", id: "task_000000000000000000000000" }, amount: { costUsd: -1, tokens: 1, attempts: 1 } })).toThrow(ValidationError);
     } finally {
       h.close();
     }
@@ -106,7 +99,7 @@ describe("budget reservations", () => {
       h.stores.plans.transitionNode(node.id, { to: "running" });
       const task = h.stores.tasks.create({ runId: s.run.id, planNodeId: node.id, origin: "coordinator", subject: "t", requirementIds: [leafIds[0]!], requirementRevisionId: revision.id, inputArtifactIds: [], requiredOutputs: [], replacesTaskId: null });
       const amount = { costUsd: 3, tokens: 30_000, attempts: 2 };
-      const taskReservation = h.stores.reservations.reserve({ runId: s.run.id, parent: { type: "plan_node", id: node.id }, child: { type: "task", id: task.id }, amount });
+      const taskReservation = h.stores.reservations.reserveOrdinary({ runId: s.run.id, parent: { type: "plan_node", id: node.id }, child: { type: "task", id: task.id }, amount });
       const before = h.stores.reservations.capacity({ type: "plan_node", id: node.id });
       expect(before.reserved).toEqual(amount);
 
@@ -141,7 +134,7 @@ describe("budget reservations", () => {
     try {
       const s = seedRun(h);
       const task = h.stores.tasks.create({ runId: s.run.id, planNodeId: s.root.id, origin: "orchestrator", subject: "t", requirementIds: [], requirementRevisionId: null, inputArtifactIds: [], requiredOutputs: [], replacesTaskId: null });
-      const taskReservation = h.stores.reservations.reserve({ runId: s.run.id, parent: { type: "plan_node", id: s.root.id }, child: { type: "task", id: task.id }, amount: { costUsd: 1, tokens: 1000, attempts: 1 } });
+      const taskReservation = h.stores.reservations.reserveOrdinary({ runId: s.run.id, parent: { type: "plan_node", id: s.root.id }, child: { type: "task", id: task.id }, amount: { costUsd: 1, tokens: 1000, attempts: 1 } });
       const before = h.ctx.journal.lastSeq();
       // The Invocation names a different allocation than the Task reservation carries.
       expect(() =>
@@ -238,7 +231,7 @@ describe("reservation overrun", () => {
     try {
       const s = seedRun(h);
       const task = h.stores.tasks.create({ runId: s.run.id, planNodeId: s.root.id, origin: "orchestrator", subject: "t", requirementIds: [], requirementRevisionId: null, inputArtifactIds: [], requiredOutputs: [], replacesTaskId: null });
-      const reservation = h.stores.reservations.reserve({ runId: s.run.id, parent: { type: "plan_node", id: s.root.id }, child: { type: "task", id: task.id }, amount: { costUsd: 1, tokens: 100, attempts: 1 } });
+      const reservation = h.stores.reservations.reserveOrdinary({ runId: s.run.id, parent: { type: "plan_node", id: s.root.id }, child: { type: "task", id: task.id }, amount: { costUsd: 1, tokens: 100, attempts: 1 } });
       const released = h.stores.reservations.release(reservation.id, "task_cancelled", { costUsd: 2.5, tokens: 250, attempts: 3 });
       expect(released.reserved).toEqual({ costUsd: 1, tokens: 100, attempts: 1 });
       expect(released.consumed).toEqual({ costUsd: 2.5, tokens: 250, attempts: 3 });

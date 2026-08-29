@@ -116,6 +116,7 @@ CREATE TABLE `budget_reservations` (
 	`consumed_tokens` integer,
 	`consumed_attempts` integer,
 	`capacity_source` text NOT NULL,
+	`final_reserve_use` text,
 	`status` text NOT NULL,
 	`transferred_from_reservation_id` text,
 	`created_at` text NOT NULL,
@@ -125,10 +126,13 @@ CREATE TABLE `budget_reservations` (
 	FOREIGN KEY (`transferred_from_reservation_id`) REFERENCES `budget_reservations`(`id`) ON UPDATE no action ON DELETE no action,
 	CONSTRAINT "budget_reservations_parent_type" CHECK("budget_reservations"."parent_type" IN ('run', 'plan_node', 'invocation')),
 	CONSTRAINT "budget_reservations_child_type" CHECK("budget_reservations"."child_type" IN ('plan_node', 'invocation', 'task')),
-	CONSTRAINT "budget_reservations_pair" CHECK(("budget_reservations"."parent_type" = 'run' AND "budget_reservations"."child_type" = 'plan_node') OR ("budget_reservations"."parent_type" = 'plan_node' AND "budget_reservations"."child_type" IN ('invocation', 'task'))),
+	CONSTRAINT "budget_reservations_pair" CHECK(("budget_reservations"."parent_type" = 'run' AND "budget_reservations"."child_type" IN ('plan_node', 'invocation')) OR ("budget_reservations"."parent_type" = 'plan_node' AND "budget_reservations"."child_type" IN ('invocation', 'task'))),
 	CONSTRAINT "budget_reservations_status" CHECK("budget_reservations"."status" IN ('active', 'released')),
 	CONSTRAINT "budget_reservations_capacity_source" CHECK("budget_reservations"."capacity_source" IN ('ordinary', 'final_reserve')),
-	CONSTRAINT "budget_reservations_final_reserve_run_only" CHECK("budget_reservations"."parent_type" = 'run' OR "budget_reservations"."capacity_source" = 'ordinary'),
+	CONSTRAINT "budget_reservations_final_reserve_use" CHECK("budget_reservations"."final_reserve_use" IS NULL OR "budget_reservations"."final_reserve_use" IN ('final_synthesis', 'run_completion')),
+	CONSTRAINT "budget_reservations_final_reserve_shape" CHECK(("budget_reservations"."capacity_source" = 'final_reserve') = ("budget_reservations"."final_reserve_use" IS NOT NULL)),
+	CONSTRAINT "budget_reservations_final_reserve_pair" CHECK(("budget_reservations"."parent_type" = 'run' AND "budget_reservations"."child_type" = 'invocation') = ("budget_reservations"."capacity_source" = 'final_reserve')),
+	CONSTRAINT "budget_reservations_final_reserve_no_transfer" CHECK("budget_reservations"."capacity_source" = 'ordinary' OR "budget_reservations"."transferred_from_reservation_id" IS NULL),
 	CONSTRAINT "budget_reservations_release_reason" CHECK("budget_reservations"."release_reason" IS NULL OR "budget_reservations"."release_reason" IN ('child_terminal', 'transferred_to_invocation', 'task_cancelled', 'task_rejected', 'plan_revision_cancelled', 'run_cancelled')),
 	CONSTRAINT "budget_reservations_release_shape" CHECK(("budget_reservations"."status" = 'released') = ("budget_reservations"."released_at" IS NOT NULL AND "budget_reservations"."release_reason" IS NOT NULL AND "budget_reservations"."consumed_cost_usd" IS NOT NULL AND "budget_reservations"."consumed_tokens" IS NOT NULL AND "budget_reservations"."consumed_attempts" IS NOT NULL)),
 	CONSTRAINT "budget_reservations_non_negative" CHECK("budget_reservations"."reserved_cost_usd" >= 0 AND "budget_reservations"."reserved_tokens" >= 0 AND "budget_reservations"."reserved_attempts" >= 0),
@@ -137,6 +141,7 @@ CREATE TABLE `budget_reservations` (
 --> statement-breakpoint
 CREATE INDEX `budget_reservations_parent` ON `budget_reservations` (`parent_type`,`parent_id`,`status`);--> statement-breakpoint
 CREATE INDEX `budget_reservations_child` ON `budget_reservations` (`child_type`,`child_id`);--> statement-breakpoint
+CREATE INDEX `budget_reservations_run_source` ON `budget_reservations` (`run_id`,`capacity_source`,`status`);--> statement-breakpoint
 CREATE UNIQUE INDEX `budget_reservations_active_child` ON `budget_reservations` (`child_type`,`child_id`) WHERE status = 'active';--> statement-breakpoint
 CREATE TABLE `capacity_leases` (
 	`id` text PRIMARY KEY NOT NULL,
@@ -367,6 +372,8 @@ CREATE TABLE `invocations` (
 	`alloc_cost_usd` real NOT NULL,
 	`alloc_tokens` integer NOT NULL,
 	`alloc_attempts` integer NOT NULL,
+	`allocation_source` text NOT NULL,
+	`final_reserve_use` text,
 	`status` text NOT NULL,
 	`wait_reason` text,
 	`failure_reason` text,
@@ -379,6 +386,11 @@ CREATE TABLE `invocations` (
 	FOREIGN KEY (`agent_definition_revision_id`) REFERENCES `agent_definition_revisions`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`continued_from_invocation_id`) REFERENCES `invocations`(`id`) ON UPDATE no action ON DELETE no action,
 	CONSTRAINT "invocations_role" CHECK("invocations"."role" IN ('orchestrator', 'worker', 'coordinator', 'evaluator')),
+	CONSTRAINT "invocations_allocation_source" CHECK("invocations"."allocation_source" IN ('plan_node', 'run_final_reserve')),
+	CONSTRAINT "invocations_final_reserve_use" CHECK("invocations"."final_reserve_use" IS NULL OR "invocations"."final_reserve_use" IN ('final_synthesis', 'run_completion')),
+	CONSTRAINT "invocations_final_reserve_shape" CHECK(("invocations"."allocation_source" = 'run_final_reserve') = ("invocations"."final_reserve_use" IS NOT NULL)),
+	CONSTRAINT "invocations_final_reserve_binding" CHECK("invocations"."final_reserve_use" IS NULL OR ("invocations"."final_reserve_use" = 'final_synthesis' AND "invocations"."role" = 'orchestrator' AND "invocations"."purpose" = 'final_synthesis') OR ("invocations"."final_reserve_use" = 'run_completion' AND "invocations"."role" = 'evaluator' AND "invocations"."purpose" = 'evaluate')),
+	CONSTRAINT "invocations_final_reserve_no_tasks" CHECK("invocations"."allocation_source" = 'plan_node' OR "invocations"."task_ids" = '[]'),
 	CONSTRAINT "invocations_purpose" CHECK("invocations"."purpose" IN ('operator_input', 'plan_revision', 'node_result', 'decision_resolution', 'gate_result', 'publication_result', 'final_synthesis', 'step', 'task', 'select', 'evaluate', 'decompose', 'replan', 'synthesize')),
 	CONSTRAINT "invocations_role_purpose" CHECK((role = 'orchestrator' AND purpose IN ('operator_input', 'plan_revision', 'node_result', 'decision_resolution', 'gate_result', 'publication_result', 'final_synthesis')) OR (role = 'worker' AND purpose IN ('step', 'task')) OR (role = 'evaluator' AND purpose IN ('select', 'evaluate')) OR (role = 'coordinator' AND purpose IN ('decompose', 'replan', 'synthesize'))),
 	CONSTRAINT "invocations_status" CHECK("invocations"."status" IN ('pending', 'running', 'waiting', 'succeeded', 'failed', 'cancelled')),
@@ -393,6 +405,7 @@ CREATE TABLE `invocations` (
 --> statement-breakpoint
 CREATE INDEX `invocations_plan_node_status` ON `invocations` (`plan_node_id`,`status`);--> statement-breakpoint
 CREATE INDEX `invocations_run_status` ON `invocations` (`run_id`,`status`);--> statement-breakpoint
+CREATE INDEX `invocations_plan_node_source` ON `invocations` (`plan_node_id`,`allocation_source`);--> statement-breakpoint
 CREATE TABLE `plan_edges` (
 	`id` text PRIMARY KEY NOT NULL,
 	`run_id` text NOT NULL,
@@ -778,7 +791,7 @@ CREATE TRIGGER `handoffs_routing_immutable` BEFORE UPDATE OF `run_id`, `source`,
 CREATE TRIGGER `handoffs_no_delete` BEFORE DELETE ON `handoffs` BEGIN SELECT RAISE(ABORT, 'handoffs are never deleted'); END;--> statement-breakpoint
 CREATE TRIGGER `agent_definition_revisions_no_update` BEFORE UPDATE ON `agent_definition_revisions` BEGIN SELECT RAISE(ABORT, 'agent_definition_revisions are immutable'); END;--> statement-breakpoint
 CREATE TRIGGER `agent_definition_revisions_no_delete` BEFORE DELETE ON `agent_definition_revisions` BEGIN SELECT RAISE(ABORT, 'agent_definition_revisions are immutable'); END;--> statement-breakpoint
-CREATE TRIGGER `invocations_definition_immutable` BEFORE UPDATE OF `run_id`, `plan_node_id`, `role`, `purpose`, `agent_definition_revision_id`, `continued_from_invocation_id`, `task_ids`, `alloc_cost_usd`, `alloc_tokens`, `alloc_attempts`, `created_at` ON `invocations` BEGIN SELECT RAISE(ABORT, 'invocation definition columns are immutable'); END;--> statement-breakpoint
+CREATE TRIGGER `invocations_definition_immutable` BEFORE UPDATE OF `run_id`, `plan_node_id`, `role`, `purpose`, `agent_definition_revision_id`, `continued_from_invocation_id`, `task_ids`, `alloc_cost_usd`, `alloc_tokens`, `alloc_attempts`, `allocation_source`, `final_reserve_use`, `created_at` ON `invocations` BEGIN SELECT RAISE(ABORT, 'invocation definition columns are immutable'); END;--> statement-breakpoint
 CREATE TRIGGER `invocations_no_delete` BEFORE DELETE ON `invocations` BEGIN SELECT RAISE(ABORT, 'invocations are never deleted'); END;--> statement-breakpoint
 CREATE TRIGGER `attempts_definition_immutable` BEFORE UPDATE OF `invocation_id`, `run_id`, `plan_node_id`, `number`, `kind`, `start_mode`, `resumed_from_attempt_id`, `created_at` ON `attempts` BEGIN SELECT RAISE(ABORT, 'attempt definition columns are immutable'); END;--> statement-breakpoint
 CREATE TRIGGER `attempts_no_delete` BEFORE DELETE ON `attempts` BEGIN SELECT RAISE(ABORT, 'attempts are never deleted'); END;--> statement-breakpoint
@@ -792,7 +805,7 @@ CREATE TRIGGER `snapshots_no_delete` BEFORE DELETE ON `snapshots` BEGIN SELECT R
 CREATE TRIGGER `changesets_definition_immutable` BEFORE UPDATE OF `run_id`, `invocation_id`, `before_snapshot_id`, `after_snapshot_id`, `diff_artifact_id`, `created_at` ON `changesets` BEGIN SELECT RAISE(ABORT, 'changeset definition columns are immutable'); END;--> statement-breakpoint
 CREATE TRIGGER `publications_no_update` BEFORE UPDATE ON `publications` BEGIN SELECT RAISE(ABORT, 'publications are immutable'); END;--> statement-breakpoint
 CREATE TRIGGER `publications_no_delete` BEFORE DELETE ON `publications` BEGIN SELECT RAISE(ABORT, 'publications are immutable'); END;--> statement-breakpoint
-CREATE TRIGGER `budget_reservations_definition_immutable` BEFORE UPDATE OF `run_id`, `parent_type`, `parent_id`, `child_type`, `child_id`, `reserved_cost_usd`, `reserved_tokens`, `reserved_attempts`, `capacity_source`, `transferred_from_reservation_id`, `created_at` ON `budget_reservations` BEGIN SELECT RAISE(ABORT, 'budget_reservation allocation columns are immutable'); END;--> statement-breakpoint
+CREATE TRIGGER `budget_reservations_definition_immutable` BEFORE UPDATE OF `run_id`, `parent_type`, `parent_id`, `child_type`, `child_id`, `reserved_cost_usd`, `reserved_tokens`, `reserved_attempts`, `capacity_source`, `final_reserve_use`, `transferred_from_reservation_id`, `created_at` ON `budget_reservations` BEGIN SELECT RAISE(ABORT, 'budget_reservation allocation columns are immutable'); END;--> statement-breakpoint
 CREATE TRIGGER `budget_reservations_released_once` BEFORE UPDATE ON `budget_reservations` WHEN OLD.`status` = 'released' BEGIN SELECT RAISE(ABORT, 'a released budget_reservation never changes again'); END;--> statement-breakpoint
 CREATE TRIGGER `budget_reservations_no_delete` BEFORE DELETE ON `budget_reservations` BEGIN SELECT RAISE(ABORT, 'budget_reservations are historical records'); END;--> statement-breakpoint
 CREATE TRIGGER `capacity_leases_released_once` BEFORE UPDATE ON `capacity_leases` WHEN OLD.`status` = 'released' BEGIN SELECT RAISE(ABORT, 'a released capacity_lease never changes again'); END;--> statement-breakpoint

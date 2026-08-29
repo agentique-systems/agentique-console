@@ -33,10 +33,12 @@ import {
   DECISION_STATUSES,
   EVALUATOR_PURPOSES,
   FAN_IN_POLICIES,
+  FINAL_RESERVE_USES,
   GATE_KINDS,
   GATE_STATUSES,
   HANDOFF_MAX_SUMMARY_LENGTH,
   HANDOFF_STATUSES,
+  INVOCATION_ALLOCATION_SOURCES,
   INVOCATION_FAILURE_REASONS,
   INVOCATION_PURPOSES,
   INVOCATION_ROLES,
@@ -747,6 +749,8 @@ export const invocations = sqliteTable(
     allocCostUsd: real("alloc_cost_usd").notNull(),
     allocTokens: integer("alloc_tokens").notNull(),
     allocAttempts: integer("alloc_attempts").notNull(),
+    allocationSource: text("allocation_source").notNull(),
+    finalReserveUse: text("final_reserve_use"),
     status: text("status").notNull(),
     waitReason: text("wait_reason"),
     failureReason: text("failure_reason"),
@@ -758,7 +762,16 @@ export const invocations = sqliteTable(
   (t) => [
     index("invocations_plan_node_status").on(t.planNodeId, t.status),
     index("invocations_run_status").on(t.runId, t.status),
+    index("invocations_plan_node_source").on(t.planNodeId, t.allocationSource),
     check("invocations_role", sql`${t.role} IN (${inList(INVOCATION_ROLES)})`),
+    check("invocations_allocation_source", sql`${t.allocationSource} IN (${inList(INVOCATION_ALLOCATION_SOURCES)})`),
+    check("invocations_final_reserve_use", sql`${t.finalReserveUse} IS NULL OR ${t.finalReserveUse} IN (${inList(FINAL_RESERVE_USES)})`),
+    check("invocations_final_reserve_shape", sql`(${t.allocationSource} = 'run_final_reserve') = (${t.finalReserveUse} IS NOT NULL)`),
+    check(
+      "invocations_final_reserve_binding",
+      sql`${t.finalReserveUse} IS NULL OR (${t.finalReserveUse} = 'final_synthesis' AND ${t.role} = 'orchestrator' AND ${t.purpose} = 'final_synthesis') OR (${t.finalReserveUse} = 'run_completion' AND ${t.role} = 'evaluator' AND ${t.purpose} = 'evaluate')`,
+    ),
+    check("invocations_final_reserve_no_tasks", sql`${t.allocationSource} = 'plan_node' OR ${t.taskIds} = '[]'`),
     check("invocations_purpose", sql`${t.purpose} IN (${inList(INVOCATION_PURPOSES)})`),
     check("invocations_role_purpose", rolePurposeCheck),
     check("invocations_status", sql`${t.status} IN (${inList(INVOCATION_STATUSES)})`),
@@ -1048,6 +1061,7 @@ export const budgetReservations = sqliteTable(
     consumedTokens: integer("consumed_tokens"),
     consumedAttempts: integer("consumed_attempts"),
     capacitySource: text("capacity_source").notNull(),
+    finalReserveUse: text("final_reserve_use"),
     status: text("status").notNull(),
     transferredFromReservationId: text("transferred_from_reservation_id").references(
       (): AnySQLiteColumn => budgetReservations.id,
@@ -1059,6 +1073,7 @@ export const budgetReservations = sqliteTable(
   (t) => [
     index("budget_reservations_parent").on(t.parentType, t.parentId, t.status),
     index("budget_reservations_child").on(t.childType, t.childId),
+    index("budget_reservations_run_source").on(t.runId, t.capacitySource, t.status),
     uniqueIndex("budget_reservations_active_child")
       .on(t.childType, t.childId)
       .where(sql`status = 'active'`),
@@ -1066,11 +1081,18 @@ export const budgetReservations = sqliteTable(
     check("budget_reservations_child_type", sql`${t.childType} IN (${inList(RESERVATION_CHILD_TYPES)})`),
     check(
       "budget_reservations_pair",
-      sql`(${t.parentType} = 'run' AND ${t.childType} = 'plan_node') OR (${t.parentType} = 'plan_node' AND ${t.childType} IN ('invocation', 'task'))`,
+      sql`(${t.parentType} = 'run' AND ${t.childType} IN ('plan_node', 'invocation')) OR (${t.parentType} = 'plan_node' AND ${t.childType} IN ('invocation', 'task'))`,
     ),
     check("budget_reservations_status", sql`${t.status} IN (${inList(RESERVATION_STATUSES)})`),
     check("budget_reservations_capacity_source", sql`${t.capacitySource} IN (${inList(RESERVATION_CAPACITY_SOURCES)})`),
-    check("budget_reservations_final_reserve_run_only", sql`${t.parentType} = 'run' OR ${t.capacitySource} = 'ordinary'`),
+    check("budget_reservations_final_reserve_use", sql`${t.finalReserveUse} IS NULL OR ${t.finalReserveUse} IN (${inList(FINAL_RESERVE_USES)})`),
+    check("budget_reservations_final_reserve_shape", sql`(${t.capacitySource} = 'final_reserve') = (${t.finalReserveUse} IS NOT NULL)`),
+    // The Run funds an Invocation directly only from the final reserve, and the final reserve funds only Invocations.
+    check(
+      "budget_reservations_final_reserve_pair",
+      sql`(${t.parentType} = 'run' AND ${t.childType} = 'invocation') = (${t.capacitySource} = 'final_reserve')`,
+    ),
+    check("budget_reservations_final_reserve_no_transfer", sql`${t.capacitySource} = 'ordinary' OR ${t.transferredFromReservationId} IS NULL`),
     check(
       "budget_reservations_release_reason",
       sql`${t.releaseReason} IS NULL OR ${t.releaseReason} IN (${inList(RESERVATION_RELEASE_REASONS)})`,

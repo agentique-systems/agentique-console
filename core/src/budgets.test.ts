@@ -11,6 +11,7 @@ import {
 } from "./budgets.ts";
 import { newId } from "./ids.ts";
 import { consumedAllocation, sumUsage, totalTokens, usageSchema } from "./usage.ts";
+import { maxAllocation, minAllocation, reservationCharge, runCapacityAccount } from "./budgets.ts";
 
 describe("allocations", () => {
   it("compares every quantity and computes availability", () => {
@@ -18,9 +19,50 @@ describe("allocations", () => {
     expect(allocationFits({ costUsd: 1.01, tokens: 10, attempts: 1 }, { costUsd: 1, tokens: 10, attempts: 1 })).toBe(false);
     expect(allocationFits({ costUsd: 1, tokens: 11, attempts: 1 }, { costUsd: 1, tokens: 10, attempts: 1 })).toBe(false);
     expect(allocationFits({ costUsd: 1, tokens: 10, attempts: 2 }, { costUsd: 1, tokens: 10, attempts: 1 })).toBe(false);
-    const account = capacityAccount({ costUsd: 10, tokens: 100, attempts: 10 }, { costUsd: 4, tokens: 40, attempts: 4 }, { costUsd: 1, tokens: 10, attempts: 1 });
-    expect(account.available).toEqual({ costUsd: 5, tokens: 50, attempts: 5 });
+    const account = capacityAccount(
+      { costUsd: 10, tokens: 100, attempts: 10 },
+      [
+        { status: "active", reserved: { costUsd: 4, tokens: 40, attempts: 4 }, actual: { costUsd: 0, tokens: 0, attempts: 0 } },
+        { status: "released", reserved: { costUsd: 2, tokens: 20, attempts: 2 }, actual: { costUsd: 1, tokens: 10, attempts: 1 } },
+      ],
+    );
+    expect(account).toEqual({
+      limit: { costUsd: 10, tokens: 100, attempts: 10 },
+      reserved: { costUsd: 4, tokens: 40, attempts: 4 },
+      consumed: { costUsd: 1, tokens: 10, attempts: 1 },
+      committed: { costUsd: 5, tokens: 50, attempts: 5 },
+      available: { costUsd: 5, tokens: 50, attempts: 5 },
+    });
+    // An active child that overran is charged max(reserved, actual) per component, never clamped.
+    expect(reservationCharge({ status: "active", reserved: { costUsd: 4, tokens: 40, attempts: 4 }, actual: { costUsd: 6, tokens: 30, attempts: 5 } })).toEqual({ costUsd: 6, tokens: 40, attempts: 5 });
+    expect(reservationCharge({ status: "released", reserved: { costUsd: 4, tokens: 40, attempts: 4 }, actual: { costUsd: 1, tokens: 90, attempts: 1 } })).toEqual({ costUsd: 1, tokens: 90, attempts: 1 });
+    expect(maxAllocation({ costUsd: 1, tokens: 9, attempts: 3 }, { costUsd: 2, tokens: 8, attempts: 3 })).toEqual({ costUsd: 2, tokens: 9, attempts: 3 });
+    expect(minAllocation({ costUsd: 1, tokens: 9, attempts: 3 }, { costUsd: 2, tokens: 8, attempts: 3 })).toEqual({ costUsd: 1, tokens: 8, attempts: 3 });
     expect(subtractAllocation({ costUsd: 1, tokens: 1, attempts: 1 }, { costUsd: 1, tokens: 1, attempts: 1 })).toEqual({ costUsd: 0, tokens: 0, attempts: 0 });
+  });
+});
+
+describe("run capacity partitions", () => {
+  it("bounds each partition by the global Run Budget and lets an overrun in either partition reduce the other's effective availability", () => {
+    const limit = { costUsd: 100, tokens: 1000, attempts: 10 };
+    const reserve = { costUsd: 10, tokens: 100, attempts: 2 };
+    // Ordinary actual 95 > ordinary limit 90 (active child overran); final untouched.
+    const overrun = runCapacityAccount(limit, reserve, [{ status: "active", reserved: { costUsd: 60, tokens: 500, attempts: 5 }, actual: { costUsd: 95, tokens: 400, attempts: 5 } }], []);
+    expect(overrun.ordinary.available).toEqual({ costUsd: -5, tokens: 400, attempts: 3 });
+    expect(overrun.global.available).toEqual({ costUsd: 5, tokens: 500, attempts: 5 });
+    expect(overrun.final.available).toEqual(reserve);
+    // Final effective availability is bounded by what is globally left: 5, not 10.
+    expect(overrun.final.effectiveAvailable).toEqual({ costUsd: 5, tokens: 100, attempts: 2 });
+    expect(overrun.ordinary.effectiveAvailable).toEqual({ costUsd: -5, tokens: 400, attempts: 3 });
+    // A final overrun reduces global and therefore ordinary effective availability, but ordinary never borrows unused reserve.
+    const finalOverrun = runCapacityAccount(limit, reserve, [{ status: "active", reserved: { costUsd: 50, tokens: 500, attempts: 5 }, actual: { costUsd: 0, tokens: 0, attempts: 0 } }], [{ status: "released", reserved: { costUsd: 10, tokens: 100, attempts: 2 }, actual: { costUsd: 45, tokens: 100, attempts: 2 } }]);
+    expect(finalOverrun.global.available).toEqual({ costUsd: 5, tokens: 400, attempts: 3 });
+    expect(finalOverrun.ordinary.available).toEqual({ costUsd: 40, tokens: 400, attempts: 3 });
+    expect(finalOverrun.ordinary.effectiveAvailable).toEqual({ costUsd: 5, tokens: 400, attempts: 3 });
+    expect(finalOverrun.final.effectiveAvailable).toEqual({ costUsd: -35, tokens: 0, attempts: 0 });
+    const idle = runCapacityAccount(limit, reserve, [], []);
+    expect(idle.ordinary.effectiveAvailable).toEqual({ costUsd: 90, tokens: 900, attempts: 8 });
+    expect(idle.final.effectiveAvailable).toEqual(reserve);
   });
 });
 
@@ -32,7 +74,7 @@ describe("reservation records", () => {
     expect(isReservationPair("run", "plan_node")).toBe(true);
     expect(isReservationPair("plan_node", "invocation")).toBe(true);
     expect(isReservationPair("plan_node", "task")).toBe(true);
-    expect(isReservationPair("run", "invocation")).toBe(false);
+    expect(isReservationPair("run", "invocation")).toBe(true);
     expect(isReservationPair("run", "task")).toBe(false);
     expect(isReservationPair("invocation", "task")).toBe(false);
   });
@@ -46,6 +88,7 @@ describe("reservation records", () => {
       reserved: { costUsd: 1, tokens: 10, attempts: 2 },
       consumed: null,
       capacitySource: "ordinary",
+      finalReserveUse: null,
       status: "active",
       transferredFromReservationId: null,
       createdAt: "2026-01-01T00:00:00.000Z",
@@ -58,9 +101,15 @@ describe("reservation records", () => {
     expect(budgetReservationSchema.safeParse({ ...base, releaseReason: "child_terminal" }).success).toBe(false);
     expect(budgetReservationSchema.safeParse({ ...base, child: { type: "task", id: newId("task") } }).success).toBe(false);
     expect(budgetReservationSchema.safeParse({ ...base, parent: { type: "seat", id: newId("run") } }).success).toBe(false);
-    // Only a Run-level reservation may draw from the final reserve.
-    expect(budgetReservationSchema.safeParse({ ...base, capacitySource: "final_reserve" }).success).toBe(true);
-    expect(budgetReservationSchema.safeParse({ ...base, parent: { type: "plan_node", id: newId("planNode") }, child: { type: "invocation", id: newId("invocation") }, capacitySource: "final_reserve" }).success).toBe(false);
+    // Only a Run → Invocation reservation may draw from the final reserve, and it always records its use.
+    const finalUse = { ...base, child: { type: "invocation", id: newId("invocation") }, capacitySource: "final_reserve", finalReserveUse: "final_synthesis" };
+    expect(budgetReservationSchema.safeParse(finalUse).success).toBe(true);
+    expect(budgetReservationSchema.safeParse({ ...finalUse, finalReserveUse: null }).success).toBe(false);
+    expect(budgetReservationSchema.safeParse({ ...finalUse, capacitySource: "ordinary" }).success).toBe(false);
+    expect(budgetReservationSchema.safeParse({ ...base, capacitySource: "final_reserve", finalReserveUse: "final_synthesis" }).success).toBe(false);
+    expect(budgetReservationSchema.safeParse({ ...base, finalReserveUse: "run_completion" }).success).toBe(false);
+    expect(budgetReservationSchema.safeParse({ ...finalUse, transferredFromReservationId: newId("budgetReservation") }).success).toBe(false);
+    expect(budgetReservationSchema.safeParse({ ...base, parent: { type: "plan_node", id: newId("planNode") }, child: { type: "invocation", id: newId("invocation") }, capacitySource: "final_reserve", finalReserveUse: "run_completion" }).success).toBe(false);
   });
 });
 

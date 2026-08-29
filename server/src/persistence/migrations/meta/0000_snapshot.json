@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "2c999c0b-9c39-494c-b798-08f75d0f1839",
+  "id": "41828315-5151-4eca-b2f6-cc422a92abe7",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "acceptance_criteria": {
@@ -827,6 +827,13 @@
           "notNull": true,
           "autoincrement": false
         },
+        "final_reserve_use": {
+          "name": "final_reserve_use",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "status": {
           "name": "status",
           "type": "text",
@@ -881,6 +888,15 @@
           ],
           "isUnique": false
         },
+        "budget_reservations_run_source": {
+          "name": "budget_reservations_run_source",
+          "columns": [
+            "run_id",
+            "capacity_source",
+            "status"
+          ],
+          "isUnique": false
+        },
         "budget_reservations_active_child": {
           "name": "budget_reservations_active_child",
           "columns": [
@@ -932,7 +948,7 @@
         },
         "budget_reservations_pair": {
           "name": "budget_reservations_pair",
-          "value": "(\"budget_reservations\".\"parent_type\" = 'run' AND \"budget_reservations\".\"child_type\" = 'plan_node') OR (\"budget_reservations\".\"parent_type\" = 'plan_node' AND \"budget_reservations\".\"child_type\" IN ('invocation', 'task'))"
+          "value": "(\"budget_reservations\".\"parent_type\" = 'run' AND \"budget_reservations\".\"child_type\" IN ('plan_node', 'invocation')) OR (\"budget_reservations\".\"parent_type\" = 'plan_node' AND \"budget_reservations\".\"child_type\" IN ('invocation', 'task'))"
         },
         "budget_reservations_status": {
           "name": "budget_reservations_status",
@@ -942,9 +958,21 @@
           "name": "budget_reservations_capacity_source",
           "value": "\"budget_reservations\".\"capacity_source\" IN ('ordinary', 'final_reserve')"
         },
-        "budget_reservations_final_reserve_run_only": {
-          "name": "budget_reservations_final_reserve_run_only",
-          "value": "\"budget_reservations\".\"parent_type\" = 'run' OR \"budget_reservations\".\"capacity_source\" = 'ordinary'"
+        "budget_reservations_final_reserve_use": {
+          "name": "budget_reservations_final_reserve_use",
+          "value": "\"budget_reservations\".\"final_reserve_use\" IS NULL OR \"budget_reservations\".\"final_reserve_use\" IN ('final_synthesis', 'run_completion')"
+        },
+        "budget_reservations_final_reserve_shape": {
+          "name": "budget_reservations_final_reserve_shape",
+          "value": "(\"budget_reservations\".\"capacity_source\" = 'final_reserve') = (\"budget_reservations\".\"final_reserve_use\" IS NOT NULL)"
+        },
+        "budget_reservations_final_reserve_pair": {
+          "name": "budget_reservations_final_reserve_pair",
+          "value": "(\"budget_reservations\".\"parent_type\" = 'run' AND \"budget_reservations\".\"child_type\" = 'invocation') = (\"budget_reservations\".\"capacity_source\" = 'final_reserve')"
+        },
+        "budget_reservations_final_reserve_no_transfer": {
+          "name": "budget_reservations_final_reserve_no_transfer",
+          "value": "\"budget_reservations\".\"capacity_source\" = 'ordinary' OR \"budget_reservations\".\"transferred_from_reservation_id\" IS NULL"
         },
         "budget_reservations_release_reason": {
           "name": "budget_reservations_release_reason",
@@ -2580,6 +2608,20 @@
           "notNull": true,
           "autoincrement": false
         },
+        "allocation_source": {
+          "name": "allocation_source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "final_reserve_use": {
+          "name": "final_reserve_use",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "status": {
           "name": "status",
           "type": "text",
@@ -2646,6 +2688,14 @@
             "status"
           ],
           "isUnique": false
+        },
+        "invocations_plan_node_source": {
+          "name": "invocations_plan_node_source",
+          "columns": [
+            "plan_node_id",
+            "allocation_source"
+          ],
+          "isUnique": false
         }
       },
       "foreignKeys": {
@@ -2708,6 +2758,26 @@
         "invocations_role": {
           "name": "invocations_role",
           "value": "\"invocations\".\"role\" IN ('orchestrator', 'worker', 'coordinator', 'evaluator')"
+        },
+        "invocations_allocation_source": {
+          "name": "invocations_allocation_source",
+          "value": "\"invocations\".\"allocation_source\" IN ('plan_node', 'run_final_reserve')"
+        },
+        "invocations_final_reserve_use": {
+          "name": "invocations_final_reserve_use",
+          "value": "\"invocations\".\"final_reserve_use\" IS NULL OR \"invocations\".\"final_reserve_use\" IN ('final_synthesis', 'run_completion')"
+        },
+        "invocations_final_reserve_shape": {
+          "name": "invocations_final_reserve_shape",
+          "value": "(\"invocations\".\"allocation_source\" = 'run_final_reserve') = (\"invocations\".\"final_reserve_use\" IS NOT NULL)"
+        },
+        "invocations_final_reserve_binding": {
+          "name": "invocations_final_reserve_binding",
+          "value": "\"invocations\".\"final_reserve_use\" IS NULL OR (\"invocations\".\"final_reserve_use\" = 'final_synthesis' AND \"invocations\".\"role\" = 'orchestrator' AND \"invocations\".\"purpose\" = 'final_synthesis') OR (\"invocations\".\"final_reserve_use\" = 'run_completion' AND \"invocations\".\"role\" = 'evaluator' AND \"invocations\".\"purpose\" = 'evaluate')"
+        },
+        "invocations_final_reserve_no_tasks": {
+          "name": "invocations_final_reserve_no_tasks",
+          "value": "\"invocations\".\"allocation_source\" = 'plan_node' OR \"invocations\".\"task_ids\" = '[]'"
         },
         "invocations_purpose": {
           "name": "invocations_purpose",

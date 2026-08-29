@@ -15,6 +15,7 @@ import {
   InvariantViolationError,
   parseOrThrow,
   PLAN_NODE_MACHINE,
+  ValidationError,
   type Attempt,
   type AttemptId,
   type AttemptInput,
@@ -31,6 +32,7 @@ import {
 import { sha256Hex } from "../blob-store.ts";
 import type { PersistenceContext } from "../context.ts";
 import { agentDefinitionRevisions, artifacts, attempts, capacityLeases, contextManifests, invocations, planNodes, tasks } from "../schema.ts";
+import { ROOT_SOURCE_PATH } from "@agentique-console/core";
 import type { BudgetReservationStore } from "./budgets.ts";
 import { assertSameRun, loadRunRef, requireRow, runScope, writeMeta, type WriteOptions } from "./support.ts";
 import type { UsageStore } from "./usage.ts";
@@ -51,6 +53,8 @@ function invocationToDomain(row: InvocationRow): Invocation {
       continuedFromInvocationId: row.continuedFromInvocationId,
       taskIds: row.taskIds,
       allocation: { costUsd: row.allocCostUsd, tokens: row.allocTokens, attempts: row.allocAttempts },
+      allocationSource: row.allocationSource,
+      finalReserveUse: row.finalReserveUse,
       status: row.status,
       waitReason: row.waitReason,
       failureReason: row.failureReason,
@@ -74,10 +78,13 @@ export interface InvocationCreateOptions extends WriteOptions {
 
 /**
  * Invocations, their Attempts, and their immutable Context Manifests.
- * Creating an Invocation reserves its allocation from its Plan Node (or
- * transfers a Task reservation with two rows) in the same transaction.
- * Creating an Attempt consumes one Attempt from the allocation whatever its
- * later outcome, so an interrupted Attempt is never refunded.
+ * Creating an Invocation reserves its allocation in the same transaction:
+ * from its Plan Node (or by transferring a Task reservation with two rows)
+ * for `allocationSource: plan_node`, or directly from the Run's final
+ * reserve for the two permitted `run_final_reserve` uses, which sit on the
+ * root Plan Node. Creating an Attempt consumes one Attempt from the
+ * allocation whatever its later outcome, so an interrupted Attempt is never
+ * refunded.
  */
 export class InvocationStore {
   constructor(
@@ -93,7 +100,7 @@ export class InvocationStore {
     return this.ctx.tx.write(() => {
       const run = loadRunRef(this.ctx, valid.runId);
       const node = requireRow(
-        this.ctx.db.select({ runId: planNodes.runId, kind: planNodes.kind, status: planNodes.status }).from(planNodes).where(eq(planNodes.id, valid.planNodeId)).get(),
+        this.ctx.db.select({ runId: planNodes.runId, kind: planNodes.kind, status: planNodes.status, sourcePath: planNodes.sourcePath }).from(planNodes).where(eq(planNodes.id, valid.planNodeId)).get(),
         "PlanNode",
         valid.planNodeId,
       );
@@ -104,6 +111,16 @@ export class InvocationStore {
       if (PLAN_NODE_MACHINE.isTerminal(node.status as never)) {
         throw new ConflictError(`PlanNode ${valid.planNodeId} is ${node.status}`);
       }
+      const allocationSource = valid.allocationSource ?? "plan_node";
+      const finalReserveUse = valid.finalReserveUse ?? null;
+      if (allocationSource === "run_final_reserve") {
+        if (node.sourcePath !== ROOT_SOURCE_PATH) {
+          throw new InvariantViolationError(`a final-reserve Invocation belongs to the root Plan Node, not ${valid.planNodeId}`, { planNodeId: valid.planNodeId, finalReserveUse });
+        }
+        if (options?.fromTaskReservationId) {
+          throw new ValidationError("a final-reserve Invocation cannot transfer a Task reservation", { finalReserveUse });
+        }
+      }
       requireRow(this.ctx.db.select({ id: agentDefinitionRevisions.id }).from(agentDefinitionRevisions).where(eq(agentDefinitionRevisions.id, valid.agentDefinitionRevisionId)).get(), "AgentDefinitionRevision", valid.agentDefinitionRevisionId);
       if (valid.continuedFromInvocationId !== null) {
         const previous = requireRow(this.ctx.db.select({ runId: invocations.runId }).from(invocations).where(eq(invocations.id, valid.continuedFromInvocationId)).get(), "Invocation", valid.continuedFromInvocationId);
@@ -113,9 +130,12 @@ export class InvocationStore {
         const rows = this.ctx.db.select({ id: tasks.id, runId: tasks.runId }).from(tasks).where(inArray(tasks.id, valid.taskIds)).all();
         for (const id of valid.taskIds) assertSameRun("Task", id, requireRow(rows.find((r) => r.id === id), "Task", id).runId, run.id);
       }
+      const { allocationSource: _source, finalReserveUse: _use, ...definition } = valid;
       const invocation: Invocation = {
         id: this.ctx.ids("invocation"),
-        ...valid,
+        ...definition,
+        allocationSource,
+        finalReserveUse,
         status: "pending",
         waitReason: null,
         failureReason: null,
@@ -134,7 +154,10 @@ export class InvocationStore {
         ...writeMeta(options),
       });
       this.ctx.db.insert(invocations).values(this.toRow(invocation)).run();
-      if (options?.fromTaskReservationId) {
+      if (allocationSource === "run_final_reserve") {
+        // The persisted row is the authorization; the reservation is created atomically with it.
+        this.reservations.reserveFinalInvocation({ runId: run.id, invocationId: invocation.id }, options);
+      } else if (options?.fromTaskReservationId) {
         const { created } = this.reservations.transferTaskToInvocation(options.fromTaskReservationId, invocation.id, options);
         if (
           created.reserved.costUsd !== valid.allocation.costUsd ||
@@ -147,7 +170,7 @@ export class InvocationStore {
           });
         }
       } else {
-        this.reservations.reserve(
+        this.reservations.reserveOrdinary(
           { runId: run.id, parent: { type: "plan_node", id: valid.planNodeId }, child: { type: "invocation", id: invocation.id }, amount: valid.allocation },
           options,
         );
@@ -454,6 +477,8 @@ export class InvocationStore {
       allocCostUsd: invocation.allocation.costUsd,
       allocTokens: invocation.allocation.tokens,
       allocAttempts: invocation.allocation.attempts,
+      allocationSource: invocation.allocationSource,
+      finalReserveUse: invocation.finalReserveUse,
       status: invocation.status,
       waitReason: invocation.waitReason,
       failureReason: invocation.failureReason,

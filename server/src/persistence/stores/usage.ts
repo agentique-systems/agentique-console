@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import {
   ConflictError,
   consumedAllocation,
@@ -109,9 +109,25 @@ export class UsageStore {
     return consumedAllocation(this.totalsForInvocation(invocationId), attemptCount);
   }
 
-  /** Consumed cost, tokens, and Attempts of every Invocation of a Plan Node. */
-  consumedByPlanNode(planNodeId: PlanNodeId): Allocation {
-    const attemptCount = this.ctx.db.select({ id: attempts.id }).from(attempts).where(eq(attempts.planNodeId, planNodeId)).all().length;
-    return consumedAllocation(this.totalsForPlanNode(planNodeId), attemptCount);
+  /**
+   * Consumed cost, tokens, and Attempts charged to a Plan Node's own
+   * allocation: the Invocations funded from the node (`allocationSource:
+   * plan_node`). Invocations funded directly from the Run final reserve are
+   * attributed to the node for operator-facing `totalsForPlanNode` but are
+   * excluded here, because their consumption is recorded on their own
+   * Run → Invocation reservation; counting them here as well would charge
+   * the Run twice when the node's reservation is released.
+   */
+  consumedFromPlanNodeAllocation(planNodeId: PlanNodeId): Allocation {
+    const funded = this.ctx.db
+      .select({ id: invocations.id })
+      .from(invocations)
+      .where(and(eq(invocations.planNodeId, planNodeId), eq(invocations.allocationSource, "plan_node")))
+      .all()
+      .map((r) => r.id);
+    if (funded.length === 0) return { costUsd: 0, tokens: 0, attempts: 0 };
+    const rows = this.ctx.db.select().from(usage).where(inArray(usage.invocationId, funded)).all();
+    const attemptCount = this.ctx.db.select({ id: attempts.id }).from(attempts).where(inArray(attempts.invocationId, funded)).all().length;
+    return consumedAllocation(sumUsage(rows), attemptCount);
   }
 }

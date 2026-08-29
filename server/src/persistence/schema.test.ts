@@ -71,7 +71,7 @@ describe("database constraints", () => {
       const insertInvocation = (purpose: string, role = "orchestrator") =>
         h.database.sqlite
           .prepare(
-            "INSERT INTO invocations (id, run_id, plan_node_id, role, purpose, agent_definition_revision_id, continued_from_invocation_id, task_ids, alloc_cost_usd, alloc_tokens, alloc_attempts, status, wait_reason, failure_reason, result, created_at, started_at, ended_at) VALUES (?, ?, ?, ?, ?, ?, NULL, '[]', 1, 1, 1, 'pending', NULL, NULL, NULL, ?, NULL, NULL)",
+            "INSERT INTO invocations (id, run_id, plan_node_id, role, purpose, agent_definition_revision_id, continued_from_invocation_id, task_ids, alloc_cost_usd, alloc_tokens, alloc_attempts, allocation_source, final_reserve_use, status, wait_reason, failure_reason, result, created_at, started_at, ended_at) VALUES (?, ?, ?, ?, ?, ?, NULL, '[]', 1, 1, 1, 'plan_node', NULL, 'pending', NULL, NULL, NULL, ?, NULL, NULL)",
           )
           .run(`inv_${"0".repeat(24)}`, s.run.id, s.root.id, role, purpose, s.definition.id, now);
       expect(() => insertInvocation("turn")).toThrow(/CHECK constraint failed: invocations_purpose/);

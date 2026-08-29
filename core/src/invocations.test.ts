@@ -1,3 +1,4 @@
+import { invocationFundingDefects } from "./invocations.ts";
 import { describe, expect, it } from "vitest";
 import { newId } from "./ids.ts";
 import {
@@ -56,6 +57,37 @@ describe("purposes", () => {
     expect(invocationInputSchema.safeParse({ ...input, role: "specialist" }).success).toBe(false);
     expect(invocationInputSchema.safeParse({ ...input, allocation: { costUsd: 1, tokens: 100, attempts: 0 } }).success).toBe(false);
   });
+
+  it("binds the final-reserve allocation source to exactly two role/purpose pairs", () => {
+    const base = {
+      runId: newId("run"),
+      planNodeId: newId("planNode"),
+      agentDefinitionRevisionId: newId("agentDefinitionRevision"),
+      continuedFromInvocationId: null,
+      taskIds: [],
+      allocation: { costUsd: 1, tokens: 100, attempts: 2 },
+    };
+    const synthesis = { ...base, role: "orchestrator", purpose: "final_synthesis", allocationSource: "run_final_reserve", finalReserveUse: "final_synthesis" };
+    const completion = { ...base, role: "evaluator", purpose: "evaluate", allocationSource: "run_final_reserve", finalReserveUse: "run_completion" };
+    expect(invocationInputSchema.safeParse(synthesis).success).toBe(true);
+    expect(invocationInputSchema.safeParse(completion).success).toBe(true);
+    // Source and use go together.
+    expect(invocationInputSchema.safeParse({ ...synthesis, finalReserveUse: null }).success).toBe(false);
+    expect(invocationInputSchema.safeParse({ ...synthesis, allocationSource: "plan_node" }).success).toBe(false);
+    expect(invocationInputSchema.safeParse({ ...base, role: "orchestrator", purpose: "final_synthesis", finalReserveUse: "final_synthesis" }).success).toBe(false);
+    // Wrong role or purpose for the use.
+    expect(invocationInputSchema.safeParse({ ...synthesis, purpose: "operator_input" }).success).toBe(false);
+    expect(invocationInputSchema.safeParse({ ...completion, finalReserveUse: "final_synthesis" }).success).toBe(false);
+    expect(invocationInputSchema.safeParse({ ...synthesis, role: "evaluator", purpose: "evaluate" }).success).toBe(false);
+    expect(invocationInputSchema.safeParse({ ...completion, purpose: "select" }).success).toBe(false);
+    expect(invocationInputSchema.safeParse({ ...base, role: "worker", purpose: "step", allocationSource: "run_final_reserve", finalReserveUse: "run_completion" }).success).toBe(false);
+    expect(invocationInputSchema.safeParse({ ...base, role: "coordinator", purpose: "decompose", allocationSource: "run_final_reserve", finalReserveUse: "final_synthesis" }).success).toBe(false);
+    // A final-reserve Invocation executes no Task; an ordinary evaluate Invocation is plan_node by default.
+    expect(invocationInputSchema.safeParse({ ...completion, taskIds: [newId("task")] }).success).toBe(false);
+    expect(invocationInputSchema.safeParse({ ...base, role: "evaluator", purpose: "evaluate" }).success).toBe(true);
+    expect(invocationFundingDefects({ role: "evaluator", purpose: "select", allocationSource: "run_final_reserve", finalReserveUse: "run_completion" })).toHaveLength(1);
+    expect(invocationFundingDefects({ role: "worker", purpose: "step", allocationSource: "plan_node", finalReserveUse: null })).toEqual([]);
+  });
 });
 
 describe("invocation record", () => {
@@ -70,6 +102,8 @@ describe("invocation record", () => {
       continuedFromInvocationId: newId("invocation"),
       taskIds: [],
       allocation: { costUsd: 1, tokens: 100, attempts: 2 },
+      allocationSource: "plan_node",
+      finalReserveUse: null,
       status: "pending",
       waitReason: null,
       failureReason: null,

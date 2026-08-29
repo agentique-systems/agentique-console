@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { allocationSchema, type Allocation } from "./budgets.ts";
+import { allocationSchema, FINAL_RESERVE_USES, type Allocation, type FinalReserveUse } from "./budgets.ts";
 import { ValidationError } from "./errors.ts";
 import type {
   AgentDefinitionRevisionId,
@@ -82,6 +82,47 @@ export function assertPurposeForRole(role: InvocationRole, purpose: InvocationPu
   if (!PURPOSES_BY_ROLE[role].includes(purpose)) {
     throw new ValidationError(`purpose ${purpose} is not valid for role ${role}`, { role, purpose });
   }
+}
+
+// ---------------------------------------------------------------------------
+// Allocation source (closed)
+// ---------------------------------------------------------------------------
+
+/**
+ * Where an Invocation's allocation is reserved from: its Plan Node (every
+ * ordinary Invocation, including transferred Coordinator Task reservations)
+ * or the Run's persisted final reserve directly (only the two uses in
+ * `FINAL_RESERVE_USES`, which stay attached to the root Plan Node for scope,
+ * progress, Event attribution, and Usage roll-up but never consume its
+ * ordinary allocation).
+ */
+export const INVOCATION_ALLOCATION_SOURCES = ["plan_node", "run_final_reserve"] as const;
+export type InvocationAllocationSource = (typeof INVOCATION_ALLOCATION_SOURCES)[number];
+
+/** The role and purpose each final-reserve use requires; anything else cannot spend the reserve. */
+export const FINAL_RESERVE_USE_BINDINGS: Readonly<Record<FinalReserveUse, { role: InvocationRole; purpose: InvocationPurpose }>> = {
+  final_synthesis: { role: "orchestrator", purpose: "final_synthesis" },
+  run_completion: { role: "evaluator", purpose: "evaluate" },
+};
+
+export interface InvocationFunding {
+  allocationSource: InvocationAllocationSource;
+  finalReserveUse: FinalReserveUse | null;
+}
+
+/** Why an Invocation's funding is inconsistent with its role and purpose; empty when it is consistent. */
+export function invocationFundingDefects(invocation: Pick<Invocation, "role" | "purpose"> & InvocationFunding): string[] {
+  const defects: string[] = [];
+  if ((invocation.allocationSource === "run_final_reserve") !== (invocation.finalReserveUse !== null)) {
+    defects.push("a final-reserve Invocation names its use and an ordinary Invocation names none");
+  }
+  if (invocation.finalReserveUse !== null) {
+    const binding = FINAL_RESERVE_USE_BINDINGS[invocation.finalReserveUse];
+    if (invocation.role !== binding.role || invocation.purpose !== binding.purpose) {
+      defects.push(`final-reserve use ${invocation.finalReserveUse} requires role ${binding.role} with purpose ${binding.purpose}, not ${invocation.role}/${invocation.purpose}`);
+    }
+  }
+  return defects;
 }
 
 // ---------------------------------------------------------------------------
@@ -174,8 +215,10 @@ export interface Invocation {
   agentDefinitionRevisionId: AgentDefinitionRevisionId;
   continuedFromInvocationId: InvocationId | null;
   taskIds: TaskId[];
-  /** The explicit allocation reserved from the Plan Node before the Invocation starts. */
+  /** The explicit allocation reserved before the Invocation starts, from the source named by `allocationSource`. */
   allocation: Allocation;
+  allocationSource: InvocationAllocationSource;
+  finalReserveUse: FinalReserveUse | null;
   status: InvocationStatus;
   waitReason: InvocationWaitReason | null;
   failureReason: InvocationFailureReason | null;
@@ -205,6 +248,8 @@ export const invocationSchema: z.ZodType<Invocation> = z
     continuedFromInvocationId: idSchema("invocation").nullable(),
     taskIds: uniqueIds(idSchema("task")),
     allocation: allocationSchema,
+    allocationSource: z.enum(INVOCATION_ALLOCATION_SOURCES),
+    finalReserveUse: z.enum(FINAL_RESERVE_USES).nullable(),
     status: z.enum(INVOCATION_STATUSES),
     waitReason: z.enum(INVOCATION_WAIT_REASONS).nullable(),
     failureReason: z.enum(INVOCATION_FAILURE_REASONS).nullable(),
@@ -236,6 +281,14 @@ export const invocationSchema: z.ZodType<Invocation> = z
   .refine((i) => i.allocation.attempts >= 1, {
     message: "an Invocation allocation permits at least one Attempt",
     path: ["allocation", "attempts"],
+  })
+  .refine((i) => invocationFundingDefects(i).length === 0, {
+    message: "the Invocation's allocation source and final-reserve use agree with its role and purpose",
+    path: ["finalReserveUse"],
+  })
+  .refine((i) => i.allocationSource === "plan_node" || i.taskIds.length === 0, {
+    message: "a final-reserve Invocation executes no Task",
+    path: ["taskIds"],
   });
 
 export interface InvocationInput {
@@ -247,6 +300,9 @@ export interface InvocationInput {
   continuedFromInvocationId: InvocationId | null;
   taskIds: TaskId[];
   allocation: Allocation;
+  /** Defaults to `plan_node`; `run_final_reserve` requires a `finalReserveUse`. */
+  allocationSource?: InvocationAllocationSource;
+  finalReserveUse?: FinalReserveUse | null;
 }
 
 export const invocationInputSchema: z.ZodType<InvocationInput> = z
@@ -259,6 +315,8 @@ export const invocationInputSchema: z.ZodType<InvocationInput> = z
     continuedFromInvocationId: idSchema("invocation").nullable(),
     taskIds: uniqueIds(idSchema("task")),
     allocation: allocationSchema,
+    allocationSource: z.enum(INVOCATION_ALLOCATION_SOURCES).optional(),
+    finalReserveUse: z.enum(FINAL_RESERVE_USES).nullable().optional(),
   })
   .refine((i) => PURPOSES_BY_ROLE[i.role].includes(i.purpose), {
     message: "purpose must belong to the Invocation's role",
@@ -267,6 +325,14 @@ export const invocationInputSchema: z.ZodType<InvocationInput> = z
   .refine((i) => i.allocation.attempts >= 1, {
     message: "an Invocation allocation permits at least one Attempt",
     path: ["allocation", "attempts"],
+  })
+  .refine((i) => invocationFundingDefects({ ...i, allocationSource: i.allocationSource ?? "plan_node", finalReserveUse: i.finalReserveUse ?? null }).length === 0, {
+    message: "the Invocation's allocation source and final-reserve use agree with its role and purpose",
+    path: ["finalReserveUse"],
+  })
+  .refine((i) => (i.allocationSource ?? "plan_node") === "plan_node" || i.taskIds.length === 0, {
+    message: "a final-reserve Invocation executes no Task",
+    path: ["taskIds"],
   });
 
 export type InvocationTransition =
