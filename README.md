@@ -1,5 +1,10 @@
 # Agentique Console v2
 
+> **Architecture rewrite in progress.** The authoritative orchestration
+> architecture is defined under [`docs/architecture/`](docs/README.md). This
+> README describes the current implementation, which that architecture
+> replaces in full; see `docs/architecture/migration-contract.md`.
+
 A deliberately narrow console for observable, coordinated agent work. It is a
 single npm-workspaces application backed by SQLite and the Claude Agent SDK.
 
