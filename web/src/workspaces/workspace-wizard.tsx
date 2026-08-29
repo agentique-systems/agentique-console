@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ArrowLeft } from "lucide-react";
+import { FolderCheck, FolderPlus } from "lucide-react";
 
 import { useCreateWorkspace } from "@/api/mutations";
 import { Button } from "@/components/ui/button";
@@ -12,23 +12,13 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { cn, errorMessage } from "@/lib/utils";
+import { errorMessage } from "@/lib/utils";
 import { useScopeStore } from "@/stores/scope";
 
 import { DirectoryPicker } from "./directory-picker";
-import { joinPath } from "./path";
+import { basename } from "./path";
 
-type Step = "location" | "name";
-
-const STEPS: readonly Step[] = ["location", "name"];
-
-/**
- * Creating a workspace: pick where it lives, then name the folder the server
- * will create there (`create: true` — the directory is minted, not adopted).
- *
- * A Dialog rather than an inline panel for one decisive reason: it must render
- * on the first-run gate, where there is no shell at all.
- */
+/** Select an existing directory, or define a new child directory inline. */
 export function WorkspaceWizard({
   open,
   onOpenChange,
@@ -37,19 +27,17 @@ export function WorkspaceWizard({
   readonly onOpenChange: (open: boolean) => void;
 }) {
   const create = useCreateWorkspace();
-  const [step, setStep] = useState<Step>("location");
-  const [path, setPath] = useState<string | null>(null);
-  const [folderName, setFolderName] = useState("");
+  const [browsePath, setBrowsePath] = useState<string | null>(null);
+  const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const [createDirectory, setCreateDirectory] = useState(false);
   const [name, setName] = useState("");
   const [touchedName, setTouchedName] = useState(false);
   const [error, setError] = useState<unknown>(null);
 
-  const index = Math.max(0, STEPS.indexOf(step));
-
   const reset = () => {
-    setStep("location");
-    setPath(null);
-    setFolderName("");
+    setBrowsePath(null);
+    setSelectedPath(null);
+    setCreateDirectory(false);
     setName("");
     setTouchedName(false);
     setError(null);
@@ -57,46 +45,38 @@ export function WorkspaceWizard({
   };
 
   const close = (next: boolean) => {
-    // A create in flight would be orphaned by dismissing mid-flight.
     if (!next && create.isPending) return;
     if (!next) reset();
     onOpenChange(next);
   };
 
-  /** The name defaults from the folder, until the operator types their own. */
-  const effectiveName = touchedName ? name : folderName.trim();
-  const rootPath =
-    path === null || folderName.trim() === ""
-      ? null
-      : joinPath(path, folderName.trim());
-
-  const canAdvance =
-    (step === "location" && path !== null) ||
-    (step === "name" && rootPath !== null && effectiveName.trim().length > 0);
-
-  const advance = () => {
-    const next = STEPS[index + 1];
-    if (next !== undefined) setStep(next);
+  const selectExisting = (path: string) => {
+    setBrowsePath(path);
+    setSelectedPath(path);
+    setCreateDirectory(false);
+    setError(null);
+    if (!touchedName) setName("");
   };
 
-  const back = () => {
-    const previous = STEPS[index - 1];
-    if (previous !== undefined) {
-      setError(null);
-      setStep(previous);
-    }
+  const selectNew = (path: string) => {
+    setSelectedPath(path);
+    setCreateDirectory(true);
+    setError(null);
+    if (!touchedName) setName("");
   };
+
+  const effectiveName = touchedName ? name.trim() : basename(selectedPath ?? "");
+  const canSubmit = selectedPath !== null && effectiveName.length > 0;
 
   const submit = () => {
-    if (rootPath === null) return;
+    if (!canSubmit || selectedPath === null) return;
     setError(null);
     create.mutate(
-      { name: effectiveName.trim(), rootPath, create: true },
+      { name: effectiveName, rootPath: selectedPath, create: createDirectory },
       {
         onSuccess: (workspace) => {
           reset();
           onOpenChange(false);
-          // Landing in the workspace you just made is the point.
           useScopeStore.getState().select(workspace.id);
         },
         onError: setError,
@@ -106,139 +86,56 @@ export function WorkspaceWizard({
 
   return (
     <Dialog open={open} onOpenChange={close}>
-      <DialogContent className="max-w-2xl">
+      <DialogContent className="flex max-h-[90vh] max-w-2xl flex-col">
         <DialogHeader>
-          <DialogTitle>New workspace</DialogTitle>
+          <DialogTitle>Select workspace folder</DialogTitle>
           <DialogDescription>
-            A workspace is a directory on this machine. The console creates it
-            where you point.
+            Open the directory you want to use. To start fresh, create a folder directly in the browser below.
           </DialogDescription>
         </DialogHeader>
 
-        {/* Progress: a dot row, not a stepper component. */}
-        <div className="flex gap-1">
-          {STEPS.map((entry, position) => (
-            <span
-              key={entry}
-              className={cn(
-                "h-1 w-8 rounded-full",
-                position <= index ? "bg-primary" : "bg-border",
-              )}
-            />
-          ))}
+        <div className="flex h-[25rem] min-h-0 flex-col">
+          <DirectoryPicker path={browsePath} onPathChange={selectExisting} onNewFolder={selectNew} />
         </div>
 
-        {/* Fixed height so the dialog does not jump between steps. */}
-        <div className="flex h-[24rem] min-h-0 flex-col gap-3">
-          {step === "location" && (
-            <DirectoryPicker path={path} onPathChange={setPath} />
-          )}
-
-          {step === "name" && (
-            <div className="flex flex-col gap-3 pt-2">
-              <Field
-                label="Folder name"
-                input={
-                  <Input
-                    autoFocus
-                    value={folderName}
-                    onChange={(event) => setFolderName(event.target.value)}
-                    placeholder="my-workspace"
-                    aria-label="folder name"
-                    className="h-8 font-mono text-xs"
-                  />
-                }
-              />
-              <Field
-                label="Workspace name"
-                input={
-                  <Input
-                    value={effectiveName}
-                    onChange={(event) => {
-                      setTouchedName(true);
-                      setName(event.target.value);
-                    }}
-                    placeholder="my-workspace"
-                    aria-label="workspace name"
-                    className="h-8"
-                  />
-                }
-              />
-              <dl className="grid grid-cols-[8rem_1fr] gap-x-3 gap-y-1.5 rounded-md border border-border p-3 text-xs">
-                <Summary label="Inside" value={path ?? "—"} />
-                <Summary label="Directory" value={rootPath ?? "—"} />
-              </dl>
+        <div className="rounded-lg border border-border bg-muted/50 p-3">
+          <div className="flex items-start gap-3">
+            <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-accent text-accent-foreground">
+              {createDirectory ? <FolderPlus className="size-4" /> : <FolderCheck className="size-4" />}
             </div>
-          )}
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-2xs font-medium">{createDirectory ? "New workspace folder" : "Selected folder"}</span>
+                {createDirectory && <span className="rounded-full bg-accent px-2 py-0.5 text-3xs text-accent-foreground">Created on confirmation</span>}
+              </div>
+              <div className="mt-1 truncate font-mono text-xs" title={selectedPath ?? undefined}>{selectedPath ?? "Choose a folder above"}</div>
+            </div>
+          </div>
         </div>
 
-        {error !== null && (
-          <p
-            className="text-2xs text-status-failed"
-            data-testid="wizard-error"
-          >
-            {errorMessage(error)}
-          </p>
-        )}
+        <div className="flex flex-col gap-1.5">
+          <div className="flex items-baseline justify-between gap-3">
+            <Label htmlFor="workspace-name" className="text-xs">Workspace name <span className="font-normal text-muted-foreground">(optional)</span></Label>
+            <span className="text-3xs text-muted-foreground">Defaults to the folder name</span>
+          </div>
+          <Input
+            id="workspace-name"
+            value={touchedName ? name : effectiveName}
+            onChange={(event) => { setTouchedName(true); setName(event.target.value); }}
+            placeholder="Workspace name"
+            className="h-8"
+          />
+        </div>
 
-        <div className="flex items-center gap-2">
-          {index > 0 && (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="gap-1.5"
-              onClick={back}
-            >
-              <ArrowLeft className="size-3.5" />
-              Back
-            </Button>
-          )}
-          <span className="flex-1" />
-          {step === "name" ? (
-            <Button
-              size="sm"
-              disabled={!canAdvance || create.isPending}
-              onClick={submit}
-            >
-              {create.isPending ? "Creating…" : "Create workspace"}
-            </Button>
-          ) : (
-            <Button size="sm" disabled={!canAdvance} onClick={advance}>
-              Next
-            </Button>
-          )}
+        {error !== null && <p className="text-2xs text-status-failed" data-testid="wizard-error">{errorMessage(error)}</p>}
+
+        <div className="flex items-center justify-end gap-2">
+          <Button variant="ghost" size="sm" disabled={create.isPending} onClick={() => close(false)}>Cancel</Button>
+          <Button size="sm" disabled={!canSubmit || create.isPending} onClick={submit}>
+            {create.isPending ? "Adding…" : createDirectory ? "Create workspace" : "Use this folder"}
+          </Button>
         </div>
       </DialogContent>
     </Dialog>
-  );
-}
-
-function Field({
-  label,
-  input,
-}: {
-  readonly label: string;
-  readonly input: React.ReactNode;
-}) {
-  return (
-    <div className="flex flex-col gap-1">
-      <Label className="text-2xs text-muted-foreground">{label}</Label>
-      {input}
-    </div>
-  );
-}
-
-function Summary({
-  label,
-  value,
-}: {
-  readonly label: string;
-  readonly value: string;
-}) {
-  return (
-    <>
-      <dt className="text-muted-foreground">{label}</dt>
-      <dd className="truncate font-mono text-2xs">{value}</dd>
-    </>
   );
 }
