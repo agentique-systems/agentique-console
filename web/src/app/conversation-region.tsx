@@ -14,6 +14,7 @@ import type {
   ConsoleEvent,
   UserSessionListItem,
 } from "@agentique-console/shared";
+import { ArrowRight, GitPullRequest, ShieldCheck, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { deriveSessionState } from "@/lib/session-state";
@@ -56,13 +57,17 @@ export function ConversationRegion() {
 
   if (session === undefined) {
     return (
-      <div className="flex min-h-0 flex-col items-center justify-center gap-3 border-r border-border">
-        <p className="text-sm text-muted-foreground">
-          Nothing in flight — start a session.
-        </p>
-        <Button size="sm" onClick={() => beginDraft()}>
-          New session
-        </Button>
+      <div className="console-grid flex min-h-0 flex-col items-center justify-center border-r border-border p-6">
+        <div className="w-full max-w-xl rounded-xl border bg-card p-6 shadow-sm">
+          <div className="mb-5 flex size-10 items-center justify-center rounded-lg bg-primary text-primary-foreground"><Sparkles className="size-5" /></div>
+          <h1 className="text-balance text-xl font-semibold tracking-tight">What should your agent team ship?</h1>
+          <p className="mt-2 max-w-md text-sm leading-relaxed text-muted-foreground">Describe an outcome. Agentique will plan the work, delegate to specialists, and keep every decision visible.</p>
+          <Button className="mt-5" aria-label="New session" onClick={() => beginDraft()}>Start a session<ArrowRight data-icon="inline-end" /></Button>
+          <div className="mt-6 grid gap-2 sm:grid-cols-2">
+            <button type="button" onClick={() => beginDraft()} className="flex items-start gap-3 rounded-lg border p-3 text-left transition-colors hover:bg-accent"><GitPullRequest className="mt-0.5 size-4 text-primary" /><span><span className="block text-xs font-medium">Review a pull request</span><span className="mt-1 block text-2xs text-muted-foreground">Inspect changes, run checks, propose fixes</span></span></button>
+            <button type="button" onClick={() => beginDraft()} className="flex items-start gap-3 rounded-lg border p-3 text-left transition-colors hover:bg-accent"><ShieldCheck className="mt-0.5 size-4 text-primary" /><span><span className="block text-xs font-medium">Audit a feature</span><span className="mt-1 block text-2xs text-muted-foreground">Map risks, tests, and implementation gaps</span></span></button>
+          </div>
+        </div>
       </div>
     );
   }

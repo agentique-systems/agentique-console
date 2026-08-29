@@ -165,7 +165,7 @@ export const Composer = forwardRef<
   };
 
   return (
-    <div className="border-t border-border p-3">
+    <div className="border-t border-border bg-card/60 p-3 backdrop-blur-sm">
       <PromptInput
         onSubmit={(event) => {
           event.preventDefault();

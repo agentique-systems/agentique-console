@@ -184,7 +184,7 @@ export function SessionHeader({
   };
 
   return (
-    <div className="flex items-center gap-2 border-b border-border px-3 py-2">
+    <div className="surface-raised flex min-h-12 items-center gap-2 border-b border-border bg-card/80 px-3 py-2 backdrop-blur-sm">
       {editing ? (
         <input
           autoFocus

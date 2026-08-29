@@ -3,42 +3,38 @@
 
 @custom-variant dark (&:is(.dark *));
 
-/*
- * The console is greyscale. Every surface, border, and text token is pure
- * neutral (chroma 0) so that the status vocabulary below is the ONLY colour in
- * the product — if something is coloured, it is telling you about state.
- */
+/* Quiet graphite surfaces with a single indigo product accent. Colour outside
+ * the brand is reserved for operational state, so the console stays scannable. */
 :root {
-  --radius: 0.5rem;
-  --background: oklch(0.995 0 0);
-  --foreground: oklch(0.16 0 0);
+  --radius: 0.625rem;
+  --background: oklch(0.982 0.004 265);
+  --foreground: oklch(0.19 0.018 265);
   --card: oklch(1 0 0);
-  --card-foreground: oklch(0.16 0 0);
+  --card-foreground: oklch(0.19 0.018 265);
   --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.16 0 0);
-  --primary: oklch(0.21 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.955 0 0);
-  --secondary-foreground: oklch(0.21 0 0);
-  --muted: oklch(0.965 0 0);
-  --muted-foreground: oklch(0.475 0 0);
-  --accent: oklch(0.94 0 0);
-  --accent-foreground: oklch(0.21 0 0);
+  --popover-foreground: oklch(0.19 0.018 265);
+  --primary: oklch(0.52 0.19 272);
+  --primary-foreground: oklch(0.99 0 0);
+  --secondary: oklch(0.95 0.009 265);
+  --secondary-foreground: oklch(0.24 0.02 265);
+  --muted: oklch(0.955 0.006 265);
+  --muted-foreground: oklch(0.49 0.02 265);
+  --accent: oklch(0.94 0.025 272);
+  --accent-foreground: oklch(0.4 0.14 272);
   --destructive: oklch(0.55 0.2 25);
   --destructive-foreground: oklch(0.99 0 0);
-  --border: oklch(0.905 0 0);
-  /* One step nearer the surface: dividers INSIDE a card, not between panels. */
-  --border-subtle: oklch(0.945 0 0);
-  --input: oklch(0.9 0 0);
-  --ring: oklch(0.62 0 0);
-  --sidebar: oklch(0.975 0 0);
-  --sidebar-foreground: oklch(0.16 0 0);
-  --sidebar-primary: oklch(0.21 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.93 0 0);
-  --sidebar-accent-foreground: oklch(0.21 0 0);
-  --sidebar-border: oklch(0.9 0 0);
-  --sidebar-ring: oklch(0.62 0 0);
+  --border: oklch(0.89 0.01 265);
+  --border-subtle: oklch(0.935 0.007 265);
+  --input: oklch(0.88 0.012 265);
+  --ring: oklch(0.56 0.18 272);
+  --sidebar: oklch(0.965 0.009 265);
+  --sidebar-foreground: oklch(0.19 0.018 265);
+  --sidebar-primary: oklch(0.52 0.19 272);
+  --sidebar-primary-foreground: oklch(0.99 0 0);
+  --sidebar-accent: oklch(0.925 0.025 272);
+  --sidebar-accent-foreground: oklch(0.35 0.14 272);
+  --sidebar-border: oklch(0.89 0.01 265);
+  --sidebar-ring: oklch(0.56 0.18 272);
 
   /* The inset top highlight that makes a raised surface read as layered. */
   --raised-highlight: oklch(0 0 0 / 0.05);
@@ -72,34 +68,34 @@
  * above; glow is reserved for live/focused elements.
  */
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.965 0 0);
-  --card: oklch(0.185 0 0);
-  --card-foreground: oklch(0.965 0 0);
-  --popover: oklch(0.175 0 0);
-  --popover-foreground: oklch(0.965 0 0);
-  --primary: oklch(0.965 0 0);
-  --primary-foreground: oklch(0.165 0 0);
-  --secondary: oklch(0.235 0 0);
-  --secondary-foreground: oklch(0.965 0 0);
-  --muted: oklch(0.225 0 0);
-  --muted-foreground: oklch(0.68 0 0);
-  --accent: oklch(0.255 0 0);
-  --accent-foreground: oklch(0.965 0 0);
+  --background: oklch(0.135 0.014 265);
+  --foreground: oklch(0.94 0.008 265);
+  --card: oklch(0.17 0.016 265);
+  --card-foreground: oklch(0.94 0.008 265);
+  --popover: oklch(0.16 0.016 265);
+  --popover-foreground: oklch(0.94 0.008 265);
+  --primary: oklch(0.7 0.16 272);
+  --primary-foreground: oklch(0.15 0.025 272);
+  --secondary: oklch(0.215 0.018 265);
+  --secondary-foreground: oklch(0.93 0.008 265);
+  --muted: oklch(0.205 0.016 265);
+  --muted-foreground: oklch(0.67 0.02 265);
+  --accent: oklch(0.255 0.04 272);
+  --accent-foreground: oklch(0.88 0.06 272);
   --destructive: oklch(0.62 0.19 25);
   --destructive-foreground: oklch(0.97 0.01 25);
-  --border: oklch(0.265 0 0);
-  --border-subtle: oklch(0.225 0 0);
-  --input: oklch(0.275 0 0);
-  --ring: oklch(0.5 0 0);
-  --sidebar: oklch(0.125 0 0);
-  --sidebar-foreground: oklch(0.965 0 0);
-  --sidebar-primary: oklch(0.965 0 0);
-  --sidebar-primary-foreground: oklch(0.165 0 0);
-  --sidebar-accent: oklch(0.235 0 0);
-  --sidebar-accent-foreground: oklch(0.965 0 0);
-  --sidebar-border: oklch(0.235 0 0);
-  --sidebar-ring: oklch(0.5 0 0);
+  --border: oklch(0.27 0.018 265);
+  --border-subtle: oklch(0.225 0.016 265);
+  --input: oklch(0.285 0.02 265);
+  --ring: oklch(0.68 0.16 272);
+  --sidebar: oklch(0.115 0.014 265);
+  --sidebar-foreground: oklch(0.94 0.008 265);
+  --sidebar-primary: oklch(0.7 0.16 272);
+  --sidebar-primary-foreground: oklch(0.15 0.025 272);
+  --sidebar-accent: oklch(0.235 0.035 272);
+  --sidebar-accent-foreground: oklch(0.88 0.06 272);
+  --sidebar-border: oklch(0.235 0.016 265);
+  --sidebar-ring: oklch(0.68 0.16 272);
 
   --raised-highlight: oklch(1 0 0 / 0.045);
 
@@ -211,6 +207,25 @@
  */
 @utility surface-raised {
   box-shadow: inset 0 1px 0 0 var(--raised-highlight);
+}
+
+@utility console-grid {
+  background-image: linear-gradient(to right, color-mix(in oklab, var(--border) 35%, transparent) 1px, transparent 1px), linear-gradient(to bottom, color-mix(in oklab, var(--border) 35%, transparent) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+@layer base {
+  ::selection {
+    background: color-mix(in oklab, var(--primary) 24%, transparent);
+  }
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+  * {
+    scrollbar-color: var(--border) transparent;
+    scrollbar-width: thin;
+  }
 }
 
 /* One-beat attention pulse (HITL materialize) — CSS only, runs once. */

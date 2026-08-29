@@ -16,7 +16,7 @@ export function Shell() {
   const workspace = useScopeStore((state) => state.selectedWorkspaceId);
   const previousWorkspace = useRef(workspace);
   useEffect(() => { if (previousWorkspace.current === workspace) return; previousWorkspace.current = workspace; useUiStore.setState({ activeUserSessionId: null, activeAgentSessionId: null, selectedTaskId: null, selectedTimelineItemId: null, selectedProfileId: null, draftOpen: false }); }, [workspace]);
-  return <div className="flex h-screen min-w-[960px] flex-col overflow-hidden"><AttentionBridge /><Topbar /><SystemPauseBanner /><main className="min-h-0 flex-1"><Suspense fallback={<div className="flex h-full items-center justify-center"><Spinner className="size-4 text-muted-foreground" /></div>}><Routes>
+  return <div className="flex h-screen min-w-0 flex-col overflow-hidden bg-background"><AttentionBridge /><Topbar /><SystemPauseBanner /><main className="min-h-0 flex-1 overflow-hidden"><Suspense fallback={<div className="console-grid flex h-full items-center justify-center"><div className="flex items-center gap-2 rounded-lg border bg-card px-4 py-3 text-xs text-muted-foreground shadow-sm"><Spinner className="size-4 text-primary" />Loading workspace</div></div>}><Routes>
     <Route path="/sessions" element={<SessionsView />} /><Route path="/agents" element={<AgentsView />} /><Route path="/tasks" element={<TasksView />} /><Route path="/timelines" element={<TimelinesView />} /><Route path="*" element={<Navigate to="/sessions" replace />} />
   </Routes></Suspense></main></div>;
 }

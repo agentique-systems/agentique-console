@@ -31,7 +31,7 @@ function TimelineCanvas() {
     return () => { timeline.destroy(); instance.current = null; };
   }, [query.data, focusAgent]);
   if (!id) return <div className="flex h-full items-center justify-center text-xs text-muted-foreground">Select a UserSession.</div>;
-  return <div className="flex h-full min-h-0 flex-col"><div className="flex h-9 items-center justify-between border-b px-3 text-3xs uppercase tracking-wider text-muted-foreground"><span>Swimlane timeline</span><span className="flex items-center gap-3">{query.hasNextPage && <button className="normal-case text-foreground hover:underline" disabled={query.isFetchingNextPage} onClick={() => void query.fetchNextPage()}>{query.isFetchingNextPage ? "loading…" : "load earlier"}</button>}<span>{query.data?.items.length ?? 0} items</span></span></div><div ref={host} className="min-h-0 flex-1 bg-background" /></div>;
+  return <div className="flex h-full min-h-0 flex-col"><div className="surface-raised flex h-12 items-center justify-between border-b bg-card px-4"><div><div className="text-xs font-semibold">Activity timeline</div><div className="text-3xs text-muted-foreground">Turns, tools, and agent handoffs</div></div><span className="flex items-center gap-3 text-3xs text-muted-foreground">{query.hasNextPage && <button className="normal-case text-foreground hover:underline" disabled={query.isFetchingNextPage} onClick={() => void query.fetchNextPage()}>{query.isFetchingNextPage ? "loading…" : "load earlier"}</button>}<span>{query.data?.items.length ?? 0} items</span></span></div><div ref={host} className="min-h-0 flex-1 bg-background" /></div>;
 }
 
 function TimelineDetails() {

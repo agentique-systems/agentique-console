@@ -4,6 +4,7 @@
  * transcript. Selection lives in the ui store's per-user-session map, so
  * switching user sessions restores each one's pick.
  */
+import { Bot } from "lucide-react";
 import { useAgentSession } from "@/api/queries";
 import type { AgentRunSummary, AgentSession } from "@agentique-console/shared";
 import { Badge } from "@/components/ui/badge";
@@ -20,10 +21,8 @@ export function AgentPane() {
 
   if (selectedId === undefined) {
     return (
-      <div className="flex min-h-0 items-center justify-center px-6 text-center">
-        <span className="text-xs text-muted-foreground">
-          select an agent session to read along
-        </span>
+      <div className="console-grid flex min-h-0 items-center justify-center px-6 text-center">
+        <div className="max-w-xs rounded-xl border bg-card p-5 shadow-sm"><div className="mx-auto mb-3 flex size-9 items-center justify-center rounded-lg bg-accent text-accent-foreground"><Bot className="size-4" /></div><div className="text-sm font-medium">Agent inspector</div><p className="mt-1 text-xs leading-relaxed text-muted-foreground">Select an agent run to follow its reasoning, tool calls, and handoffs in real time.</p></div>
       </div>
     );
   }

@@ -23,14 +23,14 @@ export function AgentsView() {
 function ProfileList() {
   const workspace = useScopeStore((s) => s.selectedWorkspaceId); const profiles = useAgentProfiles(workspace);
   const selected = useUiStore((s) => s.selectedProfileId); const select = useUiStore((s) => s.selectProfile);
-  return <aside className="flex min-h-0 flex-col border-r border-border bg-sidebar"><div className="flex h-9 items-center border-b border-border px-3"><span className="text-3xs uppercase tracking-wider text-muted-foreground">Agent profiles</span></div>
-    <div className="min-h-0 flex-1 overflow-y-auto">{profiles.data?.map((profile) => <button key={profile.id} className={cn("flex w-full items-start gap-2 border-b border-border/50 px-3 py-2 text-left hover:bg-accent", selected === profile.id && "bg-accent")} onClick={() => select(profile.id)}><Bot className="mt-0.5 size-3.5" /><span className="min-w-0 flex-1"><span className="block truncate text-xs">{profile.title}</span><span className="block truncate text-3xs text-muted-foreground">{profile.source} · {profile.trusted ? "trusted" : "not trusted"}</span></span>{!profile.valid && <span className="size-1.5 rounded-full bg-status-failed" />}</button>)}</div></aside>;
+  return <aside className="flex min-h-0 flex-col border-r border-border bg-sidebar"><div className="flex h-12 items-center justify-between border-b border-border px-3"><div><div className="text-xs font-semibold">Agent profiles</div><div className="text-3xs text-muted-foreground">{profiles.data?.length ?? 0} available</div></div><Badge variant="outline">Registry</Badge></div>
+    <div className="min-h-0 flex-1 overflow-y-auto p-1.5">{profiles.data?.map((profile) => <button key={profile.id} className={cn("mb-1 flex w-full items-start gap-2 rounded-md px-2.5 py-2.5 text-left transition-colors hover:bg-accent", selected === profile.id && "bg-accent text-accent-foreground")} onClick={() => select(profile.id)}><Bot className="mt-0.5 size-3.5" /><span className="min-w-0 flex-1"><span className="block truncate text-xs">{profile.title}</span><span className="block truncate text-3xs text-muted-foreground">{profile.source} · {profile.trusted ? "trusted" : "not trusted"}</span></span>{!profile.valid && <span className="size-1.5 rounded-full bg-status-failed" />}</button>)}</div></aside>;
 }
 
 function ProfileCard() {
   const workspace = useScopeStore((s) => s.selectedWorkspaceId); const id = useUiStore((s) => s.selectedProfileId); const profile = useAgentProfile(workspace, id); const trust = useTrustProfile();
   if (!profile.data || !workspace) return <div className="flex h-full items-center justify-center text-xs text-muted-foreground">Select a profile.</div>;
-  const p = profile.data; return <aside className="min-h-0 h-full overflow-y-auto bg-sidebar/30 p-4"><div className="flex items-start gap-3"><div className="min-w-0 flex-1"><h2 className="text-base font-medium">{p.title}</h2><p className="mt-1 text-xs text-muted-foreground">{p.purpose}</p></div><Badge variant="outline">{p.source}</Badge></div>
+  const p = profile.data; return <aside className="h-full min-h-0 overflow-y-auto bg-background p-6"><div className="mx-auto max-w-4xl"><div className="flex items-start gap-4 rounded-xl border bg-card p-5 shadow-sm"><div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-accent text-accent-foreground"><Bot className="size-5" /></div><div className="min-w-0 flex-1"><h2 className="text-lg font-semibold tracking-tight">{p.title}</h2><p className="mt-1 text-sm leading-relaxed text-muted-foreground">{p.purpose}</p></div><Badge variant="outline">{p.source}</Badge></div>
     {p.source !== "builtin" && <div className="mt-3 flex flex-wrap items-center gap-2">
       <Badge variant="outline" className={cn(p.claudeValid ? "text-status-completed" : "text-status-failed")}>{p.claudeValid ? "Claude-valid" : "not Claude-valid"}</Badge>
       <Badge variant="outline" className={cn(p.agentiqueCompatible ? "text-status-completed" : "text-status-waiting")}>{p.agentiqueCompatible ? "compatible" : "incompatible"}</Badge>
@@ -45,6 +45,6 @@ function ProfileCard() {
     {p.files.length > 0 && <Section title={`Bundle files · ${p.files.length}`}>{p.files.map((file) => <details key={file.path} className="border-b border-border/50 py-1.5 text-2xs"><summary className="cursor-pointer font-mono">{file.path}</summary><pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap rounded bg-card p-2 font-mono text-3xs text-muted-foreground">{file.content}</pre></details>)}</Section>}
     {p.issues.length > 0 && <Section title="Validation">{p.issues.map((issue, i) => <p key={i} className={cn("text-2xs", issue.level === "error" ? "text-status-failed" : "text-status-waiting")}>{issue.path}: {issue.message}</p>)}</Section>}
     <p className="mt-4 break-all font-mono text-3xs text-muted-foreground">revision {p.revision}</p>
-  </aside>;
+  </div></aside>;
 }
 function Section({ title, children }: { title: string; children: React.ReactNode }) { return <section className="mt-5"><h3 className="mb-2 text-3xs uppercase tracking-wider text-muted-foreground">{title}</h3>{children}</section>; }
