@@ -33,8 +33,11 @@ nothing else does.
 
 Replaced in full:
 
-- the domain model (`shared/src/*`)
-- the persistence schema and every migration (`server/src/db/*`)
+- the domain model (`shared/src/*`) — replaced by the permanent,
+  provider-neutral package `@agentique-console/core` (`core/`)
+- the persistence schema and every migration (`server/src/db/*`) —
+  replaced by the permanent server persistence boundary
+  `server/src/persistence/`
 - the server runtime, services, tools, prompts, and HTTP API
   (`server/src/*`)
 - the web application's domain views, stores, and API client (`web/src/*`
@@ -47,9 +50,43 @@ Replaced in full:
   `docs/architecture/`
 
 Not in scope: the build toolchain (`package.json` workspaces, TypeScript,
-Vite, Vitest, Tailwind), the dev script, and the presentational UI
-primitives. These are retained because they contain no orchestration
-semantics; they may be modified but are not part of the replacement.
+Vite, Vitest, Tailwind, `server/drizzle.config.ts`), the dev script, and
+the presentational UI primitives. These are retained because they contain
+no orchestration semantics; they may be modified but are not part of the
+replacement. In particular `server/drizzle.config.ts` is retained as a
+tool, not byte-for-byte: it points at the final persistence schema and
+migration directory from Phase 1 onward, and there is only ever one
+Drizzle configuration file.
+
+### Final module boundaries
+
+The replacement is built inside two permanent boundaries that exist from
+Phase 1 and remain after cutover:
+
+- **`core/` — `@agentique-console/core`.** The provider-neutral domain
+  package: final domain types, identifier types and generation, state sets
+  and transition validation, runtime schemas and validators, Execution Plan
+  source types, Pattern and join types, Requirement and Decision types,
+  Task, Artifact, Handoff, Agent Definition, Tool Policy, Invocation,
+  Attempt, Budget, Usage, Event contracts, persistence-facing value types,
+  and eventually the final API contracts. It depends on no other workspace
+  package and on no Node-only module (a portable validation or
+  cryptographic primitive is the only permitted exception). The final
+  server and the final web application both import it. It replaces
+  `shared/` completely at cutover.
+- **`server/src/persistence/` — the server persistence boundary.** The
+  final SQLite schema (`schema.ts`), database client (`client.ts`),
+  database-open guard (`database.ts`), transaction helpers
+  (`transactions.ts`), baseline migration
+  (`migrations/0000_orchestration_core.sql`), stores (`stores/`), the
+  content-addressed Artifact blob store (`blob-store.ts`), and
+  provider-continuation pointer persistence. It imports only
+  `@agentique-console/core`, infrastructure-neutral database libraries,
+  and final neutral server utilities that are not scheduled for deletion.
+  It replaces `server/src/db/` completely at cutover.
+
+Neither boundary is staging, `v2`, `next`, `new`, or compatibility code;
+each is the final production location of what it contains.
 
 ## 3. Binding rules
 
@@ -77,9 +114,16 @@ semantics; they may be modified but are not part of the replacement.
 5. **No `v2` names.** No module, directory, type, table, route, event,
    tool, or prompt carries `v2`, `new`, `next`, `legacy`, `old`, `compat`,
    or a similar qualifier. New code uses its final name from its first
-   commit. When a final name collides with a legacy file or directory, the
+   commit. "Final name" means the module's permanent production location;
+   it does not require overwriting a legacy file when a different,
+   permanent architectural boundary is the more correct home. The domain
+   lives in `core/` and persistence in `server/src/persistence/` precisely
+   because those are the correct final boundaries, not because the legacy
+   paths were occupied. When a final name does collide with a legacy file
+   or directory (for example `server/src/events/`, `server/src/api/`), the
    legacy file is deleted and the new one takes the path in the same
-   change; nothing is renamed to make room.
+   change; nothing is renamed to make room, and no temporary package is
+   later renamed into place.
 6. **Old database contents are unsupported.** See section 4.
 7. **New code never depends on legacy runtime code.** No file created for
    the new architecture imports a legacy `AgentSession`, lane, seat,
@@ -97,17 +141,24 @@ semantics; they may be modified but are not part of the replacement.
    fake, and their tests may be extracted, rewritten, or moved into the
    final `server/src/provider/` architecture. Source-level reuse is allowed
    exactly when the resulting code depends exclusively on the new domain
-   (`shared/src/*` final types and `server/src/provider/*`) and on nothing
+   (`@agentique-console/core` and `server/src/provider/*`) and on nothing
    scheduled for deletion. No compatibility adapter between the new
    runtime and the legacy SDK runtime may exist in either direction. A
    full migration removes legacy architecture; it does not require
    reimplementing correct low-level provider mechanics.
 8. **Temporary coexistence is construction only.** While the new runtime is
-   built, legacy modules may remain in the tree so that the legacy
-   application keeps starting. Legacy code may not be extended, fixed, or
-   made to call new code. At cutover, every file in the legacy-removal
-   inventory is deleted in one commit series and the legacy test suites go
-   with them.
+   built, legacy modules remain in the tree so that the legacy application
+   keeps building, starting, and passing its tests. `shared/` and
+   `server/src/db/` are not touched during construction. Coexistence is
+   permitted only because the old and new modules are independent: new
+   modules never import from, export to, re-export, or call their legacy
+   counterparts, legacy code never imports `core/` or
+   `server/src/persistence/`, no runtime path selects between them, no
+   production request reaches the new code before cutover, and the legacy
+   application never writes the new schema (it opens its own database
+   through its own client). Legacy code may not be extended, fixed, or made
+   to call new code. At cutover, every file in the legacy-removal inventory
+   is deleted in one commit series and the legacy test suites go with them.
 9. **No benchmark harness.** The new implementation ships correctness and
    integration tests. It does not ship an orchestration-quality evaluation
    suite, rubrics, judges, live scenario runners, or baseline files.
@@ -117,26 +168,33 @@ semantics; they may be modified but are not part of the replacement.
     on the new source directories enforces this.
 11. **Directory paths are not legacy; their contents are.** A conventional
     path the legacy code occupied (`server/src/events/`, `server/src/tasks/`,
-    `server/src/api/routes/`, `server/src/db/`, `server/src/workspaces/`,
+    `server/src/api/routes/`, `server/src/workspaces/`,
     `server/src/handoffs/`, `server/src/capacity/`, and similar) may be
     reused for final modules when everything under it conforms to the new
     architecture and depends on nothing scheduled for deletion. The removal
     inventory targets legacy files, symbols, schemas, dependencies, and
     behaviour, never a directory name as such. Paths whose names are
     themselves retired terms (`agent-sessions/`, `agent-profiles/`,
-    `sessions/`, `lane-runtime/`, `continuation/`) are deleted.
+    `sessions/`, `lane-runtime/`, `continuation/`) are deleted. `shared/`
+    and `server/src/db/` are not reused: their replacements are the
+    permanent boundaries `core/` and `server/src/persistence/` (§2), and
+    both legacy paths are deleted whole at cutover.
 
 ## 4. Database
 
 - The new application starts with a fresh schema. The schema has one
-  baseline migration (`0000_orchestration_core`) generated from the new
-  `schema.ts`. Every legacy migration file and the legacy migration journal
-  are deleted.
+  baseline migration
+  (`server/src/persistence/migrations/0000_orchestration_core.sql`)
+  generated from `server/src/persistence/schema.ts` by
+  `server/drizzle.config.ts`, with the `schema_info` insert and the
+  append-only guard triggers appended to the generated DDL. Every legacy
+  migration file and the legacy migration journal under `server/src/db/`
+  are deleted at cutover; no new legacy migration is ever generated.
 - The schema includes a `schema_info` table with a single row:
   `application = 'agentique-console'`, `schema = 'orchestration-core'`,
   `version = <integer>`. The baseline migration writes this row.
-- On open, before running migrations, the server inspects the database
-  file:
+- On open (`server/src/persistence/database.ts`), before running
+  migrations, the server inspects the database file:
   - a file that does not exist, or has no user tables, is initialised;
   - a file whose `schema_info` row matches is opened and migrated forward;
   - any other file — including one with the legacy `user_sessions`,
@@ -150,7 +208,14 @@ semantics; they may be modified but are not part of the replacement.
     ```
 
 - The server never reads, converts, backs up, renames, or deletes an old
-  database on its own. The operator resets it.
+  database on its own. The operator resets it. The presence of a
+  `__drizzle_migrations` journal is never taken as proof of compatibility;
+  only the `schema_info` row is.
+- During construction the legacy application keeps opening its own
+  database through `server/src/db/client.ts` and its already-generated
+  legacy migrations; the new schema is written only by
+  `server/src/persistence/` and only in the new runtime's tests until
+  cutover. The two never share a database file.
 - The legacy import and profile migration scripts
   (`server/scripts/import-legacy.ts`, `server/scripts/migrate-profile.ts`)
   are deleted with no replacement. Provider JSONL transcripts are not
@@ -163,7 +228,8 @@ semantics; they may be modified but are not part of the replacement.
 - `provider_continuations` is an index, not a payload store: one row per
   Attempt with provider, storage key, digest, creation time, and optional
   expiry. The opaque payload lives in a replaceable store owned by the
-  provider adapter (interface under `server/src/provider/`) and is never
+  provider adapter (interface `ContinuationPayloadStore` in
+  `server/src/provider/continuation-store.ts`) and is never
   embedded in a canonical row, Artifact, Context Manifest, Event, log, or
   API response. The index is never read to decide anything except whether
   a `resumed` Attempt is possible, and both index and payloads may be
@@ -224,7 +290,7 @@ work.
   `artifacts`, `handoffs`, `agent-definitions`, `evaluations`, `gates`,
   `snapshots`, `changesets`, `publications`, `usage`, `events`, `system`
   (health, config, resource-governor status), `fs`. The exact route table
-  is defined with the implementation in `shared/src/api.ts` and is the only
+  is defined with the implementation in `core/src/api.ts` and is the only
   route table.
 - Legacy paths return the standard 404 body. There is no redirect, no
   deprecation header, and no message naming the new path.
@@ -260,10 +326,14 @@ is one or more commits; each commit keeps `npm run typecheck` and
 `npm test` green for the code that exists at that commit.
 
 1. **Architecture documents** (this step). No runtime code.
-2. **Domain and schema.** `shared/src/*` final types; `server/src/db/`
-   final schema, baseline migration, reset-required check. Legacy files at
-   colliding paths are replaced, and their legacy importers deleted, in the
-   same change.
+2. **Domain and schema.** `core/` (`@agentique-console/core`) final
+   types, validators, and transition tables; `server/src/persistence/`
+   final schema, baseline migration, reset-required check, stores, blob
+   store, Event journal with transactional projections. `shared/` and
+   `server/src/db/` are left untouched; nothing legacy is deleted in this
+   step, and the legacy application keeps building and passing its tests.
+   The import-boundary test (rule 7) and the terminology test (rule 10)
+   are added in this step and run on every later commit.
 3. **Runtime core.** Runs, Execution Plan source validation and compiler,
    Plan Nodes of both kinds (`pattern`, `join`), Plan Edges, Plan Node
    Requirement scope, scheduler, resource governor, Budget reservations,
@@ -358,8 +428,15 @@ Merge to `main` happens after step 7 as one merge commit. Rollback is
 - Governor tests: leases are granted and refused deterministically with
   structured reasons; a refused Run is `waiting` with `provider_capacity`;
   the governor has no dependency on any model or prompt module.
-- A database-open test for each of the three cases in section 4.
-- An import-boundary test (rule 7) and a terminology test (rule 10).
+- A database-open test for each of the three cases in section 4, run
+  against a missing file, an empty database, a matching database, a legacy
+  database, and an unrelated SQLite database.
+- An import-boundary test (rule 7) proving that `core/` imports no other
+  workspace package, that `server/src/persistence/` imports neither
+  `shared/` nor `server/src/db/` nor any legacy runtime module, that no
+  legacy module imports `core/` or `server/src/persistence/`, and that no
+  legacy migration creates a new-schema table; and a terminology test
+  (rule 10) over the new source directories.
 - No live-provider tests in the default suite. A live smoke test may exist
   behind an explicit opt-in environment variable and is not a benchmark.
 
@@ -377,7 +454,7 @@ Cutover is complete when all of the following are true:
 - Starting the server against an empty `CONSOLE_DATA_DIR` creates the fresh
   schema; starting it against a legacy database prints the reset-required
   message and exits non-zero.
-- Every route in `shared/src/api.ts` is served; every legacy route in the
+- Every route in `core/src/api.ts` is served; every legacy route in the
   inventory returns 404.
 - Each invariant in [execution-model.md](execution-model.md) §15 is
   referenced by number in at least one test.

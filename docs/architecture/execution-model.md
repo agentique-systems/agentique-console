@@ -28,6 +28,13 @@ whose Context Manifests include the operator's messages.
 ## 2. State ownership
 
 Every fact in the system has exactly one canonical store and one writer.
+The types, state sets, and transition validators for every object below
+are defined once in `@agentique-console/core` (`core/src/`); every
+canonical store below is implemented behind `server/src/persistence/`
+(schema, client, database-open guard, baseline migration, stores, blob
+store, transaction helpers). Every state-changing store operation
+validates the transition, appends the Event, and updates the projection in
+one transaction; an illegal transition writes nothing.
 
 | Object | Writer | Canonical store | Projections |
 |---|---|---|---|
@@ -155,8 +162,9 @@ A compiled Plan Node has:
   Budget (§7.6), plus the node's local limits (`maxConcurrency`,
   `maxWallClockMs`, Pattern-specific bounds) and its
   `onAllocationExhausted` policy (`fail | wait | extend`)
-- `fanInPolicy`: for `kind: join`, `require_all` (default) or
-  `require_any`
+- `fanInPolicy`: for `kind: join`, exactly `require_all` (default) or
+  `require_any`; this is a closed two-value set (no threshold, count,
+  weighted, or custom policy)
 - `gate`: for `kind: pattern`, the `node_exit` Gate's Acceptance Criteria
   (may be empty)
 - `status`: `pending | ready | running | waiting | succeeded | failed | cancelled | skipped`
@@ -366,7 +374,11 @@ have no scope rows.
   revision.
 - The scope rows are the only source of truth for "which Requirements does
   this node serve"; no ancestor path, tree walk, or revision lookup is
-  needed at validation time.
+  needed at validation time. Inherited scope is materialized: a `pattern`
+  node compiled from an expression that inherits its ancestor's roots gets
+  its own complete set of rows, so identical rows under sibling nodes are
+  intentional, and validation is one indexed lookup on
+  `(plan_node_id, requirement_id, requirement_revision_id)`.
 
 ## 5. Patterns
 
@@ -573,6 +585,10 @@ Purposes by role:
 | `evaluator` | `select` (route selector), `evaluate` (evaluator-optimizer round, Gate evaluated criterion) |
 
 Invocation status: `pending | running | waiting | succeeded | failed | cancelled`.
+The `purpose` value set is closed: exactly the fourteen values in the table
+above, enforced by the `InvocationPurpose` union in `core/src/invocations.ts`
+and a database check constraint on `invocations.purpose`; each purpose is
+valid for exactly one role.
 
 ### 6.2 Context Manifest
 
@@ -701,6 +717,16 @@ terminal result or failure. Every Attempt records:
 There is no other Attempt kind. New logical input never produces an
 Attempt; it produces a new Invocation (§6.1).
 
+Attempt status is `pending | running | succeeded | failed | timed_out |
+interrupted | cancelled`. Every status other than `pending` and `running`
+is terminal. Once an Attempt is created it has consumed one Attempt from
+its Invocation's allocation, whatever its outcome: an `interrupted`
+Attempt (§14, server restart or wall-clock limit) keeps its consumed
+Attempt, and the retry that follows it is a new Attempt that consumes
+another. Recovery therefore never yields unlimited free retries; when no
+Attempt allocation remains the Invocation is `failed` with reason
+`allocation_exhausted`.
+
 ### 6.6 Provider resumption
 
 Correctness never depends on provider state. The Context Manifest and the
@@ -733,8 +759,10 @@ continuation document.
 Continuation storage is pointer-based. `provider_continuations` is an index
 row per Attempt: Attempt id, provider, storage key, digest, creation time,
 optional expiry time. The provider adapter owns a replaceable continuation
-payload store (interface under `server/src/provider/`) and the storage key
-points to the opaque payload there. Payloads are not Artifacts, are not in
+payload store (interface `ContinuationPayloadStore` in
+`server/src/provider/continuation-store.ts`; the index rows are written
+through `server/src/persistence/`) and the storage key points to the
+opaque payload there. Payloads are not Artifacts, are not in
 Context Manifests, are never read by projections or scheduler decisions,
 may be deleted at any time, and never appear in Events, logs, or API
 responses. A missing, expired, or digest-mismatched payload yields a
@@ -851,9 +879,15 @@ reaches a terminal state. A `join` node's allocation is zero.
 reserved from its Plan Node's unconsumed, unreserved allocation before it
 starts. Coordinator-proposed Tasks reserve their Worker Invocation
 allocations at proposal time (§5.5.1), before the Task can become `ready`;
-the Task-level reservation becomes the Worker Invocation's reservation
-when the Invocation is created. Unused allocation returns to the node when
-the Invocation reaches a terminal state.
+when the Worker Invocation is created the runtime, in one transaction,
+releases the Task reservation (reason `transferred_to_invocation`,
+consumed amounts zero) and creates the Invocation reservation for the same
+amounts, recording the Task reservation id on the new row. Two auditable
+rows result; a reservation is never re-pointed from a Task to an
+Invocation, and the node's capacity is at no point free or doubly
+reserved. Cancelling or rejecting the Task releases its reservation
+without creating an Invocation reservation. Unused allocation returns to
+the node when the Invocation reaches a terminal state.
 
 **Exhaustion.**
 

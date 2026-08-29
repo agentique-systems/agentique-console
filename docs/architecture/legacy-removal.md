@@ -15,17 +15,27 @@ module, table, or concept that takes over the responsibility; it does not
 imply any code is ported. "Deleted" means the responsibility itself does
 not exist in the new architecture.
 
-Final module layout referenced below (to be created under these names):
+Final module layout referenced below (to be created under these names).
+`core/` and `server/src/persistence/` are permanent production boundaries
+created in Phase 1 (see [migration-contract.md](migration-contract.md) §2,
+"Final module boundaries"); they are not transitional and are not renamed
+at cutover:
 
 ```
-shared/src/
-  ids.ts  workspaces.ts  conversations.ts  runs.ts  plans.ts  requirements.ts
-  decisions.ts  tasks.ts  artifacts.ts  handoffs.ts  agents.ts  invocations.ts
-  evaluations.ts  workspace-state.ts  capacity.ts  events.ts  usage.ts  api.ts  index.ts
+core/                      package @agentique-console/core
+  package.json  tsconfig.json
+  src/
+    index.ts  ids.ts  validation.ts  errors.ts  transitions.ts
+    workspaces.ts  conversations.ts  runs.ts  budgets.ts  plans.ts
+    requirements.ts  decisions.ts  tasks.ts  artifacts.ts  handoffs.ts
+    agents.ts  invocations.ts  verification.ts  workspace-state.ts
+    capacity.ts  usage.ts  events.ts  schema-info.ts  api.ts
 server/src/
   main.ts  app.ts  config.ts  boot.ts
-  db/            schema.ts  client.ts  migrations/0000_orchestration_core.sql
-  events/        journal.ts  stream.ts
+  persistence/   schema.ts  client.ts  database.ts  transactions.ts
+                 blob-store.ts  journal.ts  stores/*.ts
+                 migrations/0000_orchestration_core.sql
+  events/        stream.ts
   workspaces/    service.ts  fs-browse.ts
   conversations/ service.ts
   runs/          service.ts  budgets.ts  reservations.ts  usage.ts
@@ -55,15 +65,19 @@ retired term (`agent-sessions/`, `agent-profiles/`, `sessions/`,
 `lane-runtime/`, `continuation/`, `portfolio/`, `compose/`, `timeline/`,
 `completion/`, `system/`, `orchestrator/`); those directories are deleted.
 Conventional paths — `events/`, `tasks/`, `handoffs/`, `workspaces/`,
-`capacity/`, `db/`, `db/stores/`, `api/`, `api/routes/`, `runtime/`,
-`web/src/app/`, `web/src/api/`, `web/src/live/`, `web/src/stores/`,
-`web/src/lib/`, `web/src/tasks/`, `web/src/agents/` — remain appropriate
-final locations. For these the disposition below reads "legacy contents
-replaced": every legacy file under the path is deleted or rewritten, and
-what remains conforms completely to the new architecture and depends on
-nothing scheduled for deletion. `server/src/sdk/` is deleted as a path;
-its provider-neutral mechanics may be extracted into `server/src/provider/`
-under [migration-contract.md](migration-contract.md) rule 7.
+`capacity/`, `api/`, `api/routes/`, `runtime/`, `web/src/app/`,
+`web/src/api/`, `web/src/live/`, `web/src/stores/`, `web/src/lib/`,
+`web/src/tasks/`, `web/src/agents/` — remain appropriate final locations.
+For these the disposition below reads "legacy contents replaced": every
+legacy file under the path is deleted or rewritten, and what remains
+conforms completely to the new architecture and depends on nothing
+scheduled for deletion. `server/src/sdk/` is deleted as a path; its
+provider-neutral mechanics may be extracted into `server/src/provider/`
+under [migration-contract.md](migration-contract.md) rule 7. `shared/`
+and `server/src/db/` are deleted whole at cutover, untouched until then;
+their replacements are the permanent boundaries `core/` and
+`server/src/persistence/`, which exist alongside them during construction
+with no import, export, or runtime call in either direction.
 
 ## 1. Concept map
 
@@ -105,17 +119,22 @@ under [migration-contract.md](migration-contract.md) rule 7.
 | Timeline service | `server/src/timeline/*`, `GET /api/user-sessions/:id/timeline` | Plan view built from Events (`web/src/plan/`). |
 | Evaluation harness and rubrics | `server/evals/*` | Deleted with no replacement. |
 
-## 2. Shared package (`shared/src/`)
+## 2. Shared package (`shared/`)
+
+The whole `shared/` workspace package (`@agentique-console/shared`) is
+deleted at cutover and replaced by `core/` (`@agentique-console/core`).
+Nothing in `shared/` is edited during construction; no file in `core/`
+imports, re-exports, or aliases anything from it. Per-file replacements:
 
 | File | Disposition |
 |---|---|
-| `domain.ts` | Deleted. Replaced by `workspaces.ts`, `conversations.ts`, `runs.ts`, `plans.ts`, `tasks.ts`, `decisions.ts`, `agents.ts`, `invocations.ts`, `evaluations.ts`, `workspace-state.ts`. Types deleted with no replacement: `SessionMode`, `SessionPhase`, `AgentSession*`, `AgentRunSummary`, `Speaker`, `SessionMessage`, `ScheduledAssignment*`, `SessionTreeBranch`, `AgentProfile*`, `Timeline*`, `Interaction*`, `DecisionIssue*`, `Assumption*`, `RequirementFrontier*`, `RequirementVerificationGap`, `RequirementReversal`, `ChangeImpact*`, `WorkstreamLink*`, `Completion*`, `Coverage*`, `Continuation*`, `Objective*`, `PATTERN`, `PatternId`, `RunSummaryStats`, `SystemPauseState`, `PauseReason`. |
-| `events.ts` | Replaced at the same path by the new event catalogue. Every `user_session.*`, `agent_session.*`, `handoff.*`, `task.assignment.*`, `task.sync.*`, `workstream.*`, `change_impact.*`, `assumption.*`, `decision_issue.*`, `requirement.delegated`, `requirement.link.changed`, `project.continuation.recorded`, `run.capacity.*`, `run.completion.proposed`, `run.signoff.resolved`, `run.reopened`, `system.pause.changed`, `agent_profile.*`, `operator.decision.recorded`, `tool.denied`, `usage.recorded` type is deleted. New namespaces: `workspace.*`, `conversation.*`, `run.*`, `execution_plan.*`, `plan_node.*`, `invocation.*`, `attempt.*`, `requirement.*`, `acceptance_criterion.*`, `decision.*`, `task.*`, `artifact.*`, `handoff.*`, `evaluation.*`, `gate.*`, `snapshot.*`, `changeset.*`, `usage.*`; transient `stream.*`. |
-| `api.ts` | Replaced at the same path. Every legacy request/response type and path comment is deleted (section 5). |
-| `handoffs.ts` | Replaced at the same path by the single Handoff shape. `HandoffCore`, `HandoffExtension`, `*HandoffData`, `HandoffDraft`, `HandoffMetadata`, `HandoffSummary`, `HandoffPage`, `HandoffTrigger`, `HandoffRisk`, `HANDOFF_READ_*` deleted. `EvidenceRef` → `Evidence` in `evaluations.ts`. |
-| `models.ts` | Replaced by `agents.ts` (model catalogue on Agent Definitions). `ORCHESTRATOR_MODELS`, `DEFAULT_ORCHESTRATOR_MODEL`, `isOrchestratorModel`, `orchestratorModelLabel` deleted. |
-| `requirements.ts` | Replaced at the same path. Outline grammar, `parseRequirementsDocument`, `renderCommitted`, `renderStatusOutline`, `flattenRequirementGraph`, `deriveComposedStatus`, `requirementStatusCounts` are rewritten against the new Requirement type; `RequirementVerifiedBy`, `RequirementVerifyExpectation`, `(verify: …)` markers deleted. |
-| `index.ts` | Rewritten to export the new modules. |
+| `domain.ts` | Deleted. Replaced by `core/src/workspaces.ts`, `conversations.ts`, `runs.ts`, `plans.ts`, `tasks.ts`, `decisions.ts`, `agents.ts`, `invocations.ts`, `verification.ts`, `workspace-state.ts`. Types deleted with no replacement: `SessionMode`, `SessionPhase`, `AgentSession*`, `AgentRunSummary`, `Speaker`, `SessionMessage`, `ScheduledAssignment*`, `SessionTreeBranch`, `AgentProfile*`, `Timeline*`, `Interaction*`, `DecisionIssue*`, `Assumption*`, `RequirementFrontier*`, `RequirementVerificationGap`, `RequirementReversal`, `ChangeImpact*`, `WorkstreamLink*`, `Completion*`, `Coverage*`, `Continuation*`, `Objective*`, `PATTERN`, `PatternId`, `RunSummaryStats`, `SystemPauseState`, `PauseReason`. |
+| `events.ts` | Deleted. Replaced by `core/src/events.ts`, the new event catalogue. Every `user_session.*`, `agent_session.*`, `handoff.*`, `task.assignment.*`, `task.sync.*`, `workstream.*`, `change_impact.*`, `assumption.*`, `decision_issue.*`, `requirement.delegated`, `requirement.link.changed`, `project.continuation.recorded`, `run.capacity.*`, `run.completion.proposed`, `run.signoff.resolved`, `run.reopened`, `system.pause.changed`, `agent_profile.*`, `operator.decision.recorded`, `tool.denied`, `usage.recorded` type is deleted. New namespaces: `workspace.*`, `conversation.*`, `run.*`, `execution_plan.*`, `plan_node.*`, `invocation.*`, `attempt.*`, `requirement.*`, `acceptance_criterion.*`, `decision.*`, `task.*`, `artifact.*`, `handoff.*`, `evaluation.*`, `gate.*`, `snapshot.*`, `changeset.*`, `usage.*`; transient `stream.*`. |
+| `api.ts` | Deleted. Replaced by `core/src/api.ts`. Every legacy request/response type and path comment is deleted (section 5). |
+| `handoffs.ts` | Deleted. Replaced by `core/src/handoffs.ts`, the single Handoff shape. `HandoffCore`, `HandoffExtension`, `*HandoffData`, `HandoffDraft`, `HandoffMetadata`, `HandoffSummary`, `HandoffPage`, `HandoffTrigger`, `HandoffRisk`, `HANDOFF_READ_*` deleted. `EvidenceRef` → `Evidence` in `core/src/requirements.ts`. |
+| `models.ts` | Deleted. Replaced by `core/src/agents.ts` (model catalogue on Agent Definitions). `ORCHESTRATOR_MODELS`, `DEFAULT_ORCHESTRATOR_MODEL`, `isOrchestratorModel`, `orchestratorModelLabel` deleted. |
+| `requirements.ts` | Deleted. Replaced by `core/src/requirements.ts`. Outline grammar, `parseRequirementsDocument`, `renderCommitted`, `renderStatusOutline`, `flattenRequirementGraph`, `deriveComposedStatus`, `requirementStatusCounts` are rewritten against the new Requirement type; `RequirementVerifiedBy`, `RequirementVerifyExpectation`, `(verify: …)` markers deleted. |
+| `index.ts`, `package.json`, `tsconfig.json` | Deleted with the package. `core/src/index.ts` is the final public surface. |
 
 ## 3. Server (`server/src/`)
 
@@ -128,7 +147,7 @@ under [migration-contract.md](migration-contract.md) rule 7.
 | `boot.ts` | Rewritten: Attempt recovery from manifests only. `expirePendingOnBoot`, delivery requeue, `reconcileDurableCommunication`, orphan worktree recovery by session, orphan child archival, scheduled-assignment redrive, cron fallback, governance sweep deleted. |
 | `context.ts` | Retained in shape (`AppContext`), retyped to the new `App`. |
 | `config.ts` | Rewritten. See section 9 for variables. |
-| `ids.ts` | Rewritten with the glossary prefixes. Legacy prefixes `us`, `as`, `msg`, `int`, `turn`, `delivery`, `cron`, `proc`, `draft`, `rnd`, `sched`, `spec`, `ost`, `rqs`, `rqd`, `proj`, `rql`, `chg`, `wl`, `di`, `ckpt`, `land` deleted. |
+| `ids.ts` | Deleted. Replaced by `core/src/ids.ts` (the glossary prefixes). Legacy prefixes `us`, `as`, `msg`, `int`, `turn`, `delivery`, `cron`, `proc`, `draft`, `rnd`, `sched`, `spec`, `ost`, `rqs`, `rqd`, `proj`, `rql`, `chg`, `wl`, `di`, `ckpt`, `land` deleted. |
 | `errors.ts`, `late.ts`, `async-queue.ts` | Generic; rewritten under the same names if the new code needs them (rule 7 of the contract), otherwise deleted. |
 | `paging.ts`, `paging.test.ts` | Deleted with no replacement (existed for `read_handoff` and tool-output windowing; Artifacts are read by id and range). |
 | `recovery.ts`, `recovery.test.ts` | Deleted. Replaced by Attempt recovery in `invocations/attempts.ts`. |
@@ -169,14 +188,22 @@ under [migration-contract.md](migration-contract.md) rule 7.
 
 ### 3.5 Persistence (`db/`)
 
+The whole `server/src/db/` directory is deleted at cutover and replaced by
+the permanent persistence boundary `server/src/persistence/`. Nothing
+under `server/src/db/` is edited during construction; nothing under
+`server/src/persistence/` imports from it; the legacy application keeps
+opening its own database through `db/client.ts` and its already-generated
+legacy migrations, and no new legacy migration is generated
+(`server/drizzle.config.ts` points at `persistence/` from Phase 1).
+
 | Path | Disposition |
 |---|---|
-| `schema.ts` | Replaced at the same path by the new schema (section 4). |
-| `client.ts`, `client.test.ts` | Replaced at the same path; adds the reset-required check. |
-| `repo.ts` | Deleted. Replaced by per-domain stores. |
-| `stores/*.ts` (`assignment-store`, `assumption-store`, `change-impact-store`, `continuation-store`, `cron-store`, `decision-issue-store`, `handoff-store`, `index`, `interaction-store`, `landing-store`, `message-store`, `pattern-state-store`, `project-store`, `requirement-store`, `session-store`, `state-store`, `task-store`, `usage-store`, `workspace-store`, `workstream-store`) | Legacy contents deleted. New stores live under each domain directory (or under `db/stores/` if the implementation prefers; the path is not legacy, the files are). |
+| `schema.ts` | Deleted. Replaced by `persistence/schema.ts` (section 4). |
+| `client.ts`, `client.test.ts` | Deleted. Replaced by `persistence/client.ts` and `persistence/database.ts` (the reset-required check) with their tests. |
+| `repo.ts` | Deleted. Replaced by the per-aggregate stores under `persistence/stores/`. |
+| `stores/*.ts` (`assignment-store`, `assumption-store`, `change-impact-store`, `continuation-store`, `cron-store`, `decision-issue-store`, `handoff-store`, `index`, `interaction-store`, `landing-store`, `message-store`, `pattern-state-store`, `project-store`, `requirement-store`, `session-store`, `state-store`, `task-store`, `usage-store`, `workspace-store`, `workstream-store`) | Deleted. Replaced by `persistence/stores/*.ts`. |
 | `stores/requirement-store.test.ts`, `stores/requirement-projection.test.ts` | Deleted. |
-| `migrations/0000_baseline.sql` … `0027_right_mandarin.sql`, `migrations/meta/*` | Deleted. Replaced by `migrations/0000_orchestration_core.sql` and its journal. |
+| `migrations/0000_baseline.sql` … `0027_right_mandarin.sql`, `migrations/meta/*` | Deleted. Replaced by `persistence/migrations/0000_orchestration_core.sql` and its journal. |
 | `glossary-migration.test.ts`, `mailbox-timing.test.ts`, `objective-migration.test.ts`, `projection-migration.test.ts`, `spec-migration.test.ts` | Deleted. |
 
 ### 3.6 Other services
@@ -197,9 +224,9 @@ under [migration-contract.md](migration-contract.md) rule 7.
 | `workspaces/landings.ts` | Deleted. Replaced by `workspace-state/integration.ts` (Integration Workspace) and `workspace-state/publish.ts` (Publication to the Target). |
 | `runtime/worktree-manager.ts`, `worktree-manager.test.ts`, `auto-init.test.ts` | Deleted. Replaced by `workspace-state/worktrees.ts`; git-level mechanics may be extracted where they depend on nothing legacy. |
 | `lane-runtime/checkpoint.ts`, `lane-runtime/usage.ts` | Deleted. Checkpoint reconstruction has no replacement. Usage → `runs/usage.ts`. |
-| `events/bus.ts`, `bus.test.ts`, `projections.ts`, `runtime.ts`, `artifact-store.ts` | Legacy contents replaced: `events/journal.ts` and `events/stream.ts` take the path; the artifact store moves to `artifacts/store.ts`; legacy projections and the bus are deleted. |
+| `events/bus.ts`, `bus.test.ts`, `projections.ts`, `runtime.ts`, `artifact-store.ts` | Legacy contents replaced: the Event journal is `persistence/journal.ts` and `events/stream.ts` takes the path; the artifact blob store is `persistence/blob-store.ts` behind `artifacts/` (service); legacy projections and the bus are deleted. |
 | `sdk/client.ts`, `types.ts`, `mapping.ts`, `mapping.test.ts`, `env.ts`, `env.test.ts`, `effort.ts`, `fake.ts`, `failure-classifier.ts`, `tool-result.ts` | The `sdk/` path is deleted. Provider-neutral mechanics — SDK resolution, message-stream mapping, usage normalization (uncached / cache-creation / cache-read accounting), failure classification, environment setup, effort mapping, tool-result shaping, the scripted fake, and their tests — may be extracted and rewritten into `server/src/provider/*` under [migration-contract.md](migration-contract.md) rule 7, provided the result depends only on the new domain. Anything in these files that references seats, lanes, generations, rotation, or wake digests is deleted. |
-| `sdk/session-store.ts` | Deleted with no replacement (the SessionStore mirror). The optional resumption path keeps an index in `provider_continuations` (`provider/continuations.ts`) pointing at opaque payloads in the adapter-owned store (`provider/continuation-store.ts`), keyed by Attempt; payloads never enter canonical rows. |
+| `sdk/session-store.ts` | Deleted with no replacement (the SessionStore mirror). The optional resumption path keeps an index in `provider_continuations` (written through `persistence/stores/`) pointing at opaque payloads in the adapter-owned store (`provider/continuation-store.ts`), keyed by Attempt; payloads never enter canonical rows. |
 | `sdk/native-capability-policy.ts`, `native-capability-policy.test.ts` | Deleted as legacy behaviour (seat-oriented classification). The classification data and the tripwire test over the installed SDK's tool schemas may be extracted into `agents/policy.ts` (role-based capability policy and Tool Policy intersection). |
 | `api/server.ts`, `api/errors.ts`, `api/sse.ts`, `api/wire.ts` | Legacy contents replaced at the same paths. |
 | `api/routes/agent-profiles.ts`, `agent-sessions.ts`, `compose.ts`, `events.ts`, `fs.ts`, `system.ts`, `tasks.ts`, `user-sessions.ts`, `workspaces.ts` | Legacy contents replaced: `api/routes/` remains the location of the final routes, named for the new resources (section 5). Files named for retired resources are deleted; `events.ts`, `fs.ts`, `system.ts`, `tasks.ts`, `workspaces.ts` are rewritten. |
@@ -354,7 +381,7 @@ deleted. The replacement tool table is in
 |---|---|
 | `main.tsx`, `app/app.tsx`, `app/shell.tsx`, `app/providers.tsx`, `app/topbar.tsx`, `app/theme-toggle.tsx` | Rewritten against the new routes: `/conversations`, `/runs`, `/agents`. |
 | `app/conversation-region.tsx`, `inspector-region.tsx`, `session-details.tsx`, `sidebar-region.tsx`, `strip-region.tsx`, `system-pause.tsx`, `*.test.tsx` | Deleted. → `conversation/`, `run/`, `plan/`. |
-| `api/client.ts`, `keys.ts`, `mutations.ts`, `queries.ts` | Rewritten against `shared/src/api.ts`. |
+| `api/client.ts`, `keys.ts`, `mutations.ts`, `queries.ts` | Rewritten against `core/src/api.ts`. |
 | `live/boot.ts`, `event-router.ts`, `spine.ts`, `stream-kit.ts`, `watched.ts`, `attention.tsx`, `*.test.ts` | Rewritten as one event subscription in `live/`; `attention.tsx` deleted with no replacement. |
 | `session/*` (composer, draft-view, model-picker, orchestration-panel, plan-card, project-status, question-card, requirements-panel, run-summary-card, session-header, user-fold, user-groups, user-parts, user-stream, user-transcript, tests) | Deleted. → `conversation/` (message list, composer), `requirements/`, `decisions/`, `run/` (Run header, Gate view). |
 | `agents/*` (accents, active-session, agent-card, agent-fold, agent-groups, agent-pane, agent-parts, agent-stream, agent-strip, agent-transcript, flow-stem, tests) | Deleted. → `plan/` (plan graph, Plan Node inspector, Invocation and Attempt views) and `agents/` (Agent Definition list). |
@@ -407,10 +434,12 @@ legacy. The legacy `server/vitest.config.ts` exclusion of
 
 ## 12. Retained without change
 
-`package.json` (minus the deleted scripts), `package-lock.json`,
-`tsconfig.base.json`, `shared/tsconfig.json`, `server/tsconfig.json`,
-`web/tsconfig.json`, `server/drizzle.config.ts`, `scripts/dev.mjs`,
-`.gitignore`, `web/index.html`, `web/vite.config.ts`,
+`package.json` (minus the deleted scripts, plus the `core` workspace),
+`package-lock.json`, `tsconfig.base.json`, `server/tsconfig.json`,
+`web/tsconfig.json`, `scripts/dev.mjs`, `server/drizzle.config.ts`
+(retained as a tool; it points at `server/src/persistence/schema.ts` and
+`server/src/persistence/migrations` from Phase 1 and is the only Drizzle
+configuration), `.gitignore`, `web/index.html`, `web/vite.config.ts`,
 `web/vitest.config.ts`, `web/tests/setup.ts`, `web/src/styles/globals.css`,
 `web/src/components/ui/*`, `web/src/lib/utils.ts`,
 `web/src/stores/connection.ts`, `web/src/stores/theme.ts`, the

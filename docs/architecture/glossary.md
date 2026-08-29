@@ -29,6 +29,14 @@ Related documents:
 - "Canonical" means the single authoritative record of a fact. Anything
   that restates a canonical fact (a transcript, a prompt, a UI card, a
   summary) is a projection and may be regenerated at any time.
+- The TypeScript type, identifier prefix, state set, transition table, and
+  runtime validator for every term below live in the permanent,
+  provider-neutral domain package `@agentique-console/core` (`core/src/`),
+  which the final server and the final web application both import. The
+  canonical stores live behind the permanent server persistence boundary
+  `server/src/persistence/`. Neither imports the legacy `shared/` package or
+  the legacy `server/src/db/` schema; see
+  [migration-contract.md](migration-contract.md) §3.
 
 ## Scope objects
 
@@ -54,7 +62,7 @@ Orchestrator's replies, and the Decisions, Requirements, and Artifacts that
 earlier Runs produced, so a later Run can reference them by id. A
 Conversation has zero or more Runs and at most one active Run at a time.
 
-- Id prefix: `cv_`
+- Id prefix: `cv_`; `cvm_` for a Conversation message
 - Owned by: the operator (messages) and the runtime (structure)
 - Store: `conversations`, `conversation_messages`
 - Related: Workspace, Run, Orchestrator, Decision
@@ -210,7 +218,8 @@ outcome or constraint (statement, composition, Acceptance Criteria, which
 Requirements exist); changes to how the work is done change Tasks or the
 Execution Plan, never the Requirement. The id is stable across revisions.
 
-- Id prefix: `req_`
+- Id prefix: `req_` (stable across revisions); `reqr_` for a Requirement
+  revision (one immutable, numbered snapshot of a Conversation's tree)
 - Owned by: the operator (approval) and the Orchestrator (proposal)
 - Store: `requirements`, `requirement_revisions`, `requirement_status_changes`
 - Related: Acceptance Criterion, Task, Evidence, Decision, Gate
@@ -698,12 +707,17 @@ logical turn is a new Invocation), `in_progress` (as a Task state; use
   `plan_edges`, `plan_node_requirements`, `acceptance_criteria`,
   `context_manifests`, `agent_definition_revisions`, `publications`,
   `capacity_leases`, `budget_reservations`, `provider_continuations`.
-- Id prefixes: `ws_`, `cv_`, `run_`, `pn_`, `pe_`, `req_`, `ac_`, `dec_`,
-  `task_`, `art_`, `ho_`, `agd_`, `agdr_`, `inv_`, `att_`, `eval_`,
-  `gate_`, `snap_`, `cs_`, `pub_`, `lease_`, `bres_`, `cm_`, `use_`. A
-  prefix is never reused for a second kind. `plan_node_requirements` and
-  `provider_continuations` are keyed by the objects they index and carry
-  no own prefix.
+- Id prefixes: `ws_`, `cv_`, `cvm_`, `run_`, `pn_`, `pe_`, `req_`,
+  `reqr_`, `ac_`, `dec_`, `task_`, `art_`, `ho_`, `agd_`, `agdr_`, `inv_`,
+  `att_`, `eval_`, `gate_`, `snap_`, `cs_`, `pub_`, `lease_`, `bres_`,
+  `cm_`, `use_`. A prefix is never reused for a second kind.
+  `plan_node_requirements` and `provider_continuations` are keyed by the
+  objects they index and carry no own prefix; `events`,
+  `requirement_status_changes`, and `task_dependencies` are keyed by a
+  sequence number or by the objects they relate and carry no prefix.
+  Ids are `<prefix>_` followed by 24 lower-case hexadecimal characters,
+  minted by `core/src/ids.ts`; timestamps are ISO 8601 UTC with millisecond
+  precision (`2026-01-01T00:00:00.000Z`).
 - Plan Node kinds are `pattern` and `join`; Invocation purposes,
   Attempt kinds (`initial`, `retry`), Attempt start modes (`fresh`,
   `resumed`), and Task states are lower snake_case as listed in their
@@ -713,7 +727,10 @@ logical turn is a new Invocation), `in_progress` (as a Task state; use
   see [migration-contract.md](migration-contract.md) §4. It is not a
   domain object.
 - Type names are the singular PascalCase term: `Run`, `PlanNode`,
-  `AcceptanceCriterion`, `ContextManifest`.
+  `AcceptanceCriterion`, `ContextManifest`. They are exported from
+  `@agentique-console/core` and nowhere else; the closed value sets are
+  exported as `readonly` tuples (`RUN_STATUSES`, `PATTERNS`,
+  `INVOCATION_PURPOSES`, …) with a matching `zod` schema each.
 - Event types are `<object>.<past_tense_verb>` in snake_case:
   `run.started`, `plan_node.completed`, `invocation.failed`,
   `gate.passed`, `decision.recorded`.

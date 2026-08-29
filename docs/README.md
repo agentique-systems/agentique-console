@@ -25,6 +25,22 @@ described in the migration contract replaces the rest.
   configuration, documents, and UI components that are deleted or replaced,
   each mapped to its final replacement.
 
+## Final module boundaries
+
+The replacement is built inside two permanent boundaries that coexist with
+the legacy code during construction and remain after cutover:
+
+- `core/` (`@agentique-console/core`) — the provider-neutral domain
+  package: types, identifiers, state sets, transition validators, runtime
+  schemas, and Event contracts. Replaces `shared/` at cutover.
+- `server/src/persistence/` — the server persistence boundary: SQLite
+  schema, client, database-open guard, baseline migration, stores,
+  transaction helpers, Artifact blob store. Replaces `server/src/db/` at
+  cutover.
+
+Neither imports from, exports to, or is selected against its legacy
+counterpart; see the migration contract §2–§4.
+
 ## Legacy documents (scheduled for deletion at cutover)
 
 These describe the current implementation. They are superseded by the
