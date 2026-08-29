@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "b9b85001-aaba-49c7-a472-a78fd9bcc15d",
+  "id": "2c999c0b-9c39-494c-b798-08f75d0f1839",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "acceptance_criteria": {
@@ -820,6 +820,13 @@
           "notNull": false,
           "autoincrement": false
         },
+        "capacity_source": {
+          "name": "capacity_source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
         "status": {
           "name": "status",
           "type": "text",
@@ -930,6 +937,14 @@
         "budget_reservations_status": {
           "name": "budget_reservations_status",
           "value": "\"budget_reservations\".\"status\" IN ('active', 'released')"
+        },
+        "budget_reservations_capacity_source": {
+          "name": "budget_reservations_capacity_source",
+          "value": "\"budget_reservations\".\"capacity_source\" IN ('ordinary', 'final_reserve')"
+        },
+        "budget_reservations_final_reserve_run_only": {
+          "name": "budget_reservations_final_reserve_run_only",
+          "value": "\"budget_reservations\".\"parent_type\" = 'run' OR \"budget_reservations\".\"capacity_source\" = 'ordinary'"
         },
         "budget_reservations_release_reason": {
           "name": "budget_reservations_release_reason",
@@ -2753,6 +2768,13 @@
           "notNull": true,
           "autoincrement": false
         },
+        "revision_number": {
+          "name": "revision_number",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
         "source_node_id": {
           "name": "source_node_id",
           "type": "text",
@@ -2804,6 +2826,16 @@
         }
       },
       "indexes": {
+        "plan_edges_revision": {
+          "name": "plan_edges_revision",
+          "columns": [
+            "run_id",
+            "revision_number",
+            "target_node_id",
+            "position"
+          ],
+          "isUnique": false
+        },
         "plan_edges_source": {
           "name": "plan_edges_source",
           "columns": [
@@ -2814,19 +2846,30 @@
         "plan_edges_target": {
           "name": "plan_edges_target",
           "columns": [
-            "target_node_id",
-            "position"
+            "target_node_id"
           ],
           "isUnique": false
         },
         "plan_edges_unique": {
           "name": "plan_edges_unique",
           "columns": [
+            "run_id",
+            "revision_number",
             "source_node_id",
             "target_node_id",
             "type",
             "label",
             "round"
+          ],
+          "isUnique": true
+        },
+        "plan_edges_target_position": {
+          "name": "plan_edges_target_position",
+          "columns": [
+            "run_id",
+            "revision_number",
+            "target_node_id",
+            "position"
           ],
           "isUnique": true
         }
@@ -2867,6 +2910,21 @@
           ],
           "columnsTo": [
             "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "plan_edges_revision_fk": {
+          "name": "plan_edges_revision_fk",
+          "tableFrom": "plan_edges",
+          "tableTo": "execution_plan_revisions",
+          "columnsFrom": [
+            "run_id",
+            "revision_number"
+          ],
+          "columnsTo": [
+            "run_id",
+            "number"
           ],
           "onDelete": "no action",
           "onUpdate": "no action"
@@ -2931,9 +2989,24 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
+        },
+        "position": {
+          "name": "position",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
         }
       },
       "indexes": {
+        "plan_node_requirements_position": {
+          "name": "plan_node_requirements_position",
+          "columns": [
+            "plan_node_id",
+            "position"
+          ],
+          "isUnique": true
+        },
         "plan_node_requirements_requirement": {
           "name": "plan_node_requirements_requirement",
           "columns": [
@@ -3008,7 +3081,12 @@
         }
       },
       "uniqueConstraints": {},
-      "checkConstraints": {}
+      "checkConstraints": {
+        "plan_node_requirements_position": {
+          "name": "plan_node_requirements_position",
+          "value": "\"plan_node_requirements\".\"position\" >= 0"
+        }
+      }
     },
     "plan_nodes": {
       "name": "plan_nodes",
@@ -3027,8 +3105,8 @@
           "notNull": true,
           "autoincrement": false
         },
-        "revision_number": {
-          "name": "revision_number",
+        "created_in_revision_number": {
+          "name": "created_in_revision_number",
           "type": "integer",
           "primaryKey": false,
           "notNull": true,
@@ -3090,8 +3168,8 @@
           "notNull": false,
           "autoincrement": false
         },
-        "agents": {
-          "name": "agents",
+        "shape": {
+          "name": "shape",
           "type": "text",
           "primaryKey": false,
           "notNull": false,
@@ -3128,13 +3206,6 @@
         "max_wall_clock_ms": {
           "name": "max_wall_clock_ms",
           "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "bounds": {
-          "name": "bounds",
-          "type": "text",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
@@ -3220,6 +3291,21 @@
           ],
           "onDelete": "no action",
           "onUpdate": "no action"
+        },
+        "plan_nodes_created_in_revision_fk": {
+          "name": "plan_nodes_created_in_revision_fk",
+          "tableFrom": "plan_nodes",
+          "tableTo": "execution_plan_revisions",
+          "columnsFrom": [
+            "run_id",
+            "created_in_revision_number"
+          ],
+          "columnsTo": [
+            "run_id",
+            "number"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -3255,11 +3341,19 @@
         },
         "plan_nodes_pattern_shape": {
           "name": "plan_nodes_pattern_shape",
-          "value": "\"plan_nodes\".\"kind\" <> 'pattern' OR (\"plan_nodes\".\"pattern\" IS NOT NULL AND \"plan_nodes\".\"fan_in_policy\" IS NULL AND \"plan_nodes\".\"agents\" IS NOT NULL AND \"plan_nodes\".\"input\" IS NOT NULL AND \"plan_nodes\".\"bounds\" IS NOT NULL AND \"plan_nodes\".\"on_allocation_exhausted\" IS NOT NULL AND \"plan_nodes\".\"gate_acceptance_criterion_ids\" IS NOT NULL)"
+          "value": "\"plan_nodes\".\"kind\" <> 'pattern' OR (\"plan_nodes\".\"pattern\" IS NOT NULL AND \"plan_nodes\".\"fan_in_policy\" IS NULL AND \"plan_nodes\".\"shape\" IS NOT NULL AND json_extract(\"plan_nodes\".\"shape\", '$.pattern') = \"plan_nodes\".\"pattern\" AND \"plan_nodes\".\"input\" IS NOT NULL AND \"plan_nodes\".\"on_allocation_exhausted\" IS NOT NULL AND \"plan_nodes\".\"gate_acceptance_criterion_ids\" IS NOT NULL)"
         },
         "plan_nodes_join_shape": {
           "name": "plan_nodes_join_shape",
-          "value": "\"plan_nodes\".\"kind\" <> 'join' OR (\"plan_nodes\".\"pattern\" IS NULL AND \"plan_nodes\".\"fan_in_policy\" IS NOT NULL AND \"plan_nodes\".\"agents\" IS NULL AND \"plan_nodes\".\"input\" IS NULL AND \"plan_nodes\".\"bounds\" IS NULL AND \"plan_nodes\".\"on_allocation_exhausted\" IS NULL AND \"plan_nodes\".\"gate_acceptance_criterion_ids\" IS NULL AND \"plan_nodes\".\"alloc_cost_usd\" = 0 AND \"plan_nodes\".\"alloc_tokens\" = 0 AND \"plan_nodes\".\"alloc_attempts\" = 0)"
+          "value": "\"plan_nodes\".\"kind\" <> 'join' OR (\"plan_nodes\".\"pattern\" IS NULL AND \"plan_nodes\".\"fan_in_policy\" IS NOT NULL AND \"plan_nodes\".\"shape\" IS NULL AND \"plan_nodes\".\"input\" IS NULL AND \"plan_nodes\".\"on_allocation_exhausted\" IS NULL AND \"plan_nodes\".\"gate_acceptance_criterion_ids\" IS NULL AND \"plan_nodes\".\"alloc_cost_usd\" = 0 AND \"plan_nodes\".\"alloc_tokens\" = 0 AND \"plan_nodes\".\"alloc_attempts\" = 0)"
+        },
+        "plan_nodes_root_shape": {
+          "name": "plan_nodes_root_shape",
+          "value": "\"plan_nodes\".\"source_path\" <> 'root' OR (\"plan_nodes\".\"kind\" = 'pattern' AND \"plan_nodes\".\"pattern\" = 'single' AND json_extract(\"plan_nodes\".\"shape\", '$.role') = 'orchestrator')"
+        },
+        "plan_nodes_orchestrator_only_root": {
+          "name": "plan_nodes_orchestrator_only_root",
+          "value": "\"plan_nodes\".\"kind\" <> 'pattern' OR \"plan_nodes\".\"pattern\" <> 'single' OR \"plan_nodes\".\"source_path\" = 'root' OR json_extract(\"plan_nodes\".\"shape\", '$.role') = 'worker'"
         },
         "plan_nodes_join_never_runs": {
           "name": "plan_nodes_join_never_runs",
@@ -3272,6 +3366,117 @@
         "plan_nodes_terminal_has_ended_at": {
           "name": "plan_nodes_terminal_has_ended_at",
           "value": "(\"plan_nodes\".\"status\" IN ('succeeded', 'failed', 'cancelled', 'skipped')) = (\"plan_nodes\".\"ended_at\" IS NOT NULL)"
+        }
+      }
+    },
+    "plan_revision_nodes": {
+      "name": "plan_revision_nodes",
+      "columns": {
+        "run_id": {
+          "name": "run_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "revision_number": {
+          "name": "revision_number",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "plan_node_id": {
+          "name": "plan_node_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "position": {
+          "name": "position",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "plan_revision_nodes_position": {
+          "name": "plan_revision_nodes_position",
+          "columns": [
+            "run_id",
+            "revision_number",
+            "position"
+          ],
+          "isUnique": true
+        },
+        "plan_revision_nodes_node": {
+          "name": "plan_revision_nodes_node",
+          "columns": [
+            "plan_node_id"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "plan_revision_nodes_run_id_runs_id_fk": {
+          "name": "plan_revision_nodes_run_id_runs_id_fk",
+          "tableFrom": "plan_revision_nodes",
+          "tableTo": "runs",
+          "columnsFrom": [
+            "run_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "plan_revision_nodes_plan_node_id_plan_nodes_id_fk": {
+          "name": "plan_revision_nodes_plan_node_id_plan_nodes_id_fk",
+          "tableFrom": "plan_revision_nodes",
+          "tableTo": "plan_nodes",
+          "columnsFrom": [
+            "plan_node_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "plan_revision_nodes_revision_fk": {
+          "name": "plan_revision_nodes_revision_fk",
+          "tableFrom": "plan_revision_nodes",
+          "tableTo": "execution_plan_revisions",
+          "columnsFrom": [
+            "run_id",
+            "revision_number"
+          ],
+          "columnsTo": [
+            "run_id",
+            "number"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "plan_revision_nodes_run_id_revision_number_plan_node_id_pk": {
+          "columns": [
+            "run_id",
+            "revision_number",
+            "plan_node_id"
+          ],
+          "name": "plan_revision_nodes_run_id_revision_number_plan_node_id_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "plan_revision_nodes_position": {
+          "name": "plan_revision_nodes_position",
+          "value": "\"plan_revision_nodes\".\"position\" >= 0"
         }
       }
     },
@@ -4029,6 +4234,27 @@
           "notNull": false,
           "autoincrement": false
         },
+        "final_reserve_cost_usd": {
+          "name": "final_reserve_cost_usd",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "final_reserve_tokens": {
+          "name": "final_reserve_tokens",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "final_reserve_attempts": {
+          "name": "final_reserve_attempts",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
         "base_snapshot_id": {
           "name": "base_snapshot_id",
           "type": "text",
@@ -4200,6 +4426,14 @@
         "runs_budget_non_negative": {
           "name": "runs_budget_non_negative",
           "value": "\"runs\".\"max_cost_usd\" >= 0 AND \"runs\".\"max_tokens\" >= 0 AND \"runs\".\"max_attempts\" >= 0"
+        },
+        "runs_final_reserve_non_negative": {
+          "name": "runs_final_reserve_non_negative",
+          "value": "\"runs\".\"final_reserve_cost_usd\" >= 0 AND \"runs\".\"final_reserve_tokens\" >= 0 AND \"runs\".\"final_reserve_attempts\" >= 0"
+        },
+        "runs_final_reserve_within_budget": {
+          "name": "runs_final_reserve_within_budget",
+          "value": "\"runs\".\"final_reserve_cost_usd\" <= \"runs\".\"max_cost_usd\" AND \"runs\".\"final_reserve_tokens\" <= \"runs\".\"max_tokens\" AND \"runs\".\"final_reserve_attempts\" <= \"runs\".\"max_attempts\""
         }
       }
     },

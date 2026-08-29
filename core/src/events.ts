@@ -21,6 +21,8 @@ import {
   planEdgeSchema,
   planNodeRequirementSchema,
   planNodeSchema,
+  planRejectionReasonSchema,
+  planRevisionNodeSchema,
   PLAN_NODE_STATUSES,
   PLAN_NODE_WAIT_REASONS,
 } from "./plans.ts";
@@ -31,13 +33,13 @@ import {
   REQUIREMENT_STATUSES,
   REQUIREMENT_STATUS_ACTORS,
 } from "./requirements.ts";
-import { runFailureSchema, RUN_STATUSES, RUN_WAIT_REASONS } from "./runs.ts";
+import { runFailureSchema, runSchema, RUN_STATUSES, RUN_WAIT_REASONS } from "./runs.ts";
 import { taskBlockReasonSchema, taskDependencySchema, taskSchema, TASK_FAILURE_REASONS, TASK_STATUSES } from "./tasks.ts";
 import { usageSchema } from "./usage.ts";
 import { changesetSchema, publicationSchema, snapshotSchema } from "./workspace-state.ts";
 import { workspaceSchema } from "./workspaces.ts";
 import { evaluationSchema, gateSchema } from "./verification.ts";
-import { idSchema, nonEmptyString, parseOrThrow, timestampSchema, type Timestamp } from "./validation.ts";
+import { idSchema, nonEmptyString, parseOrThrow, timestampSchema, uniqueIds, type Timestamp } from "./validation.ts";
 
 /** Who caused an Event. */
 export type EventActor =
@@ -91,7 +93,7 @@ export const EVENT_CATALOGUE = {
   "conversation.created": conversationSchema,
   "conversation.updated": conversationSchema,
   "conversation.message_posted": conversationMessageSchema,
-  "run.created": z.strictObject({ runId: idSchema("run"), kind: nonEmptyString }),
+  "run.created": runSchema,
   "run.started": transition(RUN_STATUSES),
   "run.waiting": z.strictObject({ from: z.enum(RUN_STATUSES), to: z.literal("waiting"), waitReason: z.enum(RUN_WAIT_REASONS) }),
   "run.wait_cleared": z.strictObject({ from: z.literal("waiting"), to: z.literal("running"), clearedWaitReason: z.enum(RUN_WAIT_REASONS) }),
@@ -105,12 +107,24 @@ export const EVENT_CATALOGUE = {
   "run.published": publicationSchema,
   "run.publish_failed": publicationSchema,
   "execution_plan.revised": executionPlanRevisionSchema,
+  /** The complete compiled graph of one accepted revision: its membership, member nodes, edges, and scope rows. */
   "execution_plan.compiled": z.strictObject({
     runId: idSchema("run"),
     revisionNumber: z.number().int().min(1),
+    membership: z.array(planRevisionNodeSchema),
     nodes: z.array(planNodeSchema),
     edges: z.array(planEdgeSchema),
     requirements: z.array(planNodeRequirementSchema),
+    createdNodeIds: uniqueIds(idSchema("planNode")),
+    reusedNodeIds: uniqueIds(idSchema("planNode")),
+    cancelledNodeIds: uniqueIds(idSchema("planNode")),
+  }),
+  /** A proposal that was not accepted: no revision number is consumed and nothing else is written. */
+  "execution_plan.rejected": z.strictObject({
+    runId: idSchema("run"),
+    proposedByInvocationId: idSchema("invocation").nullable(),
+    currentRevisionNumber: z.number().int().min(1),
+    reasons: z.array(planRejectionReasonSchema).min(1),
   }),
   "plan_node.created": planNodeSchema,
   "plan_node.ready": transition(PLAN_NODE_STATUSES),

@@ -39,6 +39,7 @@ function toDomain(row: Row): Run {
         maxWallClockMs: row.maxWallClockMs,
         maxConcurrency: row.maxConcurrency,
       },
+      finalReserve: { costUsd: row.finalReserveCostUsd, tokens: row.finalReserveTokens, attempts: row.finalReserveAttempts },
       baseSnapshotId: row.baseSnapshotId,
       integrationSnapshotId: row.integrationSnapshotId,
       finalSnapshotId: row.finalSnapshotId,
@@ -52,13 +53,30 @@ function toDomain(row: Row): Run {
   );
 }
 
+/** The Workspace-state fields a Run acquires during its life; each is recorded once it exists. */
+export interface RunWorkspaceState {
+  baseSnapshotId?: SnapshotId;
+  integrationSnapshotId?: SnapshotId;
+  integrationWorkspacePath?: string;
+}
+
+/**
+ * Run rows. The Run's kind, Target, Budget, and final reserve are chosen at
+ * creation and never updated (the schema's `runs_definition_immutable`
+ * trigger enforces it); every later write names only lifecycle columns.
+ */
 export class RunStore {
   constructor(
     private readonly ctx: PersistenceContext,
     private readonly conversations: ConversationStore,
   ) {}
 
-  /** Creates a Run in `created` and makes it the Conversation's active Run. */
+  /**
+   * Creates a Run in `created` with its Budget and persisted final reserve
+   * and makes it the Conversation's active Run. The complete initial state
+   * of a Run (base Snapshot, Integration Workspace, revision 1, root node) is
+   * established by the Run creation service in the same root transaction.
+   */
   create(input: RunInput, options?: WriteOptions): Run {
     const valid = parseOrThrow(runInputSchema, input, "Run input");
     return this.ctx.tx.write(() => {
@@ -73,6 +91,7 @@ export class RunStore {
         waitReason: null,
         target: valid.target,
         budget: valid.budget,
+        finalReserve: valid.finalReserve,
         baseSnapshotId: null,
         integrationSnapshotId: null,
         finalSnapshotId: null,
@@ -88,7 +107,7 @@ export class RunStore {
         scope: runScope({ id: run.id, conversationId: run.conversationId, workspaceId: run.workspaceId, status: "created" }),
         subjectType: "run",
         subjectId: run.id,
-        payload: { runId: run.id, kind: run.kind },
+        payload: run,
         ...writeMeta(options),
       });
       this.ctx.db.insert(runs).values(this.toRow(run)).run();
@@ -167,7 +186,18 @@ export class RunStore {
         payload: payload as never,
         ...writeMeta(options),
       });
-      this.ctx.db.update(runs).set(this.toRow(next)).where(eq(runs.id, id)).run();
+      this.ctx.db
+        .update(runs)
+        .set({
+          status: next.status,
+          waitReason: next.waitReason,
+          finalSnapshotId: next.finalSnapshotId,
+          failure: next.failure,
+          updatedAt: next.updatedAt,
+          endedAt: next.endedAt,
+        })
+        .where(eq(runs.id, id))
+        .run();
       if (RUN_MACHINE.isTerminal(next.status)) {
         this.conversations.setActiveRun(current.conversationId, null, options);
       }
@@ -175,26 +205,50 @@ export class RunStore {
     });
   }
 
-  /** Records the base or integration Snapshot; both are lifecycle fields, not transitions. */
-  recordSnapshot(id: RunId, which: "base" | "integration", snapshotId: SnapshotId): Run {
+  /**
+   * Records the base or integration Snapshot and the Integration Workspace
+   * path; these are lifecycle fields, not transitions. A Snapshot must belong
+   * to the Run's Workspace; the base Snapshot and the path are recorded once.
+   */
+  recordWorkspaceState(id: RunId, state: RunWorkspaceState): Run {
     return this.ctx.tx.write(() => {
       const current = this.get(id);
       if (RUN_MACHINE.isTerminal(current.status)) throw new ConflictError(`Run ${id} has ended`);
-      const snapshot = requireRow(
-        this.ctx.db.select({ runId: snapshots.runId, workspaceId: snapshots.workspaceId }).from(snapshots).where(eq(snapshots.id, snapshotId)).get(),
-        "Snapshot",
-        snapshotId,
-      );
-      if (snapshot.workspaceId !== current.workspaceId) {
-        throw new ConflictError(`Snapshot ${snapshotId} belongs to another Workspace`);
+      for (const snapshotId of [state.baseSnapshotId, state.integrationSnapshotId]) {
+        if (snapshotId === undefined) continue;
+        const snapshot = requireRow(
+          this.ctx.db.select({ runId: snapshots.runId, workspaceId: snapshots.workspaceId }).from(snapshots).where(eq(snapshots.id, snapshotId)).get(),
+          "Snapshot",
+          snapshotId,
+        );
+        if (snapshot.workspaceId !== current.workspaceId) {
+          throw new ConflictError(`Snapshot ${snapshotId} belongs to another Workspace`);
+        }
+      }
+      if (state.baseSnapshotId !== undefined && current.baseSnapshotId !== null) {
+        throw new ConflictError(`Run ${id} already has base Snapshot ${current.baseSnapshotId}`);
+      }
+      if (state.integrationWorkspacePath !== undefined && current.integrationWorkspacePath !== null) {
+        throw new ConflictError(`Run ${id} already has an Integration Workspace at ${current.integrationWorkspacePath}`);
       }
       const next: Run = {
         ...current,
-        baseSnapshotId: which === "base" ? snapshotId : current.baseSnapshotId,
-        integrationSnapshotId: which === "integration" ? snapshotId : current.integrationSnapshotId,
+        baseSnapshotId: state.baseSnapshotId ?? current.baseSnapshotId,
+        integrationSnapshotId: state.integrationSnapshotId ?? current.integrationSnapshotId,
+        integrationWorkspacePath: state.integrationWorkspacePath ?? current.integrationWorkspacePath,
         updatedAt: this.ctx.clock(),
       };
-      this.ctx.db.update(runs).set(this.toRow(next)).where(eq(runs.id, id)).run();
+      parseOrThrow(runSchema, next, "Run");
+      this.ctx.db
+        .update(runs)
+        .set({
+          baseSnapshotId: next.baseSnapshotId,
+          integrationSnapshotId: next.integrationSnapshotId,
+          integrationWorkspacePath: next.integrationWorkspacePath,
+          updatedAt: next.updatedAt,
+        })
+        .where(eq(runs.id, id))
+        .run();
       return next;
     });
   }
@@ -213,6 +267,9 @@ export class RunStore {
       maxAttempts: run.budget.maxAttempts,
       maxWallClockMs: run.budget.maxWallClockMs,
       maxConcurrency: run.budget.maxConcurrency,
+      finalReserveCostUsd: run.finalReserve.costUsd,
+      finalReserveTokens: run.finalReserve.tokens,
+      finalReserveAttempts: run.finalReserve.attempts,
       baseSnapshotId: run.baseSnapshotId,
       integrationSnapshotId: run.integrationSnapshotId,
       finalSnapshotId: run.finalSnapshotId,

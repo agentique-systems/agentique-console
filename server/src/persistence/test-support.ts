@@ -4,15 +4,23 @@
  * domain objects through the stores themselves.
  */
 import {
+  EMPTY_MANIFEST_TEMPLATE,
+  ROOT_NODE_TITLE,
   ROOT_SOURCE_PATH,
   type AgentDefinitionRevision,
+  type AgentDefinitionRevisionId,
   type Allocation,
   type BudgetLimits,
+  type CompiledOperation,
   type Conversation,
   type Invocation,
   type InvocationPurpose,
   type InvocationRole,
+  type JoinPlanNodeDefinition,
+  type PatternPlanNodeDefinition,
+  type PlanGraph,
   type PlanNode,
+  type PlanNodeScope,
   type RequirementId,
   type RequirementRevision,
   type Run,
@@ -22,7 +30,7 @@ import { MemoryBlobStore } from "./blob-store.ts";
 import { createPersistenceContext, type PersistenceContext, type PersistenceDiagnostic } from "./context.ts";
 import { openDatabase, type OpenedDatabase } from "./database.ts";
 import { createStores, type Stores } from "./stores/index.ts";
-import type { CompiledPlanNode } from "./stores/plans.ts";
+import type { RevisionEdgeInput, RevisionNodeInput } from "./stores/plans.ts";
 
 export interface TestClock {
   now: () => string;
@@ -75,6 +83,8 @@ export const DEFAULT_BUDGET: BudgetLimits = {
   maxConcurrency: 4,
 };
 
+export const ZERO_RESERVE: Allocation = { costUsd: 0, tokens: 0, attempts: 0 };
+export const DEFAULT_FINAL_RESERVE: Allocation = { costUsd: 5, tokens: 50_000, attempts: 3 };
 export const SMALL_ALLOCATION: Allocation = { costUsd: 10, tokens: 100_000, attempts: 5 };
 export const INVOCATION_ALLOCATION: Allocation = { costUsd: 2, tokens: 20_000, attempts: 2 };
 
@@ -98,76 +108,126 @@ export function seedAgentRevision(h: Harness, name = "orchestrator"): AgentDefin
   });
 }
 
-export function patternNode(h: Harness, run: Run, overrides: Partial<CompiledPlanNode> & { agentDefinitionRevisionId: string }): CompiledPlanNode {
-  const { agentDefinitionRevisionId, ...rest } = overrides;
+export function operation(agentDefinitionRevisionId: string, title = "step"): CompiledOperation {
+  return { agentDefinitionRevisionId: agentDefinitionRevisionId as AgentDefinitionRevisionId, title, input: { ...EMPTY_MANIFEST_TEMPLATE } };
+}
+
+/** A `single` worker node definition; override any field. */
+export function patternDefinition(
+  agentDefinitionRevisionId: string,
+  overrides: Partial<Omit<PatternPlanNodeDefinition, "kind" | "shape">> & { shape?: PatternPlanNodeDefinition["shape"]; scope?: PlanNodeScope | null } = {},
+): PatternPlanNodeDefinition {
+  const shape = overrides.shape ?? { pattern: "single", role: "worker", operation: operation(agentDefinitionRevisionId, overrides.title ?? "node") };
   return {
-    id: h.ctx.ids("planNode"),
-    runId: run.id,
-    revisionNumber: 1,
     kind: "pattern",
-    pattern: "single",
+    pattern: shape.pattern,
     title: "node",
-    sourcePath: "0",
+    sourcePath: "e0",
     allocation: SMALL_ALLOCATION,
     maxConcurrency: null,
     maxWallClockMs: null,
     runOnDependencyFailure: false,
-    input: { taskIds: [], decisionIds: [], artifactIds: [] },
-    agents: { worker: agentDefinitionRevisionId as never },
-    bounds: {},
+    input: { ...EMPTY_MANIFEST_TEMPLATE },
     onAllocationExhausted: "fail",
     gateAcceptanceCriterionIds: [],
-    ...rest,
-  } as CompiledPlanNode;
+    scope: null,
+    ...overrides,
+    shape,
+  };
 }
 
-export function joinNode(h: Harness, run: Run, overrides: Partial<CompiledPlanNode> = {}): CompiledPlanNode {
+export function coordinatorWorkerDefinition(agentDefinitionRevisionId: string, overrides: Partial<Omit<PatternPlanNodeDefinition, "kind" | "shape">> = {}): PatternPlanNodeDefinition {
+  return patternDefinition(agentDefinitionRevisionId, {
+    ...overrides,
+    shape: {
+      pattern: "coordinator_worker",
+      coordinator: operation(agentDefinitionRevisionId, "coordinator"),
+      worker: operation(agentDefinitionRevisionId, "worker"),
+      bounds: { maxTasks: 8, maxConcurrentWorkers: 2, maxCoordinatorInvocations: 4 },
+    },
+  });
+}
+
+export function joinDefinition(overrides: Partial<Omit<JoinPlanNodeDefinition, "kind">> = {}): JoinPlanNodeDefinition {
   return {
-    id: h.ctx.ids("planNode"),
-    runId: run.id,
-    revisionNumber: 1,
     kind: "join",
     fanInPolicy: "require_all",
     title: "join",
-    sourcePath: "0.join",
+    sourcePath: "e0/join",
     allocation: { costUsd: 0, tokens: 0, attempts: 0 },
     maxConcurrency: null,
     maxWallClockMs: null,
     runOnDependencyFailure: false,
     ...overrides,
-  } as CompiledPlanNode;
+  };
 }
 
-/** Workspace, Conversation, Run (running), an Agent Definition revision, and the root node. */
-export function seedRun(h: Harness, options: { budget?: BudgetLimits; kind?: "code" | "other" } = {}): Seeded {
+export function rootDefinition(agentDefinitionRevisionId: string, allocation: Allocation = SMALL_ALLOCATION): PatternPlanNodeDefinition {
+  return patternDefinition(agentDefinitionRevisionId, {
+    title: ROOT_NODE_TITLE,
+    sourcePath: ROOT_SOURCE_PATH,
+    allocation,
+    onAllocationExhausted: "extend",
+    shape: { pattern: "single", role: "orchestrator", operation: operation(agentDefinitionRevisionId, ROOT_NODE_TITLE) },
+  });
+}
+
+/** Mints an id for a definition so it can be handed to `materializeRevision`. */
+export function nodeInput(h: Harness, definition: RevisionNodeInput["definition"]): RevisionNodeInput {
+  return { id: h.ctx.ids("planNode"), definition };
+}
+
+/**
+ * Workspace, Conversation, Run (running), an Agent Definition revision, and
+ * the root node: the Run's complete initial state built through the stores,
+ * the way the Run creation service builds it.
+ */
+export function seedRun(h: Harness, options: { budget?: BudgetLimits; kind?: "code" | "other"; finalReserve?: Allocation; rootAllocation?: Allocation } = {}): Seeded {
   const workspace = h.stores.workspaces.create({ name: "demo", rootPath: `/tmp/demo-${h.ctx.ids("workspace")}`, kind: "git" });
   const conversation = h.stores.conversations.create({ workspaceId: workspace.id, title: "demo" });
   const definition = seedAgentRevision(h);
-  let run = h.stores.runs.create({
-    conversationId: conversation.id,
-    kind: options.kind ?? "code",
-    target: { kind: "branch", branch: "main" },
-    budget: options.budget ?? DEFAULT_BUDGET,
-  });
-  h.stores.plans.appendRevision(run.id, { version: 1, expressions: [] }, null);
-  const { nodes } = h.stores.plans.insertCompiledGraph({
-    runId: run.id,
-    revisionNumber: 1,
-    nodes: [
-      patternNode(h, run, {
-        agentDefinitionRevisionId: definition.id,
-        title: "Orchestrator",
-        sourcePath: ROOT_SOURCE_PATH,
-        agents: { orchestrator: definition.id },
-        onAllocationExhausted: "extend",
-      }),
-    ],
-    edges: [],
-    requirements: [],
+  const rootId = h.ctx.ids("planNode");
+  let run!: Run;
+  h.ctx.tx.write(() => {
+    run = h.stores.runs.create({
+      conversationId: conversation.id,
+      kind: options.kind ?? "code",
+      target: { kind: "branch", branch: "main" },
+      budget: options.budget ?? DEFAULT_BUDGET,
+      finalReserve: options.finalReserve ?? ZERO_RESERVE,
+    });
+    h.stores.plans.appendRevision(run.id, { version: 1, expressions: [] }, null);
+    h.stores.plans.materializeRevision({
+      runId: run.id,
+      revisionNumber: 1,
+      membership: [rootId],
+      createdNodes: [{ id: rootId, definition: rootDefinition(definition.id, options.rootAllocation) }],
+      edges: [],
+      cancelledNodeIds: [],
+    });
   });
   run = h.stores.runs.transition(run.id, { to: "running" });
-  const root = nodes[0] as PlanNode;
-  return { workspace, conversation, run, definition, root: h.stores.plans.transitionNode(root.id, { to: "ready" }) };
+  return { workspace, conversation, run, definition, root: h.stores.plans.transitionNode(rootId, { to: "ready" }) };
+}
+
+/**
+ * Appends an accepted revision that keeps every current member and adds
+ * `nodes` with `edges`, the way the plan-revision service does after
+ * reconciliation; returns the new graph.
+ */
+export function extendPlan(h: Harness, seeded: Seeded, nodes: RevisionNodeInput[], edges: RevisionEdgeInput[] = []): PlanGraph {
+  return h.ctx.tx.write(() => {
+    const current = h.stores.plans.currentGraph(seeded.run.id);
+    const revision = h.stores.plans.appendRevision(seeded.run.id, { version: 1, expressions: [] }, null);
+    return h.stores.plans.materializeRevision({
+      runId: seeded.run.id,
+      revisionNumber: revision.number,
+      membership: [...current.nodes.map((n) => n.id), ...nodes.map((n) => n.id)],
+      createdNodes: nodes,
+      edges: [...current.edges.map((e) => ({ sourceNodeId: e.sourceNodeId, targetNodeId: e.targetNodeId, type: e.type, position: e.position, ...(e.type === "branch" ? { label: e.label } : {}), ...(e.type === "retry" ? { round: e.round } : {}) })), ...edges],
+      cancelledNodeIds: [],
+    });
+  });
 }
 
 export function seedInvocation(

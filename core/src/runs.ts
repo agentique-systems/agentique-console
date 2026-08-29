@@ -1,5 +1,12 @@
 import { z } from "zod";
-import { budgetLimitsSchema, type BudgetLimits } from "./budgets.ts";
+import {
+  allocationFits,
+  allocationOfLimits,
+  allocationSchema,
+  budgetLimitsSchema,
+  type Allocation,
+  type BudgetLimits,
+} from "./budgets.ts";
 import type { ConversationId, RunId, SnapshotId, WorkspaceId } from "./ids.ts";
 import { defineStateMachine } from "./transitions.ts";
 import { idSchema, nonEmptyString, timestampSchema, type Timestamp } from "./validation.ts";
@@ -66,6 +73,13 @@ export interface Run {
   target: RunTarget;
   /** The Run Budget: the global cap and allocation pool. */
   budget: BudgetLimits;
+  /**
+   * The effective final reserve, chosen at Run creation and immutable: Run
+   * capacity that ordinary Plan Node allocations never consume, spent only on
+   * `final_synthesis` Orchestrator Invocations and `run_completion` Gate
+   * Evaluator Invocations.
+   */
+  finalReserve: Allocation;
   baseSnapshotId: SnapshotId | null;
   integrationSnapshotId: SnapshotId | null;
   finalSnapshotId: SnapshotId | null;
@@ -97,6 +111,7 @@ export const runSchema: z.ZodType<Run> = z
     waitReason: z.enum(RUN_WAIT_REASONS).nullable(),
     target: runTargetSchema,
     budget: budgetLimitsSchema,
+    finalReserve: allocationSchema,
     baseSnapshotId: idSchema("snapshot").nullable(),
     integrationSnapshotId: idSchema("snapshot").nullable(),
     finalSnapshotId: idSchema("snapshot").nullable(),
@@ -117,6 +132,10 @@ export const runSchema: z.ZodType<Run> = z
   .refine((run) => RUN_MACHINE.isTerminal(run.status) === (run.endedAt !== null), {
     message: "endedAt is set exactly when the Run is terminal",
     path: ["endedAt"],
+  })
+  .refine((run) => allocationFits(run.finalReserve, allocationOfLimits(run.budget)), {
+    message: "the final reserve fits within the Run Budget",
+    path: ["finalReserve"],
   });
 
 export interface RunInput {
@@ -124,14 +143,22 @@ export interface RunInput {
   kind: RunKind;
   target: RunTarget;
   budget: BudgetLimits;
+  /** Selected and validated at creation; persisted on the Run and never changed. */
+  finalReserve: Allocation;
 }
 
-export const runInputSchema: z.ZodType<RunInput> = z.strictObject({
-  conversationId: idSchema("conversation"),
-  kind: z.enum(RUN_KINDS),
-  target: runTargetSchema,
-  budget: budgetLimitsSchema,
-});
+export const runInputSchema: z.ZodType<RunInput> = z
+  .strictObject({
+    conversationId: idSchema("conversation"),
+    kind: z.enum(RUN_KINDS),
+    target: runTargetSchema,
+    budget: budgetLimitsSchema,
+    finalReserve: allocationSchema,
+  })
+  .refine((input) => allocationFits(input.finalReserve, allocationOfLimits(input.budget)), {
+    message: "the final reserve fits within the Run Budget",
+    path: ["finalReserve"],
+  });
 
 /**
  * A Run transition request. `waitReason` is required when entering

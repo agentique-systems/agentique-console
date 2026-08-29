@@ -1,6 +1,6 @@
 import { ConflictError, IllegalTransitionError, NotFoundError, RUN_STATUSES, ValidationError } from "@agentique-console/core";
 import { describe, expect, it } from "vitest";
-import { DEFAULT_BUDGET, openHarness, seedRun, seedSnapshot } from "../test-support.ts";
+import { DEFAULT_BUDGET, DEFAULT_FINAL_RESERVE, openHarness, seedRun, seedSnapshot } from "../test-support.ts";
 
 describe("conversations", () => {
   it("creates, updates, and journals a Conversation and its messages", () => {
@@ -27,11 +27,11 @@ describe("conversations", () => {
     try {
       const s = seedRun(h);
       expect(h.stores.conversations.get(s.conversation.id).activeRunId).toBe(s.run.id);
-      expect(() => h.stores.runs.create({ conversationId: s.conversation.id, kind: "code", target: { kind: "branch", branch: "main" }, budget: DEFAULT_BUDGET })).toThrow(ConflictError);
+      expect(() => h.stores.runs.create({ conversationId: s.conversation.id, kind: "code", target: { kind: "branch", branch: "main" }, budget: DEFAULT_BUDGET, finalReserve: DEFAULT_FINAL_RESERVE })).toThrow(ConflictError);
       expect(h.stores.runs.listByConversation(s.conversation.id)).toHaveLength(1);
       h.stores.runs.transition(s.run.id, { to: "cancelled" });
       expect(h.stores.conversations.get(s.conversation.id).activeRunId).toBeNull();
-      const next = h.stores.runs.create({ conversationId: s.conversation.id, kind: "other", target: { kind: "branch", branch: "main" }, budget: DEFAULT_BUDGET });
+      const next = h.stores.runs.create({ conversationId: s.conversation.id, kind: "other", target: { kind: "branch", branch: "main" }, budget: DEFAULT_BUDGET, finalReserve: DEFAULT_FINAL_RESERVE });
       expect(h.stores.conversations.get(s.conversation.id).activeRunId).toBe(next.id);
     } finally {
       h.close();
@@ -40,17 +40,37 @@ describe("conversations", () => {
 });
 
 describe("runs", () => {
-  it("creates a Run in created with its Budget and workspace attribution", () => {
+  it("creates a Run in created with its Budget, persisted final reserve, and workspace attribution", () => {
     const h = openHarness();
     try {
       const workspace = h.stores.workspaces.create({ name: "w", rootPath: "/w", kind: "git" });
       const conversation = h.stores.conversations.create({ workspaceId: workspace.id, title: null });
-      const run = h.stores.runs.create({ conversationId: conversation.id, kind: "code", target: { kind: "branch", branch: "main" }, budget: DEFAULT_BUDGET });
+      const run = h.stores.runs.create({ conversationId: conversation.id, kind: "code", target: { kind: "branch", branch: "main" }, budget: DEFAULT_BUDGET, finalReserve: DEFAULT_FINAL_RESERVE });
       expect(run.status).toBe("created");
       expect(run.workspaceId).toBe(workspace.id);
       expect(run.budget).toEqual(DEFAULT_BUDGET);
+      expect(run.finalReserve).toEqual(DEFAULT_FINAL_RESERVE);
       expect(h.stores.runs.get(run.id)).toEqual(run);
-      expect(h.ctx.journal.read({ runId: run.id }).map((e) => e.type)).toEqual(["run.created", "conversation.updated"]);
+      const events = h.ctx.journal.read({ runId: run.id });
+      expect(events.map((e) => e.type)).toEqual(["run.created", "conversation.updated"]);
+      expect(events[0]!.payload).toEqual(run);
+      // The final reserve is part of the Run's immutable definition.
+      expect(() => h.database.sqlite.prepare("UPDATE runs SET final_reserve_cost_usd = 0 WHERE id = ?").run(run.id)).toThrow(/immutable/);
+      expect(() => h.database.sqlite.prepare("DELETE FROM runs WHERE id = ?").run(run.id)).toThrow(/never deleted/);
+    } finally {
+      h.close();
+    }
+  });
+
+  it("rejects a final reserve that does not fit within the Run Budget", () => {
+    const h = openHarness();
+    try {
+      const workspace = h.stores.workspaces.create({ name: "w", rootPath: "/w", kind: "git" });
+      const conversation = h.stores.conversations.create({ workspaceId: workspace.id, title: null });
+      const input = { conversationId: conversation.id, kind: "code" as const, target: { kind: "branch" as const, branch: "main" }, budget: DEFAULT_BUDGET };
+      expect(() => h.stores.runs.create({ ...input, finalReserve: { costUsd: DEFAULT_BUDGET.maxCostUsd + 1, tokens: 0, attempts: 0 } })).toThrow(ValidationError);
+      expect(() => h.stores.runs.create({ ...input, finalReserve: { costUsd: -1, tokens: 0, attempts: 0 } })).toThrow(ValidationError);
+      expect(h.stores.runs.listByConversation(conversation.id)).toHaveLength(0);
     } finally {
       h.close();
     }
@@ -121,15 +141,20 @@ describe("runs", () => {
     }
   });
 
-  it("records base and integration Snapshots of the same Workspace only", () => {
+  it("records base and integration Snapshots of the same Workspace only, and the base Snapshot and Integration Workspace once", () => {
     const h = openHarness();
     try {
       const s = seedRun(h);
       const snapshot = seedSnapshot(h, s);
-      expect(h.stores.runs.recordSnapshot(s.run.id, "base", snapshot.id).baseSnapshotId).toBe(snapshot.id);
+      const recorded = h.stores.runs.recordWorkspaceState(s.run.id, { baseSnapshotId: snapshot.id, integrationWorkspacePath: "/tmp/integration" });
+      expect(recorded.baseSnapshotId).toBe(snapshot.id);
+      expect(recorded.integrationWorkspacePath).toBe("/tmp/integration");
+      expect(() => h.stores.runs.recordWorkspaceState(s.run.id, { baseSnapshotId: snapshot.id })).toThrow(ConflictError);
+      expect(() => h.stores.runs.recordWorkspaceState(s.run.id, { integrationWorkspacePath: "/tmp/other" })).toThrow(ConflictError);
       const other = h.stores.workspaces.create({ name: "o", rootPath: "/o", kind: "git" });
       const foreign = h.stores.snapshots.record({ workspaceId: other.id, runId: null, identity: { kind: "git", commitId: "c".repeat(40), treeId: "d".repeat(40) }, reason: "run_start" });
-      expect(() => h.stores.runs.recordSnapshot(s.run.id, "integration", foreign.id)).toThrow(ConflictError);
+      expect(() => h.stores.runs.recordWorkspaceState(s.run.id, { integrationSnapshotId: foreign.id })).toThrow(ConflictError);
+      expect(h.stores.runs.recordWorkspaceState(s.run.id, { integrationSnapshotId: seedSnapshot(h, s, "integration").id }).integrationSnapshotId).not.toBeNull();
     } finally {
       h.close();
     }

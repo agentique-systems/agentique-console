@@ -83,6 +83,16 @@ export function isReservationPair(parent: ReservationParentType, child: Reservat
   return RESERVATION_PAIRS.some(([p, c]) => p === parent && c === child);
 }
 
+/**
+ * Which partition of a Run's capacity a Run-level reservation draws from:
+ * the ordinary pool (the Run Budget less the persisted final reserve) or the
+ * final reserve itself. Only the two consumers the architecture names may
+ * draw from the final reserve; reservations below the Run are unpartitioned
+ * and always `ordinary`.
+ */
+export const RESERVATION_CAPACITY_SOURCES = ["ordinary", "final_reserve"] as const;
+export type ReservationCapacitySource = (typeof RESERVATION_CAPACITY_SOURCES)[number];
+
 export const RESERVATION_STATUSES = ["active", "released"] as const;
 export type ReservationStatus = (typeof RESERVATION_STATUSES)[number];
 
@@ -134,6 +144,7 @@ export interface BudgetReservation {
   reserved: Allocation;
   /** Final consumed amounts, recorded on release; `null` while active. */
   consumed: Allocation | null;
+  capacitySource: ReservationCapacitySource;
   status: ReservationStatus;
   transferredFromReservationId: BudgetReservationId | null;
   createdAt: Timestamp;
@@ -149,6 +160,7 @@ export const budgetReservationSchema: z.ZodType<BudgetReservation> = z
     child: reservationChildRefSchema,
     reserved: allocationSchema,
     consumed: allocationSchema.nullable(),
+    capacitySource: z.enum(RESERVATION_CAPACITY_SOURCES),
     status: z.enum(RESERVATION_STATUSES),
     transferredFromReservationId: idSchema("budgetReservation").nullable(),
     createdAt: timestampSchema,
@@ -158,6 +170,10 @@ export const budgetReservationSchema: z.ZodType<BudgetReservation> = z
   .refine((r) => isReservationPair(r.parent.type, r.child.type), {
     message: "reservation parent/child pair is not defined by the architecture",
     path: ["child"],
+  })
+  .refine((r) => r.parent.type === "run" || r.capacitySource === "ordinary", {
+    message: "only a Run-level reservation can draw from the final reserve",
+    path: ["capacitySource"],
   })
   .refine(
     (r) =>
@@ -180,4 +196,19 @@ export interface CapacityAccount {
 
 export function capacityAccount(limit: Allocation, reserved: Allocation, consumed: Allocation): CapacityAccount {
   return { limit, reserved, consumed, available: subtractAllocation(subtractAllocation(limit, reserved), consumed) };
+}
+
+/**
+ * A Run's capacity as two disjoint partitions of its Budget: the ordinary
+ * pool that compiled Plan Node allocations draw from, and the persisted final
+ * reserve that only `final_synthesis` and `run_completion` consumers may
+ * draw from. Each partition is accounted from its own reservations, so the
+ * reserve is never double-counted as an ordinary child reservation and is
+ * never represented as fabricated Usage.
+ */
+export interface RunCapacity {
+  limit: Allocation;
+  finalReserve: Allocation;
+  ordinary: CapacityAccount;
+  final: CapacityAccount;
 }

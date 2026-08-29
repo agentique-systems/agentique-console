@@ -1,6 +1,6 @@
 import { ConflictError, InsufficientCapacityError, InvariantViolationError, ValidationError } from "@agentique-console/core";
 import { describe, expect, it } from "vitest";
-import { openHarness, patternNode, seedInvocation, seedManifest, seedRequirements, seedRun, SMALL_ALLOCATION } from "../test-support.ts";
+import { coordinatorWorkerDefinition, extendPlan, nodeInput, openHarness, patternDefinition, seedInvocation, seedManifest, seedRequirements, seedRun, SMALL_ALLOCATION } from "../test-support.ts";
 
 describe("budget reservations", () => {
   it("reserves atomically from the parent's unreserved capacity and rejects over-reservation", () => {
@@ -11,15 +11,44 @@ describe("budget reservations", () => {
       let account = h.stores.reservations.capacity({ type: "run", id: s.run.id });
       expect(account.reserved).toEqual(SMALL_ALLOCATION);
       expect(account.available).toEqual({ costUsd: 15, tokens: 150_000, attempts: 7 });
-      const node = patternNode(h, s.run, { agentDefinitionRevisionId: s.definition.id, sourcePath: "1", allocation: { costUsd: 15, tokens: 100_000, attempts: 5 } });
-      h.stores.plans.insertCompiledGraph({ runId: s.run.id, revisionNumber: 1, nodes: [node], edges: [], requirements: [] });
+      extendPlan(h, s, [nodeInput(h, patternDefinition(s.definition.id, { sourcePath: "e1", allocation: { costUsd: 15, tokens: 100_000, attempts: 5 } }))]);
       account = h.stores.reservations.capacity({ type: "run", id: s.run.id });
       expect(account.available).toEqual({ costUsd: 0, tokens: 50_000, attempts: 2 });
       const before = h.ctx.journal.lastSeq();
-      const extra = patternNode(h, s.run, { agentDefinitionRevisionId: s.definition.id, sourcePath: "2", allocation: { costUsd: 0.01, tokens: 1, attempts: 1 } });
-      expect(() => h.stores.plans.insertCompiledGraph({ runId: s.run.id, revisionNumber: 1, nodes: [extra], edges: [], requirements: [] })).toThrow(InsufficientCapacityError);
+      const extra = nodeInput(h, patternDefinition(s.definition.id, { sourcePath: "e2", allocation: { costUsd: 0.01, tokens: 1, attempts: 1 } }));
+      expect(() => extendPlan(h, s, [extra])).toThrow(InsufficientCapacityError);
       expect(h.ctx.journal.lastSeq()).toBe(before);
       expect(h.stores.reservations.listByParent({ type: "run", id: s.run.id }).filter((r) => r.status === "active")).toHaveLength(2);
+    } finally {
+      h.close();
+    }
+  });
+
+  it("partitions Run capacity into the ordinary pool and the persisted final reserve, never double-counting (invariant 22)", () => {
+    const h = openHarness();
+    try {
+      const finalReserve = { costUsd: 5, tokens: 50_000, attempts: 3 };
+      const s = seedRun(h, { budget: { maxCostUsd: 30, maxTokens: 1_000_000, maxAttempts: 50, maxWallClockMs: null, maxConcurrency: null }, finalReserve });
+      let capacity = h.stores.reservations.runCapacity(s.run.id);
+      expect(capacity.limit).toEqual({ costUsd: 30, tokens: 1_000_000, attempts: 50 });
+      expect(capacity.finalReserve).toEqual(finalReserve);
+      expect(capacity.ordinary.limit).toEqual({ costUsd: 25, tokens: 950_000, attempts: 47 });
+      expect(capacity.ordinary.reserved).toEqual(SMALL_ALLOCATION);
+      expect(capacity.final).toEqual({ limit: finalReserve, reserved: { costUsd: 0, tokens: 0, attempts: 0 }, consumed: { costUsd: 0, tokens: 0, attempts: 0 }, available: finalReserve });
+      // `capacity` of the Run is the ordinary partition: the reserve is never available to compiled nodes.
+      expect(h.stores.reservations.capacity({ type: "run", id: s.run.id })).toEqual(capacity.ordinary);
+      const node = nodeInput(h, patternDefinition(s.definition.id, { sourcePath: "e1", allocation: { costUsd: 1, tokens: 1, attempts: 1 } }));
+      extendPlan(h, s, [node]);
+      h.stores.plans.transitionNode(node.id, { to: "cancelled", reason: "operator" });
+      // An explicitly authorized final-reserve consumer draws from the reserve partition alone.
+      expect(() => h.stores.reservations.reserve({ runId: s.run.id, parent: { type: "run", id: s.run.id }, child: { type: "plan_node", id: node.id }, amount: { costUsd: 6, tokens: 1, attempts: 1 }, capacitySource: "final_reserve" })).toThrow(InsufficientCapacityError);
+      const fromReserve = h.stores.reservations.reserve({ runId: s.run.id, parent: { type: "run", id: s.run.id }, child: { type: "plan_node", id: node.id }, amount: { costUsd: 3, tokens: 30_000, attempts: 2 }, capacitySource: "final_reserve" });
+      expect(fromReserve.capacitySource).toBe("final_reserve");
+      capacity = h.stores.reservations.runCapacity(s.run.id);
+      expect(capacity.final.available).toEqual({ costUsd: 2, tokens: 20_000, attempts: 1 });
+      expect(capacity.ordinary.available).toEqual({ costUsd: 15, tokens: 850_000, attempts: 42 });
+      // The reserve is a partition of the Run, never of a node.
+      expect(() => h.stores.reservations.reserve({ runId: s.run.id, parent: { type: "plan_node", id: s.root.id }, child: { type: "invocation", id: seedInvocation(h, s, { allocation: { costUsd: 0.5, tokens: 1, attempts: 1 } }).id }, amount: { costUsd: 0.1, tokens: 1, attempts: 1 }, capacitySource: "final_reserve" })).toThrow(ValidationError);
     } finally {
       h.close();
     }
@@ -71,8 +100,8 @@ describe("budget reservations", () => {
     try {
       const s = seedRun(h);
       const { revision, leafIds } = seedRequirements(h, s);
-      const node = patternNode(h, s.run, { agentDefinitionRevisionId: s.definition.id, pattern: "coordinator_worker", sourcePath: "1", agents: { coordinator: s.definition.id, worker: s.definition.id } });
-      h.stores.plans.insertCompiledGraph({ runId: s.run.id, revisionNumber: 1, nodes: [node], edges: [], requirements: [{ planNodeId: node.id, requirementId: leafIds[0]!, requirementRevisionId: revision.id }] });
+      const node = nodeInput(h, coordinatorWorkerDefinition(s.definition.id, { sourcePath: "e1", scope: { requirementRevisionId: revision.id, requirementIds: [leafIds[0]!] } }));
+      extendPlan(h, s, [node]);
       h.stores.plans.transitionNode(node.id, { to: "ready" });
       h.stores.plans.transitionNode(node.id, { to: "running" });
       const task = h.stores.tasks.create({ runId: s.run.id, planNodeId: node.id, origin: "coordinator", subject: "t", requirementIds: [leafIds[0]!], requirementRevisionId: revision.id, inputArtifactIds: [], requiredOutputs: [], replacesTaskId: null });
@@ -149,7 +178,7 @@ describe("budget reservations", () => {
       expect(nodeAccount.consumed).toEqual({ costUsd: 0.4, tokens: 4000, attempts: 1 });
       expect(nodeAccount.reserved).toEqual({ costUsd: 0, tokens: 0, attempts: 0 });
       h.stores.plans.transitionNode(s.root.id, { to: "running" });
-      h.stores.plans.transitionNode(s.root.id, { to: "cancelled" });
+      h.stores.plans.transitionNode(s.root.id, { to: "cancelled", reason: "operator" });
       const runAccount = h.stores.reservations.capacity({ type: "run", id: s.run.id });
       expect(runAccount.consumed).toEqual({ costUsd: 0.4, tokens: 4000, attempts: 1 });
       expect(runAccount.reserved).toEqual({ costUsd: 0, tokens: 0, attempts: 0 });
@@ -190,15 +219,15 @@ describe("reservation overrun", () => {
       expect(() => seedInvocation(h, s, { allocation: { costUsd: 0.01, tokens: 1, attempts: 1 } })).toThrow(InsufficientCapacityError);
 
       h.stores.plans.transitionNode(s.root.id, { to: "running" });
-      h.stores.plans.transitionNode(s.root.id, { to: "cancelled" });
+      h.stores.plans.transitionNode(s.root.id, { to: "cancelled", reason: "operator" });
       const nodeReservation = h.stores.reservations.listByChild({ type: "plan_node", id: s.root.id })[0]!;
       expect(nodeReservation.reserved).toEqual(SMALL_ALLOCATION);
       expect(nodeReservation.consumed).toEqual({ costUsd: 10.5, tokens: 1500, attempts: 1 });
       const run = h.stores.reservations.capacity({ type: "run", id: s.run.id });
       expect(run.consumed.costUsd).toBe(h.stores.usage.totalsForRun(s.run.id).costUsd);
       expect(run.available).toEqual({ costUsd: -0.5, tokens: 98_500, attempts: 4 });
-      const late = patternNode(h, s.run, { agentDefinitionRevisionId: s.definition.id, sourcePath: "9", allocation: { costUsd: 0.01, tokens: 1, attempts: 1 } });
-      expect(() => h.stores.plans.insertCompiledGraph({ runId: s.run.id, revisionNumber: 1, nodes: [late], edges: [], requirements: [] })).toThrow(InsufficientCapacityError);
+      const late = nodeInput(h, patternDefinition(s.definition.id, { sourcePath: "e9", allocation: { costUsd: 0.01, tokens: 1, attempts: 1 } }));
+      expect(() => extendPlan(h, s, [late])).toThrow(InsufficientCapacityError);
     } finally {
       h.close();
     }

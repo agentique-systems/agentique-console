@@ -149,3 +149,27 @@ export function agentDefinitionContentBytes(content: AgentDefinitionContent): st
 
 /** Evaluators are read-only: every write-capable tool is denied for that role. */
 export const READ_ONLY_ROLES = ["evaluator"] as const;
+
+/** The name of the Agent Definition that holds the Orchestrator role (glossary: Orchestrator). */
+export const ORCHESTRATOR_DEFINITION_NAME = "orchestrator";
+
+/**
+ * The capability tools the Orchestrator's definition must declare
+ * (execution-model invariant 2: read, write, and shell capabilities so that
+ * it may work directly). Capability names are the console's neutral names
+ * that provider adapters map to native tools.
+ */
+export const ORCHESTRATOR_REQUIRED_TOOLS = ["read", "write", "shell"] as const;
+
+/** Why an Agent Definition revision cannot hold the Orchestrator role; empty when it can. */
+export function orchestratorDefinitionDefects(definitionName: string, revision: Pick<AgentDefinitionRevision, "capabilities" | "toolPolicy">): string[] {
+  const defects: string[] = [];
+  if (definitionName !== ORCHESTRATOR_DEFINITION_NAME) {
+    defects.push(`definition ${definitionName} is not the ${ORCHESTRATOR_DEFINITION_NAME} definition`);
+  }
+  for (const tool of ORCHESTRATOR_REQUIRED_TOOLS) {
+    if (!revision.capabilities.tools.includes(tool)) defects.push(`capability ${tool} is not declared`);
+    else if (revision.toolPolicy[tool] === "denied") defects.push(`capability ${tool} is denied by the Tool Policy`);
+  }
+  return defects;
+}

@@ -1,6 +1,6 @@
 import { ConflictError, IllegalTransitionError, InvariantViolationError, ValidationError, type TaskInput } from "@agentique-console/core";
 import { describe, expect, it } from "vitest";
-import { openHarness, patternNode, seedArtifact, seedRequirements, seedRun, type Harness, type Seeded } from "../test-support.ts";
+import { openHarness, coordinatorWorkerDefinition, extendPlan, nodeInput, seedArtifact, seedRequirements, seedRun, type Harness, type Seeded } from "../test-support.ts";
 
 function taskInput(s: Seeded, overrides: Partial<TaskInput> = {}): TaskInput {
   return { runId: s.run.id, planNodeId: null, origin: "orchestrator", subject: "work", requirementIds: [], requirementRevisionId: null, inputArtifactIds: [], requiredOutputs: [], replacesTaskId: null, ...overrides };
@@ -110,8 +110,8 @@ describe("tasks", () => {
     try {
       const s = seedRun(h);
       const { revision, leafIds } = seedRequirements(h, s, 3);
-      const node = patternNode(h, s.run, { agentDefinitionRevisionId: s.definition.id, pattern: "coordinator_worker", sourcePath: "1", agents: { coordinator: s.definition.id, worker: s.definition.id } });
-      h.stores.plans.insertCompiledGraph({ runId: s.run.id, revisionNumber: 1, nodes: [node], edges: [], requirements: leafIds.slice(0, 2).map((requirementId) => ({ planNodeId: node.id, requirementId, requirementRevisionId: revision.id })) });
+      const node = nodeInput(h, coordinatorWorkerDefinition(s.definition.id, { sourcePath: "e1", scope: { requirementRevisionId: revision.id, requirementIds: leafIds.slice(0, 2) } }));
+      extendPlan(h, s, [node]);
       const proposal = (requirementIds: string[], requirementRevisionId = revision.id) =>
         h.stores.tasks.create(taskInput(s, { origin: "coordinator", planNodeId: node.id, requirementIds: requirementIds as never, requirementRevisionId }));
       expect(proposal([leafIds[0]!]).planNodeId).toBe(node.id);

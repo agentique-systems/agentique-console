@@ -9,6 +9,7 @@
 import { sql } from "drizzle-orm";
 import {
   check,
+  foreignKey,
   index,
   integer,
   primaryKey,
@@ -53,6 +54,7 @@ import {
   PUBLICATION_OUTCOMES,
   REQUIREMENT_STATUSES,
   REQUIREMENT_STATUS_ACTORS,
+  RESERVATION_CAPACITY_SOURCES,
   RESERVATION_CHILD_TYPES,
   RESERVATION_PARENT_TYPES,
   RESERVATION_RELEASE_REASONS,
@@ -87,8 +89,7 @@ import {
   type LeasedResources,
   type ManifestTemplate,
   type ModelPolicy,
-  type PatternBounds,
-  type PlanNodeAgents,
+  type PatternShape,
   type PublicationStrategy,
   type RequirementTreeEntry,
   type RunFailure,
@@ -190,6 +191,9 @@ export const runs = sqliteTable(
     maxAttempts: integer("max_attempts").notNull(),
     maxWallClockMs: integer("max_wall_clock_ms"),
     maxConcurrency: integer("max_concurrency"),
+    finalReserveCostUsd: real("final_reserve_cost_usd").notNull(),
+    finalReserveTokens: integer("final_reserve_tokens").notNull(),
+    finalReserveAttempts: integer("final_reserve_attempts").notNull(),
     baseSnapshotId: text("base_snapshot_id").references((): AnySQLiteColumn => snapshots.id),
     integrationSnapshotId: text("integration_snapshot_id").references((): AnySQLiteColumn => snapshots.id),
     finalSnapshotId: text("final_snapshot_id").references((): AnySQLiteColumn => snapshots.id),
@@ -212,6 +216,14 @@ export const runs = sqliteTable(
       sql`(${t.status} IN ('completed', 'failed', 'cancelled')) = (${t.endedAt} IS NOT NULL)`,
     ),
     check("runs_budget_non_negative", sql`${t.maxCostUsd} >= 0 AND ${t.maxTokens} >= 0 AND ${t.maxAttempts} >= 0`),
+    check(
+      "runs_final_reserve_non_negative",
+      sql`${t.finalReserveCostUsd} >= 0 AND ${t.finalReserveTokens} >= 0 AND ${t.finalReserveAttempts} >= 0`,
+    ),
+    check(
+      "runs_final_reserve_within_budget",
+      sql`${t.finalReserveCostUsd} <= ${t.maxCostUsd} AND ${t.finalReserveTokens} <= ${t.maxTokens} AND ${t.finalReserveAttempts} <= ${t.maxAttempts}`,
+    ),
   ],
 );
 
@@ -243,7 +255,7 @@ export const planNodes = sqliteTable(
     runId: text("run_id")
       .notNull()
       .references(() => runs.id),
-    revisionNumber: integer("revision_number").notNull(),
+    createdInRevisionNumber: integer("created_in_revision_number").notNull(),
     kind: text("kind").notNull(),
     pattern: text("pattern"),
     title: text("title").notNull(),
@@ -252,13 +264,12 @@ export const planNodes = sqliteTable(
     waitReason: text("wait_reason"),
     fanInPolicy: text("fan_in_policy"),
     input: text("input", { mode: "json" }).$type<ManifestTemplate>(),
-    agents: text("agents", { mode: "json" }).$type<PlanNodeAgents>(),
+    shape: text("shape", { mode: "json" }).$type<PatternShape>(),
     allocCostUsd: real("alloc_cost_usd").notNull(),
     allocTokens: integer("alloc_tokens").notNull(),
     allocAttempts: integer("alloc_attempts").notNull(),
     maxConcurrency: integer("max_concurrency"),
     maxWallClockMs: integer("max_wall_clock_ms"),
-    bounds: text("bounds", { mode: "json" }).$type<PatternBounds>(),
     onAllocationExhausted: text("on_allocation_exhausted"),
     runOnDependencyFailure: integer("run_on_dependency_failure", { mode: "boolean" }).notNull(),
     gateAcceptanceCriterionIds: text("gate_acceptance_criterion_ids", { mode: "json" }).$type<string[]>(),
@@ -270,6 +281,11 @@ export const planNodes = sqliteTable(
   (t) => [
     index("plan_nodes_run_status").on(t.runId, t.status),
     index("plan_nodes_run_source_path").on(t.runId, t.sourcePath),
+    foreignKey({
+      name: "plan_nodes_created_in_revision_fk",
+      columns: [t.runId, t.createdInRevisionNumber],
+      foreignColumns: [executionPlanRevisions.runId, executionPlanRevisions.number],
+    }),
     check("plan_nodes_kind", sql`${t.kind} IN (${inList(PLAN_NODE_KINDS)})`),
     check("plan_nodes_status", sql`${t.status} IN (${inList(PLAN_NODE_STATUSES)})`),
     check("plan_nodes_pattern", sql`${t.pattern} IS NULL OR ${t.pattern} IN (${inList(PATTERNS)})`),
@@ -282,11 +298,19 @@ export const planNodes = sqliteTable(
     check("plan_nodes_waiting_has_reason", sql`(${t.status} = 'waiting') = (${t.waitReason} IS NOT NULL)`),
     check(
       "plan_nodes_pattern_shape",
-      sql`${t.kind} <> 'pattern' OR (${t.pattern} IS NOT NULL AND ${t.fanInPolicy} IS NULL AND ${t.agents} IS NOT NULL AND ${t.input} IS NOT NULL AND ${t.bounds} IS NOT NULL AND ${t.onAllocationExhausted} IS NOT NULL AND ${t.gateAcceptanceCriterionIds} IS NOT NULL)`,
+      sql`${t.kind} <> 'pattern' OR (${t.pattern} IS NOT NULL AND ${t.fanInPolicy} IS NULL AND ${t.shape} IS NOT NULL AND json_extract(${t.shape}, '$.pattern') = ${t.pattern} AND ${t.input} IS NOT NULL AND ${t.onAllocationExhausted} IS NOT NULL AND ${t.gateAcceptanceCriterionIds} IS NOT NULL)`,
     ),
     check(
       "plan_nodes_join_shape",
-      sql`${t.kind} <> 'join' OR (${t.pattern} IS NULL AND ${t.fanInPolicy} IS NOT NULL AND ${t.agents} IS NULL AND ${t.input} IS NULL AND ${t.bounds} IS NULL AND ${t.onAllocationExhausted} IS NULL AND ${t.gateAcceptanceCriterionIds} IS NULL AND ${t.allocCostUsd} = 0 AND ${t.allocTokens} = 0 AND ${t.allocAttempts} = 0)`,
+      sql`${t.kind} <> 'join' OR (${t.pattern} IS NULL AND ${t.fanInPolicy} IS NOT NULL AND ${t.shape} IS NULL AND ${t.input} IS NULL AND ${t.onAllocationExhausted} IS NULL AND ${t.gateAcceptanceCriterionIds} IS NULL AND ${t.allocCostUsd} = 0 AND ${t.allocTokens} = 0 AND ${t.allocAttempts} = 0)`,
+    ),
+    check(
+      "plan_nodes_root_shape",
+      sql`${t.sourcePath} <> 'root' OR (${t.kind} = 'pattern' AND ${t.pattern} = 'single' AND json_extract(${t.shape}, '$.role') = 'orchestrator')`,
+    ),
+    check(
+      "plan_nodes_orchestrator_only_root",
+      sql`${t.kind} <> 'pattern' OR ${t.pattern} <> 'single' OR ${t.sourcePath} = 'root' OR json_extract(${t.shape}, '$.role') = 'worker'`,
     ),
     check("plan_nodes_join_never_runs", sql`${t.kind} <> 'join' OR ${t.status} NOT IN ('running', 'waiting')`),
     check("plan_nodes_alloc_non_negative", sql`${t.allocCostUsd} >= 0 AND ${t.allocTokens} >= 0 AND ${t.allocAttempts} >= 0`),
@@ -304,6 +328,7 @@ export const planEdges = sqliteTable(
     runId: text("run_id")
       .notNull()
       .references(() => runs.id),
+    revisionNumber: integer("revision_number").notNull(),
     sourceNodeId: text("source_node_id")
       .notNull()
       .references(() => planNodes.id),
@@ -317,17 +342,55 @@ export const planEdges = sqliteTable(
     createdAt: timestamp("created_at").notNull(),
   },
   (t) => [
+    index("plan_edges_revision").on(t.runId, t.revisionNumber, t.targetNodeId, t.position),
     index("plan_edges_source").on(t.sourceNodeId),
-    index("plan_edges_target").on(t.targetNodeId, t.position),
+    index("plan_edges_target").on(t.targetNodeId),
+    foreignKey({
+      name: "plan_edges_revision_fk",
+      columns: [t.runId, t.revisionNumber],
+      foreignColumns: [executionPlanRevisions.runId, executionPlanRevisions.number],
+    }),
     // SQLite treats NULL label/round as distinct here; the store layer also
-    // rejects a duplicate (source, target, type, label, round) edge.
-    uniqueIndex("plan_edges_unique").on(t.sourceNodeId, t.targetNodeId, t.type, t.label, t.round),
+    // rejects a duplicate (revision, source, target, type, label, round) edge.
+    uniqueIndex("plan_edges_unique").on(t.runId, t.revisionNumber, t.sourceNodeId, t.targetNodeId, t.type, t.label, t.round),
+    uniqueIndex("plan_edges_target_position").on(t.runId, t.revisionNumber, t.targetNodeId, t.position),
     check("plan_edges_type", sql`${t.type} IN (${inList(PLAN_EDGE_TYPES)})`),
     check("plan_edges_no_self_loop", sql`${t.sourceNodeId} <> ${t.targetNodeId}`),
     check("plan_edges_branch_label", sql`(${t.type} = 'branch') = (${t.label} IS NOT NULL)`),
     check("plan_edges_retry_round", sql`(${t.type} = 'retry') = (${t.round} IS NOT NULL)`),
     check("plan_edges_round_min", sql`${t.round} IS NULL OR ${t.round} >= 2`),
     check("plan_edges_position", sql`${t.position} >= 0`),
+  ],
+);
+
+/**
+ * The immutable, ordered membership of every accepted Execution Plan
+ * revision. A node reused across revisions has one `plan_nodes` row and one
+ * membership row per revision it belongs to; the current executable graph is
+ * exactly the membership of the Run's latest accepted revision.
+ */
+export const planRevisionNodes = sqliteTable(
+  "plan_revision_nodes",
+  {
+    runId: text("run_id")
+      .notNull()
+      .references(() => runs.id),
+    revisionNumber: integer("revision_number").notNull(),
+    planNodeId: text("plan_node_id")
+      .notNull()
+      .references(() => planNodes.id),
+    position: integer("position").notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.runId, t.revisionNumber, t.planNodeId] }),
+    uniqueIndex("plan_revision_nodes_position").on(t.runId, t.revisionNumber, t.position),
+    index("plan_revision_nodes_node").on(t.planNodeId),
+    foreignKey({
+      name: "plan_revision_nodes_revision_fk",
+      columns: [t.runId, t.revisionNumber],
+      foreignColumns: [executionPlanRevisions.runId, executionPlanRevisions.number],
+    }),
+    check("plan_revision_nodes_position", sql`${t.position} >= 0`),
   ],
 );
 
@@ -346,10 +409,13 @@ export const planNodeRequirements = sqliteTable(
     requirementRevisionId: text("requirement_revision_id")
       .notNull()
       .references((): AnySQLiteColumn => requirementRevisions.id),
+    position: integer("position").notNull(),
   },
   (t) => [
     primaryKey({ columns: [t.planNodeId, t.requirementId, t.requirementRevisionId] }),
+    uniqueIndex("plan_node_requirements_position").on(t.planNodeId, t.position),
     index("plan_node_requirements_requirement").on(t.requirementId, t.requirementRevisionId),
+    check("plan_node_requirements_position", sql`${t.position} >= 0`),
   ],
 );
 
@@ -981,6 +1047,7 @@ export const budgetReservations = sqliteTable(
     consumedCostUsd: real("consumed_cost_usd"),
     consumedTokens: integer("consumed_tokens"),
     consumedAttempts: integer("consumed_attempts"),
+    capacitySource: text("capacity_source").notNull(),
     status: text("status").notNull(),
     transferredFromReservationId: text("transferred_from_reservation_id").references(
       (): AnySQLiteColumn => budgetReservations.id,
@@ -1002,6 +1069,8 @@ export const budgetReservations = sqliteTable(
       sql`(${t.parentType} = 'run' AND ${t.childType} = 'plan_node') OR (${t.parentType} = 'plan_node' AND ${t.childType} IN ('invocation', 'task'))`,
     ),
     check("budget_reservations_status", sql`${t.status} IN (${inList(RESERVATION_STATUSES)})`),
+    check("budget_reservations_capacity_source", sql`${t.capacitySource} IN (${inList(RESERVATION_CAPACITY_SOURCES)})`),
+    check("budget_reservations_final_reserve_run_only", sql`${t.parentType} = 'run' OR ${t.capacitySource} = 'ordinary'`),
     check(
       "budget_reservations_release_reason",
       sql`${t.releaseReason} IS NULL OR ${t.releaseReason} IN (${inList(RESERVATION_RELEASE_REASONS)})`,
@@ -1107,6 +1176,7 @@ export const TABLE_NAMES = [
   "execution_plan_revisions",
   "plan_nodes",
   "plan_edges",
+  "plan_revision_nodes",
   "plan_node_requirements",
   "requirements",
   "requirement_revisions",

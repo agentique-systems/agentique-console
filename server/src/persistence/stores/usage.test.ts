@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { openHarness, patternNode, seedInvocation, seedManifest, seedRun } from "../test-support.ts";
+import { extendPlan, nodeInput, openHarness, patternDefinition, seedInvocation, seedManifest, seedRun } from "../test-support.ts";
 
 describe("usage", () => {
   it("records per Attempt with Run, Plan Node, and Invocation attribution and rolls up by sum", () => {
     const h = openHarness();
     try {
       const s = seedRun(h);
-      const node = patternNode(h, s.run, { agentDefinitionRevisionId: s.definition.id, sourcePath: "1" });
-      h.stores.plans.insertCompiledGraph({ runId: s.run.id, revisionNumber: 1, nodes: [node], edges: [], requirements: [] });
+      const node = nodeInput(h, patternDefinition(s.definition.id, { sourcePath: "e1" }));
+      extendPlan(h, s, [node]);
       const rootInvocation = seedInvocation(h, s);
       seedManifest(h, s, rootInvocation);
       const workerInvocation = seedInvocation(h, s, { planNodeId: node.id, role: "worker", purpose: "step" });

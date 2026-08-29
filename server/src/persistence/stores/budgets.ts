@@ -18,9 +18,12 @@ import {
   type BudgetReservationId,
   type CapacityAccount,
   type InvocationId,
+  subtractAllocation,
+  type ReservationCapacitySource,
   type ReservationChildRef,
   type ReservationParentRef,
   type ReservationReleaseReason,
+  type RunCapacity,
   type RunId,
 } from "@agentique-console/core";
 import type { PersistenceContext } from "../context.ts";
@@ -44,6 +47,7 @@ function toDomain(row: Row): BudgetReservation {
       child: { type: row.childType, id: row.childId },
       reserved: { costUsd: row.reservedCostUsd, tokens: row.reservedTokens, attempts: row.reservedAttempts },
       consumed,
+      capacitySource: row.capacitySource,
       status: row.status,
       transferredFromReservationId: row.transferredFromReservationId,
       createdAt: row.createdAt,
@@ -59,6 +63,14 @@ export interface ReserveInput {
   parent: ReservationParentRef;
   child: ReservationChildRef;
   amount: Allocation;
+  /**
+   * For a Run-level reservation, which partition of the Run Budget it draws
+   * from. Ordinary compiled nodes draw from `ordinary` (the default); only
+   * the `final_synthesis` and `run_completion` consumers named by the
+   * architecture may pass `final_reserve`, and the caller that does so is
+   * the explicit authorization.
+   */
+  capacitySource?: ReservationCapacitySource;
 }
 
 /**
@@ -103,16 +115,16 @@ export class BudgetReservationStore {
     return row ? toDomain(row) : null;
   }
 
-  /** The limit of a parent as an Allocation, read from the bounded object. */
+  /**
+   * The limit of a parent as an Allocation, read from the bounded object.
+   * For a Run this is the ordinary pool: the Run Budget less the persisted
+   * final reserve. `runCapacity` exposes both partitions.
+   */
   limitOf(parent: ReservationParentRef): Allocation {
     switch (parent.type) {
       case "run": {
-        const run = requireRow(
-          this.ctx.db.select({ maxCostUsd: runs.maxCostUsd, maxTokens: runs.maxTokens, maxAttempts: runs.maxAttempts }).from(runs).where(eq(runs.id, parent.id)).get(),
-          "Run",
-          parent.id,
-        );
-        return { costUsd: run.maxCostUsd, tokens: run.maxTokens, attempts: run.maxAttempts };
+        const { budget, finalReserve } = this.runLimits(parent.id);
+        return subtractAllocation(budget, finalReserve);
       }
       case "plan_node": {
         const node = requireRow(
@@ -138,22 +150,70 @@ export class BudgetReservationStore {
    * the parent's own direct consumption (an Invocation's Attempts). Released
    * consumption is actual, not clamped, so `available` is signed: a
    * negative value is a visible overrun and rejects every new reservation.
+   * For a Run this is the ordinary partition (see `runCapacity`).
    */
   capacity(parent: ReservationParentRef): CapacityAccount {
-    const limit = this.limitOf(parent);
+    if (parent.type === "run") return this.runCapacity(parent.id).ordinary;
+    return this.account(this.limitOf(parent), this.listByParent(parent), parent.type === "invocation" ? this.usage.consumedByInvocation(parent.id) : ZERO_ALLOCATION);
+  }
+
+  /**
+   * A Run's two capacity partitions, each accounted from its own
+   * reservations: the ordinary pool that compiled Plan Node allocations draw
+   * from, and the persisted final reserve available only to its explicitly
+   * authorized consumers. Neither partition's reservations count against the
+   * other, so the reserve is never double-counted.
+   */
+  runCapacity(runId: RunId): RunCapacity {
+    const { budget, finalReserve } = this.runLimits(runId);
+    const reservations = this.listByParent({ type: "run", id: runId });
+    return {
+      limit: budget,
+      finalReserve,
+      ordinary: this.account(subtractAllocation(budget, finalReserve), reservations.filter((r) => r.capacitySource === "ordinary"), ZERO_ALLOCATION),
+      final: this.account(finalReserve, reservations.filter((r) => r.capacitySource === "final_reserve"), ZERO_ALLOCATION),
+    };
+  }
+
+  private account(limit: Allocation, reservations: BudgetReservation[], direct: Allocation): CapacityAccount {
     let reserved: Allocation = { ...ZERO_ALLOCATION };
-    let consumed: Allocation = { ...ZERO_ALLOCATION };
-    for (const reservation of this.listByParent(parent)) {
+    let consumed: Allocation = { ...direct };
+    for (const reservation of reservations) {
       if (reservation.status === "active") reserved = addAllocation(reserved, reservation.reserved);
       else if (reservation.consumed) consumed = addAllocation(consumed, reservation.consumed);
-    }
-    if (parent.type === "invocation") {
-      consumed = addAllocation(consumed, this.usage.consumedByInvocation(parent.id));
     }
     return capacityAccount(limit, reserved, consumed);
   }
 
-  /** Reserves `amount` for `child` from `parent`, rejecting over-reservation. */
+  private runLimits(runId: string): { budget: Allocation; finalReserve: Allocation } {
+    const run = requireRow(
+      this.ctx.db
+        .select({
+          maxCostUsd: runs.maxCostUsd,
+          maxTokens: runs.maxTokens,
+          maxAttempts: runs.maxAttempts,
+          finalReserveCostUsd: runs.finalReserveCostUsd,
+          finalReserveTokens: runs.finalReserveTokens,
+          finalReserveAttempts: runs.finalReserveAttempts,
+        })
+        .from(runs)
+        .where(eq(runs.id, runId))
+        .get(),
+      "Run",
+      runId,
+    );
+    return {
+      budget: { costUsd: run.maxCostUsd, tokens: run.maxTokens, attempts: run.maxAttempts },
+      finalReserve: { costUsd: run.finalReserveCostUsd, tokens: run.finalReserveTokens, attempts: run.finalReserveAttempts },
+    };
+  }
+
+  /**
+   * Reserves `amount` for `child` from `parent`, rejecting over-reservation.
+   * A Run-level reservation draws from the partition named by
+   * `capacitySource` (`ordinary` unless the caller explicitly authorizes the
+   * final reserve); reservations below the Run are always `ordinary`.
+   */
   reserve(input: ReserveInput, options?: WriteOptions): BudgetReservation {
     const amount = parseOrThrow(allocationSchema, input.amount, "reservation amount");
     if (!isReservationPair(input.parent.type, input.child.type)) {
@@ -162,20 +222,24 @@ export class BudgetReservationStore {
         child: input.child,
       });
     }
+    const capacitySource = input.capacitySource ?? "ordinary";
+    if (capacitySource !== "ordinary" && input.parent.type !== "run") {
+      throw new ValidationError("only a Run-level reservation can draw from the final reserve", { parent: input.parent, capacitySource });
+    }
     return this.ctx.tx.write(() => {
       const run = loadRunRef(this.ctx, input.runId);
       this.assertOwnership(input.parent, input.child, run.id);
       if (this.activeForChild(input.child)) {
         throw new ConflictError(`${input.child.type} ${input.child.id} already holds an active reservation`);
       }
-      const account = this.capacity(input.parent);
+      const account = input.parent.type === "run" ? this.runCapacity(run.id)[capacitySource === "ordinary" ? "ordinary" : "final"] : this.capacity(input.parent);
       if (!allocationFits(amount, account.available)) {
         throw new InsufficientCapacityError(
-          `${input.parent.type} ${input.parent.id} has insufficient unreserved capacity for ${input.child.type} ${input.child.id}`,
-          { requested: amount, available: account.available },
+          `${input.parent.type} ${input.parent.id} has insufficient unreserved ${capacitySource === "ordinary" ? "ordinary capacity" : "final reserve"} for ${input.child.type} ${input.child.id}`,
+          { requested: amount, available: account.available, capacitySource },
         );
       }
-      return this.insert(run.id, input.parent, input.child, amount, null, options);
+      return this.insert(run.id, input.parent, input.child, amount, capacitySource, null, options);
     });
   }
 
@@ -261,6 +325,7 @@ export class BudgetReservationStore {
         taskReservation.parent,
         { type: "invocation", id: invocationId },
         taskReservation.reserved,
+        "ordinary",
         taskReservationId,
         options,
       );
@@ -273,6 +338,7 @@ export class BudgetReservationStore {
     parent: ReservationParentRef,
     child: ReservationChildRef,
     amount: Allocation,
+    capacitySource: ReservationCapacitySource,
     transferredFromReservationId: BudgetReservationId | null,
     options?: WriteOptions,
   ): BudgetReservation {
@@ -284,6 +350,7 @@ export class BudgetReservationStore {
       child,
       reserved: amount,
       consumed: null,
+      capacitySource,
       status: "active",
       transferredFromReservationId,
       createdAt: this.ctx.clock(),
@@ -317,6 +384,7 @@ export class BudgetReservationStore {
         consumedCostUsd: null,
         consumedTokens: null,
         consumedAttempts: null,
+        capacitySource,
         status: "active",
         transferredFromReservationId,
         createdAt: reservation.createdAt,

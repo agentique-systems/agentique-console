@@ -2,7 +2,7 @@ import { AllocationExhaustedError, ConflictError, IllegalTransitionError, Invari
 import { describe, expect, it } from "vitest";
 import { sha256Hex } from "../blob-store.ts";
 import { MemoryContinuationPayloadStore } from "../../provider/continuation-store.ts";
-import { INVOCATION_ALLOCATION, joinNode, openHarness, seedArtifact, seedInvocation, seedManifest, seedRun } from "../test-support.ts";
+import { INVOCATION_ALLOCATION, extendPlan, joinDefinition, nodeInput, openHarness, seedArtifact, seedInvocation, seedManifest, seedRun } from "../test-support.ts";
 
 const result: InvocationResult = { status: "completed", artifactIds: [], tasks: [], evidence: [], summary: "done", openItems: [], blocker: null, runOutcome: null };
 
@@ -28,8 +28,8 @@ describe("invocations", () => {
     const h = openHarness();
     try {
       const s = seedRun(h);
-      const j = joinNode(h, s.run);
-      h.stores.plans.insertCompiledGraph({ runId: s.run.id, revisionNumber: 1, nodes: [j], edges: [], requirements: [] });
+      const j = nodeInput(h, joinDefinition());
+      extendPlan(h, s, [j]);
       expect(() => seedInvocation(h, s, { planNodeId: j.id, role: "worker", purpose: "step" })).toThrow(/join node .* creates no Invocation/);
       const other = seedRun(h);
       expect(() => seedInvocation(h, s, { planNodeId: other.root.id })).toThrow(InvariantViolationError);

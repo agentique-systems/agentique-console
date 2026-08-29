@@ -22,6 +22,7 @@ import type {
 } from "./ids.ts";
 import { defineStateMachine } from "./transitions.ts";
 import {
+  canonicalJson,
   idSchema,
   nonEmptyString,
   parseOrThrow,
@@ -71,12 +72,13 @@ export type PlanNodeWaitReason = (typeof PLAN_NODE_WAIT_REASONS)[number];
 export const PLAN_EDGE_TYPES = ["sequence", "branch", "fan_in", "retry"] as const;
 export type PlanEdgeType = (typeof PLAN_EDGE_TYPES)[number];
 
-/** The roles a Pattern node binds Agent Definition revisions to. */
-export const PLAN_NODE_ROLES = ["orchestrator", "worker", "coordinator", "evaluator"] as const;
-export type PlanNodeRole = (typeof PLAN_NODE_ROLES)[number];
+/** The roles a `single` node's one Invocation may hold. */
+export const SINGLE_NODE_ROLES = ["orchestrator", "worker"] as const;
+export type SingleNodeRole = (typeof SINGLE_NODE_ROLES)[number];
 
-/** The root Orchestrator node is not compiled from the source form. */
+/** The root Orchestrator node is runtime-created, not compiled from the source form. */
 export const ROOT_SOURCE_PATH = "root";
+export const ROOT_NODE_TITLE = "Orchestrator";
 
 // ---------------------------------------------------------------------------
 // Source form
@@ -93,6 +95,13 @@ export const DEFAULT_PLAN_LIMITS: Readonly<PlanLimits> = Object.freeze({
   maxUnrolledRounds: 6,
   maxPlanNodes: 200,
 });
+
+/**
+ * The hard bound on raw source object nesting, applied before any schema
+ * parse so that a malformed or cyclic proposal is rejected structurally and
+ * never by exhausting the interpreter stack.
+ */
+export const MAX_SOURCE_OBJECT_DEPTH = 64;
 
 /** The Context Manifest template of a node: what its Invocations receive. */
 export interface ManifestTemplate {
@@ -147,23 +156,6 @@ export const planNodeLimitsSchema: z.ZodType<PlanNodeLimits> = z.strictObject({
   maxWallClockMs: positiveCount.optional(),
 });
 
-/** Pattern-specific bounds, persisted on the compiled node. */
-export interface PatternBounds {
-  maxRounds?: number;
-  maxTasks?: number;
-  maxConcurrentWorkers?: number;
-  maxCoordinatorInvocations?: number;
-  requireAll?: boolean;
-}
-
-export const patternBoundsSchema: z.ZodType<PatternBounds> = z.strictObject({
-  maxRounds: positiveCount.optional(),
-  maxTasks: positiveCount.optional(),
-  maxConcurrentWorkers: positiveCount.optional(),
-  maxCoordinatorInvocations: positiveCount.optional(),
-  requireAll: z.boolean().optional(),
-});
-
 export interface PlanExpressionCommon {
   title?: string;
   scope?: PlanScope;
@@ -209,7 +201,7 @@ const commonShape = {
   gateAcceptanceCriterionIds: uniqueIds(idSchema("acceptanceCriterion")).optional(),
 };
 
-const routeSelectorSchema: z.ZodType<RouteSelector> = z.discriminatedUnion("kind", [
+export const routeSelectorSchema: z.ZodType<RouteSelector> = z.discriminatedUnion("kind", [
   z.strictObject({
     kind: z.literal("decision_answer"),
     decisionId: idSchema("decision"),
@@ -223,7 +215,7 @@ const routeSelectorSchema: z.ZodType<RouteSelector> = z.discriminatedUnion("kind
   }),
 ]);
 
-const coordinatorWorkerBoundsSchema: z.ZodType<CoordinatorWorkerBounds> = z.strictObject({
+export const coordinatorWorkerBoundsSchema: z.ZodType<CoordinatorWorkerBounds> = z.strictObject({
   maxTasks: positiveCount,
   maxConcurrentWorkers: positiveCount,
   maxCoordinatorInvocations: positiveCount,
@@ -276,6 +268,26 @@ export const executionPlanSourceSchema: z.ZodType<ExecutionPlanSource> = z.stric
   expressions: z.array(planExpressionSchema),
 });
 
+/**
+ * A leaf operation is a `single` expression that carries no node-level
+ * option other than a title. Such an expression is absorbed into its
+ * enclosing Pattern node (a chain step, a parallel item, an inline route
+ * branch, an inline producer). A `single` expression that declares its own
+ * scope, allocation, limits, policies, or Gate criteria has node semantics
+ * of its own and compiles to its own node.
+ */
+export function isLeafExpression(expression: PlanExpression): expression is PlanExpression & { pattern: "single" } {
+  return (
+    expression.pattern === "single" &&
+    expression.scope === undefined &&
+    expression.allocation === undefined &&
+    expression.limits === undefined &&
+    expression.onAllocationExhausted === undefined &&
+    expression.runOnDependencyFailure === undefined &&
+    expression.gateAcceptanceCriterionIds === undefined
+  );
+}
+
 /** Structural depth of an expression: a `single` is 1, nesting adds 1 per level. */
 export function planExpressionDepth(expression: PlanExpression): number {
   switch (expression.pattern) {
@@ -315,22 +327,62 @@ function collectRounds(expression: PlanExpression, out: number[]): void {
 }
 
 /**
- * Validates a proposed source revision structurally: the closed Pattern set,
- * well-formed operands, nesting depth, and unrolled-round limits. Graph
- * compilation (cycles, node counts, Requirement existence, allocation
- * reservation) is the compiler's job and is not performed here.
+ * Walks a raw (unvalidated) source value iteratively and rejects an object
+ * or array that is its own ancestor (a cyclic proposal) or that nests deeper
+ * than `MAX_SOURCE_OBJECT_DEPTH`. This runs before schema parsing so that
+ * cyclic input is detected structurally, never by a stack overflow.
+ */
+export function assertSourceObjectAcyclic(value: unknown, maxDepth: number = MAX_SOURCE_OBJECT_DEPTH): void {
+  type Frame = { value: object; path: string; depth: number; ancestors: ReadonlySet<object> };
+  if (value === null || typeof value !== "object") return;
+  const stack: Frame[] = [{ value, path: "$", depth: 1, ancestors: new Set() }];
+  while (stack.length > 0) {
+    const frame = stack.pop()!;
+    if (frame.depth > maxDepth) {
+      throw new ValidationError(`execution plan source nests deeper than ${maxDepth} objects at ${frame.path}`, {
+        code: "excessive_source_depth",
+        path: frame.path,
+        maxDepth,
+      });
+    }
+    if (frame.ancestors.has(frame.value)) {
+      throw new ValidationError(`execution plan source references its own ancestor at ${frame.path}`, {
+        code: "cyclic_source_object",
+        path: frame.path,
+      });
+    }
+    const ancestors = new Set(frame.ancestors);
+    ancestors.add(frame.value);
+    const entries: [string, unknown][] = Array.isArray(frame.value)
+      ? frame.value.map((v, i) => [String(i), v] as [string, unknown])
+      : Object.entries(frame.value as Record<string, unknown>);
+    for (const [key, member] of entries) {
+      if (member !== null && typeof member === "object") {
+        stack.push({ value: member, path: `${frame.path}.${key}`, depth: frame.depth + 1, ancestors });
+      }
+    }
+  }
+}
+
+/**
+ * Validates a proposed source revision structurally: no cyclic object graph,
+ * the closed Pattern set, well-formed operands, nesting depth, and
+ * unrolled-round limits. Graph compilation (cycles, node counts, Requirement
+ * existence, allocation reservation) is the compiler's job and is not
+ * performed here.
  */
 export function validateExecutionPlanSource(
   value: unknown,
   limits: PlanLimits = DEFAULT_PLAN_LIMITS,
 ): ExecutionPlanSource {
+  assertSourceObjectAcyclic(value);
   const source = parseOrThrow(executionPlanSourceSchema, value, "execution plan source");
   source.expressions.forEach((expression, index) => {
     const depth = planExpressionDepth(expression);
     if (depth > limits.maxPlanDepth) {
       throw new ValidationError(
         `execution plan expression ${index} nests ${depth} levels; the limit is ${limits.maxPlanDepth}`,
-        { index, depth, maxPlanDepth: limits.maxPlanDepth },
+        { code: "excessive_source_depth", index, depth, maxPlanDepth: limits.maxPlanDepth },
       );
     }
     const rounds: number[] = [];
@@ -339,7 +391,7 @@ export function validateExecutionPlanSource(
       if (maxRounds > limits.maxUnrolledRounds) {
         throw new ValidationError(
           `execution plan expression ${index} requests ${maxRounds} rounds; the limit is ${limits.maxUnrolledRounds}`,
-          { index, maxRounds, maxUnrolledRounds: limits.maxUnrolledRounds },
+          { code: "excessive_unrolled_rounds", index, maxRounds, maxUnrolledRounds: limits.maxUnrolledRounds },
         );
       }
     }
@@ -347,6 +399,10 @@ export function validateExecutionPlanSource(
   return source;
 }
 
+/**
+ * One accepted, immutable source revision. Only accepted revisions are
+ * persisted and numbered; a rejected proposal consumes no number.
+ */
 export interface ExecutionPlanRevision {
   runId: RunId;
   number: number;
@@ -365,89 +421,288 @@ export const executionPlanRevisionSchema: z.ZodType<ExecutionPlanRevision> = z.s
 });
 
 // ---------------------------------------------------------------------------
+// Rejections
+// ---------------------------------------------------------------------------
+
+/** Stable, machine-readable reasons a proposed revision is rejected. */
+export const PLAN_REJECTION_CODES = [
+  "cyclic_source_object",
+  "excessive_source_depth",
+  "excessive_unrolled_rounds",
+  "excessive_compiled_nodes",
+  "compiled_graph_cycle",
+  "unsupported_pattern",
+  "explicit_join",
+  "invalid_structure",
+  "invalid_agent_definition_revision",
+  "invalid_role_binding",
+  "invalid_task_reference",
+  "invalid_artifact_reference",
+  "invalid_decision_reference",
+  "invalid_acceptance_criterion_reference",
+  "invalid_requirement_scope",
+  "nested_coordinator_worker",
+  "invalid_pattern_bounds",
+  "insufficient_capacity",
+  "started_node_changed",
+] as const;
+export type PlanRejectionCode = (typeof PLAN_REJECTION_CODES)[number];
+
+export interface PlanRejectionReason {
+  code: PlanRejectionCode;
+  message: string;
+  /** The source path of the offending expression or node, when one applies. */
+  path: string | null;
+}
+
+export const planRejectionReasonSchema: z.ZodType<PlanRejectionReason> = z.strictObject({
+  code: z.enum(PLAN_REJECTION_CODES),
+  message: nonEmptyString,
+  path: nonEmptyString.nullable(),
+});
+
+// ---------------------------------------------------------------------------
 // Compiled form
 // ---------------------------------------------------------------------------
 
-export type PlanNodeAgents = Partial<Record<PlanNodeRole, AgentDefinitionRevisionId>>;
-
-export const planNodeAgentsSchema: z.ZodType<PlanNodeAgents> = z
-  .strictObject({
-    orchestrator: idSchema("agentDefinitionRevision").optional(),
-    worker: idSchema("agentDefinitionRevision").optional(),
-    coordinator: idSchema("agentDefinitionRevision").optional(),
-    evaluator: idSchema("agentDefinitionRevision").optional(),
-  })
-  .refine((agents) => Object.keys(agents).length > 0, { message: "a pattern node binds at least one role" });
-
-interface PlanNodeBase {
-  id: PlanNodeId;
-  runId: RunId;
-  /** The source revision that produced this node. */
-  revisionNumber: number;
+/** One resolved leaf operation bound inside a Pattern node. */
+export interface CompiledOperation {
+  agentDefinitionRevisionId: AgentDefinitionRevisionId;
   title: string;
-  /** Position in the source expression the node was compiled from. */
+  input: ManifestTemplate;
+}
+
+export const compiledOperationSchema: z.ZodType<CompiledOperation> = z.strictObject({
+  agentDefinitionRevisionId: idSchema("agentDefinitionRevision"),
+  title: nonEmptyString,
+  input: manifestTemplateSchema,
+});
+
+/** A route branch: inline when it holds a leaf operation, otherwise reached by a `branch(label)` edge. */
+export interface RouteBranchBinding {
+  label: string;
+  inline: CompiledOperation | null;
+}
+
+export const routeBranchBindingSchema: z.ZodType<RouteBranchBinding> = z.strictObject({
+  label: nonEmptyString,
+  inline: compiledOperationSchema.nullable(),
+});
+
+/**
+ * The immutable, pattern-specific execution shape of a `pattern` node: which
+ * Agent Definition revisions fill which positions, and the Pattern's bounds.
+ * Every position an executor needs is explicit here; nothing is inferred
+ * from the source expression at execution time.
+ */
+export type PatternShape =
+  | { pattern: "single"; role: SingleNodeRole; operation: CompiledOperation }
+  | { pattern: "chain"; steps: CompiledOperation[] }
+  | { pattern: "route"; selector: RouteSelector; branches: RouteBranchBinding[] }
+  | { pattern: "parallel"; items: CompiledOperation[]; aggregate: CompiledOperation | null; requireAll: boolean }
+  | { pattern: "coordinator_worker"; coordinator: CompiledOperation; worker: CompiledOperation; bounds: CoordinatorWorkerBounds }
+  | {
+      pattern: "evaluator_optimizer";
+      /** The inline producer; `null` for an evaluate-only node of an unrolled composite producer. */
+      producer: CompiledOperation | null;
+      evaluator: CompiledOperation;
+      maxRounds: number;
+      /** The unrolled round this evaluate-only node belongs to; `null` when the producer is inline. */
+      round: number | null;
+    };
+
+const sortedUniqueLabels = (branches: RouteBranchBinding[]): boolean => {
+  for (let i = 0; i < branches.length; i += 1) {
+    if (i > 0 && !(branches[i - 1]!.label < branches[i]!.label)) return false;
+  }
+  return true;
+};
+
+export const patternShapeSchema: z.ZodType<PatternShape> = z.discriminatedUnion("pattern", [
+  z.strictObject({ pattern: z.literal("single"), role: z.enum(SINGLE_NODE_ROLES), operation: compiledOperationSchema }),
+  z.strictObject({ pattern: z.literal("chain"), steps: z.array(compiledOperationSchema).min(2) }),
+  z.strictObject({
+    pattern: z.literal("route"),
+    selector: routeSelectorSchema,
+    branches: z.array(routeBranchBindingSchema).min(1).refine(sortedUniqueLabels, { message: "route branch labels are canonical: unique and sorted" }),
+  }),
+  z.strictObject({
+    pattern: z.literal("parallel"),
+    items: z.array(compiledOperationSchema).min(1),
+    aggregate: compiledOperationSchema.nullable(),
+    requireAll: z.boolean(),
+  }),
+  z.strictObject({
+    pattern: z.literal("coordinator_worker"),
+    coordinator: compiledOperationSchema,
+    worker: compiledOperationSchema,
+    bounds: coordinatorWorkerBoundsSchema,
+  }),
+  z
+    .strictObject({
+      pattern: z.literal("evaluator_optimizer"),
+      producer: compiledOperationSchema.nullable(),
+      evaluator: compiledOperationSchema,
+      maxRounds: positiveCount,
+      round: positiveCount.nullable(),
+    })
+    .refine((s) => (s.producer === null) === (s.round !== null), {
+      message: "an evaluate-only node names its unrolled round; an inline producer has none",
+      path: ["round"],
+    })
+    .refine((s) => s.round === null || s.round <= s.maxRounds, { message: "round exceeds maxRounds", path: ["round"] }),
+]);
+
+/** The exact Requirement scope of a pattern node: ordered leaf ids at one pinned revision. */
+export interface PlanNodeScope {
+  requirementRevisionId: RequirementRevisionId;
+  requirementIds: RequirementId[];
+}
+
+export const planNodeScopeSchema: z.ZodType<PlanNodeScope> = z.strictObject({
+  requirementRevisionId: idSchema("requirementRevision"),
+  requirementIds: uniqueIds(idSchema("requirement")).min(1),
+});
+
+/**
+ * The immutable execution semantics of a Plan Node: everything the compiler
+ * decides and nothing the runtime changes afterwards. Two nodes with equal
+ * definitions are interchangeable for reconciliation.
+ */
+interface PlanNodeDefinitionBase {
+  title: string;
+  /** Canonical position in the source form (see the source-path grammar). */
   sourcePath: string;
-  status: PlanNodeStatus;
-  waitReason: PlanNodeWaitReason | null;
   allocation: Allocation;
   maxConcurrency: number | null;
   maxWallClockMs: number | null;
   runOnDependencyFailure: boolean;
+}
+
+export interface PatternPlanNodeDefinition extends PlanNodeDefinitionBase {
+  kind: "pattern";
+  pattern: Pattern;
+  shape: PatternShape;
+  /** The union of every operation input: the Artifact, Task, and Decision ids the node's Invocations may receive. */
+  input: ManifestTemplate;
+  onAllocationExhausted: OnAllocationExhausted;
+  gateAcceptanceCriterionIds: AcceptanceCriterionId[];
+  scope: PlanNodeScope | null;
+}
+
+export interface JoinPlanNodeDefinition extends PlanNodeDefinitionBase {
+  kind: "join";
+  fanInPolicy: FanInPolicy;
+}
+
+export type PlanNodeDefinition = PatternPlanNodeDefinition | JoinPlanNodeDefinition;
+
+const planNodeDefinitionBaseShape = {
+  title: nonEmptyString,
+  sourcePath: nonEmptyString,
+  allocation: allocationSchema,
+  maxConcurrency: positiveCount.nullable(),
+  maxWallClockMs: positiveCount.nullable(),
+  runOnDependencyFailure: z.boolean(),
+};
+
+export const patternPlanNodeDefinitionSchema: z.ZodType<PatternPlanNodeDefinition> = z
+  .strictObject({
+    ...planNodeDefinitionBaseShape,
+    kind: z.literal("pattern"),
+    pattern: z.enum(PATTERNS),
+    shape: patternShapeSchema,
+    input: manifestTemplateSchema,
+    onAllocationExhausted: z.enum(ON_ALLOCATION_EXHAUSTED_POLICIES),
+    gateAcceptanceCriterionIds: uniqueIds(idSchema("acceptanceCriterion")),
+    scope: planNodeScopeSchema.nullable(),
+  })
+  .refine((d) => d.shape.pattern === d.pattern, { message: "the node's Pattern and its shape agree", path: ["shape"] })
+  .refine((d) => d.sourcePath !== ROOT_SOURCE_PATH || (d.shape.pattern === "single" && d.shape.role === "orchestrator" && d.scope === null), {
+    message: "the root node is a single Orchestrator node without scope",
+    path: ["sourcePath"],
+  })
+  .refine((d) => d.sourcePath === ROOT_SOURCE_PATH || d.shape.pattern !== "single" || d.shape.role === "worker", {
+    message: "only the root node holds the orchestrator role",
+    path: ["shape"],
+  });
+
+export const joinPlanNodeDefinitionSchema: z.ZodType<JoinPlanNodeDefinition> = z
+  .strictObject({
+    ...planNodeDefinitionBaseShape,
+    kind: z.literal("join"),
+    fanInPolicy: z.enum(FAN_IN_POLICIES),
+  })
+  .refine(
+    (d) => d.allocation.costUsd === 0 && d.allocation.tokens === 0 && d.allocation.attempts === 0,
+    { message: "a join node has zero allocation", path: ["allocation"] },
+  );
+
+export const planNodeDefinitionSchema: z.ZodType<PlanNodeDefinition> = z.discriminatedUnion("kind", [
+  patternPlanNodeDefinitionSchema as never,
+  joinPlanNodeDefinitionSchema as never,
+]) as unknown as z.ZodType<PlanNodeDefinition>;
+
+/** Byte-for-byte canonical form of a definition; equal definitions serialize identically. */
+export function planNodeDefinitionDigest(definition: PlanNodeDefinition): string {
+  return canonicalJson(definition);
+}
+
+export function planNodeDefinitionEquals(a: PlanNodeDefinition, b: PlanNodeDefinition): boolean {
+  return planNodeDefinitionDigest(a) === planNodeDefinitionDigest(b);
+}
+
+/** The runtime-owned state of a Plan Node, layered over its immutable definition. */
+interface PlanNodeState {
+  id: PlanNodeId;
+  runId: RunId;
+  /** The accepted revision that created this node; membership in later revisions is recorded separately. */
+  createdInRevisionNumber: number;
+  status: PlanNodeStatus;
+  waitReason: PlanNodeWaitReason | null;
   outputArtifactIds: ArtifactId[] | null;
   createdAt: Timestamp;
   startedAt: Timestamp | null;
   endedAt: Timestamp | null;
 }
 
-export interface PatternPlanNode extends PlanNodeBase {
-  kind: "pattern";
-  pattern: Pattern;
-  input: ManifestTemplate;
-  agents: PlanNodeAgents;
-  bounds: PatternBounds;
-  onAllocationExhausted: OnAllocationExhausted;
-  gateAcceptanceCriterionIds: AcceptanceCriterionId[];
-}
-
-export interface JoinPlanNode extends PlanNodeBase {
-  kind: "join";
-  fanInPolicy: FanInPolicy;
-}
-
+export type PatternPlanNode = PatternPlanNodeDefinition & PlanNodeState;
+export type JoinPlanNode = JoinPlanNodeDefinition & PlanNodeState;
 export type PlanNode = PatternPlanNode | JoinPlanNode;
 
-const planNodeBaseShape = {
+const planNodeStateShape = {
   id: idSchema("planNode"),
   runId: idSchema("run"),
-  revisionNumber: positiveCount,
-  title: nonEmptyString,
-  sourcePath: nonEmptyString,
+  createdInRevisionNumber: positiveCount,
   status: z.enum(PLAN_NODE_STATUSES),
   waitReason: z.enum(PLAN_NODE_WAIT_REASONS).nullable(),
-  allocation: allocationSchema,
-  maxConcurrency: positiveCount.nullable(),
-  maxWallClockMs: positiveCount.nullable(),
-  runOnDependencyFailure: z.boolean(),
   outputArtifactIds: uniqueIds(idSchema("artifact")).nullable(),
   createdAt: timestampSchema,
   startedAt: timestampSchema.nullable(),
   endedAt: timestampSchema.nullable(),
 };
 
-export const patternPlanNodeSchema: z.ZodType<PatternPlanNode> = z.strictObject({
-  ...planNodeBaseShape,
-  kind: z.literal("pattern"),
-  pattern: z.enum(PATTERNS),
-  input: manifestTemplateSchema,
-  agents: planNodeAgentsSchema,
-  bounds: patternBoundsSchema,
-  onAllocationExhausted: z.enum(ON_ALLOCATION_EXHAUSTED_POLICIES),
-  gateAcceptanceCriterionIds: uniqueIds(idSchema("acceptanceCriterion")),
-});
+export const patternPlanNodeSchema: z.ZodType<PatternPlanNode> = z
+  .strictObject({
+    ...planNodeDefinitionBaseShape,
+    ...planNodeStateShape,
+    kind: z.literal("pattern"),
+    pattern: z.enum(PATTERNS),
+    shape: patternShapeSchema,
+    input: manifestTemplateSchema,
+    onAllocationExhausted: z.enum(ON_ALLOCATION_EXHAUSTED_POLICIES),
+    gateAcceptanceCriterionIds: uniqueIds(idSchema("acceptanceCriterion")),
+    scope: planNodeScopeSchema.nullable(),
+  })
+  .refine((n) => patternPlanNodeDefinitionSchema.safeParse(planNodeDefinitionOf(n as PlanNode)).success, {
+    message: "the node's definition is well-formed",
+    path: ["shape"],
+  });
 
 export const joinPlanNodeSchema: z.ZodType<JoinPlanNode> = z
   .strictObject({
-    ...planNodeBaseShape,
+    ...planNodeDefinitionBaseShape,
+    ...planNodeStateShape,
     kind: z.literal("join"),
     fanInPolicy: z.enum(FAN_IN_POLICIES),
   })
@@ -468,6 +723,29 @@ export const planNodeSchema: z.ZodType<PlanNode> = z
     path: ["status"],
   }) as unknown as z.ZodType<PlanNode>;
 
+/** Projects a persisted node onto its immutable definition. */
+export function planNodeDefinitionOf(node: PlanNode): PlanNodeDefinition {
+  const base = {
+    title: node.title,
+    sourcePath: node.sourcePath,
+    allocation: node.allocation,
+    maxConcurrency: node.maxConcurrency,
+    maxWallClockMs: node.maxWallClockMs,
+    runOnDependencyFailure: node.runOnDependencyFailure,
+  };
+  if (node.kind === "join") return { ...base, kind: "join", fanInPolicy: node.fanInPolicy };
+  return {
+    ...base,
+    kind: "pattern",
+    pattern: node.pattern,
+    shape: node.shape,
+    input: node.input,
+    onAllocationExhausted: node.onAllocationExhausted,
+    gateAcceptanceCriterionIds: node.gateAcceptanceCriterionIds,
+    scope: node.scope,
+  };
+}
+
 export const PLAN_NODE_MACHINE = defineStateMachine<PlanNodeStatus>("PlanNode", PLAN_NODE_STATUSES, {
   pending: ["ready", "cancelled", "skipped"],
   ready: ["running", "succeeded", "failed", "cancelled", "skipped"],
@@ -478,6 +756,11 @@ export const PLAN_NODE_MACHINE = defineStateMachine<PlanNodeStatus>("PlanNode", 
   cancelled: [],
   skipped: [],
 });
+
+/** True for a node that has never started executing (reconciliation may cancel and replace it). */
+export function planNodeIsUnstarted(status: PlanNodeStatus): boolean {
+  return status === "pending" || status === "ready";
+}
 
 /**
  * Transition validation that also applies the kind-specific rules: a join
@@ -496,9 +779,15 @@ export function assertPlanNodeTransition(node: Pick<PlanNode, "kind" | "status">
 
 export const ZERO_JOIN_ALLOCATION: Readonly<Allocation> = ZERO_ALLOCATION;
 
+// ---------------------------------------------------------------------------
+// Edges: revision-owned, append-only
+// ---------------------------------------------------------------------------
+
 interface PlanEdgeBase {
   id: PlanEdgeId;
   runId: RunId;
+  /** The accepted revision this edge belongs to; edges are never shared between revisions. */
+  revisionNumber: number;
   sourceNodeId: PlanNodeId;
   targetNodeId: PlanNodeId;
   /** Order among edges into the same target (fan-in index order). */
@@ -517,6 +806,7 @@ export type PlanEdge = PlanEdgeBase &
 const planEdgeBaseShape = {
   id: idSchema("planEdge"),
   runId: idSchema("run"),
+  revisionNumber: positiveCount,
   sourceNodeId: idSchema("planNode"),
   targetNodeId: idSchema("planNode"),
   position: z.number().int().min(0),
@@ -535,12 +825,42 @@ export const planEdgeSchema: z.ZodType<PlanEdge> = z
     path: ["targetNodeId"],
   });
 
+// ---------------------------------------------------------------------------
+// Revision membership
+// ---------------------------------------------------------------------------
+
+/**
+ * One row of an accepted revision's immutable, ordered membership list. The
+ * current executable graph is exactly the member nodes of the Run's latest
+ * accepted revision plus that revision's edges; nothing is inferred from
+ * timestamps, node revision numbers, incident edges, or status.
+ */
+export interface PlanRevisionNode {
+  runId: RunId;
+  revisionNumber: number;
+  planNodeId: PlanNodeId;
+  position: number;
+}
+
+export const planRevisionNodeSchema: z.ZodType<PlanRevisionNode> = z.strictObject({
+  runId: idSchema("run"),
+  revisionNumber: positiveCount,
+  planNodeId: idSchema("planNode"),
+  position: z.number().int().min(0),
+});
+
+// ---------------------------------------------------------------------------
+// Requirement scope rows
+// ---------------------------------------------------------------------------
+
 /** One row of a pattern node's exact Requirement scope at a pinned revision. */
 export interface PlanNodeRequirement {
   planNodeId: PlanNodeId;
   runId: RunId;
   requirementId: RequirementId;
   requirementRevisionId: RequirementRevisionId;
+  /** Deterministic order of the leaf within the node's scope. */
+  position: number;
 }
 
 export const planNodeRequirementSchema: z.ZodType<PlanNodeRequirement> = z.strictObject({
@@ -548,4 +868,27 @@ export const planNodeRequirementSchema: z.ZodType<PlanNodeRequirement> = z.stric
   runId: idSchema("run"),
   requirementId: idSchema("requirement"),
   requirementRevisionId: idSchema("requirementRevision"),
+  position: z.number().int().min(0),
 });
+
+/** The scope rows a node's definition materializes to, in scope order. */
+export function planNodeRequirementRows(node: Pick<PlanNode, "id" | "runId"> & { scope: PlanNodeScope | null }): PlanNodeRequirement[] {
+  if (node.scope === null) return [];
+  const { requirementRevisionId } = node.scope;
+  return node.scope.requirementIds.map((requirementId, position) => ({
+    planNodeId: node.id,
+    runId: node.runId,
+    requirementId,
+    requirementRevisionId,
+    position,
+  }));
+}
+
+/** A complete executable or historical graph of one accepted revision. */
+export interface PlanGraph {
+  runId: RunId;
+  revisionNumber: number;
+  /** Member nodes in membership order; the root is always first. */
+  nodes: PlanNode[];
+  edges: PlanEdge[];
+}

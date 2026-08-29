@@ -45,6 +45,7 @@ describe("reservation records", () => {
       child: { type: "plan_node", id: newId("planNode") },
       reserved: { costUsd: 1, tokens: 10, attempts: 2 },
       consumed: null,
+      capacitySource: "ordinary",
       status: "active",
       transferredFromReservationId: null,
       createdAt: "2026-01-01T00:00:00.000Z",
@@ -57,6 +58,9 @@ describe("reservation records", () => {
     expect(budgetReservationSchema.safeParse({ ...base, releaseReason: "child_terminal" }).success).toBe(false);
     expect(budgetReservationSchema.safeParse({ ...base, child: { type: "task", id: newId("task") } }).success).toBe(false);
     expect(budgetReservationSchema.safeParse({ ...base, parent: { type: "seat", id: newId("run") } }).success).toBe(false);
+    // Only a Run-level reservation may draw from the final reserve.
+    expect(budgetReservationSchema.safeParse({ ...base, capacitySource: "final_reserve" }).success).toBe(true);
+    expect(budgetReservationSchema.safeParse({ ...base, parent: { type: "plan_node", id: newId("planNode") }, child: { type: "invocation", id: newId("invocation") }, capacitySource: "final_reserve" }).success).toBe(false);
   });
 });
 

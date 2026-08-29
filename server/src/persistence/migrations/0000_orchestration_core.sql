@@ -115,6 +115,7 @@ CREATE TABLE `budget_reservations` (
 	`consumed_cost_usd` real,
 	`consumed_tokens` integer,
 	`consumed_attempts` integer,
+	`capacity_source` text NOT NULL,
 	`status` text NOT NULL,
 	`transferred_from_reservation_id` text,
 	`created_at` text NOT NULL,
@@ -126,6 +127,8 @@ CREATE TABLE `budget_reservations` (
 	CONSTRAINT "budget_reservations_child_type" CHECK("budget_reservations"."child_type" IN ('plan_node', 'invocation', 'task')),
 	CONSTRAINT "budget_reservations_pair" CHECK(("budget_reservations"."parent_type" = 'run' AND "budget_reservations"."child_type" = 'plan_node') OR ("budget_reservations"."parent_type" = 'plan_node' AND "budget_reservations"."child_type" IN ('invocation', 'task'))),
 	CONSTRAINT "budget_reservations_status" CHECK("budget_reservations"."status" IN ('active', 'released')),
+	CONSTRAINT "budget_reservations_capacity_source" CHECK("budget_reservations"."capacity_source" IN ('ordinary', 'final_reserve')),
+	CONSTRAINT "budget_reservations_final_reserve_run_only" CHECK("budget_reservations"."parent_type" = 'run' OR "budget_reservations"."capacity_source" = 'ordinary'),
 	CONSTRAINT "budget_reservations_release_reason" CHECK("budget_reservations"."release_reason" IS NULL OR "budget_reservations"."release_reason" IN ('child_terminal', 'transferred_to_invocation', 'task_cancelled', 'task_rejected', 'plan_revision_cancelled', 'run_cancelled')),
 	CONSTRAINT "budget_reservations_release_shape" CHECK(("budget_reservations"."status" = 'released') = ("budget_reservations"."released_at" IS NOT NULL AND "budget_reservations"."release_reason" IS NOT NULL AND "budget_reservations"."consumed_cost_usd" IS NOT NULL AND "budget_reservations"."consumed_tokens" IS NOT NULL AND "budget_reservations"."consumed_attempts" IS NOT NULL)),
 	CONSTRAINT "budget_reservations_non_negative" CHECK("budget_reservations"."reserved_cost_usd" >= 0 AND "budget_reservations"."reserved_tokens" >= 0 AND "budget_reservations"."reserved_attempts" >= 0),
@@ -393,6 +396,7 @@ CREATE INDEX `invocations_run_status` ON `invocations` (`run_id`,`status`);--> s
 CREATE TABLE `plan_edges` (
 	`id` text PRIMARY KEY NOT NULL,
 	`run_id` text NOT NULL,
+	`revision_number` integer NOT NULL,
 	`source_node_id` text NOT NULL,
 	`target_node_id` text NOT NULL,
 	`type` text NOT NULL,
@@ -403,6 +407,7 @@ CREATE TABLE `plan_edges` (
 	FOREIGN KEY (`run_id`) REFERENCES `runs`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`source_node_id`) REFERENCES `plan_nodes`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`target_node_id`) REFERENCES `plan_nodes`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`run_id`,`revision_number`) REFERENCES `execution_plan_revisions`(`run_id`,`number`) ON UPDATE no action ON DELETE no action,
 	CONSTRAINT "plan_edges_type" CHECK("plan_edges"."type" IN ('sequence', 'branch', 'fan_in', 'retry')),
 	CONSTRAINT "plan_edges_no_self_loop" CHECK("plan_edges"."source_node_id" <> "plan_edges"."target_node_id"),
 	CONSTRAINT "plan_edges_branch_label" CHECK(("plan_edges"."type" = 'branch') = ("plan_edges"."label" IS NOT NULL)),
@@ -411,26 +416,31 @@ CREATE TABLE `plan_edges` (
 	CONSTRAINT "plan_edges_position" CHECK("plan_edges"."position" >= 0)
 );
 --> statement-breakpoint
+CREATE INDEX `plan_edges_revision` ON `plan_edges` (`run_id`,`revision_number`,`target_node_id`,`position`);--> statement-breakpoint
 CREATE INDEX `plan_edges_source` ON `plan_edges` (`source_node_id`);--> statement-breakpoint
-CREATE INDEX `plan_edges_target` ON `plan_edges` (`target_node_id`,`position`);--> statement-breakpoint
-CREATE UNIQUE INDEX `plan_edges_unique` ON `plan_edges` (`source_node_id`,`target_node_id`,`type`,`label`,`round`);--> statement-breakpoint
+CREATE INDEX `plan_edges_target` ON `plan_edges` (`target_node_id`);--> statement-breakpoint
+CREATE UNIQUE INDEX `plan_edges_unique` ON `plan_edges` (`run_id`,`revision_number`,`source_node_id`,`target_node_id`,`type`,`label`,`round`);--> statement-breakpoint
+CREATE UNIQUE INDEX `plan_edges_target_position` ON `plan_edges` (`run_id`,`revision_number`,`target_node_id`,`position`);--> statement-breakpoint
 CREATE TABLE `plan_node_requirements` (
 	`plan_node_id` text NOT NULL,
 	`run_id` text NOT NULL,
 	`requirement_id` text NOT NULL,
 	`requirement_revision_id` text NOT NULL,
+	`position` integer NOT NULL,
 	PRIMARY KEY(`plan_node_id`, `requirement_id`, `requirement_revision_id`),
 	FOREIGN KEY (`plan_node_id`) REFERENCES `plan_nodes`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`run_id`) REFERENCES `runs`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`requirement_id`) REFERENCES `requirements`(`id`) ON UPDATE no action ON DELETE no action,
-	FOREIGN KEY (`requirement_revision_id`) REFERENCES `requirement_revisions`(`id`) ON UPDATE no action ON DELETE no action
+	FOREIGN KEY (`requirement_revision_id`) REFERENCES `requirement_revisions`(`id`) ON UPDATE no action ON DELETE no action,
+	CONSTRAINT "plan_node_requirements_position" CHECK("plan_node_requirements"."position" >= 0)
 );
 --> statement-breakpoint
+CREATE UNIQUE INDEX `plan_node_requirements_position` ON `plan_node_requirements` (`plan_node_id`,`position`);--> statement-breakpoint
 CREATE INDEX `plan_node_requirements_requirement` ON `plan_node_requirements` (`requirement_id`,`requirement_revision_id`);--> statement-breakpoint
 CREATE TABLE `plan_nodes` (
 	`id` text PRIMARY KEY NOT NULL,
 	`run_id` text NOT NULL,
-	`revision_number` integer NOT NULL,
+	`created_in_revision_number` integer NOT NULL,
 	`kind` text NOT NULL,
 	`pattern` text,
 	`title` text NOT NULL,
@@ -439,13 +449,12 @@ CREATE TABLE `plan_nodes` (
 	`wait_reason` text,
 	`fan_in_policy` text,
 	`input` text,
-	`agents` text,
+	`shape` text,
 	`alloc_cost_usd` real NOT NULL,
 	`alloc_tokens` integer NOT NULL,
 	`alloc_attempts` integer NOT NULL,
 	`max_concurrency` integer,
 	`max_wall_clock_ms` integer,
-	`bounds` text,
 	`on_allocation_exhausted` text,
 	`run_on_dependency_failure` integer NOT NULL,
 	`gate_acceptance_criterion_ids` text,
@@ -454,6 +463,7 @@ CREATE TABLE `plan_nodes` (
 	`started_at` text,
 	`ended_at` text,
 	FOREIGN KEY (`run_id`) REFERENCES `runs`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`run_id`,`created_in_revision_number`) REFERENCES `execution_plan_revisions`(`run_id`,`number`) ON UPDATE no action ON DELETE no action,
 	CONSTRAINT "plan_nodes_kind" CHECK("plan_nodes"."kind" IN ('pattern', 'join')),
 	CONSTRAINT "plan_nodes_status" CHECK("plan_nodes"."status" IN ('pending', 'ready', 'running', 'waiting', 'succeeded', 'failed', 'cancelled', 'skipped')),
 	CONSTRAINT "plan_nodes_pattern" CHECK("plan_nodes"."pattern" IS NULL OR "plan_nodes"."pattern" IN ('single', 'chain', 'route', 'parallel', 'coordinator_worker', 'evaluator_optimizer')),
@@ -461,8 +471,10 @@ CREATE TABLE `plan_nodes` (
 	CONSTRAINT "plan_nodes_on_allocation_exhausted" CHECK("plan_nodes"."on_allocation_exhausted" IS NULL OR "plan_nodes"."on_allocation_exhausted" IN ('fail', 'wait', 'extend')),
 	CONSTRAINT "plan_nodes_wait_reason" CHECK("plan_nodes"."wait_reason" IS NULL OR "plan_nodes"."wait_reason" IN ('decision', 'budget', 'provider_capacity', 'operator')),
 	CONSTRAINT "plan_nodes_waiting_has_reason" CHECK(("plan_nodes"."status" = 'waiting') = ("plan_nodes"."wait_reason" IS NOT NULL)),
-	CONSTRAINT "plan_nodes_pattern_shape" CHECK("plan_nodes"."kind" <> 'pattern' OR ("plan_nodes"."pattern" IS NOT NULL AND "plan_nodes"."fan_in_policy" IS NULL AND "plan_nodes"."agents" IS NOT NULL AND "plan_nodes"."input" IS NOT NULL AND "plan_nodes"."bounds" IS NOT NULL AND "plan_nodes"."on_allocation_exhausted" IS NOT NULL AND "plan_nodes"."gate_acceptance_criterion_ids" IS NOT NULL)),
-	CONSTRAINT "plan_nodes_join_shape" CHECK("plan_nodes"."kind" <> 'join' OR ("plan_nodes"."pattern" IS NULL AND "plan_nodes"."fan_in_policy" IS NOT NULL AND "plan_nodes"."agents" IS NULL AND "plan_nodes"."input" IS NULL AND "plan_nodes"."bounds" IS NULL AND "plan_nodes"."on_allocation_exhausted" IS NULL AND "plan_nodes"."gate_acceptance_criterion_ids" IS NULL AND "plan_nodes"."alloc_cost_usd" = 0 AND "plan_nodes"."alloc_tokens" = 0 AND "plan_nodes"."alloc_attempts" = 0)),
+	CONSTRAINT "plan_nodes_pattern_shape" CHECK("plan_nodes"."kind" <> 'pattern' OR ("plan_nodes"."pattern" IS NOT NULL AND "plan_nodes"."fan_in_policy" IS NULL AND "plan_nodes"."shape" IS NOT NULL AND json_extract("plan_nodes"."shape", '$.pattern') = "plan_nodes"."pattern" AND "plan_nodes"."input" IS NOT NULL AND "plan_nodes"."on_allocation_exhausted" IS NOT NULL AND "plan_nodes"."gate_acceptance_criterion_ids" IS NOT NULL)),
+	CONSTRAINT "plan_nodes_join_shape" CHECK("plan_nodes"."kind" <> 'join' OR ("plan_nodes"."pattern" IS NULL AND "plan_nodes"."fan_in_policy" IS NOT NULL AND "plan_nodes"."shape" IS NULL AND "plan_nodes"."input" IS NULL AND "plan_nodes"."on_allocation_exhausted" IS NULL AND "plan_nodes"."gate_acceptance_criterion_ids" IS NULL AND "plan_nodes"."alloc_cost_usd" = 0 AND "plan_nodes"."alloc_tokens" = 0 AND "plan_nodes"."alloc_attempts" = 0)),
+	CONSTRAINT "plan_nodes_root_shape" CHECK("plan_nodes"."source_path" <> 'root' OR ("plan_nodes"."kind" = 'pattern' AND "plan_nodes"."pattern" = 'single' AND json_extract("plan_nodes"."shape", '$.role') = 'orchestrator')),
+	CONSTRAINT "plan_nodes_orchestrator_only_root" CHECK("plan_nodes"."kind" <> 'pattern' OR "plan_nodes"."pattern" <> 'single' OR "plan_nodes"."source_path" = 'root' OR json_extract("plan_nodes"."shape", '$.role') = 'worker'),
 	CONSTRAINT "plan_nodes_join_never_runs" CHECK("plan_nodes"."kind" <> 'join' OR "plan_nodes"."status" NOT IN ('running', 'waiting')),
 	CONSTRAINT "plan_nodes_alloc_non_negative" CHECK("plan_nodes"."alloc_cost_usd" >= 0 AND "plan_nodes"."alloc_tokens" >= 0 AND "plan_nodes"."alloc_attempts" >= 0),
 	CONSTRAINT "plan_nodes_terminal_has_ended_at" CHECK(("plan_nodes"."status" IN ('succeeded', 'failed', 'cancelled', 'skipped')) = ("plan_nodes"."ended_at" IS NOT NULL))
@@ -470,6 +482,20 @@ CREATE TABLE `plan_nodes` (
 --> statement-breakpoint
 CREATE INDEX `plan_nodes_run_status` ON `plan_nodes` (`run_id`,`status`);--> statement-breakpoint
 CREATE INDEX `plan_nodes_run_source_path` ON `plan_nodes` (`run_id`,`source_path`);--> statement-breakpoint
+CREATE TABLE `plan_revision_nodes` (
+	`run_id` text NOT NULL,
+	`revision_number` integer NOT NULL,
+	`plan_node_id` text NOT NULL,
+	`position` integer NOT NULL,
+	PRIMARY KEY(`run_id`, `revision_number`, `plan_node_id`),
+	FOREIGN KEY (`run_id`) REFERENCES `runs`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`plan_node_id`) REFERENCES `plan_nodes`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`run_id`,`revision_number`) REFERENCES `execution_plan_revisions`(`run_id`,`number`) ON UPDATE no action ON DELETE no action,
+	CONSTRAINT "plan_revision_nodes_position" CHECK("plan_revision_nodes"."position" >= 0)
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `plan_revision_nodes_position` ON `plan_revision_nodes` (`run_id`,`revision_number`,`position`);--> statement-breakpoint
+CREATE INDEX `plan_revision_nodes_node` ON `plan_revision_nodes` (`plan_node_id`);--> statement-breakpoint
 CREATE TABLE `provider_continuations` (
 	`attempt_id` text PRIMARY KEY NOT NULL,
 	`provider` text NOT NULL,
@@ -574,6 +600,9 @@ CREATE TABLE `runs` (
 	`max_attempts` integer NOT NULL,
 	`max_wall_clock_ms` integer,
 	`max_concurrency` integer,
+	`final_reserve_cost_usd` real NOT NULL,
+	`final_reserve_tokens` integer NOT NULL,
+	`final_reserve_attempts` integer NOT NULL,
 	`base_snapshot_id` text,
 	`integration_snapshot_id` text,
 	`final_snapshot_id` text,
@@ -593,7 +622,9 @@ CREATE TABLE `runs` (
 	CONSTRAINT "runs_waiting_has_reason" CHECK(("runs"."status" = 'waiting') = ("runs"."wait_reason" IS NOT NULL)),
 	CONSTRAINT "runs_failed_has_failure" CHECK(("runs"."status" = 'failed') = ("runs"."failure" IS NOT NULL)),
 	CONSTRAINT "runs_terminal_has_ended_at" CHECK(("runs"."status" IN ('completed', 'failed', 'cancelled')) = ("runs"."ended_at" IS NOT NULL)),
-	CONSTRAINT "runs_budget_non_negative" CHECK("runs"."max_cost_usd" >= 0 AND "runs"."max_tokens" >= 0 AND "runs"."max_attempts" >= 0)
+	CONSTRAINT "runs_budget_non_negative" CHECK("runs"."max_cost_usd" >= 0 AND "runs"."max_tokens" >= 0 AND "runs"."max_attempts" >= 0),
+	CONSTRAINT "runs_final_reserve_non_negative" CHECK("runs"."final_reserve_cost_usd" >= 0 AND "runs"."final_reserve_tokens" >= 0 AND "runs"."final_reserve_attempts" >= 0),
+	CONSTRAINT "runs_final_reserve_within_budget" CHECK("runs"."final_reserve_cost_usd" <= "runs"."max_cost_usd" AND "runs"."final_reserve_tokens" <= "runs"."max_tokens" AND "runs"."final_reserve_attempts" <= "runs"."max_attempts")
 );
 --> statement-breakpoint
 CREATE INDEX `runs_conversation` ON `runs` (`conversation_id`,`created_at`);--> statement-breakpoint
@@ -711,21 +742,23 @@ CREATE TABLE `workspaces` (
 	CONSTRAINT "workspaces_kind" CHECK("workspaces"."kind" IN ('git', 'directory'))
 );
 --> statement-breakpoint
-CREATE UNIQUE INDEX `workspaces_root_path_unique` ON `workspaces` (`root_path`);--> statement-breakpoint
--- Hand-maintained tail of the baseline (drizzle-kit generates only the DDL
--- above). Keep this block when regenerating: it writes the schema identity
--- row and installs the append-only and immutability guards.
+CREATE UNIQUE INDEX `workspaces_root_path_unique` ON `workspaces` (`root_path`);
+--> statement-breakpoint
 INSERT INTO `schema_info` (`id`, `application`, `schema`, `version`) VALUES (1, 'agentique-console', 'orchestration-core', 1);--> statement-breakpoint
 CREATE TRIGGER `schema_info_no_delete` BEFORE DELETE ON `schema_info` BEGIN SELECT RAISE(ABORT, 'schema_info is never deleted'); END;--> statement-breakpoint
 CREATE TRIGGER `events_no_update` BEFORE UPDATE ON `events` BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;--> statement-breakpoint
 CREATE TRIGGER `events_no_delete` BEFORE DELETE ON `events` BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;--> statement-breakpoint
+CREATE TRIGGER `runs_definition_immutable` BEFORE UPDATE OF `conversation_id`, `workspace_id`, `kind`, `target`, `final_reserve_cost_usd`, `final_reserve_tokens`, `final_reserve_attempts`, `created_at` ON `runs` BEGIN SELECT RAISE(ABORT, 'run definition columns are immutable'); END;--> statement-breakpoint
+CREATE TRIGGER `runs_no_delete` BEFORE DELETE ON `runs` BEGIN SELECT RAISE(ABORT, 'runs are never deleted'); END;--> statement-breakpoint
 CREATE TRIGGER `execution_plan_revisions_no_update` BEFORE UPDATE ON `execution_plan_revisions` BEGIN SELECT RAISE(ABORT, 'execution_plan_revisions are immutable'); END;--> statement-breakpoint
 CREATE TRIGGER `execution_plan_revisions_no_delete` BEFORE DELETE ON `execution_plan_revisions` BEGIN SELECT RAISE(ABORT, 'execution_plan_revisions are immutable'); END;--> statement-breakpoint
 CREATE TRIGGER `plan_edges_no_update` BEFORE UPDATE ON `plan_edges` BEGIN SELECT RAISE(ABORT, 'plan_edges are append-only'); END;--> statement-breakpoint
 CREATE TRIGGER `plan_edges_no_delete` BEFORE DELETE ON `plan_edges` BEGIN SELECT RAISE(ABORT, 'plan_edges are append-only'); END;--> statement-breakpoint
+CREATE TRIGGER `plan_revision_nodes_no_update` BEFORE UPDATE ON `plan_revision_nodes` BEGIN SELECT RAISE(ABORT, 'plan_revision_nodes are immutable'); END;--> statement-breakpoint
+CREATE TRIGGER `plan_revision_nodes_no_delete` BEFORE DELETE ON `plan_revision_nodes` BEGIN SELECT RAISE(ABORT, 'plan_revision_nodes are immutable'); END;--> statement-breakpoint
 CREATE TRIGGER `plan_node_requirements_no_update` BEFORE UPDATE ON `plan_node_requirements` BEGIN SELECT RAISE(ABORT, 'plan_node_requirements are never updated'); END;--> statement-breakpoint
 CREATE TRIGGER `plan_node_requirements_no_delete` BEFORE DELETE ON `plan_node_requirements` BEGIN SELECT RAISE(ABORT, 'plan_node_requirements are never deleted'); END;--> statement-breakpoint
-CREATE TRIGGER `plan_nodes_definition_immutable` BEFORE UPDATE OF `run_id`, `revision_number`, `kind`, `pattern`, `source_path`, `fan_in_policy`, `input`, `agents`, `alloc_cost_usd`, `alloc_tokens`, `alloc_attempts`, `max_concurrency`, `max_wall_clock_ms`, `bounds`, `on_allocation_exhausted`, `run_on_dependency_failure`, `gate_acceptance_criterion_ids`, `created_at` ON `plan_nodes` BEGIN SELECT RAISE(ABORT, 'plan_nodes definition columns are immutable'); END;--> statement-breakpoint
+CREATE TRIGGER `plan_nodes_definition_immutable` BEFORE UPDATE OF `run_id`, `created_in_revision_number`, `kind`, `pattern`, `title`, `source_path`, `fan_in_policy`, `input`, `shape`, `alloc_cost_usd`, `alloc_tokens`, `alloc_attempts`, `max_concurrency`, `max_wall_clock_ms`, `on_allocation_exhausted`, `run_on_dependency_failure`, `gate_acceptance_criterion_ids`, `created_at` ON `plan_nodes` BEGIN SELECT RAISE(ABORT, 'plan_nodes definition columns are immutable'); END;--> statement-breakpoint
 CREATE TRIGGER `plan_nodes_no_delete` BEFORE DELETE ON `plan_nodes` BEGIN SELECT RAISE(ABORT, 'plan_nodes are never deleted'); END;--> statement-breakpoint
 CREATE TRIGGER `requirement_revisions_no_update` BEFORE UPDATE ON `requirement_revisions` BEGIN SELECT RAISE(ABORT, 'requirement_revisions are immutable'); END;--> statement-breakpoint
 CREATE TRIGGER `requirement_revisions_no_delete` BEFORE DELETE ON `requirement_revisions` BEGIN SELECT RAISE(ABORT, 'requirement_revisions are immutable'); END;--> statement-breakpoint
@@ -759,7 +792,7 @@ CREATE TRIGGER `snapshots_no_delete` BEFORE DELETE ON `snapshots` BEGIN SELECT R
 CREATE TRIGGER `changesets_definition_immutable` BEFORE UPDATE OF `run_id`, `invocation_id`, `before_snapshot_id`, `after_snapshot_id`, `diff_artifact_id`, `created_at` ON `changesets` BEGIN SELECT RAISE(ABORT, 'changeset definition columns are immutable'); END;--> statement-breakpoint
 CREATE TRIGGER `publications_no_update` BEFORE UPDATE ON `publications` BEGIN SELECT RAISE(ABORT, 'publications are immutable'); END;--> statement-breakpoint
 CREATE TRIGGER `publications_no_delete` BEFORE DELETE ON `publications` BEGIN SELECT RAISE(ABORT, 'publications are immutable'); END;--> statement-breakpoint
-CREATE TRIGGER `budget_reservations_definition_immutable` BEFORE UPDATE OF `run_id`, `parent_type`, `parent_id`, `child_type`, `child_id`, `reserved_cost_usd`, `reserved_tokens`, `reserved_attempts`, `transferred_from_reservation_id`, `created_at` ON `budget_reservations` BEGIN SELECT RAISE(ABORT, 'budget_reservation allocation columns are immutable'); END;--> statement-breakpoint
+CREATE TRIGGER `budget_reservations_definition_immutable` BEFORE UPDATE OF `run_id`, `parent_type`, `parent_id`, `child_type`, `child_id`, `reserved_cost_usd`, `reserved_tokens`, `reserved_attempts`, `capacity_source`, `transferred_from_reservation_id`, `created_at` ON `budget_reservations` BEGIN SELECT RAISE(ABORT, 'budget_reservation allocation columns are immutable'); END;--> statement-breakpoint
 CREATE TRIGGER `budget_reservations_released_once` BEFORE UPDATE ON `budget_reservations` WHEN OLD.`status` = 'released' BEGIN SELECT RAISE(ABORT, 'a released budget_reservation never changes again'); END;--> statement-breakpoint
 CREATE TRIGGER `budget_reservations_no_delete` BEFORE DELETE ON `budget_reservations` BEGIN SELECT RAISE(ABORT, 'budget_reservations are historical records'); END;--> statement-breakpoint
 CREATE TRIGGER `capacity_leases_released_once` BEFORE UPDATE ON `capacity_leases` WHEN OLD.`status` = 'released' BEGIN SELECT RAISE(ABORT, 'a released capacity_lease never changes again'); END;--> statement-breakpoint

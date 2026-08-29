@@ -90,17 +90,27 @@ describe("database constraints", () => {
       expect(() =>
         h.database.sqlite
           .prepare(
-            "INSERT INTO plan_nodes (id, run_id, revision_number, kind, pattern, title, source_path, status, wait_reason, fan_in_policy, input, agents, alloc_cost_usd, alloc_tokens, alloc_attempts, max_concurrency, max_wall_clock_ms, bounds, on_allocation_exhausted, run_on_dependency_failure, gate_acceptance_criterion_ids, output_artifact_ids, created_at, started_at, ended_at) VALUES (?, ?, 1, 'join', 'single', 'j', '1', 'pending', NULL, 'require_all', NULL, NULL, 0, 0, 0, NULL, NULL, NULL, NULL, 0, NULL, NULL, ?, NULL, NULL)",
+            "INSERT INTO plan_nodes (id, run_id, created_in_revision_number, kind, pattern, title, source_path, status, wait_reason, fan_in_policy, input, shape, alloc_cost_usd, alloc_tokens, alloc_attempts, max_concurrency, max_wall_clock_ms, on_allocation_exhausted, run_on_dependency_failure, gate_acceptance_criterion_ids, output_artifact_ids, created_at, started_at, ended_at) VALUES (?, ?, 1, 'join', 'single', 'j', 'e1', 'pending', NULL, 'require_all', NULL, NULL, 0, 0, 0, NULL, NULL, NULL, 0, NULL, NULL, ?, NULL, NULL)",
           )
           .run(`pn_${"1".repeat(24)}`, s.run.id, now),
       ).toThrow(/CHECK constraint failed: plan_nodes_join_shape/);
       expect(() =>
         h.database.sqlite
           .prepare(
-            "INSERT INTO plan_nodes (id, run_id, revision_number, kind, pattern, title, source_path, status, wait_reason, fan_in_policy, input, agents, alloc_cost_usd, alloc_tokens, alloc_attempts, max_concurrency, max_wall_clock_ms, bounds, on_allocation_exhausted, run_on_dependency_failure, gate_acceptance_criterion_ids, output_artifact_ids, created_at, started_at, ended_at) VALUES (?, ?, 1, 'join', NULL, 'j', '1', 'pending', NULL, 'best_effort', NULL, NULL, 0, 0, 0, NULL, NULL, NULL, NULL, 0, NULL, NULL, ?, NULL, NULL)",
+            "INSERT INTO plan_nodes (id, run_id, created_in_revision_number, kind, pattern, title, source_path, status, wait_reason, fan_in_policy, input, shape, alloc_cost_usd, alloc_tokens, alloc_attempts, max_concurrency, max_wall_clock_ms, on_allocation_exhausted, run_on_dependency_failure, gate_acceptance_criterion_ids, output_artifact_ids, created_at, started_at, ended_at) VALUES (?, ?, 1, 'join', NULL, 'j', 'e1', 'pending', NULL, 'best_effort', NULL, NULL, 0, 0, 0, NULL, NULL, NULL, 0, NULL, NULL, ?, NULL, NULL)",
           )
           .run(`pn_${"2".repeat(24)}`, s.run.id, now),
       ).toThrow(/CHECK constraint failed: plan_nodes_fan_in_policy/);
+      // A pattern node's shape must agree with its Pattern column, and only the root holds the orchestrator role.
+      const patternInsert = (pattern: string, shape: string, sourcePath: string) =>
+        h.database.sqlite
+          .prepare(
+            "INSERT INTO plan_nodes (id, run_id, created_in_revision_number, kind, pattern, title, source_path, status, wait_reason, fan_in_policy, input, shape, alloc_cost_usd, alloc_tokens, alloc_attempts, max_concurrency, max_wall_clock_ms, on_allocation_exhausted, run_on_dependency_failure, gate_acceptance_criterion_ids, output_artifact_ids, created_at, started_at, ended_at) VALUES (?, ?, 1, 'pattern', ?, 'p', ?, 'pending', NULL, NULL, '{}', ?, 0, 0, 0, NULL, NULL, 'fail', 0, '[]', NULL, ?, NULL, NULL)",
+          )
+          .run(`pn_${Math.random().toString(16).slice(2, 26).padEnd(24, "0")}`, s.run.id, pattern, sourcePath, shape, now);
+      expect(() => patternInsert("chain", '{"pattern":"single","role":"worker"}', "e3")).toThrow(/CHECK constraint failed: plan_nodes_pattern_shape/);
+      expect(() => patternInsert("single", '{"pattern":"single","role":"orchestrator"}', "e4")).toThrow(/CHECK constraint failed: plan_nodes_orchestrator_only_root/);
+      expect(() => patternInsert("chain", '{"pattern":"chain"}', "root")).toThrow(/CHECK constraint failed: plan_nodes_root_shape/);
     } finally {
       h.close();
     }
@@ -117,6 +127,9 @@ describe("database constraints", () => {
       expect(() => sqlite.prepare("UPDATE plan_nodes SET pattern = 'chain' WHERE id = ?").run(s.root.id)).toThrow(/definition columns are immutable/);
       expect(() => sqlite.prepare("UPDATE agent_definition_revisions SET instructions = 'x' WHERE id = ?").run(s.definition.id)).toThrow(/immutable/);
       expect(() => sqlite.prepare("DELETE FROM budget_reservations").run()).toThrow(/historical records/);
+      expect(() => sqlite.prepare("UPDATE plan_revision_nodes SET position = 9 WHERE run_id = ?").run(s.run.id)).toThrow(/immutable/);
+      expect(() => sqlite.prepare("DELETE FROM plan_revision_nodes").run()).toThrow(/immutable/);
+      expect(() => sqlite.prepare("UPDATE runs SET kind = 'other' WHERE id = ?").run(s.run.id)).toThrow(/immutable/);
       expect(() => sqlite.prepare("DELETE FROM schema_info").run()).toThrow(/never deleted/);
     } finally {
       h.close();
