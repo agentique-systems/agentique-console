@@ -72,7 +72,7 @@ describe("WorkspaceWizard", () => {
   it("defines a new folder inline and creates it only when confirmed", async () => {
     const spy = stubRoutes([
       ROOTS, DIRS_HOME,
-      { match: (url, init) => url.endsWith("/api/workspaces") && init?.method === "POST", status: 201, body: workspace("/home/cairon/demo", "Demo project") },
+      { match: (url, init) => url.endsWith("/api/workspaces") && init?.method === "POST", status: 201, body: workspace("/home/cairon/demo", "demo") },
     ]);
     const user = userEvent.setup();
     render(createElement(WorkspaceWizard, { open: true, onOpenChange: () => {} }), { wrapper: wrapper() });
@@ -81,13 +81,10 @@ describe("WorkspaceWizard", () => {
     await user.click(await screen.findByRole("button", { name: "New folder" }));
     await user.type(await screen.findByLabelText("new folder name"), "demo");
     await user.click(screen.getByRole("button", { name: "Choose new folder" }));
-    const name = screen.getByLabelText(/Workspace name/);
-    await user.clear(name);
-    await user.type(name, "Demo project");
     await user.click(screen.getByRole("button", { name: "Create workspace" }));
 
     const post = await waitFor(() => spy.mock.calls.find(([, init]) => init?.method === "POST"));
-    expect(JSON.parse(String(post?.[1]?.body))).toEqual({ name: "Demo project", rootPath: "/home/cairon/demo", create: true });
+    expect(JSON.parse(String(post?.[1]?.body))).toEqual({ name: "demo", rootPath: "/home/cairon/demo", create: true });
   });
 
   it("shows the server error and keeps the dialog open", async () => {

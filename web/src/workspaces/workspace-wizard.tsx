@@ -10,8 +10,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { errorMessage } from "@/lib/utils";
 import { useScopeStore } from "@/stores/scope";
 
@@ -30,16 +28,12 @@ export function WorkspaceWizard({
   const [browsePath, setBrowsePath] = useState<string | null>(null);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [createDirectory, setCreateDirectory] = useState(false);
-  const [name, setName] = useState("");
-  const [touchedName, setTouchedName] = useState(false);
   const [error, setError] = useState<unknown>(null);
 
   const reset = () => {
     setBrowsePath(null);
     setSelectedPath(null);
     setCreateDirectory(false);
-    setName("");
-    setTouchedName(false);
     setError(null);
     create.reset();
   };
@@ -55,24 +49,22 @@ export function WorkspaceWizard({
     setSelectedPath(path);
     setCreateDirectory(false);
     setError(null);
-    if (!touchedName) setName("");
   };
 
   const selectNew = (path: string) => {
     setSelectedPath(path);
     setCreateDirectory(true);
     setError(null);
-    if (!touchedName) setName("");
   };
 
-  const effectiveName = touchedName ? name.trim() : basename(selectedPath ?? "");
-  const canSubmit = selectedPath !== null && effectiveName.length > 0;
+  const workspaceName = basename(selectedPath ?? "");
+  const canSubmit = selectedPath !== null && workspaceName.length > 0;
 
   const submit = () => {
     if (!canSubmit || selectedPath === null) return;
     setError(null);
     create.mutate(
-      { name: effectiveName, rootPath: selectedPath, create: createDirectory },
+      { name: workspaceName, rootPath: selectedPath, create: createDirectory },
       {
         onSuccess: (workspace) => {
           reset();
@@ -111,20 +103,6 @@ export function WorkspaceWizard({
               <div className="mt-1 truncate font-mono text-xs" title={selectedPath ?? undefined}>{selectedPath ?? "Choose a folder above"}</div>
             </div>
           </div>
-        </div>
-
-        <div className="flex flex-col gap-1.5">
-          <div className="flex items-baseline justify-between gap-3">
-            <Label htmlFor="workspace-name" className="text-xs">Workspace name <span className="font-normal text-muted-foreground">(optional)</span></Label>
-            <span className="text-3xs text-muted-foreground">Defaults to the folder name</span>
-          </div>
-          <Input
-            id="workspace-name"
-            value={touchedName ? name : effectiveName}
-            onChange={(event) => { setTouchedName(true); setName(event.target.value); }}
-            placeholder="Workspace name"
-            className="h-8"
-          />
         </div>
 
         {error !== null && <p className="text-2xs text-status-failed" data-testid="wizard-error">{errorMessage(error)}</p>}
