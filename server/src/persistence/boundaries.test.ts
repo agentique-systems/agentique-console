@@ -1,7 +1,8 @@
 /**
  * Import-boundary and terminology enforcement for the new source
- * (`core/`, `server/src/persistence/`, `server/src/provider/`), and the
- * independence of the legacy application from it.
+ * (`core/`, `server/src/persistence/`, `server/src/execution/`,
+ * `server/src/provider/`), and the independence of the legacy application
+ * from it.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -9,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-const NEW_SOURCE_DIRS = ["core/src", "server/src/persistence", "server/src/provider"];
+const NEW_SOURCE_DIRS = ["core/src", "server/src/persistence", "server/src/execution", "server/src/provider"];
 const LEGACY_SOURCE_DIRS = ["shared/src", "server/src", "web/src", "server/scripts", "server/evals"];
 
 function listFiles(dir: string, filter: (file: string) => boolean): string[] {
@@ -73,7 +74,7 @@ describe("import boundaries", () => {
     }
   });
 
-  it("persistence and provider import neither the legacy shared package, server/src/db, nor legacy runtime modules", () => {
+  it("persistence, execution, and provider import neither the legacy shared package, server/src/db, nor legacy runtime modules", () => {
     const forbiddenPackages = /^@agentique-console\/shared/;
     const forbiddenLegacyDirs = [
       "server/src/db",
@@ -99,7 +100,7 @@ describe("import boundaries", () => {
       "shared/src",
     ];
     const forbiddenLegacyFiles = ["server/src/app.ts", "server/src/boot.ts", "server/src/main.ts", "server/src/context.ts", "server/src/recovery.ts", "server/src/test-helpers.ts", "server/src/ids.ts", "server/src/errors.ts", "server/src/paging.ts"];
-    for (const file of [...listFiles("server/src/persistence", isCode), ...listFiles("server/src/provider", isCode)]) {
+    for (const file of [...listFiles("server/src/persistence", isCode), ...listFiles("server/src/execution", isCode), ...listFiles("server/src/provider", isCode)]) {
       for (const specifier of importsOf(file)) {
         expect(specifier, `${rel(file)} imports ${specifier}`).not.toMatch(forbiddenPackages);
         for (const dir of forbiddenLegacyDirs) expect(resolvesInto(file, specifier, dir), `${rel(file)} imports ${specifier} (${dir})`).toBe(false);
@@ -111,11 +112,34 @@ describe("import boundaries", () => {
     }
   });
 
+  it("the execution boundary depends only on core, the persistence boundary, and itself", () => {
+    const files = listFiles("server/src/execution", isCode);
+    expect(files.length).toBeGreaterThan(3);
+    for (const file of files) {
+      const isTest = file.endsWith(".test.ts");
+      for (const specifier of importsOf(file)) {
+        if (isTest && specifier === "vitest") continue;
+        const allowed =
+          specifier === "@agentique-console/core" ||
+          resolvesInto(file, specifier, "server/src/execution") ||
+          resolvesInto(file, specifier, "server/src/persistence");
+        expect(allowed, `${rel(file)} imports ${specifier}`).toBe(true);
+      }
+    }
+    // Nothing legacy reaches the execution boundary, and the persistence boundary never depends on it.
+    for (const file of [...legacyFiles, ...listFiles("server/src/persistence", isCode), ...listFiles("server/src/provider", isCode)]) {
+      for (const specifier of importsOf(file)) {
+        expect(resolvesInto(file, specifier, "server/src/execution"), `${rel(file)} imports ${specifier}`).toBe(false);
+      }
+    }
+  });
+
   it("legacy code imports neither core nor the new persistence boundary", () => {
     for (const file of legacyFiles) {
       for (const specifier of importsOf(file)) {
         expect(specifier, `${rel(file)} imports ${specifier}`).not.toMatch(/^@agentique-console\/core/);
         expect(resolvesInto(file, specifier, "server/src/persistence"), `${rel(file)} imports ${specifier}`).toBe(false);
+        expect(resolvesInto(file, specifier, "server/src/execution"), `${rel(file)} imports ${specifier}`).toBe(false);
         expect(resolvesInto(file, specifier, "server/src/provider"), `${rel(file)} imports ${specifier}`).toBe(false);
         expect(resolvesInto(file, specifier, "core/src"), `${rel(file)} imports ${specifier}`).toBe(false);
       }
