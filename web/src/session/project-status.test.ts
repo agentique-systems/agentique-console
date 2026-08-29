@@ -14,7 +14,7 @@ import {
 
 function item(overrides: Partial<ProjectContinuationItem>): ProjectContinuationItem {
   return {
-    id: "proj_1", name: "p", intentPreview: null, openSession: null,
+    id: "proj_1", name: "p", objectivePreview: null, intentPreview: null, openSession: null,
     lastSession: {
       id: "us_1", title: "p", lifecycle: "archived", runState: "active",
       pauseReason: null, updatedAt: "2026-08-26T19:09:38Z",

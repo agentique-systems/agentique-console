@@ -190,7 +190,10 @@ export class UserSessionService {
    */
   #resolveProject(body: CreateUserSessionBody): string {
     if (body.projectId === undefined) {
-      return this.#projects.insert({ workspaceId: body.workspaceId }).id;
+      // Fresh-project authority boundary: the exact first operator message is
+      // the governing objective. A continuation's first message is direction
+      // within the existing project and must never replace it.
+      return this.#projects.insert({ workspaceId: body.workspaceId, objectiveDocument: body.message.trim() }).id;
     }
     const project = this.#projects.get(body.projectId);
     if (!project) throw new NotFoundError(`no project ${body.projectId}`);
@@ -291,10 +294,13 @@ export class UserSessionService {
       const open = sessions.find((row) => row.lifecycle === "open");
       const intentLine = (project.intentDocument ?? "")
         .split("\n").map((line) => line.replace(/^#+\s*/, "").trim()).find((line) => line !== "") ?? null;
+      const objectiveLine = (project.objectiveDocument ?? "")
+        .split("\n").map((line) => line.replace(/^#+\s*/, "").trim()).find((line) => line !== "") ?? null;
       const item: ProjectContinuationItem = {
         id: project.id,
         name: last.title,
         intentPreview: intentLine === null ? null : intentLine.length <= 160 ? intentLine : `${intentLine.slice(0, 159)}…`,
+        objectivePreview: objectiveLine === null ? null : objectiveLine.length <= 160 ? objectiveLine : `${objectiveLine.slice(0, 159)}…`,
         openSession: open === undefined ? null
           : { id: open.id, title: open.title, pauseReason: open.pauseReason },
         lastSession: {

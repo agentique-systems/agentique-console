@@ -16,7 +16,7 @@ import { PAGE_DEFAULT_BYTES, PAGE_MAX_BYTES, pageTail } from "../paging.ts";
 import type { ConsoleSdk, SdkToolResult } from "../sdk/types.ts";
 import type { AssignmentScheduler } from "../tasks/scheduler.ts";
 import type { TaskService } from "../tasks/service.ts";
-import { flattenRequirementGraph, PATTERN_IDS, type HandoffDraft, type PatternId, type RequirementGraph } from "@agentique-console/shared";
+import { flattenRequirementGraph, PATTERN_IDS, type HandoffDraft, type ObjectiveProgressFacts, type PatternId, type RequirementGraph } from "@agentique-console/shared";
 import type { HandoffService } from "../handoffs/service.ts";
 import { EvidenceRefSchema, HandoffCoreSchema, HandoffDraftSchema } from "../handoffs/schema.ts";
 
@@ -76,10 +76,12 @@ export interface ConsoleToolsInput {
   registry: AgentProfileRegistry;
   /** The completion coverage evaluator (createApp's closure) — record_completion returns its outstanding exceptions. */
   coverage: (userSessionId: string) => import("@agentique-console/shared").CompletionCoverageReport | null;
+  /** Console-derived consequences presented alongside objective judgment. */
+  objectiveFacts: (userSessionId: string) => ObjectiveProgressFacts;
 }
 
 export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
-  const { sdk, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, decisionIssues, requirements, assumptions, changeImpacts, workstreams, state, continuation, catalog, registry, coverage } = input;
+  const { sdk, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, decisionIssues, requirements, assumptions, changeImpacts, workstreams, state, continuation, catalog, registry, coverage, objectiveFacts } = input;
 
   /** Tools operate only on this UserSession's agent sessions. */
   const owned = (agentSessionId: string) => {
@@ -1136,6 +1138,60 @@ export function buildConsoleMcpServer(input: ConsoleToolsInput): unknown {
               uncertainties: row.uncertainties, assumptions: row.assumptions, risks: row.risks, note: row.note },
             note: "Recorded. This is the full merged state your next generation reads — keep it true." };
         }),
+    ),
+
+    sdk.tool(
+      "assess_objective_progress",
+      "Assess objective progress.",
+      {
+        currentState: z.string().min(1),
+        progress: z.array(z.string().min(1)).max(12).default([]),
+        remainingGaps: z.array(z.object({
+          description: z.string().min(1),
+          executability: z.enum(["executable", "blocked", "operator_owned"]),
+          refs: z.array(z.string().min(1)).max(8).default([]),
+        })).max(20).default([]),
+        changedSincePrevious: z.string().min(1),
+        nextAction: z.string().min(1).optional(),
+        decision: z.enum(["continue", "stop"]),
+        stopReason: z.enum(["substantially_achieved", "genuinely_blocked", "needs_operator_judgment", "diminishing_returns"]).optional(),
+        rationale: z.string().min(1),
+        stopEvidence: z.array(z.string().min(1)).max(8).default([]),
+        valueCostRationale: z.string().min(1).optional(),
+      },
+      async (args: {
+        currentState: string; progress: string[];
+        remainingGaps: { description: string; executability: "executable" | "blocked" | "operator_owned"; refs: string[] }[];
+        changedSincePrevious: string; nextAction?: string; decision: "continue" | "stop";
+        stopReason?: "substantially_achieved" | "genuinely_blocked" | "needs_operator_judgment" | "diminishing_returns";
+        rationale: string; stopEvidence: string[]; valueCostRationale?: string;
+      }) => guarded(() => {
+        // Derive first: landing verification may itself emit a material event.
+        // The assessment watermark must include every fact returned beside it.
+        const facts = objectiveFacts(userSessionId);
+        const result = state.assessObjective(userSessionId, {
+          currentState: clip(args.currentState, 1_200),
+          progress: clipAll(args.progress, 300, 12),
+          remainingGaps: args.remainingGaps.slice(0, 20).map((gap) => ({
+            description: clip(gap.description, 400), executability: gap.executability,
+            refs: clipAll(gap.refs, 160, 8),
+          })),
+          changedSincePrevious: clip(args.changedSincePrevious, 600),
+          nextAction: args.nextAction === undefined ? null : clip(args.nextAction, 600),
+          decision: args.decision,
+          stopReason: args.stopReason ?? null,
+          rationale: clip(args.rationale, 1_000),
+          stopEvidence: clipAll(args.stopEvidence, 240, 8),
+          valueCostRationale: args.valueCostRationale === undefined ? null : clip(args.valueCostRationale, 600),
+        });
+        return {
+          revision: result.row.revision,
+          recorded: result.inserted,
+          assessment: result.assessment,
+          facts,
+          note: result.inserted ? "Recorded against the current material-event watermark." : "Exact duplicate at the same watermark; existing assessment retained.",
+        };
+      }),
     ),
 
     sdk.tool(

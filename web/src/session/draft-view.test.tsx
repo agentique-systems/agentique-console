@@ -39,6 +39,7 @@ function projectItem(overrides: Partial<ProjectContinuationItem> = {}): ProjectC
   return {
     id: "proj_1",
     name: "Straf3 movement wave",
+    objectivePreview: "Build the broader Straf3 competitive game ecosystem",
     intentPreview: "Canonical movement plus measured responsiveness",
     openSession: null,
     lastSession: {

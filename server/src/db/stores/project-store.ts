@@ -29,11 +29,12 @@ export class ProjectStore {
       .orderBy(projects.createdAt).all();
   }
 
-  insert(input: { workspaceId: string; title?: string | null }): ProjectRow {
+  insert(input: { workspaceId: string; title?: string | null; objectiveDocument?: string | null }): ProjectRow {
     const row: ProjectRow = {
       id: newId("proj"),
       workspaceId: input.workspaceId,
       title: input.title ?? null,
+      objectiveDocument: input.objectiveDocument ?? null,
       intentDocument: null,
       createdAt: nowIso(),
     };
@@ -41,7 +42,7 @@ export class ProjectStore {
     return row;
   }
 
-  /** The operator-approved intent prose; written at full/intent approvals only. */
+  /** The current approved milestone/specification prose; written at full/intent approvals only. */
   setIntentDocument(id: string, intentDocument: string): void {
     this.#db.update(projects).set({ intentDocument }).where(eq(projects.id, id)).run();
   }

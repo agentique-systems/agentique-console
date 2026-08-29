@@ -30,6 +30,7 @@ import { AssumptionService } from "./orchestrator/assumptions.ts";
 import { ChangeImpactService } from "./orchestrator/change-impact.ts";
 import { RequirementService } from "./orchestrator/requirements.ts";
 import { OrchestrationStateService } from "./orchestrator/state.ts";
+import { ProjectObjectiveService } from "./orchestrator/objective.ts";
 import { WorkstreamService } from "./portfolio/workstreams.ts";
 import type { ConsoleSdk } from "./sdk/types.ts";
 import type { SqliteSessionStore } from "./sdk/session-store.ts";
@@ -85,6 +86,7 @@ export interface App {
   host: AgentSessionService;
   runner: OrchestratorRunner;
   requirements: RequirementService;
+  objective: ProjectObjectiveService;
   assumptions: AssumptionService;
   changeImpacts: ChangeImpactService;
   workstreams: WorkstreamService;
@@ -132,6 +134,7 @@ export function createApp(options: CreateAppOptions): App {
   const tasks = new TaskService(stores.tasks, stores.assignments, bus, (workspaceId) => void workspaces.get(workspaceId));
   const handoffs = new HandoffService({ repo, bus, getWorkspaceRoot });
   const requirements = new RequirementService(stores.requirements, stores.projects, stores.assumptions, bus, resolveProject);
+  const objective = new ProjectObjectiveService(stores.projects, resolveProject);
   const assumptions = new AssumptionService(stores.assumptions, requirements, bus, resolveProject);
   // The project-portfolio workstream layer: durable cross-session dependency
   // links with console-derived status; ownership claims live on seat rows and
@@ -172,7 +175,13 @@ export function createApp(options: CreateAppOptions): App {
         .map((row) => row.agentSessionId)
         .filter((id): id is string => id !== null)),
   });
-  const orchestrationState = new OrchestrationStateService(stores.orchestrationState, bus);
+  const orchestrationState = new OrchestrationStateService(stores.orchestrationState, bus, objective);
+  orchestrationState.setDeps({
+    resolveProject,
+    listUserSessionIdsForProject: (projectId) => repo.listUserSessionsForProject(projectId).map((row) => row.id),
+    materialHeadSeq: (userSessionIds) => bus.objectiveMaterialHeadSeq(userSessionIds),
+    openDecisionIssueIds: (userSessionId) => decisionIssues.listOpenForProject(userSessionId).map((issue) => issue.id),
+  });
   // Continuation checkpoints: the run-boundary handoff a later session on the
   // same project inherits. Constructed here (the runner injects its digest);
   // deps wire below once host and completion exist.
@@ -195,7 +204,7 @@ export function createApp(options: CreateAppOptions): App {
   const lateRunner = late<OrchestratorRunner>("runner");
   const lateScheduler = late<AssignmentScheduler>("scheduler");
   const host = new AgentSessionService({
-    repo, bus, artifacts, config, profiles, sdk, sessionStore, getWorkspaceRoot, requirements, assumptions,
+    repo, bus, artifacts, config, profiles, sdk, sessionStore, getWorkspaceRoot, requirements, objective, assumptions,
     worktrees, landings, capacity,
     interactions, decisions, decisionIssues, tasks, handoffs,
     workstreams: {
@@ -238,6 +247,37 @@ export function createApp(options: CreateAppOptions): App {
       policy: config.policy.completionPolicy,
     }, userSessionId);
   };
+  const objectiveFacts = (userSessionId: string): import("@agentique-console/shared").ObjectiveProgressFacts => {
+    const nodes = requirements.derive(userSessionId);
+    const taskRows = tasks.listForUserSession(userSessionId).filter((task) => task.status !== "deleted");
+    const issues = decisionIssues.listOpenForProject(userSessionId);
+    const impacts = changeImpacts.listOpen(userSessionId);
+    const sessions = repo.listAgentSessions(userSessionId);
+    const invalidated = landings.invalidated(userSessionId);
+    const report = coverage(userSessionId);
+    return {
+      requirements: {
+        revision: requirements.governingRevision(userSessionId),
+        open: requirements.frontier(userSessionId).length,
+        unsatisfied: nodes.filter((node) => node.derivedStatus !== "satisfied" && node.derivedStatus !== "retired").length,
+        verificationGaps: requirements.verificationGaps(userSessionId).length,
+      },
+      tasks: {
+        pending: taskRows.filter((task) => task.status === "pending").length,
+        inProgress: taskRows.filter((task) => task.status === "in_progress").length,
+        blocked: taskRows.filter((task) => task.status === "pending" && !task.ready).length,
+      },
+      decisionIssues: { open: issues.length, ids: issues.map((issue) => issue.id) },
+      changeImpacts: { open: impacts.length, ids: impacts.map((impact) => impact.id) },
+      workstreams: {
+        active: sessions.filter((session) => session.lifecycle === "open").length,
+        archived: sessions.filter((session) => session.lifecycle === "archived").length,
+        brokenDependencies: workstreams.brokenOpen(userSessionId).length,
+      },
+      landings: { invalidated: invalidated.length, ids: invalidated.map((landing) => landing.id) },
+      completionExceptions: { count: report?.exceptions.length ?? 0, refs: (report?.exceptions ?? []).map((entry) => entry.ref) },
+    };
+  };
   const scheduler = new AssignmentScheduler({
     store: stores.assignments, tasks, sessions: stores.sessions, messages: stores.messages, bus,
     post: (input) => host.post(input),
@@ -246,11 +286,11 @@ export function createApp(options: CreateAppOptions): App {
   lateScheduler.set(scheduler);
   const runner = new OrchestratorRunner({
     repo, bus, config, sdk, interactions, decisions, handoffs, sessionStore, getWorkspaceRoot,
-    requirements, orchestrationState, continuation,
+    requirements, objective, orchestrationState, continuation,
     host: () => host,
     tasks, capacity,
     buildMcpServer: (userSessionId, sdkInstance) =>
-      buildConsoleMcpServer({ sdk: sdkInstance, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, decisionIssues, requirements, assumptions, changeImpacts, workstreams, state: orchestrationState, continuation, catalog, registry: profiles, coverage }),
+      buildConsoleMcpServer({ sdk: sdkInstance, host, repo, bus, userSessionId, tasks, scheduler, handoffs, artifacts, interactions, decisionIssues, requirements, assumptions, changeImpacts, workstreams, state: orchestrationState, continuation, catalog, registry: profiles, coverage, objectiveFacts }),
   });
   lateRunner.set(runner);
   workstreams.setWakeNote((userSessionId, text) => lateRunner.get().postConsoleNote(userSessionId, text));
@@ -283,6 +323,7 @@ export function createApp(options: CreateAppOptions): App {
     listOpenDecisionIssues: (userSessionId) => decisionIssues.listOpenForProject(userSessionId),
     listWorkstreamLinks: (userSessionId) => workstreams.list(userSessionId),
     latestState: (userSessionId) => orchestrationState.current(userSessionId),
+    latestObjectiveAssessment: (userSessionId) => orchestrationState.latestObjectiveAssessment(userSessionId),
     latestCompletion: (userSessionId) => orchestrationState.latestCompletion(userSessionId),
     latestSummaryFacts: (userSessionId) => completion.latestSummaryFacts(userSessionId),
   });
@@ -328,7 +369,7 @@ export function createApp(options: CreateAppOptions): App {
   });
 
   return {
-    config, db, sqlite, bus, artifacts, repo, sdk, getWorkspaceRoot, requirements, assumptions, changeImpacts, workstreams, orchestrationState, continuation, landings,
+    config, db, sqlite, bus, artifacts, repo, sdk, getWorkspaceRoot, requirements, objective, assumptions, changeImpacts, workstreams, orchestrationState, continuation, landings,
     workspaces, timeline, profiles, worktrees, capacity,
     decisions, decisionIssues, interactions, tasks, scheduler, handoffs, sessionStore,
     host, runner, completion, userSessions, system,

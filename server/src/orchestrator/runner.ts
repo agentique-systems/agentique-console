@@ -36,6 +36,7 @@ import type {
 import { decisionPin, type DecisionLedger } from "./decisions.ts";
 import type { RequirementService } from "./requirements.ts";
 import type { OrchestrationStateService } from "./state.ts";
+import type { ProjectObjectiveService } from "./objective.ts";
 import type { InteractionService } from "./interactions.ts";
 import { MAIN_DEFAULT_EFFORT, buildOrchestratorOptions } from "./options.ts";
 import type { EffortLevel } from "../sdk/effort.ts";
@@ -132,6 +133,7 @@ export interface OrchestratorDeps {
   /** The living spec + working state, injected into every generation like decisions. */
   /** The governing document (requirement graph, legacy-spec fallback). */
   requirements: RequirementService;
+  objective: ProjectObjectiveService;
   orchestrationState: OrchestrationStateService;
   /**
    * The prior-run continuation checkpoint on a continued project, injected
@@ -610,7 +612,9 @@ export class OrchestratorRunner {
         // prompt while any requirement it names is still unsatisfied.
         pinned: decisionPin(this.#deps.requirements.derive(sessionId)),
       }),
+      objectiveDigest: this.#deps.objective.digest(sessionId),
       specDigest: this.#deps.requirements.digest(sessionId),
+      objectiveAssessmentDigest: this.#deps.orchestrationState.objectiveAssessmentDigest(sessionId),
       stateDigest: this.#deps.orchestrationState.digest(sessionId),
       continuationDigest: this.#deps.continuation.digest(sessionId),
       autonomy: session.autonomy,

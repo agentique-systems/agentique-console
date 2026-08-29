@@ -146,6 +146,8 @@ export interface ProjectContinuationItem {
   name: string | null;
   /** First line(s) of the operator-approved intent document, clipped. */
   intentPreview: string | null;
+  /** First line(s) of the operator's durable project-level objective, clipped. */
+  objectivePreview: string | null;
   /** The project's open session, when one exists — continuing then requires handing it off. */
   openSession: { id: string; title: string | null; pauseReason: PauseReason | null } | null;
   /** The most recent session, open or archived — the "where it left off" row. */
@@ -440,6 +442,7 @@ export interface OrchestrationStateWire {
   risks: string[];
   note: string | null;
   completion: Record<string, unknown> | null;
+  objectiveAssessment: import("./domain.ts").ObjectiveAssessment | null;
   createdAt: string;
 }
 export interface CommissionSummary {
@@ -462,7 +465,19 @@ export interface CommissionSummary {
   outcome: { handoffId: string; trigger: string; status: string; action: string } | null;
 }
 export interface GetOrchestrationResponse {
+  /** Exact operator-authored project goal; distinct from the revisable intent. */
+  objectiveDocument: string | null;
+  /** Current approved milestone/specification prose. */
+  intentDocument: string | null;
   current: OrchestrationStateWire | null;
   revisions: OrchestrationStateWire[];
+  latestObjectiveAssessment: {
+    stateRevision: number;
+    authoredByUserSessionId: string;
+    assessment: import("./domain.ts").ObjectiveAssessment;
+    currentMaterialSeq: number;
+    stale: boolean;
+    createdAt: string;
+  } | null;
   commissions: CommissionSummary[];
 }

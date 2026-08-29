@@ -21,6 +21,7 @@ import type { DecisionIssueService } from "../orchestrator/decision-issues.ts";
 import type { DecisionLedger } from "../orchestrator/decisions.ts";
 import type { AssumptionService } from "../orchestrator/assumptions.ts";
 import type { RequirementService } from "../orchestrator/requirements.ts";
+import type { ProjectObjectiveService } from "../orchestrator/objective.ts";
 import type { InteractionService } from "../orchestrator/interactions.ts";
 import type { AssignmentScheduler } from "../tasks/scheduler.ts";
 import type { TaskService } from "../tasks/service.ts";
@@ -47,6 +48,7 @@ import { dispatchWorkItems, onPatternPost, sweep as patternSweep, type DispatchW
 export interface AgentSessionServiceDeps {
   repo: Repo;
   requirements: RequirementService;
+  objective?: ProjectObjectiveService;
   assumptions: AssumptionService;
   bus: EventBus;
   artifacts: ArtifactStore;
@@ -174,7 +176,7 @@ export class AgentSessionService {
     });
     this.#composer = new PromptComposer({
       repo: deps.repo, bus: deps.bus, config: deps.config, handoffs: deps.handoffs,
-      decisions: deps.decisions, requirements: deps.requirements, assumptions: deps.assumptions, tasks: deps.tasks, interactions: deps.interactions,
+      decisions: deps.decisions, requirements: deps.requirements, objective: deps.objective, assumptions: deps.assumptions, tasks: deps.tasks, interactions: deps.interactions,
       worktrees: deps.worktrees,
       laneState: (agentSessionId, agent) => {
         const lane = this.#lanes.peek(agentSessionId, agent);

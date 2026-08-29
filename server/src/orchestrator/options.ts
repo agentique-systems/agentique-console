@@ -57,6 +57,8 @@ export interface OrchestratorOptionsInput {
   mcpServer?: unknown;
   sessionStore?: unknown;
   contextMemory?: string;
+  /** Exact operator-authored project objective, bounded for prompt delivery. */
+  objectiveDigest?: string;
   /**
    * The operator's decisions, appended after the inherited memory. Main
    * must not contradict a call the operator already made, and must not relay
@@ -65,6 +67,8 @@ export interface OrchestratorOptionsInput {
   decisionDigest?: string;
   /** The governing requirements digest, injected AFTER decisions (both authoritative). */
   specDigest?: string;
+  /** Latest project-relative frontier judgment, below current requirements. */
+  objectiveAssessmentDigest?: string;
   /** Main's own working state — the durable memory of the orchestration loop. */
   stateDigest?: string;
   /**
@@ -99,8 +103,10 @@ export function buildOrchestratorOptions(
       append: (withDelegation
         ? ORCHESTRATOR_BRIEF + ORCHESTRATOR_DELEGATION_BRIEF + (input.contextMemory ? `\n\n## Inherited memory (from an earlier generation, read-only)\n${input.contextMemory}` : "")
         : ORCHESTRATOR_BRIEF + (input.contextMemory ? `\n\n## Inherited memory (from an earlier generation, read-only)\n${input.contextMemory}` : ""))
+        + (input.objectiveDigest ? `\n\n${input.objectiveDigest}` : "")
         + (input.decisionDigest ? `\n\n## Operator decisions (authoritative)\nThe operator made these. Do not re-litigate them, do not contradict them, and do not relay them to seats — they already have them.\n${input.decisionDigest}` : "")
         + (input.specDigest ? `\n\n${input.specDigest}` : "")
+        + (input.objectiveAssessmentDigest ? `\n\n${input.objectiveAssessmentDigest}` : "")
         + (input.stateDigest ? `\n\n${input.stateDigest}` : "")
         + (input.continuationDigest ? `\n\n${input.continuationDigest}` : "")
         + (input.autonomy === "away" ? "\n\nThe operator is AWAY: prefer proceeding on recommendations and provisional decisions; queue only irreversible choices for their return." : ""),

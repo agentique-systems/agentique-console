@@ -68,10 +68,10 @@ describe("orchestrator options", () => {
   // durable-policy sentence; the mechanics live on reconcile_change_impact.
   // Bumped 7300 → 7700 with the ownership rule and workstream links — two
   // durable-policy sentences; the mechanics live on the portfolio tools.
-  // Bumped 7700 → 7850 with the decision-issue chat-binding rule — one
-  // durable-policy sentence; the mechanics live on resolve_decision_issue.
+  // Bumped 7700 → 7850 with the decision-issue chat-binding rule; then to
+  // 8400 for the objective/milestone authority split and assessment boundary.
   it("keeps the standing brief within its byte budget", () => {
-    expect(Buffer.byteLength(ORCHESTRATOR_BRIEF + ORCHESTRATOR_DELEGATION_BRIEF, "utf8")).toBeLessThanOrEqual(7_850);
+    expect(Buffer.byteLength(ORCHESTRATOR_BRIEF + ORCHESTRATOR_DELEGATION_BRIEF, "utf8")).toBeLessThanOrEqual(8_400);
   });
 
   it("loads settings, CLAUDE.md and skills like the CLI", () => {
@@ -99,6 +99,22 @@ describe("orchestrator options", () => {
     const built = options();
     expect((built.env as Record<string, string>).CLAUDE_CODE_SESSION_NAME).toBe("console-main-abc123");
     expect(built.settings).toMatchObject({ crossSessionInbound: "accept" });
+  });
+
+  it("orders durable authority above assessment and prior tactical synthesis", () => {
+    const built = buildOrchestratorOptions({
+      workspaceRoot: "/tmp/ws", resume: null, mode: "execute", phase: "executing", model: undefined, effort: undefined,
+      abortController: new AbortController(), canUseTool: async () => ({ behavior: "allow", updatedInput: {} }),
+      mcpServer: {}, objectiveDigest: "OBJECTIVE_BLOCK", decisionDigest: "DECISION_BLOCK",
+      specDigest: "REQUIREMENTS_BLOCK", objectiveAssessmentDigest: "ASSESSMENT_BLOCK",
+      stateDigest: "WORKING_STATE_BLOCK", continuationDigest: "CONTINUATION_BLOCK",
+    });
+    const prompt = built.systemPrompt;
+    const append = typeof prompt === "object" && !Array.isArray(prompt) ? prompt.append ?? "" : "";
+    const positions = ["OBJECTIVE_BLOCK", "DECISION_BLOCK", "REQUIREMENTS_BLOCK", "ASSESSMENT_BLOCK", "WORKING_STATE_BLOCK", "CONTINUATION_BLOCK"]
+      .map((marker) => append.indexOf(marker));
+    expect(positions.every((position) => position >= 0)).toBe(true);
+    expect(positions).toEqual([...positions].sort((a, b) => a - b));
   });
 
   it("main holds the workshop's tools and durable coordination", () => {

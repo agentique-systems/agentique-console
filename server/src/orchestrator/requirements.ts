@@ -496,11 +496,11 @@ export class RequirementService implements GoverningDigest {
       interactionId: input.interactionId ?? null,
       ops,
     });
-    // The intent prose (title + preamble) is the project's durable vision:
-    // stored on the project so it outlives sessions and later scoped patches.
+    // The intent prose (title + preamble) is the project's CURRENT approved
+    // milestone/specification, stored on the project so it outlives sessions.
     // full/intent approvals write it (a proseless FULL document clears it —
     // "" reads as null and skips the fallback); a subtree patch never touches
-    // it — the vision outlives structure edits.
+    // it. The separate operator-authored objective is never touched here.
     if (draft.kind !== "subtree") {
       this.#projects.setIntentDocument(approved.projectId, renderIntentDocument(graph) ?? "");
     }
@@ -1432,8 +1432,8 @@ export class RequirementService implements GoverningDigest {
     if (!approved) return "";
     const nodes = this.#store.liveNodes(projectId);
     const header = `## Requirements (rev ${approved.revision}, authoritative — statuses are console-derived; claim leaves with evidence via report_requirement)`;
-    // The operator's intent prose travels with the outline: the vision is
-    // what keeps distributed work aligned, so it degrades LAST. A prose-less
+    // The current intent prose travels with the outline: the milestone context
+    // keeps distributed work aligned, so it degrades LAST. A prose-less
     // run renders byte-identically to before (cache stability).
     const intent = this.intentDocument(userSessionId);
     const prose = intent === null ? "" : `${intent}\n\n`;

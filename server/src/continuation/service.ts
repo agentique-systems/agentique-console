@@ -71,6 +71,8 @@ export interface ContinuationDeps {
   listWorkstreamLinks(userSessionId: string): WorkstreamLinkWire[];
   /** Main's latest working-state revision — the synthesis source. */
   latestState(userSessionId: string): OrchestrationStateRow | undefined;
+  /** Latest project-relative objective judgment (may have been authored by a prior session). */
+  latestObjectiveAssessment(userSessionId: string): { row: OrchestrationStateRow; assessment: import("@agentique-console/shared").ObjectiveAssessment } | null;
   /** Main's latest record_completion, when one exists. */
   latestCompletion(userSessionId: string): { revision: number; completion: CompletionRecord } | null;
   /** The latest run summary's scalar facts + granted waivers (RunCompletionService.latestSummaryFacts). */
@@ -119,6 +121,7 @@ export class ContinuationCheckpointService {
     const synthesis = this.#synthesisOf(sourceUserSessionId);
     const facts = this.#factsOf(sourceUserSessionId);
     const empty = synthesis === null && facts.completion === null
+      && facts.objectiveAssessment === null
       && facts.waivers.length === 0 && facts.knownGaps.length === 0 && facts.nonGoals.length === 0
       && facts.unfinishedWorkstreams.length === 0 && facts.pendingWorkstreamLinks.length === 0
       && facts.openChangeImpacts.length === 0 && facts.openDecisionIssues.length === 0
@@ -263,6 +266,11 @@ export class ContinuationCheckpointService {
       sections.push("Open decision issues (list_decision_issues has detail):\n"
         + facts.openDecisionIssues.map((issue) => `- ${issue.id}: ${issue.subject}`).join("\n"));
     }
+    if (facts.objectiveAssessment !== null) {
+      const a = facts.objectiveAssessment;
+      sections.push(`Latest objective assessment: ${a.decision}${a.stopReason === null ? "" : ` (${a.stopReason})`} at material seq ${a.assessedAtSeq}; ` +
+        `next action: ${a.nextAction ?? "none"} [state rev ${a.stateRevision}, objective sha256 ${a.objectiveDigest}]`);
+    }
     if (wire.synthesis !== null) {
       const s = wire.synthesis;
       const lines = [
@@ -392,6 +400,7 @@ export class ContinuationCheckpointService {
 
     const summary = deps.latestSummaryFacts(sourceUserSessionId);
     const completionRecord = deps.latestCompletion(sourceUserSessionId);
+    const objectiveAssessment = deps.latestObjectiveAssessment(sourceUserSessionId);
 
     return {
       completion: summary === null ? null : {
@@ -408,6 +417,14 @@ export class ContinuationCheckpointService {
       openChangeImpacts: openImpacts.slice(0, FACTS_LIST_MAX),
       openDecisionIssues: openIssues.slice(0, FACTS_LIST_MAX),
       salvage: salvage.slice(0, FACTS_LIST_MAX),
+      objectiveAssessment: objectiveAssessment === null ? null : {
+        stateRevision: objectiveAssessment.row.revision,
+        objectiveDigest: objectiveAssessment.assessment.objectiveDigest,
+        decision: objectiveAssessment.assessment.decision,
+        stopReason: objectiveAssessment.assessment.stopReason,
+        nextAction: objectiveAssessment.assessment.nextAction,
+        assessedAtSeq: objectiveAssessment.assessment.assessedAtSeq,
+      },
     };
   }
 
@@ -421,6 +438,9 @@ export class ContinuationCheckpointService {
 
   #toWire(row: ContinuationCheckpointRow): ContinuationCheckpointWire {
     const source = this.#requireDeps().getUserSession(row.sourceUserSessionId);
+    // Checkpoints persisted before objective assessments have no JSON member.
+    // Normalize at the boundary so old rows remain readable by new digests.
+    const facts = { ...row.facts, objectiveAssessment: row.facts.objectiveAssessment ?? null };
     return {
       id: row.id,
       projectId: row.projectId,
@@ -434,7 +454,7 @@ export class ContinuationCheckpointService {
       atRevision: row.atRevision,
       decisionCount: row.decisionCount,
       synthesis: row.synthesis,
-      facts: row.facts,
+      facts,
       createdAt: row.createdAt,
     };
   }

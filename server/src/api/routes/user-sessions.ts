@@ -292,9 +292,20 @@ export function registerUserSessionRoutes(
     "/api/user-sessions/:id/orchestration",
     async (request) => {
       const userSessionId = request.params.id;
+      const latestAssessment = ctx.app.orchestrationState.latestObjectiveAssessment(userSessionId);
       return {
+        objectiveDocument: ctx.app.objective.document(userSessionId),
+        intentDocument: ctx.app.requirements.intentDocument(userSessionId),
         current: ctx.app.orchestrationState.current(userSessionId) ?? null,
         revisions: ctx.app.orchestrationState.history(userSessionId),
+        latestObjectiveAssessment: latestAssessment === null ? null : {
+          stateRevision: latestAssessment.row.revision,
+          authoredByUserSessionId: latestAssessment.row.userSessionId,
+          assessment: latestAssessment.assessment,
+          currentMaterialSeq: latestAssessment.currentMaterialSeq,
+          stale: latestAssessment.stale,
+          createdAt: latestAssessment.row.createdAt,
+        },
         commissions: buildCommissions({
           repo: ctx.app.repo,
           statusOf: (row) => ctx.app.host.statusOf(row),

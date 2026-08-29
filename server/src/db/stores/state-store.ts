@@ -36,6 +36,7 @@ export class OrchestrationStateStore {
     risks?: string[];
     note?: string | null;
     completion?: Record<string, unknown> | null;
+    objectiveAssessment?: OrchestrationStateRow["objectiveAssessment"];
   }): OrchestrationStateRow {
     const previous = this.current(input.userSessionId);
     const row: OrchestrationStateRow = {
@@ -50,6 +51,7 @@ export class OrchestrationStateStore {
       risks: input.risks ?? previous?.risks ?? [],
       note: input.note ?? null,
       completion: input.completion ?? null,
+      objectiveAssessment: input.objectiveAssessment ?? null,
       createdAt: nowIso(),
     };
     this.#db.insert(orchestrationStateRevisions).values(row).run();

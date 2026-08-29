@@ -97,7 +97,7 @@ describe("project continuity", () => {
     const { service, stores } = makeHarness();
     const draft = service.propose("us1", DOC);
     service.approve(draft.id, { document: DOC, edited: false });
-    // No projects.intent_document written yet (that lands with vision
+    // No projects.intent_document written yet (that lands with intent
     // propagation) — the fallback reads the approved revision's stored graph.
     const fallback = service.intentDocument("us2");
     expect(fallback).toContain("# Reading tracker");

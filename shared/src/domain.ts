@@ -862,6 +862,55 @@ export interface ContinuationSynthesis {
   risks: string[];
 }
 
+// ---------------------------------------------------------------------------
+// Project objective progress. The objective itself is operator-authored
+// Project truth; an assessment is main's durable judgment over Console facts.
+
+export type ObjectiveGapExecutability = "executable" | "blocked" | "operator_owned";
+export type ObjectiveDecision = "continue" | "stop";
+export type ObjectiveStopReason =
+  | "substantially_achieved"
+  | "genuinely_blocked"
+  | "needs_operator_judgment"
+  | "diminishing_returns";
+
+export interface ObjectiveGap {
+  description: string;
+  executability: ObjectiveGapExecutability;
+  /** Durable ids/evidence refs; operator-owned gaps should reference a decision issue. */
+  refs: string[];
+}
+
+export interface ObjectiveAssessment {
+  /** SHA-256 of the exact current projects.objective_document. */
+  objectiveDigest: string;
+  currentState: string;
+  progress: string[];
+  remainingGaps: ObjectiveGap[];
+  changedSincePrevious: string;
+  nextAction: string | null;
+  decision: ObjectiveDecision;
+  stopReason: ObjectiveStopReason | null;
+  rationale: string;
+  /** Required evidence for a semantic stop (blocker refs, value/cost facts, etc.). */
+  stopEvidence: string[];
+  /** Required only for diminishing_returns. */
+  valueCostRationale: string | null;
+  /** Latest project material-event sequence considered by this judgment. */
+  assessedAtSeq: number;
+}
+
+/** Console-derived facts returned beside assess_objective_progress. */
+export interface ObjectiveProgressFacts {
+  requirements: { revision: number; open: number; unsatisfied: number; verificationGaps: number };
+  tasks: { pending: number; inProgress: number; blocked: number };
+  decisionIssues: { open: number; ids: string[] };
+  changeImpacts: { open: number; ids: string[] };
+  workstreams: { active: number; archived: number; brokenDependencies: number };
+  landings: { invalidated: number; ids: string[] };
+  completionExceptions: { count: number; refs: string[] };
+}
+
 /** Console-derived facts at the run boundary — references and bounded summaries only. */
 export interface ContinuationFacts {
   /** The latest run-summary proposal, when one exists. */
@@ -881,6 +930,15 @@ export interface ContinuationFacts {
   openDecisionIssues: { id: string; subject: string }[];
   /** Unlanded work preserved at archival: renamed branches and diff artifacts. */
   salvage: { agentSessionId: string; agent: string; branch: string | null; artifactId: string | null }[];
+  /** Reference-sized copy of the latest project-objective judgment at this boundary. */
+  objectiveAssessment: {
+    stateRevision: number;
+    objectiveDigest: string;
+    decision: ObjectiveDecision;
+    stopReason: ObjectiveStopReason | null;
+    nextAction: string | null;
+    assessedAtSeq: number;
+  } | null;
 }
 
 export interface ContinuationCheckpointWire {

@@ -741,7 +741,7 @@ export interface ContinuationCheckpointRecordedPayload {
 export interface StateUpdatedPayload {
   userSessionId: string;
   revision: number;
-  trigger: "commission" | "discovery" | "alarm" | "direction_change" | "completion" | "operator";
+  trigger: "commission" | "discovery" | "alarm" | "direction_change" | "completion" | "operator" | "objective_assessment";
   sections: string[];
   strategy?: string;
   counts: { uncertainties: number; assumptions: number; risks: number };

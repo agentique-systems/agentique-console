@@ -19,6 +19,7 @@ import { recoveryAction, rotationAction } from "../lane-runtime/checkpoint.ts";
 import { decisionOf, decisionPin, renderDecision, type DecisionLedger } from "../orchestrator/decisions.ts";
 import type { AssumptionService } from "../orchestrator/assumptions.ts";
 import type { RequirementService } from "../orchestrator/requirements.ts";
+import type { ProjectObjectiveService } from "../orchestrator/objective.ts";
 import type { InteractionService } from "../orchestrator/interactions.ts";
 import type { WorktreeManager } from "../runtime/worktree-manager.ts";
 import { effectiveNativeTools, type GovernedTool } from "../sdk/native-capability-policy.ts";
@@ -246,6 +247,8 @@ export interface PromptComposerDeps {
   decisions: DecisionLedger;
   /** The governing requirements — injected into every seat like decisions are. */
   requirements: RequirementService;
+  /** Bounded project-level orientation; delegated scope remains authoritative. */
+  objective?: ProjectObjectiveService;
   /** Recorded premises — the delegated block surfaces the ones under a seat's subtrees. */
   assumptions: AssumptionService;
   tasks: TaskService;
@@ -331,7 +334,7 @@ export class PromptComposer {
    */
   systemPromptAppend(session: AgentSessionRow, seat: AgentRow, profile: AgentProfile, rolePrompt: RolePrompt): string {
     const identity = rolePrompt.brief === undefined ? seat.instructions : `${seat.instructions}\n\n${rolePrompt.brief}`;
-    return `${identity}\n\n${capabilityBrief(profile, seat.worktreePath !== null)}\n\n${seatMessagingBrief(this.rosterLine(session, seat.name), rolePrompt.addressing)}\n${rolePrompt.protocol}${this.#decisionContext(session)}${this.#specContext(session)}${this.#checkpointContext(seat)}`;
+    return `${identity}\n\n${capabilityBrief(profile, seat.worktreePath !== null)}\n\n${seatMessagingBrief(this.rosterLine(session, seat.name), rolePrompt.addressing)}\n${rolePrompt.protocol}${this.#objectiveContext(session)}${this.#decisionContext(session)}${this.#specContext(session)}${this.#checkpointContext(seat)}`;
   }
 
   /**
@@ -651,6 +654,10 @@ export class PromptComposer {
     return `\n\n## Operator decisions (authoritative)\nAlready decided for this run — act on them as given.\n${digest}`;
   }
 
+  #objectiveContext(session: AgentSessionRow): string {
+    return this.#deps.objective?.seatDigest(session.userSessionId) ?? "";
+  }
+
   /**
    * The requirement ids a seat's decisions pin against: its delegated
    * subtrees PLUS their ancestors — a decision on the parent obligation
@@ -678,7 +685,7 @@ export class PromptComposer {
    * checkpoint (the spec outranks a model-authored summary of state). Renders
    * empty when no spec is approved — the byte-stability rule.
    *
-   * A seat gets the VISION plus the top-level shape, not the whole outline:
+   * A seat gets current milestone context plus the top-level shape, not the whole outline:
    * its delegated subtree arrives in full with every delivery, and detail
    * outside it is one read_requirements away — injecting the entire graph
    * into every seat is exactly what stops scaling.

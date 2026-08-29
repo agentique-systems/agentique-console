@@ -93,6 +93,18 @@ describe("continuation checkpoints (real composition root)", () => {
     expect(recorded.n).toBe(1);
   });
 
+  it("normalizes checkpoints written before objective-assessment facts existed", () => {
+    const h = makeHarness(trivialProgram);
+    const { userSessionId, projectId } = seedPriorRun(h);
+    h.app.userSessions.patch(userSessionId, { lifecycle: "archived" });
+    h.sqlite.prepare("UPDATE continuation_checkpoints SET facts = json_remove(facts, '$.objectiveAssessment')").run();
+
+    const successor = h.addUserSession("execute", { projectId });
+    const checkpoint = h.app.continuation.latestForSession(successor);
+    expect(checkpoint?.facts.objectiveAssessment).toBeNull();
+    expect(() => h.app.continuation.digest(successor)).not.toThrow();
+  });
+
   it("a continued session inherits the latest checkpoint as advisory context, while project truth flows unchanged", async () => {
     const h = makeHarness(trivialProgram);
     const { userSessionId: runA, projectId } = seedPriorRun(h);

@@ -37,9 +37,13 @@ export const projects = sqliteTable("projects", {
     .references(() => workspaces.id),
   title: text("title"),
   /**
-   * Operator-approved intent prose (title + preamble sections of the
-   * requirement document). Written at approval of a full or intent-kind
-   * proposal; never by a subtree amendment — the vision outlives patches.
+   * Exact operator-authored project goal: why this project exists. Captured
+   * on fresh project creation and never rewritten by requirement workflows.
+   */
+  objectiveDocument: text("objective_document"),
+  /**
+   * Current approved working specification/milestone prose (title + preamble
+   * sections). Revisions may replace it without changing objectiveDocument.
    */
   intentDocument: text("intent_document"),
   createdAt: text("created_at").notNull(),
@@ -1037,7 +1041,7 @@ export const orchestrationStateRevisions = sqliteTable(
     id: text("id").primaryKey(),
     userSessionId: text("user_session_id").notNull().references(() => userSessions.id),
     revision: integer("revision").notNull(),
-    trigger: text("trigger", { enum: ["commission", "discovery", "alarm", "direction_change", "completion", "operator"] }).notNull(),
+    trigger: text("trigger", { enum: ["commission", "discovery", "alarm", "direction_change", "completion", "operator", "objective_assessment"] }).notNull(),
     strategy: text("strategy").notNull().default(""),
     strategyWhy: text("strategy_why").notNull().default(""),
     uncertainties: text("uncertainties", { mode: "json" }).$type<string[]>().notNull().default([]),
@@ -1047,11 +1051,14 @@ export const orchestrationStateRevisions = sqliteTable(
     note: text("note"),
     /** Only on trigger='completion': {criteria:[{criterion,met,evidence}],knownGaps,nonGaps}. */
     completion: text("completion", { mode: "json" }).$type<Record<string, unknown> | null>(),
+    /** Main's project-relative frontier judgment; null on ordinary state revisions. */
+    objectiveAssessment: text("objective_assessment", { mode: "json" })
+      .$type<import("@agentique-console/shared").ObjectiveAssessment | null>(),
     createdAt: text("created_at").notNull(),
   },
   (t) => [
     index("orchestration_state_session").on(t.userSessionId, t.revision),
-    check("orchestration_state_trigger", sql`${t.trigger} IN ('commission','discovery','alarm','direction_change','completion','operator')`),
+    check("orchestration_state_trigger", sql`${t.trigger} IN ('commission','discovery','alarm','direction_change','completion','operator','objective_assessment')`),
   ],
 );
 

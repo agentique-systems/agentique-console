@@ -81,10 +81,60 @@ export function OrchestrationPanel({ userSessionId }: { userSessionId: string })
   const governing = requirements.data?.approved ?? null;
   const nodes = requirements.data?.nodes ?? [];
   const current = orchestration.data?.current ?? null;
+  const objective = orchestration.data?.objectiveDocument ?? null;
+  const intent = orchestration.data?.intentDocument ?? null;
+  const objectiveAssessment = orchestration.data?.latestObjectiveAssessment ?? null;
   const commissions = orchestration.data?.commissions ?? [];
 
   return (
     <div className="min-h-0 space-y-4 overflow-y-auto p-4">
+      <section>
+        <h3 className="text-2xs font-medium uppercase text-muted-foreground">Governing objective</h3>
+        {objective === null ? (
+          <p className="mt-1 text-2xs text-muted-foreground">No project objective recorded.</p>
+        ) : (
+          <p className="mt-1 whitespace-pre-wrap text-2xs text-foreground">{objective}</p>
+        )}
+      </section>
+
+      <section>
+        <h3 className="text-2xs font-medium uppercase text-muted-foreground">Current milestone / specification</h3>
+        {intent === null ? (
+          <p className="mt-1 text-2xs text-muted-foreground">No approved intent prose.</p>
+        ) : (
+          <p className="mt-1 whitespace-pre-wrap text-2xs text-foreground">{intent}</p>
+        )}
+      </section>
+
+      <section>
+        <h3 className="text-2xs font-medium uppercase text-muted-foreground">Objective frontier</h3>
+        {objectiveAssessment === null ? (
+          <p className="mt-1 text-2xs text-muted-foreground">No objective assessment recorded.</p>
+        ) : (
+          <div className="mt-1 space-y-2 text-2xs">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant="outline" className="text-3xs uppercase">{objectiveAssessment.assessment.decision}</Badge>
+              {objectiveAssessment.assessment.stopReason !== null && <Badge variant="outline" className="text-3xs">{objectiveAssessment.assessment.stopReason}</Badge>}
+              {objectiveAssessment.stale && <Badge variant="outline" className="text-3xs text-status-waiting">stale</Badge>}
+            </div>
+            <p><span className="font-medium">Next action:</span> {objectiveAssessment.assessment.nextAction ?? "none"}</p>
+            <div className="flex flex-wrap gap-2 text-3xs text-muted-foreground">
+              {(["executable", "blocked", "operator_owned"] as const).map((kind) => (
+                <span key={kind}>{kind.replace("_", " ")}: {objectiveAssessment.assessment.remainingGaps.filter((gap) => gap.executability === kind).length}</span>
+              ))}
+            </div>
+            {objectiveAssessment.assessment.remainingGaps.length > 0 && (
+              <ul className="space-y-1">
+                {objectiveAssessment.assessment.remainingGaps.slice(0, 6).map((gap, index) => (
+                  <li key={`${gap.executability}-${index}`}>• [{gap.executability.replace("_", " ")}] {gap.description}</li>
+                ))}
+              </ul>
+            )}
+            <p className="text-3xs text-muted-foreground">through material seq {objectiveAssessment.assessment.assessedAtSeq} · current {objectiveAssessment.currentMaterialSeq}</p>
+          </div>
+        )}
+      </section>
+
       <section>
         <h3 className="text-2xs font-medium uppercase text-muted-foreground">Requirements</h3>
         {governing !== null ? (

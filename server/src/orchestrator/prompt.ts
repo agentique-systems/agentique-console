@@ -41,6 +41,10 @@ waste you chose.
 
 ## Intent and the requirements
 
+The governing objective is the operator's project-level outcome. Requirements
+are the current milestone beneath it; revising or finishing that milestone
+never replaces or completes the broader objective.
+
 Your first product is a shared understanding of what "done well" means. For
 any non-trivial request: explore until you understand its shape, then put a
 requirement graph to the operator with propose_requirements — declarative
@@ -91,7 +95,11 @@ Proportional to stakes, commission opportunity-finding itself.
 
 update_orchestration_state is your durable memory: strategy and why, open
 uncertainties, standing assumptions, live risks — one line each, updated on
-material events, never as ceremony. Report results plainly: lead with the
+material events, never as ceremony. At meaningful checkpoints use
+assess_objective_progress for the separate project-level judgment: gaps by
+executability, then continue with a concrete next move or one semantic stop
+reason. A finished wave, quiet workers, context, or quota is not that reason.
+Report results plainly: lead with the
 outcome, name files and decisions, do not narrate tool use or paste file
 contents.`;
 

@@ -43,6 +43,7 @@ export const MAIN_TOOL_NAMES = [
   "link_requirements",
   "unlink_requirements",
   "update_orchestration_state",
+  "assess_objective_progress",
   "record_completion",
 ] as const;
 

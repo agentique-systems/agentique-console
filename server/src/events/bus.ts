@@ -6,7 +6,7 @@
  * queue buffers live events), replay committed rows, then drain the queue
  * skipping anything at or below the replay watermark.
  */
-import { and, asc, desc, eq, gte, lt, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, lt, or, sql, type SQL } from "drizzle-orm";
 import type { ConsoleEvent } from "@agentique-console/shared";
 import { AsyncQueue } from "../async-queue.ts";
 import type { Db } from "../db/client.ts";
@@ -70,6 +70,35 @@ export class EventBus {
       .select({ seq: sql<number>`coalesce(max(${events.seq}), 0)` })
       .from(events)
       .get();
+    return row?.seq ?? 0;
+  }
+
+  /**
+   * Project-objective assessment clock. This is intentionally a narrow list,
+   * not a universal materiality engine: progress/meaning/frontier transitions
+   * count; turns, tool telemetry, usage, retries, runtime notices and the
+   * assessment's own state.updated event do not.
+   */
+  objectiveMaterialHeadSeq(userSessionIds: readonly string[]): number {
+    if (userSessionIds.length === 0) return 0;
+    const materialTypes = [
+      "user_session.requirements.updated", "requirement.status.changed", "requirement.decomposed",
+      "assumption.recorded", "assumption.resolved", "requirement.link.changed",
+      "change_impact.recorded", "change_impact.reconciled",
+      "decision_issue.created", "decision_issue.resolved", "decision_issue.merged",
+      "workstream.link.created", "workstream.link.released", "workstream.link.broken",
+      "agent_session.created", "agent_session.status.changed", "agent_session.result.returned",
+      "agent_session.worktree.merged", "agent_session.worktree.landing_invalidated", "agent_session.worktree.landing_restored",
+      "task.created", "task.updated", "task.dependency.created", "task.dependency.deleted",
+      "operator.decision.recorded", "run.completion.proposed", "run.signoff.resolved", "run.reopened",
+    ];
+    const material = or(
+      inArray(events.type, materialTypes),
+      and(eq(events.type, "user_session.message.appended"), sql`json_extract(${events.payload}, '$.message.speaker.kind') = 'operator'`),
+      and(eq(events.type, "user_session.state.updated"), sql`json_extract(${events.payload}, '$.trigger') = 'completion'`),
+    );
+    const row = this.#db.select({ seq: sql<number>`coalesce(max(${events.seq}), 0)` }).from(events)
+      .where(and(inArray(events.userSessionId, [...userSessionIds]), material)).get();
     return row?.seq ?? 0;
   }
 
