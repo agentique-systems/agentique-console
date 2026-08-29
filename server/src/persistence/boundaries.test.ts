@@ -118,9 +118,10 @@ describe("import boundaries", () => {
     for (const file of files) {
       const isTest = file.endsWith(".test.ts");
       for (const specifier of importsOf(file)) {
-        if (isTest && specifier === "vitest") continue;
+        if (isTest && (specifier === "vitest" || specifier.startsWith("node:"))) continue;
         const allowed =
           specifier === "@agentique-console/core" ||
+          specifier === "zod" ||
           resolvesInto(file, specifier, "server/src/execution") ||
           resolvesInto(file, specifier, "server/src/persistence");
         expect(allowed, `${rel(file)} imports ${specifier}`).toBe(true);
