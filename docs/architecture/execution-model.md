@@ -36,6 +36,53 @@ store, transaction helpers). Every state-changing store operation
 validates the transition, appends the Event, and updates the projection in
 one transaction; an illegal transition writes nothing.
 
+### 2.1 Write transactions
+
+Store operations run inside the persistence transactor
+(`server/src/persistence/transactions.ts`), which is synchronous and
+re-entrant over one SQLite connection:
+
+- **Root and nested writes.** The outermost `write` is the root: it owns
+  `BEGIN IMMEDIATE`, `COMMIT`, and `ROLLBACK`. A `write` entered while a
+  root is open is nested: it joins the root, opens no savepoint, and never
+  commits or rolls back on its own. A service that composes several store
+  operations (Run creation with its root Plan Node and reservation, plan
+  compilation with its scope rows and reservations, Invocation creation
+  with its manifest and Events) wraps them in one root `write`.
+- **Rollback-only.** Any error that escapes a nested `write` marks the root
+  rollback-only, whether or not an enclosing callback catches it. A
+  rollback-only root never commits: when its callback returns it rolls
+  back and throws the first failure that marked it, which remains the
+  canonical cause even if the outer callback later throws something else.
+- **Transaction-scoped compensation.** A store that performs an external
+  side effect inside a transaction (today: writing a new Artifact blob)
+  registers compensation on the root with `afterRollback(hook)`, from any
+  nesting depth. Hooks run exactly once, only when the root rolls back
+  (callback failure, rollback-only failure, or commit failure), never after
+  a successful commit; they run after the SQLite `ROLLBACK` has been
+  attempted and the transactor has left the transaction, so a hook that
+  reads the database sees committed rows only; they run in reverse
+  registration order (most recently registered first, like unwinding), and
+  are cleared when the root ends. A hook that throws never replaces the
+  canonical error: the failure is reported as the `rollback_hook_failed`
+  diagnostic and attached to the thrown error.
+- **What is and is not guaranteed for blobs.** SQLite and the Artifact
+  blob store do not form a crash-atomic distributed transaction. The
+  guarantee is: no invalid request writes a blob (every validation runs
+  first); Artifact metadata never commits before its blob exists; every
+  validation failure and ordinary synchronous transaction failure is
+  compensated by removing a blob the transaction newly wrote, unless a
+  committed Artifact references its digest (a pre-existing or restored
+  blob is never removed); a process or machine crash between the blob
+  write and the database commit can leave a safe, unreferenced blob behind
+  — never committed metadata pointing at content the operation did not
+  write — and reads always verify digest and size. There is no garbage
+  collector in Phase 1.
+- **Ownership.** A database file and its blob store are owned by exactly
+  one runtime process at a time. Compensation and reference checks assume
+  that single owner; multi-process cleanup safety is neither implemented
+  nor claimed.
+
 | Object | Writer | Canonical store | Projections |
 |---|---|---|---|
 | Schema identity | Migration | `schema_info` | — |

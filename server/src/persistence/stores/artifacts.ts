@@ -48,10 +48,22 @@ export interface BlobCleanupFailure {
  * inside the write transaction before a single byte is stored. Only then
  * are the bytes put in the blob store (which verifies any existing blob of
  * the same digest), and the Event and metadata row are written in the same
- * transaction. If anything after a *new* blob write fails, the transaction
- * rolls back and the blob is removed unless a committed Artifact references
- * its digest; a reused, pre-existing blob is never removed. Reads verify
- * the digest and the byte size before returning content.
+ * transaction. When the blob was newly written, compensation is registered
+ * on the root transaction: if the root later rolls back for any reason —
+ * including a failure in a composing operation after `create` returned —
+ * the blob is removed unless a committed Artifact references its digest.
+ * A reused, pre-existing blob registers no compensation and is never
+ * removed. Reads verify the digest and the byte size before returning
+ * content.
+ *
+ * Guarantee, stated exactly: SQLite and the blob store do not form a
+ * crash-atomic distributed transaction. Validation failures and ordinary
+ * synchronous transaction failures are compensated; metadata never commits
+ * before the blob exists; a process or machine crash between the blob
+ * write and the database commit can leave a safe, unreferenced blob behind
+ * but never committed metadata pointing at content this operation did not
+ * write. The database file and its blob store are owned by one runtime
+ * process at a time; compensation is not multi-process safe.
  */
 export class ArtifactStore {
   constructor(private readonly ctx: PersistenceContext) {}
@@ -59,80 +71,82 @@ export class ArtifactStore {
   create(input: ArtifactInput, bytes: Uint8Array, options?: WriteOptions): Artifact {
     const valid = parseOrThrow(artifactInputSchema, input, "Artifact input");
     const digest = sha256Hex(bytes);
-    let newlyWrittenDigest: string | null = null;
-    try {
-      return this.ctx.tx.write(() => {
-        const run = loadRunRef(this.ctx, valid.runId);
-        let invocationId: string | null = null;
-        let attemptId: string | null = null;
-        if (valid.producer.kind === "invocation") {
-          const invocation = requireRow(
-            this.ctx.db.select({ runId: invocations.runId }).from(invocations).where(eq(invocations.id, valid.producer.invocationId)).get(),
-            "Invocation",
-            valid.producer.invocationId,
+    return this.ctx.tx.write(() => {
+      const run = loadRunRef(this.ctx, valid.runId);
+      let invocationId: string | null = null;
+      let attemptId: string | null = null;
+      if (valid.producer.kind === "invocation") {
+        const invocation = requireRow(
+          this.ctx.db.select({ runId: invocations.runId }).from(invocations).where(eq(invocations.id, valid.producer.invocationId)).get(),
+          "Invocation",
+          valid.producer.invocationId,
+        );
+        assertSameRun("Invocation", valid.producer.invocationId, invocation.runId, run.id);
+        invocationId = valid.producer.invocationId;
+        if (valid.producer.attemptId !== null) {
+          const attempt = requireRow(
+            this.ctx.db.select({ invocationId: attempts.invocationId }).from(attempts).where(eq(attempts.id, valid.producer.attemptId)).get(),
+            "Attempt",
+            valid.producer.attemptId,
           );
-          assertSameRun("Invocation", valid.producer.invocationId, invocation.runId, run.id);
-          invocationId = valid.producer.invocationId;
-          if (valid.producer.attemptId !== null) {
-            const attempt = requireRow(
-              this.ctx.db.select({ invocationId: attempts.invocationId }).from(attempts).where(eq(attempts.id, valid.producer.attemptId)).get(),
-              "Attempt",
-              valid.producer.attemptId,
-            );
-            if (attempt.invocationId !== valid.producer.invocationId) {
-              throw new InvariantViolationError(`Attempt ${valid.producer.attemptId} does not belong to Invocation ${valid.producer.invocationId}`);
-            }
-            attemptId = valid.producer.attemptId;
+          if (attempt.invocationId !== valid.producer.invocationId) {
+            throw new InvariantViolationError(`Attempt ${valid.producer.attemptId} does not belong to Invocation ${valid.producer.invocationId}`);
           }
+          attemptId = valid.producer.attemptId;
         }
-        if (valid.taskId !== null) {
-          const task = requireRow(this.ctx.db.select({ runId: tasks.runId }).from(tasks).where(eq(tasks.id, valid.taskId)).get(), "Task", valid.taskId);
-          assertSameRun("Task", valid.taskId, task.runId, run.id);
-        }
-        const artifact: Artifact = {
-          id: this.ctx.ids("artifact"),
-          runId: run.id,
-          mediaType: valid.mediaType,
-          byteSize: bytes.byteLength,
-          digest,
-          producer: valid.producer,
-          taskId: valid.taskId,
-          title: valid.title,
-          createdAt: this.ctx.clock(),
-        };
-        parseOrThrow(artifactSchema, artifact, "Artifact");
+      }
+      if (valid.taskId !== null) {
+        const task = requireRow(this.ctx.db.select({ runId: tasks.runId }).from(tasks).where(eq(tasks.id, valid.taskId)).get(), "Task", valid.taskId);
+        assertSameRun("Task", valid.taskId, task.runId, run.id);
+      }
+      const artifact: Artifact = {
+        id: this.ctx.ids("artifact"),
+        runId: run.id,
+        mediaType: valid.mediaType,
+        byteSize: bytes.byteLength,
+        digest,
+        producer: valid.producer,
+        taskId: valid.taskId,
+        title: valid.title,
+        createdAt: this.ctx.clock(),
+      };
+      parseOrThrow(artifactSchema, artifact, "Artifact");
 
-        // Every validation has passed; only now are bytes stored.
-        const blob = this.ctx.blobs.put(bytes);
-        if (blob.written) newlyWrittenDigest = digest;
+      // Every validation has passed; only now are bytes stored. A newly
+      // written blob is compensated by the root transaction on rollback;
+      // a reused blob registers nothing destructive.
+      const blob = this.ctx.blobs.put(bytes);
+      if (blob.written) {
+        this.ctx.tx.afterRollback((cause) => this.discardUnreferencedBlob(digest, cause));
+      }
 
-        this.ctx.journal.append({
-          type: "artifact.created",
-          scope: runScope(run, { invocationId: invocationId as never, attemptId: attemptId as never }),
-          subjectType: "artifact",
-          subjectId: artifact.id,
-          payload: artifact,
-          ...writeMeta(options, invocationId ? { kind: "invocation", invocationId: invocationId as never } : undefined),
-        });
-        this.ctx.db
-          .insert(artifacts)
-          .values({ ...artifact, invocationId, attemptId })
-          .run();
-        return artifact;
+      this.ctx.journal.append({
+        type: "artifact.created",
+        scope: runScope(run, { invocationId: invocationId as never, attemptId: attemptId as never }),
+        subjectType: "artifact",
+        subjectId: artifact.id,
+        payload: artifact,
+        ...writeMeta(options, invocationId ? { kind: "invocation", invocationId: invocationId as never } : undefined),
       });
-    } catch (error) {
-      if (newlyWrittenDigest !== null) this.discardUnreferencedBlob(newlyWrittenDigest, error);
-      throw error;
-    }
+      this.ctx.db
+        .insert(artifacts)
+        .values({ ...artifact, invocationId, attemptId })
+        .run();
+      return artifact;
+    });
   }
 
   /**
-   * Compensation after a failed metadata transaction: removes the blob this
-   * `create` newly wrote unless an Artifact row references its digest. When
-   * `create` ran inside an outer, still-open transaction the check also sees
-   * that transaction's uncommitted rows, which errs on keeping the blob. A
-   * cleanup failure never replaces the database error: it is reported to
-   * the diagnostics sink and attached to the error as `blobCleanupFailure`.
+   * Rollback compensation: runs after the root transaction has rolled back,
+   * outside any transaction, so the reference check sees committed rows
+   * only. Removes the blob this `create` newly wrote unless a committed
+   * Artifact references its digest (for example one whose missing blob this
+   * transaction restored). Removal is idempotent, so identical content
+   * written once and referenced by several rolled-back rows is handled by
+   * the single hook its one write registered. A cleanup failure never
+   * replaces the transaction error: it is reported to the diagnostics sink
+   * as `blob_cleanup_failed` (digest and message only, never bytes) and
+   * attached to the error as the non-enumerable `blobCleanupFailure`.
    */
   private discardUnreferencedBlob(digest: string, cause: unknown): void {
     try {

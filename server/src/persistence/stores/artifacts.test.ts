@@ -257,3 +257,140 @@ describe("handoffs", () => {
     }
   });
 });
+
+describe("artifact composition inside an outer transaction", () => {
+  it("a later failure in the composing transaction leaves no Artifact row, Event, or blob", () => {
+    const h = openHarness();
+    try {
+      const s = seedRun(h);
+      const before = h.ctx.journal.lastSeq();
+      const bytes = encode("composed content");
+      expect(() =>
+        h.ctx.tx.write(() => {
+          h.stores.artifacts.create(runtimeInput(s), bytes);
+          throw new Error("later composed operation failed");
+        }),
+      ).toThrow("later composed operation failed");
+      expect(h.stores.artifacts.listByRun(s.run.id)).toEqual([]);
+      expect(h.ctx.journal.lastSeq()).toBe(before);
+      expect(h.blobs.has(sha256Hex(bytes))).toBe(false);
+      expect(h.blobs.size).toBe(0);
+      expect(h.diagnostics).toEqual([]);
+    } finally {
+      h.close();
+    }
+  });
+
+  it("an Artifact created two levels down is cleaned up when the top-level operation fails", () => {
+    const h = openHarness();
+    try {
+      const s = seedRun(h);
+      const bytes = encode("deeply nested");
+      const composedService = () =>
+        h.ctx.tx.write(() => {
+          const artifact = h.stores.artifacts.create(runtimeInput(s), bytes);
+          return h.stores.handoffs.create({ runId: s.run.id, source: { kind: "plan_node", planNodeId: s.root.id }, target: { kind: "plan_node", planNodeId: s.root.id }, taskIds: [], artifactIds: [artifact.id], summary: "nested" });
+        });
+      expect(() =>
+        h.ctx.tx.write(() => {
+          composedService();
+          h.stores.runs.transition(s.run.id, { to: "completed", finalSnapshotId: "snap_000000000000000000000000" });
+        }),
+      ).toThrow(/cannot transition/);
+      expect(h.stores.artifacts.listByRun(s.run.id)).toEqual([]);
+      expect(h.stores.handoffs.listByRun(s.run.id)).toEqual([]);
+      expect(h.blobs.size).toBe(0);
+    } finally {
+      h.close();
+    }
+  });
+
+  it("two rows for identical newly written bytes in one outer transaction are both rolled back and the blob removed", () => {
+    const h = openHarness();
+    try {
+      const s = seedRun(h);
+      const bytes = encode("twice in one transaction");
+      expect(() =>
+        h.ctx.tx.write(() => {
+          const first = h.stores.artifacts.create(runtimeInput(s), bytes);
+          const second = h.stores.artifacts.create(runtimeInput(s), bytes);
+          expect(first.digest).toBe(second.digest);
+          expect(h.blobs.size).toBe(1);
+          throw new Error("abort both");
+        }),
+      ).toThrow("abort both");
+      expect(h.stores.artifacts.listByRun(s.run.id)).toEqual([]);
+      expect(h.blobs.size).toBe(0);
+      expect(h.diagnostics).toEqual([]);
+    } finally {
+      h.close();
+    }
+  });
+
+  it("a reused pre-existing blob survives outer rollback", () => {
+    const h = openHarness();
+    try {
+      const s = seedRun(h);
+      const committed = seedArtifact(h, s, "already here");
+      expect(() =>
+        h.ctx.tx.write(() => {
+          h.stores.artifacts.create(runtimeInput(s), encode("already here"));
+          throw new Error("outer failure");
+        }),
+      ).toThrow("outer failure");
+      expect(h.stores.artifacts.listByRun(s.run.id).map((a) => a.id)).toEqual([committed.id]);
+      expect(h.stores.artifacts.read(committed.id).bytes).toEqual(encode("already here"));
+      expect(h.blobs.size).toBe(1);
+    } finally {
+      h.close();
+    }
+  });
+
+  it("a blob restored for an already committed Artifact survives outer rollback", () => {
+    const h = openHarness();
+    try {
+      const s = seedRun(h);
+      const committed = seedArtifact(h, s, "lost and found");
+      h.blobs.remove(committed.digest);
+      expect(() => h.stores.artifacts.read(committed.id)).toThrow(BlobMissingError);
+      expect(() =>
+        h.ctx.tx.write(() => {
+          const restored = h.stores.artifacts.create(runtimeInput(s), encode("lost and found"));
+          expect(restored.digest).toBe(committed.digest);
+          throw new Error("outer failure");
+        }),
+      ).toThrow("outer failure");
+      expect(h.stores.artifacts.listByRun(s.run.id).map((a) => a.id)).toEqual([committed.id]);
+      expect(h.stores.artifacts.read(committed.id).bytes).toEqual(encode("lost and found"));
+    } finally {
+      h.close();
+    }
+  });
+
+  it("a cleanup failure during outer rollback reports a diagnostic while the outer error remains thrown", () => {
+    const h = openHarness();
+    try {
+      const s = seedRun(h);
+      const bytes = encode("stuck in composition");
+      vi.spyOn(h.blobs, "remove").mockImplementationOnce(() => {
+        throw new Error("filesystem is read-only");
+      });
+      let caught: unknown;
+      try {
+        h.ctx.tx.write(() => {
+          h.stores.artifacts.create(runtimeInput(s), bytes);
+          throw new Error("outer failure");
+        });
+      } catch (error) {
+        caught = error;
+      }
+      expect((caught as Error).message).toBe("outer failure");
+      expect((caught as { blobCleanupFailure?: unknown }).blobCleanupFailure).toEqual({ digest: sha256Hex(bytes), message: "filesystem is read-only" });
+      expect(h.diagnostics).toEqual([{ kind: "blob_cleanup_failed", digest: sha256Hex(bytes), message: "filesystem is read-only" }]);
+      expect(h.stores.artifacts.listByRun(s.run.id)).toEqual([]);
+      expect(h.ctx.tx.inTransaction).toBe(false);
+    } finally {
+      h.close();
+    }
+  });
+});

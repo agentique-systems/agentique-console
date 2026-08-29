@@ -216,6 +216,10 @@ each is the final production location of what it contains.
   legacy migrations; the new schema is written only by
   `server/src/persistence/` and only in the new runtime's tests until
   cutover. The two never share a database file.
+- A database file and its Artifact blob store are opened and written by
+  exactly one runtime process at a time. Transactional compensation for
+  blobs ([execution-model.md](execution-model.md) §2.1) relies on that
+  single owner and is not multi-process safe.
 - The legacy import and profile migration scripts
   (`server/scripts/import-legacy.ts`, `server/scripts/migrate-profile.ts`)
   are deleted with no replacement. Provider JSONL transcripts are not

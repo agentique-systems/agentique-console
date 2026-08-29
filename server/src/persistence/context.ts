@@ -11,7 +11,9 @@ import { Transactor } from "./transactions.ts";
  * condition that did not fail the caller's operation but that an operator
  * should see. Never carries payload bytes, provider state, or secrets.
  */
-export type PersistenceDiagnostic = { kind: "blob_cleanup_failed"; digest: string; message: string };
+export type PersistenceDiagnostic =
+  | { kind: "blob_cleanup_failed"; digest: string; message: string }
+  | { kind: "rollback_hook_failed"; index: number; message: string };
 
 export type DiagnosticSink = (diagnostic: PersistenceDiagnostic) => void;
 
@@ -19,7 +21,8 @@ export type DiagnosticSink = (diagnostic: PersistenceDiagnostic) => void;
  * Everything a store needs: the query builder, the raw connection, the
  * re-entrant Transactor, the Event journal bound to it, the blob store, the
  * diagnostics sink, and injectable clock and id minting for deterministic
- * tests.
+ * tests. One context owns one database file and one blob store; the pair
+ * is used by exactly one runtime process at a time.
  */
 export interface PersistenceContext {
   db: PersistenceDb;
@@ -39,7 +42,14 @@ export interface PersistenceContextOptions {
 }
 
 const defaultDiagnostics: DiagnosticSink = (diagnostic) => {
-  console.warn(`[persistence] ${diagnostic.kind}: ${diagnostic.message} (digest ${diagnostic.digest})`);
+  switch (diagnostic.kind) {
+    case "blob_cleanup_failed":
+      console.warn(`[persistence] ${diagnostic.kind}: ${diagnostic.message} (digest ${diagnostic.digest})`);
+      return;
+    case "rollback_hook_failed":
+      console.warn(`[persistence] ${diagnostic.kind}: ${diagnostic.message} (hook ${diagnostic.index})`);
+      return;
+  }
 };
 
 export function createPersistenceContext(
@@ -48,14 +58,17 @@ export function createPersistenceContext(
   options: PersistenceContextOptions = {},
 ): PersistenceContext {
   const clock = options.clock ?? (() => timestampNow());
-  const tx = new Transactor(database.sqlite);
+  const diagnostics = options.diagnostics ?? defaultDiagnostics;
+  const tx = new Transactor(database.sqlite, {
+    onRollbackHookFailure: (failure) => diagnostics({ kind: "rollback_hook_failed", ...failure }),
+  });
   return {
     db: database.db,
     sqlite: database.sqlite,
     tx,
     journal: new EventJournal(database.db, tx, clock),
     blobs,
-    diagnostics: options.diagnostics ?? defaultDiagnostics,
+    diagnostics,
     clock,
     ids: options.ids ?? ((kind) => newId(kind)),
   };
