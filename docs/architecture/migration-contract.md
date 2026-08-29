@@ -85,8 +85,22 @@ Phase 1 and remain after cutover:
   and final neutral server utilities that are not scheduled for deletion.
   It replaces `server/src/db/` completely at cutover.
 
-Neither boundary is staging, `v2`, `next`, `new`, or compatibility code;
-each is the final production location of what it contains.
+- **`server/src/execution/` — the execution boundary.** The final
+  provider-neutral runtime: the deterministic plan compiler and its
+  source-path grammar (`compiler/`), the plan-revision service
+  (authorization, validation, compilation, reconciliation, atomic
+  application or structured rejection), the Run creation service (atomic
+  Run bootstrap), and, in later phases, the scheduler, Pattern executors,
+  Invocation and Attempt lifecycle, manifests, Gates, and the resource
+  governor. It imports only `@agentique-console/core`, the persistence
+  boundary, `zod`, and the narrow capability ports it declares under
+  `ports/` (today `RunWorkspacePreparationPort`, implemented by the
+  Workspace provider in the Workspace phase). Nothing legacy imports it
+  and it imports nothing legacy; the persistence boundary never depends on
+  it.
+
+None of these boundaries is staging, `v2`, `next`, `new`, or compatibility
+code; each is the final production location of what it contains.
 
 ## 3. Binding rules
 
@@ -130,9 +144,10 @@ each is the final production location of what it contains.
    generation, attention, mailbox, continuation, or checkpoint type, or any
    module listed for deletion in [legacy-removal.md](legacy-removal.md).
    This is checked by an import test on the branch and holds for every
-   intermediate commit. Utilities that the new code needs are written under
-   their final names; the legacy utility is deleted when its last legacy
-   importer is deleted.
+   intermediate commit; the same test confines `server/src/execution/` to
+   `@agentique-console/core`, `server/src/persistence/`, and its own ports.
+   Utilities that the new code needs are written under their final names;
+   the legacy utility is deleted when its last legacy importer is deleted.
 
    **Provider implementation reuse is permitted under this rule.** The
    legacy `server/src/sdk/` directory remains scheduled for deletion, but
@@ -242,13 +257,20 @@ each is the final production location of what it contains.
   never inferred from limits and Usage.
 - `plan_node_requirements` is the only record of a Plan Node's Requirement
   scope; it is written by the compiler and never updated.
+- `plan_revision_nodes` is the only record of which Plan Nodes belong to an
+  accepted Execution Plan revision, and `plan_edges` rows belong to exactly
+  one revision; the current executable graph is read from the latest
+  accepted revision's rows and never inferred.
+- The Run's final reserve is persisted on `runs` at creation and never
+  updated; there is no runtime default read back into an existing Run.
 
 ### Phase 1 schema expectations
 
-Phase 1 must create exactly these tables, with the ownership and
+The baseline creates exactly these 34 tables, with the ownership and
 cardinality stated here and in [glossary.md](glossary.md). Column design
-beyond identifiers, keys, and the fields the architecture names is Phase 1
-work.
+beyond identifiers, keys, and the fields the architecture names is
+implementation work; the baseline is regenerated in place whenever the
+architecture corrects it before cutover, because nothing has shipped.
 
 | Table | Owner (writer) | Cardinality and immutability |
 |---|---|---|
@@ -256,11 +278,12 @@ work.
 | `workspaces` | operator via API | mutable |
 | `conversations` | runtime | one per operator thread; mutable title/policy |
 | `conversation_messages` | runtime | append-only per Conversation |
-| `runs` | runtime | one per Run; state, Target, base/integration/final Snapshot ids, Run Budget limits |
-| `execution_plan_revisions` | runtime (validated Orchestrator revisions) | append-only per Run, numbered |
-| `plan_nodes` | plan compiler | one per compiled node; `kind`, `pattern`, status, allocation limits; definition immutable after start |
-| `plan_edges` | plan compiler | append-only per compiled revision; typed |
-| `plan_node_requirements` | plan compiler | one row per (Plan Node, Requirement, pinned Requirement revision); never updated |
+| `runs` | runtime (Run creation service) | one per Run; state, Target, base/integration/final Snapshot ids, Run Budget limits, persisted final reserve (immutable) |
+| `execution_plan_revisions` | runtime (plan-revision service; revision 1 by Run creation) | append-only per Run; accepted revisions only, numbered consecutively |
+| `plan_nodes` | plan-revision service (compiler); root by Run creation | one per compiled node; `kind`, `pattern`, immutable `shape`, creating revision, status, allocation; definition immutable from insertion |
+| `plan_revision_nodes` | plan-revision service; revision 1 by Run creation | immutable ordered membership, one row per (Run, revision, Plan Node); root first in every revision |
+| `plan_edges` | plan-revision service (compiler) | append-only; every edge owned by exactly one accepted revision; typed |
+| `plan_node_requirements` | plan-revision service (compiler) | one row per (Plan Node, Requirement, pinned Requirement revision) with position; never updated |
 | `requirements` | runtime | one per Requirement id (stable across revisions); current status |
 | `requirement_revisions` | runtime (operator approval) | append-only per Conversation |
 | `requirement_status_changes` | runtime | append-only journal with Evidence |
@@ -338,7 +361,12 @@ is one or more commits; each commit keeps `npm run typecheck` and
    step, and the legacy application keeps building and passing its tests.
    The import-boundary test (rule 7) and the terminology test (rule 10)
    are added in this step and run on every later commit.
-3. **Runtime core.** Runs, Execution Plan source validation and compiler,
+3. **Runtime core.** Built in subphases under `server/src/execution/`.
+   Phase 2A (done): the execution boundary, explicit plan-revision
+   membership, the persisted final reserve, the deterministic compiler,
+   the plan-revision service with reconciliation, and atomic Run bootstrap
+   behind the Workspace preparation port. Later subphases: Runs, Execution
+   Plan source validation and compiler,
    Plan Nodes of both kinds (`pattern`, `join`), Plan Edges, Plan Node
    Requirement scope, scheduler, resource governor, Budget reservations,
    Invocations (one per logical turn, with purposes), Attempts (`initial`,
@@ -436,11 +464,26 @@ Merge to `main` happens after step 7 as one merge commit. Rollback is
   against a missing file, an empty database, a matching database, a legacy
   database, and an unrelated SQLite database.
 - An import-boundary test (rule 7) proving that `core/` imports no other
-  workspace package, that `server/src/persistence/` imports neither
-  `shared/` nor `server/src/db/` nor any legacy runtime module, that no
-  legacy module imports `core/` or `server/src/persistence/`, and that no
-  legacy migration creates a new-schema table; and a terminology test
-  (rule 10) over the new source directories.
+  workspace package, that `server/src/persistence/` and
+  `server/src/execution/` import neither `shared/` nor `server/src/db/`
+  nor any legacy runtime module, that `server/src/execution/` imports only
+  the core package, the persistence boundary, and itself, that no legacy
+  module imports `core/`, `server/src/persistence/`, or
+  `server/src/execution/`, and that no legacy migration creates a
+  new-schema table; and a terminology test (rule 10) over the new source
+  directories.
+- Compiler and plan-revision tests: every §4.4 rule and rejection, the
+  source-path grammar, deterministic repeated compilation, reconciliation
+  (identical revision, sibling append, branch removal, edge-only change,
+  scope and allocation change, started-node conflict, removal of running
+  nodes), accepted-revision atomicity and Event ordering, rejected
+  proposals writing only `execution_plan.rejected`, and revision numbers
+  counting accepted revisions only.
+- Run bootstrap tests: complete initial state in one transaction; a second
+  active Run, a Workspace preparation failure, and a persistence failure
+  after preparation each create nothing, the last invoking the port's
+  compensation; the initial allocation plus the final reserve must fit the
+  Run Budget; the current graph survives close and reopen identically.
 - No live-provider tests in the default suite. A live smoke test may exist
   behind an explicit opt-in environment variable and is not a benchmark.
 

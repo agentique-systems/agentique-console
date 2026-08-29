@@ -41,9 +41,11 @@ server/src/
   events/        stream.ts
   workspaces/    service.ts  fs-browse.ts
   conversations/ service.ts
-  runs/          service.ts  budgets.ts  reservations.ts  usage.ts
-  plans/         service.ts  compiler.ts  scheduler.ts  join.ts  scope.ts  patterns/{single,chain,route,parallel,coordinator-worker,evaluator-optimizer}.ts
-  invocations/   service.ts  attempts.ts  manifest.ts  result.ts  tools.ts
+  execution/     index.ts  run-creation-service.ts  plan-revision-service.ts  test-support.ts
+                 compiler/{compile,input,source-path}.ts
+                 ports/workspace-preparation.ts
+                 (later subphases) scheduler.ts  join.ts  patterns/{single,chain,route,parallel,coordinator-worker,evaluator-optimizer}.ts
+                 invocations.ts  attempts.ts  manifest.ts  result.ts  tools.ts  gates.ts  governor.ts
   agents/        definitions.ts  revisions.ts  native-agent-file.ts  builtins.ts  policy.ts
   provider/      adapter.ts  continuations.ts  continuation-store.ts  fake.ts  mapping.ts  env.ts  usage-normalization.ts  failure-classifier.ts
   capacity/      governor.ts  leases.ts
@@ -161,14 +163,14 @@ imports, re-exports, or aliases anything from it. Per-file replacements:
 
 | Path | Disposition |
 |---|---|
-| `runner.ts`, `runner.test.ts`, `runner-model.test.ts` | Deleted. Replaced by the Orchestrator root-node Invocation in `plans/` + `invocations/`. Serialized main turns, wake coalescing, cron fallback, lane recycling on model change deleted. |
+| `runner.ts`, `runner.test.ts`, `runner-model.test.ts` | Deleted. Replaced by the Orchestrator root-node Invocation in `execution/`. Serialized main turns, wake coalescing, cron fallback, lane recycling on model change deleted. |
 | `tools.ts`, `tools-bytes.test.ts`, `tools-paging.test.ts` | Deleted. Replaced by `invocations/tools.ts` (section 7). |
 | `prompt.ts` | Deleted. Replaced by the `orchestrator` built-in Agent Definition in `agents/builtins.ts`. |
 | `options.ts`, `options.test.ts`, `permissions.ts` | Deleted. Replaced by `agents/policy.ts` and `provider/adapter.ts`. |
 | `requirements.ts`, `requirements.test.ts`, `requirements-continuity.test.ts` | Deleted. Replaced by `requirements/service.ts`. |
 | `assumptions.ts`, `assumptions.test.ts` | Deleted with no replacement. |
 | `change-impact.ts`, `change-impact.test.ts` | Deleted with no replacement. |
-| `commissions.ts`, `commissions.e2e.test.ts` | Deleted. Replaced by `plans/service.ts` (source revision validation) and `plans/compiler.ts`. |
+| `commissions.ts`, `commissions.e2e.test.ts` | Deleted. Replaced by `execution/plan-revision-service.ts` (authorization, validation, reconciliation, atomic application) and `execution/compiler/`. |
 | `decision-issues.ts`, `decision-issues.test.ts`, `decisions.ts`, `decisions.test.ts`, `interactions.ts`, `interactions.test.ts` | Deleted. Replaced by `decisions/service.ts`. |
 | `grants.ts` | Deleted. Replaced by `invocations/tools.ts` role table. |
 | `objective.ts`, `objective-progress.test.ts`, `state.ts`, `spec-state.e2e.test.ts` | Deleted with no replacement. |
@@ -178,7 +180,7 @@ imports, re-exports, or aliases anything from it. Per-file replacements:
 
 | Path | Disposition |
 |---|---|
-| `service.ts`, `runtime.ts`, `lifecycle.ts`, `lanes.ts`, `liveness.ts`, `mailroom.ts`, `routing.ts`, `seams.ts`, `session-tree.ts`, `nesting.ts`, `attention.ts`, `names.ts`, `ledger-sync.ts`, `worktree-binding.ts`, `delivery-view.ts`, `final-gate.ts`, `operator.ts`, `grants.ts`, `composer.ts`, `presets.ts`, `topology.ts`, `topology-contract.ts`, `patterns/catalog.ts`, `patterns/engine.ts`, `agent-tools.ts` | Deleted. Responsibilities: scheduling and fan-in → `plans/scheduler.ts` and `plans/patterns/*`; Invocation process lifetime → `invocations/attempts.ts`; prompt assembly → `invocations/manifest.ts`; tools → `invocations/tools.ts`; worktrees → `workspace-state/worktrees.ts`. Mailroom, routing, liveness, nesting, attention, names, ledger sync, delivery view, final gate, operator-path prompts, presets, topology, catalog, engine → deleted with no replacement. |
+| `service.ts`, `runtime.ts`, `lifecycle.ts`, `lanes.ts`, `liveness.ts`, `mailroom.ts`, `routing.ts`, `seams.ts`, `session-tree.ts`, `nesting.ts`, `attention.ts`, `names.ts`, `ledger-sync.ts`, `worktree-binding.ts`, `delivery-view.ts`, `final-gate.ts`, `operator.ts`, `grants.ts`, `composer.ts`, `presets.ts`, `topology.ts`, `topology-contract.ts`, `patterns/catalog.ts`, `patterns/engine.ts`, `agent-tools.ts` | Deleted. Responsibilities: scheduling and fan-in → `execution/scheduler.ts` and `execution/patterns/*`; Invocation process lifetime → `execution/attempts.ts`; prompt assembly → `execution/manifest.ts`; tools → `execution/tools.ts`; worktrees → `workspace-state/worktrees.ts`. Mailroom, routing, liveness, nesting, attention, names, ledger sync, delivery view, final gate, operator-path prompts, presets, topology, catalog, engine → deleted with no replacement. |
 | Every `*.test.ts` and `*.e2e.test.ts` in this directory (48 files) and `__snapshots__/prompt-snapshot.e2e.test.ts.snap` | Deleted. |
 
 ### 3.4 Agent profiles (`agent-profiles/`)
@@ -213,14 +215,14 @@ legacy migrations, and no new legacy migration is generated
 
 | Path | Disposition |
 |---|---|
-| `sessions/service.ts`, `sessions/service-model.test.ts` | Deleted. Replaced by `conversations/service.ts` and `runs/service.ts`. |
+| `sessions/service.ts`, `sessions/service-model.test.ts` | Deleted. Replaced by `conversations/service.ts` and `execution/run-creation-service.ts` (atomic Run bootstrap) with the Run lifecycle in `execution/`. |
 | `handoffs/service.ts`, `handoffs/schema.ts`, `*.test.ts` | Legacy contents replaced: `handoffs/service.ts` is rewritten for the single Handoff shape; `schema.ts` and the tests are deleted. |
-| `tasks/service.ts`, `tasks/scheduler.ts`, `tasks/scheduler.test.ts` | Legacy contents replaced: `tasks/service.ts` is rewritten for Run-scoped Tasks; `scheduler.ts` (assignment scheduling) and its test are deleted, scheduling moves to `plans/scheduler.ts`. |
+| `tasks/service.ts`, `tasks/scheduler.ts`, `tasks/scheduler.test.ts` | Legacy contents replaced: `tasks/service.ts` is rewritten for Run-scoped Tasks; `scheduler.ts` (assignment scheduling) and its test are deleted, scheduling moves to `execution/scheduler.ts`. |
 | `completion/service.ts`, `coverage.ts`, `coverage.test.ts`, `summary.ts`, `summary.test.ts`, `completion.e2e.test.ts` | Deleted. Replaced by `evaluations/gates.ts`. |
 | `continuation/service.ts`, `continuation.e2e.test.ts` | Deleted with no replacement. |
 | `compose/improve.ts`, `improve.test.ts` | Deleted with no replacement. |
 | `capacity/service.ts`, `service.test.ts` | Legacy contents replaced: the provider-usage-window pause and resident-agent caps are deleted; `capacity/governor.ts` and `capacity/leases.ts` (the Resource Governor) take the path. Budget ceilings move to `runs/budgets.ts`. |
-| `system/pause.ts`, `pause.e2e.test.ts` | Deleted. Replaced by per-Run pause in `runs/service.ts` (Run `waiting`, reason `operator`). No process-wide pause state. |
+| `system/pause.ts`, `pause.e2e.test.ts` | Deleted. Replaced by per-Run pause in `execution/` (Run `waiting`, reason `operator`). No process-wide pause state. |
 | `portfolio/ownership.ts`, `ownership.test.ts`, `workstreams.ts`, `workstreams.e2e.test.ts` | Deleted with no replacement. |
 | `timeline/service.ts`, `service.test.ts` | Deleted with no replacement (plan view reads Events). |
 | `workspaces/service.ts`, `service.test.ts`, `fs-browse.ts` | Replaced at the same paths (new Workspace type). |

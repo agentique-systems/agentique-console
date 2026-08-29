@@ -32,9 +32,15 @@ The types, state sets, and transition validators for every object below
 are defined once in `@agentique-console/core` (`core/src/`); every
 canonical store below is implemented behind `server/src/persistence/`
 (schema, client, database-open guard, baseline migration, stores, blob
-store, transaction helpers). Every state-changing store operation
-validates the transition, appends the Event, and updates the projection in
-one transaction; an illegal transition writes nothing.
+store, transaction helpers); the deterministic runtime that composes
+stores into canonical operations — the plan compiler, the plan-revision
+service, Run creation, and in later phases the scheduler, Pattern
+executors, and Gates — lives behind `server/src/execution/`, which depends
+only on the core package, the persistence boundary, and narrow ports for
+capabilities implemented in later phases (today the Workspace preparation
+port, §3). Every state-changing store operation validates the transition,
+appends the Event, and updates the projection in one transaction; an
+illegal transition writes nothing.
 
 ### 2.1 Write transactions
 
@@ -54,10 +60,11 @@ re-entrant over one SQLite connection:
   rollback-only root never commits: when its callback returns it rolls
   back and throws the first failure that marked it, which remains the
   canonical cause even if the outer callback later throws something else.
-- **Transaction-scoped compensation.** A store that performs an external
-  side effect inside a transaction (today: writing a new Artifact blob)
-  registers compensation on the root with `afterRollback(hook)`, from any
-  nesting depth. Hooks run exactly once, only when the root rolls back
+- **Transaction-scoped compensation.** A store or service that performs an
+  external side effect inside a transaction (writing a new Artifact blob;
+  preparing a Run's Workspace through the Workspace preparation port at
+  Run creation) registers compensation on the root with
+  `afterRollback(hook)`, from any nesting depth. Hooks run exactly once, only when the root rolls back
   (callback failure, rollback-only failure, or commit failure), never after
   a successful commit; they run after the SQLite `ROLLBACK` has been
   attempted and the transactor has left the transaction, so a hook that
@@ -88,10 +95,11 @@ re-entrant over one SQLite connection:
 | Schema identity | Migration | `schema_info` | — |
 | Workspace | Operator via API | `workspaces` | — |
 | Conversation, messages | Operator, Orchestrator via runtime | `conversations`, `conversation_messages` | Conversation view |
-| Run | Runtime | `runs` | Run view, Run list |
-| Execution Plan (source) | Runtime (validated Orchestrator revisions) | `execution_plan_revisions` | Plan view |
-| Plan Node, Plan Edge (compiled) | Plan compiler only | `plan_nodes`, `plan_edges` | Plan view |
-| Plan Node Requirement scope | Plan compiler only | `plan_node_requirements` | Plan view, Task ledger |
+| Run (with its persisted final reserve) | Runtime (Run creation service) | `runs` | Run view, Run list |
+| Execution Plan (source; accepted revisions only) | Runtime (plan-revision service; revision 1 by Run creation) | `execution_plan_revisions` | Plan view |
+| Plan Node, Plan Edge (compiled) | Plan-revision service through the compiler; the root node by Run creation | `plan_nodes`, `plan_edges` | Plan view |
+| Plan Revision Membership | Plan-revision service; revision 1 by Run creation | `plan_revision_nodes` | Plan view |
+| Plan Node Requirement scope | Plan-revision service through the compiler | `plan_node_requirements` | Plan view, Task ledger |
 | Requirement | Runtime (from Orchestrator proposal, operator approval) | `requirements`, `requirement_revisions`, `requirement_status_changes` | Requirements panel |
 | Acceptance Criterion | Runtime (from Orchestrator) | `acceptance_criteria` | Requirements panel, Gate view |
 | Decision | Runtime (from operator, Orchestrator, or a resolution policy) | `decisions` | Decision cards |
@@ -133,11 +141,27 @@ created ──► running ──► verifying ──► awaiting_signoff ──�
                └──► cancelled
 ```
 
-- `created`: the Run row exists with its Run Budget; the Execution Plan
-  holds only the root Plan Node (the Orchestrator's `single` node) with its
-  initial allocation reserved. A Snapshot of the Target is taken and
-  recorded as the Run's base Snapshot; the Run's Integration Workspace is
-  created from it (§9).
+- `created`: the Run's complete initial state exists, established
+  atomically by the Run creation service in one root transaction: the Run
+  row with its Run Budget and persisted final reserve (§7.6); the base
+  Snapshot of the Target and the Run's Integration Workspace created from
+  it (§9), obtained through the Workspace preparation port
+  (`RunWorkspacePreparationPort`: `prepare` takes the Snapshot and creates
+  the Integration Workspace, `discard` is its compensation when creation
+  rolls back after preparation succeeded); accepted Execution Plan revision
+  1 with the empty source `{ "version": 1, "expressions": [] }`; the root
+  Plan Node (the Orchestrator's `single` node, §4.6) with its explicit
+  initial allocation reserved from ordinary Run capacity; revision-1
+  membership containing the root; the Conversation's active-Run reference;
+  and every corresponding Event. Creation validates Conversation and
+  Workspace ownership, that the Conversation has no active Run, that the
+  Orchestrator Agent Definition revision exists, is the `orchestrator`
+  definition, and declares the read, write, and shell capabilities, and
+  that the initial allocation and the final reserve fit the Run Budget
+  together, the allocation never being the whole Budget. A preparation
+  failure creates nothing; a database failure after preparation rolls back
+  and runs the port's compensation. No Invocation exists yet: the initial
+  Orchestrator Invocation is created when the Run starts.
 - `running`: at least one Plan Node is `ready` or `running`.
 - `waiting`: no Plan Node can make progress. The Run records a structured
   reason: `decision` (an `operator_required` Decision is unanswered),
@@ -179,36 +203,58 @@ The Execution Plan exists in two forms, both owned by the runtime:
 - **Compiled form** — a flat directed acyclic graph of Plan Nodes and typed
   Plan Edges materialized by the deterministic plan compiler from a source
   revision. The compiled form is what the scheduler executes. It is
-  persisted in `plan_nodes`, `plan_edges`, and `plan_node_requirements`.
+  persisted in `plan_nodes`, `plan_revision_nodes` (each accepted
+  revision's immutable ordered membership), `plan_edges` (each edge owned
+  by exactly one revision), and `plan_node_requirements`.
 
 The Orchestrator authors and revises the source form through the
-`revise_execution_plan` tool. The runtime validates the proposed revision
-(§4.5). The deterministic compiler materializes the compiled form. Only the
-compiler writes `plan_nodes`, `plan_edges`, and `plan_node_requirements`.
-The Orchestrator may read compiled plan state through `read_execution_plan`.
-Coordinators, Workers, and Evaluators cannot revise either form.
+`revise_execution_plan` tool. The plan-revision service validates the
+proposed revision, compiles it, reconciles it with the current accepted
+revision, and either applies it atomically or rejects it (§4.5). Only
+that service, through the compiler, writes `plan_nodes`,
+`plan_revision_nodes`, `plan_edges`, and `plan_node_requirements`; Run
+creation writes the root node and revision 1. The Orchestrator may read
+compiled plan state through `read_execution_plan`. Coordinators, Workers,
+and Evaluators cannot revise either form.
+
+The scheduler reads one thing: the **current executable graph**, the
+membership and edges of the Run's latest accepted revision
+(`currentGraph`). Historical graphs are read by revision number
+(`graph(run, n)`). No query infers membership from timestamps, a node's
+creating revision, incident edges, source-path prefixes, or status.
 
 ### 4.2 Plan Node
 
 A compiled Plan Node has:
 
-- `id`, `runId`, `kind`, `title`, `sourcePath` (the position in the
-  source expression it was compiled from)
+- `id`, `runId`, `kind`, `title`, `sourcePath` (the canonical source path
+  of the expression it was compiled from, §4.4), `createdInRevisionNumber`
+  (the accepted revision that created it; later memberships are recorded
+  in `plan_revision_nodes`)
 - `kind`: `pattern` or `join`
 - `pattern`: for `kind: pattern`, exactly one of `single`, `chain`,
   `route`, `parallel`, `coordinator_worker`, `evaluator_optimizer`; absent
   for `kind: join`
-- `input`: for `kind: pattern`, a Context Manifest template — the Task ids,
-  Decision ids, and Artifact ids this node's Invocations receive
+- `shape`: for `kind: pattern`, the immutable pattern-specific execution
+  shape — every operation the Pattern executes (Agent Definition revision,
+  title, input) in its position, and the Pattern's bounds: `single` (role
+  `worker`, or `orchestrator` for the root only, and one operation);
+  `chain` (two or more steps); `route` (the selector and the branch
+  bindings in canonical label order, each inline with an operation or
+  composite); `parallel` (one or more items, optional aggregation,
+  `requireAll`); `coordinator_worker` (coordinator, worker, bounds);
+  `evaluator_optimizer` (inline producer with `round: null`, or an
+  evaluate-only node naming its unrolled `round`, plus evaluator and
+  `maxRounds`); absent for `kind: join`
+- `input`: for `kind: pattern`, a Context Manifest template — the union of
+  the Task ids, Decision ids, and Artifact ids of the shape's operations
 - Requirement scope: the exact set of leaf Requirement ids the node serves,
   at the pinned Requirement revision, persisted in `plan_node_requirements`
   (§4.7); empty for the root node and for `join` nodes
-- `agents`: for `kind: pattern`, which Agent Definition revision each role
-  in the Pattern uses; absent for `kind: join`
 - `allocation`: the Budget allocation reserved for this node from the Run
   Budget (§7.6), plus the node's local limits (`maxConcurrency`,
-  `maxWallClockMs`, Pattern-specific bounds) and its
-  `onAllocationExhausted` policy (`fail | wait | extend`)
+  `maxWallClockMs`) and its `onAllocationExhausted` policy
+  (`fail | wait | extend`)
 - `fanInPolicy`: for `kind: join`, exactly `require_all` (default) or
   `require_any`; this is a closed two-value set (no threshold, count,
   weighted, or custom policy)
@@ -216,6 +262,11 @@ A compiled Plan Node has:
   (may be empty)
 - `status`: `pending | ready | running | waiting | succeeded | failed | cancelled | skipped`
 - `output`: the Artifact ids produced, set when the node reaches `succeeded`
+
+Everything above except `id`, `runId`, `createdInRevisionNumber`,
+`status`, `output`, and timestamps is the node's **definition**; it is
+immutable from insertion (a database trigger enforces it) and is what
+reconciliation compares (§4.5).
 
 A Plan Node of `kind: pattern` executes an orchestration Pattern by creating
 Invocations. A Plan Node of `kind: join` has no Pattern value, no Agent
@@ -240,7 +291,10 @@ A Plan Edge is a typed, directed relation between two Plan Nodes:
 | `fan_in` | Enters a `join` node. The join becomes eligible when every `fan_in` source is terminal; the sources' outcomes and outputs are recorded in the join's index Artifact in edge order. |
 | `retry(round)` | A `sequence` edge into a later unrolled round of an `evaluator_optimizer` expression; active only when the source's Evaluation failed. When the Evaluation passed, every later round is `skipped`. |
 
-Readiness is computed from edges only:
+Every Plan Edge belongs to exactly one accepted revision and is
+append-only; a later revision that keeps a node writes its own edge rows.
+Readiness is computed from the current accepted revision's edges only; an
+edge of a historical revision never makes a node ready:
 
 - A `pattern` node is `ready` when every predecessor is terminal, no
   predecessor is `failed` or `cancelled` (unless the node was compiled with
@@ -262,7 +316,65 @@ Readiness is computed from edges only:
 
 Pattern composition is expressed structurally in the source form and
 materialized flat by the compiler. The compiler is deterministic: the same
-source revision always yields the same compiled graph.
+normalized source revision, with the same resolved inputs, always yields
+the byte-for-byte same compiled draft.
+
+The compiler (`server/src/execution/compiler/`) is a pure function from
+one immutable **compile input** — the validated source, the resolved Agent
+Definition revisions, the pinned Requirement revision trees and current
+Requirement statuses, the Task, Decision, Artifact, and Acceptance
+Criterion ids that exist, the allocation defaults, and the limits — to a
+**compiled draft**: nodes keyed by canonical source path with their full
+definitions, and edges between keys with fan-in positions. It never
+queries the database, mints database ids, writes Events, reserves Budget,
+or mutates persisted state; the plan-revision service maps keys to
+retained or newly minted Plan Node ids during reconciliation (§4.5).
+
+**Leaf operations.** A leaf is a `single` expression that declares no
+node-level option other than a title (no scope, allocation, limits,
+policy, or Gate criteria). Leaves are absorbed into their enclosing
+Pattern node as chain steps, parallel items, inline route branches, or an
+inline producer. A `single` expression that declares node-level options
+has node semantics of its own and compiles to its own node.
+
+**Node options.** An expression's `allocation`, `limits`,
+`onAllocationExhausted`, `runOnDependencyFailure`, and
+`gateAcceptanceCriterionIds` apply to every `pattern` node compiled
+directly from it (the node of an all-leaf expression; the leaf-run nodes of
+a composite chain; the leaves node and the aggregation node of a composite
+parallel; every evaluate-only round). Nodes compiled from a nested
+expression take that expression's options. Omitted allocations resolve to
+the configured default; omitted limits are unbounded; policies default to
+`fail` and `false`.
+
+**Canonical source paths.** Every compiled node is keyed by a source path
+under this grammar, which is the logical key reconciliation matches on:
+
+```
+path       := "root" | expression
+expression := "e" index { "/" segment }
+segment    := "steps/" index                 a composite chain step
+            | "steps/" index ".." index       a maximal run of leaf chain steps (one chain node)
+            | "items/" index                  a composite parallel item
+            | "leaves"                        the leaf items of a composite parallel (one parallel node)
+            | "join"                          the compiler-emitted join of a composite parallel
+            | "aggregate"                     the aggregation node of a composite parallel
+            | "branches/" label               a composite route branch
+            | "rounds/" round "/producer"     one unrolled evaluator-optimizer producer round
+            | "rounds/" round "/evaluate"     the evaluate-only node of that round
+index      := decimal integer >= 0 (position in a semantically ordered array)
+round      := decimal integer >= 1
+label      := the branch label percent-encoded: [A-Za-z0-9_-] verbatim, every other
+              UTF-8 byte as %XX (upper-case hex)
+```
+
+An all-leaf expression's node takes the expression's own path (`e0`,
+`e0/steps/2`, `e0/branches/x`). The grammar is deterministic, unique
+within a revision, independent of object insertion order (route branches
+are keyed by label, never position), safe for any label, and stable when
+unrelated later siblings are appended. Inline roles (chain steps, parallel
+items, inline branches, the selector, the inline producer and evaluator)
+live inside their node's shape and have no path of their own.
 
 Compilation rules, applied recursively to each expression:
 
@@ -270,66 +382,113 @@ Compilation rules, applied recursively to each expression:
 2. `chain(e₁ … eₙ)`: each operand compiles to a subgraph; the exits of the
    subgraph for `eᵢ` are connected to the entries of the subgraph for
    `eᵢ₊₁` by `sequence` edges. A maximal run of consecutive leaf operands
-   compiles to one `chain` node whose steps are those leaves. A chain of one
-   leaf compiles to a `single` node.
+   compiles to one `chain` node whose steps are those leaves (path
+   `steps/i..j`); a run of one leaf compiles to a `single` node (path
+   `steps/i`). A chain whose operands are all leaves compiles to one
+   `chain` node at the expression's path; a chain of one leaf compiles to
+   a `single` node. Step order is preserved.
 3. `route(selector, {label ⇒ e})`: compiles to one `route` node holding
-   the selector. A leaf branch stays inside the node as its branch
-   Invocation. A composite branch compiles to its own subgraph, connected
-   from the `route` node by a `branch(label)` edge. Successors of the
-   expression receive `sequence` edges from the `route` node and from every
-   composite branch's exits; the readiness rule in §4.3 makes exactly the
-   selected path deliver.
+   the selector and the branch bindings in canonical (code-unit) label
+   order. A leaf branch stays inside the node as its branch Invocation. A
+   composite branch compiles to its own subgraph, connected from the
+   `route` node by a `branch(label)` edge. Successors of the expression
+   receive `sequence` edges from the `route` node and from every composite
+   branch's exits; the readiness rule in §4.3 makes exactly the selected
+   path deliver and never executes an inactive branch. A
+   `decision_answer` selector must name an existing Decision and map every
+   option to an existing branch label; an `evaluator` selector must name an
+   existing Agent Definition revision.
 4. `parallel(items, aggregate?)`:
    - When every item is a leaf, the expression compiles to one `parallel`
      node holding the items and, if given, the aggregation as an inline
      Invocation (§5.4).
    - When any item is composite, every composite item compiles to its own
-     subgraph, and the leaf items (if any) compile to one `parallel` node
-     without aggregation. All of these fan into one `join` node by `fan_in`
-     edges, in item order. If an aggregation is given, it compiles to a
-     `single` node reached from the join by a `sequence` edge, whose input
-     is the join's index Artifact. Successors of the expression receive
-     `sequence` edges from the aggregation node, or from the join when
-     there is none.
+     subgraph (path `items/i`), and the leaf items (if any) compile to one
+     `parallel` node without aggregation (path `leaves`, positioned at the
+     first leaf item). All of these fan into one `join` node (path `join`,
+     policy `require_all` unless `requireAll: false`, then `require_any`)
+     by `fan_in` edges, in item order (a composite item with several exits
+     contributes one edge per exit). If an aggregation is given, it
+     compiles to a `single` node (path `aggregate`) reached from the join
+     by a `sequence` edge, whose input is the join's index Artifact.
+     Successors of the expression receive `sequence` edges from the
+     aggregation node, or from the join when there is none; a terminal
+     composite parallel without aggregation ends at its join.
    - A `parallel` node is never created with zero items and never exists
      only to perform fan-in; fan-in is always a `join` node.
 5. `evaluator_optimizer(producer, evaluator, maxRounds)`: a leaf producer
-   compiles to one `evaluator_optimizer` node (§5.6). A composite producer
-   is unrolled: for each round `r` in `1 … maxRounds` the compiler emits a
-   copy of the producer subgraph `Pᵣ` and an `evaluator_optimizer` node
-   `Eᵣ` in evaluate-only form (no inline producer; it evaluates the Handoff
-   from `Pᵣ`'s exits); `Pᵣ → Eᵣ` by `sequence`; `Eᵣ → Pᵣ₊₁` by
+   compiles to one `evaluator_optimizer` node (§5.6) whose shape holds the
+   producer inline (`round: null`). A composite producer is unrolled: for
+   each round `r` in `1 … maxRounds` the compiler emits a copy of the
+   producer subgraph `Pᵣ` (path `rounds/r/producer`) and an
+   `evaluator_optimizer` node `Eᵣ` in evaluate-only form (path
+   `rounds/r/evaluate`; `producer: null`, `round: r`; it evaluates the
+   Handoff from `Pᵣ`'s exits); `Pᵣ → Eᵣ` by `sequence`; `Eᵣ → Pᵣ₊₁` by
    `retry(r+1)`; successors of the expression receive `sequence` edges from
-   every `Eᵣ`. A passing `Eᵣ` skips every later round.
+   every `Eᵣ`. A passing `Eᵣ` skips every later round. `maxRounds` above
+   `maxUnrolledRounds` is rejected.
 6. `coordinator_worker(coordinator, worker)`: compiles to one
-   `coordinator_worker` node. Its operands must be leaves. It may not be an
-   operand of another `coordinator_worker` expression at any depth.
+   `coordinator_worker` node with the resolved bounds (the expression's or
+   the configured default; `maxConcurrentWorkers` may not exceed
+   `maxTasks`). Its operands must be leaves. It may not be an operand of
+   another `coordinator_worker` expression at any depth; a raw proposal
+   that nests one, or gives one a composite operand, is rejected before
+   schema parsing with `nested_coordinator_worker`. Tasks and Invocations
+   are runtime execution records and are never compiled.
 7. Requirement scope: an expression that names Requirement roots at a
-   pinned revision is expanded to the exact leaf set (§4.7) and the set is
-   persisted for every `pattern` node compiled from that expression or its
-   descendants that do not name their own roots. `join` nodes carry no
-   scope.
+   pinned revision is expanded to the exact leaf set (§4.7), in tree order,
+   and the set is persisted for every `pattern` node compiled from that
+   expression or its descendants that do not name their own roots; a
+   descendant that names its own roots replaces the inherited scope for
+   itself and its descendants. Roots resolve against exactly one pinned
+   revision of the Run's Conversation; an internal root is expanded and is
+   never itself in the scope. The root Orchestrator node and `join` nodes
+   carry no scope.
 8. Allocation: every `pattern` node is compiled with the allocation its
    expression requests (or the configured default); the whole revision's
-   allocations are reserved atomically at compile time (§7.6). A `join`
-   node's allocation is zero.
+   allocations are validated before persistence and reserved atomically for
+   the newly created nodes when the revision is applied (§7.6), from
+   ordinary Run capacity outside the persisted final reserve. Reused nodes
+   keep their reservation and are never reserved twice. A `join` node's
+   allocation is zero.
 
 Rejected at validation or compile time, with the rejection returned to the
-Orchestrator as the tool result:
+Orchestrator as the tool result carrying one or more stable,
+machine-readable reasons (`PLAN_REJECTION_CODES`), each with a concise
+message and, where one applies, the source path:
 
-- any cycle in the compiled graph;
-- an expression that references itself or an ancestor expression;
-- a `coordinator_worker` operand that is not a leaf, or a
-  `coordinator_worker` nested inside another one;
-- source nesting depth greater than `maxPlanDepth` (default 4);
-- `maxRounds` greater than `maxUnrolledRounds` (default 6);
-- a compiled graph with more than `maxPlanNodes` (default 200) nodes;
-- any Pattern name other than the six, or a `join` requested explicitly
-  (joins are compiler-emitted only);
-- a Requirement root that does not exist at the pinned revision, belongs to
-  another Conversation, or is `retired`;
-- an allocation set that cannot be reserved from unreserved Run capacity
-  after the configured final reserve (§7.6).
+- `cyclic_source_object`: a source object that references itself or an
+  ancestor (detected structurally by an iterative walk before any schema
+  parse, never by a stack overflow);
+- `excessive_source_depth`: raw nesting beyond the hard object bound, or
+  expression depth greater than `maxPlanDepth` (default 4);
+- `excessive_unrolled_rounds`: `maxRounds` greater than
+  `maxUnrolledRounds` (default 6);
+- `excessive_compiled_nodes`: more than `maxPlanNodes` (default 200)
+  compiled nodes;
+- `compiled_graph_cycle`: any cycle in the compiled graph;
+- `unsupported_pattern`: any Pattern name other than the six;
+- `explicit_join`: a `join` requested explicitly (joins are
+  compiler-emitted only);
+- `invalid_structure`: a malformed expression (empty chain, items, or
+  branches; unknown fields; wrong operand types);
+- `invalid_agent_definition_revision`, `invalid_task_reference`,
+  `invalid_artifact_reference`, `invalid_decision_reference`,
+  `invalid_acceptance_criterion_reference`: a reference to something that
+  does not exist in this Run or Conversation;
+- `invalid_role_binding`: a selector option mapped to a branch that does
+  not exist, or any other role that cannot be bound;
+- `invalid_requirement_scope`: a Requirement revision that does not exist
+  or belongs to another Conversation, or a root that does not exist at the
+  pinned revision, belongs to another Conversation, or is `retired`;
+- `nested_coordinator_worker`: a `coordinator_worker` operand that is not
+  a leaf, or a `coordinator_worker` nested inside another one;
+- `invalid_pattern_bounds`: a Pattern-specific bound that cannot hold;
+- `insufficient_capacity`: an allocation set that cannot be reserved from
+  unreserved ordinary Run capacity after the persisted final reserve
+  (§7.6);
+- `started_node_changed`: a revision that would change the definition of
+  a node that has started or ended (§4.5).
 
 Examples that compile:
 
@@ -341,36 +500,88 @@ Examples that compile:
 
 ### 4.5 Who may change the plan
 
-- Only the Orchestrator authors and revises the source form. Each proposed
-  revision is validated by the runtime (well-formed, limits, Requirement
-  references, allocations), appended, and compiled immediately. Compilation
-  reconciles the new compiled graph with the existing one by `sourcePath`:
-  nodes whose `sourcePath` and definition are unchanged keep their id,
-  status, scope, and allocation; nodes whose source was removed and that
-  have not started become `cancelled` and their allocations are released;
-  nodes that have started or finished are never altered; new nodes are
-  added `pending` with their allocations reserved. A revision that would
-  change the definition, scope, or allocation of a node that has started is
-  rejected; the Orchestrator cancels it and adds a new expression instead.
+- Only the Orchestrator authors and revises the source form, and only an
+  Orchestrator Invocation belonging to the Run may propose a non-initial
+  revision (any other proposer is an error, not a rejection). The
+  plan-revision service (`server/src/execution/plan-revision-service.ts`)
+  performs, in order: authorization; source validation (cyclic objects,
+  explicit joins, unknown Patterns, nested coordinator-worker, schema,
+  depth and round limits); compile-input resolution; deterministic
+  compilation; reconciliation; atomic persistence; and a structured
+  accepted or rejected result.
+- **Reconciliation** compares the compiled draft with the current accepted
+  revision by canonical source path and full immutable definition (kind
+  and Pattern, title, source path, shape — role bindings and Agent
+  Definition revisions, Pattern bounds, selector, join policy — manifest
+  template, Requirement scope and pinned revision, allocation, concurrency
+  and wall-clock limits, allocation-exhaustion policy, dependency-failure
+  policy, Gate criteria):
+  - a draft node whose path matches a member with an equal definition
+    **reuses** that node: it keeps its id, status, timestamps, output,
+    scope rows, and reservation and actual Usage history, and receives no
+    second reservation;
+  - a draft node whose path matches a member with a different definition
+    **replaces** it when the member has not started (`pending` or
+    `ready`): the old node is cancelled with its reservation released and
+    a new node with a new id is created; the old node's definition is
+    never mutated and its id is never reused for changed semantics. If the
+    member has started or ended (`running`, `waiting`, or terminal) the
+    whole proposal is rejected with `started_node_changed`; the
+    Orchestrator cancels the node and adds a new expression instead;
+  - a draft node with no matching member is **created** `pending` with its
+    allocation reserved;
+  - a member with no matching draft node is **removed**: if it has not
+    started it is cancelled and its reservation released; if it is
+    `running`, `waiting`, or terminal its row, state, and definition are
+    never rewritten — it simply leaves the new revision's membership, so
+    historical edges cannot activate successors through it, its existing
+    execution may still finish and produce a `node_result`, and only the
+    current revision's graph controls future scheduling.
+- **Accepted revision.** In one root transaction the service appends the
+  immutable source revision (numbered after the latest accepted one),
+  cancels removed and replaced unstarted nodes and releases their
+  reservations, creates the new nodes with their exact scope rows, reserves
+  every new node's allocation atomically from ordinary Run capacity, writes
+  the revision's immutable membership (root first, then the compiled draft
+  order) and revision-specific edges (a reused node never reuses an older
+  revision's edge row), and appends `execution_plan.revised`,
+  `plan_node.cancelled` and `budget_reservation.released`,
+  `execution_plan.compiled`, `plan_node.created`, and
+  `budget_reservation.created`, all correlated with the proposal and caused
+  by the revised Event. No intermediate accepted state is observable.
+- **Rejected revision.** A rejected proposal persists no source revision,
+  consumes no revision number, creates no membership, node, edge, scope
+  row, or reservation, modifies no existing node, and appends exactly one
+  `execution_plan.rejected` Event in a separate successful transaction,
+  carrying the stable reasons and the proposing Invocation's correlation
+  and causation. An ordinary invalid proposal never throws at the service
+  boundary; an unexpected infrastructure failure throws after rollback and
+  is never mislabeled as a rejection.
 - Coordinators, Workers, and Evaluators cannot revise either form. Tasks a
   Coordinator proposes are internal execution records of its node (§5.5)
   and never create, remove, or alter Plan Nodes, Plan Edges, or scope rows.
 - A node in `pending` or `ready` may be cancelled by the Orchestrator or the
   operator. A `running` node may be cancelled; its Invocations are
   interrupted and the node ends `cancelled`.
-- Every revision writes one `execution_plan.revised` Event carrying the
-  source revision and one `execution_plan.compiled` Event carrying the full
-  compiled node, edge, and scope list, or one `execution_plan.rejected`
-  Event carrying the reasons.
+- Every accepted revision writes one `execution_plan.revised` Event
+  carrying the source revision and one `execution_plan.compiled` Event
+  carrying the revision's membership, its member nodes, its edges, their
+  scope rows, and the created, reused, and cancelled node ids; every
+  rejected proposal writes one `execution_plan.rejected` Event carrying the
+  reasons and the revision number that remains current.
 
 ### 4.6 The root node and Orchestrator Invocations
 
-The root Plan Node is created with the Run: `kind: pattern`, pattern
-`single`, role `orchestrator`, no predecessors, no Requirement scope, and an
-explicit initial allocation reserved from the Run Budget (§7.6) — never the
-whole Run Budget. Its `onAllocationExhausted` policy is `extend`. The root
-node stays `running` for the life of the Run and reaches `succeeded` only
-when the Run does.
+The root Plan Node is created with the Run by the Run creation service,
+not by the compiler: `kind: pattern`, pattern `single`, shape role
+`orchestrator` (the only node that may hold it), title `Orchestrator`,
+source path `root`, no predecessors, no Requirement scope, and an explicit
+initial allocation (`initialOrchestratorAllocation`, configurable and
+overridable per Run) reserved from ordinary Run capacity (§7.6) — never
+the whole Run Budget. Its `onAllocationExhausted` policy is `extend`. It
+is the first member of every accepted revision's membership. The root node
+stays `running` for the life of the Run and reaches `succeeded` only when
+the Run does.
 
 The root node owns a sequence of Orchestrator Invocations. Each is one
 logical execution with one immutable Context Manifest and one `purpose`.
@@ -425,7 +636,9 @@ have no scope rows.
   node compiled from an expression that inherits its ancestor's roots gets
   its own complete set of rows, so identical rows under sibling nodes are
   intentional, and validation is one indexed lookup on
-  `(plan_node_id, requirement_id, requirement_revision_id)`.
+  `(plan_node_id, requirement_id, requirement_revision_id)`. Rows carry a
+  position so a node's scope reads back in the deterministic tree order
+  the compiler produced.
 
 ## 5. Patterns
 
@@ -923,18 +1136,32 @@ the resource governor; they are not reserved quantities.
   then ends the Invocation.
 
 **Plan Node allocation.** Each `pattern` Plan Node receives an explicit
-allocation reserved from the Run Budget when its source revision is
-compiled (§4.4 rule 8); the whole revision's allocations are reserved
-atomically and the revision is rejected if they cannot be. The root
-Orchestrator node receives an explicit initial allocation
-(`initialOrchestratorAllocation`, configurable), not the entire Run Budget.
-When the Orchestrator revises the plan, new node allocations are reserved
-only from unconsumed, unreserved Run capacity. The runtime retains a
-configured **final reserve** (`finalReserve`, enabled by default for
-`kind: code` Runs) that plan revisions cannot reserve; it is spent only on
+allocation reserved from the Run Budget when the revision that creates it
+is applied (§4.4 rule 8); the whole revision's new allocations are
+reserved atomically and the revision is rejected if they cannot be, while
+reused nodes keep their existing reservation. The root Orchestrator node
+receives an explicit initial allocation (`initialOrchestratorAllocation`,
+configurable), not the entire Run Budget. When the Orchestrator revises
+the plan, new node allocations are reserved only from unconsumed,
+unreserved ordinary Run capacity.
+
+**Final reserve.** Every Run carries a **final reserve** (cost, tokens,
+Attempts): chosen at Run creation from a configurable default per Run kind
+(enabled by default for `kind: code` Runs, zero for `other`) or an explicit
+value, validated to be non-negative and to fit within the Run Budget
+together with the root node's initial allocation, and persisted on the Run,
+immutable for its life. "Configured final reserve" always means this
+persisted value; a runtime configuration value is never read back into an
+existing Run. The Run Budget is thereby partitioned: the **ordinary pool**
+(the Budget less the final reserve) is the only capacity plan revisions
+and root-node extensions can reserve; the final reserve is spent only on
 `final_synthesis` Orchestrator Invocations and `run_completion` Gate
-Evaluator Invocations. Unused node allocation is released when the node
-reaches a terminal state. A `join` node's allocation is zero.
+Evaluator Invocations, each reserved with the explicit capacity source
+`final_reserve`. Each partition is accounted from its own reservations
+(`runCapacity` reports both), so the reserve is never double-counted as an
+ordinary child reservation and never represented as fabricated Usage.
+Unused node allocation is released when the node reaches a terminal
+state. A `join` node's allocation is zero.
 
 **Invocation allocation.** Each Invocation receives an explicit allocation
 reserved from its Plan Node's unconsumed, unreserved allocation before it
@@ -1391,11 +1618,15 @@ by a test.
     create Invocations, or address Workers; a Worker cannot propose or
     create anything; a `coordinator_worker` expression cannot contain a
     composite operand or another `coordinator_worker`.
-15. **The persisted plan is flat and compiler-written.** Every source
-    revision compiles to a graph of Plan Nodes and typed Plan Edges with no
-    nesting, no cycles, and bounded size; only the compiler writes
-    `plan_nodes`, `plan_edges`, and `plan_node_requirements`;
-    Coordinator-proposed Tasks never change them.
+15. **The persisted plan is flat and compiler-written.** Every accepted
+    source revision compiles to a graph of Plan Nodes and typed Plan Edges
+    with no nesting, no cycles, and bounded size, recorded as an explicit
+    immutable membership and revision-owned edges; only the plan-revision
+    service, through the compiler (and Run creation for the root and
+    revision 1), writes `plan_nodes`, `plan_revision_nodes`, `plan_edges`,
+    and `plan_node_requirements`; Coordinator-proposed Tasks never change
+    them; the current executable graph is read from the latest accepted
+    revision and never inferred.
 16. **The Target is never modified by a Run.** Only a publish action on a
     `completed` Run writes to the Target, after revalidating it, and it
     fails without writing when the operation is not clean.
@@ -1429,8 +1660,9 @@ by a test.
     a reservation is created only when the parent's limit minus its active
     reservations and released actual consumption covers it, and released
     consumption is actual — never clamped — so an overrun is recorded as
-    negative available capacity rather than hidden; Budget exhaustion
-    places a Run in `waiting`, never `failed`.
+    negative available capacity rather than hidden; the persisted final
+    reserve is a separate partition that ordinary reservations never
+    consume; Budget exhaustion places a Run in `waiting`, never `failed`.
 23. **Task states are complete and runtime-owned.** A Task is always in
     exactly one of `pending`, `ready`, `running`, `blocked`, `completed`,
     `failed`, `cancelled`; only the runtime transitions it; a `failed` Task

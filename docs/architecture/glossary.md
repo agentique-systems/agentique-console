@@ -34,8 +34,13 @@ Related documents:
   provider-neutral domain package `@agentique-console/core` (`core/src/`),
   which the final server and the final web application both import. The
   canonical stores live behind the permanent server persistence boundary
-  `server/src/persistence/`. Neither imports the legacy `shared/` package or
-  the legacy `server/src/db/` schema; see
+  `server/src/persistence/`, and the deterministic runtime (plan compiler,
+  plan-revision service, Run creation, and in later phases the scheduler,
+  Pattern executors, and Gates) behind the permanent execution boundary
+  `server/src/execution/`, which depends only on the core package, the
+  persistence boundary, and narrow ports for capabilities implemented in
+  later phases. None of them imports the legacy `shared/` package or the
+  legacy `server/src/db/` schema; see
   [migration-contract.md](migration-contract.md) §3.
 
 ## Scope objects
@@ -77,7 +82,11 @@ Run ends in one of the terminal states defined in
 [execution-model.md](execution-model.md); it never resumes after ending,
 and continuing the work means starting a new Run in the same Conversation.
 A Run has a Target and a Run-owned Integration Workspace; it never writes
-to the Target itself — that is a Publication.
+to the Target itself — that is a Publication. A Run also carries its
+**final reserve**: the part of its Budget, chosen at Run creation and
+persisted on the Run, that ordinary Plan Node allocations never consume
+(see Budget). Creating a Run establishes its complete initial state
+atomically (execution-model §3, §4.6).
 
 - Id prefix: `run_`
 - Owned by: the runtime
@@ -117,36 +126,49 @@ form** is the flat directed acyclic graph of Plan Nodes and Plan Edges that
 the deterministic plan compiler materializes from a source revision and
 that the scheduler executes. Only the Orchestrator authors and revises the
 source form; the runtime validates each proposed revision; only the
-compiler writes the compiled form. Every source revision is append-only; a
-compiled node that has started cannot be altered, only cancelled. The
-compiler rejects recursion, unbounded composition, nesting beyond
-configured limits, invalid Requirement references, and allocations that
-cannot be reserved.
+compiler writes the compiled form. Only accepted revisions are persisted
+and numbered; a rejected proposal consumes no number and leaves one
+`execution_plan.rejected` Event. Every accepted revision has an immutable
+ordered **membership** of Plan Nodes and its own Plan Edges (see Plan
+Revision Membership); the current executable graph is exactly the latest
+accepted revision's members and edges. A compiled node that has started
+cannot be altered, only cancelled. The compiler rejects recursion,
+unbounded composition, nesting beyond configured limits, invalid
+Requirement references, and allocations that cannot be reserved.
 
-- Id: the owning Run's id; source revisions are numbered from 1.
+- Id: the owning Run's id; accepted source revisions are numbered from 1.
 - Owned by: the runtime
-- Store: `execution_plan_revisions` (source); `plan_nodes`, `plan_edges`, `plan_node_requirements` (compiled)
-- Related: Run, Plan Node, Plan Edge, Plan Node Requirement Scope, Pattern
+- Store: `execution_plan_revisions` (source); `plan_nodes`, `plan_revision_nodes`, `plan_edges`, `plan_node_requirements` (compiled)
+- Related: Run, Plan Node, Plan Edge, Plan Revision Membership, Plan Node Requirement Scope, Pattern
 
 ### Plan Node
 
 One unit of the compiled Execution Plan. A Plan Node has a **kind** —
-`pattern` or `join` — a status, the position in the source expression it
-was compiled from, a Budget allocation, and, when finished, a set of output
-Artifacts. A `pattern` node has exactly one of the six Pattern values, a
-set of inputs (a Context Manifest template), Agent Definition revisions per
-role, an exact Requirement scope, and creates Invocations. A `join` node
-has no Pattern value, no Agent Definition, no scope, zero allocation, and
-creates no Invocation: it executes deterministically when its `fan_in`
-predecessors are terminal, produces an index Artifact of the ordered
-predecessor references, outcomes, and output Artifact ids, and succeeds or
-fails by its fan-in policy. `join` is a deterministic node kind, not a
-seventh Pattern. A persisted Plan Node does not contain other Plan Nodes;
-composition between nodes is expressed only by Plan Edges. Only the plan
-compiler writes Plan Nodes.
+`pattern` or `join` — a status, the canonical source path of the source
+expression it was compiled from, the accepted revision that created it, a
+Budget allocation, and, when finished, a set of output Artifacts. A
+`pattern` node has exactly one of the six Pattern values, an immutable
+pattern-specific **shape** (the Agent Definition revision, title, and
+input of every operation the Pattern executes: chain steps, parallel items
+and aggregation, route selector and canonical branch bindings,
+coordinator and worker operands and bounds, inline or unrolled
+evaluator-optimizer round), a Context Manifest template (the union of its
+operations' inputs), an exact Requirement scope, and creates Invocations.
+A `join` node has no Pattern value, no shape, no scope, zero allocation,
+and creates no Invocation: it executes deterministically when its
+`fan_in` predecessors are terminal, produces an index Artifact of the
+ordered predecessor references, outcomes, and output Artifact ids, and
+succeeds or fails by its fan-in policy. `join` is a deterministic node
+kind, not a seventh Pattern. A persisted Plan Node does not contain other
+Plan Nodes; composition between nodes is expressed only by Plan Edges. A
+node's **definition** (everything but its id, revision, status,
+timestamps, and output) is immutable; reconciliation reuses a node across
+revisions only when its definition is unchanged. Only the plan-revision
+service, through the compiler, writes Plan Nodes; the root Orchestrator
+node is written by Run creation.
 
 - Id prefix: `pn_`
-- Owned by: the runtime (plan compiler)
+- Owned by: the runtime (plan-revision service and Run creation)
 - Store: `plan_nodes`
 - Related: Execution Plan, Plan Edge, Plan Node Requirement Scope, Pattern, Invocation, Handoff, Budget, Gate
 
@@ -160,20 +182,44 @@ into a `join` node; the join is eligible when every `fan_in` source is
 terminal and records their outcomes and outputs in its index Artifact in
 edge order), and `retry(round)` (a `sequence` edge into a later unrolled
 round of an `evaluator_optimizer` expression, active only when the
-source's Evaluation failed). Node readiness is computed from edges and
-allocation alone. Only the plan compiler writes Plan Edges.
+source's Evaluation failed). Every Plan Edge belongs to exactly one
+accepted Execution Plan revision and is append-only; reusing a node in a
+later revision never reuses an earlier revision's edge row. Node readiness
+is computed from the current accepted revision's edges and allocation
+alone; an edge of a historical revision never affects readiness. Only the
+plan-revision service, through the compiler, writes Plan Edges.
 
 - Id prefix: `pe_`
-- Owned by: the runtime (plan compiler)
+- Owned by: the runtime (plan-revision service)
 - Store: `plan_edges`
-- Related: Execution Plan, Plan Node, Handoff
+- Related: Execution Plan, Plan Node, Plan Revision Membership, Handoff
+
+### Plan Revision Membership
+
+The immutable, ordered list of Plan Nodes that belong to one accepted
+Execution Plan revision, persisted as one row per (Run, revision number,
+Plan Node) with a position. The root Orchestrator node is the first member
+of every accepted revision. An unchanged node appears in the membership of
+every revision it survives while keeping one Plan Node row, id, state,
+scope, and reservation; a node removed by a revision leaves the membership
+and, if it has not started, is cancelled. The scheduler's executable graph
+is exactly the latest accepted revision's membership plus that revision's
+Plan Edges; nothing infers membership from timestamps, a node's creating
+revision, incident edges, source-path prefixes, or status. Historical
+revisions remain fully inspectable through their own membership and edges.
+
+- Key: (Run id, revision number, Plan Node id); no own prefix.
+- Owned by: the runtime (plan-revision service and Run creation)
+- Store: `plan_revision_nodes`
+- Related: Execution Plan, Plan Node, Plan Edge
 
 ### Plan Node Requirement Scope
 
 The exact set of leaf Requirement ids a `pattern` Plan Node serves, at one
 pinned Requirement revision, expanded by the compiler from the Requirement
 roots its source expression named and persisted as one row per (Plan Node,
-Requirement id, Requirement revision). The scope of an existing node never
+Requirement id, Requirement revision) with a deterministic position (tree
+order). The scope of an existing node never
 changes; a later Requirement revision leaves it untouched, and revised
 Requirements reach execution only through a source plan revision that
 produces replacement nodes. Coordinator-proposed Tasks must reference a
@@ -181,7 +227,7 @@ non-empty subset of their node's scope at the pinned revision. The root
 Orchestrator node and `join` nodes have no scope rows.
 
 - Key: (Plan Node id, Requirement id, Requirement revision id); no own prefix.
-- Owned by: the runtime (plan compiler)
+- Owned by: the runtime (plan-revision service, through the compiler)
 - Store: `plan_node_requirements`
 - Related: Plan Node, Requirement, Task, Coordinator
 
@@ -604,9 +650,18 @@ reserved quantities; wall-clock deadlines and concurrency ceilings are
 limits enforced by the runtime and the Resource Governor. Exhausting a
 Run Budget places the Run in `waiting` with reason `budget`, never
 `failed`; a node or Invocation that exhausts its allocation fails or waits
-by its declared policy.
+by its declared policy. The Run Budget is partitioned into the **ordinary
+pool** that compiled Plan Node allocations draw from and the **final
+reserve** — cost, tokens, and Attempts chosen at Run creation (from a
+configurable default per Run kind), validated to fit within the Run
+Budget together with the root node's initial allocation, and persisted on
+the Run, immutable for its life. The final reserve is spent only on
+`final_synthesis` Orchestrator Invocations and `run_completion` Gate
+Evaluator Invocations, each explicitly authorized; it is accounted as its
+own capacity partition, never as fabricated Usage and never as an ordinary
+child reservation.
 
-- Limits stored on the object they bound; reservations in `budget_reservations`.
+- Limits stored on the object they bound; the final reserve on the Run; reservations in `budget_reservations`.
 - Related: Run, Plan Node, Invocation, Budget Reservation, Usage
 
 ### Budget Reservation
@@ -621,8 +676,10 @@ unreserved capacity; it is released with its final consumed amounts when
 the child reaches a terminal state, returning the remainder to the parent.
 The consumed amounts are the child's complete actual consumption and may
 exceed the reserved amounts; the reserved amounts are kept unchanged
-alongside them. A plan revision whose allocations cannot all be reserved
-is rejected.
+alongside them. A Run-level reservation records its **capacity source**
+(`ordinary` or `final_reserve`), so each partition of the Run Budget is
+accounted from its own reservations. A plan revision whose allocations
+cannot all be reserved from the ordinary pool is rejected.
 
 - Id prefix: `bres_`
 - Owned by: the runtime
@@ -707,15 +764,16 @@ logical turn is a new Invocation), `in_progress` (as a Task state; use
 ## Identifier conventions
 
 - Table names are the plural snake_case of the term: `runs`, `plan_nodes`,
-  `plan_edges`, `plan_node_requirements`, `acceptance_criteria`,
+  `plan_edges`, `plan_revision_nodes`, `plan_node_requirements`, `acceptance_criteria`,
   `context_manifests`, `agent_definition_revisions`, `publications`,
   `capacity_leases`, `budget_reservations`, `provider_continuations`.
 - Id prefixes: `ws_`, `cv_`, `cvm_`, `run_`, `pn_`, `pe_`, `req_`,
   `reqr_`, `ac_`, `dec_`, `task_`, `art_`, `ho_`, `agd_`, `agdr_`, `inv_`,
   `att_`, `eval_`, `gate_`, `snap_`, `cs_`, `pub_`, `lease_`, `bres_`,
   `cm_`, `use_`. A prefix is never reused for a second kind.
-  `plan_node_requirements` and `provider_continuations` are keyed by the
-  objects they index and carry no own prefix; `events`,
+  `plan_node_requirements`, `plan_revision_nodes`, and
+  `provider_continuations` are keyed by the objects they index and carry
+  no own prefix; `events`,
   `requirement_status_changes`, and `task_dependencies` are keyed by a
   sequence number or by the objects they relate and carry no prefix.
   Ids are `<prefix>_` followed by 24 lower-case hexadecimal characters,
