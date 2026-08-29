@@ -262,7 +262,15 @@ code; each is the final production location of what it contains.
   one revision; the current executable graph is read from the latest
   accepted revision's rows and never inferred.
 - The Run's final reserve is persisted on `runs` at creation and never
-  updated; there is no runtime default read back into an existing Run.
+  updated; there is no runtime default read back into an existing Run. Only
+  an Invocation whose row names `allocationSource: run_final_reserve` and a
+  permitted `finalReserveUse` can hold a `Run → Invocation` reservation
+  from it; the persistence API has no parameter that selects final
+  capacity.
+- An Agent Definition revision's provenance targets (Snapshot, Conversation,
+  approving Decision) are verified when the revision is appended, and the
+  execution boundary refuses to execute a revision whose provenance belongs
+  to another Workspace or Conversation.
 
 ### Phase 1 schema expectations
 
@@ -295,7 +303,7 @@ architecture corrects it before cutover, because nothing has shipped.
 | `handoffs` | runtime | immutable routing rows |
 | `agent_definitions` | runtime | one per logical id |
 | `agent_definition_revisions` | runtime | immutable; one per content hash under a logical id |
-| `invocations` | runtime | one per logical execution; role, purpose, `continuedFromInvocationId`, status; manifest immutable |
+| `invocations` | runtime | one per logical execution; role, purpose, `continuedFromInvocationId`, allocation source and final-reserve use (immutable), status; manifest immutable |
 | `attempts` | runtime | one per provider execution; `kind`, `startMode`, `resumedFromAttemptId` |
 | `provider_continuations` | provider adapter | index keyed by Attempt; truncatable |
 | `context_manifests` | runtime | exactly one per Invocation; immutable |
@@ -305,7 +313,7 @@ architecture corrects it before cutover, because nothing has shipped.
 | `changesets` | runtime (Workspace provider) | immutable metadata + diff Artifact |
 | `publications` | runtime (publish action) | one per publish action on a `completed` Run |
 | `capacity_leases` | resource governor | one per granted lease; grant and release times |
-| `budget_reservations` | runtime | one per allocation; `active` → `released` once |
+| `budget_reservations` | runtime | one per allocation; capacity source and final-reserve use derive from the creating operation; `active` → `released` once |
 | `usage` | runtime | append-only per Attempt |
 | `events` | runtime | append-only, global sequence |
 
@@ -484,6 +492,21 @@ Merge to `main` happens after step 7 as one merge commit. Rollback is
   after preparation each create nothing, the last invoking the port's
   compensation; the initial allocation plus the final reserve must fit the
   Run Budget; the current graph survives close and reopen identically.
+- Final-reserve tests: ordinary Invocations reserve from their Plan Node;
+  `final_synthesis` and `run_completion` Invocations reserve directly from
+  the Run final reserve, atomically with their creation; every other role,
+  purpose, node, discriminator, Task, or consumer is refused at the store
+  and at the database; final Usage appears once in Invocation, root node,
+  and Run totals and only on its own Run-level reservation; ordinary and
+  final overruns are visible while active, reduce the other partition's
+  effective availability, refuse later reservations, never clamp, and read
+  back identically after reopen; Task transfer stays neutral.
+- Provenance tests: builtin, Workspace-file, and Conversation revisions are
+  accepted where they belong and rejected elsewhere; missing Snapshots and
+  missing, foreign, unresolved, or inappropriate approval Decisions are
+  refused at append; a foreign Orchestrator is refused before Workspace
+  preparation; a foreign plan Worker yields exactly one rejected Event and
+  no revision number; the compiler receives only resolved revision facts.
 - No live-provider tests in the default suite. A live smoke test may exist
   behind an explicit opt-in environment variable and is not a benchmark.
 

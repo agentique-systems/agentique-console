@@ -237,7 +237,8 @@ A compiled Plan Node has:
   for `kind: join`
 - `shape`: for `kind: pattern`, the immutable pattern-specific execution
   shape — every operation the Pattern executes (Agent Definition revision,
-  title, input) in its position, and the Pattern's bounds: `single` (role
+  title, input, the `role` its Invocations hold, and `readOnly`, true for
+  the evaluator role) in its position, and the Pattern's bounds: `single` (role
   `worker`, or `orchestrator` for the root only, and one operation);
   `chain` (two or more steps); `route` (the selector and the branch
   bindings in canonical label order, each inline with an operation or
@@ -329,6 +330,22 @@ definitions, and edges between keys with fan-in positions. It never
 queries the database, mints database ids, writes Events, reserves Budget,
 or mutates persisted state; the plan-revision service maps keys to
 retained or newly minted Plan Node ids during reconciliation (§4.5).
+
+**Agent Definition resolution and role policy.** Every Agent Definition
+revision a source names is resolved by the executable-revision resolver
+(`server/src/execution/agent-definitions.ts`) before compilation: the
+revision must exist and its provenance must belong to the Run (§11); a
+revision that does not resolve rejects the proposal with
+`invalid_agent_definition_revision`. The compiler receives the resolved
+revisions' immutable facts (name, provenance kind, capabilities, Tool
+Policy, default limits) and binds each operation to the role its position
+holds, recording `role` and `readOnly` so the Context Manifest can later
+intersect the revision's Tool Policy with the role policy (§6.4) without
+re-deriving anything; the compiler evaluates no provider tool semantics and
+never rejects a definition for the tools it declares. The one contradictory
+binding — the `orchestrator` definition in any role but the root's — is
+rejected with `invalid_role_binding`, as is a route selector option mapped
+to a branch that does not exist.
 
 **Leaf operations.** A leaf is a `single` expression that declares no
 node-level option other than a title (no scope, allocation, limits,
@@ -476,8 +493,9 @@ message and, where one applies, the source path:
   `invalid_artifact_reference`, `invalid_decision_reference`,
   `invalid_acceptance_criterion_reference`: a reference to something that
   does not exist in this Run or Conversation;
-- `invalid_role_binding`: a selector option mapped to a branch that does
-  not exist, or any other role that cannot be bound;
+- `invalid_role_binding`: the `orchestrator` definition bound to a Worker,
+  Coordinator, Evaluator, or selector position, or a selector option mapped
+  to a branch that does not exist;
 - `invalid_requirement_scope`: a Requirement revision that does not exist
   or belongs to another Conversation, or a root that does not exist at the
   pinned revision, belongs to another Conversation, or is `retired`;
@@ -828,7 +846,13 @@ after creation.
 The runtime creates an Invocation when a Pattern calls for it (§5) or when
 new logical input exists for a turn-driven role (§4.6, §5.5). Creation
 records the Agent Definition revision, the role, the `purpose`, the Plan
-Node, the Task ids, the allocation reserved from the node (§7.6), and
+Node, the Task ids, the allocation and its **allocation source** — the
+Plan Node (`plan_node`, the default, reserved from the node per §7.6) or
+the Run's final reserve (`run_final_reserve`, reserved directly from the
+Run; permitted only for the `final_synthesis` Orchestrator Invocation and
+the `run_completion` Gate's Evaluator Invocation, each recorded as the
+Invocation's `finalReserveUse`, both on the root Plan Node, never with a
+Task) — and
 `continuedFromInvocationId` when the Invocation logically follows an
 earlier one (the previous Orchestrator Invocation of the Run, the previous
 Coordinator Invocation of the node, the previous producer round, or the
@@ -1157,15 +1181,61 @@ existing Run. The Run Budget is thereby partitioned: the **ordinary pool**
 and root-node extensions can reserve; the final reserve is spent only on
 `final_synthesis` Orchestrator Invocations and `run_completion` Gate
 Evaluator Invocations, each reserved with the explicit capacity source
-`final_reserve`. Each partition is accounted from its own reservations
-(`runCapacity` reports both), so the reserve is never double-counted as an
-ordinary child reservation and never represented as fabricated Usage.
-Unused node allocation is released when the node reaches a terminal
-state. A `join` node's allocation is zero.
+`final_reserve`. Unused node allocation is released when the node reaches
+a terminal state. A `join` node's allocation is zero.
+
+**Global and partition availability.** The ordinary pool and the final
+reserve are partitions of one Run Budget, not independent Budgets.
+`runCapacity` reports three accounts, each with `limit`, `reserved` (Σ
+active reserved amounts), `consumed` (Σ released consumption), `committed`
+(Σ active charges + consumed), and signed `available = limit − committed`:
+
+- the **global** account charges every Run-level child of either partition
+  against the whole Budget;
+- the **ordinary** partition charges its Plan Node children against the
+  Budget less the final reserve;
+- the **final** partition charges its final-reserve Invocations against
+  the final reserve;
+
+and each partition reports `effectiveAvailable = min(available, global
+available)` component-wise, which is what a reservation is checked
+against. An **active** child is charged component-wise `max(reserved,
+actual attributable consumption so far)` — a Plan Node's consumption from
+its own allocation at Run level, an Invocation's own Usage and Attempts at
+Plan Node level and for final-reserve Invocations at Run level; a Task
+reservation has no Usage and is charged its reserved amount — so an
+overrun is visible at every affected parent the moment it happens, not
+only after release. Consequently an ordinary overrun reduces effective
+final availability, a final overrun reduces global and therefore ordinary
+effective availability, neither partition may reserve beyond global
+availability, ordinary work still cannot claim unused reserve, final work
+still cannot claim unused ordinary capacity, negative availability stays
+visible, and nothing is clamped.
+
+**No double counting.** Usage roll-ups (`totalsForInvocation`,
+`totalsForPlanNode`, `totalsForRun`) include every Usage row once, so the
+root node's and the Run's operator-facing totals include final-synthesis
+and run-completion Usage. Reservation consumption is accounted separately:
+a Plan Node's Run-level reservation is released with
+`consumedFromPlanNodeAllocation` — the consumption of the Invocations it
+funded — while a final-reserve Invocation's consumption is recorded only on
+its own `Run → Invocation` reservation. Once every Run-level child is
+released, the sum of their recorded consumption equals total Run Usage.
 
 **Invocation allocation.** Each Invocation receives an explicit allocation
-reserved from its Plan Node's unconsumed, unreserved allocation before it
-starts. Coordinator-proposed Tasks reserve their Worker Invocation
+before it starts, from the source its row names: an ordinary Invocation
+(`allocationSource: plan_node`) reserves from its Plan Node's unconsumed,
+unreserved allocation; a final-reserve Invocation (`run_final_reserve`,
+with `finalReserveUse` `final_synthesis` or `run_completion`) reserves
+directly from the Run's final reserve with a `Run → Invocation`
+reservation created atomically with the Invocation, so that neither
+consumer needs the root node to hold a second reservation and neither
+consumes the root node's ordinary allocation. Both remain attached to the
+root Plan Node for scope, progress, Event attribution, and Usage roll-up.
+The store's `reserveFinalInvocation` accepts only a persisted Invocation
+whose row names a permitted use with the matching role and purpose, on the
+root node, with a non-zero Attempt allocation and no Task; the ordinary
+entry point has no parameter that selects final capacity. Coordinator-proposed Tasks reserve their Worker Invocation
 allocations at proposal time (§5.5.1), before the Task can become `ready`;
 when the Worker Invocation is created the runtime, in one transaction,
 releases the Task reservation (reason `transferred_to_invocation`,
@@ -1501,7 +1571,25 @@ records:
 
 Any change to any field produces a new revision with a new `agdr_` id and
 hash under the same logical id. Invocations reference the revision; a
-running Invocation is unaffected by a later revision. There is no `trusted`
+running Invocation is unaffected by a later revision.
+
+**Provenance ownership.** When a revision is appended the store verifies
+its provenance targets: a `workspace_file` revision must pin an existing
+Snapshot and name a normalized definition file path
+(`.claude/agents/<name>.md`, relative, POSIX separators, no `.` or `..`
+segments); a `conversation` revision must name an existing Conversation and
+an `operator_choice` Decision of that Conversation resolved by the
+operator. Which Runs may execute a revision is decided by the
+executable-revision resolver in `server/src/execution/`, used by Run
+creation for the Orchestrator revision and by the plan-revision service
+for every referenced revision: a `builtin` revision is executable
+everywhere; a `workspace_file` revision only by a Run whose Workspace owns
+the pinned Snapshot; a `conversation` revision only by a Run of that
+Conversation. A revision that exists but belongs elsewhere is rejected —
+before Workspace preparation or any canonical write at Run creation, and
+as `invalid_agent_definition_revision` with one `execution_plan.rejected`
+Event and no revision number for a plan proposal. The compiler is pure and
+receives only resolved revision facts. There is no `trusted`
 flag, no trust table, and no approval step for a definition as such; what a
 definition may do is bounded by its capabilities and Tool Policy
 intersected with role and Workspace policy, by worktree isolation, by
@@ -1599,7 +1687,9 @@ by a test.
    ids that do not exist in the Run.
 10. **All child Usage is included in Run totals.** The Run total is the sum
     of every Usage row tagged with the Run id, and every Attempt of every
-    Invocation of every Plan Node writes rows tagged with that Run id.
+    Invocation of every Plan Node writes rows tagged with that Run id;
+    final-reserve Invocations are included once, through the root node, and
+    charged to their own Run-level reservation rather than the root's.
 11. **Deterministic verification precedes LLM evaluation.** In every Gate
     and in the `evaluator_optimizer` Pattern, deterministic Acceptance
     Criteria are run first, and an Evaluator is not invoked while a
@@ -1660,9 +1750,13 @@ by a test.
     a reservation is created only when the parent's limit minus its active
     reservations and released actual consumption covers it, and released
     consumption is actual — never clamped — so an overrun is recorded as
-    negative available capacity rather than hidden; the persisted final
-    reserve is a separate partition that ordinary reservations never
-    consume; Budget exhaustion places a Run in `waiting`, never `failed`.
+    negative available capacity rather than hidden; an active child is
+    charged `max(reserved, actual)` so an overrun is visible before release;
+    the persisted final reserve is a separate partition that ordinary
+    reservations never consume, reachable only by a `final_synthesis` or
+    `run_completion` Invocation's own `Run → Invocation` reservation, and
+    both partitions are bounded by the global Run Budget; Budget exhaustion
+    places a Run in `waiting`, never `failed`.
 23. **Task states are complete and runtime-owned.** A Task is always in
     exactly one of `pending`, `ready`, `running`, `blocked`, `completed`,
     `failed`, `cancelled`; only the runtime transitions it; a `failed` Task

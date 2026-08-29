@@ -380,6 +380,17 @@ no `trusted` flag and no trust table: what a definition may do is bounded
 by capability policy, Tool Policy, worktree isolation, side-effect
 approval, and Gates.
 
+Provenance is ownership: a `builtin` revision is usable by any Workspace
+and Conversation; a `workspace_file` revision pins an existing Snapshot and
+a normalized `.claude/agents/<name>.md` path and is usable only by Runs of
+the Workspace that owns that Snapshot; a `conversation` revision names an
+existing Conversation and an `operator_choice` Decision of that
+Conversation resolved by the operator, and is usable only by Runs of that
+Conversation. The store verifies the targets when a revision is appended;
+the execution boundary's executable-revision resolver decides, for one
+Run, whether a revision may be executed, and both Run creation and every
+plan revision go through it.
+
 - Id prefixes: `agd_` (logical), `agdr_` (revision)
 - Owned by: the workspace author (files), the console (built-ins), the operator (conversation-authored)
 - Store: `agent_definitions`, `agent_definition_revisions`
@@ -409,8 +420,13 @@ Plan Node: one role (`orchestrator`, `worker`, `coordinator`,
 `publication_result`, `final_synthesis` for the Orchestrator; `decompose`,
 `replan`, `synthesize` for a Coordinator; `step`, `task` for a Worker;
 `select`, `evaluate` for an Evaluator), one immutable Context Manifest, one
-Budget allocation, one or more Attempts, a status, Usage, and one typed
-result. New logical input always creates a new Invocation; an Invocation
+Budget allocation with its **allocation source** (`plan_node`: reserved
+from the Invocation's Plan Node, the default; `run_final_reserve`: reserved
+directly from the Run's final reserve, permitted only for the
+`final_synthesis` Orchestrator Invocation and the `run_completion` Gate
+Evaluator Invocation, each recorded as the Invocation's `finalReserveUse`
+and always attached to the root Plan Node), one or more Attempts, a
+status, Usage, and one typed result. New logical input always creates a new Invocation; an Invocation
 never receives input after creation. An Invocation that logically follows
 an earlier one records `continuedFromInvocationId`. The root Plan Node owns
 a sequence of Orchestrator Invocations and a `coordinator_worker` node owns
@@ -657,9 +673,12 @@ configurable default per Run kind), validated to fit within the Run
 Budget together with the root node's initial allocation, and persisted on
 the Run, immutable for its life. The final reserve is spent only on
 `final_synthesis` Orchestrator Invocations and `run_completion` Gate
-Evaluator Invocations, each explicitly authorized; it is accounted as its
-own capacity partition, never as fabricated Usage and never as an ordinary
-child reservation.
+Evaluator Invocations, which reserve directly from the Run
+(`Run → Invocation`) while remaining attached to the root Plan Node; it is
+accounted as its own capacity partition, never as fabricated Usage and
+never as an ordinary child reservation. The two partitions are partitions
+of one Budget: each may reserve only what both its own and the global
+availability permit, and neither may claim the other's unused capacity.
 
 - Limits stored on the object they bound; the final reserve on the Run; reservations in `budget_reservations`.
 - Related: Run, Plan Node, Invocation, Budget Reservation, Usage
@@ -668,7 +687,8 @@ child reservation.
 
 The canonical record of one allocation: the parent bounded object (Run,
 Plan Node, or Invocation), the child bounded object or proposed work item
-(Plan Node, Invocation, or Task), the reserved cost, tokens, and Attempts,
+(Plan Node, Invocation, or Task; `Run → Invocation` exists only for a
+final-reserve Invocation), the reserved cost, tokens, and Attempts,
 the creation time, the release time, and the status (`active`,
 `released`). A reservation is created atomically with the child, before
 the child becomes runnable, and only from the parent's unconsumed,
@@ -677,9 +697,14 @@ the child reaches a terminal state, returning the remainder to the parent.
 The consumed amounts are the child's complete actual consumption and may
 exceed the reserved amounts; the reserved amounts are kept unchanged
 alongside them. A Run-level reservation records its **capacity source**
-(`ordinary` or `final_reserve`), so each partition of the Run Budget is
-accounted from its own reservations. A plan revision whose allocations
-cannot all be reserved from the ordinary pool is rejected.
+(`ordinary` or `final_reserve`) and, for the latter, the final-reserve
+use that authorized it; the source derives from the operation that created
+the reservation (`reserveOrdinary` or `reserveFinalInvocation`), never
+from a caller's parameter. While a reservation is active its parent
+charges it component-wise `max(reserved, actual attributable
+consumption)`, so an overrun is visible at once; once released, its
+recorded consumption. A plan revision whose allocations cannot all be
+reserved from the ordinary pool is rejected.
 
 - Id prefix: `bres_`
 - Owned by: the runtime
