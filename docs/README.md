@@ -11,10 +11,12 @@ described in the migration contract replaces the rest.
   ownership, identifier conventions, and the list of retired terms.
 - [Execution model](architecture/execution-model.md) — actors, state
   ownership, Run lifecycle, the Execution Plan (source form, compiler, flat
-  compiled graph), the six Patterns, runtime responsibilities including the
-  resource governor, Decisions and waivers, Agent Definition revisions,
-  verification and Gates, integration and publishing, usage accounting, and
-  the invariants.
+  compiled graph of `pattern` and `join` nodes, pinned Requirement scope),
+  the six Patterns, one Invocation per logical turn, runtime
+  responsibilities including Budget reservations, Task states, and the
+  resource governor, Decisions and operator-only waivers, Agent Definition
+  revisions, verification and Gates, integration and publishing, usage
+  accounting, and the invariants.
 - [Migration contract](architecture/migration-contract.md) — the terms of
   the clean-break replacement: no data migration, no compatibility period,
   no legacy API, no alternate runtime, no feature flag.

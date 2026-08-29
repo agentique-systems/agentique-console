@@ -28,11 +28,11 @@ server/src/
   events/        journal.ts  stream.ts
   workspaces/    service.ts  fs-browse.ts
   conversations/ service.ts
-  runs/          service.ts  budgets.ts  usage.ts
-  plans/         service.ts  compiler.ts  scheduler.ts  patterns/{single,chain,route,parallel,coordinator-worker,evaluator-optimizer}.ts
+  runs/          service.ts  budgets.ts  reservations.ts  usage.ts
+  plans/         service.ts  compiler.ts  scheduler.ts  join.ts  scope.ts  patterns/{single,chain,route,parallel,coordinator-worker,evaluator-optimizer}.ts
   invocations/   service.ts  attempts.ts  manifest.ts  result.ts  tools.ts
   agents/        definitions.ts  revisions.ts  native-agent-file.ts  builtins.ts  policy.ts
-  provider/      adapter.ts  continuations.ts  fake.ts  mapping.ts  env.ts  usage-normalization.ts  failure-classifier.ts
+  provider/      adapter.ts  continuations.ts  continuation-store.ts  fake.ts  mapping.ts  env.ts  usage-normalization.ts  failure-classifier.ts
   capacity/      governor.ts  leases.ts
   artifacts/     store.ts
   handoffs/      service.ts
@@ -78,20 +78,23 @@ under [migration-contract.md](migration-contract.md) rule 7.
 | Seat (durable named agent position in a roster) | `agents` table, `agent-sessions/runtime.ts`, `lanes.ts` | Invocation. |
 | Specialist | prompts, `AgentSession.agents` | Worker or Evaluator role. |
 | Coordinator (console-seated hub authority) | `agent-profiles/registry.ts` builtin `coordinator`, `topology-contract.ts autoCoordinatorRole` | Coordinator role inside a `coordinator_worker` node only. |
-| Generation / context rotation / retirement | `agents.generation`, `agent_session.context.rotated`, `handoffRecords.generation`, `usage_samples.generation`, `lane-runtime/checkpoint.ts` | Attempt. No rotation: an Attempt that fails is followed by a fresh Attempt from the manifest. |
+| Generation / context rotation / retirement | `agents.generation`, `agent_session.context.rotated`, `handoffRecords.generation`, `usage_samples.generation`, `lane-runtime/checkpoint.ts` | Invocation per logical turn (with `purpose` and `continuedFromInvocationId`) and Attempt (`initial` or `retry`). No rotation: a failed Attempt is followed by a `retry`; new input is a new Invocation; provider resumption is an optional adapter decision. |
+| Serialized main turns / seat turns on one long-lived provider session | `orchestrator/runner.ts`, `agent-sessions/runtime.ts` turn loop | One Invocation per logical turn owned by the stable Plan Node (root node or `coordinator_worker` node); at most one active Orchestrator Invocation per Run and one Coordinator Invocation per node. |
 | Lane / resident agent / parked agent / wake / reap | `agent-sessions/runtime.ts`, `liveness.ts`, `capacity/service.ts` residency knobs | Deleted with no replacement. An Attempt is a process that exists for its duration; nothing is parked. |
 | Attention / material wake / coalesced milestones | `agent-sessions/attention.ts`, `EdgeSpec.attention`, `web/src/live/attention.tsx` | Deleted with no replacement. Orchestrator turns are started by the runtime on dependency, Gate, Decision, and Budget events. |
 | Mailbox / mailroom / delivery states / redelivery | `mailbox_deliveries`, `agent-sessions/mailroom.ts`, `messages` | Deleted with no replacement. Handoffs are delivered inside Context Manifests. |
 | Handoff core + extension, `send_handoff`, `forward_message`, `read_handoff`, `report_handoff_discrepancy` | `shared/src/handoffs.ts`, `handoff_records`, `server/src/handoffs/*`, `agent-tools.ts` | Handoff (routing metadata + Artifact ids). Typed content → typed Artifacts. Extensions, forwarding, paging, and discrepancy reports deleted. |
 | Route law / topology edges / join gates | `topology-contract.ts` `EdgeSpec`, `JoinSpec`, `agent-sessions/routing.ts` | Plan Node dependencies and runtime fan-in. |
-| Task ledger keyed to AgentSession, scheduled assignments, assignment scheduler | `tasks`, `scheduled_assignments`, `task_dependencies`, `server/src/tasks/*` | Task (Run-scoped) + `task_dependencies`; scheduling by the runtime's plan scheduler. `scheduled_assignments` deleted. |
+| Task ledger keyed to AgentSession (states `pending`, `in_progress`, `completed`, `deleted`), scheduled assignments, assignment scheduler | `tasks`, `scheduled_assignments`, `task_dependencies`, `server/src/tasks/*` | Task (Run-scoped) with the seven runtime-owned states `pending`, `ready`, `running`, `blocked`, `completed`, `failed`, `cancelled`, plus `task_dependencies`; scheduling by the runtime's plan scheduler. `scheduled_assignments` and the `in_progress`/`deleted` states deleted. |
 | Interaction (ask_operator card), decision issue, decision ledger, operator decisions, deferred asks with auto-proceed timers | `interactions`, `decision_issues`, `server/src/orchestrator/interactions.ts`, `decision-issues.ts`, `decisions.ts` | Decision with a kind and an explicit resolution policy (`operator_required`, `use_default_after_deadline`); every resolution is a `decision.resolved` Event. Issue merging, urgency classes, detach timers, silent auto-proceed → deleted. |
 | Requirement graph (revisions, nodes, status changes, delegations, links, assumptions, change impacts, verification tiers, frontier) | `requirement_*`, `assumptions`, `change_impacts`, `server/src/orchestrator/requirements.ts`, `assumptions.ts`, `change-impact.ts`, `shared/src/requirements.ts` | Requirement (tree, `all`/`any`, semantic status incl. `waived`, revisions for outcome/constraint changes only) + Acceptance Criterion + Evaluation. Delegations → Plan Node input. Links, assumptions as an entity, change impacts, verification tiers, frontier annotations → deleted with no replacement. |
 | Orchestration working state / objective assessment | `orchestration_state_revisions`, `server/src/orchestrator/state.ts`, `objective.ts` | Deleted with no replacement. The Execution Plan, Tasks, and Decisions are the working state. |
 | Run summary, completion coverage report, typed coverage exceptions, sign-off waivers | `run_summaries`, `server/src/completion/*`, `POST /api/user-sessions/:id/signoff` | Gate (`run_completion`, `operator_signoff`) + Evaluations. Coverage exceptions deleted. Waivers are kept as `requirement_waiver` Decisions (actor, rationale, Requirement id, timestamp, optional Artifact ids) that set a Requirement `waived`; the legacy per-exception waiver rows are deleted. |
 | Workstream links, ownership claims | `workstream_links`, `agents.owns/sharedOwns`, `server/src/portfolio/*` | Deleted with no replacement. Plan Edges express ordering; worktrees and Changeset integration handle overlap. |
 | Worktree binding, landing ledger, land-on-report merge into the operator's branch | `worktree_landings`, `server/src/workspaces/landings.ts`, `agent-sessions/worktree-binding.ts`, `runtime/worktree-manager.ts` | Snapshot + Changeset + Integration Workspace (`workspace-state/`), and a separate Publication to the Target after completion. No Run writes to the operator's branch. |
-| Provider journal mirror (SDK SessionStore), provider-session resume handles on seats | `provider_entries`, `server/src/sdk/session-store.ts`, `agents.provider_session_id` | Transcript Artifact per Attempt; opaque continuation metadata in `provider_continuations` keyed by Attempt, used only for optional `resumed` Attempts. No SessionStore mirror; no durable seat identity. |
+| Provider journal mirror (SDK SessionStore), provider-session resume handles on seats | `provider_entries`, `server/src/sdk/session-store.ts`, `agents.provider_session_id` | Transcript Artifact per Attempt; a `provider_continuations` index row (Attempt id, provider, storage key, digest, times) pointing at an opaque payload in the adapter-owned payload store, used only for optional `resumed` Attempts. No SessionStore mirror; no durable seat identity; no provider payload in any canonical row. |
+| Commission budget (per AgentSession ceiling summed from usage), run-level budget pause | `agent_sessions.budget_usd`, `capacity/service.ts` budget pause, `usage_samples` sums | Run Budget as the allocation pool; explicit Plan Node and Invocation allocations recorded atomically in `budget_reservations`; Run `waiting`/`budget` on exhaustion. |
+| Requirement delegations (subtree scoping of sessions by delegated requirement ids) | `requirement_delegations`, `assertWithinDelegation` | `plan_node_requirements`: the compiler-expanded exact leaf set at a pinned Requirement revision, immutable per Plan Node; Coordinator Task proposals validated against it. |
 | Usage samples per participant/generation | `usage_samples`, `agent-sessions/usage-accounting`, `lane-runtime/usage.ts` | `usage` rows per Attempt, rolled up by sum. |
 | Event spine with user_session/agent_session scoping | `events`, `shared/src/events.ts`, `server/src/events/*` | `events` with Run/Plan Node/Invocation scoping and new type namespace. |
 | Agent profiles (builtins, native files with `agentique:` overlay, minting, trust by source revision) | `agent_profile_trust`, `minted_profiles`, `server/src/agent-profiles/*` | Agent Definition with immutable revisions (`server/src/agents/`): logical id, revision id, content hash, provenance, model policy, instructions, capabilities, Tool Policy, default limits. Overlay, sidecar, bundle, minting, `specialize_profile`, and the trust-by-source-revision system deleted with no replacement; no `trusted` flag or trust table. |
@@ -143,7 +146,7 @@ under [migration-contract.md](migration-contract.md) rule 7.
 | `requirements.ts`, `requirements.test.ts`, `requirements-continuity.test.ts` | Deleted. Replaced by `requirements/service.ts`. |
 | `assumptions.ts`, `assumptions.test.ts` | Deleted with no replacement. |
 | `change-impact.ts`, `change-impact.test.ts` | Deleted with no replacement. |
-| `commissions.ts`, `commissions.e2e.test.ts` | Deleted. Replaced by `plans/service.ts` (Plan Node append). |
+| `commissions.ts`, `commissions.e2e.test.ts` | Deleted. Replaced by `plans/service.ts` (source revision validation) and `plans/compiler.ts`. |
 | `decision-issues.ts`, `decision-issues.test.ts`, `decisions.ts`, `decisions.test.ts`, `interactions.ts`, `interactions.test.ts` | Deleted. Replaced by `decisions/service.ts`. |
 | `grants.ts` | Deleted. Replaced by `invocations/tools.ts` role table. |
 | `objective.ts`, `objective-progress.test.ts`, `state.ts`, `spec-state.e2e.test.ts` | Deleted with no replacement. |
@@ -196,7 +199,7 @@ under [migration-contract.md](migration-contract.md) rule 7.
 | `lane-runtime/checkpoint.ts`, `lane-runtime/usage.ts` | Deleted. Checkpoint reconstruction has no replacement. Usage → `runs/usage.ts`. |
 | `events/bus.ts`, `bus.test.ts`, `projections.ts`, `runtime.ts`, `artifact-store.ts` | Legacy contents replaced: `events/journal.ts` and `events/stream.ts` take the path; the artifact store moves to `artifacts/store.ts`; legacy projections and the bus are deleted. |
 | `sdk/client.ts`, `types.ts`, `mapping.ts`, `mapping.test.ts`, `env.ts`, `env.test.ts`, `effort.ts`, `fake.ts`, `failure-classifier.ts`, `tool-result.ts` | The `sdk/` path is deleted. Provider-neutral mechanics — SDK resolution, message-stream mapping, usage normalization (uncached / cache-creation / cache-read accounting), failure classification, environment setup, effort mapping, tool-result shaping, the scripted fake, and their tests — may be extracted and rewritten into `server/src/provider/*` under [migration-contract.md](migration-contract.md) rule 7, provided the result depends only on the new domain. Anything in these files that references seats, lanes, generations, rotation, or wake digests is deleted. |
-| `sdk/session-store.ts` | Deleted with no replacement (the SessionStore mirror). The optional resumption path stores opaque continuation metadata in `provider/continuations.ts` → `provider_continuations`, keyed by Attempt. |
+| `sdk/session-store.ts` | Deleted with no replacement (the SessionStore mirror). The optional resumption path keeps an index in `provider_continuations` (`provider/continuations.ts`) pointing at opaque payloads in the adapter-owned store (`provider/continuation-store.ts`), keyed by Attempt; payloads never enter canonical rows. |
 | `sdk/native-capability-policy.ts`, `native-capability-policy.test.ts` | Deleted as legacy behaviour (seat-oriented classification). The classification data and the tripwire test over the installed SDK's tool schemas may be extracted into `agents/policy.ts` (role-based capability policy and Tool Policy intersection). |
 | `api/server.ts`, `api/errors.ts`, `api/sse.ts`, `api/wire.ts` | Legacy contents replaced at the same paths. |
 | `api/routes/agent-profiles.ts`, `agent-sessions.ts`, `compose.ts`, `events.ts`, `fs.ts`, `system.ts`, `tasks.ts`, `user-sessions.ts`, `workspaces.ts` | Legacy contents replaced: `api/routes/` remains the location of the final routes, named for the new resources (section 5). Files named for retired resources are deleted; `events.ts`, `fs.ts`, `system.ts`, `tasks.ts`, `workspaces.ts` are rewritten. |
@@ -253,7 +256,7 @@ under [migration-contract.md](migration-contract.md) rule 7.
 | `requirement_status_changes` | Replaced by new `requirement_status_changes` (no verification tier). |
 | `assumptions` | Deleted with no replacement. |
 | `requirement_links` | Deleted with no replacement. |
-| `requirement_delegations` | Deleted. → `plan_nodes.input` (Requirement ids). |
+| `requirement_delegations` | Deleted. → `plan_node_requirements` (exact leaf set per Plan Node at a pinned revision). |
 | `change_impacts` | Deleted with no replacement. |
 | `workstream_links` | Deleted with no replacement. |
 | `continuation_checkpoints` | Deleted with no replacement. |
@@ -267,10 +270,13 @@ under [migration-contract.md](migration-contract.md) rule 7.
 
 New tables not derived from any legacy table: `schema_info`,
 `execution_plan_revisions`, `plan_nodes`, `plan_edges`,
-`acceptance_criteria`, `agent_definitions`, `agent_definition_revisions`,
-`invocations`, `attempts`, `provider_continuations`, `context_manifests`,
-`evaluations`, `gates`, `snapshots`, `changesets`, `publications`,
-`capacity_leases`.
+`plan_node_requirements`, `acceptance_criteria`, `agent_definitions`,
+`agent_definition_revisions`, `invocations`, `attempts`,
+`provider_continuations` (index only; payloads in the adapter store),
+`context_manifests`, `evaluations`, `gates`, `snapshots`, `changesets`,
+`publications`, `capacity_leases`, `budget_reservations`. The complete
+Phase 1 table list with ownership and cardinality is in
+[migration-contract.md](migration-contract.md) §4.
 
 ## 5. HTTP routes
 
@@ -319,10 +325,10 @@ deleted. The replacement tool table is in
 |---|---|
 | `propose_requirements`, `read_requirements`, `report_requirement`, `decompose_requirement` | → `propose_requirements`, `read_requirements`; status changes come through `update_task` Evidence and Gates. `decompose_requirement` deleted (new revision instead). |
 | `link_requirements`, `unlink_requirements`, `record_assumption`, `resolve_assumption`, `reconcile_change_impact` | Deleted with no replacement. |
-| `create_agent_session`, `add_agent`, `close_agent_session`, `list_agent_sessions`, `read_agent_session`, `session_activity`, `send_to_coordinator`, `interrupt_agent`, `create_child_session`, `abandon_child_session`, `dispatch_work_items` | → `revise_execution_plan` (Orchestrator only; source form, compiled by the runtime), `read_execution_plan`, `read_tasks`; cancellation is an operator/API action. Child sessions and runtime-minted mappers have no replacement. |
+| `create_agent_session`, `add_agent`, `close_agent_session`, `list_agent_sessions`, `read_agent_session`, `session_activity`, `send_to_coordinator`, `interrupt_agent`, `create_child_session`, `abandon_child_session`, `dispatch_work_items` | → `revise_execution_plan` (Orchestrator only; proposes a source revision that the runtime validates and the compiler materializes — the Orchestrator never writes Plan Nodes or Plan Edges), `read_execution_plan`, `read_tasks`; cancellation is an operator/API action. Child sessions and runtime-minted mappers have no replacement. |
 | `list_agent_profiles`, `specialize_profile` | → `read_agent_definitions`; minting deleted. |
 | `send_handoff`, `forward_message`, `read_handoff`, `report_handoff_discrepancy`, `write_note`, `roster_status` | → `return_result`, `write_artifact`, `read_artifact`. |
-| `ask_operator` (blocking / deferred with auto-proceed), `list_decisions`, `list_decision_issues`, `resolve_decision_issue`, `merge_decision_issues` | → `request_decision` with an explicit resolution policy (`operator_required` or `use_default_after_deadline` with recorded default, deadline or condition, rationale, affected ids), `record_decision`, `read_decisions`. |
+| `ask_operator` (blocking / deferred with auto-proceed), `list_decisions`, `list_decision_issues`, `resolve_decision_issue`, `merge_decision_issues` | → `request_decision` with an explicit resolution policy (`operator_required`, or `use_default_after_deadline` for `operator_choice` only, with recorded default, deadline or condition, rationale, affected ids); `record_decision` (kind `orchestrator_choice` only — it cannot create or resolve a `requirement_waiver`); `read_decisions`. |
 | `task_list`, `task_create`, `task_update`, `assignment_cancel` | → `read_tasks`, `create_tasks` (Orchestrator), `propose_tasks` (Coordinator; validated, Budget-reserved, and persisted by the runtime), `update_task`. |
 | `update_orchestration_state`, `assess_objective_progress`, `record_completion`, `read_continuation` | → `request_completion`; the rest deleted with no replacement. |
 | `set_deadline` | Deleted with no replacement. |

@@ -160,10 +160,61 @@ semantics; they may be modified but are not part of the replacement.
   `tasks`, `task_dependencies`, and `events`; these are new tables with new
   columns, created only in a fresh database, and the reset rule above
   guarantees a legacy table of the same name is never encountered.
-- `provider_continuations` is provider-specific storage: opaque
-  continuation metadata keyed by Attempt id. It is never read to decide
-  anything except whether a `resumed` Attempt is possible, and the schema
-  permits it to be truncated at any time.
+- `provider_continuations` is an index, not a payload store: one row per
+  Attempt with provider, storage key, digest, creation time, and optional
+  expiry. The opaque payload lives in a replaceable store owned by the
+  provider adapter (interface under `server/src/provider/`) and is never
+  embedded in a canonical row, Artifact, Context Manifest, Event, log, or
+  API response. The index is never read to decide anything except whether
+  a `resumed` Attempt is possible, and both index and payloads may be
+  truncated at any time.
+- `budget_reservations` is the only allocation record. Reservations are
+  never inferred from limits and Usage.
+- `plan_node_requirements` is the only record of a Plan Node's Requirement
+  scope; it is written by the compiler and never updated.
+
+### Phase 1 schema expectations
+
+Phase 1 must create exactly these tables, with the ownership and
+cardinality stated here and in [glossary.md](glossary.md). Column design
+beyond identifiers, keys, and the fields the architecture names is Phase 1
+work.
+
+| Table | Owner (writer) | Cardinality and immutability |
+|---|---|---|
+| `schema_info` | baseline migration | one row |
+| `workspaces` | operator via API | mutable |
+| `conversations` | runtime | one per operator thread; mutable title/policy |
+| `conversation_messages` | runtime | append-only per Conversation |
+| `runs` | runtime | one per Run; state, Target, base/integration/final Snapshot ids, Run Budget limits |
+| `execution_plan_revisions` | runtime (validated Orchestrator revisions) | append-only per Run, numbered |
+| `plan_nodes` | plan compiler | one per compiled node; `kind`, `pattern`, status, allocation limits; definition immutable after start |
+| `plan_edges` | plan compiler | append-only per compiled revision; typed |
+| `plan_node_requirements` | plan compiler | one row per (Plan Node, Requirement, pinned Requirement revision); never updated |
+| `requirements` | runtime | one per Requirement id (stable across revisions); current status |
+| `requirement_revisions` | runtime (operator approval) | append-only per Conversation |
+| `requirement_status_changes` | runtime | append-only journal with Evidence |
+| `acceptance_criteria` | runtime (Orchestrator authoring) | attached to a Requirement or Task; revisioned with the Requirement |
+| `decisions` | runtime | one per Decision; kind, policy, request and resolution fields; append-only with supersession by id |
+| `tasks` | runtime | one per Task; the seven states; `replacesTaskId` |
+| `task_dependencies` | runtime | edges between Tasks of one Run |
+| `artifacts` | runtime | immutable metadata; blob store separate |
+| `handoffs` | runtime | immutable routing rows |
+| `agent_definitions` | runtime | one per logical id |
+| `agent_definition_revisions` | runtime | immutable; one per content hash under a logical id |
+| `invocations` | runtime | one per logical execution; role, purpose, `continuedFromInvocationId`, status; manifest immutable |
+| `attempts` | runtime | one per provider execution; `kind`, `startMode`, `resumedFromAttemptId` |
+| `provider_continuations` | provider adapter | index keyed by Attempt; truncatable |
+| `context_manifests` | runtime | exactly one per Invocation; immutable |
+| `evaluations` | runtime / Evaluator via runtime | append-only |
+| `gates` | runtime | one per Gate instance with outcome |
+| `snapshots` | runtime (Workspace provider) | immutable |
+| `changesets` | runtime (Workspace provider) | immutable metadata + diff Artifact |
+| `publications` | runtime (publish action) | one per publish action on a `completed` Run |
+| `capacity_leases` | resource governor | one per granted lease; grant and release times |
+| `budget_reservations` | runtime | one per allocation; `active` → `released` once |
+| `usage` | runtime | append-only per Attempt |
+| `events` | runtime | append-only, global sequence |
 
 ## 5. API
 
@@ -213,15 +264,18 @@ is one or more commits; each commit keeps `npm run typecheck` and
    final schema, baseline migration, reset-required check. Legacy files at
    colliding paths are replaced, and their legacy importers deleted, in the
    same change.
-3. **Runtime core.** Runs, Execution Plan source and compiler, Plan Edges,
-   scheduler, resource governor, Invocations, Attempts (with the provider
-   adapter's optional resumption), Context Manifests, results, Usage,
-   Budgets, Events. The provider adapter is built in `server/src/provider/`
-   by extraction and rewrite from `server/src/sdk/` where rule 7 permits.
-   Patterns `single` and `chain` first, then `route`, `parallel`,
-   `coordinator_worker`, `evaluator_optimizer`, then composition in the
-   compiler. Integration tests with a fake provider for every Pattern,
-   every compilation rule, and every invariant.
+3. **Runtime core.** Runs, Execution Plan source validation and compiler,
+   Plan Nodes of both kinds (`pattern`, `join`), Plan Edges, Plan Node
+   Requirement scope, scheduler, resource governor, Budget reservations,
+   Invocations (one per logical turn, with purposes), Attempts (`initial`,
+   `retry`, with the provider adapter's optional pointer-based resumption),
+   Context Manifests, results, Task states, Usage, Events. The provider
+   adapter and its continuation payload store are built in
+   `server/src/provider/` by extraction and rewrite from `server/src/sdk/`
+   where rule 7 permits. Patterns `single` and `chain` first, then `route`,
+   `parallel`, `coordinator_worker`, `evaluator_optimizer`, then
+   composition and joins in the compiler. Integration tests with a fake
+   provider for every Pattern, every compilation rule, and every invariant.
 4. **Specification and verification.** Requirements (including
    `requirement_waiver` Decisions), Acceptance Criteria, Decisions with
    resolution policies, Evaluations, Gates, Agent Definition revisions and
@@ -250,25 +304,53 @@ Merge to `main` happens after step 7 as one merge commit. Rollback is
   Run for each Pattern and assert the Event sequence, the Usage roll-up,
   the Snapshot chain, and the Gate outcomes.
 - Restart tests: a Run interrupted mid-Attempt continues from persisted
-  manifests after a simulated server restart, and nothing is read from a
-  transcript. A variant truncates `provider_continuations` first and
-  asserts the same outcome with every Attempt `fresh`.
+  manifests after a simulated server restart with `retry` Attempts, and
+  nothing is read from a transcript. A variant truncates the continuation
+  index and payload store first and asserts the same outcome with every
+  Attempt `fresh`.
 - Provider resumption tests: an Attempt is `resumed` only when the fake
-  adapter reports support, safety, available metadata, and Budget headroom;
-  each missing condition yields `fresh`.
+  adapter reports support, safety, an unexpired index row whose payload is
+  present and matches its digest, and allocation headroom; each missing
+  condition yields `fresh`; resumption across an Invocation boundary
+  (`continuedFromInvocationId`) is exercised; no payload or storage key
+  appears in any Event, log line, or API response.
+- Invocation tests: every logical input creates a new Invocation with an
+  immutable manifest and a purpose; Attempts are only `initial` or
+  `retry`; at most one Orchestrator Invocation per Run and one Coordinator
+  Invocation per node is active; queued inputs coalesce into the next
+  Invocation; routine progress creates neither.
 - Compiler tests: each compilation rule in
-  [execution-model.md](execution-model.md) §4.4, each rejection, and
-  reconciliation of a revision against started nodes.
-- Coordinator tests: the Coordinator is invoked exactly for `decompose`,
-  `replan`, and `synthesize`; Task proposals are validated and Budget
-  reserved by the runtime; a Worker cannot propose anything.
-- Requirement tests: a Task completing never changes a Requirement status;
-  `satisfied` follows only from Gate Evaluations; `waived` follows only
-  from a `requirement_waiver` Decision with actor, rationale, Requirement
-  id, timestamp.
-- Decision tests: `use_default_after_deadline` resolves only with a
-  recorded recommendation, deadline or condition, rationale, and affected
-  ids, and always writes `decision.resolved`.
+  [execution-model.md](execution-model.md) §4.4 including `join` emission
+  for composite `parallel` items and terminal parallels, aggregation as a
+  subsequent `single`, the absence of any zero-item `parallel`, each
+  rejection, scope expansion into `plan_node_requirements`, atomic
+  allocation reservation, and reconciliation of a revision against started
+  nodes.
+- Coordinator tests: separate Coordinator Invocations exist exactly for
+  `decompose`, `replan`, and `synthesize`; Task proposals are validated
+  against the node's persisted scope (out-of-scope, other-Conversation,
+  other-revision, retired, and internal Requirements are rejected), Budget
+  is reserved by the runtime before a Task becomes `ready`; a Worker cannot
+  propose anything.
+- Task state tests: every transition in
+  [execution-model.md](execution-model.md) §7.9; a `failed` Task is never
+  `cancelled` by the runtime; a dependency failure blocks rather than
+  cancels; completing a Task never changes a Requirement status.
+- Budget tests: reservations are created atomically before a node or
+  Invocation becomes runnable; the root node's allocation is the
+  configured initial amount; a revision whose allocations exceed unreserved
+  capacity (after the final reserve) is rejected; release returns the
+  unused remainder; Run Budget exhaustion yields `waiting`/`budget`, never
+  `failed`; `fail`, `wait`, and `extend` node policies behave as specified.
+- Requirement tests: `satisfied` follows only from Gate Evaluations;
+  `waived` follows only from a `requirement_waiver` Decision resolved by
+  the operator with actor, rationale, Requirement id, timestamp;
+  `record_decision` cannot create or resolve one; no policy resolves one; a
+  later Requirement revision leaves existing scope rows unchanged.
+- Decision tests: `use_default_after_deadline` is accepted for
+  `operator_choice` only and resolves only with a recorded recommendation,
+  deadline or condition, rationale, and affected ids, always writing
+  `decision.resolved`.
 - Publishing tests: a Run never writes to the Target; publish revalidates
   the Target, selects the strategy at publish time, fails without writing
   when the Target moved and the operation is not clean, and records a

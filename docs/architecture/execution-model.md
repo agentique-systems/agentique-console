@@ -3,9 +3,9 @@
 This document defines how a Run executes: which component owns which state,
 how the Execution Plan is authored, compiled, and scheduled, what each
 Pattern does, how work and results move between Invocations, how
-verification, completion, and publishing work, and how usage and capacity
-are accounted. Terms are defined in [glossary.md](glossary.md). The
-replacement rules are in [migration-contract.md](migration-contract.md).
+verification, completion, and publishing work, and how budget, usage, and
+capacity are accounted. Terms are defined in [glossary.md](glossary.md).
+The replacement rules are in [migration-contract.md](migration-contract.md).
 Everything here is normative; the invariants in §15 are the acceptance test
 for the implementation.
 
@@ -15,15 +15,15 @@ There are five actors and each has a fixed responsibility.
 
 | Actor | Responsibility | Never does |
 |---|---|---|
-| Operator | Starts Conversations and Runs, approves Requirements, answers Decisions, accepts or rejects a Run at the `operator_signoff` Gate, publishes a completed Run. | Edit runtime state directly. |
-| Orchestrator | The agent that talks to the operator. Proposes Requirements, records Decisions, creates Tasks, authors and revises the source Execution Plan, reads results, works directly when that is cheaper than delegating. | Schedule, retry, wait, or account for anything. Talk to Workers. |
-| Runtime | Deterministic code. Owns the compiled Execution Plan, scheduling, retries, dependencies, waiting, progress, Budgets, fan-in, Gates, Snapshots, Changesets, publishing, the journal. | Decide what the work should be. |
+| Operator | Starts Conversations and Runs, approves Requirements, resolves Decisions (including every Requirement waiver), accepts or rejects a Run at the `operator_signoff` Gate, publishes a completed Run. | Edit runtime state directly. |
+| Orchestrator | The agent that talks to the operator. Proposes Requirements, records its own Decisions, proposes Requirement waivers, creates Tasks, authors and revises the source Execution Plan, reads compiled plan state, works directly when that is cheaper than delegating. | Schedule, retry, wait, or account for anything. Write compiled plan structure. Resolve a Requirement waiver. Talk to Workers. |
+| Runtime | Deterministic code. Validates source plan revisions, compiles them, and owns the compiled Execution Plan, scheduling, retries, dependencies, waiting, progress, Budget reservations, fan-in, Gates, Snapshots, Changesets, publishing, the journal. | Decide what the work should be. |
 | Resource governor | Deterministic code inside the runtime process. Owns provider quota, provider concurrency, and machine concurrency; grants capacity leases to Runs. | Invoke a model, generate text, or hold semantic Run state. |
 | Provider | Executes one Attempt: a model plus its native tools against a Context Manifest. | Hold any state the runtime depends on for correctness. |
 
 The Orchestrator is an agent and is subject to every rule below. It is
-distinguished only by being the root Plan Node and by being the one
-Invocation whose Context Manifest includes the operator's messages.
+distinguished only by running in the root Plan Node and by being the role
+whose Context Manifests include the operator's messages.
 
 ## 2. State ownership
 
@@ -31,25 +31,29 @@ Every fact in the system has exactly one canonical store and one writer.
 
 | Object | Writer | Canonical store | Projections |
 |---|---|---|---|
+| Schema identity | Migration | `schema_info` | — |
 | Workspace | Operator via API | `workspaces` | — |
 | Conversation, messages | Operator, Orchestrator via runtime | `conversations`, `conversation_messages` | Conversation view |
 | Run | Runtime | `runs` | Run view, Run list |
-| Execution Plan (source) | Runtime (from Orchestrator revisions) | `execution_plan_revisions` | Plan view |
-| Plan Node, Plan Edge (compiled) | Runtime (plan compiler) | `plan_nodes`, `plan_edges` | Plan view |
+| Execution Plan (source) | Runtime (validated Orchestrator revisions) | `execution_plan_revisions` | Plan view |
+| Plan Node, Plan Edge (compiled) | Plan compiler only | `plan_nodes`, `plan_edges` | Plan view |
+| Plan Node Requirement scope | Plan compiler only | `plan_node_requirements` | Plan view, Task ledger |
 | Requirement | Runtime (from Orchestrator proposal, operator approval) | `requirements`, `requirement_revisions`, `requirement_status_changes` | Requirements panel |
 | Acceptance Criterion | Runtime (from Orchestrator) | `acceptance_criteria` | Requirements panel, Gate view |
 | Decision | Runtime (from operator, Orchestrator, or a resolution policy) | `decisions` | Decision cards |
 | Task | Runtime (from Orchestrator or Coordinator proposals) | `tasks`, `task_dependencies` | Task ledger |
 | Artifact | Runtime | `artifacts` + blob store | Artifact viewer |
 | Handoff | Runtime | `handoffs` | Plan view |
-| Agent Definition, revision | Runtime (from files and built-ins) | `agent_definitions`, `agent_definition_revisions` | Agents view |
-| Invocation, Attempt | Runtime | `invocations`, `attempts` | Plan view, transcript viewer |
-| Provider continuation metadata | Provider adapter | `provider_continuations` | Attempt inspector (diagnostic) |
+| Agent Definition, revision | Runtime (from files, built-ins, approved Conversation authoring) | `agent_definitions`, `agent_definition_revisions` | Agents view |
+| Invocation | Runtime | `invocations` | Plan view |
+| Attempt | Runtime | `attempts` | Plan view, transcript viewer |
+| Provider continuation index | Provider adapter | `provider_continuations` (index) + adapter-owned payload store | Attempt inspector (existence only) |
+| Context Manifest | Runtime | `context_manifests` | Invocation inspector |
 | Evaluation, Gate | Runtime | `evaluations`, `gates` | Gate view |
 | Snapshot, Changeset | Runtime | `snapshots`, `changesets` | Run view |
 | Publication | Runtime (publish action) | `publications` | Run view |
+| Budget reservation | Runtime | `budget_reservations` | Run view, Plan view |
 | Capacity lease | Resource governor | `capacity_leases` | System view |
-| Context Manifest | Runtime | `context_manifests` | Invocation inspector |
 | Usage | Runtime | `usage` | Every view's cost line |
 | Event | Runtime | `events` | Everything |
 
@@ -57,9 +61,9 @@ Agent transcripts (the provider's message stream for one Attempt) are
 stored as Artifacts of media type `application/x-agent-transcript`. They
 are diagnostic records. No runtime decision reads a transcript; no
 projection is built from one; no state is recoverable only from one.
-Provider continuation metadata (§6.5) is likewise diagnostic and
-optimization-only: deleting every row of `provider_continuations` changes
-no Run's outcome.
+Provider continuation payloads (§6.6) are not Artifacts, are not in any
+canonical row, and are optimization-only: deleting every payload and every
+`provider_continuations` index row changes no Run's outcome.
 
 ## 3. Run lifecycle
 
@@ -71,20 +75,21 @@ created ──► running ──► verifying ──► awaiting_signoff ──�
                │            │               └──► running   (operator requests changes)
                │            └──► running                   (run_completion Gate produced Tasks)
                ├──► waiting  ──► running                   (wait reason cleared)
-               ├──► failed
+               ├──► failed                                 (terminal failure transition, §7.6)
                └──► cancelled
 ```
 
-- `created`: the Run row exists; the Execution Plan holds only the root
-  Plan Node (the Orchestrator's `single` node). A Snapshot of the target
-  branch is taken and recorded as the Run's base Snapshot; the Run's
-  integration Workspace is created from it (§9).
+- `created`: the Run row exists with its Run Budget; the Execution Plan
+  holds only the root Plan Node (the Orchestrator's `single` node) with its
+  initial allocation reserved. A Snapshot of the Target is taken and
+  recorded as the Run's base Snapshot; the Run's Integration Workspace is
+  created from it (§9).
 - `running`: at least one Plan Node is `ready` or `running`.
 - `waiting`: no Plan Node can make progress. The Run records a structured
   reason: `decision` (an `operator_required` Decision is unanswered),
-  `budget` (the Run Budget is exhausted), `provider_capacity` (the
-  resource governor has no lease to grant), `operator` (the operator paused
-  the Run).
+  `budget` (the Run Budget has no unreserved capacity for work that must
+  proceed), `provider_capacity` (the resource governor has no lease to
+  grant), `operator` (the operator paused the Run).
 - `verifying`: the Orchestrator has requested completion; the runtime is
   executing the `run_completion` Gate.
 - `awaiting_signoff`: the `run_completion` Gate passed; the
@@ -92,13 +97,16 @@ created ──► running ──► verifying ──► awaiting_signoff ──�
 - `completed`: the operator accepted the verified final Snapshot. Terminal.
   A completed Run may then be published (§9.4); publishing does not change
   the Run's state.
-- `failed`: the Run's Budget was exhausted with the `run_completion` Gate
-  never passed, or the root Plan Node failed after its Attempts. Terminal.
+- `failed`: reached only by a terminal failure transition: the root Plan
+  Node failed (its current Orchestrator Invocation failed after its
+  permitted Attempts with a permanent failure), or the Orchestrator
+  returned a result declaring the Run infeasible with Evidence. Budget
+  exhaustion never produces `failed` by itself. Terminal.
 - `cancelled`: the operator cancelled. Terminal.
 
 Terminal states are final. There is no resume. A new Run in the same
 Conversation starts from the Conversation's current Requirements, Decisions,
-and Artifacts, and from a fresh Snapshot of the target branch.
+and Artifacts, and from a fresh Snapshot of the Target.
 
 ## 4. The Execution Plan
 
@@ -109,36 +117,62 @@ The Execution Plan exists in two forms, both owned by the runtime:
 - **Source form** — a tree of Pattern expressions authored by the
   Orchestrator. Each expression names a Pattern and its operands; an operand
   is either a leaf operation (an Agent Definition revision plus an input
-  specification) or another Pattern expression. The source form is what the
-  Orchestrator reads and revises. It is persisted append-only as
+  specification) or another Pattern expression. Expressions may name the
+  Requirement roots they serve, at one pinned Requirement revision, and the
+  Budget allocation they request. The source form is what the Orchestrator
+  reads and revises. It is persisted append-only as
   `execution_plan_revisions`.
 - **Compiled form** — a flat directed acyclic graph of Plan Nodes and typed
   Plan Edges materialized by the deterministic plan compiler from a source
   revision. The compiled form is what the scheduler executes. It is
-  persisted in `plan_nodes` and `plan_edges`.
+  persisted in `plan_nodes`, `plan_edges`, and `plan_node_requirements`.
 
-Only the Orchestrator revises the source form, through the
-`revise_execution_plan` tool. Only the compiler writes the compiled form.
-No agent reads or writes `plan_nodes` or `plan_edges` except through
-read-only runtime tools.
+The Orchestrator authors and revises the source form through the
+`revise_execution_plan` tool. The runtime validates the proposed revision
+(§4.5). The deterministic compiler materializes the compiled form. Only the
+compiler writes `plan_nodes`, `plan_edges`, and `plan_node_requirements`.
+The Orchestrator may read compiled plan state through `read_execution_plan`.
+Coordinators, Workers, and Evaluators cannot revise either form.
 
 ### 4.2 Plan Node
 
 A compiled Plan Node has:
 
-- `id`, `runId`, `pattern`, `title`, `sourcePath` (the position in the
+- `id`, `runId`, `kind`, `title`, `sourcePath` (the position in the
   source expression it was compiled from)
-- `input`: a Context Manifest template — the Requirement ids, Task ids,
+- `kind`: `pattern` or `join`
+- `pattern`: for `kind: pattern`, exactly one of `single`, `chain`,
+  `route`, `parallel`, `coordinator_worker`, `evaluator_optimizer`; absent
+  for `kind: join`
+- `input`: for `kind: pattern`, a Context Manifest template — the Task ids,
   Decision ids, and Artifact ids this node's Invocations receive
-- `agents`: which Agent Definition revision each role in the Pattern uses
-- `budget`
-- `gate`: the `node_exit` Gate's Acceptance Criteria (may be empty)
+- Requirement scope: the exact set of leaf Requirement ids the node serves,
+  at the pinned Requirement revision, persisted in `plan_node_requirements`
+  (§4.7); empty for the root node and for `join` nodes
+- `agents`: for `kind: pattern`, which Agent Definition revision each role
+  in the Pattern uses; absent for `kind: join`
+- `allocation`: the Budget allocation reserved for this node from the Run
+  Budget (§7.6), plus the node's local limits (`maxConcurrency`,
+  `maxWallClockMs`, Pattern-specific bounds) and its
+  `onAllocationExhausted` policy (`fail | wait | extend`)
+- `fanInPolicy`: for `kind: join`, `require_all` (default) or
+  `require_any`
+- `gate`: for `kind: pattern`, the `node_exit` Gate's Acceptance Criteria
+  (may be empty)
 - `status`: `pending | ready | running | waiting | succeeded | failed | cancelled | skipped`
 - `output`: the Artifact ids produced, set when the node reaches `succeeded`
 
+A Plan Node of `kind: pattern` executes an orchestration Pattern by creating
+Invocations. A Plan Node of `kind: join` has no Pattern value, no Agent
+Definition, and creates no Invocation: it executes deterministically, waits
+for its declared fan-in predecessors, produces an index Artifact containing
+the ordered predecessor references, their outcomes, and their output
+Artifact ids, and succeeds or fails according to its `fanInPolicy`. `join`
+is a deterministic node kind, not a seventh orchestration Pattern.
+
 A persisted Plan Node does not contain other Plan Nodes. Everything inside
-a node is an Invocation (§5). Composition between nodes is expressed only by
-Plan Edges.
+a `pattern` node is an Invocation (§5). Composition between nodes is
+expressed only by Plan Edges.
 
 ### 4.3 Plan Edge
 
@@ -148,16 +182,26 @@ A Plan Edge is a typed, directed relation between two Plan Nodes:
 |---|---|
 | `sequence` | The target becomes eligible when the source is terminal; the source's output Artifacts are delivered to the target as a Handoff. |
 | `branch(label)` | A `sequence` edge that is active only when the source (a `route` node) selected `label`. Inactive branches' targets become `skipped`. |
-| `fan_in` | The target becomes eligible when every `fan_in` source is terminal; the sources' outputs are delivered as one index Artifact. |
+| `fan_in` | Enters a `join` node. The join becomes eligible when every `fan_in` source is terminal; the sources' outcomes and outputs are recorded in the join's index Artifact in edge order. |
 | `retry(round)` | A `sequence` edge into a later unrolled round of an `evaluator_optimizer` expression; active only when the source's Evaluation failed. When the Evaluation passed, every later round is `skipped`. |
 
-Readiness is computed from edges only: a node is `ready` when every
-predecessor is terminal, no predecessor is `failed` or `cancelled` (unless
-the node was compiled with `runOnDependencyFailure: true`), and at least one
-predecessor is `succeeded` or the node has no predecessors. A node all of
-whose predecessors are `skipped` is `skipped`. A node with a `failed` or
-`cancelled` predecessor is `skipped` unless `runOnDependencyFailure` is set,
-in which case it becomes `ready` with the failure in its manifest.
+Readiness is computed from edges only:
+
+- A `pattern` node is `ready` when every predecessor is terminal, no
+  predecessor is `failed` or `cancelled` (unless the node was compiled with
+  `runOnDependencyFailure: true`), at least one predecessor is `succeeded`
+  or the node has no predecessors, and its allocation is reserved (§7.6).
+  A node all of whose predecessors are `skipped` is `skipped`. A node with
+  a `failed` or `cancelled` predecessor is `skipped` unless
+  `runOnDependencyFailure` is set, in which case it becomes `ready` with
+  the failure in its manifest.
+- A `join` node is `ready` when every `fan_in` predecessor is terminal.
+  It then executes immediately: it writes the index Artifact and becomes
+  `succeeded` when its `fanInPolicy` is met (`require_all`: every
+  non-skipped predecessor `succeeded`; `require_any`: at least one
+  `succeeded`), otherwise `failed`. A join all of whose predecessors are
+  `skipped` is `skipped`. A join never waits on anything but its edges and
+  never holds a capacity lease or a Budget allocation beyond zero.
 
 ### 4.4 Composition and compilation
 
@@ -180,12 +224,20 @@ Compilation rules, applied recursively to each expression:
    expression receive `sequence` edges from the `route` node and from every
    composite branch's exits; the readiness rule in §4.3 makes exactly the
    selected path deliver.
-4. `parallel(items, aggregate?)`: leaf items stay inside one `parallel`
-   node. A composite item compiles to its own subgraph whose entries take
-   `sequence` edges from the expression's predecessors and whose exits take
-   `fan_in` edges into the `parallel` node. A `parallel` node compiled this
-   way may have zero inline items; it then performs only fan-in (the index
-   Artifact) and the optional aggregation Invocation.
+4. `parallel(items, aggregate?)`:
+   - When every item is a leaf, the expression compiles to one `parallel`
+     node holding the items and, if given, the aggregation as an inline
+     Invocation (§5.4).
+   - When any item is composite, every composite item compiles to its own
+     subgraph, and the leaf items (if any) compile to one `parallel` node
+     without aggregation. All of these fan into one `join` node by `fan_in`
+     edges, in item order. If an aggregation is given, it compiles to a
+     `single` node reached from the join by a `sequence` edge, whose input
+     is the join's index Artifact. Successors of the expression receive
+     `sequence` edges from the aggregation node, or from the join when
+     there is none.
+   - A `parallel` node is never created with zero items and never exists
+     only to perform fan-in; fan-in is always a `join` node.
 5. `evaluator_optimizer(producer, evaluator, maxRounds)`: a leaf producer
    compiles to one `evaluator_optimizer` node (§5.6). A composite producer
    is unrolled: for each round `r` in `1 … maxRounds` the compiler emits a
@@ -197,9 +249,18 @@ Compilation rules, applied recursively to each expression:
 6. `coordinator_worker(coordinator, worker)`: compiles to one
    `coordinator_worker` node. Its operands must be leaves. It may not be an
    operand of another `coordinator_worker` expression at any depth.
+7. Requirement scope: an expression that names Requirement roots at a
+   pinned revision is expanded to the exact leaf set (§4.7) and the set is
+   persisted for every `pattern` node compiled from that expression or its
+   descendants that do not name their own roots. `join` nodes carry no
+   scope.
+8. Allocation: every `pattern` node is compiled with the allocation its
+   expression requests (or the configured default); the whole revision's
+   allocations are reserved atomically at compile time (§7.6). A `join`
+   node's allocation is zero.
 
-Rejected at compile time, with the rejection returned to the Orchestrator
-as the tool result:
+Rejected at validation or compile time, with the rejection returned to the
+Orchestrator as the tool result:
 
 - any cycle in the compiled graph;
 - an expression that references itself or an ancestor expression;
@@ -208,55 +269,111 @@ as the tool result:
 - source nesting depth greater than `maxPlanDepth` (default 4);
 - `maxRounds` greater than `maxUnrolledRounds` (default 6);
 - a compiled graph with more than `maxPlanNodes` (default 200) nodes;
-- any Pattern name other than the six.
+- any Pattern name other than the six, or a `join` requested explicitly
+  (joins are compiler-emitted only);
+- a Requirement root that does not exist at the pinned revision, belongs to
+  another Conversation, or is `retired`;
+- an allocation set that cannot be reserved from unreserved Run capacity
+  after the configured final reserve (§7.6).
 
 Examples that compile:
 
-- a chain whose middle stage is a route: `chain(A, route(s, {x ⇒ B, y ⇒ chain(C, D)}), E)` → `single A → route(s; inline B) → E` plus `route –branch(y)→ chain(C, D) → E`;
+- a chain whose middle stage is a route: `chain(A, route(s, {x ⇒ B, y ⇒ chain(C, D)}), E)` → `single A → route(s; inline B) → single E` plus `route –branch(y)→ chain(C, D) → single E`;
 - an evaluator-optimizer wrapping a chain: unrolled rounds `chain(P₁a, P₁b) → E₁ –retry→ chain(P₂a, P₂b) → E₂ …`;
 - a route branch that is a chain (as above);
-- a parallel whose items are static subgraphs: each subgraph's exits `fan_in` to one `parallel` node that aggregates.
+- a parallel whose items are static subgraphs with an aggregation: each subgraph's exits `fan_in` to one `join`, then `join → single(aggregate)`;
+- a terminal parallel with composite branches and no aggregation: the subgraphs `fan_in` to one `join`, which is the expression's exit.
 
 ### 4.5 Who may change the plan
 
-- Only the Orchestrator revises the source form. Each revision is
-  append-only and is compiled immediately. Compilation reconciles the new
-  compiled graph with the existing one by `sourcePath`: nodes whose
-  `sourcePath` and definition are unchanged keep their id and status; nodes
-  whose source was removed and that have not started become `cancelled`;
+- Only the Orchestrator authors and revises the source form. Each proposed
+  revision is validated by the runtime (well-formed, limits, Requirement
+  references, allocations), appended, and compiled immediately. Compilation
+  reconciles the new compiled graph with the existing one by `sourcePath`:
+  nodes whose `sourcePath` and definition are unchanged keep their id,
+  status, scope, and allocation; nodes whose source was removed and that
+  have not started become `cancelled` and their allocations are released;
   nodes that have started or finished are never altered; new nodes are
-  added `pending`. A revision that would change the definition of a node
-  that has started is rejected; the Orchestrator cancels it and adds a
-  new expression instead.
-- Coordinators, Workers, and Evaluators cannot revise the plan. Tasks a
+  added `pending` with their allocations reserved. A revision that would
+  change the definition, scope, or allocation of a node that has started is
+  rejected; the Orchestrator cancels it and adds a new expression instead.
+- Coordinators, Workers, and Evaluators cannot revise either form. Tasks a
   Coordinator proposes are internal execution records of its node (§5.5)
-  and never create, remove, or alter Plan Nodes or Plan Edges.
+  and never create, remove, or alter Plan Nodes, Plan Edges, or scope rows.
 - A node in `pending` or `ready` may be cancelled by the Orchestrator or the
-  operator. A `running` node may be cancelled; its Attempts are interrupted
-  and the node ends `cancelled`.
+  operator. A `running` node may be cancelled; its Invocations are
+  interrupted and the node ends `cancelled`.
 - Every revision writes one `execution_plan.revised` Event carrying the
   source revision and one `execution_plan.compiled` Event carrying the full
-  compiled node and edge list.
+  compiled node, edge, and scope list, or one `execution_plan.rejected`
+  Event carrying the reasons.
 
-### 4.6 The root node
+### 4.6 The root node and Orchestrator Invocations
 
-The root Plan Node is created with the Run: pattern `single`, role
-`orchestrator`, no predecessors, Budget equal to the Run's Budget. Its
-Invocation is the Orchestrator. The root node stays `running` for the life
-of the Run and reaches `succeeded` only when the Run does.
+The root Plan Node is created with the Run: `kind: pattern`, pattern
+`single`, role `orchestrator`, no predecessors, no Requirement scope, and an
+explicit initial allocation reserved from the Run Budget (§7.6) — never the
+whole Run Budget. Its `onAllocationExhausted` policy is `extend`. The root
+node stays `running` for the life of the Run and reaches `succeeded` only
+when the Run does.
 
-The Orchestrator's Invocation is turn-based (§6.6): the runtime starts a turn
-when there is new input for it (an operator message, a Plan Node reaching a
-terminal state, a Gate result, a Decision resolved, a Budget event) and the
-turn ends when the Orchestrator returns. Between turns no provider process
-runs. The runtime coalesces inputs that arrive during a turn into the next
-turn.
+The root node owns a sequence of Orchestrator Invocations. Each is one
+logical execution with one immutable Context Manifest and one `purpose`.
+The runtime creates a new Orchestrator Invocation when new logical input
+exists for the Orchestrator and no Orchestrator Invocation is active:
+
+| Purpose | Created when |
+|---|---|
+| `operator_input` | The operator posted a message (the Run's first Invocation always has this purpose). |
+| `node_result` | A Plan Node reached a terminal state. |
+| `decision_resolution` | A Decision the Orchestrator requested or that affects the Run was resolved or superseded. |
+| `gate_result` | A `run_completion` or `node_exit` Gate produced a result the Orchestrator must act on. |
+| `plan_revision` | The Orchestrator's previous Invocation ended by returning `blocked` on a rejected plan revision or by requesting continuation after a revision, and the compiled outcome is now available. |
+| `publication_result` | A Publication succeeded or failed. |
+| `final_synthesis` | The `operator_signoff` Gate opened, or the Run reached a terminal state, and the Orchestrator produces the final report. |
+
+There is never more than one active Orchestrator Invocation for a Run.
+Inputs that arrive while one is active are queued; when it ends, the
+runtime creates exactly one new Invocation whose Context Manifest carries
+every queued input and whose `purpose` is the first in the table order
+above that applies. Routine progress — an Invocation starting, a Task
+changing state, Usage accruing, a lease being granted — never creates an
+Orchestrator Invocation. Each Orchestrator Invocation records
+`continuedFromInvocationId` pointing at the previous one; its initial
+Attempt may be `resumed` across that boundary under §6.6.
+
+### 4.7 Plan Node Requirement scope
+
+A source Pattern expression may name the Requirement roots it serves,
+together with exactly one pinned Requirement revision of the Conversation.
+During compilation the compiler expands those roots to the exact set of
+leaf Requirement ids that exist under them at that revision and persists
+one `plan_node_requirements` row per (Plan Node, Requirement id, pinned
+Requirement revision) for every `pattern` node compiled from the
+expression. An expression that names no roots inherits its nearest
+ancestor expression's scope; the root Orchestrator node and `join` nodes
+have no scope rows.
+
+- A running Plan Node's scope never changes. A later Requirement revision
+  does not add, remove, or re-pin any row of an existing node.
+- To work against revised Requirements, the Orchestrator revises the
+  source Execution Plan; reconciliation (§4.5) produces replacement nodes
+  with their own scope rows and cancels unstarted nodes whose expressions
+  were removed.
+- Coordinator-proposed Tasks must reference a non-empty subset of their
+  node's persisted scope at the pinned revision (§5.5.1). Orchestrator-
+  created Tasks reference leaf Requirements of the Conversation's current
+  revision.
+- The scope rows are the only source of truth for "which Requirements does
+  this node serve"; no ancestor path, tree walk, or revision lookup is
+  needed at validation time.
 
 ## 5. Patterns
 
-Each Pattern is a fixed shape the runtime executes. The runtime, not an
-agent, creates the Invocations, orders them, delivers Handoffs, and combines
-results. A Pattern never communicates with agents outside its own Plan Node.
+Each Pattern is a fixed shape the runtime executes inside one `pattern`
+Plan Node. The runtime, not an agent, creates the Invocations, orders them,
+delivers Handoffs, and combines results. A Pattern never communicates with
+agents outside its own Plan Node.
 
 Common rules for every Pattern:
 
@@ -265,6 +382,8 @@ Common rules for every Pattern:
 - Every Invocation whose Tool Policy grants write capability runs in an
   isolated worktree from the node's starting Snapshot and produces a
   Changeset (§9).
+- Every Invocation receives an explicit allocation from its node (§7.6)
+  before it starts.
 - Deterministic Acceptance Criteria on the node's `node_exit` Gate are
   checked by the runtime before the node reaches `succeeded`.
 - A Pattern's failure is the node's failure. The runtime retries at
@@ -276,7 +395,7 @@ One Invocation of one Agent Definition revision. This is the default Pattern
 and the only one the Orchestrator should choose unless the work has a shape
 that one of the others describes exactly.
 
-- Invocations: 1 (`worker`, or `orchestrator` for the root node)
+- Invocations: 1 (`worker`, purpose `step`; or `orchestrator` for the root node, §4.6)
 - Input: the node's manifest
 - Output: the Invocation's result Artifacts
 - Fan-in: none
@@ -287,7 +406,7 @@ An ordered list of leaf steps, each one Invocation. Step `n+1` starts when
 step `n` has returned; it receives the node's manifest plus a Handoff
 pointing at step `n`'s output Artifacts.
 
-- Invocations: one per step, sequential, all `worker`
+- Invocations: one per step, sequential, all `worker` with purpose `step`
 - Input: node manifest; step `n>1` additionally receives a Handoff from step `n-1`
 - Output: the last step's result Artifacts (earlier steps' Artifacts remain readable by id)
 - Fan-in: none
@@ -301,12 +420,12 @@ ever holds leaf steps.
 One selector chooses exactly one branch. The selector is either a
 deterministic rule the runtime evaluates (a predicate over the manifest,
 such as which files a Task touches or a Decision's answer) or a read-only
-`evaluator` Invocation that returns a branch label. The selection is
-recorded as an Evaluation on the node. A leaf branch runs as one
-Invocation inside the node; a composite branch is a subgraph reached by a
-`branch(label)` edge.
+`evaluator` Invocation (purpose `select`) that returns a branch label. The
+selection is recorded as an Evaluation on the node. A leaf branch runs as
+one Invocation inside the node; a composite branch is a subgraph reached by
+a `branch(label)` edge.
 
-- Invocations: 0 or 1 selector (`evaluator`), then 1 inline branch (`worker`) when the selected branch is a leaf
+- Invocations: 0 or 1 selector (`evaluator`, `select`), then 1 inline branch (`worker`, `step`) when the selected branch is a leaf
 - Input: the node manifest; the branch additionally receives the selection Evaluation reference
 - Output: the inline branch's result Artifacts, or nothing when the selected branch is composite (its subgraph's exits deliver)
 - Fan-in: none
@@ -314,16 +433,18 @@ Invocation inside the node; a composite branch is a subgraph reached by a
 
 ### 5.4 `parallel`
 
-A static list of independent items, each one Invocation, run concurrently
-up to the node Budget's concurrency limit. The runtime collects every result
-into one index Artifact (the list of item results with their Artifact ids)
-and optionally runs one aggregation Invocation over that index. Composite
-items are compiled to subgraphs whose exits `fan_in` to this node.
+A static, non-empty list of independent leaf items, each one Invocation,
+run concurrently up to the node's `maxConcurrency`. The runtime collects
+every item result into one index Artifact (the ordered list of item
+results with their Artifact ids and outcomes) and optionally runs one
+aggregation Invocation over that index inside the node. Composite items
+never live in a `parallel` node; the compiler lifts them into subgraphs
+that fan into a `join` node (§4.4).
 
-- Invocations: one `worker` per inline item, then 0 or 1 aggregation `worker`
-- Input: each inline item receives the node manifest plus its item payload; the aggregation receives the manifest plus a Handoff to the index Artifact
+- Invocations: one `worker` (`step`) per item, then 0 or 1 aggregation `worker` (`step`)
+- Input: each item receives the node manifest plus its item payload; the aggregation receives the manifest plus a Handoff to the index Artifact
 - Output: the aggregation's result Artifacts, or the index Artifact when there is no aggregation
-- Fan-in: the runtime waits for every inline item and every `fan_in` predecessor to reach a terminal state, then writes the index
+- Fan-in: the runtime waits for every item to reach a terminal state, then writes the index
 - Failure: an item that fails after its Attempts is recorded as failed in the index; whether that fails the node is a node option (`requireAll`, default true)
 
 Items never see each other's results. A `parallel` node whose items are
@@ -331,55 +452,77 @@ not independent is a plan error; the Orchestrator should use `chain`.
 
 ### 5.5 `coordinator_worker`
 
-One Coordinator proposes Tasks; the runtime creates Worker Invocations for
-them; the Coordinator synthesizes the results. The node is bounded and the
-coordination depth is one by construction.
+One Coordinator role proposes Tasks; the runtime creates Worker Invocations
+for them; a Coordinator synthesizes the results. The node is bounded and
+the coordination depth is one by construction.
 
 Roles and what each may do:
 
-- The **Coordinator** proposes Tasks through `propose_tasks` and returns a
-  synthesis through `return_result`. It does not append or revise Plan
-  Nodes, does not create Invocations, and does not call, message, or
-  address Workers. It never sees a Worker except as a Handoff the runtime
-  delivers.
-- The **runtime** validates every proposed Task (well-formed, within the
-  node's Requirement scope, dependency graph acyclic, count within the node
-  Budget's `maxTasks`), reserves Budget for it, persists it, and schedules
-  one Worker Invocation per Task when the Task's dependencies are
-  `completed`. The runtime delivers each Worker result to the node as a
-  Handoff and decides when the Coordinator is next invoked.
-- A **Worker** executes exactly one Task and returns a result. A Worker
-  cannot propose or create Tasks, Workers, Coordinators, or Plan Nodes, and
-  cannot address any other Invocation.
+- A **Coordinator Invocation** proposes Tasks through `propose_tasks` and
+  returns through `return_result`. It does not revise the Execution Plan,
+  does not create Invocations, and does not call, message, or address
+  Workers. It never sees a Worker except as a Handoff the runtime delivers.
+- The **runtime** validates every proposed Task (§5.5.1), reserves a Worker
+  Invocation allocation for it from the node's allocation, persists it, and
+  schedules one Worker Invocation per Task when the Task becomes `ready`.
+  The runtime records each Worker result as a Handoff on the node and
+  decides when a new Coordinator Invocation is created.
+- A **Worker Invocation** (purpose `task`) executes exactly one Task and
+  returns a result. A Worker cannot propose or create Tasks, Workers,
+  Coordinators, or Plan Nodes, and cannot address any other Invocation.
 
-The Coordinator is invoked only on these occasions, each a turn-based
-Attempt of the same Coordinator Invocation with a stated `purpose`:
+The node owns separate Coordinator Invocations, each with its own immutable
+Context Manifest and one purpose, created only on these occasions:
 
 1. `decompose` — once, at node start, to produce the initial Task set.
-2. `replan` — when a Worker returns `blocked` with a stated blocker, or a
-   Task fails after its Attempts, and the runtime cannot resolve it
-   deterministically (a retry within Budget is deterministic; a change in
-   what should be done is not). The Coordinator may propose replacement
-   Tasks, cancel open Tasks, or fail the node.
+2. `replan` — when a Task becomes `blocked` or `failed` and the runtime
+   cannot resolve it deterministically (a retry within the Task's Attempt
+   allocation is deterministic; a change in what should be done is not).
+   The Coordinator may propose replacement Tasks, cancel `pending`,
+   `ready`, or `blocked` Tasks, or fail the node.
 3. `synthesize` — once, when every Task is `completed` or `cancelled`, to
    produce the node's output.
 
-Routine progress — a Task completing, a Worker starting, Usage accruing —
-never invokes the Coordinator. The runtime advances the Task graph on its
-own.
+There is never more than one active Coordinator Invocation for a node.
+Blockers that arise while one is active are queued and delivered in the
+next `replan` Invocation's manifest. Routine progress — a Task completing,
+a Worker starting, Usage accruing — never creates a Coordinator Invocation.
+The runtime advances the Task graph on its own. Each Coordinator Invocation
+records `continuedFromInvocationId` pointing at the node's previous
+Coordinator Invocation; its initial Attempt may be `resumed` across that
+boundary under §6.6.
 
-- Invocations: 1 `coordinator` (turn-based), N `worker` (one per Task)
-- Input: the Coordinator receives the node manifest and, on `replan` and `synthesize` turns, Handoffs to every Worker result since its last turn; each Worker receives the manifest restricted to its Task plus Handoffs to the Artifacts the Task lists as inputs
-- Output: the Coordinator's `synthesize` result Artifacts
+- Invocations: `coordinator` Invocations with purposes `decompose`, `replan` (0..n), `synthesize`; N `worker` Invocations with purpose `task` (one per Task)
+- Input: a Coordinator Invocation receives the node manifest and, for `replan` and `synthesize`, Handoffs to every Worker result since the previous Coordinator Invocation; each Worker receives the manifest restricted to its Task plus Handoffs to the Artifacts the Task lists as inputs
+- Output: the `synthesize` Invocation's result Artifacts
 - Fan-in: performed by the runtime as described above
-- Bounds: node Budget caps `maxTasks`, `maxConcurrentWorkers`, and `maxCoordinatorTurns`
-- Failure: the Coordinator failing the node on `replan`, exhausting `maxCoordinatorTurns`, or exhausting the node Budget fails the node
+- Bounds: node limits cap `maxTasks`, `maxConcurrentWorkers`, and `maxCoordinatorInvocations`; the node allocation caps total cost, tokens, and Attempts
+- Failure: a `replan` Invocation failing the node, exhausting `maxCoordinatorInvocations`, or a node allocation exhausted under policy `fail` fails the node
 
 Tasks proposed inside a `coordinator_worker` node are Tasks of the Run (they
 appear in the ledger, reference Requirements, and carry Evidence) and are
 tagged with the node id. They are internal execution records of the node:
 they do not appear in the source Execution Plan and their existence never
-changes a Plan Node or Plan Edge.
+changes a Plan Node, Plan Edge, or scope row.
+
+#### 5.5.1 Task proposal validation
+
+The runtime accepts a proposed Task only when all of the following hold;
+otherwise the proposal is rejected in the tool result with the failing
+rule, and nothing is persisted:
+
+- it is well-formed (subject, inputs by Artifact id, dependencies by Task id
+  within the node, expected outputs);
+- it references a non-empty subset of the node's exact persisted
+  Requirement scope (`plan_node_requirements`), every reference naming the
+  node's pinned Requirement revision;
+- it references no Requirement outside that scope, none from another
+  Conversation, none at a different revision, none that is `retired`, and
+  no internal (non-leaf) Requirement;
+- the node's dependency graph stays acyclic and the Task count stays within
+  `maxTasks`;
+- a Worker Invocation allocation for it can be reserved from the node's
+  unconsumed, unreserved allocation (§7.6).
 
 ### 5.6 `evaluator_optimizer`
 
@@ -388,24 +531,48 @@ Evaluator passes the result or the round limit is reached. Between them the
 runtime runs the node's deterministic Acceptance Criteria; a deterministic
 failure skips the Evaluator for that round and is fed back as Evidence.
 
-- Invocations: per round, 1 producer `worker` then (deterministic checks, then) 1 `evaluator`
+- Invocations: per round, 1 producer `worker` (`step`) then (deterministic checks, then) 1 `evaluator` (`evaluate`)
 - Input: round 1 producer receives the node manifest; each later producer receives the manifest plus a Handoff to the previous result and the previous Evaluation; the Evaluator receives the manifest plus a Handoff to the current result and the Acceptance Criteria or rubric
 - Output: the last passing result Artifacts
 - Fan-in: none
 - Bounds: `maxRounds` on the node (default 3)
 - Failure: round limit reached without a pass fails the node; the last Evaluation is attached
 
-The producer of round `n+1` is a new Invocation. What it knows about round
-`n` is in its manifest. A composite producer is unrolled by the compiler
-(§4.4), in which case the node runs in evaluate-only form.
+The producer of round `n+1` is a new Invocation (with
+`continuedFromInvocationId` pointing at round `n`'s producer). What it knows
+about round `n` is in its manifest. A composite producer is unrolled by the
+compiler (§4.4), in which case the node runs in evaluate-only form.
 
 ## 6. Invocations
 
-### 6.1 Creation
+### 6.1 Definition and creation
 
-The runtime creates an Invocation when a Pattern calls for it. Creation
-records the Agent Definition revision, the role, the Plan Node, the Task
-ids, and the Budget. The runtime then assembles the Context Manifest.
+An Invocation is one logical execution of an Agent Definition revision
+inside a `pattern` Plan Node: one role, one `purpose`, one immutable
+Context Manifest, one allocation, and one typed result. New logical input
+always creates a new Invocation; an Invocation's manifest never changes
+after creation.
+
+The runtime creates an Invocation when a Pattern calls for it (§5) or when
+new logical input exists for a turn-driven role (§4.6, §5.5). Creation
+records the Agent Definition revision, the role, the `purpose`, the Plan
+Node, the Task ids, the allocation reserved from the node (§7.6), and
+`continuedFromInvocationId` when the Invocation logically follows an
+earlier one (the previous Orchestrator Invocation of the Run, the previous
+Coordinator Invocation of the node, the previous producer round, or the
+Invocation whose Decision was resolved). The runtime then assembles and
+persists the Context Manifest and starts the initial Attempt.
+
+Purposes by role:
+
+| Role | Purposes |
+|---|---|
+| `orchestrator` | `operator_input`, `node_result`, `decision_resolution`, `gate_result`, `plan_revision`, `publication_result`, `final_synthesis` |
+| `coordinator` | `decompose`, `replan`, `synthesize` |
+| `worker` | `step` (single, chain, parallel item, aggregation, producer), `task` (coordinator-worker Task) |
+| `evaluator` | `select` (route selector), `evaluate` (evaluator-optimizer round, Gate evaluated criterion) |
+
+Invocation status: `pending | running | waiting | succeeded | failed | cancelled`.
 
 ### 6.2 Context Manifest
 
@@ -415,25 +582,28 @@ projection, and the manifest is the record. It contains:
 
 - Agent Definition revision id and content hash, and the instructions it
   carries
-- Role, Pattern position (for example `chain step 2 of 3`), and, for
-  turn-based roles, the turn `purpose`
+- Role, `purpose`, Pattern position (for example `chain step 2 of 3`), and
+  `continuedFromInvocationId`
 - Run id, Plan Node id, Task ids and their subjects
-- Requirement ids and current statements for the Requirements the Task
-  serves, with their Acceptance Criteria
+- Requirement ids and statements at the node's pinned revision for the
+  Requirements in the node's scope (or, for the root node, the current
+  revision), with their Acceptance Criteria
 - Decision ids and answers for every Decision that references those
-  Requirements or Tasks
-- Handoffs delivered to this Invocation, including this Invocation's own
-  earlier results for a turn-based role
+  Requirements or Tasks, and every Decision resolved since the
+  `continuedFromInvocationId` Invocation's manifest
+- Handoffs delivered to this Invocation, including the results of the
+  `continuedFromInvocationId` Invocation and every queued input this
+  Invocation was created for
 - Artifact ids the Invocation may read (delivered Handoffs' Artifacts plus
   any the Orchestrator listed on the node)
 - Starting Snapshot and the worktree path
-- Budget for this Invocation
+- The allocation and limits for this Invocation
 - The Tool Policy in force and the runtime tools available (§6.4)
 
 An Invocation is told nothing else. There is no shared working state, no
-narrative of what other agents are doing, and no transcript of anyone
-else's Attempt. The manifest is always sufficient to start a fresh Attempt
-(§6.5).
+narrative of what other agents are doing, no transcript of anyone else's
+Attempt, and no provider continuation payload. The manifest is always
+sufficient to start a `fresh` Attempt (§6.6).
 
 ### 6.3 Result
 
@@ -443,21 +613,25 @@ Every Attempt must end by returning a typed result through the runtime's
 - `status`: `completed | failed | blocked`
 - `artifacts`: Artifact ids produced (the runtime has already stored them
   when the Invocation wrote them)
-- `tasks`: Task id → `completed | blocked | not_started`, with Evidence
-  for each `completed`
+- `tasks`: Task id → `completed | blocked | failed`, with Evidence for each
+  `completed` and a blocker for each `blocked`
 - `evidence`: Evidence for the claims made
 - `summary`: at most 500 characters
 - `openItems`: at most 10 short strings
 - `blocker`: for `blocked` only — the Decision id requested or a short
   statement of what must change
+- `runOutcome`: Orchestrator only, optional — `infeasible` with Evidence,
+  which is the Orchestrator's only path to a terminal Run failure (§3)
 
 The runtime validates the result: every referenced id must exist and belong
-to this Run; every `completed` Task must carry Evidence; a writing
-Invocation must have produced a Changeset (possibly empty, stated as such).
-An Attempt that ends without a valid result is a failed Attempt.
+to this Run; every `completed` Task must carry Evidence and its required
+output Artifacts; a writing Invocation must have produced a Changeset
+(possibly empty, stated as such). An Attempt that ends without a valid
+result is a failed Attempt.
 
-A Task marked `completed` in a result completes the Task. It does not
-change any Requirement's status (§8.1).
+A Task reported `completed` in a valid result is transitioned to
+`completed` by the runtime (§7.9). It does not change any Requirement's
+status (§8.1).
 
 Results are the only way an Invocation communicates. There is no message
 tool, no peer addressing, and no channel to the operator except a Decision
@@ -477,12 +651,15 @@ Each capability tool carries a **Tool Policy** disposition from the Agent
 Definition revision: `allowed`, `denied`, or `approval_required`. An
 `approval_required` tool call is intercepted by the runtime, which requests
 a `side_effect_approval` Decision (§8.2) from the operator with the exact
-call, ends the Attempt `blocked`, and continues with a new Attempt when the
-Decision is answered. Built-in definitions mark destructive shell
-operations, network access outside declared MCP servers, and any operation
-on a path outside the worktree as `approval_required` or `denied`. Tool
-Policy, capability policy, worktree isolation, side-effect approval, and
-Gates are the safety mechanisms; there is no trust flag.
+call, ends the Invocation `blocked` and `waiting`, and creates a new
+Invocation (purpose `decision_resolution` for the Orchestrator; the same
+purpose as the blocked Invocation otherwise, with
+`continuedFromInvocationId` set) when the Decision is answered. Built-in
+definitions mark destructive shell operations, network access outside
+declared MCP servers, and any operation on a path outside the worktree as
+`approval_required` or `denied`. Tool Policy, capability policy, worktree
+isolation, side-effect approval, and Gates are the safety mechanisms; there
+is no trust flag.
 
 **Runtime tools** are the same for every role, restricted by role:
 
@@ -490,47 +667,61 @@ Gates are the safety mechanisms; there is no trust flag.
 |---|---|---|---|---|
 | `read_requirements`, `read_decisions`, `read_tasks`, `read_artifact`, `read_execution_plan`, `read_agent_definitions` | yes | yes | yes | yes |
 | `write_artifact` | yes | yes | yes | yes |
-| `update_task` (status, Evidence) | yes | own node | own Task | no |
+| `update_task` (Evidence, output Artifacts on own Tasks) | yes | own node | own Task | no |
 | `create_tasks` | yes | no | no | no |
 | `propose_tasks` | no | own node | no | no |
-| `request_decision` (operator) | yes | yes | yes | no |
-| `record_decision` (orchestrator-owned, incl. waivers the operator delegated) | yes | no | no | no |
+| `request_decision` (any kind except `orchestrator_choice`; `requirement_waiver` is always `operator_required`) | yes | yes | yes | no |
+| `record_decision` (kind `orchestrator_choice` only; cannot resolve any other kind) | yes | no | no | no |
 | `propose_requirements` | yes | no | no | no |
-| `revise_execution_plan` | yes | no | no | no |
+| `revise_execution_plan` (source form only; validated and compiled by the runtime) | yes | no | no | no |
 | `request_completion` | yes | no | no | no |
-| `return_result` | yes (per turn) | yes (per turn) | yes | yes |
+| `return_result` | yes | yes | yes | yes |
 
 No tool lets an agent see another Invocation's transcript, send a message
-to another agent, or alter scheduling.
+to another agent, alter scheduling, write compiled plan structure, or
+resolve a Decision of any kind other than `orchestrator_choice`. In
+particular `record_decision` cannot create or resolve a
+`requirement_waiver`; the Orchestrator proposes a waiver only through
+`request_decision`, and only the operator resolves it (§8.2).
 
-### 6.5 Attempts and provider resumption
+### 6.5 Attempts
 
-Each Attempt is one provider execution of an Invocation. Every Attempt
-records:
+An Attempt is one provider execution of an Invocation from start to a
+terminal result or failure. Every Attempt records:
 
-- `kind`: `initial | retry | turn`
-- `resumedFromAttemptId`: the earlier Attempt whose provider execution this
-  one continued, or null
+- `kind`: `initial` (the Invocation's first Attempt) or `retry` (a later
+  Attempt after a retryable failure, §7.2)
 - `startMode`: `fresh` (started from the Context Manifest) or `resumed`
   (continued provider execution from `resumedFromAttemptId`)
-- the provider's opaque continuation metadata, if any, written by the
-  provider adapter to `provider_continuations` keyed by Attempt id
+- `resumedFromAttemptId`: nullable; the Attempt whose provider execution
+  this one continued — a prior Attempt of the same Invocation, or the last
+  Attempt of the Invocation named by `continuedFromInvocationId`
+- its transcript Artifact, Usage rows, failure classification, and result
+
+There is no other Attempt kind. New logical input never produces an
+Attempt; it produces a new Invocation (§6.1).
+
+### 6.6 Provider resumption
 
 Correctness never depends on provider state. The Context Manifest and the
-canonical Run state are always sufficient to start a fresh Attempt, and the
-runtime never waits on, reads, or reconstructs anything from a provider
+canonical Run state are always sufficient to start a `fresh` Attempt, and
+the runtime never waits on, reads, or reconstructs anything from a provider
 session to decide what to do next.
 
-A new Attempt may start `resumed` only when all of the following hold:
+An Attempt may start `resumed` only when all of the following hold:
 
 - the provider adapter reports that the provider supports continuation;
-- the adapter determines continuation is safe for this Attempt (the prior
+- the adapter determines continuation is safe for this Attempt: the prior
   Attempt ended in a state the provider can continue from, the same Agent
-  Definition revision and Tool Policy apply, and the manifest has not
-  changed except for the inputs the new Attempt is meant to receive);
-- the continuation metadata for `resumedFromAttemptId` is present;
-- the projected context size and cost stay within the Invocation's Budget
-  and the Agent Definition's context policy.
+  Definition revision and Tool Policy apply, and the new Invocation's
+  manifest differs from the prior one only by the inputs it was created to
+  receive (continuation across an Invocation boundary is permitted on
+  exactly these terms);
+- a `provider_continuations` index row exists for `resumedFromAttemptId`,
+  is not expired, and the payload it points to is present and matches its
+  digest;
+- the projected context size and cost stay within the Invocation's
+  allocation and the Agent Definition's context policy.
 
 Otherwise the Attempt starts `fresh` from the manifest. Resumption is an
 optimization that saves re-reading the manifest; a `fresh` start is always
@@ -539,14 +730,15 @@ recorded on the Attempt; nothing else in the runtime branches on it. There
 is no rotation, no generation counter, no checkpoint reconstruction, and no
 continuation document.
 
-### 6.6 Turn-based roles
-
-The `orchestrator` and `coordinator` roles are turn-based: their
-Invocation stays open across several Attempts of `kind: turn`, each started
-by the runtime with new input (§4.6, §5.5). A turn Attempt may be `resumed`
-from the previous turn under §6.5 or `fresh` with the Invocation's earlier
-results included in its manifest as Handoffs. Either way the Attempt is a
-full Attempt: it has its own Usage rows, transcript Artifact, and result.
+Continuation storage is pointer-based. `provider_continuations` is an index
+row per Attempt: Attempt id, provider, storage key, digest, creation time,
+optional expiry time. The provider adapter owns a replaceable continuation
+payload store (interface under `server/src/provider/`) and the storage key
+points to the opaque payload there. Payloads are not Artifacts, are not in
+Context Manifests, are never read by projections or scheduler decisions,
+may be deleted at any time, and never appear in Events, logs, or API
+responses. A missing, expired, or digest-mismatched payload yields a
+`fresh` Attempt.
 
 ## 7. Runtime responsibilities
 
@@ -555,76 +747,142 @@ and no agent can.
 
 ### 7.1 Scheduling
 
-- Node readiness is computed from Plan Edges as defined in §4.3.
+- Node readiness is computed from Plan Edges and allocation as defined in
+  §4.3.
 - The scheduler runs ready nodes subject to the Run Budget's concurrency
   limit, each node's own limit, and the capacity leases the resource
   governor grants (§7.8). Order among ready nodes is creation order.
-- Within a node, the Pattern decides Invocation order (§5).
+- Within a node, the Pattern decides Invocation order (§5). An Invocation
+  starts only after its allocation is reserved (§7.6) and a lease is held.
 
 ### 7.2 Retries
 
-- An Invocation has a maximum Attempt count from its Budget (default 2 for
-  `initial` plus `retry` Attempts; turn Attempts are bounded separately by
-  `maxTurns`).
+- An Invocation has a maximum Attempt count from its allocation (default 2:
+  the `initial` Attempt plus one `retry`).
 - The runtime classifies each Attempt failure: `provider_transient`
   (retry after backoff), `provider_permanent` (no retry), `result_invalid`
-  (retry with the validation error in the manifest), `budget_exhausted`
-  (no retry), `interrupted` (retry only if the interruption was not a
-  cancellation), `tool_failure` (retry once).
+  (retry with the validation error in the manifest rendering, the manifest
+  itself unchanged), `allocation_exhausted` (no retry), `interrupted`
+  (retry only if the interruption was not a cancellation), `tool_failure`
+  (retry once).
 - A retry is a new Attempt of `kind: retry`, started `fresh` or `resumed`
-  under §6.5. The failed Attempt's transcript Artifact remains.
+  under §6.6. The failed Attempt's transcript Artifact remains. When the
+  permitted Attempts are exhausted the Invocation is `failed`.
 
 ### 7.3 Dependencies
 
 - Plan Edges are the only cross-node ordering mechanism.
-- Task dependencies order Worker creation inside a `coordinator_worker`
-  node and are otherwise informational.
-- Cycles are rejected at compile time.
+- Task dependencies order Worker Invocation creation inside a
+  `coordinator_worker` node (§7.9) and are otherwise informational.
+- Cycles are rejected at compile time and at Task proposal time.
 
 ### 7.4 Waiting
 
 A node or Invocation waits when it has requested an `operator_required`
-Decision that is unanswered, when its Budget is exhausted and the operator
-has not raised it, when the resource governor has no lease to grant, or
-when the operator has paused the Run. Waiting is a recorded state with a
-recorded reason. A waiting Invocation's provider execution is ended; when
-the wait clears, a new Attempt starts (`resumed` if §6.5 allows, otherwise
-`fresh`) with the Decision's answer in the manifest. Nothing waits by
-polling, and nothing waits inside a provider process.
+Decision that is unanswered, when its allocation is exhausted under policy
+`wait` or `extend` with no capacity available, when the resource governor
+has no lease to grant, or when the operator has paused the Run. Waiting is
+a recorded state with a recorded reason. A waiting Invocation's provider
+execution is ended; when the wait clears, the runtime creates a new
+Invocation with `continuedFromInvocationId` set and the resolution in its
+manifest (its initial Attempt `resumed` if §6.6 allows, otherwise
+`fresh`). Nothing waits by polling, and nothing waits inside a provider
+process.
 
 ### 7.5 Progress
 
 Progress is derived, never reported by an agent:
 
-- Node progress: the count of Invocations by status.
+- Node progress: the count of Invocations by status and, for
+  `coordinator_worker`, the count of Tasks by status.
 - Run progress: the count of Plan Nodes by status, the count of Tasks by
-  status, the count of Requirements by status.
+  status, the count of Requirements by status, and Budget consumed versus
+  reserved versus unreserved.
 - Every derivation is a query over canonical stores and is recomputed on
   read.
 
 The UI shows these counts and the plan graph. There is no "status update"
 message type.
 
-### 7.6 Budgets
+### 7.6 Budgets, allocations, and reservations
 
-- Budgets are hierarchical: Run ≥ Plan Node ≥ Invocation. Creating a child
-  with a Budget larger than the parent's remaining allowance is rejected.
-- A `coordinator_worker` node reserves Budget for each Task the runtime
-  accepts from a `propose_tasks` call; a proposal that cannot be reserved
-  is rejected in the tool result.
-- The runtime records Usage as each Attempt reports it and checks Budgets
-  before starting any Attempt and on every Usage row.
-- Exceeding a cost or token Budget stops the bounded object with reason
-  `budget_exhausted`. Exceeding a time Budget interrupts the Attempt. The
-  Run enters `waiting` with reason `budget` when its own Budget is
-  exhausted, and the operator may raise it or cancel.
+**Run Budget.** The Run Budget is the global cap and allocation pool for
+the entire Run: limits for cost, tokens, wall-clock duration, Attempts, and
+concurrent Invocations, stored on the Run. All Usage from every Plan Node,
+Invocation, and Attempt counts against it.
+
+**Reservations.** Allocation is accounted with canonical
+`budget_reservations` rows, never inferred from limits and Usage. A
+reservation identifies the parent bounded object (Run, Plan Node, or
+Invocation), the child bounded object or proposed work item (Plan Node,
+Invocation, or Task), the reserved cost, tokens, and Attempts, the creation
+time, the release time, and the status (`active`, `released`). Wall-clock
+deadlines and concurrency ceilings are limits enforced by the runtime and
+the resource governor; they are not reserved quantities.
+
+- Unreserved capacity of a parent = its limit − Σ(reserved amounts of its
+  `active` reservations) − Σ(final consumed amounts of its `released`
+  reservations) − its own direct consumption (an Invocation's Attempts).
+- A reservation is created atomically with the object it allocates and
+  before that object becomes runnable. Creation fails, and the requesting
+  operation is rejected, when the parent's unreserved capacity is
+  insufficient.
+- When the child reaches a terminal state, its reservation is `released`
+  with its final consumed amounts recorded; the unused remainder returns to
+  the parent's unreserved capacity.
+- Consumption by a child never exceeds its reservation; reaching the
+  reserved amount is the child's local allocation exhaustion.
+
+**Plan Node allocation.** Each `pattern` Plan Node receives an explicit
+allocation reserved from the Run Budget when its source revision is
+compiled (§4.4 rule 8); the whole revision's allocations are reserved
+atomically and the revision is rejected if they cannot be. The root
+Orchestrator node receives an explicit initial allocation
+(`initialOrchestratorAllocation`, configurable), not the entire Run Budget.
+When the Orchestrator revises the plan, new node allocations are reserved
+only from unconsumed, unreserved Run capacity. The runtime retains a
+configured **final reserve** (`finalReserve`, enabled by default for
+`kind: code` Runs) that plan revisions cannot reserve; it is spent only on
+`final_synthesis` Orchestrator Invocations and `run_completion` Gate
+Evaluator Invocations. Unused node allocation is released when the node
+reaches a terminal state. A `join` node's allocation is zero.
+
+**Invocation allocation.** Each Invocation receives an explicit allocation
+reserved from its Plan Node's unconsumed, unreserved allocation before it
+starts. Coordinator-proposed Tasks reserve their Worker Invocation
+allocations at proposal time (§5.5.1), before the Task can become `ready`;
+the Task-level reservation becomes the Worker Invocation's reservation
+when the Invocation is created. Unused allocation returns to the node when
+the Invocation reaches a terminal state.
+
+**Exhaustion.**
+
+- An Invocation that reaches its reserved cost, tokens, or Attempts is
+  `failed` with reason `allocation_exhausted`; no retry. Reaching its
+  wall-clock limit interrupts the Attempt and is classified `interrupted`.
+- A Plan Node whose unconsumed, unreserved allocation cannot cover the next
+  Invocation it must create acts on its `onAllocationExhausted` policy:
+  `fail` (default) fails the node; `wait` puts the node in `waiting` with
+  reason `budget` until the operator raises the Run Budget or the
+  Orchestrator revises the node's expression; `extend` (the root node's
+  policy) has the runtime reserve a further increment from unreserved Run
+  capacity outside the final reserve and, when none is available, behaves
+  as `wait`.
+- The Run enters `waiting` with reason `budget` when a node that must
+  proceed is waiting on allocation and no unreserved Run capacity exists.
+  The operator may raise the Run Budget (which makes the waiting node's
+  extension or the Orchestrator's next revision possible) or cancel the
+  Run. Budget exhaustion never transitions the Run to `failed`; `failed` is
+  reached only through the terminal failure transitions in §3.
 
 ### 7.7 Fan-in
 
-Fan-in is performed by the runtime for `fan_in` edges and for the
-`parallel` and `coordinator_worker` Patterns: it waits for the required
-results, writes the index Artifact or delivers the Handoffs, and starts the
-next Invocation or turn. No agent waits for another agent.
+Fan-in is performed by the runtime: by `join` nodes for `fan_in` edges, by
+the `parallel` Pattern for its inline items, and by the
+`coordinator_worker` Pattern for Worker results. It waits for the required
+results, writes the index Artifact or records the Handoffs, and creates the
+next Invocation or marks the node terminal. No agent waits for another
+agent.
 
 ### 7.8 Resource governor
 
@@ -646,7 +904,7 @@ its current accounting and returns a structured reason on refusal
 runnable Attempt holding a lease enters `waiting` with reason
 `provider_capacity` and the structured sub-reason. Leases are released when
 the Attempt ends and are recorded in `capacity_leases` with grant and
-release times.
+release times. `join` nodes never request a lease.
 
 The governor never invokes a model, never generates conversational text,
 never holds or interprets semantic Run state, and never decides which Run
@@ -654,14 +912,54 @@ or node is more important beyond the configured ordering (creation order
 by default). It is backpressure, not orchestration. There is no global
 "pause" product state; the operator pauses individual Runs (§14).
 
+### 7.9 Task states and transitions
+
+A Task has exactly one of these states; every transition is made by the
+runtime:
+
+| State | Meaning |
+|---|---|
+| `pending` | Created; its dependencies are not all `completed`, a required input Artifact is not yet available, or (for a Coordinator-proposed Task) its Worker allocation is reserved but the node is not yet scheduling it. |
+| `ready` | Eligible for execution: dependencies `completed`, inputs available, allocation reserved. |
+| `running` | Assigned to an active Invocation. |
+| `blocked` | Cannot continue without a Decision, a replacement input, or Coordinator replanning. |
+| `completed` | Finished with its required output Artifacts and Evidence, validated by the runtime. Terminal. |
+| `failed` | Its Invocation exhausted the permitted Attempts or reached a permanent failure. Terminal. |
+| `cancelled` | Deliberately stopped by the Orchestrator, a Coordinator `replan`, or the operator. Terminal. |
+
+Transitions:
+
+- `pending → ready` when every dependency is `completed`, every input
+  Artifact exists, and the allocation is reserved.
+- `ready → running` when the runtime starts the assigned Invocation.
+- `running → completed` when the Invocation's valid result reports the
+  Task `completed` with Evidence and required Artifacts.
+- `running → blocked` when the result reports the Task `blocked`, or the
+  Invocation ends `waiting` on a Decision.
+- `running → failed` when the Invocation is `failed` (§7.2).
+- `blocked → ready` when the blocker is resolved (Decision answered,
+  replacement input delivered) and the runtime creates a new Invocation
+  for it; `blocked → cancelled` when a `replan` cancels it.
+- `pending → blocked` when a dependency becomes `failed` or `cancelled`
+  (never a silent cancellation; the Coordinator or Orchestrator decides).
+- `pending | ready | blocked → cancelled` by the Orchestrator, a
+  Coordinator `replan`, or operator cancellation of the Run or node.
+- `failed` and `completed` are terminal; a failed Task is never
+  reclassified as `cancelled`, and a replacement is a new Task that
+  records `replacesTaskId`.
+
+A Task completing never changes a Requirement's status (§8.1). A `blocked`
+or `failed` Task is never described as in progress; only `running` is.
+
 ## 8. Specification and decisions
 
 ### 8.1 Requirements
 
 - The Orchestrator proposes a Requirement tree with Acceptance Criteria
   through `propose_requirements`. The operator approves, edits, or rejects.
-  Approval creates a Requirement revision; every subsequent Invocation's
-  manifest carries the current revision's statements for its Requirements.
+  Approval creates a Requirement revision. Plan Nodes pin the revision
+  their expressions named (§4.7); the root node's manifests carry the
+  current revision.
 - A Requirement revision represents a change to an intended outcome or
   constraint: a statement's meaning, its composition, its Acceptance
   Criteria, or which Requirements exist. Changes to how the work is carried
@@ -680,18 +978,21 @@ by default). It is backpressure, not orchestration. There is no global
   Requirement.
 - `violated` and `infeasible` are recorded by the runtime from a failing
   Evaluation or by the Orchestrator or operator with Evidence.
-- `waived` is reached only through a Decision of kind `requirement_waiver`
-  (§8.2) recording the actor, the rationale, the affected Requirement id,
-  the timestamp, and optional supporting Artifact ids. The runtime applies
-  the status change when the Decision is recorded and links the two. There
-  is no other path to `waived`, and a waiver never satisfies the
-  Requirement's Acceptance Criteria; it records that the outcome is
-  accepted without them.
+- `waived` is reached only when the operator resolves a Decision of kind
+  `requirement_waiver` (§8.2). The resolved Decision records the actor (the
+  operator), the rationale, the affected Requirement id, the timestamp, and
+  optional supporting Artifact ids. The runtime applies the status change
+  only after that resolution and links the two. There is no other path to
+  `waived`; no policy, no Orchestrator tool, and no Conversation-level
+  setting can produce it. A waiver never satisfies the Requirement's
+  Acceptance Criteria; it records that the outcome is accepted without
+  them.
 - `retired` is reached through a Requirement revision that removes the
   Requirement.
-- Running Invocations keep the revision in their manifest; the Orchestrator
-  decides whether to cancel and re-create the affected nodes after a
-  revision.
+- A later Requirement revision never changes the scope of an existing Plan
+  Node (§4.7). To work against revised Requirements the Orchestrator
+  revises the source Execution Plan, producing replacement nodes under the
+  reconciliation rules in §4.5.
 
 ### 8.2 Decisions
 
@@ -700,7 +1001,8 @@ A Decision is the canonical record of a choice. Every Decision has a kind:
 - `operator_choice` — a question put to the operator;
 - `orchestrator_choice` — a choice the Orchestrator made itself;
 - `requirement_waiver` — accepts a Requirement without its Acceptance
-  Criteria (§8.1);
+  Criteria (§8.1); proposed by the Orchestrator, resolved only by the
+  operator;
 - `side_effect_approval` — approves one intercepted `approval_required`
   tool call (§6.4);
 - `signoff` — the operator's acceptance or change request at the
@@ -724,48 +1026,51 @@ and Plan Node ids, and a **resolution policy**:
   the recommendation; the Decision stays open for the operator until it
   resolves.
 
+Only `operator_choice` Decisions may use `use_default_after_deadline`.
+`requirement_waiver`, `side_effect_approval`, `signoff`, and `publish`
+Decisions always use `operator_required` and are resolved only by the
+operator. No policy, delegation, or Conversation-level setting can resolve
+them or transfer that authority. The one automatic capability that exists
+is the separate publish authorization in §9.4, which authorizes the
+runtime to perform a publish after `completed`; it is not a Decision
+resolution mechanism and does not generalize to any other kind.
+
 Resolution, by whichever path, writes exactly one `decision.resolved`
 Event recording the answer, the resolver (`operator`, `orchestrator`, or
 `policy:use_default_after_deadline`), and the time. No Decision resolves
 without that Event, and a policy resolution is shown in the Conversation
 like any other. A Decision resolved by policy may later be superseded by
-the operator; the runtime records the superseding Decision and the
-Orchestrator's next turn receives it.
-
-`requirement_waiver`, `side_effect_approval`, `signoff`, and `publish`
-Decisions always use `operator_required` unless a Conversation-level policy
-recorded by the operator delegates that kind to the Orchestrator (for
-`requirement_waiver`) or authorizes it automatically (for `publish`, §9.4).
-That policy is itself recorded as a Decision.
+the operator; the runtime records the superseding Decision and creates a
+`decision_resolution` Orchestrator Invocation.
 
 ## 9. Workspace, Snapshots, Changesets, integration, publishing
 
 ### 9.1 Isolation
 
-- Each Run has a **target**: the operator's branch in the Workspace that
-  the Run's result is meant for. The runtime never modifies the target
+- Each Run has a **Target**: the operator's branch in the Workspace that
+  the Run's result is meant for. The runtime never modifies the Target
   while the Run is executing.
-- Each Run has an **integration Workspace**: a Run-owned worktree and
-  branch created from the Run's base Snapshot of the target. All
+- Each Run has an **Integration Workspace**: a Run-owned worktree and
+  branch created from the Run's base Snapshot of the Target. All
   integration happens there.
 - Every Invocation with write capability runs in its own worktree created
-  from the node's starting Snapshot of the integration Workspace. Read-only
-  Invocations run against the integration Workspace directly, or a
+  from the node's starting Snapshot of the Integration Workspace. Read-only
+  Invocations run against the Integration Workspace directly, or a
   read-only worktree when concurrent writers exist.
-- The Workspace's own checkout and the target branch are never modified by
-  an Invocation.
+- The Workspace's own checkout and the Target are never modified by an
+  Invocation.
 
 ### 9.2 Integration
 
 - When a writing Invocation returns, the runtime commits its worktree,
   records the Changeset (before Snapshot, after Snapshot, diff Artifact),
-  and integrates the Changeset into the integration Workspace in Plan Edge
+  and integrates the Changeset into the Integration Workspace in Plan Edge
   order.
 - A Changeset that does not apply cleanly is not applied. The runtime
-  records the conflict as a Task assigned to the Plan Node's owner (the
-  Coordinator for `coordinator_worker`, otherwise the Orchestrator) with the
-  conflict Artifact, and the node's `node_exit` Gate cannot pass until that
-  Task completes.
+  records the conflict as a Task assigned to the Plan Node's owner (a
+  `replan` Coordinator Invocation for `coordinator_worker`, otherwise the
+  Orchestrator) with the conflict Artifact, and the node's `node_exit` Gate
+  cannot pass until that Task completes.
 - After every integration the runtime records the integration Snapshot on
   the Run.
 
@@ -780,12 +1085,12 @@ least one deterministic Acceptance Criterion on its `run_completion` Gate
 (typically build, typecheck, test). When the operator accepts at
 `operator_signoff`, the runtime records the accepted integration Snapshot as
 the Run's **final Snapshot** and the diff from the base Snapshot as the
-Run's **final Changeset**. The Run is `completed`. The target branch is
-still untouched.
+Run's **final Changeset**. The Run is `completed`. The Target is still
+untouched.
 
 ### 9.4 Publishing
 
-Applying the final Changeset to the target is a separate **publish**
+Applying the final Changeset to the Target is a separate **publish**
 action on a completed Run. It is performed by the runtime's Workspace
 provider (the git implementation for git Workspaces) and never by an
 Invocation.
@@ -793,23 +1098,26 @@ Invocation.
 Publishing:
 
 - requires a `publish` Decision by the operator, unless a Conversation-level
-  policy Decision recorded by the operator authorizes automatic publishing
-  for that target (in which case the runtime publishes immediately after
-  `completed` and records the authorizing Decision id on the Publication);
-- revalidates the target: the target's current Snapshot is taken and
+  publish authorization recorded by the operator (itself a Decision of kind
+  `operator_choice` naming the Target) authorizes automatic publishing for
+  that Target, in which case the runtime publishes immediately after
+  `completed` and records the authorizing Decision id on the Publication;
+  this authorization covers publishing only;
+- revalidates the Target: the Target's current Snapshot is taken and
   compared with the Run's base Snapshot;
 - selects the strategy at publish time from what the Workspace provider
-  supports (`fast_forward` when the target still equals the base Snapshot,
+  supports (`fast_forward` when the Target still equals the base Snapshot,
   `merge` when it has moved and the merge is clean, or another provider
   strategy the operator named in the `publish` Decision);
-- fails safely: if the target changed and the chosen strategy is not clean,
+- fails safely: if the Target changed and the chosen strategy is not clean,
   or if any deterministic verification the Workspace policy requires on the
-  post-publish state fails, nothing is written to the target, the
-  Publication is recorded `failed` with the reason, and the Orchestrator's
-  next turn receives it so it can propose a new Run to reconcile;
+  post-publish state fails, nothing is written to the Target, the
+  Publication is recorded `failed` with the reason, and a
+  `publication_result` Orchestrator Invocation is created so it can propose
+  a new Run to reconcile;
 - records the result as a Publication row, a `run.published` or
   `run.publish_failed` Event, and a publish Artifact (strategy, before and
-  after target Snapshots, command output).
+  after Target Snapshots, command output).
 
 Git strategy is Workspace-provider behaviour selected at publish time. It is
 not a Run mode, is not chosen at Run creation, and is not visible to any
@@ -821,18 +1129,21 @@ Order is fixed: deterministic checks, then Evaluations, then the operator.
 
 - `node_exit`: runs when a Pattern produces its output. Deterministic
   Acceptance Criteria run on the node's integrated Snapshot. Evaluated
-  criteria create one Evaluator Invocation per criterion group. A failing
-  Gate creates Tasks describing the failures and leaves the node in
-  `running` for the Pattern to handle (a `coordinator_worker` node gets a
-  `replan` turn; other Patterns fail the node after one automatic retry of
-  the last Invocation with the failures in its manifest).
+  criteria create one Evaluator Invocation (purpose `evaluate`) per
+  criterion group. A failing Gate creates Tasks describing the failures and
+  leaves the node in `running` for the Pattern to handle (a
+  `coordinator_worker` node gets a `replan` Coordinator Invocation; other
+  Patterns create one new Invocation with `continuedFromInvocationId` set
+  and the failures in its manifest, and fail the node if that also fails).
 - `run_completion`: runs when the Orchestrator calls `request_completion`.
   Checks every `open` Requirement's Acceptance Criteria on the integration
   Snapshot and records the resulting statuses; requires every leaf
   Requirement to be `satisfied`, `waived`, or `retired`; checks that every
-  Task is `completed` or `cancelled`; checks that no `operator_required`
-  Decision is unanswered; then runs the Run's evaluated criteria. A failure
-  returns the Run to `running` with Tasks created.
+  Task is `completed` or `cancelled` (a `failed` Task blocks completion
+  until replaced or cancelled by a recorded action); checks that no
+  `operator_required` Decision is unanswered; then runs the Run's evaluated
+  criteria from the final reserve. A failure returns the Run to `running`
+  with Tasks created and a `gate_result` Orchestrator Invocation.
 - `operator_signoff`: opens when `run_completion` passes. The operator sees
   the Requirement statuses (waivers shown with their Decisions), the
   Evaluations, the final Changeset, and the Usage, and accepts or requests
@@ -856,15 +1167,15 @@ records:
 - **content hash** — a digest of the resolved configuration;
 - **provenance** — where it came from: `builtin`, `workspace_file` (path,
   Snapshot), or `conversation` (authored by the Orchestrator in a
-  Conversation, with the Decision that approved it);
+  Conversation, with the `operator_choice` Decision that approved it);
 - **model policy** — model id, effort, and context policy (maximum context
   occupancy before a `fresh` Attempt is preferred over `resumed`);
 - **instructions**;
 - **capabilities** — the provider-native tools and MCP servers it declares;
 - **Tool Policy** — per-capability disposition `allowed`, `denied`, or
   `approval_required` (§6.4);
-- **default limits** — the default Invocation Budget and, for turn-based
-  roles, `maxTurns`.
+- **default limits** — the default Invocation allocation (cost, tokens,
+  Attempts) and wall-clock limit.
 
 Any change to any field produces a new revision with a new `agdr_` id and
 hash under the same logical id. Invocations reference the revision; a
@@ -884,9 +1195,10 @@ mechanism, if ever added, is a new feature with its own design.
   Attempts; Plan Node total = its Invocations; Run total = its Plan Nodes,
   the root node included. There is no separately stored total that can
   disagree with the rows.
-- Budget checks use the same sums.
+- Reservation accounting (§7.6) uses the same sums for consumed amounts;
+  reserved amounts come from `budget_reservations`.
 - The operator-facing cost line always shows the Run total, and a per-node
-  breakdown is available.
+  breakdown with reserved and unreserved capacity is available.
 
 ## 13. Events and projections
 
@@ -898,22 +1210,30 @@ mechanism, if ever added, is a new feature with its own design.
 - Streaming provider output (partial text, tool calls in progress) is
   delivered on the same stream as transient Events that are not journaled;
   they carry the Attempt id and nothing else about the system.
+- No Event, log line, or API response carries a provider continuation
+  payload or storage key contents; at most the existence of an index row is
+  exposed.
 
 ## 14. Failure model
 
 | Failure | Handling |
 |---|---|
-| Provider error, transient | New Attempt after backoff, within the Attempt Budget. |
+| Provider error, transient | New Attempt (`retry`) after backoff, within the Invocation's Attempt allocation. |
 | Provider error, permanent | Invocation `failed`; Pattern decides node outcome. |
 | Provider capacity refused by the governor | Attempt not started; Run `waiting` (`provider_capacity`); the scheduler retries when the governor signals capacity or the retry-after time passes. |
-| Invocation returns an invalid result | New Attempt with the validation error in the manifest. |
-| Invocation exceeds its Budget | Invocation `failed` with reason `budget_exhausted`; no retry. |
-| Plan Node fails | Successors `skipped` (or `ready` with the failure if opted in); the Orchestrator's next turn receives the failure. |
+| Invocation returns an invalid result | New Attempt (`retry`) with the validation error in the rendering. |
+| Invocation exhausts its allocation | Invocation `failed` with reason `allocation_exhausted`; no retry; its Task, if any, `failed`. |
+| Plan Node exhausts its allocation | Per `onAllocationExhausted`: `fail`, `wait` (Run may enter `waiting`/`budget`), or `extend`. |
+| Run Budget has no unreserved capacity for work that must proceed | Run `waiting` (`budget`); operator raises the Budget or cancels. Never `failed` on this alone. |
+| Plan Node fails | Successors `skipped` (or `ready` with the failure if opted in); a `node_result` Orchestrator Invocation is created. |
+| `join` fan-in policy not met | Join `failed`; handled as a Plan Node failure. |
+| Task fails or is blocked inside `coordinator_worker` | Task `failed`/`blocked`; a `replan` Coordinator Invocation is created unless one is active (then queued). |
 | Changeset conflict | Task created for the node owner; Gate blocked until resolved. |
-| Publish fails | Target untouched; Publication `failed`; Orchestrator's next turn receives it. |
-| Server restart | Every `running` Attempt is marked `interrupted`; on boot the runtime creates new Attempts for Invocations that still have Attempt Budget, from their persisted manifests, `resumed` only where §6.5 permits. Worktrees are preserved and reattached by Invocation id. Leases are recomputed from scratch. Nothing is inferred from transcripts. |
-| Operator cancels a Run | All Attempts interrupted, all nodes `cancelled`, integration Workspace left in place, Run `cancelled`. |
-| Operator pauses a Run | The scheduler stops starting Attempts for that Run; running Attempts are allowed to finish their current turn (`soft`) or interrupted (`hard`); Run `waiting` with reason `operator`. Other Runs are unaffected. |
+| Publish fails | Target untouched; Publication `failed`; a `publication_result` Orchestrator Invocation is created. |
+| Provider continuation payload missing, expired, or corrupt | The Attempt starts `fresh`; no other effect. |
+| Server restart | Every `running` Attempt is marked `interrupted`; on boot the runtime creates new Attempts (`retry`) for Invocations that still have Attempt allocation, from their persisted manifests, `resumed` only where §6.6 permits. Worktrees are preserved and reattached by Invocation id. Leases are recomputed from scratch; reservations are read as persisted. Nothing is inferred from transcripts. |
+| Operator cancels a Run | All Attempts interrupted, all nodes `cancelled`, all reservations released, Integration Workspace left in place, Run `cancelled`. |
+| Operator pauses a Run | The scheduler stops starting Attempts for that Run; running Attempts are allowed to finish (`soft`) or interrupted (`hard`); Run `waiting` with reason `operator`. Other Runs are unaffected. |
 
 ## 15. Invariants
 
@@ -922,26 +1242,27 @@ by a test.
 
 1. **Single-agent execution is the default.** A Run's Execution Plan begins
    as one `single` node (the Orchestrator). Any additional node is an
-   explicit revision by the Orchestrator with a stated Pattern.
+   explicit source revision by the Orchestrator with a stated Pattern.
 2. **The Orchestrator may work directly.** The Orchestrator's Agent
    Definition grants read, write, and shell capabilities, and work it does
-   in its own Invocation is recorded (Changesets, Artifacts, Usage) exactly
-   like any other Invocation's.
+   in its own Invocations is recorded (Changesets, Artifacts, Usage)
+   exactly like any other Invocation's.
 3. **Patterns are typed Execution Plan nodes, not persistent agent chat
-   topologies.** A Pattern exists only as the `pattern` field of a Plan
-   Node and as an expression in a source revision. No table, object, or
-   process represents a group of agents outside a Plan Node's lifetime, and
-   no agent addresses another agent.
+   topologies.** A Pattern exists only as the `pattern` field of a
+   `kind: pattern` Plan Node and as an expression in a source revision. No
+   table, object, or process represents a group of agents outside a Plan
+   Node's lifetime, and no agent addresses another agent.
 4. **Supported patterns are exactly** `single`, `chain`, `route`,
    `parallel`, `coordinator_worker`, and `evaluator_optimizer`. No other
-   value is accepted, and none of these is implemented by delegating
-   ordering or fan-in to an agent.
+   value is accepted, `join` is a deterministic node kind and not a
+   Pattern, and none of the six is implemented by delegating ordering or
+   fan-in to an agent.
 5. **The deterministic runtime owns scheduling, retries, dependencies,
    waiting, progress, budgets, and fan-in.** No runtime tool exposes any of
    these to an agent except as read-only facts; no prompt asks an agent to
    perform any of them.
 6. **Agent transcripts are diagnostic records, never canonical state.** No
-   code path reads a transcript Artifact or provider continuation metadata
+   code path reads a transcript Artifact or a provider continuation payload
    to make a decision, build a manifest, recover from a restart, or
    compute a projection.
 7. **Workers do not communicate peer-to-peer by default.** There is no
@@ -969,20 +1290,24 @@ by a test.
 13. **Requirement satisfaction derives from Acceptance Criteria and
     Evidence.** No tool, result, or Task transition sets a Requirement to
     `satisfied`; only a Gate's recorded Evaluations do. `waived` is set
-    only by a `requirement_waiver` Decision.
+    only after the operator resolves a `requirement_waiver` Decision; no
+    policy, tool, or setting can resolve one.
 14. **Coordination depth is one.** A Coordinator cannot revise the plan,
     create Invocations, or address Workers; a Worker cannot propose or
     create anything; a `coordinator_worker` expression cannot contain a
     composite operand or another `coordinator_worker`.
-15. **The persisted plan is flat.** Every source revision compiles to a
-    graph of Plan Nodes and typed Plan Edges with no nesting, no cycles, and
-    bounded size; Coordinator-proposed Tasks never change it.
-16. **The target branch is never modified by a Run.** Only a publish
-    action on a `completed` Run writes to the target, after revalidating it,
-    and it fails without writing when the operation is not clean.
+15. **The persisted plan is flat and compiler-written.** Every source
+    revision compiles to a graph of Plan Nodes and typed Plan Edges with no
+    nesting, no cycles, and bounded size; only the compiler writes
+    `plan_nodes`, `plan_edges`, and `plan_node_requirements`;
+    Coordinator-proposed Tasks never change them.
+16. **The Target is never modified by a Run.** Only a publish action on a
+    `completed` Run writes to the Target, after revalidating it, and it
+    fails without writing when the operation is not clean.
 17. **Provider resumption is optional and non-canonical.** Every Attempt
-    can start `fresh` from its Context Manifest; deleting all provider
-    continuation metadata changes no outcome.
+    can start `fresh` from its Context Manifest; deleting every
+    continuation payload and index row changes no outcome; no payload
+    appears in a canonical row, Event, log, or API response.
 18. **The resource governor is deterministic backpressure.** It never
     invokes a model, emits text, or holds semantic Run state; refusal is a
     structured reason on a `waiting` Run.
@@ -990,6 +1315,29 @@ by a test.
     Orchestrator, or `use_default_after_deadline` — writes a
     `decision.resolved` Event, and a policy resolution requires a recorded
     recommendation, deadline or condition, rationale, and affected ids.
+20. **One Invocation per logical turn.** Every Invocation has one immutable
+    Context Manifest and one `purpose`; new logical input creates a new
+    Invocation, never an Attempt; Attempts are only `initial` or `retry`;
+    at most one Orchestrator Invocation per Run and one Coordinator
+    Invocation per `coordinator_worker` node is active at any time; routine
+    progress creates neither.
+21. **Plan Node Requirement scope is exact, pinned, and immutable.** A
+    `pattern` node's scope is the exact leaf set expanded from its
+    expression's roots at one pinned Requirement revision, persisted in
+    `plan_node_requirements`, and never changed by a later Requirement
+    revision; Coordinator-proposed Tasks reference a non-empty subset of
+    it.
+22. **Budget allocation is explicit and atomic.** Every `pattern` Plan
+    Node and every Invocation has an `active` or `released`
+    `budget_reservations` row created before it becomes runnable; the root
+    node's allocation is an explicit initial amount, never the Run Budget;
+    the sum of active reservations plus released consumption never exceeds
+    the parent's limit; Budget exhaustion places a Run in `waiting`, never
+    `failed`.
+23. **Task states are complete and runtime-owned.** A Task is always in
+    exactly one of `pending`, `ready`, `running`, `blocked`, `completed`,
+    `failed`, `cancelled`; only the runtime transitions it; a `failed` Task
+    is never reclassified `cancelled`.
 
 ## 16. Non-goals
 
@@ -997,8 +1345,11 @@ by a test.
   implementation ships correctness and integration tests only.
 - No numeric quality scores anywhere in the model.
 - No agent-to-agent messaging, mailbox, or routing surface.
-- No canonical dependence on provider session state.
+- No canonical dependence on provider session state, and no provider
+  payload in any canonical row.
 - No nested persisted Plan Nodes and no nested Runs; composition is
   compiled flat.
+- No long-lived Invocation: an Invocation never receives new logical input
+  after creation.
 - No global pause product state; backpressure is the resource governor.
 - No runtime behaviour selected by a feature flag.
