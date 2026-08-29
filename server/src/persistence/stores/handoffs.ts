@@ -68,6 +68,16 @@ export class HandoffStore {
     return this.ctx.db.select().from(handoffs).where(eq(handoffs.runId, runId)).orderBy(asc(handoffs.createdAt)).all().map(toDomain);
   }
 
+  /** Handoffs addressed to one endpoint, in creation order; `status` narrows to one lifecycle state. */
+  listByTarget(runId: RunId, target: HandoffEndpoint, status?: Handoff["status"]): Handoff[] {
+    return this.listByRun(runId).filter(
+      (h) =>
+        h.target.kind === target.kind &&
+        (target.kind === "plan_node" ? h.target.kind === "plan_node" && h.target.planNodeId === target.planNodeId : h.target.kind === "invocation" && h.target.invocationId === target.invocationId) &&
+        (status === undefined || h.status === status),
+    );
+  }
+
   transition(id: HandoffId, to: "delivered" | "cancelled", options?: WriteOptions): Handoff {
     return this.ctx.tx.write(() => {
       const current = this.get(id);

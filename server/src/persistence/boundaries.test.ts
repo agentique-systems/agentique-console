@@ -112,7 +112,7 @@ describe("import boundaries", () => {
     }
   });
 
-  it("the execution boundary depends only on core, the persistence boundary, and itself", () => {
+  it("the execution boundary depends only on core, the persistence boundary, the provider contract, and itself", () => {
     const files = listFiles("server/src/execution", isCode);
     expect(files.length).toBeGreaterThan(3);
     for (const file of files) {
@@ -123,15 +123,53 @@ describe("import boundaries", () => {
           specifier === "@agentique-console/core" ||
           specifier === "zod" ||
           resolvesInto(file, specifier, "server/src/execution") ||
-          resolvesInto(file, specifier, "server/src/persistence");
+          resolvesInto(file, specifier, "server/src/persistence") ||
+          resolvesInto(file, specifier, "server/src/provider");
         expect(allowed, `${rel(file)} imports ${specifier}`).toBe(true);
       }
     }
-    // Nothing legacy reaches the execution boundary, and the persistence boundary never depends on it.
+    // Nothing legacy reaches the execution boundary, and neither the persistence nor the provider boundary depends on it.
     for (const file of [...legacyFiles, ...listFiles("server/src/persistence", isCode), ...listFiles("server/src/provider", isCode)]) {
       for (const specifier of importsOf(file)) {
         expect(resolvesInto(file, specifier, "server/src/execution"), `${rel(file)} imports ${specifier}`).toBe(false);
       }
+    }
+  });
+
+  it("the provider boundary depends only on core, the continuation index, Node built-ins, and itself, and makes no semantic decision", () => {
+    const files = listFiles("server/src/provider", isCode);
+    expect(files.length).toBeGreaterThan(1);
+    for (const file of files) {
+      const isTest = file.endsWith(".test.ts");
+      for (const specifier of importsOf(file)) {
+        if (isTest && (specifier === "vitest" || resolvesInto(file, specifier, "server/src/persistence") || resolvesInto(file, specifier, "server/src/execution"))) continue;
+        const allowed =
+          specifier === "@agentique-console/core" ||
+          specifier === "zod" ||
+          specifier.startsWith("node:") ||
+          resolvesInto(file, specifier, "server/src/provider") ||
+          // The continuation index is the one canonical row the adapter owns (execution-model §6.6).
+          rel(path.resolve(path.dirname(file), specifier)) === "server/src/persistence/stores/continuations.ts";
+        expect(allowed, `${rel(file)} imports ${specifier}`).toBe(true);
+      }
+      if (!isTest) {
+        const text = fs.readFileSync(file, "utf8");
+        // No Run, Plan, Pattern, Invocation, Task, Requirement, Decision, Budget, or retry decision is made by an adapter.
+        expect(text, rel(file)).not.toMatch(/\.transition\(|createAttempt|reserveOrdinary|reserveFinalInvocation|retryDecision|RETRY_|PATTERNS|planNodes|stores\.(runs|plans|invocations|tasks|requirements|decisions|reservations)/);
+      }
+    }
+    // The persistence boundary never depends on the provider boundary (its tests may drive the fakes).
+    for (const file of listFiles("server/src/persistence", (f) => isCode(f) && !f.endsWith(".test.ts"))) {
+      for (const specifier of importsOf(file)) {
+        expect(resolvesInto(file, specifier, "server/src/provider"), `${rel(file)} imports ${specifier}`).toBe(false);
+      }
+    }
+  });
+
+  it("no execution code reads a transcript Artifact or blob to make a decision (invariant 6)", () => {
+    for (const file of listFiles("server/src/execution", (f) => isCode(f) && !f.endsWith(".test.ts"))) {
+      const text = fs.readFileSync(file, "utf8");
+      expect(text, rel(file)).not.toMatch(/artifacts\.read\(|blobs\.get\(|\.transcriptArtifactId\b[^;\n]*\bread|TRANSCRIPT_MEDIA_TYPE[^;\n]*(read|get)\(/);
     }
   });
 

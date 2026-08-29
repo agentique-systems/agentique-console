@@ -75,6 +75,9 @@ CREATE TABLE `attempts` (
 	`resumed_from_attempt_id` text,
 	`status` text NOT NULL,
 	`failure_class` text,
+	`failure_detail` text,
+	`retry_decision` text,
+	`retry_not_before` text,
 	`transcript_artifact_id` text,
 	`capacity_lease_id` text,
 	`result` text,
@@ -96,12 +99,20 @@ CREATE TABLE `attempts` (
 	CONSTRAINT "attempts_resumed_from" CHECK(("attempts"."start_mode" = 'resumed') = ("attempts"."resumed_from_attempt_id" IS NOT NULL)),
 	CONSTRAINT "attempts_no_self_resume" CHECK("attempts"."resumed_from_attempt_id" IS NULL OR "attempts"."resumed_from_attempt_id" <> "attempts"."id"),
 	CONSTRAINT "attempts_terminal_has_ended_at" CHECK(("attempts"."status" IN ('succeeded', 'failed', 'timed_out', 'interrupted', 'cancelled')) = ("attempts"."ended_at" IS NOT NULL)),
-	CONSTRAINT "attempts_succeeded_shape" CHECK("attempts"."status" <> 'succeeded' OR ("attempts"."result" IS NOT NULL AND "attempts"."failure_class" IS NULL)),
-	CONSTRAINT "attempts_failure_classified" CHECK("attempts"."status" NOT IN ('failed', 'timed_out', 'interrupted') OR "attempts"."failure_class" IS NOT NULL)
+	CONSTRAINT "attempts_succeeded_shape" CHECK("attempts"."status" <> 'succeeded' OR ("attempts"."result" IS NOT NULL AND "attempts"."failure_class" IS NULL AND "attempts"."failure_detail" IS NULL AND "attempts"."retry_decision" IS NULL)),
+	CONSTRAINT "attempts_failure_classified" CHECK("attempts"."status" NOT IN ('failed', 'timed_out', 'interrupted') OR "attempts"."failure_class" IS NOT NULL),
+	CONSTRAINT "attempts_retry_decision_shape" CHECK("attempts"."retry_decision" IS NULL OR ("attempts"."status" IN ('failed', 'timed_out', 'interrupted', 'cancelled') AND json_extract("attempts"."retry_decision", '$.reason') IN ('provider_transient', 'result_invalid', 'interrupted', 'tool_failure', 'provider_permanent', 'allocation_exhausted', 'attempts_exhausted', 'cancelled', 'tool_failure_retried', 'approval_required') AND json_extract("attempts"."retry_decision", '$.permitted') IN (0, 1) AND ((json_extract("attempts"."retry_decision", '$.permitted') = 1 AND json_extract("attempts"."retry_decision", '$.reason') IN ('provider_transient', 'result_invalid', 'interrupted', 'tool_failure')) OR (json_extract("attempts"."retry_decision", '$.permitted') = 0 AND json_extract("attempts"."retry_decision", '$.notBefore') IS NULL AND json_extract("attempts"."retry_decision", '$.reason') IN ('provider_permanent', 'allocation_exhausted', 'attempts_exhausted', 'cancelled', 'tool_failure_retried', 'approval_required'))))),
+	CONSTRAINT "attempts_retry_not_before_agrees" CHECK("attempts"."retry_not_before" IS json_extract("attempts"."retry_decision", '$.notBefore')),
+	CONSTRAINT "attempts_failure_detail_terminal" CHECK("attempts"."failure_detail" IS NULL OR "attempts"."status" IN ('failed', 'timed_out', 'interrupted', 'cancelled')),
+	CONSTRAINT "attempts_cancelled_never_retries" CHECK("attempts"."status" <> 'cancelled' OR "attempts"."retry_decision" IS NULL OR json_extract("attempts"."retry_decision", '$.permitted') = 0)
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `attempts_invocation_number` ON `attempts` (`invocation_id`,`number`);--> statement-breakpoint
 CREATE INDEX `attempts_run_status` ON `attempts` (`run_id`,`status`);--> statement-breakpoint
+CREATE INDEX `attempts_status` ON `attempts` (`status`);--> statement-breakpoint
+CREATE INDEX `attempts_invocation_status` ON `attempts` (`invocation_id`,`status`,`number`);--> statement-breakpoint
+CREATE INDEX `attempts_retry_not_before` ON `attempts` (`retry_not_before`);--> statement-breakpoint
+CREATE UNIQUE INDEX `attempts_active_invocation` ON `attempts` (`invocation_id`) WHERE status IN ('pending', 'running');--> statement-breakpoint
 CREATE TABLE `budget_reservations` (
 	`id` text PRIMARY KEY NOT NULL,
 	`run_id` text NOT NULL,
@@ -190,10 +201,12 @@ CREATE TABLE `context_manifests` (
 	`run_id` text NOT NULL,
 	`content` text NOT NULL,
 	`digest` text NOT NULL,
+	`renderer_version` integer NOT NULL,
 	`created_at` text NOT NULL,
 	FOREIGN KEY (`invocation_id`) REFERENCES `invocations`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`run_id`) REFERENCES `runs`(`id`) ON UPDATE no action ON DELETE no action,
-	CONSTRAINT "context_manifests_digest_shape" CHECK(length("context_manifests"."digest") = 64)
+	CONSTRAINT "context_manifests_digest_shape" CHECK(length("context_manifests"."digest") = 64),
+	CONSTRAINT "context_manifests_renderer_version" CHECK("context_manifests"."renderer_version" >= 1)
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `context_manifests_invocation_id_unique` ON `context_manifests` (`invocation_id`);--> statement-breakpoint
@@ -406,6 +419,8 @@ CREATE TABLE `invocations` (
 CREATE INDEX `invocations_plan_node_status` ON `invocations` (`plan_node_id`,`status`);--> statement-breakpoint
 CREATE INDEX `invocations_run_status` ON `invocations` (`run_id`,`status`);--> statement-breakpoint
 CREATE INDEX `invocations_plan_node_source` ON `invocations` (`plan_node_id`,`allocation_source`);--> statement-breakpoint
+CREATE UNIQUE INDEX `invocations_active_orchestrator` ON `invocations` (`run_id`) WHERE role = 'orchestrator' AND status IN ('pending', 'running', 'waiting');--> statement-breakpoint
+CREATE UNIQUE INDEX `invocations_active_coordinator` ON `invocations` (`plan_node_id`) WHERE role = 'coordinator' AND status IN ('pending', 'running', 'waiting');--> statement-breakpoint
 CREATE TABLE `plan_edges` (
 	`id` text PRIMARY KEY NOT NULL,
 	`run_id` text NOT NULL,
@@ -755,8 +770,7 @@ CREATE TABLE `workspaces` (
 	CONSTRAINT "workspaces_kind" CHECK("workspaces"."kind" IN ('git', 'directory'))
 );
 --> statement-breakpoint
-CREATE UNIQUE INDEX `workspaces_root_path_unique` ON `workspaces` (`root_path`);
---> statement-breakpoint
+CREATE UNIQUE INDEX `workspaces_root_path_unique` ON `workspaces` (`root_path`);--> statement-breakpoint
 INSERT INTO `schema_info` (`id`, `application`, `schema`, `version`) VALUES (1, 'agentique-console', 'orchestration-core', 1);--> statement-breakpoint
 CREATE TRIGGER `schema_info_no_delete` BEFORE DELETE ON `schema_info` BEGIN SELECT RAISE(ABORT, 'schema_info is never deleted'); END;--> statement-breakpoint
 CREATE TRIGGER `events_no_update` BEFORE UPDATE ON `events` BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;--> statement-breakpoint
@@ -795,6 +809,7 @@ CREATE TRIGGER `invocations_definition_immutable` BEFORE UPDATE OF `run_id`, `pl
 CREATE TRIGGER `invocations_no_delete` BEFORE DELETE ON `invocations` BEGIN SELECT RAISE(ABORT, 'invocations are never deleted'); END;--> statement-breakpoint
 CREATE TRIGGER `attempts_definition_immutable` BEFORE UPDATE OF `invocation_id`, `run_id`, `plan_node_id`, `number`, `kind`, `start_mode`, `resumed_from_attempt_id`, `created_at` ON `attempts` BEGIN SELECT RAISE(ABORT, 'attempt definition columns are immutable'); END;--> statement-breakpoint
 CREATE TRIGGER `attempts_no_delete` BEFORE DELETE ON `attempts` BEGIN SELECT RAISE(ABORT, 'attempts are never deleted'); END;--> statement-breakpoint
+CREATE TRIGGER `attempts_terminal_immutable` BEFORE UPDATE OF `status`, `failure_class`, `failure_detail`, `retry_decision`, `retry_not_before`, `result`, `transcript_artifact_id`, `ended_at` ON `attempts` WHEN OLD.`status` IN ('succeeded', 'failed', 'timed_out', 'interrupted', 'cancelled') BEGIN SELECT RAISE(ABORT, 'a terminal attempt never changes again'); END;--> statement-breakpoint
 CREATE TRIGGER `context_manifests_no_update` BEFORE UPDATE ON `context_manifests` BEGIN SELECT RAISE(ABORT, 'context_manifests are immutable'); END;--> statement-breakpoint
 CREATE TRIGGER `context_manifests_no_delete` BEFORE DELETE ON `context_manifests` BEGIN SELECT RAISE(ABORT, 'context_manifests are immutable'); END;--> statement-breakpoint
 CREATE TRIGGER `evaluations_no_update` BEFORE UPDATE ON `evaluations` BEGIN SELECT RAISE(ABORT, 'evaluations are append-only'); END;--> statement-breakpoint

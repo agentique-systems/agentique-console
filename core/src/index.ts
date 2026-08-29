@@ -15,6 +15,7 @@ export * from "./artifacts.ts";
 export * from "./handoffs.ts";
 export * from "./agents.ts";
 export * from "./invocations.ts";
+export * from "./capability-policy.ts";
 export * from "./verification.ts";
 export * from "./workspace-state.ts";
 export * from "./capacity.ts";

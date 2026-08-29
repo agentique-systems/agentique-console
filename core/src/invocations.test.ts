@@ -3,18 +3,26 @@ import { describe, expect, it } from "vitest";
 import { newId } from "./ids.ts";
 import {
   assertPurposeForRole,
+  ATTEMPT_FAILURE_MAX_MESSAGE_LENGTH,
   ATTEMPT_KINDS,
   ATTEMPT_START_MODES,
   ATTEMPT_STATUSES,
   attemptSchema,
+  boundedFailureMessage,
+  boundResultViolations,
   contextManifestContentSchema,
   INVOCATION_PURPOSES,
   INVOCATION_ROLES,
   invocationInputSchema,
   invocationSchema,
   isContinuationExpired,
+  isContinuationSafeTermination,
   PURPOSES_BY_ROLE,
+  RESULT_MAX_VIOLATIONS,
+  retryBackoffMs,
+  retryDecisionSchema,
   roleOfPurpose,
+  RUNTIME_TOOLS_BY_ROLE,
 } from "./invocations.ts";
 
 describe("purposes", () => {
@@ -141,6 +149,8 @@ describe("attempts", () => {
       resumedFromAttemptId: null,
       status: "pending",
       failureClass: null,
+      failureDetail: null,
+      retryDecision: null,
       transcriptArtifactId: null,
       capacityLeaseId: null,
       result: null,
@@ -158,6 +168,63 @@ describe("attempts", () => {
     expect(attemptSchema.safeParse({ ...attempt, status: "interrupted", failureClass: "interrupted", endedAt: attempt.createdAt }).success).toBe(true);
   });
 
+  it("records bounded failure detail and a durable retry decision only on a terminal, unsuccessful Attempt", () => {
+    const terminal = {
+      id: newId("attempt"),
+      invocationId: newId("invocation"),
+      runId: newId("run"),
+      planNodeId: newId("planNode"),
+      number: 1,
+      kind: "initial",
+      startMode: "fresh",
+      resumedFromAttemptId: null,
+      status: "failed",
+      failureClass: "result_invalid",
+      failureDetail: { message: "result invalid", violations: [{ code: "unknown_artifact", message: "art_x does not exist", path: "artifactIds.0" }], tool: null, cancelled: false },
+      retryDecision: { permitted: true, reason: "result_invalid", notBefore: null },
+      transcriptArtifactId: null,
+      capacityLeaseId: null,
+      result: null,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      startedAt: "2026-01-01T00:00:00.000Z",
+      endedAt: "2026-01-01T00:00:01.000Z",
+    };
+    expect(attemptSchema.safeParse(terminal).success).toBe(true);
+    // A running Attempt carries neither; a succeeded Attempt carries neither.
+    expect(attemptSchema.safeParse({ ...terminal, status: "running", failureClass: null, endedAt: null }).success).toBe(false);
+    const result = { status: "completed", artifactIds: [], tasks: [], evidence: [], summary: "ok", openItems: [], blocker: null, runOutcome: null };
+    expect(attemptSchema.safeParse({ ...terminal, status: "succeeded", failureClass: null, failureDetail: null, retryDecision: null, result }).success).toBe(true);
+    expect(attemptSchema.safeParse({ ...terminal, status: "succeeded", failureClass: null, failureDetail: null, result }).success).toBe(false);
+    // The decision's reason agrees with its permission and a refusal carries no notBefore.
+    expect(retryDecisionSchema.safeParse({ permitted: false, reason: "provider_permanent", notBefore: null }).success).toBe(true);
+    expect(retryDecisionSchema.safeParse({ permitted: false, reason: "result_invalid", notBefore: null }).success).toBe(false);
+    expect(retryDecisionSchema.safeParse({ permitted: true, reason: "provider_permanent", notBefore: null }).success).toBe(false);
+    expect(retryDecisionSchema.safeParse({ permitted: false, reason: "cancelled", notBefore: "2026-01-01T00:00:00.000Z" }).success).toBe(false);
+    expect(retryDecisionSchema.safeParse({ permitted: true, reason: "provider_transient", notBefore: "2026-01-01T00:00:00.000Z" }).success).toBe(true);
+    // A cancelled Attempt never permits a retry; detail is bounded and single-line.
+    expect(attemptSchema.safeParse({ ...terminal, status: "cancelled", failureClass: null, retryDecision: { permitted: true, reason: "interrupted", notBefore: null } }).success).toBe(false);
+    expect(attemptSchema.safeParse({ ...terminal, status: "cancelled", failureClass: null, retryDecision: { permitted: false, reason: "cancelled", notBefore: null } }).success).toBe(true);
+    expect(boundedFailureMessage("line one\nstack line two")).toBe("line one");
+    expect(boundedFailureMessage("x".repeat(600)).length).toBe(ATTEMPT_FAILURE_MAX_MESSAGE_LENGTH);
+    expect(boundedFailureMessage("   ")).toBe("failure");
+    expect(boundResultViolations(Array.from({ length: 30 }, (_, i) => ({ code: "malformed" as const, message: `v${i}`, path: null })))).toHaveLength(RESULT_MAX_VIOLATIONS);
+  });
+
+  it("computes deterministic backoff and continuation-safe terminations", () => {
+    expect([1, 2, 3, 4].map((n) => retryBackoffMs(n, 1000, 5000))).toEqual([1000, 2000, 4000, 5000]);
+    const base = { status: "failed" as const, failureClass: "result_invalid" as const, failureDetail: null };
+    expect(isContinuationSafeTermination({ ...base, status: "succeeded", failureClass: null })).toBe(true);
+    expect(isContinuationSafeTermination(base)).toBe(true);
+    expect(isContinuationSafeTermination({ ...base, status: "interrupted", failureClass: "interrupted" })).toBe(true);
+    expect(isContinuationSafeTermination({ ...base, failureClass: "provider_transient" })).toBe(true);
+    expect(isContinuationSafeTermination({ ...base, failureClass: "provider_permanent" })).toBe(false);
+    expect(isContinuationSafeTermination({ ...base, failureClass: "tool_failure" })).toBe(false);
+    expect(isContinuationSafeTermination({ ...base, failureClass: "allocation_exhausted" })).toBe(false);
+    expect(isContinuationSafeTermination({ ...base, status: "cancelled", failureClass: null })).toBe(false);
+    expect(isContinuationSafeTermination({ ...base, status: "interrupted", failureClass: "interrupted", failureDetail: { message: "cancelled", violations: [], tool: null, cancelled: true } })).toBe(false);
+    expect(isContinuationSafeTermination({ ...base, status: "running", failureClass: null })).toBe(false);
+  });
+
   it("treats a continuation as expired at or after its expiry", () => {
     expect(isContinuationExpired({ expiresAt: null }, "2026-01-01T00:00:00.000Z")).toBe(false);
     expect(isContinuationExpired({ expiresAt: "2026-01-01T00:00:00.000Z" }, "2026-01-01T00:00:00.000Z")).toBe(true);
@@ -166,32 +233,75 @@ describe("attempts", () => {
 });
 
 describe("context manifest", () => {
+  const content = {
+    agentDefinitionRevisionId: newId("agentDefinitionRevision"),
+    agentDefinitionContentHash: "a".repeat(64),
+    instructions: "Do the thing.",
+    modelPolicy: { model: "claude-fable-5", effort: "medium", maxContextOccupancy: 0.8 },
+    role: "worker",
+    purpose: "step",
+    patternPosition: "chain step 1 of 2",
+    continuedFromInvocationId: null,
+    runId: newId("run"),
+    planNodeId: newId("planNode"),
+    tasks: [],
+    requirementRevisionId: null,
+    requirements: [],
+    acceptanceCriteria: [],
+    decisions: [],
+    inputs: [],
+    handoffs: [],
+    artifacts: [],
+    startingSnapshotId: null,
+    worktreePath: null,
+    allocation: { costUsd: 1, tokens: 100, attempts: 2 },
+    allocationSource: "plan_node",
+    finalReserveUse: null,
+    maxWallClockMs: null,
+    capabilities: { tools: ["read"], mcpServers: [] },
+    toolPolicy: { read: "allowed", shell: "denied" },
+    runtimeTools: ["return_result"],
+  };
+
   it("is strict: no unknown fields and no provider payloads can be carried", () => {
-    const content = {
-      agentDefinitionRevisionId: newId("agentDefinitionRevision"),
-      agentDefinitionContentHash: "a".repeat(64),
-      instructions: "Do the thing.",
-      role: "worker",
-      purpose: "step",
-      patternPosition: "chain step 1 of 2",
-      continuedFromInvocationId: null,
-      runId: newId("run"),
-      planNodeId: newId("planNode"),
-      tasks: [],
-      requirementRevisionId: null,
-      requirements: [],
-      decisions: [],
-      handoffIds: [],
-      readableArtifactIds: [],
-      startingSnapshotId: null,
-      worktreePath: null,
-      allocation: { costUsd: 1, tokens: 100, attempts: 2 },
-      maxWallClockMs: null,
-      toolPolicy: {},
-      runtimeTools: ["return_result"],
-    };
     expect(contextManifestContentSchema.safeParse(content).success).toBe(true);
     expect(contextManifestContentSchema.safeParse({ ...content, providerContinuation: "opaque" }).success).toBe(false);
     expect(contextManifestContentSchema.safeParse({ ...content, transcript: [] }).success).toBe(false);
+    expect(contextManifestContentSchema.safeParse({ ...content, storageKey: "k" }).success).toBe(false);
+  });
+
+  it("keeps capabilities, Tool Policy, runtime tools, funding, and ordering consistent", () => {
+    // Every effective capability carries a non-denied disposition.
+    expect(contextManifestContentSchema.safeParse({ ...content, capabilities: { tools: ["shell"], mcpServers: [] } }).success).toBe(false);
+    expect(contextManifestContentSchema.safeParse({ ...content, capabilities: { tools: ["write"], mcpServers: [] } }).success).toBe(false);
+    // Runtime tools are restricted by role.
+    expect(contextManifestContentSchema.safeParse({ ...content, runtimeTools: ["revise_execution_plan"] }).success).toBe(false);
+    expect(contextManifestContentSchema.safeParse({ ...content, role: "orchestrator", purpose: "operator_input", runtimeTools: ["revise_execution_plan", "return_result"] }).success).toBe(true);
+    expect(contextManifestContentSchema.safeParse({ ...content, role: "evaluator", purpose: "evaluate", runtimeTools: ["update_task"] }).success).toBe(false);
+    expect(contextManifestContentSchema.safeParse({ ...content, runtimeTools: ["peer_message"] }).success).toBe(false);
+    // Funding agrees.
+    expect(contextManifestContentSchema.safeParse({ ...content, finalReserveUse: "final_synthesis" }).success).toBe(false);
+    // Collections are in canonical id order.
+    const a = { artifactId: "art_" + "a".repeat(24), mediaType: "text/plain", byteSize: 1, title: null };
+    const b = { ...a, artifactId: "art_" + "b".repeat(24) };
+    expect(contextManifestContentSchema.safeParse({ ...content, artifacts: [a, b] }).success).toBe(true);
+    expect(contextManifestContentSchema.safeParse({ ...content, artifacts: [b, a] }).success).toBe(false);
+    expect(contextManifestContentSchema.safeParse({ ...content, inputs: [{ kind: "operator_message", conversationMessageId: newId("conversationMessage"), content: "hello" }] }).success).toBe(true);
+    expect(contextManifestContentSchema.safeParse({ ...content, inputs: [{ kind: "chat_history", messages: [] }] }).success).toBe(false);
+  });
+
+  it("restricts runtime tools by the §6.4 role matrix", () => {
+    expect(RUNTIME_TOOLS_BY_ROLE.orchestrator).toContain("revise_execution_plan");
+    expect(RUNTIME_TOOLS_BY_ROLE.coordinator).toContain("propose_tasks");
+    expect(RUNTIME_TOOLS_BY_ROLE.coordinator).not.toContain("create_tasks");
+    expect(RUNTIME_TOOLS_BY_ROLE.worker).not.toContain("propose_tasks");
+    expect(RUNTIME_TOOLS_BY_ROLE.evaluator).not.toContain("update_task");
+    expect(RUNTIME_TOOLS_BY_ROLE.evaluator).not.toContain("request_decision");
+    for (const role of INVOCATION_ROLES) {
+      expect(RUNTIME_TOOLS_BY_ROLE[role]).toContain("return_result");
+      expect(RUNTIME_TOOLS_BY_ROLE[role]).toContain("read_artifact");
+      if (role !== "orchestrator") expect(RUNTIME_TOOLS_BY_ROLE[role]).not.toContain("record_decision");
+    }
+    expect(RUNTIME_TOOLS_BY_ROLE.orchestrator).toContain("record_decision");
   });
 });

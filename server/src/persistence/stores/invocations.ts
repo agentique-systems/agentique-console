@@ -1,5 +1,6 @@
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray } from "drizzle-orm";
 import {
+  ACTIVE_INVOCATION_STATUSES,
   AllocationExhaustedError,
   ATTEMPT_MACHINE,
   attemptInputSchema,
@@ -13,6 +14,7 @@ import {
   invocationInputSchema,
   invocationSchema,
   InvariantViolationError,
+  MANIFEST_RENDERER_VERSION,
   parseOrThrow,
   PLAN_NODE_MACHINE,
   ValidationError,
@@ -26,8 +28,10 @@ import {
   type Invocation,
   type InvocationId,
   type InvocationInput,
+  type InvocationRole,
   type InvocationTransition,
   type PlanNodeId,
+  type RunId,
 } from "@agentique-console/core";
 import { sha256Hex } from "../blob-store.ts";
 import type { PersistenceContext } from "../context.ts";
@@ -68,7 +72,8 @@ function invocationToDomain(row: InvocationRow): Invocation {
 }
 
 function attemptToDomain(row: AttemptRow): Attempt {
-  return parseOrThrow(attemptSchema, row, "Attempt row");
+  const { retryNotBefore: _denormalized, ...attempt } = row;
+  return parseOrThrow(attemptSchema, attempt, "Attempt row");
 }
 
 export interface InvocationCreateOptions extends WriteOptions {
@@ -129,6 +134,15 @@ export class InvocationStore {
       if (valid.taskIds.length > 0) {
         const rows = this.ctx.db.select({ id: tasks.id, runId: tasks.runId }).from(tasks).where(inArray(tasks.id, valid.taskIds)).all();
         for (const id of valid.taskIds) assertSameRun("Task", id, requireRow(rows.find((r) => r.id === id), "Task", id).runId, run.id);
+      }
+      // Invariant 20: at most one active Orchestrator Invocation per Run and one active Coordinator Invocation per node (the schema enforces it too).
+      if (valid.role === "orchestrator") {
+        const active = this.listActive(run.id, "orchestrator");
+        if (active.length > 0) throw new ConflictError(`Run ${run.id} already has active Orchestrator Invocation ${active[0]!.id}`, { runId: run.id, invocationId: active[0]!.id });
+      }
+      if (valid.role === "coordinator") {
+        const active = this.listActive(run.id, "coordinator").filter((i) => i.planNodeId === valid.planNodeId);
+        if (active.length > 0) throw new ConflictError(`PlanNode ${valid.planNodeId} already has active Coordinator Invocation ${active[0]!.id}`, { planNodeId: valid.planNodeId, invocationId: active[0]!.id });
       }
       const { allocationSource: _source, finalReserveUse: _use, ...definition } = valid;
       const invocation: Invocation = {
@@ -251,8 +265,13 @@ export class InvocationStore {
 
   // ------------------------------------------------------------------ Manifests
 
-  /** Persists the one immutable manifest of an Invocation; a second write is a conflict. */
-  putManifest(invocationId: InvocationId, content: ContextManifestContent, options?: WriteOptions): ContextManifest {
+  /**
+   * Persists the one immutable manifest of an Invocation together with the
+   * renderer contract version it was assembled for; a second write is a
+   * conflict. The manifest must agree with the Invocation's row on every
+   * fact both carry.
+   */
+  putManifest(invocationId: InvocationId, content: ContextManifestContent, rendererVersion: number = MANIFEST_RENDERER_VERSION, options?: WriteOptions): ContextManifest {
     const valid = parseOrThrow(contextManifestContentSchema, content, "Context Manifest content");
     return this.ctx.tx.write(() => {
       const invocation = this.get(invocationId);
@@ -268,6 +287,19 @@ export class InvocationStore {
       if (valid.continuedFromInvocationId !== invocation.continuedFromInvocationId) {
         throw new InvariantViolationError("the manifest disagrees with its Invocation's continuedFromInvocationId");
       }
+      if (
+        valid.allocationSource !== invocation.allocationSource ||
+        valid.finalReserveUse !== invocation.finalReserveUse ||
+        valid.allocation.costUsd !== invocation.allocation.costUsd ||
+        valid.allocation.tokens !== invocation.allocation.tokens ||
+        valid.allocation.attempts !== invocation.allocation.attempts
+      ) {
+        throw new InvariantViolationError("the manifest disagrees with its Invocation's allocation or funding");
+      }
+      const taskIds = [...invocation.taskIds].sort();
+      if (valid.tasks.length !== taskIds.length || valid.tasks.some((t, i) => t.taskId !== taskIds[i])) {
+        throw new InvariantViolationError("the manifest's Tasks are exactly the Invocation's Tasks");
+      }
       const run = loadRunRef(this.ctx, invocation.runId);
       const manifest: ContextManifest = {
         id: this.ctx.ids("contextManifest"),
@@ -275,6 +307,7 @@ export class InvocationStore {
         runId: invocation.runId,
         content: valid,
         digest: sha256Hex(canonicalJson(valid)),
+        rendererVersion,
         createdAt: this.ctx.clock(),
       };
       parseOrThrow(contextManifestSchema, manifest, "ContextManifest");
@@ -349,6 +382,8 @@ export class InvocationStore {
         resumedFromAttemptId: valid.resumedFromAttemptId,
         status: "pending",
         failureClass: null,
+        failureDetail: null,
+        retryDecision: null,
         transcriptArtifactId: null,
         capacityLeaseId: null,
         result: null,
@@ -366,7 +401,7 @@ export class InvocationStore {
         payload: attempt,
         ...writeMeta(options),
       });
-      this.ctx.db.insert(attempts).values(attempt).run();
+      this.ctx.db.insert(attempts).values({ ...attempt, retryNotBefore: null }).run();
       return attempt;
     });
   }
@@ -377,6 +412,18 @@ export class InvocationStore {
 
   listAttempts(invocationId: InvocationId): Attempt[] {
     return this.ctx.db.select().from(attempts).where(eq(attempts.invocationId, invocationId)).orderBy(asc(attempts.number)).all().map(attemptToDomain);
+  }
+
+  /** The highest-numbered Attempt of an Invocation, or `null` before the first. */
+  latestAttempt(invocationId: InvocationId): Attempt | null {
+    const row = this.ctx.db.select().from(attempts).where(eq(attempts.invocationId, invocationId)).orderBy(desc(attempts.number)).limit(1).get();
+    return row ? attemptToDomain(row) : null;
+  }
+
+  /** The Invocation's non-terminal Attempt, if one exists (at most one by the schema). */
+  activeAttempt(invocationId: InvocationId): Attempt | null {
+    const row = this.ctx.db.select().from(attempts).where(and(eq(attempts.invocationId, invocationId), inArray(attempts.status, ["pending", "running"]))).get();
+    return row ? attemptToDomain(row) : null;
   }
 
   /** Attempts consumed by an Invocation: every Attempt row, whatever its outcome. */
@@ -409,6 +456,10 @@ export class InvocationStore {
         }
         next.transcriptArtifactId = transition.transcriptArtifactId;
         next.failureClass = failureClassForTransition(transition);
+        if (transition.to !== "succeeded") {
+          next.failureDetail = transition.failureDetail ?? null;
+          next.retryDecision = transition.retryDecision ?? null;
+        }
         next.endedAt = now;
         switch (transition.to) {
           case "succeeded":
@@ -448,6 +499,9 @@ export class InvocationStore {
         .set({
           status: next.status,
           failureClass: next.failureClass,
+          failureDetail: next.failureDetail,
+          retryDecision: next.retryDecision,
+          retryNotBefore: next.retryDecision?.notBefore ?? null,
           transcriptArtifactId: next.transcriptArtifactId,
           capacityLeaseId: next.capacityLeaseId,
           result: next.result,
@@ -460,8 +514,32 @@ export class InvocationStore {
     });
   }
 
+  /** Every non-terminal Attempt in the database, in creation order: what a restarted process must interrupt. */
   activeAttempts(): Attempt[] {
-    return this.ctx.db.select().from(attempts).where(and(inArray(attempts.status, ["pending", "running"]))).all().map(attemptToDomain);
+    return this.ctx.db.select().from(attempts).where(and(inArray(attempts.status, ["pending", "running"]))).orderBy(asc(attempts.createdAt), asc(attempts.id)).all().map(attemptToDomain);
+  }
+
+  listByRun(runId: RunId): Invocation[] {
+    return this.ctx.db.select().from(invocations).where(eq(invocations.runId, runId)).orderBy(asc(invocations.createdAt), asc(invocations.id)).all().map(invocationToDomain);
+  }
+
+  /** Non-terminal Invocations of a Run, optionally of one role, in creation order. */
+  listActive(runId: RunId, role?: InvocationRole): Invocation[] {
+    const conditions = [eq(invocations.runId, runId), inArray(invocations.status, [...ACTIVE_INVOCATION_STATUSES])];
+    if (role) conditions.push(eq(invocations.role, role));
+    return this.ctx.db.select().from(invocations).where(and(...conditions)).orderBy(asc(invocations.createdAt), asc(invocations.id)).all().map(invocationToDomain);
+  }
+
+  /** The most recently created Invocation of a role on a Plan Node (its logical predecessor for `continuedFromInvocationId`). */
+  latestByRole(planNodeId: PlanNodeId, role: InvocationRole): Invocation | null {
+    const row = this.ctx.db
+      .select()
+      .from(invocations)
+      .where(and(eq(invocations.planNodeId, planNodeId), eq(invocations.role, role)))
+      .orderBy(desc(invocations.createdAt), desc(invocations.id))
+      .limit(1)
+      .get();
+    return row ? invocationToDomain(row) : null;
   }
 
   private toRow(invocation: Invocation): InvocationRow {

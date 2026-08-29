@@ -1,7 +1,8 @@
-import { AllocationExhaustedError, ConflictError, IllegalTransitionError, InvariantViolationError, ValidationError, type InvocationResult } from "@agentique-console/core";
+import { AllocationExhaustedError, ConflictError, IllegalTransitionError, InvariantViolationError, MANIFEST_RENDERER_VERSION, ValidationError, type InvocationResult } from "@agentique-console/core";
 import { describe, expect, it } from "vitest";
 import { sha256Hex } from "../blob-store.ts";
 import { MemoryContinuationPayloadStore } from "../../provider/continuation-store.ts";
+import { ContinuationService } from "../../provider/continuation.ts";
 import { INVOCATION_ALLOCATION, extendPlan, joinDefinition, nodeInput, openHarness, seedArtifact, seedInvocation, seedManifest, seedRun } from "../test-support.ts";
 
 const result: InvocationResult = { status: "completed", artifactIds: [], tasks: [], evidence: [], summary: "done", openItems: [], blocker: null, runOutcome: null };
@@ -39,13 +40,25 @@ describe("invocations", () => {
     }
   });
 
-  it("records continuedFromInvocationId within the Run", () => {
+  it("records continuedFromInvocationId within the Run and keeps one active Orchestrator Invocation per Run", () => {
     const h = openHarness();
     try {
       const s = seedRun(h);
       const first = seedInvocation(h, s);
+      // Invariant 20: a second Orchestrator Invocation cannot be created while the first is active (pending, running, or waiting).
+      expect(() => seedInvocation(h, s, { purpose: "node_result", continuedFromInvocationId: first.id })).toThrow(ConflictError);
+      seedManifest(h, s, first);
+      h.stores.invocations.transition(first.id, { to: "running" });
+      h.stores.invocations.transition(first.id, { to: "waiting", waitReason: "decision" });
+      expect(() => seedInvocation(h, s, { purpose: "node_result", continuedFromInvocationId: first.id })).toThrow(ConflictError);
+      expect(() => h.database.sqlite.prepare("UPDATE invocations SET status = 'pending', wait_reason = NULL WHERE id = ?").run(first.id)).not.toThrow();
+      h.stores.invocations.transition(first.id, { to: "cancelled" });
       const second = seedInvocation(h, s, { purpose: "node_result", continuedFromInvocationId: first.id });
       expect(second.continuedFromInvocationId).toBe(first.id);
+      expect(h.stores.invocations.listActive(s.run.id, "orchestrator").map((i) => i.id)).toEqual([second.id]);
+      expect(h.stores.invocations.latestByRole(s.root.id, "orchestrator")?.id).toBe(second.id);
+      // The database refuses the duplicate even when the store check is bypassed.
+      expect(() => h.database.sqlite.prepare("UPDATE invocations SET status = 'pending', wait_reason = NULL, failure_reason = NULL, ended_at = NULL WHERE id = ?").run(first.id)).toThrow(/UNIQUE constraint failed: invocations.run_id/);
       const other = seedRun(h);
       expect(() => seedInvocation(h, s, { continuedFromInvocationId: other.root.id })).toThrow(ValidationError);
       expect(() => seedInvocation(h, s, { continuedFromInvocationId: "inv_000000000000000000000000" })).toThrow(/not found/);
@@ -94,9 +107,20 @@ describe("context manifests", () => {
       expect(h.stores.invocations.getManifest(invocation.id)).toEqual(manifest);
       expect(() => seedManifest(h, s, invocation)).toThrow(ConflictError);
       expect(() => h.database.sqlite.prepare("UPDATE context_manifests SET digest = 'x' WHERE id = ?").run(manifest.id)).toThrow(/immutable/);
+      expect(manifest.rendererVersion).toBe(MANIFEST_RENDERER_VERSION);
+      h.stores.invocations.transition(invocation.id, { to: "cancelled" });
       const second = seedInvocation(h, s, { purpose: "node_result", continuedFromInvocationId: invocation.id });
       expect(() => h.stores.invocations.putManifest(second.id, { ...manifest.content, continuedFromInvocationId: null })).toThrow(InvariantViolationError);
       expect(() => h.stores.invocations.putManifest(second.id, { ...manifest.content, purpose: "node_result", continuedFromInvocationId: invocation.id, providerContinuation: "x" } as never)).toThrow(ValidationError);
+      expect(() => h.stores.invocations.putManifest(second.id, { ...manifest.content, purpose: "node_result", continuedFromInvocationId: invocation.id, allocation: { ...manifest.content.allocation, attempts: 9 } })).toThrow(/allocation or funding/);
+      expect(() => h.stores.invocations.putManifest(second.id, { ...manifest.content, purpose: "node_result", continuedFromInvocationId: invocation.id, tasks: [{ taskId: "task_000000000000000000000000", subject: "x" }] })).toThrow(/exactly the Invocation's Tasks/);
+      expect(() => h.stores.invocations.putManifest(second.id, { ...manifest.content, purpose: "node_result", continuedFromInvocationId: invocation.id }, 0)).toThrow(ValidationError);
+      expect(() =>
+        h.database.sqlite
+          .prepare("INSERT INTO context_manifests (id, invocation_id, run_id, content, digest, renderer_version, created_at) VALUES (?, ?, ?, '{}', ?, 0, ?)")
+          .run(`cm_${"0".repeat(24)}`, second.id, s.run.id, "a".repeat(64), "2026-01-01T00:00:00.000Z"),
+      ).toThrow(/CHECK constraint failed: context_manifests_renderer_version/);
+      expect(h.stores.invocations.putManifest(second.id, { ...manifest.content, purpose: "node_result", continuedFromInvocationId: invocation.id }, 1).rendererVersion).toBe(1);
     } finally {
       h.close();
     }
@@ -149,7 +173,7 @@ describe("attempts", () => {
       seedManifest(h, s, second);
       const resumed = h.stores.invocations.createAttempt({ invocationId: second.id, startMode: "resumed", resumedFromAttemptId: a1.id });
       expect(resumed.resumedFromAttemptId).toBe(a1.id);
-      const unrelated = seedInvocation(h, s, { purpose: "gate_result" });
+      const unrelated = seedInvocation(h, s, { role: "worker", purpose: "step" });
       seedManifest(h, s, unrelated);
       expect(() => h.stores.invocations.createAttempt({ invocationId: unrelated.id, startMode: "resumed", resumedFromAttemptId: a1.id })).toThrow(InvariantViolationError);
       expect(() => h.stores.invocations.createAttempt({ invocationId: unrelated.id, startMode: "resumed", resumedFromAttemptId: null })).toThrow(ValidationError);
@@ -188,21 +212,29 @@ describe("provider continuations", () => {
       seedManifest(h, s, invocation);
       const attempt = h.stores.invocations.createAttempt({ invocationId: invocation.id, startMode: "fresh", resumedFromAttemptId: null });
       const payloads = new MemoryContinuationPayloadStore(sha256Hex);
+      const service = new ContinuationService(h.stores.continuations, payloads, { ttlMs: null, clock: h.ctx.clock });
       const bytes = new TextEncoder().encode("opaque provider state");
-      const digest = await payloads.put(`att/${attempt.id}`, bytes);
+      const digest = await payloads.put(`fake/${attempt.id}`, bytes);
       expect(h.stores.continuations.get(attempt.id)).toBeNull();
-      expect(await h.stores.continuations.resolve(attempt.id, payloads)).toBeNull();
-      h.stores.continuations.put({ attemptId: attempt.id, provider: "fake", storageKey: `att/${attempt.id}`, digest, expiresAt: null });
-      expect(await h.stores.continuations.resolve(attempt.id, payloads)).toEqual(bytes);
+      expect(await service.resolve(attempt.id, "fake")).toBeNull();
+      h.stores.continuations.put({ attemptId: attempt.id, provider: "fake", storageKey: `fake/${attempt.id}`, digest, expiresAt: null });
+      expect(await service.resolve(attempt.id, "fake")).toEqual(bytes);
+      expect(await service.resolve(attempt.id, "other-provider")).toBeNull();
       // The row carries no payload column and the journal never mentions it.
       const columns = (h.database.sqlite.prepare("PRAGMA table_info(provider_continuations)").all() as { name: string }[]).map((c) => c.name);
       expect(columns).toEqual(["attempt_id", "provider", "storage_key", "digest", "created_at", "expires_at"]);
       expect(h.ctx.journal.read({ runId: s.run.id }).some((e) => JSON.stringify(e).includes("opaque provider state") || e.type.includes("continuation"))).toBe(false);
       // Digest mismatch: the pointer and payload are discarded.
-      await payloads.put(`att/${attempt.id}`, new TextEncoder().encode("tampered"));
-      expect(await h.stores.continuations.resolve(attempt.id, payloads)).toBeNull();
+      await payloads.put(`fake/${attempt.id}`, new TextEncoder().encode("tampered"));
+      expect(await service.resolve(attempt.id, "fake")).toBeNull();
       expect(h.stores.continuations.get(attempt.id)).toBeNull();
-      expect(await payloads.get(`att/${attempt.id}`)).toBeNull();
+      expect(await payloads.get(`fake/${attempt.id}`)).toBeNull();
+      // The service stores and indexes in one step, with an expiry from its configured TTL.
+      await service.store(attempt.id, "fake", bytes);
+      expect(h.stores.continuations.get(attempt.id)?.expiresAt).toBeNull();
+      expect(await service.resolve(attempt.id, "fake")).toEqual(bytes);
+      await service.truncate();
+      expect(h.stores.continuations.count()).toBe(0);
       // Expiry.
       h.stores.continuations.put({ attemptId: attempt.id, provider: "fake", storageKey: "k", digest, expiresAt: "2026-01-01T00:00:10.000Z" });
       expect(h.stores.continuations.get(attempt.id, "2026-01-01T00:00:09.000Z")).not.toBeNull();

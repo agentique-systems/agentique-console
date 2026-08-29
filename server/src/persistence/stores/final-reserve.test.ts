@@ -50,7 +50,7 @@ describe("final-reserve Invocations", () => {
     const h = openHarness();
     try {
       const s = seedRun(h, { budget: BUDGET, finalReserve: RESERVE });
-      const ordinary = seedInvocation(h, s);
+      const ordinary = seedInvocation(h, s, { role: "worker", purpose: "step" });
       expect(ordinary).toMatchObject({ allocationSource: "plan_node", finalReserveUse: null });
       expect(h.stores.reservations.listByChild({ type: "invocation", id: ordinary.id })[0]).toMatchObject({ parent: { type: "plan_node", id: s.root.id }, capacitySource: "ordinary", finalReserveUse: null });
 
@@ -143,7 +143,7 @@ describe("final-reserve Invocations", () => {
     const h = openHarness();
     try {
       const s = seedRun(h, { budget: BUDGET, finalReserve: RESERVE });
-      const ordinary = seedInvocation(h, s, { allocation: { costUsd: 2, tokens: 20_000, attempts: 2 } });
+      const ordinary = seedInvocation(h, s, { role: "worker", purpose: "step", allocation: { costUsd: 2, tokens: 20_000, attempts: 2 } });
       const synthesis = finalInvocation(h, s, "final_synthesis", { allocation: { costUsd: 4, tokens: 40_000, attempts: 2 } });
       spend(h, s, ordinary, { costUsd: 1, tokens: 1000 });
       spend(h, s, synthesis, { costUsd: 3, tokens: 3000 });
@@ -185,7 +185,7 @@ describe("global Run Budget across partitions", () => {
       expect(capacity.ordinary.effectiveAvailable).toEqual({ costUsd: 30, tokens: 400, attempts: 3 });
       expect(capacity.final.effectiveAvailable).toEqual({ costUsd: 10, tokens: 100, attempts: 2 });
       // The root's Invocation overruns the root's reservation on cost only, while still active.
-      const invocation = seedInvocation(h, s, { allocation: { costUsd: 60, tokens: 500, attempts: 5 } });
+      const invocation = seedInvocation(h, s, { role: "worker", purpose: "step", allocation: { costUsd: 60, tokens: 500, attempts: 5 } });
       spend(h, s, invocation, { costUsd: 95, tokens: 400 });
       capacity = h.stores.reservations.runCapacity(s.run.id);
       // Visible before release: the root is charged max(60, 95) = 95 on cost, max(500, 400) = 500 on tokens.

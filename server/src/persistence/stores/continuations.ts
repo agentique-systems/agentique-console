@@ -6,10 +6,8 @@ import {
   type AttemptId,
   type ProviderContinuation,
 } from "@agentique-console/core";
-import { sha256Hex } from "../blob-store.ts";
 import type { PersistenceContext } from "../context.ts";
 import { attempts, providerContinuations } from "../schema.ts";
-import type { ContinuationPayloadStore } from "../../provider/continuation-store.ts";
 import { requireRow } from "./support.ts";
 
 function toDomain(row: typeof providerContinuations.$inferSelect): ProviderContinuation {
@@ -76,23 +74,5 @@ export class ProviderContinuationStore {
 
   count(): number {
     return this.ctx.db.select({ attemptId: providerContinuations.attemptId }).from(providerContinuations).all().length;
-  }
-
-  /**
-   * The payload bytes for `attemptId` when the index row exists, is not
-   * expired, and the stored bytes match the recorded digest; otherwise
-   * `null`. A stale or mismatched entry is removed so it is not consulted
-   * again.
-   */
-  async resolve(attemptId: AttemptId, payloads: ContinuationPayloadStore, now = this.ctx.clock()): Promise<Uint8Array | null> {
-    const continuation = this.get(attemptId, now);
-    if (!continuation) return null;
-    const bytes = await payloads.get(continuation.storageKey);
-    if (!bytes || sha256Hex(bytes) !== continuation.digest) {
-      this.delete(attemptId);
-      await payloads.delete(continuation.storageKey);
-      return null;
-    }
-    return bytes;
   }
 }

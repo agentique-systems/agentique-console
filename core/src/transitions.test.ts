@@ -132,9 +132,10 @@ describe("Invocation and Attempt transitions", () => {
     ]);
   });
 
-  it("Attempt statuses are terminal after running, including interrupted", () => {
+  it("Attempt statuses are terminal after running, including interrupted; a pending Attempt is interrupted by recovery without ever running", () => {
     exhaustively(ATTEMPT_MACHINE, [
       ["pending", "running"],
+      ["pending", "interrupted"],
       ["pending", "cancelled"],
       ["running", "succeeded"],
       ["running", "failed"],

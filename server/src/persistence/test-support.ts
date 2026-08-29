@@ -4,9 +4,12 @@
  * domain objects through the stores themselves.
  */
 import {
+  effectiveCapabilityPolicy,
   EMPTY_MANIFEST_TEMPLATE,
+  EMPTY_WORKSPACE_CAPABILITY_POLICY,
   ROOT_NODE_TITLE,
   ROOT_SOURCE_PATH,
+  RUNTIME_TOOLS_BY_ROLE,
   type AgentDefinitionRevision,
   type AgentDefinitionRevisionId,
   type Allocation,
@@ -247,29 +250,38 @@ export function seedInvocation(
   });
 }
 
-export function seedManifest(h: Harness, seeded: Seeded, invocation: Invocation) {
+/** A minimal valid manifest for a seeded Invocation: the effective policy of its definition in its role, no inputs. */
+export function seedManifest(h: Harness, seeded: Seeded, invocation: Invocation, definition: AgentDefinitionRevision = seeded.definition) {
+  const policy = effectiveCapabilityPolicy(definition, invocation.role, EMPTY_WORKSPACE_CAPABILITY_POLICY);
+  const tasks = [...invocation.taskIds].sort().map((taskId) => ({ taskId, subject: h.stores.tasks.get(taskId).subject }));
   return h.stores.invocations.putManifest(invocation.id, {
     agentDefinitionRevisionId: invocation.agentDefinitionRevisionId,
-    agentDefinitionContentHash: seeded.definition.contentHash,
-    instructions: seeded.definition.instructions,
+    agentDefinitionContentHash: definition.contentHash,
+    instructions: definition.instructions,
+    modelPolicy: definition.modelPolicy,
     role: invocation.role,
     purpose: invocation.purpose,
     patternPosition: null,
     continuedFromInvocationId: invocation.continuedFromInvocationId,
     runId: invocation.runId,
     planNodeId: invocation.planNodeId,
-    tasks: [],
+    tasks,
     requirementRevisionId: null,
     requirements: [],
+    acceptanceCriteria: [],
     decisions: [],
-    handoffIds: [],
-    readableArtifactIds: [],
+    inputs: [],
+    handoffs: [],
+    artifacts: [],
     startingSnapshotId: null,
     worktreePath: null,
     allocation: invocation.allocation,
+    allocationSource: invocation.allocationSource,
+    finalReserveUse: invocation.finalReserveUse,
     maxWallClockMs: null,
-    toolPolicy: seeded.definition.toolPolicy,
-    runtimeTools: ["return_result"],
+    capabilities: policy.capabilities,
+    toolPolicy: policy.toolPolicy,
+    runtimeTools: [...RUNTIME_TOOLS_BY_ROLE[invocation.role]],
   });
 }
 

@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "41828315-5151-4eca-b2f6-cc422a92abe7",
+  "id": "a21ea6a2-34f9-4c98-993e-ac25b84b4098",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "acceptance_criteria": {
@@ -543,6 +543,27 @@
           "notNull": false,
           "autoincrement": false
         },
+        "failure_detail": {
+          "name": "failure_detail",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "retry_decision": {
+          "name": "retry_decision",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "retry_not_before": {
+          "name": "retry_not_before",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "transcript_artifact_id": {
           "name": "transcript_artifact_id",
           "type": "text",
@@ -602,6 +623,37 @@
             "status"
           ],
           "isUnique": false
+        },
+        "attempts_status": {
+          "name": "attempts_status",
+          "columns": [
+            "status"
+          ],
+          "isUnique": false
+        },
+        "attempts_invocation_status": {
+          "name": "attempts_invocation_status",
+          "columns": [
+            "invocation_id",
+            "status",
+            "number"
+          ],
+          "isUnique": false
+        },
+        "attempts_retry_not_before": {
+          "name": "attempts_retry_not_before",
+          "columns": [
+            "retry_not_before"
+          ],
+          "isUnique": false
+        },
+        "attempts_active_invocation": {
+          "name": "attempts_active_invocation",
+          "columns": [
+            "invocation_id"
+          ],
+          "isUnique": true,
+          "where": "status IN ('pending', 'running')"
         }
       },
       "foreignKeys": {
@@ -725,11 +777,27 @@
         },
         "attempts_succeeded_shape": {
           "name": "attempts_succeeded_shape",
-          "value": "\"attempts\".\"status\" <> 'succeeded' OR (\"attempts\".\"result\" IS NOT NULL AND \"attempts\".\"failure_class\" IS NULL)"
+          "value": "\"attempts\".\"status\" <> 'succeeded' OR (\"attempts\".\"result\" IS NOT NULL AND \"attempts\".\"failure_class\" IS NULL AND \"attempts\".\"failure_detail\" IS NULL AND \"attempts\".\"retry_decision\" IS NULL)"
         },
         "attempts_failure_classified": {
           "name": "attempts_failure_classified",
           "value": "\"attempts\".\"status\" NOT IN ('failed', 'timed_out', 'interrupted') OR \"attempts\".\"failure_class\" IS NOT NULL"
+        },
+        "attempts_retry_decision_shape": {
+          "name": "attempts_retry_decision_shape",
+          "value": "\"attempts\".\"retry_decision\" IS NULL OR (\"attempts\".\"status\" IN ('failed', 'timed_out', 'interrupted', 'cancelled') AND json_extract(\"attempts\".\"retry_decision\", '$.reason') IN ('provider_transient', 'result_invalid', 'interrupted', 'tool_failure', 'provider_permanent', 'allocation_exhausted', 'attempts_exhausted', 'cancelled', 'tool_failure_retried', 'approval_required') AND json_extract(\"attempts\".\"retry_decision\", '$.permitted') IN (0, 1) AND ((json_extract(\"attempts\".\"retry_decision\", '$.permitted') = 1 AND json_extract(\"attempts\".\"retry_decision\", '$.reason') IN ('provider_transient', 'result_invalid', 'interrupted', 'tool_failure')) OR (json_extract(\"attempts\".\"retry_decision\", '$.permitted') = 0 AND json_extract(\"attempts\".\"retry_decision\", '$.notBefore') IS NULL AND json_extract(\"attempts\".\"retry_decision\", '$.reason') IN ('provider_permanent', 'allocation_exhausted', 'attempts_exhausted', 'cancelled', 'tool_failure_retried', 'approval_required'))))"
+        },
+        "attempts_retry_not_before_agrees": {
+          "name": "attempts_retry_not_before_agrees",
+          "value": "\"attempts\".\"retry_not_before\" IS json_extract(\"attempts\".\"retry_decision\", '$.notBefore')"
+        },
+        "attempts_failure_detail_terminal": {
+          "name": "attempts_failure_detail_terminal",
+          "value": "\"attempts\".\"failure_detail\" IS NULL OR \"attempts\".\"status\" IN ('failed', 'timed_out', 'interrupted', 'cancelled')"
+        },
+        "attempts_cancelled_never_retries": {
+          "name": "attempts_cancelled_never_retries",
+          "value": "\"attempts\".\"status\" <> 'cancelled' OR \"attempts\".\"retry_decision\" IS NULL OR json_extract(\"attempts\".\"retry_decision\", '$.permitted') = 0"
         }
       }
     },
@@ -1343,6 +1411,13 @@
           "notNull": true,
           "autoincrement": false
         },
+        "renderer_version": {
+          "name": "renderer_version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "text",
@@ -1394,6 +1469,10 @@
         "context_manifests_digest_shape": {
           "name": "context_manifests_digest_shape",
           "value": "length(\"context_manifests\".\"digest\") = 64"
+        },
+        "context_manifests_renderer_version": {
+          "name": "context_manifests_renderer_version",
+          "value": "\"context_manifests\".\"renderer_version\" >= 1"
         }
       }
     },
@@ -2696,6 +2775,22 @@
             "allocation_source"
           ],
           "isUnique": false
+        },
+        "invocations_active_orchestrator": {
+          "name": "invocations_active_orchestrator",
+          "columns": [
+            "run_id"
+          ],
+          "isUnique": true,
+          "where": "role = 'orchestrator' AND status IN ('pending', 'running', 'waiting')"
+        },
+        "invocations_active_coordinator": {
+          "name": "invocations_active_coordinator",
+          "columns": [
+            "plan_node_id"
+          ],
+          "isUnique": true,
+          "where": "role = 'coordinator' AND status IN ('pending', 'running', 'waiting')"
         }
       },
       "foreignKeys": {

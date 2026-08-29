@@ -1,26 +1,34 @@
 import { z } from "zod";
 import { allocationSchema, FINAL_RESERVE_USES, type Allocation, type FinalReserveUse } from "./budgets.ts";
+import { DECISION_KINDS, type DecisionKind } from "./decisions.ts";
 import { ValidationError } from "./errors.ts";
+import { handoffEndpointSchema, HANDOFF_MAX_SUMMARY_LENGTH, type HandoffEndpoint } from "./handoffs.ts";
 import type {
+  AcceptanceCriterionId,
   AgentDefinitionRevisionId,
   ArtifactId,
   AttemptId,
   CapacityLeaseId,
   ContextManifestId,
+  ConversationMessageId,
   DecisionId,
+  GateId,
   HandoffId,
   InvocationId,
   PlanNodeId,
+  PublicationId,
   RequirementId,
   RequirementRevisionId,
   RunId,
   SnapshotId,
   TaskId,
 } from "./ids.ts";
-import { evidenceSchema, type Evidence } from "./requirements.ts";
-import { toolPolicySchema, type ToolPolicy } from "./agents.ts";
+import { PLAN_NODE_STATUSES, planRejectionReasonSchema, type PlanNodeStatus, type PlanRejectionReason } from "./plans.ts";
+import { acceptanceCheckSchema, evidenceSchema, REQUIREMENT_STATUSES, type AcceptanceCheck, type Evidence, type RequirementStatus } from "./requirements.ts";
+import { agentCapabilitiesSchema, modelPolicySchema, toolPolicySchema, type AgentCapabilities, type ModelPolicy, type ToolPolicy } from "./agents.ts";
 import { defineStateMachine } from "./transitions.ts";
 import {
+  count,
   idSchema,
   nonEmptyString,
   positiveCount,
@@ -29,6 +37,7 @@ import {
   uniqueIds,
   type Timestamp,
 } from "./validation.ts";
+import { PUBLICATION_OUTCOMES, type PublicationOutcome } from "./workspace-state.ts";
 
 // ---------------------------------------------------------------------------
 // Roles and purposes (closed)
@@ -171,6 +180,66 @@ export interface InvocationResult {
 
 export const RESULT_MAX_SUMMARY_LENGTH = 500;
 export const RESULT_MAX_OPEN_ITEMS = 10;
+
+/** Every non-terminal status: an Invocation in one of these holds its Plan Node's turn. */
+export const ACTIVE_INVOCATION_STATUSES = ["pending", "running", "waiting"] as const satisfies readonly InvocationStatus[];
+
+// ---------------------------------------------------------------------------
+// Result validation violations (closed)
+// ---------------------------------------------------------------------------
+
+/**
+ * Why a candidate result is invalid (execution-model §6.3). The runtime
+ * persists a bounded list of these on the failed Attempt so a retry can be
+ * rendered deterministically after a restart without re-validating.
+ */
+export const RESULT_VIOLATION_CODES = [
+  "malformed",
+  "unknown_artifact",
+  "foreign_artifact",
+  "unknown_task",
+  "foreign_task",
+  "task_not_assigned",
+  "task_report_not_permitted",
+  "task_without_evidence",
+  "task_missing_outputs",
+  "unknown_evidence_reference",
+  "foreign_evidence_reference",
+  "run_outcome_not_permitted",
+  "run_outcome_without_evidence",
+  "changeset_missing",
+  "status_incompatible",
+] as const;
+export type ResultViolationCode = (typeof RESULT_VIOLATION_CODES)[number];
+
+export interface ResultViolation {
+  code: ResultViolationCode;
+  message: string;
+  /** The result path the violation concerns, when one applies. */
+  path: string | null;
+}
+
+export const RESULT_VIOLATION_MAX_MESSAGE_LENGTH = 300;
+export const RESULT_MAX_VIOLATIONS = 20;
+
+export const resultViolationSchema: z.ZodType<ResultViolation> = z.strictObject({
+  code: z.enum(RESULT_VIOLATION_CODES),
+  message: nonEmptyString.max(RESULT_VIOLATION_MAX_MESSAGE_LENGTH),
+  path: nonEmptyString.nullable(),
+});
+
+/** Bounds a message for persistence: single line, capped length, never a stack trace. */
+export function boundedFailureMessage(message: string, max = ATTEMPT_FAILURE_MAX_MESSAGE_LENGTH): string {
+  const firstLine = message.split(/\r?\n/, 1)[0] ?? "";
+  const trimmed = firstLine.trim();
+  const safe = trimmed.length > 0 ? trimmed : "failure";
+  return safe.length > max ? `${safe.slice(0, max - 1)}…` : safe;
+}
+
+/** Caps a violation list at `RESULT_MAX_VIOLATIONS`, bounding every message. */
+export function boundResultViolations(violations: readonly ResultViolation[]): ResultViolation[] {
+  return violations.slice(0, RESULT_MAX_VIOLATIONS).map((v) => ({ ...v, message: boundedFailureMessage(v.message, RESULT_VIOLATION_MAX_MESSAGE_LENGTH) }));
+}
 
 export const invocationResultSchema: z.ZodType<InvocationResult> = z
   .strictObject({
@@ -375,8 +444,13 @@ export const ATTEMPT_FAILURE_CLASSES = [
 ] as const;
 export type AttemptFailureClass = (typeof ATTEMPT_FAILURE_CLASSES)[number];
 
+/**
+ * A `pending` Attempt that never reached the provider (its process ended
+ * first) is `interrupted` by recovery like a running one, keeping its
+ * consumed Attempt; it never becomes `running` retroactively.
+ */
 export const ATTEMPT_MACHINE = defineStateMachine<AttemptStatus>("Attempt", ATTEMPT_STATUSES, {
-  pending: ["running", "cancelled"],
+  pending: ["running", "interrupted", "cancelled"],
   running: ["succeeded", "failed", "timed_out", "interrupted", "cancelled"],
   succeeded: [],
   failed: [],
@@ -387,6 +461,86 @@ export const ATTEMPT_MACHINE = defineStateMachine<AttemptStatus>("Attempt", ATTE
 
 /** Statuses after which the runtime may create a `retry` Attempt (if allocation remains). */
 export const RETRYABLE_ATTEMPT_STATUSES = ["failed", "timed_out", "interrupted"] as const satisfies readonly AttemptStatus[];
+
+// ---------------------------------------------------------------------------
+// Bounded failure detail and durable retry decision
+// ---------------------------------------------------------------------------
+
+export const ATTEMPT_FAILURE_MAX_MESSAGE_LENGTH = 500;
+
+/**
+ * The sanitized, bounded record of why an Attempt ended without a valid
+ * result: enough to render a retry appendix after a restart, never a
+ * transcript, raw provider message, complete tool output, secret, or stack
+ * trace.
+ */
+export interface AttemptFailureDetail {
+  message: string;
+  /** The exact result-validation violations for `result_invalid`; empty otherwise. */
+  violations: ResultViolation[];
+  /** The capability tool concerned by a `tool_failure` or an approval-required outcome. */
+  tool: string | null;
+  /** True when the interruption was a cancellation, which forbids a retry. */
+  cancelled: boolean;
+}
+
+export const attemptFailureDetailSchema: z.ZodType<AttemptFailureDetail> = z.strictObject({
+  message: nonEmptyString.max(ATTEMPT_FAILURE_MAX_MESSAGE_LENGTH),
+  violations: z.array(resultViolationSchema).max(RESULT_MAX_VIOLATIONS),
+  tool: nonEmptyString.nullable(),
+  cancelled: z.boolean(),
+});
+
+/** Why another Attempt is permitted after this one (execution-model §7.2, §14). */
+export const RETRY_PERMITTED_REASONS = ["provider_transient", "result_invalid", "interrupted", "tool_failure"] as const;
+/** Why no further Attempt is permitted after this one. */
+export const RETRY_REFUSED_REASONS = [
+  "provider_permanent",
+  "allocation_exhausted",
+  "attempts_exhausted",
+  "cancelled",
+  "tool_failure_retried",
+  "approval_required",
+] as const;
+export const RETRY_DECISION_REASONS = [...RETRY_PERMITTED_REASONS, ...RETRY_REFUSED_REASONS] as const;
+export type RetryPermittedReason = (typeof RETRY_PERMITTED_REASONS)[number];
+export type RetryRefusedReason = (typeof RETRY_REFUSED_REASONS)[number];
+export type RetryDecisionReason = (typeof RETRY_DECISION_REASONS)[number];
+
+/**
+ * The durable retry eligibility recorded on a terminal Attempt: whether the
+ * Invocation may create another Attempt, why, and the earliest time. It is
+ * persisted with the Attempt's terminal transition so that a restart reads
+ * the exact decision rather than recomputing it from possibly changed
+ * process configuration.
+ */
+export interface RetryDecision {
+  permitted: boolean;
+  reason: RetryDecisionReason;
+  /** The deterministic backoff deadline for a permitted retry; `null` when the retry may start at once or none is permitted. */
+  notBefore: Timestamp | null;
+}
+
+export const retryDecisionSchema: z.ZodType<RetryDecision> = z
+  .strictObject({
+    permitted: z.boolean(),
+    reason: z.enum(RETRY_DECISION_REASONS),
+    notBefore: timestampSchema.nullable(),
+  })
+  .refine((d) => d.permitted === (RETRY_PERMITTED_REASONS as readonly string[]).includes(d.reason), {
+    message: "a permitted retry names a permitting reason; a refused one names a refusing reason",
+    path: ["reason"],
+  })
+  .refine((d) => d.permitted || d.notBefore === null, {
+    message: "only a permitted retry carries a notBefore time",
+    path: ["notBefore"],
+  });
+
+/** Deterministic exponential backoff with no randomness: `base × 2^(attemptNumber − 1)`, capped. */
+export function retryBackoffMs(attemptNumber: number, baseMs: number, maxMs: number): number {
+  const exponent = Math.max(0, attemptNumber - 1);
+  return Math.min(maxMs, baseMs * 2 ** exponent);
+}
 
 export interface Attempt {
   id: AttemptId;
@@ -400,6 +554,8 @@ export interface Attempt {
   resumedFromAttemptId: AttemptId | null;
   status: AttemptStatus;
   failureClass: AttemptFailureClass | null;
+  failureDetail: AttemptFailureDetail | null;
+  retryDecision: RetryDecision | null;
   transcriptArtifactId: ArtifactId | null;
   capacityLeaseId: CapacityLeaseId | null;
   result: InvocationResult | null;
@@ -420,6 +576,8 @@ export const attemptSchema: z.ZodType<Attempt> = z
     resumedFromAttemptId: idSchema("attempt").nullable(),
     status: z.enum(ATTEMPT_STATUSES),
     failureClass: z.enum(ATTEMPT_FAILURE_CLASSES).nullable(),
+    failureDetail: attemptFailureDetailSchema.nullable(),
+    retryDecision: retryDecisionSchema.nullable(),
     transcriptArtifactId: idSchema("artifact").nullable(),
     capacityLeaseId: idSchema("capacityLease").nullable(),
     result: invocationResultSchema.nullable(),
@@ -440,14 +598,41 @@ export const attemptSchema: z.ZodType<Attempt> = z
     message: "endedAt is set exactly when the Attempt is terminal",
     path: ["endedAt"],
   })
-  .refine((a) => a.status !== "succeeded" || (a.result !== null && a.failureClass === null), {
-    message: "a succeeded Attempt carries a result and no failure class",
+  .refine((a) => a.status !== "succeeded" || (a.result !== null && a.failureClass === null && a.failureDetail === null && a.retryDecision === null), {
+    message: "a succeeded Attempt carries a result and no failure class, detail, or retry decision",
     path: ["result"],
   })
   .refine(
     (a) => !(a.status === "failed" || a.status === "timed_out" || a.status === "interrupted") || a.failureClass !== null,
     { message: "a failed, timed-out, or interrupted Attempt is classified", path: ["failureClass"] },
-  );
+  )
+  .refine((a) => a.retryDecision === null || (ATTEMPT_MACHINE.isTerminal(a.status) && a.status !== "succeeded"), {
+    message: "a retry decision is recorded only on a terminal Attempt that did not succeed",
+    path: ["retryDecision"],
+  })
+  .refine((a) => a.failureDetail === null || ATTEMPT_MACHINE.isTerminal(a.status), {
+    message: "failure detail is recorded only on a terminal Attempt",
+    path: ["failureDetail"],
+  })
+  .refine((a) => a.status !== "cancelled" || a.retryDecision === null || !a.retryDecision.permitted, {
+    message: "a cancelled Attempt never permits a retry",
+    path: ["retryDecision"],
+  });
+
+/**
+ * Whether a prior Attempt ended in a state the provider can safely continue
+ * from (execution-model §6.6): it completed, its result was invalid (the
+ * provider finished and may correct it), or it was interrupted or hit a
+ * transient provider error without being cancelled. Permanent failures,
+ * tool failures, cancellations, and allocation exhaustion are never
+ * continued.
+ */
+export function isContinuationSafeTermination(attempt: Pick<Attempt, "status" | "failureClass" | "failureDetail">): boolean {
+  if (attempt.status === "succeeded") return true;
+  if (attempt.status === "cancelled" || !ATTEMPT_MACHINE.isTerminal(attempt.status)) return false;
+  if (attempt.failureDetail?.cancelled) return false;
+  return attempt.failureClass === "result_invalid" || attempt.failureClass === "interrupted" || attempt.failureClass === "provider_transient";
+}
 
 export interface AttemptInput {
   invocationId: InvocationId;
@@ -466,13 +651,19 @@ export const attemptInputSchema: z.ZodType<AttemptInput> = z
     path: ["resumedFromAttemptId"],
   });
 
+/** The bounded failure record and durable retry decision a terminal-failure transition carries. */
+export interface AttemptFailureRecord {
+  failureDetail?: AttemptFailureDetail | null;
+  retryDecision?: RetryDecision | null;
+}
+
 export type AttemptTransition =
   | { to: "running"; capacityLeaseId: CapacityLeaseId | null }
   | { to: "succeeded"; result: InvocationResult; transcriptArtifactId: ArtifactId | null }
-  | { to: "failed"; failureClass: Exclude<AttemptFailureClass, "interrupted">; transcriptArtifactId: ArtifactId | null }
-  | { to: "timed_out"; transcriptArtifactId: ArtifactId | null }
-  | { to: "interrupted"; transcriptArtifactId: ArtifactId | null }
-  | { to: "cancelled"; transcriptArtifactId: ArtifactId | null };
+  | ({ to: "failed"; failureClass: Exclude<AttemptFailureClass, "interrupted">; transcriptArtifactId: ArtifactId | null } & AttemptFailureRecord)
+  | ({ to: "timed_out"; transcriptArtifactId: ArtifactId | null } & AttemptFailureRecord)
+  | ({ to: "interrupted"; transcriptArtifactId: ArtifactId | null } & AttemptFailureRecord)
+  | ({ to: "cancelled"; transcriptArtifactId: ArtifactId | null } & AttemptFailureRecord);
 
 /** The failure class each terminal-failure status implies. */
 export function failureClassForTransition(transition: AttemptTransition): AttemptFailureClass | null {
@@ -492,15 +683,58 @@ export function failureClassForTransition(transition: AttemptTransition): Attemp
 // Context Manifest
 // ---------------------------------------------------------------------------
 
+/** The runtime tools (execution-model §6.4), the same for every role and restricted by role. */
+export const RUNTIME_TOOLS = [
+  "read_requirements",
+  "read_decisions",
+  "read_tasks",
+  "read_artifact",
+  "read_execution_plan",
+  "read_agent_definitions",
+  "write_artifact",
+  "update_task",
+  "create_tasks",
+  "propose_tasks",
+  "request_decision",
+  "record_decision",
+  "propose_requirements",
+  "revise_execution_plan",
+  "request_completion",
+  "return_result",
+] as const;
+export type RuntimeTool = (typeof RUNTIME_TOOLS)[number];
+
+const READ_RUNTIME_TOOLS = ["read_requirements", "read_decisions", "read_tasks", "read_artifact", "read_execution_plan", "read_agent_definitions", "write_artifact"] as const;
+
+/** The role matrix of execution-model §6.4; no role receives peer messaging, scheduling control, compiled-plan writes, or transcript access. */
+export const RUNTIME_TOOLS_BY_ROLE: Readonly<Record<InvocationRole, readonly RuntimeTool[]>> = {
+  orchestrator: [...READ_RUNTIME_TOOLS, "update_task", "create_tasks", "request_decision", "record_decision", "propose_requirements", "revise_execution_plan", "request_completion", "return_result"],
+  coordinator: [...READ_RUNTIME_TOOLS, "update_task", "propose_tasks", "request_decision", "return_result"],
+  worker: [...READ_RUNTIME_TOOLS, "update_task", "request_decision", "return_result"],
+  evaluator: [...READ_RUNTIME_TOOLS, "return_result"],
+};
+
 export interface ManifestRequirement {
   requirementId: RequirementId;
   statement: string;
-  acceptanceCriterionIds: string[];
+  status: RequirementStatus;
+  acceptanceCriterionIds: AcceptanceCriterionId[];
+}
+
+export interface ManifestAcceptanceCriterion {
+  acceptanceCriterionId: AcceptanceCriterionId;
+  requirementId: RequirementId | null;
+  taskId: TaskId | null;
+  check: AcceptanceCheck;
 }
 
 export interface ManifestDecision {
   decisionId: DecisionId;
+  kind: DecisionKind;
+  /** The answer, or `null` while the Decision is open. */
   chosenOptionId: string | null;
+  /** True when the Decision was resolved after the `continuedFromInvocationId` Invocation's manifest was assembled. */
+  resolvedSincePrevious: boolean;
 }
 
 export interface ManifestTask {
@@ -508,15 +742,61 @@ export interface ManifestTask {
   subject: string;
 }
 
+/** Routing metadata of a Handoff delivered to the Invocation (never free-form state). */
+export interface ManifestHandoff {
+  handoffId: HandoffId;
+  source: HandoffEndpoint;
+  taskIds: TaskId[];
+  artifactIds: ArtifactId[];
+  summary: string;
+}
+
+/** Bounded metadata of an Artifact the Invocation may read through `read_artifact`; content is never embedded. */
+export interface ManifestArtifact {
+  artifactId: ArtifactId;
+  mediaType: string;
+  byteSize: number;
+  title: string | null;
+}
+
 /**
- * The explicit, complete list of inputs an Invocation receives. Exactly one
- * per Invocation, persisted before the initial Attempt and never changed.
- * It never contains a provider continuation payload.
+ * A queued logical input the runtime created the Invocation to receive
+ * (execution-model §4.6): the operator's message for `operator_input`, a
+ * Plan Node outcome for `node_result`, and so on. Each kind carries ids
+ * and closed-set facts only.
+ */
+export type ManifestInput =
+  | { kind: "operator_message"; conversationMessageId: ConversationMessageId; content: string }
+  | { kind: "node_result"; planNodeId: PlanNodeId; status: PlanNodeStatus; outputArtifactIds: ArtifactId[] }
+  | { kind: "decision_resolution"; decisionId: DecisionId }
+  | { kind: "gate_result"; gateId: GateId; passed: boolean }
+  | { kind: "plan_revision"; accepted: boolean; revisionNumber: number | null; reasons: PlanRejectionReason[] }
+  | { kind: "publication_result"; publicationId: PublicationId; outcome: PublicationOutcome };
+
+export const manifestInputSchema: z.ZodType<ManifestInput> = z.discriminatedUnion("kind", [
+  z.strictObject({ kind: z.literal("operator_message"), conversationMessageId: idSchema("conversationMessage"), content: z.string().min(1) }),
+  z.strictObject({ kind: z.literal("node_result"), planNodeId: idSchema("planNode"), status: z.enum(PLAN_NODE_STATUSES), outputArtifactIds: uniqueIds(idSchema("artifact")) }),
+  z.strictObject({ kind: z.literal("decision_resolution"), decisionId: idSchema("decision") }),
+  z.strictObject({ kind: z.literal("gate_result"), gateId: idSchema("gate"), passed: z.boolean() }),
+  z.strictObject({ kind: z.literal("plan_revision"), accepted: z.boolean(), revisionNumber: positiveCount.nullable(), reasons: z.array(planRejectionReasonSchema) }),
+  z.strictObject({ kind: z.literal("publication_result"), publicationId: idSchema("publication"), outcome: z.enum(PUBLICATION_OUTCOMES) }),
+]);
+
+/**
+ * The explicit, complete list of inputs an Invocation receives
+ * (execution-model §6.2). Exactly one per Invocation, persisted before the
+ * initial Attempt and never changed. Every collection is in canonical order
+ * (Requirements in scope order, everything else by id), so the deterministic
+ * renderer is a pure projection of this value. It never contains another
+ * Invocation's transcript, a provider continuation payload or storage key,
+ * provider messages, narrative status, or Artifact content.
  */
 export interface ContextManifestContent {
   agentDefinitionRevisionId: AgentDefinitionRevisionId;
   agentDefinitionContentHash: string;
   instructions: string;
+  /** The effective model policy of the Agent Definition revision. */
+  modelPolicy: ModelPolicy;
   role: InvocationRole;
   purpose: InvocationPurpose;
   patternPosition: string | null;
@@ -524,48 +804,105 @@ export interface ContextManifestContent {
   runId: RunId;
   planNodeId: PlanNodeId;
   tasks: ManifestTask[];
+  /** The pinned revision of a scoped node, or the current revision for the root node; `null` when the Conversation has none. */
   requirementRevisionId: RequirementRevisionId | null;
   requirements: ManifestRequirement[];
+  acceptanceCriteria: ManifestAcceptanceCriterion[];
   decisions: ManifestDecision[];
-  handoffIds: HandoffId[];
-  readableArtifactIds: ArtifactId[];
+  inputs: ManifestInput[];
+  handoffs: ManifestHandoff[];
+  artifacts: ManifestArtifact[];
   startingSnapshotId: SnapshotId | null;
   worktreePath: string | null;
   allocation: Allocation;
+  allocationSource: InvocationAllocationSource;
+  finalReserveUse: FinalReserveUse | null;
   maxWallClockMs: number | null;
+  /** The effective capability set: Agent Definition ∩ role policy ∩ Workspace policy. */
+  capabilities: AgentCapabilities;
+  /** The effective Tool Policy over every declared tool, denied ones included. */
   toolPolicy: ToolPolicy;
-  runtimeTools: string[];
+  runtimeTools: RuntimeTool[];
 }
 
-export const contextManifestContentSchema: z.ZodType<ContextManifestContent> = z.strictObject({
-  agentDefinitionRevisionId: idSchema("agentDefinitionRevision"),
-  agentDefinitionContentHash: sha256Hex,
-  instructions: z.string(),
-  role: z.enum(INVOCATION_ROLES),
-  purpose: z.enum(INVOCATION_PURPOSES),
-  patternPosition: nonEmptyString.nullable(),
-  continuedFromInvocationId: idSchema("invocation").nullable(),
-  runId: idSchema("run"),
-  planNodeId: idSchema("planNode"),
-  tasks: z.array(z.strictObject({ taskId: idSchema("task"), subject: nonEmptyString })),
-  requirementRevisionId: idSchema("requirementRevision").nullable(),
-  requirements: z.array(
-    z.strictObject({
-      requirementId: idSchema("requirement"),
-      statement: nonEmptyString,
-      acceptanceCriterionIds: z.array(idSchema("acceptanceCriterion")),
-    }),
-  ),
-  decisions: z.array(z.strictObject({ decisionId: idSchema("decision"), chosenOptionId: nonEmptyString.nullable() })),
-  handoffIds: uniqueIds(idSchema("handoff")),
-  readableArtifactIds: uniqueIds(idSchema("artifact")),
-  startingSnapshotId: idSchema("snapshot").nullable(),
-  worktreePath: nonEmptyString.nullable(),
-  allocation: allocationSchema,
-  maxWallClockMs: positiveCount.nullable(),
-  toolPolicy: toolPolicySchema,
-  runtimeTools: z.array(nonEmptyString),
-});
+const sortedIds = <T extends { [K in keyof T]: unknown }>(key: keyof T) => (items: T[]) => items.every((item, i) => i === 0 || String(items[i - 1]![key]) < String(item[key]));
+
+export const contextManifestContentSchema: z.ZodType<ContextManifestContent> = z
+  .strictObject({
+    agentDefinitionRevisionId: idSchema("agentDefinitionRevision"),
+    agentDefinitionContentHash: sha256Hex,
+    instructions: z.string(),
+    modelPolicy: modelPolicySchema,
+    role: z.enum(INVOCATION_ROLES),
+    purpose: z.enum(INVOCATION_PURPOSES),
+    patternPosition: nonEmptyString.nullable(),
+    continuedFromInvocationId: idSchema("invocation").nullable(),
+    runId: idSchema("run"),
+    planNodeId: idSchema("planNode"),
+    tasks: z.array(z.strictObject({ taskId: idSchema("task"), subject: nonEmptyString })).refine(sortedIds("taskId"), { message: "tasks are ordered by id" }),
+    requirementRevisionId: idSchema("requirementRevision").nullable(),
+    requirements: z.array(
+      z.strictObject({
+        requirementId: idSchema("requirement"),
+        statement: nonEmptyString,
+        status: z.enum(REQUIREMENT_STATUSES),
+        acceptanceCriterionIds: uniqueIds(idSchema("acceptanceCriterion")),
+      }),
+    ),
+    acceptanceCriteria: z
+      .array(
+        z.strictObject({
+          acceptanceCriterionId: idSchema("acceptanceCriterion"),
+          requirementId: idSchema("requirement").nullable(),
+          taskId: idSchema("task").nullable(),
+          check: acceptanceCheckSchema,
+        }),
+      )
+      .refine(sortedIds("acceptanceCriterionId"), { message: "acceptance criteria are ordered by id" }),
+    decisions: z
+      .array(z.strictObject({ decisionId: idSchema("decision"), kind: z.enum(DECISION_KINDS), chosenOptionId: nonEmptyString.nullable(), resolvedSincePrevious: z.boolean() }))
+      .refine(sortedIds("decisionId"), { message: "decisions are ordered by id" }),
+    inputs: z.array(manifestInputSchema),
+    handoffs: z
+      .array(
+        z.strictObject({
+          handoffId: idSchema("handoff"),
+          source: handoffEndpointSchema,
+          taskIds: uniqueIds(idSchema("task")),
+          artifactIds: uniqueIds(idSchema("artifact")),
+          summary: z.string().max(HANDOFF_MAX_SUMMARY_LENGTH),
+        }),
+      )
+      .refine(sortedIds("handoffId"), { message: "handoffs are ordered by id" }),
+    artifacts: z
+      .array(z.strictObject({ artifactId: idSchema("artifact"), mediaType: nonEmptyString, byteSize: count, title: nonEmptyString.nullable() }))
+      .refine(sortedIds("artifactId"), { message: "artifacts are ordered by id" }),
+    startingSnapshotId: idSchema("snapshot").nullable(),
+    worktreePath: nonEmptyString.nullable(),
+    allocation: allocationSchema,
+    allocationSource: z.enum(INVOCATION_ALLOCATION_SOURCES),
+    finalReserveUse: z.enum(FINAL_RESERVE_USES).nullable(),
+    maxWallClockMs: positiveCount.nullable(),
+    capabilities: agentCapabilitiesSchema,
+    toolPolicy: toolPolicySchema,
+    runtimeTools: z.array(z.enum(RUNTIME_TOOLS)).refine((t) => new Set(t).size === t.length, { message: "runtime tools are unique" }),
+  })
+  .refine((m) => PURPOSES_BY_ROLE[m.role].includes(m.purpose), { message: "purpose must belong to the role", path: ["purpose"] })
+  .refine((m) => (m.allocationSource === "run_final_reserve") === (m.finalReserveUse !== null), {
+    message: "a final-reserve manifest names its use and an ordinary one names none",
+    path: ["finalReserveUse"],
+  })
+  .refine((m) => m.capabilities.tools.every((tool) => m.toolPolicy[tool] !== undefined && m.toolPolicy[tool] !== "denied"), {
+    message: "every effective capability tool carries a non-denied disposition",
+    path: ["capabilities"],
+  })
+  .refine((m) => m.runtimeTools.every((tool) => RUNTIME_TOOLS_BY_ROLE[m.role].includes(tool)), {
+    message: "runtime tools are restricted by role",
+    path: ["runtimeTools"],
+  });
+
+/** The version of the deterministic renderer contract a manifest was assembled for. */
+export const MANIFEST_RENDERER_VERSION = 1;
 
 export interface ContextManifest {
   id: ContextManifestId;
@@ -573,6 +910,8 @@ export interface ContextManifest {
   runId: RunId;
   content: ContextManifestContent;
   digest: string;
+  /** Which rendering contract applies; a retry after a restart renders with exactly this version. */
+  rendererVersion: number;
   createdAt: Timestamp;
 }
 
@@ -582,6 +921,7 @@ export const contextManifestSchema: z.ZodType<ContextManifest> = z.strictObject(
   runId: idSchema("run"),
   content: contextManifestContentSchema,
   digest: sha256Hex,
+  rendererVersion: positiveCount,
   createdAt: timestampSchema,
 });
 

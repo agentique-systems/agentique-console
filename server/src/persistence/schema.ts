@@ -62,6 +62,9 @@ import {
   RESERVATION_RELEASE_REASONS,
   RESERVATION_STATUSES,
   RESOLUTION_POLICIES,
+  RETRY_DECISION_REASONS,
+  RETRY_PERMITTED_REASONS,
+  RETRY_REFUSED_REASONS,
   RUN_KINDS,
   RUN_STATUSES,
   RUN_WAIT_REASONS,
@@ -77,6 +80,7 @@ import {
   type AgentDefaultLimits,
   type AgentDefinitionProvenance,
   type ArtifactProducer,
+  type AttemptFailureDetail,
   type ContextManifestContent,
   type DecisionAffects,
   type DecisionOption,
@@ -94,6 +98,7 @@ import {
   type PatternShape,
   type PublicationStrategy,
   type RequirementTreeEntry,
+  type RetryDecision,
   type RunFailure,
   type RunTarget,
   type TaskBlockReason,
@@ -782,6 +787,13 @@ export const invocations = sqliteTable(
     check("invocations_terminal_has_ended_at", sql`(${t.status} IN ('succeeded', 'failed', 'cancelled')) = (${t.endedAt} IS NOT NULL)`),
     check("invocations_alloc_attempts", sql`${t.allocAttempts} >= 1 AND ${t.allocCostUsd} >= 0 AND ${t.allocTokens} >= 0`),
     check("invocations_no_self_continue", sql`${t.continuedFromInvocationId} IS NULL OR ${t.continuedFromInvocationId} <> ${t.id}`),
+    // At most one active (non-terminal) Orchestrator Invocation per Run and one active Coordinator Invocation per node (execution-model §4.6, §5.5).
+    uniqueIndex("invocations_active_orchestrator")
+      .on(t.runId)
+      .where(sql`role = 'orchestrator' AND status IN ('pending', 'running', 'waiting')`),
+    uniqueIndex("invocations_active_coordinator")
+      .on(t.planNodeId)
+      .where(sql`role = 'coordinator' AND status IN ('pending', 'running', 'waiting')`),
   ],
 );
 
@@ -804,6 +816,12 @@ export const attempts = sqliteTable(
     resumedFromAttemptId: text("resumed_from_attempt_id").references((): AnySQLiteColumn => attempts.id),
     status: text("status").notNull(),
     failureClass: text("failure_class"),
+    /** Bounded, sanitized failure record (message, result violations, tool, cancellation); never a transcript or stack trace. */
+    failureDetail: text("failure_detail", { mode: "json" }).$type<AttemptFailureDetail>(),
+    /** The durable retry decision recorded with the terminal transition; read back verbatim after a restart. */
+    retryDecision: text("retry_decision", { mode: "json" }).$type<RetryDecision>(),
+    /** The earliest time a permitted retry may start, denormalized from `retry_decision` for eligibility scans. */
+    retryNotBefore: timestamp("retry_not_before"),
     transcriptArtifactId: text("transcript_artifact_id").references(() => artifacts.id),
     capacityLeaseId: text("capacity_lease_id").references((): AnySQLiteColumn => capacityLeases.id),
     result: text("result", { mode: "json" }).$type<InvocationResult>(),
@@ -814,6 +832,14 @@ export const attempts = sqliteTable(
   (t) => [
     uniqueIndex("attempts_invocation_number").on(t.invocationId, t.number),
     index("attempts_run_status").on(t.runId, t.status),
+    // Recovery scans every non-terminal Attempt; retry eligibility reads an Invocation's latest Attempt and its deadline.
+    index("attempts_status").on(t.status),
+    index("attempts_invocation_status").on(t.invocationId, t.status, t.number),
+    index("attempts_retry_not_before").on(t.retryNotBefore),
+    // One non-terminal Attempt per Invocation at any time.
+    uniqueIndex("attempts_active_invocation")
+      .on(t.invocationId)
+      .where(sql`status IN ('pending', 'running')`),
     check("attempts_kind", sql`${t.kind} IN (${inList(ATTEMPT_KINDS)})`),
     check("attempts_start_mode", sql`${t.startMode} IN (${inList(ATTEMPT_START_MODES)})`),
     check("attempts_status", sql`${t.status} IN (${inList(ATTEMPT_STATUSES)})`),
@@ -826,8 +852,19 @@ export const attempts = sqliteTable(
       "attempts_terminal_has_ended_at",
       sql`(${t.status} IN ('succeeded', 'failed', 'timed_out', 'interrupted', 'cancelled')) = (${t.endedAt} IS NOT NULL)`,
     ),
-    check("attempts_succeeded_shape", sql`${t.status} <> 'succeeded' OR (${t.result} IS NOT NULL AND ${t.failureClass} IS NULL)`),
+    check(
+      "attempts_succeeded_shape",
+      sql`${t.status} <> 'succeeded' OR (${t.result} IS NOT NULL AND ${t.failureClass} IS NULL AND ${t.failureDetail} IS NULL AND ${t.retryDecision} IS NULL)`,
+    ),
     check("attempts_failure_classified", sql`${t.status} NOT IN ('failed', 'timed_out', 'interrupted') OR ${t.failureClass} IS NOT NULL`),
+    // Retry fields exist only on a terminal, unsuccessful Attempt; the reason is closed; a refusal has no notBefore; the denormalized column agrees.
+    check(
+      "attempts_retry_decision_shape",
+      sql`${t.retryDecision} IS NULL OR (${t.status} IN ('failed', 'timed_out', 'interrupted', 'cancelled') AND json_extract(${t.retryDecision}, '$.reason') IN (${inList(RETRY_DECISION_REASONS)}) AND json_extract(${t.retryDecision}, '$.permitted') IN (0, 1) AND ((json_extract(${t.retryDecision}, '$.permitted') = 1 AND json_extract(${t.retryDecision}, '$.reason') IN (${inList(RETRY_PERMITTED_REASONS)})) OR (json_extract(${t.retryDecision}, '$.permitted') = 0 AND json_extract(${t.retryDecision}, '$.notBefore') IS NULL AND json_extract(${t.retryDecision}, '$.reason') IN (${inList(RETRY_REFUSED_REASONS)}))))`,
+    ),
+    check("attempts_retry_not_before_agrees", sql`${t.retryNotBefore} IS json_extract(${t.retryDecision}, '$.notBefore')`),
+    check("attempts_failure_detail_terminal", sql`${t.failureDetail} IS NULL OR ${t.status} IN ('failed', 'timed_out', 'interrupted', 'cancelled')`),
+    check("attempts_cancelled_never_retries", sql`${t.status} <> 'cancelled' OR ${t.retryDecision} IS NULL OR json_extract(${t.retryDecision}, '$.permitted') = 0`),
   ],
 );
 
@@ -863,9 +900,14 @@ export const contextManifests = sqliteTable(
       .references(() => runs.id),
     content: text("content", { mode: "json" }).$type<ContextManifestContent>().notNull(),
     digest: text("digest").notNull(),
+    /** The deterministic renderer contract the manifest was assembled for (not a compatibility version). */
+    rendererVersion: integer("renderer_version").notNull(),
     createdAt: timestamp("created_at").notNull(),
   },
-  (t) => [check("context_manifests_digest_shape", sql`length(${t.digest}) = 64`)],
+  (t) => [
+    check("context_manifests_digest_shape", sql`length(${t.digest}) = 64`),
+    check("context_manifests_renderer_version", sql`${t.rendererVersion} >= 1`),
+  ],
 );
 
 // ---------------------------------------------------------------------------

@@ -8,6 +8,7 @@ import {
   type ConversationId,
   type ConversationMessage,
   type ConversationMessageAuthor,
+  type ConversationMessageId,
   type InvocationId,
   type RunId,
   type WorkspaceId,
@@ -169,6 +170,10 @@ export class ConversationStore {
       this.ctx.db.insert(conversationMessages).values(message).run();
       return message;
     });
+  }
+
+  getMessage(id: ConversationMessageId): ConversationMessage {
+    return messageToDomain(requireRow(this.ctx.db.select().from(conversationMessages).where(eq(conversationMessages.id, id)).get(), "ConversationMessage", id));
   }
 
   listMessages(conversationId: ConversationId): ConversationMessage[] {

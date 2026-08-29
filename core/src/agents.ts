@@ -151,6 +151,41 @@ export function agentDefinitionContentBytes(content: AgentDefinitionContent): st
 export const READ_ONLY_ROLES = ["evaluator"] as const;
 
 /**
+ * The console's neutral capability tool names that only read (the
+ * Workspace, the web). Every other declared tool — `write`, `shell`,
+ * `worktree`, and any provider-specific name — is treated as write-capable,
+ * so an unknown tool is never granted to a read-only role by accident.
+ */
+export const READ_ONLY_CAPABILITY_TOOLS = ["read", "search"] as const;
+
+export function isWriteCapableTool(tool: string): boolean {
+  return !(READ_ONLY_CAPABILITY_TOOLS as readonly string[]).includes(tool);
+}
+
+/**
+ * The Run Workspace's capability policy (execution-model §6.4): tools and
+ * MCP servers the Workspace denies outright, and tools whose every call
+ * requires operator approval. It narrows; it never widens a definition.
+ */
+export interface WorkspaceCapabilityPolicy {
+  deniedTools: string[];
+  approvalRequiredTools: string[];
+  deniedMcpServers: string[];
+}
+
+export const workspaceCapabilityPolicySchema: z.ZodType<WorkspaceCapabilityPolicy> = z.strictObject({
+  deniedTools: z.array(nonEmptyString),
+  approvalRequiredTools: z.array(nonEmptyString),
+  deniedMcpServers: z.array(nonEmptyString),
+});
+
+export const EMPTY_WORKSPACE_CAPABILITY_POLICY: Readonly<WorkspaceCapabilityPolicy> = Object.freeze({
+  deniedTools: [],
+  approvalRequiredTools: [],
+  deniedMcpServers: [],
+});
+
+/**
  * The Agent Definition file policy: a Workspace-file definition is one of the
  * Workspace's native `.claude/agents/<name>.md` files, named by a normalized
  * relative POSIX path with no `.` or `..` segments.
