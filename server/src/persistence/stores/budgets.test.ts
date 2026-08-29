@@ -1,0 +1,161 @@
+import { ConflictError, InsufficientCapacityError, InvariantViolationError, ValidationError } from "@agentique-console/core";
+import { describe, expect, it } from "vitest";
+import { openHarness, patternNode, seedInvocation, seedManifest, seedRequirements, seedRun, SMALL_ALLOCATION } from "../test-support.ts";
+
+describe("budget reservations", () => {
+  it("reserves atomically from the parent's unreserved capacity and rejects over-reservation", () => {
+    const h = openHarness();
+    try {
+      const s = seedRun(h, { budget: { maxCostUsd: 25, maxTokens: 250_000, maxAttempts: 12, maxWallClockMs: null, maxConcurrency: null } });
+      // The root node already holds 10 / 100k / 5.
+      let account = h.stores.reservations.capacity({ type: "run", id: s.run.id });
+      expect(account.reserved).toEqual(SMALL_ALLOCATION);
+      expect(account.available).toEqual({ costUsd: 15, tokens: 150_000, attempts: 7 });
+      const node = patternNode(h, s.run, { agentDefinitionRevisionId: s.definition.id, sourcePath: "1", allocation: { costUsd: 15, tokens: 100_000, attempts: 5 } });
+      h.stores.plans.insertCompiledGraph({ runId: s.run.id, revisionNumber: 1, nodes: [node], edges: [], requirements: [] });
+      account = h.stores.reservations.capacity({ type: "run", id: s.run.id });
+      expect(account.available).toEqual({ costUsd: 0, tokens: 50_000, attempts: 2 });
+      const before = h.ctx.journal.lastSeq();
+      const extra = patternNode(h, s.run, { agentDefinitionRevisionId: s.definition.id, sourcePath: "2", allocation: { costUsd: 0.01, tokens: 1, attempts: 1 } });
+      expect(() => h.stores.plans.insertCompiledGraph({ runId: s.run.id, revisionNumber: 1, nodes: [extra], edges: [], requirements: [] })).toThrow(InsufficientCapacityError);
+      expect(h.ctx.journal.lastSeq()).toBe(before);
+      expect(h.stores.reservations.listByParent({ type: "run", id: s.run.id }).filter((r) => r.status === "active")).toHaveLength(2);
+    } finally {
+      h.close();
+    }
+  });
+
+  it("validates parent/child pairs, ownership, and one active reservation per child", () => {
+    const h = openHarness();
+    try {
+      const s = seedRun(h);
+      const invocation = seedInvocation(h, s);
+      expect(() => h.stores.reservations.reserve({ runId: s.run.id, parent: { type: "run", id: s.run.id }, child: { type: "invocation", id: invocation.id }, amount: { costUsd: 1, tokens: 1, attempts: 1 } })).toThrow(ValidationError);
+      expect(() => h.stores.reservations.reserve({ runId: s.run.id, parent: { type: "plan_node", id: s.root.id }, child: { type: "invocation", id: invocation.id }, amount: { costUsd: 1, tokens: 1, attempts: 1 } })).toThrow(ConflictError);
+      const other = seedRun(h);
+      expect(() => h.stores.reservations.reserve({ runId: s.run.id, parent: { type: "plan_node", id: other.root.id }, child: { type: "task", id: "task_000000000000000000000000" }, amount: { costUsd: 1, tokens: 1, attempts: 1 } })).toThrow(InvariantViolationError);
+      expect(() => h.stores.reservations.reserve({ runId: s.run.id, parent: { type: "plan_node", id: s.root.id }, child: { type: "task", id: "task_000000000000000000000000" }, amount: { costUsd: -1, tokens: 1, attempts: 1 } })).toThrow(ValidationError);
+    } finally {
+      h.close();
+    }
+  });
+
+  it("releases once with final consumption, keeps the history, and returns the remainder", () => {
+    const h = openHarness();
+    try {
+      const s = seedRun(h);
+      const invocation = seedInvocation(h, s, { allocation: { costUsd: 4, tokens: 40_000, attempts: 2 } });
+      const reservation = h.stores.reservations.activeForChild({ type: "invocation", id: invocation.id })!;
+      const nodeBefore = h.stores.reservations.capacity({ type: "plan_node", id: s.root.id });
+      expect(nodeBefore.available).toEqual({ costUsd: 6, tokens: 60_000, attempts: 3 });
+      expect(() => h.stores.reservations.release(reservation.id, "child_terminal", { costUsd: 5, tokens: 0, attempts: 0 })).toThrow(InvariantViolationError);
+      const released = h.stores.reservations.release(reservation.id, "child_terminal", { costUsd: 1, tokens: 10_000, attempts: 1 });
+      expect(released.status).toBe("released");
+      expect(released.consumed).toEqual({ costUsd: 1, tokens: 10_000, attempts: 1 });
+      expect(released.releasedAt).not.toBeNull();
+      expect(() => h.stores.reservations.release(reservation.id, "child_terminal", { costUsd: 0, tokens: 0, attempts: 0 })).toThrow(ConflictError);
+      expect(() => h.database.sqlite.prepare("UPDATE budget_reservations SET status = 'active' WHERE id = ?").run(reservation.id)).toThrow(/never changes again/);
+      const nodeAfter = h.stores.reservations.capacity({ type: "plan_node", id: s.root.id });
+      expect(nodeAfter.reserved).toEqual({ costUsd: 0, tokens: 0, attempts: 0 });
+      expect(nodeAfter.consumed).toEqual({ costUsd: 1, tokens: 10_000, attempts: 1 });
+      expect(nodeAfter.available).toEqual({ costUsd: 9, tokens: 90_000, attempts: 4 });
+      expect(h.stores.reservations.listByChild({ type: "invocation", id: invocation.id })).toHaveLength(1);
+      expect(h.ctx.journal.read({ runId: s.run.id, type: "budget_reservation.released" })).toHaveLength(1);
+    } finally {
+      h.close();
+    }
+  });
+
+  it("transfers a Task reservation to its Worker Invocation with two rows in one transaction", () => {
+    const h = openHarness();
+    try {
+      const s = seedRun(h);
+      const { revision, leafIds } = seedRequirements(h, s);
+      const node = patternNode(h, s.run, { agentDefinitionRevisionId: s.definition.id, pattern: "coordinator_worker", sourcePath: "1", agents: { coordinator: s.definition.id, worker: s.definition.id } });
+      h.stores.plans.insertCompiledGraph({ runId: s.run.id, revisionNumber: 1, nodes: [node], edges: [], requirements: [{ planNodeId: node.id, requirementId: leafIds[0]!, requirementRevisionId: revision.id }] });
+      h.stores.plans.transitionNode(node.id, { to: "ready" });
+      h.stores.plans.transitionNode(node.id, { to: "running" });
+      const task = h.stores.tasks.create({ runId: s.run.id, planNodeId: node.id, origin: "coordinator", subject: "t", requirementIds: [leafIds[0]!], requirementRevisionId: revision.id, inputArtifactIds: [], requiredOutputs: [], replacesTaskId: null });
+      const amount = { costUsd: 3, tokens: 30_000, attempts: 2 };
+      const taskReservation = h.stores.reservations.reserve({ runId: s.run.id, parent: { type: "plan_node", id: node.id }, child: { type: "task", id: task.id }, amount });
+      const before = h.stores.reservations.capacity({ type: "plan_node", id: node.id });
+      expect(before.reserved).toEqual(amount);
+
+      const invocation = h.stores.invocations.create(
+        { runId: s.run.id, planNodeId: node.id, role: "worker", purpose: "task", agentDefinitionRevisionId: s.definition.id, continuedFromInvocationId: null, taskIds: [task.id], allocation: amount },
+        { fromTaskReservationId: taskReservation.id },
+      );
+      const rows = h.stores.reservations.listByParent({ type: "plan_node", id: node.id });
+      expect(rows).toHaveLength(2);
+      const released = rows.find((r) => r.id === taskReservation.id)!;
+      const created = rows.find((r) => r.child.type === "invocation")!;
+      expect(released.status).toBe("released");
+      expect(released.releaseReason).toBe("transferred_to_invocation");
+      expect(released.consumed).toEqual({ costUsd: 0, tokens: 0, attempts: 0 });
+      expect(created.status).toBe("active");
+      expect(created.child).toEqual({ type: "invocation", id: invocation.id });
+      expect(created.reserved).toEqual(amount);
+      expect(created.transferredFromReservationId).toBe(taskReservation.id);
+      // Never free and never doubly reserved: the node's reserved sum is unchanged.
+      const after = h.stores.reservations.capacity({ type: "plan_node", id: node.id });
+      expect(after.reserved).toEqual(amount);
+      expect(after.available).toEqual(before.available);
+      expect(() => h.stores.reservations.transferTaskToInvocation(taskReservation.id, invocation.id)).toThrow(ConflictError);
+      expect(h.ctx.journal.read({ runId: s.run.id, type: "budget_reservation.created" }).map((e) => (e.payload as { child: { type: string } }).child.type)).toEqual(expect.arrayContaining(["task", "invocation"]));
+    } finally {
+      h.close();
+    }
+  });
+
+  it("rolls the whole transfer back when the Invocation reservation cannot be created", () => {
+    const h = openHarness();
+    try {
+      const s = seedRun(h);
+      const task = h.stores.tasks.create({ runId: s.run.id, planNodeId: s.root.id, origin: "orchestrator", subject: "t", requirementIds: [], requirementRevisionId: null, inputArtifactIds: [], requiredOutputs: [], replacesTaskId: null });
+      const taskReservation = h.stores.reservations.reserve({ runId: s.run.id, parent: { type: "plan_node", id: s.root.id }, child: { type: "task", id: task.id }, amount: { costUsd: 1, tokens: 1000, attempts: 1 } });
+      const before = h.ctx.journal.lastSeq();
+      // The Invocation names a different allocation than the Task reservation carries.
+      expect(() =>
+        h.stores.invocations.create(
+          { runId: s.run.id, planNodeId: s.root.id, role: "worker", purpose: "task", agentDefinitionRevisionId: s.definition.id, continuedFromInvocationId: null, taskIds: [task.id], allocation: { costUsd: 2, tokens: 1000, attempts: 1 } },
+          { fromTaskReservationId: taskReservation.id },
+        ),
+      ).toThrow(InvariantViolationError);
+      expect(h.ctx.journal.lastSeq()).toBe(before);
+      expect(h.stores.reservations.get(taskReservation.id).status).toBe("active");
+      expect(h.stores.invocations.listByPlanNode(s.root.id)).toEqual([]);
+      // Cancelling the Task releases the reservation without an Invocation reservation.
+      h.stores.reservations.release(taskReservation.id, "task_cancelled", { costUsd: 0, tokens: 0, attempts: 0 });
+      expect(h.stores.reservations.listByParent({ type: "plan_node", id: s.root.id }).map((r) => r.status)).toEqual(["released"]);
+    } finally {
+      h.close();
+    }
+  });
+
+  it("run-level capacity distinguishes consumed, reserved, and available, using Usage for consumption", () => {
+    const h = openHarness();
+    try {
+      const s = seedRun(h, { budget: { maxCostUsd: 20, maxTokens: 200_000, maxAttempts: 10, maxWallClockMs: null, maxConcurrency: null } });
+      const invocation = seedInvocation(h, s, { allocation: { costUsd: 2, tokens: 20_000, attempts: 2 } });
+      seedManifest(h, s, invocation);
+      const attempt = h.stores.invocations.createAttempt({ invocationId: invocation.id, startMode: "fresh", resumedFromAttemptId: null });
+      h.stores.usage.record({ attemptId: attempt.id, model: "m", effort: "low", inputTokensUncached: 1000, cacheCreationTokens: 500, cacheReadTokens: 2000, outputTokens: 500, costUsd: 0.4, wallClockMs: 1, providerMs: null });
+      const invocationAccount = h.stores.reservations.capacity({ type: "invocation", id: invocation.id });
+      expect(invocationAccount.consumed).toEqual({ costUsd: 0.4, tokens: 4000, attempts: 1 });
+      expect(invocationAccount.available).toEqual({ costUsd: 1.6, tokens: 16_000, attempts: 1 });
+      h.stores.invocations.transition(invocation.id, { to: "running" });
+      h.stores.invocations.transition(invocation.id, { to: "cancelled" });
+      const nodeAccount = h.stores.reservations.capacity({ type: "plan_node", id: s.root.id });
+      expect(nodeAccount.consumed).toEqual({ costUsd: 0.4, tokens: 4000, attempts: 1 });
+      expect(nodeAccount.reserved).toEqual({ costUsd: 0, tokens: 0, attempts: 0 });
+      h.stores.plans.transitionNode(s.root.id, { to: "running" });
+      h.stores.plans.transitionNode(s.root.id, { to: "cancelled" });
+      const runAccount = h.stores.reservations.capacity({ type: "run", id: s.run.id });
+      expect(runAccount.consumed).toEqual({ costUsd: 0.4, tokens: 4000, attempts: 1 });
+      expect(runAccount.reserved).toEqual({ costUsd: 0, tokens: 0, attempts: 0 });
+      expect(runAccount.available).toEqual({ costUsd: 19.6, tokens: 196_000, attempts: 9 });
+    } finally {
+      h.close();
+    }
+  });
+});

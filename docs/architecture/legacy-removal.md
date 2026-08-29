@@ -32,9 +32,12 @@ core/                      package @agentique-console/core
     capacity.ts  usage.ts  events.ts  schema-info.ts  api.ts
 server/src/
   main.ts  app.ts  config.ts  boot.ts
-  persistence/   schema.ts  client.ts  database.ts  transactions.ts
-                 blob-store.ts  journal.ts  stores/*.ts
-                 migrations/0000_orchestration_core.sql
+  persistence/   schema.ts  client.ts  database.ts  transactions.ts  context.ts
+                 blob-store.ts  journal.ts  test-support.ts
+                 stores/{index,support,workspaces,conversations,runs,plans,requirements,
+                         decisions,tasks,artifacts,handoffs,agents,invocations,
+                         continuations,verification,workspace-state,capacity,budgets,usage}.ts
+                 migrations/0000_orchestration_core.sql  migrations/meta/*
   events/        stream.ts
   workspaces/    service.ts  fs-browse.ts
   conversations/ service.ts

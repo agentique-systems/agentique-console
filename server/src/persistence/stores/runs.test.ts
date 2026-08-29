@@ -1,0 +1,137 @@
+import { ConflictError, IllegalTransitionError, NotFoundError, RUN_STATUSES, ValidationError } from "@agentique-console/core";
+import { describe, expect, it } from "vitest";
+import { DEFAULT_BUDGET, openHarness, seedRun, seedSnapshot } from "../test-support.ts";
+
+describe("conversations", () => {
+  it("creates, updates, and journals a Conversation and its messages", () => {
+    const h = openHarness();
+    try {
+      const workspace = h.stores.workspaces.create({ name: "w", rootPath: "/w", kind: "git" });
+      const conversation = h.stores.conversations.create({ workspaceId: workspace.id, title: null });
+      expect(conversation.activeRunId).toBeNull();
+      const updated = h.stores.conversations.update(conversation.id, { title: "Hello" });
+      expect(updated.title).toBe("Hello");
+      const message = h.stores.conversations.postMessage({ conversationId: conversation.id, author: "operator", content: "Build it", runId: null, invocationId: null });
+      expect(h.stores.conversations.listMessages(conversation.id)).toEqual([message]);
+      expect(() => h.stores.conversations.postMessage({ conversationId: conversation.id, author: "operator", content: "x", runId: null, invocationId: "inv_000000000000000000000000" })).toThrow(NotFoundError);
+      expect(() => h.stores.conversations.postMessage({ conversationId: conversation.id, author: "operator", content: "", runId: null, invocationId: null })).toThrow(ValidationError);
+      expect(h.ctx.journal.read({ conversationId: conversation.id }).map((e) => e.type)).toEqual(["conversation.created", "conversation.updated", "conversation.message_posted"]);
+      expect(() => h.stores.workspaces.create({ name: "w2", rootPath: "/w", kind: "git" })).toThrow(/UNIQUE/);
+    } finally {
+      h.close();
+    }
+  });
+
+  it("allows at most one active Run per Conversation", () => {
+    const h = openHarness();
+    try {
+      const s = seedRun(h);
+      expect(h.stores.conversations.get(s.conversation.id).activeRunId).toBe(s.run.id);
+      expect(() => h.stores.runs.create({ conversationId: s.conversation.id, kind: "code", target: { kind: "branch", branch: "main" }, budget: DEFAULT_BUDGET })).toThrow(ConflictError);
+      expect(h.stores.runs.listByConversation(s.conversation.id)).toHaveLength(1);
+      h.stores.runs.transition(s.run.id, { to: "cancelled" });
+      expect(h.stores.conversations.get(s.conversation.id).activeRunId).toBeNull();
+      const next = h.stores.runs.create({ conversationId: s.conversation.id, kind: "other", target: { kind: "branch", branch: "main" }, budget: DEFAULT_BUDGET });
+      expect(h.stores.conversations.get(s.conversation.id).activeRunId).toBe(next.id);
+    } finally {
+      h.close();
+    }
+  });
+});
+
+describe("runs", () => {
+  it("creates a Run in created with its Budget and workspace attribution", () => {
+    const h = openHarness();
+    try {
+      const workspace = h.stores.workspaces.create({ name: "w", rootPath: "/w", kind: "git" });
+      const conversation = h.stores.conversations.create({ workspaceId: workspace.id, title: null });
+      const run = h.stores.runs.create({ conversationId: conversation.id, kind: "code", target: { kind: "branch", branch: "main" }, budget: DEFAULT_BUDGET });
+      expect(run.status).toBe("created");
+      expect(run.workspaceId).toBe(workspace.id);
+      expect(run.budget).toEqual(DEFAULT_BUDGET);
+      expect(h.stores.runs.get(run.id)).toEqual(run);
+      expect(h.ctx.journal.read({ runId: run.id }).map((e) => e.type)).toEqual(["run.created", "conversation.updated"]);
+    } finally {
+      h.close();
+    }
+  });
+
+  it("walks the happy path and records final Snapshot and ended time", () => {
+    const h = openHarness();
+    try {
+      const s = seedRun(h);
+      const snapshot = seedSnapshot(h, s, "run_completion");
+      h.stores.runs.transition(s.run.id, { to: "verifying" });
+      h.stores.runs.transition(s.run.id, { to: "awaiting_signoff" });
+      const completed = h.stores.runs.transition(s.run.id, { to: "completed", finalSnapshotId: snapshot.id });
+      expect(completed.status).toBe("completed");
+      expect(completed.finalSnapshotId).toBe(snapshot.id);
+      expect(completed.endedAt).not.toBeNull();
+      expect(h.ctx.journal.read({ runId: s.run.id }).map((e) => e.type)).toEqual(
+        expect.arrayContaining(["run.started", "run.verifying", "run.awaiting_signoff", "run.completed"]),
+      );
+    } finally {
+      h.close();
+    }
+  });
+
+  it("terminal Runs never resume", () => {
+    const h = openHarness();
+    try {
+      for (const terminal of ["cancelled", "failed"] as const) {
+        const s = seedRun(h);
+        if (terminal === "failed") h.stores.runs.transition(s.run.id, { to: "failed", failure: { kind: "root_node_failed", summary: "root failed", evidenceArtifactIds: [] } });
+        else h.stores.runs.transition(s.run.id, { to: "cancelled" });
+        for (const to of RUN_STATUSES) {
+          expect(() => h.stores.runs.transition(s.run.id, { to } as never), `${terminal} -> ${to}`).toThrow(IllegalTransitionError);
+        }
+        expect(h.stores.runs.get(s.run.id).status).toBe(terminal);
+      }
+    } finally {
+      h.close();
+    }
+  });
+
+  it("waiting requires a reason and returns to running only by clearing that reason", () => {
+    const h = openHarness();
+    try {
+      const s = seedRun(h);
+      const waiting = h.stores.runs.transition(s.run.id, { to: "waiting", waitReason: "budget" });
+      expect(waiting.waitReason).toBe("budget");
+      expect(() => h.stores.runs.transition(s.run.id, { to: "running" })).toThrow(ValidationError);
+      expect(() => h.stores.runs.transition(s.run.id, { to: "running", clearedWaitReason: "decision" })).toThrow(ValidationError);
+      const running = h.stores.runs.transition(s.run.id, { to: "running", clearedWaitReason: "budget" });
+      expect(running.waitReason).toBeNull();
+      expect(h.ctx.journal.read({ runId: s.run.id, type: "run.wait_cleared" })).toHaveLength(1);
+      expect(() => h.stores.runs.transition(s.run.id, { to: "waiting", waitReason: "sleepy" as never })).toThrow(ValidationError);
+    } finally {
+      h.close();
+    }
+  });
+
+  it("failure needs a terminal failure transition and infeasible needs Evidence", () => {
+    const h = openHarness();
+    try {
+      const s = seedRun(h);
+      expect(() => h.stores.runs.transition(s.run.id, { to: "failed", failure: { kind: "infeasible", summary: "no", evidenceArtifactIds: [] } })).toThrow(ValidationError);
+      expect(() => h.stores.runs.transition(s.run.id, { to: "verifying" })).not.toThrow();
+      expect(() => h.stores.runs.transition(s.run.id, { to: "failed", failure: { kind: "root_node_failed", summary: "x", evidenceArtifactIds: [] } })).toThrow(IllegalTransitionError);
+    } finally {
+      h.close();
+    }
+  });
+
+  it("records base and integration Snapshots of the same Workspace only", () => {
+    const h = openHarness();
+    try {
+      const s = seedRun(h);
+      const snapshot = seedSnapshot(h, s);
+      expect(h.stores.runs.recordSnapshot(s.run.id, "base", snapshot.id).baseSnapshotId).toBe(snapshot.id);
+      const other = h.stores.workspaces.create({ name: "o", rootPath: "/o", kind: "git" });
+      const foreign = h.stores.snapshots.record({ workspaceId: other.id, runId: null, identity: { kind: "git", commitId: "c".repeat(40), treeId: "d".repeat(40) }, reason: "run_start" });
+      expect(() => h.stores.runs.recordSnapshot(s.run.id, "integration", foreign.id)).toThrow(ConflictError);
+    } finally {
+      h.close();
+    }
+  });
+});
