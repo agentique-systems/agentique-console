@@ -39,6 +39,7 @@ import type { PersistenceContext } from "../persistence/context.ts";
 import type { Stores } from "../persistence/stores/index.ts";
 import type { RevisionEdgeInput, RevisionNodeInput } from "../persistence/stores/plans.ts";
 import { runScope, type WriteOptions } from "../persistence/stores/support.ts";
+import { resolveExecutableAgentDefinitionRevision } from "./agent-definitions.ts";
 import { collectSourceReferences, compileExecutionPlan, rawSourceRejections } from "./compiler/compile.ts";
 import type { CompileDefaults, CompileInput, CompiledDraft } from "./compiler/input.ts";
 
@@ -152,23 +153,27 @@ export class PlanRevisionService {
     }
   }
 
-  /** Resolves every fact the compiler needs from the stores, then compiles. */
+  /**
+   * Resolves every fact the compiler needs from the stores, then compiles.
+   * Every referenced Agent Definition revision passes the executable-revision
+   * resolver first (provenance ownership); a revision that does not resolve
+   * rejects the proposal with `invalid_agent_definition_revision`, so the
+   * pure compiler only ever sees revisions the Run may execute.
+   */
   private compile(run: Run, source: ExecutionPlanSource): CompiledDraft {
     const references = collectSourceReferences(source);
+    const owner = { workspaceId: run.workspaceId, conversationId: run.conversationId };
+    const agentDefinitionRevisions = references.agentDefinitionRevisionIds.map((id) => {
+      const resolved = resolveExecutableAgentDefinitionRevision(this.stores, owner, id);
+      if (!resolved.ok) throw new Rejected([{ code: "invalid_agent_definition_revision", message: resolved.message, path: null }]);
+      return resolved.revision;
+    });
     const input: CompileInput = {
       runId: run.id,
       conversationId: run.conversationId,
       revisionNumber: this.stores.plans.latestRevisionNumber(run.id) + 1,
       source,
-      agentDefinitionRevisions: references.agentDefinitionRevisionIds.flatMap((id) => {
-        try {
-          const revision = this.stores.agents.getRevision(id as never);
-          return [{ id: revision.id, definitionName: this.stores.agents.getDefinition(revision.definitionId).name }];
-        } catch (error) {
-          if (error instanceof NotFoundError) return [];
-          throw error;
-        }
-      }),
+      agentDefinitionRevisions,
       requirementRevisions: references.requirementRevisionIds.flatMap((id) => {
         try {
           const revision = this.stores.requirements.getRevision(id as never);

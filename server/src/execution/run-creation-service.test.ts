@@ -144,7 +144,7 @@ describe("RunCreationService", () => {
         defaultLimits: { allocation: { costUsd: 1, tokens: 1, attempts: 1 }, maxWallClockMs: null },
       });
       expect(() => h.runCreation.create({ ...base, orchestratorAgentDefinitionRevisionId: denied.id })).toThrow(/capability shell is denied/);
-      expect(() => h.runCreation.create({ ...base, orchestratorAgentDefinitionRevisionId: "agdr_000000000000000000000000" })).toThrow(NotFoundError);
+      expect(() => h.runCreation.create({ ...base, orchestratorAgentDefinitionRevisionId: "agdr_000000000000000000000000" })).toThrow(/not executable by this Run.*does not exist/);
       expect(() => h.runCreation.create({ ...base, conversationId: "cv_000000000000000000000000", orchestratorAgentDefinitionRevisionId: seedAgentRevision(h, "orchestrator").id })).toThrow(NotFoundError);
       expect(h.stores.runs.listByConversation(conversation.id)).toHaveLength(0);
       expect(h.workspacePreparation.prepared).toHaveLength(0);

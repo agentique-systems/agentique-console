@@ -130,7 +130,10 @@ describe("execution plan source validation", () => {
 });
 
 describe("compiled node schema", () => {
-  const operation = { agentDefinitionRevisionId: agdr, title: "step", input: { taskIds: [], decisionIds: [], artifactIds: [] } };
+  const operation = { agentDefinitionRevisionId: agdr, title: "step", input: { taskIds: [], decisionIds: [], artifactIds: [] }, role: "worker", readOnly: false };
+  const coordinator = { ...operation, role: "coordinator" };
+  const evaluator = { ...operation, role: "evaluator", readOnly: true };
+  const orchestratorOperation = { ...operation, role: "orchestrator" };
   const base = {
     id: newId("planNode"),
     runId: newId("run"),
@@ -170,9 +173,9 @@ describe("compiled node schema", () => {
       { pattern: "chain", steps: [operation, operation] },
       { pattern: "route", selector: { kind: "evaluator", agentDefinitionRevisionId: agdr }, branches: [{ label: "a", inline: operation }, { label: "b", inline: null }] },
       { pattern: "parallel", items: [operation], aggregate: null, requireAll: true },
-      { pattern: "coordinator_worker", coordinator: operation, worker: operation, bounds: { maxTasks: 4, maxConcurrentWorkers: 2, maxCoordinatorInvocations: 3 } },
-      { pattern: "evaluator_optimizer", producer: operation, evaluator: operation, maxRounds: 3, round: null },
-      { pattern: "evaluator_optimizer", producer: null, evaluator: operation, maxRounds: 3, round: 2 },
+      { pattern: "coordinator_worker", coordinator, worker: operation, bounds: { maxTasks: 4, maxConcurrentWorkers: 2, maxCoordinatorInvocations: 3 } },
+      { pattern: "evaluator_optimizer", producer: operation, evaluator, maxRounds: 3, round: null },
+      { pattern: "evaluator_optimizer", producer: null, evaluator, maxRounds: 3, round: 2 },
     ] as const;
     for (const shape of shapes) {
       expect(planNodeSchema.safeParse({ ...pattern, pattern: shape.pattern, shape }).success, shape.pattern).toBe(true);
@@ -181,12 +184,17 @@ describe("compiled node schema", () => {
     expect(planNodeSchema.safeParse({ ...pattern, pattern: "chain", shape: { pattern: "chain", steps: [operation] } }).success).toBe(false);
     expect(planNodeSchema.safeParse({ ...pattern, pattern: "route", shape: { pattern: "route", selector: { kind: "evaluator", agentDefinitionRevisionId: agdr }, branches: [{ label: "b", inline: null }, { label: "a", inline: null }] } }).success).toBe(false);
     expect(planNodeSchema.safeParse({ ...pattern, pattern: "parallel", shape: { pattern: "parallel", items: [], aggregate: null, requireAll: true } }).success).toBe(false);
-    expect(planNodeSchema.safeParse({ ...pattern, pattern: "evaluator_optimizer", shape: { pattern: "evaluator_optimizer", producer: null, evaluator: operation, maxRounds: 3, round: null } }).success).toBe(false);
-    expect(planNodeSchema.safeParse({ ...pattern, pattern: "evaluator_optimizer", shape: { pattern: "evaluator_optimizer", producer: null, evaluator: operation, maxRounds: 3, round: 4 } }).success).toBe(false);
+    expect(planNodeSchema.safeParse({ ...pattern, pattern: "evaluator_optimizer", shape: { pattern: "evaluator_optimizer", producer: null, evaluator, maxRounds: 3, round: null } }).success).toBe(false);
+    expect(planNodeSchema.safeParse({ ...pattern, pattern: "evaluator_optimizer", shape: { pattern: "evaluator_optimizer", producer: null, evaluator, maxRounds: 3, round: 4 } }).success).toBe(false);
+    // Every operation records the role of its position, and readOnly follows the role policy.
+    expect(planNodeSchema.safeParse({ ...pattern, pattern: "coordinator_worker", shape: { pattern: "coordinator_worker", coordinator: operation, worker: operation, bounds: { maxTasks: 4, maxConcurrentWorkers: 2, maxCoordinatorInvocations: 3 } } }).success).toBe(false);
+    expect(planNodeSchema.safeParse({ ...pattern, pattern: "evaluator_optimizer", shape: { pattern: "evaluator_optimizer", producer: operation, evaluator: operation, maxRounds: 3, round: null } }).success).toBe(false);
+    expect(planNodeSchema.safeParse({ ...pattern, pattern: "evaluator_optimizer", shape: { pattern: "evaluator_optimizer", producer: operation, evaluator: { ...evaluator, readOnly: false }, maxRounds: 3, round: null } }).success).toBe(false);
+    expect(planNodeSchema.safeParse({ ...pattern, shape: { pattern: "single", role: "worker", operation: { ...operation, readOnly: true } } }).success).toBe(false);
   });
 
   it("only the root node holds the orchestrator role, with no scope", () => {
-    const orchestrator = { pattern: "single", role: "orchestrator", operation };
+    const orchestrator = { pattern: "single", role: "orchestrator", operation: orchestratorOperation };
     expect(planNodeSchema.safeParse({ ...pattern, shape: orchestrator }).success).toBe(false);
     expect(planNodeSchema.safeParse({ ...pattern, sourcePath: ROOT_SOURCE_PATH, shape: orchestrator }).success).toBe(true);
     expect(planNodeSchema.safeParse({ ...pattern, sourcePath: ROOT_SOURCE_PATH }).success).toBe(false);

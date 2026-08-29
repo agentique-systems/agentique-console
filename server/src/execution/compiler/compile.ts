@@ -8,13 +8,16 @@
 import {
   expandRequirementRoots,
   isLeafExpression,
+  ORCHESTRATOR_DEFINITION_NAME,
   PATTERNS,
   planNodeDefinitionSchema,
   parseOrThrow,
+  READ_ONLY_OPERATION_ROLES,
   type Allocation,
   type CompiledOperation,
   type CoordinatorWorkerBounds,
   type ManifestTemplate,
+  type OperationRole,
   type PatternPlanNodeDefinition,
   type PlanExpression,
   type PlanNodeDefinition,
@@ -76,7 +79,7 @@ class Compilation {
   readonly nodes: CompiledDraftNode[] = [];
   readonly edges: RawEdge[] = [];
   private readonly keys = new Set<string>();
-  private readonly agents: ReadonlyMap<string, string>;
+  private readonly agents: ReadonlyMap<string, CompileInput["agentDefinitionRevisions"][number]>;
   private readonly requirementRevisions: ReadonlyMap<string, CompileInput["requirementRevisions"][number]>;
   private readonly requirements: ReadonlyMap<string, CompileInput["requirements"][number]>;
   private readonly taskIds: ReadonlySet<string>;
@@ -85,7 +88,7 @@ class Compilation {
   private readonly acceptanceCriterionIds: ReadonlySet<string>;
 
   constructor(private readonly input: CompileInput) {
-    this.agents = new Map(input.agentDefinitionRevisions.map((r) => [r.id, r.definitionName]));
+    this.agents = new Map(input.agentDefinitionRevisions.map((r) => [r.id, r]));
     this.requirementRevisions = new Map(input.requirementRevisions.map((r) => [r.id, r]));
     this.requirements = new Map(input.requirements.map((r) => [r.id, r]));
     this.taskIds = new Set(input.references.taskIds);
@@ -134,7 +137,7 @@ class Compilation {
 
   /** Rule 1: a leaf operation compiles to one `single` node. */
   private emitSingle(path: string, expression: PlanExpression & { pattern: "single" }, options: NodeOptions, scope: PlanNodeScope | null): Subgraph {
-    const operation = this.operation(expression.operation, path, expression.title);
+    const operation = this.operation(expression.operation, path, "worker", expression.title);
     this.emitPattern(path, expression.title ?? operation.title, { pattern: "single", role: "worker", operation }, [operation], options, scope);
     return { entries: [path], exits: [path] };
   }
@@ -143,7 +146,7 @@ class Compilation {
   private compileChain(expression: PlanExpression & { pattern: "chain" }, path: string, options: NodeOptions, frame: Frame): Subgraph {
     const steps = expression.steps;
     if (steps.every(isLeafExpression)) {
-      const operations = steps.map((step, index) => this.operation((step as PlanExpression & { pattern: "single" }).operation, sourcePath.step(path, index), step.title));
+      const operations = steps.map((step, index) => this.operation((step as PlanExpression & { pattern: "single" }).operation, sourcePath.step(path, index), "worker", step.title));
       if (operations.length === 1) {
         this.emitPattern(path, expression.title ?? operations[0]!.title, { pattern: "single", role: "worker", operation: operations[0]! }, operations, options, frame.scope);
       } else {
@@ -158,7 +161,7 @@ class Compilation {
       if (isLeafExpression(step)) {
         let end = index;
         while (end + 1 < steps.length && isLeafExpression(steps[end + 1]!)) end += 1;
-        const operations = steps.slice(index, end + 1).map((leaf, offset) => this.operation((leaf as PlanExpression & { pattern: "single" }).operation, sourcePath.step(path, index + offset), leaf.title));
+        const operations = steps.slice(index, end + 1).map((leaf, offset) => this.operation((leaf as PlanExpression & { pattern: "single" }).operation, sourcePath.step(path, index + offset), "worker", leaf.title));
         if (operations.length === 1) {
           const key = sourcePath.step(path, index);
           this.emitPattern(key, step.title ?? operations[0]!.title, { pattern: "single", role: "worker", operation: operations[0]! }, operations, options, frame.scope);
@@ -183,7 +186,7 @@ class Compilation {
     const labels = Object.keys(expression.branches).sort(compareLabels);
     const selector = expression.selector;
     if (selector.kind === "evaluator") {
-      this.requireAgent(selector.agentDefinitionRevisionId, path);
+      this.requireAgent(selector.agentDefinitionRevisionId, path, "evaluator");
     } else {
       if (!this.decisionIds.has(selector.decisionId)) reject("invalid_decision_reference", `route selector names unknown Decision ${selector.decisionId}`, path);
       for (const [optionId, label] of Object.entries(selector.labelsByOptionId)) {
@@ -196,7 +199,7 @@ class Compilation {
     for (const label of labels) {
       const branch = expression.branches[label]!;
       if (isLeafExpression(branch)) {
-        const operation = this.operation(branch.operation, sourcePath.branch(path, label), branch.title);
+        const operation = this.operation(branch.operation, sourcePath.branch(path, label), "worker", branch.title);
         bindings.push({ label, inline: operation });
         inlineOperations.push(operation);
       } else {
@@ -204,7 +207,7 @@ class Compilation {
         composites.push({ label, subgraph: this.compileExpression(branch, sourcePath.branch(path, label), frame) });
       }
     }
-    if (selector.kind === "evaluator") inlineOperations.push({ agentDefinitionRevisionId: selector.agentDefinitionRevisionId, title: "selector", input: emptyInput() });
+    if (selector.kind === "evaluator") inlineOperations.push({ agentDefinitionRevisionId: selector.agentDefinitionRevisionId, title: "selector", input: emptyInput(), role: "evaluator", readOnly: true });
     this.emitPattern(path, expression.title ?? "route", { pattern: "route", selector, branches: bindings }, inlineOperations, options, frame.scope);
     const exits = [path];
     for (const composite of composites) {
@@ -219,8 +222,8 @@ class Compilation {
     const requireAll = expression.requireAll ?? true;
     const items = expression.items;
     if (items.every(isLeafExpression)) {
-      const operations = items.map((item, index) => this.operation((item as PlanExpression & { pattern: "single" }).operation, sourcePath.item(path, index), item.title));
-      const aggregate = expression.aggregate ? this.operation(expression.aggregate, sourcePath.aggregate(path), undefined, "aggregate") : null;
+      const operations = items.map((item, index) => this.operation((item as PlanExpression & { pattern: "single" }).operation, sourcePath.item(path, index), "worker", item.title));
+      const aggregate = expression.aggregate ? this.operation(expression.aggregate, sourcePath.aggregate(path), "worker", undefined, "aggregate") : null;
       this.emitPattern(path, expression.title ?? "parallel", { pattern: "parallel", items: operations, aggregate, requireAll }, aggregate ? [...operations, aggregate] : operations, options, frame.scope);
       return { entries: [path], exits: [path] };
     }
@@ -228,7 +231,7 @@ class Compilation {
     const fanIn: string[] = [];
     const leavesKey = sourcePath.leaves(path);
     // The leaf items form one parallel node without aggregation, emitted at the position of the first leaf item.
-    const leafOperations = items.flatMap((item, index) => (isLeafExpression(item) ? [this.operation(item.operation, sourcePath.item(path, index), item.title)] : []));
+    const leafOperations = items.flatMap((item, index) => (isLeafExpression(item) ? [this.operation(item.operation, sourcePath.item(path, index), "worker", item.title)] : []));
     let leavesEmitted = false;
     items.forEach((item, index) => {
       if (isLeafExpression(item)) {
@@ -249,7 +252,7 @@ class Compilation {
     for (const source of fanIn) this.edges.push({ sourceKey: source, targetKey: joinKey, type: "fan_in" });
     if (expression.aggregate) {
       const aggregateKey = sourcePath.aggregate(path);
-      const operation = this.operation(expression.aggregate, aggregateKey, undefined, "aggregate");
+      const operation = this.operation(expression.aggregate, aggregateKey, "worker", undefined, "aggregate");
       this.emitPattern(aggregateKey, `${expression.title ?? "parallel"} aggregate`, { pattern: "single", role: "worker", operation }, [operation], options, frame.scope);
       this.connect([joinKey], [aggregateKey], "sequence");
       return { entries, exits: [aggregateKey] };
@@ -264,8 +267,8 @@ class Compilation {
     if (bounds.maxConcurrentWorkers > bounds.maxTasks) {
       reject("invalid_pattern_bounds", `maxConcurrentWorkers ${bounds.maxConcurrentWorkers} exceeds maxTasks ${bounds.maxTasks}`, path);
     }
-    const coordinator = this.operation(expression.coordinator, path, undefined, "coordinator");
-    const worker = this.operation(expression.worker, path, undefined, "worker");
+    const coordinator = this.operation(expression.coordinator, path, "coordinator", undefined, "coordinator");
+    const worker = this.operation(expression.worker, path, "worker", undefined, "worker");
     this.emitPattern(path, expression.title ?? "coordinator_worker", { pattern: "coordinator_worker", coordinator, worker, bounds }, [coordinator, worker], options, frame.scope);
     return { entries: [path], exits: [path] };
   }
@@ -275,9 +278,9 @@ class Compilation {
     if (expression.maxRounds > this.input.limits.maxUnrolledRounds) {
       reject("excessive_unrolled_rounds", `${expression.maxRounds} rounds exceed the limit of ${this.input.limits.maxUnrolledRounds}`, path);
     }
-    const evaluator = this.operation(expression.evaluator, path, undefined, "evaluator");
+    const evaluator = this.operation(expression.evaluator, path, "evaluator", undefined, "evaluator");
     if (isLeafExpression(expression.producer)) {
-      const producer = this.operation(expression.producer.operation, path, expression.producer.title, "producer");
+      const producer = this.operation(expression.producer.operation, path, "worker", expression.producer.title, "producer");
       this.emitPattern(path, expression.title ?? "evaluator_optimizer", { pattern: "evaluator_optimizer", producer, evaluator, maxRounds: expression.maxRounds, round: null }, [producer, evaluator], options, frame.scope);
       return { entries: [path], exits: [path] };
     }
@@ -372,20 +375,43 @@ class Compilation {
   // Resolution
   // -------------------------------------------------------------------------
 
-  /** Resolves an operation; its title is the expression's, else the operation's, else the role fallback, else the definition's name. */
-  private operation(operation: PlanOperation, path: string, title: string | undefined, fallback?: string): CompiledOperation {
-    const definitionName = this.requireAgent(operation.agentDefinitionRevisionId, path);
+  /**
+   * Resolves an operation for `role`; its title is the expression's, else the
+   * operation's, else the role fallback, else the definition's name. The
+   * role policy is recorded (`readOnly` for evaluators) for the manifest to
+   * apply against the revision's Tool Policy later; no provider tool
+   * semantics are evaluated here.
+   */
+  private operation(operation: PlanOperation, path: string, role: OperationRole, title: string | undefined, fallback?: string): CompiledOperation {
+    const revision = this.requireAgent(operation.agentDefinitionRevisionId, path, role);
     const input = operation.input ?? emptyInput();
     for (const id of input.taskIds) if (!this.taskIds.has(id)) reject("invalid_task_reference", `operation names unknown Task ${id}`, path);
     for (const id of input.decisionIds) if (!this.decisionIds.has(id)) reject("invalid_decision_reference", `operation names unknown Decision ${id}`, path);
     for (const id of input.artifactIds) if (!this.artifactIds.has(id)) reject("invalid_artifact_reference", `operation names unknown Artifact ${id}`, path);
-    return { agentDefinitionRevisionId: operation.agentDefinitionRevisionId, title: title ?? operation.title ?? fallback ?? definitionName, input: normalizeInput(input) };
+    return {
+      agentDefinitionRevisionId: operation.agentDefinitionRevisionId,
+      title: title ?? operation.title ?? fallback ?? revision.definitionName,
+      input: normalizeInput(input),
+      role,
+      readOnly: READ_ONLY_OPERATION_ROLES.includes(role),
+    };
   }
 
-  private requireAgent(id: string, path: string): string {
-    const name = this.agents.get(id);
-    if (name === undefined) reject("invalid_agent_definition_revision", `unknown Agent Definition revision ${id}`, path);
-    return name;
+  /**
+   * A revision the service resolved as executable, bound to `role`. The one
+   * contradictory binding is the Orchestrator's own definition in any other
+   * role: it would lend Orchestrator instructions to a Worker, Coordinator,
+   * or Evaluator that the runtime never grants Orchestrator authority.
+   * Declared tools are never a reason to reject: the role policy intersects
+   * them at manifest time.
+   */
+  private requireAgent(id: string, path: string, role: OperationRole): CompileInput["agentDefinitionRevisions"][number] {
+    const revision = this.agents.get(id);
+    if (revision === undefined) reject("invalid_agent_definition_revision", `Agent Definition revision ${id} is not executable by this Run`, path);
+    if (revision.definitionName === ORCHESTRATOR_DEFINITION_NAME && role !== "orchestrator") {
+      reject("invalid_role_binding", `the ${ORCHESTRATOR_DEFINITION_NAME} definition cannot be bound to the ${role} role`, path);
+    }
+    return revision;
   }
 
   private nodeOptions(expression: PlanExpression, path: string): NodeOptions {

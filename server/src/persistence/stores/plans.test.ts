@@ -115,7 +115,7 @@ describe("revision membership and edges", () => {
       const stranger = nodeInput(h, patternDefinition(s.definition.id, { sourcePath: "e3" }));
       expect(attempt([p], [{ type: "sequence", sourceNodeId: p.id, targetNodeId: stranger.id, position: 0 }])).toThrow(/not a member/);
       // A single Orchestrator node is only ever the root.
-      expect(attempt([nodeInput(h, patternDefinition(s.definition.id, { sourcePath: "e4", shape: { pattern: "single", role: "orchestrator", operation: { agentDefinitionRevisionId: s.definition.id, title: "x", input: { taskIds: [], decisionIds: [], artifactIds: [] } } } }))])).toThrow(/only the root node/);
+      expect(attempt([nodeInput(h, patternDefinition(s.definition.id, { sourcePath: "e4", shape: { pattern: "single", role: "orchestrator", operation: { agentDefinitionRevisionId: s.definition.id, title: "x", input: { taskIds: [], decisionIds: [], artifactIds: [] }, role: "orchestrator", readOnly: false } } }))])).toThrow(/only the root node/);
       expect(h.ctx.journal.lastSeq()).toBe(before);
       expect(h.stores.plans.listNodes(s.run.id)).toHaveLength(1);
       expect(h.stores.plans.latestRevisionNumber(s.run.id)).toBe(1);

@@ -108,8 +108,8 @@ export function seedAgentRevision(h: Harness, name = "orchestrator"): AgentDefin
   });
 }
 
-export function operation(agentDefinitionRevisionId: string, title = "step"): CompiledOperation {
-  return { agentDefinitionRevisionId: agentDefinitionRevisionId as AgentDefinitionRevisionId, title, input: { ...EMPTY_MANIFEST_TEMPLATE } };
+export function operation(agentDefinitionRevisionId: string, title = "step", role: CompiledOperation["role"] = "worker"): CompiledOperation {
+  return { agentDefinitionRevisionId: agentDefinitionRevisionId as AgentDefinitionRevisionId, title, input: { ...EMPTY_MANIFEST_TEMPLATE }, role, readOnly: role === "evaluator" };
 }
 
 /** A `single` worker node definition; override any field. */
@@ -141,7 +141,7 @@ export function coordinatorWorkerDefinition(agentDefinitionRevisionId: string, o
     ...overrides,
     shape: {
       pattern: "coordinator_worker",
-      coordinator: operation(agentDefinitionRevisionId, "coordinator"),
+      coordinator: operation(agentDefinitionRevisionId, "coordinator", "coordinator"),
       worker: operation(agentDefinitionRevisionId, "worker"),
       bounds: { maxTasks: 8, maxConcurrentWorkers: 2, maxCoordinatorInvocations: 4 },
     },
@@ -168,7 +168,7 @@ export function rootDefinition(agentDefinitionRevisionId: string, allocation: Al
     sourcePath: ROOT_SOURCE_PATH,
     allocation,
     onAllocationExhausted: "extend",
-    shape: { pattern: "single", role: "orchestrator", operation: operation(agentDefinitionRevisionId, ROOT_NODE_TITLE) },
+    shape: { pattern: "single", role: "orchestrator", operation: operation(agentDefinitionRevisionId, ROOT_NODE_TITLE, "orchestrator") },
   });
 }
 

@@ -7,6 +7,9 @@
  */
 import type {
   AcceptanceCriterionId,
+  AgentCapabilities,
+  AgentDefaultLimits,
+  AgentDefinitionProvenance,
   AgentDefinitionRevisionId,
   Allocation,
   ArtifactId,
@@ -24,13 +27,24 @@ import type {
   RequirementTreeEntry,
   RunId,
   TaskId,
+  ToolPolicy,
 } from "@agentique-console/core";
 
-/** What the compiler knows about an Agent Definition revision the source names. */
+/**
+ * What the compiler knows about an Agent Definition revision the source
+ * names: immutable facts of a revision the plan-revision service has already
+ * resolved as executable by the Run (provenance ownership checked). The
+ * compiler validates role bindings against these facts and never queries
+ * persistence.
+ */
 export interface CompileAgentDefinitionRevision {
   id: AgentDefinitionRevisionId;
   /** The logical definition's name; the default title of an operation bound to it. */
   definitionName: string;
+  provenanceKind: AgentDefinitionProvenance["kind"];
+  capabilities: AgentCapabilities;
+  toolPolicy: ToolPolicy;
+  defaultLimits: AgentDefaultLimits;
 }
 
 /** One pinned Requirement revision the source names, with the tree as of that revision. */

@@ -76,6 +76,13 @@ export type PlanEdgeType = (typeof PLAN_EDGE_TYPES)[number];
 export const SINGLE_NODE_ROLES = ["orchestrator", "worker"] as const;
 export type SingleNodeRole = (typeof SINGLE_NODE_ROLES)[number];
 
+/** The role a compiled operation's Invocations hold; the role policy of the runtime is applied by role. */
+export const OPERATION_ROLES = ["orchestrator", "worker", "coordinator", "evaluator"] as const;
+export type OperationRole = (typeof OPERATION_ROLES)[number];
+
+/** Roles whose Invocations are read-only whatever their definition declares (execution-model §6.4). */
+export const READ_ONLY_OPERATION_ROLES: readonly OperationRole[] = ["evaluator"];
+
 /** The root Orchestrator node is runtime-created, not compiled from the source form. */
 export const ROOT_SOURCE_PATH = "root";
 export const ROOT_NODE_TITLE = "Orchestrator";
@@ -465,18 +472,34 @@ export const planRejectionReasonSchema: z.ZodType<PlanRejectionReason> = z.stric
 // Compiled form
 // ---------------------------------------------------------------------------
 
-/** One resolved leaf operation bound inside a Pattern node. */
+/**
+ * One resolved leaf operation bound inside a Pattern node. `role` and
+ * `readOnly` make the effective role policy deterministic for later Context
+ * Manifest construction: the manifest intersects the revision's Tool Policy
+ * with the role policy (read-only roles deny every write-capable tool) and
+ * the Workspace policy; the compiler records the role, never provider tool
+ * semantics.
+ */
 export interface CompiledOperation {
   agentDefinitionRevisionId: AgentDefinitionRevisionId;
   title: string;
   input: ManifestTemplate;
+  role: OperationRole;
+  readOnly: boolean;
 }
 
-export const compiledOperationSchema: z.ZodType<CompiledOperation> = z.strictObject({
-  agentDefinitionRevisionId: idSchema("agentDefinitionRevision"),
-  title: nonEmptyString,
-  input: manifestTemplateSchema,
-});
+export const compiledOperationSchema: z.ZodType<CompiledOperation> = z
+  .strictObject({
+    agentDefinitionRevisionId: idSchema("agentDefinitionRevision"),
+    title: nonEmptyString,
+    input: manifestTemplateSchema,
+    role: z.enum(OPERATION_ROLES),
+    readOnly: z.boolean(),
+  })
+  .refine((o) => o.readOnly === READ_ONLY_OPERATION_ROLES.includes(o.role), {
+    message: "readOnly follows the role policy: evaluators are read-only, every other role is not",
+    path: ["readOnly"],
+  });
 
 /** A route branch: inline when it holds a leaf operation, otherwise reached by a `branch(label)` edge. */
 export interface RouteBranchBinding {
@@ -510,6 +533,25 @@ export type PatternShape =
       /** The unrolled round this evaluate-only node belongs to; `null` when the producer is inline. */
       round: number | null;
     };
+
+/** The role each operation position holds; the shape's operations must record exactly these. */
+function shapeOperationRolesAgree(shape: PatternShape): boolean {
+  const is = (operation: CompiledOperation | null, role: OperationRole) => operation === null || operation.role === role;
+  switch (shape.pattern) {
+    case "single":
+      return shape.operation.role === shape.role;
+    case "chain":
+      return shape.steps.every((s) => s.role === "worker");
+    case "route":
+      return shape.branches.every((b) => is(b.inline, "worker"));
+    case "parallel":
+      return shape.items.every((i) => i.role === "worker") && is(shape.aggregate, "worker");
+    case "coordinator_worker":
+      return shape.coordinator.role === "coordinator" && shape.worker.role === "worker";
+    case "evaluator_optimizer":
+      return is(shape.producer, "worker") && shape.evaluator.role === "evaluator";
+  }
+}
 
 const sortedUniqueLabels = (branches: RouteBranchBinding[]): boolean => {
   for (let i = 0; i < branches.length; i += 1) {
@@ -621,6 +663,10 @@ export const patternPlanNodeDefinitionSchema: z.ZodType<PatternPlanNodeDefinitio
   .refine((d) => d.sourcePath !== ROOT_SOURCE_PATH || (d.shape.pattern === "single" && d.shape.role === "orchestrator" && d.scope === null), {
     message: "the root node is a single Orchestrator node without scope",
     path: ["sourcePath"],
+  })
+  .refine((d) => shapeOperationRolesAgree(d.shape), {
+    message: "every operation's role matches its position in the Pattern",
+    path: ["shape"],
   })
   .refine((d) => d.sourcePath === ROOT_SOURCE_PATH || d.shape.pattern !== "single" || d.shape.role === "worker", {
     message: "only the root node holds the orchestrator role",

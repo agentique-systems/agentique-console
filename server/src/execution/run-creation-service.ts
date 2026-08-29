@@ -41,6 +41,7 @@ import {
 import { z } from "zod";
 import type { PersistenceContext } from "../persistence/context.ts";
 import type { Stores } from "../persistence/stores/index.ts";
+import { resolveExecutableAgentDefinitionRevision } from "./agent-definitions.ts";
 import type { RunWorkspacePreparationPort, RunWorkspacePreparationRequest } from "./ports/workspace-preparation.ts";
 
 /** Configurable defaults; the effective values are persisted on each Run. */
@@ -129,9 +130,11 @@ export class RunCreationService {
 
     const conversation = this.stores.conversations.get(valid.conversationId);
     const workspace = this.stores.workspaces.get(conversation.workspaceId);
-    const revision = this.stores.agents.getRevision(valid.orchestratorAgentDefinitionRevisionId);
-    const definition = this.stores.agents.getDefinition(revision.definitionId);
-    const defects = orchestratorDefinitionDefects(definition.name, revision);
+    // Provenance ownership and the Orchestrator role policy are settled before any Workspace preparation or canonical write.
+    const resolved = resolveExecutableAgentDefinitionRevision(this.stores, { workspaceId: workspace.id, conversationId: conversation.id }, valid.orchestratorAgentDefinitionRevisionId);
+    if (!resolved.ok) throw new ValidationError(`the Orchestrator Agent Definition revision is not executable by this Run: ${resolved.message}`, { revisionId: resolved.revisionId });
+    const revision = resolved.revision;
+    const defects = orchestratorDefinitionDefects(revision.definitionName, revision);
     if (defects.length > 0) {
       throw new ValidationError(`Agent Definition revision ${revision.id} cannot hold the Orchestrator role: ${defects.join("; ")}`, { defects });
     }
@@ -160,7 +163,7 @@ export class RunCreationService {
         shape: {
           pattern: "single",
           role: "orchestrator",
-          operation: { agentDefinitionRevisionId: revision.id, title: ROOT_NODE_TITLE, input: { ...EMPTY_MANIFEST_TEMPLATE } },
+          operation: { agentDefinitionRevisionId: revision.id, title: ROOT_NODE_TITLE, input: { ...EMPTY_MANIFEST_TEMPLATE }, role: "orchestrator", readOnly: false },
         },
         input: { ...EMPTY_MANIFEST_TEMPLATE },
         allocation,

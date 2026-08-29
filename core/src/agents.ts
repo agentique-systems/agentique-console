@@ -150,6 +150,20 @@ export function agentDefinitionContentBytes(content: AgentDefinitionContent): st
 /** Evaluators are read-only: every write-capable tool is denied for that role. */
 export const READ_ONLY_ROLES = ["evaluator"] as const;
 
+/**
+ * The Agent Definition file policy: a Workspace-file definition is one of the
+ * Workspace's native `.claude/agents/<name>.md` files, named by a normalized
+ * relative POSIX path with no `.` or `..` segments.
+ */
+export const AGENT_DEFINITION_FILE_PATTERN = /^\.claude\/agents\/[A-Za-z0-9][A-Za-z0-9._-]*\.md$/;
+
+/** Normalizes a definition file path under the file policy, or returns `null` when it is not a definition file. */
+export function normalizeAgentDefinitionPath(path: string): string | null {
+  const normalized = path.replaceAll("\\", "/").replace(/^\.\//, "");
+  if (normalized.split("/").some((segment) => segment === "." || segment === "..")) return null;
+  return AGENT_DEFINITION_FILE_PATTERN.test(normalized) ? normalized : null;
+}
+
 /** The name of the Agent Definition that holds the Orchestrator role (glossary: Orchestrator). */
 export const ORCHESTRATOR_DEFINITION_NAME = "orchestrator";
 

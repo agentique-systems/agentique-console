@@ -37,7 +37,21 @@ const decisionId = newId("decision");
 const artifactId = newId("artifact");
 const criterionId = newId("acceptanceCriterion");
 
+const orchestratorAgent = newId("agentDefinitionRevision");
+
 const DEFAULT_ALLOCATION = { costUsd: 1, tokens: 1000, attempts: 2 };
+
+/** An already-resolved, executable revision as the plan-revision service hands it to the compiler. */
+function revision(id: AgentDefinitionRevisionId, definitionName: string, tools: string[] = ["read", "write"]): CompileInput["agentDefinitionRevisions"][number] {
+  return {
+    id,
+    definitionName,
+    provenanceKind: "builtin",
+    capabilities: { tools, mcpServers: [] },
+    toolPolicy: Object.fromEntries(tools.map((t) => [t, "allowed" as const])),
+    defaultLimits: { allocation: DEFAULT_ALLOCATION, maxWallClockMs: null },
+  };
+}
 
 function input(source: PlanExpression[], overrides: Partial<CompileInput> = {}): CompileInput {
   return {
@@ -46,9 +60,10 @@ function input(source: PlanExpression[], overrides: Partial<CompileInput> = {}):
     revisionNumber: 2,
     source: { version: 1, expressions: source },
     agentDefinitionRevisions: [
-      { id: agentA, definitionName: "worker-a" },
-      { id: agentB, definitionName: "worker-b" },
-      { id: evaluatorAgent, definitionName: "reviewer" },
+      revision(agentA, "worker-a"),
+      revision(agentB, "worker-b"),
+      revision(evaluatorAgent, "reviewer", ["read", "write", "shell"]),
+      revision(orchestratorAgent, "orchestrator"),
     ],
     requirementRevisions: [
       {
@@ -178,7 +193,7 @@ describe("leaf and chain (rules 1 and 2)", () => {
     const routeNode = node(draft, "e0/steps/1");
     if (routeNode.kind === "pattern" && routeNode.shape.pattern === "route") {
       expect(routeNode.shape.branches).toEqual([
-        { label: "x", inline: { agentDefinitionRevisionId: agentB, title: "B", input: { taskIds: [], decisionIds: [], artifactIds: [] } } },
+        { label: "x", inline: { agentDefinitionRevisionId: agentB, title: "B", input: { taskIds: [], decisionIds: [], artifactIds: [] }, role: "worker", readOnly: false } },
         { label: "y", inline: null },
       ]);
     } else {
@@ -366,6 +381,42 @@ describe("coordinator_worker (rule 6, invariant 14)", () => {
     expect(rawSourceRejections({ version: 1, expressions: [{ pattern: "join" }] })[0]).toMatchObject({ code: "explicit_join", path: "$/expressions/0" });
     expect(rawSourceRejections({ version: 1, expressions: [{ pattern: "chain", steps: [{ pattern: "map_reduce" }] }] })[0]).toMatchObject({ code: "unsupported_pattern", path: "$/expressions/0/steps/0" });
     expect(rawSourceRejections({ version: 1, expressions: [leaf(), chain(leaf()), route({ a: leaf() }), parallel([leaf()]), coordinatorWorker(), evaluatorOptimizer(leaf())] })).toEqual([]);
+  });
+});
+
+describe("role bindings and role policy", () => {
+  it("records each operation's role and read-only policy without evaluating provider tool semantics", () => {
+    const draft = compile([chain(leaf(), route({ a: leaf() }), coordinatorWorker(), evaluatorOptimizer(leaf(agentA), 2))]);
+    const roles = (key: string) => {
+      const definition = node(draft, key);
+      if (definition.kind !== "pattern") throw new Error("pattern expected");
+      const ops: { role: string; readOnly: boolean }[] = [];
+      const shape = definition.shape;
+      switch (shape.pattern) {
+        case "single": ops.push(shape.operation); break;
+        case "route": for (const b of shape.branches) if (b.inline) ops.push(b.inline); break;
+        case "coordinator_worker": ops.push(shape.coordinator, shape.worker); break;
+        case "evaluator_optimizer": if (shape.producer) ops.push(shape.producer); ops.push(shape.evaluator); break;
+        default: break;
+      }
+      return ops.map((o) => `${o.role}${o.readOnly ? ":read-only" : ""}`);
+    };
+    expect(roles("e0/steps/0")).toEqual(["worker"]);
+    expect(roles("e0/steps/1")).toEqual(["worker"]);
+    expect(roles("e0/steps/2")).toEqual(["coordinator", "worker"]);
+    // The evaluator declares write and shell tools; it is still bound, read-only, for the manifest to intersect later.
+    expect(roles("e0/steps/3")).toEqual(["worker", "evaluator:read-only"]);
+  });
+
+  it("rejects binding the Orchestrator's own definition to any other role (invalid_role_binding)", () => {
+    expect(rejection([leaf(orchestratorAgent)])[0]).toMatchObject({ code: "invalid_role_binding", path: "e0" });
+    expect(rejection([{ pattern: "coordinator_worker", coordinator: { agentDefinitionRevisionId: orchestratorAgent }, worker: { agentDefinitionRevisionId: agentB } }])[0]).toMatchObject({ code: "invalid_role_binding" });
+    expect(rejection([{ pattern: "evaluator_optimizer", producer: leaf(), evaluator: { agentDefinitionRevisionId: orchestratorAgent }, maxRounds: 2 }])[0]).toMatchObject({ code: "invalid_role_binding" });
+    expect(rejection([{ pattern: "route", selector: { kind: "evaluator", agentDefinitionRevisionId: orchestratorAgent }, branches: { a: leaf() } }])[0]).toMatchObject({ code: "invalid_role_binding" });
+  });
+
+  it("receives only revisions the service already resolved; an unresolved id is rejected without any lookup", () => {
+    expect(rejection([leaf(newId("agentDefinitionRevision"))])[0]).toMatchObject({ code: "invalid_agent_definition_revision", message: expect.stringContaining("not executable by this Run") });
   });
 });
 

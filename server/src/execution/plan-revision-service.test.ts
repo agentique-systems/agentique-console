@@ -379,12 +379,21 @@ describe("reconciliation", () => {
         toolPolicy: {},
         defaultLimits: { allocation: INVOCATION_ALLOCATION, maxWallClockMs: null },
       });
+      const workerDefinition = stores.agents.ensureDefinition("worker");
+      const worker = stores.agents.appendRevision(workerDefinition.id, {
+        provenance: { kind: "builtin" },
+        modelPolicy: { model: "claude-fable-5", effort: "medium", maxContextOccupancy: 0.8 },
+        instructions: "work",
+        capabilities: { tools: ["read", "write"], mcpServers: [] },
+        toolPolicy: {},
+        defaultLimits: { allocation: INVOCATION_ALLOCATION, maxWallClockMs: null },
+      });
       const runCreation = new RunCreationService(ctx, stores, new FakeWorkspacePreparation(), TEST_POLICY);
       const created = runCreation.create({ conversationId: conversation.id, kind: "code", target: { kind: "branch", branch: "main" }, budget: { maxCostUsd: 100, maxTokens: 1_000_000, maxAttempts: 50, maxWallClockMs: null, maxConcurrency: null }, orchestratorAgentDefinitionRevisionId: orchestrator.id });
       runId = created.run.id;
       const invocation = stores.invocations.create({ runId: created.run.id, planNodeId: created.root.id, role: "orchestrator", purpose: "operator_input", agentDefinitionRevisionId: orchestrator.id, continuedFromInvocationId: null, taskIds: [], allocation: INVOCATION_ALLOCATION });
       const service = new PlanRevisionService(ctx, stores, { defaults: { nodeAllocation: TEST_NODE_ALLOCATION, coordinatorWorkerBounds: { maxTasks: 8, maxConcurrentWorkers: 2, maxCoordinatorInvocations: 4 } }, limits: { maxPlanDepth: 4, maxUnrolledRounds: 6, maxPlanNodes: 200 } });
-      const outcome = service.propose({ runId, proposedByInvocationId: invocation.id, source: { version: 1, expressions: [chain(leaf(orchestrator.id, "a"), parallel(leaf(orchestrator.id), chain(leaf(orchestrator.id), leaf(orchestrator.id))))] } });
+      const outcome = service.propose({ runId, proposedByInvocationId: invocation.id, source: { version: 1, expressions: [chain(leaf(worker.id, "a"), parallel(leaf(worker.id), chain(leaf(worker.id), leaf(worker.id))))] } });
       if (!outcome.accepted) throw new Error("expected acceptance");
       expected = stores.plans.currentGraph(runId);
     } finally {
