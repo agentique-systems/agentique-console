@@ -96,10 +96,11 @@ Phase 1 and remain after cutover:
   the Attempt executor, restart recovery, the Run start service, the pure
   readiness evaluator with its condition-fact projection, the Handoff
   router, the Changeset integration service, the `single`, `chain`,
-  `route`, and `parallel` Pattern runners with the root-node support, the
-  deterministic join settler, the bounded scheduler, and, in later
-  phases, the `coordinator_worker` and `evaluator_optimizer` runners and
-  Gates. It imports
+  `route`, `parallel`, and `coordinator_worker` Pattern runners with the
+  root-node support, the deterministic join settler, the pure Task
+  projection, the runtime-tool call executor with the Task proposal
+  service, the bounded scheduler, and, in later phases, the
+  `evaluator_optimizer` runner and Gates. It imports
   only `@agentique-console/core`, the persistence boundary, `zod`, the
   provider-neutral adapter contract under `server/src/provider/`, and the
   narrow capability ports it declares under `ports/`
@@ -296,7 +297,7 @@ code; each is the final production location of what it contains.
 
 ### Phase 1 schema expectations
 
-The baseline creates exactly these 34 tables, with the ownership and
+The baseline creates exactly these 35 tables, with the ownership and
 cardinality stated here and in [glossary.md](glossary.md). Column design
 beyond identifiers, keys, and the fields the architecture names is
 implementation work; the baseline is regenerated in place whenever the
@@ -319,7 +320,7 @@ architecture corrects it before cutover, because nothing has shipped.
 | `requirement_status_changes` | runtime | append-only journal with Evidence |
 | `acceptance_criteria` | runtime (Orchestrator authoring) | attached to a Requirement or Task; revisioned with the Requirement |
 | `decisions` | runtime | one per Decision; kind, policy, request and resolution fields, the typed `side_effect_approval` subject; append-only with supersession by id |
-| `tasks` | runtime | one per Task; the seven states; `replacesTaskId` |
+| `tasks` | runtime | one per Task; the seven states; `replacesTaskId` (unique: a Task is replaced at most once) |
 | `task_dependencies` | runtime | edges between Tasks of one Run |
 | `artifacts` | runtime | immutable metadata; blob store separate |
 | `handoffs` | runtime | immutable routing rows |
@@ -328,6 +329,7 @@ architecture corrects it before cutover, because nothing has shipped.
 | `invocations` | runtime | one per logical execution; role, purpose, `continuedFromInvocationId`, allocation source and final-reserve use (immutable), status with `blockedByDecisionId`, the Workspace cleanup obligation; manifest immutable |
 | `attempts` | runtime | one per provider execution; `kind`, `startMode`, `resumedFromAttemptId` |
 | `approved_tool_call_uses` | runtime (tool-call authorization) | append-only; one per claimed `approve_once` Decision (unique), naming tool, digest, Run, Plan Node, successor Invocation, claiming Attempt; every ownership fact re-checked at insertion |
+| `runtime_tool_calls` | runtime (runtime-tool executor) | append-only (triggers refuse update and delete); one per accepted mutating runtime-tool call, unique per (Invocation, tool, digest) and at most one `propose_tasks` per Invocation; safe result only, never the raw input |
 | `provider_continuations` | provider adapter | index keyed by Attempt; truncatable |
 | `context_manifests` | runtime | exactly one per Invocation; immutable |
 | `evaluations` | runtime / Evaluator via runtime | append-only |
@@ -427,10 +429,25 @@ is one or more commits; each commit keeps `npm run typecheck` and
    readiness, `require_all` / `require_any` over non-skipped sources, the
    versioned join index Artifact), `sequence` edges out of a route, the
    `branch` and `parallel_index` Handoff routes, and the typed
-   `routeSelection` result member. Remaining typed deferrals: the
-   `coordinator_worker` and `evaluator_optimizer` Patterns, `retry(round)`
-   edges, `node_exit` and `run_completion` Gates, and allocation
-   extension. Later
+   `routeSelection` result member. Phase 2D-B1 (done): the canonical
+   runtime-tool call boundary (`RuntimeToolCallPort` bound per Attempt,
+   the effective callable set as the intersection of manifest
+   permission, runtime handlers, and role/purpose validity, canonical
+   digests, own short root transactions, replay across a logical turn
+   through the append-only `runtime_tool_calls` table), atomic
+   Coordinator Task proposals (`propose_tasks`, cancelling `update_task`)
+   validated against the node's exact scope, bounds, and allocation, the
+   pure Task projection (canonical order, readiness, blockers, the
+   superseded set), and the `coordinator_worker` Pattern runner (one
+   `decompose` turn, bounded concurrent Workers funded by Task-reservation
+   transfer, integration in canonical Task order with `worker_result`
+   Handoffs, one consolidated `replan` turn per blocker frontier with
+   `coordinator_no_progress` and `coordinator_invocations_exhausted`,
+   one `synthesize` turn, Gate-phase deferral, and restart safety).
+   Remaining typed deferrals: the `evaluator_optimizer` Pattern,
+   `retry(round)` edges, `node_exit` and `run_completion` Gates,
+   allocation extension, and an executable `request_decision` runtime
+   tool. Later
    subphases: Runs, Execution
    Plan source validation and compiler,
    Plan Nodes of both kinds (`pattern`, `join`), Plan Edges, Plan Node
@@ -593,8 +610,41 @@ Merge to `main` happens after step 7 as one merge commit. Rollback is
   selection, makes a join ready when every `fan_in` source is terminal
   and skipped when all were skipped, fails explicitly on a missing or
   contradictory fact, ignores historical revisions' edges and historical
-  facts, and defers `retry` edges and the `coordinator_worker` and
-  `evaluator_optimizer` Patterns without marking anything successful.
+  facts, and defers `retry` edges and the `evaluator_optimizer` Pattern
+  without marking anything successful.
+- Runtime-tool call tests: the effective callable set is the
+  intersection of manifest permission, runtime handlers, and role and
+  purpose validity (a Worker and a `synthesize` turn never see
+  `propose_tasks`; `request_decision` is never exposed as callable); an
+  unlisted tool is `not_callable`; a malformed or oversized call is
+  `rejected` with nothing written; every mutating call runs in its own
+  root transaction outside provider execution and refuses to nest; an
+  identical call is replayed by digest within the logical turn (retry
+  and approval successor) and never repeats its effect; a second
+  proposal in one turn is `proposal_already_accepted`; a call from an
+  Attempt that is no longer running is `caller_not_running`; a handler
+  failure commits nothing and yields one diagnostic; no Event carries
+  the raw input.
+- Task proposal tests: every rule of execution-model §5.5.1 rejects the
+  whole batch with its closed code and persists nothing; an accepted
+  batch creates every Task, dependency, and reservation atomically;
+  replacement supersedes a `failed` or `blocked` Task at most once,
+  never a `completed` one, cancels a replaced `blocked` Task, keeps a
+  `failed` one `failed`, and copies its dependents; cumulative
+  `maxTasks` counts superseded Tasks; cancellation releases the
+  reservation and is refused for started or superseded Tasks.
+- `coordinator_worker` tests: decompose → Workers → synthesize with one
+  accepted proposal, one Worker per Task funded by its Task reservation,
+  bounded concurrency, per-Task manifests, integration in canonical Task
+  order never completion order, `worker_result` Handoffs recorded once,
+  coalesced replanning with only new blocker facts delivered,
+  `coordinator_no_progress`, `coordinator_invocations_exhausted`
+  counting approval successors as the same turn, integration conflicts
+  as blockers, Gate-phase deferral, and twelve restart windows (crash
+  before and after a tool-call commit, during Worker execution, before
+  and after integration, before and after a Handoff, across approval
+  successors, during synthesis, and after worktree-release failure)
+  with nothing repeated.
 - Handoff tests: a Handoff is created at most once per key across
   repeated passes, retries, and restarts; a second Handoff with the same
   key and a different route is refused; `sequence` edges, `branch(label)`

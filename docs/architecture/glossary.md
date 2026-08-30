@@ -370,6 +370,12 @@ without a Decision, replacement input, or Coordinator replanning),
 a Task; a `failed` Task is never reclassified `cancelled`; completing a
 Task never satisfies a Requirement.
 
+A Task proposed inside a `coordinator_worker` node may be **superseded**
+by a replacement Task that records `replacesTaskId` (at most once per
+Task, only for a `failed` or `blocked` Task, never for a `completed`
+one); the node's **current** Tasks are those not superseded, and every
+Task ever proposed counts toward the node's `maxTasks`.
+
 - Id prefix: `task_`
 - Owned by: the runtime (identity, state transitions); created from
   Orchestrator `create_tasks` or validated Coordinator `propose_tasks`
@@ -406,8 +412,10 @@ many times the runtime reaches it (a pass, a retry, a restart). The closed
 route set is `sequence:<source node>:<target node>` (a delivering
 `sequence` edge), `branch:<source node>:<target node>` (the one active
 `branch(label)` edge of a route that selected a composite branch, carrying
-no Artifacts), `chain_step:<node>:<step>`, and `parallel_index:<node>`
-(a parallel node's index Artifact to its own aggregation).
+no Artifacts), `chain_step:<node>:<step>`, `parallel_index:<node>`
+(a parallel node's index Artifact to its own aggregation), and
+`worker_result:<node>:<task>` (one integrated Worker result of a
+`coordinator_worker` node to its next Coordinator turn).
 
 - Id prefix: `ho_`
 - Owned by: the runtime
@@ -545,13 +553,16 @@ Plan Node. It does not revise the Execution Plan, does not create
 Invocations, and does not call or message Workers; it proposes Tasks and
 the runtime validates them against the node's exact Requirement scope,
 reserves Budget, persists them, and schedules the Workers. The node owns
-separate Coordinator Invocations, each with one purpose — `decompose`
-(once), `replan` (on a genuine semantic blocker), `synthesize` (once) —
-and never more than one active at a time; routine progress never creates
-one. Coordination depth is one: no Coordinator exists inside another
-Coordinator's node.
+separate Coordinator logical turns, each with one purpose — `decompose`
+(once), `replan` (only when unresolved blockers prevent progress, every
+blocker coalesced into one turn), `synthesize` (once) — bounded by
+`maxCoordinatorInvocations` and never more than one active at a time;
+an approval successor continues the same turn; routine progress never
+creates one. A Coordinator acts only through runtime-tool calls
+(`propose_tasks`, cancelling `update_task`) and its result. Coordination
+depth is one: no Coordinator exists inside another Coordinator's node.
 
-- Related: Invocation, Worker, Task, Handoff, Pattern, Plan Node Requirement Scope
+- Related: Invocation, Worker, Task, Handoff, Pattern, Plan Node Requirement Scope, Runtime Tool Call
 
 ### Evaluator
 
@@ -752,6 +763,25 @@ approval, and executing the call again needs a new Decision.
 - Store: `approved_tool_call_uses`
 - Related: Decision, Context Manifest, Invocation, Attempt, Tool Policy
 
+### Runtime Tool Call
+
+The canonical, append-only record that the runtime executed one mutating
+runtime-tool call (`propose_tasks` or `update_task`) on behalf of a
+running Invocation: the Run, Plan Node, Invocation, the first Attempt
+that committed it, the tool, the digest of the canonicalized call, the
+safe result, and the commit time. It is written by the runtime-tool
+executor in its own short transaction outside provider execution, after
+the handler validated and applied the call; a rejected call writes
+nothing. It is unique per Invocation, tool, and digest, and at most one
+accepted `propose_tasks` exists per Invocation; a retry or approval
+successor of the same logical turn replays a recorded call by digest
+instead of repeating its effect. It never holds the call's raw input.
+
+- Id prefix: `rtc_`
+- Owned by: the runtime
+- Store: `runtime_tool_calls`
+- Related: Invocation, Attempt, Task, Context Manifest, Coordinator
+
 ### Budget
 
 A set of limits: maximum cost, maximum tokens, maximum wall-clock time,
@@ -893,11 +923,11 @@ logical turn is a new Invocation), `in_progress` (as a Task state; use
   `plan_edges`, `plan_revision_nodes`, `plan_node_requirements`, `acceptance_criteria`,
   `context_manifests`, `agent_definition_revisions`, `publications`,
   `capacity_leases`, `budget_reservations`, `provider_continuations`,
-  `approved_tool_call_uses`.
+  `approved_tool_call_uses`, `runtime_tool_calls`.
 - Id prefixes: `ws_`, `cv_`, `cvm_`, `run_`, `pn_`, `pe_`, `req_`,
   `reqr_`, `ac_`, `dec_`, `task_`, `art_`, `ho_`, `agd_`, `agdr_`, `inv_`,
   `att_`, `eval_`, `gate_`, `snap_`, `cs_`, `pub_`, `lease_`, `bres_`,
-  `cm_`, `use_`, `acu_`. A prefix is never reused for a second kind.
+  `cm_`, `use_`, `acu_`, `rtc_`. A prefix is never reused for a second kind.
   `plan_node_requirements`, `plan_revision_nodes`, and
   `provider_continuations` are keyed by the objects they index and carry
   no own prefix; `events`,

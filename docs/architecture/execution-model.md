@@ -39,9 +39,10 @@ Invocation preparation, the Attempt executor with its retry policy and
 result validator, the resource governor, restart recovery, Run start, the
 readiness evaluator with its condition-fact projection, the Handoff
 router, the Changeset integration service, the `single`, `chain`, `route`,
-and `parallel` Pattern runners, the deterministic join settler, the
-scheduler, and in later phases the `coordinator_worker` and
-`evaluator_optimizer` runners and Gates — lives behind
+`parallel`, and `coordinator_worker` Pattern runners, the deterministic
+join settler, the pure Task projection, the runtime-tool call boundary
+with its Task proposal handlers, the scheduler, and in later phases the
+`evaluator_optimizer` runner and Gates — lives behind
 `server/src/execution/`, which depends only on the core package, the
 persistence boundary, the provider-neutral adapter contract under
 `server/src/provider/` (§6.5), and narrow ports for capabilities
@@ -125,6 +126,7 @@ re-entrant over one SQLite connection:
 | Invocation | Runtime | `invocations` | Plan view |
 | Attempt | Runtime | `attempts` | Plan view, transcript viewer |
 | Approval use | Runtime (tool-call authorization) | `approved_tool_call_uses` | Decision cards, Plan view |
+| Runtime-tool call | Runtime (runtime-tool executor) | `runtime_tool_calls` | Invocation inspector |
 | Provider continuation index | Provider adapter | `provider_continuations` (index) + adapter-owned payload store | Attempt inspector (existence only) |
 | Context Manifest | Runtime | `context_manifests` | Invocation inspector |
 | Evaluation, Gate | Runtime | `evaluations`, `gates` | Gate view |
@@ -418,8 +420,8 @@ selected branch's exits are terminal. A `join` becomes ready when every
 skipped; its policy is applied at settlement (§4.2), never here. The same
 activation decides which edges the Handoff router delivers along (§7.7).
 Work the runtime does not yet support — `retry` edges and the
-`coordinator_worker` and `evaluator_optimizer` Patterns — is returned as a
-typed deferral, never as readiness and never as success.
+`evaluator_optimizer` Pattern — is returned as a typed deferral, never as
+readiness and never as success.
 
 ### 4.4 Composition and compilation
 
@@ -555,7 +557,9 @@ Compilation rules, applied recursively to each expression:
 6. `coordinator_worker(coordinator, worker)`: compiles to one
    `coordinator_worker` node with the resolved bounds (the expression's or
    the configured default; `maxConcurrentWorkers` may not exceed
-   `maxTasks`). Its operands must be leaves. It may not be an operand of
+   `maxTasks`, and `maxCoordinatorInvocations` is at least 2, because a
+   useful lifecycle needs one `decompose` and one `synthesize` turn — both
+   rejected with `invalid_pattern_bounds`). Its operands must be leaves. It may not be an operand of
    another `coordinator_worker` expression at any depth; a raw proposal
    that nests one, or gives one a composite operand, is rejected before
    schema parsing with `nested_coordinator_worker`. Tasks and Invocations
@@ -951,50 +955,143 @@ settles, and its result Artifacts are the node's output.
 
 One Coordinator role proposes Tasks; the runtime creates Worker Invocations
 for them; a Coordinator synthesizes the results. The node is bounded and
-the coordination depth is one by construction.
+the coordination depth is one by construction. The runner is
+`server/src/execution/patterns/coordinator-worker.ts`; the Coordinator
+proposes intent through the runtime-tool boundary (§6.4), and the runtime
+owns every Task creation, dependency, readiness decision, allocation,
+retry, integration, fan-in, wait, and progress fact.
 
 Roles and what each may do:
 
-- A **Coordinator Invocation** proposes Tasks through `propose_tasks` and
-  returns through `return_result`. It does not revise the Execution Plan,
-  does not create Invocations, and does not call, message, or address
-  Workers. It never sees a Worker except as a Handoff the runtime delivers.
-- The **runtime** validates every proposed Task (§5.5.1), reserves a Worker
-  Invocation allocation for it from the node's allocation, persists it, and
-  schedules one Worker Invocation per Task when the Task becomes `ready`.
-  The runtime records each Worker result as a Handoff on the node and
-  decides when a new Coordinator Invocation is created.
+- A **Coordinator Invocation** proposes Tasks through `propose_tasks`,
+  cancels its node's unstarted Tasks through `update_task`, and returns
+  through `return_result`. It does not revise the Execution Plan, does not
+  create Invocations, and does not call, message, or address Workers. It
+  never sees a Worker except as a `worker_result` Handoff the runtime
+  delivers.
+- The **runtime** validates every proposed Task (§5.5.1) atomically as a
+  batch, reserves a Worker Invocation allocation for each from the node's
+  allocation, persists them, projects readiness, and starts one Worker
+  Invocation per runnable Task. It integrates Worker Changesets in
+  canonical Task order, records each integrated result as a Handoff on the
+  node, and decides when a new Coordinator turn is created.
 - A **Worker Invocation** (purpose `task`) executes exactly one Task and
-  returns a result. A Worker cannot propose or create Tasks, Workers,
-  Coordinators, or Plan Nodes, and cannot address any other Invocation.
+  returns a result. Its Context Manifest holds exactly its Task, that
+  Task's Requirements (a subset of the node's pinned scope), and the
+  Artifacts the Task lists as inputs. A Worker cannot propose or create
+  Tasks, Workers, Coordinators, or Plan Nodes, cannot address any other
+  Invocation, and has no runtime handler for `propose_tasks` however its
+  Tool Policy reads.
 
-The node owns separate Coordinator Invocations, each with its own immutable
-Context Manifest and one purpose, created only on these occasions:
+**Coordinator turns.** The node has one Coordinator position,
+`coordinator_turn`, and one Worker position per Task, `worker_task
+{ taskId }`. A **logical Coordinator turn** is one Coordinator Invocation
+plus every approval successor continued from it at the same position
+(§6.1): a `side_effect_approval` successor continues the same turn,
+consumes no unit of `maxCoordinatorInvocations`, and never duplicates its
+predecessor's accepted proposal, because the runtime-tool call records of
+the whole turn are the replay set (§6.4). Each turn has its own immutable
+Context Manifest carrying a typed `coordinator_turn` input (purpose,
+bounds, turns used, the node's Task ledger ordered by Task id, and the
+sorted keys of the blockers the turn is asked to resolve). Turns are
+created only on these occasions, and never more than one is active:
 
-1. `decompose` — once, at node start, to produce the initial Task set.
-2. `replan` — when a Task becomes `blocked` or `failed` and the runtime
-   cannot resolve it deterministically (a retry within the Task's Attempt
-   allocation is deterministic; a change in what should be done is not).
-   The Coordinator may propose replacement Tasks, cancel `pending`,
-   `ready`, or `blocked` Tasks, or fail the node.
-3. `synthesize` — once, when every Task is `completed` or `cancelled`, to
-   produce the node's output.
+1. `decompose` — once, at node start, with the node's incoming edge
+   Handoffs and the empty ledger. It must have exactly one accepted,
+   non-empty proposal before its completed result advances the node; a
+   completed turn with no accepted proposal fails the node with
+   `coordinator_no_progress`. A `decompose` that returns `blocked` or
+   `failed` waits or fails the node like any other Invocation.
+2. `replan` — only when deterministic work cannot advance any Task: no
+   Worker is active or runnable, no Changeset can be integrated, and the
+   **blocker frontier** is non-empty. The frontier is projected from rows
+   and holds every unresolved blocker: a `failed` Task that has not been
+   replaced, a `blocked` Task (blocked by a Worker's `blocked` report, or
+   by a `failed` or `cancelled` dependency), and an unresolved
+   integration conflict of a Worker's Changeset (§9.2). The whole frontier
+   is coalesced into one turn. The turn's manifest carries the
+   `worker_result` Handoffs recorded since the previous turn and one
+   `coordinator_blocker` input per blocker fact **not delivered to an
+   earlier turn**; blockers delivered before are named only by key in
+   `blockerKeys`. The Coordinator may propose replacement Tasks, cancel
+   `pending`, `ready`, or `blocked` Tasks, or return `failed`. A replan
+   must make canonical progress — an accepted proposal, an accepted
+   cancellation, or a frontier that differs from the one it was given —
+   otherwise the node fails with `coordinator_no_progress`. A blocker
+   that resolves without a turn (a conflict Task completing) spends
+   nothing.
+3. `synthesize` — once, when every current Task is `completed` or
+   `cancelled`, every completed Task's Changeset is integrated and its
+   Handoff recorded, no conflict is open, and no Worker is active. Its
+   manifest carries every `worker_result` Handoff not delivered to an
+   earlier turn. Its result Artifacts, after its own Changeset is
+   integrated, are the node's output.
 
-There is never more than one active Coordinator Invocation for a node.
-Blockers that arise while one is active are queued and delivered in the
-next `replan` Invocation's manifest. Routine progress — a Task completing,
-a Worker starting, Usage accruing — never creates a Coordinator Invocation.
-The runtime advances the Task graph on its own. Each Coordinator Invocation
-records `continuedFromInvocationId` pointing at the node's previous
-Coordinator Invocation; its initial Attempt may be `resumed` across that
-boundary under §6.6.
+Logical turns are bounded by `maxCoordinatorInvocations` (at least 2,
+§4.4). When blockers remain, or synthesis is due, and no turn is left, the
+node fails with `coordinator_invocations_exhausted`. Routine progress — a
+Task completing, a Worker starting, a Changeset integrating, Usage
+accruing — never creates a turn. Each turn records
+`continuedFromInvocationId` pointing at the node's previous turn; its
+initial Attempt may be `resumed` across that boundary under §6.6.
 
-- Invocations: `coordinator` Invocations with purposes `decompose`, `replan` (0..n), `synthesize`; N `worker` Invocations with purpose `task` (one per Task)
-- Input: a Coordinator Invocation receives the node manifest and, for `replan` and `synthesize`, Handoffs to every Worker result since the previous Coordinator Invocation; each Worker receives the manifest restricted to its Task plus Handoffs to the Artifacts the Task lists as inputs
-- Output: the `synthesize` Invocation's result Artifacts
+**Task set.** The node's Tasks are its **current** Tasks minus those a
+replacement superseded. A replacement is a proposal naming
+`replacesTaskId`: the replaced Task must be `failed` or `blocked` and
+owned by the node; a `blocked` Task is cancelled by the replacement (its
+reservation released) and a `failed` Task stays `failed` (never
+reclassified); a Task is replaced at most once (database-enforced) and a
+`completed` Task never; every dependent of the replaced Task gains the
+replacement as a dependency, so the projection sees the replacement in
+the replaced Task's place; and every proposed Task, superseded ones
+included, counts toward the cumulative `maxTasks`.
+
+**Readiness and Workers.** Task readiness is a pure projection
+(`server/src/execution/task-projection.ts`) over the current Tasks and
+dependency edges: Kahn's order over effective dependencies (creation order
+breaks ties) is the **canonical Task order**; a `pending` Task whose
+dependencies are all `completed` becomes `ready`, and one with a `failed`
+or `cancelled` dependency becomes `blocked`. The runner starts one Worker
+per runnable Task, in canonical order, one per scheduler iteration, at
+most `maxConcurrentWorkers` active at once (independently of the Run's
+`maxConcurrency` and the governor), and never while a Coordinator turn is
+active. A Worker is funded by transferring its Task's reservation
+(§7.6); the node's allocation is not reserved twice. A Task whose Worker
+ends `waiting` on a Decision stays `running` with its Invocation
+`blocked`; the resolved Decision produces an approval successor at the
+same `worker_task` position, funded like any successor. A `running` Task
+whose Worker has ended without a result (an Attempt-exhausted or
+recovered Invocation) is failed or blocked from rows on the next
+projection.
+
+**Integration and fan-in.** A Worker's completed result is integrated in
+canonical Task order — dependency order, then stable Task order, never
+completion order — so a Task's Changeset waits until every earlier Task
+in the order is determined (terminal or integrated). A result without a
+Changeset needs no integration. Only an integrated result gets its
+`worker_result:<node>:<task>` Handoff (§7.7), whose Artifacts are the
+Task's output Artifacts; the Handoff is recorded once, by key, however
+many passes reach it. A conflicting Changeset follows the ordinary
+conflict lifecycle (§9.2): the conflict Task is created for the node,
+the conflict joins the blocker frontier, and the Changeset is applied
+once more when that Task completes; a cancelled or failed conflict Task
+fails the node with `integration_conflict`. The Coordinator's own
+Changesets (its Agent Definition may grant `write`) are integrated the
+same way, before the node proceeds past the turn.
+
+**Settlement.** The synthesis result's Artifacts become the node's
+`outputArtifactIds` and the node succeeds; a node with Gate criteria is
+deferred (`awaiting_gate_phase`) instead of marked succeeded (§10). A
+failing node cancels its unstarted current Tasks and releases their
+reservations; Tasks that ran keep their state. A node removed from the
+membership settles its own turn and Workers and hands off to nobody.
+
+- Invocations: `coordinator` Invocations with purposes `decompose`, `replan` (0..n), `synthesize` (one logical turn each, plus approval successors); N `worker` Invocations with purpose `task` (one per Task that ran)
+- Input: a Coordinator turn receives the node manifest, its `coordinator_turn` input, the `worker_result` Handoffs since the previous turn, and (for `replan`) the new `coordinator_blocker` facts; each Worker receives the manifest restricted to its Task
+- Output: the `synthesize` turn's result Artifacts
 - Fan-in: performed by the runtime as described above
-- Bounds: node limits cap `maxTasks`, `maxConcurrentWorkers`, and `maxCoordinatorInvocations`; the node allocation caps total cost, tokens, and Attempts
-- Failure: a `replan` Invocation failing the node, exhausting `maxCoordinatorInvocations`, or a node allocation exhausted under policy `fail` fails the node
+- Bounds: `maxTasks` (cumulative, superseded Tasks included), `maxConcurrentWorkers`, and `maxCoordinatorInvocations` (logical turns); the node allocation caps total cost, tokens, and Attempts
+- Failure: `coordinator_no_progress`, `coordinator_invocations_exhausted`, a turn returning `failed`, `integration_conflict`, or a node allocation exhausted under policy `fail`
 
 Tasks proposed inside a `coordinator_worker` node are Tasks of the Run (they
 appear in the ledger, reference Requirements, and carry Evidence) and are
@@ -1004,22 +1101,45 @@ changes a Plan Node, Plan Edge, or scope row.
 
 #### 5.5.1 Task proposal validation
 
-The runtime accepts a proposed Task only when all of the following hold;
-otherwise the proposal is rejected in the tool result with the failing
-rule, and nothing is persisted:
+`propose_tasks` carries a batch of 1–64 proposals. Each proposal is
+well-formed by schema: a batch-unique `key`, a bounded subject, Requirement
+ids, input Artifact ids, dependencies on batch keys (`dependsOnKeys`) or
+existing Task ids (`dependsOnTaskIds`), 1–20 unique required outputs, and
+optionally `replacesTaskId`. The whole batch is validated **atomically**
+by the Task proposal service (`server/src/execution/task-proposals.ts`)
+against rows, inside the runtime-tool call's transaction; a rejected batch
+persists nothing and is reported in the tool result with every failing
+rule (closed rejection codes), and an accepted batch creates every Task,
+its dependencies, and its reservation in that one transaction. The rules:
 
-- it is well-formed (subject, inputs by Artifact id, dependencies by Task id
-  within the node, expected outputs);
-- it references a non-empty subset of the node's exact persisted
-  Requirement scope (`plan_node_requirements`), every reference naming the
-  node's pinned Requirement revision;
-- it references no Requirement outside that scope, none from another
-  Conversation, none at a different revision, none that is `retired`, and
-  no internal (non-leaf) Requirement;
-- the node's dependency graph stays acyclic and the Task count stays within
-  `maxTasks`;
-- a Worker Invocation allocation for it can be reserved from the node's
-  unconsumed, unreserved allocation (§7.6).
+1. the caller is a `running` Coordinator Invocation of the node whose
+   purpose permits proposals (`decompose`, `replan`; never `synthesize`
+   — `purpose_not_permitted`) and the logical turn has no accepted
+   proposal yet (`proposal_already_accepted`);
+2. keys are unique within the batch (`duplicate_key`) and every
+   `dependsOnKeys` entry names a batch key (`unknown_dependency_key`);
+3. every `dependsOnTaskIds` and `replacesTaskId` entry names a Task of
+   this node that is not superseded (`foreign_dependency`,
+   `invalid_replacement`);
+4. every Requirement id lies in the node's exact pinned scope
+   (`plan_node_requirements`; `requirement_out_of_scope`) and is not
+   `retired` at the current revision (`requirement_retired`);
+5. every input Artifact exists (`unknown_artifact`) and belongs to the
+   Run (`foreign_artifact`);
+6. the replaced Task is `failed` or `blocked`, has not been replaced
+   before, and is not `completed` (`invalid_replacement`);
+7. the dependency graph over existing edges, the batch, and the edges
+   implied by replacement stays acyclic (`dependency_cycle`);
+8. the cumulative Task count of the node — every Task ever proposed,
+   superseded ones included — stays within `maxTasks`
+   (`max_tasks_exceeded`);
+9. one Worker Invocation allocation per proposal can be reserved from the
+   node's unconsumed, unreserved allocation (§7.6;
+   `allocation_insufficient`).
+
+Cancellation through `update_task` (`{ kind: "cancel" }`) is accepted
+only for a `pending`, `ready`, or `blocked`, non-superseded Task of the
+caller's node (`task_not_cancellable`); it releases the Task's reservation.
 
 ### 5.6 `evaluator_optimizer`
 
@@ -1336,6 +1456,49 @@ particular `record_decision` cannot create or resolve a
 `requirement_waiver`; the Orchestrator proposes a waiver only through
 `request_decision`, and only the operator resolves it (§8.2).
 
+**Runtime-tool calls.** Four sets are distinct and never conflated:
+
+1. the runtime tools the **role** permits (the table above, computed by
+   `runtimeToolsFor(role, purpose)` in core and recorded in the
+   manifest);
+2. the tools the **manifest** permits (the role's set, restricted by
+   purpose — a `synthesize` turn has neither `propose_tasks` nor
+   `update_task`);
+3. the tools the runtime **can execute** in this phase — the handler
+   bindings in `core/src/runtime-tools.ts`: `propose_tasks` and the
+   cancelling `update_task`, for a Coordinator with purpose `decompose`
+   or `replan` and for no other role; and
+4. the **effective callable set** exposed to a provider execution: the
+   intersection of the manifest's tools, the runtime handlers, and the
+   validity of the caller's role and purpose. A tool that is permitted
+   but not executable (`request_decision`, every read tool, a Worker's
+   `update_task`) is not exposed as callable.
+
+The Attempt executor binds one `RuntimeToolCallPort` (`tools`, `call`)
+per Attempt, fixed to that Attempt, Invocation, manifest, role, purpose,
+Run, and Plan Node; the adapter receives the port and nothing else. A
+call is a closed discriminated request (`propose_tasks`, `update_task`),
+parsed strictly, canonicalized (sorted-key JSON of `{ tool, input }`),
+bounded at 65,536 bytes, and digested; its outcome is a closed union —
+`accepted` (call id, digest, `replayed`, the tool's typed result),
+`rejected` (closed rejection codes), `not_callable`, or `failed`. The
+runtime-tool executor (`server/src/execution/runtime-tools.ts`) performs
+each mutating call in its own short root transaction, outside provider
+execution and never nested: it re-checks that the caller's Attempt and
+Invocation are `running`, replays an identical call already committed
+by the same **logical turn** (the Invocation plus its approval
+predecessors) by digest, otherwise runs the handler and appends one
+`runtime_tool_calls` row — id (`rtc_`), Run, Plan Node, Invocation, the
+first committing Attempt, tool, digest, the safe result, and the commit
+time — with one `runtime_tool_call.committed` Event. The row set is
+unique per Invocation, tool, and digest, and holds at most one accepted
+`propose_tasks` per Invocation; rejected calls write nothing; rows are
+append-only (database triggers). Retries and approval successors
+therefore never duplicate an accepted proposal, and the raw call input
+never appears in an Event, diagnostic, or manifest. Decisions are not
+touched by the runtime-tool executor: `request_decision` remains
+permitted by role and not executable in this phase.
+
 ### 6.5 Attempts
 
 An Attempt is one provider execution of an Invocation from start to a
@@ -1499,10 +1662,12 @@ runtime component with two entry points and no timer, loop, or interval:
   the current graph plus the condition facts projected from rows (§4.3).
   One action is projected per node per iteration, in membership order; the
   root node is settled first. `start_position` is the one further
-  position a running `parallel` node may prepare now (a further item, or
-  the successor of a blocked position whose Decision resolved), subject to
-  the same Run and node concurrency limits as `start_node`; `settle_join`
-  is the deterministic settlement of a `ready` join (§4.2).
+  position a running `parallel` or `coordinator_worker` node may prepare
+  now (a further item or runnable Task's Worker, the successor of a
+  blocked position whose Decision resolved, or the next Coordinator turn
+  with its purpose), subject to the same Run and node concurrency limits
+  as `start_node`; `settle_join` is the deterministic settlement of a
+  `ready` join (§4.2).
 - `advanceRun(runId, { maxActions })` is a bounded pass. It performs the
   projected actions one at a time, re-projecting the current graph before
   every state-changing action; every mutation runs inside a Pattern
@@ -1584,8 +1749,10 @@ runtime component with two entry points and no timer, loop, or interval:
 ### 7.3 Dependencies
 
 - Plan Edges are the only cross-node ordering mechanism.
-- Task dependencies order Worker Invocation creation inside a
-  `coordinator_worker` node (§7.9) and are otherwise informational.
+- Task dependencies order Worker Invocation creation and Changeset
+  integration inside a `coordinator_worker` node (§5.5, §7.9) and are
+  otherwise informational. A replacement Task inherits every dependent
+  of the Task it replaces.
 - Cycles are rejected at compile time and at Task proposal time.
 
 ### 7.4 Waiting
@@ -1800,8 +1967,11 @@ sequence edges deliver only for an inline selection), `branch:<source>:<target>`
 for the one active `branch(label)` edge of a route that selected a
 composite branch (no Artifacts; the label is validated routing metadata
 against the node's shape and the revision's edge), `chain_step:<node>:<step>`
-for a chain's internal transfer, and `parallel_index:<node>` for a parallel
-node's delivery of its index to its own aggregation. Which edges deliver is
+for a chain's internal transfer, `parallel_index:<node>` for a parallel
+node's delivery of its index to its own aggregation, and
+`worker_result:<node>:<task>` for a `coordinator_worker` node's delivery
+of one integrated Worker result (the Task's output Artifacts) to its next
+Coordinator turn. Which edges deliver is
 decided by the readiness evaluator's activation over the graph and the
 facts (§4.3); a Handoff still holds only source, target, Task ids,
 Artifact ids, a bounded summary, and a status — never a message, an
@@ -1883,14 +2053,16 @@ Transitions:
 - `running → failed` when the Invocation is `failed` (§7.2).
 - `blocked → ready` when the blocker is resolved (Decision answered,
   replacement input delivered) and the runtime creates a new Invocation
-  for it; `blocked → cancelled` when a `replan` cancels it.
+  for it; `blocked → cancelled` when a `replan` cancels it or replaces it
+  (the replacement supersedes it and inherits its dependents).
 - `pending → blocked` when a dependency becomes `failed` or `cancelled`
   (never a silent cancellation; the Coordinator or Orchestrator decides).
 - `pending | ready | blocked → cancelled` by the Orchestrator, a
   Coordinator `replan`, or operator cancellation of the Run or node.
 - `failed` and `completed` are terminal; a failed Task is never
   reclassified as `cancelled`, and a replacement is a new Task that
-  records `replacesTaskId`.
+  records `replacesTaskId` — at most one per replaced Task, never for a
+  `completed` one (§5.5).
 
 A Task completing never changes a Requirement's status (§8.1). A `blocked`
 or `failed` Task is never described as in progress; only `running` is.
@@ -2241,7 +2413,9 @@ mechanism, if ever added, is a new feature with its own design.
   payload or storage key contents; at most the existence of an index row is
   exposed. Likewise no Event, failure detail, diagnostic, or manifest
   carries the bytes of an intercepted tool call (§6.4): only its digest,
-  its Artifact id, and safe metadata.
+  its Artifact id, and safe metadata. A `runtime_tool_call.committed`
+  Event likewise carries the call's digest and safe result, never its
+  input.
 
 ## 14. Failure model
 
@@ -2258,7 +2432,9 @@ mechanism, if ever added, is a new feature with its own design.
 | `join` fan-in policy not met | Join `failed` with `join_fan_in_failed`, its index Artifact recorded on the failure Event; handled as a Plan Node failure. |
 | `parallel` items do not satisfy `requireAll` | Node `failed` with `parallel_items_failed` after every item ended and every successful Changeset was integrated; the index Artifact (failed items included) is recorded on the failure Event. |
 | `route` selector yields no valid label | Node `failed` with `route_selection_failed`: an unmapped or superseded selector Decision, or an Evaluator selection Invocation that failed after its permitted Attempts (an unbound label is an invalid result, retried within them). |
-| Task fails or is blocked inside `coordinator_worker` | Task `failed`/`blocked`; a `replan` Coordinator Invocation is created unless one is active (then queued). |
+| Task fails or is blocked inside `coordinator_worker` | Task `failed`/`blocked`; dependents become `blocked`; the blocker joins the frontier. One consolidated `replan` turn is created only when no Worker is active or runnable and nothing can be integrated; blockers arising while a turn is active wait for the next turn. A replan without canonical progress fails the node with `coordinator_no_progress`; a frontier that outlives the turn bound fails it with `coordinator_invocations_exhausted` (§5.5). |
+| `decompose` completes without an accepted proposal | Node `failed` with `coordinator_no_progress`; nothing was created. |
+| Runtime-tool call fails or crashes | A failure inside the call's transaction commits nothing and returns `failed` with a bounded message and one `runtime_tool_call_failed` diagnostic; a crash after the commit leaves the row, and the retry or approval successor replays it by digest instead of repeating the effect (§6.4). |
 | Changeset conflict | Changeset `conflict`; Task with a bounded report Artifact created for the node owner; node (and, when nothing else can proceed, the Run) `waiting` with `integration_conflict`; applied once more when the Task completes; a second conflict, or a failed or cancelled Task, fails the node with `integration_conflict` (§9.2). |
 | Crash between an external Changeset application and its record | The Changeset stays `pending`; the next pass applies it again and the port reports the application that already holds; the record is written exactly once (§9.2). |
 | Crash during a scheduler pass | Nothing is lost: every action is one transaction; the next pass re-projects from rows, retries interrupted Attempts through recovery, and repeats no Invocation, Handoff, integration, or provider call (§7.1). |
@@ -2397,6 +2573,17 @@ by a test.
     never repaired, deleted, or reconstructed from Events; no adapter
     holds correctness-critical consumption state; and no raw call bytes
     appear outside the call Artifact.
+25. **Runtime-tool calls are canonical, bounded, and replayed, never
+    repeated.** A mutating runtime-tool call is executed only through the
+    per-Attempt port, only for a tool in the effective callable set, in
+    its own short root transaction outside provider execution; an
+    accepted call is one append-only `runtime_tool_calls` row (unique per
+    Invocation, tool, and digest; at most one accepted `propose_tasks`
+    per Invocation and per logical turn) that a retry or approval
+    successor replays by digest; a rejected call writes nothing; a Task
+    proposal is validated as one atomic batch against the node's exact
+    scope, bounds, and allocation; the Coordinator proposes and the
+    runtime alone creates, orders, funds, integrates, and fans in.
 
 ## 16. Non-goals
 

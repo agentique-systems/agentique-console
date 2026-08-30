@@ -36,7 +36,8 @@ server/src/
                  blob-store.ts  journal.ts  test-support.ts
                  stores/{index,support,workspaces,conversations,runs,plans,requirements,
                          decisions,tasks,artifacts,handoffs,agents,invocations,
-                         continuations,verification,workspace-state,capacity,budgets,usage}.ts
+                         continuations,verification,workspace-state,capacity,budgets,usage,
+                         runtime-tool-calls}.ts
                  migrations/0000_orchestration_core.sql  migrations/meta/*
   events/        stream.ts
   workspaces/    service.ts  fs-browse.ts
@@ -46,10 +47,11 @@ server/src/
                  result-validator.ts  retry-policy.ts  continuation-policy.ts  governor.ts
                  recovery-service.ts  workspace-cleanup.ts  tool-call-authorization.ts  agent-definitions.ts
                  readiness.ts  readiness-facts.ts  handoff-routing.ts  integration-service.ts  join.ts  scheduler.ts  test-support.ts
+                 runtime-tools.ts  task-proposals.ts  task-projection.ts  coordinator-test-support.ts
                  compiler/{compile,input,source-path}.ts  manifest/{assembler,renderer}.ts
                  ports/{workspace-preparation,execution-workspace,integration-workspace}.ts
-                 patterns/{index,support,root,single,chain,route,parallel}.ts
-                 (later subphases) patterns/{coordinator-worker,evaluator-optimizer}.ts  tools.ts  gates.ts
+                 patterns/{index,support,root,single,chain,route,parallel,coordinator-worker}.ts
+                 (later subphases) patterns/evaluator-optimizer.ts  tools.ts  gates.ts
   agents/        definitions.ts  revisions.ts  native-agent-file.ts  builtins.ts  policy.ts
   provider/      adapter.ts  continuations.ts  continuation-store.ts  fake.ts  mapping.ts  env.ts  usage-normalization.ts  failure-classifier.ts
   capacity/      governor.ts  leases.ts
