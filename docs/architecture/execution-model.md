@@ -36,13 +36,16 @@ store, transaction helpers); the deterministic runtime that composes
 stores into canonical operations — the plan compiler, the plan-revision
 service, Run creation, the Context Manifest assembler and renderer,
 Invocation preparation, the Attempt executor with its retry policy and
-result validator, the resource governor, restart recovery, Run start, and
-in later phases the scheduler, Pattern executors, and Gates — lives behind
+result validator, the resource governor, restart recovery, Run start, the
+readiness evaluator, the Handoff router, the Changeset integration
+service, the `single` and `chain` Pattern runners, the scheduler, and in
+later phases the remaining Pattern runners, joins, and Gates — lives behind
 `server/src/execution/`, which depends only on the core package, the
 persistence boundary, the provider-neutral adapter contract under
 `server/src/provider/` (§6.5), and narrow ports for capabilities
-implemented in later phases (the Workspace preparation port, §3, and the
-execution-workspace port, §9.1). The provider boundary
+implemented in later phases (the Workspace preparation port, §3, the
+execution-workspace port, §9.1, and the integration-workspace port,
+§9.2). The provider boundary
 (`server/src/provider/`) holds the adapter contract, the scripted fake,
 the continuation payload stores, and, in a later subphase, the
 provider-specific adapters; it depends on the core package and on the
@@ -189,7 +192,12 @@ created ──► running ──► verifying ──► awaiting_signoff ──�
   reason: `decision` (an `operator_required` Decision is unanswered),
   `budget` (the Run Budget has no unreserved capacity for work that must
   proceed), `provider_capacity` (the resource governor has no lease to
-  grant), `operator` (the operator paused the Run).
+  grant), `integration_conflict` (a Changeset conflict Task is open, §9.2),
+  `operator` (the operator paused the Run). The scheduler records the
+  Run `waiting` only when no action remains, no Attempt is executing, and
+  no ready node is merely held back by the concurrency limit; the reason
+  is the earliest waiting node's reason, and the Run resumes through an
+  explicit `resume_run` action when that exact reason has cleared.
 - `verifying`: the Orchestrator has requested completion; the runtime is
   executing the `run_completion` Gate.
 - `awaiting_signoff`: the `run_completion` Gate passed; the
@@ -334,6 +342,18 @@ edge of a historical revision never makes a node ready:
   `succeeded`), otherwise `failed`. A join all of whose predecessors are
   `skipped` is `skipped`. A join never waits on anything but its edges and
   never holds a capacity lease or a Budget allocation beyond zero.
+
+Readiness is computed by a pure evaluator
+(`server/src/execution/readiness.ts`) over the current graph alone: given
+the nodes and edges of the latest accepted revision it returns, per node,
+`remain_pending`, `become_ready`, `become_skipped` (with the cause and the
+failed predecessors), or the observation that the node is already ready,
+active, or terminal. It reads no clock, no store, and no Invocation. Work
+the runtime does not yet support — `join` nodes, `branch`, `fan_in`, and
+`retry` edges, `sequence` edges out of a `route` node, and the `route`,
+`parallel`, `coordinator_worker`, and `evaluator_optimizer` Patterns — is
+returned as a typed deferral, never as readiness and never as success.
+Nodes are considered in membership order.
 
 ### 4.4 Composition and compilation
 
@@ -708,9 +728,19 @@ and the only one the Orchestrator should choose unless the work has a shape
 that one of the others describes exactly.
 
 - Invocations: 1 (`worker`, purpose `step`; or `orchestrator` for the root node, §4.6)
-- Input: the node's manifest
+- Pattern position: `single` (`orchestrator` for the root node)
+- Input: the node's manifest, plus the Handoffs delivered along its incoming `sequence` edges
 - Output: the Invocation's result Artifacts
 - Fan-in: none
+- Lifecycle: `ready → running` creates and prepares the Invocation;
+  when its Attempt ends the runtime settles the node in one transaction —
+  a `succeeded` Invocation integrates the node's Changeset (§9.2) and
+  the node becomes `succeeded` with the result's output Artifacts (or
+  `failed` with `result_failed`, or waits when the result is `blocked` on
+  an open Decision); a `failed` Invocation fails the node with
+  `invocation_failed`; a `blocked` Invocation leaves the node `running`
+  until its `side_effect_approval` Decision resolves, when a successor
+  Invocation at the same position continues it (§7.4).
 
 ### 5.2 `chain`
 
@@ -719,10 +749,18 @@ step `n` has returned; it receives the node's manifest plus a Handoff
 pointing at step `n`'s output Artifacts.
 
 - Invocations: one per step, sequential, all `worker` with purpose `step`
+- Pattern position: `chain_step` with the step's `index` and the step `count`
 - Input: node manifest; step `n>1` additionally receives a Handoff from step `n-1`
+  (key `chain_step:<node>:<n-1>`) carrying that step's output Artifacts,
+  and step 1 the Handoffs of the node's incoming `sequence` edges
 - Output: the last step's result Artifacts (earlier steps' Artifacts remain readable by id)
 - Fan-in: none
-- Failure: a step that fails after its Attempts fails the node; later steps are `skipped`
+- Failure: a step that fails after its Attempts fails the node with the
+  failure reason of that step; no later step starts
+- Lifecycle: each step's Changeset is integrated (§9.2) before the next
+  step is prepared, so step `n+1` starts from the Snapshot that includes
+  step `n`; the current step is the position of the node's latest
+  Invocation, read from rows, never from a counter
 
 Composite stages are compiled out of the node (§4.4); a `chain` node only
 ever holds leaf steps.
@@ -1289,13 +1327,57 @@ and no agent can.
 
 ### 7.1 Scheduling
 
+The scheduler (`server/src/execution/scheduler.ts`) is a deterministic
+runtime component with two entry points and no timer, loop, or interval:
+
+- `reconcileRun(runId)` is a read-only projection. From canonical rows
+  alone — the current accepted revision and membership, node statuses and
+  wait reasons, Pattern positions, Invocations and Attempts, retry
+  decisions, Handoffs, Changesets and their integration status, Decisions,
+  reservations, and leases — it returns the ordered list of typed
+  **actions** that are canonical next (`resume_run`, `ready_node`,
+  `skip_node`, `start_node`, `execute_invocation`, `settle_node`,
+  `settle_removed_node`, `resume_node`, `wait_node`, `settle_root`,
+  `wait_run`), the nodes that are waiting and why, the work deferred to a
+  later phase, the ready nodes held back by the Run's `maxConcurrency`,
+  the Invocations executing in this process, and the earliest resumption
+  time (retry `notBefore`, provider `retryAfter`, or an Invocation
+  deadline). One action is projected per node per iteration, in
+  membership order; the root node is settled first.
+- `advanceRun(runId, { maxActions })` is a bounded pass. It performs the
+  projected actions one at a time, re-projecting the current graph before
+  every state-changing action; every mutation runs inside a Pattern
+  runner transaction that revalidates the revision, membership, node
+  status, and active Invocation, so a stale projection changes nothing
+  (`stale`, `no_change`). Provider executions run outside every
+  transaction; independent Attempts execute concurrently within one pass
+  up to the Run's `maxConcurrency` and the governor's leases (§7.8), and
+  the pass awaits the batch only when no other action can proceed — an
+  Attempt's completion is what re-triggers projection. The pass stops with
+  a closed reason: `quiescent` (nothing to do), `waiting` (the Run
+  waits, an Attempt is still in flight, or a resumption time is pending),
+  `action_limit`, `run_terminal`, `unsupported` (only later-phase work
+  remains), or `infrastructure_failure` (a store or port threw; the
+  bounded message is returned and the next pass resumes from rows).
+  Concurrent calls for one Run share one pass in-process; canonical
+  database constraints (one active Invocation per position, one Handoff
+  per key, one active Attempt per Invocation) remain the source of
+  correctness across processes.
 - Node readiness is computed from Plan Edges and allocation as defined in
-  §4.3.
-- The scheduler runs ready nodes subject to the Run Budget's concurrency
-  limit, each node's own limit, and the capacity leases the resource
-  governor grants (§7.8). Order among ready nodes is creation order.
-- Within a node, the Pattern decides Invocation order (§5). An Invocation
-  starts only after its allocation is reserved (§7.6) and a lease is held.
+  §4.3. Within a node, the Pattern runner (`patterns/`) decides Invocation
+  order (§5); an Invocation starts only after its allocation is reserved
+  (§7.6) and executes only under a lease. A node whose allocation cannot
+  be reserved follows its `onAllocationExhausted` policy: `fail` fails it
+  with `allocation_exhausted`, `wait` waits it with `budget`, and
+  `extend` is deferred (`awaiting_allocation_extension_phase`) until
+  extension exists.
+- A node removed from the membership while running settles its own work
+  (`settle_removed_node`) but hands off to nobody and readies nothing.
+- Deadlines are enforced from the caller's clock at the start of each
+  iteration; the scheduler holds no clock of its own and never sleeps.
+- Routine progress creates no conversational message and no status update
+  of any kind; a Run whose root node's turn fails is `failed` with
+  `root_node_failed`.
 
 ### 7.2 Retries
 
@@ -1350,7 +1432,9 @@ and no agent can.
 A node or Invocation waits when it has requested an `operator_required`
 Decision that is unanswered, when its allocation is exhausted under policy
 `wait` or `extend` with no capacity available, when the resource governor
-has no lease to grant, or when the operator has paused the Run. Waiting is
+has no lease to grant, when its Changeset conflicted on integration and
+the conflict Task is open (`integration_conflict`, §9.2), or when the
+operator has paused the Run. Waiting is
 a recorded state with a recorded reason. An Invocation `waiting` before
 its provider execution started (capacity, Budget, operator) is the same
 Invocation once the wait clears. An Invocation whose provider execution
@@ -1765,16 +1849,37 @@ the operator; the runtime records the superseding Decision and creates a
 ### 9.2 Integration
 
 - When a writing Invocation returns, the runtime commits its worktree,
-  records the Changeset (before Snapshot, after Snapshot, diff Artifact),
-  and integrates the Changeset into the Integration Workspace in Plan Edge
-  order.
+  records the Changeset (before Snapshot, after Snapshot, diff Artifact,
+  integration status `pending`), and integrates the Changeset into the
+  Integration Workspace in Plan Edge order — before the node is settled,
+  the next `chain` step is prepared, or a successor is readied.
+- Integration goes through the Changeset integration service
+  (`server/src/execution/integration-service.ts`) and the
+  integration-workspace port (`ports/integration-workspace.ts`:
+  `apply` takes the Run, the Changeset identity, the Integration Workspace
+  path, the current integration Snapshot, and the diff, and returns
+  `integrated` with the new Snapshot or `conflict` with a bounded report).
+  The service is idempotent by Changeset id: an already-`integrated`
+  Changeset is never applied again, one integration runs at a time per
+  Run, and the apply happens outside any transaction with the record
+  written in one transaction afterwards — the Changeset `integrated`, the
+  integration Snapshot, and `run.integrated` on the Run. A crash between
+  the apply and its record leaves the Changeset `pending`; the next pass
+  applies it again, and the port reports an application that already
+  holds (`alreadyApplied`) so persistence catches up exactly once.
 - A Changeset that does not apply cleanly is not applied. The runtime
-  records the conflict as a Task assigned to the Plan Node's owner (a
-  `replan` Coordinator Invocation for `coordinator_worker`, otherwise the
-  Orchestrator) with the conflict Artifact, and the node's `node_exit` Gate
-  cannot pass until that Task completes.
+  records, in one transaction, the Changeset `conflict`, a runtime-owned
+  Task for the Plan Node's owner (a `replan` Coordinator Invocation for
+  `coordinator_worker`, otherwise the Orchestrator) carrying a bounded
+  `text/plain` conflict-report Artifact, the node `waiting` with reason
+  `integration_conflict`, and — when nothing else can proceed — the Run
+  likewise. When that Task completes the node resumes and the Changeset
+  is applied once more; a second conflict fails the node with
+  `integration_conflict`, and a Task that fails or is cancelled fails the
+  node the same way. The node's `node_exit` Gate cannot pass while the
+  Task is open.
 - After every integration the runtime records the integration Snapshot on
-  the Run.
+  the Run; every later Invocation starts from it.
 
 ### 9.3 Verified final Snapshot
 
@@ -1950,7 +2055,9 @@ mechanism, if ever added, is a new feature with its own design.
 | Plan Node fails | Successors `skipped` (or `ready` with the failure if opted in); a `node_result` Orchestrator Invocation is created. |
 | `join` fan-in policy not met | Join `failed`; handled as a Plan Node failure. |
 | Task fails or is blocked inside `coordinator_worker` | Task `failed`/`blocked`; a `replan` Coordinator Invocation is created unless one is active (then queued). |
-| Changeset conflict | Task created for the node owner; Gate blocked until resolved. |
+| Changeset conflict | Changeset `conflict`; Task with a bounded report Artifact created for the node owner; node (and, when nothing else can proceed, the Run) `waiting` with `integration_conflict`; applied once more when the Task completes; a second conflict, or a failed or cancelled Task, fails the node with `integration_conflict` (§9.2). |
+| Crash between an external Changeset application and its record | The Changeset stays `pending`; the next pass applies it again and the port reports the application that already holds; the record is written exactly once (§9.2). |
+| Crash during a scheduler pass | Nothing is lost: every action is one transaction; the next pass re-projects from rows, retries interrupted Attempts through recovery, and repeats no Invocation, Handoff, integration, or provider call (§7.1). |
 | Publish fails | Target untouched; Publication `failed`; a `publication_result` Orchestrator Invocation is created. |
 | Provider continuation payload missing, expired, or corrupt | The Attempt starts `fresh`; no other effect. |
 | Approval claim transaction fails (callback or COMMIT) | No use row, no Event, no execution; the adapter learns `failed` and ends the Attempt as a tool failure with a bounded message; one `tool_call_authorization_failed` diagnostic; the retry may claim again. |

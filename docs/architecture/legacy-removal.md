@@ -41,11 +41,15 @@ server/src/
   events/        stream.ts
   workspaces/    service.ts  fs-browse.ts
   conversations/ service.ts
-  execution/     index.ts  run-creation-service.ts  plan-revision-service.ts  test-support.ts
-                 compiler/{compile,input,source-path}.ts
-                 ports/workspace-preparation.ts
-                 (later subphases) scheduler.ts  join.ts  patterns/{single,chain,route,parallel,coordinator-worker,evaluator-optimizer}.ts
-                 invocations.ts  attempts.ts  manifest.ts  result.ts  tools.ts  gates.ts  governor.ts
+  execution/     index.ts  run-creation-service.ts  plan-revision-service.ts  run-start-service.ts
+                 invocation-preparation-service.ts  invocation-lifecycle.ts  attempt-executor.ts
+                 result-validator.ts  retry-policy.ts  continuation-policy.ts  governor.ts
+                 recovery-service.ts  workspace-cleanup.ts  tool-call-authorization.ts  agent-definitions.ts
+                 readiness.ts  handoff-routing.ts  integration-service.ts  scheduler.ts  test-support.ts
+                 compiler/{compile,input,source-path}.ts  manifest/{assembler,renderer}.ts
+                 ports/{workspace-preparation,execution-workspace,integration-workspace}.ts
+                 patterns/{index,support,root,single,chain}.ts
+                 (later subphases) join.ts  patterns/{route,parallel,coordinator-worker,evaluator-optimizer}.ts  tools.ts  gates.ts
   agents/        definitions.ts  revisions.ts  native-agent-file.ts  builtins.ts  policy.ts
   provider/      adapter.ts  continuations.ts  continuation-store.ts  fake.ts  mapping.ts  env.ts  usage-normalization.ts  failure-classifier.ts
   capacity/      governor.ts  leases.ts

@@ -159,7 +159,12 @@ and creates no Invocation: it executes deterministically when its
 `fan_in` predecessors are terminal, produces an index Artifact of the
 ordered predecessor references, outcomes, and output Artifact ids, and
 succeeds or fails by its fan-in policy. `join` is a deterministic node
-kind, not a seventh Pattern. A persisted Plan Node does not contain other
+kind, not a seventh Pattern. A node that waits records one of the wait
+reasons `decision`, `budget`, `provider_capacity`, `integration_conflict`,
+`operator`; a node that fails records one of the failure reasons
+`invocation_failed`, `result_failed`, `result_blocked`, `task_unavailable`,
+`allocation_exhausted`, `integration_conflict`, `join_fan_in_failed` on
+its `plan_node.failed` Event. A persisted Plan Node does not contain other
 Plan Nodes; composition between nodes is expressed only by Plan Edges. A
 node's **definition** (everything but its id, revision, status,
 timestamps, and output) is immutable; reconciliation reuses a node across
@@ -245,7 +250,27 @@ a chat topology, and not a routing table between agents. The deterministic
 source Execution Plan; the compiler materializes the composition flat.
 
 - Value set: `single | chain | route | parallel | coordinator_worker | evaluator_optimizer`
-- Related: Plan Node, Worker, Coordinator, Evaluator
+- Related: Plan Node, Worker, Coordinator, Evaluator, Pattern Position
+
+### Pattern Position
+
+The typed place inside a Plan Node's shape that one Invocation executes.
+The closed set is `orchestrator` (the root node's turns), `single`,
+`chain_step` (`index`, `count`), `route_selection`, `route_branch`
+(`label`), `parallel_item` (`index`, `count`), `parallel_aggregation`,
+`coordinator_turn`, `worker_task` (`taskId`), `producer_round` and
+`evaluator_round` (`round`, `maxRounds`). A position names exactly one
+operation of the shape, and that operation fixes the Invocation's Agent
+Definition revision, role, purpose, and manifest inputs; the runtime
+derives all of them from the position, never from a title or an ordinal
+string. The position is persisted on the Invocation with a canonical
+**position key** (`chain_step:1`, `worker_task:task_…`), and at most one
+non-terminal Invocation exists per node and position. Only the
+evaluate-only Invocations of an unrolled `evaluator_optimizer` round have
+no position.
+
+- Stored on the Invocation and in its Context Manifest; no separate table.
+- Related: Invocation, Plan Node, Pattern, Context Manifest
 
 ## Specification objects
 
@@ -363,7 +388,12 @@ when work moves. A Handoff contains routing metadata only: source, target,
 the Task ids concerned, the Artifact ids to read, a one-line summary, and a
 status. It contains no free-form state and no instructions. A Handoff is
 delivered by the runtime as part of a Context Manifest; agents never send
-messages to each other directly.
+messages to each other directly. Every Handoff carries a **handoff key**
+derived from its route — `sequence:<source node>:<target node>` for the
+delivery along a `sequence` Plan Edge, `chain_step:<node>:<step>` for the
+delivery from one `chain` step to the next — unique per Run and enforced
+by the database, so a Handoff exists at most once for a route however
+many times the runtime reaches it (a pass, a retry, a restart).
 
 - Id prefix: `ho_`
 - Owned by: the runtime
@@ -435,7 +465,9 @@ from the Invocation's Plan Node, the default; `run_final_reserve`: reserved
 directly from the Run's final reserve, permitted only for the
 `final_synthesis` Orchestrator Invocation and the `run_completion` Gate
 Evaluator Invocation, each recorded as the Invocation's `finalReserveUse`
-and always attached to the root Plan Node), one or more Attempts, a
+and always attached to the root Plan Node), one Pattern Position (the
+operation of its node's shape it executes, which fixes its definition,
+role, purpose, and inputs), one or more Attempts, a
 status (`pending`, `running`, `waiting`, and the terminal `blocked`,
 `succeeded`, `failed`, `cancelled` — `blocked` names the open
 `side_effect_approval` Decision that ended it), one Invocation-wide
@@ -575,10 +607,15 @@ Invocation, and at Run completion.
 The difference between two Snapshots, produced by one writing Invocation in
 its isolated worktree and stored as an Artifact. The runtime integrates
 Changesets into the Run's Integration Workspace in Plan Edge order and
-records the resulting Snapshot. A Changeset that cannot be integrated
-cleanly produces a Task; it is never applied partially. The Run's **final
-Changeset** is the diff from its base Snapshot to its accepted final
-Snapshot.
+records the resulting Snapshot. A Changeset has an **integration status**:
+`pending` until the runtime applies it, then `integrated` (with the
+integration Snapshot) or `conflict`. A Changeset that cannot be integrated
+cleanly is never applied partially: the runtime records the conflict as a
+Task for the node's owner with a bounded conflict-report Artifact, the
+node and the Run wait with reason `integration_conflict`, and the
+Changeset is applied again exactly once when that Task completes. The
+Run's **final Changeset** is the diff from its base Snapshot to its
+accepted final Snapshot.
 
 - Id prefix: `cs_`
 - Owned by: the runtime

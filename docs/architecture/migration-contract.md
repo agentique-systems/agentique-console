@@ -93,13 +93,17 @@ Phase 1 and remain after cutover:
   Run bootstrap), the Context Manifest assembler and deterministic
   renderer (`manifest/`), the Invocation preparation service, the result
   validator, the retry and continuation policies, the resource governor,
-  the Attempt executor, restart recovery, the Run start service, and, in
-  later phases, the scheduler, Pattern executors, and Gates. It imports
+  the Attempt executor, restart recovery, the Run start service, the pure
+  readiness evaluator, the Handoff router, the Changeset integration
+  service, the `single` and `chain` Pattern runners with the root-node
+  support, the bounded scheduler, and, in later phases, the remaining
+  Pattern runners, joins, and Gates. It imports
   only `@agentique-console/core`, the persistence boundary, `zod`, the
   provider-neutral adapter contract under `server/src/provider/`, and the
   narrow capability ports it declares under `ports/`
-  (`RunWorkspacePreparationPort` and `ExecutionWorkspacePort`, implemented
-  by the Workspace provider in the Workspace phase). Nothing legacy
+  (`RunWorkspacePreparationPort`, `ExecutionWorkspacePort`, and
+  `IntegrationWorkspacePort`, implemented by the Workspace provider in the
+  Workspace phase). Nothing legacy
   imports it and it imports nothing legacy; the persistence boundary and
   the provider boundary never depend on it.
 
@@ -400,9 +404,17 @@ is one or more commits; each commit keeps `npm run typecheck` and
    recording, result validation, closed failure classification with
    durable retry decisions, optional pointer-based provider continuation,
    idempotent restart recovery, and the first root Orchestrator
-   Invocation through the Run start service. Phase 2C: the general
-   scheduler and the `single` and `chain` Pattern runners over this
-   substrate. Later subphases: Runs, Execution
+   Invocation through the Run start service. Phase 2C (done): canonical
+   typed Pattern positions persisted on Invocations with exact
+   per-operation manifest selection, the pure readiness evaluator,
+   idempotent Handoffs with database-enforced keys, the Changeset
+   integration port and service with the conflict lifecycle, the
+   `single` and `chain` Pattern runners over a shared sequential step
+   engine, root-node settlement, and the event-driven bounded scheduler
+   (`reconcileRun` projection, `advanceRun` pass) with restart and
+   concurrency guarantees; later-phase Patterns, edges, joins, Gates, and
+   allocation extension are returned as typed deferrals. Later
+   subphases: Runs, Execution
    Plan source validation and compiler,
    Plan Nodes of both kinds (`pattern`, `join`), Plan Edges, Plan Node
    Requirement scope, scheduler, resource governor, Budget reservations,
@@ -548,6 +560,47 @@ Merge to `main` happens after step 7 as one merge commit. Rollback is
   Events, diagnostics, failure details, uses, or rendered inputs; and the
   scripted fake exercises the authorization port rather than adapter-local
   consumption.
+- Pattern-position tests: every position kind validates against the
+  node's shape and fixes the Invocation's definition, role, and purpose;
+  a wrong revision, role, purpose, or out-of-range index is refused at the
+  store and at the database; at most one non-terminal Invocation exists
+  per node and position; the manifest carries the position and exactly
+  the operation's inputs; the same Task in two chain steps or parallel
+  items is rejected at compilation.
+- Readiness tests: the evaluator is pure (no store, clock, or Invocation
+  read), decides ready, pending, and skipped with causes for every
+  predecessor combination in §4.3, honours `runOnDependencyFailure`,
+  ignores historical revisions' edges, and defers joins, non-`sequence`
+  edges, `route` successors, and later-phase Patterns without marking
+  anything successful.
+- Handoff tests: a Handoff is created at most once per key across
+  repeated passes, retries, and restarts; a second Handoff with the same
+  key and a different route is refused; chain steps and `sequence` edges
+  produce exactly the keys of §5.
+- Integration tests: an integrated Changeset is never applied twice; a
+  crash between the apply and its record is reconciled exactly once; a
+  conflict records the Changeset, the Task, the report Artifact, and the
+  node and Run waits in one transaction; a completed Task resumes and
+  re-applies once; a second conflict, a failed Task, and a cancelled Task
+  fail the node with `integration_conflict`; one integration runs at a
+  time per Run.
+- Scheduler tests: `reconcileRun` reads only canonical rows and returns
+  the same projection before and after a reopen; `advanceRun` performs
+  exactly `maxActions` actions in membership order, stops with each
+  closed reason, executes independent Attempts concurrently within the
+  Run's `maxConcurrency`, reports concurrency-limited nodes rather than
+  waiting the Run, waits the Run on provider capacity, Budget, Decisions,
+  and integration conflicts only when nothing else can proceed and
+  resumes with the exact reason, reports retry and deadline resumption
+  times, never polls, and lets concurrent callers share one pass without
+  duplicating an Invocation or Attempt; removed running nodes settle
+  without handing off; a terminal Run applies no settlement.
+- End-to-end tests with the scripted fake: a Run whose plan is `single`
+  nodes and `chain` nodes behind `sequence` edges executes each step once,
+  integrates each Changeset once, delivers each Handoff once, blocks and
+  continues across a `side_effect_approval` Decision, and converges from
+  every durable boundary across six process lifetimes without repeating
+  provider calls, Invocations, Handoffs, Attempts, or integrations.
 - No live-provider tests in the default suite. A live smoke test may exist
   behind an explicit opt-in environment variable and is not a benchmark.
 
