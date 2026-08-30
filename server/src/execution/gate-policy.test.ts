@@ -184,7 +184,7 @@ describe("Gate ownership at the schema", () => {
       const foreign = seedInvocation(h, s, { role: "evaluator", purpose: "evaluate", planNodeId: foreignNode.node.id, patternPosition: null, gateId: foreignGate.id });
       expect(() => h.stores.evaluations.record({ ...runtime, subject: { kind: "acceptance_criterion", acceptanceCriterionId: evaluated.id }, producedBy: { kind: "evaluator", invocationId: foreign.id, agentDefinitionRevisionId: foreign.agentDefinitionRevisionId } })).toThrow(/Gate/);
       const verdict = h.stores.evaluations.record({ ...runtime, subject: { kind: "acceptance_criterion", acceptanceCriterionId: evaluated.id }, producedBy: { kind: "evaluator", invocationId: evaluator.id, agentDefinitionRevisionId: evaluator.agentDefinitionRevisionId } });
-      expect(h.stores.evaluations.gateCriterionEvaluationsOf(gate.id).map((e) => e.id)).toEqual([recorded.id, verdict.id].sort());
+      expect(h.stores.evaluations.gateCriterionEvaluationsOf(gate.id).map((e) => e.id).sort()).toEqual([recorded.id, verdict.id].sort());
       h.stores.gates.close(gate.id, "passed");
       expect(() => h.stores.evaluations.record({ ...runtime, subject: { kind: "rubric", rubric: "late" } })).toThrow(/is passed/);
     } finally {
