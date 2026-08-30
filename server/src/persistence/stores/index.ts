@@ -13,6 +13,7 @@ import { InvocationStore } from "./invocations.ts";
 import { ExecutionPlanStore } from "./plans.ts";
 import { RequirementStore } from "./requirements.ts";
 import { RunStore } from "./runs.ts";
+import { RuntimeToolCallStore } from "./runtime-tool-calls.ts";
 import { TaskStore } from "./tasks.ts";
 import { UsageStore } from "./usage.ts";
 import { EvaluationStore, GateStore } from "./verification.ts";
@@ -32,6 +33,7 @@ export interface Stores {
   agents: AgentDefinitionStore;
   invocations: InvocationStore;
   approvedToolCallUses: ApprovedToolCallUseStore;
+  runtimeToolCalls: RuntimeToolCallStore;
   continuations: ProviderContinuationStore;
   evaluations: EvaluationStore;
   gates: GateStore;
@@ -62,6 +64,7 @@ export function createStores(ctx: PersistenceContext, options: { planLimits?: Pl
     agents: new AgentDefinitionStore(ctx),
     invocations: new InvocationStore(ctx, reservations, usage),
     approvedToolCallUses: new ApprovedToolCallUseStore(ctx),
+    runtimeToolCalls: new RuntimeToolCallStore(ctx),
     continuations: new ProviderContinuationStore(ctx),
     evaluations: new EvaluationStore(ctx),
     gates: new GateStore(ctx),
@@ -92,6 +95,7 @@ export {
   PublicationStore,
   RequirementStore,
   RunStore,
+  RuntimeToolCallStore,
   SnapshotStore,
   TaskStore,
   UsageStore,

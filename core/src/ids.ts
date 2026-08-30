@@ -31,6 +31,7 @@ export const ID_PREFIXES = {
   contextManifest: "cm",
   usage: "use",
   approvedToolCallUse: "acu",
+  runtimeToolCall: "rtc",
 } as const;
 
 export type IdKind = keyof typeof ID_PREFIXES;
@@ -65,6 +66,7 @@ export type BudgetReservationId = Id<"bres">;
 export type ContextManifestId = Id<"cm">;
 export type UsageId = Id<"use">;
 export type ApprovedToolCallUseId = Id<"acu">;
+export type RuntimeToolCallId = Id<"rtc">;
 
 const ID_BODY_LENGTH = 24;
 const ID_BODY = /^[0-9a-f]{24}$/;

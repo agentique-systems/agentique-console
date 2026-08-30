@@ -9,7 +9,7 @@ import {
   EMPTY_WORKSPACE_CAPABILITY_POLICY,
   ROOT_NODE_TITLE,
   ROOT_SOURCE_PATH,
-  RUNTIME_TOOLS_BY_ROLE,
+  runtimeToolsFor,
   type AgentDefinitionRevision,
   type AgentDefinitionRevisionId,
   type Allocation,
@@ -315,7 +315,7 @@ export function seedManifest(h: Harness, seeded: Seeded, invocation: Invocation,
     maxWallClockMs: null,
     capabilities: policy.capabilities,
     toolPolicy: policy.toolPolicy,
-    runtimeTools: [...RUNTIME_TOOLS_BY_ROLE[invocation.role]],
+    runtimeTools: runtimeToolsFor(invocation.role, invocation.purpose),
     approvedCalls: [],
   });
 }

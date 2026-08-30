@@ -139,6 +139,9 @@ describe("database constraints", () => {
       // Approval uses are append-only and every insertion is re-checked against the Decision, Invocation, Attempt, and manifest rows.
       expect(() => sqlite.prepare("INSERT INTO approved_tool_call_uses (id, decision_id, tool, call_digest, run_id, plan_node_id, invocation_id, attempt_id, claimed_at) VALUES (?, ?, 'shell', ?, ?, ?, ?, ?, ?)").run(`acu_${"1".repeat(24)}`, `dec_${"1".repeat(24)}`, "a".repeat(64), s.run.id, s.root.id, `inv_${"1".repeat(24)}`, `att_${"1".repeat(24)}`, "2026-01-01T00:00:00.000Z")).toThrow(/approved_tool_call_use claims a resolved approve_once/);
       expect(() => sqlite.prepare("DELETE FROM approved_tool_call_uses").run()).not.toThrow();
+      // Runtime-tool calls hold the per-Invocation replay and one-proposal rules as unique indexes (their append-only triggers are exercised with rows in the store test).
+      expect((sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'runtime_tool_calls' AND name LIKE 'runtime_tool_calls_%' ORDER BY name").all() as { name: string }[]).map((r) => r.name)).toEqual(["runtime_tool_calls_attempt", "runtime_tool_calls_invocation_call", "runtime_tool_calls_one_proposal", "runtime_tool_calls_plan_node"]);
+      expect((sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'tasks' AND name = 'tasks_replaced_once'").all() as { name: string }[]).map((r) => r.name)).toEqual(["tasks_replaced_once"]);
       expect(sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'approved_tool_call_uses' ORDER BY name").all()).toEqual([{ name: "approved_tool_call_uses_claim_valid" }, { name: "approved_tool_call_uses_no_delete" }, { name: "approved_tool_call_uses_no_update" }]);
     } finally {
       h.close();

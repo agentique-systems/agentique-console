@@ -10,6 +10,7 @@ import {
   taskSchema,
   ValidationError,
   wouldCreateDependencyCycle,
+  type PlanNodeId,
   type RunId,
   type Task,
   type TaskDependency,
@@ -63,11 +64,15 @@ export class TaskStore {
         for (const id of valid.inputArtifactIds) assertSameRun("Artifact", id, requireRow(rows.find((r) => r.id === id), "Artifact", id).runId, run.id);
       }
       if (valid.replacesTaskId !== null) {
+        // A replacement names a blocked or failed Task of the same Run, at most once (execution-model §5.5): a completed,
+        // cancelled, or unstarted Task is never replaced, and a Task already superseded is historical.
         const replaced = this.get(valid.replacesTaskId);
         assertSameRun("Task", replaced.id, replaced.runId, run.id);
-        if (!TASK_MACHINE.isTerminal(replaced.status) && replaced.status !== "blocked") {
-          throw new ConflictError(`Task ${replaced.id} is ${replaced.status} and cannot be replaced yet`);
+        if (replaced.status !== "blocked" && replaced.status !== "failed") {
+          throw new ConflictError(`Task ${replaced.id} is ${replaced.status} and cannot be replaced`, { taskId: replaced.id, status: replaced.status });
         }
+        const superseded = this.replacementOf(replaced.id);
+        if (superseded !== null) throw new ConflictError(`Task ${replaced.id} is already superseded by ${superseded.id}`, { taskId: replaced.id, supersededByTaskId: superseded.id });
       }
       const now = this.ctx.clock();
       const task: Task = {
@@ -105,6 +110,17 @@ export class TaskStore {
     return this.ctx.db.select().from(tasks).where(eq(tasks.runId, runId)).orderBy(asc(tasks.createdAt), asc(tasks.id)).all().map(toDomain);
   }
 
+  /** Every Task tagged with a Plan Node, historical ones included, in creation order (then id): the node's canonical Task order. */
+  listByPlanNode(planNodeId: PlanNodeId): Task[] {
+    return this.ctx.db.select().from(tasks).where(eq(tasks.planNodeId, planNodeId)).orderBy(asc(tasks.createdAt), asc(tasks.id)).all().map(toDomain);
+  }
+
+  /** The Task that replaced `taskId`, or `null` while it is not superseded; at most one exists (a database unique index). */
+  replacementOf(taskId: TaskId): Task | null {
+    const row = this.ctx.db.select().from(tasks).where(eq(tasks.replacesTaskId, taskId)).get();
+    return row ? toDomain(row) : null;
+  }
+
   dependencies(runId: RunId): TaskDependency[] {
     return this.ctx.db
       .select()
@@ -128,7 +144,8 @@ export class TaskStore {
       const task = this.get(taskId);
       const dependency = this.get(dependsOnTaskId);
       assertSameRun("Task", dependsOnTaskId, dependency.runId, task.runId);
-      if (task.status !== "pending") throw new ConflictError(`Task ${taskId} is ${task.status}; dependencies are added while pending`);
+      // A dependency is added before the Task starts: while it is pending, or while it is blocked waiting on a dependency's replacement.
+      if (task.status !== "pending" && task.status !== "blocked") throw new ConflictError(`Task ${taskId} is ${task.status}; dependencies are added while pending or blocked`);
       const edge = parseOrThrow(taskDependencySchema, { runId: task.runId, taskId, dependsOnTaskId }, "TaskDependency");
       const existing = this.dependencies(task.runId);
       if (existing.some((e) => e.taskId === taskId && e.dependsOnTaskId === dependsOnTaskId)) {

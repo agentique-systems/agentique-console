@@ -21,7 +21,9 @@ import type { ExecutionWorkspacePort, ExecutionWorkspaceRequest, PreparedExecuti
 export type ExecutionDiagnostic =
   | { kind: "workspace_release_failed"; invocationId: InvocationId; message: string }
   /** An approval claim transaction failed: nothing persisted, nothing authorized; ids, tool, and digest only. */
-  | { kind: "tool_call_authorization_failed"; invocationId: InvocationId; attemptId: AttemptId; tool: string; callDigest: string; message: string };
+  | { kind: "tool_call_authorization_failed"; invocationId: InvocationId; attemptId: AttemptId; tool: string; callDigest: string; message: string }
+  /** A runtime-tool call's transaction failed: nothing persisted, nothing applied; ids, tool, and canonical digest only, never the call input. */
+  | { kind: "runtime_tool_call_failed"; invocationId: InvocationId; attemptId: AttemptId; tool: string; callDigest: string; message: string };
 
 export type ExecutionDiagnosticSink = (diagnostic: ExecutionDiagnostic) => void;
 

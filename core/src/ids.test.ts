@@ -17,7 +17,7 @@ describe("ids", () => {
 
   it("uses exactly the glossary prefixes", () => {
     expect(Object.values(ID_PREFIXES).sort()).toEqual(
-      ["ws", "cv", "cvm", "run", "pn", "pe", "req", "reqr", "ac", "dec", "task", "art", "ho", "agd", "agdr", "inv", "att", "eval", "gate", "snap", "cs", "pub", "lease", "bres", "cm", "use", "acu"].sort(),
+      ["ws", "cv", "cvm", "run", "pn", "pe", "req", "reqr", "ac", "dec", "task", "art", "ho", "agd", "agdr", "inv", "att", "eval", "gate", "snap", "cs", "pub", "lease", "bres", "cm", "use", "acu", "rtc"].sort(),
     );
   });
 

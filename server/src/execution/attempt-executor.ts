@@ -15,7 +15,9 @@
  *             appendix), call the provider with cancellation, deadline, and
  *             the runtime-owned tool-call authorization port bound to this
  *             Attempt (each approval claim commits in its own short
- *             transaction before the call may run), stream transient
+ *             transaction before the call may run) and the runtime-tool
+ *             call port bound to it (each accepted mutating call commits in
+ *             its own short transaction and is replayable), stream transient
  *             output, collect the writing Invocation's Changeset through
  *             the execution-workspace port, store the continuation payload.
  *   finalize  transcript Artifact; every Usage row; Changeset; result
@@ -62,6 +64,7 @@ import { renderManifest, type RetryAppendix } from "./manifest/renderer.ts";
 import type { CollectedChangeset, ExecutionWorkspacePort } from "./ports/execution-workspace.ts";
 import { InvocationResultValidator, type ResultValidation } from "./result-validator.ts";
 import { classifyAttempt, decideRetry, DEFAULT_RETRY_POLICY, type RetryPolicyConfig, type RuntimeInterruption } from "./retry-policy.ts";
+import { RuntimeToolExecutor } from "./runtime-tools.ts";
 import { canonicalizeToolCall, ToolCallAuthorizer } from "./tool-call-authorization.ts";
 import { WorkspaceCleanup, type ExecutionDiagnosticSink, type WorkspaceReleaseOutcome } from "./workspace-cleanup.ts";
 
@@ -345,6 +348,14 @@ export class AttemptExecutor {
         this.ctx,
         this.stores,
         { runId: invocation.runId, planNodeId: invocation.planNodeId, invocationId: invocation.id, attemptId: attempt.id, toolPolicy: manifest.content.toolPolicy, approvedCalls: manifest.content.approvedCalls },
+        options,
+        this.diagnostics,
+      ),
+      // The runtime-tool port is bound here too: the effective callable set and nothing of persistence reaches the adapter.
+      runtimeTools: new RuntimeToolExecutor(
+        this.ctx,
+        this.stores,
+        { runId: invocation.runId, planNodeId: invocation.planNodeId, invocationId: invocation.id, attemptId: attempt.id, role: invocation.role, purpose: invocation.purpose, manifestTools: manifest.content.runtimeTools },
         options,
         this.diagnostics,
       ),

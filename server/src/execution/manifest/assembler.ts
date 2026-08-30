@@ -31,7 +31,7 @@ import {
   ACTIVE_INVOCATION_STATUSES,
   InvariantViolationError,
   NotFoundError,
-  RUNTIME_TOOLS_BY_ROLE,
+  runtimeToolsFor,
   ValidationError,
   type AcceptanceCriterion,
   type AgentDefinitionRevision,
@@ -90,11 +90,11 @@ export class ContextManifestAssembler {
     if (invocation.agentDefinitionRevisionId !== revision.id) throw new InvariantViolationError(`Invocation ${invocation.id} runs revision ${invocation.agentDefinitionRevisionId}, not ${revision.id}`);
 
     const tasks = this.tasks(run, invocation);
-    const { requirementRevisionId, requirements } = this.requirements(run, node);
+    const { requirementRevisionId, requirements } = this.requirements(run, node, invocation);
     const acceptanceCriteria = this.acceptanceCriteria(run, requirementRevisionId, requirements, tasks.map((t) => t.taskId));
     const previousManifestAt = this.previousManifestAt(invocation);
     const decisions = this.decisions(run, node, invocation, requirements, tasks.map((t) => t.taskId), request.operationInput, request.inputs, previousManifestAt);
-    const inputs = this.inputs(run, invocation, request.inputs);
+    const inputs = this.inputs(run, node, invocation, request.inputs);
     const handoffs = this.handoffs(run, node, invocation, request.handoffIds);
     const approvalArtifactIds = inputs.flatMap((i) => (i.kind === "side_effect_approval_resolution" ? [i.callArtifactId] : []));
     const artifacts = this.artifacts(run, unique([...request.operationInput.artifactIds, ...handoffs.flatMap((h) => h.artifactIds), ...request.artifactIds, ...approvalArtifactIds, ...this.taskInputArtifacts(tasks.map((t) => t.taskId))]));
@@ -137,7 +137,8 @@ export class ContextManifestAssembler {
       maxWallClockMs: request.maxWallClockMs,
       capabilities: request.policy.capabilities,
       toolPolicy: request.policy.toolPolicy,
-      runtimeTools: [...RUNTIME_TOOLS_BY_ROLE[invocation.role]],
+      // Manifest permission: the role's runtime tools narrowed by the purpose; handler availability is decided at execution.
+      runtimeTools: runtimeToolsFor(invocation.role, invocation.purpose),
       approvedCalls,
     };
   }
@@ -155,9 +156,16 @@ export class ContextManifestAssembler {
     return taskIds.flatMap((id) => this.stores.tasks.get(id).inputArtifactIds);
   }
 
-  /** A scoped node: exactly its pinned leaf Requirements in scope order; the root node: the current revision's tree in tree order. */
-  private requirements(run: Run, node: PatternPlanNode): { requirementRevisionId: RequirementRevisionId | null; requirements: ManifestRequirement[] } {
-    const scope = this.stores.plans.listScope(node.id);
+  /**
+   * A scoped node: exactly its pinned leaf Requirements in scope order — for a Worker executing one Coordinator Task,
+   * exactly that Task's Requirements (a subset of the scope); the root node: the current revision's tree in tree order.
+   */
+  private requirements(run: Run, node: PatternPlanNode, invocation: Invocation): { requirementRevisionId: RequirementRevisionId | null; requirements: ManifestRequirement[] } {
+    let scope = this.stores.plans.listScope(node.id);
+    if (invocation.patternPosition?.kind === "worker_task") {
+      const owned = new Set(this.stores.tasks.get(invocation.patternPosition.taskId).requirementIds);
+      scope = scope.filter((row) => owned.has(row.requirementId));
+    }
     if (node.scope !== null || scope.length > 0) {
       const revisionId = node.scope?.requirementRevisionId ?? scope[0]!.requirementRevisionId;
       const revision = this.stores.requirements.getRevision(revisionId);
@@ -243,7 +251,7 @@ export class ContextManifestAssembler {
       .sort(byId((d) => d.decisionId));
   }
 
-  private inputs(run: Run, invocation: Invocation, inputs: ManifestInput[]): ManifestInput[] {
+  private inputs(run: Run, node: PatternPlanNode, invocation: Invocation, inputs: ManifestInput[]): ManifestInput[] {
     const digests = new Set<string>();
     for (const input of inputs) {
       switch (input.kind) {
@@ -275,8 +283,8 @@ export class ContextManifestAssembler {
           break;
         }
         case "node_result": {
-          const node = this.stores.plans.getNode(input.planNodeId);
-          if (node.runId !== run.id) throw new InvariantViolationError(`PlanNode ${input.planNodeId} belongs to another Run`);
+          const resultNode = this.stores.plans.getNode(input.planNodeId);
+          if (resultNode.runId !== run.id) throw new InvariantViolationError(`PlanNode ${input.planNodeId} belongs to another Run`);
           for (const id of input.outputArtifactIds) this.artifact(run, id);
           break;
         }
@@ -303,6 +311,26 @@ export class ContextManifestAssembler {
           if (evaluation.subject.kind !== "route_selection") throw new ValidationError(`Evaluation ${input.evaluationId} is not a route selection`);
           if (evaluation.subject.selectedLabel !== input.selectedLabel) throw new InvariantViolationError(`Evaluation ${input.evaluationId} selected ${evaluation.subject.selectedLabel}, not ${input.selectedLabel}`);
           if (invocation.patternPosition?.kind !== "route_branch" || invocation.patternPosition.label !== input.selectedLabel) throw new InvariantViolationError(`Invocation ${invocation.id} does not execute route branch ${input.selectedLabel}`);
+          break;
+        }
+        case "coordinator_turn": {
+          // The ledger names only Tasks of this coordinator_worker node, for a Coordinator turn of matching purpose.
+          if (invocation.role !== "coordinator" || invocation.purpose !== input.purpose) throw new InvariantViolationError(`Invocation ${invocation.id} is not a ${input.purpose} Coordinator turn`);
+          if (node.shape.pattern !== "coordinator_worker") throw new InvariantViolationError(`PlanNode ${node.id} is not a coordinator_worker node`);
+          for (const entry of input.tasks) {
+            const task = this.stores.tasks.get(entry.taskId);
+            if (task.runId !== run.id || task.planNodeId !== node.id) throw new InvariantViolationError(`Task ${entry.taskId} does not belong to PlanNode ${node.id}`);
+          }
+          break;
+        }
+        case "coordinator_blocker": {
+          if (invocation.role !== "coordinator") throw new InvariantViolationError(`Invocation ${invocation.id} is not a Coordinator turn`);
+          const task = this.stores.tasks.get(input.blocker.taskId);
+          if (task.runId !== run.id || task.planNodeId !== node.id) throw new InvariantViolationError(`Task ${input.blocker.taskId} does not belong to PlanNode ${node.id}`);
+          if (input.blocker.kind === "integration_conflict") {
+            const changeset = this.stores.changesets.get(input.blocker.changesetId);
+            if (changeset.runId !== run.id) throw new InvariantViolationError(`Changeset ${input.blocker.changesetId} belongs to another Run`);
+          }
           break;
         }
         case "plan_revision":

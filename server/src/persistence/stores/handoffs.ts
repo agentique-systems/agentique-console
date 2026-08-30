@@ -168,6 +168,22 @@ export class HandoffStore {
       if (!edge) throw new InvariantViolationError(`no branch(${route.label}) edge runs from ${route.sourceNodeId} to ${route.targetNodeId}`, { route });
       return;
     }
+    if (route.kind === "worker_result") {
+      // A Worker-result transfer runs from the Worker Invocation at the Task's position to its own coordinator_worker node, for that one Task.
+      if (target.kind !== "plan_node" || target.planNodeId !== route.planNodeId) throw new InvariantViolationError("a worker-result Handoff's target is its own Plan Node", { route, target });
+      if (source.kind !== "invocation") throw new InvariantViolationError("a worker-result Handoff's source is the Worker Invocation", { route, source });
+      const node = requireRow(this.ctx.db.select({ kind: planNodes.kind, shape: planNodes.shape }).from(planNodes).where(eq(planNodes.id, route.planNodeId)).get(), "PlanNode", route.planNodeId);
+      if (node.kind !== "pattern" || node.shape === null || node.shape.pattern !== "coordinator_worker") throw new InvariantViolationError(`PlanNode ${route.planNodeId} is not a coordinator_worker node`, { route });
+      const invocation = requireRow(this.ctx.db.select({ planNodeId: invocations.planNodeId, patternPosition: invocations.patternPosition }).from(invocations).where(eq(invocations.id, source.invocationId)).get(), "Invocation", source.invocationId);
+      const position = invocation.patternPosition;
+      if (invocation.planNodeId !== route.planNodeId || position === null || position.kind !== "worker_task" || position.taskId !== route.taskId) {
+        throw new InvariantViolationError(`Invocation ${source.invocationId} is not the Worker of Task ${route.taskId} on PlanNode ${route.planNodeId}`, { route, source });
+      }
+      const task = requireRow(this.ctx.db.select({ planNodeId: tasks.planNodeId }).from(tasks).where(eq(tasks.id, route.taskId)).get(), "Task", route.taskId);
+      if (task.planNodeId !== route.planNodeId) throw new InvariantViolationError(`Task ${route.taskId} does not belong to PlanNode ${route.planNodeId}`, { route });
+      if (input.taskIds.length !== 1 || input.taskIds[0] !== route.taskId) throw new InvariantViolationError("a worker-result Handoff carries exactly its Task", { route, taskIds: input.taskIds });
+      return;
+    }
     if (route.kind === "parallel_index") {
       if (source.kind !== "plan_node" || source.planNodeId !== route.planNodeId || target.kind !== "plan_node" || target.planNodeId !== route.planNodeId) {
         throw new InvariantViolationError("a parallel-index Handoff runs from a parallel Plan Node to itself", { route, source, target });

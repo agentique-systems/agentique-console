@@ -38,16 +38,23 @@ export type HandoffRoute =
    */
   | { kind: "branch"; sourceNodeId: PlanNodeId; targetNodeId: PlanNodeId; label: string }
   /** A parallel node's internal delivery of its canonical index Artifact to its own aggregation Invocation. */
-  | { kind: "parallel_index"; planNodeId: PlanNodeId };
+  | { kind: "parallel_index"; planNodeId: PlanNodeId }
+  /**
+   * A coordinator_worker node's internal transfer of one completed current Task's Worker result — its output
+   * Artifacts and a bounded summary — from the Worker Invocation to the node, for the next Coordinator turn.
+   * One exists per completed current Task, created only once the Worker's Changeset is integrated.
+   */
+  | { kind: "worker_result"; planNodeId: PlanNodeId; taskId: TaskId };
 
 export const handoffRouteSchema: z.ZodType<HandoffRoute> = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("sequence"), sourceNodeId: idSchema("planNode"), targetNodeId: idSchema("planNode") }).refine((r) => r.sourceNodeId !== r.targetNodeId, { message: "a sequence Handoff joins two nodes", path: ["targetNodeId"] }),
   z.strictObject({ kind: z.literal("chain_step"), planNodeId: idSchema("planNode"), fromStep: z.number().int().min(0) }),
   z.strictObject({ kind: z.literal("branch"), sourceNodeId: idSchema("planNode"), targetNodeId: idSchema("planNode"), label: nonEmptyString }).refine((r) => r.sourceNodeId !== r.targetNodeId, { message: "a branch Handoff joins two nodes", path: ["targetNodeId"] }),
   z.strictObject({ kind: z.literal("parallel_index"), planNodeId: idSchema("planNode") }),
+  z.strictObject({ kind: z.literal("worker_result"), planNodeId: idSchema("planNode"), taskId: idSchema("task") }),
 ]);
 
-export const HANDOFF_KEY_PATTERN = /^(sequence:pn_[0-9a-f]{24}:pn_[0-9a-f]{24}|chain_step:pn_[0-9a-f]{24}:[0-9]+|branch:pn_[0-9a-f]{24}:pn_[0-9a-f]{24}|parallel_index:pn_[0-9a-f]{24})$/;
+export const HANDOFF_KEY_PATTERN = /^(sequence:pn_[0-9a-f]{24}:pn_[0-9a-f]{24}|chain_step:pn_[0-9a-f]{24}:[0-9]+|branch:pn_[0-9a-f]{24}:pn_[0-9a-f]{24}|parallel_index:pn_[0-9a-f]{24}|worker_result:pn_[0-9a-f]{24}:task_[0-9a-f]{24})$/;
 
 /** The stable canonical key of a route; two routes are the same transfer iff their keys are equal. */
 export function handoffKeyOf(route: HandoffRoute): string {
@@ -60,6 +67,8 @@ export function handoffKeyOf(route: HandoffRoute): string {
       return `branch:${route.sourceNodeId}:${route.targetNodeId}`;
     case "parallel_index":
       return `parallel_index:${route.planNodeId}`;
+    case "worker_result":
+      return `worker_result:${route.planNodeId}:${route.taskId}`;
   }
 }
 

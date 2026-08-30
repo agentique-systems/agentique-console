@@ -89,6 +89,10 @@ export const PLAN_NODE_FAILURE_REASONS = [
   "route_selection_failed",
   /** A parallel node's items ended without satisfying `requireAll` (or with no item succeeding). */
   "parallel_items_failed",
+  /** A Coordinator turn succeeded without changing the node's canonical Task state: no accepted proposal, cancellation, or resolved blocker. */
+  "coordinator_no_progress",
+  /** The node's `maxCoordinatorInvocations` logical turns are spent while unresolved Tasks remain or synthesis is still due. */
+  "coordinator_invocations_exhausted",
 ] as const;
 export type PlanNodeFailureReason = (typeof PLAN_NODE_FAILURE_REASONS)[number];
 

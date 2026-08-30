@@ -10,9 +10,14 @@
  * `tool_calls` step submits each proposed call to the request's
  * authorization port exactly as a real adapter must, "executes" it (into
  * the `executed` ledger) only on `allowed` or `approved_once`, and ends on
- * the first refusal; the fake keeps no approval state of its own.
+ * the first refusal; the fake keeps no approval state of its own. A
+ * `runtime_tool_calls` step submits each runtime-tool call to the request's
+ * runtime-tool port in order, records every outcome, and continues with
+ * `then` whatever the outcomes were (a scripted agent that corrects itself
+ * scripts the corrected call as the next entry); the fake holds no
+ * canonical state and never inspects an outcome beyond recording it.
  */
-import type { AttemptId, ProposedToolCall, Timestamp } from "@agentique-console/core";
+import type { AttemptId, ProposedToolCall, RuntimeToolCallOutcome, RuntimeToolCallRequest, RuntimeToolCallTool, Timestamp } from "@agentique-console/core";
 import type { AttemptExecutionOutcome, AttemptExecutionRequest, InterruptionCause, ProviderAdapter, ProviderCompletion, ToolCallAuthorization, UsageChunk } from "./adapter.ts";
 
 export interface FakeStepCommon {
@@ -36,7 +41,11 @@ export type FakeStep = FakeStepCommon &
     | { kind: "tool_failure"; tool: string; message?: string }
     /** Proposes each call to the authorization port in order; on the first non-executable outcome the step ends, otherwise `then` follows. */
     | { kind: "tool_calls"; calls: ProposedToolCall[]; then: FakeStep }
+    /** Submits each runtime-tool call to the runtime-tool port in order, recording every outcome, then `then` follows. */
+    | { kind: "runtime_tool_calls"; calls: RuntimeToolCallRequest[]; then: FakeStep }
     | { kind: "interrupted"; message?: string }
+    /** A step computed when it executes, from the request alone (a test may derive it from ids minted earlier in the same pass); the fake reads nothing. */
+    | { kind: "derived"; step: (request: AttemptExecutionRequest) => FakeStep }
     | { kind: "hang" }
     | { kind: "throw"; error: Error }
     | { kind: "delay"; key: string; then: FakeStep }
@@ -49,11 +58,22 @@ export interface RecordedAuthorization {
   authorization: ToolCallAuthorization;
 }
 
+/** One runtime-tool call the fake submitted and the outcome it received. */
+export interface RecordedRuntimeToolCall {
+  attemptId: AttemptId;
+  call: RuntimeToolCallRequest;
+  outcome: RuntimeToolCallOutcome;
+}
+
 export interface RecordedRequest {
   attemptId: AttemptId;
-  request: Omit<AttemptExecutionRequest, "signal" | "output" | "continuation" | "authorization">;
+  request: Omit<AttemptExecutionRequest, "signal" | "output" | "continuation" | "authorization" | "runtimeTools">;
+  /** The effective callable runtime tools the request exposed. */
+  runtimeTools: RuntimeToolCallTool[];
   /** Every call submitted to the authorization port during this execution, in order, with its outcome. */
   authorizations: RecordedAuthorization[];
+  /** Every runtime-tool call submitted during this execution, in order, with its outcome. */
+  runtimeToolCalls: RecordedRuntimeToolCall[];
   /** A copy of the continuation bytes the runtime supplied, or `null` for a fresh start. */
   continuation: Uint8Array | null;
   /** Whether the request was aborted before the step completed, and why. */
@@ -100,6 +120,8 @@ export class ScriptedProvider implements ProviderAdapter {
   readonly authorizations: RecordedAuthorization[] = [];
   /** The external side effects the fake performed: exactly the calls the port answered `allowed` or `approved_once`. */
   readonly executed: RecordedAuthorization[] = [];
+  /** Every runtime-tool call submitted, across executions, with its outcome. */
+  readonly runtimeToolCalls: RecordedRuntimeToolCall[] = [];
   readonly #script: FakeStep[] = [];
   readonly #released = new Map<string, () => void>();
   readonly #clock: () => Timestamp;
@@ -138,11 +160,13 @@ export class ScriptedProvider implements ProviderAdapter {
 
   async execute(request: AttemptExecutionRequest): Promise<AttemptExecutionOutcome> {
     const step = this.#script.shift() ?? this.#defaultStep;
-    const { signal, output, continuation, authorization: _port, ...rest } = request;
+    const { signal, output, continuation, authorization: _port, runtimeTools, ...rest } = request;
     const recorded: RecordedRequest = {
       attemptId: request.attemptId,
       request: rest,
+      runtimeTools: [...runtimeTools.tools],
       authorizations: [],
+      runtimeToolCalls: [],
       continuation: continuation ? Uint8Array.from(continuation) : null,
       aborted: false,
       abortCause: null,
@@ -156,6 +180,7 @@ export class ScriptedProvider implements ProviderAdapter {
   }
 
   async #run(step: FakeStep, request: AttemptExecutionRequest, recorded: RecordedRequest): Promise<Omit<AttemptExecutionOutcome, "timing">> {
+    if (step.kind === "derived") return this.#run(step.step(request), request, recorded);
     if (step.kind === "delay") {
       await new Promise<void>((resolve) => {
         const finish = () => resolve();
@@ -174,6 +199,16 @@ export class ScriptedProvider implements ProviderAdapter {
     if (step.kind === "hang") {
       if (!request.signal.aborted) await new Promise<void>((resolve) => request.signal.addEventListener("abort", () => resolve(), { once: true }));
       return this.#interrupted(step, request, recorded);
+    }
+    if (step.kind === "runtime_tool_calls") {
+      for (const call of step.calls) {
+        const outcome = await request.runtimeTools.call(call);
+        const record: RecordedRuntimeToolCall = { attemptId: request.attemptId, call, outcome };
+        this.runtimeToolCalls.push(record);
+        recorded.runtimeToolCalls.push(record);
+        request.output({ attemptId: request.attemptId, kind: "tool_call", text: `${call.tool} ${outcome.kind}` });
+      }
+      return this.#run({ ...step.then, usage: step.then.usage ?? step.usage, transcript: step.then.transcript ?? step.transcript, continuation: step.then.continuation ?? step.continuation }, request, recorded);
     }
     if (step.kind === "tool_calls") {
       for (const call of step.calls) {

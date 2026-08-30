@@ -19,7 +19,7 @@
  * approval-consumption state — the runtime's canonical approval use
  * decides, so a fresh or restarted adapter cannot repeat a consumed call.
  */
-import type { AgentCapabilities, ApprovedToolCallUseId, AttemptId, DecisionId, InvocationId, ModelEffort, ProposedToolCall, RunId, Timestamp, ToolPolicy, UsageInput } from "@agentique-console/core";
+import type { AgentCapabilities, ApprovedToolCallUseId, AttemptId, DecisionId, InvocationId, ModelEffort, ProposedToolCall, RunId, RuntimeToolCallOutcome, RuntimeToolCallRequest, RuntimeToolCallTool, Timestamp, ToolPolicy, UsageInput } from "@agentique-console/core";
 
 /** The deterministic bytes rendered from the persisted Context Manifest (plus a bounded retry appendix). */
 export interface RenderedInput {
@@ -65,6 +65,26 @@ export interface ToolCallAuthorizationPort {
   authorize(call: ProposedToolCall): ToolCallAuthorization;
 }
 
+/**
+ * The runtime-tool call boundary (execution-model §6.4 "Runtime tools"),
+ * separate from provider-native capability authorization. The runtime binds
+ * it to exactly one running Attempt, Invocation, immutable Context Manifest,
+ * role, purpose, Run, and Plan Node; the adapter receives no store, database
+ * handle, transaction, execution service, or persistence object. `tools` is
+ * the **effective callable set** — manifest permission ∩ runtime handler
+ * availability ∩ role/purpose validity — and the adapter exposes exactly
+ * these to the model and submits calls only for them. Every mutating call
+ * commits in its own short root transaction while the provider runs outside
+ * every transaction; an accepted call is replayable by canonical digest, a
+ * rejected call writes nothing, and results carry ids and stable refusal
+ * codes rather than domain history. Runtime tools never go through
+ * side-effect approval and expose no transcript or continuation state.
+ */
+export interface RuntimeToolCallPort {
+  readonly tools: readonly RuntimeToolCallTool[];
+  call(request: RuntimeToolCallRequest): Promise<RuntimeToolCallOutcome>;
+}
+
 export interface AttemptExecutionRequest {
   attemptId: AttemptId;
   invocationId: InvocationId;
@@ -84,6 +104,8 @@ export interface AttemptExecutionRequest {
    * An approval widens no Tool Policy: it is one exact digest, once.
    */
   authorization: ToolCallAuthorizationPort;
+  /** The runtime-tool call boundary bound to this Attempt; the adapter exposes exactly `runtimeTools.tools`. */
+  runtimeTools: RuntimeToolCallPort;
   /** The worktree (or Integration Workspace for a read-only Invocation) the Attempt runs in; `null` for a Run without one. */
   workingDirectory: string | null;
   /** The wall-clock deadline the runtime enforces; the adapter may also stop itself at it. */

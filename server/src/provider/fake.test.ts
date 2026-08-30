@@ -38,6 +38,7 @@ function request(overrides: Partial<AttemptExecutionRequest> = {}): AttemptExecu
     capabilities: { tools: ["read"], mcpServers: [] },
     toolPolicy: { read: "allowed", shell: "approval_required" },
     authorization: policyPort({ read: "allowed", shell: "approval_required" }),
+    runtimeTools: { tools: [], call: async (call) => ({ kind: "not_callable", tool: call.tool }) },
     workingDirectory: "/tmp/wt",
     deadlineAt: null,
     signal: new AbortController().signal,

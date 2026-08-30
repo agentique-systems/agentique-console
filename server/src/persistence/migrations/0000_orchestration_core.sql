@@ -396,7 +396,7 @@ CREATE TABLE `handoffs` (
 	`created_at` text NOT NULL,
 	`delivered_at` text,
 	FOREIGN KEY (`run_id`) REFERENCES `runs`(`id`) ON UPDATE no action ON DELETE no action,
-	CONSTRAINT "handoffs_key_shape" CHECK("handoffs"."handoff_key" GLOB 'sequence:pn_*:pn_*' OR "handoffs"."handoff_key" GLOB 'chain_step:pn_*:[0-9]*' OR "handoffs"."handoff_key" GLOB 'branch:pn_*:pn_*' OR "handoffs"."handoff_key" GLOB 'parallel_index:pn_*'),
+	CONSTRAINT "handoffs_key_shape" CHECK("handoffs"."handoff_key" GLOB 'sequence:pn_*:pn_*' OR "handoffs"."handoff_key" GLOB 'chain_step:pn_*:[0-9]*' OR "handoffs"."handoff_key" GLOB 'branch:pn_*:pn_*' OR "handoffs"."handoff_key" GLOB 'parallel_index:pn_*' OR "handoffs"."handoff_key" GLOB 'worker_result:pn_*:task_*'),
 	CONSTRAINT "handoffs_status" CHECK("handoffs"."status" IN ('pending', 'delivered', 'cancelled')),
 	CONSTRAINT "handoffs_summary_length" CHECK(length("handoffs"."summary") <= 500),
 	CONSTRAINT "handoffs_delivered_at" CHECK(("handoffs"."status" = 'delivered') = ("handoffs"."delivered_at" IS NOT NULL))
@@ -704,6 +704,29 @@ CREATE TABLE `runs` (
 --> statement-breakpoint
 CREATE INDEX `runs_conversation` ON `runs` (`conversation_id`,`created_at`);--> statement-breakpoint
 CREATE INDEX `runs_status` ON `runs` (`status`);--> statement-breakpoint
+CREATE TABLE `runtime_tool_calls` (
+	`id` text PRIMARY KEY NOT NULL,
+	`run_id` text NOT NULL,
+	`plan_node_id` text NOT NULL,
+	`invocation_id` text NOT NULL,
+	`attempt_id` text NOT NULL,
+	`tool` text NOT NULL,
+	`call_digest` text NOT NULL,
+	`result` text NOT NULL,
+	`committed_at` text NOT NULL,
+	FOREIGN KEY (`run_id`) REFERENCES `runs`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`plan_node_id`) REFERENCES `plan_nodes`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`invocation_id`) REFERENCES `invocations`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`attempt_id`) REFERENCES `attempts`(`id`) ON UPDATE no action ON DELETE no action,
+	CONSTRAINT "runtime_tool_calls_tool" CHECK("runtime_tool_calls"."tool" IN ('propose_tasks', 'update_task')),
+	CONSTRAINT "runtime_tool_calls_digest_shape" CHECK(length("runtime_tool_calls"."call_digest") = 64),
+	CONSTRAINT "runtime_tool_calls_result_tool" CHECK(json_extract("runtime_tool_calls"."result", '$.tool') = "runtime_tool_calls"."tool")
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `runtime_tool_calls_invocation_call` ON `runtime_tool_calls` (`invocation_id`,`tool`,`call_digest`);--> statement-breakpoint
+CREATE UNIQUE INDEX `runtime_tool_calls_one_proposal` ON `runtime_tool_calls` (`invocation_id`) WHERE tool = 'propose_tasks';--> statement-breakpoint
+CREATE INDEX `runtime_tool_calls_plan_node` ON `runtime_tool_calls` (`plan_node_id`,`committed_at`);--> statement-breakpoint
+CREATE INDEX `runtime_tool_calls_attempt` ON `runtime_tool_calls` (`attempt_id`);--> statement-breakpoint
 CREATE TABLE `schema_info` (
 	`id` integer PRIMARY KEY NOT NULL,
 	`application` text NOT NULL,
@@ -779,6 +802,7 @@ CREATE TABLE `tasks` (
 --> statement-breakpoint
 CREATE INDEX `tasks_run_status` ON `tasks` (`run_id`,`status`);--> statement-breakpoint
 CREATE INDEX `tasks_plan_node` ON `tasks` (`plan_node_id`,`status`);--> statement-breakpoint
+CREATE UNIQUE INDEX `tasks_replaced_once` ON `tasks` (`replaces_task_id`) WHERE replaces_task_id IS NOT NULL;--> statement-breakpoint
 CREATE TABLE `usage` (
 	`id` text PRIMARY KEY NOT NULL,
 	`run_id` text NOT NULL,
@@ -860,6 +884,8 @@ CREATE TRIGGER `attempts_terminal_immutable` BEFORE UPDATE OF `status`, `failure
 CREATE TRIGGER `approved_tool_call_uses_no_update` BEFORE UPDATE ON `approved_tool_call_uses` BEGIN SELECT RAISE(ABORT, 'approved_tool_call_uses are append-only'); END;--> statement-breakpoint
 CREATE TRIGGER `approved_tool_call_uses_no_delete` BEFORE DELETE ON `approved_tool_call_uses` BEGIN SELECT RAISE(ABORT, 'approved_tool_call_uses are append-only'); END;--> statement-breakpoint
 CREATE TRIGGER `approved_tool_call_uses_claim_valid` BEFORE INSERT ON `approved_tool_call_uses` BEGIN SELECT RAISE(ABORT, 'an approved_tool_call_use claims a resolved approve_once side_effect_approval of its own Run and Plan Node whose subject names the call and the running invocation''s predecessor, carried by that invocation''s manifest, from its running attempt') WHERE NOT EXISTS (SELECT 1 FROM `decisions` d JOIN `invocations` i ON i.`id` = NEW.`invocation_id` JOIN `attempts` a ON a.`id` = NEW.`attempt_id` WHERE d.`id` = NEW.`decision_id` AND d.`kind` = 'side_effect_approval' AND d.`status` = 'resolved' AND d.`chosen_option_id` = 'approve_once' AND d.`run_id` = NEW.`run_id` AND json_extract(d.`subject`, '$.tool') = NEW.`tool` AND json_extract(d.`subject`, '$.callDigest') = NEW.`call_digest` AND json_extract(d.`subject`, '$.runId') = NEW.`run_id` AND json_extract(d.`subject`, '$.planNodeId') = NEW.`plan_node_id` AND json_extract(d.`subject`, '$.invocationId') = i.`continued_from_invocation_id` AND i.`run_id` = NEW.`run_id` AND i.`plan_node_id` = NEW.`plan_node_id` AND i.`status` = 'running' AND a.`invocation_id` = NEW.`invocation_id` AND a.`status` = 'running' AND EXISTS (SELECT 1 FROM `context_manifests` cm, json_each(cm.`content`, '$.approvedCalls') ac WHERE cm.`invocation_id` = NEW.`invocation_id` AND json_extract(ac.`value`, '$.decisionId') = NEW.`decision_id` AND json_extract(ac.`value`, '$.tool') = NEW.`tool` AND json_extract(ac.`value`, '$.callDigest') = NEW.`call_digest`)); END;--> statement-breakpoint
+CREATE TRIGGER `runtime_tool_calls_no_update` BEFORE UPDATE ON `runtime_tool_calls` BEGIN SELECT RAISE(ABORT, 'runtime_tool_calls are append-only'); END;--> statement-breakpoint
+CREATE TRIGGER `runtime_tool_calls_no_delete` BEFORE DELETE ON `runtime_tool_calls` BEGIN SELECT RAISE(ABORT, 'runtime_tool_calls are append-only'); END;--> statement-breakpoint
 CREATE TRIGGER `context_manifests_no_update` BEFORE UPDATE ON `context_manifests` BEGIN SELECT RAISE(ABORT, 'context_manifests are immutable'); END;--> statement-breakpoint
 CREATE TRIGGER `context_manifests_no_delete` BEFORE DELETE ON `context_manifests` BEGIN SELECT RAISE(ABORT, 'context_manifests are immutable'); END;--> statement-breakpoint
 CREATE TRIGGER `evaluations_no_update` BEFORE UPDATE ON `evaluations` BEGIN SELECT RAISE(ABORT, 'evaluations are append-only'); END;--> statement-breakpoint

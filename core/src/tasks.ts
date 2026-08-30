@@ -2,6 +2,7 @@ import { z } from "zod";
 import { ValidationError } from "./errors.ts";
 import type {
   ArtifactId,
+  ChangesetId,
   DecisionId,
   InvocationId,
   PlanNodeId,
@@ -201,6 +202,69 @@ export function wouldCreateDependencyCycle(
     for (const next of adjacency.get(current) ?? []) stack.push(next);
   }
   return false;
+}
+
+// ---------------------------------------------------------------------------
+// Coordinator-facing Task facts (execution-model §5.5)
+// ---------------------------------------------------------------------------
+
+/**
+ * One entry of the canonical current Task ledger a Coordinator turn receives:
+ * ids, the closed status, the replacement links, and output Artifact ids —
+ * never a Worker transcript, a result summary, or narrative.
+ */
+export interface TaskLedgerEntry {
+  taskId: TaskId;
+  subject: string;
+  status: TaskStatus;
+  replacesTaskId: TaskId | null;
+  /** The replacement that superseded this Task, when one was accepted; a superseded Task is historical, not current. */
+  supersededByTaskId: TaskId | null;
+  outputArtifactIds: ArtifactId[];
+}
+
+export const taskLedgerEntrySchema: z.ZodType<TaskLedgerEntry> = z.strictObject({
+  taskId: idSchema("task"),
+  subject: nonEmptyString,
+  status: z.enum(TASK_STATUSES),
+  replacesTaskId: idSchema("task").nullable(),
+  supersededByTaskId: idSchema("task").nullable(),
+  outputArtifactIds: uniqueIds(idSchema("artifact")),
+});
+
+/**
+ * One canonical blocker of a coordinator_worker node's current Task set
+ * (execution-model §5.5): a current Task the runtime cannot advance without
+ * a Coordinator `replan`. Ids and closed reasons only.
+ */
+export type CoordinatorBlocker =
+  | { kind: "task_failed"; taskId: TaskId; failureReason: TaskFailureReason }
+  | { kind: "task_blocked"; taskId: TaskId; blockReason: TaskBlockReason }
+  | { kind: "integration_conflict"; taskId: TaskId; invocationId: InvocationId; changesetId: ChangesetId; conflictTaskId: TaskId; reportArtifactId: ArtifactId | null };
+
+export const coordinatorBlockerSchema: z.ZodType<CoordinatorBlocker> = z.discriminatedUnion("kind", [
+  z.strictObject({ kind: z.literal("task_failed"), taskId: idSchema("task"), failureReason: z.enum(TASK_FAILURE_REASONS) }),
+  z.strictObject({ kind: z.literal("task_blocked"), taskId: idSchema("task"), blockReason: taskBlockReasonSchema }),
+  z.strictObject({
+    kind: z.literal("integration_conflict"),
+    taskId: idSchema("task"),
+    invocationId: idSchema("invocation"),
+    changesetId: idSchema("changeset"),
+    conflictTaskId: idSchema("task"),
+    reportArtifactId: idSchema("artifact").nullable(),
+  }),
+]);
+
+/** The stable identity of a blocker, for comparing one turn's frontier with the next. */
+export function coordinatorBlockerKey(blocker: CoordinatorBlocker): string {
+  switch (blocker.kind) {
+    case "task_failed":
+      return `task_failed:${blocker.taskId}`;
+    case "task_blocked":
+      return `task_blocked:${blocker.taskId}:${blocker.blockReason.kind}`;
+    case "integration_conflict":
+      return `integration_conflict:${blocker.changesetId}`;
+  }
 }
 
 export function assertTaskCompletion(evidence: Evidence[], requiredOutputs: string[], outputArtifactIds: ArtifactId[]): void {

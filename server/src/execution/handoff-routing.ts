@@ -21,13 +21,16 @@
  * - `chain_step`: a completed step Invocation → its own chain node, for the
  *   next step;
  * - `parallel_index`: a parallel node → itself, delivering its canonical
- *   index Artifact to its aggregation Invocation.
+ *   index Artifact to its aggregation Invocation;
+ * - `worker_result`: a completed, integrated Worker Invocation of a
+ *   coordinator_worker node → its node, carrying the Task's output
+ *   Artifacts for the next Coordinator turn; one per completed current Task.
  * Which edges deliver is decided by the pure readiness evaluator over the
  * graph and its explicit condition facts; nothing here infers a selection.
  * Decision and approval continuations use the typed manifest inputs
  * instead; nothing here invents a narrative Handoff.
  */
-import { HANDOFF_MAX_SUMMARY_LENGTH, INVOCATION_MACHINE, isIncomingHandoffKey, PLAN_NODE_MACHINE, type ArtifactId, type Handoff, type Invocation, type PatternPlanNode, type PlanEdge, type PlanGraph, type PlanNode, type PlanNodeId, type RunId } from "@agentique-console/core";
+import { HANDOFF_MAX_SUMMARY_LENGTH, INVOCATION_MACHINE, isIncomingHandoffKey, PLAN_NODE_MACHINE, type ArtifactId, type Handoff, type Invocation, type PatternPlanNode, type PlanEdge, type PlanGraph, type PlanNode, type PlanNodeId, type RunId, type Task, type TaskId } from "@agentique-console/core";
 import type { Stores } from "../persistence/stores/index.ts";
 import type { WriteOptions } from "../persistence/stores/support.ts";
 import { edgeActivation, predecessorEdges, successorEdges, type ReadinessInput } from "./readiness.ts";
@@ -108,6 +111,40 @@ export class HandoffRouter {
       },
       options,
     );
+  }
+
+  /**
+   * The internal coordinator_worker transfer of one completed current Task's Worker result to its node, created only
+   * once the Worker's Changeset is integrated. Idempotent by the Task.
+   */
+  ensureWorkerResultHandoff(node: PatternPlanNode, worker: Invocation, task: Task, options?: WriteOptions): EnsuredHandoff {
+    if (node.shape.pattern !== "coordinator_worker") throw new Error(`PlanNode ${node.id} is not a coordinator_worker node`);
+    const position = worker.patternPosition;
+    if (position === null || position.kind !== "worker_task" || position.taskId !== task.id || worker.planNodeId !== node.id) throw new Error(`Invocation ${worker.id} is not the Worker of Task ${task.id} on PlanNode ${node.id}`);
+    if (worker.status !== "succeeded" || worker.result === null || worker.result.status !== "completed") throw new Error(`Invocation ${worker.id} did not complete; a Worker-result Handoff carries a completed result`);
+    if (task.status !== "completed") throw new Error(`Task ${task.id} is ${task.status}; a Worker-result Handoff carries a completed Task`);
+    return this.stores.handoffs.ensure(
+      {
+        runId: node.runId,
+        route: { kind: "worker_result", planNodeId: node.id, taskId: task.id },
+        source: { kind: "invocation", invocationId: worker.id },
+        target: { kind: "plan_node", planNodeId: node.id },
+        taskIds: [task.id],
+        artifactIds: [...task.outputArtifactIds].sort(),
+        summary: boundedHandoffSummary(worker.result.summary),
+      },
+      options,
+    );
+  }
+
+  /** The Worker-result Handoff of one Task, if it exists. */
+  workerResultHandoff(runId: RunId, planNodeId: PlanNodeId, taskId: TaskId): Handoff | null {
+    return this.stores.handoffs.getByKey(runId, `worker_result:${planNodeId}:${taskId}`);
+  }
+
+  /** Every Worker-result Handoff of a node, in creation order; `status` narrows to one lifecycle state. */
+  workerResultHandoffs(runId: RunId, planNodeId: PlanNodeId, status?: Handoff["status"]): Handoff[] {
+    return this.stores.handoffs.listByTarget(runId, { kind: "plan_node", planNodeId }, status).filter((h) => h.handoffKey.startsWith(`worker_result:${planNodeId}:`));
   }
 
   /** The pending edge Handoffs addressed to a node, in creation order: what its next Invocation delivers. */

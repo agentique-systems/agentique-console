@@ -88,6 +88,17 @@ function renderInput(input: ManifestInput): string[] {
       return [`- publication_result ${input.publicationId} ${input.outcome}`];
     case "route_selection":
       return [`- route_selection ${input.evaluationId} selected ${input.selectedLabel}`];
+    case "coordinator_turn":
+      return [
+        `- coordinator_turn ${input.purpose} turn ${input.turnsUsed} of ${input.bounds.maxCoordinatorInvocations} max_tasks ${input.bounds.maxTasks} max_concurrent_workers ${input.bounds.maxConcurrentWorkers} unresolved ${list(input.blockerKeys)}`,
+        ...(input.tasks.length === 0 ? ["  tasks: none"] : input.tasks.map((t) => `  - ${t.taskId} [${t.status}]${t.replacesTaskId === null ? "" : ` replaces ${t.replacesTaskId}`}${t.supersededByTaskId === null ? "" : ` superseded_by ${t.supersededByTaskId}`} outputs ${list(t.outputArtifactIds)}: ${t.subject}`)),
+      ];
+    case "coordinator_blocker": {
+      const b = input.blocker;
+      if (b.kind === "task_failed") return [`- coordinator_blocker task_failed ${b.taskId} ${b.failureReason}`];
+      if (b.kind === "task_blocked") return [`- coordinator_blocker task_blocked ${b.taskId} ${b.blockReason.kind}${"taskId" in b.blockReason ? ` ${b.blockReason.taskId}` : ""}${"decisionId" in b.blockReason ? ` ${b.blockReason.decisionId}` : ""}${"description" in b.blockReason ? `: ${b.blockReason.description}` : ""}`];
+      return [`- coordinator_blocker integration_conflict ${b.taskId} invocation ${b.invocationId} changeset ${b.changesetId} conflict_task ${b.conflictTaskId} report ${b.reportArtifactId ?? NONE}`];
+    }
   }
 }
 

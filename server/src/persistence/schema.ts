@@ -64,6 +64,7 @@ import {
   RESERVATION_STATUSES,
   RESOLUTION_POLICIES,
   RETRY_DECISION_REASONS,
+  RUNTIME_TOOL_CALL_TOOLS,
   RETRY_PERMITTED_REASONS,
   RETRY_REFUSED_REASONS,
   RUN_KINDS,
@@ -105,6 +106,7 @@ import {
   type RetryDecision,
   type RunFailure,
   type RunTarget,
+  type RuntimeToolResult,
   type TaskBlockReason,
   type ToolPolicy,
 } from "@agentique-console/core";
@@ -630,6 +632,10 @@ export const tasks = sqliteTable(
       sql`${t.origin} <> 'coordinator' OR (${t.planNodeId} IS NOT NULL AND ${t.requirementRevisionId} IS NOT NULL)`,
     ),
     check("tasks_no_self_replace", sql`${t.replacesTaskId} IS NULL OR ${t.replacesTaskId} <> ${t.id}`),
+    // A Task is replaced at most once (execution-model §5.5): the database holds the rule across passes and restarts.
+    uniqueIndex("tasks_replaced_once")
+      .on(t.replacesTaskId)
+      .where(sql`replaces_task_id IS NOT NULL`),
   ],
 );
 
@@ -701,7 +707,7 @@ export const handoffs = sqliteTable(
     index("handoffs_run").on(t.runId, t.createdAt),
     // One Handoff per logical transfer per Run: repeated reconciliation, transaction retry, restart, and racing callers all land here.
     uniqueIndex("handoffs_run_key").on(t.runId, t.handoffKey),
-    check("handoffs_key_shape", sql`${t.handoffKey} GLOB 'sequence:pn_*:pn_*' OR ${t.handoffKey} GLOB 'chain_step:pn_*:[0-9]*' OR ${t.handoffKey} GLOB 'branch:pn_*:pn_*' OR ${t.handoffKey} GLOB 'parallel_index:pn_*'`),
+    check("handoffs_key_shape", sql`${t.handoffKey} GLOB 'sequence:pn_*:pn_*' OR ${t.handoffKey} GLOB 'chain_step:pn_*:[0-9]*' OR ${t.handoffKey} GLOB 'branch:pn_*:pn_*' OR ${t.handoffKey} GLOB 'parallel_index:pn_*' OR ${t.handoffKey} GLOB 'worker_result:pn_*:task_*'`),
     check("handoffs_status", sql`${t.status} IN (${inList(HANDOFF_STATUSES)})`),
     check("handoffs_summary_length", sql`length(${t.summary}) <= ${sql.raw(String(HANDOFF_MAX_SUMMARY_LENGTH))}`),
     check("handoffs_delivered_at", sql`(${t.status} = 'delivered') = (${t.deliveredAt} IS NOT NULL)`),
@@ -951,6 +957,49 @@ export const approvedToolCallUses = sqliteTable(
     index("approved_tool_call_uses_run").on(t.runId),
     check("approved_tool_call_uses_digest_shape", sql`length(${t.callDigest}) = 64`),
     check("approved_tool_call_uses_tool", sql`length(${t.tool}) > 0`),
+  ],
+);
+
+/**
+ * Runtime-tool calls: one append-only row per accepted mutating runtime-tool
+ * call (execution-model §6.4). The unique index over (Invocation, tool,
+ * digest) is the replay rule — a retry of the same call finds its committed
+ * result — and the partial unique index over (Invocation) for `propose_tasks`
+ * holds the one-accepted-proposal-per-Coordinator-Invocation rule. The row
+ * carries ids, the tool, the canonical digest, and the bounded result; never
+ * the call input.
+ */
+export const runtimeToolCalls = sqliteTable(
+  "runtime_tool_calls",
+  {
+    id: text("id").primaryKey(),
+    runId: text("run_id")
+      .notNull()
+      .references(() => runs.id),
+    planNodeId: text("plan_node_id")
+      .notNull()
+      .references(() => planNodes.id),
+    invocationId: text("invocation_id")
+      .notNull()
+      .references(() => invocations.id),
+    attemptId: text("attempt_id")
+      .notNull()
+      .references(() => attempts.id),
+    tool: text("tool").notNull(),
+    callDigest: text("call_digest").notNull(),
+    result: text("result", { mode: "json" }).$type<RuntimeToolResult>().notNull(),
+    committedAt: timestamp("committed_at").notNull(),
+  },
+  (t) => [
+    uniqueIndex("runtime_tool_calls_invocation_call").on(t.invocationId, t.tool, t.callDigest),
+    uniqueIndex("runtime_tool_calls_one_proposal")
+      .on(t.invocationId)
+      .where(sql`tool = 'propose_tasks'`),
+    index("runtime_tool_calls_plan_node").on(t.planNodeId, t.committedAt),
+    index("runtime_tool_calls_attempt").on(t.attemptId),
+    check("runtime_tool_calls_tool", sql`${t.tool} IN (${inList(RUNTIME_TOOL_CALL_TOOLS)})`),
+    check("runtime_tool_calls_digest_shape", sql`length(${t.callDigest}) = 64`),
+    check("runtime_tool_calls_result_tool", sql`json_extract(${t.result}, '$.tool') = ${t.tool}`),
   ],
 );
 
@@ -1352,6 +1401,7 @@ export const TABLE_NAMES = [
   "invocations",
   "attempts",
   "approved_tool_call_uses",
+  "runtime_tool_calls",
   "provider_continuations",
   "context_manifests",
   "evaluations",

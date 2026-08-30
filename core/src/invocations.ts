@@ -24,7 +24,8 @@ import type {
   SnapshotId,
   TaskId,
 } from "./ids.ts";
-import { PLAN_NODE_STATUSES, planRejectionReasonSchema, type PlanNodeStatus, type PlanRejectionReason } from "./plans.ts";
+import { coordinatorWorkerBoundsSchema, PLAN_NODE_STATUSES, planRejectionReasonSchema, type CoordinatorWorkerBounds, type PlanNodeStatus, type PlanRejectionReason } from "./plans.ts";
+import { coordinatorBlockerSchema, taskLedgerEntrySchema, type CoordinatorBlocker, type TaskLedgerEntry } from "./tasks.ts";
 import { PATTERN_POSITION_BINDINGS, patternPositionKey, patternPositionSchema, type PatternPosition } from "./pattern-positions.ts";
 import { acceptanceCheckSchema, evidenceSchema, REQUIREMENT_STATUSES, type AcceptanceCheck, type Evidence, type RequirementStatus } from "./requirements.ts";
 import { agentCapabilitiesSchema, modelPolicySchema, toolPolicySchema, type AgentCapabilities, type ModelPolicy, type ToolPolicy } from "./agents.ts";
@@ -905,7 +906,15 @@ export type ManifestInput =
   | { kind: "plan_revision"; accepted: boolean; revisionNumber: number | null; reasons: PlanRejectionReason[] }
   | { kind: "publication_result"; publicationId: PublicationId; outcome: PublicationOutcome }
   /** The canonical route-selection Evaluation of the route node an inline branch Invocation executes for (execution-model §5.3). */
-  | { kind: "route_selection"; evaluationId: EvaluationId; selectedLabel: string };
+  | { kind: "route_selection"; evaluationId: EvaluationId; selectedLabel: string }
+  /**
+   * The logical input of one Coordinator turn (execution-model §5.5): its purpose, the node's bounds, how many logical
+   * turns the node has used (this one included), and the canonical current Task ledger — ids, statuses, replacement
+   * links, and output Artifact ids, never a Worker transcript or narrative.
+   */
+  | { kind: "coordinator_turn"; purpose: CoordinatorPurpose; bounds: CoordinatorWorkerBounds; turnsUsed: number; tasks: TaskLedgerEntry[]; blockerKeys: string[] }
+  /** One canonical unresolved blocker delivered to a `replan` turn that was not delivered to an earlier Coordinator turn. */
+  | { kind: "coordinator_blocker"; blocker: CoordinatorBlocker };
 
 export const manifestInputSchema: z.ZodType<ManifestInput> = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("operator_message"), conversationMessageId: idSchema("conversationMessage"), content: z.string().min(1) }),
@@ -925,6 +934,16 @@ export const manifestInputSchema: z.ZodType<ManifestInput> = z.discriminatedUnio
   z.strictObject({ kind: z.literal("plan_revision"), accepted: z.boolean(), revisionNumber: positiveCount.nullable(), reasons: z.array(planRejectionReasonSchema) }),
   z.strictObject({ kind: z.literal("publication_result"), publicationId: idSchema("publication"), outcome: z.enum(PUBLICATION_OUTCOMES) }),
   z.strictObject({ kind: z.literal("route_selection"), evaluationId: idSchema("evaluation"), selectedLabel: nonEmptyString }),
+  z.strictObject({
+    kind: z.literal("coordinator_turn"),
+    purpose: z.enum(COORDINATOR_PURPOSES),
+    bounds: coordinatorWorkerBoundsSchema,
+    turnsUsed: positiveCount,
+    tasks: z.array(taskLedgerEntrySchema).refine((tasks) => tasks.every((t, i) => i === 0 || tasks[i - 1]!.taskId < t.taskId), { message: "ledger entries are ordered by Task id" }),
+    /** The stable keys (`coordinatorBlockerKey`) of every unresolved blocker at the turn's start, sorted: what a later no-progress check compares against. */
+    blockerKeys: z.array(nonEmptyString.max(200)).max(256).refine((keys) => keys.every((k, i) => i === 0 || keys[i - 1]! < k), { message: "blocker keys are sorted and unique" }),
+  }),
+  z.strictObject({ kind: z.literal("coordinator_blocker"), blocker: coordinatorBlockerSchema }),
 ]);
 
 /**
