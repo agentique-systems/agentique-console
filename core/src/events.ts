@@ -35,6 +35,7 @@ import {
 } from "./requirements.ts";
 import { runFailureSchema, runSchema, RUN_STATUSES, RUN_WAIT_REASONS } from "./runs.ts";
 import { taskBlockReasonSchema, taskDependencySchema, taskSchema, TASK_FAILURE_REASONS, TASK_STATUSES } from "./tasks.ts";
+import { approvedToolCallUseSchema } from "./tool-calls.ts";
 import { usageSchema } from "./usage.ts";
 import { changesetSchema, publicationSchema, snapshotSchema } from "./workspace-state.ts";
 import { workspaceSchema } from "./workspaces.ts";
@@ -185,6 +186,8 @@ export const EVENT_CATALOGUE = {
   "attempt.timed_out": z.strictObject({ attemptId: idSchema("attempt") }),
   "attempt.interrupted": z.strictObject({ attemptId: idSchema("attempt") }),
   "attempt.cancelled": z.strictObject({ attemptId: idSchema("attempt") }),
+  /** One approval grant was claimed, in its own committed transaction, before the call could execute; ids, tool, and digest only, never the call bytes. */
+  "approved_tool_call.used": approvedToolCallUseSchema,
   "evaluation.recorded": evaluationSchema,
   "gate.opened": gateSchema,
   "gate.passed": z.strictObject({ gateId: idSchema("gate") }),

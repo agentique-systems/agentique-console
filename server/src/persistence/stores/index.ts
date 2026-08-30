@@ -1,6 +1,7 @@
 import type { PlanLimits } from "@agentique-console/core";
 import type { PersistenceContext } from "../context.ts";
 import { AgentDefinitionStore } from "./agents.ts";
+import { ApprovedToolCallUseStore } from "./approved-tool-call-uses.ts";
 import { ArtifactStore } from "./artifacts.ts";
 import { BudgetReservationStore } from "./budgets.ts";
 import { CapacityLeaseStore } from "./capacity.ts";
@@ -30,6 +31,7 @@ export interface Stores {
   handoffs: HandoffStore;
   agents: AgentDefinitionStore;
   invocations: InvocationStore;
+  approvedToolCallUses: ApprovedToolCallUseStore;
   continuations: ProviderContinuationStore;
   evaluations: EvaluationStore;
   gates: GateStore;
@@ -59,6 +61,7 @@ export function createStores(ctx: PersistenceContext, options: { planLimits?: Pl
     handoffs: new HandoffStore(ctx),
     agents: new AgentDefinitionStore(ctx),
     invocations: new InvocationStore(ctx, reservations, usage),
+    approvedToolCallUses: new ApprovedToolCallUseStore(ctx),
     continuations: new ProviderContinuationStore(ctx),
     evaluations: new EvaluationStore(ctx),
     gates: new GateStore(ctx),
@@ -73,6 +76,7 @@ export function createStores(ctx: PersistenceContext, options: { planLimits?: Pl
 
 export {
   AgentDefinitionStore,
+  ApprovedToolCallUseStore,
   ArtifactStore,
   BudgetReservationStore,
   CapacityLeaseStore,

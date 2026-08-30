@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "4584dc1e-53af-4233-87de-59f57db1fdd9",
+  "id": "63db78a5-03c3-4442-bd26-1671e16f34dc",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "acceptance_criteria": {
@@ -297,6 +297,183 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {}
+    },
+    "approved_tool_call_uses": {
+      "name": "approved_tool_call_uses",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "decision_id": {
+          "name": "decision_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "tool": {
+          "name": "tool",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "call_digest": {
+          "name": "call_digest",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "run_id": {
+          "name": "run_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "plan_node_id": {
+          "name": "plan_node_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "invocation_id": {
+          "name": "invocation_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "attempt_id": {
+          "name": "attempt_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "claimed_at": {
+          "name": "claimed_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "approved_tool_call_uses_decision": {
+          "name": "approved_tool_call_uses_decision",
+          "columns": [
+            "decision_id"
+          ],
+          "isUnique": true
+        },
+        "approved_tool_call_uses_invocation": {
+          "name": "approved_tool_call_uses_invocation",
+          "columns": [
+            "invocation_id"
+          ],
+          "isUnique": false
+        },
+        "approved_tool_call_uses_attempt": {
+          "name": "approved_tool_call_uses_attempt",
+          "columns": [
+            "attempt_id"
+          ],
+          "isUnique": false
+        },
+        "approved_tool_call_uses_run": {
+          "name": "approved_tool_call_uses_run",
+          "columns": [
+            "run_id"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "approved_tool_call_uses_decision_id_decisions_id_fk": {
+          "name": "approved_tool_call_uses_decision_id_decisions_id_fk",
+          "tableFrom": "approved_tool_call_uses",
+          "tableTo": "decisions",
+          "columnsFrom": [
+            "decision_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "approved_tool_call_uses_run_id_runs_id_fk": {
+          "name": "approved_tool_call_uses_run_id_runs_id_fk",
+          "tableFrom": "approved_tool_call_uses",
+          "tableTo": "runs",
+          "columnsFrom": [
+            "run_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "approved_tool_call_uses_plan_node_id_plan_nodes_id_fk": {
+          "name": "approved_tool_call_uses_plan_node_id_plan_nodes_id_fk",
+          "tableFrom": "approved_tool_call_uses",
+          "tableTo": "plan_nodes",
+          "columnsFrom": [
+            "plan_node_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "approved_tool_call_uses_invocation_id_invocations_id_fk": {
+          "name": "approved_tool_call_uses_invocation_id_invocations_id_fk",
+          "tableFrom": "approved_tool_call_uses",
+          "tableTo": "invocations",
+          "columnsFrom": [
+            "invocation_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "approved_tool_call_uses_attempt_id_attempts_id_fk": {
+          "name": "approved_tool_call_uses_attempt_id_attempts_id_fk",
+          "tableFrom": "approved_tool_call_uses",
+          "tableTo": "attempts",
+          "columnsFrom": [
+            "attempt_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "approved_tool_call_uses_digest_shape": {
+          "name": "approved_tool_call_uses_digest_shape",
+          "value": "length(\"approved_tool_call_uses\".\"call_digest\") = 64"
+        },
+        "approved_tool_call_uses_tool": {
+          "name": "approved_tool_call_uses_tool",
+          "value": "length(\"approved_tool_call_uses\".\"tool\") > 0"
+        }
+      }
     },
     "artifacts": {
       "name": "artifacts",

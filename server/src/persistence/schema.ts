@@ -885,6 +885,46 @@ export const attempts = sqliteTable(
   ],
 );
 
+/**
+ * Approval uses: one append-only row per claimed `approve_once` grant. The
+ * unique index on `decision_id` is the at-most-once rule; the claim
+ * trigger in the baseline migration re-checks every ownership fact against
+ * the Decision, Invocation, Attempt, and manifest rows at insertion.
+ */
+export const approvedToolCallUses = sqliteTable(
+  "approved_tool_call_uses",
+  {
+    id: text("id").primaryKey(),
+    decisionId: text("decision_id")
+      .notNull()
+      .references(() => decisions.id),
+    tool: text("tool").notNull(),
+    callDigest: text("call_digest").notNull(),
+    runId: text("run_id")
+      .notNull()
+      .references(() => runs.id),
+    planNodeId: text("plan_node_id")
+      .notNull()
+      .references(() => planNodes.id),
+    invocationId: text("invocation_id")
+      .notNull()
+      .references(() => invocations.id),
+    attemptId: text("attempt_id")
+      .notNull()
+      .references(() => attempts.id),
+    claimedAt: timestamp("claimed_at").notNull(),
+  },
+  (t) => [
+    // One use at most per approval Decision: the database, not a process lock, decides the one committed claim.
+    uniqueIndex("approved_tool_call_uses_decision").on(t.decisionId),
+    index("approved_tool_call_uses_invocation").on(t.invocationId),
+    index("approved_tool_call_uses_attempt").on(t.attemptId),
+    index("approved_tool_call_uses_run").on(t.runId),
+    check("approved_tool_call_uses_digest_shape", sql`length(${t.callDigest}) = 64`),
+    check("approved_tool_call_uses_tool", sql`length(${t.tool}) > 0`),
+  ],
+);
+
 /** Index only: the payload lives in the adapter-owned continuation payload store. */
 export const providerContinuations = sqliteTable(
   "provider_continuations",
@@ -1272,6 +1312,7 @@ export const TABLE_NAMES = [
   "agent_definition_revisions",
   "invocations",
   "attempts",
+  "approved_tool_call_uses",
   "provider_continuations",
   "context_manifests",
   "evaluations",

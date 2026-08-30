@@ -131,6 +131,10 @@ describe("database constraints", () => {
       expect(() => sqlite.prepare("DELETE FROM plan_revision_nodes").run()).toThrow(/immutable/);
       expect(() => sqlite.prepare("UPDATE runs SET kind = 'other' WHERE id = ?").run(s.run.id)).toThrow(/immutable/);
       expect(() => sqlite.prepare("DELETE FROM schema_info").run()).toThrow(/never deleted/);
+      // Approval uses are append-only and every insertion is re-checked against the Decision, Invocation, Attempt, and manifest rows.
+      expect(() => sqlite.prepare("INSERT INTO approved_tool_call_uses (id, decision_id, tool, call_digest, run_id, plan_node_id, invocation_id, attempt_id, claimed_at) VALUES (?, ?, 'shell', ?, ?, ?, ?, ?, ?)").run(`acu_${"1".repeat(24)}`, `dec_${"1".repeat(24)}`, "a".repeat(64), s.run.id, s.root.id, `inv_${"1".repeat(24)}`, `att_${"1".repeat(24)}`, "2026-01-01T00:00:00.000Z")).toThrow(/approved_tool_call_use claims a resolved approve_once/);
+      expect(() => sqlite.prepare("DELETE FROM approved_tool_call_uses").run()).not.toThrow();
+      expect(sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'approved_tool_call_uses' ORDER BY name").all()).toEqual([{ name: "approved_tool_call_uses_claim_valid" }, { name: "approved_tool_call_uses_no_delete" }, { name: "approved_tool_call_uses_no_update" }]);
     } finally {
       h.close();
     }

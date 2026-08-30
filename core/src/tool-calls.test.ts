@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { decisionRequestSchema, decisionSubjectSchema } from "./decisions.ts";
 import { newId } from "./ids.ts";
-import { canonicalToolCall, proposedToolCallSchema, SIDE_EFFECT_APPROVAL_OPTIONS, TOOL_CALL_MAX_BYTES } from "./tool-calls.ts";
+import { validateEventPayload } from "./events.ts";
+import { APPROVAL_CLAIM_REFUSAL_REASONS, approvedToolCallUseInputSchema, approvedToolCallUseSchema, canonicalToolCall, proposedToolCallSchema, SIDE_EFFECT_APPROVAL_OPTIONS, TOOL_CALL_MAX_BYTES } from "./tool-calls.ts";
 
 describe("proposed tool calls", () => {
   it("canonicalizes by sorted keys with no whitespace, so equal calls have equal bytes whatever their key order", () => {
@@ -58,5 +59,21 @@ describe("side-effect approval Decisions", () => {
     expect(decisionRequestSchema.safeParse({ ...request, resolutionPolicy: "use_default_after_deadline", recommendedOptionId: "approve_once", rationale: "r", deadlineAt: "2026-01-01T00:00:00.000Z" }).success).toBe(false);
     expect(decisionRequestSchema.safeParse({ ...request, kind: "operator_choice" }).success).toBe(false);
     expect(decisionRequestSchema.safeParse({ ...request, kind: "operator_choice", subject: null }).success).toBe(true);
+  });
+});
+
+describe("approval uses", () => {
+  it("records ids, tool, digest, and the claim time only, and closes the refusal reasons", () => {
+    const use = { id: newId("approvedToolCallUse"), decisionId: newId("decision"), tool: "shell", callDigest: "a".repeat(64), runId: newId("run"), planNodeId: newId("planNode"), invocationId: newId("invocation"), attemptId: newId("attempt"), claimedAt: "2026-01-01T00:00:00.000Z" };
+    expect(approvedToolCallUseSchema.safeParse(use).success).toBe(true);
+    expect(approvedToolCallUseSchema.safeParse({ ...use, input: { command: "rm -rf build" } }).success).toBe(false);
+    expect(approvedToolCallUseSchema.safeParse({ ...use, callDigest: "abc" }).success).toBe(false);
+    expect(approvedToolCallUseSchema.safeParse({ ...use, tool: "" }).success).toBe(false);
+    expect(approvedToolCallUseInputSchema.safeParse({ decisionId: use.decisionId, invocationId: use.invocationId, attemptId: use.attemptId, tool: "shell", callDigest: use.callDigest }).success).toBe(true);
+    expect(approvedToolCallUseInputSchema.safeParse({ decisionId: use.decisionId, invocationId: use.invocationId, attemptId: use.attemptId, tool: "shell", callDigest: use.callDigest, runId: use.runId }).success).toBe(false);
+    expect(APPROVAL_CLAIM_REFUSAL_REASONS).toContain("already_used");
+    expect(new Set(APPROVAL_CLAIM_REFUSAL_REASONS).size).toBe(APPROVAL_CLAIM_REFUSAL_REASONS.length);
+    expect(validateEventPayload("approved_tool_call.used", use)).toEqual(use);
+    expect(() => validateEventPayload("approved_tool_call.used", { ...use, call: { tool: "shell" } })).toThrow();
   });
 });
