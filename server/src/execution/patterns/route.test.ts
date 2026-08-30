@@ -391,16 +391,16 @@ describe("RoutePatternRunner", () => {
       expect(selections(h, route.id)).toHaveLength(1);
       expect(h.stores.invocations.listAtPosition(route.id, "route_branch:y")).toHaveLength(1);
       // The store refuses a second selection (any label), and the database refuses a row that bypasses the store.
-      expect(() => h.stores.evaluations.record({ runId: s.created.run.id, planNodeId: route.id, gateId: null, subject: { kind: "route_selection", selectedLabel: "x" }, verdict: "pass", evidence: [], producedBy: { kind: "runtime" }, artifactIds: [] })).toThrow(/already selected/);
-      expect(() => h.stores.evaluations.record({ runId: s.created.run.id, planNodeId: route.id, gateId: null, subject: { kind: "route_selection", selectedLabel: "y" }, verdict: "pass", evidence: [], producedBy: { kind: "runtime" }, artifactIds: [] })).toThrow(/already selected/);
+      expect(() => h.stores.evaluations.record({ context: null, snapshotId: null, runId: s.created.run.id, planNodeId: route.id, gateId: null, subject: { kind: "route_selection", selectedLabel: "x" }, verdict: "pass", evidence: [], producedBy: { kind: "runtime" }, artifactIds: [] })).toThrow(/already selected/);
+      expect(() => h.stores.evaluations.record({ context: null, snapshotId: null, runId: s.created.run.id, planNodeId: route.id, gateId: null, subject: { kind: "route_selection", selectedLabel: "y" }, verdict: "pass", evidence: [], producedBy: { kind: "runtime" }, artifactIds: [] })).toThrow(/already selected/);
       expect(() =>
         h.database.sqlite
           .prepare("INSERT INTO evaluations (id, run_id, plan_node_id, gate_id, subject, verdict, evidence, produced_by, artifact_ids, created_at) VALUES (?, ?, ?, NULL, ?, 'pass', '[]', ?, '[]', ?)")
           .run("eval_" + "0".repeat(24), s.created.run.id, route.id, JSON.stringify({ kind: "route_selection", selectedLabel: "x" }), JSON.stringify({ kind: "runtime" }), "2026-01-01T00:00:00.000Z"),
       ).toThrow(/UNIQUE constraint failed: evaluations.plan_node_id/);
       // A selection is admitted only for a route node binding the label, never for another node or with a null verdict.
-      expect(() => h.stores.evaluations.record({ runId: s.created.run.id, planNodeId: s.created.root.id, gateId: null, subject: { kind: "route_selection", selectedLabel: "x" }, verdict: "pass", evidence: [], producedBy: { kind: "runtime" }, artifactIds: [] })).toThrow(/not a route node/);
-      expect(() => h.stores.evaluations.record({ runId: s.created.run.id, planNodeId: route.id, gateId: null, subject: { kind: "route_selection", selectedLabel: "x" }, verdict: "fail", evidence: [], producedBy: { kind: "runtime" }, artifactIds: [] })).toThrow(/selection that was made/);
+      expect(() => h.stores.evaluations.record({ context: null, snapshotId: null, runId: s.created.run.id, planNodeId: s.created.root.id, gateId: null, subject: { kind: "route_selection", selectedLabel: "x" }, verdict: "pass", evidence: [], producedBy: { kind: "runtime" }, artifactIds: [] })).toThrow(/not a route node/);
+      expect(() => h.stores.evaluations.record({ context: null, snapshotId: null, runId: s.created.run.id, planNodeId: route.id, gateId: null, subject: { kind: "route_selection", selectedLabel: "x" }, verdict: "fail", evidence: [], producedBy: { kind: "runtime" }, artifactIds: [] })).toThrow(/selection that was made/);
       expect(h.stores.evaluations.routeSelectionOf(route.id)?.subject).toEqual({ kind: "route_selection", selectedLabel: "y" });
     } finally {
       h.close();

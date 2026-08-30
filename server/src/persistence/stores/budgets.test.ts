@@ -195,7 +195,7 @@ describe("reservation overrun", () => {
       const attempt = h.stores.invocations.createAttempt({ invocationId: invocation.id, startMode: "fresh", resumedFromAttemptId: null });
       h.stores.invocations.transitionAttempt(attempt.id, { to: "running", capacityLeaseId: null });
       h.stores.usage.record({ attemptId: attempt.id, model: "m", effort: null, inputTokensUncached: 1000, cacheCreationTokens: 0, cacheReadTokens: 0, outputTokens: 500, costUsd: 10.5, wallClockMs: 5, providerMs: null });
-      h.stores.invocations.transitionAttempt(attempt.id, { to: "succeeded", result: { status: "completed", artifactIds: [], tasks: [], evidence: [], summary: "", openItems: [], blocker: null, runOutcome: null, routeSelection: null }, transcriptArtifactId: null });
+      h.stores.invocations.transitionAttempt(attempt.id, { to: "succeeded", result: { status: "completed", artifactIds: [], tasks: [], evidence: [], summary: "", openItems: [], blocker: null, runOutcome: null, routeSelection: null, evaluation: null }, transcriptArtifactId: null });
       h.stores.invocations.transition(invocation.id, { to: "running" });
       h.stores.invocations.transition(invocation.id, { to: "cancelled" });
 

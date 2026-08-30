@@ -92,7 +92,7 @@ describe("requirement status", () => {
       const s = seedRun(h);
       const { leafIds } = seedRequirements(h, s);
       const gate = openGate(h, s);
-      const evaluation = h.stores.evaluations.record({ runId: s.run.id, planNodeId: null, gateId: gate.id, subject: { kind: "rubric", rubric: "works" }, verdict: "pass", evidence: [], producedBy: { kind: "runtime" }, artifactIds: [] });
+      const evaluation = h.stores.evaluations.record({ context: null, snapshotId: null, runId: s.run.id, planNodeId: null, gateId: gate.id, subject: { kind: "rubric", rubric: "works" }, verdict: "pass", evidence: [], producedBy: { kind: "runtime" }, artifactIds: [] });
       const change = h.stores.requirements.recordStatusChange({ requirementId: leafIds[0]!, runId: s.run.id, to: "satisfied", actor: "runtime", evidence: [{ kind: "evaluation", evaluationId: evaluation.id }], gateId: gate.id, decisionId: null, rationale: null });
       expect(change.from).toBe("open");
       expect(h.stores.requirements.get(leafIds[0]!).status).toBe("satisfied");

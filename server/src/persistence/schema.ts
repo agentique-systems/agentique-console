@@ -89,6 +89,7 @@ import {
   type DecisionOption,
   type DecisionRequester,
   type DecisionSubject,
+  type EvaluationContext,
   type EvaluationProducer,
   type EvaluationSubject,
   type EventActor,
@@ -707,7 +708,10 @@ export const handoffs = sqliteTable(
     index("handoffs_run").on(t.runId, t.createdAt),
     // One Handoff per logical transfer per Run: repeated reconciliation, transaction retry, restart, and racing callers all land here.
     uniqueIndex("handoffs_run_key").on(t.runId, t.handoffKey),
-    check("handoffs_key_shape", sql`${t.handoffKey} GLOB 'sequence:pn_*:pn_*' OR ${t.handoffKey} GLOB 'chain_step:pn_*:[0-9]*' OR ${t.handoffKey} GLOB 'branch:pn_*:pn_*' OR ${t.handoffKey} GLOB 'parallel_index:pn_*' OR ${t.handoffKey} GLOB 'worker_result:pn_*:task_*'`),
+    check(
+      "handoffs_key_shape",
+      sql`${t.handoffKey} GLOB 'sequence:pn_*:pn_*' OR ${t.handoffKey} GLOB 'chain_step:pn_*:[0-9]*' OR ${t.handoffKey} GLOB 'branch:pn_*:pn_*' OR ${t.handoffKey} GLOB 'parallel_index:pn_*' OR ${t.handoffKey} GLOB 'worker_result:pn_*:task_*' OR ${t.handoffKey} GLOB 'retry:pn_*:pn_*' OR ${t.handoffKey} GLOB 'optimizer_candidate:pn_*:[0-9]*' OR ${t.handoffKey} GLOB 'optimizer_feedback:pn_*:[0-9]*'`,
+    ),
     check("handoffs_status", sql`${t.status} IN (${inList(HANDOFF_STATUSES)})`),
     check("handoffs_summary_length", sql`length(${t.summary}) <= ${sql.raw(String(HANDOFF_MAX_SUMMARY_LENGTH))}`),
     check("handoffs_delivered_at", sql`(${t.status} = 'delivered') = (${t.deliveredAt} IS NOT NULL)`),
@@ -1059,11 +1063,19 @@ export const evaluations = sqliteTable(
     planNodeId: text("plan_node_id").references(() => planNodes.id),
     gateId: text("gate_id").references((): AnySQLiteColumn => gates.id),
     subject: text("subject", { mode: "json" }).$type<EvaluationSubject>().notNull(),
+    /** The optimizer round context (`optimizer_criterion` | `optimizer_verdict`), or NULL outside an evaluator_optimizer round. */
+    context: text("context", { mode: "json" }).$type<EvaluationContext>(),
     verdict: text("verdict").notNull(),
     evidence: text("evidence", { mode: "json" }).$type<Evidence[]>().notNull(),
     producedBy: text("produced_by", { mode: "json" }).$type<EvaluationProducer>().notNull(),
     artifactIds: text("artifact_ids", { mode: "json" }).$type<string[]>().notNull(),
+    /** The integration Snapshot the judgment was made against; required for an optimizer round. */
+    snapshotId: text("snapshot_id").references((): AnySQLiteColumn => snapshots.id),
     createdAt: timestamp("created_at").notNull(),
+    // Generated projections of the JSON columns, so the optimizer uniqueness rules are plain indexed columns.
+    contextKind: text("context_kind").generatedAlwaysAs(sql`json_extract(context, '$.kind')`, { mode: "virtual" }),
+    contextRound: integer("context_round").generatedAlwaysAs(sql`json_extract(context, '$.round')`, { mode: "virtual" }),
+    subjectCriterionId: text("subject_criterion_id").generatedAlwaysAs(sql`json_extract(subject, '$.acceptanceCriterionId')`, { mode: "virtual" }),
   },
   (t) => [
     index("evaluations_run").on(t.runId, t.createdAt),
@@ -1077,8 +1089,21 @@ export const evaluations = sqliteTable(
       .where(sql`json_extract(subject, '$.kind') = 'route_selection'`),
     check(
       "evaluations_route_selection_shape",
-      sql`json_extract(${t.subject}, '$.kind') <> 'route_selection' OR (${t.planNodeId} IS NOT NULL AND ${t.gateId} IS NULL AND ${t.verdict} = 'pass' AND json_extract(${t.subject}, '$.selectedLabel') IS NOT NULL)`,
+      sql`json_extract(${t.subject}, '$.kind') <> 'route_selection' OR (${t.planNodeId} IS NOT NULL AND ${t.gateId} IS NULL AND ${t.context} IS NULL AND ${t.verdict} = 'pass' AND json_extract(${t.subject}, '$.selectedLabel') IS NOT NULL)`,
     ),
+    // One overall verdict per evaluator_optimizer node and round, and one Evaluation per node, round, and Acceptance
+    // Criterion (execution-model §5.6): repeated passes, restarts, and racing callers converge on one canonical row each.
+    uniqueIndex("evaluations_optimizer_verdict_round")
+      .on(t.planNodeId, t.contextRound)
+      .where(sql`context_kind = 'optimizer_verdict'`),
+    uniqueIndex("evaluations_optimizer_criterion_round")
+      .on(t.planNodeId, t.contextRound, t.subjectCriterionId)
+      .where(sql`context_kind = 'optimizer_criterion'`),
+    check(
+      "evaluations_optimizer_shape",
+      sql`${t.context} IS NULL OR (${t.planNodeId} IS NOT NULL AND ${t.gateId} IS NULL AND ${t.snapshotId} IS NOT NULL AND json_extract(${t.context}, '$.round') >= 1 AND json_extract(${t.context}, '$.round') <= json_extract(${t.context}, '$.maxRounds') AND ((json_extract(${t.context}, '$.kind') = 'optimizer_verdict' AND json_extract(${t.subject}, '$.kind') = 'optimizer_round') OR (json_extract(${t.context}, '$.kind') = 'optimizer_criterion' AND json_extract(${t.subject}, '$.kind') = 'acceptance_criterion')))`,
+    ),
+    check("evaluations_optimizer_round_subject", sql`json_extract(${t.subject}, '$.kind') <> 'optimizer_round' OR json_extract(${t.context}, '$.kind') = 'optimizer_verdict'`),
   ],
 );
 

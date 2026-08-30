@@ -301,7 +301,7 @@ describe("readiness evaluator", () => {
       ]);
       h.stores.plans.transitionNode(r1.id, { to: "ready" });
       h.stores.plans.transitionNode(r1.id, { to: "running" });
-      h.stores.evaluations.record({ runId: s.run.id, planNodeId: r1.id, gateId: null, subject: { kind: "route_selection", selectedLabel: "y" }, verdict: "pass", evidence: [], producedBy: { kind: "runtime" }, artifactIds: [] });
+      h.stores.evaluations.record({ context: null, snapshotId: null, runId: s.run.id, planNodeId: r1.id, gateId: null, subject: { kind: "route_selection", selectedLabel: "y" }, verdict: "pass", evidence: [], producedBy: { kind: "runtime" }, artifactIds: [] });
       h.stores.plans.transitionNode(r1.id, { to: "succeeded", outputArtifactIds: [] });
       const fifth = projectReadinessInput(h.stores, h.stores.plans.currentGraph(s.run.id));
       expect(fifth.routeSelections.get(r1.id)).toMatchObject({ planNodeId: r1.id, selectedLabel: "y" });

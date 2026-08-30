@@ -16,7 +16,7 @@ import type { ReadinessInput } from "./readiness.ts";
 /** The graph with no route-selection facts: what plain sequence transfers are computed from. */
 const input = (graph: PlanGraph): ReadinessInput => ({ graph, routeSelections: new Map() });
 
-const result = (summary: string, artifactIds: string[] = []): InvocationResult => ({ status: "completed", artifactIds: artifactIds as never, tasks: [], evidence: [], summary, openItems: [], blocker: null, runOutcome: null, routeSelection: null });
+const result = (summary: string, artifactIds: string[] = []): InvocationResult => ({ status: "completed", artifactIds: artifactIds as never, tasks: [], evidence: [], summary, openItems: [], blocker: null, runOutcome: null, routeSelection: null, evaluation: null });
 
 /** A → B (and A → C with runOnDependencyFailure) in one revision; A running. */
 function sequenced(h: Harness, s: Seeded) {
@@ -179,7 +179,7 @@ describe("HandoffRouter", () => {
       h.stores.plans.transitionNode(route.id, { to: "running" });
       const router = new HandoffRouter(h.stores);
       // A composite selection: only the selected branch transfer exists; the route's own sequence edge is inactive.
-      h.stores.evaluations.record({ runId: s.run.id, planNodeId: route.id, gateId: null, subject: { kind: "route_selection", selectedLabel: "b" }, verdict: "pass", evidence: [], producedBy: { kind: "runtime" }, artifactIds: [] });
+      h.stores.evaluations.record({ context: null, snapshotId: null, runId: s.run.id, planNodeId: route.id, gateId: null, subject: { kind: "route_selection", selectedLabel: "b" }, verdict: "pass", evidence: [], producedBy: { kind: "runtime" }, artifactIds: [] });
       h.stores.plans.transitionNode(route.id, { to: "succeeded", outputArtifactIds: [] });
       const facts = projectReadinessInput(h.stores, h.stores.plans.currentGraph(s.run.id));
       const seq = h.ctx.journal.lastSeq();

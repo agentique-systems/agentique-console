@@ -133,7 +133,7 @@ export class ScriptedProvider implements ProviderAdapter {
     this.supportsContinuation = options.supportsContinuation ?? true;
     this.#clock = options.clock;
     this.#inTransaction = options.inTransaction ?? (() => false);
-    this.#defaultStep = options.defaultStep ?? { kind: "succeed", result: { status: "completed", artifactIds: [], tasks: [], evidence: [], summary: "done", openItems: [], blocker: null, runOutcome: null, routeSelection: null } };
+    this.#defaultStep = options.defaultStep ?? { kind: "succeed", result: { status: "completed", artifactIds: [], tasks: [], evidence: [], summary: "done", openItems: [], blocker: null, runOutcome: null, routeSelection: null, evaluation: null } };
   }
 
   /** Queues steps in execution order. */

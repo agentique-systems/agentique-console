@@ -311,22 +311,32 @@ CREATE TABLE `evaluations` (
 	`plan_node_id` text,
 	`gate_id` text,
 	`subject` text NOT NULL,
+	`context` text,
 	`verdict` text NOT NULL,
 	`evidence` text NOT NULL,
 	`produced_by` text NOT NULL,
 	`artifact_ids` text NOT NULL,
+	`snapshot_id` text,
 	`created_at` text NOT NULL,
+	`context_kind` text GENERATED ALWAYS AS (json_extract(context, '$.kind')) VIRTUAL,
+	`context_round` integer GENERATED ALWAYS AS (json_extract(context, '$.round')) VIRTUAL,
+	`subject_criterion_id` text GENERATED ALWAYS AS (json_extract(subject, '$.acceptanceCriterionId')) VIRTUAL,
 	FOREIGN KEY (`run_id`) REFERENCES `runs`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`plan_node_id`) REFERENCES `plan_nodes`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`gate_id`) REFERENCES `gates`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`snapshot_id`) REFERENCES `snapshots`(`id`) ON UPDATE no action ON DELETE no action,
 	CONSTRAINT "evaluations_verdict" CHECK("evaluations"."verdict" IN ('pass', 'fail', 'inconclusive')),
-	CONSTRAINT "evaluations_route_selection_shape" CHECK(json_extract("evaluations"."subject", '$.kind') <> 'route_selection' OR ("evaluations"."plan_node_id" IS NOT NULL AND "evaluations"."gate_id" IS NULL AND "evaluations"."verdict" = 'pass' AND json_extract("evaluations"."subject", '$.selectedLabel') IS NOT NULL))
+	CONSTRAINT "evaluations_route_selection_shape" CHECK(json_extract("evaluations"."subject", '$.kind') <> 'route_selection' OR ("evaluations"."plan_node_id" IS NOT NULL AND "evaluations"."gate_id" IS NULL AND "evaluations"."context" IS NULL AND "evaluations"."verdict" = 'pass' AND json_extract("evaluations"."subject", '$.selectedLabel') IS NOT NULL)),
+	CONSTRAINT "evaluations_optimizer_shape" CHECK("evaluations"."context" IS NULL OR ("evaluations"."plan_node_id" IS NOT NULL AND "evaluations"."gate_id" IS NULL AND "evaluations"."snapshot_id" IS NOT NULL AND json_extract("evaluations"."context", '$.round') >= 1 AND json_extract("evaluations"."context", '$.round') <= json_extract("evaluations"."context", '$.maxRounds') AND ((json_extract("evaluations"."context", '$.kind') = 'optimizer_verdict' AND json_extract("evaluations"."subject", '$.kind') = 'optimizer_round') OR (json_extract("evaluations"."context", '$.kind') = 'optimizer_criterion' AND json_extract("evaluations"."subject", '$.kind') = 'acceptance_criterion')))),
+	CONSTRAINT "evaluations_optimizer_round_subject" CHECK(json_extract("evaluations"."subject", '$.kind') <> 'optimizer_round' OR json_extract("evaluations"."context", '$.kind') = 'optimizer_verdict')
 );
 --> statement-breakpoint
 CREATE INDEX `evaluations_run` ON `evaluations` (`run_id`,`created_at`);--> statement-breakpoint
 CREATE INDEX `evaluations_gate` ON `evaluations` (`gate_id`);--> statement-breakpoint
 CREATE INDEX `evaluations_plan_node` ON `evaluations` (`plan_node_id`);--> statement-breakpoint
 CREATE UNIQUE INDEX `evaluations_route_selection_node` ON `evaluations` (`plan_node_id`) WHERE json_extract(subject, '$.kind') = 'route_selection';--> statement-breakpoint
+CREATE UNIQUE INDEX `evaluations_optimizer_verdict_round` ON `evaluations` (`plan_node_id`,`context_round`) WHERE context_kind = 'optimizer_verdict';--> statement-breakpoint
+CREATE UNIQUE INDEX `evaluations_optimizer_criterion_round` ON `evaluations` (`plan_node_id`,`context_round`,`subject_criterion_id`) WHERE context_kind = 'optimizer_criterion';--> statement-breakpoint
 CREATE TABLE `events` (
 	`seq` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
 	`type` text NOT NULL,
@@ -396,7 +406,7 @@ CREATE TABLE `handoffs` (
 	`created_at` text NOT NULL,
 	`delivered_at` text,
 	FOREIGN KEY (`run_id`) REFERENCES `runs`(`id`) ON UPDATE no action ON DELETE no action,
-	CONSTRAINT "handoffs_key_shape" CHECK("handoffs"."handoff_key" GLOB 'sequence:pn_*:pn_*' OR "handoffs"."handoff_key" GLOB 'chain_step:pn_*:[0-9]*' OR "handoffs"."handoff_key" GLOB 'branch:pn_*:pn_*' OR "handoffs"."handoff_key" GLOB 'parallel_index:pn_*' OR "handoffs"."handoff_key" GLOB 'worker_result:pn_*:task_*'),
+	CONSTRAINT "handoffs_key_shape" CHECK("handoffs"."handoff_key" GLOB 'sequence:pn_*:pn_*' OR "handoffs"."handoff_key" GLOB 'chain_step:pn_*:[0-9]*' OR "handoffs"."handoff_key" GLOB 'branch:pn_*:pn_*' OR "handoffs"."handoff_key" GLOB 'parallel_index:pn_*' OR "handoffs"."handoff_key" GLOB 'worker_result:pn_*:task_*' OR "handoffs"."handoff_key" GLOB 'retry:pn_*:pn_*' OR "handoffs"."handoff_key" GLOB 'optimizer_candidate:pn_*:[0-9]*' OR "handoffs"."handoff_key" GLOB 'optimizer_feedback:pn_*:[0-9]*'),
 	CONSTRAINT "handoffs_status" CHECK("handoffs"."status" IN ('pending', 'delivered', 'cancelled')),
 	CONSTRAINT "handoffs_summary_length" CHECK(length("handoffs"."summary") <= 500),
 	CONSTRAINT "handoffs_delivered_at" CHECK(("handoffs"."status" = 'delivered') = ("handoffs"."delivered_at" IS NOT NULL))

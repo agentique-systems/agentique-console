@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "9167c512-94e4-4859-8da1-4ae7f1a3dd8c",
+  "id": "239654b1-ab12-41ab-872e-68fd461c65c6",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "acceptance_criteria": {
@@ -2184,6 +2184,13 @@
           "notNull": true,
           "autoincrement": false
         },
+        "context": {
+          "name": "context",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "verdict": {
           "name": "verdict",
           "type": "text",
@@ -2212,12 +2219,52 @@
           "notNull": true,
           "autoincrement": false
         },
+        "snapshot_id": {
+          "name": "snapshot_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "text",
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
+        },
+        "context_kind": {
+          "name": "context_kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false,
+          "generated": {
+            "as": "(json_extract(context, '$.kind'))",
+            "type": "virtual"
+          }
+        },
+        "context_round": {
+          "name": "context_round",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false,
+          "generated": {
+            "as": "(json_extract(context, '$.round'))",
+            "type": "virtual"
+          }
+        },
+        "subject_criterion_id": {
+          "name": "subject_criterion_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false,
+          "generated": {
+            "as": "(json_extract(subject, '$.acceptanceCriterionId'))",
+            "type": "virtual"
+          }
         }
       },
       "indexes": {
@@ -2250,6 +2297,25 @@
           ],
           "isUnique": true,
           "where": "json_extract(subject, '$.kind') = 'route_selection'"
+        },
+        "evaluations_optimizer_verdict_round": {
+          "name": "evaluations_optimizer_verdict_round",
+          "columns": [
+            "plan_node_id",
+            "context_round"
+          ],
+          "isUnique": true,
+          "where": "context_kind = 'optimizer_verdict'"
+        },
+        "evaluations_optimizer_criterion_round": {
+          "name": "evaluations_optimizer_criterion_round",
+          "columns": [
+            "plan_node_id",
+            "context_round",
+            "subject_criterion_id"
+          ],
+          "isUnique": true,
+          "where": "context_kind = 'optimizer_criterion'"
         }
       },
       "foreignKeys": {
@@ -2291,6 +2357,19 @@
           ],
           "onDelete": "no action",
           "onUpdate": "no action"
+        },
+        "evaluations_snapshot_id_snapshots_id_fk": {
+          "name": "evaluations_snapshot_id_snapshots_id_fk",
+          "tableFrom": "evaluations",
+          "tableTo": "snapshots",
+          "columnsFrom": [
+            "snapshot_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -2302,7 +2381,15 @@
         },
         "evaluations_route_selection_shape": {
           "name": "evaluations_route_selection_shape",
-          "value": "json_extract(\"evaluations\".\"subject\", '$.kind') <> 'route_selection' OR (\"evaluations\".\"plan_node_id\" IS NOT NULL AND \"evaluations\".\"gate_id\" IS NULL AND \"evaluations\".\"verdict\" = 'pass' AND json_extract(\"evaluations\".\"subject\", '$.selectedLabel') IS NOT NULL)"
+          "value": "json_extract(\"evaluations\".\"subject\", '$.kind') <> 'route_selection' OR (\"evaluations\".\"plan_node_id\" IS NOT NULL AND \"evaluations\".\"gate_id\" IS NULL AND \"evaluations\".\"context\" IS NULL AND \"evaluations\".\"verdict\" = 'pass' AND json_extract(\"evaluations\".\"subject\", '$.selectedLabel') IS NOT NULL)"
+        },
+        "evaluations_optimizer_shape": {
+          "name": "evaluations_optimizer_shape",
+          "value": "\"evaluations\".\"context\" IS NULL OR (\"evaluations\".\"plan_node_id\" IS NOT NULL AND \"evaluations\".\"gate_id\" IS NULL AND \"evaluations\".\"snapshot_id\" IS NOT NULL AND json_extract(\"evaluations\".\"context\", '$.round') >= 1 AND json_extract(\"evaluations\".\"context\", '$.round') <= json_extract(\"evaluations\".\"context\", '$.maxRounds') AND ((json_extract(\"evaluations\".\"context\", '$.kind') = 'optimizer_verdict' AND json_extract(\"evaluations\".\"subject\", '$.kind') = 'optimizer_round') OR (json_extract(\"evaluations\".\"context\", '$.kind') = 'optimizer_criterion' AND json_extract(\"evaluations\".\"subject\", '$.kind') = 'acceptance_criterion')))"
+        },
+        "evaluations_optimizer_round_subject": {
+          "name": "evaluations_optimizer_round_subject",
+          "value": "json_extract(\"evaluations\".\"subject\", '$.kind') <> 'optimizer_round' OR json_extract(\"evaluations\".\"context\", '$.kind') = 'optimizer_verdict'"
         }
       }
     },
@@ -2817,7 +2904,7 @@
       "checkConstraints": {
         "handoffs_key_shape": {
           "name": "handoffs_key_shape",
-          "value": "\"handoffs\".\"handoff_key\" GLOB 'sequence:pn_*:pn_*' OR \"handoffs\".\"handoff_key\" GLOB 'chain_step:pn_*:[0-9]*' OR \"handoffs\".\"handoff_key\" GLOB 'branch:pn_*:pn_*' OR \"handoffs\".\"handoff_key\" GLOB 'parallel_index:pn_*' OR \"handoffs\".\"handoff_key\" GLOB 'worker_result:pn_*:task_*'"
+          "value": "\"handoffs\".\"handoff_key\" GLOB 'sequence:pn_*:pn_*' OR \"handoffs\".\"handoff_key\" GLOB 'chain_step:pn_*:[0-9]*' OR \"handoffs\".\"handoff_key\" GLOB 'branch:pn_*:pn_*' OR \"handoffs\".\"handoff_key\" GLOB 'parallel_index:pn_*' OR \"handoffs\".\"handoff_key\" GLOB 'worker_result:pn_*:task_*' OR \"handoffs\".\"handoff_key\" GLOB 'retry:pn_*:pn_*' OR \"handoffs\".\"handoff_key\" GLOB 'optimizer_candidate:pn_*:[0-9]*' OR \"handoffs\".\"handoff_key\" GLOB 'optimizer_feedback:pn_*:[0-9]*'"
         },
         "handoffs_status": {
           "name": "handoffs_status",

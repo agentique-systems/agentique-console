@@ -28,6 +28,7 @@ import { coordinatorWorkerBoundsSchema, PLAN_NODE_STATUSES, planRejectionReasonS
 import { coordinatorBlockerSchema, taskLedgerEntrySchema, type CoordinatorBlocker, type TaskLedgerEntry } from "./tasks.ts";
 import { PATTERN_POSITION_BINDINGS, patternPositionKey, patternPositionSchema, type PatternPosition } from "./pattern-positions.ts";
 import { acceptanceCheckSchema, evidenceSchema, REQUIREMENT_STATUSES, type AcceptanceCheck, type Evidence, type RequirementStatus } from "./requirements.ts";
+import { VERDICTS, type Verdict } from "./verification.ts";
 import { agentCapabilitiesSchema, modelPolicySchema, toolPolicySchema, type AgentCapabilities, type ModelPolicy, type ToolPolicy } from "./agents.ts";
 import { defineStateMachine } from "./transitions.ts";
 import {
@@ -205,10 +206,42 @@ export interface RouteSelectionResult {
 
 export const routeSelectionResultSchema: z.ZodType<RouteSelectionResult> = z.strictObject({ selectedLabel: nonEmptyString });
 
+/** An Evaluator's verdict on one evaluated Acceptance Criterion it was asked to judge, with the Evidence for that verdict. */
+export interface EvaluatorCriterionVerdict {
+  acceptanceCriterionId: AcceptanceCriterionId;
+  verdict: Verdict;
+  evidence: Evidence[];
+}
+
+/**
+ * The typed payload an `evaluate` Invocation returns (execution-model §5.6,
+ * §6.3): the overall verdict on the judged candidate, one verdict per
+ * evaluated Acceptance Criterion the runtime asked it to judge, and the
+ * Evidence for the overall verdict. It is the only channel for a verdict —
+ * never the summary, an open item, an Artifact, or transcript text. The
+ * runtime supplies the subject, Plan Node, round, Snapshot, and judged
+ * Artifacts through the immutable manifest; the Evaluator cannot substitute
+ * them. Per-criterion Evidence is recorded on the criterion Evaluation,
+ * overall Evidence on the round verdict, so nothing is duplicated.
+ */
+export interface EvaluatorResult {
+  verdict: Verdict;
+  criteria: EvaluatorCriterionVerdict[];
+  evidence: Evidence[];
+}
+
+export const evaluatorResultSchema: z.ZodType<EvaluatorResult> = z.strictObject({
+  verdict: z.enum(VERDICTS),
+  criteria: z.array(z.strictObject({ acceptanceCriterionId: idSchema("acceptanceCriterion"), verdict: z.enum(VERDICTS), evidence: z.array(evidenceSchema) })),
+  evidence: z.array(evidenceSchema),
+});
+
 /**
  * The typed result every Attempt returns through `return_result`. The
  * purpose-specific members are typed and closed: `runOutcome` exists only
- * for the Orchestrator, `routeSelection` only for a route selector.
+ * for the Orchestrator, `routeSelection` only for a route selector, and
+ * `evaluation` only for an Evaluator of purpose `evaluate`; the last two are
+ * mutually exclusive.
  */
 export interface InvocationResult {
   status: ResultStatus;
@@ -220,6 +253,7 @@ export interface InvocationResult {
   blocker: string | null;
   runOutcome: { kind: "infeasible"; evidence: Evidence[] } | null;
   routeSelection: RouteSelectionResult | null;
+  evaluation: EvaluatorResult | null;
 }
 
 export const RESULT_MAX_SUMMARY_LENGTH = 500;
@@ -254,6 +288,12 @@ export const RESULT_VIOLATION_CODES = [
   "selection_missing",
   "selection_invalid",
   "selection_not_permitted",
+  "evaluation_missing",
+  "evaluation_not_permitted",
+  "evaluation_criteria_mismatch",
+  "evaluation_verdict_inconsistent",
+  "evaluation_evidence_missing",
+  "evidence_not_permitted",
   "changeset_missing",
   "status_incompatible",
 ] as const;
@@ -317,6 +357,7 @@ export const invocationResultSchema: z.ZodType<InvocationResult> = z
       .strictObject({ kind: z.literal("infeasible"), evidence: z.array(evidenceSchema).min(1) })
       .nullable(),
     routeSelection: routeSelectionResultSchema.nullable(),
+    evaluation: evaluatorResultSchema.nullable(),
   })
   .refine((r) => (r.status === "blocked") === (r.blocker !== null), {
     message: "blocker is set exactly for a blocked result",
@@ -325,6 +366,14 @@ export const invocationResultSchema: z.ZodType<InvocationResult> = z
   .refine((r) => r.routeSelection === null || r.status === "completed", {
     message: "a route selection is returned only by a completed result",
     path: ["routeSelection"],
+  })
+  .refine((r) => r.evaluation === null || r.status === "completed", {
+    message: "an evaluation is returned only by a completed result",
+    path: ["evaluation"],
+  })
+  .refine((r) => r.evaluation === null || r.routeSelection === null, {
+    message: "a route selection and an evaluation are mutually exclusive",
+    path: ["evaluation"],
   });
 
 export interface Invocation {
@@ -914,7 +963,19 @@ export type ManifestInput =
    */
   | { kind: "coordinator_turn"; purpose: CoordinatorPurpose; bounds: CoordinatorWorkerBounds; turnsUsed: number; tasks: TaskLedgerEntry[]; blockerKeys: string[] }
   /** One canonical unresolved blocker delivered to a `replan` turn that was not delivered to an earlier Coordinator turn. */
-  | { kind: "coordinator_blocker"; blocker: CoordinatorBlocker };
+  | { kind: "coordinator_blocker"; blocker: CoordinatorBlocker }
+  /**
+   * What an `evaluator_optimizer` round's Evaluator judges (execution-model §5.6), supplied by the runtime and never by the
+   * model: the round, the judged integration Snapshot, the exact candidate Artifact ids of the round, and the evaluated
+   * Acceptance Criteria the result must cover exactly (deterministic criteria are checked by the runtime, never reported).
+   */
+  | { kind: "optimizer_candidate"; round: number; maxRounds: number; snapshotId: SnapshotId; artifactIds: ArtifactId[]; acceptanceCriterionIds: AcceptanceCriterionId[] }
+  /**
+   * The canonical overall verdict of the previous `evaluator_optimizer` round, delivered to the next producer round (an
+   * inline node's `producer_round`, or the entry of the next unrolled producer subgraph): the Evaluation's identity, its
+   * round, its verdict, and its Evidence references. The judged candidate Artifacts travel by Handoff.
+   */
+  | { kind: "optimizer_feedback"; evaluationId: EvaluationId; round: number; verdict: Exclude<Verdict, "pass">; evidence: Evidence[] };
 
 export const manifestInputSchema: z.ZodType<ManifestInput> = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("operator_message"), conversationMessageId: idSchema("conversationMessage"), content: z.string().min(1) }),
@@ -944,6 +1005,17 @@ export const manifestInputSchema: z.ZodType<ManifestInput> = z.discriminatedUnio
     blockerKeys: z.array(nonEmptyString.max(200)).max(256).refine((keys) => keys.every((k, i) => i === 0 || keys[i - 1]! < k), { message: "blocker keys are sorted and unique" }),
   }),
   z.strictObject({ kind: z.literal("coordinator_blocker"), blocker: coordinatorBlockerSchema }),
+  z
+    .strictObject({
+      kind: z.literal("optimizer_candidate"),
+      round: positiveCount,
+      maxRounds: positiveCount,
+      snapshotId: idSchema("snapshot"),
+      artifactIds: uniqueIds(idSchema("artifact")),
+      acceptanceCriterionIds: uniqueIds(idSchema("acceptanceCriterion")).refine((ids) => ids.every((id, i) => i === 0 || ids[i - 1]! < id), { message: "acceptance criteria are ordered by id" }),
+    })
+    .refine((i) => i.round <= i.maxRounds, { message: "round is within maxRounds", path: ["round"] }),
+  z.strictObject({ kind: z.literal("optimizer_feedback"), evaluationId: idSchema("evaluation"), round: positiveCount, verdict: z.enum(["fail", "inconclusive"]), evidence: z.array(evidenceSchema) }),
 ]);
 
 /**

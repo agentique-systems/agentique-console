@@ -15,6 +15,7 @@ import {
   type Evidence,
   type Invocation,
   type InvocationResult,
+  type ManifestInput,
   type ResultViolation,
   type Run,
   type TaskId,
@@ -120,9 +121,62 @@ export class InvocationResultValidator {
       }
     } else if (result.routeSelection !== null) add("selection_not_permitted", "only a route selector returns a routeSelection", "routeSelection");
 
+    // An Evaluator's verdict is typed and closed (execution-model §5.6, §6.3): a completed `evaluate` result carries exactly
+    // one `evaluation` covering exactly the evaluated criteria the manifest asked it to judge; no other Invocation returns one.
+    if (invocation.purpose === "evaluate") {
+      if (result.status === "completed") {
+        if (result.evaluation === null) add("evaluation_missing", "a completed evaluation names its verdict, the evaluated criteria, and Evidence", "evaluation");
+        else this.evaluation(result.evaluation, context, add);
+      }
+    } else if (result.evaluation !== null) add("evaluation_not_permitted", "only an Evaluator of purpose evaluate returns an evaluation", "evaluation");
+
+    if (invocation.role === "evaluator") {
+      // An Evaluator judges; it never claims to have run a deterministic command (the runtime runs those) and never writes.
+      result.evidence.forEach((evidence, i) => {
+        if (evidence.kind === "command") add("evidence_not_permitted", "an Evaluator does not run deterministic commands; the runtime records command Evidence", `evidence.${i}`);
+      });
+      if (context.changeset !== null) add("status_incompatible", "an Evaluator is read-only and records no Changeset", null);
+    }
+
     if (context.writes && context.changeset === null) add("changeset_missing", "a writing Invocation records a Changeset, an explicitly empty one when nothing changed", null);
 
     return violations.length === 0 ? { ok: true, result } : { ok: false, violations: boundResultViolations(violations) };
+  }
+
+  /**
+   * The criteria an Evaluator must cover are the ones the runtime delivered in its immutable manifest: the
+   * `optimizer_candidate` input's evaluated criteria for an optimizer round (otherwise the manifest's evaluated criteria).
+   * Coverage is exact — no missing, duplicate, extra, foreign, or deterministic criterion — every Evidence reference
+   * exists in the Run and is not a command claim, the overall verdict carries Evidence, and a pass cannot stand on a
+   * failed or inconclusive criterion.
+   */
+  private evaluation(evaluation: NonNullable<InvocationResult["evaluation"]>, context: ResultValidationContext, add: (code: ResultViolation["code"], message: string, path: string | null) => void): void {
+    const manifest = context.manifest.content;
+    const candidate = manifest.inputs.find((i): i is Extract<ManifestInput, { kind: "optimizer_candidate" }> => i.kind === "optimizer_candidate");
+    const expected = candidate === undefined ? manifest.acceptanceCriteria.filter((c) => c.check.kind === "evaluated").map((c) => c.acceptanceCriterionId) : candidate.acceptanceCriterionIds;
+    const deterministic = new Set(manifest.acceptanceCriteria.filter((c) => c.check.kind === "deterministic").map((c) => c.acceptanceCriterionId));
+    const seen = new Set<string>();
+    evaluation.criteria.forEach((criterion, index) => {
+      const path = `evaluation.criteria.${index}`;
+      const id = criterion.acceptanceCriterionId;
+      if (seen.has(id)) add("evaluation_criteria_mismatch", `AcceptanceCriterion ${id} is reported twice`, path);
+      seen.add(id);
+      if (deterministic.has(id)) add("evaluation_criteria_mismatch", `AcceptanceCriterion ${id} is deterministic; the runtime checks it`, path);
+      else if (!expected.includes(id)) add("evaluation_criteria_mismatch", `AcceptanceCriterion ${id} is not among the evaluated criteria of this Invocation`, path);
+      criterion.evidence.forEach((evidence, i) => {
+        if (evidence.kind === "command") add("evidence_not_permitted", "an Evaluator does not run deterministic commands; the runtime records command Evidence", `${path}.evidence.${i}`);
+        else this.evidence(evidence, context, `${path}.evidence.${i}`, add);
+      });
+      if (evaluation.verdict === "pass" && criterion.verdict !== "pass") add("evaluation_verdict_inconsistent", `the overall verdict is pass but AcceptanceCriterion ${id} is ${criterion.verdict}`, "evaluation.verdict");
+    });
+    for (const id of expected) {
+      if (!seen.has(id)) add("evaluation_criteria_mismatch", `AcceptanceCriterion ${id} was not reported`, "evaluation.criteria");
+    }
+    if (evaluation.evidence.length === 0) add("evaluation_evidence_missing", "the overall verdict carries Evidence", "evaluation.evidence");
+    evaluation.evidence.forEach((evidence, i) => {
+      if (evidence.kind === "command") add("evidence_not_permitted", "an Evaluator does not run deterministic commands; the runtime records command Evidence", `evaluation.evidence.${i}`);
+      else this.evidence(evidence, context, `evaluation.evidence.${i}`, add);
+    });
   }
 
   private artifact(id: string) {

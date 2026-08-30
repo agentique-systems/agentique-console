@@ -36,6 +36,7 @@ import {
   type AttemptFailureDetail,
   type AttemptId,
   type ContextManifest,
+  type Evidence,
   type ManifestInput,
 } from "@agentique-console/core";
 import { sha256Hex } from "../../persistence/blob-store.ts";
@@ -99,6 +100,28 @@ function renderInput(input: ManifestInput): string[] {
       if (b.kind === "task_blocked") return [`- coordinator_blocker task_blocked ${b.taskId} ${b.blockReason.kind}${"taskId" in b.blockReason ? ` ${b.blockReason.taskId}` : ""}${"decisionId" in b.blockReason ? ` ${b.blockReason.decisionId}` : ""}${"description" in b.blockReason ? `: ${b.blockReason.description}` : ""}`];
       return [`- coordinator_blocker integration_conflict ${b.taskId} invocation ${b.invocationId} changeset ${b.changesetId} conflict_task ${b.conflictTaskId} report ${b.reportArtifactId ?? NONE}`];
     }
+    case "optimizer_candidate":
+      return [`- optimizer_candidate round ${input.round} of ${input.maxRounds} snapshot ${input.snapshotId} artifacts ${list(input.artifactIds)} evaluated_criteria ${list(input.acceptanceCriterionIds)}`];
+    case "optimizer_feedback":
+      return [`- optimizer_feedback round ${input.round} verdict ${input.verdict} evaluation ${input.evaluationId}`, ...(input.evidence.length === 0 ? ["  evidence: none"] : input.evidence.map((e) => `  - ${renderEvidence(e)}`))];
+  }
+}
+
+/** One Evidence reference as ids and closed facts; never content. */
+function renderEvidence(evidence: Evidence): string {
+  switch (evidence.kind) {
+    case "artifact":
+      return `artifact ${evidence.artifactId}`;
+    case "command":
+      return `command exit ${evidence.exitCode} output ${evidence.outputArtifactId}${evidence.outputTruncated ? " (truncated)" : ""}: ${evidence.command}`;
+    case "evaluation":
+      return `evaluation ${evidence.evaluationId}`;
+    case "file":
+      return `file ${evidence.path} at ${evidence.snapshotId}`;
+    case "snapshot":
+      return `snapshot ${evidence.snapshotId}`;
+    case "url":
+      return `url ${evidence.url}`;
   }
 }
 

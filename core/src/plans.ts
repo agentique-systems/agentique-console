@@ -93,6 +93,8 @@ export const PLAN_NODE_FAILURE_REASONS = [
   "coordinator_no_progress",
   /** The node's `maxCoordinatorInvocations` logical turns are spent while unresolved Tasks remain or synthesis is still due. */
   "coordinator_invocations_exhausted",
+  /** An `evaluator_optimizer` node's final round ended `fail` or `inconclusive`: no candidate passed within `maxRounds`. */
+  "optimizer_rounds_exhausted",
 ] as const;
 export type PlanNodeFailureReason = (typeof PLAN_NODE_FAILURE_REASONS)[number];
 

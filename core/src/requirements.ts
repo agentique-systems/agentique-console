@@ -29,7 +29,11 @@ export type RequirementComposition = (typeof REQUIREMENT_COMPOSITIONS)[number];
 /** A reference to a verifiable fact; never free text. */
 export type Evidence =
   | { kind: "artifact"; artifactId: ArtifactId }
-  | { kind: "command"; command: string; exitCode: number; outputArtifactId: ArtifactId }
+  /**
+   * A command the runtime ran and its captured output Artifact. `outputTruncated` records canonically that the stored
+   * output is a bounded prefix of what the command produced; it is never left implicit.
+   */
+  | { kind: "command"; command: string; exitCode: number; outputArtifactId: ArtifactId; outputTruncated?: boolean }
   | { kind: "evaluation"; evaluationId: EvaluationId }
   | { kind: "file"; path: string; snapshotId: SnapshotId }
   | { kind: "snapshot"; snapshotId: SnapshotId }
@@ -42,6 +46,7 @@ export const evidenceSchema: z.ZodType<Evidence> = z.discriminatedUnion("kind", 
     command: nonEmptyString,
     exitCode: z.number().int(),
     outputArtifactId: idSchema("artifact"),
+    outputTruncated: z.boolean().optional(),
   }),
   z.strictObject({ kind: z.literal("evaluation"), evaluationId: idSchema("evaluation") }),
   z.strictObject({ kind: z.literal("file"), path: nonEmptyString, snapshotId: idSchema("snapshot") }),

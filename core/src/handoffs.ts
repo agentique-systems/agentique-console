@@ -44,7 +44,21 @@ export type HandoffRoute =
    * Artifacts and a bounded summary — from the Worker Invocation to the node, for the next Coordinator turn.
    * One exists per completed current Task, created only once the Worker's Changeset is integrated.
    */
-  | { kind: "worker_result"; planNodeId: PlanNodeId; taskId: TaskId };
+  | { kind: "worker_result"; planNodeId: PlanNodeId; taskId: TaskId }
+  /**
+   * The activation of a `retry(round)` edge: the evaluate-only `evaluator_optimizer` node of round `round - 1` recorded a
+   * `fail` or `inconclusive` verdict, and the next unrolled producer round's entry node may start. It carries the judged
+   * candidate Artifact ids of the failed round; the round is validated routing metadata against the revision's edge.
+   */
+  | { kind: "retry"; sourceNodeId: PlanNodeId; targetNodeId: PlanNodeId; round: number }
+  /** An inline `evaluator_optimizer` node's internal transfer of round `round`'s candidate output from its producer Invocation to the node, for that round's Evaluator. */
+  | { kind: "optimizer_candidate"; planNodeId: PlanNodeId; round: number }
+  /**
+   * An inline `evaluator_optimizer` node's internal transfer of round `round`'s judged candidate Artifacts to the node, for
+   * producer round `round + 1`, created once the round's overall verdict is `fail` or `inconclusive`. The verdict itself
+   * travels as the typed `optimizer_feedback` manifest input, never as Handoff text.
+   */
+  | { kind: "optimizer_feedback"; planNodeId: PlanNodeId; round: number };
 
 export const handoffRouteSchema: z.ZodType<HandoffRoute> = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("sequence"), sourceNodeId: idSchema("planNode"), targetNodeId: idSchema("planNode") }).refine((r) => r.sourceNodeId !== r.targetNodeId, { message: "a sequence Handoff joins two nodes", path: ["targetNodeId"] }),
@@ -52,9 +66,13 @@ export const handoffRouteSchema: z.ZodType<HandoffRoute> = z.discriminatedUnion(
   z.strictObject({ kind: z.literal("branch"), sourceNodeId: idSchema("planNode"), targetNodeId: idSchema("planNode"), label: nonEmptyString }).refine((r) => r.sourceNodeId !== r.targetNodeId, { message: "a branch Handoff joins two nodes", path: ["targetNodeId"] }),
   z.strictObject({ kind: z.literal("parallel_index"), planNodeId: idSchema("planNode") }),
   z.strictObject({ kind: z.literal("worker_result"), planNodeId: idSchema("planNode"), taskId: idSchema("task") }),
+  z.strictObject({ kind: z.literal("retry"), sourceNodeId: idSchema("planNode"), targetNodeId: idSchema("planNode"), round: z.number().int().min(2) }).refine((r) => r.sourceNodeId !== r.targetNodeId, { message: "a retry Handoff joins two nodes", path: ["targetNodeId"] }),
+  z.strictObject({ kind: z.literal("optimizer_candidate"), planNodeId: idSchema("planNode"), round: z.number().int().min(1) }),
+  z.strictObject({ kind: z.literal("optimizer_feedback"), planNodeId: idSchema("planNode"), round: z.number().int().min(1) }),
 ]);
 
-export const HANDOFF_KEY_PATTERN = /^(sequence:pn_[0-9a-f]{24}:pn_[0-9a-f]{24}|chain_step:pn_[0-9a-f]{24}:[0-9]+|branch:pn_[0-9a-f]{24}:pn_[0-9a-f]{24}|parallel_index:pn_[0-9a-f]{24}|worker_result:pn_[0-9a-f]{24}:task_[0-9a-f]{24})$/;
+export const HANDOFF_KEY_PATTERN =
+  /^(sequence:pn_[0-9a-f]{24}:pn_[0-9a-f]{24}|chain_step:pn_[0-9a-f]{24}:[0-9]+|branch:pn_[0-9a-f]{24}:pn_[0-9a-f]{24}|parallel_index:pn_[0-9a-f]{24}|worker_result:pn_[0-9a-f]{24}:task_[0-9a-f]{24}|retry:pn_[0-9a-f]{24}:pn_[0-9a-f]{24}|optimizer_candidate:pn_[0-9a-f]{24}:[0-9]+|optimizer_feedback:pn_[0-9a-f]{24}:[0-9]+)$/;
 
 /** The stable canonical key of a route; two routes are the same transfer iff their keys are equal. */
 export function handoffKeyOf(route: HandoffRoute): string {
@@ -69,11 +87,17 @@ export function handoffKeyOf(route: HandoffRoute): string {
       return `parallel_index:${route.planNodeId}`;
     case "worker_result":
       return `worker_result:${route.planNodeId}:${route.taskId}`;
+    case "retry":
+      return `retry:${route.sourceNodeId}:${route.targetNodeId}`;
+    case "optimizer_candidate":
+      return `optimizer_candidate:${route.planNodeId}:${route.round}`;
+    case "optimizer_feedback":
+      return `optimizer_feedback:${route.planNodeId}:${route.round}`;
   }
 }
 
 /** The kinds of Handoff a node's next Invocation is delivered when it starts: transfers along the current graph's edges into the node. */
-export const INCOMING_HANDOFF_KEY_PREFIXES = ["sequence:", "branch:"] as const;
+export const INCOMING_HANDOFF_KEY_PREFIXES = ["sequence:", "branch:", "retry:"] as const;
 
 export function isIncomingHandoffKey(handoffKey: string): boolean {
   return INCOMING_HANDOFF_KEY_PREFIXES.some((prefix) => handoffKey.startsWith(prefix));

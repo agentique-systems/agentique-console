@@ -29,7 +29,8 @@ describe("baseline migration", () => {
       expect(exportedTables.map(getTableName).sort()).toEqual([...TABLE_NAMES].sort());
       for (const table of exportedTables) {
         const expectedColumns = Object.values(getTableColumns(table)).map((c) => c.name).sort();
-        const actualColumns = (h.database.sqlite.prepare(`PRAGMA table_info(${JSON.stringify(getTableName(table))})`).all() as { name: string }[]).map((c) => c.name).sort();
+        // `table_xinfo` lists generated (virtual) columns too, which `table_info` hides.
+        const actualColumns = (h.database.sqlite.prepare(`PRAGMA table_xinfo(${JSON.stringify(getTableName(table))})`).all() as { name: string }[]).map((c) => c.name).sort();
         expect(actualColumns, getTableName(table)).toEqual(expectedColumns);
       }
     } finally {

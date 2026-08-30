@@ -29,6 +29,7 @@
  */
 import {
   ACTIVE_INVOCATION_STATUSES,
+  canonicalJson,
   InvariantViolationError,
   NotFoundError,
   runtimeToolsFor,
@@ -91,13 +92,15 @@ export class ContextManifestAssembler {
 
     const tasks = this.tasks(run, invocation);
     const { requirementRevisionId, requirements } = this.requirements(run, node, invocation);
-    const acceptanceCriteria = this.acceptanceCriteria(run, requirementRevisionId, requirements, tasks.map((t) => t.taskId));
     const previousManifestAt = this.previousManifestAt(invocation);
     const decisions = this.decisions(run, node, invocation, requirements, tasks.map((t) => t.taskId), request.operationInput, request.inputs, previousManifestAt);
-    const inputs = this.inputs(run, node, invocation, request.inputs);
     const handoffs = this.handoffs(run, node, invocation, request.handoffIds);
+    const inputs = this.inputs(run, node, invocation, request.inputs, handoffs);
+    const acceptanceCriteria = this.acceptanceCriteria(run, requirementRevisionId, requirements, tasks.map((t) => t.taskId), inputs);
     const approvalArtifactIds = inputs.flatMap((i) => (i.kind === "side_effect_approval_resolution" ? [i.callArtifactId] : []));
-    const artifacts = this.artifacts(run, unique([...request.operationInput.artifactIds, ...handoffs.flatMap((h) => h.artifactIds), ...request.artifactIds, ...approvalArtifactIds, ...this.taskInputArtifacts(tasks.map((t) => t.taskId))]));
+    // An optimizer round's candidate and the Evidence Artifacts of its feedback are readable by id, like every Handoff Artifact.
+    const optimizerArtifactIds = inputs.flatMap((i) => (i.kind === "optimizer_candidate" ? i.artifactIds : i.kind === "optimizer_feedback" ? i.evidence.flatMap((e) => (e.kind === "artifact" ? [e.artifactId] : e.kind === "command" ? [e.outputArtifactId] : [])) : []));
+    const artifacts = this.artifacts(run, unique([...request.operationInput.artifactIds, ...handoffs.flatMap((h) => h.artifactIds), ...request.artifactIds, ...approvalArtifactIds, ...optimizerArtifactIds, ...this.taskInputArtifacts(tasks.map((t) => t.taskId))]));
     for (const id of request.operationInput.taskIds) {
       if (!invocation.taskIds.includes(id)) throw new InvariantViolationError(`operation input names Task ${id}, which Invocation ${invocation.id} does not own`);
     }
@@ -195,7 +198,7 @@ export class ContextManifestAssembler {
     return { requirementId: id, statement, status: requirement.status, acceptanceCriterionIds: [...acceptanceCriterionIds].sort() };
   }
 
-  private acceptanceCriteria(run: Run, revisionId: RequirementRevisionId | null, requirements: ManifestRequirement[], taskIds: TaskId[]): ManifestAcceptanceCriterion[] {
+  private acceptanceCriteria(run: Run, revisionId: RequirementRevisionId | null, requirements: ManifestRequirement[], taskIds: TaskId[], inputs: ManifestInput[]): ManifestAcceptanceCriterion[] {
     const criteria: AcceptanceCriterion[] = [];
     for (const requirement of requirements) {
       for (const criterion of this.stores.requirements.listAcceptanceCriteria({ requirementId: requirement.requirementId })) {
@@ -203,6 +206,10 @@ export class ContextManifestAssembler {
       }
     }
     for (const taskId of taskIds) criteria.push(...this.stores.requirements.listAcceptanceCriteria({ taskId }));
+    // An optimizer round's Evaluator receives exactly the evaluated criteria it must judge, whatever the node's scope lists.
+    for (const input of inputs) {
+      if (input.kind === "optimizer_candidate") for (const id of input.acceptanceCriterionIds) criteria.push(this.stores.requirements.getAcceptanceCriterion(id));
+    }
     for (const criterion of criteria) {
       if (criterion.conversationId !== run.conversationId) throw new InvariantViolationError(`AcceptanceCriterion ${criterion.id} belongs to another Conversation`);
     }
@@ -251,10 +258,70 @@ export class ContextManifestAssembler {
       .sort(byId((d) => d.decisionId));
   }
 
-  private inputs(run: Run, node: PatternPlanNode, invocation: Invocation, inputs: ManifestInput[]): ManifestInput[] {
+  private inputs(run: Run, node: PatternPlanNode, invocation: Invocation, inputs: ManifestInput[], delivered: { handoffId: HandoffId; artifactIds: ArtifactId[] }[]): ManifestInput[] {
+    const handoffs = delivered.map((h) => ({ ...h, handoffKey: this.stores.handoffs.get(h.handoffId).handoffKey }));
     const digests = new Set<string>();
     for (const input of inputs) {
       switch (input.kind) {
+        case "optimizer_candidate": {
+          // The runtime supplies what the Evaluator judges: this round of this evaluator_optimizer node, a Snapshot of the
+          // Run's Workspace, Artifacts of the Run, and exactly the node's evaluated Gate criteria.
+          const shape = node.shape.pattern === "evaluator_optimizer" ? node.shape : null;
+          if (shape === null) throw new InvariantViolationError(`PlanNode ${node.id} is not an evaluator_optimizer node`);
+          const position = invocation.patternPosition;
+          if (invocation.role !== "evaluator" || invocation.purpose !== "evaluate" || position === null || position.kind !== "evaluator_round") throw new InvariantViolationError(`Invocation ${invocation.id} is not an optimizer round Evaluator`);
+          if (position.round !== input.round || position.maxRounds !== input.maxRounds || shape.maxRounds !== input.maxRounds) throw new InvariantViolationError(`optimizer_candidate input names round ${input.round} of ${input.maxRounds}, not the Invocation's ${position.round} of ${position.maxRounds}`);
+          if (shape.round !== null && shape.round !== input.round) throw new InvariantViolationError(`PlanNode ${node.id} evaluates round ${shape.round}, not ${input.round}`);
+          const snapshot = this.stores.snapshots.get(input.snapshotId);
+          if (snapshot.workspaceId !== run.workspaceId) throw new InvariantViolationError(`Snapshot ${input.snapshotId} belongs to another Workspace`);
+          for (const id of input.artifactIds) this.artifact(run, id);
+          const evaluated = node.gateAcceptanceCriterionIds.filter((id) => this.stores.requirements.getAcceptanceCriterion(id).check.kind === "evaluated").sort();
+          if (evaluated.length !== input.acceptanceCriterionIds.length || evaluated.some((id, i) => id !== input.acceptanceCriterionIds[i])) {
+            throw new InvariantViolationError(`optimizer_candidate input names criteria ${input.acceptanceCriterionIds.join(", ")}, not the node's evaluated Gate criteria ${evaluated.join(", ")}`);
+          }
+          for (const id of input.acceptanceCriterionIds) {
+            if (this.stores.requirements.getAcceptanceCriterion(id).conversationId !== run.conversationId) throw new InvariantViolationError(`AcceptanceCriterion ${id} belongs to another Conversation`);
+          }
+          // The delivered Handoffs (a prior round's feedback aside) carry exactly the candidate: the inline round's candidate
+          // Handoff, or the producer subgraph's edge Handoffs.
+          const carried = [...new Set(handoffs.filter((h) => !h.handoffKey.startsWith("optimizer_feedback:")).flatMap((h) => h.artifactIds))].sort();
+          const expected = [...input.artifactIds].sort();
+          if (carried.length !== expected.length || carried.some((id, i) => id !== expected[i])) throw new InvariantViolationError(`the delivered Handoffs carry Artifacts ${carried.join(", ")}, not the candidate ${expected.join(", ")}`);
+          break;
+        }
+        case "optimizer_feedback": {
+          // The canonical round verdict this producer round follows: of this Run, a failed or inconclusive optimizer_verdict of the
+          // round before this one, on this inline node (producer_round or evaluator_round r + 1) or on the evaluate-only node whose
+          // retry(r + 1) edge enters this node in the current revision; its judged Artifacts are exactly what the Handoff carries.
+          const evaluation = this.stores.evaluations.get(input.evaluationId);
+          if (evaluation.runId !== run.id) throw new InvariantViolationError(`Evaluation ${input.evaluationId} belongs to another Run`);
+          if (evaluation.context === null || evaluation.context.kind !== "optimizer_verdict") throw new ValidationError(`Evaluation ${input.evaluationId} is not an optimizer round verdict`);
+          if (evaluation.context.round !== input.round) throw new InvariantViolationError(`Evaluation ${input.evaluationId} judged round ${evaluation.context.round}, not ${input.round}`);
+          if (evaluation.verdict !== input.verdict) throw new InvariantViolationError(`Evaluation ${input.evaluationId} recorded ${evaluation.verdict}, not ${input.verdict}`);
+          if (canonicalJson(evaluation.evidence) !== canonicalJson(input.evidence)) throw new InvariantViolationError(`optimizer_feedback input disagrees with the Evidence of Evaluation ${input.evaluationId}`);
+          const judged = [...evaluation.artifactIds].sort();
+          let carried: ArtifactId[];
+          if (evaluation.planNodeId === node.id) {
+            const position = invocation.patternPosition;
+            if (position === null || (position.kind !== "producer_round" && position.kind !== "evaluator_round") || position.round !== input.round + 1) {
+              throw new InvariantViolationError(`Invocation ${invocation.id} does not follow round ${input.round} of PlanNode ${node.id}`);
+            }
+            const handoff = this.stores.handoffs.getByKey(run.id, `optimizer_feedback:${node.id}:${input.round}`);
+            if (handoff === null || !handoffs.some((h) => h.handoffId === handoff.id)) throw new InvariantViolationError(`the feedback Handoff of round ${input.round} of PlanNode ${node.id} is not delivered to Invocation ${invocation.id}`);
+            carried = [...handoff.artifactIds].sort();
+          } else {
+            const sourceId = evaluation.planNodeId;
+            if (sourceId === null) throw new InvariantViolationError(`Evaluation ${input.evaluationId} belongs to no Plan Node`);
+            const graph = this.stores.plans.currentGraph(run.id);
+            const edge = graph.edges.find((e) => e.type === "retry" && e.sourceNodeId === sourceId && e.targetNodeId === node.id && e.round === input.round + 1);
+            if (edge === undefined) throw new InvariantViolationError(`no current retry(${input.round + 1}) edge runs from PlanNode ${sourceId} to ${node.id}`);
+            const handoff = this.stores.handoffs.getByKey(run.id, `retry:${sourceId}:${node.id}`);
+            if (handoff === null || !handoffs.some((h) => h.handoffId === handoff.id)) throw new InvariantViolationError(`the retry Handoff from PlanNode ${sourceId} is not delivered to Invocation ${invocation.id}`);
+            carried = [...handoff.artifactIds].sort();
+          }
+          if (carried.length !== judged.length || carried.some((id, i) => id !== judged[i])) throw new InvariantViolationError(`the Handoff carries Artifacts ${carried.join(", ")}, not the judged ${judged.join(", ")} of Evaluation ${input.evaluationId}`);
+          break;
+        }
         case "side_effect_approval_resolution": {
           // The resolved Decision is the successor's typed input; every fact must agree with the canonical Decision.
           const decision = this.stores.decisions.get(input.decisionId);

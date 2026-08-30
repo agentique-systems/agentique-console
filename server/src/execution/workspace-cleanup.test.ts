@@ -149,7 +149,8 @@ describe("Execution Workspace cleanup", () => {
       const evaluator = h.preparation.prepare({ runId: s.created.run.id, planNodeId: node.id, role: "evaluator", purpose: "evaluate", agentDefinitionRevisionId: s.worker.id, continuedFromInvocationId: null, patternPosition: null });
       expect(evaluator.invocation.workspaceCleanup).toBe("none");
       expect(h.ctx.journal.read({ runId: s.created.run.id, type: "invocation.workspace_prepared" }).map((e) => (e.payload as { invocationId: string }).invocationId)).toEqual([s.invocation.id]);
-      h.provider.script({ kind: "succeed", result: COMPLETED_RESULT });
+      const judged = h.stores.artifacts.create({ runId: s.created.run.id, mediaType: "text/plain", producer: { kind: "runtime", component: "command" }, taskId: null, title: "judged" }, new TextEncoder().encode("judged"));
+      h.provider.script({ kind: "succeed", result: { ...COMPLETED_RESULT, evaluation: { verdict: "pass", criteria: [], evidence: [{ kind: "artifact", artifactId: judged.id }] } } });
       expect(await advance(h, evaluator.invocation)).toMatchObject({ kind: "finalized", settlement: { invocation: { status: "succeeded", workspaceCleanup: "none" } } });
       expect(h.executor.releaseWorkspace(evaluator.invocation.id)).toBe("not_due");
       expect(h.executionWorkspace.released).toHaveLength(1);

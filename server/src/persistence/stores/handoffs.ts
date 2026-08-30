@@ -168,6 +168,51 @@ export class HandoffStore {
       if (!edge) throw new InvariantViolationError(`no branch(${route.label}) edge runs from ${route.sourceNodeId} to ${route.targetNodeId}`, { route });
       return;
     }
+    if (route.kind === "retry") {
+      // A retry transfer runs from the evaluate-only evaluator_optimizer node of round `round - 1` to the entry of the next
+      // unrolled producer round along a `retry(round)` edge of the Run's plan; it carries the judged candidate Artifacts.
+      if (source.kind !== "plan_node" || source.planNodeId !== route.sourceNodeId) throw new InvariantViolationError("a retry Handoff's source is its evaluate-only Plan Node", { route, source });
+      if (target.kind !== "plan_node" || target.planNodeId !== route.targetNodeId) throw new InvariantViolationError("a retry Handoff's target is the next producer round's entry Plan Node", { route, target });
+      const node = requireRow(this.ctx.db.select({ kind: planNodes.kind, shape: planNodes.shape }).from(planNodes).where(eq(planNodes.id, route.sourceNodeId)).get(), "PlanNode", route.sourceNodeId);
+      if (node.kind !== "pattern" || node.shape === null || node.shape.pattern !== "evaluator_optimizer" || node.shape.round !== route.round - 1) {
+        throw new InvariantViolationError(`PlanNode ${route.sourceNodeId} is not the evaluate-only evaluator_optimizer node of round ${route.round - 1}`, { route });
+      }
+      const edge = this.ctx.db
+        .select({ id: planEdges.id })
+        .from(planEdges)
+        .where(and(eq(planEdges.runId, input.runId), eq(planEdges.sourceNodeId, route.sourceNodeId), eq(planEdges.targetNodeId, route.targetNodeId), eq(planEdges.type, "retry"), eq(planEdges.round, route.round)))
+        .get();
+      if (!edge) throw new InvariantViolationError(`no retry(${route.round}) edge runs from ${route.sourceNodeId} to ${route.targetNodeId}`, { route });
+      return;
+    }
+    if (route.kind === "optimizer_candidate" || route.kind === "optimizer_feedback") {
+      if (target.kind !== "plan_node" || target.planNodeId !== route.planNodeId) throw new InvariantViolationError(`an ${route.kind} Handoff's target is its own Plan Node`, { route, target });
+      const node = requireRow(this.ctx.db.select({ kind: planNodes.kind, shape: planNodes.shape }).from(planNodes).where(eq(planNodes.id, route.planNodeId)).get(), "PlanNode", route.planNodeId);
+      if (node.kind !== "pattern" || node.shape === null || node.shape.pattern !== "evaluator_optimizer" || node.shape.producer === null) throw new InvariantViolationError(`PlanNode ${route.planNodeId} is not an inline evaluator_optimizer node`, { route });
+      if (route.round > node.shape.maxRounds) throw new InvariantViolationError(`PlanNode ${route.planNodeId} has ${node.shape.maxRounds} rounds, not ${route.round}`, { route });
+      if (route.kind === "optimizer_candidate") {
+        // The candidate transfer runs from the round's producer Invocation to the node, for that round's Evaluator.
+        if (source.kind !== "invocation") throw new InvariantViolationError("an optimizer_candidate Handoff's source is the round's producer Invocation", { route, source });
+        const producer = requireRow(this.ctx.db.select({ planNodeId: invocations.planNodeId, patternPosition: invocations.patternPosition }).from(invocations).where(eq(invocations.id, source.invocationId)).get(), "Invocation", source.invocationId);
+        const position = producer.patternPosition;
+        if (producer.planNodeId !== route.planNodeId || position === null || position.kind !== "producer_round" || position.round !== route.round) {
+          throw new InvariantViolationError(`Invocation ${source.invocationId} is not producer round ${route.round} of PlanNode ${route.planNodeId}`, { route, source });
+        }
+        return;
+      }
+      // The feedback transfer runs from the round's Evaluator Invocation (or the node itself for a runtime-derived verdict) to the node, for the next producer round.
+      if (route.round >= node.shape.maxRounds) throw new InvariantViolationError(`round ${route.round} of PlanNode ${route.planNodeId} is the final round; no producer follows it`, { route });
+      if (source.kind === "invocation") {
+        const evaluator = requireRow(this.ctx.db.select({ planNodeId: invocations.planNodeId, patternPosition: invocations.patternPosition }).from(invocations).where(eq(invocations.id, source.invocationId)).get(), "Invocation", source.invocationId);
+        const position = evaluator.patternPosition;
+        if (evaluator.planNodeId !== route.planNodeId || position === null || position.kind !== "evaluator_round" || position.round !== route.round) {
+          throw new InvariantViolationError(`Invocation ${source.invocationId} is not evaluator round ${route.round} of PlanNode ${route.planNodeId}`, { route, source });
+        }
+      } else if (source.planNodeId !== route.planNodeId) {
+        throw new InvariantViolationError("an optimizer_feedback Handoff's source is its own Plan Node or the round's Evaluator Invocation", { route, source });
+      }
+      return;
+    }
     if (route.kind === "worker_result") {
       // A Worker-result transfer runs from the Worker Invocation at the Task's position to its own coordinator_worker node, for that one Task.
       if (target.kind !== "plan_node" || target.planNodeId !== route.planNodeId) throw new InvariantViolationError("a worker-result Handoff's target is its own Plan Node", { route, target });

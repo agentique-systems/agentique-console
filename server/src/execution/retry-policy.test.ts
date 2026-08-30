@@ -12,7 +12,7 @@ const over: Allocation = { costUsd: 1.5, tokens: 100, attempts: 1 };
 const config: RetryPolicyConfig = { backoffBaseMs: 1000, backoffMaxMs: 3000 };
 const now = "2026-01-01T00:00:00.000Z";
 const invalid = { ok: false as const, violations: [{ code: "unknown_artifact" as const, message: "no such artifact", path: "artifactIds.0" }] };
-const valid = { ok: true as const, result: { status: "completed" as const, artifactIds: [], tasks: [], evidence: [], summary: "ok", openItems: [], blocker: null, runOutcome: null, routeSelection: null } };
+const valid = { ok: true as const, result: { status: "completed" as const, artifactIds: [], tasks: [], evidence: [], summary: "ok", openItems: [], blocker: null, runOutcome: null, routeSelection: null, evaluation: null } };
 
 describe("classifyAttempt", () => {
   it("maps every completion and runtime interruption to the closed status and failure class with bounded detail", () => {

@@ -246,7 +246,7 @@ export class RoutePatternRunner {
   private applySelection(node: PatternPlanNode, label: string, producedBy: Evaluation["producedBy"], options: WriteOptions, current: boolean): PatternRunnerOutcome {
     const binding = node.shape.pattern === "route" ? (node.shape.branches.find((b) => b.label === label) ?? null) : null;
     if (binding === null) return this.support.failNow(node, "route_selection_failed", options);
-    const evaluation = this.deps.stores.evaluations.record({ runId: node.runId, planNodeId: node.id, gateId: null, subject: { kind: "route_selection", selectedLabel: label }, verdict: "pass", evidence: [], producedBy, artifactIds: [] }, options);
+    const evaluation = this.deps.stores.evaluations.record({ context: null, snapshotId: null, runId: node.runId, planNodeId: node.id, gateId: null, subject: { kind: "route_selection", selectedLabel: label }, verdict: "pass", evidence: [], producedBy, artifactIds: [] }, options);
     if (binding.inline === null) {
       const done = this.support.succeedNow(node, [], options, current);
       return done.kind === "succeeded" ? { kind: "selected", evaluationId: evaluation.id, selectedLabel: label, invocationId: null } : done;
