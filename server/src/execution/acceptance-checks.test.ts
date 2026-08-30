@@ -57,7 +57,7 @@ describe("AcceptanceCheckService", () => {
       expect(JSON.stringify(events)).not.toContain("boom");
       expect(JSON.stringify(outcome)).not.toContain("boom");
       // Every request carried exactly the facts the port needs: no store, no Artifact lookup, the exact Snapshot, the bound.
-      expect(h.criterionExecution.requests.map((r) => Object.keys(r).sort())).toEqual([["acceptanceCriterionId", "command", "deadlineAt", "expectedExitCode", "gateId", "maxOutputBytes", "planNodeId", "round", "runId", "signal", "workspace"], ["acceptanceCriterionId", "command", "deadlineAt", "expectedExitCode", "gateId", "maxOutputBytes", "planNodeId", "round", "runId", "signal", "workspace"]]);
+      expect(h.criterionExecution.requests.map((r) => Object.keys(r).sort())).toEqual([["acceptanceCriterionId", "command", "deadlineAt", "expectedExitCode", "gateId", "maxOutputBytes", "planNodeId", "publicationId", "round", "runId", "signal", "workspace"], ["acceptanceCriterionId", "command", "deadlineAt", "expectedExitCode", "gateId", "maxOutputBytes", "planNodeId", "publicationId", "round", "runId", "signal", "workspace"]]);
       expect(h.criterionExecution.requests[0]!.workspace).toEqual({ integrationWorkspacePath: run.integrationWorkspacePath, snapshot: h.stores.snapshots.get(snapshotId).identity, isolationKey: `${run.id}/${node.id}/1/${criteria.deterministic[0]}` });
     } finally {
       h.close();

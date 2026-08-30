@@ -279,9 +279,10 @@ describe("import boundaries", () => {
     expect(fake.length).toBeGreaterThan(100);
     expect(fake).not.toMatch(/\bstores\b|\bctx\b|\bblobs\b|artifacts\.|sha256Hex|BlobStore|ArtifactStore/);
     expect(strip(fake)).not.toMatch(targetSafety);
-    // Nothing in the execution boundary creates a Publication or writes the operator's branch; only the Publication store (a later phase's) records one.
-    for (const file of listFiles("server/src/execution", (f) => isCode(f) && !f.endsWith(".test.ts"))) {
-      expect(strip(fs.readFileSync(file, "utf8")), rel(file)).not.toMatch(/publications\.record\(|targetBeforeSnapshot|fast_forward/);
+    // Nothing in the execution boundary but the publication service and its port touches Publications or the Target
+    // (invariant 16): no Pattern runner, Gate, completion, signoff, or scheduler code creates, transitions, or names one.
+    for (const file of listFiles("server/src/execution", (f) => isCode(f) && !f.endsWith(".test.ts") && !f.endsWith("test-support.ts") && !f.endsWith("publication.ts") && !f.endsWith("publication-workspace.ts") && !f.endsWith("publications.ts"))) {
+      expect(strip(fs.readFileSync(file, "utf8")), rel(file)).not.toMatch(/publications\.(create|transition|recordStagingReleased)\(|targetBeforeSnapshot|fast_forward/);
     }
     // No compatibility mechanism anywhere in the signoff path.
     expect(`${service}\n${port}\n${coreSignoff}`).not.toMatch(/\b(legacy|compat\w*|fallback|shim|deprecated|feature.?flag)\b/i);
@@ -290,9 +291,9 @@ describe("import boundaries", () => {
   it("no execution code reads a transcript Artifact or blob to make a decision (invariant 6)", () => {
     for (const file of listFiles("server/src/execution", (f) => isCode(f) && !f.endsWith(".test.ts"))) {
       const text = fs.readFileSync(file, "utf8");
-      // The integration service is the one reader of Artifact content: it delivers a Changeset's verified diff to the
-      // Integration Workspace (§9.2) and decides nothing from the bytes; it never touches a transcript.
-      if (rel(file) === "server/src/execution/integration-service.ts") {
+      // The integration and publication services are the readers of Artifact content: each delivers one verified
+      // Changeset diff to its Workspace port (§9.2, §9.4) and decides nothing from the bytes; neither touches a transcript.
+      if (rel(file) === "server/src/execution/integration-service.ts" || rel(file) === "server/src/execution/publication.ts") {
         expect(text, rel(file)).not.toMatch(/blobs\.get\(|transcript|TRANSCRIPT_MEDIA_TYPE/i);
         continue;
       }

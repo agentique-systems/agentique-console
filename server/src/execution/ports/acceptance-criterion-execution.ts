@@ -32,25 +32,30 @@
  * The provider implementation arrives in the Workspace phase; tests use a
  * deterministic fake.
  */
-import type { AcceptanceCriterionId, GateId, PlanNodeId, RunId, SnapshotIdentity, Timestamp } from "@agentique-console/core";
+import type { AcceptanceCriterionId, GateId, PlanNodeId, PublicationId, RunId, SnapshotIdentity, Timestamp } from "@agentique-console/core";
 
 export interface AcceptanceCriterionExecutionRequest {
   runId: RunId;
-  /** The Plan Node whose round or `node_exit` Gate the check belongs to; `null` for a Run-level `run_completion` Gate check. */
+  /** The Plan Node whose round or `node_exit` Gate the check belongs to; `null` for a Run-level `run_completion` Gate check and for a Publication check. */
   planNodeId: PlanNodeId | null;
   acceptanceCriterionId: AcceptanceCriterionId;
-  /** The optimizer round the check belongs to; `null` for a Gate check. */
+  /** The optimizer round the check belongs to; `null` for a Gate or Publication check. */
   round: number | null;
-  /** The `node_exit` or `run_completion` Gate the check belongs to; `null` for an optimizer round's check. Exactly one of `round` and `gateId` is set. */
+  /** The `node_exit` or `run_completion` Gate the check belongs to; `null` for an optimizer round's or Publication's check. */
   gateId: GateId | null;
+  /** The Publication whose prepared candidate the check verifies; `null` otherwise. Exactly one of `round`, `gateId`, and `publicationId` is set. */
+  publicationId: PublicationId | null;
   command: string;
   expectedExitCode: number;
   workspace: {
-    /** The Run's Integration Workspace the isolated view is derived from; `null` for a Run without one. */
+    /**
+     * The workspace the isolated view is derived from — the Run's Integration Workspace for a round or Gate check,
+     * the Publication's verification workspace for a Publication check; `null` for a Run without one. Never the Target.
+     */
     integrationWorkspacePath: string | null;
     /** The exact Snapshot the command verifies; the view holds this state and nothing newer. */
     snapshot: SnapshotIdentity;
-    /** A stable key for the isolated view (Run, node, round or Gate, criterion), so a stale view is discarded rather than reused. */
+    /** A stable key for the isolated view (Run, node, round, Gate, or Publication, and criterion), so a stale view is discarded rather than reused. */
     isolationKey: string;
   };
   /** The most output bytes the runtime records; the port bounds what it returns and reports truncation. */

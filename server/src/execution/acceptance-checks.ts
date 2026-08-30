@@ -3,9 +3,10 @@
  * invariant 11): the one runtime service that runs a node's deterministic
  * criteria against one exact integration Snapshot, in stable Acceptance
  * Criterion id order, stopping at the first failure, through the narrow
- * `AcceptanceCriterionExecutionPort`. It serves two callers with one
- * executor: an `evaluator_optimizer` round (scope `optimizer_round`) and a
- * `node_exit` Gate (scope `gate`); nothing else runs a command.
+ * `AcceptanceCriterionExecutionPort`. It serves three callers with one
+ * executor: an `evaluator_optimizer` round (scope `optimizer_round`), a
+ * `node_exit` or `run_completion` Gate (scope `gate`), and a Publication's
+ * prepared candidate (scope `publication`); nothing else runs a command.
  *
  * Boundaries are fixed. Each command runs outside every database
  * transaction, against an isolated view of the Snapshot that the port owns
@@ -26,7 +27,7 @@
  * outcomes, and diagnostics carry ids, exit status, digest, byte size, and
  * truncation — never output bytes.
  */
-import { boundedFailureMessage, InvariantViolationError, type AcceptanceCriterion, type AcceptanceCriterionId, type ArtifactId, type Evaluation, type EvaluationInput, type Evidence, type GateId, type PlanNodeId, type RunId, type SnapshotId, type Timestamp } from "@agentique-console/core";
+import { boundedFailureMessage, InvariantViolationError, type AcceptanceCriterion, type AcceptanceCriterionId, type ArtifactId, type Evaluation, type EvaluationInput, type Evidence, type GateId, type PlanNodeId, type PublicationId, type RunId, type SnapshotId, type Timestamp } from "@agentique-console/core";
 import type { PersistenceContext } from "../persistence/context.ts";
 import type { Stores } from "../persistence/stores/index.ts";
 import type { WriteOptions } from "../persistence/stores/support.ts";
@@ -44,8 +45,18 @@ export interface AcceptanceCheckConfig {
 
 export const DEFAULT_ACCEPTANCE_CHECK_CONFIG: Readonly<AcceptanceCheckConfig> = Object.freeze({ maxOutputBytes: 65_536, commandTimeoutMs: 600_000 });
 
-/** Whose deterministic criteria run: one `evaluator_optimizer` round of a node, or one `node_exit` or `run_completion` Gate. */
-export type AcceptanceCheckScope = { kind: "optimizer_round"; round: number; maxRounds: number } | { kind: "gate"; gateId: GateId };
+/**
+ * Whose deterministic criteria run: one `evaluator_optimizer` round of a
+ * node, one `node_exit` or `run_completion` Gate, or one Publication's
+ * prepared candidate (execution-model §9.4) — the same executor, the same
+ * fail-fast criterion order, the same infrastructure-failure rules. A
+ * Publication scope carries the verification workspace the isolated view is
+ * derived from (the port's prepared staging location, never persisted).
+ */
+export type AcceptanceCheckScope =
+  | { kind: "optimizer_round"; round: number; maxRounds: number }
+  | { kind: "gate"; gateId: GateId }
+  | { kind: "publication"; publicationId: PublicationId; verificationWorkspacePath: string | null };
 
 /** One set of checks to run: the node (none for a Run-level Gate), the scope, the exact Snapshot, the judged candidate, and the criteria in canonical order. */
 export interface AcceptanceCheckRequest {
@@ -103,6 +114,7 @@ export class AcceptanceCheckService {
   /** The criterion Evaluations already recorded for the scope, by Acceptance Criterion id. */
   private recorded(request: AcceptanceCheckRequest): Evaluation[] {
     if (request.scope.kind === "gate") return this.stores.evaluations.gateCriterionEvaluationsOf(request.scope.gateId);
+    if (request.scope.kind === "publication") return this.stores.evaluations.publicationCriterionEvaluationsOf(request.scope.publicationId);
     if (request.planNodeId === null) throw new InvariantViolationError("an optimizer round belongs to its evaluator_optimizer Plan Node", { round: request.scope.round });
     return this.stores.evaluations.optimizerCriterionEvaluationsOf(request.planNodeId, request.scope.round);
   }
@@ -135,15 +147,23 @@ export class AcceptanceCheckService {
     const now = this.ctx.clock();
     const deadlineAt: Timestamp | null = this.config.commandTimeoutMs === null ? null : new Date(Date.parse(now) + this.config.commandTimeoutMs).toISOString();
     const scope = request.scope;
+    const isolationKey =
+      scope.kind === "gate"
+        ? `${run.id}/${request.planNodeId ?? "run"}/gate/${scope.gateId}/${criterion.id}`
+        : scope.kind === "publication"
+          ? `${run.id}/publication/${scope.publicationId}/${criterion.id}`
+          : `${run.id}/${request.planNodeId}/${scope.round}/${criterion.id}`;
     const executionRequest: AcceptanceCriterionExecutionRequest = {
       runId: run.id,
       planNodeId: request.planNodeId,
       acceptanceCriterionId: criterion.id,
       round: scope.kind === "optimizer_round" ? scope.round : null,
       gateId: scope.kind === "gate" ? scope.gateId : null,
+      publicationId: scope.kind === "publication" ? scope.publicationId : null,
       command: criterion.check.command,
       expectedExitCode: criterion.check.expectedExitCode,
-      workspace: { integrationWorkspacePath: run.integrationWorkspacePath, snapshot: snapshot.identity, isolationKey: scope.kind === "gate" ? `${run.id}/${request.planNodeId ?? "run"}/gate/${scope.gateId}/${criterion.id}` : `${run.id}/${request.planNodeId}/${scope.round}/${criterion.id}` },
+      // A publication check's view is derived from the prepared verification workspace, never the Integration Workspace or the Target.
+      workspace: { integrationWorkspacePath: scope.kind === "publication" ? scope.verificationWorkspacePath : run.integrationWorkspacePath, snapshot: snapshot.identity, isolationKey },
       maxOutputBytes: this.config.maxOutputBytes,
       deadlineAt,
       signal: controller.signal,
@@ -166,8 +186,14 @@ export class AcceptanceCheckService {
       // A concurrent pass may have recorded the same check meanwhile; the existing row wins and nothing is written twice.
       const again = this.recorded(request).find((e) => e.subject.kind === "acceptance_criterion" && e.subject.acceptanceCriterionId === criterion.id);
       if (again !== undefined) return again;
+      const title =
+        scope.kind === "gate"
+          ? `check ${criterion.id} gate ${scope.gateId} of ${request.planNodeId ?? run.id}`
+          : scope.kind === "publication"
+            ? `check ${criterion.id} publication ${scope.publicationId}`
+            : `check ${criterion.id} round ${scope.round} of ${request.planNodeId}`;
       const artifact = this.stores.artifacts.create(
-        { runId: run.id, mediaType: COMMAND_OUTPUT_MEDIA_TYPE, producer: { kind: "runtime", component: "command" }, taskId: null, title: scope.kind === "gate" ? `check ${criterion.id} gate ${scope.gateId} of ${request.planNodeId ?? run.id}` : `check ${criterion.id} round ${scope.round} of ${request.planNodeId}` },
+        { runId: run.id, mediaType: COMMAND_OUTPUT_MEDIA_TYPE, producer: { kind: "runtime", component: "command" }, taskId: null, title },
         output,
         options,
       );
@@ -177,7 +203,7 @@ export class AcceptanceCheckService {
         planNodeId: request.planNodeId,
         gateId: scope.kind === "gate" ? scope.gateId : null,
         subject: { kind: "acceptance_criterion", acceptanceCriterionId: criterion.id },
-        context: scope.kind === "gate" ? null : { kind: "optimizer_criterion", round: scope.round, maxRounds: scope.maxRounds },
+        context: scope.kind === "gate" ? null : scope.kind === "publication" ? { kind: "publication", publicationId: scope.publicationId } : { kind: "optimizer_criterion", round: scope.round, maxRounds: scope.maxRounds },
         verdict: outcome.exitCode === expected ? "pass" : "fail",
         evidence,
         producedBy: { kind: "runtime" },

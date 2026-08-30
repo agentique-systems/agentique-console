@@ -11,7 +11,7 @@
  * Invocation outcome: it is reported through a bounded diagnostic and left
  * for the next reconciliation.
  */
-import { boundedFailureMessage, INVOCATION_MACHINE, grantsWriteCapability, type AttemptId, type Invocation, type InvocationId } from "@agentique-console/core";
+import { boundedFailureMessage, INVOCATION_MACHINE, grantsWriteCapability, type AttemptId, type Invocation, type InvocationId, type PublicationId } from "@agentique-console/core";
 import type { PersistenceContext } from "../persistence/context.ts";
 import type { Stores } from "../persistence/stores/index.ts";
 import type { WriteOptions } from "../persistence/stores/support.ts";
@@ -23,7 +23,11 @@ export type ExecutionDiagnostic =
   /** An approval claim transaction failed: nothing persisted, nothing authorized; ids, tool, and digest only. */
   | { kind: "tool_call_authorization_failed"; invocationId: InvocationId; attemptId: AttemptId; tool: string; callDigest: string; message: string }
   /** A runtime-tool call's transaction failed: nothing persisted, nothing applied; ids, tool, and canonical digest only, never the call input. */
-  | { kind: "runtime_tool_call_failed"; invocationId: InvocationId; attemptId: AttemptId; tool: string; callDigest: string; message: string };
+  | { kind: "runtime_tool_call_failed"; invocationId: InvocationId; attemptId: AttemptId; tool: string; callDigest: string; message: string }
+  /** A publication Workspace operation could not complete; the Publication stays in its nonterminal status and a later pass retries. Bounded message, never output, receipts, or paths. */
+  | { kind: "publication_provider_unavailable"; publicationId: PublicationId; stage: "prepare" | "verify" | "apply"; message: string }
+  /** A terminal Publication's staging release failed; the obligation stays pending for recovery. */
+  | { kind: "publication_staging_release_failed"; publicationId: PublicationId; message: string };
 
 export type ExecutionDiagnosticSink = (diagnostic: ExecutionDiagnostic) => void;
 
