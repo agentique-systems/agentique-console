@@ -76,6 +76,7 @@ describe("AttemptExecutor", () => {
         "capacity_lease.released",
         "invocation.succeeded",
         "budget_reservation.released",
+        "invocation.workspace_released",
       ]);
       const journal = JSON.stringify(h.ctx.journal.read({ runId: s.created.run.id }));
       expect(journal).not.toContain("the model said things");
@@ -86,9 +87,9 @@ describe("AttemptExecutor", () => {
       const again = await h.executor.advanceInvocation(invocation.id);
       expect(again).toMatchObject({ kind: "not_permitted", reason: "invocation_terminal" });
       expect(h.stores.invocations.listAttempts(invocation.id)).toHaveLength(1);
-      expect(h.ctx.journal.lastSeq()).toBe(seq + 14);
+      expect(h.ctx.journal.lastSeq()).toBe(seq + 15);
       expect((await h.executor.executePreparedAttempt(attempt.id)).kind).toBe("finalized");
-      expect(h.ctx.journal.lastSeq()).toBe(seq + 14);
+      expect(h.ctx.journal.lastSeq()).toBe(seq + 15);
     } finally {
       h.close();
     }

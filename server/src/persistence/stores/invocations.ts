@@ -64,6 +64,8 @@ function invocationToDomain(row: InvocationRow): Invocation {
       failureReason: row.failureReason,
       blockedByDecisionId: row.blockedByDecisionId,
       result: row.result,
+      workspaceCleanup: row.workspaceCleanup,
+      workspaceReleasedAt: row.workspaceReleasedAt,
       createdAt: row.createdAt,
       startedAt: row.startedAt,
       endedAt: row.endedAt,
@@ -156,6 +158,8 @@ export class InvocationStore {
         failureReason: null,
         blockedByDecisionId: null,
         result: null,
+        workspaceCleanup: "none",
+        workspaceReleasedAt: null,
         createdAt: this.ctx.clock(),
         startedAt: null,
         endedAt: null,
@@ -278,6 +282,71 @@ export class InvocationStore {
       }
       return next;
     });
+  }
+
+  // ------------------------------------------------------------------ Workspace cleanup obligation
+
+  /**
+   * Records that the Invocation's isolated worktree exists and must be
+   * released once the Invocation is terminal. Written in the preparation
+   * transaction right after the port prepared the worktree, so a rollback
+   * leaves no obligation (and the port's compensation removes the worktree).
+   */
+  recordWorkspaceObligation(id: InvocationId, worktreePath: string, options?: WriteOptions): Invocation {
+    return this.ctx.tx.write(() => {
+      const current = this.get(id);
+      if (current.workspaceCleanup !== "none") throw new ConflictError(`Invocation ${id} already holds a Workspace cleanup obligation (${current.workspaceCleanup})`);
+      if (INVOCATION_MACHINE.isTerminal(current.status)) throw new ConflictError(`Invocation ${id} is ${current.status}; a worktree is prepared before execution`);
+      const run = loadRunRef(this.ctx, current.runId);
+      this.ctx.journal.append({
+        type: "invocation.workspace_prepared",
+        scope: runScope(run, { planNodeId: current.planNodeId, invocationId: id }),
+        subjectType: "invocation",
+        subjectId: id,
+        payload: { invocationId: id, worktreePath },
+        ...writeMeta(options),
+      });
+      this.ctx.db.update(invocations).set({ workspaceCleanup: "pending" }).where(eq(invocations.id, id)).run();
+      return { ...current, workspaceCleanup: "pending" };
+    });
+  }
+
+  /**
+   * Records that the external release succeeded. Only a terminal Invocation
+   * with a pending obligation changes; an obligation already released is
+   * returned unchanged (repeated release is harmless), and a non-terminal
+   * Invocation never releases (a retry reattaches its worktree).
+   */
+  recordWorkspaceReleased(id: InvocationId, options?: WriteOptions): Invocation {
+    return this.ctx.tx.write(() => {
+      const current = this.get(id);
+      if (current.workspaceCleanup === "released") return current;
+      if (current.workspaceCleanup !== "pending") throw new ConflictError(`Invocation ${id} holds no Workspace cleanup obligation`);
+      if (!INVOCATION_MACHINE.isTerminal(current.status)) throw new ConflictError(`Invocation ${id} is ${current.status}; its worktree is released only once it is terminal`);
+      const run = loadRunRef(this.ctx, current.runId);
+      const releasedAt = this.ctx.clock();
+      this.ctx.journal.append({
+        type: "invocation.workspace_released",
+        scope: runScope(run, { planNodeId: current.planNodeId, invocationId: id }),
+        subjectType: "invocation",
+        subjectId: id,
+        payload: { invocationId: id },
+        ...writeMeta(options),
+      });
+      this.ctx.db.update(invocations).set({ workspaceCleanup: "released", workspaceReleasedAt: releasedAt }).where(eq(invocations.id, id)).run();
+      return { ...current, workspaceCleanup: "released", workspaceReleasedAt: releasedAt };
+    });
+  }
+
+  /** Terminal Invocations whose worktree release has not yet succeeded: the outstanding cleanup obligations, in creation order. */
+  listPendingWorkspaceCleanup(): Invocation[] {
+    return this.ctx.db
+      .select()
+      .from(invocations)
+      .where(and(eq(invocations.workspaceCleanup, "pending"), inArray(invocations.status, [...INVOCATION_MACHINE.terminal])))
+      .orderBy(asc(invocations.createdAt), asc(invocations.id))
+      .all()
+      .map(invocationToDomain);
   }
 
   // ------------------------------------------------------------------ Manifests
@@ -579,6 +648,8 @@ export class InvocationStore {
       failureReason: invocation.failureReason,
       blockedByDecisionId: invocation.blockedByDecisionId,
       result: invocation.result,
+      workspaceCleanup: invocation.workspaceCleanup,
+      workspaceReleasedAt: invocation.workspaceReleasedAt,
       createdAt: invocation.createdAt,
       startedAt: invocation.startedAt,
       endedAt: invocation.endedAt,

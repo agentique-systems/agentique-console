@@ -119,11 +119,18 @@ describe("invocation record", () => {
       failureReason: null,
       blockedByDecisionId: null,
       result: null,
+      workspaceCleanup: "none",
+      workspaceReleasedAt: null,
       createdAt: "2026-01-01T00:00:00.000Z",
       startedAt: null,
       endedAt: null,
     };
     expect(invocationSchema.safeParse(record).success).toBe(true);
+    // The Workspace cleanup obligation: released exactly when a release time is recorded.
+    expect(invocationSchema.safeParse({ ...record, workspaceCleanup: "pending" }).success).toBe(true);
+    expect(invocationSchema.safeParse({ ...record, workspaceCleanup: "released" }).success).toBe(false);
+    expect(invocationSchema.safeParse({ ...record, workspaceCleanup: "released", workspaceReleasedAt: record.createdAt }).success).toBe(true);
+    expect(invocationSchema.safeParse({ ...record, workspaceReleasedAt: record.createdAt }).success).toBe(false);
     expect(invocationSchema.safeParse({ ...record, continuedFromInvocationId: record.id }).success).toBe(false);
     expect(invocationSchema.safeParse({ ...record, status: "waiting" }).success).toBe(false);
     expect(invocationSchema.safeParse({ ...record, status: "waiting", waitReason: "decision" }).success).toBe(true);

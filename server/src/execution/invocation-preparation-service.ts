@@ -179,6 +179,12 @@ export class InvocationPreparationService {
       const prepared = this.workspace.prepare(workspaceRequest);
       this.ctx.tx.afterRollback(() => this.workspace.discard(workspaceRequest, prepared));
       if (writes && prepared.startingSnapshot === null) throw new ValidationError("a writing Invocation needs a starting Snapshot from the execution-workspace port");
+      // A writing Invocation's worktree is a durable cleanup obligation from this moment; a read-only one owns nothing to clean up.
+      let obliged = invocation;
+      if (writes) {
+        if (prepared.worktreePath === null) throw new ValidationError("a writing Invocation needs an isolated worktree from the execution-workspace port");
+        obliged = this.stores.invocations.recordWorkspaceObligation(invocation.id, prepared.worktreePath, caused);
+      }
       const startingSnapshotId = this.startingSnapshot(run, prepared, caused);
       for (const handoffId of valid.handoffIds ?? []) this.deliverHandoff(run, node, invocation, handoffId, caused);
       const content = this.assembler.assemble({
@@ -197,7 +203,7 @@ export class InvocationPreparationService {
       });
       const manifest = this.stores.invocations.putManifest(invocation.id, content, MANIFEST_RENDERER_VERSION, caused);
       for (const task of tasks) this.stores.tasks.transition(task.id, { to: "running", invocationId: invocation.id }, caused);
-      return { invocation, manifest, policy, workspace: { request: workspaceRequest, prepared } };
+      return { invocation: obliged, manifest, policy, workspace: { request: workspaceRequest, prepared } };
     });
   }
 

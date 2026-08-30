@@ -35,8 +35,9 @@ describe("InvocationPreparationService", () => {
       const seq = h.ctx.journal.lastSeq();
       const { prepared } = startRun(h, s);
       const events = h.ctx.journal.read({ runId: s.created.run.id, afterSeq: seq }).map((e) => e.type);
-      expect(events).toEqual(["plan_node.ready", "plan_node.started", "run.started", "invocation.created", "budget_reservation.created", "snapshot.taken", "context_manifest.created"]);
+      expect(events).toEqual(["plan_node.ready", "plan_node.started", "run.started", "invocation.created", "budget_reservation.created", "invocation.workspace_prepared", "snapshot.taken", "context_manifest.created"]);
       expect(prepared.invocation.status).toBe("pending");
+      expect(prepared.invocation.workspaceCleanup).toBe("pending");
       expect(h.stores.reservations.activeForChild({ type: "invocation", id: prepared.invocation.id })).toMatchObject({ parent: { type: "plan_node", id: s.created.root.id }, reserved: prepared.invocation.allocation });
       expect(h.executionWorkspace.prepared).toHaveLength(1);
       expect(h.executionWorkspace.prepared[0]!.request).toEqual({ runId: s.created.run.id, invocationId: prepared.invocation.id, role: "orchestrator", writes: true, integrationWorkspacePath: s.created.run.integrationWorkspacePath });

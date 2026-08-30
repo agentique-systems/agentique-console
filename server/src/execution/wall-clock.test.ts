@@ -101,10 +101,10 @@ describe("Invocation-wide wall clock", () => {
       expect(h.stores.leases.listByRun(s.created.run.id).every((l) => l.status === "released")).toBe(true);
       expect(h.provider.requests).toHaveLength(1);
       const events = h.ctx.journal.read({ runId: s.created.run.id, afterSeq: seq }).map((e) => e.type);
-      expect(events).toEqual(["invocation.failed", "budget_reservation.released"]);
+      expect(events).toEqual(["invocation.failed", "budget_reservation.released", "invocation.workspace_released"]);
       // Settling expiry again changes nothing.
       expect(await h.executor.advanceInvocation(invocation.id)).toMatchObject({ kind: "not_permitted", reason: "invocation_terminal" });
-      expect(h.ctx.journal.lastSeq()).toBe(seq + 2);
+      expect(h.ctx.journal.lastSeq()).toBe(seq + 3);
       expect(h.executionWorkspace.released.map((r) => r.invocationId)).toEqual([invocation.id]);
     } finally {
       h.close();

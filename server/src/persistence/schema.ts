@@ -74,6 +74,7 @@ import {
   TASK_STATUSES,
   VERDICTS,
   WORKER_PURPOSES,
+  WORKSPACE_CLEANUP_STATES,
   WORKSPACE_KINDS,
   type ActivationCondition,
   type AgentCapabilities,
@@ -766,12 +767,21 @@ export const invocations = sqliteTable(
     /** The open `side_effect_approval` Decision that ended the Invocation `blocked`; set exactly then. */
     blockedByDecisionId: text("blocked_by_decision_id").references((): AnySQLiteColumn => decisions.id),
     result: text("result", { mode: "json" }).$type<InvocationResult>(),
+    /** The Execution Workspace cleanup obligation: `none` (read-only), `pending` (worktree prepared, not yet released), `released`. */
+    workspaceCleanup: text("workspace_cleanup").notNull().default("none"),
+    workspaceReleasedAt: timestamp("workspace_released_at"),
     createdAt: timestamp("created_at").notNull(),
     startedAt: timestamp("started_at"),
     endedAt: timestamp("ended_at"),
   },
   (t) => [
     index("invocations_plan_node_status").on(t.planNodeId, t.status),
+    // Recovery scans outstanding cleanup obligations.
+    index("invocations_workspace_cleanup_pending")
+      .on(t.runId, t.status)
+      .where(sql`workspace_cleanup = 'pending'`),
+    check("invocations_workspace_cleanup", sql`${t.workspaceCleanup} IN (${inList(WORKSPACE_CLEANUP_STATES)})`),
+    check("invocations_workspace_released_at", sql`(${t.workspaceCleanup} = 'released') = (${t.workspaceReleasedAt} IS NOT NULL)`),
     index("invocations_run_status").on(t.runId, t.status),
     index("invocations_plan_node_source").on(t.planNodeId, t.allocationSource),
     check("invocations_role", sql`${t.role} IN (${inList(INVOCATION_ROLES)})`),

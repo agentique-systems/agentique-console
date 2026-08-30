@@ -394,6 +394,8 @@ CREATE TABLE `invocations` (
 	`failure_reason` text,
 	`blocked_by_decision_id` text,
 	`result` text,
+	`workspace_cleanup` text DEFAULT 'none' NOT NULL,
+	`workspace_released_at` text,
 	`created_at` text NOT NULL,
 	`started_at` text,
 	`ended_at` text,
@@ -402,6 +404,8 @@ CREATE TABLE `invocations` (
 	FOREIGN KEY (`agent_definition_revision_id`) REFERENCES `agent_definition_revisions`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`continued_from_invocation_id`) REFERENCES `invocations`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`blocked_by_decision_id`) REFERENCES `decisions`(`id`) ON UPDATE no action ON DELETE no action,
+	CONSTRAINT "invocations_workspace_cleanup" CHECK("invocations"."workspace_cleanup" IN ('none', 'pending', 'released')),
+	CONSTRAINT "invocations_workspace_released_at" CHECK(("invocations"."workspace_cleanup" = 'released') = ("invocations"."workspace_released_at" IS NOT NULL)),
 	CONSTRAINT "invocations_role" CHECK("invocations"."role" IN ('orchestrator', 'worker', 'coordinator', 'evaluator')),
 	CONSTRAINT "invocations_allocation_source" CHECK("invocations"."allocation_source" IN ('plan_node', 'run_final_reserve')),
 	CONSTRAINT "invocations_final_reserve_use" CHECK("invocations"."final_reserve_use" IS NULL OR "invocations"."final_reserve_use" IN ('final_synthesis', 'run_completion')),
@@ -422,6 +426,7 @@ CREATE TABLE `invocations` (
 );
 --> statement-breakpoint
 CREATE INDEX `invocations_plan_node_status` ON `invocations` (`plan_node_id`,`status`);--> statement-breakpoint
+CREATE INDEX `invocations_workspace_cleanup_pending` ON `invocations` (`run_id`,`status`) WHERE workspace_cleanup = 'pending';--> statement-breakpoint
 CREATE INDEX `invocations_run_status` ON `invocations` (`run_id`,`status`);--> statement-breakpoint
 CREATE INDEX `invocations_plan_node_source` ON `invocations` (`plan_node_id`,`allocation_source`);--> statement-breakpoint
 CREATE UNIQUE INDEX `invocations_active_orchestrator` ON `invocations` (`run_id`) WHERE role = 'orchestrator' AND status IN ('pending', 'running', 'waiting');--> statement-breakpoint

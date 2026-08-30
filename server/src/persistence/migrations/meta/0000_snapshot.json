@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "b8faa175-70fd-4c0f-872b-7c70ffef2820",
+  "id": "4584dc1e-53af-4233-87de-59f57db1fdd9",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "acceptance_criteria": {
@@ -2747,6 +2747,21 @@
           "notNull": false,
           "autoincrement": false
         },
+        "workspace_cleanup": {
+          "name": "workspace_cleanup",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'none'"
+        },
+        "workspace_released_at": {
+          "name": "workspace_released_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "text",
@@ -2777,6 +2792,15 @@
             "status"
           ],
           "isUnique": false
+        },
+        "invocations_workspace_cleanup_pending": {
+          "name": "invocations_workspace_cleanup_pending",
+          "columns": [
+            "run_id",
+            "status"
+          ],
+          "isUnique": false,
+          "where": "workspace_cleanup = 'pending'"
         },
         "invocations_run_status": {
           "name": "invocations_run_status",
@@ -2881,6 +2905,14 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {
+        "invocations_workspace_cleanup": {
+          "name": "invocations_workspace_cleanup",
+          "value": "\"invocations\".\"workspace_cleanup\" IN ('none', 'pending', 'released')"
+        },
+        "invocations_workspace_released_at": {
+          "name": "invocations_workspace_released_at",
+          "value": "(\"invocations\".\"workspace_cleanup\" = 'released') = (\"invocations\".\"workspace_released_at\" IS NOT NULL)"
+        },
         "invocations_role": {
           "name": "invocations_role",
           "value": "\"invocations\".\"role\" IN ('orchestrator', 'worker', 'coordinator', 'evaluator')"

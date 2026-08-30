@@ -22,6 +22,7 @@ import { continuationCandidate, type ContinuationPolicyConfig } from "./continua
 import type { ResourceGovernor } from "./governor.ts";
 import { settleInvocation } from "./invocation-lifecycle.ts";
 import { decideRetry, type RetryPolicyConfig } from "./retry-policy.ts";
+import type { WorkspaceCleanup } from "./workspace-cleanup.ts";
 
 export interface RecoveryConfig {
   retry: RetryPolicyConfig;
@@ -34,6 +35,9 @@ export interface RecoveryReport {
   failedInvocationIds: InvocationId[];
   /** Invocations that may create another Attempt, with the earliest time and the Attempt a resumed start may continue from. */
   retryEligible: { invocationId: InvocationId; notBefore: Timestamp | null; resumeCandidateAttemptId: AttemptId | null }[];
+  /** Outstanding worktree cleanup obligations of terminal Invocations that this recovery released, and those whose release failed again. */
+  workspaceReleasedInvocationIds: InvocationId[];
+  workspaceReleaseFailedInvocationIds: InvocationId[];
 }
 
 export class RecoveryService {
@@ -43,13 +47,25 @@ export class RecoveryService {
     private readonly governor: ResourceGovernor,
     private readonly continuations: ContinuationService,
     private readonly provider: Pick<ProviderAdapter, "provider" | "supportsContinuation">,
+    private readonly cleanup: WorkspaceCleanup,
     private readonly config: RecoveryConfig,
   ) {}
 
+  /**
+   * The canonical reconciliation runs in one transaction; the external
+   * worktree releases follow outside it, so a crash between the two leaves
+   * only pending obligations that the next recovery retries.
+   */
   recover(options: WriteOptions = {}): RecoveryReport {
+    const report = this.reconcile(options);
+    const releases = this.cleanup.releaseOutstanding(options);
+    return { ...report, workspaceReleasedInvocationIds: releases.releasedInvocationIds, workspaceReleaseFailedInvocationIds: releases.failedInvocationIds };
+  }
+
+  private reconcile(options: WriteOptions): Omit<RecoveryReport, "workspaceReleasedInvocationIds" | "workspaceReleaseFailedInvocationIds"> {
     return this.ctx.tx.write(() => {
       const now = this.ctx.clock();
-      const report: RecoveryReport = { interruptedAttemptIds: [], releasedLeaseIds: [], failedInvocationIds: [], retryEligible: [] };
+      const report: Omit<RecoveryReport, "workspaceReleasedInvocationIds" | "workspaceReleaseFailedInvocationIds"> = { interruptedAttemptIds: [], releasedLeaseIds: [], failedInvocationIds: [], retryEligible: [] };
       for (const attempt of this.stores.invocations.activeAttempts()) {
         const invocation = this.stores.invocations.get(attempt.invocationId);
         const manifest = this.stores.invocations.getManifest(invocation.id);

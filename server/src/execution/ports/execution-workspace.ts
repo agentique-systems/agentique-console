@@ -47,6 +47,15 @@ export interface ExecutionWorkspacePort {
    * transaction.
    */
   collectChangeset(request: ExecutionWorkspaceRequest, prepared: PreparedExecutionWorkspace): Promise<CollectedChangeset | null>;
-  /** Releases the Invocation's worktree once the Invocation is terminal; a retry reattaches by Invocation id, so this is never called between Attempts. */
+  /**
+   * Releases the Invocation's worktree once the Invocation is terminal; a
+   * retry reattaches by Invocation id, so this is never called between
+   * Attempts. Called outside any transaction, after the terminal settlement
+   * committed and before the obligation is recorded released, so it must be
+   * idempotent: a worktree already removed (a crash between release and the
+   * record, or a repeated reconciliation) is not an error. A failure is
+   * reported as a bounded diagnostic and retried by recovery; it never
+   * changes the canonical outcome.
+   */
   release(request: ExecutionWorkspaceRequest, prepared: PreparedExecutionWorkspace): void;
 }

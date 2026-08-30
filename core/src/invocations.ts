@@ -162,6 +162,19 @@ export const INVOCATION_FAILURE_REASONS = [
 ] as const;
 export type InvocationFailureReason = (typeof INVOCATION_FAILURE_REASONS)[number];
 
+/**
+ * The Invocation's Execution Workspace cleanup obligation (execution-model
+ * §9.1): `none` for a read-only Invocation (it runs against the Integration
+ * Workspace and owns nothing to clean up), `pending` from the moment a
+ * writing Invocation's worktree was prepared until the external release
+ * succeeded, `released` afterwards. The obligation outlives the Invocation's
+ * terminal transition on purpose: canonical settlement commits first, the
+ * destructive external cleanup follows, and restart recovery retries every
+ * obligation still `pending` on a terminal Invocation.
+ */
+export const WORKSPACE_CLEANUP_STATES = ["none", "pending", "released"] as const;
+export type WorkspaceCleanupState = (typeof WORKSPACE_CLEANUP_STATES)[number];
+
 export const RESULT_STATUSES = ["completed", "failed", "blocked"] as const;
 export type ResultStatus = (typeof RESULT_STATUSES)[number];
 
@@ -303,6 +316,8 @@ export interface Invocation {
   /** The open `side_effect_approval` Decision that ended the Invocation `blocked`; set exactly then. */
   blockedByDecisionId: DecisionId | null;
   result: InvocationResult | null;
+  workspaceCleanup: WorkspaceCleanupState;
+  workspaceReleasedAt: Timestamp | null;
   createdAt: Timestamp;
   startedAt: Timestamp | null;
   endedAt: Timestamp | null;
@@ -336,6 +351,8 @@ export const invocationSchema: z.ZodType<Invocation> = z
     failureReason: z.enum(INVOCATION_FAILURE_REASONS).nullable(),
     blockedByDecisionId: idSchema("decision").nullable(),
     result: invocationResultSchema.nullable(),
+    workspaceCleanup: z.enum(WORKSPACE_CLEANUP_STATES),
+    workspaceReleasedAt: timestampSchema.nullable(),
     createdAt: timestampSchema,
     startedAt: timestampSchema.nullable(),
     endedAt: timestampSchema.nullable(),
@@ -343,6 +360,10 @@ export const invocationSchema: z.ZodType<Invocation> = z
   .refine((i) => PURPOSES_BY_ROLE[i.role].includes(i.purpose), {
     message: "purpose must belong to the Invocation's role",
     path: ["purpose"],
+  })
+  .refine((i) => (i.workspaceCleanup === "released") === (i.workspaceReleasedAt !== null), {
+    message: "workspaceReleasedAt is set exactly when the Workspace cleanup is released",
+    path: ["workspaceReleasedAt"],
   })
   .refine((i) => (i.status === "waiting") === (i.waitReason !== null), {
     message: "waitReason is set exactly when the Invocation is waiting",

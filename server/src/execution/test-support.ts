@@ -30,6 +30,7 @@ import type { PreparedRunWorkspace, RunWorkspacePreparationPort, RunWorkspacePre
 import { RecoveryService } from "./recovery-service.ts";
 import { RunCreationService, type CreatedRun, type RunCreationPolicy, type RunCreationRequest } from "./run-creation-service.ts";
 import { RunStartService } from "./run-start-service.ts";
+import { WorkspaceCleanup, type ExecutionDiagnostic } from "./workspace-cleanup.ts";
 
 /** A deterministic Workspace preparation port that records what it did and can be told to fail. */
 export class FakeWorkspacePreparation implements RunWorkspacePreparationPort {
@@ -64,6 +65,8 @@ export class FakeExecutionWorkspace implements ExecutionWorkspacePort {
   readonly collected: ExecutionWorkspaceRequest[] = [];
   readonly released: ExecutionWorkspaceRequest[] = [];
   failWith: Error | null = null;
+  /** When set, every `release` throws it until cleared (a failing or crashed external cleanup). */
+  failReleaseWith: Error | null = null;
   /** The next collected Changeset; `null` makes the port report none (a validation violation for a writing Invocation). */
   nextChangeset: CollectedChangeset | null | undefined = undefined;
   #counter = 0;
@@ -97,6 +100,7 @@ export class FakeExecutionWorkspace implements ExecutionWorkspacePort {
   }
 
   release(request: ExecutionWorkspaceRequest): void {
+    if (this.failReleaseWith) throw this.failReleaseWith;
     this.released.push(request);
   }
 }
@@ -125,8 +129,11 @@ export interface RuntimeHarness extends Harness {
   executor: AttemptExecutor;
   recovery: RecoveryService;
   runStart: RunStartService;
+  cleanup: WorkspaceCleanup;
   /** Every transient output chunk the executor forwarded. */
   transient: TransientOutput[];
+  /** Every bounded diagnostic the execution boundary reported, in order. */
+  executionDiagnostics: ExecutionDiagnostic[];
 }
 
 export interface RuntimeHarnessOptions {
@@ -150,6 +157,9 @@ export function openRuntimeHarness(options: RuntimeHarnessOptions = {}): Runtime
   const executorConfig = options.executor ?? TEST_EXECUTOR_CONFIG;
   const preparation = new InvocationPreparationService(h.ctx, h.stores, executionWorkspace, { workspacePolicy: EMPTY_WORKSPACE_CAPABILITY_POLICY });
   const transient: TransientOutput[] = [];
+  const executionDiagnostics: ExecutionDiagnostic[] = [];
+  const diagnostics = (d: ExecutionDiagnostic) => executionDiagnostics.push(d);
+  const cleanup = new WorkspaceCleanup(h.ctx, h.stores, executionWorkspace, diagnostics);
   return {
     ...h,
     workspacePreparation,
@@ -164,10 +174,12 @@ export function openRuntimeHarness(options: RuntimeHarnessOptions = {}): Runtime
       limits: options.limits ?? DEFAULT_PLAN_LIMITS,
     }),
     preparation,
-    executor: new AttemptExecutor(h.ctx, h.stores, provider, continuations, governor, executionWorkspace, executorConfig, (chunk) => transient.push(chunk)),
-    recovery: new RecoveryService(h.ctx, h.stores, governor, continuations, provider, executorConfig),
+    executor: new AttemptExecutor(h.ctx, h.stores, provider, continuations, governor, executionWorkspace, executorConfig, (chunk) => transient.push(chunk), diagnostics),
+    recovery: new RecoveryService(h.ctx, h.stores, governor, continuations, provider, cleanup, executorConfig),
     runStart: new RunStartService(h.ctx, h.stores, preparation),
+    cleanup,
     transient,
+    executionDiagnostics,
   };
 }
 

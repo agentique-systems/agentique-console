@@ -28,14 +28,14 @@ describe("RunStartService", () => {
         status: "pending",
       });
       expect(started.prepared.manifest.content.inputs).toEqual([{ kind: "operator_message", conversationMessageId: s.message.id, content: s.message.content }]);
-      expect(h.ctx.journal.read({ runId: s.created.run.id, afterSeq: seq }).map((e) => e.type)).toEqual(["plan_node.ready", "plan_node.started", "run.started", "invocation.created", "budget_reservation.created", "snapshot.taken", "context_manifest.created"]);
+      expect(h.ctx.journal.read({ runId: s.created.run.id, afterSeq: seq }).map((e) => e.type)).toEqual(["plan_node.ready", "plan_node.started", "run.started", "invocation.created", "budget_reservation.created", "invocation.workspace_prepared", "snapshot.taken", "context_manifest.created"]);
       // Nothing executed yet.
       expect(h.stores.invocations.listAttempts(started.prepared.invocation.id)).toEqual([]);
       expect(h.provider.requests).toHaveLength(0);
       // Starting twice is a conflict that creates no second first Invocation.
       expect(() => startRun(h, s)).toThrow(ConflictError);
       expect(h.stores.invocations.listByRun(s.created.run.id)).toHaveLength(1);
-      expect(h.ctx.journal.lastSeq()).toBe(seq + 7);
+      expect(h.ctx.journal.lastSeq()).toBe(seq + 8);
     } finally {
       h.close();
     }

@@ -44,6 +44,8 @@ export { settleInvocation, invocationFailureReasonFor } from "./invocation-lifec
 export type { Settlement, SettleInvocationInput } from "./invocation-lifecycle.ts";
 export { AttemptExecutor, DEFAULT_EXECUTOR_CONFIG } from "./attempt-executor.ts";
 export type { AdvanceOutcome, AttemptExecutorConfig, ExecutionOutcome, InvocationInspection, NotPermittedReason, PrepareOutcome } from "./attempt-executor.ts";
+export { WorkspaceCleanup } from "./workspace-cleanup.ts";
+export type { ExecutionDiagnostic, ExecutionDiagnosticSink, WorkspaceReleaseOutcome } from "./workspace-cleanup.ts";
 export { RecoveryService } from "./recovery-service.ts";
 export type { RecoveryConfig, RecoveryReport } from "./recovery-service.ts";
 export { RunStartService } from "./run-start-service.ts";

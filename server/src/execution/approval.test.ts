@@ -99,7 +99,9 @@ describe("side-effect approval", () => {
         "invocation.blocked",
         "budget_reservation.released",
         "task.blocked",
+        "invocation.workspace_released",
       ]);
+      expect(h.stores.invocations.get(invocation.id).workspaceCleanup).toBe("released");
       expect(h.ctx.journal.read({ runId: s.created.run.id, type: "invocation.blocked" })[0]!.payload).toEqual({ invocationId: invocation.id, decisionId: decision.id });
       // Repeated advancement or finalization creates no second Artifact or Decision.
       expect(await h.executor.advanceInvocation(invocation.id)).toMatchObject({ kind: "not_permitted", reason: "invocation_terminal" });

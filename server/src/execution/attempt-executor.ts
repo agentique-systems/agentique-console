@@ -59,9 +59,10 @@ import { continuationCandidate, type ContinuationPolicyConfig } from "./continua
 import type { ResourceGovernor } from "./governor.ts";
 import { settleInvocation, type Settlement } from "./invocation-lifecycle.ts";
 import { renderManifest, type RetryAppendix } from "./manifest/renderer.ts";
-import type { CollectedChangeset, ExecutionWorkspacePort, ExecutionWorkspaceRequest, PreparedExecutionWorkspace } from "./ports/execution-workspace.ts";
+import type { CollectedChangeset, ExecutionWorkspacePort } from "./ports/execution-workspace.ts";
 import { InvocationResultValidator, type ResultValidation } from "./result-validator.ts";
 import { classifyAttempt, decideRetry, DEFAULT_RETRY_POLICY, type RetryPolicyConfig, type RuntimeInterruption } from "./retry-policy.ts";
+import { WorkspaceCleanup, type ExecutionDiagnosticSink, type WorkspaceReleaseOutcome } from "./workspace-cleanup.ts";
 
 export interface AttemptExecutorConfig {
   retry: RetryPolicyConfig;
@@ -127,6 +128,7 @@ interface InFlight {
 export class AttemptExecutor {
   readonly #inFlight = new Map<AttemptId, InFlight>();
   private readonly validator: InvocationResultValidator;
+  private readonly cleanup: WorkspaceCleanup;
 
   constructor(
     private readonly ctx: PersistenceContext,
@@ -137,8 +139,10 @@ export class AttemptExecutor {
     private readonly workspace: ExecutionWorkspacePort,
     private readonly config: AttemptExecutorConfig = DEFAULT_EXECUTOR_CONFIG,
     private readonly output: TransientOutputSink = () => {},
+    diagnostics: ExecutionDiagnosticSink = () => {},
   ) {
     this.validator = new InvocationResultValidator(stores);
+    this.cleanup = new WorkspaceCleanup(ctx, stores, workspace, diagnostics);
   }
 
   // ---------------------------------------------------------------------------
@@ -261,7 +265,8 @@ export class AttemptExecutor {
         }
         return invocation;
       });
-      this.releaseWorkspace(failed);
+      // Settlement has committed; the worktree release is the external step that follows and recovery retries.
+      this.cleanup.release(failed.id, options);
       return { kind: "not_permitted", reason: "allocation_exhausted", invocation: failed, notBefore: null };
     }
     if (inspection.next.permitted) throw new Error("unreachable: refuse called for a permitted Attempt");
@@ -302,8 +307,7 @@ export class AttemptExecutor {
   private async run(flight: InFlight, options: WriteOptions): Promise<ExecutionOutcome> {
     if (flight.outcome === null) flight.outcome = await this.callProvider(flight);
     const invocation = this.stores.invocations.get(flight.invocationId);
-    const manifest = this.stores.invocations.getManifest(invocation.id);
-    const workspace = this.workspaceOf(invocation, manifest);
+    const workspace = this.cleanup.workspaceOf(invocation);
     if (workspace.request.writes && flight.outcome.completion.kind === "completed" && flight.changeset === null) {
       flight.changeset = await this.workspace.collectChangeset(workspace.request, workspace.prepared);
     }
@@ -348,17 +352,6 @@ export class AttemptExecutor {
       const message = boundedFailureMessage(error instanceof Error ? error.message : String(error));
       return { completion: { kind: "provider_error", transient: true, message }, result: null, usage: [], transcript: null, continuation: null, timing: { startedAt, endedAt: this.ctx.clock(), providerMs: null }, diagnostics: { adapterThrew: "true" } };
     }
-  }
-
-  /** Reconstructs the execution-workspace facts from the manifest, never from memory. */
-  private workspaceOf(invocation: Invocation, manifest: ContextManifest): { request: ExecutionWorkspaceRequest; prepared: PreparedExecutionWorkspace } {
-    const run = this.stores.runs.get(invocation.runId);
-    const writes = grantsWriteCapability(manifest.content);
-    const startingSnapshot = writes && manifest.content.startingSnapshotId !== null ? this.stores.snapshots.get(manifest.content.startingSnapshotId).identity : null;
-    return {
-      request: { runId: run.id, invocationId: invocation.id, role: invocation.role, writes, integrationWorkspacePath: run.integrationWorkspacePath },
-      prepared: { worktreePath: manifest.content.worktreePath, startingSnapshot },
-    };
   }
 
   // ---------------------------------------------------------------------------
@@ -436,8 +429,15 @@ export class AttemptExecutor {
       return { kind: "finalized", attempt: terminal, settlement };
     });
     this.#inFlight.delete(flight.attemptId);
-    if (INVOCATION_MACHINE.isTerminal(result.settlement.invocation.status)) this.releaseWorkspace(result.settlement.invocation);
+    // Canonical settlement has committed. The destructive worktree release follows outside any transaction and is
+    // recorded only once it succeeded; a failure or crash here leaves a pending obligation that recovery retries.
+    if (INVOCATION_MACHINE.isTerminal(result.settlement.invocation.status)) this.cleanup.release(result.settlement.invocation.id, options);
     return result;
+  }
+
+  /** Retries the Invocation's outstanding worktree release (external, idempotent); `not_due` for a non-terminal or read-only Invocation. */
+  releaseWorkspace(invocationId: InvocationId, options: WriteOptions = {}): WorkspaceReleaseOutcome {
+    return this.cleanup.release(invocationId, options);
   }
 
   private canonicalize(call: ProposedToolCall): { bytes: Uint8Array } {
@@ -485,13 +485,6 @@ export class AttemptExecutor {
       meta,
     );
     this.stores.changesets.record({ runId: run.id, invocationId: invocation.id, beforeSnapshotId: before, afterSnapshotId: after.id, diffArtifactId: diff.id }, meta);
-  }
-
-  private releaseWorkspace(invocation: Invocation): void {
-    const manifest = this.manifestOf(invocation);
-    if (!manifest) return;
-    const workspace = this.workspaceOf(invocation, manifest);
-    this.workspace.release(workspace.request, workspace.prepared);
   }
 
   // ---------------------------------------------------------------------------

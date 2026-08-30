@@ -170,6 +170,10 @@ export const EVENT_CATALOGUE = {
   "invocation.wait_cleared": z.strictObject({ invocationId: idSchema("invocation") }),
   /** Terminal: an `approval_required` call was intercepted; the Decision's subject names the call by digest and Artifact, never by bytes. */
   "invocation.blocked": z.strictObject({ invocationId: idSchema("invocation"), decisionId: idSchema("decision") }),
+  /** A writing Invocation's worktree exists and must be released once the Invocation is terminal. */
+  "invocation.workspace_prepared": z.strictObject({ invocationId: idSchema("invocation"), worktreePath: nonEmptyString }),
+  /** The external release succeeded; recorded only afterwards, so a crash in between leaves the obligation pending for recovery. */
+  "invocation.workspace_released": z.strictObject({ invocationId: idSchema("invocation") }),
   "invocation.succeeded": z.strictObject({ invocationId: idSchema("invocation"), result: invocationResultSchema }),
   "invocation.failed": z.strictObject({ invocationId: idSchema("invocation"), failureReason: z.enum(INVOCATION_FAILURE_REASONS) }),
   "invocation.cancelled": z.strictObject({ invocationId: idSchema("invocation") }),
