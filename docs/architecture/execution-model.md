@@ -34,13 +34,23 @@ canonical store below is implemented behind `server/src/persistence/`
 (schema, client, database-open guard, baseline migration, stores, blob
 store, transaction helpers); the deterministic runtime that composes
 stores into canonical operations — the plan compiler, the plan-revision
-service, Run creation, and in later phases the scheduler, Pattern
-executors, and Gates — lives behind `server/src/execution/`, which depends
-only on the core package, the persistence boundary, and narrow ports for
-capabilities implemented in later phases (today the Workspace preparation
-port, §3). Every state-changing store operation validates the transition,
-appends the Event, and updates the projection in one transaction; an
-illegal transition writes nothing.
+service, Run creation, the Context Manifest assembler and renderer,
+Invocation preparation, the Attempt executor with its retry policy and
+result validator, the resource governor, restart recovery, Run start, and
+in later phases the scheduler, Pattern executors, and Gates — lives behind
+`server/src/execution/`, which depends only on the core package, the
+persistence boundary, the provider-neutral adapter contract under
+`server/src/provider/` (§6.5), and narrow ports for capabilities
+implemented in later phases (the Workspace preparation port, §3, and the
+execution-workspace port, §9.1). The provider boundary
+(`server/src/provider/`) holds the adapter contract, the scripted fake,
+the continuation payload stores, and, in a later subphase, the
+provider-specific adapters; it depends on the core package and on the
+continuation index alone, and it never makes a Run, Plan, Pattern,
+Invocation, Task, Requirement, Decision, Budget, or retry decision. Every
+state-changing store operation validates the transition, appends the
+Event, and updates the projection in one transaction; an illegal
+transition writes nothing.
 
 ### 2.1 Write transactions
 
@@ -162,7 +172,18 @@ created ──► running ──► verifying ──► awaiting_signoff ──�
   failure creates nothing; a database failure after preparation rolls back
   and runs the port's compensation. No Invocation exists yet: the initial
   Orchestrator Invocation is created when the Run starts.
-- `running`: at least one Plan Node is `ready` or `running`.
+- `running`: at least one Plan Node is `ready` or `running`. A Run
+  enters `running` through the Run start service
+  (`server/src/execution/run-start-service.ts`): given a Run in
+  `created` and the operator's initial message (which must belong to the
+  Run's Conversation), one transaction moves the root node `pending →
+  ready → running`, the Run `created → running`, and prepares the first
+  Orchestrator Invocation (§4.6, §6.1) — role `orchestrator`, purpose
+  `operator_input`, ordinary Plan Node funding, no predecessor — with its
+  reservation and Context Manifest. Nothing executes until the Attempt
+  executor is asked; a second start is a conflict that creates no second
+  first Invocation. Completing an Orchestrator turn leaves the root node
+  and the Run `running`.
 - `waiting`: no Plan Node can make progress. The Run records a structured
   reason: `decision` (an `operator_required` Decision is unanswered),
   `budget` (the Run Budget has no unreserved capacity for work that must
@@ -905,6 +926,39 @@ narrative of what other agents are doing, no transcript of anyone else's
 Attempt, and no provider continuation payload. The manifest is always
 sufficient to start a `fresh` Attempt (§6.6).
 
+**Assembly.** The Context Manifest assembler
+(`server/src/execution/manifest/assembler.ts`) resolves every entry by
+id from the canonical stores inside the preparation transaction (§6.1)
+and validates ownership: a foreign, missing, retired, or unauthorized
+object fails preparation and nothing is written. The manifest content
+records, beyond the list above, the effective model policy, the
+allocation source and final-reserve use, the effective capability set and
+Tool Policy (§6.4), the role's runtime tools, the queued logical inputs
+as typed entries (an operator message with its content; a Plan Node
+outcome; a Decision resolution; a Gate result; a plan-revision outcome; a
+Publication result), each delivered Handoff's routing metadata, and
+bounded metadata (media type, size, title) of every readable Artifact;
+Artifact content is never embedded and is read through `read_artifact`.
+Every collection is in canonical order — Requirements in scope order,
+everything else by id — so equal inputs assemble byte-identical content.
+The root node's manifest carries the current Requirement revision; a
+scoped node's carries exactly its pinned leaf Requirements, and a scoped
+node whose pinned Requirement has since been retired cannot prepare a
+further Invocation (the Orchestrator revises the plan).
+
+**Rendering.** The renderer (`server/src/execution/manifest/renderer.ts`)
+is a pure projection from the persisted manifest to the bytes the
+provider receives: a documented field order (header, instructions,
+inputs, Tasks, Requirements, Acceptance Criteria, Decisions, Handoffs,
+Artifacts, capabilities, Tool Policy, runtime tools), compact technical
+wording, no clock, no query, no path ordering, and byte-for-byte the same
+text for the same manifest before and after a restart. The manifest row
+records the renderer format version it was assembled for
+(`rendererVersion`), so a retry after a restart renders under the
+contract it was prepared with; this is a renderer version, not a
+compatibility version. A retry Attempt receives the same text plus a
+bounded appendix (§7.2).
+
 ### 6.3 Result
 
 Every Attempt must end by returning a typed result through the runtime's
@@ -945,7 +999,22 @@ An Invocation has two tool sets.
 provider-native. Which of them an Attempt may use is the intersection of
 the Agent Definition revision's declared capabilities, the role's policy
 (Evaluators and selectors are read-only), and the Run's Workspace policy.
-The console builds no capability tools.
+The console builds no capability tools. The intersection is computed once
+per Invocation by `effectiveCapabilityPolicy` in the core package and
+persisted in the Context Manifest: per declared tool, the revision's
+disposition (default `allowed`) is narrowed — never widened — to `denied`
+by a role that does not hold the tool or a Workspace that denies it, and
+to `approval_required` by a Workspace that requires approval; the
+effective capability set is every declared tool whose disposition is not
+`denied`. The role policy is: the Orchestrator and a Worker may hold
+every declared tool and MCP server; a Coordinator holds only the
+coordination set (`read`, `search`, `write`) and no MCP server; an
+Evaluator or route selector holds only the read-only tools (`read`,
+`search`) and no MCP server. Every tool name outside the read-only set,
+including any provider-specific name, is treated as write-capable, so a
+read-only role never receives an unknown tool by accident and any
+Invocation holding a write-capable tool runs in an isolated worktree and
+produces a Changeset (§5, §9.1).
 
 Each capability tool carries a **Tool Policy** disposition from the Agent
 Definition revision: `allowed`, `denied`, or `approval_required`. An
@@ -1007,9 +1076,55 @@ is terminal. Once an Attempt is created it has consumed one Attempt from
 its Invocation's allocation, whatever its outcome: an `interrupted`
 Attempt (§14, server restart or wall-clock limit) keeps its consumed
 Attempt, and the retry that follows it is a new Attempt that consumes
-another. Recovery therefore never yields unlimited free retries; when no
-Attempt allocation remains the Invocation is `failed` with reason
+another. A `pending` Attempt whose process ended before the provider was
+reached is likewise `interrupted` by recovery and never becomes `running`
+retroactively. Recovery therefore never yields unlimited free retries;
+when no Attempt allocation remains the Invocation is `failed` with reason
 `allocation_exhausted`.
+
+A terminal Attempt that did not succeed also records, in the same
+transition, a bounded **failure detail** (a sanitized single-line
+message, the exact result-validation violations for `result_invalid`,
+the capability tool concerned, and whether the interruption was a
+cancellation — never a transcript, raw provider message, complete tool
+output, stack trace, or secret) and its durable **retry decision**
+(§7.2): whether another Attempt is permitted, the closed reason, and the
+earliest time. A restart reads these back verbatim instead of
+recomputing them from process configuration. Every Attempt is executed
+by the Attempt executor (`server/src/execution/attempt-executor.ts`)
+through a provider-neutral adapter (`server/src/provider/adapter.ts`)
+that receives one execution request — Attempt and Invocation ids, model
+and effort, the deterministic rendered input, the effective capability
+and Tool Policy, the working directory, the wall-clock deadline, a
+cancellation signal, an optional verified continuation payload, and a
+transient-output sink — and returns one typed outcome: a closed
+completion (completed, transient or permanent provider error, tool
+failure, approval required, interrupted with its cause), the candidate
+result, Usage chunks, bounded transcript bytes, an optional opaque
+continuation payload, timing, and safe diagnostics. The adapter holds no
+canonical state, makes no scheduling, retry, or transition decision, and
+never treats an `approval_required` disposition as `allowed`.
+
+The executor's transaction boundaries are fixed. *Prepare* (one
+transaction) verifies the Invocation and its manifest, the remaining
+Attempt, cost, and token allocation, and the previous Attempt's retry
+decision, selects a fresh or resumed start, checks the governor before
+creating anything, then creates the Attempt with its lease and starts it;
+a capacity refusal creates no Attempt and consumes nothing. *Execute*
+(no transaction) renders the manifest, calls the provider under
+cancellation and a per-Attempt wall-clock deadline that the caller's
+clock enforces, streams transient output, collects a writing
+Invocation's Changeset through the execution-workspace port, and stores
+any continuation payload. *Finalize* (one transaction) stores the
+transcript Artifact, records every Usage row, records the Changeset,
+validates the candidate result, transitions the Attempt with its failure
+detail and retry decision, releases the lease exactly once, and settles
+the Invocation and its Tasks only when no retry remains — which releases
+the Invocation's reservation. Usage is therefore always recorded before
+the Invocation becomes terminal, and a finalization that fails is retried
+on the next call without repeating the provider call. Every executor
+operation is safe to repeat: it never creates a duplicate Attempt, lease,
+Usage row, or terminal Event.
 
 ### 6.6 Provider resumption
 
@@ -1035,10 +1150,23 @@ An Attempt may start `resumed` only when all of the following hold:
 
 Otherwise the Attempt starts `fresh` from the manifest. Resumption is an
 optimization that saves re-reading the manifest; a `fresh` start is always
-correct. Resumption is decided by the adapter at Attempt start and is
-recorded on the Attempt; nothing else in the runtime branches on it. There
-is no rotation, no generation counter, no checkpoint reconstruction, and no
-continuation document.
+correct. The adapter reports whether it supports continuation; the
+runtime's continuation policy
+(`server/src/execution/continuation-policy.ts`) decides the candidate
+from canonical facts alone at Attempt start — a prior Attempt of the
+same Invocation, or the last Attempt of the `continuedFromInvocationId`
+Invocation whose manifest agrees with the new one on everything that is
+not new logical input (the definition revision, hash, instructions, and
+model policy; the role, Plan Node, and Run; the effective capabilities,
+Tool Policy, and runtime tools; the funding), the prior Attempt having
+succeeded, returned an invalid result, or been interrupted or hit a
+transient provider error without being cancelled, with an unexpired
+index row and a last prompt that fits the context policy and the
+remaining token allocation — and the executor resolves and verifies the
+payload outside any transaction. The decision is recorded only as the
+Attempt's `startMode` and `resumedFromAttemptId`; nothing else in the
+runtime branches on it. There is no rotation, no generation counter, no
+checkpoint reconstruction, and no continuation document.
 
 Continuation storage is pointer-based. `provider_continuations` is an index
 row per Attempt: Attempt id, provider, storage key, digest, creation time,
@@ -1080,6 +1208,29 @@ and no agent can.
 - A retry is a new Attempt of `kind: retry`, started `fresh` or `resumed`
   under §6.6. The failed Attempt's transcript Artifact remains. When the
   permitted Attempts are exhausted the Invocation is `failed`.
+- The decision is deterministic and durable
+  (`server/src/execution/retry-policy.ts`): backoff is `base × 2^(n−1)`
+  capped, from an injected clock and without randomness; a tool failure
+  is retried once (a second consecutive tool failure refuses with
+  `tool_failure_retried`); an interruption caused by cancellation refuses
+  with `cancelled`; a transient failure, invalid result, or interruption
+  whose Usage has already exhausted the cost or token allocation is
+  classified `allocation_exhausted` and refused; an `approval_required`
+  capability call ends the Attempt `failed` (`tool_failure`) with the
+  refusal reason `approval_required` and leaves the Invocation `waiting`
+  on `decision` for the specification phase to create the
+  `side_effect_approval` Decision — no approval is invented and no
+  provider process waits. The decision is persisted on the Attempt with
+  its exact `retryNotBefore`, and the Invocation's next Attempt is
+  permitted only when that time has passed. A refused retry ends the
+  Invocation: `provider_permanent`, `allocation_exhausted` (cost, tokens,
+  or Attempts exhausted, including after an interruption), `result_invalid`
+  when the last Attempt's result was invalid, `attempts_exhausted` after
+  a repeated tool failure, `cancelled` on cancellation; a `task`
+  Invocation's Task fails with the corresponding reason. The retry
+  Attempt is rendered from the unchanged manifest plus a bounded appendix
+  carrying only the prior Attempt id, failure class, sanitized detail,
+  exact violations, and the ordinal and remaining Attempts.
 
 ### 7.3 Dependencies
 
@@ -1250,8 +1401,11 @@ the node when the Invocation reaches a terminal state.
 **Exhaustion.**
 
 - An Invocation that reaches its reserved cost, tokens, or Attempts is
-  `failed` with reason `allocation_exhausted`; no retry. Reaching its
-  wall-clock limit interrupts the Attempt and is classified `interrupted`.
+  `failed` with reason `allocation_exhausted`; no retry. The wall-clock
+  limit (the Invocation's, bounded by its node's) applies to each Attempt
+  from its start; reaching it interrupts the Attempt and is classified
+  `interrupted`, and the retry that follows is bounded by the same limit
+  from its own start.
 - A Plan Node whose unconsumed, unreserved allocation cannot cover the next
   Invocation it must create acts on its `onAllocationExhausted` policy:
   `fail` (default) fails the node; `wait` puts the node in `waiting` with
@@ -1303,6 +1457,25 @@ never holds or interprets semantic Run state, and never decides which Run
 or node is more important beyond the configured ordering (creation order
 by default). It is backpressure, not orchestration. There is no global
 "pause" product state; the operator pauses individual Runs (§14).
+
+The governor (`server/src/execution/governor.ts`) accounts from the
+canonical `capacity_leases` rows on every call rather than from in-memory
+counters, so a rolled-back grant, a crashed process, or a restart never
+leaves it trusting stale state; its only memory is the availability a
+provider last reported (a quota or overload refusal with an optional
+retry-after time that clears itself once passed). Refusal reasons are
+evaluated in a fixed order — `configured_limit` (an unconfigured or
+zero-limit provider, or a request above a configured ceiling),
+`provider_quota`, `provider_concurrency`, `process_concurrency` — and a
+refusal writes nothing. A grant and its persisted lease are one
+transaction with the Attempt it starts; the executor checks the governor
+before creating the Attempt so that a refusal creates no Attempt and
+consumes no allocation; a lease is released exactly once on every
+terminal path; restoration after a restart releases every lease still
+active and forgets reported availability. `join` nodes never request a
+lease. The governor performs no polling and, in Phase 2B, no queueing:
+it returns the typed refusal and the scheduler maps it to a `waiting`
+Run.
 
 ### 7.9 Task states and transitions
 
@@ -1641,7 +1814,7 @@ mechanism, if ever added, is a new feature with its own design.
 | Changeset conflict | Task created for the node owner; Gate blocked until resolved. |
 | Publish fails | Target untouched; Publication `failed`; a `publication_result` Orchestrator Invocation is created. |
 | Provider continuation payload missing, expired, or corrupt | The Attempt starts `fresh`; no other effect. |
-| Server restart | Every `running` Attempt is marked `interrupted`; on boot the runtime creates new Attempts (`retry`) for Invocations that still have Attempt allocation, from their persisted manifests, `resumed` only where §6.6 permits. Worktrees are preserved and reattached by Invocation id. Leases are recomputed from scratch; reservations are read as persisted. Nothing is inferred from transcripts. |
+| Server restart | Recovery (`server/src/execution/recovery-service.ts`) runs once at startup in one transaction: every `pending` or `running` Attempt of the previous process is marked `interrupted` with its consumed Attempt kept and its durable retry decision recorded; every stale lease is released and the governor is rebuilt from canonical lease state; an Invocation with no Attempt remaining is `failed` with `allocation_exhausted` (its Task failing likewise); every other interrupted Invocation is left `running` with durable retry eligibility, `resumed` only where §6.6 permits and `fresh` when the payload is absent or invalid. Recovery is idempotent, reads no transcript and no provider message, and executes nothing: recoverable work is returned for an explicit execution call, which the scheduler drives. Worktrees are preserved and reattached by Invocation id; reservations are read as persisted. |
 | Operator cancels a Run | All Attempts interrupted, all nodes `cancelled`, all reservations released, Integration Workspace left in place, Run `cancelled`. |
 | Operator pauses a Run | The scheduler stops starting Attempts for that Run; running Attempts are allowed to finish (`soft`) or interrupted (`hard`); Run `waiting` with reason `operator`. Other Runs are unaffected. |
 

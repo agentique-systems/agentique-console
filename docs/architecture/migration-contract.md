@@ -90,14 +90,30 @@ Phase 1 and remain after cutover:
   source-path grammar (`compiler/`), the plan-revision service
   (authorization, validation, compilation, reconciliation, atomic
   application or structured rejection), the Run creation service (atomic
-  Run bootstrap), and, in later phases, the scheduler, Pattern executors,
-  Invocation and Attempt lifecycle, manifests, Gates, and the resource
-  governor. It imports only `@agentique-console/core`, the persistence
-  boundary, `zod`, and the narrow capability ports it declares under
-  `ports/` (today `RunWorkspacePreparationPort`, implemented by the
-  Workspace provider in the Workspace phase). Nothing legacy imports it
-  and it imports nothing legacy; the persistence boundary never depends on
-  it.
+  Run bootstrap), the Context Manifest assembler and deterministic
+  renderer (`manifest/`), the Invocation preparation service, the result
+  validator, the retry and continuation policies, the resource governor,
+  the Attempt executor, restart recovery, the Run start service, and, in
+  later phases, the scheduler, Pattern executors, and Gates. It imports
+  only `@agentique-console/core`, the persistence boundary, `zod`, the
+  provider-neutral adapter contract under `server/src/provider/`, and the
+  narrow capability ports it declares under `ports/`
+  (`RunWorkspacePreparationPort` and `ExecutionWorkspacePort`, implemented
+  by the Workspace provider in the Workspace phase). Nothing legacy
+  imports it and it imports nothing legacy; the persistence boundary and
+  the provider boundary never depend on it.
+
+- **`server/src/provider/` — the provider boundary.** The
+  provider-neutral adapter contract (one Attempt execution request in,
+  one typed outcome out), the scripted fake provider used by the default
+  suite, the continuation service with its memory- and file-backed
+  payload stores, and, in a later subphase, the provider-specific
+  adapters extracted from `server/src/sdk/` under rule 7. It imports only
+  `@agentique-console/core`, Node built-ins, and the continuation index
+  store; it never imports another store or the execution boundary, and
+  an adapter never makes a Run, Plan, Pattern, Invocation, Task,
+  Requirement, Decision, Budget, or retry decision. The import-boundary
+  test enforces both.
 
 None of these boundaries is staging, `v2`, `next`, `new`, or compatibility
 code; each is the final production location of what it contains.
@@ -373,7 +389,19 @@ is one or more commits; each commit keeps `npm run typecheck` and
    Phase 2A (done): the execution boundary, explicit plan-revision
    membership, the persisted final reserve, the deterministic compiler,
    the plan-revision service with reconciliation, and atomic Run bootstrap
-   behind the Workspace preparation port. Later subphases: Runs, Execution
+   behind the Workspace preparation port. Phase 2B (done): the durable
+   Invocation execution substrate — Context Manifest assembly and
+   deterministic rendering with a persisted renderer version, atomic
+   Invocation preparation behind the execution-workspace port, the
+   provider-neutral adapter contract and scripted fake under
+   `server/src/provider/`, the deterministic resource governor with
+   persisted leases, Attempt execution with Usage and transcript
+   recording, result validation, closed failure classification with
+   durable retry decisions, optional pointer-based provider continuation,
+   idempotent restart recovery, and the first root Orchestrator
+   Invocation through the Run start service. Phase 2C: the general
+   scheduler and the `single` and `chain` Pattern runners over this
+   substrate. Later subphases: Runs, Execution
    Plan source validation and compiler,
    Plan Nodes of both kinds (`pattern`, `join`), Plan Edges, Plan Node
    Requirement scope, scheduler, resource governor, Budget reservations,

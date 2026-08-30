@@ -450,10 +450,15 @@ Usage rows, and failure classification, and records its `startMode` —
 `fresh` (started from the Context Manifest) or `resumed` (continued
 provider execution from the nullable `resumedFromAttemptId`, which may
 name a prior Attempt of the same Invocation or the last Attempt of the
-Invocation named by `continuedFromInvocationId`, when the provider adapter
-determines that is supported, safe, available, and within the allocation).
-Every Attempt can be started `fresh`. Attempts are numbered from 1 within
-their Invocation.
+Invocation named by `continuedFromInvocationId`, when the adapter reports
+support and the runtime's continuation policy finds it safe, available,
+and within the allocation). Every Attempt can be started `fresh`.
+Attempts are numbered from 1 within their Invocation. A terminal Attempt
+that did not succeed carries a bounded, sanitized **failure detail**
+(message, exact result-validation violations, tool, cancellation) and a
+durable **retry decision** (permitted, closed reason, earliest time) that
+a restart reads back verbatim; a `pending` Attempt whose process ended is
+`interrupted` like a running one.
 
 - Id prefix: `att_`
 - Owned by: the runtime
@@ -625,9 +630,12 @@ Requirement ids and their statements, the Decision ids and their answers,
 the Handoffs delivered, the Artifact ids the Invocation may read, the
 Snapshot it starts from, and the allocation it holds. Exactly one manifest
 exists per Invocation; it is persisted before the initial Attempt starts
-and never changes, so that any Attempt can be reproduced and audited. An
-Invocation receives nothing that is not in its manifest, and never a
-provider continuation payload.
+and never changes, so that any Attempt can be reproduced and audited. It
+also records the effective model policy, capabilities, Tool Policy, and
+runtime tools, the typed queued inputs, and the renderer format version
+it was assembled for; the rendered prompt is a deterministic projection of
+it and never the record. An Invocation receives nothing that is not in
+its manifest, and never a provider continuation payload.
 
 - Id prefix: `cm_`
 - Owned by: the runtime
