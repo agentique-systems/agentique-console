@@ -21,7 +21,9 @@ import { MemoryContinuationPayloadStore } from "../provider/continuation-store.t
 import { ContinuationService } from "../provider/continuation.ts";
 import { ScriptedProvider } from "../provider/fake.ts";
 import type { TransientOutput } from "../provider/adapter.ts";
+import { AcceptanceCheckService, type AcceptanceCheckConfig } from "./acceptance-checks.ts";
 import { AttemptExecutor, DEFAULT_EXECUTOR_CONFIG, type AttemptExecutorConfig } from "./attempt-executor.ts";
+import type { AcceptanceCriterionExecutionFailure, AcceptanceCriterionExecutionOutcome, AcceptanceCriterionExecutionPort, AcceptanceCriterionExecutionRequest } from "./ports/acceptance-criterion-execution.ts";
 import { ResourceGovernor, type GovernorConfig } from "./governor.ts";
 import { InvocationPreparationService } from "./invocation-preparation-service.ts";
 import { PlanRevisionService, type PlanRevisionOutcome } from "./plan-revision-service.ts";
@@ -198,6 +200,130 @@ export class FakeExecutionWorkspace implements ExecutionWorkspacePort {
   }
 }
 
+/** One scripted answer of the fake check port for a criterion (by Acceptance Criterion id, or by command text). */
+export type FakeCheckStep =
+  | { kind: "exit"; exitCode: number; output?: string; truncated?: boolean }
+  /** Resolves only when the test releases `key` (or the runtime aborts); then `then` applies. */
+  | { kind: "delay"; key: string; then: FakeCheckStep }
+  | { kind: "fail"; failure: AcceptanceCriterionExecutionFailure; message?: string }
+  /** Waits for the request's deadline or abort signal and reports a timeout. */
+  | { kind: "hang" }
+  | { kind: "throw"; error: Error };
+
+/** What the fake port observed about one execution: safe facts only. */
+export interface ObservedCheck {
+  acceptanceCriterionId: string;
+  command: string;
+  round: number | null;
+  /** The isolated view the command ran in; never the Integration Workspace or the Target. */
+  viewPath: string;
+  isolationKey: string;
+  snapshot: SnapshotIdentity;
+  maxOutputBytes: number;
+  /** Whether a database transaction was open while the command ran (`null` without a probe). */
+  inTransaction: boolean | null;
+  outcome: "exited" | "failed";
+  /** Whether a stale view under the same key was discarded before this execution. */
+  discardedStale: boolean;
+}
+
+/**
+ * A deterministic Acceptance Criterion execution port: answers each request
+ * from a script keyed by criterion id (then by command), models the isolated
+ * view of the Snapshot (prepared, written to, disposed), bounded output,
+ * deadline and abort, infrastructure failures, and stale-view disposal
+ * across a process restart; it receives no persistence and reads nothing but
+ * the request.
+ */
+export class FakeAcceptanceCriterionExecution implements AcceptanceCriterionExecutionPort {
+  readonly requests: AcceptanceCriterionExecutionRequest[] = [];
+  readonly observed: ObservedCheck[] = [];
+  /** Isolated views by isolation key that were prepared and not yet disposed (a "stale" view after a simulated crash). */
+  readonly liveViews = new Map<string, string>();
+  readonly disposed: string[] = [];
+  /** Every write the "command" performed, by the path it wrote to: proves isolation. */
+  readonly writes: { path: string; isolationKey: string }[] = [];
+  readonly #script = new Map<string, FakeCheckStep[]>();
+  readonly #released = new Map<string, () => void>();
+  /** The answer when nothing is scripted for a criterion. */
+  defaultStep: FakeCheckStep = { kind: "exit", exitCode: 0, output: "ok\n" };
+  /** When set, a view whose disposal would run is left live instead (a crash before cleanup). */
+  crashBeforeDispose = false;
+  #counter = 0;
+
+  constructor(public transactionProbe: (() => boolean) | null = null) {}
+
+  /** Queues answers for a criterion id or a command text, consumed in order. */
+  script(key: string, ...steps: FakeCheckStep[]): this {
+    this.#script.set(key, [...(this.#script.get(key) ?? []), ...steps]);
+    return this;
+  }
+
+  release(key: string): void {
+    const release = this.#released.get(key);
+    if (!release) throw new Error(`no delayed check is waiting on ${key}`);
+    this.#released.delete(key);
+    release();
+  }
+
+  get delayedKeys(): string[] {
+    return [...this.#released.keys()].sort();
+  }
+
+  async execute(request: AcceptanceCriterionExecutionRequest): Promise<AcceptanceCriterionExecutionOutcome> {
+    this.requests.push(request);
+    const step = this.#script.get(request.acceptanceCriterionId)?.shift() ?? this.#script.get(request.command)?.shift() ?? this.defaultStep;
+    // A stale view under the same key (a previous process died mid-check) is discarded; a fresh, disposable view holds exactly the Snapshot.
+    const discardedStale = this.liveViews.has(request.workspace.isolationKey);
+    if (discardedStale) this.disposed.push(this.liveViews.get(request.workspace.isolationKey)!);
+    this.#counter += 1;
+    const viewPath = `${request.workspace.integrationWorkspacePath ?? "/tmp"}/.verification/${request.workspace.isolationKey.replaceAll("/", "_")}-${this.#counter}`;
+    this.liveViews.set(request.workspace.isolationKey, viewPath);
+    const inTransaction = this.transactionProbe?.() ?? null;
+    const record = (outcome: "exited" | "failed") => this.observed.push({ acceptanceCriterionId: request.acceptanceCriterionId, command: request.command, round: request.round, viewPath, isolationKey: request.workspace.isolationKey, snapshot: request.workspace.snapshot, maxOutputBytes: request.maxOutputBytes, inTransaction, outcome, discardedStale });
+    const dispose = () => {
+      if (this.crashBeforeDispose) return;
+      this.liveViews.delete(request.workspace.isolationKey);
+      this.disposed.push(viewPath);
+    };
+    try {
+      const outcome = await this.#run(step, request, viewPath);
+      record(outcome.kind);
+      return outcome;
+    } finally {
+      dispose();
+    }
+  }
+
+  async #run(step: FakeCheckStep, request: AcceptanceCriterionExecutionRequest, viewPath: string): Promise<AcceptanceCriterionExecutionOutcome> {
+    switch (step.kind) {
+      case "delay":
+        await new Promise<void>((resolve) => {
+          this.#released.set(step.key, resolve);
+          request.signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        this.#released.delete(step.key);
+        if (request.signal.aborted) return { kind: "failed", failure: "aborted", message: "aborted by the runtime" };
+        return this.#run(step.then, request, viewPath);
+      case "hang":
+        if (!request.signal.aborted) await new Promise<void>((resolve) => request.signal.addEventListener("abort", () => resolve(), { once: true }));
+        return { kind: "failed", failure: request.signal.aborted ? "aborted" : "timed_out", message: "the command did not finish" };
+      case "throw":
+        throw step.error;
+      case "fail":
+        return { kind: "failed", failure: step.failure, message: step.message ?? step.failure };
+      case "exit": {
+        // The command "writes" into its isolated view only; the Integration Workspace path is never touched.
+        this.writes.push({ path: `${viewPath}/scratch`, isolationKey: request.workspace.isolationKey });
+        const full = new TextEncoder().encode(step.output ?? `exit ${step.exitCode}\n`);
+        const truncated = step.truncated === true || full.byteLength > request.maxOutputBytes;
+        const output = full.byteLength > request.maxOutputBytes ? full.slice(0, request.maxOutputBytes) : full;
+        return { kind: "exited", exitCode: step.exitCode, output, truncated };
+      }
+    }
+  }
+}
+
 export const TEST_POLICY: RunCreationPolicy = {
   initialOrchestratorAllocation: { costUsd: 10, tokens: 100_000, attempts: 5 },
   finalReserve: { code: { costUsd: 5, tokens: 50_000, attempts: 3 }, other: { costUsd: 0, tokens: 0, attempts: 0 } },
@@ -209,11 +335,15 @@ export const TEST_GOVERNOR: GovernorConfig = { providers: { fake: { maxConcurren
 
 export const TEST_EXECUTOR_CONFIG: AttemptExecutorConfig = { retry: { backoffBaseMs: 1_000, backoffMaxMs: 8_000 }, continuation: DEFAULT_EXECUTOR_CONFIG.continuation };
 
+export const TEST_ACCEPTANCE_CHECKS: AcceptanceCheckConfig = { maxOutputBytes: 4_096, commandTimeoutMs: 60_000 };
+
 export interface RuntimeHarness extends Harness {
   workspacePreparation: FakeWorkspacePreparation;
   executionWorkspace: FakeExecutionWorkspace;
   integrationWorkspace: FakeIntegrationWorkspace;
   integration: ChangesetIntegrationService;
+  criterionExecution: FakeAcceptanceCriterionExecution;
+  checks: AcceptanceCheckService;
   handoffs: HandoffRouter;
   runners: PatternRunners;
   scheduler: RunScheduler;
@@ -245,6 +375,9 @@ export interface RuntimeHarnessOptions {
   payloads?: MemoryContinuationPayloadStore;
   /** Reuse the fake Integration Workspace of an earlier harness (the external Workspace survives a process). */
   integrationWorkspace?: FakeIntegrationWorkspace;
+  /** Reuse the fake check port of an earlier harness (its isolated views survive a process, stale ones included). */
+  criterionExecution?: FakeAcceptanceCriterionExecution;
+  checks?: AcceptanceCheckConfig;
 }
 
 export function openRuntimeHarness(options: RuntimeHarnessOptions = {}): RuntimeHarness {
@@ -265,13 +398,18 @@ export function openRuntimeHarness(options: RuntimeHarnessOptions = {}): Runtime
   const cleanup = new WorkspaceCleanup(h.ctx, h.stores, executionWorkspace, diagnostics);
   const executor = new AttemptExecutor(h.ctx, h.stores, provider, continuations, governor, executionWorkspace, executorConfig, (chunk) => transient.push(chunk), diagnostics);
   const integration = new ChangesetIntegrationService(h.ctx, h.stores, integrationWorkspace);
-  const runners = createPatternRunners({ ctx: h.ctx, stores: h.stores, executor, preparation, integration, governor, provider });
+  const criterionExecution = options.criterionExecution ?? new FakeAcceptanceCriterionExecution();
+  criterionExecution.transactionProbe = () => h.ctx.tx.inTransaction;
+  const checks = new AcceptanceCheckService(h.ctx, h.stores, criterionExecution, options.checks ?? TEST_ACCEPTANCE_CHECKS);
+  const runners = createPatternRunners({ ctx: h.ctx, stores: h.stores, executor, preparation, integration, checks, governor, provider });
   return {
     ...h,
     workspacePreparation,
     executionWorkspace,
     integrationWorkspace,
     integration,
+    criterionExecution,
+    checks,
     handoffs: new HandoffRouter(h.stores),
     runners,
     scheduler: new RunScheduler(h.ctx, h.stores, executor, governor, runners, provider, options.scheduler),

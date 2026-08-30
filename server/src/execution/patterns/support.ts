@@ -22,6 +22,7 @@
 import {
   allocationFits,
   ConflictError,
+  InvariantViolationError,
   INVOCATION_MACHINE,
   isIdOfKind,
   PATTERN_POSITION_BINDINGS,
@@ -59,6 +60,7 @@ import {
 import type { PersistenceContext } from "../../persistence/context.ts";
 import type { Stores } from "../../persistence/stores/index.ts";
 import type { WriteOptions } from "../../persistence/stores/support.ts";
+import type { AcceptanceCheckService } from "../acceptance-checks.ts";
 import type { AttemptExecutor } from "../attempt-executor.ts";
 import type { ResourceGovernor } from "../governor.ts";
 import { HandoffRouter } from "../handoff-routing.ts";
@@ -78,6 +80,8 @@ export type NodeAdvice =
   | { kind: "start_position"; position: PatternPosition; turn?: CoordinatorPurpose }
   /** The named active Invocation may create its next Attempt now. */
   | { kind: "execute"; invocationId: InvocationId }
+  /** An evaluator_optimizer round's deterministic Acceptance Criteria are pending: run them (external, outside any transaction). */
+  | { kind: "verify"; round: number }
   /** An Attempt of an active Invocation is executing in this process. */
   | { kind: "attempt_in_flight"; invocationId: InvocationId }
   /** An active Invocation's retry is permitted only from `notBefore`. */
@@ -97,6 +101,8 @@ export type NodeAdvice =
 /** The closed outcome of one canonical runner action. */
 export type PatternRunnerOutcome =
   | { kind: "started"; invocationId: InvocationId; position: PatternPosition }
+  /** An evaluate-only evaluator_optimizer node started its round over its incoming candidate; no Invocation exists until its checks pass. */
+  | { kind: "round_opened"; round: number }
   | { kind: "step_prepared"; invocationId: InvocationId; position: PatternPosition; handoffId: HandoffId }
   | { kind: "successor_prepared"; invocationId: InvocationId; position: PatternPosition; decisionId: DecisionId }
   /** A route node recorded its selection; `invocationId` is the inline branch Invocation, or `null` for a composite selection. */
@@ -109,6 +115,12 @@ export type PatternRunnerOutcome =
   | { kind: "tasks_projected"; readied: TaskId[]; blocked: TaskId[] }
   /** A completed, integrated Worker Task's result Handoff was recorded for the next Coordinator turn. */
   | { kind: "worker_result_recorded"; invocationId: InvocationId; handoffId: HandoffId }
+  /** An evaluator_optimizer round's deterministic checks ran: every one passed, or the first failure ended the round with a runtime verdict. */
+  | { kind: "verified"; round: number; verdict: "pass" | "fail"; evaluationIds: EvaluationId[] }
+  /** An evaluator_optimizer round's deterministic check could not be carried out; nothing was recorded for it and a later pass retries. */
+  | { kind: "verification_failed"; round: number; acceptanceCriterionId: string; failure: string; message: string }
+  /** An evaluator_optimizer round's overall verdict was recorded from the validated Evaluator result (or derived by the runtime). */
+  | { kind: "verdict_recorded"; round: number; verdict: "pass" | "fail" | "inconclusive"; evaluationId: EvaluationId }
   | { kind: "succeeded"; outputArtifactIds: string[]; handoffIds: HandoffId[] }
   | { kind: "failed"; reason: PlanNodeFailureReason }
   | { kind: "cancelled" }
@@ -127,6 +139,8 @@ export interface PatternRunnerDependencies {
   executor: AttemptExecutor;
   preparation: InvocationPreparationService;
   integration: ChangesetIntegrationService;
+  /** Deterministic Acceptance Criterion execution, used by the evaluator_optimizer runner for its rounds. */
+  checks: AcceptanceCheckService;
   governor: ResourceGovernor;
   provider: { readonly provider: string };
 }
@@ -254,6 +268,25 @@ export class PatternNodeSupport {
     return this.router.incomingHandoffsFor(node.runId, node.id).map((h) => h.id);
   }
 
+  /**
+   * The typed `optimizer_feedback` input an Invocation receives with every
+   * `retry` Handoff among its deliveries (execution-model §5.6): the canonical
+   * round verdict of the evaluate-only node the retry edge leaves, read from
+   * rows, so the entry of the next unrolled producer round knows why the
+   * previous round failed. Every other Handoff adds nothing.
+   */
+  retryFeedbackInputs(handoffIds: readonly HandoffId[]): ManifestInput[] {
+    const { stores } = this.deps;
+    return handoffIds.flatMap((id): ManifestInput[] => {
+      const handoff = stores.handoffs.get(id);
+      if (!handoff.handoffKey.startsWith("retry:") || handoff.source.kind !== "plan_node") return [];
+      const verdict = stores.evaluations.optimizerVerdictsOfNode(handoff.source.planNodeId).at(-1);
+      if (verdict === undefined || verdict.context === null || verdict.context.kind !== "optimizer_verdict") throw new InvariantViolationError(`retry Handoff ${handoff.id} leaves PlanNode ${handoff.source.planNodeId}, which recorded no round verdict`, { handoffId: handoff.id });
+      if (verdict.verdict === "pass") throw new InvariantViolationError(`retry Handoff ${handoff.id} exists although PlanNode ${handoff.source.planNodeId} passed round ${verdict.context.round}`, { handoffId: handoff.id, evaluationId: verdict.id });
+      return [{ kind: "optimizer_feedback", evaluationId: verdict.id, round: verdict.context.round, verdict: verdict.verdict, evidence: verdict.evidence }];
+    });
+  }
+
   // ---------------------------------------------------------------------------
   // Preparation
   // ---------------------------------------------------------------------------
@@ -300,7 +333,7 @@ export class PatternNodeSupport {
       patternPosition: position,
       continuedFromInvocationId: request.continuedFromInvocationId,
       handoffIds: request.handoffIds,
-      inputs: request.inputs,
+      inputs: [...request.inputs, ...this.retryFeedbackInputs(request.handoffIds)],
       ...(request.taskReservationId === undefined ? {} : { funding: { source: "task_transfer" as const, taskReservationId: request.taskReservationId } }),
       correlationId: options.correlationId ?? null,
       causationSeq: options.causationSeq ?? null,
