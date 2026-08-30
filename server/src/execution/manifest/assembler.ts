@@ -100,7 +100,9 @@ export class ContextManifestAssembler {
     const approvalArtifactIds = inputs.flatMap((i) => (i.kind === "side_effect_approval_resolution" ? [i.callArtifactId] : []));
     // An optimizer round's candidate and the Evidence Artifacts of its feedback are readable by id, like every Handoff Artifact.
     const optimizerArtifactIds = inputs.flatMap((i) => (i.kind === "optimizer_candidate" ? i.artifactIds : i.kind === "optimizer_feedback" ? i.evidence.flatMap((e) => (e.kind === "artifact" ? [e.artifactId] : e.kind === "command" ? [e.outputArtifactId] : [])) : []));
-    const artifacts = this.artifacts(run, unique([...request.operationInput.artifactIds, ...handoffs.flatMap((h) => h.artifactIds), ...request.artifactIds, ...approvalArtifactIds, ...optimizerArtifactIds, ...this.taskInputArtifacts(tasks.map((t) => t.taskId))]));
+    // A Gate's candidate is readable by its Evaluator; a Gate result's candidate and its remediation Task's inputs (the judged and command-output Artifacts) by whoever remediates it.
+    const gateArtifactIds = inputs.flatMap((i) => (i.kind === "gate_candidate" ? i.artifactIds : i.kind === "gate_result" ? [...i.artifactIds, ...(i.remediationTaskId === null ? [] : this.stores.tasks.get(i.remediationTaskId).inputArtifactIds)] : []));
+    const artifacts = this.artifacts(run, unique([...request.operationInput.artifactIds, ...handoffs.flatMap((h) => h.artifactIds), ...request.artifactIds, ...approvalArtifactIds, ...optimizerArtifactIds, ...gateArtifactIds, ...this.taskInputArtifacts(tasks.map((t) => t.taskId))]));
     for (const id of request.operationInput.taskIds) {
       if (!invocation.taskIds.includes(id)) throw new InvariantViolationError(`operation input names Task ${id}, which Invocation ${invocation.id} does not own`);
     }
@@ -206,9 +208,9 @@ export class ContextManifestAssembler {
       }
     }
     for (const taskId of taskIds) criteria.push(...this.stores.requirements.listAcceptanceCriteria({ taskId }));
-    // An optimizer round's Evaluator receives exactly the evaluated criteria it must judge, whatever the node's scope lists.
+    // An optimizer round's or a Gate's Evaluator receives exactly the evaluated criteria it must judge, whatever the node's scope lists.
     for (const input of inputs) {
-      if (input.kind === "optimizer_candidate") for (const id of input.acceptanceCriterionIds) criteria.push(this.stores.requirements.getAcceptanceCriterion(id));
+      if (input.kind === "optimizer_candidate" || input.kind === "gate_candidate") for (const id of input.acceptanceCriterionIds) criteria.push(this.stores.requirements.getAcceptanceCriterion(id));
     }
     for (const criterion of criteria) {
       if (criterion.conversationId !== run.conversationId) throw new InvariantViolationError(`AcceptanceCriterion ${criterion.id} belongs to another Conversation`);
@@ -361,8 +363,42 @@ export class ContextManifestAssembler {
           break;
         }
         case "gate_result": {
+          // The closed Gate's canonical facts, restated exactly (execution-model §10): its kind, node, cycle, verdict, pinned Snapshot and
+          // candidate, failed criteria, every Evaluation, and its one remediation Task; delivered to the root Orchestrator or to the
+          // Coordinator turn of the gated node, never to anyone else.
           const gate = this.stores.gates.get(input.gateId);
           if (gate.runId !== run.id) throw new InvariantViolationError(`Gate ${input.gateId} belongs to another Run`);
+          if (gate.status === "open") throw new ValidationError(`Gate ${input.gateId} is open; a gate_result carries a closed Gate`, { gateId: gate.id });
+          if (!(invocation.role === "orchestrator" || (invocation.role === "coordinator" && gate.planNodeId === node.id))) throw new InvariantViolationError(`Invocation ${invocation.id} does not remediate Gate ${gate.id}`);
+          const failed = gate.failure?.kind === "criteria_failed" ? [...gate.failure.acceptanceCriterionIds].sort() : [];
+          const evaluationIds = this.stores.evaluations.listByGate(gate.id).map((e) => e.id).sort();
+          const task = this.stores.tasks.remediationTaskOf(gate.id);
+          const facts = { gateKind: gate.kind, planNodeId: gate.planNodeId, ordinal: gate.ordinal, passed: gate.status === "passed", snapshotId: gate.snapshotId, artifactIds: [...gate.candidateArtifactIds].sort(), failedAcceptanceCriterionIds: failed, evaluationIds, remediationTaskId: task?.id ?? null };
+          const given = { gateKind: input.gateKind, planNodeId: input.planNodeId, ordinal: input.ordinal, passed: input.passed, snapshotId: input.snapshotId, artifactIds: [...input.artifactIds].sort(), failedAcceptanceCriterionIds: [...input.failedAcceptanceCriterionIds].sort(), evaluationIds: [...input.evaluationIds].sort(), remediationTaskId: input.remediationTaskId };
+          if (canonicalJson(facts) !== canonicalJson(given)) throw new InvariantViolationError(`gate_result input disagrees with the canonical facts of Gate ${gate.id}`, { gateId: gate.id });
+          break;
+        }
+        case "gate_candidate": {
+          // The runtime supplies what a Gate Evaluator judges: its own open Gate, the Gate's pinned Snapshot and candidate, and exactly the
+          // Gate's evaluated criteria.
+          if (invocation.role !== "evaluator" || invocation.purpose !== "evaluate" || invocation.patternPosition !== null || invocation.gateId !== input.gateId) throw new InvariantViolationError(`Invocation ${invocation.id} is not the Evaluator of Gate ${input.gateId}`);
+          const gate = this.stores.gates.get(input.gateId);
+          if (gate.runId !== run.id) throw new InvariantViolationError(`Gate ${input.gateId} belongs to another Run`);
+          if (gate.status !== "open") throw new ValidationError(`Gate ${input.gateId} is ${gate.status}; an Evaluator judges an open Gate`, { gateId: gate.id });
+          if (gate.kind !== input.gateKind) throw new InvariantViolationError(`Gate ${gate.id} is a ${gate.kind} Gate, not ${input.gateKind}`);
+          if (gate.planNodeId !== null && gate.planNodeId !== node.id) throw new InvariantViolationError(`Gate ${gate.id} belongs to PlanNode ${gate.planNodeId}, not ${node.id}`);
+          if (gate.snapshotId !== input.snapshotId) throw new InvariantViolationError(`Gate ${gate.id} pinned Snapshot ${String(gate.snapshotId)}, not ${input.snapshotId}`);
+          const pinned = [...gate.candidateArtifactIds].sort();
+          const given = [...input.artifactIds].sort();
+          if (pinned.length !== given.length || pinned.some((id, i) => id !== given[i])) throw new InvariantViolationError(`Gate ${gate.id} judges candidate ${pinned.join(", ")}, not ${given.join(", ")}`);
+          for (const id of input.artifactIds) this.artifact(run, id);
+          const evaluated = gate.acceptanceCriterionIds.filter((id) => this.stores.requirements.getAcceptanceCriterion(id).check.kind === "evaluated").sort();
+          if (evaluated.length !== input.acceptanceCriterionIds.length || evaluated.some((id, i) => id !== input.acceptanceCriterionIds[i])) {
+            throw new InvariantViolationError(`gate_candidate input names criteria ${input.acceptanceCriterionIds.join(", ")}, not the Gate's evaluated criteria ${evaluated.join(", ")}`);
+          }
+          for (const id of input.acceptanceCriterionIds) {
+            if (this.stores.requirements.getAcceptanceCriterion(id).conversationId !== run.conversationId) throw new InvariantViolationError(`AcceptanceCriterion ${id} belongs to another Conversation`);
+          }
           break;
         }
         case "publication_result": {

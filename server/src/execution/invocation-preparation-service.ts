@@ -48,6 +48,7 @@ import {
   type ContextManifest,
   type EffectiveCapabilityPolicy,
   type FinalReserveUse,
+  type GateId,
   type HandoffId,
   type Invocation,
   type InvocationId,
@@ -95,6 +96,8 @@ export interface InvocationPreparationRequest {
    * node shape at this position. `null` only for a Gate Evaluator.
    */
   patternPosition: PatternPosition | null;
+  /** The Gate a position-less Gate Evaluator judges (execution-model §10); required exactly then. */
+  gateId?: GateId | null;
   /** Required for a position-less Invocation; for a positioned one it is derived from the operation and, when given, must agree with it. */
   agentDefinitionRevisionId?: string;
   continuedFromInvocationId: InvocationId | null;
@@ -122,6 +125,7 @@ const requestSchema: z.ZodType<InvocationPreparationRequest> = z.strictObject({
   role: z.enum(INVOCATION_ROLES),
   purpose: z.enum(INVOCATION_PURPOSES),
   patternPosition: patternPositionSchema.nullable(),
+  gateId: idSchema("gate").nullable().optional(),
   agentDefinitionRevisionId: nonEmptyString.optional(),
   continuedFromInvocationId: idSchema("invocation").nullable(),
   taskIds: uniqueIds(idSchema("task")).optional(),
@@ -198,6 +202,7 @@ export class InvocationPreparationService {
           agentDefinitionRevisionId: revision.id,
           continuedFromInvocationId: valid.continuedFromInvocationId,
           patternPosition: valid.patternPosition,
+          gateId: valid.gateId ?? null,
           taskIds: resolved.taskIds,
           allocation,
           allocationSource: funding.source === "run_final_reserve" ? "run_final_reserve" : "plan_node",
@@ -266,10 +271,12 @@ export class InvocationPreparationService {
   private operation(node: PatternPlanNode, request: InvocationPreparationRequest): ResolvedOperation {
     if (request.patternPosition === null) {
       if (!(request.role === "evaluator" && request.purpose === "evaluate")) throw new ValidationError("every Invocation but a Gate Evaluator names its Pattern position", { role: request.role, purpose: request.purpose });
+      if ((request.gateId ?? null) === null) throw new ValidationError("a position-less Evaluator Invocation is a Gate Evaluator and names its Gate", { role: request.role, purpose: request.purpose });
       if (request.agentDefinitionRevisionId === undefined) throw new ValidationError("a position-less Evaluator Invocation names its Agent Definition revision");
       if ((request.taskIds ?? []).length > 0) throw new ValidationError("an Evaluator Invocation holds no Task");
       return { operation: null, agentDefinitionRevisionId: request.agentDefinitionRevisionId, input: { ...EMPTY_MANIFEST_TEMPLATE }, taskIds: [] };
     }
+    if ((request.gateId ?? null) !== null) throw new ValidationError("a positioned Invocation names no Gate", { patternPosition: request.patternPosition });
     const operation = operationAt(node.shape, request.patternPosition);
     const defects = patternPositionDefects(node, request.patternPosition, { role: request.role, purpose: request.purpose, agentDefinitionRevisionId: (request.agentDefinitionRevisionId ?? operation?.agentDefinitionRevisionId ?? "agdr_none") as never });
     if (operation === null || defects.length > 0) {

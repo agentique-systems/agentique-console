@@ -8,7 +8,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { openHarness } from "../persistence/test-support.ts";
+import { openHarness, seedAgentRevision } from "../persistence/test-support.ts";
 import { ContextManifestAssembler } from "./manifest/assembler.ts";
 import { renderManifest } from "./manifest/renderer.ts";
 import { accepted, COMPLETED_RESULT, openRuntimeHarness, propose, seedPlanningRuntime, seedRuntime, startRun, type RuntimeHarness } from "./test-support.ts";
@@ -110,7 +110,8 @@ describe("context manifest assembly", () => {
   it("gives a scoped node exactly its pinned leaf Requirements and the root the current revision, with role-specific tools and capabilities", async () => {
     const h = openRuntimeHarness();
     try {
-      const s = seedPlanningRuntime(h);
+      // The Run's Gate Evaluator is the worker definition (read, write, shell) so that the role policy alone must make it read-only.
+      const s = seedPlanningRuntime(h, { verificationPolicy: { evaluatorAgentDefinitionRevisionId: seedAgentRevision(h, "worker").id } });
       const { node, revision, rootId, leafIds, criterion } = scopedWorkerNode(h, s);
       const worker = h.preparation.prepare({ runId: s.created.run.id, planNodeId: node.id, role: "worker", purpose: "step", continuedFromInvocationId: null, patternPosition: { kind: "single" } });
       const c = worker.manifest.content;
@@ -124,7 +125,9 @@ describe("context manifest assembly", () => {
       expect(worker.invocation.patternPosition).toEqual({ kind: "single" });
       expect(worker.invocation.agentDefinitionRevisionId).toBe(s.worker.id);
       // An Evaluator on the node is read-only whatever its definition declares, and runs against the Integration Workspace.
-      const evaluator = h.preparation.prepare({ runId: s.created.run.id, planNodeId: node.id, role: "evaluator", purpose: "evaluate", agentDefinitionRevisionId: s.worker.id, continuedFromInvocationId: null, taskIds: [], patternPosition: null });
+      const gate = h.stores.gates.open({ runId: s.created.run.id, planNodeId: node.id, kind: "node_exit", acceptanceCriterionIds: [], snapshotId: s.created.run.baseSnapshotId!, candidateArtifactIds: [] });
+      const evaluator = h.preparation.prepare({ runId: s.created.run.id, planNodeId: node.id, role: "evaluator", purpose: "evaluate", agentDefinitionRevisionId: s.worker.id, continuedFromInvocationId: null, taskIds: [], patternPosition: null, gateId: gate.id });
+      expect(evaluator.invocation.gateId).toBe(gate.id);
       expect(evaluator.manifest.content.capabilities).toEqual({ tools: ["read"], mcpServers: [] });
       expect(evaluator.manifest.content.toolPolicy).toEqual({ read: "allowed", shell: "denied", write: "denied" });
       expect(evaluator.manifest.content.worktreePath).toBe(s.created.run.integrationWorkspacePath);

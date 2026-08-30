@@ -79,7 +79,11 @@ function renderInput(input: ManifestInput): string[] {
     case "side_effect_approval_resolution":
       return [`- side_effect_approval_resolution ${input.decisionId} ${input.outcome}: ${input.tool} call ${input.callDigest} (artifact ${input.callArtifactId}) from invocation ${input.blockedInvocationId} attempt ${input.attemptId}`];
     case "gate_result":
-      return [`- gate_result ${input.gateId} ${input.passed ? "passed" : "failed"}`];
+      return [
+        `- gate_result ${input.gateId} ${input.gateKind} cycle ${input.ordinal} ${input.passed ? "passed" : "failed"} plan_node ${input.planNodeId ?? NONE} snapshot ${input.snapshotId ?? NONE} artifacts ${list(input.artifactIds)} failed_criteria ${list(input.failedAcceptanceCriterionIds)} evaluations ${list(input.evaluationIds)} remediation_task ${input.remediationTaskId ?? NONE}`,
+      ];
+    case "gate_candidate":
+      return [`- gate_candidate ${input.gateId} ${input.gateKind} snapshot ${input.snapshotId} artifacts ${list(input.artifactIds)} evaluated_criteria ${list(input.acceptanceCriterionIds)}`];
     case "plan_revision":
       return [
         `- plan_revision ${input.accepted ? `accepted revision ${input.revisionNumber ?? NONE}` : "rejected"}`,
@@ -98,6 +102,7 @@ function renderInput(input: ManifestInput): string[] {
       const b = input.blocker;
       if (b.kind === "task_failed") return [`- coordinator_blocker task_failed ${b.taskId} ${b.failureReason}`];
       if (b.kind === "task_blocked") return [`- coordinator_blocker task_blocked ${b.taskId} ${b.blockReason.kind}${"taskId" in b.blockReason ? ` ${b.blockReason.taskId}` : ""}${"decisionId" in b.blockReason ? ` ${b.blockReason.decisionId}` : ""}${"description" in b.blockReason ? `: ${b.blockReason.description}` : ""}`];
+      if (b.kind === "gate_failed") return [`- coordinator_blocker gate_failed ${b.gateId} remediation_task ${b.taskId}`];
       return [`- coordinator_blocker integration_conflict ${b.taskId} invocation ${b.invocationId} changeset ${b.changesetId} conflict_task ${b.conflictTaskId} report ${b.reportArtifactId ?? NONE}`];
     }
     case "optimizer_candidate":

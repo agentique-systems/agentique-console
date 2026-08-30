@@ -2,6 +2,8 @@ import { ConflictError, IllegalTransitionError, NotFoundError, RUN_STATUSES, Val
 import { describe, expect, it } from "vitest";
 import { DEFAULT_BUDGET, DEFAULT_FINAL_RESERVE, openHarness, seedRun, seedSnapshot } from "../test-support.ts";
 
+const NO_EVALUATOR = { evaluatorAgentDefinitionRevisionId: null, maxNodeGateCycles: 3 };
+
 describe("conversations", () => {
   it("creates, updates, and journals a Conversation and its messages", () => {
     const h = openHarness();
@@ -27,11 +29,11 @@ describe("conversations", () => {
     try {
       const s = seedRun(h);
       expect(h.stores.conversations.get(s.conversation.id).activeRunId).toBe(s.run.id);
-      expect(() => h.stores.runs.create({ conversationId: s.conversation.id, kind: "code", target: { kind: "branch", branch: "main" }, budget: DEFAULT_BUDGET, finalReserve: DEFAULT_FINAL_RESERVE })).toThrow(ConflictError);
+      expect(() => h.stores.runs.create({ conversationId: s.conversation.id, kind: "code", target: { kind: "branch", branch: "main" }, budget: DEFAULT_BUDGET, finalReserve: DEFAULT_FINAL_RESERVE, verificationPolicy: NO_EVALUATOR })).toThrow(ConflictError);
       expect(h.stores.runs.listByConversation(s.conversation.id)).toHaveLength(1);
       h.stores.runs.transition(s.run.id, { to: "cancelled" });
       expect(h.stores.conversations.get(s.conversation.id).activeRunId).toBeNull();
-      const next = h.stores.runs.create({ conversationId: s.conversation.id, kind: "other", target: { kind: "branch", branch: "main" }, budget: DEFAULT_BUDGET, finalReserve: DEFAULT_FINAL_RESERVE });
+      const next = h.stores.runs.create({ conversationId: s.conversation.id, kind: "other", target: { kind: "branch", branch: "main" }, budget: DEFAULT_BUDGET, finalReserve: DEFAULT_FINAL_RESERVE, verificationPolicy: NO_EVALUATOR });
       expect(h.stores.conversations.get(s.conversation.id).activeRunId).toBe(next.id);
     } finally {
       h.close();
@@ -45,7 +47,7 @@ describe("runs", () => {
     try {
       const workspace = h.stores.workspaces.create({ name: "w", rootPath: "/w", kind: "git" });
       const conversation = h.stores.conversations.create({ workspaceId: workspace.id, title: null });
-      const run = h.stores.runs.create({ conversationId: conversation.id, kind: "code", target: { kind: "branch", branch: "main" }, budget: DEFAULT_BUDGET, finalReserve: DEFAULT_FINAL_RESERVE });
+      const run = h.stores.runs.create({ conversationId: conversation.id, kind: "code", target: { kind: "branch", branch: "main" }, budget: DEFAULT_BUDGET, finalReserve: DEFAULT_FINAL_RESERVE, verificationPolicy: NO_EVALUATOR });
       expect(run.status).toBe("created");
       expect(run.workspaceId).toBe(workspace.id);
       expect(run.budget).toEqual(DEFAULT_BUDGET);
@@ -67,7 +69,7 @@ describe("runs", () => {
     try {
       const workspace = h.stores.workspaces.create({ name: "w", rootPath: "/w", kind: "git" });
       const conversation = h.stores.conversations.create({ workspaceId: workspace.id, title: null });
-      const input = { conversationId: conversation.id, kind: "code" as const, target: { kind: "branch" as const, branch: "main" }, budget: DEFAULT_BUDGET };
+      const input = { conversationId: conversation.id, kind: "code" as const, target: { kind: "branch" as const, branch: "main" }, budget: DEFAULT_BUDGET, verificationPolicy: NO_EVALUATOR };
       expect(() => h.stores.runs.create({ ...input, finalReserve: { costUsd: DEFAULT_BUDGET.maxCostUsd + 1, tokens: 0, attempts: 0 } })).toThrow(ValidationError);
       expect(() => h.stores.runs.create({ ...input, finalReserve: { costUsd: -1, tokens: 0, attempts: 0 } })).toThrow(ValidationError);
       expect(h.stores.runs.listByConversation(conversation.id)).toHaveLength(0);

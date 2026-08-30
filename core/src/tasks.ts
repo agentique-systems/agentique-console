@@ -4,6 +4,7 @@ import type {
   ArtifactId,
   ChangesetId,
   DecisionId,
+  GateId,
   InvocationId,
   PlanNodeId,
   RequirementId,
@@ -48,6 +49,12 @@ export interface Task {
   /** The active Invocation assigned to the Task, while `running`. */
   invocationId: InvocationId | null;
   origin: TaskOrigin;
+  /**
+   * The failed Gate this runtime-owned remediation Task addresses (execution-model §10): set exactly for a Gate
+   * remediation Task, at most one per Gate; the Gate row and its Evaluations carry the failed criteria, the Snapshot,
+   * and the candidate, so nothing here is narrative.
+   */
+  gateId: GateId | null;
   subject: string;
   requirementIds: RequirementId[];
   /** The pinned revision the Requirement references name (Coordinator-proposed Tasks). */
@@ -82,6 +89,7 @@ export const taskSchema: z.ZodType<Task> = z
     planNodeId: idSchema("planNode").nullable(),
     invocationId: idSchema("invocation").nullable(),
     origin: z.enum(TASK_ORIGINS),
+    gateId: idSchema("gate").nullable(),
     subject: nonEmptyString,
     requirementIds: uniqueIds(idSchema("requirement")),
     requirementRevisionId: idSchema("requirementRevision").nullable(),
@@ -121,12 +129,18 @@ export const taskSchema: z.ZodType<Task> = z
     message: "a Coordinator-proposed Task references a non-empty subset of its node's scope",
     path: ["requirementIds"],
   })
-  .refine((t) => t.id !== t.replacesTaskId, { message: "a Task cannot replace itself", path: ["replacesTaskId"] });
+  .refine((t) => t.id !== t.replacesTaskId, { message: "a Task cannot replace itself", path: ["replacesTaskId"] })
+  .refine((t) => t.gateId === null || (t.origin === "runtime" && t.planNodeId !== null), {
+    message: "a Gate remediation Task is runtime-owned and tagged with the gated Plan Node",
+    path: ["gateId"],
+  });
 
 export interface TaskInput {
   runId: RunId;
   planNodeId: PlanNodeId | null;
   origin: TaskOrigin;
+  /** The failed Gate a runtime-owned remediation Task addresses; defaults to `null`. */
+  gateId?: GateId | null;
   subject: string;
   requirementIds: RequirementId[];
   requirementRevisionId: RequirementRevisionId | null;
@@ -140,6 +154,7 @@ export const taskInputSchema: z.ZodType<TaskInput> = z
     runId: idSchema("run"),
     planNodeId: idSchema("planNode").nullable(),
     origin: z.enum(TASK_ORIGINS),
+    gateId: idSchema("gate").nullable().optional(),
     subject: nonEmptyString,
     requirementIds: uniqueIds(idSchema("requirement")),
     requirementRevisionId: idSchema("requirementRevision").nullable(),
@@ -150,7 +165,11 @@ export const taskInputSchema: z.ZodType<TaskInput> = z
   .refine(
     (t) => t.origin !== "coordinator" || (t.planNodeId !== null && t.requirementRevisionId !== null && t.requirementIds.length > 0),
     { message: "a Coordinator-proposed Task names its node, pinned revision, and Requirements", path: ["origin"] },
-  );
+  )
+  .refine((t) => (t.gateId ?? null) === null || (t.origin === "runtime" && t.planNodeId !== null), {
+    message: "a Gate remediation Task is runtime-owned and tagged with the gated Plan Node",
+    path: ["gateId"],
+  });
 
 export interface TaskDependency {
   runId: RunId;
@@ -240,7 +259,9 @@ export const taskLedgerEntrySchema: z.ZodType<TaskLedgerEntry> = z.strictObject(
 export type CoordinatorBlocker =
   | { kind: "task_failed"; taskId: TaskId; failureReason: TaskFailureReason }
   | { kind: "task_blocked"; taskId: TaskId; blockReason: TaskBlockReason }
-  | { kind: "integration_conflict"; taskId: TaskId; invocationId: InvocationId; changesetId: ChangesetId; conflictTaskId: TaskId; reportArtifactId: ArtifactId | null };
+  | { kind: "integration_conflict"; taskId: TaskId; invocationId: InvocationId; changesetId: ChangesetId; conflictTaskId: TaskId; reportArtifactId: ArtifactId | null }
+  /** The node's `node_exit` Gate failed; `taskId` is the runtime-owned remediation Task the replan must address (execution-model §10). */
+  | { kind: "gate_failed"; taskId: TaskId; gateId: GateId };
 
 export const coordinatorBlockerSchema: z.ZodType<CoordinatorBlocker> = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("task_failed"), taskId: idSchema("task"), failureReason: z.enum(TASK_FAILURE_REASONS) }),
@@ -253,6 +274,7 @@ export const coordinatorBlockerSchema: z.ZodType<CoordinatorBlocker> = z.discrim
     conflictTaskId: idSchema("task"),
     reportArtifactId: idSchema("artifact").nullable(),
   }),
+  z.strictObject({ kind: z.literal("gate_failed"), taskId: idSchema("task"), gateId: idSchema("gate") }),
 ]);
 
 /** The stable identity of a blocker, for comparing one turn's frontier with the next. */
@@ -264,6 +286,8 @@ export function coordinatorBlockerKey(blocker: CoordinatorBlocker): string {
       return `task_blocked:${blocker.taskId}:${blocker.blockReason.kind}`;
     case "integration_conflict":
       return `integration_conflict:${blocker.changesetId}`;
+    case "gate_failed":
+      return `gate_failed:${blocker.gateId}`;
   }
 }
 

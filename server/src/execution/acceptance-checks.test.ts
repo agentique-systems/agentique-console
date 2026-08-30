@@ -25,7 +25,7 @@ function checkable(h: RuntimeHarness, counts: { deterministic: number; evaluated
   const run = h.stores.runs.get(s.created.run.id);
   const snapshotId = run.baseSnapshotId!;
   const artifact = h.stores.artifacts.create({ runId: run.id, mediaType: "text/plain", producer: { kind: "runtime", component: "command" }, taskId: null, title: "candidate" }, new TextEncoder().encode("candidate"));
-  const request = { runId: run.id, planNodeId: node.id, round: { round: 1, maxRounds: 2 }, snapshotId, artifactIds: [artifact.id], criteria: h.checks.deterministicCriteria(run.id, node.kind === "pattern" ? node.gateAcceptanceCriterionIds : []) };
+  const request = { runId: run.id, planNodeId: node.id, scope: { kind: "optimizer_round" as const, round: 1, maxRounds: 2 }, snapshotId, artifactIds: [artifact.id], criteria: h.checks.deterministicCriteria(run.id, node.kind === "pattern" ? node.gateAcceptanceCriterionIds : []) };
   return { s, criteria, node, run, snapshotId, artifact, request };
 }
 
@@ -57,7 +57,7 @@ describe("AcceptanceCheckService", () => {
       expect(JSON.stringify(events)).not.toContain("boom");
       expect(JSON.stringify(outcome)).not.toContain("boom");
       // Every request carried exactly the facts the port needs: no store, no Artifact lookup, the exact Snapshot, the bound.
-      expect(h.criterionExecution.requests.map((r) => Object.keys(r).sort())).toEqual([["acceptanceCriterionId", "command", "deadlineAt", "expectedExitCode", "maxOutputBytes", "planNodeId", "round", "runId", "signal", "workspace"], ["acceptanceCriterionId", "command", "deadlineAt", "expectedExitCode", "maxOutputBytes", "planNodeId", "round", "runId", "signal", "workspace"]]);
+      expect(h.criterionExecution.requests.map((r) => Object.keys(r).sort())).toEqual([["acceptanceCriterionId", "command", "deadlineAt", "expectedExitCode", "gateId", "maxOutputBytes", "planNodeId", "round", "runId", "signal", "workspace"], ["acceptanceCriterionId", "command", "deadlineAt", "expectedExitCode", "gateId", "maxOutputBytes", "planNodeId", "round", "runId", "signal", "workspace"]]);
       expect(h.criterionExecution.requests[0]!.workspace).toEqual({ integrationWorkspacePath: run.integrationWorkspacePath, snapshot: h.stores.snapshots.get(snapshotId).identity, isolationKey: `${run.id}/${node.id}/1/${criteria.deterministic[0]}` });
     } finally {
       h.close();

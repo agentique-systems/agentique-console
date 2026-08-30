@@ -1,4 +1,4 @@
-import { asc, eq, inArray, or } from "drizzle-orm";
+import { and, asc, eq, inArray, isNotNull, or } from "drizzle-orm";
 import {
   assertTaskCompletion,
   ConflictError,
@@ -10,6 +10,7 @@ import {
   taskSchema,
   ValidationError,
   wouldCreateDependencyCycle,
+  type GateId,
   type PlanNodeId,
   type RunId,
   type Task,
@@ -19,7 +20,7 @@ import {
   type TaskTransition,
 } from "@agentique-console/core";
 import type { PersistenceContext } from "../context.ts";
-import { artifacts, invocations, planNodes, taskDependencies, tasks } from "../schema.ts";
+import { artifacts, gates, invocations, planNodes, taskDependencies, tasks } from "../schema.ts";
 import type { ExecutionPlanStore } from "./plans.ts";
 import { assertSameRun, loadRunRef, requireRow, runScope, writeMeta, type WriteOptions } from "./support.ts";
 
@@ -74,10 +75,21 @@ export class TaskStore {
         const superseded = this.replacementOf(replaced.id);
         if (superseded !== null) throw new ConflictError(`Task ${replaced.id} is already superseded by ${superseded.id}`, { taskId: replaced.id, supersededByTaskId: superseded.id });
       }
+      const gateId = valid.gateId ?? null;
+      if (gateId !== null) {
+        // A Gate remediation Task (execution-model §10) addresses a failed Gate of the same Run on the Task's own node, once.
+        const gate = requireRow(this.ctx.db.select({ runId: gates.runId, planNodeId: gates.planNodeId, status: gates.status }).from(gates).where(eq(gates.id, gateId)).get(), "Gate", gateId);
+        assertSameRun("Gate", gateId, gate.runId, run.id);
+        if (gate.status !== "failed") throw new InvariantViolationError(`Gate ${gateId} is ${gate.status}; a remediation Task addresses a failed Gate`, { gateId });
+        if (gate.planNodeId !== valid.planNodeId) throw new InvariantViolationError(`Gate ${gateId} belongs to PlanNode ${gate.planNodeId ?? "(none)"}, not ${String(valid.planNodeId)}`, { gateId, planNodeId: valid.planNodeId });
+        const existing = this.remediationTaskOf(gateId);
+        if (existing !== null) throw new ConflictError(`Gate ${gateId} already has remediation Task ${existing.id}`, { gateId, taskId: existing.id });
+      }
       const now = this.ctx.clock();
       const task: Task = {
         id: this.ctx.ids("task"),
         ...valid,
+        gateId,
         invocationId: null,
         outputArtifactIds: [],
         evidence: [],
@@ -119,6 +131,17 @@ export class TaskStore {
   replacementOf(taskId: TaskId): Task | null {
     const row = this.ctx.db.select().from(tasks).where(eq(tasks.replacesTaskId, taskId)).get();
     return row ? toDomain(row) : null;
+  }
+
+  /** The runtime-owned remediation Task of a failed Gate, or `null`; at most one exists (a database unique index). */
+  remediationTaskOf(gateId: GateId): Task | null {
+    const row = this.ctx.db.select().from(tasks).where(eq(tasks.gateId, gateId)).get();
+    return row ? toDomain(row) : null;
+  }
+
+  /** Every Gate remediation Task of a Run, in creation order (then id). */
+  listRemediationTasks(runId: RunId): Task[] {
+    return this.ctx.db.select().from(tasks).where(and(eq(tasks.runId, runId), isNotNull(tasks.gateId))).orderBy(asc(tasks.createdAt), asc(tasks.id)).all().map(toDomain);
   }
 
   dependencies(runId: RunId): TaskDependency[] {

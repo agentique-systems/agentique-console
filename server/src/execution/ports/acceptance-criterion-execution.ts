@@ -2,8 +2,8 @@
  * The Acceptance Criterion execution port: the final boundary between the
  * runtime's deterministic verification and the Workspace provider that runs
  * one deterministic Acceptance Criterion's command (execution-model §5.6,
- * §10; glossary Acceptance Criterion). Phase 2D-B2 drives it for
- * `evaluator_optimizer` rounds; the general Gate phase reuses it unchanged.
+ * §10; glossary Acceptance Criterion), for an `evaluator_optimizer` round
+ * and for a `node_exit` Gate alike.
  *
  * Ownership rule: the execution runtime selects the criterion, the exact
  * Snapshot to verify, and the output bound, and records every outcome
@@ -32,14 +32,16 @@
  * The provider implementation arrives in the Workspace phase; tests use a
  * deterministic fake.
  */
-import type { AcceptanceCriterionId, PlanNodeId, RunId, SnapshotIdentity, Timestamp } from "@agentique-console/core";
+import type { AcceptanceCriterionId, GateId, PlanNodeId, RunId, SnapshotIdentity, Timestamp } from "@agentique-console/core";
 
 export interface AcceptanceCriterionExecutionRequest {
   runId: RunId;
   planNodeId: PlanNodeId;
   acceptanceCriterionId: AcceptanceCriterionId;
-  /** The optimizer round the check belongs to (`null` for a Gate check in a later phase). */
+  /** The optimizer round the check belongs to; `null` for a Gate check. */
   round: number | null;
+  /** The `node_exit` Gate the check belongs to; `null` for an optimizer round's check. Exactly one of `round` and `gateId` is set. */
+  gateId: GateId | null;
   command: string;
   expectedExitCode: number;
   workspace: {
@@ -47,7 +49,7 @@ export interface AcceptanceCriterionExecutionRequest {
     integrationWorkspacePath: string | null;
     /** The exact Snapshot the command verifies; the view holds this state and nothing newer. */
     snapshot: SnapshotIdentity;
-    /** A stable key for the isolated view (Run, node, round, criterion), so a stale view is discarded rather than reused. */
+    /** A stable key for the isolated view (Run, node, round or Gate, criterion), so a stale view is discarded rather than reused. */
     isolationKey: string;
   };
   /** The most output bytes the runtime records; the port bounds what it returns and reports truncation. */

@@ -145,14 +145,15 @@ export class InvocationResultValidator {
 
   /**
    * The criteria an Evaluator must cover are the ones the runtime delivered in its immutable manifest: the
-   * `optimizer_candidate` input's evaluated criteria for an optimizer round (otherwise the manifest's evaluated criteria).
+   * `optimizer_candidate` input's evaluated criteria for an optimizer round, the `gate_candidate` input's for a Gate
+   * Evaluator (otherwise the manifest's evaluated criteria).
    * Coverage is exact — no missing, duplicate, extra, foreign, or deterministic criterion — every Evidence reference
    * exists in the Run and is not a command claim, the overall verdict carries Evidence, and a pass cannot stand on a
    * failed or inconclusive criterion.
    */
   private evaluation(evaluation: NonNullable<InvocationResult["evaluation"]>, context: ResultValidationContext, add: (code: ResultViolation["code"], message: string, path: string | null) => void): void {
     const manifest = context.manifest.content;
-    const candidate = manifest.inputs.find((i): i is Extract<ManifestInput, { kind: "optimizer_candidate" }> => i.kind === "optimizer_candidate");
+    const candidate = manifest.inputs.find((i): i is Extract<ManifestInput, { kind: "optimizer_candidate" | "gate_candidate" }> => i.kind === "optimizer_candidate" || i.kind === "gate_candidate");
     const expected = candidate === undefined ? manifest.acceptanceCriteria.filter((c) => c.check.kind === "evaluated").map((c) => c.acceptanceCriterionId) : candidate.acceptanceCriterionIds;
     const deterministic = new Set(manifest.acceptanceCriteria.filter((c) => c.check.kind === "deterministic").map((c) => c.acceptanceCriterionId));
     const seen = new Set<string>();

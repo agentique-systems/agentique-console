@@ -184,21 +184,59 @@ export const GATE_MACHINE = defineStateMachine<GateStatus>("Gate", GATE_STATUSES
 });
 
 /**
- * A runtime checkpoint. It lists the Acceptance Criteria it requires in the
- * order they are checked: deterministic first, then evaluated, then (for
- * `operator_signoff`) the operator's acceptance.
+ * Why a Gate closed `failed` (execution-model §10): one or more of its
+ * Acceptance Criteria recorded `fail` or `inconclusive`, or its Evaluator
+ * Invocation ended without a valid verdict after its permitted Attempts —
+ * an execution failure that fabricates no criterion verdict. The failure is
+ * a closed fact of the Gate row, never inferred from Events.
+ */
+export type GateFailure =
+  | { kind: "criteria_failed"; acceptanceCriterionIds: AcceptanceCriterionId[] }
+  | { kind: "evaluator_failed"; invocationId: InvocationId };
+
+export const gateFailureSchema: z.ZodType<GateFailure> = z.discriminatedUnion("kind", [
+  z.strictObject({ kind: z.literal("criteria_failed"), acceptanceCriterionIds: uniqueIds(idSchema("acceptanceCriterion")).min(1) }),
+  z.strictObject({ kind: z.literal("evaluator_failed"), invocationId: idSchema("invocation") }),
+]);
+
+const sortedIds = (ids: readonly string[]): boolean => ids.every((id, i) => i === 0 || ids[i - 1]! < id);
+
+/**
+ * A runtime checkpoint. A Gate identifies canonically what it judges: the
+ * Run, the Plan Node (for `node_exit`), its kind, its verification cycle
+ * (`ordinal`, from 1 per node and kind), the exact integration Snapshot
+ * pinned when it opened, the exact candidate Artifact ids, and its Acceptance
+ * Criteria in canonical (id) order — deterministic ones are checked first,
+ * then evaluated ones, then (for `operator_signoff`) the operator's
+ * acceptance. Criteria, Snapshot, and candidate are immutable once the Gate
+ * is open; a closed Gate is append-only history and a later verification
+ * cycle opens a new Gate with the next ordinal.
  */
 export interface Gate {
   id: GateId;
   runId: RunId;
   planNodeId: PlanNodeId | null;
   kind: GateKind;
+  /** The verification cycle of this node and kind, from 1; never inferred from timestamps or Event order. */
+  ordinal: number;
   status: GateStatus;
   acceptanceCriterionIds: AcceptanceCriterionId[];
-  /** The integration Snapshot the Gate was checked against. */
+  /** The integration Snapshot the Gate judges, pinned at opening; required for a `node_exit` Gate. */
   snapshotId: SnapshotId | null;
+  /** The exact candidate output Artifact ids the Gate judges, pinned at opening. */
+  candidateArtifactIds: ArtifactId[];
+  /** Why the Gate failed; set exactly when `status` is `failed`. */
+  failure: GateFailure | null;
   openedAt: Timestamp;
   closedAt: Timestamp | null;
+}
+
+type GateShape = Pick<Gate, "kind" | "planNodeId" | "snapshotId" | "acceptanceCriterionIds">;
+
+function gateShape(gate: GateShape, ctx: z.RefinementCtx): void {
+  if ((gate.kind === "node_exit") !== (gate.planNodeId !== null)) ctx.addIssue({ code: "custom", path: ["planNodeId"], message: "a node_exit Gate belongs to a Plan Node; Run Gates do not" });
+  if (gate.kind === "node_exit" && gate.snapshotId === null) ctx.addIssue({ code: "custom", path: ["snapshotId"], message: "a node_exit Gate pins the integration Snapshot it judges" });
+  if (!sortedIds(gate.acceptanceCriterionIds)) ctx.addIssue({ code: "custom", path: ["acceptanceCriterionIds"], message: "Gate criteria are in canonical id order" });
 }
 
 export const gateSchema: z.ZodType<Gate> = z
@@ -207,27 +245,41 @@ export const gateSchema: z.ZodType<Gate> = z
     runId: idSchema("run"),
     planNodeId: idSchema("planNode").nullable(),
     kind: z.enum(GATE_KINDS),
+    ordinal: positiveCount,
     status: z.enum(GATE_STATUSES),
     acceptanceCriterionIds: uniqueIds(idSchema("acceptanceCriterion")),
     snapshotId: idSchema("snapshot").nullable(),
+    candidateArtifactIds: uniqueIds(idSchema("artifact")),
+    failure: gateFailureSchema.nullable(),
     openedAt: timestampSchema,
     closedAt: timestampSchema.nullable(),
   })
-  .refine((g) => (g.kind === "node_exit") === (g.planNodeId !== null), {
-    message: "a node_exit Gate belongs to a Plan Node; Run Gates do not",
-    path: ["planNodeId"],
-  })
+  .superRefine(gateShape)
   .refine((g) => (g.status === "open") === (g.closedAt === null), {
     message: "closedAt is set exactly when the Gate is closed",
     path: ["closedAt"],
+  })
+  .refine((g) => (g.status === "failed") === (g.failure !== null), {
+    message: "failure is set exactly when the Gate failed",
+    path: ["failure"],
+  })
+  .refine((g) => g.failure === null || g.failure.kind !== "criteria_failed" || g.failure.acceptanceCriterionIds.every((id) => g.acceptanceCriterionIds.includes(id)), {
+    message: "a Gate fails only on its own criteria",
+    path: ["failure"],
+  })
+  .refine((g) => sortedIds(g.candidateArtifactIds), {
+    message: "the candidate Artifact ids are in canonical id order",
+    path: ["candidateArtifactIds"],
   });
 
+/** What opens a Gate; the store assigns the ordinal from the Gates that already exist. */
 export interface GateInput {
   runId: RunId;
   planNodeId: PlanNodeId | null;
   kind: GateKind;
   acceptanceCriterionIds: AcceptanceCriterionId[];
   snapshotId: SnapshotId | null;
+  candidateArtifactIds: ArtifactId[];
 }
 
 export const gateInputSchema: z.ZodType<GateInput> = z
@@ -237,8 +289,15 @@ export const gateInputSchema: z.ZodType<GateInput> = z
     kind: z.enum(GATE_KINDS),
     acceptanceCriterionIds: uniqueIds(idSchema("acceptanceCriterion")),
     snapshotId: idSchema("snapshot").nullable(),
+    candidateArtifactIds: uniqueIds(idSchema("artifact")),
   })
-  .refine((g) => (g.kind === "node_exit") === (g.planNodeId !== null), {
-    message: "a node_exit Gate belongs to a Plan Node; Run Gates do not",
-    path: ["planNodeId"],
+  .superRefine(gateShape)
+  .refine((g) => sortedIds(g.candidateArtifactIds), {
+    message: "the candidate Artifact ids are in canonical id order",
+    path: ["candidateArtifactIds"],
   });
+
+/** The verdict of a closed Gate from its criterion verdicts: `passed` only when every criterion passed. */
+export function gateVerdictOf(verdicts: readonly Verdict[]): "passed" | "failed" {
+  return verdicts.every((v) => v === "pass") ? "passed" : "failed";
+}

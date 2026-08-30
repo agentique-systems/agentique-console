@@ -7,14 +7,17 @@ describe("evaluations and gates", () => {
     const h = openHarness();
     try {
       const s = seedRun(h);
-      const gate = h.stores.gates.open({ runId: s.run.id, planNodeId: s.root.id, kind: "node_exit", acceptanceCriterionIds: [], snapshotId: null });
-      expect(gate.status).toBe("open");
-      expect(() => h.stores.gates.open({ runId: s.run.id, planNodeId: null, kind: "node_exit", acceptanceCriterionIds: [], snapshotId: null })).toThrow(ValidationError);
-      expect(() => h.stores.gates.open({ runId: s.run.id, planNodeId: s.root.id, kind: "run_completion", acceptanceCriterionIds: [], snapshotId: null })).toThrow(ValidationError);
+      const snapshotId = seedSnapshot(h, s).id;
+      const gate = h.stores.gates.open({ runId: s.run.id, planNodeId: s.root.id, kind: "node_exit", acceptanceCriterionIds: [], snapshotId, candidateArtifactIds: [] });
+      expect(gate).toMatchObject({ status: "open", ordinal: 1, snapshotId, candidateArtifactIds: [], failure: null });
+      expect(() => h.stores.gates.open({ runId: s.run.id, planNodeId: null, kind: "node_exit", acceptanceCriterionIds: [], snapshotId, candidateArtifactIds: [] })).toThrow(ValidationError);
+      expect(() => h.stores.gates.open({ runId: s.run.id, planNodeId: s.root.id, kind: "node_exit", acceptanceCriterionIds: [], snapshotId: null, candidateArtifactIds: [] })).toThrow(ValidationError);
+      expect(() => h.stores.gates.open({ runId: s.run.id, planNodeId: s.root.id, kind: "run_completion", acceptanceCriterionIds: [], snapshotId: null, candidateArtifactIds: [] })).toThrow(ValidationError);
+      expect(() => h.stores.gates.close(gate.id, "failed")).toThrow(InvariantViolationError);
       const passed = h.stores.gates.close(gate.id, "passed");
       expect(passed.closedAt).not.toBeNull();
       expect(() => h.stores.gates.close(gate.id, "failed")).toThrow(IllegalTransitionError);
-      expect(() => h.database.sqlite.prepare("UPDATE gates SET kind = 'run_completion', plan_node_id = NULL WHERE id = ?").run(gate.id)).toThrow(/immutable/);
+      expect(() => h.database.sqlite.prepare("UPDATE gates SET kind = 'run_completion', plan_node_id = NULL WHERE id = ?").run(gate.id)).toThrow(/never changes again/);
     } finally {
       h.close();
     }
@@ -24,18 +27,19 @@ describe("evaluations and gates", () => {
     const h = openHarness();
     try {
       const s = seedRun(h);
-      const gate = h.stores.gates.open({ runId: s.run.id, planNodeId: null, kind: "run_completion", acceptanceCriterionIds: [], snapshotId: null });
+      const gate = h.stores.gates.open({ runId: s.run.id, planNodeId: null, kind: "run_completion", acceptanceCriterionIds: [], snapshotId: null, candidateArtifactIds: [] });
       const worker = seedInvocation(h, s, { role: "worker", purpose: "step", planNodeId: seedWorkerNode(h, s).id });
-      const evaluator = seedInvocation(h, s, { role: "evaluator", purpose: "evaluate" });
+      const evaluator = seedInvocation(h, s, { role: "evaluator", purpose: "evaluate", gateId: gate.id });
       const produced = seedArtifact(h, s, "judge me", { invocationId: worker.id });
       const selfProduced = seedArtifact(h, s, "mine", { invocationId: evaluator.id });
-      const input = { runId: s.run.id, planNodeId: null, gateId: gate.id, subject: { kind: "rubric" as const, rubric: "quality" }, context: null, snapshotId: null, verdict: "pass" as const, evidence: [{ kind: "artifact" as const, artifactId: produced.id }], producedBy: { kind: "evaluator" as const, invocationId: evaluator.id, agentDefinitionRevisionId: s.definition.id }, artifactIds: [produced.id] };
+      const input = { runId: s.run.id, planNodeId: null, gateId: gate.id, subject: { kind: "rubric" as const, rubric: "quality" }, context: null, snapshotId: null, verdict: "pass" as const, evidence: [{ kind: "artifact" as const, artifactId: produced.id }], producedBy: { kind: "evaluator" as const, invocationId: evaluator.id, agentDefinitionRevisionId: evaluator.agentDefinitionRevisionId }, artifactIds: [produced.id] };
       const evaluation = h.stores.evaluations.record(input);
       expect(h.stores.evaluations.listByGate(gate.id)).toEqual([evaluation]);
       expect(() => h.stores.evaluations.record({ ...input, artifactIds: [selfProduced.id] })).toThrow(/cannot evaluate it/);
       expect(() => h.stores.evaluations.record({ ...input, producedBy: { kind: "evaluator", invocationId: worker.id, agentDefinitionRevisionId: s.definition.id } })).toThrow(/not an Evaluator/);
       expect(() => h.stores.evaluations.record({ ...input, verdict: "maybe" as never })).toThrow(ValidationError);
-      h.stores.gates.close(gate.id, "failed");
+      h.stores.gates.close(gate.id, "failed", { kind: "evaluator_failed", invocationId: evaluator.id });
+      expect(h.stores.gates.get(gate.id)).toMatchObject({ status: "failed", failure: { kind: "evaluator_failed", invocationId: evaluator.id } });
       expect(() => h.stores.evaluations.record({ ...input, producedBy: { kind: "runtime" }, artifactIds: [] })).toThrow(InvariantViolationError);
       expect(() => h.database.sqlite.prepare("DELETE FROM evaluations").run()).toThrow(/append-only/);
     } finally {

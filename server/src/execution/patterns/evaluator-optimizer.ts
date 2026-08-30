@@ -232,7 +232,7 @@ export class EvaluatorOptimizerPatternRunner {
     const round = state.current.round;
     const snapshotId = this.roundSnapshot(state);
     const artifactIds = this.candidate(state);
-    const outcome = await checks.run({ runId: node.runId, planNodeId: node.id, round: { round, maxRounds: state.shape.maxRounds }, snapshotId, artifactIds, criteria: state.deterministic }, options);
+    const outcome = await checks.run({ runId: node.runId, planNodeId: node.id, scope: { kind: "optimizer_round", round, maxRounds: state.shape.maxRounds }, snapshotId, artifactIds, criteria: state.deterministic }, options);
     if (outcome.kind === "infrastructure_failure") return { kind: "verification_failed", round, acceptanceCriterionId: outcome.acceptanceCriterionId, failure: outcome.failure, message: outcome.message };
     if (outcome.kind === "passed") return { kind: "verified", round, verdict: "pass", evaluationIds: outcome.checks.map((c) => c.evaluation.id) };
     // The first deterministic failure ends the round: one runtime verdict, recorded once.

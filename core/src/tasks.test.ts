@@ -15,6 +15,7 @@ describe("task states", () => {
       planNodeId: null,
       invocationId: null,
       origin: "orchestrator",
+      gateId: null,
       subject: "do it",
       requirementIds: [],
       requirementRevisionId: null,

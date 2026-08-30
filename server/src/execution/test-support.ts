@@ -215,6 +215,7 @@ export interface ObservedCheck {
   acceptanceCriterionId: string;
   command: string;
   round: number | null;
+  gateId: string | null;
   /** The isolated view the command ran in; never the Integration Workspace or the Target. */
   viewPath: string;
   isolationKey: string;
@@ -280,7 +281,7 @@ export class FakeAcceptanceCriterionExecution implements AcceptanceCriterionExec
     const viewPath = `${request.workspace.integrationWorkspacePath ?? "/tmp"}/.verification/${request.workspace.isolationKey.replaceAll("/", "_")}-${this.#counter}`;
     this.liveViews.set(request.workspace.isolationKey, viewPath);
     const inTransaction = this.transactionProbe?.() ?? null;
-    const record = (outcome: "exited" | "failed") => this.observed.push({ acceptanceCriterionId: request.acceptanceCriterionId, command: request.command, round: request.round, viewPath, isolationKey: request.workspace.isolationKey, snapshot: request.workspace.snapshot, maxOutputBytes: request.maxOutputBytes, inTransaction, outcome, discardedStale });
+    const record = (outcome: "exited" | "failed") => this.observed.push({ acceptanceCriterionId: request.acceptanceCriterionId, command: request.command, round: request.round, gateId: request.gateId, viewPath, isolationKey: request.workspace.isolationKey, snapshot: request.workspace.snapshot, maxOutputBytes: request.maxOutputBytes, inTransaction, outcome, discardedStale });
     const dispose = () => {
       if (this.crashBeforeDispose) return;
       this.liveViews.delete(request.workspace.isolationKey);
@@ -327,6 +328,7 @@ export class FakeAcceptanceCriterionExecution implements AcceptanceCriterionExec
 export const TEST_POLICY: RunCreationPolicy = {
   initialOrchestratorAllocation: { costUsd: 10, tokens: 100_000, attempts: 5 },
   finalReserve: { code: { costUsd: 5, tokens: 50_000, attempts: 3 }, other: { costUsd: 0, tokens: 0, attempts: 0 } },
+  maxNodeGateCycles: 3,
 };
 
 export const TEST_NODE_ALLOCATION = { costUsd: 4, tokens: 40_000, attempts: 2 };
@@ -436,25 +438,32 @@ export interface RuntimeSeed {
   created: CreatedRun;
   orchestrator: AgentDefinitionRevision;
   worker: AgentDefinitionRevision;
+  /** The read-only Gate Evaluator revision the Run's verification policy names. */
+  evaluator: AgentDefinitionRevision;
   message: ConversationMessage;
 }
 
-/** Workspace, Conversation, Orchestrator and worker definitions, a created Run, and the operator's opening message. */
+/**
+ * Workspace, Conversation, Orchestrator, worker, and Gate Evaluator definitions, a created Run whose verification
+ * policy names the Evaluator, and the operator's opening message.
+ */
 export function seedRuntime(h: RuntimeHarness, overrides: Partial<RunCreationRequest> = {}): RuntimeSeed {
   const workspace = h.stores.workspaces.create({ name: "demo", rootPath: `/tmp/demo-${h.ctx.ids("workspace")}`, kind: "git" });
   const conversation = h.stores.conversations.create({ workspaceId: workspace.id, title: "demo" });
   const orchestrator = seedAgentRevision(h, "orchestrator");
   const worker = seedAgentRevision(h, "worker");
+  const evaluator = seedReadOnlyWorker(h, "evaluator");
   const created = h.runCreation.create({
     conversationId: conversation.id,
     kind: "code",
     target: { kind: "branch", branch: "main" },
     budget: DEFAULT_BUDGET,
     orchestratorAgentDefinitionRevisionId: orchestrator.id,
+    verificationPolicy: { evaluatorAgentDefinitionRevisionId: evaluator.id },
     ...overrides,
   });
   const message = h.stores.conversations.postMessage({ conversationId: conversation.id, author: "operator", content: "Add a --version flag to the CLI.", runId: created.run.id, invocationId: null });
-  return { created, orchestrator, worker, message };
+  return { created, orchestrator, worker, evaluator, message };
 }
 
 /** Starts the seeded Run: root running, Run running, first Orchestrator Invocation prepared. */

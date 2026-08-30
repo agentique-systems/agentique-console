@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "239654b1-ab12-41ab-872e-68fd461c65c6",
+  "id": "6ad3f2bb-ddf5-4d50-8273-53975bdbe794",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "acceptance_criteria": {
@@ -2316,6 +2316,15 @@
           ],
           "isUnique": true,
           "where": "context_kind = 'optimizer_criterion'"
+        },
+        "evaluations_gate_criterion": {
+          "name": "evaluations_gate_criterion",
+          "columns": [
+            "gate_id",
+            "subject_criterion_id"
+          ],
+          "isUnique": true,
+          "where": "gate_id IS NOT NULL AND subject_criterion_id IS NOT NULL"
         }
       },
       "foreignKeys": {
@@ -2390,6 +2399,10 @@
         "evaluations_optimizer_round_subject": {
           "name": "evaluations_optimizer_round_subject",
           "value": "json_extract(\"evaluations\".\"subject\", '$.kind') <> 'optimizer_round' OR json_extract(\"evaluations\".\"context\", '$.kind') = 'optimizer_verdict'"
+        },
+        "evaluations_gate_shape": {
+          "name": "evaluations_gate_shape",
+          "value": "\"evaluations\".\"gate_id\" IS NULL OR \"evaluations\".\"context\" IS NULL"
         }
       }
     },
@@ -2676,6 +2689,13 @@
           "notNull": true,
           "autoincrement": false
         },
+        "ordinal": {
+          "name": "ordinal",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
         "status": {
           "name": "status",
           "type": "text",
@@ -2692,6 +2712,20 @@
         },
         "snapshot_id": {
           "name": "snapshot_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "candidate_artifact_ids": {
+          "name": "candidate_artifact_ids",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "failure": {
+          "name": "failure",
           "type": "text",
           "primaryKey": false,
           "notNull": false,
@@ -2721,6 +2755,31 @@
             "status"
           ],
           "isUnique": false
+        },
+        "gates_plan_node": {
+          "name": "gates_plan_node",
+          "columns": [
+            "plan_node_id",
+            "ordinal"
+          ],
+          "isUnique": false
+        },
+        "gates_open_node_exit": {
+          "name": "gates_open_node_exit",
+          "columns": [
+            "plan_node_id"
+          ],
+          "isUnique": true,
+          "where": "kind = 'node_exit' AND status = 'open'"
+        },
+        "gates_node_exit_ordinal": {
+          "name": "gates_node_exit_ordinal",
+          "columns": [
+            "plan_node_id",
+            "ordinal"
+          ],
+          "isUnique": true,
+          "where": "kind = 'node_exit'"
         }
       },
       "foreignKeys": {
@@ -2779,9 +2838,25 @@
           "name": "gates_node_exit_has_node",
           "value": "(\"gates\".\"kind\" = 'node_exit') = (\"gates\".\"plan_node_id\" IS NOT NULL)"
         },
+        "gates_node_exit_has_snapshot": {
+          "name": "gates_node_exit_has_snapshot",
+          "value": "\"gates\".\"kind\" <> 'node_exit' OR \"gates\".\"snapshot_id\" IS NOT NULL"
+        },
+        "gates_ordinal": {
+          "name": "gates_ordinal",
+          "value": "\"gates\".\"ordinal\" >= 1"
+        },
         "gates_closed_at": {
           "name": "gates_closed_at",
           "value": "(\"gates\".\"status\" = 'open') = (\"gates\".\"closed_at\" IS NULL)"
+        },
+        "gates_failed_has_failure": {
+          "name": "gates_failed_has_failure",
+          "value": "(\"gates\".\"status\" = 'failed') = (\"gates\".\"failure\" IS NOT NULL)"
+        },
+        "gates_failure_kind": {
+          "name": "gates_failure_kind",
+          "value": "\"gates\".\"failure\" IS NULL OR json_extract(\"gates\".\"failure\", '$.kind') IN ('criteria_failed', 'evaluator_failed')"
         }
       }
     },
@@ -2986,6 +3061,13 @@
           "notNull": false,
           "autoincrement": false
         },
+        "gate_id": {
+          "name": "gate_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "task_ids": {
           "name": "task_ids",
           "type": "text",
@@ -3143,6 +3225,21 @@
           ],
           "isUnique": false
         },
+        "invocations_active_gate": {
+          "name": "invocations_active_gate",
+          "columns": [
+            "gate_id"
+          ],
+          "isUnique": true,
+          "where": "gate_id IS NOT NULL AND status IN ('pending', 'running', 'waiting')"
+        },
+        "invocations_gate": {
+          "name": "invocations_gate",
+          "columns": [
+            "gate_id"
+          ],
+          "isUnique": false
+        },
         "invocations_active_position": {
           "name": "invocations_active_position",
           "columns": [
@@ -3215,6 +3312,19 @@
           "tableTo": "invocations",
           "columnsFrom": [
             "continued_from_invocation_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "invocations_gate_id_gates_id_fk": {
+          "name": "invocations_gate_id_gates_id_fk",
+          "tableFrom": "invocations",
+          "tableTo": "gates",
+          "columnsFrom": [
+            "gate_id"
           ],
           "columnsTo": [
             "id"
@@ -3322,6 +3432,14 @@
         "invocations_pattern_position_present": {
           "name": "invocations_pattern_position_present",
           "value": "\"invocations\".\"pattern_position\" IS NOT NULL OR (\"invocations\".\"role\" = 'evaluator' AND \"invocations\".\"purpose\" = 'evaluate')"
+        },
+        "invocations_gate_ownership": {
+          "name": "invocations_gate_ownership",
+          "value": "(\"invocations\".\"pattern_position\" IS NULL) = (\"invocations\".\"gate_id\" IS NOT NULL)"
+        },
+        "invocations_gate_evaluator_role": {
+          "name": "invocations_gate_evaluator_role",
+          "value": "\"invocations\".\"gate_id\" IS NULL OR (\"invocations\".\"role\" = 'evaluator' AND \"invocations\".\"purpose\" = 'evaluate' AND \"invocations\".\"task_ids\" = '[]')"
         },
         "invocations_pattern_position_key_agrees": {
           "name": "invocations_pattern_position_key_agrees",
@@ -4837,6 +4955,13 @@
           "notNull": true,
           "autoincrement": false
         },
+        "verification_policy": {
+          "name": "verification_policy",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
         "base_snapshot_id": {
           "name": "base_snapshot_id",
           "type": "text",
@@ -5016,6 +5141,10 @@
         "runs_final_reserve_within_budget": {
           "name": "runs_final_reserve_within_budget",
           "value": "\"runs\".\"final_reserve_cost_usd\" <= \"runs\".\"max_cost_usd\" AND \"runs\".\"final_reserve_tokens\" <= \"runs\".\"max_tokens\" AND \"runs\".\"final_reserve_attempts\" <= \"runs\".\"max_attempts\""
+        },
+        "runs_verification_policy_shape": {
+          "name": "runs_verification_policy_shape",
+          "value": "json_type(\"runs\".\"verification_policy\", '$.maxNodeGateCycles') = 'integer' AND json_extract(\"runs\".\"verification_policy\", '$.maxNodeGateCycles') >= 1 AND json_extract(\"runs\".\"verification_policy\", '$.maxNodeGateCycles') <= 10 AND (json_type(\"runs\".\"verification_policy\", '$.evaluatorAgentDefinitionRevisionId') = 'null' OR json_extract(\"runs\".\"verification_policy\", '$.evaluatorAgentDefinitionRevisionId') GLOB 'agdr_*')"
         }
       }
     },
@@ -5486,6 +5615,13 @@
           "notNull": true,
           "autoincrement": false
         },
+        "gate_id": {
+          "name": "gate_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "subject": {
           "name": "subject",
           "type": "text",
@@ -5609,6 +5745,14 @@
           ],
           "isUnique": true,
           "where": "replaces_task_id IS NOT NULL"
+        },
+        "tasks_gate_remediation": {
+          "name": "tasks_gate_remediation",
+          "columns": [
+            "gate_id"
+          ],
+          "isUnique": true,
+          "where": "gate_id IS NOT NULL"
         }
       },
       "foreignKeys": {
@@ -5644,6 +5788,19 @@
           "tableTo": "invocations",
           "columnsFrom": [
             "invocation_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "tasks_gate_id_gates_id_fk": {
+          "name": "tasks_gate_id_gates_id_fk",
+          "tableFrom": "tasks",
+          "tableTo": "gates",
+          "columnsFrom": [
+            "gate_id"
           ],
           "columnsTo": [
             "id"
@@ -5712,6 +5869,10 @@
         "tasks_no_self_replace": {
           "name": "tasks_no_self_replace",
           "value": "\"tasks\".\"replaces_task_id\" IS NULL OR \"tasks\".\"replaces_task_id\" <> \"tasks\".\"id\""
+        },
+        "tasks_gate_remediation_shape": {
+          "name": "tasks_gate_remediation_shape",
+          "value": "\"tasks\".\"gate_id\" IS NULL OR (\"tasks\".\"origin\" = 'runtime' AND \"tasks\".\"plan_node_id\" IS NOT NULL)"
         }
       }
     },

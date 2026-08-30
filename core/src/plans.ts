@@ -95,6 +95,12 @@ export const PLAN_NODE_FAILURE_REASONS = [
   "coordinator_invocations_exhausted",
   /** An `evaluator_optimizer` node's final round ended `fail` or `inconclusive`: no candidate passed within `maxRounds`. */
   "optimizer_rounds_exhausted",
+  /** The node's `node_exit` Gate failed and the Run's `maxNodeGateCycles` permits no further verification cycle (execution-model §10). */
+  "gate_cycles_exhausted",
+  /** The runtime-owned remediation of a failed `node_exit` Gate ended without completing: its Invocation failed after its permitted Attempts, or its Task was cancelled. */
+  "gate_remediation_failed",
+  /** A `node_exit` Gate's Evaluator Invocation ended without a valid verdict after its permitted Attempts; no criterion verdict was invented. */
+  "gate_evaluator_failed",
 ] as const;
 export type PlanNodeFailureReason = (typeof PLAN_NODE_FAILURE_REASONS)[number];
 
@@ -482,6 +488,8 @@ export const PLAN_REJECTION_CODES = [
   "invalid_pattern_bounds",
   "insufficient_capacity",
   "started_node_changed",
+  /** A node's `node_exit` Gate names an evaluated Acceptance Criterion but the Run's verification policy names no Gate Evaluator. */
+  "gate_evaluator_unavailable",
 ] as const;
 export type PlanRejectionCode = (typeof PLAN_REJECTION_CODES)[number];
 

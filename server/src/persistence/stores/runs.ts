@@ -1,6 +1,7 @@
 import { asc, eq } from "drizzle-orm";
 import {
   ConflictError,
+  ORCHESTRATOR_DEFINITION_NAME,
   parseOrThrow,
   RUN_MACHINE,
   runInputSchema,
@@ -16,7 +17,7 @@ import {
   type SnapshotId,
 } from "@agentique-console/core";
 import type { PersistenceContext } from "../context.ts";
-import { changesets, runs, snapshots } from "../schema.ts";
+import { agentDefinitionRevisions, agentDefinitions, changesets, runs, snapshots } from "../schema.ts";
 import type { ConversationStore } from "./conversations.ts";
 import { assertSameRun, loadConversationRef, requireRow, runScope, writeMeta, type WriteOptions } from "./support.ts";
 
@@ -41,6 +42,7 @@ function toDomain(row: Row): Run {
         maxConcurrency: row.maxConcurrency,
       },
       finalReserve: { costUsd: row.finalReserveCostUsd, tokens: row.finalReserveTokens, attempts: row.finalReserveAttempts },
+      verificationPolicy: row.verificationPolicy,
       baseSnapshotId: row.baseSnapshotId,
       integrationSnapshotId: row.integrationSnapshotId,
       finalSnapshotId: row.finalSnapshotId,
@@ -62,9 +64,10 @@ export interface RunWorkspaceState {
 }
 
 /**
- * Run rows. The Run's kind, Target, Budget, and final reserve are chosen at
- * creation and never updated (the schema's `runs_definition_immutable`
- * trigger enforces it); every later write names only lifecycle columns.
+ * Run rows. The Run's kind, Target, Budget, final reserve, and verification
+ * policy are chosen at creation and never updated (the schema's
+ * `runs_definition_immutable` trigger enforces it); every later write names
+ * only lifecycle columns.
  */
 export class RunStore {
   constructor(
@@ -82,6 +85,16 @@ export class RunStore {
     const valid = parseOrThrow(runInputSchema, input, "Run input");
     return this.ctx.tx.write(() => {
       const conversation = loadConversationRef(this.ctx, valid.conversationId);
+      // The Gate Evaluator revision exists and is not the Orchestrator definition; provenance is the Run creation service's check.
+      const evaluatorId = valid.verificationPolicy.evaluatorAgentDefinitionRevisionId;
+      if (evaluatorId !== null) {
+        const revision = requireRow(
+          this.ctx.db.select({ name: agentDefinitions.name }).from(agentDefinitionRevisions).innerJoin(agentDefinitions, eq(agentDefinitions.id, agentDefinitionRevisions.definitionId)).where(eq(agentDefinitionRevisions.id, evaluatorId)).get(),
+          "AgentDefinitionRevision",
+          evaluatorId,
+        );
+        if (revision.name === ORCHESTRATOR_DEFINITION_NAME) throw new ValidationError(`the ${ORCHESTRATOR_DEFINITION_NAME} definition cannot be the Run's Gate Evaluator`, { evaluatorAgentDefinitionRevisionId: evaluatorId });
+      }
       const now = this.ctx.clock();
       const run: Run = {
         id: this.ctx.ids("run"),
@@ -93,6 +106,7 @@ export class RunStore {
         target: valid.target,
         budget: valid.budget,
         finalReserve: valid.finalReserve,
+        verificationPolicy: valid.verificationPolicy,
         baseSnapshotId: null,
         integrationSnapshotId: null,
         finalSnapshotId: null,
@@ -300,6 +314,7 @@ export class RunStore {
       finalReserveCostUsd: run.finalReserve.costUsd,
       finalReserveTokens: run.finalReserve.tokens,
       finalReserveAttempts: run.finalReserve.attempts,
+      verificationPolicy: run.verificationPolicy,
       baseSnapshotId: run.baseSnapshotId,
       integrationSnapshotId: run.integrationSnapshotId,
       finalSnapshotId: run.finalSnapshotId,

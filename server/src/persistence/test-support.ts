@@ -28,6 +28,7 @@ import {
   type RequirementId,
   type RequirementRevision,
   type Run,
+  type VerificationPolicy,
   type Workspace,
 } from "@agentique-console/core";
 import { MemoryBlobStore } from "./blob-store.ts";
@@ -98,8 +99,12 @@ export interface Seeded {
   conversation: Conversation;
   run: Run;
   definition: AgentDefinitionRevision;
+  /** The Run's Gate Evaluator revision (its verification policy names it). */
+  evaluator: AgentDefinitionRevision;
   root: PlanNode;
 }
+
+export const DEFAULT_MAX_NODE_GATE_CYCLES = 3;
 
 export function seedAgentRevision(h: Harness, name = "orchestrator"): AgentDefinitionRevision {
   const definition = h.stores.agents.ensureDefinition(name);
@@ -187,10 +192,11 @@ export function nodeInput(h: Harness, definition: RevisionNodeInput["definition"
  * the root node: the Run's complete initial state built through the stores,
  * the way the Run creation service builds it.
  */
-export function seedRun(h: Harness, options: { budget?: BudgetLimits; kind?: "code" | "other"; finalReserve?: Allocation; rootAllocation?: Allocation } = {}): Seeded {
+export function seedRun(h: Harness, options: { budget?: BudgetLimits; kind?: "code" | "other"; finalReserve?: Allocation; rootAllocation?: Allocation; verificationPolicy?: VerificationPolicy } = {}): Seeded {
   const workspace = h.stores.workspaces.create({ name: "demo", rootPath: `/tmp/demo-${h.ctx.ids("workspace")}`, kind: "git" });
   const conversation = h.stores.conversations.create({ workspaceId: workspace.id, title: "demo" });
   const definition = seedAgentRevision(h);
+  const evaluator = seedAgentRevision(h, "evaluator");
   const rootId = h.ctx.ids("planNode");
   let run!: Run;
   h.ctx.tx.write(() => {
@@ -200,6 +206,7 @@ export function seedRun(h: Harness, options: { budget?: BudgetLimits; kind?: "co
       target: { kind: "branch", branch: "main" },
       budget: options.budget ?? DEFAULT_BUDGET,
       finalReserve: options.finalReserve ?? ZERO_RESERVE,
+      verificationPolicy: options.verificationPolicy ?? { evaluatorAgentDefinitionRevisionId: evaluator.id, maxNodeGateCycles: DEFAULT_MAX_NODE_GATE_CYCLES },
     });
     h.stores.plans.appendRevision(run.id, { version: 1, expressions: [] }, null);
     h.stores.plans.materializeRevision({
@@ -212,7 +219,7 @@ export function seedRun(h: Harness, options: { budget?: BudgetLimits; kind?: "co
     });
   });
   run = h.stores.runs.transition(run.id, { to: "running" });
-  return { workspace, conversation, run, definition, root: h.stores.plans.transitionNode(rootId, { to: "ready" }) };
+  return { workspace, conversation, run, definition, evaluator, root: h.stores.plans.transitionNode(rootId, { to: "ready" }) };
 }
 
 /**
@@ -263,22 +270,30 @@ export function defaultPatternPosition(role: InvocationRole, purpose: Invocation
   }
 }
 
+/**
+ * A test Invocation. A position-less Evaluator (`evaluate` outside a Pattern position) is a Gate Evaluator and needs a
+ * Gate: `gateId` names one, or a `run_completion` Gate of the Run is opened for it; it then executes the Run's
+ * verification-policy Evaluator revision.
+ */
 export function seedInvocation(
   h: Harness,
   seeded: Seeded,
-  overrides: Partial<{ role: InvocationRole; purpose: InvocationPurpose; planNodeId: string; allocation: Allocation; continuedFromInvocationId: string | null; patternPosition: PatternPosition | null; taskIds: string[] }> = {},
+  overrides: Partial<{ role: InvocationRole; purpose: InvocationPurpose; planNodeId: string; allocation: Allocation; continuedFromInvocationId: string | null; patternPosition: PatternPosition | null; gateId: string | null; taskIds: string[]; agentDefinitionRevisionId: string }> = {},
 ): Invocation {
   const role = overrides.role ?? "orchestrator";
   const purpose = overrides.purpose ?? "operator_input";
   const taskIds = overrides.taskIds ?? [];
+  const patternPosition = overrides.patternPosition === undefined ? defaultPatternPosition(role, purpose, taskIds) : overrides.patternPosition;
+  const gateId = patternPosition !== null ? null : (overrides.gateId ?? h.stores.gates.open({ runId: seeded.run.id, planNodeId: null, kind: "run_completion", acceptanceCriterionIds: [], snapshotId: null, candidateArtifactIds: [] }).id);
   return h.stores.invocations.create({
     runId: seeded.run.id,
     planNodeId: (overrides.planNodeId ?? seeded.root.id) as never,
     role,
     purpose,
-    agentDefinitionRevisionId: seeded.definition.id,
+    agentDefinitionRevisionId: (overrides.agentDefinitionRevisionId ?? (gateId !== null ? seeded.run.verificationPolicy.evaluatorAgentDefinitionRevisionId ?? seeded.evaluator.id : seeded.definition.id)) as never,
     continuedFromInvocationId: (overrides.continuedFromInvocationId ?? null) as never,
-    patternPosition: overrides.patternPosition === undefined ? defaultPatternPosition(role, purpose, taskIds) : overrides.patternPosition,
+    patternPosition,
+    gateId: gateId as never,
     taskIds: taskIds as never,
     allocation: overrides.allocation ?? INVOCATION_ALLOCATION,
   });

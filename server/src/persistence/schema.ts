@@ -45,6 +45,7 @@ import {
   INVOCATION_STATUSES,
   INVOCATION_WAIT_REASONS,
   LEASE_STATUSES,
+  MAX_NODE_GATE_CYCLES,
   MODEL_EFFORTS,
   ON_ALLOCATION_EXHAUSTED_POLICIES,
   ORCHESTRATOR_PURPOSES,
@@ -95,6 +96,7 @@ import {
   type EventActor,
   type Evidence,
   type ExecutionPlanSource,
+  type GateFailure,
   type HandoffEndpoint,
   type InvocationResult,
   type LeasedResources,
@@ -110,6 +112,7 @@ import {
   type RuntimeToolResult,
   type TaskBlockReason,
   type ToolPolicy,
+  type VerificationPolicy,
 } from "@agentique-console/core";
 
 /** Renders a closed value set as a SQL `IN (...)` list. */
@@ -208,6 +211,8 @@ export const runs = sqliteTable(
     finalReserveCostUsd: real("final_reserve_cost_usd").notNull(),
     finalReserveTokens: integer("final_reserve_tokens").notNull(),
     finalReserveAttempts: integer("final_reserve_attempts").notNull(),
+    /** The immutable verification policy (core `VerificationPolicy`): the Gate Evaluator revision and the node_exit Gate cycle bound. */
+    verificationPolicy: text("verification_policy", { mode: "json" }).$type<VerificationPolicy>().notNull(),
     baseSnapshotId: text("base_snapshot_id").references((): AnySQLiteColumn => snapshots.id),
     integrationSnapshotId: text("integration_snapshot_id").references((): AnySQLiteColumn => snapshots.id),
     finalSnapshotId: text("final_snapshot_id").references((): AnySQLiteColumn => snapshots.id),
@@ -237,6 +242,10 @@ export const runs = sqliteTable(
     check(
       "runs_final_reserve_within_budget",
       sql`${t.finalReserveCostUsd} <= ${t.maxCostUsd} AND ${t.finalReserveTokens} <= ${t.maxTokens} AND ${t.finalReserveAttempts} <= ${t.maxAttempts}`,
+    ),
+    check(
+      "runs_verification_policy_shape",
+      sql`json_type(${t.verificationPolicy}, '$.maxNodeGateCycles') = 'integer' AND json_extract(${t.verificationPolicy}, '$.maxNodeGateCycles') >= 1 AND json_extract(${t.verificationPolicy}, '$.maxNodeGateCycles') <= ${sql.raw(String(MAX_NODE_GATE_CYCLES))} AND (json_type(${t.verificationPolicy}, '$.evaluatorAgentDefinitionRevisionId') = 'null' OR json_extract(${t.verificationPolicy}, '$.evaluatorAgentDefinitionRevisionId') GLOB 'agdr_*')`,
     ),
   ],
 );
@@ -604,6 +613,8 @@ export const tasks = sqliteTable(
     planNodeId: text("plan_node_id").references(() => planNodes.id),
     invocationId: text("invocation_id").references((): AnySQLiteColumn => invocations.id),
     origin: text("origin").notNull(),
+    /** The failed Gate a runtime-owned remediation Task addresses; at most one Task per Gate (the unique index below). */
+    gateId: text("gate_id").references((): AnySQLiteColumn => gates.id),
     subject: text("subject").notNull(),
     requirementIds: text("requirement_ids", { mode: "json" }).$type<string[]>().notNull(),
     requirementRevisionId: text("requirement_revision_id").references(() => requirementRevisions.id),
@@ -637,6 +648,11 @@ export const tasks = sqliteTable(
     uniqueIndex("tasks_replaced_once")
       .on(t.replacesTaskId)
       .where(sql`replaces_task_id IS NOT NULL`),
+    // A Gate remediation Task is runtime-owned, tagged with the gated node, and the only one for its Gate (execution-model §10).
+    check("tasks_gate_remediation_shape", sql`${t.gateId} IS NULL OR (${t.origin} = 'runtime' AND ${t.planNodeId} IS NOT NULL)`),
+    uniqueIndex("tasks_gate_remediation")
+      .on(t.gateId)
+      .where(sql`gate_id IS NOT NULL`),
   ],
 );
 
@@ -776,6 +792,8 @@ export const invocations = sqliteTable(
     patternPosition: text("pattern_position", { mode: "json" }).$type<PatternPosition>(),
     /** The position's stable key (`patternPositionKey`), denormalized for the one-active-per-position rule; agrees with the JSON by CHECK. */
     patternPositionKey: text("pattern_position_key"),
+    /** The Gate a Gate Evaluator judges: set exactly when the position is absent; immutable; validated against the open Gate by trigger. */
+    gateId: text("gate_id").references((): AnySQLiteColumn => gates.id),
     taskIds: text("task_ids", { mode: "json" }).$type<string[]>().notNull(),
     allocCostUsd: real("alloc_cost_usd").notNull(),
     allocTokens: integer("alloc_tokens").notNull(),
@@ -829,6 +847,14 @@ export const invocations = sqliteTable(
     check("invocations_pattern_position_kind", sql`${t.patternPosition} IS NULL OR json_extract(${t.patternPosition}, '$.kind') IN (${inList(PATTERN_POSITION_KINDS)})`),
     // A position is absent only for a Gate Evaluator; every other Invocation names one.
     check("invocations_pattern_position_present", sql`${t.patternPosition} IS NOT NULL OR (${t.role} = 'evaluator' AND ${t.purpose} = 'evaluate')`),
+    // A Gate Evaluator names exactly its Gate and no position, carries no Task; every positioned Invocation names no Gate (execution-model §10).
+    check("invocations_gate_ownership", sql`(${t.patternPosition} IS NULL) = (${t.gateId} IS NOT NULL)`),
+    check("invocations_gate_evaluator_role", sql`${t.gateId} IS NULL OR (${t.role} = 'evaluator' AND ${t.purpose} = 'evaluate' AND ${t.taskIds} = '[]')`),
+    // At most one active Evaluator Invocation per Gate: a successor after a blocker shares the Gate, never concurrently.
+    uniqueIndex("invocations_active_gate")
+      .on(t.gateId)
+      .where(sql`gate_id IS NOT NULL AND status IN ('pending', 'running', 'waiting')`),
+    index("invocations_gate").on(t.gateId),
     // The denormalized key is exactly the kind plus its one discriminating field.
     check(
       "invocations_pattern_position_key_agrees",
@@ -1104,6 +1130,11 @@ export const evaluations = sqliteTable(
       sql`${t.context} IS NULL OR (${t.planNodeId} IS NOT NULL AND ${t.gateId} IS NULL AND ${t.snapshotId} IS NOT NULL AND json_extract(${t.context}, '$.round') >= 1 AND json_extract(${t.context}, '$.round') <= json_extract(${t.context}, '$.maxRounds') AND ((json_extract(${t.context}, '$.kind') = 'optimizer_verdict' AND json_extract(${t.subject}, '$.kind') = 'optimizer_round') OR (json_extract(${t.context}, '$.kind') = 'optimizer_criterion' AND json_extract(${t.subject}, '$.kind') = 'acceptance_criterion')))`,
     ),
     check("evaluations_optimizer_round_subject", sql`json_extract(${t.subject}, '$.kind') <> 'optimizer_round' OR json_extract(${t.context}, '$.kind') = 'optimizer_verdict'`),
+    // One Evaluation per Gate and Acceptance Criterion (execution-model §10): repeated passes, restarts, and racing callers converge on one row.
+    uniqueIndex("evaluations_gate_criterion")
+      .on(t.gateId, t.subjectCriterionId)
+      .where(sql`gate_id IS NOT NULL AND subject_criterion_id IS NOT NULL`),
+    check("evaluations_gate_shape", sql`${t.gateId} IS NULL OR ${t.context} IS NULL`),
   ],
 );
 
@@ -1116,18 +1147,36 @@ export const gates = sqliteTable(
       .references(() => runs.id),
     planNodeId: text("plan_node_id").references(() => planNodes.id),
     kind: text("kind").notNull(),
+    /** The verification cycle of this node and kind, from 1; unique per node for `node_exit`. */
+    ordinal: integer("ordinal").notNull(),
     status: text("status").notNull(),
     acceptanceCriterionIds: text("acceptance_criterion_ids", { mode: "json" }).$type<string[]>().notNull(),
     snapshotId: text("snapshot_id").references((): AnySQLiteColumn => snapshots.id),
+    /** The exact candidate Artifact ids the Gate judges, pinned at opening. */
+    candidateArtifactIds: text("candidate_artifact_ids", { mode: "json" }).$type<string[]>().notNull(),
+    /** The closed failure fact (core `GateFailure`); set exactly when the Gate failed. */
+    failure: text("failure", { mode: "json" }).$type<GateFailure>(),
     openedAt: timestamp("opened_at").notNull(),
     closedAt: timestamp("closed_at"),
   },
   (t) => [
     index("gates_run").on(t.runId, t.kind, t.status),
+    index("gates_plan_node").on(t.planNodeId, t.ordinal),
     check("gates_kind", sql`${t.kind} IN (${inList(GATE_KINDS)})`),
     check("gates_status", sql`${t.status} IN (${inList(GATE_STATUSES)})`),
     check("gates_node_exit_has_node", sql`(${t.kind} = 'node_exit') = (${t.planNodeId} IS NOT NULL)`),
+    check("gates_node_exit_has_snapshot", sql`${t.kind} <> 'node_exit' OR ${t.snapshotId} IS NOT NULL`),
+    check("gates_ordinal", sql`${t.ordinal} >= 1`),
     check("gates_closed_at", sql`(${t.status} = 'open') = (${t.closedAt} IS NULL)`),
+    check("gates_failed_has_failure", sql`(${t.status} = 'failed') = (${t.failure} IS NOT NULL)`),
+    check("gates_failure_kind", sql`${t.failure} IS NULL OR json_extract(${t.failure}, '$.kind') IN ('criteria_failed', 'evaluator_failed')`),
+    // At most one open node_exit Gate per Plan Node, and one Gate per node and verification cycle (execution-model §10).
+    uniqueIndex("gates_open_node_exit")
+      .on(t.planNodeId)
+      .where(sql`kind = 'node_exit' AND status = 'open'`),
+    uniqueIndex("gates_node_exit_ordinal")
+      .on(t.planNodeId, t.ordinal)
+      .where(sql`kind = 'node_exit'`),
   ],
 );
 

@@ -28,7 +28,7 @@ import { coordinatorWorkerBoundsSchema, PLAN_NODE_STATUSES, planRejectionReasonS
 import { coordinatorBlockerSchema, taskLedgerEntrySchema, type CoordinatorBlocker, type TaskLedgerEntry } from "./tasks.ts";
 import { PATTERN_POSITION_BINDINGS, patternPositionKey, patternPositionSchema, type PatternPosition } from "./pattern-positions.ts";
 import { acceptanceCheckSchema, evidenceSchema, REQUIREMENT_STATUSES, type AcceptanceCheck, type Evidence, type RequirementStatus } from "./requirements.ts";
-import { VERDICTS, type Verdict } from "./verification.ts";
+import { GATE_KINDS, VERDICTS, type GateKind, type Verdict } from "./verification.ts";
 import { agentCapabilitiesSchema, modelPolicySchema, toolPolicySchema, type AgentCapabilities, type ModelPolicy, type ToolPolicy } from "./agents.ts";
 import { defineStateMachine } from "./transitions.ts";
 import {
@@ -387,9 +387,17 @@ export interface Invocation {
   /**
    * The canonical position inside the node's Pattern, owned by the Pattern
    * runtime; `null` only for a Gate Evaluator Invocation (purpose
-   * `evaluate` outside a Pattern position).
+   * `evaluate` outside a Pattern position), which names its Gate instead.
    */
   patternPosition: PatternPosition | null;
+  /**
+   * The Gate a Gate Evaluator Invocation judges (execution-model §10): set
+   * exactly when `patternPosition` is `null`, immutable, and the only way
+   * the runtime learns which Gate an Invocation belongs to — never the
+   * manifest. An optimizer round's Evaluator holds its `evaluator_round`
+   * position and no Gate.
+   */
+  gateId: GateId | null;
   taskIds: TaskId[];
   /** The explicit allocation reserved before the Invocation starts, from the source named by `allocationSource`. */
   allocation: Allocation;
@@ -428,6 +436,7 @@ export const invocationSchema: z.ZodType<Invocation> = z
     agentDefinitionRevisionId: idSchema("agentDefinitionRevision"),
     continuedFromInvocationId: idSchema("invocation").nullable(),
     patternPosition: patternPositionSchema.nullable(),
+    gateId: idSchema("gate").nullable(),
     taskIds: uniqueIds(idSchema("task")),
     allocation: allocationSchema,
     allocationSource: z.enum(INVOCATION_ALLOCATION_SOURCES),
@@ -486,6 +495,10 @@ export const invocationSchema: z.ZodType<Invocation> = z
   .refine((i) => patternPositionDefectsForInvocation(i).length === 0, {
     message: "the Pattern position agrees with the Invocation's role and purpose",
     path: ["patternPosition"],
+  })
+  .refine((i) => gateOwnershipDefects(i).length === 0, {
+    message: "a Gate Evaluator names its Gate and no Pattern position; every other Invocation names no Gate",
+    path: ["gateId"],
   });
 
 /**
@@ -506,6 +519,20 @@ export function patternPositionDefectsForInvocation(invocation: { role: Invocati
   return defects;
 }
 
+/**
+ * Why an Invocation's Gate ownership is inconsistent (execution-model §10):
+ * a Gate Evaluator (role `evaluator`, purpose `evaluate`, no Pattern
+ * position) names exactly one Gate and carries no Task; a positioned
+ * Invocation — an optimizer round's Evaluator included — names none.
+ */
+export function gateOwnershipDefects(invocation: { role: InvocationRole; purpose: InvocationPurpose; patternPosition: PatternPosition | null; gateId: GateId | null; taskIds: readonly TaskId[] }): string[] {
+  const defects: string[] = [];
+  if ((invocation.patternPosition === null) !== (invocation.gateId !== null)) defects.push("a position-less Invocation is a Gate Evaluator and names its Gate; a positioned Invocation names no Gate");
+  if (invocation.gateId !== null && !(invocation.role === "evaluator" && invocation.purpose === "evaluate")) defects.push("only an Evaluator Invocation of purpose evaluate belongs to a Gate");
+  if (invocation.gateId !== null && invocation.taskIds.length > 0) defects.push("a Gate Evaluator carries no Task");
+  return defects;
+}
+
 /** The position key persisted beside the typed position, or `null` for a position-less Invocation. */
 export function invocationPositionKey(position: PatternPosition | null): string | null {
   return position === null ? null : patternPositionKey(position);
@@ -519,6 +546,8 @@ export interface InvocationInput {
   agentDefinitionRevisionId: AgentDefinitionRevisionId;
   continuedFromInvocationId: InvocationId | null;
   patternPosition: PatternPosition | null;
+  /** The Gate a Gate Evaluator judges; defaults to `null`, which a position-less Invocation may not use. */
+  gateId?: GateId | null;
   taskIds: TaskId[];
   allocation: Allocation;
   /** Defaults to `plan_node`; `run_final_reserve` requires a `finalReserveUse`. */
@@ -535,6 +564,7 @@ export const invocationInputSchema: z.ZodType<InvocationInput> = z
     agentDefinitionRevisionId: idSchema("agentDefinitionRevision"),
     continuedFromInvocationId: idSchema("invocation").nullable(),
     patternPosition: patternPositionSchema.nullable(),
+    gateId: idSchema("gate").nullable().optional(),
     taskIds: uniqueIds(idSchema("task")),
     allocation: allocationSchema,
     allocationSource: z.enum(INVOCATION_ALLOCATION_SOURCES).optional(),
@@ -559,6 +589,10 @@ export const invocationInputSchema: z.ZodType<InvocationInput> = z
   .refine((i) => patternPositionDefectsForInvocation(i).length === 0, {
     message: "the Pattern position agrees with the Invocation's role and purpose",
     path: ["patternPosition"],
+  })
+  .refine((i) => gateOwnershipDefects({ ...i, gateId: i.gateId ?? null }).length === 0, {
+    message: "a Gate Evaluator names its Gate and no Pattern position; every other Invocation names no Gate",
+    path: ["gateId"],
   });
 
 export type InvocationTransition =
@@ -951,7 +985,19 @@ export type ManifestInput =
       callArtifactId: ArtifactId;
       outcome: SideEffectApprovalOption;
     }
-  | { kind: "gate_result"; gateId: GateId; passed: boolean }
+  /**
+   * The result of one closed Gate, delivered to whoever remediates it (execution-model §10): the Gate's identity, kind,
+   * node, and cycle, its verdict, the exact Snapshot and candidate Artifacts it judged, the criteria that failed or were
+   * inconclusive, every Evaluation it recorded, and the runtime-owned remediation Task — ids and closed facts only, never
+   * command output, a rubric, or narrative.
+   */
+  | { kind: "gate_result"; gateId: GateId; gateKind: GateKind; planNodeId: PlanNodeId | null; ordinal: number; passed: boolean; snapshotId: SnapshotId | null; artifactIds: ArtifactId[]; failedAcceptanceCriterionIds: AcceptanceCriterionId[]; evaluationIds: EvaluationId[]; remediationTaskId: TaskId | null }
+  /**
+   * What a Gate Evaluator judges (execution-model §10), supplied by the runtime and never by the model: the Gate, its
+   * kind, the pinned Snapshot, the exact candidate Artifact ids, and the evaluated Acceptance Criteria the result must
+   * cover exactly (deterministic criteria are checked by the runtime, never reported).
+   */
+  | { kind: "gate_candidate"; gateId: GateId; gateKind: GateKind; snapshotId: SnapshotId; artifactIds: ArtifactId[]; acceptanceCriterionIds: AcceptanceCriterionId[] }
   | { kind: "plan_revision"; accepted: boolean; revisionNumber: number | null; reasons: PlanRejectionReason[] }
   | { kind: "publication_result"; publicationId: PublicationId; outcome: PublicationOutcome }
   /** The canonical route-selection Evaluation of the route node an inline branch Invocation executes for (execution-model §5.3). */
@@ -991,7 +1037,27 @@ export const manifestInputSchema: z.ZodType<ManifestInput> = z.discriminatedUnio
     callArtifactId: idSchema("artifact"),
     outcome: z.enum(SIDE_EFFECT_APPROVAL_OPTIONS),
   }),
-  z.strictObject({ kind: z.literal("gate_result"), gateId: idSchema("gate"), passed: z.boolean() }),
+  z.strictObject({
+    kind: z.literal("gate_result"),
+    gateId: idSchema("gate"),
+    gateKind: z.enum(GATE_KINDS),
+    planNodeId: idSchema("planNode").nullable(),
+    ordinal: positiveCount,
+    passed: z.boolean(),
+    snapshotId: idSchema("snapshot").nullable(),
+    artifactIds: uniqueIds(idSchema("artifact")),
+    failedAcceptanceCriterionIds: uniqueIds(idSchema("acceptanceCriterion")),
+    evaluationIds: uniqueIds(idSchema("evaluation")),
+    remediationTaskId: idSchema("task").nullable(),
+  }),
+  z.strictObject({
+    kind: z.literal("gate_candidate"),
+    gateId: idSchema("gate"),
+    gateKind: z.enum(GATE_KINDS),
+    snapshotId: idSchema("snapshot"),
+    artifactIds: uniqueIds(idSchema("artifact")),
+    acceptanceCriterionIds: uniqueIds(idSchema("acceptanceCriterion")).refine((ids) => ids.every((id, i) => i === 0 || ids[i - 1]! < id), { message: "acceptance criteria are ordered by id" }),
+  }),
   z.strictObject({ kind: z.literal("plan_revision"), accepted: z.boolean(), revisionNumber: positiveCount.nullable(), reasons: z.array(planRejectionReasonSchema) }),
   z.strictObject({ kind: z.literal("publication_result"), publicationId: idSchema("publication"), outcome: z.enum(PUBLICATION_OUTCOMES) }),
   z.strictObject({ kind: z.literal("route_selection"), evaluationId: idSchema("evaluation"), selectedLabel: nonEmptyString }),

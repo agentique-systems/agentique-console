@@ -41,7 +41,7 @@ import { approvedToolCallUseSchema } from "./tool-calls.ts";
 import { usageSchema } from "./usage.ts";
 import { changesetSchema, publicationSchema, snapshotSchema } from "./workspace-state.ts";
 import { workspaceSchema } from "./workspaces.ts";
-import { evaluationSchema, gateSchema } from "./verification.ts";
+import { evaluationSchema, gateFailureSchema, gateSchema } from "./verification.ts";
 import { idSchema, nonEmptyString, parseOrThrow, timestampSchema, uniqueIds, type Timestamp } from "./validation.ts";
 
 /** Who caused an Event. */
@@ -198,7 +198,8 @@ export const EVENT_CATALOGUE = {
   "evaluation.recorded": evaluationSchema,
   "gate.opened": gateSchema,
   "gate.passed": z.strictObject({ gateId: idSchema("gate") }),
-  "gate.failed": z.strictObject({ gateId: idSchema("gate") }),
+  /** Ids and the closed failure fact only: never command output, a rubric, or a prompt. */
+  "gate.failed": z.strictObject({ gateId: idSchema("gate"), failure: gateFailureSchema }),
   "snapshot.taken": snapshotSchema,
   "changeset.recorded": changesetSchema,
   "changeset.integrated": z.strictObject({ changesetId: idSchema("changeset"), integratedSnapshotId: idSchema("snapshot") }),

@@ -16,7 +16,9 @@ function context(h: Harness, s: Seeded, overrides: Partial<{ role: "orchestrator
   // Each role sits at a position its node's shape defines: the Orchestrator and a Gate Evaluator on the root, a step on a single node, a Task or Coordinator turn on a coordinator_worker node.
   const node = role === "orchestrator" || role === "evaluator" ? s.root : role === "coordinator" || purpose === "task" ? seedWorkerNode(h, s, "coordinator_worker") : seedWorkerNode(h, s);
   const patternPosition = role === "orchestrator" ? { kind: "orchestrator" as const } : role === "evaluator" ? null : role === "coordinator" ? { kind: "coordinator_turn" as const } : purpose === "task" ? { kind: "worker_task" as const, taskId: taskIds[0]! } : { kind: "single" as const };
-  const invocation = h.stores.invocations.create({ runId: s.run.id, planNodeId: node.id, role, purpose, agentDefinitionRevisionId: s.definition.id, continuedFromInvocationId: null, patternPosition, taskIds, allocation: { costUsd: 0.1, tokens: 100, attempts: 1 } });
+  // A position-less Evaluator is a Gate Evaluator: it judges a Gate of the Run and executes the Run's Gate Evaluator revision.
+  const gateId = patternPosition === null ? h.stores.gates.open({ runId: s.run.id, planNodeId: null, kind: "run_completion", acceptanceCriterionIds: [], snapshotId: null, candidateArtifactIds: [] }).id : null;
+  const invocation = h.stores.invocations.create({ runId: s.run.id, planNodeId: node.id, role, purpose, agentDefinitionRevisionId: gateId === null ? s.definition.id : s.evaluator.id, continuedFromInvocationId: null, patternPosition, gateId, taskIds, allocation: { costUsd: 0.1, tokens: 100, attempts: 1 } });
   const manifest = seedManifest(h, s, invocation);
   return { run: h.stores.runs.get(s.run.id), invocation, manifest, writes: overrides.writes ?? false, changeset: overrides.changeset ?? null };
 }

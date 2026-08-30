@@ -27,7 +27,7 @@ function waiverRequest(s: Seeded, requirementId: string, overrides: Partial<Deci
 
 function openGate(h: Harness, s: Seeded) {
   const snapshot = seedSnapshot(h, s, "integration");
-  return h.stores.gates.open({ runId: s.run.id, planNodeId: null, kind: "run_completion", acceptanceCriterionIds: [], snapshotId: snapshot.id });
+  return h.stores.gates.open({ runId: s.run.id, planNodeId: null, kind: "run_completion", acceptanceCriterionIds: [], snapshotId: snapshot.id, candidateArtifactIds: [] });
 }
 
 describe("requirement revisions", () => {

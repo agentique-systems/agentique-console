@@ -7,9 +7,32 @@ import {
   type Allocation,
   type BudgetLimits,
 } from "./budgets.ts";
-import type { ConversationId, RunId, SnapshotId, WorkspaceId } from "./ids.ts";
+import type { AgentDefinitionRevisionId, ConversationId, RunId, SnapshotId, WorkspaceId } from "./ids.ts";
 import { defineStateMachine } from "./transitions.ts";
 import { idSchema, nonEmptyString, timestampSchema, type Timestamp } from "./validation.ts";
+
+/** The hard validation bound on `VerificationPolicy.maxNodeGateCycles`. */
+export const MAX_NODE_GATE_CYCLES = 10;
+
+/**
+ * The Run's immutable verification policy (execution-model §10): which Agent
+ * Definition revision every Gate Evaluator Invocation of the Run executes,
+ * and how many `node_exit` Gates one Plan Node may open before it fails with
+ * `gate_cycles_exhausted`. Chosen at Run creation, persisted on the Run, and
+ * never read from ambient Workspace state, a latest revision, a provider
+ * default, or mutable configuration afterwards. `null` names no Evaluator: a
+ * Run whose Gates carry only deterministic criteria; a plan revision that
+ * gates a node on an evaluated criterion is then rejected.
+ */
+export interface VerificationPolicy {
+  evaluatorAgentDefinitionRevisionId: AgentDefinitionRevisionId | null;
+  maxNodeGateCycles: number;
+}
+
+export const verificationPolicySchema: z.ZodType<VerificationPolicy> = z.strictObject({
+  evaluatorAgentDefinitionRevisionId: idSchema("agentDefinitionRevision").nullable(),
+  maxNodeGateCycles: z.number().int().min(1).max(MAX_NODE_GATE_CYCLES),
+});
 
 export const RUN_KINDS = ["code", "other"] as const;
 export type RunKind = (typeof RUN_KINDS)[number];
@@ -80,6 +103,8 @@ export interface Run {
    * Evaluator Invocations.
    */
   finalReserve: Allocation;
+  /** The immutable verification policy: the Gate Evaluator revision and the `node_exit` Gate cycle bound. */
+  verificationPolicy: VerificationPolicy;
   baseSnapshotId: SnapshotId | null;
   integrationSnapshotId: SnapshotId | null;
   finalSnapshotId: SnapshotId | null;
@@ -112,6 +137,7 @@ export const runSchema: z.ZodType<Run> = z
     target: runTargetSchema,
     budget: budgetLimitsSchema,
     finalReserve: allocationSchema,
+    verificationPolicy: verificationPolicySchema,
     baseSnapshotId: idSchema("snapshot").nullable(),
     integrationSnapshotId: idSchema("snapshot").nullable(),
     finalSnapshotId: idSchema("snapshot").nullable(),
@@ -145,6 +171,8 @@ export interface RunInput {
   budget: BudgetLimits;
   /** Selected and validated at creation; persisted on the Run and never changed. */
   finalReserve: Allocation;
+  /** Selected and validated at creation; persisted on the Run and never changed. */
+  verificationPolicy: VerificationPolicy;
 }
 
 export const runInputSchema: z.ZodType<RunInput> = z
@@ -154,6 +182,7 @@ export const runInputSchema: z.ZodType<RunInput> = z
     target: runTargetSchema,
     budget: budgetLimitsSchema,
     finalReserve: allocationSchema,
+    verificationPolicy: verificationPolicySchema,
   })
   .refine((input) => allocationFits(input.finalReserve, allocationOfLimits(input.budget)), {
     message: "the final reserve fits within the Run Budget",

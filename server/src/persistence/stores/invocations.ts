@@ -27,6 +27,7 @@ import {
   type BudgetReservationId,
   type ContextManifest,
   type ContextManifestContent,
+  type GateId,
   type Invocation,
   type InvocationId,
   type InvocationInput,
@@ -37,7 +38,7 @@ import {
 } from "@agentique-console/core";
 import { sha256Hex } from "../blob-store.ts";
 import type { PersistenceContext } from "../context.ts";
-import { agentDefinitionRevisions, artifacts, attempts, capacityLeases, contextManifests, decisions, invocations, planNodes, tasks } from "../schema.ts";
+import { agentDefinitionRevisions, artifacts, attempts, capacityLeases, contextManifests, decisions, gates, invocations, planNodes, runs, tasks } from "../schema.ts";
 import { ROOT_SOURCE_PATH } from "@agentique-console/core";
 import type { BudgetReservationStore } from "./budgets.ts";
 import { assertSameRun, loadRunRef, requireRow, runScope, writeMeta, type WriteOptions } from "./support.ts";
@@ -58,6 +59,7 @@ function invocationToDomain(row: InvocationRow): Invocation {
       agentDefinitionRevisionId: row.agentDefinitionRevisionId,
       continuedFromInvocationId: row.continuedFromInvocationId,
       patternPosition: row.patternPosition,
+      gateId: row.gateId,
       taskIds: row.taskIds,
       allocation: { costUsd: row.allocCostUsd, tokens: row.allocTokens, attempts: row.allocAttempts },
       allocationSource: row.allocationSource,
@@ -124,6 +126,8 @@ export class InvocationStore {
         const defects = patternPositionDefects({ sourcePath: node.sourcePath, shape: node.shape }, valid.patternPosition, valid);
         if (defects.length > 0) throw new InvariantViolationError(`Pattern position is invalid for PlanNode ${valid.planNodeId}: ${defects.join("; ")}`, { planNodeId: valid.planNodeId, patternPosition: valid.patternPosition, defects });
       }
+      const gateId = valid.gateId ?? null;
+      if (gateId !== null) this.assertGateEvaluator(run, valid.planNodeId, node.sourcePath, valid.agentDefinitionRevisionId, gateId);
       if (PLAN_NODE_MACHINE.isTerminal(node.status as never)) {
         throw new ConflictError(`PlanNode ${valid.planNodeId} is ${node.status}`);
       }
@@ -164,10 +168,11 @@ export class InvocationStore {
         const active = this.listActive(run.id, "coordinator").filter((i) => i.planNodeId === valid.planNodeId);
         if (active.length > 0) throw new ConflictError(`PlanNode ${valid.planNodeId} already has active Coordinator Invocation ${active[0]!.id}`, { planNodeId: valid.planNodeId, invocationId: active[0]!.id });
       }
-      const { allocationSource: _source, finalReserveUse: _use, ...definition } = valid;
+      const { allocationSource: _source, finalReserveUse: _use, gateId: _gate, ...definition } = valid;
       const invocation: Invocation = {
         id: this.ctx.ids("invocation"),
         ...definition,
+        gateId,
         allocationSource,
         finalReserveUse,
         status: "pending",
@@ -216,8 +221,40 @@ export class InvocationStore {
     });
   }
 
+  /**
+   * A Gate Evaluator (execution-model §10) judges an open Gate of its Run: a
+   * `node_exit` Gate of its own Plan Node, or a Run Gate from the root node;
+   * it executes exactly the Run's verification-policy Evaluator revision;
+   * and at most one Evaluator Invocation of a Gate is active at a time (the
+   * database's partial unique index holds the same rule).
+   */
+  private assertGateEvaluator(run: { id: RunId }, planNodeId: PlanNodeId, sourcePath: string, agentDefinitionRevisionId: string, gateId: string): void {
+    const gate = requireRow(this.ctx.db.select({ runId: gates.runId, planNodeId: gates.planNodeId, kind: gates.kind, status: gates.status }).from(gates).where(eq(gates.id, gateId)).get(), "Gate", gateId);
+    assertSameRun("Gate", gateId, gate.runId, run.id);
+    if (gate.status !== "open") throw new ConflictError(`Gate ${gateId} is ${gate.status}; an Evaluator is created for an open Gate`, { gateId });
+    if (gate.planNodeId !== null ? gate.planNodeId !== planNodeId : sourcePath !== ROOT_SOURCE_PATH) {
+      throw new InvariantViolationError(gate.planNodeId === null ? `Gate ${gateId} is a Run Gate judged from the root Plan Node, not PlanNode ${planNodeId}` : `Gate ${gateId} belongs to PlanNode ${gate.planNodeId}, not ${planNodeId}`, { gateId, planNodeId });
+    }
+    const policy = requireRow(this.ctx.db.select({ verificationPolicy: runs.verificationPolicy }).from(runs).where(eq(runs.id, run.id)).get(), "Run", run.id).verificationPolicy;
+    if (policy.evaluatorAgentDefinitionRevisionId !== agentDefinitionRevisionId) {
+      throw new InvariantViolationError(`a Gate Evaluator executes the Run's verification-policy revision ${policy.evaluatorAgentDefinitionRevisionId ?? "(none)"}, not ${agentDefinitionRevisionId}`, { gateId, agentDefinitionRevisionId });
+    }
+    const active = this.listByGate(gateId as GateId).filter((i) => !INVOCATION_MACHINE.isTerminal(i.status));
+    if (active.length > 0) throw new ConflictError(`Gate ${gateId} already has active Evaluator Invocation ${active[0]!.id}`, { gateId, invocationId: active[0]!.id });
+  }
+
   get(id: InvocationId): Invocation {
     return invocationToDomain(requireRow(this.ctx.db.select().from(invocations).where(eq(invocations.id, id)).get(), "Invocation", id));
+  }
+
+  /** Every Evaluator Invocation of a Gate, in creation order: at most one is active, a later one continues from a blocked predecessor. */
+  listByGate(gateId: GateId): Invocation[] {
+    return this.ctx.db.select().from(invocations).where(eq(invocations.gateId, gateId)).orderBy(asc(invocations.createdAt), asc(invocations.id)).all().map(invocationToDomain);
+  }
+
+  /** The most recently created Evaluator Invocation of a Gate, or `null` before the first. */
+  latestByGate(gateId: GateId): Invocation | null {
+    return this.listByGate(gateId).at(-1) ?? null;
   }
 
   listByPlanNode(planNodeId: PlanNodeId): Invocation[] {
@@ -675,6 +712,7 @@ export class InvocationStore {
       continuedFromInvocationId: invocation.continuedFromInvocationId,
       patternPosition: invocation.patternPosition,
       patternPositionKey: invocationPositionKey(invocation.patternPosition),
+      gateId: invocation.gateId,
       taskIds: invocation.taskIds,
       allocCostUsd: invocation.allocation.costUsd,
       allocTokens: invocation.allocation.tokens,

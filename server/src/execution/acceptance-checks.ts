@@ -1,10 +1,11 @@
 /**
  * Deterministic Acceptance Criterion execution (execution-model §5.6, §10;
- * invariant 11): the reusable runtime service that runs a node's
- * deterministic criteria against one exact integration Snapshot, in stable
- * Acceptance Criterion id order, stopping at the first failure, through the
- * narrow `AcceptanceCriterionExecutionPort`. Phase 2D-B2 invokes it for
- * `evaluator_optimizer` rounds; the general Gate phase reuses it.
+ * invariant 11): the one runtime service that runs a node's deterministic
+ * criteria against one exact integration Snapshot, in stable Acceptance
+ * Criterion id order, stopping at the first failure, through the narrow
+ * `AcceptanceCriterionExecutionPort`. It serves two callers with one
+ * executor: an `evaluator_optimizer` round (scope `optimizer_round`) and a
+ * `node_exit` Gate (scope `gate`); nothing else runs a command.
  *
  * Boundaries are fixed. Each command runs outside every database
  * transaction, against an isolated view of the Snapshot that the port owns
@@ -19,13 +20,13 @@
  * check safely.
  *
  * Everything is idempotent from canonical rows: a criterion whose
- * Evaluation for this node and round already exists is never executed
- * again, so a crash after a command ran but before its record leaves only a
- * command to rerun, and a crash after the record leaves nothing to repeat.
- * Events, outcomes, and diagnostics carry ids, exit status, digest, byte
- * size, and truncation — never output bytes.
+ * Evaluation for this scope already exists is never executed again, so a
+ * crash after a command ran but before its record leaves only a command to
+ * rerun, and a crash after the record leaves nothing to repeat. Events,
+ * outcomes, and diagnostics carry ids, exit status, digest, byte size, and
+ * truncation — never output bytes.
  */
-import { boundedFailureMessage, InvariantViolationError, type AcceptanceCriterion, type AcceptanceCriterionId, type ArtifactId, type Evaluation, type Evidence, type PlanNodeId, type RunId, type SnapshotId, type Timestamp } from "@agentique-console/core";
+import { boundedFailureMessage, InvariantViolationError, type AcceptanceCriterion, type AcceptanceCriterionId, type ArtifactId, type Evaluation, type EvaluationInput, type Evidence, type GateId, type PlanNodeId, type RunId, type SnapshotId, type Timestamp } from "@agentique-console/core";
 import type { PersistenceContext } from "../persistence/context.ts";
 import type { Stores } from "../persistence/stores/index.ts";
 import type { WriteOptions } from "../persistence/stores/support.ts";
@@ -43,15 +44,17 @@ export interface AcceptanceCheckConfig {
 
 export const DEFAULT_ACCEPTANCE_CHECK_CONFIG: Readonly<AcceptanceCheckConfig> = Object.freeze({ maxOutputBytes: 65_536, commandTimeoutMs: 600_000 });
 
-/** One deterministic round of checks to run: the node, the round, the exact Snapshot, the judged candidate, and the criteria in canonical order. */
+/** Whose deterministic criteria run: one `evaluator_optimizer` round of a node, or one `node_exit` Gate. */
+export type AcceptanceCheckScope = { kind: "optimizer_round"; round: number; maxRounds: number } | { kind: "gate"; gateId: GateId };
+
+/** One set of checks to run: the node, the scope, the exact Snapshot, the judged candidate, and the criteria in canonical order. */
 export interface AcceptanceCheckRequest {
   runId: RunId;
   planNodeId: PlanNodeId;
-  /** The optimizer round the checks belong to, with the node's `maxRounds`. */
-  round: { round: number; maxRounds: number };
+  scope: AcceptanceCheckScope;
   /** The integration Snapshot every check verifies; recorded on every Evaluation. */
   snapshotId: SnapshotId;
-  /** The candidate Artifacts of the round, recorded as the judged Artifacts of every Evaluation. */
+  /** The candidate Artifacts, recorded as the judged Artifacts of every Evaluation. */
   artifactIds: ArtifactId[];
   /** The node's deterministic criteria; the service orders them by id. */
   criteria: AcceptanceCriterion[];
@@ -97,7 +100,12 @@ export class AcceptanceCheckService {
       });
   }
 
-  /** Runs the round's deterministic checks in canonical order, outside any transaction, recording each outcome once. */
+  /** The criterion Evaluations already recorded for the scope, by Acceptance Criterion id. */
+  private recorded(request: AcceptanceCheckRequest): Evaluation[] {
+    return request.scope.kind === "gate" ? this.stores.evaluations.gateCriterionEvaluationsOf(request.scope.gateId) : this.stores.evaluations.optimizerCriterionEvaluationsOf(request.planNodeId, request.scope.round);
+  }
+
+  /** Runs the scope's deterministic checks in canonical order, outside any transaction, recording each outcome once. */
   async run(request: AcceptanceCheckRequest, options: WriteOptions = {}): Promise<AcceptanceCheckOutcome> {
     if (this.ctx.tx.inTransaction) throw new Error("deterministic checks run outside any transaction; command execution is external");
     const run = this.stores.runs.get(request.runId);
@@ -107,7 +115,7 @@ export class AcceptanceCheckService {
     const ordered = [...request.criteria].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
     for (const criterion of ordered) {
       if (criterion.check.kind !== "deterministic") throw new InvariantViolationError(`AcceptanceCriterion ${criterion.id} is not deterministic`, { acceptanceCriterionId: criterion.id });
-      const existing = this.stores.evaluations.optimizerCriterionEvaluationsOf(request.planNodeId, request.round.round).find((e) => e.subject.kind === "acceptance_criterion" && e.subject.acceptanceCriterionId === criterion.id);
+      const existing = this.recorded(request).find((e) => e.subject.kind === "acceptance_criterion" && e.subject.acceptanceCriterionId === criterion.id);
       const recorded = existing === undefined ? await this.execute(run, request, criterion, options) : { kind: "recorded" as const, check: recordedOf(existing, false) };
       if (recorded.kind === "failed") return { kind: "infrastructure_failure", checks, acceptanceCriterionId: criterion.id, failure: recorded.failure, message: recorded.message };
       checks.push(recorded.check);
@@ -124,14 +132,16 @@ export class AcceptanceCheckService {
     request.signal?.addEventListener("abort", onAbort, { once: true });
     const now = this.ctx.clock();
     const deadlineAt: Timestamp | null = this.config.commandTimeoutMs === null ? null : new Date(Date.parse(now) + this.config.commandTimeoutMs).toISOString();
+    const scope = request.scope;
     const executionRequest: AcceptanceCriterionExecutionRequest = {
       runId: run.id,
       planNodeId: request.planNodeId,
       acceptanceCriterionId: criterion.id,
-      round: request.round.round,
+      round: scope.kind === "optimizer_round" ? scope.round : null,
+      gateId: scope.kind === "gate" ? scope.gateId : null,
       command: criterion.check.command,
       expectedExitCode: criterion.check.expectedExitCode,
-      workspace: { integrationWorkspacePath: run.integrationWorkspacePath, snapshot: snapshot.identity, isolationKey: `${run.id}/${request.planNodeId}/${request.round.round}/${criterion.id}` },
+      workspace: { integrationWorkspacePath: run.integrationWorkspacePath, snapshot: snapshot.identity, isolationKey: scope.kind === "gate" ? `${run.id}/${request.planNodeId}/gate/${scope.gateId}/${criterion.id}` : `${run.id}/${request.planNodeId}/${scope.round}/${criterion.id}` },
       maxOutputBytes: this.config.maxOutputBytes,
       deadlineAt,
       signal: controller.signal,
@@ -152,29 +162,27 @@ export class AcceptanceCheckService {
     const command = criterion.check.command;
     const evaluation = this.ctx.tx.write((): Evaluation => {
       // A concurrent pass may have recorded the same check meanwhile; the existing row wins and nothing is written twice.
-      const again = this.stores.evaluations.optimizerCriterionEvaluationsOf(request.planNodeId, request.round.round).find((e) => e.subject.kind === "acceptance_criterion" && e.subject.acceptanceCriterionId === criterion.id);
+      const again = this.recorded(request).find((e) => e.subject.kind === "acceptance_criterion" && e.subject.acceptanceCriterionId === criterion.id);
       if (again !== undefined) return again;
       const artifact = this.stores.artifacts.create(
-        { runId: run.id, mediaType: COMMAND_OUTPUT_MEDIA_TYPE, producer: { kind: "runtime", component: "command" }, taskId: null, title: `check ${criterion.id} round ${request.round.round} of ${request.planNodeId}` },
+        { runId: run.id, mediaType: COMMAND_OUTPUT_MEDIA_TYPE, producer: { kind: "runtime", component: "command" }, taskId: null, title: scope.kind === "gate" ? `check ${criterion.id} gate ${scope.gateId} of ${request.planNodeId}` : `check ${criterion.id} round ${scope.round} of ${request.planNodeId}` },
         output,
         options,
       );
       const evidence: Evidence[] = [{ kind: "command", command, exitCode: outcome.exitCode, outputArtifactId: artifact.id, outputTruncated: truncated }, { kind: "snapshot", snapshotId: request.snapshotId }];
-      return this.stores.evaluations.record(
-        {
-          runId: run.id,
-          planNodeId: request.planNodeId,
-          gateId: null,
-          subject: { kind: "acceptance_criterion", acceptanceCriterionId: criterion.id },
-          context: { kind: "optimizer_criterion", round: request.round.round, maxRounds: request.round.maxRounds },
-          verdict: outcome.exitCode === expected ? "pass" : "fail",
-          evidence,
-          producedBy: { kind: "runtime" },
-          artifactIds: [...request.artifactIds].sort(),
-          snapshotId: request.snapshotId,
-        },
-        options,
-      );
+      const input: EvaluationInput = {
+        runId: run.id,
+        planNodeId: request.planNodeId,
+        gateId: scope.kind === "gate" ? scope.gateId : null,
+        subject: { kind: "acceptance_criterion", acceptanceCriterionId: criterion.id },
+        context: scope.kind === "gate" ? null : { kind: "optimizer_criterion", round: scope.round, maxRounds: scope.maxRounds },
+        verdict: outcome.exitCode === expected ? "pass" : "fail",
+        evidence,
+        producedBy: { kind: "runtime" },
+        artifactIds: [...request.artifactIds].sort(),
+        snapshotId: request.snapshotId,
+      };
+      return this.stores.evaluations.record(input, options);
     });
     return { kind: "recorded", check: recordedOf(evaluation, true) };
   }

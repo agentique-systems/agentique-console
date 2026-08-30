@@ -17,7 +17,9 @@ import {
   budgetLimitsSchema,
   EMPTY_MANIFEST_TEMPLATE,
   idSchema,
+  MAX_NODE_GATE_CYCLES,
   nonEmptyString,
+  ORCHESTRATOR_DEFINITION_NAME,
   orchestratorDefinitionDefects,
   parseOrThrow,
   ROOT_NODE_TITLE,
@@ -25,6 +27,7 @@ import {
   runTargetSchema,
   RUN_KINDS,
   ValidationError,
+  verificationPolicySchema,
   type AgentDefinitionRevisionId,
   type Allocation,
   type BudgetLimits,
@@ -37,6 +40,7 @@ import {
   type RunKind,
   type RunTarget,
   type Snapshot,
+  type VerificationPolicy,
 } from "@agentique-console/core";
 import { z } from "zod";
 import type { PersistenceContext } from "../persistence/context.ts";
@@ -50,6 +54,8 @@ export interface RunCreationPolicy {
   initialOrchestratorAllocation: Allocation;
   /** The default final reserve per Run kind (enabled by default for `code`). */
   finalReserve: Record<RunKind, Allocation>;
+  /** The default `node_exit` Gate cycle bound of a Run's verification policy. */
+  maxNodeGateCycles: number;
 }
 
 export const DEFAULT_RUN_CREATION_POLICY: Readonly<RunCreationPolicy> = Object.freeze({
@@ -58,7 +64,16 @@ export const DEFAULT_RUN_CREATION_POLICY: Readonly<RunCreationPolicy> = Object.f
     code: { costUsd: 2, tokens: 200_000, attempts: 4 },
     other: { costUsd: 0, tokens: 0, attempts: 0 },
   },
+  maxNodeGateCycles: 3,
 });
+
+/** The verification policy a Run is created with (execution-model §10); the effective values are persisted on the Run and immutable. */
+export interface RunVerificationRequest {
+  /** The Gate Evaluator revision, resolved through the executable-revision resolver; `null` for a Run with deterministic-only Gates. */
+  evaluatorAgentDefinitionRevisionId: string | null;
+  /** Overrides the policy default. */
+  maxNodeGateCycles?: number;
+}
 
 export interface RunCreationRequest {
   conversationId: ConversationId;
@@ -70,6 +85,8 @@ export interface RunCreationRequest {
   finalReserve?: Allocation;
   /** Overrides the policy default; the effective value is the root node's allocation. */
   orchestratorAllocation?: Allocation;
+  /** The verification policy; defaults to no Gate Evaluator and the policy's cycle bound. */
+  verificationPolicy?: RunVerificationRequest;
   correlationId?: string | null;
 }
 
@@ -81,6 +98,7 @@ const runCreationRequestSchema: z.ZodType<RunCreationRequest> = z.strictObject({
   orchestratorAgentDefinitionRevisionId: idSchema("agentDefinitionRevision"),
   finalReserve: allocationSchema.optional(),
   orchestratorAllocation: allocationSchema.optional(),
+  verificationPolicy: z.strictObject({ evaluatorAgentDefinitionRevisionId: nonEmptyString.nullable(), maxNodeGateCycles: z.number().int().min(1).max(MAX_NODE_GATE_CYCLES).optional() }).optional(),
   correlationId: nonEmptyString.nullable().optional(),
 });
 
@@ -138,11 +156,24 @@ export class RunCreationService {
     if (defects.length > 0) {
       throw new ValidationError(`Agent Definition revision ${revision.id} cannot hold the Orchestrator role: ${defects.join("; ")}`, { defects });
     }
+    // The immutable verification policy: the Gate Evaluator revision resolves through the same executable-revision resolver
+    // (provenance ownership), is never the Orchestrator definition, and is read-only by role policy at every Gate.
+    const evaluatorId = valid.verificationPolicy?.evaluatorAgentDefinitionRevisionId ?? null;
+    if (evaluatorId !== null) {
+      const evaluator = resolveExecutableAgentDefinitionRevision(this.stores, { workspaceId: workspace.id, conversationId: conversation.id }, evaluatorId);
+      if (!evaluator.ok) throw new ValidationError(`the Gate Evaluator Agent Definition revision is not executable by this Run: ${evaluator.message}`, { revisionId: evaluator.revisionId });
+      if (evaluator.revision.definitionName === ORCHESTRATOR_DEFINITION_NAME) throw new ValidationError(`the ${ORCHESTRATOR_DEFINITION_NAME} definition cannot be the Run's Gate Evaluator`, { revisionId: evaluator.revision.id });
+    }
+    const verificationPolicy: VerificationPolicy = parseOrThrow(
+      verificationPolicySchema,
+      { evaluatorAgentDefinitionRevisionId: evaluatorId, maxNodeGateCycles: valid.verificationPolicy?.maxNodeGateCycles ?? this.policy.maxNodeGateCycles },
+      "verification policy",
+    );
 
     const meta = { correlationId: valid.correlationId ?? null };
     return this.ctx.tx.write(() => {
       const created = this.stores.runs.create(
-        { conversationId: conversation.id, kind: valid.kind, target: valid.target, budget: valid.budget, finalReserve },
+        { conversationId: conversation.id, kind: valid.kind, target: valid.target, budget: valid.budget, finalReserve, verificationPolicy },
         meta,
       );
       const preparation: RunWorkspacePreparationRequest = { runId: created.id, workspace, target: valid.target };

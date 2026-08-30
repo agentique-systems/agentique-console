@@ -146,7 +146,8 @@ describe("Execution Workspace cleanup", () => {
       const node = plan.graph.nodes[1]!;
       h.stores.plans.transitionNode(node.id, { to: "ready" });
       h.stores.plans.transitionNode(node.id, { to: "running" });
-      const evaluator = h.preparation.prepare({ runId: s.created.run.id, planNodeId: node.id, role: "evaluator", purpose: "evaluate", agentDefinitionRevisionId: s.worker.id, continuedFromInvocationId: null, patternPosition: null });
+      const gate = h.stores.gates.open({ runId: s.created.run.id, planNodeId: node.id, kind: "node_exit", acceptanceCriterionIds: [], snapshotId: h.stores.runs.get(s.created.run.id).integrationSnapshotId ?? s.created.run.baseSnapshotId!, candidateArtifactIds: [] });
+      const evaluator = h.preparation.prepare({ runId: s.created.run.id, planNodeId: node.id, role: "evaluator", purpose: "evaluate", agentDefinitionRevisionId: s.evaluator.id, continuedFromInvocationId: null, patternPosition: null, gateId: gate.id });
       expect(evaluator.invocation.workspaceCleanup).toBe("none");
       expect(h.ctx.journal.read({ runId: s.created.run.id, type: "invocation.workspace_prepared" }).map((e) => (e.payload as { invocationId: string }).invocationId)).toEqual([s.invocation.id]);
       const judged = h.stores.artifacts.create({ runId: s.created.run.id, mediaType: "text/plain", producer: { kind: "runtime", component: "command" }, taskId: null, title: "judged" }, new TextEncoder().encode("judged"));

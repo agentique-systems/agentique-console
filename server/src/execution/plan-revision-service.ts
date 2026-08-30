@@ -203,7 +203,24 @@ export class PlanRevisionService {
     };
     const result = compileExecutionPlan(input);
     if (!result.accepted) throw new Rejected(result.reasons);
+    this.assertGateEvaluator(run, result.draft);
     return result.draft;
+  }
+
+  /**
+   * A node whose `node_exit` Gate names an evaluated criterion needs the Run's Gate Evaluator (execution-model §10); a Run
+   * whose verification policy names none cannot execute such a Gate. An `evaluator_optimizer` node consumes its criteria
+   * through its own Evaluator and is exempt.
+   */
+  private assertGateEvaluator(run: Run, draft: CompiledDraft): void {
+    if (run.verificationPolicy.evaluatorAgentDefinitionRevisionId !== null) return;
+    const reasons: PlanRejectionReason[] = [];
+    for (const { key, definition } of draft.nodes) {
+      if (definition.kind !== "pattern" || definition.pattern === "evaluator_optimizer") continue;
+      const evaluated = definition.gateAcceptanceCriterionIds.filter((id) => this.stores.requirements.getAcceptanceCriterion(id).check.kind === "evaluated");
+      if (evaluated.length > 0) reasons.push({ code: "gate_evaluator_unavailable", message: `node ${key} gates on evaluated Acceptance Criteria ${evaluated.join(", ")} but the Run names no Gate Evaluator`, path: key });
+    }
+    if (reasons.length > 0) throw new Rejected(reasons);
   }
 
   // -------------------------------------------------------------------------

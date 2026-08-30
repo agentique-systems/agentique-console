@@ -1,4 +1,4 @@
-import { invocationFundingDefects } from "./invocations.ts";
+import { gateOwnershipDefects, invocationFundingDefects } from "./invocations.ts";
 import { describe, expect, it } from "vitest";
 import { newId } from "./ids.ts";
 import {
@@ -66,7 +66,13 @@ describe("purposes", () => {
     expect(invocationInputSchema.safeParse({ ...input, patternPosition: { kind: "orchestrator" } }).success).toBe(false);
     expect(invocationInputSchema.safeParse({ ...input, patternPosition: { kind: "chain_step", index: 2, count: 2 } }).success).toBe(false);
     expect(invocationInputSchema.safeParse({ ...input, patternPosition: null }).success).toBe(false);
-    expect(invocationInputSchema.safeParse({ ...input, role: "evaluator", purpose: "evaluate", patternPosition: null }).success).toBe(true);
+    // A position-less Evaluator is a Gate Evaluator: it names its Gate and carries no Task; a positioned Invocation names no Gate.
+    expect(invocationInputSchema.safeParse({ ...input, role: "evaluator", purpose: "evaluate", patternPosition: null }).success).toBe(false);
+    expect(invocationInputSchema.safeParse({ ...input, role: "evaluator", purpose: "evaluate", patternPosition: null, gateId: newId("gate") }).success).toBe(true);
+    expect(invocationInputSchema.safeParse({ ...input, role: "evaluator", purpose: "evaluate", patternPosition: null, gateId: newId("gate"), taskIds: [newId("task")] }).success).toBe(false);
+    expect(invocationInputSchema.safeParse({ ...input, gateId: newId("gate") }).success).toBe(false);
+    expect(invocationInputSchema.safeParse({ ...input, role: "evaluator", purpose: "evaluate", patternPosition: { kind: "evaluator_round", round: 1, maxRounds: 2 }, gateId: newId("gate") }).success).toBe(false);
+    expect(gateOwnershipDefects({ role: "worker", purpose: "step", patternPosition: null, gateId: newId("gate"), taskIds: [] })).toHaveLength(1);
     expect(invocationInputSchema.safeParse({ ...input, purpose: "turn" }).success).toBe(false);
     expect(invocationInputSchema.safeParse({ ...input, purpose: "chat" }).success).toBe(false);
     expect(invocationInputSchema.safeParse({ ...input, purpose: "evaluate" }).success).toBe(false);
@@ -84,7 +90,7 @@ describe("purposes", () => {
       allocation: { costUsd: 1, tokens: 100, attempts: 2 },
     };
     const synthesis = { ...base, role: "orchestrator", purpose: "final_synthesis", patternPosition: { kind: "orchestrator" }, allocationSource: "run_final_reserve", finalReserveUse: "final_synthesis" };
-    const completion = { ...base, role: "evaluator", purpose: "evaluate", patternPosition: null, allocationSource: "run_final_reserve", finalReserveUse: "run_completion" };
+    const completion = { ...base, role: "evaluator", purpose: "evaluate", patternPosition: null, gateId: newId("gate"), allocationSource: "run_final_reserve", finalReserveUse: "run_completion" };
     expect(invocationInputSchema.safeParse(synthesis).success).toBe(true);
     expect(invocationInputSchema.safeParse(completion).success).toBe(true);
     // Source and use go together.
@@ -100,7 +106,7 @@ describe("purposes", () => {
     expect(invocationInputSchema.safeParse({ ...base, role: "coordinator", purpose: "decompose", allocationSource: "run_final_reserve", finalReserveUse: "final_synthesis" }).success).toBe(false);
     // A final-reserve Invocation executes no Task; an ordinary evaluate Invocation is plan_node by default.
     expect(invocationInputSchema.safeParse({ ...completion, taskIds: [newId("task")] }).success).toBe(false);
-    expect(invocationInputSchema.safeParse({ ...base, role: "evaluator", purpose: "evaluate", patternPosition: null }).success).toBe(true);
+    expect(invocationInputSchema.safeParse({ ...base, role: "evaluator", purpose: "evaluate", patternPosition: null, gateId: newId("gate") }).success).toBe(true);
     expect(invocationFundingDefects({ role: "evaluator", purpose: "select", allocationSource: "run_final_reserve", finalReserveUse: "run_completion" })).toHaveLength(1);
     expect(invocationFundingDefects({ role: "worker", purpose: "step", allocationSource: "plan_node", finalReserveUse: null })).toEqual([]);
   });
@@ -117,6 +123,7 @@ describe("invocation record", () => {
       agentDefinitionRevisionId: newId("agentDefinitionRevision"),
       continuedFromInvocationId: newId("invocation"),
       patternPosition: { kind: "orchestrator" },
+      gateId: null,
       taskIds: [],
       allocation: { costUsd: 1, tokens: 100, attempts: 2 },
       allocationSource: "plan_node",

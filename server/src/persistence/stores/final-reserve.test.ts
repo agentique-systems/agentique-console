@@ -19,14 +19,18 @@ const ZERO: Allocation = { costUsd: 0, tokens: 0, attempts: 0 };
 
 function finalInvocation(h: Harness, s: Seeded, use: "final_synthesis" | "run_completion", overrides: Partial<{ role: InvocationRole; purpose: InvocationPurpose; planNodeId: string; allocation: Allocation; taskIds: string[] }> = {}): Invocation {
   const binding = use === "final_synthesis" ? { role: "orchestrator" as const, purpose: "final_synthesis" as const } : { role: "evaluator" as const, purpose: "evaluate" as const };
+  const patternPosition = (overrides.role ?? binding.role) === "orchestrator" ? { kind: "orchestrator" as const } : (overrides.purpose ?? binding.purpose) === "select" ? { kind: "route_selection" as const } : (overrides.purpose ?? binding.purpose) === "task" ? { kind: "worker_task" as const, taskId: (overrides.taskIds?.[0] ?? "task_000000000000000000000000") as never } : null;
+  // A run_completion Evaluator is a Gate Evaluator: it judges the Run's run_completion Gate with the Run's Gate Evaluator revision.
+  const gateId = patternPosition === null ? h.stores.gates.open({ runId: s.run.id, planNodeId: null, kind: "run_completion", acceptanceCriterionIds: [], snapshotId: null, candidateArtifactIds: [] }).id : null;
   return h.stores.invocations.create({
     runId: s.run.id,
     planNodeId: (overrides.planNodeId ?? s.root.id) as never,
     role: overrides.role ?? binding.role,
     purpose: overrides.purpose ?? binding.purpose,
-    agentDefinitionRevisionId: s.definition.id,
+    agentDefinitionRevisionId: gateId === null ? s.definition.id : s.evaluator.id,
     continuedFromInvocationId: null,
-    patternPosition: (overrides.role ?? binding.role) === "orchestrator" ? { kind: "orchestrator" } : (overrides.purpose ?? binding.purpose) === "select" ? { kind: "route_selection" } : null,
+    patternPosition,
+    gateId,
     taskIds: (overrides.taskIds ?? []) as never,
     allocation: overrides.allocation ?? { costUsd: 3, tokens: 30_000, attempts: 2 },
     allocationSource: "run_final_reserve",
@@ -102,7 +106,7 @@ describe("final-reserve Invocations", () => {
       // Nothing was written: no Invocation, no reservation, no Event beyond the Task and its reservation.
       expect(h.stores.invocations.listByPlanNode(s.root.id)).toEqual([]);
       expect(h.stores.reservations.listByParent({ type: "run", id: s.run.id }).filter((r) => r.capacitySource === "final_reserve")).toEqual([]);
-      expect(h.ctx.journal.read({ runId: s.run.id, afterSeq: before }).map((e) => e.type)).toEqual(["execution_plan.revised", "execution_plan.compiled", "plan_node.created", "budget_reservation.created", "task.created", "budget_reservation.created"]);
+      expect(h.ctx.journal.read({ runId: s.run.id, afterSeq: before }).map((e) => e.type).filter((t) => t !== "gate.opened")).toEqual(["execution_plan.revised", "execution_plan.compiled", "plan_node.created", "budget_reservation.created", "task.created", "budget_reservation.created"]);
       // The store entry point is not reachable for anything but a persisted final-reserve Invocation.
       const ordinary = seedInvocation(h, s, { allocation: { costUsd: 0.5, tokens: 1, attempts: 1 } });
       expect(() => h.stores.reservations.reserveFinalInvocation({ runId: s.run.id, invocationId: ordinary.id })).toThrow(InvariantViolationError);
