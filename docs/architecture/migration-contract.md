@@ -321,6 +321,7 @@ architecture corrects it before cutover, because nothing has shipped.
 | `agent_definition_revisions` | runtime | immutable; one per content hash under a logical id |
 | `invocations` | runtime | one per logical execution; role, purpose, `continuedFromInvocationId`, allocation source and final-reserve use (immutable), status with `blockedByDecisionId`, the Workspace cleanup obligation; manifest immutable |
 | `attempts` | runtime | one per provider execution; `kind`, `startMode`, `resumedFromAttemptId` |
+| `approved_tool_call_uses` | runtime (tool-call authorization) | append-only; one per claimed `approve_once` Decision (unique), naming tool, digest, Run, Plan Node, successor Invocation, claiming Attempt; every ownership fact re-checked at insertion |
 | `provider_continuations` | provider adapter | index keyed by Attempt; truncatable |
 | `context_manifests` | runtime | exactly one per Invocation; immutable |
 | `evaluations` | runtime / Evaluator via runtime | append-only |
@@ -535,6 +536,18 @@ Merge to `main` happens after step 7 as one merge commit. Rollback is
   refused at append; a foreign Orchestrator is refused before Workspace
   preparation; a foreign plan Worker yields exactly one rejected Event and
   no revision number; the compiler receives only resolved revision facts.
+- Approval-use tests: a matching resolved `approve_once` Decision is
+  claimed exactly once; a second claim in the same Attempt, a retry
+  Attempt, and a restarted process are refused; two connections
+  competing for one grant have one committed winner; a different tool,
+  digest, Run, Plan Node, predecessor, or manifest, a denied, open, or
+  superseded Decision, and a non-running or foreign Attempt are refused
+  at the store and at the database; an injected claim callback or COMMIT
+  failure executes nothing and leaves no row or Event; provider failure
+  after a claim leaves the approval consumed; no raw call bytes appear in
+  Events, diagnostics, failure details, uses, or rendered inputs; and the
+  scripted fake exercises the authorization port rather than adapter-local
+  consumption.
 - No live-provider tests in the default suite. A live smoke test may exist
   behind an explicit opt-in environment variable and is not a benchmark.
 

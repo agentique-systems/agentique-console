@@ -119,6 +119,7 @@ re-entrant over one SQLite connection:
 | Agent Definition, revision | Runtime (from files, built-ins, approved Conversation authoring) | `agent_definitions`, `agent_definition_revisions` | Agents view |
 | Invocation | Runtime | `invocations` | Plan view |
 | Attempt | Runtime | `attempts` | Plan view, transcript viewer |
+| Approval use | Runtime (tool-call authorization) | `approved_tool_call_uses` | Decision cards, Plan view |
 | Provider continuation index | Provider adapter | `provider_continuations` (index) + adapter-owned payload store | Attempt inspector (existence only) |
 | Context Manifest | Runtime | `context_manifests` | Invocation inspector |
 | Evaluation, Gate | Runtime | `evaluations`, `gates` | Gate view |
@@ -1056,16 +1057,66 @@ the blocked Invocation otherwise) with `continuedFromInvocationId` set to
 the blocked Invocation and the resolution as typed logical input
 (`side_effect_approval_resolution`: Decision, blocked Invocation, Attempt,
 tool, digest, Artifact, outcome), validated against the canonical
-Decision. An `approve_once` resolution becomes one entry of the
-successor's manifest `approvedCalls` (Decision, tool, digest); a `deny`
-resolution is input and nothing more. **Approval authorizes only the
-exact tool and canonical call digest, once.** It changes neither the
-Agent Definition nor the effective Tool Policy (the tool stays
-`approval_required`), it authorizes no later or different call, and its
-enforcement belongs to the provider boundary — the adapter permits an
-`approval_required` call only when the canonical digest of the exact
-proposed call matches an unused `approvedCalls` entry — never to the
-model. Built-in definitions mark destructive shell operations, network
+Decision. An `approve_once` resolution becomes one **approval grant** in
+the successor's manifest `approvedCalls` (Decision, tool, digest); a
+`deny` resolution is input and nothing more. **Approval authorizes only
+the exact tool and canonical call digest, at most once across the entire
+Run.** It changes neither the Agent Definition nor the effective Tool
+Policy (the tool stays `approval_required`), it authorizes no later or
+different call, and its enforcement belongs to the runtime — never to the
+adapter's memory and never to the model.
+
+Three things are distinct here. The **approval grant** is immutable
+input delivered to an Invocation: it says the call *may* be claimed, and
+because the manifest is immutable every Attempt of that Invocation
+receives the same grant list; it is eligibility, never evidence that the
+call remains unused. The **approval claim** (or **use**) is the canonical
+append-only record (`approved_tool_call_uses`: Decision, tool, digest,
+Run, Plan Node, successor Invocation, claiming Attempt, claim time) that
+consumes the grant; the database allows one use per Decision and
+re-checks every ownership fact at insertion, so competing claimants have
+exactly one committed winner without any process lock. **External
+execution** is what the provider-native tool does after the claim; it
+cannot be made atomic with the claim. The runtime-owned authorization
+boundary (`server/src/execution/tool-call-authorization.ts`, the
+`ToolCallAuthorizationPort` of the adapter contract) is bound to the
+Attempt being executed and answers one closed outcome per proposed call:
+`allowed` (Tool Policy `allowed`; no claim involved), `denied` (Tool
+Policy `denied`, or an undeclared tool), `approved_once` (an exact
+matching grant was claimed and committed), `approval_required` (the tool
+requires approval and no matching unconsumed grant exists — a refused
+claim, a used grant, or no grant at all), `invalid` (malformed or beyond
+the canonical bound; nothing recorded), and `failed` (the claim
+transaction failed; nothing persisted, nothing authorized, one bounded
+diagnostic). The algorithm is: the adapter proposes the exact
+`ProposedToolCall`; the runtime validates and canonicalizes it and
+evaluates the effective Tool Policy; for an `approval_required` tool it
+looks the digest up among the manifest's grants and, when one matches,
+claims that Decision in its own short root transaction while the
+provider is running — the use row and its `approved_tool_call.used`
+Event commit, then and only then the adapter learns `approved_once` and
+may execute the call. The adapter must consult the port before executing
+every provider-native capability call, executes only on `allowed` or
+`approved_once`, ends the execution with the typed `approval_required`
+completion otherwise, never queries a canonical store, and keeps no
+approval-consumption state; a fresh or restarted adapter therefore
+cannot repeat a consumed call.
+
+The claim is never rolled back because the provider later fails, the
+Attempt is retried, finalization fails, or the process crashes, and the
+same Decision can never be claimed again: a retry receives the unchanged
+manifest but its claim is refused, and if the call must be attempted
+again it is intercepted again and a new `side_effect_approval` Decision
+is opened. This is **at-most-once authorization**, not exactly-once
+execution: a crash after the claim and before the external call
+conservatively consumes the approval and requires a new operator
+approval, and a crash after the external call but before the Attempt is
+finalized leaves the call executed once with its use recorded. Exactly-once
+execution of the external effect is possible only when the underlying
+tool supports its own idempotency mechanism. A consumed grant is never
+delivered again: the manifest assembler refuses a
+`side_effect_approval_resolution` input whose Decision already has a
+use. Built-in definitions mark destructive shell operations, network
 access outside declared MCP servers, and any operation on a path outside
 the worktree as `approval_required` or `denied`. Tool Policy, capability
 policy, worktree isolation, side-effect approval, and Gates are the safety
@@ -1136,15 +1187,18 @@ by the Attempt executor (`server/src/execution/attempt-executor.ts`)
 through a provider-neutral adapter (`server/src/provider/adapter.ts`)
 that receives one execution request — Attempt and Invocation ids, model
 and effort, the deterministic rendered input, the effective capability
-and Tool Policy, the working directory, the wall-clock deadline, a
+and Tool Policy, the runtime-owned tool-call authorization port bound to
+this Attempt (§6.4), the working directory, the wall-clock deadline, a
 cancellation signal, an optional verified continuation payload, and a
 transient-output sink — and returns one typed outcome: a closed
 completion (completed, transient or permanent provider error, tool
 failure, approval required, interrupted with its cause), the candidate
 result, Usage chunks, bounded transcript bytes, an optional opaque
 continuation payload, timing, and safe diagnostics. The adapter holds no
-canonical state, makes no scheduling, retry, or transition decision, and
-never treats an `approval_required` disposition as `allowed`.
+canonical state, makes no scheduling, retry, or transition decision,
+never treats an `approval_required` disposition as `allowed`, and never
+decides for itself whether a call may run: every provider-native
+capability call goes through the authorization port first.
 
 The executor's transaction boundaries are fixed. *Prepare* (one
 transaction) verifies the Invocation and its manifest, the remaining
@@ -1156,7 +1210,9 @@ a capacity refusal creates no Attempt and consumes nothing. *Execute*
 cancellation and the Invocation-wide wall-clock deadline that the
 caller's clock enforces, streams transient output, collects a writing
 Invocation's Changeset through the execution-workspace port, and stores
-any continuation payload. *Finalize* (one transaction) stores the
+any continuation payload; each approval claim the provider requests
+during this step commits in its own short transaction (§6.4) that
+contains no external execution. *Finalize* (one transaction) stores the
 transcript Artifact, records every Usage row, records the Changeset,
 validates the candidate result, transitions the Attempt with its failure
 detail and retry decision, releases the lease exactly once, records an
@@ -1897,6 +1953,9 @@ mechanism, if ever added, is a new feature with its own design.
 | Changeset conflict | Task created for the node owner; Gate blocked until resolved. |
 | Publish fails | Target untouched; Publication `failed`; a `publication_result` Orchestrator Invocation is created. |
 | Provider continuation payload missing, expired, or corrupt | The Attempt starts `fresh`; no other effect. |
+| Approval claim transaction fails (callback or COMMIT) | No use row, no Event, no execution; the adapter learns `failed` and ends the Attempt as a tool failure with a bounded message; one `tool_call_authorization_failed` diagnostic; the retry may claim again. |
+| Provider fails after an approval claim | The use stays committed; the retry receives the same manifest but the grant is refused; repeating the call needs a new `side_effect_approval` Decision. |
+| Crash after an approval claim, before the external call | The approval is conservatively consumed (recovery repairs nothing); the retry cannot repeat the call under the original Decision and intercepts it again for a new approval. |
 | Server restart | Recovery (`server/src/execution/recovery-service.ts`) runs once at startup in one transaction: every `pending` or `running` Attempt of the previous process is marked `interrupted` with its consumed Attempt kept and its durable retry decision recorded; every stale lease is released and the governor is rebuilt from canonical lease state; an Invocation with no Attempt remaining is `failed` with `allocation_exhausted` (its Task failing likewise); every other interrupted Invocation is left `running` with durable retry eligibility under the same Invocation-wide deadline (§7.6), `resumed` only where §6.6 permits and `fresh` when the payload is absent or invalid. After that transaction recovery retries, outside any transaction, every worktree cleanup obligation still `pending` on a terminal Invocation (§9.1). Recovery is idempotent, reads no transcript and no provider message, and executes nothing: recoverable work is returned for an explicit execution call, which the scheduler drives. The worktree of a retry-eligible Invocation is preserved and reattached by Invocation id; reservations are read as persisted. |
 | Operator cancels a Run | All Attempts interrupted, all nodes `cancelled`, all reservations released, Integration Workspace left in place, Run `cancelled`. |
 | Operator pauses a Run | The scheduler stops starting Attempts for that Run; running Attempts are allowed to finish (`soft`) or interrupted (`hard`); Run `waiting` with reason `operator`. Other Runs are unaffected. |
@@ -2017,6 +2076,16 @@ by a test.
     exactly one of `pending`, `ready`, `running`, `blocked`, `completed`,
     `failed`, `cancelled`; only the runtime transitions it; a `failed` Task
     is never reclassified `cancelled`.
+24. **Side-effect approval is exact-digest and at-most-once.** An
+    `approve_once` resolution authorizes exactly one tool and canonical
+    call digest at most once across the Run: the grant in the immutable
+    manifest is eligibility input only; a call executes only after the
+    runtime claimed the grant in a committed `approved_tool_call_uses`
+    row (one per Decision, enforced by the database); the claim survives
+    provider failure, retries, failed finalization, and restart and is
+    never repaired, deleted, or reconstructed from Events; no adapter
+    holds correctness-critical consumption state; and no raw call bytes
+    appear outside the call Artifact.
 
 ## 16. Non-goals
 

@@ -300,8 +300,10 @@ A `side_effect_approval` carries a typed **subject** — the intercepted
 call's tool name, canonical call digest, call Artifact id, and originating
 Run, Plan Node, Invocation, and Attempt — with exactly the options
 `approve_once` and `deny`; the call's bytes exist only in the Artifact, and
-approval authorizes exactly that digest once without widening any Tool
-Policy. A `requirement_waiver` is proposed by the Orchestrator, always
+an `approve_once` resolution is an **approval grant** that authorizes
+exactly that digest at most once across the Run without widening any Tool
+Policy — consumed by one canonical Approval Use, never by adapter memory.
+A `requirement_waiver` is proposed by the Orchestrator, always
 `operator_required`, resolved only by the operator, and never delegated or
 auto-resolved; its resolution records actor, rationale, Requirement id,
 timestamp, and optional Artifact ids, after which the runtime sets the
@@ -405,9 +407,12 @@ plan revision go through it.
 
 The per-capability disposition an Agent Definition revision carries for
 each provider-native tool it declares: `allowed`, `denied`, or
-`approval_required`. An `approval_required` call is intercepted by the
-runtime and turned into a `side_effect_approval` Decision before it may
-proceed. The effective policy for an Attempt is the intersection of the
+`approval_required`. Every provider-native call is authorized by the
+runtime before it executes: an `allowed` tool needs no approval, a
+`denied` (or undeclared) tool never executes, and an `approval_required`
+call executes only after the runtime claimed a matching approval grant —
+otherwise it is intercepted and turned into a `side_effect_approval`
+Decision. The effective policy for an Attempt is the intersection of the
 revision's Tool Policy with the role policy (Evaluators are read-only) and
 the Workspace policy. Tool Policy is one of the five safety mechanisms
 (with capability policy, worktree isolation, side-effect approval, and
@@ -669,6 +674,26 @@ means the Attempt starts `fresh`.
 - Store: `provider_continuations` (index) + adapter payload store
 - Related: Attempt, Invocation
 
+### Approval Use
+
+The canonical, append-only record that one `approve_once` side-effect
+approval grant was claimed: the Decision consumed, its tool and canonical
+call digest, the Run and Plan Node, the successor Invocation whose Context
+Manifest carried the grant, the running Attempt that claimed it, and the
+claim time. It is written by the runtime's tool-call authorization
+boundary in its own short transaction before the adapter may execute the
+call, and it is never rolled back because the provider later fails, the
+Attempt is retried, finalization fails, or the process restarts. At most
+one use exists per Decision, enforced by the database; a claim that is
+refused writes nothing. A use records authorization, not completion: a
+crash between the claim and the external call conservatively consumes the
+approval, and executing the call again needs a new Decision.
+
+- Id prefix: `acu_`
+- Owned by: the runtime
+- Store: `approved_tool_call_uses`
+- Related: Decision, Context Manifest, Invocation, Attempt, Tool Policy
+
 ### Budget
 
 A set of limits: maximum cost, maximum tokens, maximum wall-clock time,
@@ -809,11 +834,12 @@ logical turn is a new Invocation), `in_progress` (as a Task state; use
 - Table names are the plural snake_case of the term: `runs`, `plan_nodes`,
   `plan_edges`, `plan_revision_nodes`, `plan_node_requirements`, `acceptance_criteria`,
   `context_manifests`, `agent_definition_revisions`, `publications`,
-  `capacity_leases`, `budget_reservations`, `provider_continuations`.
+  `capacity_leases`, `budget_reservations`, `provider_continuations`,
+  `approved_tool_call_uses`.
 - Id prefixes: `ws_`, `cv_`, `cvm_`, `run_`, `pn_`, `pe_`, `req_`,
   `reqr_`, `ac_`, `dec_`, `task_`, `art_`, `ho_`, `agd_`, `agdr_`, `inv_`,
   `att_`, `eval_`, `gate_`, `snap_`, `cs_`, `pub_`, `lease_`, `bres_`,
-  `cm_`, `use_`. A prefix is never reused for a second kind.
+  `cm_`, `use_`, `acu_`. A prefix is never reused for a second kind.
   `plan_node_requirements`, `plan_revision_nodes`, and
   `provider_continuations` are keyed by the objects they index and carry
   no own prefix; `events`,

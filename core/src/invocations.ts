@@ -897,10 +897,12 @@ export interface ContextManifestContent {
   toolPolicy: ToolPolicy;
   runtimeTools: RuntimeTool[];
   /**
-   * Calls the operator approved once for this Invocation (from its
+   * The approval grants delivered to this Invocation (from its
    * `side_effect_approval_resolution` inputs), by Decision, tool, and
-   * canonical digest, ordered by digest. They widen no Tool Policy: the
-   * provider boundary permits exactly these calls once and nothing else.
+   * canonical digest, ordered by digest. A grant is eligibility input,
+   * not evidence that the call remains unused: every Attempt receives this
+   * same immutable list, and the runtime's canonical approval use decides
+   * whether a grant can still be claimed. Grants widen no Tool Policy.
    */
   approvedCalls: ApprovedToolCall[];
 }

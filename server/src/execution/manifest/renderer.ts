@@ -21,7 +21,8 @@
  *   Capabilities   tools and MCP servers
  *   Tool Policy    every declared tool with its effective disposition
  *   Runtime Tools  the role's runtime tools
- *   Approved Calls calls the operator approved once, by tool, digest, Decision
+ *   Approved Calls the approval grants (calls the operator approved once, by tool, digest, Decision;
+ *                  whether each is still claimable is decided by the canonical approval use)
  *   Retry          (only for a retry) prior Attempt, failure class, bounded
  *                  detail, exact violations, ordinal and remaining Attempts
  *
