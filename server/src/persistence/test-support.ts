@@ -283,6 +283,7 @@ export function seedManifest(h: Harness, seeded: Seeded, invocation: Invocation,
     capabilities: policy.capabilities,
     toolPolicy: policy.toolPolicy,
     runtimeTools: [...RUNTIME_TOOLS_BY_ROLE[invocation.role]],
+    approvedCalls: [],
   });
 }
 

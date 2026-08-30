@@ -7,10 +7,12 @@
  */
 import {
   type Attempt,
+  type DecisionId,
   type Invocation,
   type InvocationFailureReason,
   type InvocationResult,
   type RetryDecision,
+  type TaskBlockReason,
   type TaskFailureReason,
   type TaskId,
 } from "@agentique-console/core";
@@ -24,8 +26,8 @@ export interface SettleInvocationInput {
   decision: RetryDecision | null;
   /** The validated result of a succeeded Attempt. */
   result: InvocationResult | null;
-  /** The provider ended on an `approval_required` capability call; the Invocation waits for the Decision the later phase creates. */
-  approvalRequired: boolean;
+  /** The open `side_effect_approval` Decision recorded for an intercepted call; the Invocation ends `blocked` on it. */
+  approval: { decisionId: DecisionId } | null;
   meta: WriteOptions;
 }
 
@@ -46,8 +48,9 @@ export function invocationFailureReasonFor(decision: RetryDecision, attempt: Pic
       // except that a last invalid result is reported as what it was.
       return attempt.failureClass === "result_invalid" ? "result_invalid" : "allocation_exhausted";
     case "tool_failure_retried":
-    case "approval_required":
       return "attempts_exhausted";
+    case "approval_required":
+      throw new Error("an approval-required refusal ends the Invocation blocked, never failed");
     default:
       throw new Error(`retry decision ${decision.reason} permits a retry; the Invocation does not fail`);
   }
@@ -79,10 +82,11 @@ export function settleInvocation(stores: Stores, input: SettleInvocationInput): 
     return { kind: "settled", invocation: settled };
   }
   if (!decision) throw new Error(`terminal Attempt ${attempt.id} carries no retry decision`);
-  if (input.approvalRequired) {
-    const waiting = stores.invocations.transition(invocation.id, { to: "waiting", waitReason: "decision" }, meta);
-    blockRunningTasks(stores, invocation, { kind: "input", description: `tool ${attempt.failureDetail?.tool ?? "unknown"} requires operator approval` }, meta);
-    return { kind: "settled", invocation: waiting };
+  if (input.approval !== null) {
+    // Terminal: the provider execution is over; the successor Invocation continues from here once the Decision is resolved.
+    const blocked = stores.invocations.transition(invocation.id, { to: "blocked", decisionId: input.approval.decisionId }, meta);
+    blockRunningTasks(stores, invocation, { kind: "decision", decisionId: input.approval.decisionId }, meta);
+    return { kind: "settled", invocation: blocked };
   }
   if (decision.permitted) return { kind: "retry_pending", invocation, decision };
   const failureReason = invocationFailureReasonFor(decision, attempt);
@@ -115,7 +119,7 @@ function applyTaskReports(stores: Stores, invocation: Invocation, result: Invoca
   }
 }
 
-function blockRunningTasks(stores: Stores, invocation: Invocation, blockReason: { kind: "replan"; description: string } | { kind: "input"; description: string }, meta: WriteOptions): void {
+function blockRunningTasks(stores: Stores, invocation: Invocation, blockReason: TaskBlockReason, meta: WriteOptions): void {
   for (const taskId of invocation.taskIds) {
     if (stores.tasks.get(taskId).status === "running") stores.tasks.transition(taskId, { to: "blocked", blockReason }, meta);
   }

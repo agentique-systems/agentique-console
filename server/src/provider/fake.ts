@@ -8,7 +8,7 @@
  * timers: a `hang` step resolves only when the runtime aborts the request,
  * and a `delay` step resolves only when the test releases it.
  */
-import type { AttemptId, Timestamp } from "@agentique-console/core";
+import type { AttemptId, JsonValue, Timestamp } from "@agentique-console/core";
 import type { AttemptExecutionOutcome, AttemptExecutionRequest, InterruptionCause, ProviderAdapter, ProviderCompletion, UsageChunk } from "./adapter.ts";
 
 export interface FakeStepCommon {
@@ -30,7 +30,7 @@ export type FakeStep = FakeStepCommon &
     | { kind: "transient_error"; message?: string }
     | { kind: "permanent_error"; message?: string }
     | { kind: "tool_failure"; tool: string; message?: string }
-    | { kind: "approval_required"; tool: string; call: string }
+    | { kind: "approval_required"; tool: string; input: JsonValue }
     | { kind: "interrupted"; message?: string }
     | { kind: "hang" }
     | { kind: "throw"; error: Error }
@@ -167,7 +167,7 @@ export class ScriptedProvider implements ProviderAdapter {
       case "tool_failure":
         return { ...base, completion: { kind: "tool_failure", tool: step.tool, message: step.message ?? `${step.tool} failed` }, result: null };
       case "approval_required":
-        return { ...base, completion: { kind: "approval_required", tool: step.tool, call: step.call }, result: null };
+        return { ...base, completion: { kind: "approval_required", call: { tool: step.tool, input: step.input } }, result: null };
       case "interrupted":
         return { ...base, completion: { kind: "interrupted", cause: "provider", message: step.message ?? "provider stream ended" }, result: null };
     }

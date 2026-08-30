@@ -23,6 +23,7 @@ const request = (overrides: Partial<DecisionRequest> = {}): DecisionRequest => (
   ],
   recommendedOptionId: "a",
   rationale: "because",
+  subject: null,
   affects: { requirementIds: [], taskIds: [], planNodeIds: [] },
   deadlineAt: null,
   activationCondition: null,

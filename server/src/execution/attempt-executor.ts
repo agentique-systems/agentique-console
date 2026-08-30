@@ -29,25 +29,31 @@
 import {
   ATTEMPT_MACHINE,
   boundedFailureMessage,
+  canonicalToolCall,
   ConflictError,
   grantsWriteCapability,
   INVOCATION_MACHINE,
   invocationDeadlineAt,
+  TOOL_CALL_MAX_BYTES,
+  TOOL_CALL_MEDIA_TYPE,
   TRANSCRIPT_MEDIA_TYPE,
   type Attempt,
   type AttemptId,
   type CapacityLease,
   type CapacityRefusal,
   type ContextManifest,
+  type Decision,
   type Invocation,
   type InvocationId,
+  type ProposedToolCall,
   type RetryDecision,
+  type Run,
   type Timestamp,
 } from "@agentique-console/core";
 import type { PersistenceContext } from "../persistence/context.ts";
 import type { Stores } from "../persistence/stores/index.ts";
 import type { WriteOptions } from "../persistence/stores/support.ts";
-import type { AttemptExecutionOutcome, AttemptExecutionRequest, ProviderAdapter, TransientOutputSink } from "../provider/adapter.ts";
+import type { AttemptExecutionOutcome, AttemptExecutionRequest, ProviderAdapter, ProviderCompletion, TransientOutputSink } from "../provider/adapter.ts";
 import type { ContinuationService } from "../provider/continuation.ts";
 import { continuationCandidate, type ContinuationPolicyConfig } from "./continuation-policy.ts";
 import type { ResourceGovernor } from "./governor.ts";
@@ -76,7 +82,8 @@ export type PrepareOutcome =
 
 export type ExecutionOutcome =
   | { kind: "finalized"; attempt: Attempt; settlement: Settlement }
-  | { kind: "approval_required"; attempt: Attempt; settlement: Settlement; tool: string; call: string };
+  /** The Invocation ended `blocked` on the open `side_effect_approval` Decision; the call itself is only in the Decision's call Artifact. */
+  | { kind: "approval_required"; attempt: Attempt; settlement: Settlement; decision: Decision };
 
 export type AdvanceOutcome = PrepareOutcome | ExecutionOutcome | { kind: "in_flight"; attemptId: AttemptId; invocation: Invocation };
 
@@ -326,6 +333,7 @@ export class AttemptExecutor {
       input: renderManifest(manifest, appendix),
       capabilities: manifest.content.capabilities,
       toolPolicy: manifest.content.toolPolicy,
+      approvedCalls: manifest.content.approvedCalls,
       workingDirectory: manifest.content.worktreePath,
       deadlineAt: flight.deadlineAt,
       signal: flight.controller.signal,
@@ -384,10 +392,16 @@ export class AttemptExecutor {
       // 4. Result validation (only a completed provider execution has a candidate).
       const validation: ResultValidation =
         outcome.completion.kind === "completed" ? this.validator.validate(outcome.result, { run, invocation, manifest, writes, changeset: flight.changeset }) : { ok: false, violations: [] };
+      // An intercepted call is canonicalized once; a call beyond the bound is a tool failure, never a truncated approval subject.
+      const proposed = outcome.completion.kind === "approval_required" ? this.canonicalize(outcome.completion.call) : null;
+      const completion: ProviderCompletion =
+        outcome.completion.kind === "approval_required" && proposed !== null && proposed.bytes.byteLength > TOOL_CALL_MAX_BYTES
+          ? { kind: "tool_failure", tool: outcome.completion.call.tool, message: `proposed ${outcome.completion.call.tool} call exceeds the ${TOOL_CALL_MAX_BYTES}-byte canonical bound` }
+          : outcome.completion;
       const consumed = this.stores.usage.consumedByInvocation(invocation.id);
-      const classified = classifyAttempt({ completion: outcome.completion, validation, runtimeInterruption: flight.runtimeInterruption, consumed, allocation: invocation.allocation });
+      const classified = classifyAttempt({ completion, validation, runtimeInterruption: flight.runtimeInterruption, consumed, allocation: invocation.allocation });
       const previous = attempt.number > 1 ? this.stores.invocations.listAttempts(invocation.id)[attempt.number - 2] : undefined;
-      const approvalRequired = outcome.completion.kind === "approval_required" && flight.runtimeInterruption === null;
+      const approvalRequired = completion.kind === "approval_required" && flight.runtimeInterruption === null;
       const decision = decideRetry({
         classified,
         attemptNumber: attempt.number,
@@ -412,16 +426,53 @@ export class AttemptExecutor {
       );
       // 6. The capacity lease is released exactly once on every terminal path.
       if (terminal.capacityLeaseId !== null) this.governor.release(terminal.capacityLeaseId, meta);
-      // 7–10. Retry eligibility is the decision above; the Invocation ends only when no retry remains (releasing its reservation), and its Tasks follow.
-      const settlement = settleInvocation(this.stores, { invocation, attempt: terminal, decision, result: classified.result, approvalRequired, meta });
-      if (outcome.completion.kind === "approval_required" && approvalRequired) {
-        return { kind: "approval_required", attempt: terminal, settlement, tool: outcome.completion.tool, call: outcome.completion.call };
-      }
+      // 7. An intercepted call becomes canonical in the same transaction: the call Artifact (its bytes live only there,
+      //    compensated on rollback like every blob) and the open side_effect_approval Decision whose subject names the
+      //    tool, the canonical digest, the Artifact, and the originating Run, Plan Node, Invocation, and Attempt.
+      const approvalDecision = approvalRequired && proposed !== null && completion.kind === "approval_required" ? this.recordApproval(run, invocation, terminal, completion.call.tool, proposed.bytes, meta) : null;
+      // 8–10. Retry eligibility is the decision above; the Invocation ends only when no retry remains (releasing its reservation), and its Tasks follow.
+      const settlement = settleInvocation(this.stores, { invocation, attempt: terminal, decision, result: classified.result, approval: approvalDecision ? { decisionId: approvalDecision.id } : null, meta });
+      if (approvalDecision) return { kind: "approval_required", attempt: terminal, settlement, decision: approvalDecision };
       return { kind: "finalized", attempt: terminal, settlement };
     });
     this.#inFlight.delete(flight.attemptId);
     if (INVOCATION_MACHINE.isTerminal(result.settlement.invocation.status)) this.releaseWorkspace(result.settlement.invocation);
     return result;
+  }
+
+  private canonicalize(call: ProposedToolCall): { bytes: Uint8Array } {
+    return { bytes: new TextEncoder().encode(canonicalToolCall(call)) };
+  }
+
+  /** The call Artifact and the open `side_effect_approval` Decision, both in the finalization transaction. */
+  private recordApproval(run: Run, invocation: Invocation, attempt: Attempt, tool: string, bytes: Uint8Array, meta: WriteOptions): Decision {
+    const artifact = this.stores.artifacts.create(
+      { runId: run.id, mediaType: TOOL_CALL_MEDIA_TYPE, producer: { kind: "runtime", component: "tool_call" }, taskId: null, title: `proposed ${tool} call of ${attempt.id}` },
+      bytes,
+      meta,
+    );
+    return this.stores.decisions.request(
+      {
+        conversationId: run.conversationId,
+        runId: run.id,
+        kind: "side_effect_approval",
+        resolutionPolicy: "operator_required",
+        requestedBy: { kind: "invocation", invocationId: invocation.id },
+        question: `Approve this ${tool} call once?`,
+        options: [
+          { id: "approve_once", label: "Approve once", description: "Permit exactly this call, once; the Tool Policy is unchanged." },
+          { id: "deny", label: "Deny", description: "Refuse the call; the successor Invocation continues without it." },
+        ],
+        recommendedOptionId: null,
+        rationale: null,
+        affects: { requirementIds: [], taskIds: invocation.taskIds, planNodeIds: [invocation.planNodeId] },
+        deadlineAt: null,
+        activationCondition: null,
+        subject: { kind: "side_effect_approval", tool, callDigest: artifact.digest, callArtifactId: artifact.id, runId: run.id, planNodeId: invocation.planNodeId, invocationId: invocation.id, attemptId: attempt.id },
+        supersedesDecisionId: null,
+      },
+      meta,
+    );
   }
 
   private recordChangeset(run: { id: Invocation["runId"]; workspaceId: string }, invocation: Invocation, manifest: ContextManifest, changeset: CollectedChangeset, meta: WriteOptions): void {

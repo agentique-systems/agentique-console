@@ -13,7 +13,7 @@
  * never treats an `approval_required` disposition as `allowed`: such a call
  * ends the execution with the typed `approval_required` completion.
  */
-import type { AgentCapabilities, AttemptId, InvocationId, ModelEffort, RunId, Timestamp, ToolPolicy, UsageInput } from "@agentique-console/core";
+import type { AgentCapabilities, ApprovedToolCall, AttemptId, InvocationId, ModelEffort, ProposedToolCall, RunId, Timestamp, ToolPolicy, UsageInput } from "@agentique-console/core";
 
 /** The deterministic bytes rendered from the persisted Context Manifest (plus a bounded retry appendix). */
 export interface RenderedInput {
@@ -43,6 +43,16 @@ export interface AttemptExecutionRequest {
   capabilities: AgentCapabilities;
   /** The effective Tool Policy over every declared tool; `approval_required` calls end the execution. */
   toolPolicy: ToolPolicy;
+  /**
+   * Calls the operator approved once for this Invocation. Enforcement is
+   * the adapter's, at the provider boundary, never the model's: a call
+   * whose tool's disposition is `approval_required` proceeds only when the
+   * canonical digest of the exact proposed call (`canonicalToolCall`)
+   * matches an entry here and that entry has not been used; any other
+   * `approval_required` call still ends the execution with the typed
+   * `approval_required` completion. An approval widens no Tool Policy.
+   */
+  approvedCalls: ApprovedToolCall[];
   /** The worktree (or Integration Workspace for a read-only Invocation) the Attempt runs in; `null` for a Run without one. */
   workingDirectory: string | null;
   /** The wall-clock deadline the runtime enforces; the adapter may also stop itself at it. */
@@ -62,7 +72,8 @@ export type ProviderCompletion =
   | { kind: "completed" }
   | { kind: "provider_error"; transient: boolean; message: string }
   | { kind: "tool_failure"; tool: string; message: string }
-  | { kind: "approval_required"; tool: string; call: string }
+  /** An `approval_required` tool was called: the exact proposed call in the provider-neutral form the runtime canonicalizes and records. */
+  | { kind: "approval_required"; call: ProposedToolCall }
   | { kind: "interrupted"; cause: InterruptionCause; message: string };
 
 /** One provider result's measured consumption; the runtime records one Usage row per chunk. */

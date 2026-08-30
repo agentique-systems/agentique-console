@@ -35,7 +35,7 @@ import {
 } from "@agentique-console/core";
 import { sha256Hex } from "../blob-store.ts";
 import type { PersistenceContext } from "../context.ts";
-import { agentDefinitionRevisions, artifacts, attempts, capacityLeases, contextManifests, invocations, planNodes, tasks } from "../schema.ts";
+import { agentDefinitionRevisions, artifacts, attempts, capacityLeases, contextManifests, decisions, invocations, planNodes, tasks } from "../schema.ts";
 import { ROOT_SOURCE_PATH } from "@agentique-console/core";
 import type { BudgetReservationStore } from "./budgets.ts";
 import { assertSameRun, loadRunRef, requireRow, runScope, writeMeta, type WriteOptions } from "./support.ts";
@@ -62,6 +62,7 @@ function invocationToDomain(row: InvocationRow): Invocation {
       status: row.status,
       waitReason: row.waitReason,
       failureReason: row.failureReason,
+      blockedByDecisionId: row.blockedByDecisionId,
       result: row.result,
       createdAt: row.createdAt,
       startedAt: row.startedAt,
@@ -153,6 +154,7 @@ export class InvocationStore {
         status: "pending",
         waitReason: null,
         failureReason: null,
+        blockedByDecisionId: null,
         result: null,
         createdAt: this.ctx.clock(),
         startedAt: null,
@@ -208,7 +210,7 @@ export class InvocationStore {
       const run = loadRunRef(this.ctx, current.runId);
       const now = this.ctx.clock();
       const next: Invocation = { ...current, status: transition.to, waitReason: null };
-      let type: "invocation.started" | "invocation.waiting" | "invocation.wait_cleared" | "invocation.succeeded" | "invocation.failed" | "invocation.cancelled";
+      let type: "invocation.started" | "invocation.waiting" | "invocation.wait_cleared" | "invocation.blocked" | "invocation.succeeded" | "invocation.failed" | "invocation.cancelled";
       let payload: unknown;
       switch (transition.to) {
         case "running":
@@ -221,6 +223,21 @@ export class InvocationStore {
           type = "invocation.waiting";
           payload = { invocationId: id, waitReason: transition.waitReason };
           break;
+        case "blocked": {
+          // The blocking Decision is an open side_effect_approval of this Run whose subject names this Invocation.
+          const decision = requireRow(
+            this.ctx.db.select({ runId: decisions.runId, kind: decisions.kind, status: decisions.status, subject: decisions.subject }).from(decisions).where(eq(decisions.id, transition.decisionId)).get(),
+            "Decision",
+            transition.decisionId,
+          );
+          if (decision.runId !== current.runId || decision.kind !== "side_effect_approval" || decision.status !== "open" || decision.subject?.invocationId !== id) {
+            throw new InvariantViolationError(`Decision ${transition.decisionId} is not an open side_effect_approval of Invocation ${id}`, { decisionId: transition.decisionId });
+          }
+          next.blockedByDecisionId = transition.decisionId;
+          type = "invocation.blocked";
+          payload = { invocationId: id, decisionId: transition.decisionId };
+          break;
+        }
         case "succeeded":
           next.result = transition.result;
           type = "invocation.succeeded";
@@ -249,7 +266,7 @@ export class InvocationStore {
       });
       this.ctx.db
         .update(invocations)
-        .set({ status: next.status, waitReason: next.waitReason, failureReason: next.failureReason, result: next.result, startedAt: next.startedAt, endedAt: next.endedAt })
+        .set({ status: next.status, waitReason: next.waitReason, failureReason: next.failureReason, blockedByDecisionId: next.blockedByDecisionId, result: next.result, startedAt: next.startedAt, endedAt: next.endedAt })
         .where(eq(invocations.id, id))
         .run();
       if (INVOCATION_MACHINE.isTerminal(next.status)) {
@@ -560,6 +577,7 @@ export class InvocationStore {
       status: invocation.status,
       waitReason: invocation.waitReason,
       failureReason: invocation.failureReason,
+      blockedByDecisionId: invocation.blockedByDecisionId,
       result: invocation.result,
       createdAt: invocation.createdAt,
       startedAt: invocation.startedAt,

@@ -253,6 +253,7 @@ CREATE TABLE `decisions` (
 	`affects` text NOT NULL,
 	`deadline_at` text,
 	`activation_condition` text,
+	`subject` text,
 	`resolved_by` text,
 	`chosen_option_id` text,
 	`resolution_rationale` text,
@@ -275,6 +276,7 @@ CREATE TABLE `decisions` (
 	CONSTRAINT "decisions_policy_resolver" CHECK("decisions"."resolved_by" IS NULL OR "decisions"."resolved_by" <> 'policy:use_default_after_deadline' OR ("decisions"."resolution_policy" = 'use_default_after_deadline' AND "decisions"."chosen_option_id" = "decisions"."recommended_option_id")),
 	CONSTRAINT "decisions_resolution_shape" CHECK(("decisions"."status" = 'open' AND "decisions"."resolved_by" IS NULL AND "decisions"."chosen_option_id" IS NULL AND "decisions"."resolved_at" IS NULL) OR ("decisions"."status" = 'resolved' AND "decisions"."resolved_by" IS NOT NULL AND "decisions"."chosen_option_id" IS NOT NULL AND "decisions"."resolved_at" IS NOT NULL) OR "decisions"."status" = 'superseded'),
 	CONSTRAINT "decisions_superseded_by" CHECK(("decisions"."status" = 'superseded') = ("decisions"."superseded_by_decision_id" IS NOT NULL)),
+	CONSTRAINT "decisions_subject_shape" CHECK(("decisions"."kind" = 'side_effect_approval') = ("decisions"."subject" IS NOT NULL AND json_extract("decisions"."subject", '$.kind') = 'side_effect_approval' AND "decisions"."run_id" IS NOT NULL)),
 	CONSTRAINT "decisions_no_self_supersede" CHECK("decisions"."supersedes_decision_id" IS NULL OR "decisions"."supersedes_decision_id" <> "decisions"."id")
 );
 --> statement-breakpoint
@@ -390,6 +392,7 @@ CREATE TABLE `invocations` (
 	`status` text NOT NULL,
 	`wait_reason` text,
 	`failure_reason` text,
+	`blocked_by_decision_id` text,
 	`result` text,
 	`created_at` text NOT NULL,
 	`started_at` text,
@@ -398,6 +401,7 @@ CREATE TABLE `invocations` (
 	FOREIGN KEY (`plan_node_id`) REFERENCES `plan_nodes`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`agent_definition_revision_id`) REFERENCES `agent_definition_revisions`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`continued_from_invocation_id`) REFERENCES `invocations`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`blocked_by_decision_id`) REFERENCES `decisions`(`id`) ON UPDATE no action ON DELETE no action,
 	CONSTRAINT "invocations_role" CHECK("invocations"."role" IN ('orchestrator', 'worker', 'coordinator', 'evaluator')),
 	CONSTRAINT "invocations_allocation_source" CHECK("invocations"."allocation_source" IN ('plan_node', 'run_final_reserve')),
 	CONSTRAINT "invocations_final_reserve_use" CHECK("invocations"."final_reserve_use" IS NULL OR "invocations"."final_reserve_use" IN ('final_synthesis', 'run_completion')),
@@ -406,12 +410,13 @@ CREATE TABLE `invocations` (
 	CONSTRAINT "invocations_final_reserve_no_tasks" CHECK("invocations"."allocation_source" = 'plan_node' OR "invocations"."task_ids" = '[]'),
 	CONSTRAINT "invocations_purpose" CHECK("invocations"."purpose" IN ('operator_input', 'plan_revision', 'node_result', 'decision_resolution', 'gate_result', 'publication_result', 'final_synthesis', 'step', 'task', 'select', 'evaluate', 'decompose', 'replan', 'synthesize')),
 	CONSTRAINT "invocations_role_purpose" CHECK((role = 'orchestrator' AND purpose IN ('operator_input', 'plan_revision', 'node_result', 'decision_resolution', 'gate_result', 'publication_result', 'final_synthesis')) OR (role = 'worker' AND purpose IN ('step', 'task')) OR (role = 'evaluator' AND purpose IN ('select', 'evaluate')) OR (role = 'coordinator' AND purpose IN ('decompose', 'replan', 'synthesize'))),
-	CONSTRAINT "invocations_status" CHECK("invocations"."status" IN ('pending', 'running', 'waiting', 'succeeded', 'failed', 'cancelled')),
+	CONSTRAINT "invocations_status" CHECK("invocations"."status" IN ('pending', 'running', 'waiting', 'blocked', 'succeeded', 'failed', 'cancelled')),
 	CONSTRAINT "invocations_wait_reason" CHECK("invocations"."wait_reason" IS NULL OR "invocations"."wait_reason" IN ('decision', 'budget', 'provider_capacity', 'operator')),
 	CONSTRAINT "invocations_failure_reason" CHECK("invocations"."failure_reason" IS NULL OR "invocations"."failure_reason" IN ('attempts_exhausted', 'provider_permanent', 'allocation_exhausted', 'result_invalid', 'cancelled')),
 	CONSTRAINT "invocations_waiting_has_reason" CHECK(("invocations"."status" = 'waiting') = ("invocations"."wait_reason" IS NOT NULL)),
 	CONSTRAINT "invocations_failed_has_reason" CHECK(("invocations"."status" = 'failed') = ("invocations"."failure_reason" IS NOT NULL)),
-	CONSTRAINT "invocations_terminal_has_ended_at" CHECK(("invocations"."status" IN ('succeeded', 'failed', 'cancelled')) = ("invocations"."ended_at" IS NOT NULL)),
+	CONSTRAINT "invocations_blocked_has_decision" CHECK(("invocations"."status" = 'blocked') = ("invocations"."blocked_by_decision_id" IS NOT NULL)),
+	CONSTRAINT "invocations_terminal_has_ended_at" CHECK(("invocations"."status" IN ('blocked', 'succeeded', 'failed', 'cancelled')) = ("invocations"."ended_at" IS NOT NULL)),
 	CONSTRAINT "invocations_alloc_attempts" CHECK("invocations"."alloc_attempts" >= 1 AND "invocations"."alloc_cost_usd" >= 0 AND "invocations"."alloc_tokens" >= 0),
 	CONSTRAINT "invocations_no_self_continue" CHECK("invocations"."continued_from_invocation_id" IS NULL OR "invocations"."continued_from_invocation_id" <> "invocations"."id")
 );
@@ -793,7 +798,7 @@ CREATE TRIGGER `requirement_status_changes_no_update` BEFORE UPDATE ON `requirem
 CREATE TRIGGER `requirement_status_changes_no_delete` BEFORE DELETE ON `requirement_status_changes` BEGIN SELECT RAISE(ABORT, 'requirement_status_changes are append-only'); END;--> statement-breakpoint
 CREATE TRIGGER `acceptance_criteria_no_update` BEFORE UPDATE ON `acceptance_criteria` BEGIN SELECT RAISE(ABORT, 'acceptance_criteria are immutable'); END;--> statement-breakpoint
 CREATE TRIGGER `acceptance_criteria_no_delete` BEFORE DELETE ON `acceptance_criteria` BEGIN SELECT RAISE(ABORT, 'acceptance_criteria are immutable'); END;--> statement-breakpoint
-CREATE TRIGGER `decisions_request_immutable` BEFORE UPDATE OF `conversation_id`, `run_id`, `kind`, `resolution_policy`, `requested_by`, `question`, `options`, `recommended_option_id`, `rationale`, `affects`, `deadline_at`, `activation_condition`, `supersedes_decision_id`, `created_at` ON `decisions` BEGIN SELECT RAISE(ABORT, 'decision request fields are immutable'); END;--> statement-breakpoint
+CREATE TRIGGER `decisions_request_immutable` BEFORE UPDATE OF `conversation_id`, `run_id`, `kind`, `resolution_policy`, `requested_by`, `question`, `options`, `recommended_option_id`, `rationale`, `affects`, `deadline_at`, `activation_condition`, `subject`, `supersedes_decision_id`, `created_at` ON `decisions` BEGIN SELECT RAISE(ABORT, 'decision request fields are immutable'); END;--> statement-breakpoint
 CREATE TRIGGER `decisions_resolution_immutable` BEFORE UPDATE OF `resolved_by`, `chosen_option_id`, `resolution_rationale`, `resolution_artifact_ids`, `resolved_at` ON `decisions` WHEN OLD.`resolved_by` IS NOT NULL BEGIN SELECT RAISE(ABORT, 'a decision resolution is recorded once'); END;--> statement-breakpoint
 CREATE TRIGGER `decisions_no_delete` BEFORE DELETE ON `decisions` BEGIN SELECT RAISE(ABORT, 'decisions are append-only'); END;--> statement-breakpoint
 CREATE TRIGGER `tasks_definition_immutable` BEFORE UPDATE OF `run_id`, `plan_node_id`, `origin`, `subject`, `requirement_ids`, `requirement_revision_id`, `input_artifact_ids`, `required_outputs`, `replaces_task_id`, `created_at` ON `tasks` BEGIN SELECT RAISE(ABORT, 'task definition columns are immutable'); END;--> statement-breakpoint

@@ -19,6 +19,7 @@ function waiverRequest(s: Seeded, requirementId: string, overrides: Partial<Deci
     affects: { requirementIds: [requirementId as never], taskIds: [], planNodeIds: [] },
     deadlineAt: null,
     activationCondition: null,
+    subject: null,
     supersedesDecisionId: null,
     ...overrides,
   };

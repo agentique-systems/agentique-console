@@ -2,6 +2,7 @@ import { invocationFundingDefects } from "./invocations.ts";
 import { describe, expect, it } from "vitest";
 import { newId } from "./ids.ts";
 import {
+  ACTIVE_INVOCATION_STATUSES,
   assertPurposeForRole,
   ATTEMPT_FAILURE_MAX_MESSAGE_LENGTH,
   ATTEMPT_KINDS,
@@ -11,6 +12,7 @@ import {
   boundedFailureMessage,
   boundResultViolations,
   contextManifestContentSchema,
+  INVOCATION_MACHINE,
   INVOCATION_PURPOSES,
   INVOCATION_ROLES,
   invocationInputSchema,
@@ -115,6 +117,7 @@ describe("invocation record", () => {
       status: "pending",
       waitReason: null,
       failureReason: null,
+      blockedByDecisionId: null,
       result: null,
       createdAt: "2026-01-01T00:00:00.000Z",
       startedAt: null,
@@ -126,6 +129,15 @@ describe("invocation record", () => {
     expect(invocationSchema.safeParse({ ...record, status: "waiting", waitReason: "decision" }).success).toBe(true);
     expect(invocationSchema.safeParse({ ...record, status: "failed", failureReason: "attempts_exhausted" }).success).toBe(false);
     expect(invocationSchema.safeParse({ ...record, status: "failed", failureReason: "attempts_exhausted", endedAt: record.createdAt }).success).toBe(true);
+    // `blocked` is terminal and names its side_effect_approval Decision, exactly then.
+    expect(invocationSchema.safeParse({ ...record, status: "blocked", endedAt: record.createdAt }).success).toBe(false);
+    expect(invocationSchema.safeParse({ ...record, status: "blocked", blockedByDecisionId: newId("decision"), endedAt: record.createdAt }).success).toBe(true);
+    expect(invocationSchema.safeParse({ ...record, status: "blocked", blockedByDecisionId: newId("decision") }).success).toBe(false);
+    expect(invocationSchema.safeParse({ ...record, blockedByDecisionId: newId("decision") }).success).toBe(false);
+    expect(INVOCATION_MACHINE.isTerminal("blocked")).toBe(true);
+    expect(INVOCATION_MACHINE.canTransition("running", "blocked")).toBe(true);
+    expect(INVOCATION_MACHINE.canTransition("waiting", "blocked")).toBe(false);
+    expect(ACTIVE_INVOCATION_STATUSES).not.toContain("blocked" as never);
   });
 });
 
@@ -261,6 +273,7 @@ describe("context manifest", () => {
     capabilities: { tools: ["read"], mcpServers: [] },
     toolPolicy: { read: "allowed", shell: "denied" },
     runtimeTools: ["return_result"],
+    approvedCalls: [],
   };
 
   it("is strict: no unknown fields and no provider payloads can be carried", () => {
@@ -288,6 +301,13 @@ describe("context manifest", () => {
     expect(contextManifestContentSchema.safeParse({ ...content, artifacts: [b, a] }).success).toBe(false);
     expect(contextManifestContentSchema.safeParse({ ...content, inputs: [{ kind: "operator_message", conversationMessageId: newId("conversationMessage"), content: "hello" }] }).success).toBe(true);
     expect(contextManifestContentSchema.safeParse({ ...content, inputs: [{ kind: "chat_history", messages: [] }] }).success).toBe(false);
+    // Approved calls come only from approve_once resolutions among the inputs, ordered by digest.
+    const resolution = { kind: "side_effect_approval_resolution", decisionId: newId("decision"), blockedInvocationId: newId("invocation"), attemptId: newId("attempt"), tool: "shell", callDigest: "c".repeat(64), callArtifactId: newId("artifact"), outcome: "approve_once" };
+    const approved = { decisionId: resolution.decisionId, tool: "shell", callDigest: resolution.callDigest };
+    expect(contextManifestContentSchema.safeParse({ ...content, inputs: [resolution], approvedCalls: [approved] }).success).toBe(true);
+    expect(contextManifestContentSchema.safeParse({ ...content, inputs: [{ ...resolution, outcome: "deny" }], approvedCalls: [approved] }).success).toBe(false);
+    expect(contextManifestContentSchema.safeParse({ ...content, approvedCalls: [approved] }).success).toBe(false);
+    expect(contextManifestContentSchema.safeParse({ ...content, inputs: [resolution], approvedCalls: [{ ...approved, callDigest: "d".repeat(64) }] }).success).toBe(false);
   });
 
   it("restricts runtime tools by the §6.4 role matrix", () => {

@@ -10,6 +10,7 @@ export * from "./runs.ts";
 export * from "./plans.ts";
 export * from "./requirements.ts";
 export * from "./decisions.ts";
+export * from "./tool-calls.ts";
 export * from "./tasks.ts";
 export * from "./artifacts.ts";
 export * from "./handoffs.ts";

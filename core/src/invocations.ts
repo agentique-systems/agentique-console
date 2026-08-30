@@ -37,6 +37,7 @@ import {
   uniqueIds,
   type Timestamp,
 } from "./validation.ts";
+import { approvedToolCallSchema, SIDE_EFFECT_APPROVAL_OPTIONS, type ApprovedToolCall, type SideEffectApprovalOption } from "./tool-calls.ts";
 import { PUBLICATION_OUTCOMES, type PublicationOutcome } from "./workspace-state.ts";
 
 // ---------------------------------------------------------------------------
@@ -138,7 +139,15 @@ export function invocationFundingDefects(invocation: Pick<Invocation, "role" | "
 // Invocation
 // ---------------------------------------------------------------------------
 
-export const INVOCATION_STATUSES = ["pending", "running", "waiting", "succeeded", "failed", "cancelled"] as const;
+/**
+ * `waiting` is a pause after which the same Invocation can still start or
+ * continue (capacity, Budget, operator); `blocked` is terminal: the provider
+ * execution is over because an `approval_required` capability call was
+ * intercepted, and the logical continuation is a successor Invocation with
+ * `continuedFromInvocationId` set once the `side_effect_approval` Decision
+ * is resolved.
+ */
+export const INVOCATION_STATUSES = ["pending", "running", "waiting", "blocked", "succeeded", "failed", "cancelled"] as const;
 export type InvocationStatus = (typeof INVOCATION_STATUSES)[number];
 
 export const INVOCATION_WAIT_REASONS = ["decision", "budget", "provider_capacity", "operator"] as const;
@@ -291,6 +300,8 @@ export interface Invocation {
   status: InvocationStatus;
   waitReason: InvocationWaitReason | null;
   failureReason: InvocationFailureReason | null;
+  /** The open `side_effect_approval` Decision that ended the Invocation `blocked`; set exactly then. */
+  blockedByDecisionId: DecisionId | null;
   result: InvocationResult | null;
   createdAt: Timestamp;
   startedAt: Timestamp | null;
@@ -299,8 +310,9 @@ export interface Invocation {
 
 export const INVOCATION_MACHINE = defineStateMachine<InvocationStatus>("Invocation", INVOCATION_STATUSES, {
   pending: ["running", "cancelled"],
-  running: ["waiting", "succeeded", "failed", "cancelled"],
+  running: ["waiting", "blocked", "succeeded", "failed", "cancelled"],
   waiting: ["running", "succeeded", "failed", "cancelled"],
+  blocked: [],
   succeeded: [],
   failed: [],
   cancelled: [],
@@ -322,6 +334,7 @@ export const invocationSchema: z.ZodType<Invocation> = z
     status: z.enum(INVOCATION_STATUSES),
     waitReason: z.enum(INVOCATION_WAIT_REASONS).nullable(),
     failureReason: z.enum(INVOCATION_FAILURE_REASONS).nullable(),
+    blockedByDecisionId: idSchema("decision").nullable(),
     result: invocationResultSchema.nullable(),
     createdAt: timestampSchema,
     startedAt: timestampSchema.nullable(),
@@ -338,6 +351,10 @@ export const invocationSchema: z.ZodType<Invocation> = z
   .refine((i) => (i.status === "failed") === (i.failureReason !== null), {
     message: "failureReason is set exactly when the Invocation failed",
     path: ["failureReason"],
+  })
+  .refine((i) => (i.status === "blocked") === (i.blockedByDecisionId !== null), {
+    message: "blockedByDecisionId is set exactly when the Invocation is blocked",
+    path: ["blockedByDecisionId"],
   })
   .refine((i) => i.id !== i.continuedFromInvocationId, {
     message: "an Invocation cannot continue from itself",
@@ -407,6 +424,7 @@ export const invocationInputSchema: z.ZodType<InvocationInput> = z
 export type InvocationTransition =
   | { to: "running" }
   | { to: "waiting"; waitReason: InvocationWaitReason }
+  | { to: "blocked"; decisionId: DecisionId }
   | { to: "succeeded"; result: InvocationResult }
   | { to: "failed"; failureReason: InvocationFailureReason; result: InvocationResult | null }
   | { to: "cancelled" };
@@ -782,6 +800,17 @@ export type ManifestInput =
   | { kind: "operator_message"; conversationMessageId: ConversationMessageId; content: string }
   | { kind: "node_result"; planNodeId: PlanNodeId; status: PlanNodeStatus; outputArtifactIds: ArtifactId[] }
   | { kind: "decision_resolution"; decisionId: DecisionId }
+  | {
+      /** The resolved `side_effect_approval` Decision that ended the predecessor `blocked`: the successor's typed logical input. */
+      kind: "side_effect_approval_resolution";
+      decisionId: DecisionId;
+      blockedInvocationId: InvocationId;
+      attemptId: AttemptId;
+      tool: string;
+      callDigest: string;
+      callArtifactId: ArtifactId;
+      outcome: SideEffectApprovalOption;
+    }
   | { kind: "gate_result"; gateId: GateId; passed: boolean }
   | { kind: "plan_revision"; accepted: boolean; revisionNumber: number | null; reasons: PlanRejectionReason[] }
   | { kind: "publication_result"; publicationId: PublicationId; outcome: PublicationOutcome };
@@ -790,6 +819,16 @@ export const manifestInputSchema: z.ZodType<ManifestInput> = z.discriminatedUnio
   z.strictObject({ kind: z.literal("operator_message"), conversationMessageId: idSchema("conversationMessage"), content: z.string().min(1) }),
   z.strictObject({ kind: z.literal("node_result"), planNodeId: idSchema("planNode"), status: z.enum(PLAN_NODE_STATUSES), outputArtifactIds: uniqueIds(idSchema("artifact")) }),
   z.strictObject({ kind: z.literal("decision_resolution"), decisionId: idSchema("decision") }),
+  z.strictObject({
+    kind: z.literal("side_effect_approval_resolution"),
+    decisionId: idSchema("decision"),
+    blockedInvocationId: idSchema("invocation"),
+    attemptId: idSchema("attempt"),
+    tool: nonEmptyString,
+    callDigest: sha256Hex,
+    callArtifactId: idSchema("artifact"),
+    outcome: z.enum(SIDE_EFFECT_APPROVAL_OPTIONS),
+  }),
   z.strictObject({ kind: z.literal("gate_result"), gateId: idSchema("gate"), passed: z.boolean() }),
   z.strictObject({ kind: z.literal("plan_revision"), accepted: z.boolean(), revisionNumber: positiveCount.nullable(), reasons: z.array(planRejectionReasonSchema) }),
   z.strictObject({ kind: z.literal("publication_result"), publicationId: idSchema("publication"), outcome: z.enum(PUBLICATION_OUTCOMES) }),
@@ -836,6 +875,13 @@ export interface ContextManifestContent {
   /** The effective Tool Policy over every declared tool, denied ones included. */
   toolPolicy: ToolPolicy;
   runtimeTools: RuntimeTool[];
+  /**
+   * Calls the operator approved once for this Invocation (from its
+   * `side_effect_approval_resolution` inputs), by Decision, tool, and
+   * canonical digest, ordered by digest. They widen no Tool Policy: the
+   * provider boundary permits exactly these calls once and nothing else.
+   */
+  approvedCalls: ApprovedToolCall[];
 }
 
 const sortedIds = <T extends { [K in keyof T]: unknown }>(key: keyof T) => (items: T[]) => items.every((item, i) => i === 0 || String(items[i - 1]![key]) < String(item[key]));
@@ -899,8 +945,16 @@ export const contextManifestContentSchema: z.ZodType<ContextManifestContent> = z
     capabilities: agentCapabilitiesSchema,
     toolPolicy: toolPolicySchema,
     runtimeTools: z.array(z.enum(RUNTIME_TOOLS)).refine((t) => new Set(t).size === t.length, { message: "runtime tools are unique" }),
+    approvedCalls: z.array(approvedToolCallSchema).refine(sortedIds("callDigest"), { message: "approved calls are ordered by digest" }),
   })
   .refine((m) => PURPOSES_BY_ROLE[m.role].includes(m.purpose), { message: "purpose must belong to the role", path: ["purpose"] })
+  .refine(
+    (m) =>
+      m.approvedCalls.every((call) =>
+        m.inputs.some((i) => i.kind === "side_effect_approval_resolution" && i.outcome === "approve_once" && i.decisionId === call.decisionId && i.tool === call.tool && i.callDigest === call.callDigest),
+      ),
+    { message: "every approved call comes from an approve_once resolution among the inputs", path: ["approvedCalls"] },
+  )
   .refine((m) => (m.allocationSource === "run_final_reserve") === (m.finalReserveUse !== null), {
     message: "a final-reserve manifest names its use and an ordinary one names none",
     path: ["finalReserveUse"],

@@ -233,26 +233,6 @@ describe("AttemptExecutor", () => {
     }
   });
 
-  it("returns a typed approval_required outcome, leaving the Invocation waiting for the Decision phase without inventing an approval", async () => {
-    const h = openRuntimeHarness();
-    try {
-      const s = seedRuntime(h);
-      const invocation = startRun(h, s).prepared.invocation;
-      h.provider.script({ kind: "approval_required", tool: "shell", call: "rm -rf dist" });
-      const outcome = await finalized(h, invocation);
-      expect(outcome).toMatchObject({ kind: "approval_required", tool: "shell", call: "rm -rf dist" });
-      expect(outcome.attempt).toMatchObject({ status: "failed", failureClass: "tool_failure", failureDetail: { tool: "shell" }, retryDecision: { permitted: false, reason: "approval_required", notBefore: null } });
-      expect(outcome.settlement.invocation).toMatchObject({ status: "waiting", waitReason: "decision" });
-      expect(h.stores.reservations.activeForChild({ type: "invocation", id: invocation.id })).not.toBeNull();
-      expect(h.governor.status().activeLeases).toEqual([]);
-      expect(h.executor.inspectInvocation(invocation.id).next).toEqual({ permitted: false, reason: "invocation_waiting", notBefore: null });
-      expect(await h.executor.advanceInvocation(invocation.id)).toMatchObject({ kind: "not_permitted", reason: "invocation_waiting" });
-      expect(h.provider.requests).toHaveLength(1);
-    } finally {
-      h.close();
-    }
-  });
-
   it("refuses to create an Attempt when the governor has no capacity, consuming nothing; and classifies an adapter that throws as transient", async () => {
     const h = openRuntimeHarness({ governor: { ...TEST_GOVERNOR, providers: { fake: { maxConcurrency: 1 } } } });
     try {

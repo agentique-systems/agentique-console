@@ -117,11 +117,12 @@ describe("Task transitions", () => {
 });
 
 describe("Invocation and Attempt transitions", () => {
-  it("Invocation distinguishes not started, active, waiting, success, failure, cancellation", () => {
+  it("Invocation distinguishes not started, active, waiting, blocked (terminal, on an approval), success, failure, cancellation", () => {
     exhaustively(INVOCATION_MACHINE, [
       ["pending", "running"],
       ["pending", "cancelled"],
       ["running", "waiting"],
+      ["running", "blocked"],
       ["running", "succeeded"],
       ["running", "failed"],
       ["running", "cancelled"],

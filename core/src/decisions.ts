@@ -2,6 +2,7 @@ import { z } from "zod";
 import { ValidationError } from "./errors.ts";
 import type {
   ArtifactId,
+  AttemptId,
   ConversationId,
   DecisionId,
   InvocationId,
@@ -10,7 +11,8 @@ import type {
   RunId,
   TaskId,
 } from "./ids.ts";
-import { idSchema, nonEmptyString, timestampSchema, uniqueIds, type Timestamp } from "./validation.ts";
+import { SIDE_EFFECT_APPROVAL_OPTIONS } from "./tool-calls.ts";
+import { idSchema, nonEmptyString, sha256Hex, timestampSchema, uniqueIds, type Timestamp } from "./validation.ts";
 
 export const DECISION_KINDS = [
   "operator_choice",
@@ -81,6 +83,51 @@ export const activationConditionSchema: z.ZodType<ActivationCondition> = z.discr
   z.strictObject({ kind: z.literal("plan_node_ready"), planNodeId: idSchema("planNode") }),
 ]);
 
+/**
+ * The canonical subject of a `side_effect_approval` Decision: the exact
+ * intercepted call by tool name and canonical digest, the Artifact holding
+ * its canonical bytes, and the originating Run, Plan Node, Invocation, and
+ * Attempt. The raw call lives only in the Artifact; the subject carries ids,
+ * the digest, and the tool name, so it may travel in Events and views.
+ */
+export type DecisionSubject = {
+  kind: "side_effect_approval";
+  tool: string;
+  callDigest: string;
+  callArtifactId: ArtifactId;
+  runId: RunId;
+  planNodeId: PlanNodeId;
+  invocationId: InvocationId;
+  attemptId: AttemptId;
+};
+
+export const decisionSubjectSchema: z.ZodType<DecisionSubject> = z.discriminatedUnion("kind", [
+  z.strictObject({
+    kind: z.literal("side_effect_approval"),
+    tool: nonEmptyString,
+    callDigest: sha256Hex,
+    callArtifactId: idSchema("artifact"),
+    runId: idSchema("run"),
+    planNodeId: idSchema("planNode"),
+    invocationId: idSchema("invocation"),
+    attemptId: idSchema("attempt"),
+  }),
+]);
+
+/** A `side_effect_approval` Decision has exactly its subject and exactly the two stable options. */
+function sideEffectApprovalShape(decision: { kind: DecisionKind; subject: DecisionSubject | null; options: DecisionOption[]; runId: RunId | null }, ctx: z.RefinementCtx): void {
+  if (decision.kind === "side_effect_approval") {
+    if (decision.subject === null) ctx.addIssue({ code: "custom", path: ["subject"], message: "a side_effect_approval names its subject" });
+    const ids = decision.options.map((o) => o.id).sort();
+    if (ids.join(",") !== [...SIDE_EFFECT_APPROVAL_OPTIONS].sort().join(",")) {
+      ctx.addIssue({ code: "custom", path: ["options"], message: `a side_effect_approval offers exactly ${SIDE_EFFECT_APPROVAL_OPTIONS.join(" and ")}` });
+    }
+    if (decision.runId === null) ctx.addIssue({ code: "custom", path: ["runId"], message: "a side_effect_approval belongs to a Run" });
+  } else if (decision.subject !== null) {
+    ctx.addIssue({ code: "custom", path: ["subject"], message: `a ${decision.kind} Decision has no subject` });
+  }
+}
+
 export interface DecisionResolution {
   resolvedBy: DecisionResolver;
   chosenOptionId: string;
@@ -112,6 +159,8 @@ export interface Decision {
   affects: DecisionAffects;
   deadlineAt: Timestamp | null;
   activationCondition: ActivationCondition | null;
+  /** The canonical subject; present exactly for `side_effect_approval`. */
+  subject: DecisionSubject | null;
   resolution: DecisionResolution | null;
   /** The earlier Decision this one supersedes, when it was recorded as a supersession. */
   supersedesDecisionId: DecisionId | null;
@@ -132,6 +181,7 @@ export interface DecisionRequest {
   affects: DecisionAffects;
   deadlineAt: Timestamp | null;
   activationCondition: ActivationCondition | null;
+  subject: DecisionSubject | null;
   supersedesDecisionId: DecisionId | null;
 }
 
@@ -151,9 +201,11 @@ export const decisionRequestSchema: z.ZodType<DecisionRequest> = z
     affects: decisionAffectsSchema,
     deadlineAt: timestampSchema.nullable(),
     activationCondition: activationConditionSchema.nullable(),
+    subject: decisionSubjectSchema.nullable(),
     supersedesDecisionId: idSchema("decision").nullable(),
   })
   .superRefine((request, ctx) => {
+    sideEffectApprovalShape(request, ctx);
     if (request.recommendedOptionId !== null && !request.options.some((o) => o.id === request.recommendedOptionId)) {
       ctx.addIssue({ code: "custom", path: ["recommendedOptionId"], message: "recommended option must be one of the options" });
     }
@@ -203,11 +255,13 @@ export const decisionSchema: z.ZodType<Decision> = z
     affects: decisionAffectsSchema,
     deadlineAt: timestampSchema.nullable(),
     activationCondition: activationConditionSchema.nullable(),
+    subject: decisionSubjectSchema.nullable(),
     resolution: decisionResolutionSchema.nullable(),
     supersedesDecisionId: idSchema("decision").nullable(),
     supersededByDecisionId: idSchema("decision").nullable(),
     createdAt: timestampSchema,
   })
+  .superRefine(sideEffectApprovalShape)
   .refine((d) => (d.status === "open") === (d.resolution === null), {
     message: "an open Decision has no resolution; a resolved or superseded one does",
     path: ["resolution"],

@@ -90,7 +90,7 @@ describe("snapshots, changesets, publications", () => {
       const final = seedSnapshot(h, s, "run_completion");
       const diff = seedArtifact(h, s, "final diff");
       const changeset = h.stores.changesets.record({ runId: s.run.id, invocationId: null, beforeSnapshotId: before.id, afterSnapshotId: final.id, diffArtifactId: diff.id });
-      const decision = h.stores.decisions.request({ conversationId: s.conversation.id, runId: s.run.id, kind: "publish", resolutionPolicy: "operator_required", requestedBy: { kind: "operator" }, question: "Publish?", options: [{ id: "yes", label: "Yes", description: null }], recommendedOptionId: null, rationale: null, affects: { requirementIds: [], taskIds: [], planNodeIds: [] }, deadlineAt: null, activationCondition: null, supersedesDecisionId: null });
+      const decision = h.stores.decisions.request({ conversationId: s.conversation.id, runId: s.run.id, kind: "publish", resolutionPolicy: "operator_required", requestedBy: { kind: "operator" }, question: "Publish?", options: [{ id: "yes", label: "Yes", description: null }], recommendedOptionId: null, rationale: null, affects: { requirementIds: [], taskIds: [], planNodeIds: [] }, deadlineAt: null, activationCondition: null, subject: null, supersedesDecisionId: null });
       const input = { runId: s.run.id, decisionId: decision.id, changesetId: changeset.id, targetBeforeSnapshotId: before.id, targetAfterSnapshotId: final.id, strategy: { kind: "fast_forward" as const }, outcome: "succeeded" as const, failureReason: null, artifactId: null };
       expect(() => h.stores.publications.record(input)).toThrow(ConflictError);
       h.stores.runs.transition(s.run.id, { to: "verifying" });

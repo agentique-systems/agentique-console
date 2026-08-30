@@ -169,6 +169,7 @@ describe("context manifest assembly", () => {
           affects: { requirementIds: (affects.requirementIds ?? []) as never, taskIds: (affects.taskIds ?? []) as never, planNodeIds: (affects.planNodeIds ?? []) as never },
           deadlineAt: null,
           activationCondition: null,
+          subject: null,
           supersedesDecisionId: null,
         });
       const relevant = request({ requirementIds: [leafIds[1]!] });
@@ -230,7 +231,7 @@ describe("deterministic rendering", () => {
       expect(lines[0]).toBe("# Context Manifest v1");
       expect(lines[1]).toBe(`manifest: ${manifest.id} digest ${manifest.digest}`);
       const headings = lines.filter((l) => l.startsWith("## "));
-      expect(headings).toEqual(["## Instructions", "## Inputs", "## Tasks", "## Requirements (revision none)", "## Acceptance Criteria", "## Decisions", "## Handoffs", "## Artifacts", "## Capabilities", "## Tool Policy", "## Runtime Tools"]);
+      expect(headings).toEqual(["## Instructions", "## Inputs", "## Tasks", "## Requirements (revision none)", "## Acceptance Criteria", "## Decisions", "## Handoffs", "## Artifacts", "## Capabilities", "## Tool Policy", "## Runtime Tools", "## Approved Calls"]);
       expect(a.text).toContain(`- operator_message ${s.message.id}\n\`\`\`\n${s.message.content}\n\`\`\``);
       expect(a.text).toContain("- shell: approval_required");
       expect(a.text).not.toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/);

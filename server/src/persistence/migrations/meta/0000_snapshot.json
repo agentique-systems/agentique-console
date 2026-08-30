@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "e3db9b1e-1fd9-46eb-adf4-4656945d9285",
+  "id": "b8faa175-70fd-4c0f-872b-7c70ffef2820",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "acceptance_criteria": {
@@ -1781,6 +1781,13 @@
           "notNull": false,
           "autoincrement": false
         },
+        "subject": {
+          "name": "subject",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "resolved_by": {
           "name": "resolved_by",
           "type": "text",
@@ -1951,6 +1958,10 @@
         "decisions_superseded_by": {
           "name": "decisions_superseded_by",
           "value": "(\"decisions\".\"status\" = 'superseded') = (\"decisions\".\"superseded_by_decision_id\" IS NOT NULL)"
+        },
+        "decisions_subject_shape": {
+          "name": "decisions_subject_shape",
+          "value": "(\"decisions\".\"kind\" = 'side_effect_approval') = (\"decisions\".\"subject\" IS NOT NULL AND json_extract(\"decisions\".\"subject\", '$.kind') = 'side_effect_approval' AND \"decisions\".\"run_id\" IS NOT NULL)"
         },
         "decisions_no_self_supersede": {
           "name": "decisions_no_self_supersede",
@@ -2722,6 +2733,13 @@
           "notNull": false,
           "autoincrement": false
         },
+        "blocked_by_decision_id": {
+          "name": "blocked_by_decision_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "result": {
           "name": "result",
           "type": "text",
@@ -2845,6 +2863,19 @@
           ],
           "onDelete": "no action",
           "onUpdate": "no action"
+        },
+        "invocations_blocked_by_decision_id_decisions_id_fk": {
+          "name": "invocations_blocked_by_decision_id_decisions_id_fk",
+          "tableFrom": "invocations",
+          "tableTo": "decisions",
+          "columnsFrom": [
+            "blocked_by_decision_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -2884,7 +2915,7 @@
         },
         "invocations_status": {
           "name": "invocations_status",
-          "value": "\"invocations\".\"status\" IN ('pending', 'running', 'waiting', 'succeeded', 'failed', 'cancelled')"
+          "value": "\"invocations\".\"status\" IN ('pending', 'running', 'waiting', 'blocked', 'succeeded', 'failed', 'cancelled')"
         },
         "invocations_wait_reason": {
           "name": "invocations_wait_reason",
@@ -2902,9 +2933,13 @@
           "name": "invocations_failed_has_reason",
           "value": "(\"invocations\".\"status\" = 'failed') = (\"invocations\".\"failure_reason\" IS NOT NULL)"
         },
+        "invocations_blocked_has_decision": {
+          "name": "invocations_blocked_has_decision",
+          "value": "(\"invocations\".\"status\" = 'blocked') = (\"invocations\".\"blocked_by_decision_id\" IS NOT NULL)"
+        },
         "invocations_terminal_has_ended_at": {
           "name": "invocations_terminal_has_ended_at",
-          "value": "(\"invocations\".\"status\" IN ('succeeded', 'failed', 'cancelled')) = (\"invocations\".\"ended_at\" IS NOT NULL)"
+          "value": "(\"invocations\".\"status\" IN ('blocked', 'succeeded', 'failed', 'cancelled')) = (\"invocations\".\"ended_at\" IS NOT NULL)"
         },
         "invocations_alloc_attempts": {
           "name": "invocations_alloc_attempts",

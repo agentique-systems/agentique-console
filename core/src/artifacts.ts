@@ -14,6 +14,7 @@ export const RUNTIME_ARTIFACT_PRODUCERS = [
   "publication",
   "transcript",
   "command",
+  "tool_call",
 ] as const;
 export type RuntimeArtifactProducer = (typeof RUNTIME_ARTIFACT_PRODUCERS)[number];
 

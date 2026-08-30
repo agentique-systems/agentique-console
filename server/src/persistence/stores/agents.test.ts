@@ -41,6 +41,7 @@ export function approvalDecision(h: Harness, conversationId: string, resolve = t
     affects: { requirementIds: [], taskIds: [], planNodeIds: [] },
     deadlineAt: null,
     activationCondition: null,
+    subject: null,
     supersedesDecisionId: null,
   });
   if (resolve) h.stores.decisions.resolve(decision.id, { resolvedBy: "operator", chosenOptionId: "yes", rationale: null, artifactIds: [] });
@@ -88,7 +89,7 @@ describe("agent definition provenance", () => {
       const open = approvalDecision(h, s.conversation.id, false);
       expect(() => h.stores.agents.appendRevision(definition.id, content({ kind: "conversation", conversationId: s.conversation.id, approvedByDecisionId: open }))).toThrow(/not been resolved by the operator/);
       // A Decision of an inappropriate kind (an Orchestrator's own choice cannot approve a definition).
-      const orchestratorChoice = h.stores.decisions.request({ conversationId: s.conversation.id, runId: null, kind: "orchestrator_choice", resolutionPolicy: "operator_required", requestedBy: { kind: "runtime" }, question: "q", options: [{ id: "a", label: "A", description: null }], recommendedOptionId: "a", rationale: null, affects: { requirementIds: [], taskIds: [], planNodeIds: [] }, deadlineAt: null, activationCondition: null, supersedesDecisionId: null });
+      const orchestratorChoice = h.stores.decisions.request({ conversationId: s.conversation.id, runId: null, kind: "orchestrator_choice", resolutionPolicy: "operator_required", requestedBy: { kind: "runtime" }, question: "q", options: [{ id: "a", label: "A", description: null }], recommendedOptionId: "a", rationale: null, affects: { requirementIds: [], taskIds: [], planNodeIds: [] }, deadlineAt: null, activationCondition: null, subject: null, supersedesDecisionId: null });
       h.stores.decisions.resolve(orchestratorChoice.id, { resolvedBy: "orchestrator", chosenOptionId: "a", rationale: null, artifactIds: [] });
       expect(() => h.stores.agents.appendRevision(definition.id, content({ kind: "conversation", conversationId: s.conversation.id, approvedByDecisionId: orchestratorChoice.id }))).toThrow(/operator_choice/);
       expect(h.stores.agents.listRevisions(definition.id)).toHaveLength(1);

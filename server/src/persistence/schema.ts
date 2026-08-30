@@ -85,6 +85,7 @@ import {
   type DecisionAffects,
   type DecisionOption,
   type DecisionRequester,
+  type DecisionSubject,
   type EvaluationProducer,
   type EvaluationSubject,
   type EventActor,
@@ -542,6 +543,8 @@ export const decisions = sqliteTable(
     affects: text("affects", { mode: "json" }).$type<DecisionAffects>().notNull(),
     deadlineAt: timestamp("deadline_at"),
     activationCondition: text("activation_condition", { mode: "json" }).$type<ActivationCondition>(),
+    /** The canonical subject of a `side_effect_approval` (tool, call digest, call Artifact, originating ids); never the call bytes. */
+    subject: text("subject", { mode: "json" }).$type<DecisionSubject>(),
     resolvedBy: text("resolved_by"),
     chosenOptionId: text("chosen_option_id"),
     resolutionRationale: text("resolution_rationale"),
@@ -576,6 +579,7 @@ export const decisions = sqliteTable(
       sql`(${t.status} = 'open' AND ${t.resolvedBy} IS NULL AND ${t.chosenOptionId} IS NULL AND ${t.resolvedAt} IS NULL) OR (${t.status} = 'resolved' AND ${t.resolvedBy} IS NOT NULL AND ${t.chosenOptionId} IS NOT NULL AND ${t.resolvedAt} IS NOT NULL) OR ${t.status} = 'superseded'`,
     ),
     check("decisions_superseded_by", sql`(${t.status} = 'superseded') = (${t.supersededByDecisionId} IS NOT NULL)`),
+    check("decisions_subject_shape", sql`(${t.kind} = 'side_effect_approval') = (${t.subject} IS NOT NULL AND json_extract(${t.subject}, '$.kind') = 'side_effect_approval' AND ${t.runId} IS NOT NULL)`),
     check("decisions_no_self_supersede", sql`${t.supersedesDecisionId} IS NULL OR ${t.supersedesDecisionId} <> ${t.id}`),
   ],
 );
@@ -759,6 +763,8 @@ export const invocations = sqliteTable(
     status: text("status").notNull(),
     waitReason: text("wait_reason"),
     failureReason: text("failure_reason"),
+    /** The open `side_effect_approval` Decision that ended the Invocation `blocked`; set exactly then. */
+    blockedByDecisionId: text("blocked_by_decision_id").references((): AnySQLiteColumn => decisions.id),
     result: text("result", { mode: "json" }).$type<InvocationResult>(),
     createdAt: timestamp("created_at").notNull(),
     startedAt: timestamp("started_at"),
@@ -784,7 +790,8 @@ export const invocations = sqliteTable(
     check("invocations_failure_reason", sql`${t.failureReason} IS NULL OR ${t.failureReason} IN (${inList(INVOCATION_FAILURE_REASONS)})`),
     check("invocations_waiting_has_reason", sql`(${t.status} = 'waiting') = (${t.waitReason} IS NOT NULL)`),
     check("invocations_failed_has_reason", sql`(${t.status} = 'failed') = (${t.failureReason} IS NOT NULL)`),
-    check("invocations_terminal_has_ended_at", sql`(${t.status} IN ('succeeded', 'failed', 'cancelled')) = (${t.endedAt} IS NOT NULL)`),
+    check("invocations_blocked_has_decision", sql`(${t.status} = 'blocked') = (${t.blockedByDecisionId} IS NOT NULL)`),
+    check("invocations_terminal_has_ended_at", sql`(${t.status} IN ('blocked', 'succeeded', 'failed', 'cancelled')) = (${t.endedAt} IS NOT NULL)`),
     check("invocations_alloc_attempts", sql`${t.allocAttempts} >= 1 AND ${t.allocCostUsd} >= 0 AND ${t.allocTokens} >= 0`),
     check("invocations_no_self_continue", sql`${t.continuedFromInvocationId} IS NULL OR ${t.continuedFromInvocationId} <> ${t.id}`),
     // At most one active (non-terminal) Orchestrator Invocation per Run and one active Coordinator Invocation per node (execution-model §4.6, §5.5).

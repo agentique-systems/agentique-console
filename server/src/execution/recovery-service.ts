@@ -72,7 +72,7 @@ export class RecoveryService {
           const lease = this.stores.leases.get(interrupted.capacityLeaseId);
           if (lease.status === "active") report.releasedLeaseIds.push(this.governor.release(lease.id, options).id);
         }
-        const settlement = settleInvocation(this.stores, { invocation, attempt: interrupted, decision, result: null, approvalRequired: false, meta: options });
+        const settlement = settleInvocation(this.stores, { invocation, attempt: interrupted, decision, result: null, approval: null, meta: options });
         if (settlement.kind === "settled") {
           if (settlement.invocation.status === "failed") report.failedInvocationIds.push(settlement.invocation.id);
           continue;

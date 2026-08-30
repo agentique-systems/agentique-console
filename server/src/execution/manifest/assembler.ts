@@ -86,9 +86,14 @@ export class ContextManifestAssembler {
     const acceptanceCriteria = this.acceptanceCriteria(run, requirementRevisionId, requirements, tasks.map((t) => t.taskId));
     const previousManifestAt = this.previousManifestAt(invocation);
     const decisions = this.decisions(run, node, invocation, requirements, tasks.map((t) => t.taskId), request.inputs, previousManifestAt);
-    const inputs = this.inputs(run, request.inputs);
+    const inputs = this.inputs(run, invocation, request.inputs);
     const handoffs = this.handoffs(run, node, invocation, request.handoffIds);
-    const artifacts = this.artifacts(run, unique([...node.input.artifactIds, ...handoffs.flatMap((h) => h.artifactIds), ...request.artifactIds, ...this.taskInputArtifacts(tasks.map((t) => t.taskId))]));
+    const approvalArtifactIds = inputs.flatMap((i) => (i.kind === "side_effect_approval_resolution" ? [i.callArtifactId] : []));
+    const artifacts = this.artifacts(run, unique([...node.input.artifactIds, ...handoffs.flatMap((h) => h.artifactIds), ...request.artifactIds, ...approvalArtifactIds, ...this.taskInputArtifacts(tasks.map((t) => t.taskId))]));
+    // Approved calls: exactly the approve_once resolutions among the inputs, by Decision, tool, and digest; they widen no policy.
+    const approvedCalls = inputs
+      .flatMap((i) => (i.kind === "side_effect_approval_resolution" && i.outcome === "approve_once" ? [{ decisionId: i.decisionId, tool: i.tool, callDigest: i.callDigest }] : []))
+      .sort(byId((c) => c.callDigest));
     if (request.startingSnapshotId !== null) {
       const snapshot = this.stores.snapshots.get(request.startingSnapshotId);
       if (snapshot.workspaceId !== run.workspaceId) throw new InvariantViolationError(`Snapshot ${request.startingSnapshotId} belongs to another Workspace`);
@@ -122,6 +127,7 @@ export class ContextManifestAssembler {
       capabilities: request.policy.capabilities,
       toolPolicy: request.policy.toolPolicy,
       runtimeTools: [...RUNTIME_TOOLS_BY_ROLE[invocation.role]],
+      approvedCalls,
     };
   }
 
@@ -226,9 +232,26 @@ export class ContextManifestAssembler {
       .sort(byId((d) => d.decisionId));
   }
 
-  private inputs(run: Run, inputs: ManifestInput[]): ManifestInput[] {
+  private inputs(run: Run, invocation: Invocation, inputs: ManifestInput[]): ManifestInput[] {
+    const digests = new Set<string>();
     for (const input of inputs) {
       switch (input.kind) {
+        case "side_effect_approval_resolution": {
+          // The resolved Decision is the successor's typed input; every fact must agree with the canonical Decision.
+          const decision = this.stores.decisions.get(input.decisionId);
+          if (decision.conversationId !== run.conversationId || decision.runId !== run.id) throw new InvariantViolationError(`Decision ${input.decisionId} belongs to another Run`);
+          if (decision.kind !== "side_effect_approval" || decision.subject === null) throw new ValidationError(`Decision ${input.decisionId} is not a side_effect_approval`);
+          if (decision.status !== "resolved" || decision.resolution === null) throw new ValidationError(`Decision ${input.decisionId} is ${decision.status}; a successor is created after resolution`);
+          if (decision.resolution.chosenOptionId !== input.outcome) throw new InvariantViolationError(`Decision ${input.decisionId} resolved ${decision.resolution.chosenOptionId}, not ${input.outcome}`);
+          const s = decision.subject;
+          if (s.invocationId !== input.blockedInvocationId || s.attemptId !== input.attemptId || s.tool !== input.tool || s.callDigest !== input.callDigest || s.callArtifactId !== input.callArtifactId) {
+            throw new InvariantViolationError(`input disagrees with the subject of Decision ${input.decisionId}`);
+          }
+          if (invocation.continuedFromInvocationId !== input.blockedInvocationId) throw new InvariantViolationError(`Invocation ${invocation.id} does not continue from blocked Invocation ${input.blockedInvocationId}`);
+          if (digests.has(input.callDigest)) throw new ValidationError(`approval resolution for call ${input.callDigest} appears twice`);
+          digests.add(input.callDigest);
+          break;
+        }
         case "operator_message": {
           const message = this.stores.conversations.getMessage(input.conversationMessageId);
           if (message.conversationId !== run.conversationId) throw new InvariantViolationError(`ConversationMessage ${input.conversationMessageId} belongs to another Conversation`);

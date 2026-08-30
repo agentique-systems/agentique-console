@@ -21,6 +21,7 @@
  *   Capabilities   tools and MCP servers
  *   Tool Policy    every declared tool with its effective disposition
  *   Runtime Tools  the role's runtime tools
+ *   Approved Calls calls the operator approved once, by tool, digest, Decision
  *   Retry          (only for a retry) prior Attempt, failure class, bounded
  *                  detail, exact violations, ordinal and remaining Attempts
  *
@@ -72,6 +73,8 @@ function renderInput(input: ManifestInput): string[] {
       return [`- node_result ${input.planNodeId} status ${input.status} output_artifacts ${list(input.outputArtifactIds)}`];
     case "decision_resolution":
       return [`- decision_resolution ${input.decisionId}`];
+    case "side_effect_approval_resolution":
+      return [`- side_effect_approval_resolution ${input.decisionId} ${input.outcome}: ${input.tool} call ${input.callDigest} (artifact ${input.callArtifactId}) from invocation ${input.blockedInvocationId} attempt ${input.attemptId}`];
     case "gate_result":
       return [`- gate_result ${input.gateId} ${input.passed ? "passed" : "failed"}`];
     case "plan_revision":
@@ -149,6 +152,9 @@ export function renderManifest(manifest: ContextManifest, appendix: RetryAppendi
     "",
     "## Runtime Tools",
     ...(c.runtimeTools.length === 0 ? [NONE] : c.runtimeTools.map((t) => `- ${t}`)),
+    "",
+    "## Approved Calls",
+    ...(c.approvedCalls.length === 0 ? [NONE] : c.approvedCalls.map((a) => `- ${a.tool} ${a.callDigest} once, by decision ${a.decisionId}`)),
   ];
   if (appendix !== null) {
     lines.push(

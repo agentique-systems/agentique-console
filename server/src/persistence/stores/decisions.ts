@@ -5,16 +5,19 @@ import {
   decisionRequestSchema,
   decisionResolutionInputSchema,
   decisionSchema,
+  InvariantViolationError,
   parseOrThrow,
+  TOOL_CALL_MEDIA_TYPE,
   type ConversationId,
   type Decision,
   type DecisionId,
   type DecisionRequest,
   type DecisionResolutionInput,
+  type DecisionSubject,
   type EventActor,
 } from "@agentique-console/core";
 import type { PersistenceContext } from "../context.ts";
-import { decisions, planNodes, requirements, runs, tasks } from "../schema.ts";
+import { artifacts, attempts, decisions, invocations, planNodes, requirements, runs, tasks } from "../schema.ts";
 import { assertSameConversation, conversationScope, loadConversationRef, OPERATOR_ACTOR, requireRow, writeMeta, type WriteOptions } from "./support.ts";
 
 type Row = typeof decisions.$inferSelect;
@@ -37,6 +40,7 @@ function toDomain(row: Row): Decision {
       affects: row.affects,
       deadlineAt: row.deadlineAt,
       activationCondition: row.activationCondition,
+      subject: row.subject,
       resolution:
         row.resolvedBy === null
           ? null
@@ -78,6 +82,7 @@ export class DecisionStore {
         assertSameConversation("Run", valid.runId, run.conversationId, conversation.id);
       }
       this.assertAffectsOwnership(valid, conversation.id);
+      if (valid.subject !== null) this.assertSubjectOwnership(valid.subject, valid.runId);
       const decision: Decision = {
         id: this.ctx.ids("decision"),
         ...valid,
@@ -170,6 +175,22 @@ export class DecisionStore {
     });
   }
 
+  /** A side-effect approval subject names the Run's own Plan Node, Invocation, Attempt, and call Artifact, consistently. */
+  private assertSubjectOwnership(subject: DecisionSubject, runId: string | null): void {
+    if (subject.runId !== runId) throw new InvariantViolationError(`Decision subject names Run ${subject.runId}, not ${String(runId)}`);
+    const node = requireRow(this.ctx.db.select({ runId: planNodes.runId }).from(planNodes).where(eq(planNodes.id, subject.planNodeId)).get(), "PlanNode", subject.planNodeId);
+    if (node.runId !== subject.runId) throw new InvariantViolationError(`PlanNode ${subject.planNodeId} belongs to another Run`);
+    const invocation = requireRow(this.ctx.db.select({ runId: invocations.runId, planNodeId: invocations.planNodeId }).from(invocations).where(eq(invocations.id, subject.invocationId)).get(), "Invocation", subject.invocationId);
+    if (invocation.runId !== subject.runId || invocation.planNodeId !== subject.planNodeId) throw new InvariantViolationError(`Invocation ${subject.invocationId} does not belong to PlanNode ${subject.planNodeId} of Run ${subject.runId}`);
+    const attempt = requireRow(this.ctx.db.select({ invocationId: attempts.invocationId }).from(attempts).where(eq(attempts.id, subject.attemptId)).get(), "Attempt", subject.attemptId);
+    if (attempt.invocationId !== subject.invocationId) throw new InvariantViolationError(`Attempt ${subject.attemptId} does not belong to Invocation ${subject.invocationId}`);
+    const artifact = requireRow(this.ctx.db.select({ runId: artifacts.runId, digest: artifacts.digest, mediaType: artifacts.mediaType }).from(artifacts).where(eq(artifacts.id, subject.callArtifactId)).get(), "Artifact", subject.callArtifactId);
+    if (artifact.runId !== subject.runId) throw new InvariantViolationError(`Artifact ${subject.callArtifactId} belongs to another Run`);
+    if (artifact.digest !== subject.callDigest || artifact.mediaType !== TOOL_CALL_MEDIA_TYPE) {
+      throw new InvariantViolationError(`Artifact ${subject.callArtifactId} is not the canonical call the subject names`, { digest: artifact.digest, mediaType: artifact.mediaType });
+    }
+  }
+
   private assertAffectsOwnership(request: DecisionRequest, conversationId: string): void {
     const { requirementIds, taskIds, planNodeIds } = request.affects;
     if (requirementIds.length > 0) {
@@ -210,6 +231,7 @@ export class DecisionStore {
       affects: decision.affects,
       deadlineAt: decision.deadlineAt,
       activationCondition: decision.activationCondition,
+      subject: decision.subject,
       resolvedBy: decision.resolution?.resolvedBy ?? null,
       chosenOptionId: decision.resolution?.chosenOptionId ?? null,
       resolutionRationale: decision.resolution?.rationale ?? null,

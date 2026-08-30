@@ -85,7 +85,8 @@ export function classifyAttempt(input: ClassificationInput): ClassifiedAttempt {
       if (exhausted) return { status: "failed", failureClass: "allocation_exhausted", detail: detail(completion.message, { tool: completion.tool }), result: null };
       return { status: "failed", failureClass: "tool_failure", detail: detail(completion.message, { tool: completion.tool }), result: null };
     case "approval_required":
-      return { status: "failed", failureClass: "tool_failure", detail: detail(`tool ${completion.tool} requires operator approval: ${completion.call}`, { tool: completion.tool }), result: null };
+      // The call itself is recorded only as the Decision's call Artifact; the bounded detail names the tool alone.
+      return { status: "failed", failureClass: "tool_failure", detail: detail(`tool ${completion.call.tool} requires operator approval`, { tool: completion.call.tool }), result: null };
     case "interrupted":
       if (completion.cause === "cancelled") return { status: "cancelled", failureClass: null, detail: detail(completion.message, { cancelled: true }), result: null };
       if (completion.cause === "deadline") return { status: "timed_out", failureClass: "interrupted", detail: detail(completion.message), result: null };

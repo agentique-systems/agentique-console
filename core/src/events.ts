@@ -168,6 +168,8 @@ export const EVENT_CATALOGUE = {
   "invocation.started": z.strictObject({ invocationId: idSchema("invocation") }),
   "invocation.waiting": z.strictObject({ invocationId: idSchema("invocation"), waitReason: z.enum(INVOCATION_WAIT_REASONS) }),
   "invocation.wait_cleared": z.strictObject({ invocationId: idSchema("invocation") }),
+  /** Terminal: an `approval_required` call was intercepted; the Decision's subject names the call by digest and Artifact, never by bytes. */
+  "invocation.blocked": z.strictObject({ invocationId: idSchema("invocation"), decisionId: idSchema("decision") }),
   "invocation.succeeded": z.strictObject({ invocationId: idSchema("invocation"), result: invocationResultSchema }),
   "invocation.failed": z.strictObject({ invocationId: idSchema("invocation"), failureReason: z.enum(INVOCATION_FAILURE_REASONS) }),
   "invocation.cancelled": z.strictObject({ invocationId: idSchema("invocation") }),
