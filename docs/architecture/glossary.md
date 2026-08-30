@@ -35,9 +35,9 @@ Related documents:
   which the final server and the final web application both import. The
   canonical stores live behind the permanent server persistence boundary
   `server/src/persistence/`, and the deterministic runtime (plan compiler,
-  plan-revision service, Run creation, the scheduler, the `single`,
-  `chain`, `route`, and `parallel` Pattern runners, join settlement, and
-  in later phases the remaining Pattern runners and Gates) behind the permanent execution boundary
+  plan-revision service, Run creation, the scheduler, the six Pattern
+  runners, join settlement, the deterministic Acceptance Criterion check
+  service, and in a later phase the Gates) behind the permanent execution boundary
   `server/src/execution/`, which depends only on the core package, the
   persistence boundary, and narrow ports for capabilities implemented in
   later phases. None of them imports the legacy `shared/` package or the
@@ -167,9 +167,11 @@ reasons `decision`, `budget`, `provider_capacity`, `integration_conflict`,
 `operator`; a node that fails records one of the failure reasons
 `invocation_failed`, `result_failed`, `result_blocked`, `task_unavailable`,
 `allocation_exhausted`, `integration_conflict`, `join_fan_in_failed`,
-`route_selection_failed`, `parallel_items_failed` on its
+`route_selection_failed`, `parallel_items_failed`, `coordinator_no_progress`,
+`coordinator_invocations_exhausted`, `optimizer_rounds_exhausted` on its
 `plan_node.failed` Event, which also lists the runtime index Artifacts
-recorded with a fan-in failure. A persisted Plan Node does not contain other
+recorded with a fan-in failure (or the last judged candidate of an
+exhausted optimizer). A persisted Plan Node does not contain other
 Plan Nodes; composition between nodes is expressed only by Plan Edges. A
 node's **definition** (everything but its id, revision, status,
 timestamps, and output) is immutable; reconciliation reuses a node across
@@ -190,18 +192,23 @@ source outputs delivered as a Handoff), `branch(label)` (a `sequence` edge
 active only when a `route` source selected the label), `fan_in` (an edge
 into a `join` node; the join is eligible when every `fan_in` source is
 terminal and records their outcomes and outputs in its index Artifact in
-edge order), and `retry(round)` (a `sequence` edge into a later unrolled
-round of an `evaluator_optimizer` expression, active only when the
-source's Evaluation failed). Every Plan Edge belongs to exactly one
+edge order), and `retry(round)` (a `sequence` edge from the evaluate-only
+`evaluator_optimizer` node of round `round − 1` into the unrolled producer
+subgraph of round `round`, active only when the source's recorded round
+verdict is `fail` or `inconclusive`; a `pass` leaves it inactive and every
+later round is skipped). Every Plan Edge belongs to exactly one
 accepted Execution Plan revision and is append-only; reusing a node in a
 later revision never reuses an earlier revision's edge row. Node readiness
 is a pure function of the current accepted revision's graph plus the
 explicit canonical condition facts a conditional edge needs (a `route`
 node's recorded `route_selection` Evaluation for its `branch(label)` and
-`sequence` edges), together with allocation; an edge of a historical
-revision never affects readiness, and a fact is keyed by node id so a
-historical selection never activates a current edge. Only the
-plan-revision service, through the compiler, writes Plan Edges.
+`sequence` edges; an evaluate-only `evaluator_optimizer` node's recorded
+`optimizer_verdict` Evaluation for its `retry(round)` and `sequence`
+edges), together with allocation; an edge of a historical revision never
+affects readiness, and a fact is keyed by node id so a historical
+selection or verdict never activates a current edge. An inactive
+conditional edge is never a failed predecessor: its target is skipped.
+Only the plan-revision service, through the compiler, writes Plan Edges.
 
 - Id prefix: `pe_`
 - Owned by: the runtime (plan-revision service)
@@ -268,14 +275,16 @@ The closed set is `orchestrator` (the root node's turns), `single`,
 `chain_step` (`index`, `count`), `route_selection`, `route_branch`
 (`label`), `parallel_item` (`index`, `count`), `parallel_aggregation`,
 `coordinator_turn`, `worker_task` (`taskId`), `producer_round` and
-`evaluator_round` (`round`, `maxRounds`). A position names exactly one
+`evaluator_round` (`round`, `maxRounds`; an evaluate-only
+`evaluator_optimizer` node holds only the `evaluator_round` of its fixed
+round). A position names exactly one
 operation of the shape, and that operation fixes the Invocation's Agent
 Definition revision, role, purpose, and manifest inputs; the runtime
 derives all of them from the position, never from a title or an ordinal
 string. The position is persisted on the Invocation with a canonical
-**position key** (`chain_step:1`, `worker_task:task_…`), and at most one
-non-terminal Invocation exists per node and position. Only the
-evaluate-only Invocations of an unrolled `evaluator_optimizer` round have
+**position key** (`chain_step:1`, `worker_task:task_…`,
+`producer_round:2`), and at most one non-terminal Invocation exists per
+node and position. Only a Gate Evaluator Invocation (a later phase) has
 no position.
 
 - Stored on the Invocation and in its Context Manifest; no separate table.
@@ -311,7 +320,13 @@ says how satisfaction is established. An Acceptance Criterion is either
 `deterministic` (a command the runtime runs and whose exit status and
 output decide it, such as a test or build command) or `evaluated` (a
 question an Evaluator answers with an Evaluation). Deterministic criteria
-are always checked before evaluated ones.
+are always checked before evaluated ones, in stable criterion id order,
+stopping at the first failure; the runtime runs each command through the
+**Acceptance Criterion execution port** (`AcceptanceCriterionExecutionPort`,
+execution-model §10.1) in a disposable, isolated view of the exact
+Snapshot being verified, stores its bounded output as an Artifact, and
+records the outcome as an Evaluation with `command` Evidence. An
+infrastructure failure of the port is never a criterion verdict.
 
 - Id prefix: `ac_`
 - Owned by: the Orchestrator (authoring), the runtime (checking)
@@ -413,9 +428,16 @@ route set is `sequence:<source node>:<target node>` (a delivering
 `sequence` edge), `branch:<source node>:<target node>` (the one active
 `branch(label)` edge of a route that selected a composite branch, carrying
 no Artifacts), `chain_step:<node>:<step>`, `parallel_index:<node>`
-(a parallel node's index Artifact to its own aggregation), and
+(a parallel node's index Artifact to its own aggregation),
 `worker_result:<node>:<task>` (one integrated Worker result of a
-`coordinator_worker` node to its next Coordinator turn).
+`coordinator_worker` node to its next Coordinator turn),
+`retry:<source node>:<target node>` (the one active `retry(round)` edge
+out of an evaluate-only `evaluator_optimizer` node whose round failed,
+carrying the judged candidate), `optimizer_candidate:<node>:<round>` (an
+inline optimizer round's candidate from its producer to its Evaluator),
+and `optimizer_feedback:<node>:<round>` (a failed inline round's judged
+candidate to the next producer round; the verdict itself is a typed
+Context Manifest input, never Handoff text).
 
 - Id prefix: `ho_`
 - Owned by: the runtime
@@ -568,7 +590,14 @@ depth is one: no Coordinator exists inside another Coordinator's node.
 
 An Invocation role: an agent that judges an Artifact against Acceptance
 Criteria or a stated rubric and produces an Evaluation. An Evaluator has
-read-only tools and never modifies the Workspace.
+read-only tools and never modifies the Workspace. Its `evaluate` result
+carries the typed `evaluation` payload (`EvaluatorResult`: the overall
+verdict, one verdict per evaluated criterion it was asked to judge, and
+Evidence), validated against the immutable Context Manifest; the runtime
+supplies what is judged (the Plan Node, round, Snapshot, and Artifacts)
+and records the Evaluations. An Evaluator never claims `command` Evidence,
+changes Task state, returns `blocked` or `runOutcome`, records a Changeset,
+or judges an Artifact it produced.
 
 - Related: Invocation, Evaluation, Gate, Pattern
 
@@ -577,13 +606,25 @@ read-only tools and never modifies the Workspace.
 ### Evaluation
 
 The recorded outcome of a check: which Acceptance Criterion or rubric was
-checked, the verdict (`pass`, `fail`, `inconclusive`), the Evidence, and
-who produced it (`runtime` for a deterministic check, an Evaluator
-Invocation id otherwise). A `route_selection` Evaluation is the one
+checked (the **subject**: `acceptance_criterion`, `rubric`,
+`route_selection`, or `optimizer_round`), the verdict (`pass`, `fail`,
+`inconclusive`), the Evidence, who produced it (`runtime` for a
+deterministic check or a runtime-derived verdict, an Evaluator Invocation
+id and Agent Definition revision otherwise), the judged Artifact ids, the
+judged Snapshot (`snapshotId`), and, inside an `evaluator_optimizer`
+round, an explicit **context** — `optimizer_criterion { round, maxRounds }`
+for one criterion of the round or `optimizer_verdict { round, maxRounds }`
+for the round's overall verdict — so round identity is never hidden in a
+rubric string or narrative. A `route_selection` Evaluation is the one
 canonical fact that a `route` Plan Node selected a branch label: exactly
 one exists per route node (a database unique index), it names a label the
 node's shape binds, and readiness reads it as an explicit condition fact.
-Evaluations are append-only.
+An `optimizer_verdict` Evaluation is the one canonical fact of a round's
+outcome: at most one per node and round, and at most one criterion
+Evaluation per node, round, and criterion (partial unique indexes over
+generated columns); readiness reads the latest round's verdict as the
+condition fact of an evaluate-only node's edges. Evaluations are
+append-only.
 
 - Id prefix: `eval_`
 - Owned by: the runtime or the Evaluator
@@ -607,11 +648,14 @@ fails does not end the Run; it produces Tasks.
 
 ### Evidence
 
-A reference to a verifiable fact: a command and its captured output, an
-Artifact id, a file path at a Snapshot, a test report, a URL. Evidence is
-always attached to something (an Evaluation, a Requirement status change,
-a Task completion) and is never free text. The runtime validates that
-referenced Artifacts, Snapshots, and files exist when Evidence is recorded.
+A reference to a verifiable fact: a command and its captured output
+Artifact (with `outputTruncated` recorded whenever the stored output is a
+bounded prefix), an Artifact id, an Evaluation id, a file path at a
+Snapshot, a Snapshot, a URL. Evidence is always attached to something (an
+Evaluation, a Requirement status change, a Task completion) and is never
+free text. The runtime validates that referenced Artifacts, Snapshots,
+and files exist when Evidence is recorded; only the runtime records
+`command` Evidence.
 
 - Stored inline on the object it supports; no separate table.
 - Related: Evaluation, Requirement, Task, Artifact, Snapshot

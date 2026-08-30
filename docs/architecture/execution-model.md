@@ -39,16 +39,17 @@ Invocation preparation, the Attempt executor with its retry policy and
 result validator, the resource governor, restart recovery, Run start, the
 readiness evaluator with its condition-fact projection, the Handoff
 router, the Changeset integration service, the `single`, `chain`, `route`,
-`parallel`, and `coordinator_worker` Pattern runners, the deterministic
-join settler, the pure Task projection, the runtime-tool call boundary
-with its Task proposal handlers, the scheduler, and in later phases the
-`evaluator_optimizer` runner and Gates — lives behind
-`server/src/execution/`, which depends only on the core package, the
-persistence boundary, the provider-neutral adapter contract under
-`server/src/provider/` (§6.5), and narrow ports for capabilities
-implemented in later phases (the Workspace preparation port, §3, the
-execution-workspace port, §9.1, and the integration-workspace port,
-§9.2). The provider boundary
+`parallel`, `coordinator_worker`, and `evaluator_optimizer` Pattern
+runners, the deterministic join settler, the pure Task projection, the
+runtime-tool call boundary with its Task proposal handlers, the
+deterministic Acceptance Criterion check service, the scheduler, and in a
+later phase the Gates — lives behind `server/src/execution/`, which
+depends only on the core package, the persistence boundary, the
+provider-neutral adapter contract under `server/src/provider/` (§6.5),
+and narrow ports for capabilities implemented in later phases (the
+Workspace preparation port, §3, the execution-workspace port, §9.1, the
+integration-workspace port, §9.2, and the Acceptance Criterion execution
+port, §10.1). The provider boundary
 (`server/src/provider/`) holds the adapter contract, the scripted fake,
 the continuation payload stores, and, in a later subphase, the
 provider-specific adapters; it depends on the core package and on the
@@ -343,7 +344,7 @@ A Plan Edge is a typed, directed relation between two Plan Nodes:
 | `sequence` | The target becomes eligible when the source is terminal; the source's output Artifacts are delivered to the target as a Handoff. |
 | `branch(label)` | A `sequence` edge that is active only when the source (a `route` node) selected `label`. Inactive branches' targets become `skipped`. |
 | `fan_in` | Enters a `join` node. The join becomes eligible when every `fan_in` source is terminal; the sources' outcomes and outputs are recorded in the join's index Artifact in edge order. |
-| `retry(round)` | A `sequence` edge into a later unrolled round of an `evaluator_optimizer` expression; active only when the source's Evaluation failed. When the Evaluation passed, every later round is `skipped`. |
+| `retry(round)` | A `sequence` edge from the evaluate-only node of round `round − 1` of an unrolled `evaluator_optimizer` expression into the producer subgraph of round `round`; active only when the source's recorded round verdict is `fail` or `inconclusive`. When the verdict is `pass`, the edge is inactive and every later round is `skipped`. |
 
 Every Plan Edge belongs to exactly one accepted revision and is
 append-only; a later revision that keeps a node writes its own edge rows.
@@ -375,29 +376,38 @@ conditional edges.
 interface ReadinessInput {
   graph: PlanGraph;
   routeSelections: ReadonlyMap<PlanNodeId, RouteSelectionFact>;
+  optimizerVerdicts: ReadonlyMap<PlanNodeId, OptimizerVerdictFact>;
 }
 interface RouteSelectionFact { planNodeId; selectedLabel; evaluationId }
+interface OptimizerVerdictFact { planNodeId; round; maxRounds; evaluationId; verdict }
 ```
 
 Readiness cannot be a function of `PlanGraph` alone: a `branch(label)`
-edge (and, in a later phase, a `retry(round)` edge) is activated by a
-canonical Evaluation fact the graph does not contain. The evaluator
-therefore receives those facts as input and stays pure: it queries no
-store, writes nothing, mints nothing, and reads no clock, transcript,
-Artifact content, Handoff summary, Invocation creation order, source-path
-text, or Event replay. The caller projects the facts from canonical rows
+edge and a `retry(round)` edge (and the `sequence` edges out of an
+evaluate-only `evaluator_optimizer` node) are activated by a canonical
+Evaluation fact the graph does not contain. The evaluator therefore
+receives those facts as input and stays pure: it queries no store, writes
+nothing, mints nothing, and reads no clock, transcript, Artifact content,
+Handoff summary, Invocation creation order, source-path text, or Event
+replay. The caller projects the facts from canonical rows
 (`server/src/execution/readiness-facts.ts`: `projectReadinessInput` reads
 exactly the `route_selection` Evaluations of the Run, keyed by route node
-id) and hands them in. A fact that is missing where an edge needs it (a
-succeeded route node without a selection) or that contradicts the graph (a
-label the node's shape does not bind, a fact on a member that is not a
-route node, a fact keyed by another node) is a typed `ReadinessFactError`
-— an invariant failure, never guessed readiness. Facts are per node id, so
-a node a later revision replaced (a new id) carries no historical
-selection, and a fact of a node outside the current membership is inert:
-historical Evaluation facts cannot activate current-revision edges. Later
-phases add the facts their conditional edges need (a `retry(round)` edge
-reads the round's Evaluation verdict) as further members of this input.
+id, and the `optimizer_verdict` Evaluations of the Run, keyed by
+`evaluator_optimizer` node id — of a node that judged several rounds the
+latest round's verdict, with its `round` explicit so several rounds inside
+one inline node stay unambiguous) and hands them in. A fact that is
+missing where an edge needs it (a succeeded route node without a
+selection; a succeeded evaluate-only node without a verdict) or that
+contradicts the graph (a label the node's shape does not bind, a fact on a
+member of another kind, a fact keyed by another node, a verdict whose
+`round` or `maxRounds` the node's immutable shape does not hold, an
+evaluate-only node's fact naming another round than its fixed one, a
+succeeded inline optimizer node whose latest verdict is not `pass`) is a
+typed `ReadinessFactError` — an invariant failure, never guessed
+readiness. Facts are per node id, so a node a later revision replaced (a
+new id) carries no historical fact, and a fact of a node outside the
+current membership is inert: historical Evaluation facts cannot activate
+current-revision edges.
 
 Given the input, the evaluator returns, per member in membership order,
 `remain_pending`, `become_ready`, `become_skipped` (with the cause and the
@@ -405,23 +415,34 @@ failed predecessors), or the observation that the node is already ready,
 active, or terminal. Each current-revision edge into a pending node has an
 **activation**: `pending` while its source has not ended; `inactive` when
 the source was skipped, when it is a `branch(label)` edge whose route
-selected another label, or when it is a `sequence` edge out of a route
-that selected a composite branch (that selection delivers through the
-branch's exits, never through the route's own edges); `failed` when the
-source failed or was cancelled; `delivers` when the source succeeded and
-the edge is active. A pending pattern node with no edges becomes ready;
+selected another label, when it is a `sequence` edge out of a route that
+selected a composite branch (that selection delivers through the branch's
+exits, never through the route's own edges), when it is a `sequence` edge
+out of an evaluate-only optimizer node whose round verdict is `fail` or
+`inconclusive`, or when it is a `retry(round)` edge out of an evaluate-only
+node whose verdict is `pass`; `failed` when the source failed or was
+cancelled; `delivers` when the source succeeded and the edge is active. A
+`retry(round)` edge is validated against the graph before any status is
+read: its source is the evaluate-only node of round `round − 1` and
+`round` is within the node's `maxRounds`; anything else is a
+`ReadinessFactError`. A pending pattern node with no edges becomes ready;
 with every edge inactive it is skipped; with a failed edge it is skipped
 unless compiled with `runOnDependencyFailure`; otherwise it becomes ready
 once every edge has settled and at least one delivers — so an inline
 selection lets successors proceed once every composite alternative has
-been skipped, and a composite selection makes successors wait until the
-selected branch's exits are terminal. A `join` becomes ready when every
-`fan_in` predecessor is terminal and is skipped when every one was
-skipped; its policy is applied at settlement (§4.2), never here. The same
-activation decides which edges the Handoff router delivers along (§7.7).
-Work the runtime does not yet support — `retry` edges and the
-`evaluator_optimizer` Pattern — is returned as a typed deferral, never as
-readiness and never as success.
+been skipped, a composite selection makes successors wait until the
+selected branch's exits are terminal, a failed optimizer round readies
+exactly the next producer round through its retry edge while the
+expression's successors wait for a later round, and a passing round skips
+every later round through the ordinary all-inactive rule. An inactive
+conditional edge is never a failed predecessor: it removes that path from
+eligibility, and the inactive target and everything behind it are
+`skipped`, never `failed`. A `join` becomes ready when every `fan_in`
+predecessor is terminal and is skipped when every one was skipped; its
+policy is applied at settlement (§4.2), never here. The same activation
+decides which edges the Handoff router delivers along (§7.7). Every
+Pattern has a runner and every edge type has activation semantics; the
+readiness evaluator defers nothing.
 
 ### 4.4 Composition and compilation
 
@@ -1143,22 +1164,142 @@ caller's node (`task_not_cancellable`); it releases the Task's reservation.
 
 ### 5.6 `evaluator_optimizer`
 
-One producer Invocation and one Evaluator Invocation alternate until the
-Evaluator passes the result or the round limit is reached. Between them the
-runtime runs the node's deterministic Acceptance Criteria; a deterministic
-failure skips the Evaluator for that round and is fed back as Evidence.
+One producer and one Evaluator alternate in rounds until a round passes
+or `maxRounds` is reached. In every round the runtime first runs the
+node's deterministic Acceptance Criteria against the exact integration
+Snapshot that holds the candidate; only when every deterministic criterion
+passed is one read-only Evaluator invoked. The runner is
+`server/src/execution/patterns/evaluator-optimizer.ts`; the deterministic
+checks go through the Acceptance Criterion check service (§10.1).
 
-- Invocations: per round, 1 producer `worker` (`step`) then (deterministic checks, then) 1 `evaluator` (`evaluate`)
-- Input: round 1 producer receives the node manifest; each later producer receives the manifest plus a Handoff to the previous result and the previous Evaluation; the Evaluator receives the manifest plus a Handoff to the current result and the Acceptance Criteria or rubric
-- Output: the last passing result Artifacts
+- Invocations: per round, 1 producer `worker` (`step`, position `producer_round { round, maxRounds }`; inline form only), then the deterministic checks (no Invocation, no Usage, no lease), then 1 `evaluator` (`evaluate`, position `evaluator_round { round, maxRounds }`) unless a deterministic criterion failed
+- Input: the round-1 producer receives the node's incoming edge Handoffs and its compiled input; producer round `r > 1` additionally receives the `optimizer_feedback:<node>:<r−1>` Handoff carrying the previous candidate's Artifact ids and the typed `optimizer_feedback` manifest input (the previous round's overall Evaluation id, round, verdict, and Evidence references); the Evaluator receives the candidate (the `optimizer_candidate:<node>:<r>` Handoff of an inline node, or the producer subgraph's edge Handoffs of an evaluate-only node), the typed `optimizer_candidate` input (round, `maxRounds`, judged Snapshot, exact candidate Artifact ids, and the evaluated Acceptance Criteria it must cover), the criteria themselves, and — for an inline round `r > 1` — the previous round's `optimizer_feedback`
+- Output: the passing round's candidate Artifact ids; an evaluate-only node whose non-final round failed outputs the judged candidate for the retry edge (see below)
 - Fan-in: none
-- Bounds: `maxRounds` on the node (default 3)
-- Failure: round limit reached without a pass fails the node; the last Evaluation is attached
+- Bounds: `maxRounds` on the node (validated against `maxUnrolledRounds` at compile time)
+- Failure: `optimizer_rounds_exhausted` when the final round's verdict is `fail` or `inconclusive` (the last verdict's Artifacts are the failure Event's diagnostic references); `invocation_failed` when a producer or Evaluator fails after its permitted Attempts (no verdict is manufactured); `result_failed`, `result_blocked`, `integration_conflict`, and `allocation_exhausted` as for every Pattern
 
-The producer of round `n+1` is a new Invocation (with
-`continuedFromInvocationId` pointing at round `n`'s producer). What it knows
-about round `n` is in its manifest. A composite producer is unrolled by the
-compiler (§4.4), in which case the node runs in evaluate-only form.
+**Round identity.** A round verdict is correctness-critical state and is
+persisted as an Evaluation with an explicit, machine-readable
+**context** (`core/src/verification.ts`):
+
+```ts
+type EvaluationContext =
+  | { kind: "optimizer_criterion"; round; maxRounds }   // subject: acceptance_criterion
+  | { kind: "optimizer_verdict";   round; maxRounds };  // subject: optimizer_round
+```
+
+Every optimizer Evaluation names its Run, its `evaluator_optimizer` Plan
+Node, the round and `maxRounds` (validated against the node's immutable
+shape; an evaluate-only node accepts only its fixed round), the judged
+Snapshot (`snapshotId`), the judged candidate Artifact ids, its verdict
+(`pass | fail | inconclusive`), its producer (`runtime` for a
+deterministic check or a deterministically derived verdict; the Evaluator
+Invocation and its Agent Definition revision otherwise), and its Evidence.
+Nothing infers a round verdict from a node status, an Invocation summary,
+a blocker, a transcript, a Handoff summary, an Artifact title, an Event, a
+source path, or Invocation creation order. **Uniqueness:** at most one
+`optimizer_criterion` Evaluation per node, round, and Acceptance Criterion,
+and at most one `optimizer_verdict` per node and round — enforced by the
+Evaluation store and by partial unique indexes over generated columns of
+`evaluations` (`context_kind`, `context_round`, `subject_criterion_id`),
+so repeated passes, restarts, and racing callers converge on one canonical
+row. Evaluation rows stay append-only.
+
+**Deterministic checks (fail-fast).** For one round, in order: the
+producer's successful Changeset is integrated; the exact resulting
+integration Snapshot is the round's judged Snapshot (recorded on every
+Evaluation of the round and in the Evaluator's manifest); the node's
+deterministic criteria are selected in stable Acceptance Criterion id
+order; each command runs outside every database transaction against a
+disposable, isolated view of that Snapshot (§10.1); its bounded output is
+stored as a `text/plain` Artifact (runtime producer `command`) and its
+Evaluation — verdict `pass` on the expected exit code, `fail` on any other,
+Evidence `command` (with `outputTruncated` recorded canonically whenever
+the stored output is a prefix) plus `snapshot` — is recorded in one
+transaction; the first failure ends the round: no later command runs, the
+Evaluator is not invoked, and the runtime records the round's
+`optimizer_verdict` of `fail` (Evidence: the failing criterion Evaluation
+and its command Evidence) in the same transaction. A criterion whose
+Evaluation for this node and round already exists is never executed
+again. A port failure (timeout, abort, a view that could not be created,
+lost output) is an infrastructure failure: it records nothing, fabricates
+no Evaluation, is returned typed (`verification_failed`), and a later pass
+retries the check.
+
+**Evaluator round.** When every deterministic criterion passed, the
+Evaluator's completed result must carry the typed `evaluation` payload
+(§6.3); the runner records one `optimizer_criterion` Evaluation per
+reported evaluated criterion (producer: the Evaluator) and one
+`optimizer_verdict` Evaluation with the overall verdict, in the transaction
+that acts on it. An invalid Evaluator result is retried within the
+Evaluator Invocation's Attempt allocation and creates no Evaluation; a
+permanently failed Evaluator Invocation fails the node.
+
+**Inline lifecycle** (`producer` set, `round: null`). `ready → running`
+ensures the node's incoming edge Handoffs and prepares producer round 1.
+When the producer completes, the runner integrates its Changeset (outside
+any transaction), then asks for verification (the scheduler's
+`verify_node` action), then prepares the Evaluator, then acts on the
+recorded verdict: `pass` settles the node `succeeded` with the candidate
+as its output and creates its edge Handoffs; `fail` or `inconclusive`
+below `maxRounds` ensures the `optimizer_feedback` Handoff and prepares
+producer round `r + 1` with `continuedFromInvocationId` pointing at the
+round-`r` producer (a new Invocation, never a retry Attempt); at
+`maxRounds` the node fails with `optimizer_rounds_exhausted`. Exactly one
+producer or Evaluator position is active at a time; the current round is
+the highest producer position that exists, read from rows. An
+approval-blocked producer or Evaluator continues through a successor at
+the same round position with the same typed optimizer inputs, consuming
+no round. A producer that fails after its permitted Attempts fails the
+node at once. Every round Invocation is funded from the node's allocation
+under its `onAllocationExhausted` policy (`extend` remains a typed
+deferral); the deterministic checks reserve nothing, record no Usage, and
+hold no lease.
+
+**Evaluate-only lifecycle** (`producer: null`, fixed `round`). The node
+becomes ready when the unrolled producer subgraph's exits are terminal and
+every producer Changeset is integrated (§4.3, §9.2). `ready → running`
+ensures its incoming edge Handoffs; the candidate is the Artifact set
+carried by the delivering `sequence` Handoffs in canonical incoming-edge
+order (an inactive edge — a route's own sequence edge under a composite
+selection, a skipped alternative — carries nothing); the judged Snapshot
+is the Run's current integration Snapshot when verification begins. The
+deterministic-then-Evaluator round then runs exactly as inline. The
+recorded verdict is the readiness fact that activates the node's edges
+(§4.3): on `pass` the node succeeds with the candidate as its output (its
+`sequence` edges deliver, its `retry` edge is inactive, every later round
+is skipped); on a non-final `fail` or `inconclusive` the node also ends
+`succeeded` — **as a control node**, so that the typed `retry(r+1)` edge
+can be consumed — with the judged candidate as its output, which the
+`retry:<source>:<target>` Handoff carries to the next producer round's
+entry together with the `optimizer_feedback` input the runtime derives
+from the verdict; the candidate did not pass verification, the recorded
+Evaluation says so, and nothing reads the node's success as candidate
+acceptance. A final `fail` or `inconclusive` fails the node with
+`optimizer_rounds_exhausted` and readies nothing. Evaluate-only Evaluators
+judge each round independently: prior-round feedback reaches the next
+producer subgraph, not the Evaluator.
+
+**Gate boundary.** An `evaluator_optimizer` node's `gateAcceptanceCriterionIds`
+are exactly the round criteria this contract verifies: the deterministic
+ones by the runtime, the evaluated ones by the Evaluator, each once per
+round on the exact judged Snapshot and candidate. A passing round
+therefore settles the node `succeeded` without opening a separate
+`node_exit` Gate row, and no criterion is evaluated twice. The Gate phase
+reuses these Snapshot- and Artifact-bound Evaluations for a node whose
+Gate would otherwise re-check the same criteria on the same Snapshot; it
+never spends another Evaluator Invocation for an identical judgment. No
+general `node_exit` Gate is opened for any other Pattern by this contract.
+
+**Recovery.** Every step is derived from rows and safe to repeat: a
+prepared position, an integrated Changeset, a recorded check, an existing
+Handoff, a recorded verdict, or a settled node is found, never duplicated.
+A crash after a command ran but before its record leaves only that command
+to rerun (its stale isolated view is discarded by the port); a crash after
+the Evaluator's result committed leaves only the Evaluations to record; a
+crash after a verdict leaves only its consequence to apply, which the next
+pass re-derives from the verdict row.
 
 ## 6. Invocations
 
@@ -1251,7 +1392,17 @@ Tool Policy (§6.4), the role's runtime tools, the queued logical inputs
 as typed entries (an operator message with its content; a Plan Node
 outcome; a Decision resolution; a Gate result; a plan-revision outcome; a
 Publication result; a route selection, validated against the node's
-canonical `route_selection` Evaluation), each delivered Handoff's routing metadata, and
+canonical `route_selection` Evaluation; an `optimizer_candidate`,
+validated to name the Invocation's `evaluator_round`, the node's exact
+`maxRounds` and fixed round, a Snapshot of the Run's Workspace, Artifacts
+of the Run carried by the delivered Handoffs, and exactly the node's
+evaluated Gate criteria; an `optimizer_feedback`, validated to name a
+`fail` or `inconclusive` `optimizer_verdict` Evaluation of this Run for
+the round before the Invocation's — on the same inline node, or on the
+evaluate-only node whose current-revision `retry(r+1)` edge enters this
+node — whose Evidence the input restates exactly and whose judged
+Artifacts the delivered feedback or retry Handoff carries exactly; a
+historical or foreign Evaluation is refused), each delivered Handoff's routing metadata, and
 bounded metadata (media type, size, title) of every readable Artifact;
 Artifact content is never embedded and is read through `read_artifact`.
 Every collection is in canonical order — Requirements in scope order,
@@ -1295,13 +1446,37 @@ Every Attempt must end by returning a typed result through the runtime's
   `{ selectedLabel }` of exactly one branch the node's shape binds; the
   only channel for a selection (never the summary, blocker, an open item,
   an Artifact, or transcript text), `null` for every other Invocation
+- `evaluation`: Evaluator only (`evaluate`) — the typed
+  `EvaluatorResult { verdict, criteria: [{ acceptanceCriterionId, verdict,
+  evidence }], evidence }`: the overall verdict on the judged candidate,
+  one verdict per evaluated Acceptance Criterion the runtime asked it to
+  judge, and the Evidence of the overall verdict (per-criterion Evidence
+  lives on the criterion entry, so nothing is duplicated); the only channel
+  for a verdict, `null` for every other Invocation, and mutually exclusive
+  with `routeSelection`
 
 The runtime validates the result: every referenced id must exist and belong
 to this Run; every `completed` Task must carry Evidence and its required
 output Artifacts; a writing Invocation must have produced a Changeset
 (possibly empty, stated as such); a completed `select` result names a
-bound branch label and no other result names one. An Attempt that ends
-without a valid result is a failed Attempt.
+bound branch label and no other result names one; a completed `evaluate`
+result carries an `evaluation` and no other result does. The Evaluator
+payload is bound through the same validator: the reported criteria must be
+exactly the evaluated criteria the immutable Context Manifest delivered
+(the `optimizer_candidate` input's list for an optimizer round, otherwise
+the manifest's evaluated criteria) — none missing, none duplicated, none
+extra or foreign, and never a deterministic criterion, which the runtime
+checks; every Evidence reference exists in the Run; the overall verdict
+carries Evidence; an overall `pass` is invalid when any reported criterion
+is `fail` or `inconclusive`; and an Evaluator never claims `command`
+Evidence (the runtime records those), never reports Task state, never
+returns `runOutcome` or `blocked`, and never records a Changeset. The
+runtime supplies the subject, Plan Node, round, Snapshot, and judged
+Artifact set through the manifest; the model cannot substitute them, and
+an Evaluator cannot judge an Artifact it produced (refused by the
+Evaluation store). An invalid Evaluator result follows ordinary Attempt
+retry and creates no Evaluation. An Attempt that ends without a valid
+result is a failed Attempt.
 
 A Task reported `completed` in a valid result is transitioned to
 `completed` by the runtime (§7.9). It does not change any Requirement's
@@ -1653,9 +1828,9 @@ runtime component with two entry points and no timer, loop, or interval:
   reservations, and leases — it returns the ordered list of typed
   **actions** that are canonical next (`resume_run`, `ready_node`,
   `skip_node`, `start_node`, `start_position`, `execute_invocation`,
-  `settle_node`, `settle_join`, `settle_removed_node`, `resume_node`,
-  `wait_node`, `settle_root`, `wait_run`), the nodes that are waiting and
-  why, the work deferred to a later phase, the ready nodes held back by
+  `verify_node`, `settle_node`, `settle_join`, `settle_removed_node`,
+  `resume_node`, `wait_node`, `settle_root`, `wait_run`), the nodes that
+  are waiting and why, the work deferred to a later phase, the ready nodes held back by
   the Run's `maxConcurrency`, the Invocations executing in this process,
   and the earliest resumption time (retry `notBefore`, provider
   `retryAfter`, or an Invocation deadline). Readiness is evaluated over
@@ -1666,8 +1841,19 @@ runtime component with two entry points and no timer, loop, or interval:
   now (a further item or runnable Task's Worker, the successor of a
   blocked position whose Decision resolved, or the next Coordinator turn
   with its purpose), subject to the same Run and node concurrency limits
-  as `start_node`; `settle_join` is the deterministic settlement of a
-  `ready` join (§4.2).
+  as `start_node`; `verify_node` runs an `evaluator_optimizer` round's
+  pending deterministic Acceptance Criteria (§5.6, §10.1) — external like a
+  Changeset application, outside every transaction, recorded afterwards;
+  `settle_join` is the deterministic settlement of a `ready` join (§4.2).
+  For an `evaluator_optimizer` node the projection distinguishes, from rows
+  alone: producer position ready (`start_node` / `settle_node` preparing
+  the next round), producer Attempt active (`execute_invocation` or an
+  in-flight or timed wait), deterministic checks pending (`verify_node`),
+  Evaluator position ready (`settle_node` preparing it), Evaluator Attempt
+  active, round verdict recorded (`settle_node` applying it), retry edge
+  active (`ready_node` of the next producer round), final pass and rounds
+  exhausted (terminal), and Gate-phase deferral (which this Pattern never
+  reports, §5.6).
 - `advanceRun(runId, { maxActions })` is a bounded pass. It performs the
   projected actions one at a time, re-projecting the current graph before
   every state-changing action; every mutation runs inside a Pattern
@@ -1968,10 +2154,20 @@ for the one active `branch(label)` edge of a route that selected a
 composite branch (no Artifacts; the label is validated routing metadata
 against the node's shape and the revision's edge), `chain_step:<node>:<step>`
 for a chain's internal transfer, `parallel_index:<node>` for a parallel
-node's delivery of its index to its own aggregation, and
+node's delivery of its index to its own aggregation,
 `worker_result:<node>:<task>` for a `coordinator_worker` node's delivery
 of one integrated Worker result (the Task's output Artifacts) to its next
-Coordinator turn. Which edges deliver is
+Coordinator turn, `retry:<source>:<target>` for the one active
+`retry(round)` edge out of an evaluate-only `evaluator_optimizer` node
+whose round failed (carrying the judged candidate Artifact ids to the next
+producer round's entry; the round is validated routing metadata against
+the revision's edge), `optimizer_candidate:<node>:<round>` for an inline
+`evaluator_optimizer` node's delivery of a round's candidate from its
+producer Invocation to that round's Evaluator, and
+`optimizer_feedback:<node>:<round>` for an inline node's delivery of a
+failed round's judged candidate to the next producer round (the verdict
+itself travels as the typed `optimizer_feedback` manifest input, never as
+Handoff text). Which edges deliver is
 decided by the readiness evaluator's activation over the graph and the
 facts (§4.3); a Handoff still holds only source, target, Task ids,
 Artifact ids, a bounded summary, and a status — never a message, an
@@ -2336,6 +2532,56 @@ Invocation id and Agent Definition revision, so a reviewer of the Run can
 see which judgments were made by which definition. An Evaluator never
 evaluates an Artifact it produced.
 
+**Pattern-internal verification is not a Gate.** The rounds of an
+`evaluator_optimizer` node (§5.6) run the same deterministic-then-Evaluator
+order over the node's Gate criteria, but their Evaluations carry the
+explicit `optimizer_criterion` / `optimizer_verdict` context, belong to no
+`gates` row, and never claim that a `node_exit` Gate passed. Under the
+documented rule a passing round settles the node without a separate Gate
+because the optimizer contract has consumed every one of its criteria on
+the exact judged Snapshot and Artifact set; the Gate phase reuses those
+Evaluations instead of judging the same criterion twice. No `node_exit`
+Gate is executed for `single`, `chain`, `route`, `parallel`, or
+`coordinator_worker` in this phase (they report `awaiting_gate_phase`),
+and `run_completion` and `operator_signoff` are untouched.
+
+### 10.1 Deterministic Acceptance Criterion execution
+
+Deterministic criteria are run by the Acceptance Criterion check service
+(`server/src/execution/acceptance-checks.ts`, `AcceptanceCheckService`)
+through the **Acceptance Criterion execution port**
+(`ports/acceptance-criterion-execution.ts`, `AcceptanceCriterionExecutionPort`).
+The runtime selects the criteria, the exact Snapshot, and the output bound,
+and records every outcome; the port receives one request per command —
+Run and Plan Node identity, the criterion, its command and expected exit
+code, the round, the verified Snapshot identity with the Integration
+Workspace it is derived from and a stable isolation key, the configured
+`maxOutputBytes`, a deadline, and an abort signal — and nothing else: no
+store, database handle, Blob Store, Artifact lookup, transcript, provider
+continuation state, or Target write access. Its outcome is closed:
+`exited` with the exit code, the bounded output bytes, and a `truncated`
+flag, or `failed` with a closed infrastructure reason (`start_failed`,
+`timed_out`, `aborted`, `workspace_unavailable`, `output_unavailable`)
+and a bounded message.
+
+Isolation: every command runs in a disposable view of exactly the
+requested Snapshot, derived from the Run's Integration Workspace and keyed
+by the isolation key; it never runs in the Integration Workspace, an
+Invocation worktree, or the Target, whatever it writes is discarded with
+the view, two executions never share a view, and a stale view under the
+same key (a previous process died mid-check) is discarded before a fresh
+one is created. Commands run outside every database transaction; the
+service refuses to run inside one. Classification is fixed: the expected
+exit code is a criterion `pass`, any other exit code a criterion `fail`,
+and a port failure is neither — it records nothing and is returned typed
+so a later pass retries. Raw command output lives only in its `text/plain`
+Artifact (bounded at `maxOutputBytes`; a stored prefix is recorded as
+`outputTruncated: true` on the command Evidence, never silently); Events,
+outcomes, projections, diagnostics, and errors carry ids, exit status,
+digest, byte size, and the truncation flag. Phase 2D-B2 drives the
+service for `evaluator_optimizer` rounds only; the Gate phase reuses it
+unchanged.
+
 ## 11. Agent Definitions
 
 An Agent Definition is an immutable, versioned configuration. Each revision
@@ -2434,6 +2680,11 @@ mechanism, if ever added, is a new feature with its own design.
 | `route` selector yields no valid label | Node `failed` with `route_selection_failed`: an unmapped or superseded selector Decision, or an Evaluator selection Invocation that failed after its permitted Attempts (an unbound label is an invalid result, retried within them). |
 | Task fails or is blocked inside `coordinator_worker` | Task `failed`/`blocked`; dependents become `blocked`; the blocker joins the frontier. One consolidated `replan` turn is created only when no Worker is active or runnable and nothing can be integrated; blockers arising while a turn is active wait for the next turn. A replan without canonical progress fails the node with `coordinator_no_progress`; a frontier that outlives the turn bound fails it with `coordinator_invocations_exhausted` (§5.5). |
 | `decompose` completes without an accepted proposal | Node `failed` with `coordinator_no_progress`; nothing was created. |
+| `evaluator_optimizer` deterministic criterion fails | The round ends: no later command runs, no Evaluator is invoked, the runtime records the round's `fail` verdict with the failing Evaluation as Evidence; the next producer round follows (with the feedback), or the node fails with `optimizer_rounds_exhausted` at `maxRounds` (§5.6). |
+| `evaluator_optimizer` Evaluator returns `fail` or `inconclusive` | As above; a non-final evaluate-only node ends `succeeded` as a control node so its `retry(round)` edge activates, and its candidate is not accepted. |
+| `evaluator_optimizer` final round without a pass | Node `failed` with `optimizer_rounds_exhausted`; the last verdict and its Evidence remain the canonical diagnostic references; successors are `skipped`. |
+| Deterministic check cannot run (timeout, abort, lost view, lost output, failed start) | Infrastructure failure: nothing recorded, no Evaluation fabricated, the pass stops typed (`verification_failed`); the next pass reruns exactly the unrecorded checks (§10.1). |
+| Crash between a check's command and its record | The command reruns in a fresh view (the stale one is discarded); the output Artifact and its Evaluation are recorded once, in one transaction. |
 | Runtime-tool call fails or crashes | A failure inside the call's transaction commits nothing and returns `failed` with a bounded message and one `runtime_tool_call_failed` diagnostic; a crash after the commit leaves the row, and the retry or approval successor replays it by digest instead of repeating the effect (§6.4). |
 | Changeset conflict | Changeset `conflict`; Task with a bounded report Artifact created for the node owner; node (and, when nothing else can proceed, the Run) `waiting` with `integration_conflict`; applied once more when the Task completes; a second conflict, or a failed or cancelled Task, fails the node with `integration_conflict` (§9.2). |
 | Crash between an external Changeset application and its record | The Changeset stays `pending`; the next pass applies it again and the port reports the application that already holds; the record is written exactly once (§9.2). |
@@ -2494,8 +2745,12 @@ by a test.
     charged to their own Run-level reservation rather than the root's.
 11. **Deterministic verification precedes LLM evaluation.** In every Gate
     and in the `evaluator_optimizer` Pattern, deterministic Acceptance
-    Criteria are run first, and an Evaluator is not invoked while a
-    deterministic criterion is failing.
+    Criteria are run first, in stable criterion id order, stopping at the
+    first failure, and an Evaluator is not invoked while a deterministic
+    criterion is failing. Every optimizer round verdict is one canonical
+    `optimizer_verdict` Evaluation naming its node, round, judged Snapshot,
+    and judged Artifacts (one per node and round, database-enforced), and
+    a `retry(round)` edge activates from that fact alone.
 12. **Completed coding Runs must finish on a verified integration state.** A
     Run with `kind: code` cannot leave `verifying` unless its deterministic
     `run_completion` criteria passed on the integration Snapshot that the

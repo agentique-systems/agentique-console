@@ -96,17 +96,17 @@ Phase 1 and remain after cutover:
   the Attempt executor, restart recovery, the Run start service, the pure
   readiness evaluator with its condition-fact projection, the Handoff
   router, the Changeset integration service, the `single`, `chain`,
-  `route`, `parallel`, and `coordinator_worker` Pattern runners with the
-  root-node support, the deterministic join settler, the pure Task
-  projection, the runtime-tool call executor with the Task proposal
-  service, the bounded scheduler, and, in later phases, the
-  `evaluator_optimizer` runner and Gates. It imports
-  only `@agentique-console/core`, the persistence boundary, `zod`, the
-  provider-neutral adapter contract under `server/src/provider/`, and the
-  narrow capability ports it declares under `ports/`
-  (`RunWorkspacePreparationPort`, `ExecutionWorkspacePort`, and
-  `IntegrationWorkspacePort`, implemented by the Workspace provider in the
-  Workspace phase). Nothing legacy
+  `route`, `parallel`, `coordinator_worker`, and `evaluator_optimizer`
+  Pattern runners with the root-node support, the deterministic join
+  settler, the pure Task projection, the runtime-tool call executor with
+  the Task proposal service, the deterministic Acceptance Criterion check
+  service, the bounded scheduler, and, in a later phase, the Gates. It
+  imports only `@agentique-console/core`, the persistence boundary, `zod`,
+  the provider-neutral adapter contract under `server/src/provider/`, and
+  the narrow capability ports it declares under `ports/`
+  (`RunWorkspacePreparationPort`, `ExecutionWorkspacePort`,
+  `IntegrationWorkspacePort`, and `AcceptanceCriterionExecutionPort`,
+  implemented by the Workspace provider in the Workspace phase). Nothing legacy
   imports it and it imports nothing legacy; the persistence boundary and
   the provider boundary never depend on it.
 
@@ -444,10 +444,26 @@ is one or more commits; each commit keeps `npm run typecheck` and
    Handoffs, one consolidated `replan` turn per blocker frontier with
    `coordinator_no_progress` and `coordinator_invocations_exhausted`,
    one `synthesize` turn, Gate-phase deferral, and restart safety).
-   Remaining typed deferrals: the `evaluator_optimizer` Pattern,
-   `retry(round)` edges, `node_exit` and `run_completion` Gates,
-   allocation extension, and an executable `request_decision` runtime
-   tool. Later
+   Phase 2D-B2 (done): typed Evaluator results (`evaluation` on the
+   result contract, validated against the immutable manifest's evaluated
+   criteria), optimizer Evaluations with explicit round context and judged
+   Snapshot (one verdict per node and round, one criterion Evaluation per
+   node, round, and criterion, database-enforced), the deterministic
+   Acceptance Criterion check service behind the
+   `AcceptanceCriterionExecutionPort` (isolated views of the exact
+   Snapshot, fail-fast criterion order, bounded output Artifacts with
+   canonical truncation, infrastructure failures that record nothing), the
+   `evaluator_optimizer` Pattern runner in inline and evaluate-only form
+   (producer rounds as new Invocations with `continuedFromInvocationId`,
+   the `optimizer_candidate` and `optimizer_feedback` Handoffs and typed
+   manifest inputs, `optimizer_rounds_exhausted`), `retry(round)` edge
+   activation from the `optimizer_verdict` readiness fact, the
+   `verify_node` scheduler action, and restart safety across every round
+   boundary. Remaining typed deferrals: `node_exit` and `run_completion`
+   Gates (`awaiting_gate_phase` for every Pattern but `evaluator_optimizer`,
+   whose rounds consume their own Gate criteria), allocation extension
+   (`awaiting_allocation_extension_phase`), and an executable
+   `request_decision` runtime tool. Later
    subphases: Runs, Execution
    Plan source validation and compiler,
    Plan Nodes of both kinds (`pattern`, `join`), Plan Edges, Plan Node
@@ -610,8 +626,51 @@ Merge to `main` happens after step 7 as one merge commit. Rollback is
   selection, makes a join ready when every `fan_in` source is terminal
   and skipped when all were skipped, fails explicitly on a missing or
   contradictory fact, ignores historical revisions' edges and historical
-  facts, and defers `retry` edges and the `evaluator_optimizer` Pattern
-  without marking anything successful.
+  facts, activates a `retry(round)` edge from the recorded round verdict
+  alone (a failed or inconclusive round delivers exactly the next retry
+  edge, a pass skips every later unrolled round, an inactive retry path
+  is skipped and never failed, a retry edge out of anything but the
+  evaluate-only node of round `round − 1` is a contradiction), and
+  refuses a missing, contradictory, or historical verdict fact.
+- Evaluator-result tests: an `evaluation` payload is admitted only from an
+  `evaluate` Invocation and is exclusive with `routeSelection`; coverage
+  of the manifest's evaluated criteria is exact (missing, duplicate,
+  extra, foreign, and deterministic criteria are rejected); an overall
+  pass with a failed or inconclusive criterion is rejected; a foreign
+  Evidence reference, a `command` claim, a Task report, `blocked`, and a
+  Changeset are rejected; the Evaluation store refuses a self-produced or
+  foreign judged Artifact, the wrong node or round, a foreign Snapshot, a
+  criterion the node does not gate, and a second verdict for a round at
+  the store and at the database, and persists the Snapshot and judged
+  Artifact set exactly.
+- Deterministic-check tests: the expected exit code passes and any other
+  fails; criteria execute in canonical id order and stop at the first
+  failure; a deterministic failure skips the Evaluator; a port timeout,
+  abort, failed start, lost view, or lost output creates no Evaluation
+  and is retried by the next run; every command runs outside every
+  transaction in an isolated view that never writes to the Integration
+  Workspace or the Target; raw output appears only in its Artifact, bounded,
+  with truncation recorded; a restart between a command and its record
+  converges without a duplicate row and discards the stale view.
+- `evaluator_optimizer` tests: a round-one pass; a deterministic failure
+  and an Evaluator failure each followed by a passing second round;
+  inconclusive continuing like failure; rounds exhausted with the last
+  Evaluation retained; a producer failure failing at once; an invalid
+  Evaluator result retried as an Attempt, never a round; the next
+  producer's exact Handoff and typed feedback; `continuedFromInvocationId`
+  across rounds; an approval continuation consuming no round; one active
+  position at a time; evaluate-only rounds over a producer subgraph with
+  the candidate in canonical incoming-edge order, control-node success on a
+  non-final failure, `optimizer_rounds_exhausted` on the final one, a
+  missing verdict fact as an infrastructure failure, and no transcript or
+  Event consulted; and sixteen restart windows over a file-backed database
+  (producer prepared, result committed, Changeset applied but unrecorded,
+  integration recorded, command run but unrecorded, deterministic failure
+  recorded, deterministic pass recorded, Evaluator result committed,
+  overall failure recorded, retry verdict recorded, overall pass recorded,
+  final failure recorded, final pass recorded, approval continuation, stale
+  verification view) with nothing repeated and an identical projection
+  after every reopen.
 - Runtime-tool call tests: the effective callable set is the
   intersection of manifest permission, runtime handlers, and role and
   purpose validity (a Worker and a `synthesize` turn never see
