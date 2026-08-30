@@ -15,6 +15,7 @@ import {
   type Invocation,
   type PlanExpression,
   type PlanLimits,
+  type PublicationStrategy,
   type RequirementId,
   type RequirementRevision,
   type SnapshotIdentity,
@@ -35,7 +36,9 @@ import { HandoffRouter } from "./handoff-routing.ts";
 import { ChangesetIntegrationService } from "./integration-service.ts";
 import type { CollectedChangeset, ExecutionWorkspacePort, ExecutionWorkspaceRequest, PreparedExecutionWorkspace } from "./ports/execution-workspace.ts";
 import type { IntegrationApplyOutcome, IntegrationApplyRequest, IntegrationWorkspacePort } from "./ports/integration-workspace.ts";
+import type { PublicationApplyOutcome, PublicationApplyRequest, PublicationPrepareOutcome, PublicationPrepareRequest, PublicationReleaseOutcome, PublicationReleaseRequest, PublicationWorkspacePort } from "./ports/publication-workspace.ts";
 import type { RunFinalizationFailure, RunFinalizationOutcome, RunFinalizationRequest, RunFinalizationWorkspacePort } from "./ports/run-finalization-workspace.ts";
+import { RunPublicationService } from "./publication.ts";
 import { RunSignoffService } from "./signoff.ts";
 import { createPatternRunners, type PatternRunners } from "./patterns/index.ts";
 import { RunScheduler, type SchedulerConfig } from "./scheduler.ts";
@@ -165,6 +168,139 @@ export class FakeIntegrationWorkspace implements IntegrationWorkspacePort {
   }
 }
 
+/**
+ * A deterministic publication Workspace port (execution-model §9.4) whose
+ * external state — the Target each Workspace holds, the staging per
+ * Publication, and the durable atomic-update receipts — survives process
+ * lifetimes when the instance is carried into a reopened harness, exactly
+ * like a real provider's refs. `prepare` is idempotent by Publication id and
+ * never moves the Target; `apply` models the provider guarantee that the
+ * Target compare-and-swap and the receipt are one atomic operation (a
+ * scripted crash happens after both, so a retry recovers `already_applied`
+ * even when the Target has since moved again); `release` is idempotent.
+ */
+export class FakePublicationWorkspace implements PublicationWorkspacePort {
+  readonly prepares: PublicationPrepareRequest[] = [];
+  readonly applies: PublicationApplyRequest[] = [];
+  readonly releases: PublicationReleaseRequest[] = [];
+  /** Whether a database transaction was open during each port call (`null` without a probe): must always be false. */
+  readonly observedTransactions: (boolean | null)[] = [];
+  /** The Snapshot each Workspace's Target holds now, keyed by Workspace and Target; initialized from the first prepare's base Snapshot. */
+  readonly targets = new Map<string, SnapshotIdentity>();
+  /** Durable staging per Publication: what an idempotent prepare replays. */
+  readonly staged = new Map<string, { targetBefore: SnapshotIdentity; candidate: SnapshotIdentity; strategy: PublicationStrategy; verificationWorkspacePath: string }>();
+  /** The durable provider-owned receipt of one atomic Target update, keyed by Publication id. */
+  readonly receipts = new Map<string, { targetSnapshot: SnapshotIdentity }>();
+  readonly released = new Set<string>();
+  /** Every actual Target mutation, in order: "at most one" is the crash-window assertion. */
+  readonly targetMutations: { publicationId: string; to: SnapshotIdentity }[] = [];
+  /** Whether this provider supports `merge` for automatic selection and exact requests. */
+  supportsMerge = true;
+  /** Provider-named `other` strategies reported as supported. */
+  readonly supportedOther = new Set<string>();
+  /** Publication ids whose next candidate construction conflicts; consumed on use. */
+  readonly conflictNext = new Set<string>();
+  /** Infrastructure-failure scripting: the next N calls return `unavailable`/`failed` without doing anything. */
+  prepareUnavailableNext = 0;
+  applyUnavailableNext = 0;
+  releaseFailNext = 0;
+  /** When set, the next `apply` performs the atomic update-plus-receipt and then throws: a crash after the external mutation, before any result reaches the runtime. */
+  crashAfterApply = false;
+  transactionProbe: (() => boolean) | null = null;
+
+  constructor(private readonly digestOf: (bytes: Uint8Array) => string) {}
+
+  targetKey(request: { workspaceId: string; target: unknown }): string {
+    return `${request.workspaceId}:${JSON.stringify(request.target)}`;
+  }
+
+  /** Moves a Target externally (an operator push): what a compare-and-swap must then definitely refuse. */
+  moveTarget(request: { workspaceId: string; target: unknown }, to: SnapshotIdentity): void {
+    this.targets.set(this.targetKey(request), to);
+  }
+
+  currentTarget(request: { workspaceId: string; target: unknown }): SnapshotIdentity | null {
+    return this.targets.get(this.targetKey(request)) ?? null;
+  }
+
+  async prepare(request: PublicationPrepareRequest): Promise<PublicationPrepareOutcome> {
+    this.prepares.push(request);
+    this.observedTransactions.push(this.transactionProbe?.() ?? null);
+    if (this.prepareUnavailableNext > 0) {
+      this.prepareUnavailableNext -= 1;
+      return { kind: "unavailable", message: "the Workspace provider could not be reached" };
+    }
+    const existing = this.staged.get(request.publicationId);
+    if (existing) return { kind: "prepared", targetBeforeSnapshot: existing.targetBefore, candidateSnapshot: existing.candidate, strategy: existing.strategy, verificationWorkspacePath: existing.verificationWorkspacePath, alreadyPrepared: true };
+    // The content is read and verified on every fresh prepare; the source itself refuses inside a transaction.
+    const bytes = await request.changeset.diff.read();
+    if (this.digestOf(bytes) !== request.changeset.diff.digest || bytes.byteLength !== request.changeset.diff.byteSize) {
+      throw new Error(`the content source of ${request.publicationId} delivered bytes that do not match its declared digest and size`);
+    }
+    const key = this.targetKey(request);
+    if (!this.targets.has(key)) this.targets.set(key, request.baseSnapshot);
+    const current = this.targets.get(key)!;
+    const atBase = JSON.stringify(current) === JSON.stringify(request.baseSnapshot);
+    let strategy: PublicationStrategy;
+    if (request.requestedStrategy.kind === "automatic") {
+      if (atBase) strategy = { kind: "fast_forward" };
+      else if (this.supportsMerge) strategy = { kind: "merge" };
+      else return { kind: "refused", refusal: "strategy_unsupported", strategy: { kind: "merge" }, message: "merge is not supported for this Target" };
+    } else {
+      strategy = request.requestedStrategy.strategy;
+      if (strategy.kind === "fast_forward" && !atBase) return { kind: "refused", refusal: "fast_forward_unavailable", strategy: null, message: "the Target no longer equals the base Snapshot" };
+      if (strategy.kind === "merge" && !this.supportsMerge) return { kind: "refused", refusal: "strategy_unsupported", strategy, message: "merge is not supported for this Target" };
+      if (strategy.kind === "other" && !this.supportedOther.has(strategy.name)) return { kind: "refused", refusal: "strategy_unsupported", strategy, message: `strategy ${strategy.name} is not supported` };
+    }
+    if (this.conflictNext.delete(request.publicationId)) {
+      return { kind: "refused", refusal: "candidate_conflict", strategy: null, message: `CONFLICT (content): the final Changeset does not apply cleanly onto the Target` };
+    }
+    const candidate = strategy.kind === "fast_forward" ? request.changeset.afterSnapshot : fakeSnapshot(JSON.stringify(current), JSON.stringify(request.changeset.afterSnapshot), "publication");
+    const staged = { targetBefore: current, candidate, strategy, verificationWorkspacePath: `${request.workspaceRootPath}/.agentique/publications/${request.publicationId}` };
+    this.staged.set(request.publicationId, staged);
+    return { kind: "prepared", targetBeforeSnapshot: staged.targetBefore, candidateSnapshot: staged.candidate, strategy: staged.strategy, verificationWorkspacePath: staged.verificationWorkspacePath, alreadyPrepared: false };
+  }
+
+  async apply(request: PublicationApplyRequest): Promise<PublicationApplyOutcome> {
+    this.applies.push(request);
+    this.observedTransactions.push(this.transactionProbe?.() ?? null);
+    // The durable receipt decides replays first: even when the Target has since moved again, the recorded resulting identity is returned.
+    const receipt = this.receipts.get(request.publicationId);
+    if (receipt) return { kind: "applied", targetSnapshot: receipt.targetSnapshot, alreadyApplied: true };
+    if (this.applyUnavailableNext > 0) {
+      this.applyUnavailableNext -= 1;
+      return { kind: "unavailable", message: "the Target update result is unknown" };
+    }
+    const key = this.targetKey(request);
+    const current = this.targets.get(key) ?? request.expectedTargetSnapshot;
+    if (JSON.stringify(current) !== JSON.stringify(request.expectedTargetSnapshot)) {
+      return { kind: "target_changed", currentTargetSnapshot: current };
+    }
+    // One atomic provider operation: the Target ref and the receipt ref move together; there is no unguarded force update.
+    this.targets.set(key, request.candidateSnapshot);
+    this.receipts.set(request.publicationId, { targetSnapshot: request.candidateSnapshot });
+    this.targetMutations.push({ publicationId: request.publicationId, to: request.candidateSnapshot });
+    if (this.crashAfterApply) {
+      this.crashAfterApply = false;
+      throw new Error("process died after the atomic Target update and receipt");
+    }
+    return { kind: "applied", targetSnapshot: request.candidateSnapshot, alreadyApplied: false };
+  }
+
+  async release(request: PublicationReleaseRequest): Promise<PublicationReleaseOutcome> {
+    this.releases.push(request);
+    this.observedTransactions.push(this.transactionProbe?.() ?? null);
+    if (this.releaseFailNext > 0) {
+      this.releaseFailNext -= 1;
+      return { kind: "failed", message: "staging release failed" };
+    }
+    // Idempotent: releasing staging that was never created (or is already gone) is released.
+    this.staged.delete(request.publicationId);
+    this.released.add(request.publicationId);
+    return { kind: "released" };
+  }
+}
+
 /** What the fake finalization port observed about one inspection: safe facts only, never the diff bytes. */
 export interface ObservedFinalization {
   runId: string;
@@ -289,6 +425,7 @@ export interface ObservedCheck {
   command: string;
   round: number | null;
   gateId: string | null;
+  publicationId: string | null;
   /** The isolated view the command ran in; never the Integration Workspace or the Target. */
   viewPath: string;
   isolationKey: string;
@@ -354,7 +491,7 @@ export class FakeAcceptanceCriterionExecution implements AcceptanceCriterionExec
     const viewPath = `${request.workspace.integrationWorkspacePath ?? "/tmp"}/.verification/${request.workspace.isolationKey.replaceAll("/", "_")}-${this.#counter}`;
     this.liveViews.set(request.workspace.isolationKey, viewPath);
     const inTransaction = this.transactionProbe?.() ?? null;
-    const record = (outcome: "exited" | "failed") => this.observed.push({ acceptanceCriterionId: request.acceptanceCriterionId, command: request.command, round: request.round, gateId: request.gateId, viewPath, isolationKey: request.workspace.isolationKey, snapshot: request.workspace.snapshot, maxOutputBytes: request.maxOutputBytes, inTransaction, outcome, discardedStale });
+    const record = (outcome: "exited" | "failed") => this.observed.push({ acceptanceCriterionId: request.acceptanceCriterionId, command: request.command, round: request.round, gateId: request.gateId, publicationId: request.publicationId, viewPath, isolationKey: request.workspace.isolationKey, snapshot: request.workspace.snapshot, maxOutputBytes: request.maxOutputBytes, inTransaction, outcome, discardedStale });
     const dispose = () => {
       if (this.crashBeforeDispose) return;
       this.liveViews.delete(request.workspace.isolationKey);
@@ -421,6 +558,9 @@ export interface RuntimeHarness extends Harness {
   finalizationWorkspace: FakeRunFinalizationWorkspace;
   /** The operator signoff boundary (execution-model §10 `operator_signoff`). */
   signoff: RunSignoffService;
+  publicationWorkspace: FakePublicationWorkspace;
+  /** The publication boundary (execution-model §9.4): the only runtime code that may modify a Run's Target. */
+  publication: RunPublicationService;
   criterionExecution: FakeAcceptanceCriterionExecution;
   checks: AcceptanceCheckService;
   handoffs: HandoffRouter;
@@ -458,6 +598,8 @@ export interface RuntimeHarnessOptions {
   criterionExecution?: FakeAcceptanceCriterionExecution;
   /** Reuse the fake finalization port of an earlier harness (its injected drift survives a process). */
   finalizationWorkspace?: FakeRunFinalizationWorkspace;
+  /** Reuse the fake publication Workspace of an earlier harness (Targets, staging, and receipts survive a process). */
+  publicationWorkspace?: FakePublicationWorkspace;
   checks?: AcceptanceCheckConfig;
 }
 
@@ -485,6 +627,8 @@ export function openRuntimeHarness(options: RuntimeHarnessOptions = {}): Runtime
   const runners = createPatternRunners({ ctx: h.ctx, stores: h.stores, executor, preparation, integration, checks, governor, provider });
   const finalizationWorkspace = options.finalizationWorkspace ?? new FakeRunFinalizationWorkspace(integrationWorkspace);
   finalizationWorkspace.transactionProbe = () => h.ctx.tx.inTransaction;
+  const publicationWorkspace = options.publicationWorkspace ?? new FakePublicationWorkspace(sha256Hex);
+  publicationWorkspace.transactionProbe = () => h.ctx.tx.inTransaction;
   return {
     ...h,
     workspacePreparation,
@@ -493,6 +637,8 @@ export function openRuntimeHarness(options: RuntimeHarnessOptions = {}): Runtime
     integration,
     finalizationWorkspace,
     signoff: new RunSignoffService({ ctx: h.ctx, stores: h.stores, preparation, finalization: finalizationWorkspace }),
+    publicationWorkspace,
+    publication: new RunPublicationService({ ctx: h.ctx, stores: h.stores, port: publicationWorkspace, checks, diagnostics }),
     criterionExecution,
     checks,
     handoffs: new HandoffRouter(h.stores),
@@ -552,8 +698,8 @@ export function seedCompletionCriterion(h: Pick<Harness, "ctx" | "stores">, conv
  * revision with the deterministic completion criterion a coding Run declares, a created Run whose verification policy
  * names the Evaluator and that criterion, and the operator's opening message.
  */
-/** Run creation overrides for a seed: the verification policy is merged over the seed's defaults. */
-export type RuntimeSeedOverrides = Omit<Partial<RunCreationRequest>, "verificationPolicy"> & { verificationPolicy?: Partial<RunVerificationRequest> };
+/** Run creation overrides for a seed: the verification policy is merged over the seed's defaults; `completionCommands` adds further deterministic completion criteria on the seeded leaf. */
+export type RuntimeSeedOverrides = Omit<Partial<RunCreationRequest>, "verificationPolicy"> & { verificationPolicy?: Partial<RunVerificationRequest>; completionCommands?: string[] };
 
 export function seedRuntime(h: RuntimeHarness, overrides: RuntimeSeedOverrides = {}): RuntimeSeed {
   const workspace = h.stores.workspaces.create({ name: "demo", rootPath: `/tmp/demo-${h.ctx.ids("workspace")}`, kind: "git" });
@@ -562,14 +708,17 @@ export function seedRuntime(h: RuntimeHarness, overrides: RuntimeSeedOverrides =
   const worker = seedAgentRevision(h, "worker");
   const evaluator = seedReadOnlyWorker(h, "evaluator");
   const completion = seedCompletionCriterion(h, conversation.id);
-  const { verificationPolicy, ...rest } = overrides;
+  const { verificationPolicy, completionCommands, ...rest } = overrides;
+  const extraCriterionIds = (completionCommands ?? []).map(
+    (command) => h.stores.requirements.createAcceptanceCriterion({ conversationId: conversation.id, requirementId: completion.requirementId, requirementRevisionId: completion.revision.id, taskId: null, check: { kind: "deterministic", command, expectedExitCode: 0 } }).id,
+  );
   const created = h.runCreation.create({
     conversationId: conversation.id,
     kind: "code",
     target: { kind: "branch", branch: "main" },
     budget: DEFAULT_BUDGET,
     orchestratorAgentDefinitionRevisionId: orchestrator.id,
-    verificationPolicy: { evaluatorAgentDefinitionRevisionId: evaluator.id, runCompletionAcceptanceCriterionIds: [completion.criterionId], ...verificationPolicy },
+    verificationPolicy: { evaluatorAgentDefinitionRevisionId: evaluator.id, runCompletionAcceptanceCriterionIds: [completion.criterionId, ...extraCriterionIds].sort(), ...verificationPolicy },
     ...rest,
   });
   const message = h.stores.conversations.postMessage({ conversationId: conversation.id, author: "operator", content: "Add a --version flag to the CLI.", runId: created.run.id, invocationId: null });

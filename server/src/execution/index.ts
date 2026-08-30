@@ -79,4 +79,18 @@ export type { RunFinalizationFailure, RunFinalizationOutcome, RunFinalizationReq
 export { RUN_FINALIZATION_FAILURES } from "./ports/run-finalization-workspace.ts";
 export { RunSignoffService } from "./signoff.ts";
 export type { SignoffAcceptRequest, SignoffArtifactFacts, SignoffBlocker, SignoffOutcome, SignoffProjection, SignoffRequestChangesRequest, SignoffServiceDependencies } from "./signoff.ts";
+export type {
+  PublicationApplyOutcome,
+  PublicationApplyRequest,
+  PublicationPrepareOutcome,
+  PublicationPrepareRefusal,
+  PublicationPrepareRequest,
+  PublicationReleaseOutcome,
+  PublicationReleaseRequest,
+  PublicationWorkspaceIdentity,
+  PublicationWorkspacePort,
+} from "./ports/publication-workspace.ts";
+export { PUBLICATION_PREPARE_REFUSALS } from "./ports/publication-workspace.ts";
+export { RunPublicationService, PUBLICATION_DIAGNOSTIC_MEDIA_TYPE, PUBLICATION_DIAGNOSTIC_MAX_BYTES } from "./publication.ts";
+export type { PublicationAdvanceOutcome, PublicationArtifactFacts, PublicationProjection, PublicationRequestInput, PublicationResolutionOutcome, PublicationResolveInput, PublicationServiceDependencies } from "./publication.ts";
 export type { DeferredWork, NodeProjection, PerformedAction, SchedulerAction, SchedulerConfig, SchedulerOutcome, SchedulerProjection, SchedulerStopReason, WaitingCondition } from "./scheduler.ts";
