@@ -14,7 +14,7 @@ import { projectReadinessInput } from "./readiness-facts.ts";
 import type { ReadinessInput } from "./readiness.ts";
 
 /** The graph with no route-selection facts: what plain sequence transfers are computed from. */
-const input = (graph: PlanGraph): ReadinessInput => ({ graph, routeSelections: new Map() });
+const input = (graph: PlanGraph): ReadinessInput => ({ graph, routeSelections: new Map(), optimizerVerdicts: new Map() });
 
 const result = (summary: string, artifactIds: string[] = []): InvocationResult => ({ status: "completed", artifactIds: artifactIds as never, tasks: [], evidence: [], summary, openItems: [], blocker: null, runOutcome: null, routeSelection: null, evaluation: null });
 

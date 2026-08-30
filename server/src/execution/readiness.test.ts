@@ -13,7 +13,7 @@ import { EMPTY_MANIFEST_TEMPLATE, newId, ROOT_SOURCE_PATH, type Pattern, type Pl
 import { describe, expect, it } from "vitest";
 import { extendPlan, nodeInput, openHarness, patternDefinition, seedRun } from "../persistence/test-support.ts";
 import { projectReadinessInput } from "./readiness-facts.ts";
-import { decideReadiness, edgeActivation, evaluateReadiness, predecessorEdges, ReadinessFactError, schedulingOrder, successorEdges, SUPPORTED_EDGE_TYPES, SUPPORTED_PATTERNS, type ReadinessDecision, type ReadinessInput, type RouteSelectionFact } from "./readiness.ts";
+import { decideReadiness, edgeActivation, evaluateReadiness, predecessorEdges, ReadinessFactError, schedulingOrder, successorEdges, type OptimizerVerdictFact, type ReadinessDecision, type ReadinessInput, type RouteSelectionFact } from "./readiness.ts";
 
 const runId = newId("run");
 const agent = newId("agentDefinitionRevision");
@@ -28,6 +28,9 @@ interface NodeOptions {
   sourcePath?: string;
   /** Route branches: label → inline (`true`) or composite (`false`). */
   branches?: Record<string, boolean>;
+  /** An evaluator_optimizer node's round: `null` for an inline producer, a number for an evaluate-only node. */
+  round?: number | null;
+  maxRounds?: number;
 }
 
 function node(id: string, status: PlanNodeStatus, options: NodeOptions = {}): PlanNode {
@@ -48,15 +51,15 @@ function node(id: string, status: PlanNodeStatus, options: NodeOptions = {}): Pl
           : pattern === "coordinator_worker"
             ? { pattern: "coordinator_worker" as const, coordinator: { ...operation, role: "coordinator" as const }, worker: operation, bounds: { maxTasks: 2, maxConcurrentWorkers: 1, maxCoordinatorInvocations: 2 } }
             : pattern === "evaluator_optimizer"
-              ? { pattern: "evaluator_optimizer" as const, producer: operation, evaluator: { ...operation, role: "evaluator" as const, readOnly: true }, maxRounds: 2, round: null }
+              ? { pattern: "evaluator_optimizer" as const, producer: (options.round ?? null) === null ? operation : null, evaluator: { ...operation, role: "evaluator" as const, readOnly: true }, maxRounds: options.maxRounds ?? 2, round: options.round ?? null }
               : { pattern: "single" as const, role: "worker" as const, operation };
   return { ...base, kind: "pattern", pattern: shape.pattern, shape, input: { ...EMPTY_MANIFEST_TEMPLATE }, onAllocationExhausted: "fail", gateAcceptanceCriterionIds: [], scope: null } as PlanNode;
 }
 
-function edge(source: string, target: string, type: PlanEdgeType = "sequence", position = 0, label = "x"): PlanEdge {
+function edge(source: string, target: string, type: PlanEdgeType = "sequence", position = 0, label = "x", round = 2): PlanEdge {
   const base = { id: newId("planEdge"), runId, revisionNumber: 2, sourceNodeId: source as PlanNodeId, targetNodeId: target as PlanNodeId, position, createdAt: at };
   if (type === "branch") return { ...base, type, label };
-  if (type === "retry") return { ...base, type, round: 2 };
+  if (type === "retry") return { ...base, type, round };
   return { ...base, type };
 }
 
@@ -65,14 +68,15 @@ function graph(nodes: PlanNode[], edges: PlanEdge[] = []): PlanGraph {
 }
 
 const fact = (nodeId: string, selectedLabel: string): [PlanNodeId, RouteSelectionFact] => [nodeId as PlanNodeId, { planNodeId: nodeId as PlanNodeId, selectedLabel, evaluationId: newId("evaluation") }];
+const verdict = (nodeId: string, verdict: OptimizerVerdictFact["verdict"], round = 1, maxRounds = 2): [PlanNodeId, OptimizerVerdictFact] => [nodeId as PlanNodeId, { planNodeId: nodeId as PlanNodeId, round, maxRounds, evaluationId: newId("evaluation"), verdict }];
 
-function input(g: PlanGraph, facts: [PlanNodeId, RouteSelectionFact][] = []): ReadinessInput {
-  return { graph: g, routeSelections: new Map(facts) };
+function input(g: PlanGraph, facts: [PlanNodeId, RouteSelectionFact][] = [], verdicts: [PlanNodeId, OptimizerVerdictFact][] = []): ReadinessInput {
+  return { graph: g, routeSelections: new Map(facts), optimizerVerdicts: new Map(verdicts) };
 }
 
 const root = node("pn_root", "running", { sourcePath: ROOT_SOURCE_PATH });
 const decisionFor = (nodes: PlanNode[], edges: PlanEdge[], id: string, facts: [PlanNodeId, RouteSelectionFact][] = []): ReadinessDecision => evaluateReadiness(input(graph([root, ...nodes], edges), facts)).decisions.find((d) => d.nodeId === id)!;
-const by = (nodes: PlanNode[], edges: PlanEdge[], facts: [PlanNodeId, RouteSelectionFact][] = []) => Object.fromEntries(evaluateReadiness(input(graph([root, ...nodes], edges), facts)).decisions.map((d) => [d.nodeId, d]));
+const by = (nodes: PlanNode[], edges: PlanEdge[], facts: [PlanNodeId, RouteSelectionFact][] = [], verdicts: [PlanNodeId, OptimizerVerdictFact][] = []) => Object.fromEntries(evaluateReadiness(input(graph([root, ...nodes], edges), facts, verdicts)).decisions.map((d) => [d.nodeId, d]));
 
 describe("readiness evaluator", () => {
   it("decides every predecessor-state combination of sequence edges from the graph alone", () => {
@@ -213,24 +217,85 @@ describe("readiness evaluator", () => {
     expect(() => evaluateReadiness(input(graph([root, node("pn_a", "succeeded"), node("pn_p", "pending")], [edge("pn_a", "pn_p", "fan_in")])))).toThrow(/receives a fan_in/);
   });
 
-  it("defers the later-phase Pattern and retry edges instead of scheduling them, and decides route, parallel, and coordinator_worker nodes like any other", () => {
-    expect(SUPPORTED_PATTERNS).toEqual(["single", "chain", "route", "parallel", "coordinator_worker"]);
-    expect(SUPPORTED_EDGE_TYPES).toEqual(["sequence", "branch", "fan_in"]);
+  it("decides every Pattern's node like any other, the evaluator_optimizer included, and a retry edge out of anything but an evaluate-only node is a contradiction", () => {
     const done = node("pn_done", "succeeded");
     const chain = node("pn_chain", "pending", { pattern: "chain" });
     const parallel = node("pn_parallel", "pending", { pattern: "parallel" });
     const route = node("pn_route", "pending", { pattern: "route" });
     const coordinator = node("pn_cw", "pending", { pattern: "coordinator_worker" });
     const optimizer = node("pn_eo", "pending", { pattern: "evaluator_optimizer" });
+    const decisions = by([done, chain, parallel, route, coordinator, optimizer], [edge("pn_done", "pn_chain"), edge("pn_done", "pn_parallel"), edge("pn_done", "pn_route"), edge("pn_done", "pn_cw"), edge("pn_done", "pn_eo")]);
+    for (const id of ["pn_chain", "pn_parallel", "pn_route", "pn_cw", "pn_eo"]) expect(decisions[id]).toEqual({ kind: "become_ready", nodeId: id, dependencyFailures: [] });
     const retried = node("pn_retried", "pending");
-    const decisions = by([done, chain, parallel, route, coordinator, optimizer, retried], [edge("pn_done", "pn_chain"), edge("pn_done", "pn_parallel"), edge("pn_done", "pn_route"), edge("pn_done", "pn_cw"), edge("pn_done", "pn_eo"), edge("pn_done", "pn_retried", "retry")]);
-    expect(decisions.pn_chain).toEqual({ kind: "become_ready", nodeId: "pn_chain", dependencyFailures: [] });
-    expect(decisions.pn_parallel).toEqual({ kind: "become_ready", nodeId: "pn_parallel", dependencyFailures: [] });
-    expect(decisions.pn_route).toEqual({ kind: "become_ready", nodeId: "pn_route", dependencyFailures: [] });
-    expect(decisions.pn_cw).toEqual({ kind: "become_ready", nodeId: "pn_cw", dependencyFailures: [] });
-    expect(decisions.pn_eo).toEqual({ kind: "deferred", nodeId: "pn_eo", reason: "later_phase_pattern", pattern: "evaluator_optimizer", edgeTypes: ["sequence"] });
-    expect(decisions.pn_retried).toEqual({ kind: "deferred", nodeId: "pn_retried", reason: "later_phase_edge", pattern: "single", edgeTypes: ["retry"] });
-    expect(() => edgeActivation(input(graph([root, done, retried], [edge("pn_done", "pn_retried", "retry")])), edge("pn_done", "pn_retried", "retry"))).toThrow(/later phase/);
+    expect(() => edgeActivation(input(graph([root, done, retried], [edge("pn_done", "pn_retried", "retry")])), edge("pn_done", "pn_retried", "retry"))).toThrow(/not an evaluate-only evaluator_optimizer node/);
+    // An inline optimizer node is not a retry source either, and a retry(r) edge must leave round r − 1.
+    const inline = node("pn_inline", "succeeded", { pattern: "evaluator_optimizer" });
+    expect(() => edgeActivation(input(graph([root, inline, retried], [edge("pn_inline", "pn_retried", "retry")]), [], [verdict("pn_inline", "pass")]), edge("pn_inline", "pn_retried", "retry"))).toThrow(/not an evaluate-only/);
+    const e1 = node("pn_e1", "succeeded", { pattern: "evaluator_optimizer", round: 1, maxRounds: 3 });
+    expect(() => edgeActivation(input(graph([root, e1, retried], [edge("pn_e1", "pn_retried", "retry", 0, "x", 3)]), [], [verdict("pn_e1", "fail", 1, 3)]), edge("pn_e1", "pn_retried", "retry", 0, "x", 3))).toThrow(/retry\(3\) edge out of round 1/);
+  });
+
+  it("activates a retry(round) edge from the recorded round verdict alone: a failed or inconclusive round delivers, a pass skips every later round", () => {
+    // E1 (evaluate-only, round 1 of 3) –retry(2)→ P2 → E2 (round 2) –retry(3)→ P3 → E3 (round 3); every E → S by sequence.
+    const e = (id: string, status: PlanNodeStatus, round: number) => node(id, status, { pattern: "evaluator_optimizer", round, maxRounds: 3 });
+    const p2 = node("pn_p2", "pending");
+    const p3 = node("pn_p3", "pending");
+    const s = node("pn_s", "pending");
+    const edges = [
+      edge("pn_e1", "pn_p2", "retry", 0, "x", 2),
+      edge("pn_p2", "pn_e2", "sequence"),
+      edge("pn_e2", "pn_p3", "retry", 0, "x", 3),
+      edge("pn_p3", "pn_e3", "sequence"),
+      edge("pn_e1", "pn_s", "sequence", 0),
+      edge("pn_e2", "pn_s", "sequence", 1),
+      edge("pn_e3", "pn_s", "sequence", 2),
+    ];
+    const world = (e1: PlanNodeStatus, e2: PlanNodeStatus, e3: PlanNodeStatus, p2s: PlanNodeStatus = "pending", p3s: PlanNodeStatus = "pending") => [e("pn_e1", e1, 1), { ...p2, status: p2s, endedAt: terminal(p2s) ? at : null, outputArtifactIds: p2s === "succeeded" ? [] : null } as PlanNode, e("pn_e2", e2, 2), { ...p3, status: p3s, endedAt: terminal(p3s) ? at : null, outputArtifactIds: p3s === "succeeded" ? [] : null } as PlanNode, e("pn_e3", e3, 3), s];
+    // Round 1 failed: exactly retry(2) delivers; E1's sequence edge is inactive; S waits for the later rounds.
+    const failed = by(world("succeeded", "pending", "pending"), edges, [], [verdict("pn_e1", "fail", 1, 3)]);
+    expect(failed.pn_p2).toEqual({ kind: "become_ready", nodeId: "pn_p2", dependencyFailures: [] });
+    expect(failed.pn_s).toEqual({ kind: "remain_pending", nodeId: "pn_s", awaiting: ["pn_e2", "pn_e3"] });
+    expect(edgeActivation(input(graph([root, ...world("succeeded", "pending", "pending")], edges), [], [verdict("pn_e1", "fail", 1, 3)]), edges[4]!)).toEqual({ kind: "inactive" });
+    expect(edgeActivation(input(graph([root, ...world("succeeded", "pending", "pending")], edges), [], [verdict("pn_e1", "fail", 1, 3)]), edges[0]!)).toEqual({ kind: "delivers" });
+    // Inconclusive continues like a failure.
+    expect(by(world("succeeded", "pending", "pending"), edges, [], [verdict("pn_e1", "inconclusive", 1, 3)]).pn_p2).toEqual({ kind: "become_ready", nodeId: "pn_p2", dependencyFailures: [] });
+    // Round 1 passed: retry(2) is inactive, so P2 is skipped; its exit E2 is skipped, retry(3) is inactive, P3 and E3 are skipped, and S becomes ready from E1 alone.
+    const passed = by(world("succeeded", "pending", "pending"), edges, [], [verdict("pn_e1", "pass", 1, 3)]);
+    expect(passed.pn_p2).toEqual({ kind: "become_skipped", nodeId: "pn_p2", cause: "all_predecessors_skipped", failed: [] });
+    expect(passed.pn_s).toEqual({ kind: "remain_pending", nodeId: "pn_s", awaiting: ["pn_e2", "pn_e3"] });
+    const later = by(world("succeeded", "skipped", "pending", "skipped"), edges, [], [verdict("pn_e1", "pass", 1, 3)]);
+    expect(later.pn_p3).toEqual({ kind: "become_skipped", nodeId: "pn_p3", cause: "all_predecessors_skipped", failed: [] });
+    expect(by(world("succeeded", "skipped", "skipped", "skipped", "skipped"), edges, [], [verdict("pn_e1", "pass", 1, 3)]).pn_s).toEqual({ kind: "become_ready", nodeId: "pn_s", dependencyFailures: [] });
+    // Round 2 passed after round 1 failed: S proceeds from E2 once E3 is skipped; E1's own sequence edge stays inactive, E2's delivers.
+    const g2 = graph([root, ...world("succeeded", "succeeded", "skipped", "succeeded", "skipped")], edges);
+    const v2 = [verdict("pn_e1", "fail", 1, 3), verdict("pn_e2", "pass", 2, 3)];
+    expect(evaluateReadiness(input(g2, [], v2)).decisions.find((d) => d.nodeId === "pn_s")).toEqual({ kind: "become_ready", nodeId: "pn_s", dependencyFailures: [] });
+    expect(edges.slice(4).map((x) => edgeActivation(input(g2, [], v2), x).kind)).toEqual(["inactive", "delivers", "inactive"]);
+    // An inactive retry path is skipped, never failed: a failed evaluate-only node (its Evaluator failed) is an ordinary dependency failure.
+    expect(by(world("failed", "pending", "pending"), edges).pn_p2).toEqual({ kind: "become_skipped", nodeId: "pn_p2", cause: "dependency_failed", failed: ["pn_e1"] });
+    expect(by(world("failed", "pending", "pending"), edges).pn_s).toMatchObject({ kind: "remain_pending" });
+    // A running evaluate-only node needs no fact yet.
+    expect(by(world("running", "pending", "pending"), edges).pn_p2).toEqual({ kind: "remain_pending", nodeId: "pn_p2", awaiting: ["pn_e1"] });
+  });
+
+  it("fails explicitly on a missing, contradictory, or historical optimizer verdict fact instead of guessing an activation", () => {
+    const e1 = node("pn_e1", "succeeded", { pattern: "evaluator_optimizer", round: 1, maxRounds: 3 });
+    const p2 = node("pn_p2", "pending");
+    const s = node("pn_s", "pending");
+    const edges = [edge("pn_e1", "pn_p2", "retry", 0, "x", 2), edge("pn_e1", "pn_s", "sequence")];
+    // Missing: a succeeded evaluate-only node without a verdict cannot activate either edge.
+    expect(() => evaluateReadiness(input(graph([root, e1, p2, s], edges)))).toThrow(/without a recorded round verdict/);
+    // Contradictory: the wrong round, the wrong maxRounds, a fact on a non-optimizer node, a fact keyed by another node, a passing inline node that did not pass.
+    expect(() => evaluateReadiness(input(graph([root, e1, p2, s], edges), [], [verdict("pn_e1", "fail", 2, 3)]))).toThrow(/of round 1 recorded a verdict for round 2/);
+    expect(() => evaluateReadiness(input(graph([root, e1, p2, s], edges), [], [verdict("pn_e1", "fail", 1, 2)]))).toThrow(/does not hold/);
+    expect(() => evaluateReadiness(input(graph([root, e1, p2, s], edges), [], [verdict("pn_e1", "fail", 1, 3), verdict("pn_s", "pass")]))).toThrow(/not an evaluator_optimizer node/);
+    expect(() => evaluateReadiness(input(graph([root, e1, p2, s], edges), [], [["pn_p2" as PlanNodeId, { planNodeId: "pn_e1" as PlanNodeId, round: 1, maxRounds: 3, evaluationId: newId("evaluation"), verdict: "fail" }]]))).toThrow(/keyed by/);
+    const inline = node("pn_inline", "succeeded", { pattern: "evaluator_optimizer" });
+    expect(() => evaluateReadiness(input(graph([root, inline, s], [edge("pn_inline", "pn_s")]), [], [verdict("pn_inline", "fail", 2, 2)]))).toThrow(/succeeded although its latest round verdict is fail/);
+    // A verdict of a node outside the current membership is inert: nothing it names is activated.
+    expect(by([node("pn_a", "succeeded"), s], [edge("pn_a", "pn_s")], [], [verdict("pn_gone", "fail", 1, 3)]).pn_s).toEqual({ kind: "become_ready", nodeId: "pn_s", dependencyFailures: [] });
+    // An inline node that succeeded on a pass delivers along its sequence edges; the fact is consistent.
+    expect(by([inline, s], [edge("pn_inline", "pn_s")], [], [verdict("pn_inline", "pass", 2, 2)]).pn_s).toEqual({ kind: "become_ready", nodeId: "pn_s", dependencyFailures: [] });
   });
 
   it("orders decisions by membership position then node id, and lists edges deterministically", () => {

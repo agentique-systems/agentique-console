@@ -167,7 +167,7 @@ describe("import boundaries", () => {
   });
 
   it("the scheduler, join settler, and Pattern runners import nothing legacy, poll nothing, and implement only the supported Patterns", () => {
-    const files = [...listFiles("server/src/execution/patterns", isCode), path.join(repoRoot, "server/src/execution/scheduler.ts"), path.join(repoRoot, "server/src/execution/join.ts"), path.join(repoRoot, "server/src/execution/readiness.ts"), path.join(repoRoot, "server/src/execution/readiness-facts.ts"), path.join(repoRoot, "server/src/execution/handoff-routing.ts"), path.join(repoRoot, "server/src/execution/integration-service.ts"), path.join(repoRoot, "server/src/execution/task-projection.ts"), path.join(repoRoot, "server/src/execution/task-proposals.ts"), path.join(repoRoot, "server/src/execution/runtime-tools.ts")];
+    const files = [...listFiles("server/src/execution/patterns", isCode), path.join(repoRoot, "server/src/execution/scheduler.ts"), path.join(repoRoot, "server/src/execution/join.ts"), path.join(repoRoot, "server/src/execution/readiness.ts"), path.join(repoRoot, "server/src/execution/readiness-facts.ts"), path.join(repoRoot, "server/src/execution/handoff-routing.ts"), path.join(repoRoot, "server/src/execution/integration-service.ts"), path.join(repoRoot, "server/src/execution/task-projection.ts"), path.join(repoRoot, "server/src/execution/task-proposals.ts"), path.join(repoRoot, "server/src/execution/runtime-tools.ts"), path.join(repoRoot, "server/src/execution/acceptance-checks.ts")];
     expect(files.length).toBeGreaterThan(5);
     for (const file of files) {
       for (const specifier of importsOf(file)) {
@@ -182,20 +182,35 @@ describe("import boundaries", () => {
       // Nothing schedules from a transcript, an Event replay, or a rendered position string.
       expect(text, rel(file)).not.toMatch(/journal\.read\(|renderPatternPosition|TRANSCRIPT_MEDIA_TYPE/);
     }
-    // Only the supported runners exist; evaluator_optimizer has no runner file and no runner registration.
+    // Every one of the six Patterns has a runner file and a runner registration; nothing is deferred.
     const runnerFiles = listFiles("server/src/execution/patterns", (f) => isCode(f) && !f.endsWith(".test.ts")).map((f) => path.basename(f)).sort();
-    expect(runnerFiles).toEqual(["chain.ts", "coordinator-worker.ts", "index.ts", "parallel.ts", "root.ts", "route.ts", "single.ts", "support.ts"]);
+    expect(runnerFiles).toEqual(["chain.ts", "coordinator-worker.ts", "evaluator-optimizer.ts", "index.ts", "parallel.ts", "root.ts", "route.ts", "single.ts", "support.ts"]);
     const registry = fs.readFileSync(path.join(repoRoot, "server/src/execution/patterns/index.ts"), "utf8");
-    for (const later of ["evaluator_optimizer"]) expect(registry).not.toMatch(new RegExp(`case "${later}"`));
-    for (const supported of ["single", "chain", "route", "parallel", "coordinator_worker"]) expect(registry).toMatch(new RegExp(`case "${supported}"`));
+    for (const supported of ["single", "chain", "route", "parallel", "coordinator_worker", "evaluator_optimizer"]) expect(registry).toMatch(new RegExp(`case "${supported}"`));
+    expect(`${registry}\n${fs.readFileSync(path.join(repoRoot, "server/src/execution/readiness.ts"), "utf8")}\n${fs.readFileSync(path.join(repoRoot, "server/src/execution/scheduler.ts"), "utf8")}`).not.toMatch(/later_phase|SUPPORTED_PATTERNS|SUPPORTED_EDGE_TYPES/);
     // The readiness evaluator is pure over the graph plus explicit facts: no persistence, provider, Workspace, clock, or id minting; the
-    // facts projection is the one reader of rows and reads only route-selection Evaluations (never a transcript, Handoff summary, or Event).
+    // facts projection is the one reader of rows and reads only route-selection and optimizer-verdict Evaluations (never a transcript,
+    // Handoff summary, or Event).
     const readiness = fs.readFileSync(path.join(repoRoot, "server/src/execution/readiness.ts"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
     expect(importsOf(path.join(repoRoot, "server/src/execution/readiness.ts"))).toEqual(["@agentique-console/core"]);
-    expect(readiness).not.toMatch(/\bstores\b|\bctx\b|clock\(|newId\(|\.ids\(|Date\.|journal|\.execute\(|\.prepare\(|\.apply\(/);
+    expect(readiness).not.toMatch(/\bstores\b|\bctx\b|clock\(|newId\(|\.ids\(|Date\.|journal|\.execute\(|\.prepare\(|\.apply\(|sourcePath/);
     const facts = fs.readFileSync(path.join(repoRoot, "server/src/execution/readiness-facts.ts"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
     expect(facts).toMatch(/stores\.evaluations\.routeSelectionsOf\(/);
+    expect(facts).toMatch(/stores\.evaluations\.optimizerVerdictsOf\(/);
     expect(facts).not.toMatch(/stores\.(invocations|handoffs|artifacts|tasks|decisions|runs)\b|journal|transcript|summary|artifacts\.read\(/);
+    // The evaluator_optimizer runner decides every round from Evaluation rows: never from a status alone, a summary, a transcript, an Event, or a source path.
+    const optimizer = fs.readFileSync(path.join(repoRoot, "server/src/execution/patterns/evaluator-optimizer.ts"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    expect(optimizer).not.toMatch(/journal\.read\(|\.summary\b|TRANSCRIPT_MEDIA_TYPE|artifacts\.read\(|result\.openItems|result\.blocker|sourcePath|setTimeout|setInterval/);
+    // The Acceptance Criterion execution port depends on core alone and names no persistence, storage, transcript, or Target write concept.
+    const checkPortFile = path.join(repoRoot, "server/src/execution/ports/acceptance-criterion-execution.ts");
+    expect(importsOf(checkPortFile)).toEqual(["@agentique-console/core"]);
+    const checkPort = fs.readFileSync(checkPortFile, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    expect(checkPort).not.toMatch(/PersistenceContext|\bStores\b|ArtifactStore|BlobStore|Database|better-sqlite3|drizzle|storageKey|\btx\b|transcript|continuation|artifactId|target/i);
+    // The check service records only ids, exit status, digest, size, and truncation outside the output Artifact: no output bytes reach an outcome or an Event.
+    const checkService = fs.readFileSync(path.join(repoRoot, "server/src/execution/acceptance-checks.ts"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    expect(checkService).toMatch(/if \(this\.ctx\.tx\.inTransaction\) throw/);
+    expect(checkService).not.toMatch(/journal\.read\(|transcript|TextDecoder|toString\(\)|summary/);
+    expect(checkService.slice(checkService.indexOf("export type AcceptanceCheckOutcome"), checkService.indexOf("export class AcceptanceCheckService"))).not.toMatch(/output|bytes|Uint8Array/);
     // A join never touches the executor, the governor, or a provider: no Invocation, Attempt, lease, or Usage.
     const join = fs.readFileSync(path.join(repoRoot, "server/src/execution/join.ts"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
     expect(join).not.toMatch(/executor|governor|provider|invocations\.create|createAttempt|tryAcquire|usage\.record|preparation/);

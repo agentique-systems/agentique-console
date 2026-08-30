@@ -31,11 +31,19 @@
  * - `fan_in` into a `join`: the join becomes ready when every fan-in source
  *   is terminal, skipped when every one was skipped; its policy is applied
  *   at settlement, never here;
- * - `retry(round)`: deferred to a later phase; the evaluator never invents
- *   its semantics.
+ * - `sequence` from an evaluate-only `evaluator_optimizer` node: as a
+ *   sequence edge, except that a succeeded node delivers only when its
+ *   recorded round verdict is `pass`; a `fail` or `inconclusive` verdict
+ *   (the node succeeded as a control node so its retry can be consumed)
+ *   makes the edge inactive;
+ * - `retry(round)` from an evaluate-only `evaluator_optimizer` node of round
+ *   `round - 1`: as a sequence edge, except that a succeeded node delivers
+ *   only when its recorded round verdict is `fail` or `inconclusive`, and a
+ *   `pass` makes the edge inactive — which skips every later unrolled round
+ *   through the ordinary all-inactive rule.
  *
- * Only the `evaluator_optimizer` Pattern remains deferred; every other
- * Pattern has a runner.
+ * Every Pattern has a runner and every edge type has activation semantics;
+ * nothing is deferred here.
  *
  * A pending pattern node with no predecessors becomes ready; with every edge
  * inactive it is skipped; with a failed edge it is skipped unless it was
@@ -47,20 +55,13 @@ import {
   InvariantViolationError,
   PLAN_NODE_MACHINE,
   type EvaluationId,
-  type Pattern,
   type PlanEdge,
-  type PlanEdgeType,
   type PlanGraph,
   type PlanNode,
   type PlanNodeId,
   type PlanNodeStatus,
+  type Verdict,
 } from "@agentique-console/core";
-
-/** The Patterns whose runners exist; every other Pattern is deferred, never falsely scheduled. */
-export const SUPPORTED_PATTERNS: readonly Pattern[] = ["single", "chain", "route", "parallel", "coordinator_worker"];
-
-/** The edge types whose readiness semantics are implemented; `retry` is deferred. */
-export const SUPPORTED_EDGE_TYPES: readonly PlanEdgeType[] = ["sequence", "branch", "fan_in"];
 
 /** The canonical route-selection fact of one route node, projected from its `route_selection` Evaluation. */
 export interface RouteSelectionFact {
@@ -70,15 +71,31 @@ export interface RouteSelectionFact {
 }
 
 /**
+ * The canonical overall verdict of one `evaluator_optimizer` node's latest
+ * judged round, projected from its `optimizer_verdict` Evaluation. `round`
+ * and `maxRounds` are explicit, so the fact is unambiguous for an inline node
+ * that judged several rounds and validates against an evaluate-only node's
+ * fixed round.
+ */
+export interface OptimizerVerdictFact {
+  planNodeId: PlanNodeId;
+  round: number;
+  maxRounds: number;
+  evaluationId: EvaluationId;
+  verdict: Verdict;
+}
+
+/**
  * Everything readiness decides from: the current graph and the explicit
  * canonical condition facts. `routeSelections` is keyed by route node id and
- * carries at most one selection per node. Later phases add the facts their
- * conditional edges need (a `retry(round)` edge reads the round's
- * Evaluation verdict) as further members of this input, never as queries.
+ * carries at most one selection per node; `optimizerVerdicts` is keyed by
+ * `evaluator_optimizer` node id and carries the node's latest round verdict.
+ * Facts are projected from canonical Evaluation rows, never queried here.
  */
 export interface ReadinessInput {
   graph: PlanGraph;
   routeSelections: ReadonlyMap<PlanNodeId, RouteSelectionFact>;
+  optimizerVerdicts: ReadonlyMap<PlanNodeId, OptimizerVerdictFact>;
 }
 
 /** A condition fact readiness needs is missing or contradicts the graph; a typed invariant failure, never guessed readiness. */
@@ -89,8 +106,6 @@ export class ReadinessFactError extends InvariantViolationError {
 }
 
 export type SkipCause = "all_predecessors_skipped" | "dependency_failed";
-
-export type DeferralReason = "later_phase_pattern" | "later_phase_edge";
 
 export type ReadinessDecision =
   /** Pending, and at least one current-revision predecessor has not ended. */
@@ -104,9 +119,7 @@ export type ReadinessDecision =
   /** `running` or `waiting`: its Pattern runner owns it. */
   | { kind: "active"; nodeId: PlanNodeId; status: "running" | "waiting" }
   /** Ended; nothing to decide. */
-  | { kind: "terminal"; nodeId: PlanNodeId; status: Extract<PlanNodeStatus, "succeeded" | "failed" | "cancelled" | "skipped"> }
-  /** Would be decided by an edge type or Pattern of a later phase; untouched now. */
-  | { kind: "deferred"; nodeId: PlanNodeId; reason: DeferralReason; pattern: Pattern | null; edgeTypes: PlanEdgeType[] };
+  | { kind: "terminal"; nodeId: PlanNodeId; status: Extract<PlanNodeStatus, "succeeded" | "failed" | "cancelled" | "skipped"> };
 
 export interface ReadinessEvaluation {
   runId: PlanGraph["runId"];
@@ -164,7 +177,33 @@ function selectionOf(input: ReadinessInput, node: PlanNode): { label: string; in
   return { label: binding.label, inline: binding.inline !== null };
 }
 
-/** Every recorded fact for a member must belong to a route node of the graph and name a bound label; facts for non-members are inert. */
+/** The immutable evaluator_optimizer shape of a node, or `null` for any other node. */
+function optimizerShapeOf(node: PlanNode): Extract<PlanNode, { kind: "pattern" }>["shape"] & { pattern: "evaluator_optimizer" } | null {
+  return node.kind === "pattern" && node.shape.pattern === "evaluator_optimizer" ? node.shape : null;
+}
+
+/**
+ * The round verdict of a succeeded evaluate-only `evaluator_optimizer` node,
+ * checked against the node it belongs to: present, of the node's fixed round
+ * and `maxRounds`. A succeeded evaluate-only node without a verdict is
+ * missing its fact.
+ */
+function verdictOf(input: ReadinessInput, node: PlanNode): OptimizerVerdictFact {
+  const shape = optimizerShapeOf(node);
+  if (shape === null) throw new ReadinessFactError(`PlanNode ${node.id} is not an evaluator_optimizer node and records no round verdict`, { nodeId: node.id });
+  const fact = input.optimizerVerdicts.get(node.id);
+  if (!fact) throw new ReadinessFactError(`evaluator_optimizer PlanNode ${node.id} succeeded without a recorded round verdict Evaluation`, { nodeId: node.id });
+  return fact;
+}
+
+/**
+ * Every recorded fact for a member must agree with the member it is keyed
+ * by: a route-selection fact belongs to a route node and names a bound label;
+ * an optimizer-verdict fact belongs to an `evaluator_optimizer` node, names
+ * its exact `maxRounds`, a round within it (the fixed round of an
+ * evaluate-only node), and never contradicts a succeeded inline node (which
+ * succeeds only on a pass). Facts for non-members are inert.
+ */
 function assertFactsConsistent(input: ReadinessInput, byId: ReadonlyMap<PlanNodeId, PlanNode>): void {
   for (const [nodeId, fact] of input.routeSelections) {
     if (fact.planNodeId !== nodeId) throw new ReadinessFactError(`route-selection fact keyed by ${nodeId} names PlanNode ${fact.planNodeId}`, { nodeId, factNodeId: fact.planNodeId });
@@ -172,6 +211,16 @@ function assertFactsConsistent(input: ReadinessInput, byId: ReadonlyMap<PlanNode
     if (!node) continue;
     if (node.kind !== "pattern" || node.shape.pattern !== "route") throw new ReadinessFactError(`PlanNode ${nodeId} is not a route node yet carries a route-selection fact`, { nodeId });
     if (!node.shape.branches.some((b) => b.label === fact.selectedLabel)) throw new ReadinessFactError(`route PlanNode ${nodeId} recorded selection ${fact.selectedLabel}, which its shape does not bind`, { nodeId, selectedLabel: fact.selectedLabel });
+  }
+  for (const [nodeId, fact] of input.optimizerVerdicts) {
+    if (fact.planNodeId !== nodeId) throw new ReadinessFactError(`optimizer-verdict fact keyed by ${nodeId} names PlanNode ${fact.planNodeId}`, { nodeId, factNodeId: fact.planNodeId });
+    const node = byId.get(nodeId);
+    if (!node) continue;
+    const shape = optimizerShapeOf(node);
+    if (shape === null) throw new ReadinessFactError(`PlanNode ${nodeId} is not an evaluator_optimizer node yet carries a round verdict fact`, { nodeId });
+    if (fact.maxRounds !== shape.maxRounds || fact.round < 1 || fact.round > shape.maxRounds) throw new ReadinessFactError(`evaluator_optimizer PlanNode ${nodeId} recorded a verdict for round ${fact.round} of ${fact.maxRounds}, which its shape (${shape.maxRounds} rounds) does not hold`, { nodeId, round: fact.round, maxRounds: fact.maxRounds, evaluationId: fact.evaluationId });
+    if (shape.round !== null && fact.round !== shape.round) throw new ReadinessFactError(`evaluate-only PlanNode ${nodeId} of round ${shape.round} recorded a verdict for round ${fact.round}`, { nodeId, round: fact.round, evaluationId: fact.evaluationId });
+    if (shape.round === null && node.status === "succeeded" && fact.verdict !== "pass") throw new ReadinessFactError(`inline evaluator_optimizer PlanNode ${nodeId} succeeded although its latest round verdict is ${fact.verdict}`, { nodeId, round: fact.round, evaluationId: fact.evaluationId });
   }
 }
 
@@ -183,7 +232,12 @@ export function edgeActivation(input: ReadinessInput, edge: PlanEdge): EdgeActiv
 
 function activation(input: ReadinessInput, byId: ReadonlyMap<PlanNodeId, PlanNode>, edge: PlanEdge): EdgeActivation {
   const source = member(input, byId, edge, edge.sourceNodeId);
-  if (edge.type === "retry") throw new ReadinessFactError(`PlanEdge ${edge.id} is a retry edge; its activation belongs to a later phase`, { edgeId: edge.id });
+  if (edge.type === "retry") {
+    // Validated from the graph before any status is read: a retry(round) edge leaves exactly the evaluate-only node of round − 1.
+    const shape = optimizerShapeOf(source);
+    if (shape === null || shape.round === null) throw new ReadinessFactError(`PlanEdge ${edge.id} is a retry edge out of ${source.id}, which is not an evaluate-only evaluator_optimizer node`, { edgeId: edge.id, nodeId: source.id });
+    if (shape.round !== edge.round - 1 || edge.round > shape.maxRounds) throw new ReadinessFactError(`PlanEdge ${edge.id} is a retry(${edge.round}) edge out of round ${shape.round} of ${shape.maxRounds}`, { edgeId: edge.id, nodeId: source.id, round: edge.round });
+  }
   if (!PLAN_NODE_MACHINE.isTerminal(source.status)) return { kind: "pending" };
   if (source.status === "skipped") return { kind: "inactive" };
   if (source.status === "failed" || source.status === "cancelled") return { kind: "failed", status: source.status };
@@ -198,9 +252,19 @@ function activation(input: ReadinessInput, byId: ReadonlyMap<PlanNodeId, PlanNod
       if (!binding || binding.inline !== null) throw new ReadinessFactError(`PlanEdge ${edge.id} names branch ${edge.label}, which route PlanNode ${source.id} does not bind as a composite branch`, { edgeId: edge.id, nodeId: source.id, label: edge.label });
       return selectionOf(input, source).label === edge.label ? { kind: "delivers" } : { kind: "inactive" };
     }
-    case "sequence":
+    case "retry": {
+      // The fact's round agrees with the immutable shape (checked in assertFactsConsistent); a pass deactivates the retry.
+      const fact = verdictOf(input, source);
+      if (fact.round !== edge.round - 1) throw new ReadinessFactError(`PlanEdge ${edge.id} is a retry(${edge.round}) edge but PlanNode ${source.id} recorded round ${fact.round}`, { edgeId: edge.id, nodeId: source.id, evaluationId: fact.evaluationId });
+      return fact.verdict === "pass" ? { kind: "inactive" } : { kind: "delivers" };
+    }
+    case "sequence": {
       if (source.kind === "pattern" && source.shape.pattern === "route") return selectionOf(input, source).inline ? { kind: "delivers" } : { kind: "inactive" };
+      const shape = optimizerShapeOf(source);
+      // An evaluate-only node that succeeded as a control node after a failed round delivers nothing forward; the retry edge carries the round on.
+      if (shape !== null && shape.round !== null) return verdictOf(input, source).verdict === "pass" ? { kind: "delivers" } : { kind: "inactive" };
       return { kind: "delivers" };
+    }
   }
 }
 
@@ -222,17 +286,11 @@ export function decideReadiness(input: ReadinessInput, nodeId: PlanNodeId): Read
 
 function decide(input: ReadinessInput, byId: ReadonlyMap<PlanNodeId, PlanNode>, node: PlanNode): ReadinessDecision {
   const incoming = predecessorEdges(input.graph, node.id);
-  const edgeTypes = [...new Set(incoming.map((edge) => edge.type))].sort();
   if (node.status === "ready") return { kind: "ready", nodeId: node.id };
   if (node.status === "running" || node.status === "waiting") return { kind: "active", nodeId: node.id, status: node.status };
   if (PLAN_NODE_MACHINE.isTerminal(node.status)) return { kind: "terminal", nodeId: node.id, status: node.status as Extract<PlanNodeStatus, "succeeded" | "failed" | "cancelled" | "skipped"> };
-  // Pending: a later-phase edge or Pattern is never decided here.
-  if (edgeTypes.some((type) => !SUPPORTED_EDGE_TYPES.includes(type))) {
-    return { kind: "deferred", nodeId: node.id, reason: "later_phase_edge", pattern: node.kind === "pattern" ? node.pattern : null, edgeTypes };
-  }
-  if (node.kind === "pattern" && !SUPPORTED_PATTERNS.includes(node.pattern)) return { kind: "deferred", nodeId: node.id, reason: "later_phase_pattern", pattern: node.pattern, edgeTypes };
   if (node.kind === "join") {
-    if (incoming.some((edge) => edge.type !== "fan_in")) throw new ReadinessFactError(`join PlanNode ${node.id} has a non-fan_in edge`, { nodeId: node.id, edgeTypes });
+    if (incoming.some((edge) => edge.type !== "fan_in")) throw new ReadinessFactError(`join PlanNode ${node.id} has a non-fan_in edge`, { nodeId: node.id, edgeTypes: [...new Set(incoming.map((edge) => edge.type))].sort() });
     if (incoming.length === 0) throw new ReadinessFactError(`join PlanNode ${node.id} has no fan_in predecessor`, { nodeId: node.id });
   } else if (incoming.some((edge) => edge.type === "fan_in")) {
     throw new ReadinessFactError(`pattern PlanNode ${node.id} receives a fan_in edge`, { nodeId: node.id });

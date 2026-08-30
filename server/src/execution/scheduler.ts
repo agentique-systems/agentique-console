@@ -56,7 +56,7 @@ import type { ResourceGovernor } from "./governor.ts";
 import { JoinNodeSettler, type JoinOutcome } from "./join.ts";
 import { runnerFor, type NodeAdvice, type PatternRunnerOutcome, type PatternRunners, type RootAdvice, type RootOutcome } from "./patterns/index.ts";
 import { projectReadinessInput } from "./readiness-facts.ts";
-import { decideReadiness, evaluateReadiness, type DeferralReason, type ReadinessDecision, type SkipCause } from "./readiness.ts";
+import { decideReadiness, evaluateReadiness, type ReadinessDecision, type SkipCause } from "./readiness.ts";
 
 export type SchedulerAction =
   /** The Run was `waiting` and work can proceed again: clear the exact reason. */
@@ -67,6 +67,8 @@ export type SchedulerAction =
   /** A running node prepares one more position: a parallel item, a Worker Task, a blocked position's successor, or (with `turn`) a Coordinator logical turn. */
   | { kind: "start_position"; nodeId: PlanNodeId; position: PatternPosition; turn?: CoordinatorPurpose }
   | { kind: "execute_invocation"; nodeId: PlanNodeId; invocationId: InvocationId; worktrees: number }
+  /** An evaluator_optimizer round's deterministic Acceptance Criteria run now, outside every transaction, through the check port. */
+  | { kind: "verify_node"; nodeId: PlanNodeId; round: number }
   | { kind: "settle_node"; nodeId: PlanNodeId; invocationId: InvocationId | null }
   /** A `ready` join executes deterministically: policy, index Artifact, terminal transition, edge Handoffs — in one transaction. */
   | { kind: "settle_join"; nodeId: PlanNodeId }
@@ -87,7 +89,7 @@ export interface WaitingCondition {
 
 export interface DeferredWork {
   nodeId: PlanNodeId;
-  reason: DeferralReason | "awaiting_gate_phase" | "awaiting_allocation_extension_phase";
+  reason: "awaiting_gate_phase" | "awaiting_allocation_extension_phase";
   pattern: Pattern | null;
 }
 
@@ -241,9 +243,6 @@ export class RunScheduler {
         case "become_skipped":
           actions.push({ kind: "skip_node", nodeId: node.id, cause: decision.cause, failed: decision.failed });
           continue;
-        case "deferred":
-          deferred.push({ nodeId: node.id, reason: decision.reason, pattern: decision.pattern });
-          continue;
         case "remain_pending":
         case "terminal":
           continue;
@@ -256,12 +255,7 @@ export class RunScheduler {
         if (decision.kind === "ready") actions.push({ kind: "settle_join", nodeId: node.id });
         continue;
       }
-      const runner = runnerFor(this.runners, node.pattern);
-      if (runner === null) {
-        deferred.push({ nodeId: node.id, reason: "later_phase_pattern", pattern: node.pattern });
-        continue;
-      }
-      const advice = runner.inspect(node.id, now);
+      const advice = runnerFor(this.runners, node.pattern).inspect(node.id, now);
       projection.advice = advice;
       switch (advice.kind) {
         case "start":
@@ -292,6 +286,9 @@ export class RunScheduler {
         case "settle":
           actions.push({ kind: "settle_node", nodeId: node.id, invocationId: advice.invocationId });
           break;
+        case "verify":
+          actions.push({ kind: "verify_node", nodeId: node.id, round: advice.round });
+          break;
         case "waiting":
           if (advice.cleared) actions.push({ kind: "resume_node", nodeId: node.id, reason: advice.reason });
           else {
@@ -313,9 +310,7 @@ export class RunScheduler {
     const members = new Set(graph.nodes.map((n) => n.id));
     for (const node of this.stores.plans.listNodes(runId)) {
       if (members.has(node.id) || node.kind !== "pattern" || PLAN_NODE_MACHINE.isTerminal(node.status) || node.sourcePath === ROOT_SOURCE_PATH) continue;
-      const runner = runnerFor(this.runners, node.pattern);
-      if (runner === null) continue;
-      const advice = runner.inspect(node.id, now);
+      const advice = runnerFor(this.runners, node.pattern).inspect(node.id, now);
       nodes.push({ nodeId: node.id, pattern: node.pattern, status: node.status, readiness: null, advice, current: false });
       if (advice.kind === "not_current" && advice.settle) actions.push({ kind: "settle_removed_node", nodeId: node.id, invocationId: advice.invocationId });
     }
@@ -447,19 +442,22 @@ export class RunScheduler {
       case "skip_node":
         return this.ctx.tx.write(() => this.#applyReadiness(runId, revision, action, meta));
       case "start_node":
-        return runnerFor(this.runners, action.pattern)!.start(action.nodeId, revision, meta);
+        return runnerFor(this.runners, action.pattern).start(action.nodeId, revision, meta);
       case "start_position":
-        return runnerFor(this.runners, this.patternOf(action.nodeId))!.startPosition(action.nodeId, revision, action.position, meta);
+        return runnerFor(this.runners, this.patternOf(action.nodeId)).startPosition(action.nodeId, revision, action.position, meta);
+      case "verify_node":
+        // Deterministic checks are external like a Changeset application: outside every transaction, recorded afterwards.
+        return this.runners.evaluatorOptimizer.verify(action.nodeId, revision, meta);
       case "settle_node":
-        return runnerFor(this.runners, this.patternOf(action.nodeId))!.settle(action.nodeId, revision, meta);
+        return runnerFor(this.runners, this.patternOf(action.nodeId)).settle(action.nodeId, revision, meta);
       case "settle_join":
         return this.joins.settle(action.nodeId, revision, meta);
       case "settle_removed_node":
-        return runnerFor(this.runners, this.patternOf(action.nodeId))!.settleRemoved(action.nodeId, meta);
+        return runnerFor(this.runners, this.patternOf(action.nodeId)).settleRemoved(action.nodeId, meta);
       case "resume_node":
-        return runnerFor(this.runners, this.patternOf(action.nodeId))!.resume(action.nodeId, revision, meta);
+        return runnerFor(this.runners, this.patternOf(action.nodeId)).resume(action.nodeId, revision, meta);
       case "wait_node":
-        return runnerFor(this.runners, this.patternOf(action.nodeId))!.markWaiting(action.nodeId, revision, action.reason, meta);
+        return runnerFor(this.runners, this.patternOf(action.nodeId)).markWaiting(action.nodeId, revision, action.reason, meta);
       case "settle_root":
         return this.runners.root.settle(runId, meta);
       case "execute_invocation": {
@@ -470,7 +468,7 @@ export class RunScheduler {
           return { kind: "prepared", attemptId: prepared.attempt.id };
         }
         if (prepared.kind === "capacity_refused") {
-          if (action.nodeId !== this.stores.plans.rootNode(runId).id) runnerFor(this.runners, this.patternOf(action.nodeId))!.markWaiting(action.nodeId, revision, "provider_capacity", meta);
+          if (action.nodeId !== this.stores.plans.rootNode(runId).id) runnerFor(this.runners, this.patternOf(action.nodeId)).markWaiting(action.nodeId, revision, "provider_capacity", meta);
           return { kind: "capacity_refused" };
         }
         return { kind: "not_permitted", reason: prepared.reason };

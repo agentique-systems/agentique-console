@@ -267,20 +267,17 @@ describe("RunScheduler", () => {
     }
   });
 
-  it("defers later-phase Patterns and Gate criteria with a typed stop reason, fails the Run when the root turn fails, and stops on a terminal Run", async () => {
+  it("defers Gate criteria with a typed stop reason, integrates the root's own Changeset, fails the Run when the root turn fails, and stops on a terminal Run", async () => {
     const h = openRuntimeHarness();
     try {
       const s = seedPlanningRuntime(h);
-      const { nodes } = planNodes(h, s, [{ pattern: "evaluator_optimizer", producer: { pattern: "single", operation: { agentDefinitionRevisionId: s.worker.id } }, evaluator: { agentDefinitionRevisionId: s.worker.id }, maxRounds: 2, allocation: { costUsd: 6, tokens: 60_000, attempts: 6 } }, single(s, "A")]);
-      const [coordinator, a] = nodes as [PlanNode, PlanNode];
+      const { nodes } = planNodes(h, s, [single(s, "A")]);
+      const a = nodes[0]!;
       h.executionWorkspace.nextChangeset = { afterSnapshot: fakeSnapshot("root"), diff: new TextEncoder().encode("+root"), empty: false };
       const outcome = await h.scheduler.advanceRun(s.created.run.id);
-      // A completes; the evaluator_optimizer node is deferred, never marked ready, running, or succeeded; the pass reports later-phase work.
-      expect(outcome.stop).toBe("unsupported");
-      expect(outcome.deferred).toEqual([{ nodeId: coordinator.id, reason: "later_phase_pattern", pattern: "evaluator_optimizer" }]);
-      expect(h.stores.plans.getNode(coordinator.id).status).toBe("pending");
+      expect(outcome.stop).toBe("quiescent");
+      expect(outcome.deferred).toEqual([]);
       expect(h.stores.plans.getNode(a.id).status).toBe("succeeded");
-      expect(h.stores.invocations.listByPlanNode(coordinator.id)).toEqual([]);
       // The root Orchestrator's own Changeset was integrated and the root stays running.
       expect(h.stores.changesets.listByRun(s.created.run.id).find((c) => c.invocationId === s.invocation.id)!.integrationStatus).toBe("integrated");
       expect(h.stores.plans.getNode(s.created.root.id).status).toBe("running");

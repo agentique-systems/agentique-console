@@ -24,13 +24,23 @@
  *   index Artifact to its aggregation Invocation;
  * - `worker_result`: a completed, integrated Worker Invocation of a
  *   coordinator_worker node → its node, carrying the Task's output
- *   Artifacts for the next Coordinator turn; one per completed current Task.
+ *   Artifacts for the next Coordinator turn; one per completed current Task;
+ * - `retry`: a succeeded evaluate-only evaluator_optimizer node whose round
+ *   verdict was `fail` or `inconclusive` → the entry node of the next
+ *   unrolled producer round, along the one active `retry(round)` edge,
+ *   carrying the judged candidate Artifacts;
+ * - `optimizer_candidate`: a completed producer round Invocation of an
+ *   inline evaluator_optimizer node → its node, carrying the round's
+ *   candidate Artifacts for that round's Evaluator;
+ * - `optimizer_feedback`: an inline evaluator_optimizer node's judged
+ *   candidate Artifacts of a failed round → its node, for the next producer
+ *   round; the verdict itself is a typed manifest input.
  * Which edges deliver is decided by the pure readiness evaluator over the
- * graph and its explicit condition facts; nothing here infers a selection.
- * Decision and approval continuations use the typed manifest inputs
- * instead; nothing here invents a narrative Handoff.
+ * graph and its explicit condition facts; nothing here infers a selection or
+ * a verdict. Decision and approval continuations use the typed manifest
+ * inputs instead; nothing here invents a narrative Handoff.
  */
-import { HANDOFF_MAX_SUMMARY_LENGTH, INVOCATION_MACHINE, isIncomingHandoffKey, PLAN_NODE_MACHINE, type ArtifactId, type Handoff, type Invocation, type PatternPlanNode, type PlanEdge, type PlanGraph, type PlanNode, type PlanNodeId, type RunId, type Task, type TaskId } from "@agentique-console/core";
+import { HANDOFF_MAX_SUMMARY_LENGTH, INVOCATION_MACHINE, isIncomingHandoffKey, PLAN_NODE_MACHINE, type ArtifactId, type Evaluation, type Handoff, type Invocation, type PatternPlanNode, type PlanEdge, type PlanGraph, type PlanNode, type PlanNodeId, type RunId, type Task, type TaskId } from "@agentique-console/core";
 import type { Stores } from "../persistence/stores/index.ts";
 import type { WriteOptions } from "../persistence/stores/support.ts";
 import { edgeActivation, predecessorEdges, successorEdges, type ReadinessInput } from "./readiness.ts";
@@ -137,6 +147,59 @@ export class HandoffRouter {
     );
   }
 
+  /** The internal optimizer transfer of round `round`'s candidate from its completed producer Invocation to the node, for the Evaluator. Idempotent by the round. */
+  ensureOptimizerCandidateHandoff(node: PatternPlanNode, producer: Invocation, options?: WriteOptions): EnsuredHandoff {
+    if (node.shape.pattern !== "evaluator_optimizer" || node.shape.producer === null) throw new Error(`PlanNode ${node.id} is not an inline evaluator_optimizer node`);
+    const position = producer.patternPosition;
+    if (position === null || position.kind !== "producer_round" || producer.planNodeId !== node.id) throw new Error(`Invocation ${producer.id} is not a producer round of PlanNode ${node.id}`);
+    if (producer.status !== "succeeded" || producer.result === null || producer.result.status !== "completed") throw new Error(`Invocation ${producer.id} did not complete; a candidate Handoff carries a completed result`);
+    return this.stores.handoffs.ensure(
+      {
+        runId: node.runId,
+        route: { kind: "optimizer_candidate", planNodeId: node.id, round: position.round },
+        source: { kind: "invocation", invocationId: producer.id },
+        target: { kind: "plan_node", planNodeId: node.id },
+        taskIds: [...producer.taskIds].sort(),
+        artifactIds: [...producer.result.artifactIds].sort(),
+        summary: boundedHandoffSummary(producer.result.summary),
+      },
+      options,
+    );
+  }
+
+  /**
+   * The internal optimizer transfer of a failed round's judged candidate Artifacts to the node, for the next producer
+   * round: from the round's Evaluator Invocation when it judged, from the node itself when the runtime derived the verdict
+   * from a deterministic failure. Idempotent by the round.
+   */
+  ensureOptimizerFeedbackHandoff(node: PatternPlanNode, verdict: Evaluation, options?: WriteOptions): EnsuredHandoff {
+    if (node.shape.pattern !== "evaluator_optimizer" || node.shape.producer === null) throw new Error(`PlanNode ${node.id} is not an inline evaluator_optimizer node`);
+    if (verdict.planNodeId !== node.id || verdict.context === null || verdict.context.kind !== "optimizer_verdict") throw new Error(`Evaluation ${verdict.id} is not a round verdict of PlanNode ${node.id}`);
+    if (verdict.verdict === "pass") throw new Error(`Evaluation ${verdict.id} passed; a feedback Handoff carries a failed round`);
+    return this.stores.handoffs.ensure(
+      {
+        runId: node.runId,
+        route: { kind: "optimizer_feedback", planNodeId: node.id, round: verdict.context.round },
+        source: verdict.producedBy.kind === "evaluator" ? { kind: "invocation", invocationId: verdict.producedBy.invocationId } : { kind: "plan_node", planNodeId: node.id },
+        target: { kind: "plan_node", planNodeId: node.id },
+        taskIds: [],
+        artifactIds: [...verdict.artifactIds].sort(),
+        summary: boundedHandoffSummary(`${node.title} round ${verdict.context.round} ${verdict.verdict}`),
+      },
+      options,
+    );
+  }
+
+  /** The candidate Handoff of an inline optimizer round, if it exists. */
+  optimizerCandidateHandoff(runId: RunId, planNodeId: PlanNodeId, round: number): Handoff | null {
+    return this.stores.handoffs.getByKey(runId, `optimizer_candidate:${planNodeId}:${round}`);
+  }
+
+  /** The feedback Handoff of an inline optimizer round, if it exists. */
+  optimizerFeedbackHandoff(runId: RunId, planNodeId: PlanNodeId, round: number): Handoff | null {
+    return this.stores.handoffs.getByKey(runId, `optimizer_feedback:${planNodeId}:${round}`);
+  }
+
   /** The Worker-result Handoff of one Task, if it exists. */
   workerResultHandoff(runId: RunId, planNodeId: PlanNodeId, taskId: TaskId): Handoff | null {
     return this.stores.handoffs.getByKey(runId, `worker_result:${planNodeId}:${taskId}`);
@@ -152,7 +215,7 @@ export class HandoffRouter {
     return this.incomingHandoffsFor(runId, planNodeId).filter((h) => h.status === "pending");
   }
 
-  /** Every non-cancelled edge Handoff (`sequence`, `branch`) addressed to a node, in creation order, whether or not an earlier Invocation already received it. */
+  /** Every non-cancelled edge Handoff (`sequence`, `branch`, `retry`) addressed to a node, in creation order, whether or not an earlier Invocation already received it. */
   incomingHandoffsFor(runId: RunId, planNodeId: PlanNodeId): Handoff[] {
     return this.stores.handoffs.listByTarget(runId, { kind: "plan_node", planNodeId }).filter((h) => h.status !== "cancelled" && isIncomingHandoffKey(h.handoffKey));
   }
@@ -168,11 +231,27 @@ export class HandoffRouter {
   }
 
   private ensureEdge(input: ReadinessInput, edge: PlanEdge, options?: WriteOptions): EnsuredHandoff | null {
-    if (edge.type !== "sequence" && edge.type !== "branch") return null;
+    if (edge.type !== "sequence" && edge.type !== "branch" && edge.type !== "retry") return null;
     const source = member(input.graph, edge.sourceNodeId);
     const target = member(input.graph, edge.targetNodeId);
     const activation = edgeActivation(input, edge);
     if (activation.kind === "pending" || activation.kind === "inactive") return null;
+    if (edge.type === "retry") {
+      // Delivers only from a succeeded evaluate-only node whose verdict failed (decided by the evaluator); carries the judged candidate.
+      if (activation.kind !== "delivers") return null;
+      return this.stores.handoffs.ensure(
+        {
+          runId: input.graph.runId,
+          route: { kind: "retry", sourceNodeId: source.id, targetNodeId: target.id, round: edge.round },
+          source: { kind: "plan_node", planNodeId: source.id },
+          target: { kind: "plan_node", planNodeId: target.id },
+          taskIds: [],
+          artifactIds: [...(source.outputArtifactIds ?? [])].sort(),
+          summary: boundedHandoffSummary(`${source.title} retry round ${edge.round}`),
+        },
+        options,
+      );
+    }
     if (edge.type === "branch") {
       if (activation.kind !== "delivers") return null;
       return this.stores.handoffs.ensure(

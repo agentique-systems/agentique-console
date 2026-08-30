@@ -1,15 +1,15 @@
 /**
  * The Pattern runners: `single` and `chain` over the shared sequential step
- * engine, `route` and `parallel` over the shared node support, plus the root
- * Orchestrator node's support, and `coordinator_worker` over the node
- * support plus the pure Task projection. `evaluator_optimizer` belongs to
- * a later phase and is never falsely scheduled: it has no runner and
- * `runnerFor` returns `null` for it.
+ * engine, `route`, `parallel`, `coordinator_worker` (with the pure Task
+ * projection), and `evaluator_optimizer` (with the deterministic check
+ * service) over the shared node support, plus the root Orchestrator node's
+ * support. Every one of the six Patterns has a runner.
  */
 import type { Pattern, PatternPosition, PlanNodeId, Timestamp } from "@agentique-console/core";
 import type { WriteOptions } from "../../persistence/stores/support.ts";
 import { ChainPatternRunner } from "./chain.ts";
 import { CoordinatorWorkerPatternRunner } from "./coordinator-worker.ts";
+import { EvaluatorOptimizerPatternRunner } from "./evaluator-optimizer.ts";
 import { ParallelPatternRunner } from "./parallel.ts";
 import { RootNodeSupport } from "./root.ts";
 import { RoutePatternRunner } from "./route.ts";
@@ -18,6 +18,7 @@ import type { NodeAdvice, PatternRunnerDependencies, PatternRunnerOutcome } from
 
 export { ChainPatternRunner } from "./chain.ts";
 export { CoordinatorWorkerPatternRunner } from "./coordinator-worker.ts";
+export { EvaluatorOptimizerPatternRunner } from "./evaluator-optimizer.ts";
 export { ParallelPatternRunner } from "./parallel.ts";
 export { RootNodeSupport } from "./root.ts";
 export type { RootAdvice, RootOutcome } from "./root.ts";
@@ -44,15 +45,24 @@ export interface PatternRunners {
   route: RoutePatternRunner;
   parallel: ParallelPatternRunner;
   coordinatorWorker: CoordinatorWorkerPatternRunner;
+  evaluatorOptimizer: EvaluatorOptimizerPatternRunner;
   root: RootNodeSupport;
 }
 
 export function createPatternRunners(deps: PatternRunnerDependencies): PatternRunners {
-  return { single: new SinglePatternRunner(deps), chain: new ChainPatternRunner(deps), route: new RoutePatternRunner(deps), parallel: new ParallelPatternRunner(deps), coordinatorWorker: new CoordinatorWorkerPatternRunner(deps), root: new RootNodeSupport(deps) };
+  return {
+    single: new SinglePatternRunner(deps),
+    chain: new ChainPatternRunner(deps),
+    route: new RoutePatternRunner(deps),
+    parallel: new ParallelPatternRunner(deps),
+    coordinatorWorker: new CoordinatorWorkerPatternRunner(deps),
+    evaluatorOptimizer: new EvaluatorOptimizerPatternRunner(deps),
+    root: new RootNodeSupport(deps),
+  };
 }
 
-/** The runner for a Pattern, or `null` when the Pattern belongs to a later phase. */
-export function runnerFor(runners: PatternRunners, pattern: Pattern): PatternRunner | null {
+/** The runner for a Pattern. */
+export function runnerFor(runners: PatternRunners, pattern: Pattern): PatternRunner {
   switch (pattern) {
     case "single":
       return runners.single;
@@ -64,7 +74,7 @@ export function runnerFor(runners: PatternRunners, pattern: Pattern): PatternRun
       return runners.parallel;
     case "coordinator_worker":
       return runners.coordinatorWorker;
-    default:
-      return null;
+    case "evaluator_optimizer":
+      return runners.evaluatorOptimizer;
   }
 }
