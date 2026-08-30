@@ -312,14 +312,14 @@ architecture corrects it before cutover, because nothing has shipped.
 | `requirement_revisions` | runtime (operator approval) | append-only per Conversation |
 | `requirement_status_changes` | runtime | append-only journal with Evidence |
 | `acceptance_criteria` | runtime (Orchestrator authoring) | attached to a Requirement or Task; revisioned with the Requirement |
-| `decisions` | runtime | one per Decision; kind, policy, request and resolution fields; append-only with supersession by id |
+| `decisions` | runtime | one per Decision; kind, policy, request and resolution fields, the typed `side_effect_approval` subject; append-only with supersession by id |
 | `tasks` | runtime | one per Task; the seven states; `replacesTaskId` |
 | `task_dependencies` | runtime | edges between Tasks of one Run |
 | `artifacts` | runtime | immutable metadata; blob store separate |
 | `handoffs` | runtime | immutable routing rows |
 | `agent_definitions` | runtime | one per logical id |
 | `agent_definition_revisions` | runtime | immutable; one per content hash under a logical id |
-| `invocations` | runtime | one per logical execution; role, purpose, `continuedFromInvocationId`, allocation source and final-reserve use (immutable), status; manifest immutable |
+| `invocations` | runtime | one per logical execution; role, purpose, `continuedFromInvocationId`, allocation source and final-reserve use (immutable), status with `blockedByDecisionId`, the Workspace cleanup obligation; manifest immutable |
 | `attempts` | runtime | one per provider execution; `kind`, `startMode`, `resumedFromAttemptId` |
 | `provider_continuations` | provider adapter | index keyed by Attempt; truncatable |
 | `context_manifests` | runtime | exactly one per Invocation; immutable |

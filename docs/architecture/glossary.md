@@ -296,7 +296,12 @@ affects. A Decision has a **kind** — `operator_choice`,
 (resolves only when the operator answers) or `use_default_after_deadline`
 (resolves to the recorded recommended option at a recorded deadline or
 deterministic activation condition; permitted for `operator_choice` only).
-A `requirement_waiver` is proposed by the Orchestrator, always
+A `side_effect_approval` carries a typed **subject** — the intercepted
+call's tool name, canonical call digest, call Artifact id, and originating
+Run, Plan Node, Invocation, and Attempt — with exactly the options
+`approve_once` and `deny`; the call's bytes exist only in the Artifact, and
+approval authorizes exactly that digest once without widening any Tool
+Policy. A `requirement_waiver` is proposed by the Orchestrator, always
 `operator_required`, resolved only by the operator, and never delegated or
 auto-resolved; its resolution records actor, rationale, Requirement id,
 timestamp, and optional Artifact ids, after which the runtime sets the
@@ -426,7 +431,12 @@ directly from the Run's final reserve, permitted only for the
 `final_synthesis` Orchestrator Invocation and the `run_completion` Gate
 Evaluator Invocation, each recorded as the Invocation's `finalReserveUse`
 and always attached to the root Plan Node), one or more Attempts, a
-status, Usage, and one typed result. New logical input always creates a new Invocation; an Invocation
+status (`pending`, `running`, `waiting`, and the terminal `blocked`,
+`succeeded`, `failed`, `cancelled` — `blocked` names the open
+`side_effect_approval` Decision that ended it), one Invocation-wide
+wall-clock deadline shared by every Attempt, a durable Execution Workspace
+cleanup obligation (`none`, `pending`, `released`), Usage, and one typed
+result. New logical input always creates a new Invocation; an Invocation
 never receives input after creation. An Invocation that logically follows
 an earlier one records `continuedFromInvocationId`. The root Plan Node owns
 a sequence of Orchestrator Invocations and a `coordinator_worker` node owns

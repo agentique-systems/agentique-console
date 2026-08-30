@@ -889,7 +889,15 @@ Purposes by role:
 | `worker` | `step` (single, chain, parallel item, aggregation, producer), `task` (coordinator-worker Task) |
 | `evaluator` | `select` (route selector), `evaluate` (evaluator-optimizer round, Gate evaluated criterion) |
 
-Invocation status: `pending | running | waiting | succeeded | failed | cancelled`.
+Invocation status: `pending | running | waiting | blocked | succeeded |
+failed | cancelled`. `waiting` is a pause after which the same Invocation
+can still start or continue (capacity, Budget, operator; §7.4); `blocked`
+is terminal: an `approval_required` capability call was intercepted, the
+provider execution is over, the Invocation records the open
+`side_effect_approval` Decision it is blocked on (`blockedByDecisionId`),
+and the logical continuation is a successor Invocation with
+`continuedFromInvocationId` set (§6.4). `blocked`, `succeeded`, `failed`,
+and `cancelled` are terminal.
 The `purpose` value set is closed: exactly the fourteen values in the table
 above, enforced by the `InvocationPurpose` union in `core/src/invocations.ts`
 and a database check constraint on `invocations.purpose`; each purpose is
@@ -1018,17 +1026,50 @@ produces a Changeset (§5, §9.1).
 
 Each capability tool carries a **Tool Policy** disposition from the Agent
 Definition revision: `allowed`, `denied`, or `approval_required`. An
-`approval_required` tool call is intercepted by the runtime, which requests
-a `side_effect_approval` Decision (§8.2) from the operator with the exact
-call, ends the Invocation `blocked` and `waiting`, and creates a new
-Invocation (purpose `decision_resolution` for the Orchestrator; the same
-purpose as the blocked Invocation otherwise, with
-`continuedFromInvocationId` set) when the Decision is answered. Built-in
-definitions mark destructive shell operations, network access outside
-declared MCP servers, and any operation on a path outside the worktree as
-`approval_required` or `denied`. Tool Policy, capability policy, worktree
-isolation, side-effect approval, and Gates are the safety mechanisms; there
-is no trust flag.
+`approval_required` tool call is intercepted at the provider boundary and
+ends the provider execution with the exact proposed call in the
+provider-neutral form (`ProposedToolCall`: the console's tool name and the
+call's input as plain JSON). The runtime then finalizes the Attempt and
+the interception in one transaction (§6.5): the Attempt ends `failed`
+(`tool_failure`, retry refused `approval_required`, detail naming the tool
+only); the call's **canonical bytes** — the canonical JSON of exactly
+`{ "input": …, "tool": … }` with keys sorted at every depth and no
+whitespace, bounded at 64 KiB — are stored as a content-addressed
+Artifact of media type `application/x-tool-call+json`, whose SHA-256 is
+the **call digest**; one open `side_effect_approval` Decision (§8.2) is
+requested with policy `operator_required`, the two stable options
+`approve_once` and `deny`, `affects` naming the Plan Node and the
+Invocation's Tasks, and a typed **subject** (tool, call digest, call
+Artifact id, originating Run, Plan Node, Invocation, and Attempt); the
+Invocation ends `blocked` on that Decision with its reservation released;
+its Tasks are `blocked` on the Decision; and its worktree cleanup
+obligation is due (§9.1). Two calls are the same call if and only if their
+canonical bytes are equal; a provider-specific display string is never
+used for equality or enforcement, and a call beyond the bound is a tool
+failure, never a truncated subject. The call bytes live only in the
+Artifact: Events, failure details, diagnostics, manifests, and views carry
+the digest, the Artifact id, and safe metadata.
+
+When the Decision is resolved the runtime creates the successor Invocation
+(purpose `decision_resolution` for the Orchestrator; the same purpose as
+the blocked Invocation otherwise) with `continuedFromInvocationId` set to
+the blocked Invocation and the resolution as typed logical input
+(`side_effect_approval_resolution`: Decision, blocked Invocation, Attempt,
+tool, digest, Artifact, outcome), validated against the canonical
+Decision. An `approve_once` resolution becomes one entry of the
+successor's manifest `approvedCalls` (Decision, tool, digest); a `deny`
+resolution is input and nothing more. **Approval authorizes only the
+exact tool and canonical call digest, once.** It changes neither the
+Agent Definition nor the effective Tool Policy (the tool stays
+`approval_required`), it authorizes no later or different call, and its
+enforcement belongs to the provider boundary — the adapter permits an
+`approval_required` call only when the canonical digest of the exact
+proposed call matches an unused `approvedCalls` entry — never to the
+model. Built-in definitions mark destructive shell operations, network
+access outside declared MCP servers, and any operation on a path outside
+the worktree as `approval_required` or `denied`. Tool Policy, capability
+policy, worktree isolation, side-effect approval, and Gates are the safety
+mechanisms; there is no trust flag.
 
 **Runtime tools** are the same for every role, restricted by role:
 
@@ -1118,13 +1159,18 @@ Invocation's Changeset through the execution-workspace port, and stores
 any continuation payload. *Finalize* (one transaction) stores the
 transcript Artifact, records every Usage row, records the Changeset,
 validates the candidate result, transitions the Attempt with its failure
-detail and retry decision, releases the lease exactly once, and settles
-the Invocation and its Tasks only when no retry remains — which releases
-the Invocation's reservation. Usage is therefore always recorded before
-the Invocation becomes terminal, and a finalization that fails is retried
-on the next call without repeating the provider call. Every executor
-operation is safe to repeat: it never creates a duplicate Attempt, lease,
-Usage row, or terminal Event.
+detail and retry decision, releases the lease exactly once, records an
+intercepted call's Artifact and Decision (§6.4), and settles the
+Invocation and its Tasks only when no retry remains — which releases the
+Invocation's reservation; the worktree release then follows the commit
+under the §9.1 ordering. Usage is therefore always recorded before the
+Invocation becomes terminal, and a finalization that fails is retried on
+the next call without repeating the provider call. The in-memory record
+of an executing Attempt is published only after the prepare transaction
+has committed: a callback failure, a rollback-only root, or a failed
+COMMIT leaves no such record, so the provider is never called for an
+Attempt that does not exist. Every executor operation is safe to repeat:
+it never creates a duplicate Attempt, lease, Usage row, or terminal Event.
 
 ### 6.6 Provider resumption
 
@@ -1217,10 +1263,10 @@ and no agent can.
   whose Usage has already exhausted the cost or token allocation is
   classified `allocation_exhausted` and refused; an `approval_required`
   capability call ends the Attempt `failed` (`tool_failure`) with the
-  refusal reason `approval_required` and leaves the Invocation `waiting`
-  on `decision` for the specification phase to create the
-  `side_effect_approval` Decision — no approval is invented and no
-  provider process waits. The decision is persisted on the Attempt with
+  refusal reason `approval_required` and ends the Invocation `blocked` on
+  the `side_effect_approval` Decision created in the same transaction
+  (§6.4) — no approval is invented, no provider process waits, and the
+  continuation is a successor Invocation. The decision is persisted on the Attempt with
   its exact `retryNotBefore`, and the Invocation's next Attempt is
   permitted only when that time has passed and the Invocation-wide
   deadline (§7.6) has not; a deadline timeout, a passed deadline, or a
@@ -1249,12 +1295,15 @@ A node or Invocation waits when it has requested an `operator_required`
 Decision that is unanswered, when its allocation is exhausted under policy
 `wait` or `extend` with no capacity available, when the resource governor
 has no lease to grant, or when the operator has paused the Run. Waiting is
-a recorded state with a recorded reason. A waiting Invocation's provider
-execution is ended; when the wait clears, the runtime creates a new
-Invocation with `continuedFromInvocationId` set and the resolution in its
-manifest (its initial Attempt `resumed` if §6.6 allows, otherwise
-`fresh`). Nothing waits by polling, and nothing waits inside a provider
-process.
+a recorded state with a recorded reason. An Invocation `waiting` before
+its provider execution started (capacity, Budget, operator) is the same
+Invocation once the wait clears. An Invocation whose provider execution
+ended on an intercepted `approval_required` call is not waiting: it is
+terminal, `blocked` on its `side_effect_approval` Decision (§6.1, §6.4),
+and when the Decision is resolved the runtime creates a new Invocation
+with `continuedFromInvocationId` set and the resolution in its manifest
+(its initial Attempt `resumed` if §6.6 allows, otherwise `fresh`).
+Nothing waits by polling, and nothing waits inside a provider process.
 
 ### 7.5 Progress
 
@@ -1636,6 +1685,26 @@ the operator; the runtime records the superseding Decision and creates a
   read-only worktree when concurrent writers exist.
 - The Workspace's own checkout and the Target are never modified by an
   Invocation.
+- **Worktree cleanup is a durable obligation** (`invocations.workspace_cleanup`:
+  `none | pending | released`, with `workspaceReleasedAt`). Preparation
+  (§6.1) calls the execution-workspace port's `prepare` inside its
+  transaction and records the obligation `pending` right after it, so a
+  rollback runs the port's `discard` and commits no obligation; a
+  read-only Invocation records `none` and never creates cleanup work. The
+  release ordering is fixed and its crash window is closed by
+  reconciliation: (1) the Invocation's terminal settlement (`blocked`,
+  `succeeded`, `failed`, or `cancelled`) commits; (2) the port's `release`
+  runs outside any transaction and must be idempotent; (3) the obligation
+  is recorded `released` in its own transaction with the
+  `invocation.workspace_released` Event. A release failure never changes
+  the canonical Attempt or Invocation outcome — it is reported as the
+  bounded `workspace_release_failed` diagnostic — and restart recovery
+  (§14) retries every obligation still `pending` on a terminal Invocation
+  after its canonical reconciliation; a crash between (2) and (3) is
+  closed by the same idempotent retry. A retryable Invocation never
+  releases its worktree between Attempts; repeated recovery and repeated
+  release are harmless. The manifest's worktree path is a rendering input,
+  never the record of the obligation.
 
 ### 9.2 Integration
 
@@ -1807,7 +1876,9 @@ mechanism, if ever added, is a new feature with its own design.
   they carry the Attempt id and nothing else about the system.
 - No Event, log line, or API response carries a provider continuation
   payload or storage key contents; at most the existence of an index row is
-  exposed.
+  exposed. Likewise no Event, failure detail, diagnostic, or manifest
+  carries the bytes of an intercepted tool call (§6.4): only its digest,
+  its Artifact id, and safe metadata.
 
 ## 14. Failure model
 
@@ -1826,7 +1897,7 @@ mechanism, if ever added, is a new feature with its own design.
 | Changeset conflict | Task created for the node owner; Gate blocked until resolved. |
 | Publish fails | Target untouched; Publication `failed`; a `publication_result` Orchestrator Invocation is created. |
 | Provider continuation payload missing, expired, or corrupt | The Attempt starts `fresh`; no other effect. |
-| Server restart | Recovery (`server/src/execution/recovery-service.ts`) runs once at startup in one transaction: every `pending` or `running` Attempt of the previous process is marked `interrupted` with its consumed Attempt kept and its durable retry decision recorded; every stale lease is released and the governor is rebuilt from canonical lease state; an Invocation with no Attempt remaining is `failed` with `allocation_exhausted` (its Task failing likewise); every other interrupted Invocation is left `running` with durable retry eligibility, `resumed` only where §6.6 permits and `fresh` when the payload is absent or invalid. Recovery is idempotent, reads no transcript and no provider message, and executes nothing: recoverable work is returned for an explicit execution call, which the scheduler drives. Worktrees are preserved and reattached by Invocation id; reservations are read as persisted. |
+| Server restart | Recovery (`server/src/execution/recovery-service.ts`) runs once at startup in one transaction: every `pending` or `running` Attempt of the previous process is marked `interrupted` with its consumed Attempt kept and its durable retry decision recorded; every stale lease is released and the governor is rebuilt from canonical lease state; an Invocation with no Attempt remaining is `failed` with `allocation_exhausted` (its Task failing likewise); every other interrupted Invocation is left `running` with durable retry eligibility under the same Invocation-wide deadline (§7.6), `resumed` only where §6.6 permits and `fresh` when the payload is absent or invalid. After that transaction recovery retries, outside any transaction, every worktree cleanup obligation still `pending` on a terminal Invocation (§9.1). Recovery is idempotent, reads no transcript and no provider message, and executes nothing: recoverable work is returned for an explicit execution call, which the scheduler drives. The worktree of a retry-eligible Invocation is preserved and reattached by Invocation id; reservations are read as persisted. |
 | Operator cancels a Run | All Attempts interrupted, all nodes `cancelled`, all reservations released, Integration Workspace left in place, Run `cancelled`. |
 | Operator pauses a Run | The scheduler stops starting Attempts for that Run; running Attempts are allowed to finish (`soft`) or interrupted (`hard`); Run `waiting` with reason `operator`. Other Runs are unaffected. |
 
