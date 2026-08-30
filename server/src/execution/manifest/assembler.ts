@@ -100,6 +100,8 @@ export class ContextManifestAssembler {
     const inputs = this.inputs(run, node, invocation, request.inputs, handoffs);
     const acceptanceCriteria = this.acceptanceCriteria(run, requirementRevisionId, requirements, tasks.map((t) => t.taskId), inputs);
     const approvalArtifactIds = inputs.flatMap((i) => (i.kind === "side_effect_approval_resolution" ? [i.callArtifactId] : []));
+    // The final report the operator reviewed is readable by the follow-up turn that answers a change request.
+    const signoffArtifactIds = inputs.flatMap((i) => (i.kind === "signoff_resolution" ? [i.reportArtifactId] : []));
     // An optimizer round's candidate and the Evidence Artifacts of its feedback are readable by id, like every Handoff Artifact.
     const optimizerArtifactIds = inputs.flatMap((i) => (i.kind === "optimizer_candidate" ? i.artifactIds : i.kind === "optimizer_feedback" ? i.evidence.flatMap((e) => (e.kind === "artifact" ? [e.artifactId] : e.kind === "command" ? [e.outputArtifactId] : [])) : []));
     // A Gate's candidate is readable by its Evaluator; a Gate result's candidate and its remediation Task's inputs (the judged and command-output
@@ -113,7 +115,7 @@ export class ContextManifestAssembler {
             ? [...i.artifactIds, ...i.evaluations.flatMap((e) => e.evidence.flatMap((v) => (v.kind === "artifact" ? [v.artifactId] : v.kind === "command" ? [v.outputArtifactId] : [])))]
             : [],
     );
-    const artifacts = this.artifacts(run, unique([...request.operationInput.artifactIds, ...handoffs.flatMap((h) => h.artifactIds), ...request.artifactIds, ...approvalArtifactIds, ...optimizerArtifactIds, ...gateArtifactIds, ...this.taskInputArtifacts(tasks.map((t) => t.taskId))]));
+    const artifacts = this.artifacts(run, unique([...request.operationInput.artifactIds, ...handoffs.flatMap((h) => h.artifactIds), ...request.artifactIds, ...approvalArtifactIds, ...optimizerArtifactIds, ...gateArtifactIds, ...signoffArtifactIds, ...this.taskInputArtifacts(tasks.map((t) => t.taskId))]));
     for (const id of request.operationInput.taskIds) {
       if (!invocation.taskIds.includes(id)) throw new InvariantViolationError(`operation input names Task ${id}, which Invocation ${invocation.id} does not own`);
     }
@@ -254,7 +256,7 @@ export class ContextManifestAssembler {
   private decisions(run: Run, node: PatternPlanNode, invocation: Invocation, requirements: ManifestRequirement[], taskIds: TaskId[], operationInput: ManifestTemplate, inputs: ManifestInput[], previousManifestAt: string | null): ManifestDecision[] {
     const requirementIds = new Set(requirements.map((r) => r.requirementId));
     const taskSet = new Set<string>(taskIds);
-    const named = new Set<DecisionId>([...operationInput.decisionIds, ...inputs.flatMap((i) => (i.kind === "decision_resolution" ? [i.decisionId] : []))]);
+    const named = new Set<DecisionId>([...operationInput.decisionIds, ...inputs.flatMap((i) => (i.kind === "decision_resolution" || i.kind === "signoff_resolution" ? [i.decisionId] : []))]);
     const all = this.stores.decisions.listByConversation(run.conversationId);
     const byIdMap = new Map(all.map((d) => [d.id, d] as const));
     for (const id of named) {
@@ -453,6 +455,36 @@ export class ContextManifestAssembler {
             if (this.stores.tasks.get(entry.taskId).runId !== run.id) throw new InvariantViolationError(`Task ${entry.taskId} belongs to another Run`);
           }
           for (const id of input.artifactIds) this.artifact(run, id);
+          break;
+        }
+        case "signoff_resolution": {
+          // The operator's request for changes (execution-model §10 `operator_signoff`), restated from rows: the canonical Signoff
+          // Resolution of this Run with outcome request_changes, its closed signoff Gate (failed changes_requested on this Decision),
+          // the operator-resolved Decision, the passed completion Gate, the verified Snapshot, the final report, and the operator's own
+          // message; delivered only to the root Orchestrator's decision_resolution turn.
+          if (invocation.role !== "orchestrator" || invocation.purpose !== "decision_resolution" || node.sourcePath !== ROOT_SOURCE_PATH) throw new InvariantViolationError(`Invocation ${invocation.id} is not the root Orchestrator's decision_resolution turn`);
+          const resolution = this.stores.signoffResolutions.get(input.signoffResolutionId);
+          if (resolution.runId !== run.id) throw new InvariantViolationError(`Signoff Resolution ${input.signoffResolutionId} belongs to another Run`);
+          if (resolution.outcome !== "request_changes" || resolution.gateId !== input.gateId || resolution.decisionId !== input.decisionId || resolution.operatorMessageId !== input.operatorMessageId) {
+            throw new InvariantViolationError(`signoff_resolution input disagrees with Signoff Resolution ${resolution.id}`, { signoffResolutionId: resolution.id });
+          }
+          if (resolution.followUpInvocationId !== null && resolution.followUpInvocationId !== invocation.id) throw new InvariantViolationError(`Signoff Resolution ${resolution.id} already continues in Invocation ${resolution.followUpInvocationId}`);
+          const gate = this.stores.gates.get(input.gateId);
+          if (gate.runId !== run.id || gate.kind !== "operator_signoff" || gate.status !== "failed" || gate.failure?.kind !== "changes_requested" || gate.failure.decisionId !== input.decisionId) {
+            throw new InvariantViolationError(`Gate ${input.gateId} is not the operator_signoff Gate closed on Decision ${input.decisionId}`, { gateId: input.gateId });
+          }
+          if (gate.completionGateId !== input.completionGateId || gate.snapshotId !== input.verifiedSnapshotId || gate.reportArtifactId !== input.reportArtifactId) throw new InvariantViolationError(`signoff_resolution input disagrees with the facts of Gate ${gate.id}`, { gateId: gate.id });
+          const decision = this.stores.decisions.get(input.decisionId);
+          if (decision.conversationId !== run.conversationId || decision.runId !== run.id || decision.kind !== "signoff") throw new InvariantViolationError(`Decision ${input.decisionId} is not a signoff Decision of Run ${run.id}`);
+          if (decision.status !== "resolved" || decision.resolution === null || decision.resolution.resolvedBy !== "operator" || decision.resolution.chosenOptionId !== "request_changes") throw new ValidationError(`Decision ${input.decisionId} was not resolved request_changes by the operator`);
+          const completion = this.stores.gates.get(input.completionGateId);
+          if (completion.runId !== run.id || completion.kind !== "run_completion" || completion.status !== "passed" || completion.reportArtifactId !== input.reportArtifactId) throw new InvariantViolationError(`Gate ${input.completionGateId} is not the passed run_completion Gate the signoff presented`, { gateId: input.completionGateId });
+          const snapshot = this.stores.snapshots.get(input.verifiedSnapshotId);
+          if (snapshot.workspaceId !== run.workspaceId) throw new InvariantViolationError(`Snapshot ${input.verifiedSnapshotId} belongs to another Workspace`);
+          this.artifact(run, input.reportArtifactId);
+          const message = this.stores.conversations.getMessage(input.operatorMessageId);
+          if (message.conversationId !== run.conversationId || message.author !== "operator") throw new InvariantViolationError(`ConversationMessage ${input.operatorMessageId} is not an operator message of this Conversation`);
+          if (!inputs.some((i) => i.kind === "operator_message" && i.conversationMessageId === input.operatorMessageId)) throw new InvariantViolationError(`the operator message ${input.operatorMessageId} of the change request is not delivered to Invocation ${invocation.id}`);
           break;
         }
         case "publication_result": {

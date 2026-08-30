@@ -35,6 +35,8 @@ import { HandoffRouter } from "./handoff-routing.ts";
 import { ChangesetIntegrationService } from "./integration-service.ts";
 import type { CollectedChangeset, ExecutionWorkspacePort, ExecutionWorkspaceRequest, PreparedExecutionWorkspace } from "./ports/execution-workspace.ts";
 import type { IntegrationApplyOutcome, IntegrationApplyRequest, IntegrationWorkspacePort } from "./ports/integration-workspace.ts";
+import type { RunFinalizationFailure, RunFinalizationOutcome, RunFinalizationRequest, RunFinalizationWorkspacePort } from "./ports/run-finalization-workspace.ts";
+import { RunSignoffService } from "./signoff.ts";
 import { createPatternRunners, type PatternRunners } from "./patterns/index.ts";
 import { RunScheduler, type SchedulerConfig } from "./scheduler.ts";
 import type { PreparedRunWorkspace, RunWorkspacePreparationPort, RunWorkspacePreparationRequest } from "./ports/workspace-preparation.ts";
@@ -115,6 +117,10 @@ export class FakeIntegrationWorkspace implements IntegrationWorkspacePort {
   readonly maxConcurrentByRun = new Map<string, number>();
   /** When set, the next apply records success in the fake (as if the external application happened) and then throws (a crash before persistence). */
   crashAfterApply = false;
+  /** The Snapshot each Run's Integration Workspace holds now (the last applied), what a finalization inspects. */
+  readonly currentByRun = new Map<string, SnapshotIdentity>();
+  /** The exact diff bytes applied into each Run's Integration Workspace, in apply order: what the base-to-final diff is made of. */
+  readonly appliedDiffsByRun = new Map<string, { changesetId: string; bytes: Uint8Array }[]>();
 
   constructor(
     private readonly digestOf: (bytes: Uint8Array) => string,
@@ -146,6 +152,8 @@ export class FakeIntegrationWorkspace implements IntegrationWorkspacePort {
       const current = request.currentSnapshot.kind === "git" ? request.currentSnapshot.commitId : request.currentSnapshot.contentDigest;
       const snapshot = bytes.byteLength === 0 ? request.currentSnapshot : fakeSnapshot(current, request.changesetId);
       this.applied.set(request.changesetId, snapshot);
+      this.currentByRun.set(request.runId, snapshot);
+      this.appliedDiffsByRun.set(request.runId, [...(this.appliedDiffsByRun.get(request.runId) ?? []), { changesetId: request.changesetId, bytes }]);
       if (this.crashAfterApply) {
         this.crashAfterApply = false;
         throw new Error("process died after applying the Changeset");
@@ -154,6 +162,67 @@ export class FakeIntegrationWorkspace implements IntegrationWorkspacePort {
     } finally {
       this.#inFlightByRun.set(request.runId, (this.#inFlightByRun.get(request.runId) ?? 1) - 1);
     }
+  }
+}
+
+/** What the fake finalization port observed about one inspection: safe facts only, never the diff bytes. */
+export interface ObservedFinalization {
+  runId: string;
+  /** Whether a database transaction was open while the Integration Workspace was inspected (`null` without a probe). */
+  inTransaction: boolean | null;
+  outcome: "inspected" | "failed";
+  byteSize: number;
+}
+
+/**
+ * A deterministic Run finalization port over the fake Integration Workspace:
+ * reports the Snapshot that Workspace holds now (the last applied one, or the
+ * base when nothing was applied; a drift a test injected otherwise), whether
+ * it is clean, and the exact base-to-final diff — the applied diffs in apply
+ * order — and records every call. It receives no persistence: only the
+ * request and, from the harness, a transaction-state probe.
+ */
+export class FakeRunFinalizationWorkspace implements RunFinalizationWorkspacePort {
+  readonly requests: RunFinalizationRequest[] = [];
+  readonly observed: ObservedFinalization[] = [];
+  /** Per Run, a Snapshot the Integration Workspace drifted to outside the runtime (a stray write); the next inspection reports it. */
+  readonly driftedTo = new Map<string, SnapshotIdentity>();
+  /** Runs whose Integration Workspace holds uncommitted changes. */
+  readonly dirtyRuns = new Set<string>();
+  /** When set, the next inspection reports this infrastructure failure. */
+  failNext: RunFinalizationFailure | null = null;
+  /** When set, the next inspection throws (an adapter crash). */
+  throwNext: Error | null = null;
+
+  constructor(
+    private readonly integration: FakeIntegrationWorkspace,
+    public transactionProbe: (() => boolean) | null = null,
+  ) {}
+
+  async inspect(request: RunFinalizationRequest): Promise<RunFinalizationOutcome> {
+    this.requests.push(request);
+    const inTransaction = this.transactionProbe?.() ?? null;
+    if (this.throwNext) {
+      const error = this.throwNext;
+      this.throwNext = null;
+      throw error;
+    }
+    if (this.failNext) {
+      const failure = this.failNext;
+      this.failNext = null;
+      this.observed.push({ runId: request.runId, inTransaction, outcome: "failed", byteSize: 0 });
+      return { kind: "failed", failure, message: `${failure} while inspecting the Integration Workspace` };
+    }
+    const currentSnapshot = this.driftedTo.get(request.runId) ?? this.integration.currentByRun.get(request.runId) ?? request.baseSnapshot;
+    const parts = (this.integration.appliedDiffsByRun.get(request.runId) ?? []).map((d) => d.bytes);
+    const diff = new Uint8Array(parts.reduce((n, p) => n + p.byteLength, 0));
+    let offset = 0;
+    for (const part of parts) {
+      diff.set(part, offset);
+      offset += part.byteLength;
+    }
+    this.observed.push({ runId: request.runId, inTransaction, outcome: "inspected", byteSize: diff.byteLength });
+    return { kind: "inspected", currentSnapshot, diff, workspace: { clean: !this.dirtyRuns.has(request.runId) } };
   }
 }
 
@@ -349,6 +418,9 @@ export interface RuntimeHarness extends Harness {
   executionWorkspace: FakeExecutionWorkspace;
   integrationWorkspace: FakeIntegrationWorkspace;
   integration: ChangesetIntegrationService;
+  finalizationWorkspace: FakeRunFinalizationWorkspace;
+  /** The operator signoff boundary (execution-model §10 `operator_signoff`). */
+  signoff: RunSignoffService;
   criterionExecution: FakeAcceptanceCriterionExecution;
   checks: AcceptanceCheckService;
   handoffs: HandoffRouter;
@@ -384,6 +456,8 @@ export interface RuntimeHarnessOptions {
   integrationWorkspace?: FakeIntegrationWorkspace;
   /** Reuse the fake check port of an earlier harness (its isolated views survive a process, stale ones included). */
   criterionExecution?: FakeAcceptanceCriterionExecution;
+  /** Reuse the fake finalization port of an earlier harness (its injected drift survives a process). */
+  finalizationWorkspace?: FakeRunFinalizationWorkspace;
   checks?: AcceptanceCheckConfig;
 }
 
@@ -409,12 +483,16 @@ export function openRuntimeHarness(options: RuntimeHarnessOptions = {}): Runtime
   criterionExecution.transactionProbe = () => h.ctx.tx.inTransaction;
   const checks = new AcceptanceCheckService(h.ctx, h.stores, criterionExecution, options.checks ?? TEST_ACCEPTANCE_CHECKS);
   const runners = createPatternRunners({ ctx: h.ctx, stores: h.stores, executor, preparation, integration, checks, governor, provider });
+  const finalizationWorkspace = options.finalizationWorkspace ?? new FakeRunFinalizationWorkspace(integrationWorkspace);
+  finalizationWorkspace.transactionProbe = () => h.ctx.tx.inTransaction;
   return {
     ...h,
     workspacePreparation,
     executionWorkspace,
     integrationWorkspace,
     integration,
+    finalizationWorkspace,
+    signoff: new RunSignoffService({ ctx: h.ctx, stores: h.stores, preparation, finalization: finalizationWorkspace }),
     criterionExecution,
     checks,
     handoffs: new HandoffRouter(h.stores),

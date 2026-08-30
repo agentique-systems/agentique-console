@@ -6,6 +6,7 @@ import {
   signoffResolutionInputSchema,
   signoffResolutionSchema,
   signoffSubjectOf,
+  type ConversationMessageId,
   type DecisionId,
   type GateId,
   type InvocationId,
@@ -137,6 +138,12 @@ export class SignoffResolutionStore {
   /** The resolution of a `signoff` Decision, or `null` while it is open; at most one exists (a database unique index). */
   byDecision(decisionId: DecisionId): SignoffResolution | null {
     const row = this.ctx.db.select().from(signoffResolutions).where(eq(signoffResolutions.decisionId, decisionId)).get();
+    return row ? toDomain(row) : null;
+  }
+
+  /** The `request_changes` resolution an operator message answered, or `null`; a message answers at most one (a database unique index). */
+  byOperatorMessage(operatorMessageId: ConversationMessageId): SignoffResolution | null {
+    const row = this.ctx.db.select().from(signoffResolutions).where(eq(signoffResolutions.operatorMessageId, operatorMessageId)).get();
     return row ? toDomain(row) : null;
   }
 

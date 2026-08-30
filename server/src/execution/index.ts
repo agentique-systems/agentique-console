@@ -75,4 +75,8 @@ export type { ChangesetContentFailure, IntegrationOutcome } from "./integration-
 export { ChainPatternRunner, CoordinatorWorkerPatternRunner, EvaluatorOptimizerPatternRunner, ParallelPatternRunner, PatternNodeSupport, RootNodeSupport, RoutePatternRunner, SinglePatternRunner, SequentialStepEngine, createPatternRunners, runnerFor } from "./patterns/index.ts";
 export type { NodeAdvice, PatternRunner, PatternRunnerDependencies, PatternRunnerOutcome, PatternRunners, RootAdvice, RootOutcome } from "./patterns/index.ts";
 export { RunScheduler, DEFAULT_SCHEDULER_CONFIG } from "./scheduler.ts";
+export type { RunFinalizationFailure, RunFinalizationOutcome, RunFinalizationRequest, RunFinalizationWorkspacePort } from "./ports/run-finalization-workspace.ts";
+export { RUN_FINALIZATION_FAILURES } from "./ports/run-finalization-workspace.ts";
+export { RunSignoffService } from "./signoff.ts";
+export type { SignoffAcceptRequest, SignoffArtifactFacts, SignoffBlocker, SignoffOutcome, SignoffProjection, SignoffRequestChangesRequest, SignoffServiceDependencies } from "./signoff.ts";
 export type { DeferredWork, NodeProjection, PerformedAction, SchedulerAction, SchedulerConfig, SchedulerOutcome, SchedulerProjection, SchedulerStopReason, WaitingCondition } from "./scheduler.ts";
