@@ -167,7 +167,7 @@ describe("import boundaries", () => {
   });
 
   it("the scheduler, join settler, and Pattern runners import nothing legacy, poll nothing, and implement only the supported Patterns", () => {
-    const files = [...listFiles("server/src/execution/patterns", isCode), path.join(repoRoot, "server/src/execution/scheduler.ts"), path.join(repoRoot, "server/src/execution/join.ts"), path.join(repoRoot, "server/src/execution/readiness.ts"), path.join(repoRoot, "server/src/execution/readiness-facts.ts"), path.join(repoRoot, "server/src/execution/handoff-routing.ts"), path.join(repoRoot, "server/src/execution/integration-service.ts"), path.join(repoRoot, "server/src/execution/task-projection.ts"), path.join(repoRoot, "server/src/execution/task-proposals.ts"), path.join(repoRoot, "server/src/execution/runtime-tools.ts"), path.join(repoRoot, "server/src/execution/acceptance-checks.ts"), path.join(repoRoot, "server/src/execution/gates.ts"), path.join(repoRoot, "server/src/execution/invocation-facts.ts"), path.join(repoRoot, "server/src/execution/patterns/root.ts"), path.join(repoRoot, "server/src/execution/completion.ts"), path.join(repoRoot, "server/src/execution/completion-requests.ts"), path.join(repoRoot, "server/src/execution/requirement-derivation.ts")];
+    const files = [...listFiles("server/src/execution/patterns", isCode), path.join(repoRoot, "server/src/execution/scheduler.ts"), path.join(repoRoot, "server/src/execution/join.ts"), path.join(repoRoot, "server/src/execution/readiness.ts"), path.join(repoRoot, "server/src/execution/readiness-facts.ts"), path.join(repoRoot, "server/src/execution/handoff-routing.ts"), path.join(repoRoot, "server/src/execution/integration-service.ts"), path.join(repoRoot, "server/src/execution/task-projection.ts"), path.join(repoRoot, "server/src/execution/task-proposals.ts"), path.join(repoRoot, "server/src/execution/runtime-tools.ts"), path.join(repoRoot, "server/src/execution/acceptance-checks.ts"), path.join(repoRoot, "server/src/execution/gates.ts"), path.join(repoRoot, "server/src/execution/invocation-facts.ts"), path.join(repoRoot, "server/src/execution/patterns/root.ts"), path.join(repoRoot, "server/src/execution/completion.ts"), path.join(repoRoot, "server/src/execution/completion-requests.ts"), path.join(repoRoot, "server/src/execution/requirement-derivation.ts"), path.join(repoRoot, "server/src/execution/signoff.ts")];
     expect(files.length).toBeGreaterThan(5);
     for (const file of files) {
       for (const specifier of importsOf(file)) {
@@ -241,6 +241,50 @@ describe("import boundaries", () => {
         expect(resolvesInto(file, specifier, "server/src/execution"), `${rel(file)} imports ${specifier}`).toBe(false);
       }
     }
+  });
+
+  it("signoff resolution reads rows only, inspects the Workspace through a read-only port, writes nothing outside the Run, and leaks no diff (invariants 16, 27)", () => {
+    const strip = (text: string) => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    const serviceFile = path.join(repoRoot, "server/src/execution/signoff.ts");
+    const service = strip(fs.readFileSync(serviceFile, "utf8"));
+    // Rows only: no transcript, Artifact content, result prose, Event replay, timestamp ordering, timer, or byte decoding decides anything.
+    expect(service).not.toMatch(/journal\.read\(|\.summary\b|TRANSCRIPT_MEDIA_TYPE|artifacts\.read\(|blobs\.|result\.openItems|result\.blocker|openedAt|closedAt|createdAt|setTimeout|setInterval|TextDecoder|worktreePath/);
+    // The external read runs outside every transaction and is refused inside one; nothing is polled.
+    expect(service).toMatch(/if \(ctx\.tx\.inTransaction\) throw/);
+    expect(service).toMatch(/await finalization\.inspect\(/);
+    // No mutation outside the Run: no Publication, no operator-branch operation, no provider strategy, no Target read.
+    const targetSafety = /\btarget\b|publish|publication|fast_forward|\bmerge\b|rebase|cherry|checkout|\bcommit\b|\bgit\b/i;
+    expect(service).not.toMatch(targetSafety);
+    // The final diff bytes reach the Artifact Store and nothing else: no outcome, projection, or Event type carries bytes.
+    const surface = service.slice(service.indexOf("export interface SignoffArtifactFacts"), service.indexOf("export class RunSignoffService"));
+    expect(surface).not.toMatch(/Uint8Array|bytes|\bdiff\b|content/);
+    const diffLines = service.split(/\r?\n/).filter((line) => /\bdiff\b/.test(line));
+    expect(diffLines).toHaveLength(1);
+    expect(diffLines[0]).toMatch(/artifacts\.create\(/);
+    const coreSignoff = strip(fs.readFileSync(path.join(repoRoot, "core/src/signoff.ts"), "utf8"));
+    expect(coreSignoff).not.toMatch(/content|bytes|Uint8Array|diff:/);
+    // The finalization port depends on core alone, names no persistence, storage, transcript, credential, or operator-branch concept, and exposes one read-only method.
+    const portFile = path.join(repoRoot, "server/src/execution/ports/run-finalization-workspace.ts");
+    expect(importsOf(portFile)).toEqual(["@agentique-console/core"]);
+    const port = strip(fs.readFileSync(portFile, "utf8"));
+    expect(port).not.toMatch(/PersistenceContext|\bStores\b|ArtifactStore|BlobStore|Database|better-sqlite3|drizzle|storageKey|\btx\b|transcript|continuation|artifactId|credential|token/i);
+    expect(port).not.toMatch(targetSafety);
+    const portMethods = (port.match(/export interface RunFinalizationWorkspacePort \{([\s\S]*?)\n\}/)?.[1] ?? "").match(/^\s*\w+\(.*\).*;$/gm) ?? [];
+    expect(portMethods.map((m) => m.trim())).toEqual(["inspect(request: RunFinalizationRequest): Promise<RunFinalizationOutcome>;"]);
+    const request = port.match(/export interface RunFinalizationRequest \{([\s\S]*?)\n\}/)?.[1] ?? "";
+    expect(request).not.toMatch(/store|blob|artifact|lookup|write|apply/i);
+    // The fake port receives no persistence either.
+    const support = fs.readFileSync(path.join(repoRoot, "server/src/execution/test-support.ts"), "utf8");
+    const fake = support.slice(support.indexOf("export class FakeRunFinalizationWorkspace"), support.indexOf("export class FakeExecutionWorkspace"));
+    expect(fake.length).toBeGreaterThan(100);
+    expect(fake).not.toMatch(/\bstores\b|\bctx\b|\bblobs\b|artifacts\.|sha256Hex|BlobStore|ArtifactStore/);
+    expect(strip(fake)).not.toMatch(targetSafety);
+    // Nothing in the execution boundary creates a Publication or writes the operator's branch; only the Publication store (a later phase's) records one.
+    for (const file of listFiles("server/src/execution", (f) => isCode(f) && !f.endsWith(".test.ts"))) {
+      expect(strip(fs.readFileSync(file, "utf8")), rel(file)).not.toMatch(/publications\.record\(|targetBeforeSnapshot|fast_forward/);
+    }
+    // No compatibility mechanism anywhere in the signoff path.
+    expect(`${service}\n${port}\n${coreSignoff}`).not.toMatch(/\b(legacy|compat\w*|fallback|shim|deprecated|feature.?flag)\b/i);
   });
 
   it("no execution code reads a transcript Artifact or blob to make a decision (invariant 6)", () => {
