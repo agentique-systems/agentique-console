@@ -89,7 +89,7 @@ describe("purposes", () => {
       taskIds: [],
       allocation: { costUsd: 1, tokens: 100, attempts: 2 },
     };
-    const synthesis = { ...base, role: "orchestrator", purpose: "final_synthesis", patternPosition: { kind: "orchestrator" }, allocationSource: "run_final_reserve", finalReserveUse: "final_synthesis" };
+    const synthesis = { ...base, role: "orchestrator", purpose: "final_synthesis", patternPosition: { kind: "orchestrator" }, gateId: newId("gate"), allocationSource: "run_final_reserve", finalReserveUse: "final_synthesis" };
     const completion = { ...base, role: "evaluator", purpose: "evaluate", patternPosition: null, gateId: newId("gate"), allocationSource: "run_final_reserve", finalReserveUse: "run_completion" };
     expect(invocationInputSchema.safeParse(synthesis).success).toBe(true);
     expect(invocationInputSchema.safeParse(completion).success).toBe(true);
@@ -225,7 +225,7 @@ describe("attempts", () => {
     expect(attemptSchema.safeParse(terminal).success).toBe(true);
     // A running Attempt carries neither; a succeeded Attempt carries neither.
     expect(attemptSchema.safeParse({ ...terminal, status: "running", failureClass: null, endedAt: null }).success).toBe(false);
-    const result = { status: "completed", artifactIds: [], tasks: [], evidence: [], summary: "ok", openItems: [], blocker: null, runOutcome: null, routeSelection: null, evaluation: null };
+    const result = { status: "completed", artifactIds: [], tasks: [], evidence: [], summary: "ok", openItems: [], blocker: null, runOutcome: null, routeSelection: null, evaluation: null, finalReport: null };
     expect(attemptSchema.safeParse({ ...terminal, status: "succeeded", failureClass: null, failureDetail: null, retryDecision: null, result }).success).toBe(true);
     expect(attemptSchema.safeParse({ ...terminal, status: "succeeded", failureClass: null, failureDetail: null, result }).success).toBe(false);
     // The decision's reason agrees with its permission and a refusal carries no notBefore.

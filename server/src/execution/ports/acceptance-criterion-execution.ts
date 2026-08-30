@@ -36,11 +36,12 @@ import type { AcceptanceCriterionId, GateId, PlanNodeId, RunId, SnapshotIdentity
 
 export interface AcceptanceCriterionExecutionRequest {
   runId: RunId;
-  planNodeId: PlanNodeId;
+  /** The Plan Node whose round or `node_exit` Gate the check belongs to; `null` for a Run-level `run_completion` Gate check. */
+  planNodeId: PlanNodeId | null;
   acceptanceCriterionId: AcceptanceCriterionId;
   /** The optimizer round the check belongs to; `null` for a Gate check. */
   round: number | null;
-  /** The `node_exit` Gate the check belongs to; `null` for an optimizer round's check. Exactly one of `round` and `gateId` is set. */
+  /** The `node_exit` or `run_completion` Gate the check belongs to; `null` for an optimizer round's check. Exactly one of `round` and `gateId` is set. */
   gateId: GateId | null;
   command: string;
   expectedExitCode: number;

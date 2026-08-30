@@ -207,7 +207,7 @@ describe("node_exit Gate remediation", () => {
   it("fails the node with gate_cycles_exhausted, without a further Task or waiver, when the last permitted Gate cycle fails", async () => {
     const h = openRuntimeHarness({ governor: WIDE_GOVERNOR });
     try {
-      const s = seedPlanningRuntime(h, { verificationPolicy: { evaluatorAgentDefinitionRevisionId: null, maxNodeGateCycles: 2 } });
+      const s = seedPlanningRuntime(h, { verificationPolicy: { evaluatorAgentDefinitionRevisionId: null, maxNodeGateCycles: 2, maxRunCompletionCycles: 3 } });
       const criteria = seedCriteria(h, s, { deterministic: 1 });
       const { nodes } = planNodes(h, s, [singleExpression(s, "A", { gate: criteria.all })]);
       const node = nodes[0]!;

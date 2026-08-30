@@ -7,7 +7,7 @@ import {
   type ToolPolicy,
   type WorkspaceCapabilityPolicy,
 } from "./agents.ts";
-import type { InvocationRole } from "./invocations.ts";
+import type { InvocationPurpose, InvocationRole } from "./invocations.ts";
 
 /**
  * The role policy of execution-model §6.4, applied to provider capabilities:
@@ -29,6 +29,24 @@ export const ROLE_CAPABILITY_POLICY: Readonly<Record<InvocationRole, RoleCapabil
   evaluator: { tools: READ_ONLY_CAPABILITY_TOOLS, mcpServers: false },
 };
 
+/**
+ * Purposes whose Invocations are read-only whatever the role holds
+ * (execution-model §10): the Orchestrator's `final_synthesis` turn runs after
+ * verification and must not change the verified state, so it holds only the
+ * read-only tools and no MCP server — a policy the runtime computes and
+ * persists in the manifest, never a prompt instruction.
+ */
+export const READ_ONLY_PURPOSES = ["final_synthesis"] as const satisfies readonly InvocationPurpose[];
+
+/** The effective capability policy of a role narrowed by the Invocation's purpose. */
+export function capabilityPolicyFor(role: InvocationRole, purpose: InvocationPurpose | null): RoleCapabilityPolicy {
+  const rolePolicy = ROLE_CAPABILITY_POLICY[role];
+  if (purpose !== null && (READ_ONLY_PURPOSES as readonly string[]).includes(purpose)) {
+    return { tools: rolePolicy.tools === null ? READ_ONLY_CAPABILITY_TOOLS : rolePolicy.tools.filter((tool) => (READ_ONLY_CAPABILITY_TOOLS as readonly string[]).includes(tool)), mcpServers: false };
+  }
+  return rolePolicy;
+}
+
 /** The effective provider capability policy of one Attempt. */
 export interface EffectiveCapabilityPolicy {
   /** Tools and MCP servers the provider may expose: every declared tool whose effective disposition is not `denied`. */
@@ -46,17 +64,18 @@ function narrow(current: ToolDisposition, by: ToolDisposition): ToolDisposition 
 /**
  * `Agent Definition capabilities ∩ role policy ∩ Workspace policy`, per tool:
  * the definition's disposition (default `allowed` for a declared tool with no
- * entry), narrowed to `denied` by a role that does not hold the tool or a
- * Workspace that denies it, and to `approval_required` by a Workspace that
- * requires approval. A disposition is never widened, and
- * `approval_required` is never read as `allowed`.
+ * entry), narrowed to `denied` by a role (or a read-only purpose) that does
+ * not hold the tool or a Workspace that denies it, and to
+ * `approval_required` by a Workspace that requires approval. A disposition
+ * is never widened, and `approval_required` is never read as `allowed`.
  */
 export function effectiveCapabilityPolicy(
   revision: Pick<AgentDefinitionRevision, "capabilities" | "toolPolicy">,
   role: InvocationRole,
   workspace: WorkspaceCapabilityPolicy,
+  purpose: InvocationPurpose | null = null,
 ): EffectiveCapabilityPolicy {
-  const rolePolicy = ROLE_CAPABILITY_POLICY[role];
+  const rolePolicy = capabilityPolicyFor(role, purpose);
   const toolPolicy: ToolPolicy = {};
   for (const tool of [...revision.capabilities.tools].sort()) {
     let disposition: ToolDisposition = revision.toolPolicy[tool] ?? "allowed";

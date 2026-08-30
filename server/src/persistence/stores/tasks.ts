@@ -4,6 +4,7 @@ import {
   ConflictError,
   InvariantViolationError,
   parseOrThrow,
+  ROOT_SOURCE_PATH,
   TASK_MACHINE,
   taskDependencySchema,
   taskInputSchema,
@@ -77,11 +78,15 @@ export class TaskStore {
       }
       const gateId = valid.gateId ?? null;
       if (gateId !== null) {
-        // A Gate remediation Task (execution-model §10) addresses a failed Gate of the same Run on the Task's own node, once.
-        const gate = requireRow(this.ctx.db.select({ runId: gates.runId, planNodeId: gates.planNodeId, status: gates.status }).from(gates).where(eq(gates.id, gateId)).get(), "Gate", gateId);
+        // A Gate remediation Task (execution-model §10) addresses a failed Gate of the same Run, once: a node_exit Gate on the gated
+        // node, a run_completion Gate from the root Plan Node (the root Orchestrator remediates it).
+        const gate = requireRow(this.ctx.db.select({ runId: gates.runId, planNodeId: gates.planNodeId, kind: gates.kind, status: gates.status }).from(gates).where(eq(gates.id, gateId)).get(), "Gate", gateId);
         assertSameRun("Gate", gateId, gate.runId, run.id);
         if (gate.status !== "failed") throw new InvariantViolationError(`Gate ${gateId} is ${gate.status}; a remediation Task addresses a failed Gate`, { gateId });
-        if (gate.planNodeId !== valid.planNodeId) throw new InvariantViolationError(`Gate ${gateId} belongs to PlanNode ${gate.planNodeId ?? "(none)"}, not ${String(valid.planNodeId)}`, { gateId, planNodeId: valid.planNodeId });
+        if (gate.planNodeId === null) {
+          const node = valid.planNodeId === null ? null : requireRow(this.ctx.db.select({ sourcePath: planNodes.sourcePath }).from(planNodes).where(eq(planNodes.id, valid.planNodeId)).get(), "PlanNode", valid.planNodeId);
+          if (gate.kind !== "run_completion" || node === null || node.sourcePath !== ROOT_SOURCE_PATH) throw new InvariantViolationError(`Gate ${gateId} is a ${gate.kind} Run Gate; its remediation Task is tagged with the root Plan Node`, { gateId, planNodeId: valid.planNodeId });
+        } else if (gate.planNodeId !== valid.planNodeId) throw new InvariantViolationError(`Gate ${gateId} belongs to PlanNode ${gate.planNodeId}, not ${String(valid.planNodeId)}`, { gateId, planNodeId: valid.planNodeId });
         const existing = this.remediationTaskOf(gateId);
         if (existing !== null) throw new ConflictError(`Gate ${gateId} already has remediation Task ${existing.id}`, { gateId, taskId: existing.id });
       }

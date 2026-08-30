@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { allocationSchema, FINAL_RESERVE_USES, type Allocation, type FinalReserveUse } from "./budgets.ts";
+import { completionConditionSchema, finalSynthesisResultSchema, type CompletionCondition, type FinalSynthesisResult } from "./completion.ts";
 import { DECISION_KINDS, type DecisionKind } from "./decisions.ts";
 import { ValidationError } from "./errors.ts";
 import { handoffEndpointSchema, HANDOFF_MAX_SUMMARY_LENGTH, type HandoffEndpoint } from "./handoffs.ts";
@@ -9,6 +10,7 @@ import type {
   ArtifactId,
   AttemptId,
   CapacityLeaseId,
+  CompletionRequestId,
   ContextManifestId,
   ConversationMessageId,
   DecisionId,
@@ -239,9 +241,10 @@ export const evaluatorResultSchema: z.ZodType<EvaluatorResult> = z.strictObject(
 /**
  * The typed result every Attempt returns through `return_result`. The
  * purpose-specific members are typed and closed: `runOutcome` exists only
- * for the Orchestrator, `routeSelection` only for a route selector, and
- * `evaluation` only for an Evaluator of purpose `evaluate`; the last two are
- * mutually exclusive.
+ * for the Orchestrator, `routeSelection` only for a route selector,
+ * `evaluation` only for an Evaluator of purpose `evaluate`, and
+ * `finalReport` only for an Orchestrator of purpose `final_synthesis`; the
+ * purpose-specific members are mutually exclusive.
  */
 export interface InvocationResult {
   status: ResultStatus;
@@ -254,6 +257,8 @@ export interface InvocationResult {
   runOutcome: { kind: "infeasible"; evidence: Evidence[] } | null;
   routeSelection: RouteSelectionResult | null;
   evaluation: EvaluatorResult | null;
+  /** The bounded typed final report (execution-model §10), the only source of the final-report Artifact. */
+  finalReport: FinalSynthesisResult | null;
 }
 
 export const RESULT_MAX_SUMMARY_LENGTH = 500;
@@ -295,6 +300,8 @@ export const RESULT_VIOLATION_CODES = [
   "evaluation_evidence_missing",
   "evidence_not_permitted",
   "changeset_missing",
+  "final_report_missing",
+  "final_report_not_permitted",
   "status_incompatible",
 ] as const;
 export type ResultViolationCode = (typeof RESULT_VIOLATION_CODES)[number];
@@ -358,6 +365,7 @@ export const invocationResultSchema: z.ZodType<InvocationResult> = z
       .nullable(),
     routeSelection: routeSelectionResultSchema.nullable(),
     evaluation: evaluatorResultSchema.nullable(),
+    finalReport: finalSynthesisResultSchema.nullable(),
   })
   .refine((r) => (r.status === "blocked") === (r.blocker !== null), {
     message: "blocker is set exactly for a blocked result",
@@ -371,9 +379,17 @@ export const invocationResultSchema: z.ZodType<InvocationResult> = z
     message: "an evaluation is returned only by a completed result",
     path: ["evaluation"],
   })
-  .refine((r) => r.evaluation === null || r.routeSelection === null, {
-    message: "a route selection and an evaluation are mutually exclusive",
+  .refine((r) => r.finalReport === null || r.status === "completed", {
+    message: "a final report is returned only by a completed result",
+    path: ["finalReport"],
+  })
+  .refine((r) => [r.evaluation, r.routeSelection, r.finalReport].filter((member) => member !== null).length <= 1, {
+    message: "a route selection, an evaluation, and a final report are mutually exclusive",
     path: ["evaluation"],
+  })
+  .refine((r) => r.finalReport === null || r.runOutcome === null, {
+    message: "a final report never declares a Run outcome",
+    path: ["runOutcome"],
   });
 
 export interface Invocation {
@@ -391,11 +407,12 @@ export interface Invocation {
    */
   patternPosition: PatternPosition | null;
   /**
-   * The Gate a Gate Evaluator Invocation judges (execution-model §10): set
-   * exactly when `patternPosition` is `null`, immutable, and the only way
-   * the runtime learns which Gate an Invocation belongs to — never the
-   * manifest. An optimizer round's Evaluator holds its `evaluator_round`
-   * position and no Gate.
+   * The Gate a Gate-owned Invocation belongs to (execution-model §10): set
+   * exactly for a Gate Evaluator (`patternPosition` `null`) and for the
+   * Orchestrator's `final_synthesis` turn (the `run_completion` Gate it
+   * reports on), immutable, and the only way the runtime learns which Gate
+   * an Invocation belongs to — never the manifest. An optimizer round's
+   * Evaluator holds its `evaluator_round` position and no Gate.
    */
   gateId: GateId | null;
   taskIds: TaskId[];
@@ -519,17 +536,26 @@ export function patternPositionDefectsForInvocation(invocation: { role: Invocati
   return defects;
 }
 
+/** Whether an Invocation of this role and purpose is Gate-owned: a Gate Evaluator, or the Orchestrator's final-synthesis turn. */
+export function isGateOwnedPurpose(role: InvocationRole, purpose: InvocationPurpose): boolean {
+  return (role === "evaluator" && purpose === "evaluate") || (role === "orchestrator" && purpose === "final_synthesis");
+}
+
 /**
  * Why an Invocation's Gate ownership is inconsistent (execution-model §10):
  * a Gate Evaluator (role `evaluator`, purpose `evaluate`, no Pattern
- * position) names exactly one Gate and carries no Task; a positioned
+ * position) names exactly one Gate and carries no Task; the Orchestrator's
+ * `final_synthesis` turn (positioned at `orchestrator`) names the
+ * `run_completion` Gate it reports on and carries no Task; every other
  * Invocation — an optimizer round's Evaluator included — names none.
  */
 export function gateOwnershipDefects(invocation: { role: InvocationRole; purpose: InvocationPurpose; patternPosition: PatternPosition | null; gateId: GateId | null; taskIds: readonly TaskId[] }): string[] {
   const defects: string[] = [];
-  if ((invocation.patternPosition === null) !== (invocation.gateId !== null)) defects.push("a position-less Invocation is a Gate Evaluator and names its Gate; a positioned Invocation names no Gate");
-  if (invocation.gateId !== null && !(invocation.role === "evaluator" && invocation.purpose === "evaluate")) defects.push("only an Evaluator Invocation of purpose evaluate belongs to a Gate");
-  if (invocation.gateId !== null && invocation.taskIds.length > 0) defects.push("a Gate Evaluator carries no Task");
+  const synthesis = invocation.role === "orchestrator" && invocation.purpose === "final_synthesis";
+  if (!synthesis && (invocation.patternPosition === null) !== (invocation.gateId !== null)) defects.push("a position-less Invocation is a Gate Evaluator and names its Gate; a positioned Invocation names no Gate");
+  if (synthesis && invocation.gateId === null) defects.push("a final_synthesis turn names the run_completion Gate it reports on");
+  if (invocation.gateId !== null && !isGateOwnedPurpose(invocation.role, invocation.purpose)) defects.push("only an Evaluator Invocation of purpose evaluate or an Orchestrator final_synthesis turn belongs to a Gate");
+  if (invocation.gateId !== null && invocation.taskIds.length > 0) defects.push("a Gate-owned Invocation carries no Task");
   return defects;
 }
 
@@ -964,6 +990,22 @@ export interface ManifestArtifact {
   title: string | null;
 }
 
+/** One leaf Requirement's status as the final synthesis reports it, with the operator-resolved waiver Decision that established `waived`. */
+export interface FinalRequirementFact {
+  requirementId: RequirementId;
+  status: RequirementStatus;
+  waiverDecisionId: DecisionId | null;
+}
+
+/** One completion Evaluation as the final synthesis reports it: its verdict, who produced it, and its Evidence references. */
+export interface FinalEvaluationFact {
+  evaluationId: EvaluationId;
+  acceptanceCriterionId: AcceptanceCriterionId;
+  verdict: Verdict;
+  producedBy: "runtime" | "evaluator";
+  evidence: Evidence[];
+}
+
 /**
  * A queued logical input the runtime created the Invocation to receive
  * (execution-model §4.6): the operator's message for `operator_input`, a
@@ -995,9 +1037,32 @@ export type ManifestInput =
   /**
    * What a Gate Evaluator judges (execution-model §10), supplied by the runtime and never by the model: the Gate, its
    * kind, the pinned Snapshot, the exact candidate Artifact ids, and the evaluated Acceptance Criteria the result must
-   * cover exactly (deterministic criteria are checked by the runtime, never reported).
+   * cover exactly (deterministic criteria are checked by the runtime, never reported). A `run_completion` Gate's
+   * candidate additionally names the Completion Request, the pinned Requirement revision, and the canonical current
+   * Task ledger (ids, statuses, outputs); a `node_exit` Gate's names none of them.
    */
-  | { kind: "gate_candidate"; gateId: GateId; gateKind: GateKind; snapshotId: SnapshotId; artifactIds: ArtifactId[]; acceptanceCriterionIds: AcceptanceCriterionId[] }
+  | { kind: "gate_candidate"; gateId: GateId; gateKind: GateKind; snapshotId: SnapshotId; artifactIds: ArtifactId[]; acceptanceCriterionIds: AcceptanceCriterionId[]; completionRequestId: CompletionRequestId | null; requirementRevisionId: RequirementRevisionId | null; tasks: TaskLedgerEntry[] }
+  /**
+   * The canonical completion facts the Orchestrator's `final_synthesis` turn reports on (execution-model §10): the
+   * Completion Request and its passed `run_completion` Gate, the verified Snapshot and pinned Requirement revision, every
+   * leaf Requirement's status with its waiver Decision, every completion Evaluation with its verdict and Evidence, the
+   * current Task ledger, the candidate Artifact ids, the Run's Usage totals, the final reserve and its consumption, and
+   * the unresolved conditions (empty for a passing Gate). Never a transcript, a provider message, or an Event history.
+   */
+  | {
+      kind: "final_synthesis";
+      completionRequestId: CompletionRequestId;
+      gateId: GateId;
+      snapshotId: SnapshotId;
+      requirementRevisionId: RequirementRevisionId;
+      requirements: FinalRequirementFact[];
+      evaluations: FinalEvaluationFact[];
+      tasks: TaskLedgerEntry[];
+      artifactIds: ArtifactId[];
+      usage: Allocation;
+      finalReserve: { limit: Allocation; consumed: Allocation };
+      unresolved: CompletionCondition[];
+    }
   | { kind: "plan_revision"; accepted: boolean; revisionNumber: number | null; reasons: PlanRejectionReason[] }
   | { kind: "publication_result"; publicationId: PublicationId; outcome: PublicationOutcome }
   /** The canonical route-selection Evaluation of the route node an inline branch Invocation executes for (execution-model §5.3). */
@@ -1050,13 +1115,38 @@ export const manifestInputSchema: z.ZodType<ManifestInput> = z.discriminatedUnio
     evaluationIds: uniqueIds(idSchema("evaluation")),
     remediationTaskId: idSchema("task").nullable(),
   }),
+  z
+    .strictObject({
+      kind: z.literal("gate_candidate"),
+      gateId: idSchema("gate"),
+      gateKind: z.enum(GATE_KINDS),
+      snapshotId: idSchema("snapshot"),
+      artifactIds: uniqueIds(idSchema("artifact")),
+      acceptanceCriterionIds: uniqueIds(idSchema("acceptanceCriterion")).refine((ids) => ids.every((id, i) => i === 0 || ids[i - 1]! < id), { message: "acceptance criteria are ordered by id" }),
+      completionRequestId: idSchema("completionRequest").nullable(),
+      requirementRevisionId: idSchema("requirementRevision").nullable(),
+      tasks: z.array(taskLedgerEntrySchema).refine((tasks) => tasks.every((t, i) => i === 0 || tasks[i - 1]!.taskId < t.taskId), { message: "ledger entries are ordered by Task id" }),
+    })
+    .refine((i) => (i.gateKind === "run_completion") === (i.completionRequestId !== null && i.requirementRevisionId !== null), {
+      message: "a run_completion candidate names its Completion Request and pinned Requirement revision; a node_exit candidate names neither",
+      path: ["completionRequestId"],
+    })
+    .refine((i) => i.gateKind === "run_completion" || i.tasks.length === 0, { message: "only a run_completion candidate carries the Task ledger", path: ["tasks"] }),
   z.strictObject({
-    kind: z.literal("gate_candidate"),
+    kind: z.literal("final_synthesis"),
+    completionRequestId: idSchema("completionRequest"),
     gateId: idSchema("gate"),
-    gateKind: z.enum(GATE_KINDS),
     snapshotId: idSchema("snapshot"),
+    requirementRevisionId: idSchema("requirementRevision"),
+    requirements: z.array(z.strictObject({ requirementId: idSchema("requirement"), status: z.enum(REQUIREMENT_STATUSES), waiverDecisionId: idSchema("decision").nullable() })).refine((r) => r.every((f, i) => i === 0 || r[i - 1]!.requirementId < f.requirementId), { message: "requirement facts are ordered by id" }),
+    evaluations: z
+      .array(z.strictObject({ evaluationId: idSchema("evaluation"), acceptanceCriterionId: idSchema("acceptanceCriterion"), verdict: z.enum(VERDICTS), producedBy: z.enum(["runtime", "evaluator"]), evidence: z.array(evidenceSchema) }))
+      .refine((e) => e.every((f, i) => i === 0 || e[i - 1]!.evaluationId < f.evaluationId), { message: "evaluation facts are ordered by id" }),
+    tasks: z.array(taskLedgerEntrySchema).refine((tasks) => tasks.every((t, i) => i === 0 || tasks[i - 1]!.taskId < t.taskId), { message: "ledger entries are ordered by Task id" }),
     artifactIds: uniqueIds(idSchema("artifact")),
-    acceptanceCriterionIds: uniqueIds(idSchema("acceptanceCriterion")).refine((ids) => ids.every((id, i) => i === 0 || ids[i - 1]! < id), { message: "acceptance criteria are ordered by id" }),
+    usage: allocationSchema,
+    finalReserve: z.strictObject({ limit: allocationSchema, consumed: allocationSchema }),
+    unresolved: z.array(completionConditionSchema),
   }),
   z.strictObject({ kind: z.literal("plan_revision"), accepted: z.boolean(), revisionNumber: positiveCount.nullable(), reasons: z.array(planRejectionReasonSchema) }),
   z.strictObject({ kind: z.literal("publication_result"), publicationId: idSchema("publication"), outcome: z.enum(PUBLICATION_OUTCOMES) }),

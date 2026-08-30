@@ -31,6 +31,7 @@
  */
 import {
   MANIFEST_RENDERER_VERSION,
+  type CompletionCondition,
   renderPatternPosition,
   type AttemptFailureClass,
   type AttemptFailureDetail,
@@ -83,7 +84,19 @@ function renderInput(input: ManifestInput): string[] {
         `- gate_result ${input.gateId} ${input.gateKind} cycle ${input.ordinal} ${input.passed ? "passed" : "failed"} plan_node ${input.planNodeId ?? NONE} snapshot ${input.snapshotId ?? NONE} artifacts ${list(input.artifactIds)} failed_criteria ${list(input.failedAcceptanceCriterionIds)} evaluations ${list(input.evaluationIds)} remediation_task ${input.remediationTaskId ?? NONE}`,
       ];
     case "gate_candidate":
-      return [`- gate_candidate ${input.gateId} ${input.gateKind} snapshot ${input.snapshotId} artifacts ${list(input.artifactIds)} evaluated_criteria ${list(input.acceptanceCriterionIds)}`];
+      return [
+        `- gate_candidate ${input.gateId} ${input.gateKind} snapshot ${input.snapshotId} artifacts ${list(input.artifactIds)} evaluated_criteria ${list(input.acceptanceCriterionIds)}${input.completionRequestId === null ? "" : ` completion_request ${input.completionRequestId} requirement_revision ${input.requirementRevisionId ?? NONE}`}`,
+        ...(input.gateKind !== "run_completion" ? [] : input.tasks.length === 0 ? ["  tasks: none"] : input.tasks.map((t) => `  - ${t.taskId} [${t.status}]${t.replacesTaskId === null ? "" : ` replaces ${t.replacesTaskId}`}${t.supersededByTaskId === null ? "" : ` superseded_by ${t.supersededByTaskId}`} outputs ${list(t.outputArtifactIds)}: ${t.subject}`)),
+      ];
+    case "final_synthesis":
+      return [
+        `- final_synthesis completion_request ${input.completionRequestId} gate ${input.gateId} snapshot ${input.snapshotId} requirement_revision ${input.requirementRevisionId} artifacts ${list(input.artifactIds)}`,
+        `  usage cost_usd ${input.usage.costUsd} tokens ${input.usage.tokens} attempts ${input.usage.attempts}; final_reserve limit cost_usd ${input.finalReserve.limit.costUsd} tokens ${input.finalReserve.limit.tokens} attempts ${input.finalReserve.limit.attempts} consumed cost_usd ${input.finalReserve.consumed.costUsd} tokens ${input.finalReserve.consumed.tokens} attempts ${input.finalReserve.consumed.attempts}`,
+        ...(input.requirements.length === 0 ? ["  requirements: none"] : input.requirements.map((r) => `  - requirement ${r.requirementId} [${r.status}]${r.waiverDecisionId === null ? "" : ` waived_by ${r.waiverDecisionId}`}`)),
+        ...(input.evaluations.length === 0 ? ["  evaluations: none"] : input.evaluations.map((e) => `  - evaluation ${e.evaluationId} criterion ${e.acceptanceCriterionId} ${e.verdict} by ${e.producedBy}${e.evidence.length === 0 ? "" : `: ${e.evidence.map(renderEvidence).join("; ")}`}`)),
+        ...(input.tasks.length === 0 ? ["  tasks: none"] : input.tasks.map((t) => `  - task ${t.taskId} [${t.status}]${t.replacesTaskId === null ? "" : ` replaces ${t.replacesTaskId}`}${t.supersededByTaskId === null ? "" : ` superseded_by ${t.supersededByTaskId}`} outputs ${list(t.outputArtifactIds)}: ${t.subject}`)),
+        ...(input.unresolved.length === 0 ? ["  unresolved: none"] : input.unresolved.map((c) => `  - unresolved ${renderCondition(c)}`)),
+      ];
     case "plan_revision":
       return [
         `- plan_revision ${input.accepted ? `accepted revision ${input.revisionNumber ?? NONE}` : "rejected"}`,
@@ -109,6 +122,28 @@ function renderInput(input: ManifestInput): string[] {
       return [`- optimizer_candidate round ${input.round} of ${input.maxRounds} snapshot ${input.snapshotId} artifacts ${list(input.artifactIds)} evaluated_criteria ${list(input.acceptanceCriterionIds)}`];
     case "optimizer_feedback":
       return [`- optimizer_feedback round ${input.round} verdict ${input.verdict} evaluation ${input.evaluationId}`, ...(input.evidence.length === 0 ? ["  evidence: none"] : input.evidence.map((e) => `  - ${renderEvidence(e)}`))];
+  }
+}
+
+/** One structural completion condition as ids and closed facts. */
+function renderCondition(condition: CompletionCondition): string {
+  switch (condition.kind) {
+    case "requirement_unsatisfied":
+      return `requirement ${condition.requirementId} ${condition.status}`;
+    case "task_unfinished":
+      return `task ${condition.taskId} ${condition.status}`;
+    case "decision_unresolved":
+      return `decision ${condition.decisionId}`;
+    case "changeset_unintegrated":
+      return `changeset ${condition.changesetId} ${condition.status}`;
+    case "node_gate_open":
+      return `gate ${condition.gateId} of plan_node ${condition.planNodeId}`;
+    case "node_unfinished":
+      return `plan_node ${condition.planNodeId} ${condition.status}`;
+    case "criterion_unjudged":
+      return `criterion ${condition.acceptanceCriterionId}`;
+    case "snapshot_moved":
+      return `snapshot ${condition.pinnedSnapshotId} moved to ${condition.currentSnapshotId ?? NONE}`;
   }
 }
 

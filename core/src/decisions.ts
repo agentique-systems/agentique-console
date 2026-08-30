@@ -3,12 +3,15 @@ import { ValidationError } from "./errors.ts";
 import type {
   ArtifactId,
   AttemptId,
+  CompletionRequestId,
   ConversationId,
   DecisionId,
+  GateId,
   InvocationId,
   PlanNodeId,
   RequirementId,
   RunId,
+  SnapshotId,
   TaskId,
 } from "./ids.ts";
 import { SIDE_EFFECT_APPROVAL_OPTIONS } from "./tool-calls.ts";
@@ -83,23 +86,44 @@ export const activationConditionSchema: z.ZodType<ActivationCondition> = z.discr
   z.strictObject({ kind: z.literal("plan_node_ready"), planNodeId: idSchema("planNode") }),
 ]);
 
+/** The two stable options of a `signoff` Decision (execution-model §10 `operator_signoff`). */
+export const SIGNOFF_OPTIONS = ["accept", "request_changes"] as const;
+export type SignoffOption = (typeof SIGNOFF_OPTIONS)[number];
+
+/** Decision kinds whose canonical subject is a typed record (`subject.kind` equals the Decision kind). */
+export const SUBJECT_DECISION_KINDS = ["side_effect_approval", "signoff"] as const satisfies readonly DecisionKind[];
+
 /**
- * The canonical subject of a `side_effect_approval` Decision: the exact
- * intercepted call by tool name and canonical digest, the Artifact holding
- * its canonical bytes, and the originating Run, Plan Node, Invocation, and
- * Attempt. The raw call lives only in the Artifact; the subject carries ids,
- * the digest, and the tool name, so it may travel in Events and views.
+ * The canonical subject of a Decision that concerns one exact runtime fact.
+ * A `side_effect_approval` names the intercepted call by tool name and
+ * canonical digest, the Artifact holding its canonical bytes, and the
+ * originating Run, Plan Node, Invocation, and Attempt; the raw call lives
+ * only in the Artifact. A `signoff` names the Run, the open
+ * `operator_signoff` Gate it resolves, the passed `run_completion` Gate and
+ * Completion Request it presents, the verified integration Snapshot, and the
+ * final-report Artifact; it carries no publish authority. Subjects carry ids
+ * and digests only, so they may travel in Events and views.
  */
-export type DecisionSubject = {
-  kind: "side_effect_approval";
-  tool: string;
-  callDigest: string;
-  callArtifactId: ArtifactId;
-  runId: RunId;
-  planNodeId: PlanNodeId;
-  invocationId: InvocationId;
-  attemptId: AttemptId;
-};
+export type DecisionSubject =
+  | {
+      kind: "side_effect_approval";
+      tool: string;
+      callDigest: string;
+      callArtifactId: ArtifactId;
+      runId: RunId;
+      planNodeId: PlanNodeId;
+      invocationId: InvocationId;
+      attemptId: AttemptId;
+    }
+  | {
+      kind: "signoff";
+      runId: RunId;
+      gateId: GateId;
+      completionGateId: GateId;
+      completionRequestId: CompletionRequestId;
+      snapshotId: SnapshotId;
+      reportArtifactId: ArtifactId;
+    };
 
 export const decisionSubjectSchema: z.ZodType<DecisionSubject> = z.discriminatedUnion("kind", [
   z.strictObject({
@@ -112,17 +136,31 @@ export const decisionSubjectSchema: z.ZodType<DecisionSubject> = z.discriminated
     invocationId: idSchema("invocation"),
     attemptId: idSchema("attempt"),
   }),
+  z
+    .strictObject({
+      kind: z.literal("signoff"),
+      runId: idSchema("run"),
+      gateId: idSchema("gate"),
+      completionGateId: idSchema("gate"),
+      completionRequestId: idSchema("completionRequest"),
+      snapshotId: idSchema("snapshot"),
+      reportArtifactId: idSchema("artifact"),
+    })
+    .refine((s) => s.gateId !== s.completionGateId, { message: "the signoff Gate and the completion Gate are distinct", path: ["completionGateId"] }),
 ]);
 
-/** A `side_effect_approval` Decision has exactly its subject and exactly the two stable options. */
-function sideEffectApprovalShape(decision: { kind: DecisionKind; subject: DecisionSubject | null; options: DecisionOption[]; runId: RunId | null }, ctx: z.RefinementCtx): void {
-  if (decision.kind === "side_effect_approval") {
-    if (decision.subject === null) ctx.addIssue({ code: "custom", path: ["subject"], message: "a side_effect_approval names its subject" });
+/** A `side_effect_approval` or `signoff` Decision has exactly its typed subject, exactly its two stable options, and a Run; no other kind has a subject. */
+function sideEffectApprovalShape(decision: { kind: DecisionKind; subject: DecisionSubject | null; options: DecisionOption[]; runId: RunId | null; resolutionPolicy: ResolutionPolicy }, ctx: z.RefinementCtx): void {
+  if (decision.kind === "side_effect_approval" || decision.kind === "signoff") {
+    const expected: readonly string[] = decision.kind === "side_effect_approval" ? SIDE_EFFECT_APPROVAL_OPTIONS : SIGNOFF_OPTIONS;
+    if (decision.subject === null || decision.subject.kind !== decision.kind) ctx.addIssue({ code: "custom", path: ["subject"], message: `a ${decision.kind} names its ${decision.kind} subject` });
     const ids = decision.options.map((o) => o.id).sort();
-    if (ids.join(",") !== [...SIDE_EFFECT_APPROVAL_OPTIONS].sort().join(",")) {
-      ctx.addIssue({ code: "custom", path: ["options"], message: `a side_effect_approval offers exactly ${SIDE_EFFECT_APPROVAL_OPTIONS.join(" and ")}` });
+    if (ids.join(",") !== [...expected].sort().join(",")) {
+      ctx.addIssue({ code: "custom", path: ["options"], message: `a ${decision.kind} offers exactly ${expected.join(" and ")}` });
     }
-    if (decision.runId === null) ctx.addIssue({ code: "custom", path: ["runId"], message: "a side_effect_approval belongs to a Run" });
+    if (decision.runId === null) ctx.addIssue({ code: "custom", path: ["runId"], message: `a ${decision.kind} belongs to a Run` });
+    if (decision.kind === "signoff" && decision.resolutionPolicy !== "operator_required") ctx.addIssue({ code: "custom", path: ["resolutionPolicy"], message: "a signoff is always operator_required" });
+    if (decision.kind === "signoff" && decision.subject?.kind === "signoff" && decision.subject.runId !== decision.runId) ctx.addIssue({ code: "custom", path: ["subject"], message: "a signoff subject names the Decision's own Run" });
   } else if (decision.subject !== null) {
     ctx.addIssue({ code: "custom", path: ["subject"], message: `a ${decision.kind} Decision has no subject` });
   }
@@ -324,6 +362,22 @@ export function assertDecisionResolutionRules(
       }
       return;
   }
+}
+
+/** The typed subject of a `side_effect_approval` Decision; a Decision of another kind (or without one) is an invariant violation. */
+export function approvalSubjectOf(decision: Pick<Decision, "id" | "kind" | "subject">): Extract<DecisionSubject, { kind: "side_effect_approval" }> {
+  if (decision.kind !== "side_effect_approval" || decision.subject === null || decision.subject.kind !== "side_effect_approval") {
+    throw new ValidationError(`Decision ${decision.id} is not a side_effect_approval with its subject`, { decisionId: decision.id, kind: decision.kind });
+  }
+  return decision.subject;
+}
+
+/** The typed subject of a `signoff` Decision; a Decision of another kind (or without one) is an invariant violation. */
+export function signoffSubjectOf(decision: Pick<Decision, "id" | "kind" | "subject">): Extract<DecisionSubject, { kind: "signoff" }> {
+  if (decision.kind !== "signoff" || decision.subject === null || decision.subject.kind !== "signoff") {
+    throw new ValidationError(`Decision ${decision.id} is not a signoff with its subject`, { decisionId: decision.id, kind: decision.kind });
+  }
+  return decision.subject;
 }
 
 export function isOperatorOnlyDecisionKind(kind: DecisionKind): boolean {

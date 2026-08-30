@@ -44,7 +44,7 @@ describe("Evaluation contexts", () => {
 });
 
 describe("Evaluator results and optimizer manifest inputs", () => {
-  const result = { status: "completed", artifactIds: [], tasks: [], evidence: [], summary: "ok", openItems: [], blocker: null, runOutcome: null, routeSelection: null, evaluation: null };
+  const result = { status: "completed", artifactIds: [], tasks: [], evidence: [], summary: "ok", openItems: [], blocker: null, runOutcome: null, routeSelection: null, evaluation: null, finalReport: null };
   const evaluation = { verdict: "pass", criteria: [{ acceptanceCriterionId: criterion, verdict: "pass", evidence: [] }], evidence: [{ kind: "artifact", artifactId: newId("artifact") }] };
 
   it("types the Evaluator payload, returns it only from a completed result, and keeps it exclusive with a route selection", () => {

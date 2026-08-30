@@ -127,7 +127,8 @@ export class InvocationStore {
         if (defects.length > 0) throw new InvariantViolationError(`Pattern position is invalid for PlanNode ${valid.planNodeId}: ${defects.join("; ")}`, { planNodeId: valid.planNodeId, patternPosition: valid.patternPosition, defects });
       }
       const gateId = valid.gateId ?? null;
-      if (gateId !== null) this.assertGateEvaluator(run, valid.planNodeId, node.sourcePath, valid.agentDefinitionRevisionId, gateId);
+      if (gateId !== null && valid.purpose === "final_synthesis") this.assertFinalSynthesis(run, node.sourcePath, valid.finalReserveUse ?? null, gateId);
+      else if (gateId !== null) this.assertGateEvaluator(run, valid.planNodeId, node.sourcePath, valid.agentDefinitionRevisionId, gateId);
       if (PLAN_NODE_MACHINE.isTerminal(node.status as never)) {
         throw new ConflictError(`PlanNode ${valid.planNodeId} is ${node.status}`);
       }
@@ -239,22 +240,45 @@ export class InvocationStore {
     if (policy.evaluatorAgentDefinitionRevisionId !== agentDefinitionRevisionId) {
       throw new InvariantViolationError(`a Gate Evaluator executes the Run's verification-policy revision ${policy.evaluatorAgentDefinitionRevisionId ?? "(none)"}, not ${agentDefinitionRevisionId}`, { gateId, agentDefinitionRevisionId });
     }
-    const active = this.listByGate(gateId as GateId).filter((i) => !INVOCATION_MACHINE.isTerminal(i.status));
+    const active = this.listByGate(gateId as GateId).filter((i) => i.role === "evaluator" && !INVOCATION_MACHINE.isTerminal(i.status));
     if (active.length > 0) throw new ConflictError(`Gate ${gateId} already has active Evaluator Invocation ${active[0]!.id}`, { gateId, invocationId: active[0]!.id });
+  }
+
+  /**
+   * The Orchestrator's `final_synthesis` turn (execution-model §10) reports
+   * on the open `run_completion` Gate of its Run from the root Plan Node,
+   * funded from the final reserve; at most one Gate-owned Invocation of a
+   * Gate is active at a time (the database's partial unique index holds the
+   * same rule), and a Gate whose Evaluator is still active admits no
+   * synthesis.
+   */
+  private assertFinalSynthesis(run: { id: RunId }, sourcePath: string, finalReserveUse: string | null, gateId: string): void {
+    const gate = requireRow(this.ctx.db.select({ runId: gates.runId, kind: gates.kind, status: gates.status }).from(gates).where(eq(gates.id, gateId)).get(), "Gate", gateId);
+    assertSameRun("Gate", gateId, gate.runId, run.id);
+    if (gate.kind !== "run_completion" || gate.status !== "open") throw new ConflictError(`Gate ${gateId} is not an open run_completion Gate; a final_synthesis turn reports on one`, { gateId });
+    if (sourcePath !== ROOT_SOURCE_PATH) throw new InvariantViolationError("a final_synthesis turn belongs to the root Plan Node", { gateId });
+    if (finalReserveUse !== "final_synthesis") throw new InvariantViolationError("a final_synthesis turn is funded from the final reserve as final_synthesis", { gateId });
+    const active = this.listByGate(gateId as GateId).filter((i) => i.purpose === "final_synthesis" && !INVOCATION_MACHINE.isTerminal(i.status));
+    if (active.length > 0) throw new ConflictError(`Gate ${gateId} already has active final-synthesis Invocation ${active[0]!.id}`, { gateId, invocationId: active[0]!.id });
   }
 
   get(id: InvocationId): Invocation {
     return invocationToDomain(requireRow(this.ctx.db.select().from(invocations).where(eq(invocations.id, id)).get(), "Invocation", id));
   }
 
-  /** Every Evaluator Invocation of a Gate, in creation order: at most one is active, a later one continues from a blocked predecessor. */
+  /** Every Gate-owned Invocation of a Gate (its Evaluators, then a run_completion Gate's final-synthesis turn), in creation order: at most one is active. */
   listByGate(gateId: GateId): Invocation[] {
     return this.ctx.db.select().from(invocations).where(eq(invocations.gateId, gateId)).orderBy(asc(invocations.createdAt), asc(invocations.id)).all().map(invocationToDomain);
   }
 
-  /** The most recently created Evaluator Invocation of a Gate, or `null` before the first. */
+  /** The most recently created Evaluator Invocation of a Gate, or `null` before the first; a run_completion Gate's synthesis turn is not one. */
   latestByGate(gateId: GateId): Invocation | null {
-    return this.listByGate(gateId).at(-1) ?? null;
+    return this.listByGate(gateId).filter((i) => i.role === "evaluator").at(-1) ?? null;
+  }
+
+  /** The most recently created final-synthesis turn of a run_completion Gate, or `null` before the first. */
+  latestSynthesisByGate(gateId: GateId): Invocation | null {
+    return this.listByGate(gateId).filter((i) => i.purpose === "final_synthesis").at(-1) ?? null;
   }
 
   listByPlanNode(planNodeId: PlanNodeId): Invocation[] {
@@ -288,7 +312,7 @@ export class InvocationStore {
             "Decision",
             transition.decisionId,
           );
-          if (decision.runId !== current.runId || decision.kind !== "side_effect_approval" || decision.status !== "open" || decision.subject?.invocationId !== id) {
+          if (decision.runId !== current.runId || decision.kind !== "side_effect_approval" || decision.status !== "open" || (decision.subject?.kind === "side_effect_approval" ? decision.subject.invocationId : null) !== id) {
             throw new InvariantViolationError(`Decision ${transition.decisionId} is not an open side_effect_approval of Invocation ${id}`, { decisionId: transition.decisionId });
           }
           next.blockedByDecisionId = transition.decisionId;

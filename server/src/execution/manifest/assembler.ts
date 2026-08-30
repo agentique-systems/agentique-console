@@ -54,6 +54,7 @@ import {
   type Run,
   type SnapshotId,
   type TaskId,
+  approvalSubjectOf,
 } from "@agentique-console/core";
 import type { Stores } from "../../persistence/stores/index.ts";
 
@@ -334,7 +335,7 @@ export class ContextManifestAssembler {
           // A consumed grant is never delivered again: the canonical use, not the manifest, says whether the approval remains claimable.
           const use = input.outcome === "approve_once" ? this.stores.approvedToolCallUses.getByDecision(decision.id) : null;
           if (use !== null) throw new ValidationError(`Decision ${input.decisionId} was already used by Attempt ${use.attemptId}; executing the call again needs a new approval`, { useId: use.id });
-          const s = decision.subject;
+          const s = approvalSubjectOf(decision);
           if (s.invocationId !== input.blockedInvocationId || s.attemptId !== input.attemptId || s.tool !== input.tool || s.callDigest !== input.callDigest || s.callArtifactId !== input.callArtifactId) {
             throw new InvariantViolationError(`input disagrees with the subject of Decision ${input.decisionId}`);
           }

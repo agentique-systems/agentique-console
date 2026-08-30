@@ -151,7 +151,7 @@ describe("node_exit Gate lifecycle", () => {
       expect(evaluator).toMatchObject({ role: "evaluator", purpose: "evaluate", gateId: opened.gateId, patternPosition: null, planNodeId: node.id, agentDefinitionRevisionId: s.evaluator.id, taskIds: [], allocationSource: "plan_node", continuedFromInvocationId: null, status: "pending" });
       expect(h.stores.reservations.activeForChild({ type: "invocation", id: evaluator.id })?.parent).toEqual({ type: "plan_node", id: node.id });
       const manifest = h.stores.invocations.getManifest(evaluator.id).content;
-      expect(manifest.inputs).toEqual([{ kind: "gate_candidate", gateId: opened.gateId, gateKind: "node_exit", snapshotId: h.stores.runs.get(runId).integrationSnapshotId, artifactIds: candidate, acceptanceCriterionIds: criteria.evaluated }]);
+      expect(manifest.inputs).toEqual([{ kind: "gate_candidate", gateId: opened.gateId, gateKind: "node_exit", snapshotId: h.stores.runs.get(runId).integrationSnapshotId, artifactIds: candidate, acceptanceCriterionIds: criteria.evaluated, completionRequestId: null, requirementRevisionId: null, tasks: [] }]);
       expect(manifest.capabilities).toEqual({ tools: ["read"], mcpServers: [] });
       expect(manifest.toolPolicy).toEqual({ read: "allowed" });
       expect(manifest.handoffs).toEqual([]);

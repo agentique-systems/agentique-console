@@ -59,6 +59,7 @@ import {
   type Task,
   type TaskId,
   type Timestamp,
+  approvalSubjectOf,
 } from "@agentique-console/core";
 import type { PersistenceContext } from "../../persistence/context.ts";
 import type { Stores } from "../../persistence/stores/index.ts";
@@ -348,7 +349,7 @@ export class PatternNodeSupport {
     if (decision.status !== "resolved" || decision.resolution === null) return this.failNow(node, "result_blocked", options);
     const resolution: ManifestInput =
       predecessor.status === "blocked" && decision.kind === "side_effect_approval" && decision.subject !== null
-        ? { kind: "side_effect_approval_resolution", decisionId: decision.id, blockedInvocationId: predecessor.id, attemptId: decision.subject.attemptId, tool: decision.subject.tool, callDigest: decision.subject.callDigest, callArtifactId: decision.subject.callArtifactId, outcome: decision.resolution.chosenOptionId as "approve_once" | "deny" }
+        ? { kind: "side_effect_approval_resolution", decisionId: decision.id, blockedInvocationId: predecessor.id, attemptId: approvalSubjectOf(decision).attemptId, tool: approvalSubjectOf(decision).tool, callDigest: approvalSubjectOf(decision).callDigest, callArtifactId: approvalSubjectOf(decision).callArtifactId, outcome: decision.resolution.chosenOptionId as "approve_once" | "deny" }
         : { kind: "decision_resolution", decisionId: decision.id };
     const handoffIds = stores.invocations.getManifest(predecessor.id).content.handoffs.map((h) => h.handoffId);
     const prepared = this.prepareAs(node, position, predecessor.purpose, { continuedFromInvocationId: predecessor.id, handoffIds, inputs: [...extraInputs, resolution] }, options);

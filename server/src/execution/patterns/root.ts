@@ -42,6 +42,7 @@ import {
   type Task,
   type TaskId,
   type Timestamp,
+  approvalSubjectOf,
 } from "@agentique-console/core";
 import type { WriteOptions } from "../../persistence/stores/support.ts";
 import { NodeExitGates } from "../gates.ts";
@@ -230,7 +231,7 @@ export class RootNodeSupport {
           patternPosition: { kind: "orchestrator" },
           continuedFromInvocationId: turn.id,
           handoffIds: stores.invocations.getManifest(turn.id).content.handoffs.map((h) => h.handoffId),
-          inputs: [{ kind: "side_effect_approval_resolution", decisionId: decision.id, blockedInvocationId: turn.id, attemptId: decision.subject.attemptId, tool: decision.subject.tool, callDigest: decision.subject.callDigest, callArtifactId: decision.subject.callArtifactId, outcome: decision.resolution.chosenOptionId as "approve_once" | "deny" }],
+          inputs: [{ kind: "side_effect_approval_resolution", decisionId: decision.id, blockedInvocationId: turn.id, attemptId: approvalSubjectOf(decision).attemptId, tool: approvalSubjectOf(decision).tool, callDigest: approvalSubjectOf(decision).callDigest, callArtifactId: approvalSubjectOf(decision).callArtifactId, outcome: decision.resolution.chosenOptionId as "approve_once" | "deny" }],
           correlationId: options.correlationId ?? null,
           causationSeq: options.causationSeq ?? null,
         });
@@ -272,7 +273,7 @@ export class RootNodeSupport {
         patternPosition: { kind: "orchestrator" },
         continuedFromInvocationId: turn.id,
         handoffIds: stores.invocations.getManifest(turn.id).content.handoffs.map((h) => h.handoffId),
-        inputs: [...previous, { kind: "side_effect_approval_resolution", decisionId: decision.id, blockedInvocationId: turn.id, attemptId: decision.subject.attemptId, tool: decision.subject.tool, callDigest: decision.subject.callDigest, callArtifactId: decision.subject.callArtifactId, outcome: decision.resolution.chosenOptionId as "approve_once" | "deny" }],
+        inputs: [...previous, { kind: "side_effect_approval_resolution", decisionId: decision.id, blockedInvocationId: turn.id, attemptId: approvalSubjectOf(decision).attemptId, tool: approvalSubjectOf(decision).tool, callDigest: approvalSubjectOf(decision).callDigest, callArtifactId: approvalSubjectOf(decision).callArtifactId, outcome: decision.resolution.chosenOptionId as "approve_once" | "deny" }],
         correlationId: options.correlationId ?? null,
         causationSeq: options.causationSeq ?? null,
       });

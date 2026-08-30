@@ -1,6 +1,6 @@
 import { ConflictError, IllegalTransitionError, InvariantViolationError, ValidationError } from "@agentique-console/core";
 import { describe, expect, it } from "vitest";
-import { openHarness, operation, seedArtifact, seedInvocation, seedRun, seedSnapshot, seedWorkerNode } from "../test-support.ts";
+import { openHarness, operation, seedArtifact, seedInvocation, seedRun, seedSnapshot, seedWorkerNode, seedRunCompletionGate, seedRequirements } from "../test-support.ts";
 
 describe("evaluations and gates", () => {
   it("opens node_exit Gates on pattern nodes only and closes them once", () => {
@@ -27,12 +27,15 @@ describe("evaluations and gates", () => {
     const h = openHarness();
     try {
       const s = seedRun(h);
-      const gate = h.stores.gates.open({ runId: s.run.id, planNodeId: null, kind: "run_completion", acceptanceCriterionIds: [], snapshotId: null, candidateArtifactIds: [] });
       const worker = seedInvocation(h, s, { role: "worker", purpose: "step", planNodeId: seedWorkerNode(h, s).id });
-      const evaluator = seedInvocation(h, s, { role: "evaluator", purpose: "evaluate", gateId: gate.id });
       const produced = seedArtifact(h, s, "judge me", { invocationId: worker.id });
+      const { revision, leafIds } = seedRequirements(h, s, 1);
+      const criterion = h.stores.requirements.createAcceptanceCriterion({ conversationId: s.conversation.id, requirementId: leafIds[0]!, requirementRevisionId: revision.id, taskId: null, check: { kind: "evaluated", question: "Is it good?", rubric: null } });
+      // A run_completion Gate judges exactly its criteria on its pinned Snapshot and candidate; the Evaluator judges the candidate.
+      const gate = seedRunCompletionGate(h, s, { acceptanceCriterionIds: [criterion.id], candidateArtifactIds: [produced.id] }).gate;
+      const evaluator = seedInvocation(h, s, { role: "evaluator", purpose: "evaluate", gateId: gate.id });
       const selfProduced = seedArtifact(h, s, "mine", { invocationId: evaluator.id });
-      const input = { runId: s.run.id, planNodeId: null, gateId: gate.id, subject: { kind: "rubric" as const, rubric: "quality" }, context: null, snapshotId: null, verdict: "pass" as const, evidence: [{ kind: "artifact" as const, artifactId: produced.id }], producedBy: { kind: "evaluator" as const, invocationId: evaluator.id, agentDefinitionRevisionId: evaluator.agentDefinitionRevisionId }, artifactIds: [produced.id] };
+      const input = { runId: s.run.id, planNodeId: null, gateId: gate.id, subject: { kind: "acceptance_criterion" as const, acceptanceCriterionId: criterion.id }, context: null, snapshotId: gate.snapshotId, verdict: "pass" as const, evidence: [{ kind: "artifact" as const, artifactId: produced.id }], producedBy: { kind: "evaluator" as const, invocationId: evaluator.id, agentDefinitionRevisionId: evaluator.agentDefinitionRevisionId }, artifactIds: [produced.id] };
       const evaluation = h.stores.evaluations.record(input);
       expect(h.stores.evaluations.listByGate(gate.id)).toEqual([evaluation]);
       expect(() => h.stores.evaluations.record({ ...input, artifactIds: [selfProduced.id] })).toThrow(/cannot evaluate it/);

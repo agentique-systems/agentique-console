@@ -6,7 +6,7 @@
 import { ConflictError, NotFoundError, ROOT_SOURCE_PATH, ValidationError } from "@agentique-console/core";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_BUDGET, seedAgentRevision } from "../persistence/test-support.ts";
-import { openRuntimeHarness, seedRuntime, TEST_POLICY, type RuntimeHarness } from "./test-support.ts";
+import { openRuntimeHarness, seedRuntime, TEST_POLICY, type RuntimeHarness, seedCompletionCriterion } from "./test-support.ts";
 
 function tableCounts(h: RuntimeHarness): Record<string, number> {
   const out: Record<string, number> = {};
@@ -99,7 +99,7 @@ describe("RunCreationService", () => {
       const conversation = h.stores.conversations.create({ workspaceId: workspace.id, title: null });
       const orchestrator = seedAgentRevision(h, "orchestrator");
       const budget = { maxCostUsd: 10, maxTokens: 10_000, maxAttempts: 5, maxWallClockMs: null, maxConcurrency: null };
-      const base = { conversationId: conversation.id, kind: "code" as const, target: { kind: "branch" as const, branch: "main" }, budget, orchestratorAgentDefinitionRevisionId: orchestrator.id };
+      const base = { conversationId: conversation.id, kind: "code" as const, target: { kind: "branch" as const, branch: "main" }, budget, orchestratorAgentDefinitionRevisionId: orchestrator.id, verificationPolicy: { evaluatorAgentDefinitionRevisionId: null, runCompletionAcceptanceCriterionIds: [seedCompletionCriterion(h, conversation.id).criterionId] } };
       const attempt = (overrides: Partial<typeof base> & { finalReserve?: { costUsd: number; tokens: number; attempts: number }; orchestratorAllocation?: { costUsd: number; tokens: number; attempts: number } }) => () => h.runCreation.create({ ...base, ...overrides });
       expect(attempt({ finalReserve: { costUsd: 11, tokens: 0, attempts: 0 }, orchestratorAllocation: { costUsd: 1, tokens: 1, attempts: 1 } })).toThrow(/final reserve does not fit/);
       expect(attempt({ finalReserve: { costUsd: 0, tokens: 0, attempts: 0 }, orchestratorAllocation: { costUsd: 11, tokens: 1, attempts: 1 } })).toThrow(/initial Orchestrator allocation does not fit/);
@@ -166,6 +166,7 @@ describe("RunCreationService", () => {
           target: { kind: "branch", branch: "main" },
           budget: DEFAULT_BUDGET,
           orchestratorAgentDefinitionRevisionId: first.orchestrator.id,
+          verificationPolicy: { evaluatorAgentDefinitionRevisionId: null, runCompletionAcceptanceCriterionIds: [first.completion.criterionId] },
         }),
       ).toThrow(ConflictError);
       expect(tableCounts(h)).toEqual(before);
@@ -184,7 +185,7 @@ describe("RunCreationService", () => {
       const workspace = h.stores.workspaces.create({ name: "w", rootPath: "/w", kind: "git" });
       const conversation = h.stores.conversations.create({ workspaceId: workspace.id, title: null });
       const orchestrator = seedAgentRevision(h, "orchestrator");
-      const request = { conversationId: conversation.id, kind: "code" as const, target: { kind: "branch" as const, branch: "main" }, budget: DEFAULT_BUDGET, orchestratorAgentDefinitionRevisionId: orchestrator.id };
+      const request = { conversationId: conversation.id, kind: "code" as const, target: { kind: "branch" as const, branch: "main" }, budget: DEFAULT_BUDGET, orchestratorAgentDefinitionRevisionId: orchestrator.id, verificationPolicy: { evaluatorAgentDefinitionRevisionId: null, runCompletionAcceptanceCriterionIds: [seedCompletionCriterion(h, conversation.id).criterionId] } };
       const before = tableCounts(h);
       const seq = h.ctx.journal.lastSeq();
 

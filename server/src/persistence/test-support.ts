@@ -15,6 +15,7 @@ import {
   type Allocation,
   type BudgetLimits,
   type CompiledOperation,
+  type CompletionRequest,
   type Conversation,
   type Invocation,
   type InvocationPurpose,
@@ -28,6 +29,7 @@ import {
   type RequirementId,
   type RequirementRevision,
   type Run,
+  type RuntimeToolCall,
   type VerificationPolicy,
   type Workspace,
 } from "@agentique-console/core";
@@ -206,7 +208,7 @@ export function seedRun(h: Harness, options: { budget?: BudgetLimits; kind?: "co
       target: { kind: "branch", branch: "main" },
       budget: options.budget ?? DEFAULT_BUDGET,
       finalReserve: options.finalReserve ?? ZERO_RESERVE,
-      verificationPolicy: options.verificationPolicy ?? { evaluatorAgentDefinitionRevisionId: evaluator.id, maxNodeGateCycles: DEFAULT_MAX_NODE_GATE_CYCLES },
+      verificationPolicy: options.verificationPolicy ?? { evaluatorAgentDefinitionRevisionId: evaluator.id, maxNodeGateCycles: DEFAULT_MAX_NODE_GATE_CYCLES, maxRunCompletionCycles: 3, runCompletionAcceptanceCriterionIds: [] },
     });
     h.stores.plans.appendRevision(run.id, { version: 1, expressions: [] }, null);
     h.stores.plans.materializeRevision({
@@ -271,9 +273,72 @@ export function defaultPatternPosition(role: InvocationRole, purpose: Invocation
 }
 
 /**
+ * A `requested` Completion Request of the seeded Run, built the way the runtime-tool executor builds it: a running root
+ * Orchestrator turn with a running Attempt, its accepted `request_completion` call, and the request the call names. The
+ * requesting turn then completes (as it must before verification begins), so the root position is free again.
+ */
+export function seedCompletionRequest(h: Harness, seeded: Seeded): { request: CompletionRequest; invocation: Invocation; call: RuntimeToolCall } {
+  // The latest root turn requests completion: an active one is driven through its Attempt, a terminal one is continued by a fresh turn.
+  const latest = h.stores.invocations.latestAtPosition(seeded.root.id, "orchestrator");
+  const orchestrator = latest !== null && (latest.status === "pending" || latest.status === "running") ? latest : seedInvocation(h, seeded, { role: "orchestrator", purpose: "operator_input", continuedFromInvocationId: latest?.id ?? null, allocation: { costUsd: 0, tokens: 0, attempts: 1 } });
+  try {
+    h.stores.invocations.getManifest(orchestrator.id);
+  } catch {
+    seedManifest(h, seeded, orchestrator);
+  }
+  const attempt = h.stores.invocations.activeAttempt(orchestrator.id) ?? h.stores.invocations.createAttempt({ invocationId: orchestrator.id, startMode: "fresh", resumedFromAttemptId: null });
+  if (attempt.status === "pending") h.stores.invocations.transitionAttempt(attempt.id, { to: "running", capacityLeaseId: null });
+  const running = orchestrator.status === "pending" ? h.stores.invocations.transition(orchestrator.id, { to: "running" }) : orchestrator;
+  const id = h.ctx.ids("completionRequest");
+  const { request, call } = h.ctx.tx.write(() => {
+    const call = h.stores.runtimeToolCalls.record({ invocationId: running.id, attemptId: attempt.id, tool: "request_completion", callDigest: "0".repeat(64), result: { tool: "request_completion", completionRequestId: id, status: "requested" } });
+    const request = h.stores.completionRequests.create({ runId: seeded.run.id, invocationId: running.id, runtimeToolCallId: call.id }, { id });
+    return { request, call };
+  });
+  const result = { status: "completed" as const, artifactIds: [], tasks: [], evidence: [], summary: "requested completion", openItems: [], blocker: null, runOutcome: null, routeSelection: null, evaluation: null, finalReport: null };
+  h.stores.invocations.transitionAttempt(attempt.id, { to: "succeeded", result, transcriptArtifactId: null });
+  const invocation = h.stores.invocations.transition(running.id, { to: "succeeded", result });
+  return { request, invocation, call };
+}
+
+/**
+ * An open `run_completion` Gate of the seeded Run for a fresh Completion Request, pinning the Conversation's current
+ * Requirement revision (a one-leaf revision is created when none exists) and the Run's current or base Snapshot (a
+ * Snapshot is taken when none exists); the request is moved to `verifying` on it.
+ */
+export function seedRunCompletionGate(h: Harness, seeded: Seeded, overrides: Partial<{ acceptanceCriterionIds: string[]; candidateArtifactIds: string[] }> = {}) {
+  const open = h.stores.gates.openRunGateOf(seeded.run.id, "run_completion");
+  if (open !== null) {
+    // Idempotent: the Run's one open completion Gate serves every fixture of a test.
+    return { gate: open, request: h.stores.completionRequests.get(open.completionRequestId!), revision: h.stores.requirements.getRevision(open.requirementRevisionId!), snapshotId: open.snapshotId! };
+  }
+  const { request } = seedCompletionRequest(h, seeded);
+  const revision = h.stores.requirements.currentRevision(seeded.conversation.id) ?? seedRequirements(h, seeded, 1).revision;
+  const run = h.stores.runs.get(seeded.run.id);
+  const snapshotId = run.integrationSnapshotId ?? run.baseSnapshotId ?? seedSnapshot(h, seeded, "integration").id;
+  const parents = new Set(revision.tree.map((e) => e.parentId).filter((id) => id !== null));
+  const requirementIds = revision.tree.filter((e) => !parents.has(e.id)).map((e) => e.id).sort();
+  return h.ctx.tx.write(() => {
+    const gate = h.stores.gates.open({
+      runId: seeded.run.id,
+      planNodeId: null,
+      kind: "run_completion",
+      acceptanceCriterionIds: [...(overrides.acceptanceCriterionIds ?? [])].sort() as never,
+      snapshotId,
+      candidateArtifactIds: [...(overrides.candidateArtifactIds ?? [])].sort() as never,
+      completionRequestId: request.id,
+      requirementRevisionId: revision.id,
+      requirementIds,
+    });
+    const verifying = h.stores.completionRequests.transition(request.id, { to: "verifying", gateId: gate.id });
+    return { gate, request: verifying, revision, snapshotId };
+  });
+}
+
+/**
  * A test Invocation. A position-less Evaluator (`evaluate` outside a Pattern position) is a Gate Evaluator and needs a
- * Gate: `gateId` names one, or a `run_completion` Gate of the Run is opened for it; it then executes the Run's
- * verification-policy Evaluator revision.
+ * Gate: `gateId` names one, or a `run_completion` Gate of the Run is opened for it (with its Completion Request); it
+ * then executes the Run's verification-policy Evaluator revision.
  */
 export function seedInvocation(
   h: Harness,
@@ -284,7 +349,7 @@ export function seedInvocation(
   const purpose = overrides.purpose ?? "operator_input";
   const taskIds = overrides.taskIds ?? [];
   const patternPosition = overrides.patternPosition === undefined ? defaultPatternPosition(role, purpose, taskIds) : overrides.patternPosition;
-  const gateId = patternPosition !== null ? null : (overrides.gateId ?? h.stores.gates.open({ runId: seeded.run.id, planNodeId: null, kind: "run_completion", acceptanceCriterionIds: [], snapshotId: null, candidateArtifactIds: [] }).id);
+  const gateId = patternPosition !== null ? null : (overrides.gateId ?? seedRunCompletionGate(h, seeded).gate.id);
   return h.stores.invocations.create({
     runId: seeded.run.id,
     planNodeId: (overrides.planNodeId ?? seeded.root.id) as never,

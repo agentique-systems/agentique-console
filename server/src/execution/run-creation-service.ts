@@ -18,7 +18,9 @@ import {
   EMPTY_MANIFEST_TEMPLATE,
   idSchema,
   MAX_NODE_GATE_CYCLES,
+  MAX_RUN_COMPLETION_CYCLES,
   nonEmptyString,
+  NotFoundError,
   ORCHESTRATOR_DEFINITION_NAME,
   orchestratorDefinitionDefects,
   parseOrThrow,
@@ -28,6 +30,7 @@ import {
   RUN_KINDS,
   ValidationError,
   verificationPolicySchema,
+  type AcceptanceCriterionId,
   type AgentDefinitionRevisionId,
   type Allocation,
   type BudgetLimits,
@@ -56,6 +59,8 @@ export interface RunCreationPolicy {
   finalReserve: Record<RunKind, Allocation>;
   /** The default `node_exit` Gate cycle bound of a Run's verification policy. */
   maxNodeGateCycles: number;
+  /** The default `run_completion` Gate cycle bound of a Run's verification policy. */
+  maxRunCompletionCycles: number;
 }
 
 export const DEFAULT_RUN_CREATION_POLICY: Readonly<RunCreationPolicy> = Object.freeze({
@@ -65,6 +70,7 @@ export const DEFAULT_RUN_CREATION_POLICY: Readonly<RunCreationPolicy> = Object.f
     other: { costUsd: 0, tokens: 0, attempts: 0 },
   },
   maxNodeGateCycles: 3,
+  maxRunCompletionCycles: 3,
 });
 
 /** The verification policy a Run is created with (execution-model §10); the effective values are persisted on the Run and immutable. */
@@ -73,6 +79,14 @@ export interface RunVerificationRequest {
   evaluatorAgentDefinitionRevisionId: string | null;
   /** Overrides the policy default. */
   maxNodeGateCycles?: number;
+  /** Overrides the policy default. */
+  maxRunCompletionCycles?: number;
+  /**
+   * The Acceptance Criteria the Run declares for its `run_completion` Gate: each must exist in the Run's Conversation on a
+   * Requirement (pinned to a revision of that Conversation) or on a Task of that Conversation; a coding Run declares at
+   * least one deterministic one. Deduplicated and persisted in canonical id order.
+   */
+  runCompletionAcceptanceCriterionIds?: string[];
 }
 
 export interface RunCreationRequest {
@@ -98,7 +112,14 @@ const runCreationRequestSchema: z.ZodType<RunCreationRequest> = z.strictObject({
   orchestratorAgentDefinitionRevisionId: idSchema("agentDefinitionRevision"),
   finalReserve: allocationSchema.optional(),
   orchestratorAllocation: allocationSchema.optional(),
-  verificationPolicy: z.strictObject({ evaluatorAgentDefinitionRevisionId: nonEmptyString.nullable(), maxNodeGateCycles: z.number().int().min(1).max(MAX_NODE_GATE_CYCLES).optional() }).optional(),
+  verificationPolicy: z
+    .strictObject({
+      evaluatorAgentDefinitionRevisionId: nonEmptyString.nullable(),
+      maxNodeGateCycles: z.number().int().min(1).max(MAX_NODE_GATE_CYCLES).optional(),
+      maxRunCompletionCycles: z.number().int().min(1).max(MAX_RUN_COMPLETION_CYCLES).optional(),
+      runCompletionAcceptanceCriterionIds: z.array(idSchema("acceptanceCriterion")).optional(),
+    })
+    .optional(),
   correlationId: nonEmptyString.nullable().optional(),
 });
 
@@ -164,9 +185,40 @@ export class RunCreationService {
       if (!evaluator.ok) throw new ValidationError(`the Gate Evaluator Agent Definition revision is not executable by this Run: ${evaluator.message}`, { revisionId: evaluator.revisionId });
       if (evaluator.revision.definitionName === ORCHESTRATOR_DEFINITION_NAME) throw new ValidationError(`the ${ORCHESTRATOR_DEFINITION_NAME} definition cannot be the Run's Gate Evaluator`, { revisionId: evaluator.revision.id });
     }
+    // The declared completion criteria: each exists in this Conversation on a Requirement pinned to a revision of this Conversation or
+    // on a Task of this Conversation; deduplicated and canonically ordered; a coding Run declares at least one deterministic one.
+    const criterionIds = [...new Set(valid.verificationPolicy?.runCompletionAcceptanceCriterionIds ?? [])].sort() as AcceptanceCriterionId[];
+    let deterministic = 0;
+    for (const id of criterionIds) {
+      let criterion;
+      try {
+        criterion = this.stores.requirements.getAcceptanceCriterion(id);
+      } catch (error) {
+        if (error instanceof NotFoundError) throw new ValidationError(`completion criterion ${id} does not exist`, { acceptanceCriterionId: id });
+        throw error;
+      }
+      if (criterion.conversationId !== conversation.id) throw new ValidationError(`completion criterion ${id} belongs to another Conversation`, { acceptanceCriterionId: id });
+      if (criterion.requirementId !== null) {
+        const requirement = this.stores.requirements.get(criterion.requirementId);
+        if (requirement.conversationId !== conversation.id) throw new ValidationError(`completion criterion ${id} belongs to a Requirement of another Conversation`, { acceptanceCriterionId: id });
+        const revision = criterion.requirementRevisionId === null ? null : this.stores.requirements.getRevision(criterion.requirementRevisionId);
+        if (revision === null || revision.conversationId !== conversation.id) throw new ValidationError(`completion criterion ${id} is not pinned to a Requirement revision of this Conversation`, { acceptanceCriterionId: id });
+      } else if (criterion.taskId !== null) {
+        const task = this.stores.tasks.get(criterion.taskId);
+        if (this.stores.runs.get(task.runId).conversationId !== conversation.id) throw new ValidationError(`completion criterion ${id} belongs to a Task of another Conversation`, { acceptanceCriterionId: id });
+      }
+      if (criterion.check.kind === "deterministic") deterministic += 1;
+    }
+    if (valid.kind === "code" && deterministic === 0) throw new ValidationError("a coding Run declares at least one deterministic completion criterion", { runCompletionAcceptanceCriterionIds: criterionIds });
+    if (criterionIds.length > deterministic && evaluatorId === null) throw new ValidationError("a Run whose completion criteria include an evaluated criterion names a Gate Evaluator", { runCompletionAcceptanceCriterionIds: criterionIds });
     const verificationPolicy: VerificationPolicy = parseOrThrow(
       verificationPolicySchema,
-      { evaluatorAgentDefinitionRevisionId: evaluatorId, maxNodeGateCycles: valid.verificationPolicy?.maxNodeGateCycles ?? this.policy.maxNodeGateCycles },
+      {
+        evaluatorAgentDefinitionRevisionId: evaluatorId,
+        maxNodeGateCycles: valid.verificationPolicy?.maxNodeGateCycles ?? this.policy.maxNodeGateCycles,
+        maxRunCompletionCycles: valid.verificationPolicy?.maxRunCompletionCycles ?? this.policy.maxRunCompletionCycles,
+        runCompletionAcceptanceCriterionIds: criterionIds,
+      },
       "verification policy",
     );
 

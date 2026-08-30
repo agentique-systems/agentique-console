@@ -7,31 +7,46 @@ import {
   type Allocation,
   type BudgetLimits,
 } from "./budgets.ts";
-import type { AgentDefinitionRevisionId, ConversationId, RunId, SnapshotId, WorkspaceId } from "./ids.ts";
+import type { AcceptanceCriterionId, AgentDefinitionRevisionId, ConversationId, RunId, SnapshotId, WorkspaceId } from "./ids.ts";
 import { defineStateMachine } from "./transitions.ts";
-import { idSchema, nonEmptyString, timestampSchema, type Timestamp } from "./validation.ts";
+import { idSchema, nonEmptyString, timestampSchema, uniqueIds, type Timestamp } from "./validation.ts";
 
 /** The hard validation bound on `VerificationPolicy.maxNodeGateCycles`. */
 export const MAX_NODE_GATE_CYCLES = 10;
 
+/** The hard validation bound on `VerificationPolicy.maxRunCompletionCycles`. */
+export const MAX_RUN_COMPLETION_CYCLES = 10;
+
 /**
  * The Run's immutable verification policy (execution-model §10): which Agent
  * Definition revision every Gate Evaluator Invocation of the Run executes,
- * and how many `node_exit` Gates one Plan Node may open before it fails with
- * `gate_cycles_exhausted`. Chosen at Run creation, persisted on the Run, and
- * never read from ambient Workspace state, a latest revision, a provider
- * default, or mutable configuration afterwards. `null` names no Evaluator: a
- * Run whose Gates carry only deterministic criteria; a plan revision that
- * gates a node on an evaluated criterion is then rejected.
+ * how many `node_exit` Gates one Plan Node may open before it fails with
+ * `gate_cycles_exhausted`, how many `run_completion` Gates the Run may open
+ * before a further Completion Request is refused with
+ * `run_completion_cycles_exhausted`, and the Acceptance Criteria the Run
+ * itself declares for its `run_completion` Gate (deduplicated, in canonical
+ * id order; a coding Run declares at least one deterministic one at
+ * creation). Chosen at Run creation, persisted on the Run, and never read
+ * from ambient Workspace state, a latest revision, a provider default, or
+ * mutable configuration afterwards. `null` names no Evaluator: a Run whose
+ * Gates carry only deterministic criteria; a plan revision that gates a node
+ * on an evaluated criterion is then rejected, and a Completion Request whose
+ * criterion set holds an evaluated criterion is refused.
  */
 export interface VerificationPolicy {
   evaluatorAgentDefinitionRevisionId: AgentDefinitionRevisionId | null;
   maxNodeGateCycles: number;
+  maxRunCompletionCycles: number;
+  runCompletionAcceptanceCriterionIds: AcceptanceCriterionId[];
 }
+
+const canonicalIds = (ids: readonly string[]): boolean => ids.every((id, i) => i === 0 || ids[i - 1]! < id);
 
 export const verificationPolicySchema: z.ZodType<VerificationPolicy> = z.strictObject({
   evaluatorAgentDefinitionRevisionId: idSchema("agentDefinitionRevision").nullable(),
   maxNodeGateCycles: z.number().int().min(1).max(MAX_NODE_GATE_CYCLES),
+  maxRunCompletionCycles: z.number().int().min(1).max(MAX_RUN_COMPLETION_CYCLES),
+  runCompletionAcceptanceCriterionIds: uniqueIds(idSchema("acceptanceCriterion")).refine(canonicalIds, { message: "completion criteria are in canonical id order" }),
 });
 
 export const RUN_KINDS = ["code", "other"] as const;

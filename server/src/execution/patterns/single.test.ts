@@ -5,7 +5,7 @@
  * id, 20 one Invocation per logical turn, 22 atomic allocation, 23
  * runtime-owned Task states, 24 at-most-once approval).
  */
-import { ConflictError, type Invocation, type PlanNode } from "@agentique-console/core";
+import { ConflictError, type Invocation, type PlanNode, approvalSubjectOf } from "@agentique-console/core";
 import { describe, expect, it } from "vitest";
 import { COMPLETED_RESULT, fakeSnapshot, openRuntimeHarness, planNodes, seedPlanningRuntime, seedReadOnlyWorker, TEST_GOVERNOR, type RuntimeHarness } from "../test-support.ts";
 
@@ -240,7 +240,7 @@ describe("SinglePatternRunner", () => {
       expect(h.stores.reservations.listByChild({ type: "invocation", id: predecessor.id })[0]!.status).toBe("released");
       expect(h.stores.invocations.getManifest(successor.id).content.worktreePath).not.toBe(h.stores.invocations.getManifest(predecessor.id).content.worktreePath);
       const manifest = h.stores.invocations.getManifest(successor.id).content;
-      expect(manifest.inputs).toEqual([{ kind: "side_effect_approval_resolution", decisionId: blocked.decision.id, blockedInvocationId: predecessor.id, attemptId: blocked.attempt.id, tool: "shell", callDigest: blocked.decision.subject!.callDigest, callArtifactId: blocked.decision.subject!.callArtifactId, outcome: "approve_once" }]);
+      expect(manifest.inputs).toEqual([{ kind: "side_effect_approval_resolution", decisionId: blocked.decision.id, blockedInvocationId: predecessor.id, attemptId: blocked.attempt.id, tool: "shell", callDigest: approvalSubjectOf(blocked.decision).callDigest, callArtifactId: approvalSubjectOf(blocked.decision).callArtifactId, outcome: "approve_once" }]);
       expect(manifest.toolPolicy.shell).toBe("approval_required");
       expect(manifest.approvedCalls).toHaveLength(1);
       expect(h.stores.tasks.get(task.id)).toMatchObject({ status: "running", invocationId: successor.id });

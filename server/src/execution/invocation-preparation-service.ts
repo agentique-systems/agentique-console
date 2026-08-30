@@ -276,7 +276,8 @@ export class InvocationPreparationService {
       if ((request.taskIds ?? []).length > 0) throw new ValidationError("an Evaluator Invocation holds no Task");
       return { operation: null, agentDefinitionRevisionId: request.agentDefinitionRevisionId, input: { ...EMPTY_MANIFEST_TEMPLATE }, taskIds: [] };
     }
-    if ((request.gateId ?? null) !== null) throw new ValidationError("a positioned Invocation names no Gate", { patternPosition: request.patternPosition });
+    if ((request.gateId ?? null) !== null && !(request.role === "orchestrator" && request.purpose === "final_synthesis")) throw new ValidationError("a positioned Invocation names no Gate", { patternPosition: request.patternPosition });
+    if (request.role === "orchestrator" && request.purpose === "final_synthesis" && (request.gateId ?? null) === null) throw new ValidationError("a final_synthesis turn names the run_completion Gate it reports on");
     const operation = operationAt(node.shape, request.patternPosition);
     const defects = patternPositionDefects(node, request.patternPosition, { role: request.role, purpose: request.purpose, agentDefinitionRevisionId: (request.agentDefinitionRevisionId ?? operation?.agentDefinitionRevisionId ?? "agdr_none") as never });
     if (operation === null || defects.length > 0) {

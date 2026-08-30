@@ -5,6 +5,7 @@ import { ApprovedToolCallUseStore } from "./approved-tool-call-uses.ts";
 import { ArtifactStore } from "./artifacts.ts";
 import { BudgetReservationStore } from "./budgets.ts";
 import { CapacityLeaseStore } from "./capacity.ts";
+import { CompletionRequestStore } from "./completion-requests.ts";
 import { ProviderContinuationStore } from "./continuations.ts";
 import { ConversationStore } from "./conversations.ts";
 import { DecisionStore } from "./decisions.ts";
@@ -37,6 +38,7 @@ export interface Stores {
   continuations: ProviderContinuationStore;
   evaluations: EvaluationStore;
   gates: GateStore;
+  completionRequests: CompletionRequestStore;
   snapshots: SnapshotStore;
   changesets: ChangesetStore;
   publications: PublicationStore;
@@ -68,6 +70,7 @@ export function createStores(ctx: PersistenceContext, options: { planLimits?: Pl
     continuations: new ProviderContinuationStore(ctx),
     evaluations: new EvaluationStore(ctx),
     gates: new GateStore(ctx),
+    completionRequests: new CompletionRequestStore(ctx),
     snapshots: new SnapshotStore(ctx),
     changesets: new ChangesetStore(ctx),
     publications: new PublicationStore(ctx),
@@ -84,6 +87,7 @@ export {
   BudgetReservationStore,
   CapacityLeaseStore,
   ChangesetStore,
+  CompletionRequestStore,
   ConversationStore,
   DecisionStore,
   EvaluationStore,

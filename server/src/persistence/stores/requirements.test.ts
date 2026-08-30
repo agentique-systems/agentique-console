@@ -1,6 +1,6 @@
 import { ConflictError, IllegalTransitionError, InvariantViolationError, ValidationError, type DecisionRequest } from "@agentique-console/core";
 import { describe, expect, it } from "vitest";
-import { openHarness, seedRequirements, seedRun, seedSnapshot, seedWorkerNode, type Harness, type Seeded } from "../test-support.ts";
+import { openHarness, seedRequirements, seedRun, seedSnapshot, seedWorkerNode, type Harness, type Seeded, seedRunCompletionGate } from "../test-support.ts";
 
 function waiverRequest(s: Seeded, requirementId: string, overrides: Partial<DecisionRequest> = {}): DecisionRequest {
   return {
@@ -25,9 +25,8 @@ function waiverRequest(s: Seeded, requirementId: string, overrides: Partial<Deci
   };
 }
 
-function openGate(h: Harness, s: Seeded) {
-  const snapshot = seedSnapshot(h, s, "integration");
-  return h.stores.gates.open({ runId: s.run.id, planNodeId: null, kind: "run_completion", acceptanceCriterionIds: [], snapshotId: snapshot.id, candidateArtifactIds: [] });
+function openGate(h: Harness, s: Seeded, acceptanceCriterionIds: string[] = []) {
+  return seedRunCompletionGate(h, s, { acceptanceCriterionIds }).gate;
 }
 
 describe("requirement revisions", () => {
@@ -90,9 +89,10 @@ describe("requirement status", () => {
     const h = openHarness();
     try {
       const s = seedRun(h);
-      const { leafIds } = seedRequirements(h, s);
-      const gate = openGate(h, s);
-      const evaluation = h.stores.evaluations.record({ context: null, snapshotId: null, runId: s.run.id, planNodeId: null, gateId: gate.id, subject: { kind: "rubric", rubric: "works" }, verdict: "pass", evidence: [], producedBy: { kind: "runtime" }, artifactIds: [] });
+      const { revision, leafIds } = seedRequirements(h, s);
+      const criterion = h.stores.requirements.createAcceptanceCriterion({ conversationId: s.conversation.id, requirementId: leafIds[0]!, requirementRevisionId: revision.id, taskId: null, check: { kind: "deterministic", command: "npm test", expectedExitCode: 0 } });
+      const gate = openGate(h, s, [criterion.id]);
+      const evaluation = h.stores.evaluations.record({ context: null, snapshotId: gate.snapshotId, runId: s.run.id, planNodeId: null, gateId: gate.id, subject: { kind: "acceptance_criterion", acceptanceCriterionId: criterion.id }, verdict: "pass", evidence: [], producedBy: { kind: "runtime" }, artifactIds: [] });
       const change = h.stores.requirements.recordStatusChange({ requirementId: leafIds[0]!, runId: s.run.id, to: "satisfied", actor: "runtime", evidence: [{ kind: "evaluation", evaluationId: evaluation.id }], gateId: gate.id, decisionId: null, rationale: null });
       expect(change.from).toBe("open");
       expect(h.stores.requirements.get(leafIds[0]!).status).toBe("satisfied");

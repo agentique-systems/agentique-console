@@ -73,6 +73,7 @@ import {
   type PlanNodeId,
   type Task,
   type Timestamp,
+  approvalSubjectOf,
 } from "@agentique-console/core";
 import type { WriteOptions } from "../persistence/stores/support.ts";
 import { activeInvocationAdvice, blockedOn, blockingDecisionOf } from "./invocation-facts.ts";
@@ -336,7 +337,7 @@ export class NodeExitGates {
           return { kind: "awaiting_allocation_extension_phase" };
       }
     }
-    const input: ManifestInput = { kind: "gate_candidate", gateId: gate.id, gateKind: gate.kind, snapshotId: gate.snapshotId!, artifactIds: gate.candidateArtifactIds, acceptanceCriterionIds: this.criteriaOf(node).evaluated };
+    const input: ManifestInput = { kind: "gate_candidate", gateId: gate.id, gateKind: gate.kind, snapshotId: gate.snapshotId!, artifactIds: gate.candidateArtifactIds, acceptanceCriterionIds: this.criteriaOf(node).evaluated, completionRequestId: null, requirementRevisionId: null, tasks: [] };
     const prepared = preparation.prepare({
       runId: node.runId,
       planNodeId: node.id,
@@ -366,7 +367,7 @@ export class NodeExitGates {
     if (decision.status !== "resolved" || decision.resolution === null) return this.support.failNow(node, "result_blocked", options);
     const resolution: ManifestInput =
       predecessor.status === "blocked" && decision.kind === "side_effect_approval" && decision.subject !== null
-        ? { kind: "side_effect_approval_resolution", decisionId: decision.id, blockedInvocationId: predecessor.id, attemptId: decision.subject.attemptId, tool: decision.subject.tool, callDigest: decision.subject.callDigest, callArtifactId: decision.subject.callArtifactId, outcome: decision.resolution.chosenOptionId as "approve_once" | "deny" }
+        ? { kind: "side_effect_approval_resolution", decisionId: decision.id, blockedInvocationId: predecessor.id, attemptId: approvalSubjectOf(decision).attemptId, tool: approvalSubjectOf(decision).tool, callDigest: approvalSubjectOf(decision).callDigest, callArtifactId: approvalSubjectOf(decision).callArtifactId, outcome: decision.resolution.chosenOptionId as "approve_once" | "deny" }
         : { kind: "decision_resolution", decisionId: decision.id };
     const prepared = this.prepareEvaluatorFor(node, gate, predecessor, [resolution], options);
     if (prepared.kind !== "gate_evaluator_prepared") return prepared;

@@ -26,6 +26,7 @@ import {
   ATTEMPT_START_MODES,
   ATTEMPT_STATUSES,
   CHANGESET_INTEGRATION_STATUSES,
+  COMPLETION_REQUEST_STATUSES,
   CONVERSATION_MESSAGE_AUTHORS,
   COORDINATOR_PURPOSES,
   DECISION_KINDS,
@@ -34,6 +35,7 @@ import {
   EVALUATOR_PURPOSES,
   FAN_IN_POLICIES,
   FINAL_RESERVE_USES,
+  GATE_FAILURE_KINDS,
   GATE_KINDS,
   GATE_STATUSES,
   HANDOFF_MAX_SUMMARY_LENGTH,
@@ -46,6 +48,7 @@ import {
   INVOCATION_WAIT_REASONS,
   LEASE_STATUSES,
   MAX_NODE_GATE_CYCLES,
+  MAX_RUN_COMPLETION_CYCLES,
   MODEL_EFFORTS,
   ON_ALLOCATION_EXHAUSTED_POLICIES,
   ORCHESTRATOR_PURPOSES,
@@ -85,6 +88,7 @@ import {
   type AgentDefinitionProvenance,
   type ArtifactProducer,
   type AttemptFailureDetail,
+  type CompletionRequestOutcome,
   type ContextManifestContent,
   type DecisionAffects,
   type DecisionOption,
@@ -211,7 +215,7 @@ export const runs = sqliteTable(
     finalReserveCostUsd: real("final_reserve_cost_usd").notNull(),
     finalReserveTokens: integer("final_reserve_tokens").notNull(),
     finalReserveAttempts: integer("final_reserve_attempts").notNull(),
-    /** The immutable verification policy (core `VerificationPolicy`): the Gate Evaluator revision and the node_exit Gate cycle bound. */
+    /** The immutable verification policy (core `VerificationPolicy`): the Gate Evaluator revision, the Gate cycle bounds, and the declared completion criteria. */
     verificationPolicy: text("verification_policy", { mode: "json" }).$type<VerificationPolicy>().notNull(),
     baseSnapshotId: text("base_snapshot_id").references((): AnySQLiteColumn => snapshots.id),
     integrationSnapshotId: text("integration_snapshot_id").references((): AnySQLiteColumn => snapshots.id),
@@ -245,7 +249,7 @@ export const runs = sqliteTable(
     ),
     check(
       "runs_verification_policy_shape",
-      sql`json_type(${t.verificationPolicy}, '$.maxNodeGateCycles') = 'integer' AND json_extract(${t.verificationPolicy}, '$.maxNodeGateCycles') >= 1 AND json_extract(${t.verificationPolicy}, '$.maxNodeGateCycles') <= ${sql.raw(String(MAX_NODE_GATE_CYCLES))} AND (json_type(${t.verificationPolicy}, '$.evaluatorAgentDefinitionRevisionId') = 'null' OR json_extract(${t.verificationPolicy}, '$.evaluatorAgentDefinitionRevisionId') GLOB 'agdr_*')`,
+      sql`json_type(${t.verificationPolicy}, '$.maxNodeGateCycles') = 'integer' AND json_extract(${t.verificationPolicy}, '$.maxNodeGateCycles') >= 1 AND json_extract(${t.verificationPolicy}, '$.maxNodeGateCycles') <= ${sql.raw(String(MAX_NODE_GATE_CYCLES))} AND json_type(${t.verificationPolicy}, '$.maxRunCompletionCycles') = 'integer' AND json_extract(${t.verificationPolicy}, '$.maxRunCompletionCycles') >= 1 AND json_extract(${t.verificationPolicy}, '$.maxRunCompletionCycles') <= ${sql.raw(String(MAX_RUN_COMPLETION_CYCLES))} AND json_type(${t.verificationPolicy}, '$.runCompletionAcceptanceCriterionIds') = 'array' AND (json_type(${t.verificationPolicy}, '$.evaluatorAgentDefinitionRevisionId') = 'null' OR json_extract(${t.verificationPolicy}, '$.evaluatorAgentDefinitionRevisionId') GLOB 'agdr_*')`,
     ),
   ],
 );
@@ -558,7 +562,7 @@ export const decisions = sqliteTable(
     affects: text("affects", { mode: "json" }).$type<DecisionAffects>().notNull(),
     deadlineAt: timestamp("deadline_at"),
     activationCondition: text("activation_condition", { mode: "json" }).$type<ActivationCondition>(),
-    /** The canonical subject of a `side_effect_approval` (tool, call digest, call Artifact, originating ids); never the call bytes. */
+    /** The canonical subject of a `side_effect_approval` (tool, call digest, call Artifact, originating ids; never the call bytes) or a `signoff` (the Gates, Completion Request, Snapshot, and report it presents). */
     subject: text("subject", { mode: "json" }).$type<DecisionSubject>(),
     resolvedBy: text("resolved_by"),
     chosenOptionId: text("chosen_option_id"),
@@ -568,10 +572,15 @@ export const decisions = sqliteTable(
     supersedesDecisionId: text("supersedes_decision_id").references((): AnySQLiteColumn => decisions.id),
     supersededByDecisionId: text("superseded_by_decision_id").references((): AnySQLiteColumn => decisions.id),
     createdAt: timestamp("created_at").notNull(),
+    // A generated projection of the subject, so "one signoff Decision per operator_signoff Gate" is a plain unique index.
+    subjectGateId: text("subject_gate_id").generatedAlwaysAs(sql`json_extract(subject, '$.gateId')`, { mode: "virtual" }),
   },
   (t) => [
     index("decisions_conversation_status").on(t.conversationId, t.status),
     index("decisions_run").on(t.runId),
+    uniqueIndex("decisions_signoff_gate")
+      .on(t.subjectGateId)
+      .where(sql`kind = 'signoff'`),
     check("decisions_kind", sql`${t.kind} IN (${inList(DECISION_KINDS)})`),
     check("decisions_policy", sql`${t.resolutionPolicy} IN (${inList(RESOLUTION_POLICIES)})`),
     check("decisions_status", sql`${t.status} IN (${inList(DECISION_STATUSES)})`),
@@ -594,7 +603,9 @@ export const decisions = sqliteTable(
       sql`(${t.status} = 'open' AND ${t.resolvedBy} IS NULL AND ${t.chosenOptionId} IS NULL AND ${t.resolvedAt} IS NULL) OR (${t.status} = 'resolved' AND ${t.resolvedBy} IS NOT NULL AND ${t.chosenOptionId} IS NOT NULL AND ${t.resolvedAt} IS NOT NULL) OR ${t.status} = 'superseded'`,
     ),
     check("decisions_superseded_by", sql`(${t.status} = 'superseded') = (${t.supersededByDecisionId} IS NOT NULL)`),
-    check("decisions_subject_shape", sql`(${t.kind} = 'side_effect_approval') = (${t.subject} IS NOT NULL AND json_extract(${t.subject}, '$.kind') = 'side_effect_approval' AND ${t.runId} IS NOT NULL)`),
+    // A side_effect_approval and a signoff carry exactly their typed subject and belong to a Run; no other kind has a subject; a signoff is operator_required.
+    check("decisions_subject_shape", sql`(${t.kind} IN ('side_effect_approval', 'signoff')) = (${t.subject} IS NOT NULL AND json_extract(${t.subject}, '$.kind') = ${t.kind} AND ${t.runId} IS NOT NULL)`),
+    check("decisions_signoff_policy", sql`${t.kind} <> 'signoff' OR (${t.resolutionPolicy} = 'operator_required' AND json_extract(${t.subject}, '$.runId') = ${t.runId})`),
     check("decisions_no_self_supersede", sql`${t.supersedesDecisionId} IS NULL OR ${t.supersedesDecisionId} <> ${t.id}`),
   ],
 );
@@ -792,7 +803,7 @@ export const invocations = sqliteTable(
     patternPosition: text("pattern_position", { mode: "json" }).$type<PatternPosition>(),
     /** The position's stable key (`patternPositionKey`), denormalized for the one-active-per-position rule; agrees with the JSON by CHECK. */
     patternPositionKey: text("pattern_position_key"),
-    /** The Gate a Gate Evaluator judges: set exactly when the position is absent; immutable; validated against the open Gate by trigger. */
+    /** The Gate a Gate-owned Invocation belongs to: a Gate Evaluator's (position absent) or a final_synthesis turn's run_completion Gate; immutable; validated against the open Gate by trigger. */
     gateId: text("gate_id").references((): AnySQLiteColumn => gates.id),
     taskIds: text("task_ids", { mode: "json" }).$type<string[]>().notNull(),
     allocCostUsd: real("alloc_cost_usd").notNull(),
@@ -847,13 +858,19 @@ export const invocations = sqliteTable(
     check("invocations_pattern_position_kind", sql`${t.patternPosition} IS NULL OR json_extract(${t.patternPosition}, '$.kind') IN (${inList(PATTERN_POSITION_KINDS)})`),
     // A position is absent only for a Gate Evaluator; every other Invocation names one.
     check("invocations_pattern_position_present", sql`${t.patternPosition} IS NOT NULL OR (${t.role} = 'evaluator' AND ${t.purpose} = 'evaluate')`),
-    // A Gate Evaluator names exactly its Gate and no position, carries no Task; every positioned Invocation names no Gate (execution-model §10).
-    check("invocations_gate_ownership", sql`(${t.patternPosition} IS NULL) = (${t.gateId} IS NOT NULL)`),
-    check("invocations_gate_evaluator_role", sql`${t.gateId} IS NULL OR (${t.role} = 'evaluator' AND ${t.purpose} = 'evaluate' AND ${t.taskIds} = '[]')`),
-    // At most one active Evaluator Invocation per Gate: a successor after a blocker shares the Gate, never concurrently.
+    // A Gate Evaluator names exactly its Gate and no position; the Orchestrator's final_synthesis turn names its run_completion Gate at the
+    // orchestrator position; both carry no Task; every other Invocation names no Gate (execution-model §10).
+    check("invocations_gate_ownership", sql`${t.purpose} = 'final_synthesis' OR ((${t.patternPosition} IS NULL) = (${t.gateId} IS NOT NULL))`),
+    check("invocations_final_synthesis_gate", sql`${t.purpose} <> 'final_synthesis' OR ${t.gateId} IS NOT NULL`),
+    check("invocations_gate_evaluator_role", sql`${t.gateId} IS NULL OR (((${t.role} = 'evaluator' AND ${t.purpose} = 'evaluate') OR (${t.role} = 'orchestrator' AND ${t.purpose} = 'final_synthesis')) AND ${t.taskIds} = '[]')`),
+    // At most one active Evaluator Invocation per Gate, and one active final-synthesis turn per run_completion Gate: a successor after a
+    // blocker shares the Gate, never concurrently.
     uniqueIndex("invocations_active_gate")
       .on(t.gateId)
-      .where(sql`gate_id IS NOT NULL AND status IN ('pending', 'running', 'waiting')`),
+      .where(sql`gate_id IS NOT NULL AND role = 'evaluator' AND status IN ('pending', 'running', 'waiting')`),
+    uniqueIndex("invocations_active_synthesis")
+      .on(t.gateId)
+      .where(sql`gate_id IS NOT NULL AND purpose = 'final_synthesis' AND status IN ('pending', 'running', 'waiting')`),
     index("invocations_gate").on(t.gateId),
     // The denormalized key is exactly the kind plus its one discriminating field.
     check(
@@ -1147,13 +1164,25 @@ export const gates = sqliteTable(
       .references(() => runs.id),
     planNodeId: text("plan_node_id").references(() => planNodes.id),
     kind: text("kind").notNull(),
-    /** The verification cycle of this node and kind, from 1; unique per node for `node_exit`. */
+    /** The verification cycle of this node (or Run) and kind, from 1; unique per node for `node_exit`, per Run and kind for a Run Gate. */
     ordinal: integer("ordinal").notNull(),
     status: text("status").notNull(),
     acceptanceCriterionIds: text("acceptance_criterion_ids", { mode: "json" }).$type<string[]>().notNull(),
-    snapshotId: text("snapshot_id").references((): AnySQLiteColumn => snapshots.id),
+    snapshotId: text("snapshot_id")
+      .notNull()
+      .references((): AnySQLiteColumn => snapshots.id),
     /** The exact candidate Artifact ids the Gate judges, pinned at opening. */
     candidateArtifactIds: text("candidate_artifact_ids", { mode: "json" }).$type<string[]>().notNull(),
+    /** The Completion Request a run_completion or operator_signoff Gate belongs to; NULL for a node_exit Gate. */
+    completionRequestId: text("completion_request_id").references((): AnySQLiteColumn => completionRequests.id),
+    /** The Requirement revision a Run Gate pins; NULL for a node_exit Gate. */
+    requirementRevisionId: text("requirement_revision_id").references((): AnySQLiteColumn => requirementRevisions.id),
+    /** The exact current leaf Requirement ids a Run Gate judges, in id order; empty for a node_exit Gate. */
+    requirementIds: text("requirement_ids", { mode: "json" }).$type<string[]>().notNull(),
+    /** The passed run_completion Gate an operator_signoff Gate presents. */
+    completionGateId: text("completion_gate_id").references((): AnySQLiteColumn => gates.id),
+    /** The canonical final-report Artifact: recorded when a run_completion Gate closes passed, at opening for an operator_signoff Gate. */
+    reportArtifactId: text("report_artifact_id").references((): AnySQLiteColumn => artifacts.id),
     /** The closed failure fact (core `GateFailure`); set exactly when the Gate failed. */
     failure: text("failure", { mode: "json" }).$type<GateFailure>(),
     openedAt: timestamp("opened_at").notNull(),
@@ -1162,14 +1191,23 @@ export const gates = sqliteTable(
   (t) => [
     index("gates_run").on(t.runId, t.kind, t.status),
     index("gates_plan_node").on(t.planNodeId, t.ordinal),
+    index("gates_completion_request").on(t.completionRequestId),
     check("gates_kind", sql`${t.kind} IN (${inList(GATE_KINDS)})`),
     check("gates_status", sql`${t.status} IN (${inList(GATE_STATUSES)})`),
     check("gates_node_exit_has_node", sql`(${t.kind} = 'node_exit') = (${t.planNodeId} IS NOT NULL)`),
-    check("gates_node_exit_has_snapshot", sql`${t.kind} <> 'node_exit' OR ${t.snapshotId} IS NOT NULL`),
     check("gates_ordinal", sql`${t.ordinal} >= 1`),
     check("gates_closed_at", sql`(${t.status} = 'open') = (${t.closedAt} IS NULL)`),
     check("gates_failed_has_failure", sql`(${t.status} = 'failed') = (${t.failure} IS NOT NULL)`),
-    check("gates_failure_kind", sql`${t.failure} IS NULL OR json_extract(${t.failure}, '$.kind') IN ('criteria_failed', 'evaluator_failed')`),
+    check("gates_failure_kind", sql`${t.failure} IS NULL OR json_extract(${t.failure}, '$.kind') IN (${inList(GATE_FAILURE_KINDS)})`),
+    check("gates_run_completion_failure", sql`${t.failure} IS NULL OR ${t.kind} = 'run_completion' OR json_extract(${t.failure}, '$.kind') IN ('criteria_failed', 'evaluator_failed')`),
+    // A Run Gate names its Completion Request and pinned Requirement revision; a node_exit Gate names neither and no Requirement.
+    check("gates_run_gate_identity", sql`(${t.kind} <> 'node_exit') = (${t.completionRequestId} IS NOT NULL AND ${t.requirementRevisionId} IS NOT NULL)`),
+    check("gates_node_exit_no_requirements", sql`${t.kind} <> 'node_exit' OR ${t.requirementIds} = '[]'`),
+    check("gates_signoff_shape", sql`(${t.kind} = 'operator_signoff') = (${t.completionGateId} IS NOT NULL)`),
+    check("gates_signoff_criteria", sql`${t.kind} <> 'operator_signoff' OR ${t.acceptanceCriterionIds} = '[]'`),
+    check("gates_no_self_presentation", sql`${t.completionGateId} IS NULL OR ${t.completionGateId} <> ${t.id}`),
+    // The final report: an operator_signoff Gate presents it from opening; a run_completion Gate records it exactly when it passed; a node_exit Gate has none.
+    check("gates_report_shape", sql`(${t.kind} = 'operator_signoff' AND ${t.reportArtifactId} IS NOT NULL) OR (${t.kind} = 'run_completion' AND ((${t.status} = 'passed') = (${t.reportArtifactId} IS NOT NULL))) OR (${t.kind} = 'node_exit' AND ${t.reportArtifactId} IS NULL)`),
     // At most one open node_exit Gate per Plan Node, and one Gate per node and verification cycle (execution-model §10).
     uniqueIndex("gates_open_node_exit")
       .on(t.planNodeId)
@@ -1177,6 +1215,63 @@ export const gates = sqliteTable(
     uniqueIndex("gates_node_exit_ordinal")
       .on(t.planNodeId, t.ordinal)
       .where(sql`kind = 'node_exit'`),
+    // At most one open Run Gate per Run and kind, one Run Gate per Run, kind, and cycle, and one Gate per Completion Request and kind.
+    uniqueIndex("gates_open_run_gate")
+      .on(t.runId, t.kind)
+      .where(sql`plan_node_id IS NULL AND status = 'open'`),
+    uniqueIndex("gates_run_gate_ordinal")
+      .on(t.runId, t.kind, t.ordinal)
+      .where(sql`plan_node_id IS NULL`),
+    uniqueIndex("gates_completion_request_kind")
+      .on(t.completionRequestId, t.kind)
+      .where(sql`completion_request_id IS NOT NULL`),
+  ],
+);
+
+/**
+ * Completion Requests (execution-model §10 `run_completion`): one row per
+ * accepted `request_completion` call, the canonical lifecycle record of a
+ * completion attempt. The partial unique index over the Run holds "at most
+ * one non-terminal request per Run"; the unique indexes over the accepted
+ * call and the requesting Invocation make a replay find the same request.
+ * Rows are append-only history: identity columns and terminal rows are
+ * guarded by triggers in the baseline migration.
+ */
+export const completionRequests = sqliteTable(
+  "completion_requests",
+  {
+    id: text("id").primaryKey(),
+    runId: text("run_id")
+      .notNull()
+      .references(() => runs.id),
+    invocationId: text("invocation_id")
+      .notNull()
+      .references(() => invocations.id),
+    runtimeToolCallId: text("runtime_tool_call_id")
+      .notNull()
+      .references(() => runtimeToolCalls.id),
+    status: text("status").notNull(),
+    gateId: text("gate_id").references((): AnySQLiteColumn => gates.id),
+    reportArtifactId: text("report_artifact_id").references(() => artifacts.id),
+    /** The closed terminal outcome (core `CompletionRequestOutcome`); set exactly when the request failed or was cancelled. */
+    outcome: text("outcome", { mode: "json" }).$type<CompletionRequestOutcome>(),
+    createdAt: timestamp("created_at").notNull(),
+    startedAt: timestamp("started_at"),
+    endedAt: timestamp("ended_at"),
+  },
+  (t) => [
+    index("completion_requests_run").on(t.runId, t.createdAt),
+    uniqueIndex("completion_requests_active_run")
+      .on(t.runId)
+      .where(sql`status IN ('requested', 'verifying')`),
+    uniqueIndex("completion_requests_call").on(t.runtimeToolCallId),
+    uniqueIndex("completion_requests_invocation").on(t.invocationId),
+    check("completion_requests_status", sql`${t.status} IN (${inList(COMPLETION_REQUEST_STATUSES)})`),
+    check("completion_requests_gate_shape", sql`(${t.status} IN ('verifying', 'passed', 'failed')) = (${t.gateId} IS NOT NULL)`),
+    check("completion_requests_started_shape", sql`(${t.status} IN ('verifying', 'passed', 'failed')) = (${t.startedAt} IS NOT NULL)`),
+    check("completion_requests_report_shape", sql`(${t.status} = 'passed') = (${t.reportArtifactId} IS NOT NULL)`),
+    check("completion_requests_outcome_shape", sql`(${t.status} IN ('failed', 'cancelled')) = (${t.outcome} IS NOT NULL)`),
+    check("completion_requests_terminal_has_ended_at", sql`(${t.status} IN ('passed', 'failed', 'cancelled')) = (${t.endedAt} IS NOT NULL)`),
   ],
 );
 
@@ -1480,6 +1575,7 @@ export const TABLE_NAMES = [
   "context_manifests",
   "evaluations",
   "gates",
+  "completion_requests",
   "snapshots",
   "changesets",
   "publications",

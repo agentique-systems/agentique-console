@@ -17,7 +17,7 @@ import {
   type EventActor,
 } from "@agentique-console/core";
 import type { PersistenceContext } from "../context.ts";
-import { artifacts, attempts, decisions, invocations, planNodes, requirements, runs, tasks } from "../schema.ts";
+import { artifacts, attempts, completionRequests, decisions, gates, invocations, planNodes, requirements, runs, tasks } from "../schema.ts";
 import { assertSameConversation, conversationScope, loadConversationRef, OPERATOR_ACTOR, requireRow, writeMeta, type WriteOptions } from "./support.ts";
 
 type Row = typeof decisions.$inferSelect;
@@ -137,6 +137,12 @@ export class DecisionStore {
       .map(toDomain);
   }
 
+  /** The one `signoff` Decision of an `operator_signoff` Gate, or `null` before it was requested; at most one exists (a database unique index). */
+  signoffOf(gateId: string): Decision | null {
+    const row = this.ctx.db.select().from(decisions).where(and(eq(decisions.kind, "signoff"), eq(decisions.subjectGateId, gateId))).get();
+    return row ? toDomain(row) : null;
+  }
+
   /** Resolves an open Decision once; who may resolve what is enforced by the core rules. */
   resolve(id: DecisionId, input: DecisionResolutionInput, options?: WriteOptions): Decision {
     const resolution = parseOrThrow(decisionResolutionInputSchema, input, "Decision resolution");
@@ -175,9 +181,29 @@ export class DecisionStore {
     });
   }
 
-  /** A side-effect approval subject names the Run's own Plan Node, Invocation, Attempt, and call Artifact, consistently. */
+  /**
+   * A side-effect approval subject names the Run's own Plan Node, Invocation,
+   * Attempt, and call Artifact, consistently; a signoff subject names the
+   * Run's open `operator_signoff` Gate, the passed `run_completion` Gate and
+   * `passed` Completion Request that Gate presents, and exactly the Gate's
+   * verified Snapshot and final-report Artifact — and the Gate has no other
+   * signoff Decision.
+   */
   private assertSubjectOwnership(subject: DecisionSubject, runId: string | null): void {
     if (subject.runId !== runId) throw new InvariantViolationError(`Decision subject names Run ${subject.runId}, not ${String(runId)}`);
+    if (subject.kind === "signoff") {
+      const gate = requireRow(this.ctx.db.select({ runId: gates.runId, kind: gates.kind, status: gates.status, completionRequestId: gates.completionRequestId, completionGateId: gates.completionGateId, snapshotId: gates.snapshotId, reportArtifactId: gates.reportArtifactId }).from(gates).where(eq(gates.id, subject.gateId)).get(), "Gate", subject.gateId);
+      if (gate.runId !== subject.runId || gate.kind !== "operator_signoff") throw new InvariantViolationError(`Gate ${subject.gateId} is not an operator_signoff Gate of Run ${subject.runId}`, { gateId: subject.gateId });
+      if (gate.status !== "open") throw new ConflictError(`Gate ${subject.gateId} is ${gate.status}; a signoff Decision is requested for an open Gate`, { gateId: subject.gateId });
+      if (gate.completionGateId !== subject.completionGateId || gate.completionRequestId !== subject.completionRequestId || gate.snapshotId !== subject.snapshotId || gate.reportArtifactId !== subject.reportArtifactId) {
+        throw new InvariantViolationError(`signoff subject disagrees with the facts of Gate ${subject.gateId}`, { gateId: subject.gateId });
+      }
+      const request = requireRow(this.ctx.db.select({ status: completionRequests.status, gateId: completionRequests.gateId }).from(completionRequests).where(eq(completionRequests.id, subject.completionRequestId)).get(), "CompletionRequest", subject.completionRequestId);
+      if (request.status !== "passed" || request.gateId !== subject.completionGateId) throw new InvariantViolationError(`Completion Request ${subject.completionRequestId} has not passed on Gate ${subject.completionGateId}`, { completionRequestId: subject.completionRequestId });
+      const existing = this.ctx.db.select({ id: decisions.id }).from(decisions).where(and(eq(decisions.kind, "signoff"), eq(decisions.subjectGateId, subject.gateId))).get();
+      if (existing) throw new ConflictError(`Gate ${subject.gateId} already has signoff Decision ${existing.id}`, { gateId: subject.gateId, decisionId: existing.id });
+      return;
+    }
     const node = requireRow(this.ctx.db.select({ runId: planNodes.runId }).from(planNodes).where(eq(planNodes.id, subject.planNodeId)).get(), "PlanNode", subject.planNodeId);
     if (node.runId !== subject.runId) throw new InvariantViolationError(`PlanNode ${subject.planNodeId} belongs to another Run`);
     const invocation = requireRow(this.ctx.db.select({ runId: invocations.runId, planNodeId: invocations.planNodeId }).from(invocations).where(eq(invocations.id, subject.invocationId)).get(), "Invocation", subject.invocationId);
@@ -215,7 +241,7 @@ export class DecisionStore {
     }
   }
 
-  private toRow(decision: Decision): Row {
+  private toRow(decision: Decision): typeof decisions.$inferInsert {
     return {
       id: decision.id,
       conversationId: decision.conversationId,

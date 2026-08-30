@@ -30,13 +30,15 @@ describe("runtime tools", () => {
     expect(runtimeToolsFor("coordinator", "synthesize")).toEqual(RUNTIME_TOOLS_BY_ROLE.coordinator.filter((t) => t !== "propose_tasks" && t !== "update_task"));
     expect(runtimeToolsFor("worker", "task")).toEqual(RUNTIME_TOOLS_BY_ROLE.worker);
     expect(runtimeToolsFor("orchestrator", "operator_input")).toEqual(RUNTIME_TOOLS_BY_ROLE.orchestrator);
-    expect(RUNTIME_TOOL_CALL_TOOLS).toEqual(["propose_tasks", "update_task"]);
+    expect(RUNTIME_TOOL_CALL_TOOLS).toEqual(["propose_tasks", "update_task", "request_completion"]);
     expect(RUNTIME_TOOL_HANDLER_BINDINGS.propose_tasks).toEqual({ role: "coordinator", purposes: ["decompose", "replan"] });
     // Effective = manifest ∩ handlers ∩ role/purpose validity: a permitted tool without a handler is never callable.
     expect(effectiveRuntimeTools(runtimeToolsFor("coordinator", "decompose"), "coordinator", "decompose")).toEqual(["propose_tasks", "update_task"]);
     expect(effectiveRuntimeTools(runtimeToolsFor("coordinator", "synthesize"), "coordinator", "synthesize")).toEqual([]);
     expect(effectiveRuntimeTools(runtimeToolsFor("worker", "task"), "worker", "task")).toEqual([]);
-    expect(effectiveRuntimeTools(runtimeToolsFor("orchestrator", "operator_input"), "orchestrator", "operator_input")).toEqual([]);
+    expect(effectiveRuntimeTools(runtimeToolsFor("orchestrator", "operator_input"), "orchestrator", "operator_input")).toEqual(["request_completion"]);
+    expect(effectiveRuntimeTools(runtimeToolsFor("orchestrator", "final_synthesis"), "orchestrator", "final_synthesis")).toEqual([]);
+    expect(runtimeToolsFor("orchestrator", "final_synthesis")).not.toContain("request_completion");
     expect(effectiveRuntimeTools(["update_task"], "coordinator", "decompose")).toEqual(["update_task"]);
     expect(effectiveRuntimeTools(["propose_tasks"], "worker", "task")).toEqual([]);
   });

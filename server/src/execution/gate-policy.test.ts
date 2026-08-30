@@ -39,13 +39,13 @@ describe("Run verification policy", () => {
     const h = openHarness();
     try {
       const s = seedRun(h);
-      expect(s.run.verificationPolicy).toEqual({ evaluatorAgentDefinitionRevisionId: s.evaluator.id, maxNodeGateCycles: 3 });
+      expect(s.run.verificationPolicy).toEqual({ evaluatorAgentDefinitionRevisionId: s.evaluator.id, maxNodeGateCycles: 3, maxRunCompletionCycles: 3, runCompletionAcceptanceCriterionIds: [] });
       expect(h.stores.runs.get(s.run.id).verificationPolicy).toEqual(s.run.verificationPolicy);
       expect(() => h.database.sqlite.prepare("UPDATE runs SET verification_policy = '{\"evaluatorAgentDefinitionRevisionId\":null,\"maxNodeGateCycles\":1}' WHERE id = ?").run(s.run.id)).toThrow(/immutable/);
       const base = { conversationId: s.conversation.id, kind: "code" as const, target: { kind: "branch" as const, branch: "main" }, budget: s.run.budget, finalReserve: s.run.finalReserve };
-      expect(() => h.stores.runs.create({ ...base, verificationPolicy: { evaluatorAgentDefinitionRevisionId: null, maxNodeGateCycles: 0 } })).toThrow(ValidationError);
-      expect(() => h.stores.runs.create({ ...base, verificationPolicy: { evaluatorAgentDefinitionRevisionId: null, maxNodeGateCycles: MAX_NODE_GATE_CYCLES + 1 } })).toThrow(ValidationError);
-      expect(() => h.stores.runs.create({ ...base, verificationPolicy: { evaluatorAgentDefinitionRevisionId: "agdr_000000000000000000000000" as never, maxNodeGateCycles: 2 } })).toThrow(/AgentDefinitionRevision/);
+      expect(() => h.stores.runs.create({ ...base, verificationPolicy: { evaluatorAgentDefinitionRevisionId: null, maxNodeGateCycles: 0, maxRunCompletionCycles: 3, runCompletionAcceptanceCriterionIds: [] } })).toThrow(ValidationError);
+      expect(() => h.stores.runs.create({ ...base, verificationPolicy: { evaluatorAgentDefinitionRevisionId: null, maxNodeGateCycles: MAX_NODE_GATE_CYCLES + 1, maxRunCompletionCycles: 3, runCompletionAcceptanceCriterionIds: [] } })).toThrow(ValidationError);
+      expect(() => h.stores.runs.create({ ...base, verificationPolicy: { evaluatorAgentDefinitionRevisionId: "agdr_000000000000000000000000" as never, maxNodeGateCycles: 2, maxRunCompletionCycles: 3, runCompletionAcceptanceCriterionIds: [] } })).toThrow(/AgentDefinitionRevision/);
     } finally {
       h.close();
     }
@@ -55,11 +55,11 @@ describe("Run verification policy", () => {
     const h = openRuntimeHarness();
     try {
       expect(() => seedPlanningRuntime(h, { verificationPolicy: { evaluatorAgentDefinitionRevisionId: "agdr_000000000000000000000000" } })).toThrow(/not executable by this Run/);
-      const s = seedPlanningRuntime(h, { verificationPolicy: { evaluatorAgentDefinitionRevisionId: null, maxNodeGateCycles: 5 } });
-      expect(h.stores.runs.get(s.created.run.id).verificationPolicy).toEqual({ evaluatorAgentDefinitionRevisionId: null, maxNodeGateCycles: 5 });
+      const s = seedPlanningRuntime(h, { verificationPolicy: { evaluatorAgentDefinitionRevisionId: null, maxNodeGateCycles: 5, maxRunCompletionCycles: 3 } });
+      expect(h.stores.runs.get(s.created.run.id).verificationPolicy).toEqual({ evaluatorAgentDefinitionRevisionId: null, maxNodeGateCycles: 5, maxRunCompletionCycles: 3, runCompletionAcceptanceCriterionIds: [s.completion.criterionId] });
       const reader = seedReadOnlyWorker(h, "judge");
       const t = seedPlanningRuntime(h, { verificationPolicy: { evaluatorAgentDefinitionRevisionId: reader.id } });
-      expect(h.stores.runs.get(t.created.run.id).verificationPolicy).toEqual({ evaluatorAgentDefinitionRevisionId: reader.id, maxNodeGateCycles: 3 });
+      expect(h.stores.runs.get(t.created.run.id).verificationPolicy).toEqual({ evaluatorAgentDefinitionRevisionId: reader.id, maxNodeGateCycles: 3, maxRunCompletionCycles: 3, runCompletionAcceptanceCriterionIds: [t.completion.criterionId] });
     } finally {
       h.close();
     }
@@ -71,7 +71,7 @@ describe("Run verification policy", () => {
       const orchestrator = seedAgentRevision(h, "orchestrator");
       expect(() => seedPlanningRuntime(h, { verificationPolicy: { evaluatorAgentDefinitionRevisionId: orchestrator.id } })).toThrow(/cannot be the Run's Gate Evaluator/);
       const s = seedRun(h);
-      expect(() => h.stores.runs.create({ conversationId: s.conversation.id, kind: "code", target: { kind: "branch", branch: "main" }, budget: s.run.budget, finalReserve: s.run.finalReserve, verificationPolicy: { evaluatorAgentDefinitionRevisionId: s.definition.id, maxNodeGateCycles: 3 } })).toThrow(/orchestrator/);
+      expect(() => h.stores.runs.create({ conversationId: s.conversation.id, kind: "code", target: { kind: "branch", branch: "main" }, budget: s.run.budget, finalReserve: s.run.finalReserve, verificationPolicy: { evaluatorAgentDefinitionRevisionId: s.definition.id, maxNodeGateCycles: 3, maxRunCompletionCycles: 3, runCompletionAcceptanceCriterionIds: [] } })).toThrow(/orchestrator/);
     } finally {
       h.close();
     }
@@ -211,7 +211,7 @@ describe("Gate ownership at the schema", () => {
       expect(h.stores.tasks.remediationTaskOf(gate.id)?.id).toBe(created.id);
       expect(() => task({})).toThrow(ConflictError);
       expect(() => cloneRow(h, "tasks", created.id, { id: "'task_000000000000000000000000'" })).toThrow(/UNIQUE constraint failed: tasks\.gate_id/);
-      expect(() => cloneRow(h, "tasks", created.id, { id: "'task_000000000000000000000001'", plan_node_id: `'${other.id}'`, gate_id: `'${gate.id}'` })).toThrow(/addresses a failed gate of its own run and plan node/);
+      expect(() => cloneRow(h, "tasks", created.id, { id: "'task_000000000000000000000001'", plan_node_id: `'${other.id}'`, gate_id: `'${gate.id}'` })).toThrow(/addresses a failed gate of its own run/);
       expect(() => h.database.sqlite.prepare("UPDATE tasks SET gate_id = NULL WHERE id = ?").run(created.id)).toThrow(/immutable/);
       const passed = h.stores.gates.open({ runId: s.run.id, planNodeId: node.id, kind: "node_exit", acceptanceCriterionIds: criteria, snapshotId, candidateArtifactIds: [] });
       h.stores.gates.close(passed.id, "passed");
@@ -224,7 +224,7 @@ describe("Gate ownership at the schema", () => {
   it("bounds the Gate cycles of a node by the Run's policy at the store, and lets a Gate Evaluator hold no Task", () => {
     const h = openHarness();
     try {
-      const s = seedRun(h, { verificationPolicy: { evaluatorAgentDefinitionRevisionId: null, maxNodeGateCycles: 1 } });
+      const s = seedRun(h, { verificationPolicy: { evaluatorAgentDefinitionRevisionId: null, maxNodeGateCycles: 1, maxRunCompletionCycles: 3, runCompletionAcceptanceCriterionIds: [] } });
       const { node, criteria } = gatedNode(h, s);
       const snapshotId = seedSnapshot(h, s).id;
       const gate = h.stores.gates.open({ runId: s.run.id, planNodeId: node.id, kind: "node_exit", acceptanceCriterionIds: criteria, snapshotId, candidateArtifactIds: [] });

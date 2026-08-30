@@ -3,6 +3,7 @@ import { agentDefinitionRevisionSchema, agentDefinitionSchema } from "./agents.t
 import { artifactSchema } from "./artifacts.ts";
 import { budgetReservationSchema, RESERVATION_RELEASE_REASONS } from "./budgets.ts";
 import { capacityLeaseSchema } from "./capacity.ts";
+import { completionRequestSchema } from "./completion.ts";
 import { conversationMessageSchema, conversationSchema } from "./conversations.ts";
 import { decisionResolutionSchema, decisionSchema } from "./decisions.ts";
 import { handoffSchema } from "./handoffs.ts";
@@ -197,7 +198,14 @@ export const EVENT_CATALOGUE = {
   "runtime_tool_call.committed": runtimeToolCallSchema,
   "evaluation.recorded": evaluationSchema,
   "gate.opened": gateSchema,
-  "gate.passed": z.strictObject({ gateId: idSchema("gate") }),
+  /** `reportArtifactId`: the final-report Artifact a passed `run_completion` Gate recorded; `null` for every other Gate. */
+  "gate.passed": z.strictObject({ gateId: idSchema("gate"), reportArtifactId: idSchema("artifact").nullable() }),
+  /** One canonical Completion Request per accepted `request_completion` call (execution-model §10); every transition is journaled with the row. */
+  "completion_request.created": completionRequestSchema,
+  "completion_request.verifying": completionRequestSchema,
+  "completion_request.passed": completionRequestSchema,
+  "completion_request.failed": completionRequestSchema,
+  "completion_request.cancelled": completionRequestSchema,
   /** Ids and the closed failure fact only: never command output, a rubric, or a prompt. */
   "gate.failed": z.strictObject({ gateId: idSchema("gate"), failure: gateFailureSchema }),
   "snapshot.taken": snapshotSchema,

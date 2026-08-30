@@ -2,7 +2,7 @@ import { ConflictError, IllegalTransitionError, NotFoundError, RUN_STATUSES, Val
 import { describe, expect, it } from "vitest";
 import { DEFAULT_BUDGET, DEFAULT_FINAL_RESERVE, openHarness, seedRun, seedSnapshot } from "../test-support.ts";
 
-const NO_EVALUATOR = { evaluatorAgentDefinitionRevisionId: null, maxNodeGateCycles: 3 };
+const NO_EVALUATOR = { evaluatorAgentDefinitionRevisionId: null, maxNodeGateCycles: 3, maxRunCompletionCycles: 3, runCompletionAcceptanceCriterionIds: [] };
 
 describe("conversations", () => {
   it("creates, updates, and journals a Conversation and its messages", () => {

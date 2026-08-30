@@ -15,6 +15,8 @@ export const RUNTIME_ARTIFACT_PRODUCERS = [
   "transcript",
   "command",
   "tool_call",
+  /** The canonical final-report Artifact serialized from a validated final-synthesis result (execution-model §10). */
+  "final_report",
 ] as const;
 export type RuntimeArtifactProducer = (typeof RUNTIME_ARTIFACT_PRODUCERS)[number];
 

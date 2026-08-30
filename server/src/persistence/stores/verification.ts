@@ -10,6 +10,8 @@ import {
   InvariantViolationError,
   parseOrThrow,
   type AcceptanceCriterionId,
+  type ArtifactId,
+  type CompletionRequestId,
   type Evaluation,
   type EvaluationId,
   type EvaluationInput,
@@ -22,7 +24,7 @@ import {
   type RunId,
 } from "@agentique-console/core";
 import type { PersistenceContext } from "../context.ts";
-import { acceptanceCriteria, artifacts, evaluations, gates, invocations, planNodes, runs, snapshots } from "../schema.ts";
+import { acceptanceCriteria, artifacts, completionRequests, evaluations, gates, invocations, planNodes, requirementRevisions, runs, snapshots } from "../schema.ts";
 import { assertSameRun, loadRunRef, requireRow, runScope, writeMeta, type WriteOptions } from "./support.ts";
 
 function evaluationToDomain(row: typeof evaluations.$inferSelect): Evaluation {
@@ -99,27 +101,6 @@ export class EvaluationStore {
         const snapshot = requireRow(this.ctx.db.select({ workspaceId: snapshots.workspaceId }).from(snapshots).where(eq(snapshots.id, valid.snapshotId)).get(), "Snapshot", valid.snapshotId);
         if (snapshot.workspaceId !== run.workspaceId) throw new InvariantViolationError(`Snapshot ${valid.snapshotId} belongs to another Workspace`, { snapshotId: valid.snapshotId });
       }
-      if (valid.gateId !== null) {
-        const gate = gateToDomain(requireRow(this.ctx.db.select().from(gates).where(eq(gates.id, valid.gateId)).get(), "Gate", valid.gateId));
-        assertSameRun("Gate", valid.gateId, gate.runId, run.id);
-        if (gate.status !== "open") throw new InvariantViolationError(`Gate ${valid.gateId} is ${gate.status}; it accepts no further Evaluations`);
-        if (gate.kind === "node_exit") {
-          // A node_exit Gate Evaluation judges exactly what the Gate pinned: its node, its Snapshot, its candidate, one of its criteria.
-          if (valid.planNodeId !== gate.planNodeId) throw new InvariantViolationError(`Gate ${gate.id} belongs to PlanNode ${gate.planNodeId}, not ${String(valid.planNodeId)}`, { gateId: gate.id });
-          if (valid.snapshotId !== gate.snapshotId) throw new InvariantViolationError(`Gate ${gate.id} pinned Snapshot ${gate.snapshotId}, not ${String(valid.snapshotId)}`, { gateId: gate.id });
-          if (!sameIds(valid.artifactIds, gate.candidateArtifactIds)) throw new InvariantViolationError(`Gate ${gate.id} judges candidate ${gate.candidateArtifactIds.join(", ")}, not ${valid.artifactIds.join(", ")}`, { gateId: gate.id });
-          if (valid.subject.kind !== "acceptance_criterion") throw new InvariantViolationError("a node_exit Gate Evaluation judges one of the Gate's Acceptance Criteria", { gateId: gate.id });
-          const criterionId = valid.subject.acceptanceCriterionId;
-          if (!gate.acceptanceCriterionIds.includes(criterionId)) throw new InvariantViolationError(`AcceptanceCriterion ${criterionId} is not a criterion of Gate ${gate.id}`, { gateId: gate.id, acceptanceCriterionId: criterionId });
-          this.assertCriterionProducer(run.conversationId, criterionId, valid.producedBy.kind);
-          if (valid.producedBy.kind === "evaluator") {
-            const evaluator = requireRow(this.ctx.db.select({ gateId: invocations.gateId }).from(invocations).where(eq(invocations.id, valid.producedBy.invocationId)).get(), "Invocation", valid.producedBy.invocationId);
-            if (evaluator.gateId !== gate.id) throw new InvariantViolationError(`Invocation ${valid.producedBy.invocationId} is not the Evaluator of Gate ${gate.id}`, { gateId: gate.id, invocationId: valid.producedBy.invocationId });
-          }
-          const existing = this.gateCriterionEvaluationsOf(gate.id).find((e) => e.subject.kind === "acceptance_criterion" && e.subject.acceptanceCriterionId === criterionId);
-          if (existing !== undefined) throw new ConflictError(`Gate ${gate.id} already evaluated AcceptanceCriterion ${criterionId} (Evaluation ${existing.id})`, { gateId: gate.id, evaluationId: existing.id });
-        }
-      }
       const judged = valid.artifactIds.length > 0 ? this.ctx.db.select({ id: artifacts.id, runId: artifacts.runId, invocationId: artifacts.invocationId }).from(artifacts).where(inArray(artifacts.id, valid.artifactIds)).all() : [];
       for (const id of valid.artifactIds) assertSameRun("Artifact", id, requireRow(judged.find((r) => r.id === id), "Artifact", id).runId, run.id);
       if (valid.producedBy.kind === "evaluator") {
@@ -136,6 +117,28 @@ export class EvaluationStore {
         }
         const selfJudged = judged.find((a) => a.invocationId === evaluatorId);
         if (selfJudged) throw new InvariantViolationError(`Evaluator ${evaluatorId} produced Artifact ${selfJudged.id} and cannot evaluate it`);
+      }
+      if (valid.gateId !== null) {
+        const gate = gateToDomain(requireRow(this.ctx.db.select().from(gates).where(eq(gates.id, valid.gateId)).get(), "Gate", valid.gateId));
+        assertSameRun("Gate", valid.gateId, gate.runId, run.id);
+        if (gate.status !== "open") throw new InvariantViolationError(`Gate ${valid.gateId} is ${gate.status}; it accepts no further Evaluations`);
+        if (gate.kind === "operator_signoff") throw new InvariantViolationError(`Gate ${valid.gateId} asks the operator; it records no Evaluation`, { gateId: gate.id });
+        {
+          // A Gate Evaluation judges exactly what the Gate pinned: its node (none for a run_completion Gate), its Snapshot, its candidate, one of its criteria.
+          if (valid.planNodeId !== gate.planNodeId) throw new InvariantViolationError(gate.planNodeId === null ? `Gate ${gate.id} is a Run Gate; its Evaluations belong to no Plan Node` : `Gate ${gate.id} belongs to PlanNode ${gate.planNodeId}, not ${String(valid.planNodeId)}`, { gateId: gate.id });
+          if (valid.snapshotId !== gate.snapshotId) throw new InvariantViolationError(`Gate ${gate.id} pinned Snapshot ${gate.snapshotId}, not ${String(valid.snapshotId)}`, { gateId: gate.id });
+          if (!sameIds(valid.artifactIds, gate.candidateArtifactIds)) throw new InvariantViolationError(`Gate ${gate.id} judges candidate ${gate.candidateArtifactIds.join(", ")}, not ${valid.artifactIds.join(", ")}`, { gateId: gate.id });
+          if (valid.subject.kind !== "acceptance_criterion") throw new InvariantViolationError("a node_exit Gate Evaluation judges one of the Gate's Acceptance Criteria", { gateId: gate.id });
+          const criterionId = valid.subject.acceptanceCriterionId;
+          if (!gate.acceptanceCriterionIds.includes(criterionId)) throw new InvariantViolationError(`AcceptanceCriterion ${criterionId} is not a criterion of Gate ${gate.id}`, { gateId: gate.id, acceptanceCriterionId: criterionId });
+          this.assertCriterionProducer(run.conversationId, criterionId, valid.producedBy.kind);
+          if (valid.producedBy.kind === "evaluator") {
+            const evaluator = requireRow(this.ctx.db.select({ gateId: invocations.gateId }).from(invocations).where(eq(invocations.id, valid.producedBy.invocationId)).get(), "Invocation", valid.producedBy.invocationId);
+            if (evaluator.gateId !== gate.id) throw new InvariantViolationError(`Invocation ${valid.producedBy.invocationId} is not the Evaluator of Gate ${gate.id}`, { gateId: gate.id, invocationId: valid.producedBy.invocationId });
+          }
+          const existing = this.gateCriterionEvaluationsOf(gate.id).find((e) => e.subject.kind === "acceptance_criterion" && e.subject.acceptanceCriterionId === criterionId);
+          if (existing !== undefined) throw new ConflictError(`Gate ${gate.id} already evaluated AcceptanceCriterion ${criterionId} (Evaluation ${existing.id})`, { gateId: gate.id, evaluationId: existing.id });
+        }
       }
       const evaluation: Evaluation = { id: this.ctx.ids("evaluation"), ...valid, createdAt: this.ctx.clock() };
       parseOrThrow(evaluationSchema, evaluation, "Evaluation");
@@ -282,10 +285,19 @@ export class EvaluationStore {
  * order, a pinned Snapshot of the Run's Workspace, and the exact candidate
  * Artifacts; its ordinal is the next verification cycle of that node, at
  * most one Gate of the node is open at a time, and the Run's
- * `maxNodeGateCycles` bounds how many may ever open — each rule held by the
- * store and by the database (unique indexes), so racing passes converge on
- * one row. A Gate closes exactly once, `passed` or `failed` with its closed
- * failure fact; closed Gates are append-only history.
+ * `maxNodeGateCycles` bounds how many may ever open. A `run_completion`
+ * Gate is opened for a `requested` Completion Request of the Run (one Gate
+ * per request), pinning a Requirement revision of the Run's Conversation and
+ * exactly the leaf Requirements and criteria of that Conversation it judges;
+ * its ordinal is the Run's next completion cycle, at most one is open per
+ * Run, and `maxRunCompletionCycles` bounds how many may ever open. An
+ * `operator_signoff` Gate is opened for a `passed` request on its passed
+ * `run_completion` Gate's exact Snapshot, Requirement revision, Requirements,
+ * and final-report Artifact. Each rule is held by the store and by the
+ * database (unique indexes), so racing passes converge on one row. A Gate
+ * closes exactly once, `passed` (a `run_completion` Gate recording its
+ * report) or `failed` with its closed failure fact; closed Gates are
+ * append-only history.
  */
 export class GateStore {
   constructor(private readonly ctx: PersistenceContext) {}
@@ -294,6 +306,7 @@ export class GateStore {
     const valid = parseOrThrow(gateInputSchema, input, "Gate input");
     return this.ctx.tx.write(() => {
       const run = loadRunRef(this.ctx, valid.runId);
+      const policy = requireRow(this.ctx.db.select({ verificationPolicy: runs.verificationPolicy }).from(runs).where(eq(runs.id, run.id)).get(), "Run", run.id).verificationPolicy;
       let ordinal: number;
       if (valid.planNodeId !== null) {
         const node = requireRow(this.ctx.db.select({ runId: planNodes.runId, kind: planNodes.kind, gateAcceptanceCriterionIds: planNodes.gateAcceptanceCriterionIds }).from(planNodes).where(eq(planNodes.id, valid.planNodeId)).get(), "PlanNode", valid.planNodeId);
@@ -304,11 +317,17 @@ export class GateStore {
         const existing = this.listByPlanNode(valid.planNodeId);
         const open = existing.find((g) => g.status === "open");
         if (open !== undefined) throw new ConflictError(`PlanNode ${valid.planNodeId} already has open Gate ${open.id}`, { planNodeId: valid.planNodeId, gateId: open.id });
-        const policy = requireRow(this.ctx.db.select({ verificationPolicy: runs.verificationPolicy }).from(runs).where(eq(runs.id, run.id)).get(), "Run", run.id).verificationPolicy;
         if (existing.length >= policy.maxNodeGateCycles) throw new ConflictError(`PlanNode ${valid.planNodeId} has opened ${existing.length} node_exit Gates; the Run permits ${policy.maxNodeGateCycles}`, { planNodeId: valid.planNodeId, maxNodeGateCycles: policy.maxNodeGateCycles });
         ordinal = existing.length + 1;
       } else {
-        ordinal = this.listByRun(run.id).filter((g) => g.kind === valid.kind).length + 1;
+        const existing = this.listByKind(run.id, valid.kind);
+        const open = existing.find((g) => g.status === "open");
+        if (open !== undefined) throw new ConflictError(`Run ${run.id} already has open ${valid.kind} Gate ${open.id}`, { runId: run.id, gateId: open.id });
+        if (valid.kind === "run_completion" && existing.length >= policy.maxRunCompletionCycles) {
+          throw new ConflictError(`Run ${run.id} has opened ${existing.length} run_completion Gates; the Run permits ${policy.maxRunCompletionCycles}`, { runId: run.id, maxRunCompletionCycles: policy.maxRunCompletionCycles });
+        }
+        this.assertRunGate(run, valid);
+        ordinal = existing.length + 1;
       }
       if (valid.snapshotId !== null) {
         const snapshot = requireRow(this.ctx.db.select({ workspaceId: snapshots.workspaceId }).from(snapshots).where(eq(snapshots.id, valid.snapshotId)).get(), "Snapshot", valid.snapshotId);
@@ -318,7 +337,25 @@ export class GateStore {
         const rows = this.ctx.db.select({ id: artifacts.id, runId: artifacts.runId }).from(artifacts).where(inArray(artifacts.id, valid.candidateArtifactIds)).all();
         for (const id of valid.candidateArtifactIds) assertSameRun("Artifact", id, requireRow(rows.find((r) => r.id === id), "Artifact", id).runId, run.id);
       }
-      const gate: Gate = { id: this.ctx.ids("gate"), ...valid, ordinal, status: "open", failure: null, openedAt: this.ctx.clock(), closedAt: null };
+      const gate: Gate = {
+        id: this.ctx.ids("gate"),
+        runId: valid.runId,
+        planNodeId: valid.planNodeId,
+        kind: valid.kind,
+        ordinal,
+        status: "open",
+        acceptanceCriterionIds: valid.acceptanceCriterionIds,
+        snapshotId: valid.snapshotId,
+        candidateArtifactIds: valid.candidateArtifactIds,
+        completionRequestId: valid.completionRequestId ?? null,
+        requirementRevisionId: valid.requirementRevisionId ?? null,
+        requirementIds: valid.requirementIds ?? [],
+        completionGateId: valid.completionGateId ?? null,
+        reportArtifactId: valid.reportArtifactId ?? null,
+        failure: null,
+        openedAt: this.ctx.clock(),
+        closedAt: null,
+      };
       parseOrThrow(gateSchema, gate, "Gate");
       this.ctx.journal.append({
         type: "gate.opened",
@@ -328,13 +365,72 @@ export class GateStore {
         payload: gate,
         ...writeMeta(options),
       });
-      this.ctx.db.insert(gates).values(gate).run();
+      this.ctx.db.insert(gates).values({ ...gate, snapshotId: gate.snapshotId! }).run();
       return gate;
     });
   }
 
+  /**
+   * A Run Gate's named facts belong to the Run and agree with one another: a
+   * `run_completion` Gate names a `requested` request without a Gate, a
+   * Requirement revision of the Conversation, leaf Requirements of that
+   * revision, and criteria of the Conversation; an `operator_signoff` Gate
+   * names a `passed` request and its passed `run_completion` Gate, repeating
+   * that Gate's Snapshot, revision, Requirements, and report exactly.
+   */
+  private assertRunGate(run: { id: RunId; conversationId: string }, valid: GateInput): void {
+    const requestId = valid.completionRequestId ?? null;
+    if (requestId === null) throw new InvariantViolationError(`a ${valid.kind} Gate names its Completion Request`, { kind: valid.kind });
+    const request = requireRow(this.ctx.db.select({ runId: completionRequests.runId, status: completionRequests.status, gateId: completionRequests.gateId }).from(completionRequests).where(eq(completionRequests.id, requestId)).get(), "CompletionRequest", requestId);
+    assertSameRun("CompletionRequest", requestId, request.runId, run.id);
+    const revisionId = valid.requirementRevisionId ?? null;
+    if (revisionId === null) throw new InvariantViolationError(`a ${valid.kind} Gate pins the Requirement revision it judges`, { kind: valid.kind });
+    const revision = requireRow(this.ctx.db.select({ conversationId: requirementRevisions.conversationId, tree: requirementRevisions.tree }).from(requirementRevisions).where(eq(requirementRevisions.id, revisionId)).get(), "RequirementRevision", revisionId);
+    if (revision.conversationId !== run.conversationId) throw new InvariantViolationError(`RequirementRevision ${revisionId} belongs to another Conversation`, { requirementRevisionId: revisionId });
+    const parents = new Set(revision.tree.map((e) => e.parentId).filter((id) => id !== null));
+    const leaves = new Set(revision.tree.filter((e) => !parents.has(e.id)).map((e) => e.id));
+    for (const id of valid.requirementIds ?? []) {
+      if (!leaves.has(id)) throw new InvariantViolationError(`Requirement ${id} is not a leaf of RequirementRevision ${revisionId}`, { requirementId: id, requirementRevisionId: revisionId });
+    }
+    for (const id of valid.acceptanceCriterionIds) {
+      const criterion = requireRow(this.ctx.db.select({ conversationId: acceptanceCriteria.conversationId }).from(acceptanceCriteria).where(eq(acceptanceCriteria.id, id)).get(), "AcceptanceCriterion", id);
+      if (criterion.conversationId !== run.conversationId) throw new InvariantViolationError(`AcceptanceCriterion ${id} belongs to another Conversation`, { acceptanceCriterionId: id });
+    }
+    if (valid.kind === "run_completion") {
+      if (request.status !== "requested" || request.gateId !== null) throw new ConflictError(`Completion Request ${requestId} is ${request.status}; a run_completion Gate opens for a requested request without a Gate`, { completionRequestId: requestId });
+      if (this.listByCompletionRequest(requestId).length > 0) throw new ConflictError(`Completion Request ${requestId} already has a Gate`, { completionRequestId: requestId });
+      return;
+    }
+    // operator_signoff
+    const completionGateId = valid.completionGateId ?? null;
+    if (completionGateId === null) throw new InvariantViolationError("an operator_signoff Gate names the passed run_completion Gate it presents");
+    const completion = this.get(completionGateId);
+    assertSameRun("Gate", completionGateId, completion.runId, run.id);
+    if (completion.kind !== "run_completion" || completion.status !== "passed" || completion.completionRequestId !== requestId) {
+      throw new InvariantViolationError(`Gate ${completionGateId} is not the passed run_completion Gate of Completion Request ${requestId}`, { gateId: completionGateId, completionRequestId: requestId });
+    }
+    if (request.status !== "passed" || request.gateId !== completionGateId) throw new ConflictError(`Completion Request ${requestId} is ${request.status}; an operator_signoff Gate opens for a passed request`, { completionRequestId: requestId });
+    if (valid.snapshotId !== completion.snapshotId) throw new InvariantViolationError(`an operator_signoff Gate pins the verified Snapshot ${completion.snapshotId} of Gate ${completionGateId}`, { gateId: completionGateId });
+    if (revisionId !== completion.requirementRevisionId) throw new InvariantViolationError(`an operator_signoff Gate pins the Requirement revision ${completion.requirementRevisionId} of Gate ${completionGateId}`, { gateId: completionGateId });
+    if (!sameIds(valid.requirementIds ?? [], completion.requirementIds)) throw new InvariantViolationError(`an operator_signoff Gate presents exactly the Requirements of Gate ${completionGateId}`, { gateId: completionGateId });
+    if ((valid.reportArtifactId ?? null) !== completion.reportArtifactId) throw new InvariantViolationError(`an operator_signoff Gate presents the final-report Artifact ${completion.reportArtifactId} of Gate ${completionGateId}`, { gateId: completionGateId });
+    if (this.listByCompletionRequest(requestId).some((g) => g.kind === "operator_signoff")) throw new ConflictError(`Completion Request ${requestId} already has an operator_signoff Gate`, { completionRequestId: requestId });
+  }
+
   get(id: GateId): Gate {
     return gateToDomain(requireRow(this.ctx.db.select().from(gates).where(eq(gates.id, id)).get(), "Gate", id));
+  }
+
+  /** The Gates of one Completion Request (its run_completion Gate, then its operator_signoff Gate), in opening order. */
+  listByCompletionRequest(completionRequestId: CompletionRequestId): Gate[] {
+    return this.ctx.db.select().from(gates).where(eq(gates.completionRequestId, completionRequestId)).orderBy(asc(gates.openedAt), asc(gates.id)).all().map(gateToDomain);
+  }
+
+  /** The Run's open Gate of a Run-level kind, or `null`; at most one exists (a database unique index). */
+  openRunGateOf(runId: RunId, kind: Exclude<GateKind, "node_exit">): Gate | null {
+    const rows = this.listByKind(runId, kind).filter((g) => g.status === "open");
+    if (rows.length > 1) throw new InvariantViolationError(`Run ${runId} has ${rows.length} open ${kind} Gates`, { runId, kind });
+    return rows[0] ?? null;
   }
 
   listByRun(runId: RunId): Gate[] {
@@ -358,8 +454,13 @@ export class GateStore {
     return this.ctx.db.select().from(gates).where(and(eq(gates.runId, runId), eq(gates.kind, kind))).orderBy(asc(gates.ordinal), asc(gates.id)).all().map(gateToDomain);
   }
 
-  /** Closes an open Gate exactly once: `passed` carries no failure, `failed` carries its closed failure fact. */
-  close(id: GateId, outcome: "passed" | "failed", failure: GateFailure | null = null, options?: WriteOptions): Gate {
+  /**
+   * Closes an open Gate exactly once: `passed` carries no failure (a
+   * `run_completion` Gate records its final-report Artifact of the Run),
+   * `failed` carries its closed failure fact (the completion-only kinds for a
+   * `run_completion` Gate alone).
+   */
+  close(id: GateId, outcome: "passed" | "failed", failure: GateFailure | null = null, options?: WriteOptions & { reportArtifactId?: ArtifactId }): Gate {
     return this.ctx.tx.write(() => {
       const current = this.get(id);
       GATE_MACHINE.assertTransition(current.status, outcome, { gateId: id });
@@ -369,14 +470,22 @@ export class GateStore {
         throw new InvariantViolationError(`Gate ${id} fails only on its own criteria`, { gateId: id, acceptanceCriterionIds: valid.acceptanceCriterionIds });
       }
       const run = loadRunRef(this.ctx, current.runId);
-      const next: Gate = { ...current, status: outcome, failure: valid, closedAt: this.ctx.clock() };
+      const reportArtifactId = options?.reportArtifactId ?? null;
+      if ((current.kind === "run_completion" && outcome === "passed") !== (reportArtifactId !== null)) {
+        throw new InvariantViolationError("a run_completion Gate passes with its final-report Artifact; no other closure records one", { gateId: id, outcome });
+      }
+      if (reportArtifactId !== null) {
+        const artifact = requireRow(this.ctx.db.select({ runId: artifacts.runId }).from(artifacts).where(eq(artifacts.id, reportArtifactId)).get(), "Artifact", reportArtifactId);
+        assertSameRun("Artifact", reportArtifactId, artifact.runId, run.id);
+      }
+      const next: Gate = { ...current, status: outcome, failure: valid, reportArtifactId: reportArtifactId ?? current.reportArtifactId, closedAt: this.ctx.clock() };
       parseOrThrow(gateSchema, next, "Gate");
       if (outcome === "passed") {
-        this.ctx.journal.append({ type: "gate.passed", scope: runScope(run, { planNodeId: current.planNodeId }), subjectType: "gate", subjectId: id, payload: { gateId: id }, ...writeMeta(options) });
+        this.ctx.journal.append({ type: "gate.passed", scope: runScope(run, { planNodeId: current.planNodeId }), subjectType: "gate", subjectId: id, payload: { gateId: id, reportArtifactId }, ...writeMeta(options) });
       } else {
         this.ctx.journal.append({ type: "gate.failed", scope: runScope(run, { planNodeId: current.planNodeId }), subjectType: "gate", subjectId: id, payload: { gateId: id, failure: valid! }, ...writeMeta(options) });
       }
-      this.ctx.db.update(gates).set({ status: next.status, failure: next.failure, closedAt: next.closedAt }).where(eq(gates.id, id)).run();
+      this.ctx.db.update(gates).set({ status: next.status, failure: next.failure, reportArtifactId: next.reportArtifactId, closedAt: next.closedAt }).where(eq(gates.id, id)).run();
       return next;
     });
   }

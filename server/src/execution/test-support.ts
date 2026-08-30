@@ -8,15 +8,19 @@
 import {
   DEFAULT_PLAN_LIMITS,
   EMPTY_WORKSPACE_CAPABILITY_POLICY,
+  type AcceptanceCriterionId,
   type AgentDefinitionRevision,
+  type ConversationId,
   type ConversationMessage,
   type Invocation,
   type PlanExpression,
   type PlanLimits,
+  type RequirementId,
+  type RequirementRevision,
   type SnapshotIdentity,
 } from "@agentique-console/core";
 import { sha256Hex } from "../persistence/blob-store.ts";
-import { DEFAULT_BUDGET, INVOCATION_ALLOCATION, openHarness, seedAgentRevision, type Harness } from "../persistence/test-support.ts";
+import { DEFAULT_BUDGET, INVOCATION_ALLOCATION, openHarness, seedAgentRevision, seedRunCompletionGate, type Harness, type Seeded } from "../persistence/test-support.ts";
 import { MemoryContinuationPayloadStore } from "../provider/continuation-store.ts";
 import { ContinuationService } from "../provider/continuation.ts";
 import { ScriptedProvider } from "../provider/fake.ts";
@@ -329,6 +333,7 @@ export const TEST_POLICY: RunCreationPolicy = {
   initialOrchestratorAllocation: { costUsd: 10, tokens: 100_000, attempts: 5 },
   finalReserve: { code: { costUsd: 5, tokens: 50_000, attempts: 3 }, other: { costUsd: 0, tokens: 0, attempts: 0 } },
   maxNodeGateCycles: 3,
+  maxRunCompletionCycles: 3,
 };
 
 export const TEST_NODE_ALLOCATION = { costUsd: 4, tokens: 40_000, attempts: 2 };
@@ -441,11 +446,33 @@ export interface RuntimeSeed {
   /** The read-only Gate Evaluator revision the Run's verification policy names. */
   evaluator: AgentDefinitionRevision;
   message: ConversationMessage;
+  /** The Conversation's initial Requirement revision (one leaf) and the deterministic completion criterion the Run declares on it. */
+  completion: { revision: RequirementRevision; requirementId: RequirementId; criterionId: AcceptanceCriterionId };
+}
+
+/** The persistence-harness view of a runtime seed, for the persistence fixtures that build Gates and Completion Requests. */
+export function asSeeded(seed: RuntimeSeed): Seeded {
+  const run = seed.created.run;
+  return { workspace: { id: run.workspaceId } as never, conversation: { id: run.conversationId } as never, run, definition: seed.orchestrator, evaluator: seed.evaluator, root: seed.created.root };
+}
+
+/** An open `run_completion` Gate (with its `verifying` Completion Request) of a runtime-seeded Run; see `seedRunCompletionGate`. */
+export function seedRunCompletionGateFor(h: RuntimeHarness, seed: RuntimeSeed, overrides: Parameters<typeof seedRunCompletionGate>[2] = {}) {
+  return seedRunCompletionGate(h, asSeeded(seed), overrides);
+}
+
+/** A one-leaf Requirement revision with one deterministic criterion: what a coding Run must declare for its run_completion Gate at creation. */
+export function seedCompletionCriterion(h: Pick<Harness, "ctx" | "stores">, conversationId: ConversationId, command = "npm test"): RuntimeSeed["completion"] {
+  const requirementId = h.ctx.ids("requirement");
+  const revision = h.stores.requirements.createRevision({ conversationId, approvedByDecisionId: null, tree: [{ id: requirementId, parentId: null, composition: null, statement: "The change builds and its tests pass", position: 0, acceptanceCriterionIds: [] }] });
+  const criterion = h.stores.requirements.createAcceptanceCriterion({ conversationId, requirementId, requirementRevisionId: revision.id, taskId: null, check: { kind: "deterministic", command, expectedExitCode: 0 } });
+  return { revision, requirementId, criterionId: criterion.id };
 }
 
 /**
- * Workspace, Conversation, Orchestrator, worker, and Gate Evaluator definitions, a created Run whose verification
- * policy names the Evaluator, and the operator's opening message.
+ * Workspace, Conversation, Orchestrator, worker, and Gate Evaluator definitions, the Conversation's initial Requirement
+ * revision with the deterministic completion criterion a coding Run declares, a created Run whose verification policy
+ * names the Evaluator and that criterion, and the operator's opening message.
  */
 export function seedRuntime(h: RuntimeHarness, overrides: Partial<RunCreationRequest> = {}): RuntimeSeed {
   const workspace = h.stores.workspaces.create({ name: "demo", rootPath: `/tmp/demo-${h.ctx.ids("workspace")}`, kind: "git" });
@@ -453,17 +480,19 @@ export function seedRuntime(h: RuntimeHarness, overrides: Partial<RunCreationReq
   const orchestrator = seedAgentRevision(h, "orchestrator");
   const worker = seedAgentRevision(h, "worker");
   const evaluator = seedReadOnlyWorker(h, "evaluator");
+  const completion = seedCompletionCriterion(h, conversation.id);
+  const { verificationPolicy, ...rest } = overrides;
   const created = h.runCreation.create({
     conversationId: conversation.id,
     kind: "code",
     target: { kind: "branch", branch: "main" },
     budget: DEFAULT_BUDGET,
     orchestratorAgentDefinitionRevisionId: orchestrator.id,
-    verificationPolicy: { evaluatorAgentDefinitionRevisionId: evaluator.id },
-    ...overrides,
+    verificationPolicy: { evaluatorAgentDefinitionRevisionId: evaluator.id, runCompletionAcceptanceCriterionIds: [completion.criterionId], ...verificationPolicy },
+    ...rest,
   });
   const message = h.stores.conversations.postMessage({ conversationId: conversation.id, author: "operator", content: "Add a --version flag to the CLI.", runId: created.run.id, invocationId: null });
-  return { created, orchestrator, worker, evaluator, message };
+  return { created, orchestrator, worker, evaluator, message, completion };
 }
 
 /** Starts the seeded Run: root running, Run running, first Orchestrator Invocation prepared. */
@@ -517,6 +546,6 @@ export function planNodes(h: RuntimeHarness, seed: RuntimeSeed & { invocation: I
   return { outcome, nodes: outcome.graph.nodes.slice(1), revisionNumber: outcome.revision.number };
 }
 
-export const COMPLETED_RESULT = { status: "completed" as const, artifactIds: [] as string[], tasks: [] as never[], evidence: [] as never[], summary: "done", openItems: [] as string[], blocker: null, runOutcome: null, routeSelection: null, evaluation: null };
+export const COMPLETED_RESULT = { status: "completed" as const, artifactIds: [] as string[], tasks: [] as never[], evidence: [] as never[], summary: "done", openItems: [] as string[], blocker: null, runOutcome: null, routeSelection: null, evaluation: null, finalReport: null };
 
 export { INVOCATION_ALLOCATION };

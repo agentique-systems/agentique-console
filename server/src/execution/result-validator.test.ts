@@ -4,10 +4,10 @@
  */
 import type { InvocationResult } from "@agentique-console/core";
 import { describe, expect, it } from "vitest";
-import { openHarness, operation, seedArtifact, seedInvocation, seedManifest, seedRun, seedSnapshot, seedWorkerNode, type Harness, type Seeded } from "../persistence/test-support.ts";
+import { openHarness, operation, seedArtifact, seedInvocation, seedManifest, seedRun, seedSnapshot, seedWorkerNode, type Harness, type Seeded, seedRunCompletionGate } from "../persistence/test-support.ts";
 import { InvocationResultValidator, type ResultValidationContext } from "./result-validator.ts";
 
-const base: InvocationResult = { status: "completed", artifactIds: [], tasks: [], evidence: [], summary: "done", openItems: [], blocker: null, runOutcome: null, routeSelection: null, evaluation: null };
+const base: InvocationResult = { status: "completed", artifactIds: [], tasks: [], evidence: [], summary: "done", openItems: [], blocker: null, runOutcome: null, routeSelection: null, evaluation: null, finalReport: null };
 
 function context(h: Harness, s: Seeded, overrides: Partial<{ role: "orchestrator" | "worker" | "evaluator" | "coordinator"; purpose: "operator_input" | "step" | "task" | "evaluate" | "decompose"; taskIds: string[]; writes: boolean; changeset: ResultValidationContext["changeset"] }> = {}): ResultValidationContext {
   const role = overrides.role ?? "worker";
@@ -17,7 +17,7 @@ function context(h: Harness, s: Seeded, overrides: Partial<{ role: "orchestrator
   const node = role === "orchestrator" || role === "evaluator" ? s.root : role === "coordinator" || purpose === "task" ? seedWorkerNode(h, s, "coordinator_worker") : seedWorkerNode(h, s);
   const patternPosition = role === "orchestrator" ? { kind: "orchestrator" as const } : role === "evaluator" ? null : role === "coordinator" ? { kind: "coordinator_turn" as const } : purpose === "task" ? { kind: "worker_task" as const, taskId: taskIds[0]! } : { kind: "single" as const };
   // A position-less Evaluator is a Gate Evaluator: it judges a Gate of the Run and executes the Run's Gate Evaluator revision.
-  const gateId = patternPosition === null ? h.stores.gates.open({ runId: s.run.id, planNodeId: null, kind: "run_completion", acceptanceCriterionIds: [], snapshotId: null, candidateArtifactIds: [] }).id : null;
+  const gateId = patternPosition === null ? seedRunCompletionGate(h, s).gate.id : null;
   const invocation = h.stores.invocations.create({ runId: s.run.id, planNodeId: node.id, role, purpose, agentDefinitionRevisionId: gateId === null ? s.definition.id : s.evaluator.id, continuedFromInvocationId: null, patternPosition, gateId, taskIds, allocation: { costUsd: 0.1, tokens: 100, attempts: 1 } });
   const manifest = seedManifest(h, s, invocation);
   return { run: h.stores.runs.get(s.run.id), invocation, manifest, writes: overrides.writes ?? false, changeset: overrides.changeset ?? null };

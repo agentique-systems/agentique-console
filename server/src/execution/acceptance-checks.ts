@@ -44,13 +44,13 @@ export interface AcceptanceCheckConfig {
 
 export const DEFAULT_ACCEPTANCE_CHECK_CONFIG: Readonly<AcceptanceCheckConfig> = Object.freeze({ maxOutputBytes: 65_536, commandTimeoutMs: 600_000 });
 
-/** Whose deterministic criteria run: one `evaluator_optimizer` round of a node, or one `node_exit` Gate. */
+/** Whose deterministic criteria run: one `evaluator_optimizer` round of a node, or one `node_exit` or `run_completion` Gate. */
 export type AcceptanceCheckScope = { kind: "optimizer_round"; round: number; maxRounds: number } | { kind: "gate"; gateId: GateId };
 
-/** One set of checks to run: the node, the scope, the exact Snapshot, the judged candidate, and the criteria in canonical order. */
+/** One set of checks to run: the node (none for a Run-level Gate), the scope, the exact Snapshot, the judged candidate, and the criteria in canonical order. */
 export interface AcceptanceCheckRequest {
   runId: RunId;
-  planNodeId: PlanNodeId;
+  planNodeId: PlanNodeId | null;
   scope: AcceptanceCheckScope;
   /** The integration Snapshot every check verifies; recorded on every Evaluation. */
   snapshotId: SnapshotId;
@@ -102,7 +102,9 @@ export class AcceptanceCheckService {
 
   /** The criterion Evaluations already recorded for the scope, by Acceptance Criterion id. */
   private recorded(request: AcceptanceCheckRequest): Evaluation[] {
-    return request.scope.kind === "gate" ? this.stores.evaluations.gateCriterionEvaluationsOf(request.scope.gateId) : this.stores.evaluations.optimizerCriterionEvaluationsOf(request.planNodeId, request.scope.round);
+    if (request.scope.kind === "gate") return this.stores.evaluations.gateCriterionEvaluationsOf(request.scope.gateId);
+    if (request.planNodeId === null) throw new InvariantViolationError("an optimizer round belongs to its evaluator_optimizer Plan Node", { round: request.scope.round });
+    return this.stores.evaluations.optimizerCriterionEvaluationsOf(request.planNodeId, request.scope.round);
   }
 
   /** Runs the scope's deterministic checks in canonical order, outside any transaction, recording each outcome once. */
@@ -141,7 +143,7 @@ export class AcceptanceCheckService {
       gateId: scope.kind === "gate" ? scope.gateId : null,
       command: criterion.check.command,
       expectedExitCode: criterion.check.expectedExitCode,
-      workspace: { integrationWorkspacePath: run.integrationWorkspacePath, snapshot: snapshot.identity, isolationKey: scope.kind === "gate" ? `${run.id}/${request.planNodeId}/gate/${scope.gateId}/${criterion.id}` : `${run.id}/${request.planNodeId}/${scope.round}/${criterion.id}` },
+      workspace: { integrationWorkspacePath: run.integrationWorkspacePath, snapshot: snapshot.identity, isolationKey: scope.kind === "gate" ? `${run.id}/${request.planNodeId ?? "run"}/gate/${scope.gateId}/${criterion.id}` : `${run.id}/${request.planNodeId}/${scope.round}/${criterion.id}` },
       maxOutputBytes: this.config.maxOutputBytes,
       deadlineAt,
       signal: controller.signal,
@@ -165,7 +167,7 @@ export class AcceptanceCheckService {
       const again = this.recorded(request).find((e) => e.subject.kind === "acceptance_criterion" && e.subject.acceptanceCriterionId === criterion.id);
       if (again !== undefined) return again;
       const artifact = this.stores.artifacts.create(
-        { runId: run.id, mediaType: COMMAND_OUTPUT_MEDIA_TYPE, producer: { kind: "runtime", component: "command" }, taskId: null, title: scope.kind === "gate" ? `check ${criterion.id} gate ${scope.gateId} of ${request.planNodeId}` : `check ${criterion.id} round ${scope.round} of ${request.planNodeId}` },
+        { runId: run.id, mediaType: COMMAND_OUTPUT_MEDIA_TYPE, producer: { kind: "runtime", component: "command" }, taskId: null, title: scope.kind === "gate" ? `check ${criterion.id} gate ${scope.gateId} of ${request.planNodeId ?? run.id}` : `check ${criterion.id} round ${scope.round} of ${request.planNodeId}` },
         output,
         options,
       );

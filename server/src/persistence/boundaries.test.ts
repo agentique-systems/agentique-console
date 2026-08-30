@@ -267,7 +267,7 @@ describe("import boundaries", () => {
     expect(executor).not.toMatch(/approvedToolCallUses|ToolCallAuthorizer|side_effect_approval|TRANSCRIPT_MEDIA_TYPE|artifacts\.read\(|decisions\.(request|resolve)/);
     // Runtime tools are closed unions in core: no free tool name, no `unknown` input at the boundary.
     const core = fs.readFileSync(path.join(repoRoot, "core/src/runtime-tools.ts"), "utf8");
-    expect(core).toMatch(/export type RuntimeToolCallRequest = \{ tool: "propose_tasks"; input: TaskProposalBatch \} \| \{ tool: "update_task"; input: TaskUpdateRequest \};/);
+    expect(core).toMatch(/export type RuntimeToolCallRequest = \{ tool: "propose_tasks"; input: TaskProposalBatch \} \| \{ tool: "update_task"; input: TaskUpdateRequest \} \| \{ tool: "request_completion"; input: CompletionCallInput \};/);
     expect(core).not.toMatch(/input: unknown|tool: string;/);
   });
 

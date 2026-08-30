@@ -1,12 +1,17 @@
 import { z } from "zod";
+import { FINAL_RESERVE_USES, type FinalReserveUse } from "./budgets.ts";
+import { completionConditionSchema, type CompletionCondition } from "./completion.ts";
 import type {
   AcceptanceCriterionId,
   AgentDefinitionRevisionId,
   ArtifactId,
+  CompletionRequestId,
   EvaluationId,
   GateId,
   InvocationId,
   PlanNodeId,
+  RequirementId,
+  RequirementRevisionId,
   RunId,
   SnapshotId,
 } from "./ids.ts";
@@ -185,18 +190,32 @@ export const GATE_MACHINE = defineStateMachine<GateStatus>("Gate", GATE_STATUSES
 
 /**
  * Why a Gate closed `failed` (execution-model §10): one or more of its
- * Acceptance Criteria recorded `fail` or `inconclusive`, or its Evaluator
+ * Acceptance Criteria recorded `fail` or `inconclusive`; its Evaluator
  * Invocation ended without a valid verdict after its permitted Attempts —
- * an execution failure that fabricates no criterion verdict. The failure is
- * a closed fact of the Gate row, never inferred from Events.
+ * an execution failure that fabricates no criterion verdict; or, for a
+ * `run_completion` Gate, the Run's structural completion conditions did not
+ * hold, its final synthesis ended without a valid report, or the Run's final
+ * reserve could not fund the next completion Invocation. The failure is a
+ * closed fact of the Gate row, never inferred from Events.
  */
 export type GateFailure =
   | { kind: "criteria_failed"; acceptanceCriterionIds: AcceptanceCriterionId[] }
-  | { kind: "evaluator_failed"; invocationId: InvocationId };
+  | { kind: "evaluator_failed"; invocationId: InvocationId }
+  | { kind: "conditions_unmet"; conditions: CompletionCondition[] }
+  | { kind: "final_synthesis_failed"; invocationId: InvocationId }
+  | { kind: "final_reserve_exhausted"; use: FinalReserveUse };
+
+export const GATE_FAILURE_KINDS = ["criteria_failed", "evaluator_failed", "conditions_unmet", "final_synthesis_failed", "final_reserve_exhausted"] as const;
+
+/** The failure kinds only a `run_completion` Gate may record. */
+export const RUN_COMPLETION_GATE_FAILURE_KINDS = ["conditions_unmet", "final_synthesis_failed", "final_reserve_exhausted"] as const satisfies readonly GateFailure["kind"][];
 
 export const gateFailureSchema: z.ZodType<GateFailure> = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("criteria_failed"), acceptanceCriterionIds: uniqueIds(idSchema("acceptanceCriterion")).min(1) }),
   z.strictObject({ kind: z.literal("evaluator_failed"), invocationId: idSchema("invocation") }),
+  z.strictObject({ kind: z.literal("conditions_unmet"), conditions: z.array(completionConditionSchema).min(1) }),
+  z.strictObject({ kind: z.literal("final_synthesis_failed"), invocationId: idSchema("invocation") }),
+  z.strictObject({ kind: z.literal("final_reserve_exhausted"), use: z.enum(FINAL_RESERVE_USES) }),
 ]);
 
 const sortedIds = (ids: readonly string[]): boolean => ids.every((id, i) => i === 0 || ids[i - 1]! < id);
@@ -204,39 +223,62 @@ const sortedIds = (ids: readonly string[]): boolean => ids.every((id, i) => i ==
 /**
  * A runtime checkpoint. A Gate identifies canonically what it judges: the
  * Run, the Plan Node (for `node_exit`), its kind, its verification cycle
- * (`ordinal`, from 1 per node and kind), the exact integration Snapshot
- * pinned when it opened, the exact candidate Artifact ids, and its Acceptance
- * Criteria in canonical (id) order — deterministic ones are checked first,
- * then evaluated ones, then (for `operator_signoff`) the operator's
- * acceptance. Criteria, Snapshot, and candidate are immutable once the Gate
- * is open; a closed Gate is append-only history and a later verification
- * cycle opens a new Gate with the next ordinal.
+ * (`ordinal`, from 1 per node and kind, or per Run and kind for a Run
+ * Gate), the exact integration Snapshot pinned when it opened, the exact
+ * candidate Artifact ids, and its Acceptance Criteria in canonical (id)
+ * order — deterministic ones are checked first, then evaluated ones, then
+ * (for `operator_signoff`) the operator's acceptance. A `run_completion`
+ * Gate additionally names its Completion Request, the pinned Requirement
+ * revision, and the exact current leaf Requirement ids it judges; an
+ * `operator_signoff` Gate names the Completion Request, the passed
+ * `run_completion` Gate, the same verified Snapshot and Requirement
+ * revision, and the final-report Artifact. Criteria, Snapshot, candidate,
+ * and every named id are immutable once the Gate is open; a closed Gate is
+ * append-only history and a later verification cycle opens a new Gate with
+ * the next ordinal.
  */
 export interface Gate {
   id: GateId;
   runId: RunId;
   planNodeId: PlanNodeId | null;
   kind: GateKind;
-  /** The verification cycle of this node and kind, from 1; never inferred from timestamps or Event order. */
+  /** The verification cycle of this node (or Run) and kind, from 1; never inferred from timestamps or Event order. */
   ordinal: number;
   status: GateStatus;
   acceptanceCriterionIds: AcceptanceCriterionId[];
-  /** The integration Snapshot the Gate judges, pinned at opening; required for a `node_exit` Gate. */
+  /** The integration Snapshot the Gate judges, pinned at opening; required for every kind but declared nullable for the row. */
   snapshotId: SnapshotId | null;
   /** The exact candidate output Artifact ids the Gate judges, pinned at opening. */
   candidateArtifactIds: ArtifactId[];
+  /** The Completion Request a `run_completion` or `operator_signoff` Gate belongs to; `null` for a `node_exit` Gate. */
+  completionRequestId: CompletionRequestId | null;
+  /** The Requirement revision a Run Gate pins; `null` for a `node_exit` Gate. */
+  requirementRevisionId: RequirementRevisionId | null;
+  /** The exact current leaf Requirement ids a Run Gate judges, in canonical id order; empty for a `node_exit` Gate. */
+  requirementIds: RequirementId[];
+  /** The passed `run_completion` Gate an `operator_signoff` Gate presents; `null` otherwise. */
+  completionGateId: GateId | null;
+  /** The canonical final-report Artifact: set when a `run_completion` Gate closes `passed`, at opening for an `operator_signoff` Gate. */
+  reportArtifactId: ArtifactId | null;
   /** Why the Gate failed; set exactly when `status` is `failed`. */
   failure: GateFailure | null;
   openedAt: Timestamp;
   closedAt: Timestamp | null;
 }
 
-type GateShape = Pick<Gate, "kind" | "planNodeId" | "snapshotId" | "acceptanceCriterionIds">;
+type GateShape = Pick<Gate, "kind" | "planNodeId" | "snapshotId" | "acceptanceCriterionIds" | "completionRequestId" | "requirementRevisionId" | "requirementIds" | "completionGateId">;
 
 function gateShape(gate: GateShape, ctx: z.RefinementCtx): void {
   if ((gate.kind === "node_exit") !== (gate.planNodeId !== null)) ctx.addIssue({ code: "custom", path: ["planNodeId"], message: "a node_exit Gate belongs to a Plan Node; Run Gates do not" });
-  if (gate.kind === "node_exit" && gate.snapshotId === null) ctx.addIssue({ code: "custom", path: ["snapshotId"], message: "a node_exit Gate pins the integration Snapshot it judges" });
+  if (gate.snapshotId === null) ctx.addIssue({ code: "custom", path: ["snapshotId"], message: "a Gate pins the integration Snapshot it judges" });
   if (!sortedIds(gate.acceptanceCriterionIds)) ctx.addIssue({ code: "custom", path: ["acceptanceCriterionIds"], message: "Gate criteria are in canonical id order" });
+  if (!sortedIds(gate.requirementIds)) ctx.addIssue({ code: "custom", path: ["requirementIds"], message: "Gate Requirement ids are in canonical id order" });
+  const runGate = gate.kind !== "node_exit";
+  if (runGate !== (gate.completionRequestId !== null)) ctx.addIssue({ code: "custom", path: ["completionRequestId"], message: "a Run Gate names its Completion Request; a node_exit Gate names none" });
+  if (runGate !== (gate.requirementRevisionId !== null)) ctx.addIssue({ code: "custom", path: ["requirementRevisionId"], message: "a Run Gate pins the Requirement revision it judges; a node_exit Gate pins none" });
+  if (!runGate && gate.requirementIds.length > 0) ctx.addIssue({ code: "custom", path: ["requirementIds"], message: "a node_exit Gate names no Requirements" });
+  if ((gate.kind === "operator_signoff") !== (gate.completionGateId !== null)) ctx.addIssue({ code: "custom", path: ["completionGateId"], message: "an operator_signoff Gate names the passed run_completion Gate; no other Gate does" });
+  if (gate.kind === "operator_signoff" && gate.acceptanceCriterionIds.length > 0) ctx.addIssue({ code: "custom", path: ["acceptanceCriterionIds"], message: "an operator_signoff Gate asks the operator, not a criterion" });
 }
 
 export const gateSchema: z.ZodType<Gate> = z
@@ -250,6 +292,11 @@ export const gateSchema: z.ZodType<Gate> = z
     acceptanceCriterionIds: uniqueIds(idSchema("acceptanceCriterion")),
     snapshotId: idSchema("snapshot").nullable(),
     candidateArtifactIds: uniqueIds(idSchema("artifact")),
+    completionRequestId: idSchema("completionRequest").nullable(),
+    requirementRevisionId: idSchema("requirementRevision").nullable(),
+    requirementIds: uniqueIds(idSchema("requirement")),
+    completionGateId: idSchema("gate").nullable(),
+    reportArtifactId: idSchema("artifact").nullable(),
     failure: gateFailureSchema.nullable(),
     openedAt: timestampSchema,
     closedAt: timestampSchema.nullable(),
@@ -267,12 +314,29 @@ export const gateSchema: z.ZodType<Gate> = z
     message: "a Gate fails only on its own criteria",
     path: ["failure"],
   })
+  .refine((g) => g.failure === null || g.kind === "run_completion" || !(RUN_COMPLETION_GATE_FAILURE_KINDS as readonly string[]).includes(g.failure.kind), {
+    message: "only a run_completion Gate fails on completion conditions, final synthesis, or the final reserve",
+    path: ["failure"],
+  })
   .refine((g) => sortedIds(g.candidateArtifactIds), {
     message: "the candidate Artifact ids are in canonical id order",
     path: ["candidateArtifactIds"],
-  });
+  })
+  .refine((g) => g.kind !== "operator_signoff" || g.reportArtifactId !== null, {
+    message: "an operator_signoff Gate presents the final-report Artifact",
+    path: ["reportArtifactId"],
+  })
+  .refine((g) => g.kind !== "run_completion" || (g.status === "passed") === (g.reportArtifactId !== null), {
+    message: "a run_completion Gate records the final-report Artifact exactly when it passed",
+    path: ["reportArtifactId"],
+  })
+  .refine((g) => g.kind !== "node_exit" || g.reportArtifactId === null, {
+    message: "a node_exit Gate has no final report",
+    path: ["reportArtifactId"],
+  })
+  .refine((g) => g.id !== g.completionGateId, { message: "a Gate cannot present itself", path: ["completionGateId"] });
 
-/** What opens a Gate; the store assigns the ordinal from the Gates that already exist. */
+/** What opens a Gate; the store assigns the ordinal from the Gates that already exist. The Run-Gate fields default to their `node_exit` values. */
 export interface GateInput {
   runId: RunId;
   planNodeId: PlanNodeId | null;
@@ -280,6 +344,12 @@ export interface GateInput {
   acceptanceCriterionIds: AcceptanceCriterionId[];
   snapshotId: SnapshotId | null;
   candidateArtifactIds: ArtifactId[];
+  completionRequestId?: CompletionRequestId | null;
+  requirementRevisionId?: RequirementRevisionId | null;
+  requirementIds?: RequirementId[];
+  completionGateId?: GateId | null;
+  /** The final-report Artifact an `operator_signoff` Gate presents; never given for another kind. */
+  reportArtifactId?: ArtifactId | null;
 }
 
 export const gateInputSchema: z.ZodType<GateInput> = z
@@ -290,11 +360,20 @@ export const gateInputSchema: z.ZodType<GateInput> = z
     acceptanceCriterionIds: uniqueIds(idSchema("acceptanceCriterion")),
     snapshotId: idSchema("snapshot").nullable(),
     candidateArtifactIds: uniqueIds(idSchema("artifact")),
+    completionRequestId: idSchema("completionRequest").nullable().optional(),
+    requirementRevisionId: idSchema("requirementRevision").nullable().optional(),
+    requirementIds: uniqueIds(idSchema("requirement")).optional(),
+    completionGateId: idSchema("gate").nullable().optional(),
+    reportArtifactId: idSchema("artifact").nullable().optional(),
   })
-  .superRefine(gateShape)
+  .superRefine((g, ctx) => gateShape({ ...g, completionRequestId: g.completionRequestId ?? null, requirementRevisionId: g.requirementRevisionId ?? null, requirementIds: g.requirementIds ?? [], completionGateId: g.completionGateId ?? null }, ctx))
   .refine((g) => sortedIds(g.candidateArtifactIds), {
     message: "the candidate Artifact ids are in canonical id order",
     path: ["candidateArtifactIds"],
+  })
+  .refine((g) => (g.kind === "operator_signoff") === ((g.reportArtifactId ?? null) !== null), {
+    message: "an operator_signoff Gate opens with the final-report Artifact; no other Gate opens with one",
+    path: ["reportArtifactId"],
   });
 
 /** The verdict of a closed Gate from its criterion verdicts: `passed` only when every criterion passed. */

@@ -67,7 +67,7 @@ describe("executable-revision resolver", () => {
       h.stores.runs.transition(s.created.run.id, { to: "cancelled" });
       const prepared = h.workspacePreparation.prepared.length;
       const seq = h.ctx.journal.lastSeq();
-      const request = { conversationId: s.created.run.conversationId, kind: "code" as const, target: { kind: "branch" as const, branch: "main" }, budget: DEFAULT_BUDGET };
+      const request = { conversationId: s.created.run.conversationId, kind: "code" as const, target: { kind: "branch" as const, branch: "main" }, budget: DEFAULT_BUDGET, verificationPolicy: { evaluatorAgentDefinitionRevisionId: null, runCompletionAcceptanceCriterionIds: [s.completion.criterionId] } };
       expect(() => h.runCreation.create({ ...request, orchestratorAgentDefinitionRevisionId: foreignFile.id })).toThrow(/not executable by this Run.*another Workspace/);
       expect(() => h.runCreation.create({ ...request, orchestratorAgentDefinitionRevisionId: foreignConversation.id })).toThrow(/not executable by this Run.*another Conversation/);
       expect(h.workspacePreparation.prepared).toHaveLength(prepared);

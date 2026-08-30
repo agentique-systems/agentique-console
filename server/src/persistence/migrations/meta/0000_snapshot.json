@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "6ad3f2bb-ddf5-4d50-8273-53975bdbe794",
+  "id": "be3ccdbe-6ca6-4f16-8eab-5416ad37e357",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "acceptance_criteria": {
@@ -1550,6 +1550,215 @@
         }
       }
     },
+    "completion_requests": {
+      "name": "completion_requests",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "run_id": {
+          "name": "run_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "invocation_id": {
+          "name": "invocation_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "runtime_tool_call_id": {
+          "name": "runtime_tool_call_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "gate_id": {
+          "name": "gate_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "report_artifact_id": {
+          "name": "report_artifact_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "outcome": {
+          "name": "outcome",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "started_at": {
+          "name": "started_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "ended_at": {
+          "name": "ended_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "completion_requests_run": {
+          "name": "completion_requests_run",
+          "columns": [
+            "run_id",
+            "created_at"
+          ],
+          "isUnique": false
+        },
+        "completion_requests_active_run": {
+          "name": "completion_requests_active_run",
+          "columns": [
+            "run_id"
+          ],
+          "isUnique": true,
+          "where": "status IN ('requested', 'verifying')"
+        },
+        "completion_requests_call": {
+          "name": "completion_requests_call",
+          "columns": [
+            "runtime_tool_call_id"
+          ],
+          "isUnique": true
+        },
+        "completion_requests_invocation": {
+          "name": "completion_requests_invocation",
+          "columns": [
+            "invocation_id"
+          ],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {
+        "completion_requests_run_id_runs_id_fk": {
+          "name": "completion_requests_run_id_runs_id_fk",
+          "tableFrom": "completion_requests",
+          "tableTo": "runs",
+          "columnsFrom": [
+            "run_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "completion_requests_invocation_id_invocations_id_fk": {
+          "name": "completion_requests_invocation_id_invocations_id_fk",
+          "tableFrom": "completion_requests",
+          "tableTo": "invocations",
+          "columnsFrom": [
+            "invocation_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "completion_requests_runtime_tool_call_id_runtime_tool_calls_id_fk": {
+          "name": "completion_requests_runtime_tool_call_id_runtime_tool_calls_id_fk",
+          "tableFrom": "completion_requests",
+          "tableTo": "runtime_tool_calls",
+          "columnsFrom": [
+            "runtime_tool_call_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "completion_requests_gate_id_gates_id_fk": {
+          "name": "completion_requests_gate_id_gates_id_fk",
+          "tableFrom": "completion_requests",
+          "tableTo": "gates",
+          "columnsFrom": [
+            "gate_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "completion_requests_report_artifact_id_artifacts_id_fk": {
+          "name": "completion_requests_report_artifact_id_artifacts_id_fk",
+          "tableFrom": "completion_requests",
+          "tableTo": "artifacts",
+          "columnsFrom": [
+            "report_artifact_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "completion_requests_status": {
+          "name": "completion_requests_status",
+          "value": "\"completion_requests\".\"status\" IN ('requested', 'verifying', 'passed', 'failed', 'cancelled')"
+        },
+        "completion_requests_gate_shape": {
+          "name": "completion_requests_gate_shape",
+          "value": "(\"completion_requests\".\"status\" IN ('verifying', 'passed', 'failed')) = (\"completion_requests\".\"gate_id\" IS NOT NULL)"
+        },
+        "completion_requests_started_shape": {
+          "name": "completion_requests_started_shape",
+          "value": "(\"completion_requests\".\"status\" IN ('verifying', 'passed', 'failed')) = (\"completion_requests\".\"started_at\" IS NOT NULL)"
+        },
+        "completion_requests_report_shape": {
+          "name": "completion_requests_report_shape",
+          "value": "(\"completion_requests\".\"status\" = 'passed') = (\"completion_requests\".\"report_artifact_id\" IS NOT NULL)"
+        },
+        "completion_requests_outcome_shape": {
+          "name": "completion_requests_outcome_shape",
+          "value": "(\"completion_requests\".\"status\" IN ('failed', 'cancelled')) = (\"completion_requests\".\"outcome\" IS NOT NULL)"
+        },
+        "completion_requests_terminal_has_ended_at": {
+          "name": "completion_requests_terminal_has_ended_at",
+          "value": "(\"completion_requests\".\"status\" IN ('passed', 'failed', 'cancelled')) = (\"completion_requests\".\"ended_at\" IS NOT NULL)"
+        }
+      }
+    },
     "context_manifests": {
       "name": "context_manifests",
       "columns": {
@@ -2020,6 +2229,17 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
+        },
+        "subject_gate_id": {
+          "name": "subject_gate_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false,
+          "generated": {
+            "as": "(json_extract(subject, '$.gateId'))",
+            "type": "virtual"
+          }
         }
       },
       "indexes": {
@@ -2037,6 +2257,14 @@
             "run_id"
           ],
           "isUnique": false
+        },
+        "decisions_signoff_gate": {
+          "name": "decisions_signoff_gate",
+          "columns": [
+            "subject_gate_id"
+          ],
+          "isUnique": true,
+          "where": "kind = 'signoff'"
         }
       },
       "foreignKeys": {
@@ -2138,7 +2366,11 @@
         },
         "decisions_subject_shape": {
           "name": "decisions_subject_shape",
-          "value": "(\"decisions\".\"kind\" = 'side_effect_approval') = (\"decisions\".\"subject\" IS NOT NULL AND json_extract(\"decisions\".\"subject\", '$.kind') = 'side_effect_approval' AND \"decisions\".\"run_id\" IS NOT NULL)"
+          "value": "(\"decisions\".\"kind\" IN ('side_effect_approval', 'signoff')) = (\"decisions\".\"subject\" IS NOT NULL AND json_extract(\"decisions\".\"subject\", '$.kind') = \"decisions\".\"kind\" AND \"decisions\".\"run_id\" IS NOT NULL)"
+        },
+        "decisions_signoff_policy": {
+          "name": "decisions_signoff_policy",
+          "value": "\"decisions\".\"kind\" <> 'signoff' OR (\"decisions\".\"resolution_policy\" = 'operator_required' AND json_extract(\"decisions\".\"subject\", '$.runId') = \"decisions\".\"run_id\")"
         },
         "decisions_no_self_supersede": {
           "name": "decisions_no_self_supersede",
@@ -2714,7 +2946,7 @@
           "name": "snapshot_id",
           "type": "text",
           "primaryKey": false,
-          "notNull": false,
+          "notNull": true,
           "autoincrement": false
         },
         "candidate_artifact_ids": {
@@ -2722,6 +2954,41 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true,
+          "autoincrement": false
+        },
+        "completion_request_id": {
+          "name": "completion_request_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "requirement_revision_id": {
+          "name": "requirement_revision_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "requirement_ids": {
+          "name": "requirement_ids",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "completion_gate_id": {
+          "name": "completion_gate_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "report_artifact_id": {
+          "name": "report_artifact_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
           "autoincrement": false
         },
         "failure": {
@@ -2764,6 +3031,13 @@
           ],
           "isUnique": false
         },
+        "gates_completion_request": {
+          "name": "gates_completion_request",
+          "columns": [
+            "completion_request_id"
+          ],
+          "isUnique": false
+        },
         "gates_open_node_exit": {
           "name": "gates_open_node_exit",
           "columns": [
@@ -2780,6 +3054,34 @@
           ],
           "isUnique": true,
           "where": "kind = 'node_exit'"
+        },
+        "gates_open_run_gate": {
+          "name": "gates_open_run_gate",
+          "columns": [
+            "run_id",
+            "kind"
+          ],
+          "isUnique": true,
+          "where": "plan_node_id IS NULL AND status = 'open'"
+        },
+        "gates_run_gate_ordinal": {
+          "name": "gates_run_gate_ordinal",
+          "columns": [
+            "run_id",
+            "kind",
+            "ordinal"
+          ],
+          "isUnique": true,
+          "where": "plan_node_id IS NULL"
+        },
+        "gates_completion_request_kind": {
+          "name": "gates_completion_request_kind",
+          "columns": [
+            "completion_request_id",
+            "kind"
+          ],
+          "isUnique": true,
+          "where": "completion_request_id IS NOT NULL"
         }
       },
       "foreignKeys": {
@@ -2821,6 +3123,58 @@
           ],
           "onDelete": "no action",
           "onUpdate": "no action"
+        },
+        "gates_completion_request_id_completion_requests_id_fk": {
+          "name": "gates_completion_request_id_completion_requests_id_fk",
+          "tableFrom": "gates",
+          "tableTo": "completion_requests",
+          "columnsFrom": [
+            "completion_request_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "gates_requirement_revision_id_requirement_revisions_id_fk": {
+          "name": "gates_requirement_revision_id_requirement_revisions_id_fk",
+          "tableFrom": "gates",
+          "tableTo": "requirement_revisions",
+          "columnsFrom": [
+            "requirement_revision_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "gates_completion_gate_id_gates_id_fk": {
+          "name": "gates_completion_gate_id_gates_id_fk",
+          "tableFrom": "gates",
+          "tableTo": "gates",
+          "columnsFrom": [
+            "completion_gate_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "gates_report_artifact_id_artifacts_id_fk": {
+          "name": "gates_report_artifact_id_artifacts_id_fk",
+          "tableFrom": "gates",
+          "tableTo": "artifacts",
+          "columnsFrom": [
+            "report_artifact_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -2838,10 +3192,6 @@
           "name": "gates_node_exit_has_node",
           "value": "(\"gates\".\"kind\" = 'node_exit') = (\"gates\".\"plan_node_id\" IS NOT NULL)"
         },
-        "gates_node_exit_has_snapshot": {
-          "name": "gates_node_exit_has_snapshot",
-          "value": "\"gates\".\"kind\" <> 'node_exit' OR \"gates\".\"snapshot_id\" IS NOT NULL"
-        },
         "gates_ordinal": {
           "name": "gates_ordinal",
           "value": "\"gates\".\"ordinal\" >= 1"
@@ -2856,7 +3206,35 @@
         },
         "gates_failure_kind": {
           "name": "gates_failure_kind",
-          "value": "\"gates\".\"failure\" IS NULL OR json_extract(\"gates\".\"failure\", '$.kind') IN ('criteria_failed', 'evaluator_failed')"
+          "value": "\"gates\".\"failure\" IS NULL OR json_extract(\"gates\".\"failure\", '$.kind') IN ('criteria_failed', 'evaluator_failed', 'conditions_unmet', 'final_synthesis_failed', 'final_reserve_exhausted')"
+        },
+        "gates_run_completion_failure": {
+          "name": "gates_run_completion_failure",
+          "value": "\"gates\".\"failure\" IS NULL OR \"gates\".\"kind\" = 'run_completion' OR json_extract(\"gates\".\"failure\", '$.kind') IN ('criteria_failed', 'evaluator_failed')"
+        },
+        "gates_run_gate_identity": {
+          "name": "gates_run_gate_identity",
+          "value": "(\"gates\".\"kind\" <> 'node_exit') = (\"gates\".\"completion_request_id\" IS NOT NULL AND \"gates\".\"requirement_revision_id\" IS NOT NULL)"
+        },
+        "gates_node_exit_no_requirements": {
+          "name": "gates_node_exit_no_requirements",
+          "value": "\"gates\".\"kind\" <> 'node_exit' OR \"gates\".\"requirement_ids\" = '[]'"
+        },
+        "gates_signoff_shape": {
+          "name": "gates_signoff_shape",
+          "value": "(\"gates\".\"kind\" = 'operator_signoff') = (\"gates\".\"completion_gate_id\" IS NOT NULL)"
+        },
+        "gates_signoff_criteria": {
+          "name": "gates_signoff_criteria",
+          "value": "\"gates\".\"kind\" <> 'operator_signoff' OR \"gates\".\"acceptance_criterion_ids\" = '[]'"
+        },
+        "gates_no_self_presentation": {
+          "name": "gates_no_self_presentation",
+          "value": "\"gates\".\"completion_gate_id\" IS NULL OR \"gates\".\"completion_gate_id\" <> \"gates\".\"id\""
+        },
+        "gates_report_shape": {
+          "name": "gates_report_shape",
+          "value": "(\"gates\".\"kind\" = 'operator_signoff' AND \"gates\".\"report_artifact_id\" IS NOT NULL) OR (\"gates\".\"kind\" = 'run_completion' AND ((\"gates\".\"status\" = 'passed') = (\"gates\".\"report_artifact_id\" IS NOT NULL))) OR (\"gates\".\"kind\" = 'node_exit' AND \"gates\".\"report_artifact_id\" IS NULL)"
         }
       }
     },
@@ -3231,7 +3609,15 @@
             "gate_id"
           ],
           "isUnique": true,
-          "where": "gate_id IS NOT NULL AND status IN ('pending', 'running', 'waiting')"
+          "where": "gate_id IS NOT NULL AND role = 'evaluator' AND status IN ('pending', 'running', 'waiting')"
+        },
+        "invocations_active_synthesis": {
+          "name": "invocations_active_synthesis",
+          "columns": [
+            "gate_id"
+          ],
+          "isUnique": true,
+          "where": "gate_id IS NOT NULL AND purpose = 'final_synthesis' AND status IN ('pending', 'running', 'waiting')"
         },
         "invocations_gate": {
           "name": "invocations_gate",
@@ -3435,11 +3821,15 @@
         },
         "invocations_gate_ownership": {
           "name": "invocations_gate_ownership",
-          "value": "(\"invocations\".\"pattern_position\" IS NULL) = (\"invocations\".\"gate_id\" IS NOT NULL)"
+          "value": "\"invocations\".\"purpose\" = 'final_synthesis' OR ((\"invocations\".\"pattern_position\" IS NULL) = (\"invocations\".\"gate_id\" IS NOT NULL))"
+        },
+        "invocations_final_synthesis_gate": {
+          "name": "invocations_final_synthesis_gate",
+          "value": "\"invocations\".\"purpose\" <> 'final_synthesis' OR \"invocations\".\"gate_id\" IS NOT NULL"
         },
         "invocations_gate_evaluator_role": {
           "name": "invocations_gate_evaluator_role",
-          "value": "\"invocations\".\"gate_id\" IS NULL OR (\"invocations\".\"role\" = 'evaluator' AND \"invocations\".\"purpose\" = 'evaluate' AND \"invocations\".\"task_ids\" = '[]')"
+          "value": "\"invocations\".\"gate_id\" IS NULL OR (((\"invocations\".\"role\" = 'evaluator' AND \"invocations\".\"purpose\" = 'evaluate') OR (\"invocations\".\"role\" = 'orchestrator' AND \"invocations\".\"purpose\" = 'final_synthesis')) AND \"invocations\".\"task_ids\" = '[]')"
         },
         "invocations_pattern_position_key_agrees": {
           "name": "invocations_pattern_position_key_agrees",
@@ -5144,7 +5534,7 @@
         },
         "runs_verification_policy_shape": {
           "name": "runs_verification_policy_shape",
-          "value": "json_type(\"runs\".\"verification_policy\", '$.maxNodeGateCycles') = 'integer' AND json_extract(\"runs\".\"verification_policy\", '$.maxNodeGateCycles') >= 1 AND json_extract(\"runs\".\"verification_policy\", '$.maxNodeGateCycles') <= 10 AND (json_type(\"runs\".\"verification_policy\", '$.evaluatorAgentDefinitionRevisionId') = 'null' OR json_extract(\"runs\".\"verification_policy\", '$.evaluatorAgentDefinitionRevisionId') GLOB 'agdr_*')"
+          "value": "json_type(\"runs\".\"verification_policy\", '$.maxNodeGateCycles') = 'integer' AND json_extract(\"runs\".\"verification_policy\", '$.maxNodeGateCycles') >= 1 AND json_extract(\"runs\".\"verification_policy\", '$.maxNodeGateCycles') <= 10 AND json_type(\"runs\".\"verification_policy\", '$.maxRunCompletionCycles') = 'integer' AND json_extract(\"runs\".\"verification_policy\", '$.maxRunCompletionCycles') >= 1 AND json_extract(\"runs\".\"verification_policy\", '$.maxRunCompletionCycles') <= 10 AND json_type(\"runs\".\"verification_policy\", '$.runCompletionAcceptanceCriterionIds') = 'array' AND (json_type(\"runs\".\"verification_policy\", '$.evaluatorAgentDefinitionRevisionId') = 'null' OR json_extract(\"runs\".\"verification_policy\", '$.evaluatorAgentDefinitionRevisionId') GLOB 'agdr_*')"
         }
       }
     },
@@ -5308,7 +5698,7 @@
       "checkConstraints": {
         "runtime_tool_calls_tool": {
           "name": "runtime_tool_calls_tool",
-          "value": "\"runtime_tool_calls\".\"tool\" IN ('propose_tasks', 'update_task')"
+          "value": "\"runtime_tool_calls\".\"tool\" IN ('propose_tasks', 'update_task', 'request_completion')"
         },
         "runtime_tool_calls_digest_shape": {
           "name": "runtime_tool_calls_digest_shape",

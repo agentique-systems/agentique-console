@@ -5,7 +5,7 @@
  * call may run; the claim survives provider failure, retries, failed
  * finalization, and restart; and no raw call reaches any record.
  */
-import { canonicalJson, canonicalToolCall, ValidationError, type Decision, type Invocation } from "@agentique-console/core";
+import { canonicalJson, canonicalToolCall, ValidationError, type Decision, type Invocation, approvalSubjectOf } from "@agentique-console/core";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -27,7 +27,7 @@ async function blockOnApproval(h: RuntimeHarness, invocation: Invocation): Promi
 }
 
 const resolution = (blocked: Invocation, decision: Decision, outcome: "approve_once" | "deny" = "approve_once") => {
-  const s = decision.subject!;
+  const s = approvalSubjectOf(decision);
   return { kind: "side_effect_approval_resolution" as const, decisionId: decision.id, blockedInvocationId: blocked.id, attemptId: s.attemptId, tool: s.tool, callDigest: s.callDigest, callArtifactId: s.callArtifactId, outcome };
 };
 

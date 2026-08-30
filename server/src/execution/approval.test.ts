@@ -3,7 +3,7 @@
  * §7.4; invariants 5 runtime-owned retries, 6 no transcript decides, 9
  * canonical objects by id, 20 one Invocation per logical turn).
  */
-import { canonicalJson, canonicalToolCall, InvariantViolationError, TOOL_CALL_MEDIA_TYPE, ValidationError, type Decision, type Invocation } from "@agentique-console/core";
+import { canonicalJson, canonicalToolCall, InvariantViolationError, TOOL_CALL_MEDIA_TYPE, ValidationError, type Decision, type Invocation, approvalSubjectOf } from "@agentique-console/core";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -24,7 +24,7 @@ async function blockOnApproval(h: RuntimeHarness, invocation: Invocation) {
 }
 
 function successorAfter(h: RuntimeHarness, s: ReturnType<typeof seedRuntime>, blocked: Invocation, decision: Decision, outcome: "approve_once" | "deny") {
-  const subject = decision.subject!;
+  const subject = approvalSubjectOf(decision);
   return h.preparation.prepare({
     runId: s.created.run.id,
     planNodeId: s.created.root.id,
@@ -68,7 +68,7 @@ describe("side-effect approval", () => {
       expect(decision.options.map((o) => o.id)).toEqual(["approve_once", "deny"]);
       expect(h.stores.decisions.get(decision.id)).toEqual(decision);
       // The call Artifact holds exactly the canonical bytes; its digest is the subject's digest.
-      const artifact = h.stores.artifacts.read(decision.subject!.callArtifactId);
+      const artifact = h.stores.artifacts.read(approvalSubjectOf(decision).callArtifactId);
       expect(artifact.artifact).toMatchObject({ mediaType: TOOL_CALL_MEDIA_TYPE, producer: { kind: "runtime", component: "tool_call" }, digest: DIGEST, runId: s.created.run.id });
       expect(new TextDecoder().decode(artifact.bytes)).toBe(CANONICAL);
       // The Invocation: terminal `blocked`, linked to the Decision, reservation released, lease released; its Task blocked on the Decision.
@@ -193,9 +193,9 @@ describe("side-effect approval", () => {
       const successor = successorAfter(reopened, s, blocked, reopened.stores.decisions.get(decision.id), "approve_once");
       expect(successor.invocation).toMatchObject({ continuedFromInvocationId: blocked.id, purpose: "decision_resolution", status: "pending" });
       const content = successor.manifest.content;
-      expect(content.inputs).toEqual([{ kind: "side_effect_approval_resolution", decisionId: decision.id, blockedInvocationId: blocked.id, attemptId: decision.subject!.attemptId, tool: "shell", callDigest: DIGEST, callArtifactId: decision.subject!.callArtifactId, outcome: "approve_once" }]);
+      expect(content.inputs).toEqual([{ kind: "side_effect_approval_resolution", decisionId: decision.id, blockedInvocationId: blocked.id, attemptId: approvalSubjectOf(decision).attemptId, tool: "shell", callDigest: DIGEST, callArtifactId: approvalSubjectOf(decision).callArtifactId, outcome: "approve_once" }]);
       expect(content.approvedCalls).toEqual([{ decisionId: decision.id, tool: "shell", callDigest: DIGEST }]);
-      expect(content.artifacts.some((a) => a.artifactId === decision.subject!.callArtifactId)).toBe(true);
+      expect(content.artifacts.some((a) => a.artifactId === approvalSubjectOf(decision).callArtifactId)).toBe(true);
       // Approval widens nothing: the Tool Policy still requires approval for shell; only the exact digest is permitted once.
       expect(content.toolPolicy.shell).toBe("approval_required");
       expect(content.capabilities.tools).toEqual(["read", "shell", "write"]);
@@ -230,7 +230,7 @@ describe("side-effect approval", () => {
       h.stores.decisions.resolve(decision.id, { resolvedBy: "operator", chosenOptionId: "deny", rationale: "not in CI", artifactIds: [] });
       const resolved = h.stores.decisions.get(decision.id);
       expect(() => successorAfter(h, s, blocked, resolved, "approve_once")).toThrow(InvariantViolationError);
-      expect(() => successorAfter(h, s, blocked, { ...resolved, subject: { ...resolved.subject!, callDigest: "b".repeat(64) } }, "deny")).toThrow(InvariantViolationError);
+      expect(() => successorAfter(h, s, blocked, { ...resolved, subject: { ...approvalSubjectOf(resolved), callDigest: "b".repeat(64) } }, "deny")).toThrow(InvariantViolationError);
       expect(h.stores.invocations.listByRun(s.created.run.id)).toHaveLength(1);
       const successor = successorAfter(h, s, blocked, resolved, "deny");
       expect(successor.manifest.content.approvedCalls).toEqual([]);

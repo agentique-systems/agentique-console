@@ -12,7 +12,7 @@ import { createStores } from "../persistence/stores/index.ts";
 import { seedRequirements, INVOCATION_ALLOCATION } from "../persistence/test-support.ts";
 import { PlanRevisionService } from "./plan-revision-service.ts";
 import { RunCreationService } from "./run-creation-service.ts";
-import { accepted, FakeWorkspacePreparation, openRuntimeHarness, propose, rejected, seedPlanningRuntime, TEST_NODE_ALLOCATION, TEST_POLICY, type RuntimeHarness, type RuntimeSeed } from "./test-support.ts";
+import { accepted, FakeWorkspacePreparation, openRuntimeHarness, propose, rejected, seedPlanningRuntime, TEST_NODE_ALLOCATION, TEST_POLICY, type RuntimeHarness, type RuntimeSeed, seedCompletionCriterion } from "./test-support.ts";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -390,7 +390,7 @@ describe("reconciliation", () => {
         defaultLimits: { allocation: INVOCATION_ALLOCATION, maxWallClockMs: null },
       });
       const runCreation = new RunCreationService(ctx, stores, new FakeWorkspacePreparation(), TEST_POLICY);
-      const created = runCreation.create({ conversationId: conversation.id, kind: "code", target: { kind: "branch", branch: "main" }, budget: { maxCostUsd: 100, maxTokens: 1_000_000, maxAttempts: 50, maxWallClockMs: null, maxConcurrency: null }, orchestratorAgentDefinitionRevisionId: orchestrator.id });
+      const created = runCreation.create({ conversationId: conversation.id, kind: "code", target: { kind: "branch", branch: "main" }, budget: { maxCostUsd: 100, maxTokens: 1_000_000, maxAttempts: 50, maxWallClockMs: null, maxConcurrency: null }, orchestratorAgentDefinitionRevisionId: orchestrator.id, verificationPolicy: { evaluatorAgentDefinitionRevisionId: null, runCompletionAcceptanceCriterionIds: [seedCompletionCriterion({ ctx, stores }, conversation.id).criterionId] } });
       runId = created.run.id;
       const invocation = stores.invocations.create({ runId: created.run.id, planNodeId: created.root.id, role: "orchestrator", purpose: "operator_input", agentDefinitionRevisionId: orchestrator.id, continuedFromInvocationId: null, patternPosition: { kind: "orchestrator" }, taskIds: [], allocation: INVOCATION_ALLOCATION });
       const service = new PlanRevisionService(ctx, stores, { defaults: { nodeAllocation: TEST_NODE_ALLOCATION, coordinatorWorkerBounds: { maxTasks: 8, maxConcurrentWorkers: 2, maxCoordinatorInvocations: 4 } }, limits: { maxPlanDepth: 4, maxUnrolledRounds: 6, maxPlanNodes: 200 } });

@@ -25,7 +25,7 @@ describe("runtime-tool call boundary", () => {
       expect(d.port.tools).toEqual(["propose_tasks", "update_task"]);
       expect(effectiveRuntimeTools(runtimeToolsFor("coordinator", "synthesize"), "coordinator", "synthesize")).toEqual([]);
       expect(effectiveRuntimeTools(runtimeToolsFor("worker", "task"), "worker", "task")).toEqual([]);
-      expect(effectiveRuntimeTools(runtimeToolsFor("orchestrator", "operator_input"), "orchestrator", "operator_input")).toEqual([]);
+      expect(effectiveRuntimeTools(runtimeToolsFor("orchestrator", "operator_input"), "orchestrator", "operator_input")).toEqual(["request_completion"]);
       // A manifest that withholds a tool withholds it from the port even for the right role and purpose.
       const narrowed = new RuntimeToolExecutor(h.ctx, h.stores, { runId: s.created.run.id, planNodeId: d.node.id, invocationId: d.invocation.id, attemptId: d.attempt.id, role: "coordinator", purpose: "decompose", manifestTools: ["update_task", "return_result"] });
       expect(narrowed.tools).toEqual(["update_task"]);
@@ -37,7 +37,7 @@ describe("runtime-tool call boundary", () => {
       expect(h.ctx.journal.lastSeq()).toBe(seq);
       expect(h.stores.tasks.listByRun(s.created.run.id)).toEqual([]);
       // The port bound to the root Orchestrator's Attempt exposed nothing in this phase, whatever its role permits.
-      expect(h.provider.requests[0]!.runtimeTools).toEqual([]);
+      expect(h.provider.requests[0]!.runtimeTools).toEqual(["request_completion"]);
     } finally {
       h.close();
     }

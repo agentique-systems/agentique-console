@@ -49,6 +49,7 @@ import type { PersistenceContext } from "../persistence/context.ts";
 import type { Stores } from "../persistence/stores/index.ts";
 import type { WriteOptions } from "../persistence/stores/support.ts";
 import type { RuntimeToolCallPort } from "../provider/adapter.ts";
+import { CompletionRequestService } from "./completion-requests.ts";
 import { TaskProposalService, type HandlerOutcome, type RuntimeToolCaller } from "./task-proposals.ts";
 import type { ExecutionDiagnosticSink } from "./workspace-cleanup.ts";
 
@@ -91,6 +92,7 @@ export class RuntimeToolExecutor implements RuntimeToolCallPort {
   readonly #options: WriteOptions;
   readonly #diagnostics: ExecutionDiagnosticSink;
   readonly #proposals: TaskProposalService;
+  readonly #completion: CompletionRequestService;
 
   constructor(ctx: PersistenceContext, stores: Stores, binding: RuntimeToolBinding, options: WriteOptions = {}, diagnostics: ExecutionDiagnosticSink = () => {}) {
     this.#ctx = ctx;
@@ -99,6 +101,7 @@ export class RuntimeToolExecutor implements RuntimeToolCallPort {
     this.#options = options;
     this.#diagnostics = diagnostics;
     this.#proposals = new TaskProposalService(ctx, stores);
+    this.#completion = new CompletionRequestService(ctx, stores);
     this.tools = effectiveRuntimeTools(binding.manifestTools, binding.role, binding.purpose);
   }
 
@@ -137,6 +140,8 @@ export class RuntimeToolExecutor implements RuntimeToolCallPort {
         const outcome = this.#handle(caller, valid);
         if (outcome.kind === "rejected") return { kind: "rejected", tool, reasons: outcome.reasons };
         const call = this.#stores.runtimeToolCalls.record({ invocationId: invocation.id, attemptId: attempt.id, tool, callDigest, result: outcome.result }, this.#options);
+        // A handler whose canonical record names the call row (a Completion Request) writes it now, in the same transaction.
+        outcome.then?.(call);
         return { kind: "accepted", tool, callId: call.id, callDigest, replayed: false, result: call.result };
       });
     } catch (error) {
@@ -158,6 +163,8 @@ export class RuntimeToolExecutor implements RuntimeToolCallPort {
       }
       case "update_task":
         return this.#proposals.cancel(caller, request.input, this.#options);
+      case "request_completion":
+        return this.#completion.request(caller, this.#options);
     }
   }
 }

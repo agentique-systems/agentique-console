@@ -8,7 +8,7 @@ import { createPersistenceContext } from "../context.ts";
 import { MemoryBlobStore } from "../blob-store.ts";
 import { openDatabase } from "../database.ts";
 import { createStores } from "../stores/index.ts";
-import { extendPlan, nodeInput, openHarness, patternDefinition, seedAgentRevision, seedInvocation, seedManifest, seedRun, seedWorkerNode, type Harness, type Seeded } from "../test-support.ts";
+import { extendPlan, nodeInput, openHarness, patternDefinition, seedAgentRevision, seedInvocation, seedManifest, seedRun, seedRunCompletionGate, seedWorkerNode, type Harness, type Seeded, seedSnapshot } from "../test-support.ts";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -17,20 +17,38 @@ const BUDGET = { maxCostUsd: 100, maxTokens: 1_000_000, maxAttempts: 50, maxWall
 const RESERVE: Allocation = { costUsd: 10, tokens: 100_000, attempts: 4 };
 const ZERO: Allocation = { costUsd: 0, tokens: 0, attempts: 0 };
 
+const gates = new Map<string, string>();
+
+/** The one open run_completion Gate of a seeded Run, opened (with its Completion Request) on first use. */
+function gateFor(h: Harness, s: Seeded): string {
+  const existing = gates.get(s.run.id);
+  if (existing !== undefined) return existing;
+  const gate = seedRunCompletionGate(h, s).gate;
+  gates.set(s.run.id, gate.id);
+  return gate.id;
+}
+
+/** An ordinary Gate Evaluator on the root, funded from the root node: it judges a node_exit Gate opened on the root itself. */
+function ordinaryEvaluator(h: Harness, s: Seeded, allocation?: Allocation): Invocation {
+  const gate = h.stores.gates.open({ runId: s.run.id, planNodeId: s.root.id, kind: "node_exit", acceptanceCriterionIds: [], snapshotId: seedSnapshot(h, s).id, candidateArtifactIds: [] });
+  return seedInvocation(h, s, { role: "evaluator", purpose: "evaluate", gateId: gate.id, ...(allocation ? { allocation } : {}) });
+}
+
 function finalInvocation(h: Harness, s: Seeded, use: "final_synthesis" | "run_completion", overrides: Partial<{ role: InvocationRole; purpose: InvocationPurpose; planNodeId: string; allocation: Allocation; taskIds: string[] }> = {}): Invocation {
   const binding = use === "final_synthesis" ? { role: "orchestrator" as const, purpose: "final_synthesis" as const } : { role: "evaluator" as const, purpose: "evaluate" as const };
   const patternPosition = (overrides.role ?? binding.role) === "orchestrator" ? { kind: "orchestrator" as const } : (overrides.purpose ?? binding.purpose) === "select" ? { kind: "route_selection" as const } : (overrides.purpose ?? binding.purpose) === "task" ? { kind: "worker_task" as const, taskId: (overrides.taskIds?.[0] ?? "task_000000000000000000000000") as never } : null;
-  // A run_completion Evaluator is a Gate Evaluator: it judges the Run's run_completion Gate with the Run's Gate Evaluator revision.
-  const gateId = patternPosition === null ? h.stores.gates.open({ runId: s.run.id, planNodeId: null, kind: "run_completion", acceptanceCriterionIds: [], snapshotId: null, candidateArtifactIds: [] }).id : null;
+  // A run_completion Evaluator is a Gate Evaluator judging the Run's open run_completion Gate with the Run's Gate Evaluator revision; a
+  // final_synthesis turn reports on that same Gate. One Gate per seeded Run serves every final Invocation of a test.
+  const gateId = patternPosition === null || (overrides.purpose ?? binding.purpose) === "final_synthesis" ? gateFor(h, s) : null;
   return h.stores.invocations.create({
     runId: s.run.id,
     planNodeId: (overrides.planNodeId ?? s.root.id) as never,
     role: overrides.role ?? binding.role,
     purpose: overrides.purpose ?? binding.purpose,
-    agentDefinitionRevisionId: gateId === null ? s.definition.id : s.evaluator.id,
+    agentDefinitionRevisionId: patternPosition === null ? s.evaluator.id : s.definition.id,
     continuedFromInvocationId: null,
     patternPosition,
-    gateId,
+    gateId: gateId as never,
     taskIds: (overrides.taskIds ?? []) as never,
     allocation: overrides.allocation ?? { costUsd: 3, tokens: 30_000, attempts: 2 },
     allocationSource: "run_final_reserve",
@@ -48,14 +66,14 @@ function spend(h: Harness, s: Seeded, invocation: Invocation, usage: { costUsd: 
   h.stores.invocations.transitionAttempt(attempt.id, { to: "failed", failureClass: "provider_transient", transcriptArtifactId: null });
 }
 
-const RESULT = { status: "completed" as const, artifactIds: [], tasks: [], evidence: [], summary: "done", openItems: [], blocker: null, runOutcome: null, routeSelection: null, evaluation: null };
+const RESULT = { status: "completed" as const, artifactIds: [], tasks: [], evidence: [], summary: "done", openItems: [], blocker: null, runOutcome: null, routeSelection: null, evaluation: null, finalReport: null };
 
 describe("final-reserve Invocations", () => {
   it("an ordinary Invocation reserves from its Plan Node; final-synthesis and run-completion Invocations reserve directly from the Run final reserve", () => {
     const h = openHarness();
     try {
       const s = seedRun(h, { budget: BUDGET, finalReserve: RESERVE });
-      const ordinary = seedInvocation(h, s, { role: "evaluator", purpose: "evaluate" });
+      const ordinary = ordinaryEvaluator(h, s);
       expect(ordinary).toMatchObject({ allocationSource: "plan_node", finalReserveUse: null });
       expect(h.stores.reservations.listByChild({ type: "invocation", id: ordinary.id })[0]).toMatchObject({ parent: { type: "plan_node", id: s.root.id }, capacitySource: "ordinary", finalReserveUse: null });
 
@@ -84,12 +102,13 @@ describe("final-reserve Invocations", () => {
     const h = openHarness();
     try {
       const s = seedRun(h, { budget: BUDGET, finalReserve: RESERVE });
+      gateFor(h, s);
       const before = h.ctx.journal.lastSeq();
       // Wrong role/purpose for the discriminator (schema), and a missing discriminator.
       expect(() => finalInvocation(h, s, "final_synthesis", { purpose: "operator_input" })).toThrow(ValidationError);
       expect(() => finalInvocation(h, s, "final_synthesis", { role: "evaluator", purpose: "evaluate" })).toThrow(ValidationError);
       expect(() => finalInvocation(h, s, "run_completion", { role: "orchestrator", purpose: "final_synthesis" })).toThrow(ValidationError);
-      expect(() => h.stores.invocations.create({ runId: s.run.id, planNodeId: s.root.id, role: "orchestrator", purpose: "final_synthesis", agentDefinitionRevisionId: s.definition.id, continuedFromInvocationId: null, patternPosition: { kind: "orchestrator" }, taskIds: [], allocation: { costUsd: 1, tokens: 1, attempts: 1 }, allocationSource: "run_final_reserve" })).toThrow(ValidationError);
+      expect(() => h.stores.invocations.create({ runId: s.run.id, planNodeId: s.root.id, role: "orchestrator", purpose: "final_synthesis", agentDefinitionRevisionId: s.definition.id, continuedFromInvocationId: null, patternPosition: { kind: "orchestrator" }, gateId: gateFor(h, s) as never, taskIds: [], allocation: { costUsd: 1, tokens: 1, attempts: 1 }, allocationSource: "run_final_reserve" })).toThrow(ValidationError);
       // A route selector or evaluator-optimizer Evaluator cannot use the reserve: only `evaluate` classified `run_completion` may, and a plain evaluate is plan_node.
       expect(() => finalInvocation(h, s, "run_completion", { purpose: "select" })).toThrow(ValidationError);
       const worker = nodeInput(h, patternDefinition(s.definition.id, { sourcePath: "e1" }));
@@ -101,10 +120,10 @@ describe("final-reserve Invocations", () => {
       const task = h.stores.tasks.create({ runId: s.run.id, planNodeId: s.root.id, origin: "orchestrator", subject: "t", requirementIds: [], requirementRevisionId: null, inputArtifactIds: [], requiredOutputs: [], replacesTaskId: null });
       expect(() => finalInvocation(h, s, "final_synthesis", { taskIds: [task.id] })).toThrow(ValidationError);
       const taskReservation = h.stores.reservations.reserveOrdinary({ runId: s.run.id, parent: { type: "plan_node", id: s.root.id }, child: { type: "task", id: task.id }, amount: { costUsd: 1, tokens: 1, attempts: 1 } });
-      expect(() => h.stores.invocations.create({ runId: s.run.id, planNodeId: s.root.id, role: "orchestrator", purpose: "final_synthesis", agentDefinitionRevisionId: s.definition.id, continuedFromInvocationId: null, patternPosition: { kind: "orchestrator" }, taskIds: [], allocation: { costUsd: 1, tokens: 1, attempts: 1 }, allocationSource: "run_final_reserve", finalReserveUse: "final_synthesis" }, { fromTaskReservationId: taskReservation.id })).toThrow(/cannot transfer a Task reservation/);
+      expect(() => h.stores.invocations.create({ runId: s.run.id, planNodeId: s.root.id, role: "orchestrator", purpose: "final_synthesis", agentDefinitionRevisionId: s.definition.id, continuedFromInvocationId: null, patternPosition: { kind: "orchestrator" }, gateId: gateFor(h, s) as never, taskIds: [], allocation: { costUsd: 1, tokens: 1, attempts: 1 }, allocationSource: "run_final_reserve", finalReserveUse: "final_synthesis" }, { fromTaskReservationId: taskReservation.id })).toThrow(/cannot transfer a Task reservation/);
       expect(() => finalInvocation(h, s, "final_synthesis", { allocation: { costUsd: 1, tokens: 1, attempts: 0 } })).toThrow(ValidationError);
       // Nothing was written: no Invocation, no reservation, no Event beyond the Task and its reservation.
-      expect(h.stores.invocations.listByPlanNode(s.root.id)).toEqual([]);
+      expect(h.stores.invocations.listByPlanNode(s.root.id).filter((i) => i.allocationSource === "run_final_reserve")).toEqual([]);
       expect(h.stores.reservations.listByParent({ type: "run", id: s.run.id }).filter((r) => r.capacitySource === "final_reserve")).toEqual([]);
       expect(h.ctx.journal.read({ runId: s.run.id, afterSeq: before }).map((e) => e.type).filter((t) => t !== "gate.opened")).toEqual(["execution_plan.revised", "execution_plan.compiled", "plan_node.created", "budget_reservation.created", "task.created", "budget_reservation.created"]);
       // The store entry point is not reachable for anything but a persisted final-reserve Invocation.
@@ -130,10 +149,11 @@ describe("final-reserve Invocations", () => {
     const h = openHarness();
     try {
       const s = seedRun(h, { budget: BUDGET, finalReserve: RESERVE });
+      gateFor(h, s);
       const before = h.ctx.journal.lastSeq();
       expect(() => finalInvocation(h, s, "final_synthesis", { allocation: { costUsd: 11, tokens: 1, attempts: 1 } })).toThrow(InsufficientCapacityError);
       expect(h.ctx.journal.lastSeq()).toBe(before);
-      expect(h.stores.invocations.listByPlanNode(s.root.id)).toEqual([]);
+      expect(h.stores.invocations.listByPlanNode(s.root.id).filter((i) => i.allocationSource === "run_final_reserve")).toEqual([]);
       const created = finalInvocation(h, s, "final_synthesis", { allocation: { costUsd: 10, tokens: 100_000, attempts: 4 } });
       expect(h.ctx.journal.read({ runId: s.run.id, afterSeq: before }).map((e) => e.type)).toEqual(["invocation.created", "budget_reservation.created"]);
       expect(h.stores.reservations.runCapacity(s.run.id).final.available).toEqual(ZERO);
@@ -148,7 +168,7 @@ describe("final-reserve Invocations", () => {
     const h = openHarness();
     try {
       const s = seedRun(h, { budget: BUDGET, finalReserve: RESERVE });
-      const ordinary = seedInvocation(h, s, { role: "evaluator", purpose: "evaluate", allocation: { costUsd: 2, tokens: 20_000, attempts: 2 } });
+      const ordinary = ordinaryEvaluator(h, s, { costUsd: 2, tokens: 20_000, attempts: 2 });
       const synthesis = finalInvocation(h, s, "final_synthesis", { allocation: { costUsd: 4, tokens: 40_000, attempts: 2 } });
       spend(h, s, ordinary, { costUsd: 1, tokens: 1000 });
       spend(h, s, synthesis, { costUsd: 3, tokens: 3000 });
@@ -157,7 +177,7 @@ describe("final-reserve Invocations", () => {
       expect(h.stores.usage.totalsForPlanNode(s.root.id).costUsd).toBe(4);
       expect(h.stores.usage.totalsForRun(s.run.id)).toMatchObject({ rows: 2, costUsd: 4 });
       // Reservation accounting charges the final Invocation on its own Run-level row only.
-      expect(h.stores.usage.consumedFromPlanNodeAllocation(s.root.id)).toEqual({ costUsd: 1, tokens: 1000, attempts: 1 });
+      expect(h.stores.usage.consumedFromPlanNodeAllocation(s.root.id)).toEqual({ costUsd: 1, tokens: 1000, attempts: 2 });
       expect(h.stores.usage.consumedByInvocation(synthesis.id)).toEqual({ costUsd: 3, tokens: 3000, attempts: 1 });
       let capacity = h.stores.reservations.runCapacity(s.run.id);
       expect(capacity.ordinary.committed).toEqual(s.root.allocation);
@@ -169,11 +189,11 @@ describe("final-reserve Invocations", () => {
       h.stores.plans.transitionNode(s.root.id, { to: "running" });
       h.stores.plans.transitionNode(s.root.id, { to: "succeeded", outputArtifactIds: [] });
       const rootReservation = h.stores.reservations.listByChild({ type: "plan_node", id: s.root.id })[0]!;
-      expect(rootReservation).toMatchObject({ status: "released", consumed: { costUsd: 1, tokens: 1000, attempts: 1 } });
+      expect(rootReservation).toMatchObject({ status: "released", consumed: { costUsd: 1, tokens: 1000, attempts: 2 } });
       capacity = h.stores.reservations.runCapacity(s.run.id);
-      expect(capacity.global.consumed).toEqual({ costUsd: 4, tokens: 4000, attempts: 2 });
+      expect(capacity.global.consumed).toEqual({ costUsd: 4, tokens: 4000, attempts: 3 });
       expect(capacity.global.consumed.costUsd).toBe(h.stores.usage.totalsForRun(s.run.id).costUsd);
-      expect(capacity.ordinary.consumed).toEqual({ costUsd: 1, tokens: 1000, attempts: 1 });
+      expect(capacity.ordinary.consumed).toEqual({ costUsd: 1, tokens: 1000, attempts: 2 });
       expect(capacity.final.consumed).toEqual({ costUsd: 3, tokens: 3000, attempts: 1 });
     } finally {
       h.close();
@@ -186,11 +206,13 @@ describe("global Run Budget across partitions", () => {
     const h = openHarness();
     try {
       const s = seedRun(h, { budget: { ...BUDGET, maxCostUsd: 100, maxTokens: 1000, maxAttempts: 10 }, finalReserve: { costUsd: 10, tokens: 100, attempts: 2 }, rootAllocation: { costUsd: 60, tokens: 500, attempts: 5 } });
+      // The completion Gate (and the root turn that requested it) exists before the overrun below leaves the root unable to fund any turn.
+      gateFor(h, s);
       let capacity = h.stores.reservations.runCapacity(s.run.id);
       expect(capacity.ordinary.effectiveAvailable).toEqual({ costUsd: 30, tokens: 400, attempts: 3 });
       expect(capacity.final.effectiveAvailable).toEqual({ costUsd: 10, tokens: 100, attempts: 2 });
       // The root's Invocation overruns the root's reservation on cost only, while still active.
-      const invocation = seedInvocation(h, s, { role: "evaluator", purpose: "evaluate", allocation: { costUsd: 60, tokens: 500, attempts: 5 } });
+      const invocation = ordinaryEvaluator(h, s, { costUsd: 60, tokens: 500, attempts: 4 });
       spend(h, s, invocation, { costUsd: 95, tokens: 400 });
       capacity = h.stores.reservations.runCapacity(s.run.id);
       // Visible before release: the root is charged max(60, 95) = 95 on cost, max(500, 400) = 500 on tokens.

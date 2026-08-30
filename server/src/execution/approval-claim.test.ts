@@ -4,7 +4,7 @@
  * database, decided from canonical rows alone, and unchanged by retries,
  * reopen, or provider outcomes.
  */
-import { canonicalJson, canonicalToolCall, type ApprovedToolCallUse, type Decision, type Invocation } from "@agentique-console/core";
+import { canonicalJson, canonicalToolCall, type ApprovedToolCallUse, type Decision, type Invocation, approvalSubjectOf } from "@agentique-console/core";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -28,7 +28,7 @@ async function blockOnApproval(h: RuntimeHarness, invocation: Invocation): Promi
 }
 
 function successor(h: RuntimeHarness, s: RuntimeSeed, blocked: Invocation, decision: Decision | null, outcome: "approve_once" | "deny" = "approve_once") {
-  const subject = decision?.subject ?? null;
+  const subject = decision === null ? null : approvalSubjectOf(decision);
   return h.preparation.prepare({
     runId: s.created.run.id,
     planNodeId: s.created.root.id,
@@ -112,7 +112,7 @@ describe("approval use store", () => {
       expect(uses.claim(claimOf(g, { tool: "write" }))).toEqual({ kind: "refused", reason: "call_mismatch" });
       expect(uses.claim(claimOf(g, { callDigest: sha256Hex(canonicalToolCall({ tool: "shell", input: { command: "rm -rf build", cwd: "/x" } })) }))).toEqual({ kind: "refused", reason: "call_mismatch" });
       // The blocked predecessor's own Attempt is not the claimant.
-      expect(uses.claim(claimOf(g, { attemptId: g.decision.subject!.attemptId }))).toEqual({ kind: "refused", reason: "attempt_mismatch" });
+      expect(uses.claim(claimOf(g, { attemptId: approvalSubjectOf(g.decision).attemptId }))).toEqual({ kind: "refused", reason: "attempt_mismatch" });
       // A Decision that is not a side-effect approval.
       const choice = h.stores.decisions.request({ conversationId: g.s.created.run.conversationId, runId: g.s.created.run.id, kind: "operator_choice", resolutionPolicy: "operator_required", requestedBy: { kind: "operator" }, question: "q", options: [{ id: "approve_once", label: "A", description: null }, { id: "deny", label: "D", description: null }], recommendedOptionId: null, rationale: null, affects: { requirementIds: [], taskIds: [], planNodeIds: [] }, deadlineAt: null, activationCondition: null, subject: null, supersedesDecisionId: null });
       expect(uses.claim(claimOf(g, { decisionId: choice.id }))).toEqual({ kind: "refused", reason: "not_side_effect_approval" });
@@ -185,7 +185,7 @@ describe("approval use store", () => {
       // An Orchestrator successor on the root, continuing from the Orchestrator's own terminal Invocation, is on another Plan Node than the Worker's Decision.
       const rootBlocked = await blockOnApproval(h, h.preparation.prepare({ runId: planning.created.run.id, planNodeId: planning.created.root.id, role: "orchestrator", purpose: "node_result", continuedFromInvocationId: planning.invocation.id, patternPosition: { kind: "orchestrator" } }).invocation);
       h.stores.decisions.resolve(rootBlocked.id, { resolvedBy: "operator", chosenOptionId: "approve_once", rationale: null, artifactIds: [] });
-      const rootSuccessor = successor(h, planning, h.stores.invocations.get(rootBlocked.subject!.invocationId), h.stores.decisions.get(rootBlocked.id));
+      const rootSuccessor = successor(h, planning, h.stores.invocations.get(approvalSubjectOf(rootBlocked).invocationId), h.stores.decisions.get(rootBlocked.id));
       const rootPrepared = await h.executor.prepareNextAttempt(rootSuccessor.invocation.id);
       if (rootPrepared.kind !== "prepared") throw new Error(rootPrepared.kind);
       expect(uses.claim({ decisionId: openWorker.id, invocationId: rootSuccessor.invocation.id, attemptId: rootPrepared.attempt.id, tool: "shell", callDigest: DIGEST })).toEqual({ kind: "refused", reason: "plan_node_mismatch" });
@@ -230,7 +230,7 @@ describe("approval use store", () => {
       const trigger = /approved_tool_call_use claims a resolved approve_once/;
       expect(() => insert({ tool: "write" })).toThrow(trigger);
       expect(() => insert({ digest: "b".repeat(64) })).toThrow(trigger);
-      expect(() => insert({ attempt: g.decision.subject!.attemptId })).toThrow(trigger);
+      expect(() => insert({ attempt: approvalSubjectOf(g.decision).attemptId })).toThrow(trigger);
       expect(() => insert({ invocation: g.blocked.id })).toThrow(trigger);
       // The BEFORE INSERT trigger runs before the column checks, so a malformed digest or empty tool is refused as a mismatch.
       expect(() => insert({ digest: "abc" })).toThrow(trigger);
@@ -244,7 +244,7 @@ describe("approval use store", () => {
       insert();
       expect(() => insert({ id: `acu_${"2".repeat(24)}` })).toThrow(/UNIQUE constraint failed: approved_tool_call_uses.decision_id/);
       expect(() => sqlite.prepare("UPDATE approved_tool_call_uses SET tool = 'write'").run()).toThrow(/append-only/);
-      expect(() => sqlite.prepare("UPDATE approved_tool_call_uses SET attempt_id = ?").run(g.decision.subject!.attemptId)).toThrow(/append-only/);
+      expect(() => sqlite.prepare("UPDATE approved_tool_call_uses SET attempt_id = ?").run(approvalSubjectOf(g.decision).attemptId)).toThrow(/append-only/);
       expect(() => sqlite.prepare("DELETE FROM approved_tool_call_uses").run()).toThrow(/append-only/);
       expect(h.stores.approvedToolCallUses.getByDecision(g.decision.id)).toMatchObject({ id: `acu_${"1".repeat(24)}` });
       expect(h.stores.approvedToolCallUses.claim(claimOf(g))).toEqual({ kind: "refused", reason: "already_used" });

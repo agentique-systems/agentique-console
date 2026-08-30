@@ -218,6 +218,35 @@ CREATE TABLE `changesets` (
 );
 --> statement-breakpoint
 CREATE INDEX `changesets_run` ON `changesets` (`run_id`,`created_at`);--> statement-breakpoint
+CREATE TABLE `completion_requests` (
+	`id` text PRIMARY KEY NOT NULL,
+	`run_id` text NOT NULL,
+	`invocation_id` text NOT NULL,
+	`runtime_tool_call_id` text NOT NULL,
+	`status` text NOT NULL,
+	`gate_id` text,
+	`report_artifact_id` text,
+	`outcome` text,
+	`created_at` text NOT NULL,
+	`started_at` text,
+	`ended_at` text,
+	FOREIGN KEY (`run_id`) REFERENCES `runs`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`invocation_id`) REFERENCES `invocations`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`runtime_tool_call_id`) REFERENCES `runtime_tool_calls`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`gate_id`) REFERENCES `gates`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`report_artifact_id`) REFERENCES `artifacts`(`id`) ON UPDATE no action ON DELETE no action,
+	CONSTRAINT "completion_requests_status" CHECK("completion_requests"."status" IN ('requested', 'verifying', 'passed', 'failed', 'cancelled')),
+	CONSTRAINT "completion_requests_gate_shape" CHECK(("completion_requests"."status" IN ('verifying', 'passed', 'failed')) = ("completion_requests"."gate_id" IS NOT NULL)),
+	CONSTRAINT "completion_requests_started_shape" CHECK(("completion_requests"."status" IN ('verifying', 'passed', 'failed')) = ("completion_requests"."started_at" IS NOT NULL)),
+	CONSTRAINT "completion_requests_report_shape" CHECK(("completion_requests"."status" = 'passed') = ("completion_requests"."report_artifact_id" IS NOT NULL)),
+	CONSTRAINT "completion_requests_outcome_shape" CHECK(("completion_requests"."status" IN ('failed', 'cancelled')) = ("completion_requests"."outcome" IS NOT NULL)),
+	CONSTRAINT "completion_requests_terminal_has_ended_at" CHECK(("completion_requests"."status" IN ('passed', 'failed', 'cancelled')) = ("completion_requests"."ended_at" IS NOT NULL))
+);
+--> statement-breakpoint
+CREATE INDEX `completion_requests_run` ON `completion_requests` (`run_id`,`created_at`);--> statement-breakpoint
+CREATE UNIQUE INDEX `completion_requests_active_run` ON `completion_requests` (`run_id`) WHERE status IN ('requested', 'verifying');--> statement-breakpoint
+CREATE UNIQUE INDEX `completion_requests_call` ON `completion_requests` (`runtime_tool_call_id`);--> statement-breakpoint
+CREATE UNIQUE INDEX `completion_requests_invocation` ON `completion_requests` (`invocation_id`);--> statement-breakpoint
 CREATE TABLE `context_manifests` (
 	`id` text PRIMARY KEY NOT NULL,
 	`invocation_id` text NOT NULL,
@@ -285,6 +314,7 @@ CREATE TABLE `decisions` (
 	`supersedes_decision_id` text,
 	`superseded_by_decision_id` text,
 	`created_at` text NOT NULL,
+	`subject_gate_id` text GENERATED ALWAYS AS (json_extract(subject, '$.gateId')) VIRTUAL,
 	FOREIGN KEY (`conversation_id`) REFERENCES `conversations`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`run_id`) REFERENCES `runs`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`supersedes_decision_id`) REFERENCES `decisions`(`id`) ON UPDATE no action ON DELETE no action,
@@ -299,12 +329,14 @@ CREATE TABLE `decisions` (
 	CONSTRAINT "decisions_policy_resolver" CHECK("decisions"."resolved_by" IS NULL OR "decisions"."resolved_by" <> 'policy:use_default_after_deadline' OR ("decisions"."resolution_policy" = 'use_default_after_deadline' AND "decisions"."chosen_option_id" = "decisions"."recommended_option_id")),
 	CONSTRAINT "decisions_resolution_shape" CHECK(("decisions"."status" = 'open' AND "decisions"."resolved_by" IS NULL AND "decisions"."chosen_option_id" IS NULL AND "decisions"."resolved_at" IS NULL) OR ("decisions"."status" = 'resolved' AND "decisions"."resolved_by" IS NOT NULL AND "decisions"."chosen_option_id" IS NOT NULL AND "decisions"."resolved_at" IS NOT NULL) OR "decisions"."status" = 'superseded'),
 	CONSTRAINT "decisions_superseded_by" CHECK(("decisions"."status" = 'superseded') = ("decisions"."superseded_by_decision_id" IS NOT NULL)),
-	CONSTRAINT "decisions_subject_shape" CHECK(("decisions"."kind" = 'side_effect_approval') = ("decisions"."subject" IS NOT NULL AND json_extract("decisions"."subject", '$.kind') = 'side_effect_approval' AND "decisions"."run_id" IS NOT NULL)),
+	CONSTRAINT "decisions_subject_shape" CHECK(("decisions"."kind" IN ('side_effect_approval', 'signoff')) = ("decisions"."subject" IS NOT NULL AND json_extract("decisions"."subject", '$.kind') = "decisions"."kind" AND "decisions"."run_id" IS NOT NULL)),
+	CONSTRAINT "decisions_signoff_policy" CHECK("decisions"."kind" <> 'signoff' OR ("decisions"."resolution_policy" = 'operator_required' AND json_extract("decisions"."subject", '$.runId') = "decisions"."run_id")),
 	CONSTRAINT "decisions_no_self_supersede" CHECK("decisions"."supersedes_decision_id" IS NULL OR "decisions"."supersedes_decision_id" <> "decisions"."id")
 );
 --> statement-breakpoint
 CREATE INDEX `decisions_conversation_status` ON `decisions` (`conversation_id`,`status`);--> statement-breakpoint
 CREATE INDEX `decisions_run` ON `decisions` (`run_id`);--> statement-breakpoint
+CREATE UNIQUE INDEX `decisions_signoff_gate` ON `decisions` (`subject_gate_id`) WHERE kind = 'signoff';--> statement-breakpoint
 CREATE TABLE `evaluations` (
 	`id` text PRIMARY KEY NOT NULL,
 	`run_id` text NOT NULL,
@@ -383,28 +415,47 @@ CREATE TABLE `gates` (
 	`ordinal` integer NOT NULL,
 	`status` text NOT NULL,
 	`acceptance_criterion_ids` text NOT NULL,
-	`snapshot_id` text,
+	`snapshot_id` text NOT NULL,
 	`candidate_artifact_ids` text NOT NULL,
+	`completion_request_id` text,
+	`requirement_revision_id` text,
+	`requirement_ids` text NOT NULL,
+	`completion_gate_id` text,
+	`report_artifact_id` text,
 	`failure` text,
 	`opened_at` text NOT NULL,
 	`closed_at` text,
 	FOREIGN KEY (`run_id`) REFERENCES `runs`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`plan_node_id`) REFERENCES `plan_nodes`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`snapshot_id`) REFERENCES `snapshots`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`completion_request_id`) REFERENCES `completion_requests`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`requirement_revision_id`) REFERENCES `requirement_revisions`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`completion_gate_id`) REFERENCES `gates`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`report_artifact_id`) REFERENCES `artifacts`(`id`) ON UPDATE no action ON DELETE no action,
 	CONSTRAINT "gates_kind" CHECK("gates"."kind" IN ('node_exit', 'run_completion', 'operator_signoff')),
 	CONSTRAINT "gates_status" CHECK("gates"."status" IN ('open', 'passed', 'failed')),
 	CONSTRAINT "gates_node_exit_has_node" CHECK(("gates"."kind" = 'node_exit') = ("gates"."plan_node_id" IS NOT NULL)),
-	CONSTRAINT "gates_node_exit_has_snapshot" CHECK("gates"."kind" <> 'node_exit' OR "gates"."snapshot_id" IS NOT NULL),
 	CONSTRAINT "gates_ordinal" CHECK("gates"."ordinal" >= 1),
 	CONSTRAINT "gates_closed_at" CHECK(("gates"."status" = 'open') = ("gates"."closed_at" IS NULL)),
 	CONSTRAINT "gates_failed_has_failure" CHECK(("gates"."status" = 'failed') = ("gates"."failure" IS NOT NULL)),
-	CONSTRAINT "gates_failure_kind" CHECK("gates"."failure" IS NULL OR json_extract("gates"."failure", '$.kind') IN ('criteria_failed', 'evaluator_failed'))
+	CONSTRAINT "gates_failure_kind" CHECK("gates"."failure" IS NULL OR json_extract("gates"."failure", '$.kind') IN ('criteria_failed', 'evaluator_failed', 'conditions_unmet', 'final_synthesis_failed', 'final_reserve_exhausted')),
+	CONSTRAINT "gates_run_completion_failure" CHECK("gates"."failure" IS NULL OR "gates"."kind" = 'run_completion' OR json_extract("gates"."failure", '$.kind') IN ('criteria_failed', 'evaluator_failed')),
+	CONSTRAINT "gates_run_gate_identity" CHECK(("gates"."kind" <> 'node_exit') = ("gates"."completion_request_id" IS NOT NULL AND "gates"."requirement_revision_id" IS NOT NULL)),
+	CONSTRAINT "gates_node_exit_no_requirements" CHECK("gates"."kind" <> 'node_exit' OR "gates"."requirement_ids" = '[]'),
+	CONSTRAINT "gates_signoff_shape" CHECK(("gates"."kind" = 'operator_signoff') = ("gates"."completion_gate_id" IS NOT NULL)),
+	CONSTRAINT "gates_signoff_criteria" CHECK("gates"."kind" <> 'operator_signoff' OR "gates"."acceptance_criterion_ids" = '[]'),
+	CONSTRAINT "gates_no_self_presentation" CHECK("gates"."completion_gate_id" IS NULL OR "gates"."completion_gate_id" <> "gates"."id"),
+	CONSTRAINT "gates_report_shape" CHECK(("gates"."kind" = 'operator_signoff' AND "gates"."report_artifact_id" IS NOT NULL) OR ("gates"."kind" = 'run_completion' AND (("gates"."status" = 'passed') = ("gates"."report_artifact_id" IS NOT NULL))) OR ("gates"."kind" = 'node_exit' AND "gates"."report_artifact_id" IS NULL))
 );
 --> statement-breakpoint
 CREATE INDEX `gates_run` ON `gates` (`run_id`,`kind`,`status`);--> statement-breakpoint
 CREATE INDEX `gates_plan_node` ON `gates` (`plan_node_id`,`ordinal`);--> statement-breakpoint
+CREATE INDEX `gates_completion_request` ON `gates` (`completion_request_id`);--> statement-breakpoint
 CREATE UNIQUE INDEX `gates_open_node_exit` ON `gates` (`plan_node_id`) WHERE kind = 'node_exit' AND status = 'open';--> statement-breakpoint
 CREATE UNIQUE INDEX `gates_node_exit_ordinal` ON `gates` (`plan_node_id`,`ordinal`) WHERE kind = 'node_exit';--> statement-breakpoint
+CREATE UNIQUE INDEX `gates_open_run_gate` ON `gates` (`run_id`,`kind`) WHERE plan_node_id IS NULL AND status = 'open';--> statement-breakpoint
+CREATE UNIQUE INDEX `gates_run_gate_ordinal` ON `gates` (`run_id`,`kind`,`ordinal`) WHERE plan_node_id IS NULL;--> statement-breakpoint
+CREATE UNIQUE INDEX `gates_completion_request_kind` ON `gates` (`completion_request_id`,`kind`) WHERE completion_request_id IS NOT NULL;--> statement-breakpoint
 CREATE TABLE `handoffs` (
 	`id` text PRIMARY KEY NOT NULL,
 	`run_id` text NOT NULL,
@@ -480,8 +531,9 @@ CREATE TABLE `invocations` (
 	CONSTRAINT "invocations_no_self_continue" CHECK("invocations"."continued_from_invocation_id" IS NULL OR "invocations"."continued_from_invocation_id" <> "invocations"."id"),
 	CONSTRAINT "invocations_pattern_position_kind" CHECK("invocations"."pattern_position" IS NULL OR json_extract("invocations"."pattern_position", '$.kind') IN ('orchestrator', 'single', 'chain_step', 'route_selection', 'route_branch', 'parallel_item', 'parallel_aggregation', 'coordinator_turn', 'worker_task', 'producer_round', 'evaluator_round')),
 	CONSTRAINT "invocations_pattern_position_present" CHECK("invocations"."pattern_position" IS NOT NULL OR ("invocations"."role" = 'evaluator' AND "invocations"."purpose" = 'evaluate')),
-	CONSTRAINT "invocations_gate_ownership" CHECK(("invocations"."pattern_position" IS NULL) = ("invocations"."gate_id" IS NOT NULL)),
-	CONSTRAINT "invocations_gate_evaluator_role" CHECK("invocations"."gate_id" IS NULL OR ("invocations"."role" = 'evaluator' AND "invocations"."purpose" = 'evaluate' AND "invocations"."task_ids" = '[]')),
+	CONSTRAINT "invocations_gate_ownership" CHECK("invocations"."purpose" = 'final_synthesis' OR (("invocations"."pattern_position" IS NULL) = ("invocations"."gate_id" IS NOT NULL))),
+	CONSTRAINT "invocations_final_synthesis_gate" CHECK("invocations"."purpose" <> 'final_synthesis' OR "invocations"."gate_id" IS NOT NULL),
+	CONSTRAINT "invocations_gate_evaluator_role" CHECK("invocations"."gate_id" IS NULL OR ((("invocations"."role" = 'evaluator' AND "invocations"."purpose" = 'evaluate') OR ("invocations"."role" = 'orchestrator' AND "invocations"."purpose" = 'final_synthesis')) AND "invocations"."task_ids" = '[]')),
 	CONSTRAINT "invocations_pattern_position_key_agrees" CHECK(("invocations"."pattern_position" IS NULL AND "invocations"."pattern_position_key" IS NULL) OR "invocations"."pattern_position_key" = (json_extract("invocations"."pattern_position", '$.kind') || CASE WHEN json_extract("invocations"."pattern_position", '$.index') IS NOT NULL THEN ':' || json_extract("invocations"."pattern_position", '$.index') WHEN json_extract("invocations"."pattern_position", '$.round') IS NOT NULL THEN ':' || json_extract("invocations"."pattern_position", '$.round') WHEN json_extract("invocations"."pattern_position", '$.label') IS NOT NULL THEN ':' || json_extract("invocations"."pattern_position", '$.label') WHEN json_extract("invocations"."pattern_position", '$.taskId') IS NOT NULL THEN ':' || json_extract("invocations"."pattern_position", '$.taskId') ELSE '' END)),
 	CONSTRAINT "invocations_pattern_position_role" CHECK("invocations"."pattern_position" IS NULL OR (json_extract("invocations"."pattern_position", '$.kind') = 'orchestrator' AND "invocations"."role" = 'orchestrator') OR (json_extract("invocations"."pattern_position", '$.kind') IN ('single', 'chain_step', 'route_branch', 'parallel_item', 'parallel_aggregation', 'producer_round') AND "invocations"."role" = 'worker' AND "invocations"."purpose" = 'step') OR (json_extract("invocations"."pattern_position", '$.kind') = 'worker_task' AND "invocations"."role" = 'worker' AND "invocations"."purpose" = 'task') OR (json_extract("invocations"."pattern_position", '$.kind') = 'route_selection' AND "invocations"."role" = 'evaluator' AND "invocations"."purpose" = 'select') OR (json_extract("invocations"."pattern_position", '$.kind') = 'evaluator_round' AND "invocations"."role" = 'evaluator' AND "invocations"."purpose" = 'evaluate') OR (json_extract("invocations"."pattern_position", '$.kind') = 'coordinator_turn' AND "invocations"."role" = 'coordinator'))
 );
@@ -491,7 +543,8 @@ CREATE INDEX `invocations_workspace_cleanup_pending` ON `invocations` (`run_id`,
 CREATE INDEX `invocations_run_status` ON `invocations` (`run_id`,`status`);--> statement-breakpoint
 CREATE INDEX `invocations_plan_node_source` ON `invocations` (`plan_node_id`,`allocation_source`);--> statement-breakpoint
 CREATE INDEX `invocations_plan_node_position` ON `invocations` (`plan_node_id`,`pattern_position_key`,`created_at`);--> statement-breakpoint
-CREATE UNIQUE INDEX `invocations_active_gate` ON `invocations` (`gate_id`) WHERE gate_id IS NOT NULL AND status IN ('pending', 'running', 'waiting');--> statement-breakpoint
+CREATE UNIQUE INDEX `invocations_active_gate` ON `invocations` (`gate_id`) WHERE gate_id IS NOT NULL AND role = 'evaluator' AND status IN ('pending', 'running', 'waiting');--> statement-breakpoint
+CREATE UNIQUE INDEX `invocations_active_synthesis` ON `invocations` (`gate_id`) WHERE gate_id IS NOT NULL AND purpose = 'final_synthesis' AND status IN ('pending', 'running', 'waiting');--> statement-breakpoint
 CREATE INDEX `invocations_gate` ON `invocations` (`gate_id`);--> statement-breakpoint
 CREATE UNIQUE INDEX `invocations_active_position` ON `invocations` (`plan_node_id`,`pattern_position_key`) WHERE pattern_position_key IS NOT NULL AND status IN ('pending', 'running', 'waiting');--> statement-breakpoint
 CREATE UNIQUE INDEX `invocations_active_orchestrator` ON `invocations` (`run_id`) WHERE role = 'orchestrator' AND status IN ('pending', 'running', 'waiting');--> statement-breakpoint
@@ -729,7 +782,7 @@ CREATE TABLE `runs` (
 	CONSTRAINT "runs_budget_non_negative" CHECK("runs"."max_cost_usd" >= 0 AND "runs"."max_tokens" >= 0 AND "runs"."max_attempts" >= 0),
 	CONSTRAINT "runs_final_reserve_non_negative" CHECK("runs"."final_reserve_cost_usd" >= 0 AND "runs"."final_reserve_tokens" >= 0 AND "runs"."final_reserve_attempts" >= 0),
 	CONSTRAINT "runs_final_reserve_within_budget" CHECK("runs"."final_reserve_cost_usd" <= "runs"."max_cost_usd" AND "runs"."final_reserve_tokens" <= "runs"."max_tokens" AND "runs"."final_reserve_attempts" <= "runs"."max_attempts"),
-	CONSTRAINT "runs_verification_policy_shape" CHECK(json_type("runs"."verification_policy", '$.maxNodeGateCycles') = 'integer' AND json_extract("runs"."verification_policy", '$.maxNodeGateCycles') >= 1 AND json_extract("runs"."verification_policy", '$.maxNodeGateCycles') <= 10 AND (json_type("runs"."verification_policy", '$.evaluatorAgentDefinitionRevisionId') = 'null' OR json_extract("runs"."verification_policy", '$.evaluatorAgentDefinitionRevisionId') GLOB 'agdr_*'))
+	CONSTRAINT "runs_verification_policy_shape" CHECK(json_type("runs"."verification_policy", '$.maxNodeGateCycles') = 'integer' AND json_extract("runs"."verification_policy", '$.maxNodeGateCycles') >= 1 AND json_extract("runs"."verification_policy", '$.maxNodeGateCycles') <= 10 AND json_type("runs"."verification_policy", '$.maxRunCompletionCycles') = 'integer' AND json_extract("runs"."verification_policy", '$.maxRunCompletionCycles') >= 1 AND json_extract("runs"."verification_policy", '$.maxRunCompletionCycles') <= 10 AND json_type("runs"."verification_policy", '$.runCompletionAcceptanceCriterionIds') = 'array' AND (json_type("runs"."verification_policy", '$.evaluatorAgentDefinitionRevisionId') = 'null' OR json_extract("runs"."verification_policy", '$.evaluatorAgentDefinitionRevisionId') GLOB 'agdr_*'))
 );
 --> statement-breakpoint
 CREATE INDEX `runs_conversation` ON `runs` (`conversation_id`,`created_at`);--> statement-breakpoint
@@ -748,7 +801,7 @@ CREATE TABLE `runtime_tool_calls` (
 	FOREIGN KEY (`plan_node_id`) REFERENCES `plan_nodes`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`invocation_id`) REFERENCES `invocations`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`attempt_id`) REFERENCES `attempts`(`id`) ON UPDATE no action ON DELETE no action,
-	CONSTRAINT "runtime_tool_calls_tool" CHECK("runtime_tool_calls"."tool" IN ('propose_tasks', 'update_task')),
+	CONSTRAINT "runtime_tool_calls_tool" CHECK("runtime_tool_calls"."tool" IN ('propose_tasks', 'update_task', 'request_completion')),
 	CONSTRAINT "runtime_tool_calls_digest_shape" CHECK(length("runtime_tool_calls"."call_digest") = 64),
 	CONSTRAINT "runtime_tool_calls_result_tool" CHECK(json_extract("runtime_tool_calls"."result", '$.tool') = "runtime_tool_calls"."tool")
 );
@@ -903,7 +956,7 @@ CREATE TRIGGER `decisions_resolution_immutable` BEFORE UPDATE OF `resolved_by`, 
 CREATE TRIGGER `decisions_no_delete` BEFORE DELETE ON `decisions` BEGIN SELECT RAISE(ABORT, 'decisions are append-only'); END;--> statement-breakpoint
 CREATE TRIGGER `tasks_definition_immutable` BEFORE UPDATE OF `run_id`, `plan_node_id`, `origin`, `gate_id`, `subject`, `requirement_ids`, `requirement_revision_id`, `input_artifact_ids`, `required_outputs`, `replaces_task_id`, `created_at` ON `tasks` BEGIN SELECT RAISE(ABORT, 'task definition columns are immutable'); END;--> statement-breakpoint
 CREATE TRIGGER `tasks_no_delete` BEFORE DELETE ON `tasks` BEGIN SELECT RAISE(ABORT, 'tasks are never deleted'); END;--> statement-breakpoint
-CREATE TRIGGER `tasks_gate_remediation_valid` BEFORE INSERT ON `tasks` WHEN NEW.`gate_id` IS NOT NULL BEGIN SELECT RAISE(ABORT, 'a gate remediation task addresses a failed gate of its own run and plan node') WHERE NOT EXISTS (SELECT 1 FROM `gates` g WHERE g.`id` = NEW.`gate_id` AND g.`run_id` = NEW.`run_id` AND g.`status` = 'failed' AND g.`plan_node_id` IS NEW.`plan_node_id`); END;--> statement-breakpoint
+CREATE TRIGGER `tasks_gate_remediation_valid` BEFORE INSERT ON `tasks` WHEN NEW.`gate_id` IS NOT NULL BEGIN SELECT RAISE(ABORT, 'a gate remediation task addresses a failed gate of its own run on the gated plan node, or a failed run_completion gate from the root plan node') WHERE NOT EXISTS (SELECT 1 FROM `gates` g JOIN `plan_nodes` n ON n.`id` = NEW.`plan_node_id` WHERE g.`id` = NEW.`gate_id` AND g.`run_id` = NEW.`run_id` AND g.`status` = 'failed' AND ((g.`plan_node_id` IS NOT NULL AND g.`plan_node_id` = NEW.`plan_node_id`) OR (g.`plan_node_id` IS NULL AND g.`kind` = 'run_completion' AND n.`source_path` = 'root' AND n.`run_id` = NEW.`run_id`))); END;--> statement-breakpoint
 CREATE TRIGGER `task_dependencies_no_update` BEFORE UPDATE ON `task_dependencies` BEGIN SELECT RAISE(ABORT, 'task_dependencies are append-only'); END;--> statement-breakpoint
 CREATE TRIGGER `artifacts_no_update` BEFORE UPDATE ON `artifacts` BEGIN SELECT RAISE(ABORT, 'artifacts are immutable'); END;--> statement-breakpoint
 CREATE TRIGGER `artifacts_no_delete` BEFORE DELETE ON `artifacts` BEGIN SELECT RAISE(ABORT, 'artifacts are immutable'); END;--> statement-breakpoint
@@ -913,7 +966,8 @@ CREATE TRIGGER `agent_definition_revisions_no_update` BEFORE UPDATE ON `agent_de
 CREATE TRIGGER `agent_definition_revisions_no_delete` BEFORE DELETE ON `agent_definition_revisions` BEGIN SELECT RAISE(ABORT, 'agent_definition_revisions are immutable'); END;--> statement-breakpoint
 CREATE TRIGGER `invocations_definition_immutable` BEFORE UPDATE OF `run_id`, `plan_node_id`, `role`, `purpose`, `agent_definition_revision_id`, `continued_from_invocation_id`, `pattern_position`, `pattern_position_key`, `gate_id`, `task_ids`, `alloc_cost_usd`, `alloc_tokens`, `alloc_attempts`, `allocation_source`, `final_reserve_use`, `created_at` ON `invocations` BEGIN SELECT RAISE(ABORT, 'invocation definition columns are immutable'); END;--> statement-breakpoint
 CREATE TRIGGER `invocations_no_delete` BEFORE DELETE ON `invocations` BEGIN SELECT RAISE(ABORT, 'invocations are never deleted'); END;--> statement-breakpoint
-CREATE TRIGGER `invocations_gate_evaluator_valid` BEFORE INSERT ON `invocations` WHEN NEW.`gate_id` IS NOT NULL BEGIN SELECT RAISE(ABORT, 'a gate evaluator invocation judges an open gate of its own run and plan node and executes the run''s verification-policy evaluator revision') WHERE NOT EXISTS (SELECT 1 FROM `gates` g JOIN `runs` r ON r.`id` = NEW.`run_id` JOIN `plan_nodes` n ON n.`id` = NEW.`plan_node_id` WHERE g.`id` = NEW.`gate_id` AND g.`run_id` = NEW.`run_id` AND g.`status` = 'open' AND ((g.`plan_node_id` IS NOT NULL AND g.`plan_node_id` = NEW.`plan_node_id`) OR (g.`plan_node_id` IS NULL AND n.`source_path` = 'root')) AND json_extract(r.`verification_policy`, '$.evaluatorAgentDefinitionRevisionId') = NEW.`agent_definition_revision_id`); END;--> statement-breakpoint
+CREATE TRIGGER `invocations_gate_evaluator_valid` BEFORE INSERT ON `invocations` WHEN NEW.`gate_id` IS NOT NULL AND NEW.`role` = 'evaluator' BEGIN SELECT RAISE(ABORT, 'a gate evaluator invocation judges an open gate of its own run and plan node and executes the run''s verification-policy evaluator revision') WHERE NOT EXISTS (SELECT 1 FROM `gates` g JOIN `runs` r ON r.`id` = NEW.`run_id` JOIN `plan_nodes` n ON n.`id` = NEW.`plan_node_id` WHERE g.`id` = NEW.`gate_id` AND g.`run_id` = NEW.`run_id` AND g.`status` = 'open' AND ((g.`plan_node_id` IS NOT NULL AND g.`plan_node_id` = NEW.`plan_node_id`) OR (g.`plan_node_id` IS NULL AND n.`source_path` = 'root')) AND json_extract(r.`verification_policy`, '$.evaluatorAgentDefinitionRevisionId') = NEW.`agent_definition_revision_id`); END;--> statement-breakpoint
+CREATE TRIGGER `invocations_final_synthesis_valid` BEFORE INSERT ON `invocations` WHEN NEW.`purpose` = 'final_synthesis' AND NEW.`gate_id` IS NOT NULL BEGIN SELECT RAISE(ABORT, 'a final_synthesis turn reports on an open run_completion gate of its own run, from the root plan node, funded from the final reserve') WHERE NOT EXISTS (SELECT 1 FROM `gates` g JOIN `plan_nodes` n ON n.`id` = NEW.`plan_node_id` WHERE g.`id` = NEW.`gate_id` AND g.`run_id` = NEW.`run_id` AND g.`kind` = 'run_completion' AND g.`status` = 'open' AND n.`source_path` = 'root' AND NEW.`final_reserve_use` = 'final_synthesis'); END;--> statement-breakpoint
 CREATE TRIGGER `attempts_definition_immutable` BEFORE UPDATE OF `invocation_id`, `run_id`, `plan_node_id`, `number`, `kind`, `start_mode`, `resumed_from_attempt_id`, `created_at` ON `attempts` BEGIN SELECT RAISE(ABORT, 'attempt definition columns are immutable'); END;--> statement-breakpoint
 CREATE TRIGGER `attempts_no_delete` BEFORE DELETE ON `attempts` BEGIN SELECT RAISE(ABORT, 'attempts are never deleted'); END;--> statement-breakpoint
 CREATE TRIGGER `attempts_terminal_immutable` BEFORE UPDATE OF `status`, `failure_class`, `failure_detail`, `retry_decision`, `retry_not_before`, `result`, `transcript_artifact_id`, `ended_at` ON `attempts` WHEN OLD.`status` IN ('succeeded', 'failed', 'timed_out', 'interrupted', 'cancelled') BEGIN SELECT RAISE(ABORT, 'a terminal attempt never changes again'); END;--> statement-breakpoint
@@ -926,10 +980,15 @@ CREATE TRIGGER `context_manifests_no_update` BEFORE UPDATE ON `context_manifests
 CREATE TRIGGER `context_manifests_no_delete` BEFORE DELETE ON `context_manifests` BEGIN SELECT RAISE(ABORT, 'context_manifests are immutable'); END;--> statement-breakpoint
 CREATE TRIGGER `evaluations_no_update` BEFORE UPDATE ON `evaluations` BEGIN SELECT RAISE(ABORT, 'evaluations are append-only'); END;--> statement-breakpoint
 CREATE TRIGGER `evaluations_no_delete` BEFORE DELETE ON `evaluations` BEGIN SELECT RAISE(ABORT, 'evaluations are append-only'); END;--> statement-breakpoint
-CREATE TRIGGER `evaluations_gate_valid` BEFORE INSERT ON `evaluations` WHEN NEW.`gate_id` IS NOT NULL BEGIN SELECT RAISE(ABORT, 'a gate evaluation judges one criterion of an open gate of its own run on the gate''s pinned snapshot and plan node') WHERE NOT EXISTS (SELECT 1 FROM `gates` g WHERE g.`id` = NEW.`gate_id` AND g.`run_id` = NEW.`run_id` AND g.`status` = 'open' AND (g.`kind` <> 'node_exit' OR (g.`plan_node_id` = NEW.`plan_node_id` AND g.`snapshot_id` = NEW.`snapshot_id` AND json_extract(NEW.`subject`, '$.kind') = 'acceptance_criterion' AND EXISTS (SELECT 1 FROM json_each(g.`acceptance_criterion_ids`) c WHERE c.`value` = json_extract(NEW.`subject`, '$.acceptanceCriterionId'))))); END;--> statement-breakpoint
-CREATE TRIGGER `gates_definition_immutable` BEFORE UPDATE OF `run_id`, `plan_node_id`, `kind`, `ordinal`, `acceptance_criterion_ids`, `snapshot_id`, `candidate_artifact_ids`, `opened_at` ON `gates` BEGIN SELECT RAISE(ABORT, 'gate definition columns are immutable'); END;--> statement-breakpoint
+CREATE TRIGGER `evaluations_gate_valid` BEFORE INSERT ON `evaluations` WHEN NEW.`gate_id` IS NOT NULL BEGIN SELECT RAISE(ABORT, 'a gate evaluation judges one criterion of an open gate of its own run on the gate''s pinned snapshot and plan node (none for a run gate)') WHERE NOT EXISTS (SELECT 1 FROM `gates` g WHERE g.`id` = NEW.`gate_id` AND g.`run_id` = NEW.`run_id` AND g.`status` = 'open' AND g.`plan_node_id` IS NEW.`plan_node_id` AND g.`snapshot_id` = NEW.`snapshot_id` AND json_extract(NEW.`subject`, '$.kind') = 'acceptance_criterion' AND EXISTS (SELECT 1 FROM json_each(g.`acceptance_criterion_ids`) c WHERE c.`value` = json_extract(NEW.`subject`, '$.acceptanceCriterionId'))); END;--> statement-breakpoint
+CREATE TRIGGER `gates_definition_immutable` BEFORE UPDATE OF `run_id`, `plan_node_id`, `kind`, `ordinal`, `acceptance_criterion_ids`, `snapshot_id`, `candidate_artifact_ids`, `completion_request_id`, `requirement_revision_id`, `requirement_ids`, `completion_gate_id`, `opened_at` ON `gates` BEGIN SELECT RAISE(ABORT, 'gate definition columns are immutable'); END;--> statement-breakpoint
 CREATE TRIGGER `gates_closed_immutable` BEFORE UPDATE ON `gates` WHEN OLD.`status` <> 'open' BEGIN SELECT RAISE(ABORT, 'a closed gate never changes again'); END;--> statement-breakpoint
 CREATE TRIGGER `gates_no_delete` BEFORE DELETE ON `gates` BEGIN SELECT RAISE(ABORT, 'gates are append-only history'); END;--> statement-breakpoint
+CREATE TRIGGER `gates_report_immutable` BEFORE UPDATE OF `report_artifact_id` ON `gates` WHEN OLD.`report_artifact_id` IS NOT NULL BEGIN SELECT RAISE(ABORT, 'a gate records its final report once'); END;--> statement-breakpoint
+CREATE TRIGGER `completion_requests_identity_immutable` BEFORE UPDATE OF `id`, `run_id`, `invocation_id`, `runtime_tool_call_id`, `created_at` ON `completion_requests` BEGIN SELECT RAISE(ABORT, 'completion request identity columns are immutable'); END;--> statement-breakpoint
+CREATE TRIGGER `completion_requests_gate_immutable` BEFORE UPDATE OF `gate_id` ON `completion_requests` WHEN OLD.`gate_id` IS NOT NULL AND NEW.`gate_id` IS NOT OLD.`gate_id` BEGIN SELECT RAISE(ABORT, 'a completion request names its gate once'); END;--> statement-breakpoint
+CREATE TRIGGER `completion_requests_terminal_immutable` BEFORE UPDATE ON `completion_requests` WHEN OLD.`status` IN ('passed', 'failed', 'cancelled') BEGIN SELECT RAISE(ABORT, 'a terminal completion request never changes again'); END;--> statement-breakpoint
+CREATE TRIGGER `completion_requests_no_delete` BEFORE DELETE ON `completion_requests` BEGIN SELECT RAISE(ABORT, 'completion requests are append-only history'); END;--> statement-breakpoint
 CREATE TRIGGER `snapshots_no_update` BEFORE UPDATE ON `snapshots` BEGIN SELECT RAISE(ABORT, 'snapshots are immutable'); END;--> statement-breakpoint
 CREATE TRIGGER `snapshots_no_delete` BEFORE DELETE ON `snapshots` BEGIN SELECT RAISE(ABORT, 'snapshots are immutable'); END;--> statement-breakpoint
 CREATE TRIGGER `changesets_definition_immutable` BEFORE UPDATE OF `run_id`, `invocation_id`, `before_snapshot_id`, `after_snapshot_id`, `diff_artifact_id`, `created_at` ON `changesets` BEGIN SELECT RAISE(ABORT, 'changeset definition columns are immutable'); END;--> statement-breakpoint

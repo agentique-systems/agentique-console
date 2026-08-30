@@ -4,7 +4,7 @@
  */
 import { ConflictError, InsufficientCapacityError, ValidationError, type Invocation } from "@agentique-console/core";
 import { describe, expect, it } from "vitest";
-import { accepted, COMPLETED_RESULT, openRuntimeHarness, propose, seedPlanningRuntime, seedRuntime, startRun, type RuntimeHarness } from "./test-support.ts";
+import { accepted, COMPLETED_RESULT, openRuntimeHarness, propose, seedPlanningRuntime, seedRuntime, startRun, type RuntimeHarness, seedRunCompletionGateFor } from "./test-support.ts";
 
 function counts(h: RuntimeHarness): Record<string, number> {
   const out: Record<string, number> = {};
@@ -69,11 +69,11 @@ describe("InvocationPreparationService", () => {
       expect(() => h.preparation.prepare({ runId: s.created.run.id, planNodeId: node.id, role: "worker", purpose: "step", continuedFromInvocationId: null, taskIds: [task.id], patternPosition: { kind: "single" } })).toThrow(/has no single position/);
       // Final-reserve funding: only on the root, only for the two uses, reserved directly from the Run.
       await complete(h, s.invocation);
-      const synthesis = h.preparation.prepare({ runId: s.created.run.id, planNodeId: s.created.root.id, role: "orchestrator", purpose: "final_synthesis", continuedFromInvocationId: s.invocation.id, patternPosition: { kind: "orchestrator" }, funding: { source: "run_final_reserve", use: "final_synthesis" } });
+      const completionGate = seedRunCompletionGateFor(h, s).gate;
+      const synthesis = h.preparation.prepare({ runId: s.created.run.id, planNodeId: s.created.root.id, role: "orchestrator", purpose: "final_synthesis", continuedFromInvocationId: h.stores.invocations.latestAtPosition(s.created.root.id, "orchestrator")!.id, patternPosition: { kind: "orchestrator" }, gateId: completionGate.id, funding: { source: "run_final_reserve", use: "final_synthesis" } });
       expect(synthesis.invocation).toMatchObject({ allocationSource: "run_final_reserve", finalReserveUse: "final_synthesis" });
       expect(synthesis.manifest.content).toMatchObject({ allocationSource: "run_final_reserve", finalReserveUse: "final_synthesis" });
       expect(h.stores.reservations.activeForChild({ type: "invocation", id: synthesis.invocation.id })).toMatchObject({ parent: { type: "run", id: s.created.run.id }, capacitySource: "final_reserve" });
-      const completionGate = h.stores.gates.open({ runId: s.created.run.id, planNodeId: null, kind: "run_completion", acceptanceCriterionIds: [], snapshotId: null, candidateArtifactIds: [] });
       expect(() => h.preparation.prepare({ runId: s.created.run.id, planNodeId: node.id, role: "evaluator", purpose: "evaluate", agentDefinitionRevisionId: s.evaluator.id, continuedFromInvocationId: null, patternPosition: null, gateId: completionGate.id, funding: { source: "run_final_reserve", use: "run_completion" } })).toThrow(/root Plan Node/);
       // A position-less Evaluator names its Gate; a positioned Invocation never does.
       expect(() => h.preparation.prepare({ runId: s.created.run.id, planNodeId: node.id, role: "evaluator", purpose: "evaluate", agentDefinitionRevisionId: s.evaluator.id, continuedFromInvocationId: null, patternPosition: null })).toThrow(/names its Gate/);
@@ -179,7 +179,7 @@ describe("InvocationPreparationService", () => {
       expect(() => h.preparation.prepare({ ...base, planNodeId: pending.id, patternPosition: { kind: "single" } })).toThrow(/has no single position/);
       expect(() => h.preparation.prepare({ ...base, planNodeId: pending.id, patternPosition: { kind: "chain_step", index: 2, count: 2 } })).toThrow(/within bounds/);
       expect(() => h.preparation.prepare({ ...base, planNodeId: pending.id, patternPosition: { kind: "chain_step", index: 0, count: 3 } })).toThrow(/has no chain step 1 of 3 position/);
-      expect(() => h.preparation.prepare({ ...base, planNodeId: pending.id, role: "evaluator", purpose: "evaluate", patternPosition: null, gateId: h.stores.gates.open({ runId: s.created.run.id, planNodeId: null, kind: "run_completion", acceptanceCriterionIds: [], snapshotId: null, candidateArtifactIds: [] }).id, agentDefinitionRevisionId: "agdr_000000000000000000000000" })).toThrow(/not executable by this Run/);
+      expect(() => h.preparation.prepare({ ...base, planNodeId: pending.id, role: "evaluator", purpose: "evaluate", patternPosition: null, gateId: "gate_000000000000000000000000", agentDefinitionRevisionId: "agdr_000000000000000000000000" })).toThrow(/not executable by this Run/);
       const other = seedPlanningRuntime(h);
       expect(() => h.preparation.prepare({ ...base, planNodeId: other.created.root.id })).toThrow(/belongs to Run/);
       expect(() => h.preparation.prepare({ ...base, runId: other.created.run.id, planNodeId: other.created.root.id, role: "orchestrator", purpose: "operator_input", patternPosition: { kind: "orchestrator" }, agentDefinitionRevisionId: s.worker.id })).toThrow(/runs Agent Definition revision/);

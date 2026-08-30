@@ -1,6 +1,7 @@
 import { z } from "zod";
-import type { ArtifactId, AttemptId, InvocationId, PlanNodeId, RequirementId, RunId, RuntimeToolCallId, TaskId } from "./ids.ts";
-import { RUNTIME_TOOLS_BY_ROLE, type InvocationPurpose, type InvocationRole, type RuntimeTool } from "./invocations.ts";
+import { COMPLETION_PREFLIGHT_CODES, COMPLETION_REQUEST_STATUSES, type CompletionRequestStatus } from "./completion.ts";
+import type { ArtifactId, AttemptId, CompletionRequestId, InvocationId, PlanNodeId, RequirementId, RunId, RuntimeToolCallId, TaskId } from "./ids.ts";
+import { ORCHESTRATOR_PURPOSES, RUNTIME_TOOLS_BY_ROLE, type InvocationPurpose, type InvocationRole, type RuntimeTool } from "./invocations.ts";
 import { TASK_STATUSES, type TaskStatus } from "./tasks.ts";
 import { canonicalJson, idSchema, nonEmptyString, sha256Hex, timestampSchema, uniqueIds, type Timestamp } from "./validation.ts";
 
@@ -27,14 +28,24 @@ import { canonicalJson, idSchema, nonEmptyString, sha256Hex, timestampSchema, un
  */
 
 /** The runtime tools the execution runtime implements as executable handlers in this phase. */
-export const RUNTIME_TOOL_CALL_TOOLS = ["propose_tasks", "update_task"] as const;
+export const RUNTIME_TOOL_CALL_TOOLS = ["propose_tasks", "update_task", "request_completion"] as const;
 export type RuntimeToolCallTool = (typeof RUNTIME_TOOL_CALL_TOOLS)[number];
+
+/** The Orchestrator purposes from which completion may be requested: every turn but the read-only `final_synthesis` report. */
+export const COMPLETION_REQUESTING_PURPOSES = ORCHESTRATOR_PURPOSES.filter((purpose) => purpose !== "final_synthesis");
 
 /** Purposes for which a role-permitted tool is withheld from the manifest; a tool absent here is permitted for every purpose of its role. */
 const PURPOSE_EXCLUSIONS: Readonly<Partial<Record<RuntimeTool, readonly InvocationPurpose[]>>> = {
   // A `synthesize` turn produces the node's output; it never proposes or mutates Tasks.
   propose_tasks: ["synthesize"],
-  update_task: ["synthesize"],
+  // A `final_synthesis` turn reports on the verified state and changes nothing (execution-model §10).
+  update_task: ["synthesize", "final_synthesis"],
+  create_tasks: ["final_synthesis"],
+  request_decision: ["final_synthesis"],
+  record_decision: ["final_synthesis"],
+  propose_requirements: ["final_synthesis"],
+  revise_execution_plan: ["final_synthesis"],
+  request_completion: ["final_synthesis"],
 };
 
 /** Manifest permission: the role's runtime tools narrowed by the Invocation's purpose. */
@@ -47,6 +58,8 @@ export const RUNTIME_TOOL_HANDLER_BINDINGS: Readonly<Record<RuntimeToolCallTool,
   propose_tasks: { role: "coordinator", purposes: ["decompose", "replan"] },
   // The Coordinator-permitted subset of `update_task`: cancelling the node's own unstarted or blocked current Tasks.
   update_task: { role: "coordinator", purposes: ["decompose", "replan"] },
+  // Only the root Orchestrator requests completion (execution-model §10), never from its read-only final-synthesis turn.
+  request_completion: { role: "orchestrator", purposes: COMPLETION_REQUESTING_PURPOSES },
 };
 
 /** The effective callable set of one Invocation: manifest permission ∩ runtime handlers ∩ role/purpose validity. */
@@ -130,15 +143,31 @@ export const taskUpdateRequestSchema: z.ZodType<TaskUpdateRequest> = z.strictObj
 });
 
 // ---------------------------------------------------------------------------
+// request_completion
+// ---------------------------------------------------------------------------
+
+/**
+ * The `request_completion` call carries no facts the runtime cannot know:
+ * the runtime pins the Snapshot, the Requirement revision, the criteria, and
+ * the candidate itself when verification begins, so the input is empty and
+ * every call of one logical turn has one canonical digest — a retry or an
+ * approval successor replays the same Completion Request.
+ */
+export type CompletionCallInput = Record<string, never>;
+
+export const completionCallInputSchema: z.ZodType<CompletionCallInput> = z.strictObject({}) as unknown as z.ZodType<CompletionCallInput>;
+
+// ---------------------------------------------------------------------------
 // Calls, results, outcomes
 // ---------------------------------------------------------------------------
 
 /** A runtime-tool call as the adapter submits it: a closed union, never a free tool name with unvalidated input. */
-export type RuntimeToolCallRequest = { tool: "propose_tasks"; input: TaskProposalBatch } | { tool: "update_task"; input: TaskUpdateRequest };
+export type RuntimeToolCallRequest = { tool: "propose_tasks"; input: TaskProposalBatch } | { tool: "update_task"; input: TaskUpdateRequest } | { tool: "request_completion"; input: CompletionCallInput };
 
 export const runtimeToolCallRequestSchema: z.ZodType<RuntimeToolCallRequest> = z.discriminatedUnion("tool", [
   z.strictObject({ tool: z.literal("propose_tasks"), input: taskProposalBatchSchema }),
   z.strictObject({ tool: z.literal("update_task"), input: taskUpdateRequestSchema }),
+  z.strictObject({ tool: z.literal("request_completion"), input: completionCallInputSchema }),
 ]);
 
 /** The bound on a call's canonical bytes; a larger call is rejected, never truncated. */
@@ -152,19 +181,23 @@ export function canonicalRuntimeToolCall(request: RuntimeToolCallRequest): strin
 /** The bounded, typed result of an accepted call: ids and stable facts only, never copied domain history. */
 export type RuntimeToolResult =
   | { tool: "propose_tasks"; taskIds: TaskId[]; taskIdsByKey: Record<string, TaskId> }
-  | { tool: "update_task"; taskId: TaskId; status: TaskStatus };
+  | { tool: "update_task"; taskId: TaskId; status: TaskStatus }
+  /** The Completion Request the call created (or, on replay, found); its status at commit time. */
+  | { tool: "request_completion"; completionRequestId: CompletionRequestId; status: CompletionRequestStatus };
 
 export const runtimeToolResultSchema: z.ZodType<RuntimeToolResult> = z.discriminatedUnion("tool", [
   z
     .strictObject({ tool: z.literal("propose_tasks"), taskIds: uniqueIds(idSchema("task")).min(1), taskIdsByKey: z.record(z.string().regex(TASK_PROPOSAL_KEY_PATTERN), idSchema("task")) })
     .refine((r) => Object.keys(r.taskIdsByKey).length === r.taskIds.length && Object.values(r.taskIdsByKey).every((id) => r.taskIds.includes(id)), { message: "every key maps to one of the created Tasks", path: ["taskIdsByKey"] }),
   z.strictObject({ tool: z.literal("update_task"), taskId: idSchema("task"), status: z.enum(TASK_STATUSES) }),
+  z.strictObject({ tool: z.literal("request_completion"), completionRequestId: idSchema("completionRequest"), status: z.enum(COMPLETION_REQUEST_STATUSES) }),
 ]);
 
 /** The closed reasons a call is rejected; a rejected call writes no row, no domain mutation, and no Event. */
 export const RUNTIME_TOOL_REJECTION_CODES = [
   "invalid_input",
   "caller_not_running",
+  "caller_not_permitted",
   "purpose_not_permitted",
   "proposal_already_accepted",
   "duplicate_key",
@@ -180,6 +213,8 @@ export const RUNTIME_TOOL_REJECTION_CODES = [
   "invalid_bounds",
   "allocation_insufficient",
   "task_not_cancellable",
+  // The completion preflight refusals (execution-model §10 `run_completion`), one code per canonical fact.
+  ...COMPLETION_PREFLIGHT_CODES,
 ] as const;
 export type RuntimeToolRejectionCode = (typeof RUNTIME_TOOL_REJECTION_CODES)[number];
 

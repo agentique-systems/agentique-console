@@ -26,6 +26,7 @@ import {
   type CoordinatorWorkerBounds,
   type Invocation,
   type PatternPlanNode,
+  type RuntimeToolCall,
   type RuntimeToolRejection,
   type RuntimeToolResult,
   type Task,
@@ -43,7 +44,12 @@ export interface RuntimeToolCaller {
   node: PatternPlanNode;
 }
 
-export type HandlerOutcome = { kind: "applied"; result: RuntimeToolResult } | { kind: "rejected"; reasons: RuntimeToolRejection[] };
+/**
+ * What a runtime-tool handler returns inside the call's transaction: the applied result (with an optional continuation the
+ * executor runs once the `runtime_tool_calls` row exists, for a handler whose canonical record names that row), or the
+ * closed rejection reasons.
+ */
+export type HandlerOutcome = { kind: "applied"; result: RuntimeToolResult; then?: (call: RuntimeToolCall) => void } | { kind: "rejected"; reasons: RuntimeToolRejection[] };
 
 class Rejected extends Error {
   constructor(readonly reasons: RuntimeToolRejection[]) {
