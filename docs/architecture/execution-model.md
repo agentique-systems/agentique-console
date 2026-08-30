@@ -42,8 +42,7 @@ router, the Changeset integration service, the `single`, `chain`, `route`,
 `parallel`, `coordinator_worker`, and `evaluator_optimizer` Pattern
 runners, the deterministic join settler, the pure Task projection, the
 runtime-tool call boundary with its Task proposal handlers, the
-deterministic Acceptance Criterion check service, the scheduler, and in a
-later phase the Gates — lives behind `server/src/execution/`, which
+deterministic Acceptance Criterion check service, the scheduler, and the Gates — lives behind `server/src/execution/`, which
 depends only on the core package, the persistence boundary, the
 provider-neutral adapter contract under `server/src/provider/` (§6.5),
 and narrow ports for capabilities implemented in later phases (the
@@ -177,7 +176,13 @@ created ──► running ──► verifying ──► awaiting_signoff ──�
   Orchestrator Agent Definition revision exists, is the `orchestrator`
   definition, and declares the read, write, and shell capabilities, and
   that the initial allocation and the final reserve fit the Run Budget
-  together, the allocation never being the whole Budget. A preparation
+  together, the allocation never being the whole Budget. Creation also
+  persists the Run's immutable **verification policy** (§10): the Gate
+  Evaluator Agent Definition revision — resolved through the same
+  executable-revision resolver as the Orchestrator's, never the
+  `orchestrator` definition, `null` for a Run whose Gates are
+  deterministic only — and `maxNodeGateCycles`, the bound on `node_exit`
+  Gate cycles per Plan Node. A preparation
   failure creates nothing; a database failure after preparation rolls back
   and runs the port's compensation. No Invocation exists yet: the initial
   Orchestrator Invocation is created when the Run starts.
@@ -708,6 +713,12 @@ Examples that compile:
   and causation. An ordinary invalid proposal never throws at the service
   boundary; an unexpected infrastructure failure throws after rollback and
   is never mislabeled as a rejection.
+- **Gate Evaluator availability.** A draft `pattern` node other than
+  `evaluator_optimizer` whose `node_exit` Gate names an evaluated
+  Acceptance Criterion is rejected with `gate_evaluator_unavailable` when
+  the Run's verification policy names no Gate Evaluator; deterministic-only
+  Gates and `evaluator_optimizer` nodes (whose rounds consume their own
+  criteria through their own Evaluator, §5.6) are unaffected.
 - Coordinators, Workers, and Evaluators cannot revise either form. Tasks a
   Coordinator proposes are internal execution records of its node (§5.5)
   and never create, remove, or alter Plan Nodes, Plan Edges, or scope rows.
@@ -744,7 +755,7 @@ exists for the Orchestrator and no Orchestrator Invocation is active:
 | `operator_input` | The operator posted a message (the Run's first Invocation always has this purpose). |
 | `node_result` | A Plan Node reached a terminal state. |
 | `decision_resolution` | A Decision the Orchestrator requested or that affects the Run was resolved or superseded. |
-| `gate_result` | A `run_completion` or `node_exit` Gate produced a result the Orchestrator must act on. |
+| `gate_result` | A `node_exit` Gate of a node without a Coordinator failed and its remediation Task awaits the Orchestrator (§10): every pending remediation Task of the Run is batched into one turn, created only when no other action, in-flight Attempt, or concurrency-limited node remains, funded from the root's ordinary allocation (when it does not fit, the root's `extend` policy applies and the turn is deferred as `awaiting_allocation_extension_phase`); or a `run_completion` Gate produced a result (later phase). |
 | `plan_revision` | The Orchestrator's previous Invocation ended by returning `blocked` on a rejected plan revision or by requesting continuation after a revision, and the compiled outcome is now available. |
 | `publication_result` | A Publication succeeded or failed. |
 | `final_synthesis` | The `operator_signoff` Gate opened, or the Run reached a terminal state, and the Orchestrator produces the final report. |
@@ -758,6 +769,18 @@ changing state, Usage accruing, a lease being granted — never creates an
 Orchestrator Invocation. Each Orchestrator Invocation records
 `continuedFromInvocationId` pointing at the previous one; its initial
 Attempt may be `resumed` across that boundary under §6.6.
+
+A `gate_result` turn ends its remediation Tasks, never the Run: a
+completed turn (its Changeset integrated first) marks every Task it was
+given addressed — a Task the Orchestrator reported completed keeps its
+own Evidence and output Artifacts, the rest complete with the integration
+Snapshot as Evidence — and the gated nodes open their next Gate cycle
+(§10); a turn blocked on an approval continues in a successor that carries
+the same `gate_result` inputs and takes the Tasks over; a turn that fails,
+ends without completing, or reports a Task blocked ends those Tasks, and
+each affected node fails with `gate_remediation_failed` while the root and
+the Run stay `running`. This is the one Orchestrator failure that does not
+fail the Run.
 
 ### 4.7 Plan Node Requirement scope
 
@@ -807,8 +830,12 @@ Common rules for every Pattern:
   Changeset (§9).
 - Every Invocation receives an explicit allocation from its node (§7.6)
   before it starts.
-- Deterministic Acceptance Criteria on the node's `node_exit` Gate are
-  checked by the runtime before the node reaches `succeeded`.
+- A node with `node_exit` Gate criteria reaches `succeeded` only through
+  its Gate (§10): once the Pattern's candidate output is complete and
+  integrated the runtime opens the Gate, runs the deterministic criteria
+  first, invokes one read-only Evaluator for the evaluated ones, and
+  settles the node on a pass; `evaluator_optimizer` consumes its criteria
+  inside its rounds instead (§5.6).
 - A Pattern's failure is the node's failure. The runtime retries at
   Invocation level (§7.2), never by re-running the whole node.
 
@@ -826,7 +853,9 @@ that one of the others describes exactly.
 - Lifecycle: `ready → running` creates and prepares the Invocation;
   when its Attempt ends the runtime settles the node in one transaction —
   a `succeeded` Invocation integrates the node's Changeset (§9.2) and
-  the node becomes `succeeded` with the result's output Artifacts (or
+  the node becomes `succeeded` with the result's output Artifacts — a node
+  with Gate criteria stays `running` and its `node_exit` Gate judges those
+  Artifacts on the integration Snapshot (§10) — (or
   `failed` with `result_failed`, or waits when the result is `blocked` on
   an open Decision); a `failed` Invocation fails the node with
   `invocation_failed`; a `blocked` Invocation leaves the node `running`
@@ -1101,14 +1130,22 @@ Changesets (its Agent Definition may grant `write`) are integrated the
 same way, before the node proceeds past the turn.
 
 **Settlement.** The synthesis result's Artifacts become the node's
-`outputArtifactIds` and the node succeeds; a node with Gate criteria is
-deferred (`awaiting_gate_phase`) instead of marked succeeded (§10). A
+`outputArtifactIds` and the node succeeds; a node with Gate criteria stays
+`running` while its `node_exit` Gate judges the integrated synthesis
+(§10). The Coordinator remediates its own failed Gate: the Gate joins the
+blocker frontier as `gate_failed` (its remediation Task and Gate ids), the
+next consolidated `replan` turn receives that blocker together with the
+Gate's typed `gate_result` facts, canonical progress on that turn marks
+the remediation Task addressed, and the next `synthesize` turn's
+integrated output is the next Gate's candidate (one logical synthesis per
+Gate cycle); a replan without progress fails the node with
+`coordinator_no_progress` as for any other blocker. A
 failing node cancels its unstarted current Tasks and releases their
 reservations; Tasks that ran keep their state. A node removed from the
 membership settles its own turn and Workers and hands off to nobody.
 
 - Invocations: `coordinator` Invocations with purposes `decompose`, `replan` (0..n), `synthesize` (one logical turn each, plus approval successors); N `worker` Invocations with purpose `task` (one per Task that ran)
-- Input: a Coordinator turn receives the node manifest, its `coordinator_turn` input, the `worker_result` Handoffs since the previous turn, and (for `replan`) the new `coordinator_blocker` facts; each Worker receives the manifest restricted to its Task
+- Input: a Coordinator turn receives the node manifest, its `coordinator_turn` input, the `worker_result` Handoffs since the previous turn, and (for `replan`) the new `coordinator_blocker` facts — a `gate_failed` blocker with the Gate's `gate_result` input; each Worker receives the manifest restricted to its Task
 - Output: the `synthesize` turn's result Artifacts
 - Fan-in: performed by the runtime as described above
 - Bounds: `maxTasks` (cumulative, superseded Tasks included), `maxConcurrentWorkers`, and `maxCoordinatorInvocations` (logical turns); the node allocation caps total cost, tokens, and Attempts
@@ -1289,8 +1326,9 @@ therefore settles the node `succeeded` without opening a separate
 `node_exit` Gate row, and no criterion is evaluated twice. The Gate phase
 reuses these Snapshot- and Artifact-bound Evaluations for a node whose
 Gate would otherwise re-check the same criteria on the same Snapshot; it
-never spends another Evaluator Invocation for an identical judgment. No
-general `node_exit` Gate is opened for any other Pattern by this contract.
+never spends another Evaluator Invocation for an identical judgment. An
+`evaluator_optimizer` node never has a `gates` row; every other Pattern's
+`node_exit` Gate is opened and settled by the Gate engine (§10).
 
 **Recovery.** Every step is derived from rows and safe to repeat: a
 prepared position, an integrated Changeset, a recorded check, an existing
@@ -1350,6 +1388,16 @@ above, enforced by the `InvocationPurpose` union in `core/src/invocations.ts`
 and a database check constraint on `invocations.purpose`; each purpose is
 valid for exactly one role.
 
+A **Gate Evaluator Invocation** (role `evaluator`, purpose `evaluate`)
+has no Pattern position and names its Gate in the immutable `gateId`; a
+positioned Invocation names no Gate (database-enforced, as is the role).
+It belongs to the Gate's Plan Node, executes exactly the Run's
+verification-policy Evaluator revision, holds no Task, is read-only, is
+funded from the node's allocation under the node's allocation policy, and
+is the one active Evaluator of its Gate; it can be created only while the
+Gate is open. An `evaluator_optimizer` round's Evaluator is positioned
+(`evaluator_round`) and names no Gate.
+
 ### 6.2 Context Manifest
 
 The manifest lists every input by id. The runtime renders it into the
@@ -1390,7 +1438,13 @@ records, beyond the list above, the effective model policy, the
 allocation source and final-reserve use, the effective capability set and
 Tool Policy (§6.4), the role's runtime tools, the queued logical inputs
 as typed entries (an operator message with its content; a Plan Node
-outcome; a Decision resolution; a Gate result; a plan-revision outcome; a
+outcome; a Decision resolution; a `gate_result`, validated against the
+closed Gate's canonical facts (kind, node, cycle ordinal, verdict, pinned
+Snapshot and candidate, failed criteria, Evaluations, remediation Task)
+and delivered only to the root Orchestrator or to the gated node's
+Coordinator; a `gate_candidate`, validated to name the Invocation's own
+open Gate, the Gate's pinned Snapshot and candidate, and exactly the
+Gate's evaluated criteria; a plan-revision outcome; a
 Publication result; a route selection, validated against the node's
 canonical `route_selection` Evaluation; an `optimizer_candidate`,
 validated to name the Invocation's `evaluator_round`, the node's exact
@@ -1844,7 +1898,18 @@ runtime component with two entry points and no timer, loop, or interval:
   as `start_node`; `verify_node` runs an `evaluator_optimizer` round's
   pending deterministic Acceptance Criteria (§5.6, §10.1) — external like a
   Changeset application, outside every transaction, recorded afterwards;
-  `settle_join` is the deterministic settlement of a `ready` join (§4.2).
+  `settle_join` is the deterministic settlement of a `ready` join (§4.2);
+  `open_node_gate`, `run_gate_checks` (external, outside every
+  transaction), `prepare_gate_evaluator` (subject to the Run and node
+  concurrency limits like any Invocation), and `settle_node_gate` are the
+  `node_exit` Gate phase of a node whose candidate is complete and
+  integrated (§10); `prepare_gate_remediation` and
+  `settle_gate_remediation` are the root Orchestrator's batched
+  remediation of failed non-Coordinator Gates, the former projected only
+  when no other action, in-flight Attempt, or concurrency-limited node
+  remains, so every Gate that fails in a pass joins the same turn. The
+  projection lists nodes whose failed Gate awaits the root under
+  `remediating`; no Gate work is ever deferred to a later phase.
   For an `evaluator_optimizer` node the projection distinguishes, from rows
   alone: producer position ready (`start_node` / `settle_node` preparing
   the next round), producer Attempt active (`execute_invocation` or an
@@ -1852,8 +1917,8 @@ runtime component with two entry points and no timer, loop, or interval:
   Evaluator position ready (`settle_node` preparing it), Evaluator Attempt
   active, round verdict recorded (`settle_node` applying it), retry edge
   active (`ready_node` of the next producer round), final pass and rounds
-  exhausted (terminal), and Gate-phase deferral (which this Pattern never
-  reports, §5.6).
+  exhausted (terminal), and the Gate phase (which this Pattern never
+  enters, §5.6).
 - `advanceRun(runId, { maxActions })` is a bounded pass. It performs the
   projected actions one at a time, re-projecting the current graph before
   every state-changing action; every mutation runs inside a Pattern
@@ -2504,14 +2569,51 @@ Invocation.
 
 Order is fixed: deterministic checks, then Evaluations, then the operator.
 
-- `node_exit`: runs when a Pattern produces its output. Deterministic
-  Acceptance Criteria run on the node's integrated Snapshot. Evaluated
-  criteria create one Evaluator Invocation (purpose `evaluate`) per
-  criterion group. A failing Gate creates Tasks describing the failures and
-  leaves the node in `running` for the Pattern to handle (a
-  `coordinator_worker` node gets a `replan` Coordinator Invocation; other
-  Patterns create one new Invocation with `continuedFromInvocationId` set
-  and the failures in its manifest, and fail the node if that also fails).
+- `node_exit`: executed by the Gate engine
+  (`server/src/execution/gates.ts`, reached by every Pattern runner through
+  the shared node support) once a `pattern` node's candidate output is
+  complete and integrated — a `single` or `chain` node's final result, a
+  `route` node's inline branch result, a `parallel` node's aggregate
+  result or its runtime index Artifact, a `coordinator_worker` node's
+  integrated synthesis. One **cycle** is one `gates` row with a canonical
+  identity: the Run, the Plan Node, the kind, the cycle **ordinal** (1, 2,
+  …; at most one open Gate per node, database-enforced), the exact
+  integration Snapshot pinned at opening, the exact candidate Artifact ids,
+  the exact criterion ids in canonical order, its status, and its
+  timestamps. Deterministic criteria run first, in id order, on a
+  disposable view of the pinned Snapshot through the check service
+  (§10.1), each outcome recorded once as a `runtime` Evaluation naming the
+  Gate; the first failure ends the checks and no Evaluator is invoked. When
+  every deterministic criterion passed, all evaluated criteria are judged
+  by exactly one read-only Gate Evaluator Invocation (§6.1) whose manifest
+  carries one typed `gate_candidate` input (the Gate, its Snapshot, the
+  candidate, exactly the evaluated criteria) and no transcript; its
+  validated result becomes one Evaluation per evaluated criterion on the
+  Gate's Snapshot and candidate (one per Gate and criterion, `gateId` set,
+  no optimizer context, database-enforced); an invalid result is an
+  ordinary Attempt retry; a permanently failed Evaluator closes the Gate
+  `failed` with the `evaluator_failed` fact and fails the node with
+  `gate_evaluator_failed` — no verdict is invented. A Gate whose every
+  verdict is `pass` closes `passed`, and in the same transaction the node
+  succeeds with the candidate, its edge Handoffs are created, and its
+  reservation is released; a Gate with any `fail` or `inconclusive`
+  verdict closes `failed` on those criteria and creates exactly one
+  runtime-owned **remediation Task** (`gateId` on the Task, one per Gate)
+  whose inputs are the candidate and the command-output Artifacts, leaving
+  the node `running`; when the closing cycle is the Run's
+  `maxNodeGateCycles`, the node fails with `gate_cycles_exhausted` instead
+  and no Task is created. Closed Gates never change; a later cycle is a new
+  row. Remediation is owned by the node's Coordinator (§5.5) or, for every
+  other Pattern, by the root Orchestrator's batched `gate_result` turn
+  (§4.6). Once the remediation Task is completed, the next cycle opens a
+  new Gate with the next ordinal on the current integration Snapshot and
+  the persisted candidate — the Task's output Artifacts when the
+  remediation replaced the output, the previous Gate's candidate when it
+  did not, a Coordinator's fresh synthesis — so an ordinary Gate never
+  re-judges a stale Snapshot; a remediation Task that failed or was
+  cancelled fails the node with `gate_remediation_failed`. There are no
+  waivers and no implicit passes: a node with Gate criteria reaches
+  `succeeded` only through a `passed` Gate.
 - `run_completion`: runs when the Orchestrator calls `request_completion`.
   Checks every `open` Requirement's Acceptance Criteria on the integration
   Snapshot and records the resulting statuses; requires every leaf
@@ -2539,11 +2641,11 @@ explicit `optimizer_criterion` / `optimizer_verdict` context, belong to no
 `gates` row, and never claim that a `node_exit` Gate passed. Under the
 documented rule a passing round settles the node without a separate Gate
 because the optimizer contract has consumed every one of its criteria on
-the exact judged Snapshot and Artifact set; the Gate phase reuses those
-Evaluations instead of judging the same criterion twice. No `node_exit`
-Gate is executed for `single`, `chain`, `route`, `parallel`, or
-`coordinator_worker` in this phase (they report `awaiting_gate_phase`),
-and `run_completion` and `operator_signoff` are untouched.
+the exact judged Snapshot and Artifact set; no criterion of such a node
+is ever judged twice and the Gate engine never touches it. `single`,
+`chain`, `route`, `parallel`, and `coordinator_worker` execute the
+general `node_exit` Gate above; `run_completion` and `operator_signoff`
+are later phases.
 
 ### 10.1 Deterministic Acceptance Criterion execution
 
@@ -2578,9 +2680,11 @@ so a later pass retries. Raw command output lives only in its `text/plain`
 Artifact (bounded at `maxOutputBytes`; a stored prefix is recorded as
 `outputTruncated: true` on the command Evidence, never silently); Events,
 outcomes, projections, diagnostics, and errors carry ids, exit status,
-digest, byte size, and the truncation flag. Phase 2D-B2 drives the
-service for `evaluator_optimizer` rounds only; the Gate phase reuses it
-unchanged.
+digest, byte size, and the truncation flag. The service is driven under
+two typed scopes, an `evaluator_optimizer` round (`optimizer_round`) and a
+`node_exit` Gate (`gate`); the scope fixes the Evaluation's context or
+Gate, the isolation key, and the output Artifact's title, and nothing else
+differs.
 
 ## 11. Agent Definitions
 
@@ -2683,6 +2787,12 @@ mechanism, if ever added, is a new feature with its own design.
 | `evaluator_optimizer` deterministic criterion fails | The round ends: no later command runs, no Evaluator is invoked, the runtime records the round's `fail` verdict with the failing Evaluation as Evidence; the next producer round follows (with the feedback), or the node fails with `optimizer_rounds_exhausted` at `maxRounds` (§5.6). |
 | `evaluator_optimizer` Evaluator returns `fail` or `inconclusive` | As above; a non-final evaluate-only node ends `succeeded` as a control node so its `retry(round)` edge activates, and its candidate is not accepted. |
 | `evaluator_optimizer` final round without a pass | Node `failed` with `optimizer_rounds_exhausted`; the last verdict and its Evidence remain the canonical diagnostic references; successors are `skipped`. |
+| `node_exit` Gate deterministic criterion fails | The checks stop at that criterion, no Evaluator is invoked, the Gate closes `failed` on it, and its one remediation Task is created (or the node fails with `gate_cycles_exhausted` at the Run's `maxNodeGateCycles`); the node stays `running` (§10). |
+| `node_exit` Gate Evaluator returns `fail` or `inconclusive` | Every verdict is recorded; the Gate closes `failed` on exactly those criteria with its remediation Task, as above. |
+| `node_exit` Gate Evaluator fails permanently | The Gate closes `failed` with the `evaluator_failed` fact (no verdict invented, no Task) and the node fails with `gate_evaluator_failed`. |
+| Root `gate_result` turn fails, ends without completing, or reports a remediation Task blocked | The affected Tasks end (`failed` under the turn, `cancelled` otherwise) and each affected node fails with `gate_remediation_failed`; the root and the Run stay `running` (§4.6). |
+| Coordinator `replan` makes no progress on its node's failed Gate | Node `failed` with `coordinator_no_progress`; the remediation Task stays unaddressed and no further Gate opens (§5.5). |
+| Crash during a Gate cycle (between opening, a check, the Evaluator, settlement, the remediation turn, or a reopened cycle) | Every step is one transaction or one external step recorded once; the next pass finds the open Gate, the recorded checks, the existing Evaluator or Task, or the closed Gate, and repeats nothing (§10). |
 | Deterministic check cannot run (timeout, abort, lost view, lost output, failed start) | Infrastructure failure: nothing recorded, no Evaluation fabricated, the pass stops typed (`verification_failed`); the next pass reruns exactly the unrecorded checks (§10.1). |
 | Crash between a check's command and its record | The command reruns in a fresh view (the stale one is discarded); the output Artifact and its Evaluation are recorded once, in one transaction. |
 | Runtime-tool call fails or crashes | A failure inside the call's transaction commits nothing and returns `failed` with a bounded message and one `runtime_tool_call_failed` diagnostic; a crash after the commit leaves the row, and the retry or approval successor replays it by digest instead of repeating the effect (§6.4). |
@@ -2750,7 +2860,12 @@ by a test.
     criterion is failing. Every optimizer round verdict is one canonical
     `optimizer_verdict` Evaluation naming its node, round, judged Snapshot,
     and judged Artifacts (one per node and round, database-enforced), and
-    a `retry(round)` edge activates from that fact alone.
+    a `retry(round)` edge activates from that fact alone. Every
+    `node_exit` Gate cycle is one `gates` row with its ordinal, pinned
+    Snapshot, candidate, and criteria; it has at most one active Evaluator
+    Invocation, one Evaluation per criterion, and, once failed, exactly one
+    remediation Task; closed Gates never change; and a node with Gate
+    criteria succeeds only through a `passed` Gate (all database-enforced).
 12. **Completed coding Runs must finish on a verified integration state.** A
     Run with `kind: code` cannot leave `verifying` unless its deterministic
     `run_completion` criteria passed on the integration Snapshot that the

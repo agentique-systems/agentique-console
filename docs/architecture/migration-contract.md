@@ -459,11 +459,29 @@ is one or more commits; each commit keeps `npm run typecheck` and
    manifest inputs, `optimizer_rounds_exhausted`), `retry(round)` edge
    activation from the `optimizer_verdict` readiness fact, the
    `verify_node` scheduler action, and restart safety across every round
-   boundary. Remaining typed deferrals: `node_exit` and `run_completion`
-   Gates (`awaiting_gate_phase` for every Pattern but `evaluator_optimizer`,
-   whose rounds consume their own Gate criteria), allocation extension
-   (`awaiting_allocation_extension_phase`), and an executable
-   `request_decision` runtime tool. Later
+   boundary. Phase 2E-A (done): the immutable Run verification policy
+   (Gate Evaluator revision resolved through the executable-revision
+   resolver, never the Orchestrator; `maxNodeGateCycles`), plan validation
+   refusing evaluated Gate criteria without an Evaluator
+   (`gate_evaluator_unavailable`), the general `node_exit` Gate engine for
+   `single`, `chain`, `route`, `parallel`, and `coordinator_worker` (one
+   `gates` row per cycle with ordinal, pinned Snapshot, candidate, and
+   criteria; deterministic-first fail-fast checks through the shared check
+   service; one read-only Gate Evaluator Invocation per Gate owned through
+   the immutable `gateId` with a typed `gate_candidate` input; one
+   Evaluation per Gate and criterion; settlement with Handoffs and
+   reservation release in one transaction; `gate_evaluator_failed`,
+   `gate_cycles_exhausted`, `gate_remediation_failed`), remediation by the
+   root Orchestrator's batched `gate_result` turn or by the Coordinator's
+   frontier (`gate_failed` blocker with `gate_result` facts), the
+   `open_node_gate`, `run_gate_checks`, `prepare_gate_evaluator`,
+   `settle_node_gate`, `prepare_gate_remediation`, and
+   `settle_gate_remediation` scheduler actions, and restart safety across
+   every Gate window; `awaiting_gate_phase` no longer exists. Remaining
+   typed deferrals: the `run_completion` and `operator_signoff` Gates,
+   allocation extension (`awaiting_allocation_extension_phase`, also for
+   the root's unfunded `gate_result` turn), and executable
+   `request_decision` and `request_completion` runtime tools. Later
    subphases: Runs, Execution
    Plan source validation and compiler,
    Plan Nodes of both kinds (`pattern`, `join`), Plan Edges, Plan Node
@@ -699,11 +717,29 @@ Merge to `main` happens after step 7 as one merge commit. Rollback is
   coalesced replanning with only new blocker facts delivered,
   `coordinator_no_progress`, `coordinator_invocations_exhausted`
   counting approval successors as the same turn, integration conflicts
-  as blockers, Gate-phase deferral, and twelve restart windows (crash
+  as blockers, the `node_exit` Gate over the integrated synthesis with
+  Coordinator-owned remediation, and twelve restart windows (crash
   before and after a tool-call commit, during Worker execution, before
   and after integration, before and after a Handoff, across approval
   successors, during synthesis, and after worktree-release failure)
   with nothing repeated.
+- Gate tests: the verification policy and Gate ownership at the schema
+  (immutable policy, Evaluator resolution and Orchestrator refusal,
+  `gate_evaluator_unavailable`, Gate identity and append-only closure,
+  Evaluator ownership and revision, one Evaluation per Gate and
+  criterion, one remediation Task per failed Gate, the cycle bound); the
+  Gate lifecycle (pinned Snapshot and candidate, deterministic-first
+  fail-fast checks, infrastructure failures recording nothing, one
+  Evaluator per Gate with a typed `gate_candidate` input, Evaluations on
+  the Gate's rows, one-transaction settlement, invalid results as ordinary
+  retries, a failed Evaluator without an invented verdict, raw output only
+  in the Artifact Store, idempotent and revision-safe operations, typed
+  actions, node funding); the Gate phase of every non-optimizer Pattern
+  and the optimizer's absence of a Gate; root and Coordinator remediation
+  (batching, Task addressing and candidate invalidation, failed and
+  blocked turns, approval successors, exhaustion, unfunded root); and
+  twenty file-backed crash windows of a root-remediated and a
+  Coordinator-remediated cycle with nothing repeated.
 - Handoff tests: a Handoff is created at most once per key across
   repeated passes, retries, and restarts; a second Handoff with the same
   key and a different route is refused; `sequence` edges, `branch(label)`

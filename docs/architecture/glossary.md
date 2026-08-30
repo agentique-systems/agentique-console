@@ -37,7 +37,7 @@ Related documents:
   `server/src/persistence/`, and the deterministic runtime (plan compiler,
   plan-revision service, Run creation, the scheduler, the six Pattern
   runners, join settlement, the deterministic Acceptance Criterion check
-  service, and in a later phase the Gates) behind the permanent execution boundary
+  service, and the Gates) behind the permanent execution boundary
   `server/src/execution/`, which depends only on the core package, the
   persistence boundary, and narrow ports for capabilities implemented in
   later phases. None of them imports the legacy `shared/` package or the
@@ -86,8 +86,12 @@ A Run has a Target and a Run-owned Integration Workspace; it never writes
 to the Target itself — that is a Publication. A Run also carries its
 **final reserve**: the part of its Budget, chosen at Run creation and
 persisted on the Run, that ordinary Plan Node allocations never consume
-(see Budget). Creating a Run establishes its complete initial state
-atomically (execution-model §3, §4.6).
+(see Budget), and its immutable **verification policy**: the Gate
+Evaluator Agent Definition revision every `node_exit` Gate's evaluated
+criteria are judged by (`null` for a Run whose Gates are deterministic
+only; never the `orchestrator` definition) and `maxNodeGateCycles`, the
+bound on Gate cycles per Plan Node. Creating a Run establishes its
+complete initial state atomically (execution-model §3, §4.6).
 
 - Id prefix: `run_`
 - Owned by: the runtime
@@ -284,8 +288,8 @@ derives all of them from the position, never from a title or an ordinal
 string. The position is persisted on the Invocation with a canonical
 **position key** (`chain_step:1`, `worker_task:task_…`,
 `producer_round:2`), and at most one non-terminal Invocation exists per
-node and position. Only a Gate Evaluator Invocation (a later phase) has
-no position.
+node and position. Only a Gate Evaluator Invocation has no position; it
+names its Gate (`gateId`) instead, and a positioned Invocation never does.
 
 - Stored on the Invocation and in its Context Manifest; no separate table.
 - Related: Invocation, Plan Node, Pattern, Context Manifest
@@ -638,13 +642,26 @@ Run completes, or before a Run is accepted by the operator. A Gate lists
 the Acceptance Criteria it requires and the order they are checked:
 deterministic criteria first, then evaluated criteria, then, for the
 `operator_signoff` Gate, the operator's explicit acceptance. A Gate that
-fails does not end the Run; it produces Tasks.
+fails does not end the Run; it produces a Task. A `node_exit` Gate is one
+**cycle** of a Plan Node's verification with a canonical identity — the
+Run, the Plan Node, the cycle ordinal, the integration Snapshot pinned
+when it opened, the exact candidate Artifact ids, the exact criterion ids
+in id order, its status, and, once failed, its failure (the failed
+criteria, or the Evaluator Invocation that failed permanently) — with at
+most one open Gate per node and at most one Gate Evaluator Invocation
+active per Gate; a closed Gate never changes and a later cycle is a new
+Gate. A failed `node_exit` Gate has exactly one runtime-owned remediation
+Task (the Task's `gateId`), addressed by the node's Coordinator or by the
+root Orchestrator's batched `gate_result` turn; cycles are bounded by the
+Run's verification policy (`maxNodeGateCycles`), beyond which the node
+fails with `gate_cycles_exhausted`. An `evaluator_optimizer` node never
+has a Gate: its rounds consume its criteria (execution-model §5.6, §10).
 
 - Id prefix: `gate_`
 - Kinds: `node_exit`, `run_completion`, `operator_signoff`
 - Owned by: the runtime
 - Store: `gates`
-- Related: Acceptance Criterion, Evaluation, Plan Node, Run
+- Related: Acceptance Criterion, Evaluation, Plan Node, Run, Task, Invocation
 
 ### Evidence
 
