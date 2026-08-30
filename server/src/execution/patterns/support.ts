@@ -433,6 +433,8 @@ export class PatternNodeSupport {
         return { kind: "waiting", reason, cleared: refusal === null, wakeAt: refusal?.retryAfter ?? null };
       }
       case "budget": {
+        // A node whose open Gate awaits its Evaluator waits for the Evaluator's funding, not for a further position's.
+        if (this.gates.awaitingEvaluator(node)) return { kind: "waiting", reason, cleared: this.gates.evaluatorFits(node), wakeAt: null };
         const fits = context.nextPosition === null || this.allocationFor(node, context.nextPosition).fits;
         return { kind: "waiting", reason, cleared: fits, wakeAt: null };
       }

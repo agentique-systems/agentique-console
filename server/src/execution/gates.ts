@@ -59,6 +59,7 @@ import {
   PLAN_NODE_MACHINE,
   type AcceptanceCriterion,
   type AcceptanceCriterionId,
+  type AgentDefinitionRevisionId,
   type ArtifactId,
   type Decision,
   type Evaluation,
@@ -301,14 +302,31 @@ export class NodeExitGates {
     });
   }
 
+  /** The Run's Gate Evaluator revision; plan validation admits no evaluated Gate criterion on a Run without one. */
+  private evaluatorRevisionOf(node: PatternPlanNode): AgentDefinitionRevisionId {
+    const run = this.stores.runs.get(node.runId);
+    const revisionId = run.verificationPolicy.evaluatorAgentDefinitionRevisionId;
+    if (revisionId === null) throw new InvariantViolationError(`Run ${run.id} names no Gate Evaluator; plan validation admits no evaluated Gate criterion without one`, { runId: run.id });
+    return revisionId;
+  }
+
+  /** Whether the node's allocation admits one Gate Evaluator Invocation now (what a `budget` wait of the Gate phase is cleared by). */
+  evaluatorFits(node: PatternPlanNode): boolean {
+    const allocation = this.stores.agents.getRevision(this.evaluatorRevisionOf(node)).defaultLimits.allocation;
+    return allocationFits(allocation, this.stores.reservations.capacity({ type: "plan_node", id: node.id }).available);
+  }
+
+  /** Whether the node's open Gate awaits its Evaluator (none exists yet): the phase whose funding a `budget` wait concerns. */
+  awaitingEvaluator(node: PatternPlanNode): boolean {
+    const gate = this.stores.gates.openGateOf(node.id);
+    return gate !== null && this.evaluatorOf(gate) === null && this.criteriaOf(node).evaluated.length > 0;
+  }
+
   /** The Evaluator (or its approval successor) of a Gate: one typed `gate_candidate` input, the candidate readable by id, no Handoff. */
   private prepareEvaluatorFor(node: PatternPlanNode, gate: Gate, predecessor: Invocation | null, extraInputs: ManifestInput[], options: WriteOptions): PatternRunnerOutcome {
     const { preparation } = this.support.deps;
-    const run = this.stores.runs.get(node.runId);
-    const revisionId = run.verificationPolicy.evaluatorAgentDefinitionRevisionId;
-    if (revisionId === null) throw new InvariantViolationError(`Run ${run.id} names no Gate Evaluator; plan validation admits no evaluated Gate criterion without one`, { runId: run.id, gateId: gate.id });
-    const allocation = this.stores.agents.getRevision(revisionId).defaultLimits.allocation;
-    if (!allocationFits(allocation, this.stores.reservations.capacity({ type: "plan_node", id: node.id }).available)) {
+    const revisionId = this.evaluatorRevisionOf(node);
+    if (!this.evaluatorFits(node)) {
       switch (node.onAllocationExhausted) {
         case "fail":
           return this.support.failNow(node, "allocation_exhausted", options);
