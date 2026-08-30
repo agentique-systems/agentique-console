@@ -32,6 +32,7 @@ import {
   canonicalJson,
   InvariantViolationError,
   NotFoundError,
+  ROOT_SOURCE_PATH,
   runtimeToolsFor,
   ValidationError,
   type AcceptanceCriterion,
@@ -92,7 +93,7 @@ export class ContextManifestAssembler {
     if (invocation.agentDefinitionRevisionId !== revision.id) throw new InvariantViolationError(`Invocation ${invocation.id} runs revision ${invocation.agentDefinitionRevisionId}, not ${revision.id}`);
 
     const tasks = this.tasks(run, invocation);
-    const { requirementRevisionId, requirements } = this.requirements(run, node, invocation);
+    const { requirementRevisionId, requirements } = this.requirements(run, node, invocation, request.inputs);
     const previousManifestAt = this.previousManifestAt(invocation);
     const decisions = this.decisions(run, node, invocation, requirements, tasks.map((t) => t.taskId), request.operationInput, request.inputs, previousManifestAt);
     const handoffs = this.handoffs(run, node, invocation, request.handoffIds);
@@ -101,8 +102,17 @@ export class ContextManifestAssembler {
     const approvalArtifactIds = inputs.flatMap((i) => (i.kind === "side_effect_approval_resolution" ? [i.callArtifactId] : []));
     // An optimizer round's candidate and the Evidence Artifacts of its feedback are readable by id, like every Handoff Artifact.
     const optimizerArtifactIds = inputs.flatMap((i) => (i.kind === "optimizer_candidate" ? i.artifactIds : i.kind === "optimizer_feedback" ? i.evidence.flatMap((e) => (e.kind === "artifact" ? [e.artifactId] : e.kind === "command" ? [e.outputArtifactId] : [])) : []));
-    // A Gate's candidate is readable by its Evaluator; a Gate result's candidate and its remediation Task's inputs (the judged and command-output Artifacts) by whoever remediates it.
-    const gateArtifactIds = inputs.flatMap((i) => (i.kind === "gate_candidate" ? i.artifactIds : i.kind === "gate_result" ? [...i.artifactIds, ...(i.remediationTaskId === null ? [] : this.stores.tasks.get(i.remediationTaskId).inputArtifactIds)] : []));
+    // A Gate's candidate is readable by its Evaluator; a Gate result's candidate and its remediation Task's inputs (the judged and command-output
+    // Artifacts) by whoever remediates it; the completion candidate and the Evaluations' Evidence Artifacts by the final synthesis.
+    const gateArtifactIds = inputs.flatMap((i) =>
+      i.kind === "gate_candidate"
+        ? i.artifactIds
+        : i.kind === "gate_result"
+          ? [...i.artifactIds, ...(i.remediationTaskId === null ? [] : this.stores.tasks.get(i.remediationTaskId).inputArtifactIds)]
+          : i.kind === "final_synthesis"
+            ? [...i.artifactIds, ...i.evaluations.flatMap((e) => e.evidence.flatMap((v) => (v.kind === "artifact" ? [v.artifactId] : v.kind === "command" ? [v.outputArtifactId] : [])))]
+            : [],
+    );
     const artifacts = this.artifacts(run, unique([...request.operationInput.artifactIds, ...handoffs.flatMap((h) => h.artifactIds), ...request.artifactIds, ...approvalArtifactIds, ...optimizerArtifactIds, ...gateArtifactIds, ...this.taskInputArtifacts(tasks.map((t) => t.taskId))]));
     for (const id of request.operationInput.taskIds) {
       if (!invocation.taskIds.includes(id)) throw new InvariantViolationError(`operation input names Task ${id}, which Invocation ${invocation.id} does not own`);
@@ -164,13 +174,20 @@ export class ContextManifestAssembler {
 
   /**
    * A scoped node: exactly its pinned leaf Requirements in scope order — for a Worker executing one Coordinator Task,
-   * exactly that Task's Requirements (a subset of the scope); the root node: the current revision's tree in tree order.
+   * exactly that Task's Requirements (a subset of the scope); the root node: the current revision's tree in tree order —
+   * or, for a run_completion Gate Evaluator and a final-synthesis turn, the revision the Gate pinned.
    */
-  private requirements(run: Run, node: PatternPlanNode, invocation: Invocation): { requirementRevisionId: RequirementRevisionId | null; requirements: ManifestRequirement[] } {
+  private requirements(run: Run, node: PatternPlanNode, invocation: Invocation, inputs: ManifestInput[]): { requirementRevisionId: RequirementRevisionId | null; requirements: ManifestRequirement[] } {
     let scope = this.stores.plans.listScope(node.id);
     if (invocation.patternPosition?.kind === "worker_task") {
       const owned = new Set(this.stores.tasks.get(invocation.patternPosition.taskId).requirementIds);
       scope = scope.filter((row) => owned.has(row.requirementId));
+    }
+    const pinned = inputs.flatMap((i) => (i.kind === "final_synthesis" ? [i.requirementRevisionId] : i.kind === "gate_candidate" && i.requirementRevisionId !== null ? [i.requirementRevisionId] : []));
+    if (pinned.length > 0 && node.sourcePath === ROOT_SOURCE_PATH) {
+      const revision = this.stores.requirements.getRevision(pinned[0]!);
+      if (revision.conversationId !== run.conversationId) throw new InvariantViolationError(`RequirementRevision ${revision.id} belongs to another Conversation`);
+      return { requirementRevisionId: revision.id, requirements: [...revision.tree].sort((a, b) => a.position - b.position).map((entry) => this.requirement(run, entry.id, entry.statement, entry.acceptanceCriterionIds, false)) };
     }
     if (node.scope !== null || scope.length > 0) {
       const revisionId = node.scope?.requirementRevisionId ?? scope[0]!.requirementRevisionId;
@@ -400,6 +417,42 @@ export class ContextManifestAssembler {
           for (const id of input.acceptanceCriterionIds) {
             if (this.stores.requirements.getAcceptanceCriterion(id).conversationId !== run.conversationId) throw new InvariantViolationError(`AcceptanceCriterion ${id} belongs to another Conversation`);
           }
+          // A run_completion candidate restates the Gate's Completion Request and pinned revision and names Tasks of the Run; a node_exit one names neither.
+          if (gate.kind === "run_completion") {
+            if (input.completionRequestId !== gate.completionRequestId || input.requirementRevisionId !== gate.requirementRevisionId) throw new InvariantViolationError(`gate_candidate input disagrees with the Completion Request or Requirement revision of Gate ${gate.id}`, { gateId: gate.id });
+            for (const entry of input.tasks) {
+              if (this.stores.tasks.get(entry.taskId).runId !== run.id) throw new InvariantViolationError(`Task ${entry.taskId} belongs to another Run`);
+            }
+          }
+          break;
+        }
+        case "final_synthesis": {
+          // The runtime supplies the completion facts: this turn's own open run_completion Gate of this Run, the Gate's request, Snapshot, and
+          // revision, Requirements of the Conversation, the Gate's own Evaluations, Tasks and Artifacts of the Run; nothing narrative.
+          if (invocation.role !== "orchestrator" || invocation.purpose !== "final_synthesis" || invocation.gateId !== input.gateId) throw new InvariantViolationError(`Invocation ${invocation.id} is not the final synthesis of Gate ${input.gateId}`);
+          const gate = this.stores.gates.get(input.gateId);
+          if (gate.runId !== run.id) throw new InvariantViolationError(`Gate ${input.gateId} belongs to another Run`);
+          if (gate.kind !== "run_completion" || gate.status !== "open") throw new ValidationError(`Gate ${input.gateId} is not an open run_completion Gate`, { gateId: gate.id });
+          if (gate.completionRequestId !== input.completionRequestId || gate.snapshotId !== input.snapshotId || gate.requirementRevisionId !== input.requirementRevisionId) throw new InvariantViolationError(`final_synthesis input disagrees with the facts of Gate ${gate.id}`, { gateId: gate.id });
+          const pinnedCandidate = [...gate.candidateArtifactIds].sort();
+          const given = [...input.artifactIds].sort();
+          if (pinnedCandidate.length !== given.length || pinnedCandidate.some((id, i) => id !== given[i])) throw new InvariantViolationError(`Gate ${gate.id} judged candidate ${pinnedCandidate.join(", ")}, not ${given.join(", ")}`);
+          for (const fact of input.requirements) {
+            if (this.stores.requirements.get(fact.requirementId).conversationId !== run.conversationId) throw new InvariantViolationError(`Requirement ${fact.requirementId} belongs to another Conversation`);
+            if (fact.waiverDecisionId !== null) {
+              const waiver = this.stores.decisions.get(fact.waiverDecisionId);
+              if (waiver.conversationId !== run.conversationId || waiver.kind !== "requirement_waiver") throw new InvariantViolationError(`Decision ${fact.waiverDecisionId} is not a waiver of this Conversation`);
+            }
+          }
+          for (const fact of input.evaluations) {
+            const evaluation = this.stores.evaluations.get(fact.evaluationId);
+            if (evaluation.runId !== run.id || evaluation.gateId !== gate.id) throw new InvariantViolationError(`Evaluation ${fact.evaluationId} does not belong to Gate ${gate.id}`);
+            if (evaluation.verdict !== fact.verdict || canonicalJson(evaluation.evidence) !== canonicalJson(fact.evidence)) throw new InvariantViolationError(`final_synthesis input disagrees with Evaluation ${fact.evaluationId}`);
+          }
+          for (const entry of input.tasks) {
+            if (this.stores.tasks.get(entry.taskId).runId !== run.id) throw new InvariantViolationError(`Task ${entry.taskId} belongs to another Run`);
+          }
+          for (const id of input.artifactIds) this.artifact(run, id);
           break;
         }
         case "publication_result": {

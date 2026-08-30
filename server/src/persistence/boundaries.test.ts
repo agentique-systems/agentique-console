@@ -167,7 +167,7 @@ describe("import boundaries", () => {
   });
 
   it("the scheduler, join settler, and Pattern runners import nothing legacy, poll nothing, and implement only the supported Patterns", () => {
-    const files = [...listFiles("server/src/execution/patterns", isCode), path.join(repoRoot, "server/src/execution/scheduler.ts"), path.join(repoRoot, "server/src/execution/join.ts"), path.join(repoRoot, "server/src/execution/readiness.ts"), path.join(repoRoot, "server/src/execution/readiness-facts.ts"), path.join(repoRoot, "server/src/execution/handoff-routing.ts"), path.join(repoRoot, "server/src/execution/integration-service.ts"), path.join(repoRoot, "server/src/execution/task-projection.ts"), path.join(repoRoot, "server/src/execution/task-proposals.ts"), path.join(repoRoot, "server/src/execution/runtime-tools.ts"), path.join(repoRoot, "server/src/execution/acceptance-checks.ts"), path.join(repoRoot, "server/src/execution/gates.ts"), path.join(repoRoot, "server/src/execution/invocation-facts.ts"), path.join(repoRoot, "server/src/execution/patterns/root.ts")];
+    const files = [...listFiles("server/src/execution/patterns", isCode), path.join(repoRoot, "server/src/execution/scheduler.ts"), path.join(repoRoot, "server/src/execution/join.ts"), path.join(repoRoot, "server/src/execution/readiness.ts"), path.join(repoRoot, "server/src/execution/readiness-facts.ts"), path.join(repoRoot, "server/src/execution/handoff-routing.ts"), path.join(repoRoot, "server/src/execution/integration-service.ts"), path.join(repoRoot, "server/src/execution/task-projection.ts"), path.join(repoRoot, "server/src/execution/task-proposals.ts"), path.join(repoRoot, "server/src/execution/runtime-tools.ts"), path.join(repoRoot, "server/src/execution/acceptance-checks.ts"), path.join(repoRoot, "server/src/execution/gates.ts"), path.join(repoRoot, "server/src/execution/invocation-facts.ts"), path.join(repoRoot, "server/src/execution/patterns/root.ts"), path.join(repoRoot, "server/src/execution/completion.ts"), path.join(repoRoot, "server/src/execution/completion-requests.ts"), path.join(repoRoot, "server/src/execution/requirement-derivation.ts")];
     expect(files.length).toBeGreaterThan(5);
     for (const file of files) {
       for (const specifier of importsOf(file)) {
@@ -215,6 +215,14 @@ describe("import boundaries", () => {
     // open item, an Event, a source path, or a timestamp; and it never reads Artifact content (raw command output stays in the Artifact Store).
     const gatesEngine = fs.readFileSync(path.join(repoRoot, "server/src/execution/gates.ts"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
     expect(gatesEngine).not.toMatch(/journal\.read\(|\.summary|TRANSCRIPT_MEDIA_TYPE|artifacts\.read\(|result\.openItems|result\.blocker|sourcePath|openedAt|closedAt|createdAt|setTimeout|setInterval|TextDecoder/);
+    // The completion engine decides every phase from Completion Request, Gate, Evaluation, Requirement, Invocation, and Task rows: never from
+    // a transcript, a result summary, an open item, an Event, or a timestamp; it reads no Artifact content and starts no timer.
+    const completion = fs.readFileSync(path.join(repoRoot, "server/src/execution/completion.ts"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    expect(completion).not.toMatch(/journal\.read\(|\.summary|TRANSCRIPT_MEDIA_TYPE|artifacts\.read\(|result\.openItems|result\.blocker|openedAt|closedAt|createdAt(?!:)|setTimeout|setInterval|TextDecoder/);
+    // The requirement derivation is pure over its explicit input: no store, clock, id minting, or persistence reaches it.
+    const derivation = fs.readFileSync(path.join(repoRoot, "server/src/execution/requirement-derivation.ts"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    expect(importsOf(path.join(repoRoot, "server/src/execution/requirement-derivation.ts"))).toEqual(["@agentique-console/core"]);
+    expect(derivation).not.toMatch(/stores|ctx|clock\(|newId\(|\.ids\(|Date\.|journal|transcript/);
     // The optimizer runner never opens a Gate row: its rounds consume the node's Gate criteria (execution-model §5.6).
     expect(fs.readFileSync(path.join(repoRoot, "server/src/execution/patterns/evaluator-optimizer.ts"), "utf8")).not.toMatch(/gates\.(open|close)\(|support\.gates\./);
     // A join never touches the executor, the governor, or a provider: no Invocation, Attempt, lease, or Usage.

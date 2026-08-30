@@ -39,7 +39,7 @@ import { createPatternRunners, type PatternRunners } from "./patterns/index.ts";
 import { RunScheduler, type SchedulerConfig } from "./scheduler.ts";
 import type { PreparedRunWorkspace, RunWorkspacePreparationPort, RunWorkspacePreparationRequest } from "./ports/workspace-preparation.ts";
 import { RecoveryService } from "./recovery-service.ts";
-import { RunCreationService, type CreatedRun, type RunCreationPolicy, type RunCreationRequest } from "./run-creation-service.ts";
+import { RunCreationService, type CreatedRun, type RunCreationPolicy, type RunCreationRequest, type RunVerificationRequest } from "./run-creation-service.ts";
 import { RunStartService } from "./run-start-service.ts";
 import { WorkspaceCleanup, type ExecutionDiagnostic } from "./workspace-cleanup.ts";
 
@@ -474,7 +474,10 @@ export function seedCompletionCriterion(h: Pick<Harness, "ctx" | "stores">, conv
  * revision with the deterministic completion criterion a coding Run declares, a created Run whose verification policy
  * names the Evaluator and that criterion, and the operator's opening message.
  */
-export function seedRuntime(h: RuntimeHarness, overrides: Partial<RunCreationRequest> = {}): RuntimeSeed {
+/** Run creation overrides for a seed: the verification policy is merged over the seed's defaults. */
+export type RuntimeSeedOverrides = Omit<Partial<RunCreationRequest>, "verificationPolicy"> & { verificationPolicy?: Partial<RunVerificationRequest> };
+
+export function seedRuntime(h: RuntimeHarness, overrides: RuntimeSeedOverrides = {}): RuntimeSeed {
   const workspace = h.stores.workspaces.create({ name: "demo", rootPath: `/tmp/demo-${h.ctx.ids("workspace")}`, kind: "git" });
   const conversation = h.stores.conversations.create({ workspaceId: workspace.id, title: "demo" });
   const orchestrator = seedAgentRevision(h, "orchestrator");
@@ -501,7 +504,7 @@ export function startRun(h: RuntimeHarness, seed: RuntimeSeed) {
 }
 
 /** A seeded Run whose first Orchestrator Invocation has completed, so a plan proposal has an authorizing Invocation. */
-export function seedPlanningRuntime(h: RuntimeHarness, overrides: Partial<RunCreationRequest> = {}): RuntimeSeed & { invocation: Invocation } {
+export function seedPlanningRuntime(h: RuntimeHarness, overrides: RuntimeSeedOverrides = {}): RuntimeSeed & { invocation: Invocation } {
   const seed = seedRuntime(h, overrides);
   const started = startRun(h, seed);
   return { ...seed, invocation: started.prepared.invocation };

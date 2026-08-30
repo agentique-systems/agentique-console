@@ -36,6 +36,7 @@ import {
   ROOT_SOURCE_PATH,
   RUN_MACHINE,
   type AttemptId,
+  type CompletionRequestId,
   type CoordinatorPurpose,
   type GateId,
   type InvocationId,
@@ -54,6 +55,7 @@ import type { PersistenceContext } from "../persistence/context.ts";
 import type { Stores } from "../persistence/stores/index.ts";
 import type { WriteOptions } from "../persistence/stores/support.ts";
 import type { AttemptExecutor, ExecutionOutcome } from "./attempt-executor.ts";
+import type { CompletionAdvice, CompletionOutcome } from "./completion.ts";
 import type { ResourceGovernor } from "./governor.ts";
 import { JoinNodeSettler, type JoinOutcome } from "./join.ts";
 import { runnerFor, type NodeAdvice, type PatternRunnerOutcome, type PatternRunners, type RootAdvice, type RootOutcome } from "./patterns/index.ts";
@@ -90,6 +92,22 @@ export type SchedulerAction =
   | { kind: "prepare_gate_remediation"; taskIds: TaskId[] }
   /** The latest `gate_result` turn ended: its Changeset is integrated and its remediation Tasks are addressed or ended. */
   | { kind: "settle_gate_remediation"; invocationId: InvocationId }
+  /** The requesting root turn settled: the Run enters `verifying` and the `run_completion` Gate opens (execution-model §10). */
+  | { kind: "begin_run_completion"; completionRequestId: CompletionRequestId }
+  /** The open run_completion Gate's deterministic criteria run now, outside every transaction, through the check port. */
+  | { kind: "run_completion_checks"; gateId: GateId }
+  /** The run_completion Gate's one read-only Evaluator, funded from the final reserve, is prepared. */
+  | { kind: "prepare_run_completion_evaluator"; gateId: GateId }
+  /** The Evaluator's verdicts are recorded (or its successor prepared, or the Gate fails). */
+  | { kind: "settle_run_completion_evaluator"; gateId: GateId; invocationId: InvocationId }
+  /** Every criterion passed: the derived Requirement statuses are recorded. */
+  | { kind: "derive_requirement_statuses"; gateId: GateId }
+  /** The read-only final-synthesis turn, funded from the final reserve, is prepared. */
+  | { kind: "prepare_final_synthesis"; gateId: GateId }
+  /** The synthesis ended: the report Artifact, the passed Gate, the signoff boundary, and `awaiting_signoff` — or the failure. */
+  | { kind: "settle_final_synthesis"; gateId: GateId; invocationId: InvocationId }
+  /** The rows imply the request's end: cancelled before verification, or the Gate closed failed with its remediation Task. */
+  | { kind: "complete_run_verification"; completionRequestId: CompletionRequestId }
   /** No current work can proceed and no Attempt is running: the Run records the reason. */
   | { kind: "wait_run"; reason: RunWaitReason };
 
@@ -141,13 +159,15 @@ export interface SchedulerProjection {
   /** The earliest known time at which projection may change without an Attempt ending. */
   wakeAt: Timestamp | null;
   concurrency: { active: number; max: number | null };
+  /** The completion engine's advice (execution-model §10): what the Run's active Completion Request needs next, `none` without one. */
+  completion: CompletionAdvice;
   /** What a pass stops with once no action remains. */
   stop: Exclude<SchedulerStopReason, "action_limit" | "infrastructure_failure">;
 }
 
 export interface PerformedAction {
   action: SchedulerAction;
-  outcome: PatternRunnerOutcome | RootOutcome | JoinOutcome | { kind: "prepared"; attemptId: AttemptId } | { kind: "capacity_refused" } | { kind: "not_permitted"; reason: string } | { kind: "transitioned" } | { kind: "stale" } | { kind: "no_change" };
+  outcome: PatternRunnerOutcome | RootOutcome | JoinOutcome | CompletionOutcome | { kind: "prepared"; attemptId: AttemptId } | { kind: "capacity_refused" } | { kind: "not_permitted"; reason: string } | { kind: "transitioned" } | { kind: "stale" } | { kind: "no_change" };
 }
 
 export interface SchedulerOutcome {
@@ -209,7 +229,13 @@ export class RunScheduler {
     const run = this.stores.runs.get(runId);
     const graph = this.stores.plans.currentGraph(runId);
     const base = { runId, revisionNumber: graph.revisionNumber, run: { status: run.status, waitReason: run.waitReason } };
-    if (RUN_MACHINE.isTerminal(run.status)) return { ...base, nodes: [], actions: [], waiting: [], deferred: [], remediating: [], limited: [], inFlight: [], wakeAt: null, concurrency: { active: 0, max: run.budget.maxConcurrency }, stop: "run_terminal" };
+    const none: CompletionAdvice = { kind: "none" };
+    if (RUN_MACHINE.isTerminal(run.status)) return { ...base, nodes: [], actions: [], waiting: [], deferred: [], remediating: [], limited: [], inFlight: [], wakeAt: null, concurrency: { active: 0, max: run.budget.maxConcurrency }, completion: none, stop: "run_terminal" };
+    const root = graph.nodes.find((n) => n.sourcePath === ROOT_SOURCE_PATH)!;
+    // Awaiting the operator's signoff: no model or Pattern work is scheduled (execution-model §3).
+    if (run.status === "awaiting_signoff") return { ...base, nodes: [{ nodeId: root.id, pattern: "single", status: root.status, readiness: null, advice: null, current: true }], actions: [], waiting: [], deferred: [], remediating: [], limited: [], inFlight: [], wakeAt: null, concurrency: { active: 0, max: run.budget.maxConcurrency }, completion: none, stop: "quiescent" };
+    // Verifying: only the completion engine's actions execute; no ordinary Pattern work starts (execution-model §10).
+    if (run.status === "verifying") return this.reconcileVerifying(runId, run, root, base, now);
     const readiness = new Map(evaluateReadiness(projectReadinessInput(this.stores, graph)).decisions.map((d) => [d.nodeId, d] as const));
     const nodes: NodeProjection[] = [];
     const actions: SchedulerAction[] = [];
@@ -226,8 +252,8 @@ export class RunScheduler {
     const withinNodeLimit = (node: PlanNode) => node.maxConcurrency === null || this.stores.invocations.listByPlanNode(node.id).filter((i) => !["blocked", "succeeded", "failed", "cancelled"].includes(i.status)).length < node.maxConcurrency;
 
     // The root Orchestrator node: its existing turns execute and settle; it is never started or completed here.
-    const root = graph.nodes.find((n) => n.sourcePath === ROOT_SOURCE_PATH)!;
     const rootAdvice = this.runners.root.inspect(runId, now);
+    const completion = this.runners.completion.advice(runId, now);
     nodes.push({ nodeId: root.id, pattern: "single", status: root.status, readiness: readiness.get(root.id) ?? null, advice: rootAdvice, current: true });
     switch (rootAdvice.kind) {
       case "execute": {
@@ -376,13 +402,75 @@ export class RunScheduler {
       else deferred.push({ nodeId: root.id, reason: "awaiting_allocation_extension_phase", pattern: "single" });
     }
 
+    // An accepted Completion Request whose requesting turn settled begins (or, when that turn did not complete, ends) once the root is idle
+    // and nothing else is executing; the preflight forbade every other current work before the call was accepted.
+    if (run.status === "running" && (completion.kind === "begin" || completion.kind === "complete") && (rootAdvice.kind === "idle" || rootAdvice.kind === "remediate") && inFlight.length === 0) {
+      actions.push(completion.kind === "begin" ? { kind: "begin_run_completion", completionRequestId: completion.completionRequestId } : { kind: "complete_run_verification", completionRequestId: completion.completionRequestId });
+    }
+
     // Run-level: resume before any other action; wait only when nothing can proceed and nothing is running.
     if (run.status === "waiting" && actions.length > 0) actions.unshift({ kind: "resume_run", reason: run.waitReason! });
     if (actions.length === 0 && run.status === "running" && waiting.length > 0 && inFlight.length === 0 && limited.length === 0) {
       actions.push({ kind: "wait_run", reason: RUN_WAIT_REASONS_BY_NODE[waiting[0]!.reason] });
     }
     const stop: SchedulerProjection["stop"] = waiting.length > 0 || inFlight.length > 0 || limited.length > 0 || wakeAt !== null ? "waiting" : deferred.length > 0 ? "unsupported" : "quiescent";
-    return { ...base, nodes, actions, waiting, deferred, remediating, limited, inFlight, wakeAt, concurrency: { active, max }, stop };
+    return { ...base, nodes, actions, waiting, deferred, remediating, limited, inFlight, wakeAt, concurrency: { active, max }, completion, stop };
+  }
+
+  /** The projection of a `verifying` Run: the completion engine's one next action, its waits, and its in-flight Attempt. */
+  private reconcileVerifying(runId: RunId, run: { budget: { maxConcurrency: number | null } }, root: PlanNode, base: Pick<SchedulerProjection, "runId" | "revisionNumber" | "run">, now: Timestamp): SchedulerProjection {
+    const actions: SchedulerAction[] = [];
+    const waiting: WaitingCondition[] = [];
+    const inFlight = [...new Set(this.executor.inFlight().map((a) => this.stores.invocations.getAttempt(a)).filter((a) => a.runId === runId).map((a) => a.invocationId))].sort();
+    let wakeAt: Timestamp | null = null;
+    const completion = this.runners.completion.advice(runId, now);
+    switch (completion.kind) {
+      case "none":
+      case "begin":
+        break;
+      case "complete":
+        actions.push({ kind: "complete_run_verification", completionRequestId: completion.completionRequestId });
+        break;
+      case "checks":
+        actions.push({ kind: "run_completion_checks", gateId: completion.gateId });
+        break;
+      case "prepare_evaluator":
+        actions.push({ kind: "prepare_run_completion_evaluator", gateId: completion.gateId });
+        break;
+      case "execute": {
+        const refusal = this.capacityRefusal(runId, completion.invocationId);
+        if (refusal === null) actions.push({ kind: "execute_invocation", nodeId: root.id, invocationId: completion.invocationId, worktrees: this.worktreesOf(completion.invocationId) });
+        else {
+          waiting.push({ nodeId: root.id, reason: "provider_capacity", wakeAt: refusal.retryAfter });
+          wakeAt = earliest(wakeAt, refusal.retryAfter);
+        }
+        break;
+      }
+      case "attempt_in_flight":
+        wakeAt = earliest(wakeAt, this.executor.inspectInvocation(completion.invocationId, now).deadlineAt);
+        break;
+      case "retry_not_before":
+        wakeAt = earliest(wakeAt, completion.notBefore);
+        break;
+      case "settle_evaluator":
+        actions.push({ kind: "settle_run_completion_evaluator", gateId: completion.gateId, invocationId: completion.invocationId });
+        break;
+      case "blocked":
+        waiting.push({ nodeId: root.id, reason: "decision", wakeAt: null });
+        break;
+      case "derive":
+        actions.push({ kind: "derive_requirement_statuses", gateId: completion.gateId });
+        break;
+      case "prepare_synthesis":
+        actions.push({ kind: "prepare_final_synthesis", gateId: completion.gateId });
+        break;
+      case "settle_synthesis":
+        actions.push({ kind: "settle_final_synthesis", gateId: completion.gateId, invocationId: completion.invocationId });
+        break;
+    }
+    for (const invocationId of inFlight) wakeAt = earliest(wakeAt, this.executor.inspectInvocation(invocationId, now).deadlineAt);
+    const stop: SchedulerProjection["stop"] = waiting.length > 0 || inFlight.length > 0 || wakeAt !== null ? "waiting" : "quiescent";
+    return { ...base, nodes: [{ nodeId: root.id, pattern: "single", status: root.status, readiness: null, advice: null, current: true }], actions, waiting, deferred: [], remediating: [], limited: [], inFlight, wakeAt, concurrency: { active: this.stores.invocations.listActive(runId).length, max: run.budget.maxConcurrency }, completion, stop };
   }
 
   private capacityRefusal(runId: RunId, invocationId: InvocationId) {
@@ -533,6 +621,23 @@ export class RunScheduler {
         return this.runners.root.prepareRemediation(runId, meta);
       case "settle_gate_remediation":
         return this.runners.root.settleRemediation(runId, meta);
+      case "begin_run_completion":
+        return this.runners.completion.begin(runId, meta);
+      case "run_completion_checks":
+        // Completion checks are external like a Gate's: outside every transaction, recorded afterwards.
+        return this.runners.completion.verify(runId, meta);
+      case "prepare_run_completion_evaluator":
+        return this.runners.completion.prepareEvaluator(runId, meta);
+      case "settle_run_completion_evaluator":
+        return this.runners.completion.settleEvaluator(runId, meta);
+      case "derive_requirement_statuses":
+        return this.runners.completion.derive(runId, meta);
+      case "prepare_final_synthesis":
+        return this.runners.completion.prepareSynthesis(runId, meta);
+      case "settle_final_synthesis":
+        return this.runners.completion.settleSynthesis(runId, meta);
+      case "complete_run_verification":
+        return this.runners.completion.complete(runId, meta);
       case "execute_invocation": {
         const prepared = await this.executor.prepareNextAttempt(action.invocationId, meta);
         if (prepared.kind === "prepared") {

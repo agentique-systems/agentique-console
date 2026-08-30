@@ -182,10 +182,14 @@ export class InvocationPreparationService {
     return this.ctx.tx.write(() => {
       const run = this.stores.runs.get(valid.runId);
       if (RUN_MACHINE.isTerminal(run.status)) throw new ConflictError(`Run ${run.id} is ${run.status}; no Invocation can be prepared`);
+      // A Run awaiting signoff performs nothing; a verifying Run performs only its completion work, funded from the final reserve (§10).
+      if (run.status === "awaiting_signoff") throw new ConflictError(`Run ${run.id} is awaiting signoff; no Invocation can be prepared`);
+      if (run.status === "verifying" && valid.funding?.source !== "run_final_reserve") throw new ConflictError(`Run ${run.id} is verifying; only its completion Invocations can be prepared`);
       const node = this.node(run, valid);
       const resolved = this.operation(node, valid);
       const revision = this.revision(run, valid, resolved.agentDefinitionRevisionId);
-      const policy = effectiveCapabilityPolicy(revision, valid.role, this.config.workspacePolicy);
+      // The purpose narrows the role policy: a final_synthesis turn is read-only whatever the Orchestrator definition declares (§10).
+      const policy = effectiveCapabilityPolicy(revision, valid.role, this.config.workspacePolicy, valid.purpose);
       const tasks = this.tasks(run, node, valid, resolved.taskIds);
       this.assertContinuation(run, node, valid);
       const funding = valid.funding ?? { source: "plan_node" };

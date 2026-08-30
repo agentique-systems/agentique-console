@@ -130,6 +130,15 @@ export class InvocationResultValidator {
       }
     } else if (result.evaluation !== null) add("evaluation_not_permitted", "only an Evaluator of purpose evaluate returns an evaluation", "evaluation");
 
+    // The final report is typed and closed (execution-model §10): a completed `final_synthesis` result carries exactly one, no other
+    // Invocation returns one, and a final-synthesis turn changes nothing — no Task state, no Run outcome, no Changeset.
+    if (invocation.purpose === "final_synthesis") {
+      if (result.status === "completed" && result.finalReport === null) add("final_report_missing", "a completed final synthesis returns its typed final report", "finalReport");
+      if (result.tasks.length > 0) add("task_report_not_permitted", "a final_synthesis turn changes no Task state", "tasks");
+      if (result.runOutcome !== null) add("run_outcome_not_permitted", "a final_synthesis turn declares no Run outcome", "runOutcome");
+      if (context.changeset !== null) add("status_incompatible", "a final_synthesis turn is read-only and records no Changeset", null);
+    } else if (result.finalReport !== null) add("final_report_not_permitted", "only an Orchestrator final_synthesis turn returns a final report", "finalReport");
+
     if (invocation.role === "evaluator") {
       // An Evaluator judges; it never claims to have run a deterministic command (the runtime runs those) and never writes.
       result.evidence.forEach((evidence, i) => {

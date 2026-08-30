@@ -45,6 +45,7 @@ import {
   approvalSubjectOf,
 } from "@agentique-console/core";
 import type { WriteOptions } from "../../persistence/stores/support.ts";
+import type { RunCompletionEngine } from "../completion.ts";
 import { NodeExitGates } from "../gates.ts";
 import { blockingDecisionOf, outstandingChangesetOf, PatternNodeSupport, type PatternRunnerDependencies } from "./support.ts";
 
@@ -86,7 +87,11 @@ interface RootRemediation {
 export class RootNodeSupport {
   private readonly gates: NodeExitGates;
 
-  constructor(private readonly deps: PatternRunnerDependencies) {
+  constructor(
+    private readonly deps: PatternRunnerDependencies,
+    /** The completion engine's remediation facts: failed run_completion Gates the root remediates beside failed node Gates. */
+    private readonly completion: RunCompletionEngine,
+  ) {
     // The Gate engine's remediation facts read rows only; the root never loads a gated node through this support.
     this.gates = new NodeExitGates(new PatternNodeSupport(deps, "single"));
   }
@@ -115,6 +120,9 @@ export class RootNodeSupport {
       if (inspection.next.reason === "retry_not_yet") return { kind: "retry_not_before", invocationId: latest.id, notBefore: inspection.next.notBefore! };
       return { kind: "execute", invocationId: latest.id };
     }
+    // A final_synthesis turn belongs to the completion engine (execution-model §10): its execution, blocking, and settlement are the
+    // engine's, and its failure fails the Completion Request, never the Run.
+    if (latest.purpose === "final_synthesis") return this.idle(runId, latest.id);
     if (latest.status === "blocked") {
       const decision = blockingDecisionOf(stores, latest)!;
       return decision.status === "open" ? { kind: "blocked", invocationId: latest.id, decisionId: decision.id } : this.settleAdvice(latest);
@@ -146,18 +154,27 @@ export class RootNodeSupport {
 
   /**
    * Every remediation Task the root owns and no turn has ended: the Task of
-   * the latest, failed Gate of a running current node whose Pattern has no
-   * Coordinator, in Task creation order. A Task assigned to an active turn
-   * is not pending.
+   * the latest, failed `node_exit` Gate of a running current node whose
+   * Pattern has no Coordinator, and the Task of every failed
+   * `run_completion` Gate (execution-model §10), in Task creation order, so
+   * both kinds coalesce into one `gate_result` turn. A Task assigned to an
+   * active turn is not pending.
    */
   pendingRemediations(runId: RunId): RootRemediation[] {
     const { stores } = this.deps;
     const members = new Set(stores.plans.currentGraph(runId).nodes.map((n) => n.id));
+    const completion = new Map(this.completion.pendingRemediations(runId).map((r) => [r.task.id, r] as const));
     const pending: RootRemediation[] = [];
     for (const task of stores.tasks.listRemediationTasks(runId)) {
       if (task.status === "completed" || task.status === "failed" || task.status === "cancelled" || task.status === "running") continue;
       const node = stores.plans.getNode(task.planNodeId!);
-      if (node.kind !== "pattern" || node.pattern === "coordinator_worker" || node.status !== "running" || !members.has(node.id)) continue;
+      if (node.kind !== "pattern") continue;
+      const runGate = completion.get(task.id);
+      if (runGate !== undefined) {
+        pending.push({ gate: runGate.gate, task: runGate.task, node });
+        continue;
+      }
+      if (node.pattern === "coordinator_worker" || node.status !== "running" || !members.has(node.id)) continue;
       const remediation = this.gates.pendingRemediationOf(node);
       if (remediation === null || remediation.task.id !== task.id) continue;
       pending.push({ gate: remediation.gate, task: remediation.task, node });
@@ -214,6 +231,8 @@ export class RootNodeSupport {
       if (turn.purpose === "gate_result") return this.settleRemediationTurn(run.id, turn, options);
       if (turn.status === "failed") {
         if (root.status === "failed") return { kind: "no_change" };
+        // A failed requesting turn cancels its Completion Request before the Run fails (execution-model §10).
+        this.completion.cancelEndedRequest(run.id, options);
         if (root.status === "waiting") stores.plans.transitionNode(root.id, { to: "running" }, options);
         stores.plans.transitionNode(root.id, { to: "failed", reason: "invocation_failed" }, options);
         stores.runs.transition(run.id, { to: "failed", failure: { kind: "root_node_failed", summary: `Orchestrator Invocation ${turn.id} failed: ${turn.failureReason ?? "unknown"}`, evidenceArtifactIds: [] } }, options);

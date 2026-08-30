@@ -31,7 +31,6 @@ import {
   operationAt,
   ROOT_SOURCE_PATH,
   TASK_MACHINE,
-  TRANSCRIPT_MEDIA_TYPE,
   ZERO_ALLOCATION,
   type AcceptanceCriterion,
   type AcceptanceCriterionId,
@@ -172,7 +171,8 @@ export class CompletionFacts {
         }
       }
     }
-    return [...ids].filter((id) => this.stores.artifacts.get(id).mediaType !== TRANSCRIPT_MEDIA_TYPE).sort();
+    // Never a transcript: the candidate set names produced work, not conversation.
+    return [...ids].filter((id) => { const p = this.stores.artifacts.get(id).producer; return !(p.kind === "runtime" && p.component === "transcript"); }).sort();
   }
 
   /** The least final-reserve allocation the remaining completion work needs: the Gate Evaluator (when evaluated criteria exist) plus the final synthesis. */
