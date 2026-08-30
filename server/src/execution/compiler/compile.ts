@@ -267,6 +267,10 @@ class Compilation {
     if (bounds.maxConcurrentWorkers > bounds.maxTasks) {
       reject("invalid_pattern_bounds", `maxConcurrentWorkers ${bounds.maxConcurrentWorkers} exceeds maxTasks ${bounds.maxTasks}`, path);
     }
+    // A useful Coordinator lifecycle needs at least one decompose and one synthesize turn (execution-model §5.5).
+    if (bounds.maxCoordinatorInvocations < 2) {
+      reject("invalid_pattern_bounds", `maxCoordinatorInvocations ${bounds.maxCoordinatorInvocations} cannot hold a decompose and a synthesize turn`, path);
+    }
     const coordinator = this.operation(expression.coordinator, path, "coordinator", undefined, "coordinator");
     const worker = this.operation(expression.worker, path, "worker", undefined, "worker");
     this.emitPattern(path, expression.title ?? "coordinator_worker", { pattern: "coordinator_worker", coordinator, worker, bounds }, [coordinator, worker], options, frame.scope);

@@ -36,6 +36,7 @@ import {
   ROOT_SOURCE_PATH,
   RUN_MACHINE,
   type AttemptId,
+  type CoordinatorPurpose,
   type InvocationId,
   type Pattern,
   type PatternPosition,
@@ -63,8 +64,8 @@ export type SchedulerAction =
   | { kind: "ready_node"; nodeId: PlanNodeId }
   | { kind: "skip_node"; nodeId: PlanNodeId; cause: SkipCause; failed: PlanNodeId[] }
   | { kind: "start_node"; nodeId: PlanNodeId; pattern: Pattern }
-  /** A running node prepares one more position (a parallel item, or a blocked position's successor). */
-  | { kind: "start_position"; nodeId: PlanNodeId; position: PatternPosition }
+  /** A running node prepares one more position: a parallel item, a Worker Task, a blocked position's successor, or (with `turn`) a Coordinator logical turn. */
+  | { kind: "start_position"; nodeId: PlanNodeId; position: PatternPosition; turn?: CoordinatorPurpose }
   | { kind: "execute_invocation"; nodeId: PlanNodeId; invocationId: InvocationId; worktrees: number }
   | { kind: "settle_node"; nodeId: PlanNodeId; invocationId: InvocationId | null }
   /** A `ready` join executes deterministically: policy, index Artifact, terminal transition, edge Handoffs — in one transaction. */
@@ -271,7 +272,7 @@ export class RunScheduler {
           }
           if (!withinNodeLimit(node)) break;
           active += 1;
-          actions.push(advice.kind === "start" ? { kind: "start_node", nodeId: node.id, pattern: node.pattern } : { kind: "start_position", nodeId: node.id, position: advice.position });
+          actions.push(advice.kind === "start" ? { kind: "start_node", nodeId: node.id, pattern: node.pattern } : { kind: "start_position", nodeId: node.id, position: advice.position, ...(advice.turn === undefined ? {} : { turn: advice.turn }) });
           break;
         case "execute": {
           const refusal = this.capacityRefusal(runId, advice.invocationId);

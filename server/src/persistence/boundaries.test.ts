@@ -167,7 +167,7 @@ describe("import boundaries", () => {
   });
 
   it("the scheduler, join settler, and Pattern runners import nothing legacy, poll nothing, and implement only the supported Patterns", () => {
-    const files = [...listFiles("server/src/execution/patterns", isCode), path.join(repoRoot, "server/src/execution/scheduler.ts"), path.join(repoRoot, "server/src/execution/join.ts"), path.join(repoRoot, "server/src/execution/readiness.ts"), path.join(repoRoot, "server/src/execution/readiness-facts.ts"), path.join(repoRoot, "server/src/execution/handoff-routing.ts"), path.join(repoRoot, "server/src/execution/integration-service.ts")];
+    const files = [...listFiles("server/src/execution/patterns", isCode), path.join(repoRoot, "server/src/execution/scheduler.ts"), path.join(repoRoot, "server/src/execution/join.ts"), path.join(repoRoot, "server/src/execution/readiness.ts"), path.join(repoRoot, "server/src/execution/readiness-facts.ts"), path.join(repoRoot, "server/src/execution/handoff-routing.ts"), path.join(repoRoot, "server/src/execution/integration-service.ts"), path.join(repoRoot, "server/src/execution/task-projection.ts"), path.join(repoRoot, "server/src/execution/task-proposals.ts"), path.join(repoRoot, "server/src/execution/runtime-tools.ts")];
     expect(files.length).toBeGreaterThan(5);
     for (const file of files) {
       for (const specifier of importsOf(file)) {
@@ -182,12 +182,12 @@ describe("import boundaries", () => {
       // Nothing schedules from a transcript, an Event replay, or a rendered position string.
       expect(text, rel(file)).not.toMatch(/journal\.read\(|renderPatternPosition|TRANSCRIPT_MEDIA_TYPE/);
     }
-    // Only the supported runners exist; coordinator_worker and evaluator_optimizer have no runner file and no runner registration.
+    // Only the supported runners exist; evaluator_optimizer has no runner file and no runner registration.
     const runnerFiles = listFiles("server/src/execution/patterns", (f) => isCode(f) && !f.endsWith(".test.ts")).map((f) => path.basename(f)).sort();
-    expect(runnerFiles).toEqual(["chain.ts", "index.ts", "parallel.ts", "root.ts", "route.ts", "single.ts", "support.ts"]);
+    expect(runnerFiles).toEqual(["chain.ts", "coordinator-worker.ts", "index.ts", "parallel.ts", "root.ts", "route.ts", "single.ts", "support.ts"]);
     const registry = fs.readFileSync(path.join(repoRoot, "server/src/execution/patterns/index.ts"), "utf8");
-    for (const later of ["coordinator_worker", "evaluator_optimizer"]) expect(registry).not.toMatch(new RegExp(`case "${later}"`));
-    for (const supported of ["single", "chain", "route", "parallel"]) expect(registry).toMatch(new RegExp(`case "${supported}"`));
+    for (const later of ["evaluator_optimizer"]) expect(registry).not.toMatch(new RegExp(`case "${later}"`));
+    for (const supported of ["single", "chain", "route", "parallel", "coordinator_worker"]) expect(registry).toMatch(new RegExp(`case "${supported}"`));
     // The readiness evaluator is pure over the graph plus explicit facts: no persistence, provider, Workspace, clock, or id minting; the
     // facts projection is the one reader of rows and reads only route-selection Evaluations (never a transcript, Handoff summary, or Event).
     const readiness = fs.readFileSync(path.join(repoRoot, "server/src/execution/readiness.ts"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
@@ -199,6 +199,13 @@ describe("import boundaries", () => {
     // A join never touches the executor, the governor, or a provider: no Invocation, Attempt, lease, or Usage.
     const join = fs.readFileSync(path.join(repoRoot, "server/src/execution/join.ts"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
     expect(join).not.toMatch(/executor|governor|provider|invocations\.create|createAttempt|tryAcquire|usage\.record|preparation/);
+    // The Task projection is pure over explicit facts: its one store reader is the projector, which reads Tasks, dependency edges, and Artifact ids only.
+    const projection = fs.readFileSync(path.join(repoRoot, "server/src/execution/task-projection.ts"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    expect(projection.slice(projection.indexOf("export function projectTasks"), projection.indexOf("export function projectNodeTasks"))).not.toMatch(/\bstores\b|\bctx\b|clock\(|journal|invocations\.|handoffs\.|changesets\.|transcript/);
+    expect(projection.slice(projection.indexOf("export function projectNodeTasks"))).not.toMatch(/stores\.(invocations|handoffs|changesets|decisions|runs)\b|journal|transcript|summary/);
+    // The coordinator_worker runner never reads a transcript, a Handoff summary, or an Event to decide anything, and infers no Task state from a Coordinator claim.
+    const coordinator = fs.readFileSync(path.join(repoRoot, "server/src/execution/patterns/coordinator-worker.ts"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    expect(coordinator).not.toMatch(/journal\.read\(|\.summary\b|TRANSCRIPT_MEDIA_TYPE|artifacts\.read\(|result\.openItems|setTimeout|setInterval/);
     // The provider boundary never imports the scheduler or the stores; the persistence boundary never imports execution (checked above too).
     for (const file of listFiles("server/src/provider", isCode)) {
       for (const specifier of importsOf(file)) {
@@ -218,6 +225,29 @@ describe("import boundaries", () => {
       }
       expect(text, rel(file)).not.toMatch(/artifacts\.read\(|blobs\.get\(|\.transcriptArtifactId\b[^;\n]*\bread|TRANSCRIPT_MEDIA_TYPE[^;\n]*(read|get)\(/);
     }
+  });
+
+  it("the runtime-tool port exposes only the effective callable set and one call, and only the execution boundary binds it", () => {
+    const adapter = fs.readFileSync(path.join(repoRoot, "server/src/provider/adapter.ts"), "utf8");
+    const port = adapter.match(/export interface RuntimeToolCallPort \{([\s\S]*?)\n\}/)?.[1] ?? "";
+    expect(port).toMatch(/readonly tools: readonly RuntimeToolCallTool\[\];/);
+    const members = port.replace(/\/\*[\s\S]*?\*\//g, "").match(/^\s*(readonly\s+)?\w+(\(.*\))?:.*;$/gm) ?? [];
+    expect(members.map((m) => m.trim())).toEqual(["readonly tools: readonly RuntimeToolCallTool[];", "call(request: RuntimeToolCallRequest): Promise<RuntimeToolCallOutcome>;"]);
+    // Provider code never constructs, imports, or reaches the executor, a store, a proposal service, or a transaction; it calls the port only.
+    for (const file of listFiles("server/src/provider", (f) => isCode(f) && !f.endsWith(".test.ts"))) {
+      const text = fs.readFileSync(file, "utf8");
+      expect(text, rel(file)).not.toMatch(/RuntimeToolExecutor|TaskProposalService|runtimeToolCalls\.(record|find)|tx\.write|persistence\/(stores\/(?!continuations)|blob-store|database|client|schema|context|transactions)/);
+    }
+    // The executor is the one binder: it is constructed in the Attempt executor from the Attempt's canonical rows, nowhere else outside tests and test support.
+    const binders = listFiles("server/src", (f) => isCode(f) && !f.endsWith(".test.ts") && !f.endsWith("test-support.ts")).filter((f) => /new RuntimeToolExecutor\(/.test(fs.readFileSync(f, "utf8"))).map(rel);
+    expect(binders).toEqual(["server/src/execution/attempt-executor.ts"]);
+    const executor = fs.readFileSync(path.join(repoRoot, "server/src/execution/runtime-tools.ts"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    // The port's runtime does not authorize provider-native calls and never touches approvals, Decisions, transcripts, or side-effect approval state.
+    expect(executor).not.toMatch(/approvedToolCallUses|ToolCallAuthorizer|side_effect_approval|TRANSCRIPT_MEDIA_TYPE|artifacts\.read\(|decisions\.(request|resolve)/);
+    // Runtime tools are closed unions in core: no free tool name, no `unknown` input at the boundary.
+    const core = fs.readFileSync(path.join(repoRoot, "core/src/runtime-tools.ts"), "utf8");
+    expect(core).toMatch(/export type RuntimeToolCallRequest = \{ tool: "propose_tasks"; input: TaskProposalBatch \} \| \{ tool: "update_task"; input: TaskUpdateRequest \};/);
+    expect(core).not.toMatch(/input: unknown|tool: string;/);
   });
 
   it("the integration-workspace port carries verified content bound to one Artifact, and only the integration service binds it", () => {

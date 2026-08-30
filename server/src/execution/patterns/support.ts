@@ -31,14 +31,17 @@ import {
   ROOT_SOURCE_PATH,
   TASK_MACHINE,
   type ArtifactId,
+  type BudgetReservationId,
   type Changeset,
   type CompiledOperation,
+  type CoordinatorPurpose,
   type Decision,
   type DecisionId,
   type EvaluationId,
   type HandoffId,
   type Invocation,
   type InvocationId,
+  type InvocationPurpose,
   type ManifestInput,
   type Pattern,
   type PatternPlanNode,
@@ -68,8 +71,11 @@ import type { ReadinessInput } from "../readiness.ts";
 export type NodeAdvice =
   /** `ready` (or `running` with no Invocation yet): prepare the first position. */
   | { kind: "start" }
-  /** A running node may prepare another position now: a further parallel item, or the successor of a blocked position whose Decision resolved. */
-  | { kind: "start_position"; position: PatternPosition }
+  /**
+   * A running node may prepare another position now: a further parallel item, a runnable Coordinator Task's Worker, the
+   * successor of a blocked position whose Decision resolved, or (with `turn`) the next Coordinator logical turn.
+   */
+  | { kind: "start_position"; position: PatternPosition; turn?: CoordinatorPurpose }
   /** The named active Invocation may create its next Attempt now. */
   | { kind: "execute"; invocationId: InvocationId }
   /** An Attempt of an active Invocation is executing in this process. */
@@ -95,8 +101,14 @@ export type PatternRunnerOutcome =
   | { kind: "successor_prepared"; invocationId: InvocationId; position: PatternPosition; decisionId: DecisionId }
   /** A route node recorded its selection; `invocationId` is the inline branch Invocation, or `null` for a composite selection. */
   | { kind: "selected"; evaluationId: EvaluationId; selectedLabel: string; invocationId: InvocationId | null }
-  /** A parallel item's Changeset was integrated in index order. */
+  /** A parallel item's or a Coordinator Worker's Changeset was integrated in canonical order. */
   | { kind: "integrated"; invocationId: InvocationId }
+  /** A Worker's Changeset conflicted: recorded through the conflict lifecycle, now an unresolved blocker of its coordinator_worker node. */
+  | { kind: "conflicted"; invocationId: InvocationId }
+  /** The runtime applied its Task readiness projection: these Tasks became ready or blocked. */
+  | { kind: "tasks_projected"; readied: TaskId[]; blocked: TaskId[] }
+  /** A completed, integrated Worker Task's result Handoff was recorded for the next Coordinator turn. */
+  | { kind: "worker_result_recorded"; invocationId: InvocationId; handoffId: HandoffId }
   | { kind: "succeeded"; outputArtifactIds: string[]; handoffIds: HandoffId[] }
   | { kind: "failed"; reason: PlanNodeFailureReason }
   | { kind: "cancelled" }
@@ -166,6 +178,8 @@ export interface PreparationRequest {
   continuedFromInvocationId: InvocationId | null;
   handoffIds: HandoffId[];
   inputs: ManifestInput[];
+  /** A Coordinator Task's reservation to transfer (a `worker_task` position); the node's allocation check is then already settled. */
+  taskReservationId?: BudgetReservationId;
 }
 
 /** Everything a waiting node's condition is checked against. */
@@ -255,7 +269,18 @@ export class PatternNodeSupport {
     if (operation === null) throw new Error(`PlanNode ${node.id} has no ${patternPositionKey(position)} position`);
     const binding = PATTERN_POSITION_BINDINGS[position.kind];
     if (binding.purpose === null) throw new Error(`position ${position.kind} fixes no purpose; a Pattern runner prepares only fixed-purpose positions`);
-    if (!this.allocationFor(node, position).fits) {
+    return this.prepareAs(node, position, binding.purpose, request, options);
+  }
+
+  /** `prepare` for a position whose purpose the runner fixes (a Coordinator turn): the same funding, ownership, and manifest rules. */
+  prepareAs(node: PatternPlanNode, position: PatternPosition, purpose: InvocationPurpose, request: PreparationRequest, options: WriteOptions): { kind: "prepared"; invocationId: InvocationId } | { kind: "refused"; outcome: PatternRunnerOutcome } {
+    const { preparation } = this.deps;
+    const operation = operationAt(node.shape, position);
+    if (operation === null) throw new Error(`PlanNode ${node.id} has no ${patternPositionKey(position)} position`);
+    const binding = PATTERN_POSITION_BINDINGS[position.kind];
+    if (binding.purpose !== null && binding.purpose !== purpose) throw new Error(`position ${position.kind} fixes purpose ${binding.purpose}, not ${purpose}`);
+    // A transferred Task reservation was checked against the node when the Task was accepted; only fresh funding is checked now.
+    if (request.taskReservationId === undefined && !this.allocationFor(node, position).fits) {
       switch (node.onAllocationExhausted) {
         case "fail":
           return { kind: "refused", outcome: this.failNow(node, "allocation_exhausted", options) };
@@ -271,11 +296,12 @@ export class PatternNodeSupport {
       runId: node.runId,
       planNodeId: node.id,
       role: binding.role,
-      purpose: binding.purpose,
+      purpose,
       patternPosition: position,
       continuedFromInvocationId: request.continuedFromInvocationId,
       handoffIds: request.handoffIds,
       inputs: request.inputs,
+      ...(request.taskReservationId === undefined ? {} : { funding: { source: "task_transfer" as const, taskReservationId: request.taskReservationId } }),
       correlationId: options.correlationId ?? null,
       causationSeq: options.causationSeq ?? null,
     });
@@ -298,7 +324,7 @@ export class PatternNodeSupport {
         ? { kind: "side_effect_approval_resolution", decisionId: decision.id, blockedInvocationId: predecessor.id, attemptId: decision.subject.attemptId, tool: decision.subject.tool, callDigest: decision.subject.callDigest, callArtifactId: decision.subject.callArtifactId, outcome: decision.resolution.chosenOptionId as "approve_once" | "deny" }
         : { kind: "decision_resolution", decisionId: decision.id };
     const handoffIds = stores.invocations.getManifest(predecessor.id).content.handoffs.map((h) => h.handoffId);
-    const prepared = this.prepare(node, position, { continuedFromInvocationId: predecessor.id, handoffIds, inputs: [...extraInputs, resolution] }, options);
+    const prepared = this.prepareAs(node, position, predecessor.purpose, { continuedFromInvocationId: predecessor.id, handoffIds, inputs: [...extraInputs, resolution] }, options);
     if (prepared.kind !== "prepared") return prepared.outcome;
     return { kind: "successor_prepared", invocationId: prepared.invocationId, position, decisionId: decision.id };
   }

@@ -213,8 +213,8 @@ describe("readiness evaluator", () => {
     expect(() => evaluateReadiness(input(graph([root, node("pn_a", "succeeded"), node("pn_p", "pending")], [edge("pn_a", "pn_p", "fan_in")])))).toThrow(/receives a fan_in/);
   });
 
-  it("defers later-phase Patterns and retry edges instead of scheduling them, and decides route and parallel nodes like any other", () => {
-    expect(SUPPORTED_PATTERNS).toEqual(["single", "chain", "route", "parallel"]);
+  it("defers the later-phase Pattern and retry edges instead of scheduling them, and decides route, parallel, and coordinator_worker nodes like any other", () => {
+    expect(SUPPORTED_PATTERNS).toEqual(["single", "chain", "route", "parallel", "coordinator_worker"]);
     expect(SUPPORTED_EDGE_TYPES).toEqual(["sequence", "branch", "fan_in"]);
     const done = node("pn_done", "succeeded");
     const chain = node("pn_chain", "pending", { pattern: "chain" });
@@ -227,7 +227,7 @@ describe("readiness evaluator", () => {
     expect(decisions.pn_chain).toEqual({ kind: "become_ready", nodeId: "pn_chain", dependencyFailures: [] });
     expect(decisions.pn_parallel).toEqual({ kind: "become_ready", nodeId: "pn_parallel", dependencyFailures: [] });
     expect(decisions.pn_route).toEqual({ kind: "become_ready", nodeId: "pn_route", dependencyFailures: [] });
-    expect(decisions.pn_cw).toEqual({ kind: "deferred", nodeId: "pn_cw", reason: "later_phase_pattern", pattern: "coordinator_worker", edgeTypes: ["sequence"] });
+    expect(decisions.pn_cw).toEqual({ kind: "become_ready", nodeId: "pn_cw", dependencyFailures: [] });
     expect(decisions.pn_eo).toEqual({ kind: "deferred", nodeId: "pn_eo", reason: "later_phase_pattern", pattern: "evaluator_optimizer", edgeTypes: ["sequence"] });
     expect(decisions.pn_retried).toEqual({ kind: "deferred", nodeId: "pn_retried", reason: "later_phase_edge", pattern: "single", edgeTypes: ["retry"] });
     expect(() => edgeActivation(input(graph([root, done, retried], [edge("pn_done", "pn_retried", "retry")])), edge("pn_done", "pn_retried", "retry"))).toThrow(/later phase/);

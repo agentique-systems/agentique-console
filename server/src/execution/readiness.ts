@@ -34,6 +34,9 @@
  * - `retry(round)`: deferred to a later phase; the evaluator never invents
  *   its semantics.
  *
+ * Only the `evaluator_optimizer` Pattern remains deferred; every other
+ * Pattern has a runner.
+ *
  * A pending pattern node with no predecessors becomes ready; with every edge
  * inactive it is skipped; with a failed edge it is skipped unless it was
  * compiled with `runOnDependencyFailure`, in which case it becomes ready with
@@ -54,7 +57,7 @@ import {
 } from "@agentique-console/core";
 
 /** The Patterns whose runners exist; every other Pattern is deferred, never falsely scheduled. */
-export const SUPPORTED_PATTERNS: readonly Pattern[] = ["single", "chain", "route", "parallel"];
+export const SUPPORTED_PATTERNS: readonly Pattern[] = ["single", "chain", "route", "parallel", "coordinator_worker"];
 
 /** The edge types whose readiness semantics are implemented; `retry` is deferred. */
 export const SUPPORTED_EDGE_TYPES: readonly PlanEdgeType[] = ["sequence", "branch", "fan_in"];

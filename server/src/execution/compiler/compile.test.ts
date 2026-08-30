@@ -374,7 +374,10 @@ describe("coordinator_worker (rule 6, invariant 14)", () => {
     expect(rawSourceRejections({ version: 1, expressions: [nested] }).map((r) => r.code)).toEqual(["nested_coordinator_worker", "nested_coordinator_worker"]);
     const composite = { pattern: "coordinator_worker", coordinator: { agentDefinitionRevisionId: agentA }, worker: { pattern: "chain", steps: [] } };
     expect(rawSourceRejections({ version: 1, expressions: [composite] })[0]).toMatchObject({ code: "nested_coordinator_worker", path: "$/expressions/0/worker" });
-    expect(rejection([coordinatorWorker({ maxTasks: 1, maxConcurrentWorkers: 2, maxCoordinatorInvocations: 1 })])[0]).toMatchObject({ code: "invalid_pattern_bounds" });
+    expect(rejection([coordinatorWorker({ maxTasks: 1, maxConcurrentWorkers: 2, maxCoordinatorInvocations: 2 })])[0]).toMatchObject({ code: "invalid_pattern_bounds" });
+    // A useful Coordinator lifecycle needs a decompose and a synthesize turn: fewer than two logical turns can never complete.
+    expect(rejection([coordinatorWorker({ maxTasks: 4, maxConcurrentWorkers: 2, maxCoordinatorInvocations: 1 })])[0]).toMatchObject({ code: "invalid_pattern_bounds", message: expect.stringMatching(/maxCoordinatorInvocations 1/) });
+    expect(compile([coordinatorWorker({ maxTasks: 4, maxConcurrentWorkers: 2, maxCoordinatorInvocations: 2 })]).nodes).toHaveLength(1);
   });
 
   it("rejects an explicit join and unknown Patterns, keeping exactly six (invariant 4)", () => {
