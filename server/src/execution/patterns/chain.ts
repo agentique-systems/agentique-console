@@ -19,8 +19,9 @@
  * - A failed step fails the node and no later step Invocation is created;
  *   no "skipped step" records exist for inline steps.
  * - The final step's result Artifacts are the node's output; earlier
- *   steps' Artifacts remain historical. Gate criteria yield
- *   `awaiting_gate_phase` instead of success.
+ *   steps' Artifacts remain historical. With Gate criteria the final step's
+ *   integrated result is the `node_exit` Gate's candidate (execution-model
+ *   §10): the shared Gate engine judges it without rerunning any step.
  * Every action is idempotent: repeated reconciliation creates no duplicate
  * Invocation, Handoff, integration, or transition.
  */
@@ -64,6 +65,22 @@ export class ChainPatternRunner {
 
   markWaiting(nodeId: PlanNodeId, expectedRevisionNumber: number, reason: "provider_capacity" | "budget", options?: WriteOptions): PatternRunnerOutcome {
     return this.engine.markWaiting(nodeId, expectedRevisionNumber, reason, options);
+  }
+
+  openGate(nodeId: PlanNodeId, expectedRevisionNumber: number, options?: WriteOptions): PatternRunnerOutcome {
+    return this.engine.openGate(nodeId, expectedRevisionNumber, options);
+  }
+
+  verifyGate(nodeId: PlanNodeId, expectedRevisionNumber: number, options?: WriteOptions): Promise<PatternRunnerOutcome> {
+    return this.engine.verifyGate(nodeId, expectedRevisionNumber, options);
+  }
+
+  prepareGateEvaluator(nodeId: PlanNodeId, expectedRevisionNumber: number, options?: WriteOptions): PatternRunnerOutcome {
+    return this.engine.prepareGateEvaluator(nodeId, expectedRevisionNumber, options);
+  }
+
+  settleGate(nodeId: PlanNodeId, expectedRevisionNumber: number, options?: WriteOptions): PatternRunnerOutcome {
+    return this.engine.settleGate(nodeId, expectedRevisionNumber, options);
   }
 
   /** The chain's current step from persisted positions: the latest Invocation at the highest step that has one, or `null` before step 0. */

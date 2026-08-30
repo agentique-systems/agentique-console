@@ -35,7 +35,10 @@
  * With an aggregation, the index is delivered through one canonical
  * Handoff, the aggregation's Changeset is integrated before settlement, its
  * result Artifacts are the node's output, and its failure fails the node.
- * Without one, the index Artifact is the node's output.
+ * Without one, the index Artifact is the node's output. With Gate criteria
+ * that output is the candidate of the node's `node_exit` Gate
+ * (execution-model §10), which the shared Gate engine judges; an index
+ * candidate is created inside the Gate's opening transaction.
  */
 import {
   canonicalParallelIndex,
@@ -55,6 +58,7 @@ import {
   type Timestamp,
 } from "@agentique-console/core";
 import type { WriteOptions } from "../../persistence/stores/support.ts";
+import type { GateCandidateSource } from "../gates.ts";
 import { activeInvocationAdvice, blockedOn, blockingDecisionOf, outstandingChangesetOf, PatternNodeSupport, type NodeAdvice, type PatternRunnerDependencies, type PatternRunnerOutcome } from "./support.ts";
 
 const AGGREGATION: PatternPosition = { kind: "parallel_aggregation" };
@@ -116,13 +120,17 @@ export class ParallelPatternRunner {
     if (this.nextIntegrable(state) !== null) return { kind: "settle", invocationId: this.nextIntegrable(state)!.id };
     if (state.items.some((s) => s.kind === "blocked" && s.decisionStatus === "superseded")) return { kind: "settle", invocationId: null };
     if (state.items.every((s) => s.kind === "done")) {
-      if (node.shape.pattern !== "parallel" || node.shape.aggregate === null) return { kind: "settle", invocationId: null };
+      if (node.shape.pattern !== "parallel" || node.shape.aggregate === null) {
+        // Without an aggregation the index is the candidate: with Gate criteria and a met policy the Gate engine takes over.
+        if (node.gateAcceptanceCriterionIds.length > 0 && this.policyMet(node, state)) return this.support.gates.advice(node, this.gateSource(node), now);
+        return { kind: "settle", invocationId: null };
+      }
       const aggregation = state.aggregation;
       if (aggregation === null) return { kind: "settle", invocationId: null };
       if (!INVOCATION_MACHINE.isTerminal(aggregation.status)) return activeInvocationAdvice(this.deps.executor, aggregation, now);
       const blocked = blockedOn(stores, aggregation);
       if (blocked !== null && blocked.status === "resolved") return { kind: "start_position", position: AGGREGATION };
-      if (aggregation.status === "succeeded" && aggregation.result?.status === "completed" && outstandingChangesetOf(stores, aggregation) === null && node.gateAcceptanceCriterionIds.length > 0) return { kind: "awaiting_gate_phase" };
+      if (aggregation.status === "succeeded" && aggregation.result?.status === "completed" && outstandingChangesetOf(stores, aggregation) === null && node.gateAcceptanceCriterionIds.length > 0) return this.support.gates.advice(node, this.gateSource(node), now);
       return { kind: "settle", invocationId: aggregation.id };
     }
     const inFlight = advices.find((a) => a.kind === "attempt_in_flight");
@@ -279,13 +287,13 @@ export class ParallelPatternRunner {
       return { kind: "no_change" };
     }
     const entries = state.items.map((s) => (s.kind === "done" ? s.entry : null)).filter((e): e is ParallelIndexEntry => e !== null);
-    const succeeded = entries.filter((e) => e.outcome === "succeeded").length;
-    const policyMet = node.shape.pattern === "parallel" && (node.shape.requireAll ? succeeded === entries.length : succeeded > 0);
+    const policyMet = this.policyMet(node, state);
     if (node.shape.pattern !== "parallel") throw new Error("unreachable");
     if (node.shape.aggregate === null) {
+      // With Gate criteria and a met policy the index is created in the Gate's opening transaction, which consumes it.
+      if (policyMet && node.gateAcceptanceCriterionIds.length > 0) return { kind: "no_change" };
       const index = this.createIndex(node, entries, options);
       if (!policyMet) return this.support.failNow(node, "parallel_items_failed", options, [index.id]);
-      if (node.gateAcceptanceCriterionIds.length > 0) return { kind: "awaiting_gate_phase" };
       return this.support.succeedNow(node, [index.id], options, current);
     }
     const existing = this.support.router.parallelIndexHandoff(node.runId, node.id);
@@ -316,12 +324,60 @@ export class ParallelPatternRunner {
         if (result.status === "failed") return this.support.failNow(node, "result_failed", options);
         if (result.status === "blocked") return blockingDecisionOf(stores, aggregation) !== null ? this.support.wait(node, "decision", options) : this.support.failNow(node, "result_blocked", options);
         if (outstandingChangesetOf(stores, aggregation) !== null) return { kind: "no_change" };
-        if (node.gateAcceptanceCriterionIds.length > 0) return { kind: "awaiting_gate_phase" };
+        // With Gate criteria the integrated aggregation result is the Gate candidate; the Gate engine settles the node.
+        if (node.gateAcceptanceCriterionIds.length > 0) return { kind: "no_change" };
         return this.support.succeedNow(node, result.artifactIds, options, current);
       }
       default:
         throw new Error(`unreachable: Invocation ${aggregation.id} is ${aggregation.status}`);
     }
+  }
+
+  /** Whether the done items satisfy `requireAll`. */
+  private policyMet(node: PatternPlanNode, state: ParallelState): boolean {
+    if (node.shape.pattern !== "parallel") throw new Error("unreachable");
+    const entries = state.items.map((s) => (s.kind === "done" ? s.entry : null)).filter((e): e is ParallelIndexEntry => e !== null);
+    const succeeded = entries.filter((e) => e.outcome === "succeeded").length;
+    return node.shape.requireAll ? succeeded === entries.length : succeeded > 0;
+  }
+
+  /**
+   * The Gate candidate of a parallel node (execution-model §10): the aggregation's completed, integrated result
+   * Artifacts, or — without an aggregation — the one index Artifact, created inside the Gate's opening transaction so
+   * that the transaction consuming it is the one that pins it. Remediated by the root Orchestrator.
+   */
+  private gateSource(node: PatternPlanNode): GateCandidateSource {
+    return {
+      owner: "root",
+      candidate: (options) => {
+        if (node.shape.pattern !== "parallel" || node.gateAcceptanceCriterionIds.length === 0) return null;
+        const state = this.state(node);
+        if (!state.items.every((s) => s.kind === "done") || !this.policyMet(node, state)) return null;
+        if (node.shape.aggregate === null) {
+          const entries = state.items.map((s) => (s.kind === "done" ? s.entry : null)).filter((e): e is ParallelIndexEntry => e !== null);
+          return [this.createIndex(node, entries, options).id];
+        }
+        const aggregation = state.aggregation;
+        if (aggregation === null || aggregation.status !== "succeeded" || aggregation.result?.status !== "completed" || outstandingChangesetOf(this.deps.stores, aggregation) !== null) return null;
+        return [...aggregation.result.artifactIds];
+      },
+    };
+  }
+
+  openGate(nodeId: PlanNodeId, expectedRevisionNumber: number, options: WriteOptions = {}): PatternRunnerOutcome {
+    return this.support.gates.open(nodeId, expectedRevisionNumber, this.gateSource(this.support.node(nodeId)), options);
+  }
+
+  verifyGate(nodeId: PlanNodeId, expectedRevisionNumber: number, options: WriteOptions = {}): Promise<PatternRunnerOutcome> {
+    return this.support.gates.verify(nodeId, expectedRevisionNumber, this.gateSource(this.support.node(nodeId)), options);
+  }
+
+  prepareGateEvaluator(nodeId: PlanNodeId, expectedRevisionNumber: number, options: WriteOptions = {}): PatternRunnerOutcome {
+    return this.support.gates.prepareEvaluator(nodeId, expectedRevisionNumber, this.gateSource(this.support.node(nodeId)), options);
+  }
+
+  settleGate(nodeId: PlanNodeId, expectedRevisionNumber: number, options: WriteOptions = {}): PatternRunnerOutcome {
+    return this.support.gates.settle(nodeId, expectedRevisionNumber, this.gateSource(this.support.node(nodeId)), options);
   }
 
   /** The one canonical index Artifact, created in the transaction that consumes it. */
@@ -361,6 +417,8 @@ export class ParallelPatternRunner {
       if (advice.kind !== "waiting" || !advice.cleared) return { kind: "no_change" };
       const running = stores.plans.transitionNode(node.id, { to: "running" }, options) as PatternPlanNode;
       if (reason !== "decision") return { kind: "resumed", reason };
+      const gated = this.support.resumeGateEvaluator(running, options);
+      if (gated !== null) return gated;
       const candidates = [...state.items.flatMap((s) => ("invocation" in s ? [s.invocation] : [])), ...(state.aggregation === null ? [] : [state.aggregation])];
       const blocked = candidates.find((i) => INVOCATION_MACHINE.isTerminal(i.status) && (blockedOn(stores, i)?.status ?? "open") !== "open");
       if (!blocked) return { kind: "resumed", reason };

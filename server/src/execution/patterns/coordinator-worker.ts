@@ -74,6 +74,7 @@ import {
   type Timestamp,
 } from "@agentique-console/core";
 import type { WriteOptions } from "../../persistence/stores/support.ts";
+import type { GateCandidateSource } from "../gates.ts";
 import { logicalTurnInvocationIds } from "../runtime-tools.ts";
 import { projectNodeTasks, type TaskProjection } from "../task-projection.ts";
 import { activeInvocationAdvice, blockedOn, blockingDecisionOf, outstandingChangesetOf, PatternNodeSupport, type NodeAdvice, type PatternRunnerDependencies, type PatternRunnerOutcome } from "./support.ts";
@@ -144,8 +145,8 @@ export class CoordinatorWorkerPatternRunner {
     if (this.turnNeedsSettlement(state)) {
       const decision = blockedOn(stores, turn);
       if (decision !== null && decision.status === "resolved") return { kind: "start_position", position: TURN, turn: turn.purpose as CoordinatorPurpose };
-      // Synthesis complete and integrated on a node with Gate criteria: work is done; the Gate phase is a later phase.
-      if (turn.purpose === "synthesize" && turn.status === "succeeded" && turn.result?.status === "completed" && outstandingChangesetOf(stores, turn) === null && state.node.gateAcceptanceCriterionIds.length > 0) return { kind: "awaiting_gate_phase" };
+      // Synthesis complete and integrated on a node with Gate criteria: the synthesis is the candidate of the node's node_exit Gate.
+      if (this.gateSource(state).candidate({}) !== null) return this.support.gates.advice(state.node, this.gateSource(state), now);
       return { kind: "settle", invocationId: turn.id };
     }
     // 2. The Task projection: readiness and dependency blocking, and Workers that ended without reporting their Task.
@@ -357,7 +358,8 @@ export class CoordinatorWorkerPatternRunner {
             case "replan":
               return this.failNode(state, "coordinator_no_progress", options);
             case "synthesize": {
-              if (node.gateAcceptanceCriterionIds.length > 0) return { kind: "awaiting_gate_phase" };
+              // With Gate criteria the integrated synthesis is the Gate candidate; the Gate engine settles the node.
+              if (node.gateAcceptanceCriterionIds.length > 0) return { kind: "no_change" };
               return this.support.succeedNow(node, result.artifactIds, options, current);
             }
             default:
@@ -520,6 +522,53 @@ export class CoordinatorWorkerPatternRunner {
   }
 
   // ---------------------------------------------------------------------------
+  // The node_exit Gate (execution-model §10)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * The Gate candidate of a coordinator_worker node: the latest logical `synthesize` turn's completed, integrated result
+   * Artifacts, `null` before then. Remediation is the Coordinator's own: a failed Gate joins its blocker frontier, and a
+   * candidate is fresh for the next cycle only once a further synthesis exists (one logical synthesize turn per Gate).
+   */
+  private gateSource(state: CoordinatorState): GateCandidateSource {
+    const { stores } = this.deps;
+    const node = state.node;
+    const turn = state.latestTurn;
+    const synthesized = turn !== null && turn.purpose === "synthesize" && turn.status === "succeeded" && turn.result?.status === "completed" && outstandingChangesetOf(stores, turn) === null;
+    return {
+      owner: "coordinator",
+      candidate: () => (node.gateAcceptanceCriterionIds.length > 0 && synthesized ? [...turn.result!.artifactIds] : null),
+      fresh: () => this.logicalSynthesisTurns(state) > stores.gates.listByPlanNode(node.id).length,
+    };
+  }
+
+  /** Logical `synthesize` turns of the node: approval successors continue their predecessor's turn and count once. */
+  private logicalSynthesisTurns(state: CoordinatorState): number {
+    const byId = new Map(state.turns.map((t) => [t.id, t] as const));
+    return state.turns.filter((t) => t.purpose === "synthesize" && (t.continuedFromInvocationId === null || byId.get(t.continuedFromInvocationId)?.status !== "blocked")).length;
+  }
+
+  openGate(nodeId: PlanNodeId, expectedRevisionNumber: number, options: WriteOptions = {}): PatternRunnerOutcome {
+    const node = this.support.node(nodeId);
+    return this.support.gates.open(nodeId, expectedRevisionNumber, this.gateSource(this.state(node)), options);
+  }
+
+  verifyGate(nodeId: PlanNodeId, expectedRevisionNumber: number, options: WriteOptions = {}): Promise<PatternRunnerOutcome> {
+    const node = this.support.node(nodeId);
+    return this.support.gates.verify(nodeId, expectedRevisionNumber, this.gateSource(this.state(node)), options);
+  }
+
+  prepareGateEvaluator(nodeId: PlanNodeId, expectedRevisionNumber: number, options: WriteOptions = {}): PatternRunnerOutcome {
+    const node = this.support.node(nodeId);
+    return this.support.gates.prepareEvaluator(nodeId, expectedRevisionNumber, this.gateSource(this.state(node)), options);
+  }
+
+  settleGate(nodeId: PlanNodeId, expectedRevisionNumber: number, options: WriteOptions = {}): PatternRunnerOutcome {
+    const node = this.support.node(nodeId);
+    return this.support.gates.settle(nodeId, expectedRevisionNumber, this.gateSource(this.state(node)), options);
+  }
+
+  // ---------------------------------------------------------------------------
   // Waiting and resuming
   // ---------------------------------------------------------------------------
 
@@ -545,6 +594,8 @@ export class CoordinatorWorkerPatternRunner {
       if (advice.kind !== "waiting" || !advice.cleared) return { kind: "no_change" };
       const running = stores.plans.transitionNode(node.id, { to: "running" }, options) as PatternPlanNode;
       if (reason !== "decision") return { kind: "resumed", reason };
+      const gated = this.support.resumeGateEvaluator(running, options);
+      if (gated !== null) return gated;
       const turn = state.latestTurn;
       if (turn !== null && INVOCATION_MACHINE.isTerminal(turn.status)) {
         const decision = blockedOn(stores, turn);

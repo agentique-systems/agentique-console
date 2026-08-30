@@ -37,6 +37,7 @@ import {
   RUN_MACHINE,
   type AttemptId,
   type CoordinatorPurpose,
+  type GateId,
   type InvocationId,
   type Pattern,
   type PatternPosition,
@@ -46,6 +47,7 @@ import {
   type RunId,
   type RunStatus,
   type RunWaitReason,
+  type TaskId,
   type Timestamp,
 } from "@agentique-console/core";
 import type { PersistenceContext } from "../persistence/context.ts";
@@ -69,6 +71,14 @@ export type SchedulerAction =
   | { kind: "execute_invocation"; nodeId: PlanNodeId; invocationId: InvocationId; worktrees: number }
   /** An evaluator_optimizer round's deterministic Acceptance Criteria run now, outside every transaction, through the check port. */
   | { kind: "verify_node"; nodeId: PlanNodeId; round: number }
+  /** A node whose candidate is complete and integrated opens its next `node_exit` Gate (execution-model §10). */
+  | { kind: "open_node_gate"; nodeId: PlanNodeId }
+  /** The open Gate's deterministic Acceptance Criteria run now, outside every transaction, through the check port. */
+  | { kind: "run_gate_checks"; nodeId: PlanNodeId; gateId: GateId }
+  /** The open Gate's one read-only Evaluator Invocation is prepared. */
+  | { kind: "prepare_gate_evaluator"; nodeId: PlanNodeId; gateId: GateId }
+  /** The Gate's rows imply a consequence: verdicts recorded, the Gate closed, the node settled or failed, or its remediation Task created. */
+  | { kind: "settle_node_gate"; nodeId: PlanNodeId; gateId: GateId }
   | { kind: "settle_node"; nodeId: PlanNodeId; invocationId: InvocationId | null }
   /** A `ready` join executes deterministically: policy, index Artifact, terminal transition, edge Handoffs — in one transaction. */
   | { kind: "settle_join"; nodeId: PlanNodeId }
@@ -89,8 +99,15 @@ export interface WaitingCondition {
 
 export interface DeferredWork {
   nodeId: PlanNodeId;
-  reason: "awaiting_gate_phase" | "awaiting_allocation_extension_phase";
+  reason: "awaiting_allocation_extension_phase";
   pattern: Pattern | null;
+}
+
+/** A node whose failed `node_exit` Gate is being remediated by its owner (the root Orchestrator); no action of its own. */
+export interface RemediatingNode {
+  nodeId: PlanNodeId;
+  gateId: GateId;
+  taskId: TaskId;
 }
 
 export interface NodeProjection {
@@ -111,6 +128,8 @@ export interface SchedulerProjection {
   actions: SchedulerAction[];
   waiting: WaitingCondition[];
   deferred: DeferredWork[];
+  /** Nodes whose failed Gate awaits its owner's remediation. */
+  remediating: RemediatingNode[];
   /** Ready nodes (or further positions) not started this pass because the Run's `maxConcurrency` is reached; they start as active Invocations end. */
   limited: PlanNodeId[];
   /** Invocations whose Attempt is executing in this process. */
@@ -135,6 +154,7 @@ export interface SchedulerOutcome {
   executed: AttemptId[];
   waiting: WaitingCondition[];
   deferred: DeferredWork[];
+  remediating: RemediatingNode[];
   wakeAt: Timestamp | null;
   failure: { message: string } | null;
 }
@@ -185,12 +205,13 @@ export class RunScheduler {
     const run = this.stores.runs.get(runId);
     const graph = this.stores.plans.currentGraph(runId);
     const base = { runId, revisionNumber: graph.revisionNumber, run: { status: run.status, waitReason: run.waitReason } };
-    if (RUN_MACHINE.isTerminal(run.status)) return { ...base, nodes: [], actions: [], waiting: [], deferred: [], limited: [], inFlight: [], wakeAt: null, concurrency: { active: 0, max: run.budget.maxConcurrency }, stop: "run_terminal" };
+    if (RUN_MACHINE.isTerminal(run.status)) return { ...base, nodes: [], actions: [], waiting: [], deferred: [], remediating: [], limited: [], inFlight: [], wakeAt: null, concurrency: { active: 0, max: run.budget.maxConcurrency }, stop: "run_terminal" };
     const readiness = new Map(evaluateReadiness(projectReadinessInput(this.stores, graph)).decisions.map((d) => [d.nodeId, d] as const));
     const nodes: NodeProjection[] = [];
     const actions: SchedulerAction[] = [];
     const waiting: WaitingCondition[] = [];
     const deferred: DeferredWork[] = [];
+    const remediating: RemediatingNode[] = [];
     const limited: PlanNodeId[] = [];
     // Every Attempt of the Run executing in this process, from the executor's record, whatever its node advises.
     const inFlight = [...new Set(this.executor.inFlight().map((a) => this.stores.invocations.getAttempt(a)).filter((a) => a.runId === runId).map((a) => a.invocationId))].sort();
@@ -289,6 +310,27 @@ export class RunScheduler {
         case "verify":
           actions.push({ kind: "verify_node", nodeId: node.id, round: advice.round });
           break;
+        case "open_gate":
+          actions.push({ kind: "open_node_gate", nodeId: node.id });
+          break;
+        case "verify_gate":
+          actions.push({ kind: "run_gate_checks", nodeId: node.id, gateId: advice.gateId });
+          break;
+        case "prepare_gate_evaluator":
+          if (max !== null && active >= max) {
+            limited.push(node.id);
+            break;
+          }
+          if (!withinNodeLimit(node)) break;
+          active += 1;
+          actions.push({ kind: "prepare_gate_evaluator", nodeId: node.id, gateId: advice.gateId });
+          break;
+        case "settle_gate":
+          actions.push({ kind: "settle_node_gate", nodeId: node.id, gateId: advice.gateId });
+          break;
+        case "awaiting_remediation":
+          remediating.push({ nodeId: node.id, gateId: advice.gateId, taskId: advice.taskId });
+          break;
         case "waiting":
           if (advice.cleared) actions.push({ kind: "resume_node", nodeId: node.id, reason: advice.reason });
           else {
@@ -296,7 +338,6 @@ export class RunScheduler {
             wakeAt = earliest(wakeAt, advice.wakeAt);
           }
           break;
-        case "awaiting_gate_phase":
         case "awaiting_allocation_extension_phase":
           deferred.push({ nodeId: node.id, reason: advice.kind, pattern: node.pattern });
           break;
@@ -322,7 +363,7 @@ export class RunScheduler {
       actions.push({ kind: "wait_run", reason: RUN_WAIT_REASONS_BY_NODE[waiting[0]!.reason] });
     }
     const stop: SchedulerProjection["stop"] = waiting.length > 0 || inFlight.length > 0 || limited.length > 0 || wakeAt !== null ? "waiting" : deferred.length > 0 ? "unsupported" : "quiescent";
-    return { ...base, nodes, actions, waiting, deferred, limited, inFlight, wakeAt, concurrency: { active, max }, stop };
+    return { ...base, nodes, actions, waiting, deferred, remediating, limited, inFlight, wakeAt, concurrency: { active, max }, stop };
   }
 
   private capacityRefusal(runId: RunId, invocationId: InvocationId) {
@@ -392,7 +433,7 @@ export class RunScheduler {
         // A projection that cannot be computed (a missing or contradictory condition fact) is an infrastructure failure, never a guess.
         finalFailure = finalFailure ?? failureOf(error);
       }
-      return { runId, stop: finalFailure !== null ? "infrastructure_failure" : stop, actions, executed, waiting: projection?.waiting ?? [], deferred: projection?.deferred ?? [], wakeAt: projection?.wakeAt ?? null, failure: finalFailure };
+      return { runId, stop: finalFailure !== null ? "infrastructure_failure" : stop, actions, executed, waiting: projection?.waiting ?? [], deferred: projection?.deferred ?? [], remediating: projection?.remediating ?? [], wakeAt: projection?.wakeAt ?? null, failure: finalFailure };
     };
     for (;;) {
       this.executor.enforceDeadlines(this.ctx.clock());
@@ -448,6 +489,15 @@ export class RunScheduler {
       case "verify_node":
         // Deterministic checks are external like a Changeset application: outside every transaction, recorded afterwards.
         return this.runners.evaluatorOptimizer.verify(action.nodeId, revision, meta);
+      case "open_node_gate":
+        return runnerFor(this.runners, this.patternOf(action.nodeId)).openGate(action.nodeId, revision, meta);
+      case "run_gate_checks":
+        // Gate checks are external like an optimizer round's: outside every transaction, recorded afterwards.
+        return runnerFor(this.runners, this.patternOf(action.nodeId)).verifyGate(action.nodeId, revision, meta);
+      case "prepare_gate_evaluator":
+        return runnerFor(this.runners, this.patternOf(action.nodeId)).prepareGateEvaluator(action.nodeId, revision, meta);
+      case "settle_node_gate":
+        return runnerFor(this.runners, this.patternOf(action.nodeId)).settleGate(action.nodeId, revision, meta);
       case "settle_node":
         return runnerFor(this.runners, this.patternOf(action.nodeId)).settle(action.nodeId, revision, meta);
       case "settle_join":

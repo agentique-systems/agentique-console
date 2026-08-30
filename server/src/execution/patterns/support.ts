@@ -9,8 +9,10 @@
  * Pattern runner never talks to a provider: it owns its node's lifecycle in
  * short root transactions — revalidating the current revision, membership,
  * node status, and active Invocations inside each — and returns closed,
- * typed outcomes. Integration of a Changeset is the one external step,
- * awaited outside every transaction through the integration service.
+ * typed outcomes. Integration of a Changeset and a Gate's deterministic checks are the
+ * external steps, awaited outside every transaction through the integration
+ * and check services; the `node_exit` Gate phase itself lives in
+ * `../gates.ts` and is reached through `PatternNodeSupport.gates`.
  *
  * Everything here is derived from canonical rows: Pattern positions,
  * Invocations and their results, Changesets, Handoffs by key, Decisions,
@@ -24,21 +26,21 @@ import {
   ConflictError,
   InvariantViolationError,
   INVOCATION_MACHINE,
-  isIdOfKind,
   PATTERN_POSITION_BINDINGS,
   PLAN_NODE_MACHINE,
   operationAt,
   patternPositionKey,
   ROOT_SOURCE_PATH,
   TASK_MACHINE,
+  type AcceptanceCriterionId,
   type ArtifactId,
   type BudgetReservationId,
-  type Changeset,
   type CompiledOperation,
   type CoordinatorPurpose,
   type Decision,
   type DecisionId,
   type EvaluationId,
+  type GateId,
   type HandoffId,
   type Invocation,
   type InvocationId,
@@ -53,6 +55,7 @@ import {
   type PlanNodeId,
   type PlanNodeWaitReason,
   type RunId,
+  type SnapshotId,
   type Task,
   type TaskId,
   type Timestamp,
@@ -62,8 +65,11 @@ import type { Stores } from "../../persistence/stores/index.ts";
 import type { WriteOptions } from "../../persistence/stores/support.ts";
 import type { AcceptanceCheckService } from "../acceptance-checks.ts";
 import type { AttemptExecutor } from "../attempt-executor.ts";
+import { NodeExitGates, type GateCandidateSource } from "../gates.ts";
 import type { ResourceGovernor } from "../governor.ts";
 import { HandoffRouter } from "../handoff-routing.ts";
+import { activeInvocationAdvice, blockedOn, blockingDecisionOf, outstandingChangesetOf } from "../invocation-facts.ts";
+import type { AcceptanceCriterionExecutionFailure } from "../ports/acceptance-criterion-execution.ts";
 import type { ChangesetIntegrationService } from "../integration-service.ts";
 import type { InvocationPreparationService } from "../invocation-preparation-service.ts";
 import { currentReadinessInput } from "../readiness-facts.ts";
@@ -88,11 +94,19 @@ export type NodeAdvice =
   | { kind: "retry_not_before"; invocationId: InvocationId; notBefore: Timestamp }
   /** A terminal Invocation's consequences (or a selector Decision's answer) are not yet applied to the node; `invocationId` names the Invocation concerned when one exists. */
   | { kind: "settle"; invocationId: InvocationId | null }
+  /** The Pattern's candidate is complete and integrated: the next `node_exit` Gate cycle may open now (execution-model §10). */
+  | { kind: "open_gate" }
+  /** The open Gate's deterministic Acceptance Criteria are pending: run them (external, outside any transaction). */
+  | { kind: "verify_gate"; gateId: GateId }
+  /** The open Gate's deterministic criteria passed and evaluated criteria remain: prepare its one Evaluator Invocation. */
+  | { kind: "prepare_gate_evaluator"; gateId: GateId }
+  /** The Gate's rows imply a consequence not yet applied: record verdicts, close it, settle the node, create its remediation Task, or fail the node. */
+  | { kind: "settle_gate"; gateId: GateId }
+  /** The Gate failed and its remediation Task is owned elsewhere (the root Orchestrator); the node waits for it. */
+  | { kind: "awaiting_remediation"; gateId: GateId; taskId: TaskId }
   /** The node waits; `cleared` says whether the condition has cleared and `resume` applies; `wakeAt` when a time is known. */
   | { kind: "waiting"; reason: PlanNodeWaitReason; cleared: boolean; wakeAt: Timestamp | null }
   | { kind: "terminal"; status: "succeeded" | "failed" | "cancelled" | "skipped" }
-  /** Work complete; the node has Gate criteria and Gates arrive in a later phase. */
-  | { kind: "awaiting_gate_phase" }
   /** The node's `extend` allocation policy would apply and extension arrives in a later phase. */
   | { kind: "awaiting_allocation_extension_phase" }
   /** The node is not a member of the current revision: its own started work may finish (`settle` says a settlement is due), nothing new starts. */
@@ -104,7 +118,8 @@ export type PatternRunnerOutcome =
   /** An evaluate-only evaluator_optimizer node started its round over its incoming candidate; no Invocation exists until its checks pass. */
   | { kind: "round_opened"; round: number }
   | { kind: "step_prepared"; invocationId: InvocationId; position: PatternPosition; handoffId: HandoffId }
-  | { kind: "successor_prepared"; invocationId: InvocationId; position: PatternPosition; decisionId: DecisionId }
+  /** `position` is `null` for a Gate Evaluator's successor. */
+  | { kind: "successor_prepared"; invocationId: InvocationId; position: PatternPosition | null; decisionId: DecisionId }
   /** A route node recorded its selection; `invocationId` is the inline branch Invocation, or `null` for a composite selection. */
   | { kind: "selected"; evaluationId: EvaluationId; selectedLabel: string; invocationId: InvocationId | null }
   /** A parallel item's or a Coordinator Worker's Changeset was integrated in canonical order. */
@@ -121,12 +136,24 @@ export type PatternRunnerOutcome =
   | { kind: "verification_failed"; round: number; acceptanceCriterionId: string; failure: string; message: string }
   /** An evaluator_optimizer round's overall verdict was recorded from the validated Evaluator result (or derived by the runtime). */
   | { kind: "verdict_recorded"; round: number; verdict: "pass" | "fail" | "inconclusive"; evaluationId: EvaluationId }
+  /** A `node_exit` Gate opened with its pinned Snapshot and candidate (execution-model §10). */
+  | { kind: "gate_opened"; gateId: GateId; ordinal: number; snapshotId: SnapshotId; candidateArtifactIds: ArtifactId[] }
+  /** The Gate's deterministic checks ran: every one passed, or the first failure ended them. */
+  | { kind: "gate_verified"; gateId: GateId; verdict: "pass" | "fail"; evaluationIds: EvaluationId[] }
+  /** A Gate check could not be carried out; nothing was recorded for it and a later pass retries. */
+  | { kind: "gate_verification_failed"; gateId: GateId; acceptanceCriterionId: AcceptanceCriterionId; failure: AcceptanceCriterionExecutionFailure; message: string }
+  | { kind: "gate_evaluator_prepared"; gateId: GateId; invocationId: InvocationId }
+  /** The Evaluator's verdicts were recorded; the Gate stays open until every criterion has one. */
+  | { kind: "gate_evaluations_recorded"; gateId: GateId; evaluationIds: EvaluationId[] }
+  /** The Gate closed `passed` and the node succeeded with the candidate; its edge Handoffs exist. */
+  | { kind: "gate_passed"; gateId: GateId; outputArtifactIds: string[]; handoffIds: HandoffId[] }
+  /** The Gate closed `failed`; its one remediation Task exists (or the node failed on an exhausted cycle bound, reported as `failed`). */
+  | { kind: "gate_failed"; gateId: GateId; remediationTaskId: TaskId | null }
   | { kind: "succeeded"; outputArtifactIds: string[]; handoffIds: HandoffId[] }
   | { kind: "failed"; reason: PlanNodeFailureReason }
   | { kind: "cancelled" }
   | { kind: "waiting"; reason: PlanNodeWaitReason; wakeAt: Timestamp | null }
   | { kind: "resumed"; reason: PlanNodeWaitReason }
-  | { kind: "awaiting_gate_phase" }
   | { kind: "awaiting_allocation_extension_phase" }
   /** The revision, membership, or node state changed since projection; nothing was written. */
   | { kind: "stale"; expectedRevisionNumber: number; currentRevisionNumber: number }
@@ -145,45 +172,7 @@ export interface PatternRunnerDependencies {
   provider: { readonly provider: string };
 }
 
-/** The Decision a `blocked` result names, when its blocker is a Decision id of the Run; otherwise `null`. */
-export function blockingDecisionOf(stores: Stores, invocation: Invocation): Decision | null {
-  if (invocation.status === "blocked" && invocation.blockedByDecisionId !== null) return stores.decisions.get(invocation.blockedByDecisionId);
-  const result = invocation.result;
-  if (invocation.status !== "succeeded" || result === null || result.status !== "blocked" || !isIdOfKind("decision", result.blocker)) return null;
-  try {
-    const decision = stores.decisions.get(result.blocker);
-    return decision.runId === invocation.runId ? decision : null;
-  } catch {
-    return null;
-  }
-}
-
-/** The Changeset of an Invocation that is not yet integrated, if any. */
-export function outstandingChangesetOf(stores: Stores, invocation: Invocation): Changeset | null {
-  return stores.changesets.listByRun(invocation.runId).find((c) => c.invocationId === invocation.id && c.integrationStatus !== "integrated") ?? null;
-}
-
-/** Whether a terminal Invocation is blocked (by status or by a `blocked` result) on a Decision, and that Decision. */
-export function blockedOn(stores: Stores, invocation: Invocation): Decision | null {
-  if (invocation.status === "blocked") return blockingDecisionOf(stores, invocation);
-  if (invocation.status === "succeeded" && invocation.result?.status === "blocked") return blockingDecisionOf(stores, invocation);
-  return null;
-}
-
-/** What the executor says about an active Invocation, as node advice. */
-export function activeInvocationAdvice(executor: AttemptExecutor, invocation: Invocation, now: Timestamp): Extract<NodeAdvice, { kind: "execute" | "attempt_in_flight" | "retry_not_before" }> {
-  const inspection = executor.inspectInvocation(invocation.id, now);
-  if (inspection.next.permitted) return { kind: "execute", invocationId: invocation.id };
-  switch (inspection.next.reason) {
-    case "attempt_active":
-      return { kind: "attempt_in_flight", invocationId: invocation.id };
-    case "retry_not_yet":
-      return { kind: "retry_not_before", invocationId: invocation.id, notBefore: inspection.next.notBefore! };
-    default:
-      // Allocation exhaustion or a refused retry: the executor settles the Invocation on the next execute call.
-      return { kind: "execute", invocationId: invocation.id };
-  }
-}
+export { activeInvocationAdvice, blockedOn, blockingDecisionOf, outstandingChangesetOf } from "../invocation-facts.ts";
 
 /** The outcome of integrating an Invocation's outstanding Changeset, reduced to what a runner acts on. */
 export type IntegrationStep = { kind: "integrated" } | { kind: "conflict" } | { kind: "conflict_unresolved" };
@@ -212,12 +201,15 @@ export interface WaitContext {
 
 export class PatternNodeSupport {
   readonly router: HandoffRouter;
+  /** The `node_exit` Gate engine shared by every runner (execution-model §10). */
+  readonly gates: NodeExitGates;
 
   constructor(
     readonly deps: PatternRunnerDependencies,
     readonly pattern: Pattern,
   ) {
     this.router = new HandoffRouter(deps.stores);
+    this.gates = new NodeExitGates(this);
   }
 
   // ---------------------------------------------------------------------------
@@ -420,6 +412,8 @@ export class PatternNodeSupport {
     const reason = node.waitReason!;
     switch (reason) {
       case "decision": {
+        const evaluator = this.gates.openGateEvaluator(node);
+        if (evaluator !== null && INVOCATION_MACHINE.isTerminal(evaluator.status) && blockedOn(stores, evaluator) !== null && !context.blocked.some((i) => i.id === evaluator.id)) context.blocked.push(evaluator);
         if (context.blocked.length > 0) {
           const cleared = context.blocked.some((invocation) => {
             const decision = blockedOn(stores, invocation);
@@ -467,6 +461,18 @@ export class PatternNodeSupport {
       if (node.status !== "running") return { kind: "stale", expectedRevisionNumber, currentRevisionNumber: expectedRevisionNumber };
       return this.wait(node, reason, options);
     });
+  }
+
+  /**
+   * A `decision` wait whose blocked Invocation is the open Gate's Evaluator: prepares its successor for the same Gate
+   * once the Decision resolved; `null` when the wait belongs to a Pattern position instead.
+   */
+  resumeGateEvaluator(node: PatternPlanNode, options: WriteOptions): PatternRunnerOutcome | null {
+    const evaluator = this.gates.openGateEvaluator(node);
+    if (evaluator === null || !INVOCATION_MACHINE.isTerminal(evaluator.status)) return null;
+    const decision = blockedOn(this.deps.stores, evaluator);
+    if (decision === null || decision.status === "open") return null;
+    return this.gates.prepareEvaluatorSuccessor(node, evaluator, decision, options);
   }
 
   /** Fails the node now (from `running` or `waiting`), failing every owned Task still running on its terminal Invocations. */
@@ -563,9 +569,37 @@ export class SequentialStepEngine {
     if (node.status === "ready" || latest === null) return { kind: "start" };
     if (!INVOCATION_MACHINE.isTerminal(latest.status)) return activeInvocationAdvice(this.deps.executor, latest, now);
     if (latest.status === "succeeded" && latest.result?.status === "completed" && this.isComplete(node, latest)) {
-      return node.gateAcceptanceCriterionIds.length > 0 ? { kind: "awaiting_gate_phase" } : { kind: "settle", invocationId: latest.id };
+      return node.gateAcceptanceCriterionIds.length > 0 ? this.support.gates.advice(node, this.gateSource(node), now) : { kind: "settle", invocationId: latest.id };
     }
     return { kind: "settle", invocationId: latest.id };
+  }
+
+  /** The Gate candidate of a `single` or `chain` node: the final position's completed, integrated result Artifacts; remediated by the root Orchestrator. */
+  gateSource(node: PatternPlanNode): GateCandidateSource {
+    return {
+      owner: "root",
+      candidate: () => {
+        const latest = this.latestInvocation(node);
+        if (latest === null || latest.status !== "succeeded" || latest.result?.status !== "completed" || !this.isComplete(node, latest)) return null;
+        return [...latest.result.artifactIds];
+      },
+    };
+  }
+
+  openGate(nodeId: PlanNodeId, expectedRevisionNumber: number, options: WriteOptions = {}): PatternRunnerOutcome {
+    return this.support.gates.open(nodeId, expectedRevisionNumber, this.gateSource(this.node(nodeId)), options);
+  }
+
+  verifyGate(nodeId: PlanNodeId, expectedRevisionNumber: number, options: WriteOptions = {}): Promise<PatternRunnerOutcome> {
+    return this.support.gates.verify(nodeId, expectedRevisionNumber, this.gateSource(this.node(nodeId)), options);
+  }
+
+  prepareGateEvaluator(nodeId: PlanNodeId, expectedRevisionNumber: number, options: WriteOptions = {}): PatternRunnerOutcome {
+    return this.support.gates.prepareEvaluator(nodeId, expectedRevisionNumber, this.gateSource(this.node(nodeId)), options);
+  }
+
+  settleGate(nodeId: PlanNodeId, expectedRevisionNumber: number, options: WriteOptions = {}): PatternRunnerOutcome {
+    return this.support.gates.settle(nodeId, expectedRevisionNumber, this.gateSource(this.node(nodeId)), options);
   }
 
   /** A waiting node's condition, and whether it has cleared; `latest` is null only for a budget wait before the first Invocation. */
@@ -728,7 +762,8 @@ export class SequentialStepEngine {
     const result = invocation.result!;
     const next = this.nextPosition(node, invocation);
     if (next === null) {
-      if (node.gateAcceptanceCriterionIds.length > 0) return { kind: "awaiting_gate_phase" };
+      // With Gate criteria the candidate is complete and integrated here; the Gate engine opens, checks, and settles from now on.
+      if (node.gateAcceptanceCriterionIds.length > 0) return { kind: "no_change" };
       return this.support.succeedNow(node, result.artifactIds, options);
     }
     const handoff = this.router.ensureChainStepHandoff(node, invocation, options).handoff;
@@ -765,6 +800,8 @@ export class SequentialStepEngine {
       if (advice.kind !== "waiting" || !advice.cleared) return { kind: "no_change" };
       const running = stores.plans.transitionNode(node.id, { to: "running" }, options) as PatternPlanNode;
       if (reason !== "decision") return { kind: "resumed", reason };
+      const gated = this.support.resumeGateEvaluator(running, options);
+      if (gated !== null) return gated;
       const predecessor = this.latestInvocation(running)!;
       return this.support.prepareSuccessor(running, predecessor, blockingDecisionOf(stores, predecessor)!, [], options);
     });

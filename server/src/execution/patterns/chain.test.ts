@@ -184,7 +184,7 @@ describe("ChainPatternRunner", () => {
     }
   });
 
-  it("reports awaiting_gate_phase after the final step when the node has Gate criteria, and does nothing under a stale revision", async () => {
+  it("gates the final step's integrated output without rerunning any step, and does nothing under a stale revision", async () => {
     const h = openRuntimeHarness();
     try {
       const s = seedPlanningRuntime(h);
@@ -198,13 +198,26 @@ describe("ChainPatternRunner", () => {
       const second = await runner.settle(node.id, revisionNumber);
       if (second.kind !== "step_prepared") throw new Error(second.kind);
       await completeStep(h, second.invocationId, "b");
-      expect(await runner.settle(node.id, revisionNumber)).toEqual({ kind: "awaiting_gate_phase" });
+      // The final step's Changeset is integrated by settle; the node stays running for its node_exit Gate.
+      expect(await runner.settle(node.id, revisionNumber)).toEqual({ kind: "no_change" });
       expect(h.stores.plans.getNode(node.id)).toMatchObject({ status: "running", outputArtifactIds: null });
       expect(h.stores.changesets.listByRun(s.created.run.id).map((c) => c.integrationStatus)).toEqual(["integrated", "integrated"]);
-      expect(runner.inspect(node.id)).toEqual({ kind: "awaiting_gate_phase" });
-      expect(await runner.settle(node.id, revisionNumber)).toEqual({ kind: "awaiting_gate_phase" });
+      expect(runner.inspect(node.id)).toEqual({ kind: "open_gate" });
+      expect(await runner.settle(node.id, revisionNumber)).toEqual({ kind: "no_change" });
+      const opened = runner.openGate(node.id, revisionNumber);
+      expect(opened).toMatchObject({ kind: "gate_opened", ordinal: 1, snapshotId: h.stores.runs.get(s.created.run.id).integrationSnapshotId, candidateArtifactIds: h.stores.invocations.get(second.invocationId).result!.artifactIds });
+      if (opened.kind !== "gate_opened") throw new Error(opened.kind);
+      expect(runner.inspect(node.id)).toEqual({ kind: "verify_gate", gateId: opened.gateId });
+      expect(await runner.verifyGate(node.id, revisionNumber)).toMatchObject({ kind: "gate_verified", gateId: opened.gateId, verdict: "pass" });
+      expect(runner.inspect(node.id)).toEqual({ kind: "settle_gate", gateId: opened.gateId });
+      expect(runner.settleGate(node.id, revisionNumber)).toMatchObject({ kind: "gate_passed", gateId: opened.gateId, outputArtifactIds: h.stores.invocations.get(second.invocationId).result!.artifactIds });
+      expect(h.stores.plans.getNode(node.id).status).toBe("succeeded");
+      // No step ran again: two Invocations, one command, one Gate.
       expect(h.stores.invocations.listByPlanNode(node.id)).toHaveLength(2);
-      expect(await runner.settle(node.id, revisionNumber + 1)).toMatchObject({ kind: "stale" });
+      expect(h.criterionExecution.requests).toHaveLength(1);
+      expect(h.stores.gates.listByPlanNode(node.id).map((x) => x.status)).toEqual(["passed"]);
+      expect(await runner.settle(node.id, revisionNumber + 1)).toEqual({ kind: "no_change" });
+      expect(runner.openGate(node.id, revisionNumber + 1)).toMatchObject({ kind: "stale" });
     } finally {
       h.close();
     }

@@ -167,7 +167,7 @@ describe("import boundaries", () => {
   });
 
   it("the scheduler, join settler, and Pattern runners import nothing legacy, poll nothing, and implement only the supported Patterns", () => {
-    const files = [...listFiles("server/src/execution/patterns", isCode), path.join(repoRoot, "server/src/execution/scheduler.ts"), path.join(repoRoot, "server/src/execution/join.ts"), path.join(repoRoot, "server/src/execution/readiness.ts"), path.join(repoRoot, "server/src/execution/readiness-facts.ts"), path.join(repoRoot, "server/src/execution/handoff-routing.ts"), path.join(repoRoot, "server/src/execution/integration-service.ts"), path.join(repoRoot, "server/src/execution/task-projection.ts"), path.join(repoRoot, "server/src/execution/task-proposals.ts"), path.join(repoRoot, "server/src/execution/runtime-tools.ts"), path.join(repoRoot, "server/src/execution/acceptance-checks.ts")];
+    const files = [...listFiles("server/src/execution/patterns", isCode), path.join(repoRoot, "server/src/execution/scheduler.ts"), path.join(repoRoot, "server/src/execution/join.ts"), path.join(repoRoot, "server/src/execution/readiness.ts"), path.join(repoRoot, "server/src/execution/readiness-facts.ts"), path.join(repoRoot, "server/src/execution/handoff-routing.ts"), path.join(repoRoot, "server/src/execution/integration-service.ts"), path.join(repoRoot, "server/src/execution/task-projection.ts"), path.join(repoRoot, "server/src/execution/task-proposals.ts"), path.join(repoRoot, "server/src/execution/runtime-tools.ts"), path.join(repoRoot, "server/src/execution/acceptance-checks.ts"), path.join(repoRoot, "server/src/execution/gates.ts"), path.join(repoRoot, "server/src/execution/invocation-facts.ts")];
     expect(files.length).toBeGreaterThan(5);
     for (const file of files) {
       for (const specifier of importsOf(file)) {
@@ -211,6 +211,12 @@ describe("import boundaries", () => {
     expect(checkService).toMatch(/if \(this\.ctx\.tx\.inTransaction\) throw/);
     expect(checkService).not.toMatch(/journal\.read\(|transcript|TextDecoder|toString\(\)|summary/);
     expect(checkService.slice(checkService.indexOf("export type AcceptanceCheckOutcome"), checkService.indexOf("export class AcceptanceCheckService"))).not.toMatch(/output|bytes|Uint8Array/);
+    // The Gate engine decides every phase from Gate, Evaluation, Invocation, and Task rows: never from a transcript, a result summary, an
+    // open item, an Event, a source path, or a timestamp; and it never reads Artifact content (raw command output stays in the Artifact Store).
+    const gatesEngine = fs.readFileSync(path.join(repoRoot, "server/src/execution/gates.ts"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    expect(gatesEngine).not.toMatch(/journal\.read\(|\.summary|TRANSCRIPT_MEDIA_TYPE|artifacts\.read\(|result\.openItems|result\.blocker|sourcePath|openedAt|closedAt|createdAt|setTimeout|setInterval|TextDecoder/);
+    // The optimizer runner never opens a Gate row: its rounds consume the node's Gate criteria (execution-model §5.6).
+    expect(fs.readFileSync(path.join(repoRoot, "server/src/execution/patterns/evaluator-optimizer.ts"), "utf8")).not.toMatch(/gates\.(open|close)\(|support\.gates\./);
     // A join never touches the executor, the governor, or a provider: no Invocation, Attempt, lease, or Usage.
     const join = fs.readFileSync(path.join(repoRoot, "server/src/execution/join.ts"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
     expect(join).not.toMatch(/executor|governor|provider|invocations\.create|createAttempt|tryAcquire|usage\.record|preparation/);

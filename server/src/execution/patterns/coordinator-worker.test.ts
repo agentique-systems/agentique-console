@@ -346,7 +346,7 @@ describe("CoordinatorWorkerPatternRunner", () => {
     }
   });
 
-  it("keeps a node with Gate criteria in an explicit Gate-phase deferral after synthesis, never marking it succeeded", async () => {
+  it("gates the integrated synthesis output through its node_exit Gate and succeeds the node on a pass", async () => {
     const h = openRuntimeHarness({ governor: WIDE });
     try {
       const s = seedPlanningRuntime(h);
@@ -357,12 +357,16 @@ describe("CoordinatorWorkerPatternRunner", () => {
       const final: { artifactId?: ArtifactId } = {};
       h.provider.script(turn([propose([proposal({ key: "a", requirementIds: [leafIds[0]!] })])]), workerStep(h, { summary: "a", diff: "+a" }), synthesisStep(h, runId, final));
       const outcome = await h.scheduler.advanceRun(runId);
-      expect(outcome.stop).toBe("unsupported");
-      expect(outcome.deferred).toEqual([{ nodeId: node.id, reason: "awaiting_gate_phase", pattern: "coordinator_worker" }]);
-      expect(h.stores.plans.getNode(node.id)).toMatchObject({ status: "running", outputArtifactIds: null });
+      expect(outcome.stop).toBe("quiescent");
+      expect(outcome.deferred).toEqual([]);
+      expect(outcome.actions.map((p) => p.action.kind).filter((k) => k.includes("gate"))).toEqual(["open_node_gate", "run_gate_checks", "settle_node_gate"]);
+      expect(h.stores.plans.getNode(node.id)).toMatchObject({ status: "succeeded", outputArtifactIds: [final.artifactId] });
       expect(h.stores.changesets.listByRun(runId).every((c) => c.integrationStatus === "integrated")).toBe(true);
       expect(turnsOf(h, node).map((t) => t.purpose)).toEqual(["decompose", "synthesize"]);
-      expect(await h.scheduler.advanceRun(runId)).toMatchObject({ stop: "unsupported", actions: [] });
+      const [gate] = h.stores.gates.listByPlanNode(node.id);
+      expect(gate).toMatchObject({ status: "passed", ordinal: 1, candidateArtifactIds: [final.artifactId], snapshotId: h.stores.runs.get(runId).integrationSnapshotId });
+      expect(h.criterionExecution.observed.map((o) => [o.acceptanceCriterionId, o.gateId])).toEqual([[criterion.id, gate!.id]]);
+      expect(await h.scheduler.advanceRun(runId)).toMatchObject({ stop: "quiescent", actions: [] });
       expect(h.provider.requests).toHaveLength(4);
     } finally {
       h.close();

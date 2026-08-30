@@ -406,14 +406,18 @@ describe("SinglePatternRunner", () => {
       h.executionWorkspace.nextChangeset = { afterSnapshot: fakeSnapshot("after", started.invocationId), diff: new TextEncoder().encode("+gated"), empty: false };
       h.provider.script({ kind: "succeed", result: COMPLETED_RESULT });
       await execute(h, started.invocationId);
-      // Work completes canonically (the Changeset is integrated) but the node stays running for the Gate phase; nothing repeats.
-      expect(await runner.settle(node.id, revisionNumber)).toEqual({ kind: "awaiting_gate_phase" });
+      // Work completes canonically (the Changeset is integrated) but the node stays running for its Gate; nothing repeats.
+      expect(await runner.settle(node.id, revisionNumber)).toEqual({ kind: "no_change" });
       expect(nodeState(h, node)).toMatchObject({ status: "running", outputArtifactIds: null });
       expect(h.stores.changesets.listByRun(s.created.run.id)[0]!.integrationStatus).toBe("integrated");
-      expect(runner.inspect(node.id)).toEqual({ kind: "awaiting_gate_phase" });
-      expect(await runner.settle(node.id, revisionNumber)).toEqual({ kind: "awaiting_gate_phase" });
+      expect(runner.inspect(node.id)).toEqual({ kind: "open_gate" });
+      expect(await runner.settle(node.id, revisionNumber)).toEqual({ kind: "no_change" });
       expect(h.integrationWorkspace.requests).toHaveLength(1);
       expect(h.stores.invocations.listByPlanNode(node.id)).toHaveLength(1);
+      const opened = runner.openGate(node.id, revisionNumber);
+      expect(opened).toMatchObject({ kind: "gate_opened", ordinal: 1 });
+      expect(runner.openGate(node.id, revisionNumber)).toEqual({ kind: "no_change" });
+      expect(runner.inspect(node.id)).toMatchObject({ kind: "verify_gate" });
       // The root Orchestrator node is never a worker single.
       expect(() => runner.inspect(s.created.root.id)).toThrow(ConflictError);
       expect(() => runner.start(s.created.root.id, revisionNumber)).toThrow(/root Orchestrator node/);
@@ -424,6 +428,8 @@ describe("SinglePatternRunner", () => {
       const seq = h.ctx.journal.lastSeq();
       expect(runner.start(other.id, revisionNumber)).toEqual({ kind: "stale", expectedRevisionNumber: revisionNumber, currentRevisionNumber: revisionNumber + 1 });
       expect(await runner.settle(node.id, revisionNumber)).toEqual({ kind: "stale", expectedRevisionNumber: revisionNumber, currentRevisionNumber: revisionNumber + 1 });
+      expect(await runner.verifyGate(node.id, revisionNumber)).toMatchObject({ kind: "stale" });
+      expect(runner.settleGate(node.id, revisionNumber)).toMatchObject({ kind: "stale" });
       expect(runner.markWaiting(other.id, revisionNumber, "budget")).toMatchObject({ kind: "stale" });
       expect(h.ctx.journal.lastSeq()).toBe(seq);
       expect(nodeState(h, other).status).toBe("ready");

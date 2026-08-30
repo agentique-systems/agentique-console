@@ -14,9 +14,12 @@
  * 3. `settle`: on a completed result integrate the Changeset, then set the
  *    node's exact output Artifact ids, create the current-revision sequence
  *    Handoffs, and succeed the node — unless it has Gate criteria, in which
- *    case work is complete and `awaiting_gate_phase` is reported; on a
- *    failed Invocation or a failed result fail the node; on cancellation
- *    cancel it with the cause; on an approval block wait on the Decision.
+ *    case the integrated result is the candidate of its `node_exit` Gate
+ *    (execution-model §10), which the shared Gate engine opens, checks,
+ *    judges, and settles through `openGate`, `verifyGate`,
+ *    `prepareGateEvaluator`, and `settleGate`; on a failed Invocation or a
+ *    failed result fail the node; on cancellation cancel it with the cause;
+ *    on an approval block wait on the Decision.
  * 4. `resume`: after the Decision resolves, prepare the successor at the
  *    same position continuing from the blocked Invocation with the typed
  *    resolution input, on a fresh reservation and worktree.
@@ -64,5 +67,21 @@ export class SinglePatternRunner {
 
   markWaiting(nodeId: PlanNodeId, expectedRevisionNumber: number, reason: "provider_capacity" | "budget", options?: WriteOptions): PatternRunnerOutcome {
     return this.engine.markWaiting(nodeId, expectedRevisionNumber, reason, options);
+  }
+
+  openGate(nodeId: PlanNodeId, expectedRevisionNumber: number, options?: WriteOptions): PatternRunnerOutcome {
+    return this.engine.openGate(nodeId, expectedRevisionNumber, options);
+  }
+
+  verifyGate(nodeId: PlanNodeId, expectedRevisionNumber: number, options?: WriteOptions): Promise<PatternRunnerOutcome> {
+    return this.engine.verifyGate(nodeId, expectedRevisionNumber, options);
+  }
+
+  prepareGateEvaluator(nodeId: PlanNodeId, expectedRevisionNumber: number, options?: WriteOptions): PatternRunnerOutcome {
+    return this.engine.prepareGateEvaluator(nodeId, expectedRevisionNumber, options);
+  }
+
+  settleGate(nodeId: PlanNodeId, expectedRevisionNumber: number, options?: WriteOptions): PatternRunnerOutcome {
+    return this.engine.settleGate(nodeId, expectedRevisionNumber, options);
   }
 }

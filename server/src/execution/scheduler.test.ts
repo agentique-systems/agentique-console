@@ -267,7 +267,7 @@ describe("RunScheduler", () => {
     }
   });
 
-  it("defers Gate criteria with a typed stop reason, integrates the root's own Changeset, fails the Run when the root turn fails, and stops on a terminal Run", async () => {
+  it("runs a node's node_exit Gate to a pass in one pass, integrates the root's own Changeset, fails the Run when the root turn fails, and stops on a terminal Run", async () => {
     const h = openRuntimeHarness();
     try {
       const s = seedPlanningRuntime(h);
@@ -291,9 +291,14 @@ describe("RunScheduler", () => {
       const criterion = g.stores.requirements.createAcceptanceCriterion({ conversationId: s.created.run.conversationId, requirementId: null, requirementRevisionId: null, taskId: task.id, check: { kind: "deterministic", command: "npm test", expectedExitCode: 0 } });
       const { nodes } = planNodes(g, s, [single(s, "gated", { gateAcceptanceCriterionIds: [criterion.id] })]);
       const outcome = await g.scheduler.advanceRun(s.created.run.id);
-      expect(outcome.stop).toBe("unsupported");
-      expect(outcome.deferred).toEqual([{ nodeId: nodes[0]!.id, reason: "awaiting_gate_phase", pattern: "single" }]);
-      expect(g.stores.plans.getNode(nodes[0]!.id).status).toBe("running");
+      // The Gate is opened, checked (external), and settled by typed actions; nothing is deferred and the node succeeds.
+      expect(outcome.stop).toBe("quiescent");
+      expect(outcome.deferred).toEqual([]);
+      const kinds = outcome.actions.map((p) => p.action.kind);
+      expect(kinds.slice(kinds.indexOf("open_node_gate"))).toEqual(["open_node_gate", "run_gate_checks", "settle_node_gate"]);
+      expect(outcome.actions.map((p) => p.outcome.kind)).toEqual(expect.arrayContaining(["gate_opened", "gate_verified", "gate_passed"]));
+      expect(g.stores.plans.getNode(nodes[0]!.id).status).toBe("succeeded");
+      expect(g.stores.gates.listByPlanNode(nodes[0]!.id).map((x) => [x.ordinal, x.status])).toEqual([[1, "passed"]]);
       expect(g.stores.invocations.listByPlanNode(nodes[0]!.id)).toHaveLength(1);
       expect((await g.scheduler.advanceRun(s.created.run.id)).actions).toEqual([]);
     } finally {

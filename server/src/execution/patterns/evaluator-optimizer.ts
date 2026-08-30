@@ -479,6 +479,26 @@ export class EvaluatorOptimizerPatternRunner {
     return this.support.markWaiting(nodeId, expectedRevisionNumber, reason, options);
   }
 
+  // ---------------------------------------------------------------------------
+  // Gate boundary: the rounds consume the node's Gate criteria; no `node_exit` Gate is ever opened or advised for this Pattern.
+  // ---------------------------------------------------------------------------
+
+  openGate(nodeId: PlanNodeId, expectedRevisionNumber: number, _options?: WriteOptions): PatternRunnerOutcome {
+    return this.support.staleness(nodeId, expectedRevisionNumber) ?? { kind: "no_change" };
+  }
+
+  async verifyGate(nodeId: PlanNodeId, expectedRevisionNumber: number, _options?: WriteOptions): Promise<PatternRunnerOutcome> {
+    return this.support.staleness(nodeId, expectedRevisionNumber) ?? { kind: "no_change" };
+  }
+
+  prepareGateEvaluator(nodeId: PlanNodeId, expectedRevisionNumber: number, _options?: WriteOptions): PatternRunnerOutcome {
+    return this.support.staleness(nodeId, expectedRevisionNumber) ?? { kind: "no_change" };
+  }
+
+  settleGate(nodeId: PlanNodeId, expectedRevisionNumber: number, _options?: WriteOptions): PatternRunnerOutcome {
+    return this.support.staleness(nodeId, expectedRevisionNumber) ?? { kind: "no_change" };
+  }
+
   /**
    * Clears a wait whose condition has cleared: the node returns to `running`; for a `decision` wait the blocked producer
    * or Evaluator gets its approval successor at the same round position, with the same typed optimizer inputs, so a

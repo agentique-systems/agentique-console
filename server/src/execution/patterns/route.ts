@@ -33,14 +33,18 @@
  * An inline branch behaves like a `single` step: retries stay
  * Invocation-owned, an approval successor continues at the same position
  * with the selection input re-delivered, its Changeset is integrated before
- * the node settles, its result Artifacts are the node's output, and its
- * failure fails the node. Successors are readied by the readiness evaluator
+ * the node settles, its result Artifacts are the node's output (and, with
+ * Gate criteria, the candidate of its `node_exit` Gate, which the shared
+ * Gate engine judges), and its failure fails the node. A composite selection
+ * has no inline output and no Gate of its own; the branch's subgraph carries
+ * its own gated nodes. Successors are readied by the readiness evaluator
  * from the graph plus the recorded selection: an inline selection delivers
  * along the route's `sequence` edges and skips every composite branch; a
  * composite selection delivers through the selected branch's exits only.
  */
 import { INVOCATION_MACHINE, InvariantViolationError, PLAN_NODE_MACHINE, type Decision, type Evaluation, type Invocation, type ManifestInput, type PatternPlanNode, type PatternPosition, type PlanNodeId, type Timestamp } from "@agentique-console/core";
 import type { WriteOptions } from "../../persistence/stores/support.ts";
+import type { GateCandidateSource } from "../gates.ts";
 import { activeInvocationAdvice, blockedOn, blockingDecisionOf, outstandingChangesetOf, PatternNodeSupport, type NodeAdvice, type PatternRunnerDependencies, type PatternRunnerOutcome } from "./support.ts";
 
 const SELECTION: PatternPosition = { kind: "route_selection" };
@@ -81,8 +85,41 @@ export class RoutePatternRunner {
     const branch = state.branch;
     if (branch === null) return { kind: "settle", invocationId: null };
     if (!INVOCATION_MACHINE.isTerminal(branch.status)) return activeInvocationAdvice(this.deps.executor, branch, now);
-    if (branch.status === "succeeded" && branch.result?.status === "completed" && outstandingChangesetOf(this.deps.stores, branch) === null && node.gateAcceptanceCriterionIds.length > 0) return { kind: "awaiting_gate_phase" };
+    if (this.gateSource(node).candidate({}) !== null) return this.support.gates.advice(node, this.gateSource(node), now);
     return { kind: "settle", invocationId: branch.id };
+  }
+
+  /**
+   * The Gate candidate of a route node (execution-model §10): its inline branch's completed, integrated result Artifacts;
+   * `null` before then, and for a composite selection, which delivers through its subgraph's own gated nodes. Remediated
+   * by the root Orchestrator.
+   */
+  private gateSource(node: PatternPlanNode): GateCandidateSource {
+    return {
+      owner: "root",
+      candidate: () => {
+        if (node.gateAcceptanceCriterionIds.length === 0) return null;
+        const branch = this.state(node).branch;
+        if (branch === null || branch.status !== "succeeded" || branch.result?.status !== "completed" || outstandingChangesetOf(this.deps.stores, branch) !== null) return null;
+        return [...branch.result.artifactIds];
+      },
+    };
+  }
+
+  openGate(nodeId: PlanNodeId, expectedRevisionNumber: number, options: WriteOptions = {}): PatternRunnerOutcome {
+    return this.support.gates.open(nodeId, expectedRevisionNumber, this.gateSource(this.support.node(nodeId)), options);
+  }
+
+  verifyGate(nodeId: PlanNodeId, expectedRevisionNumber: number, options: WriteOptions = {}): Promise<PatternRunnerOutcome> {
+    return this.support.gates.verify(nodeId, expectedRevisionNumber, this.gateSource(this.support.node(nodeId)), options);
+  }
+
+  prepareGateEvaluator(nodeId: PlanNodeId, expectedRevisionNumber: number, options: WriteOptions = {}): PatternRunnerOutcome {
+    return this.support.gates.prepareEvaluator(nodeId, expectedRevisionNumber, this.gateSource(this.support.node(nodeId)), options);
+  }
+
+  settleGate(nodeId: PlanNodeId, expectedRevisionNumber: number, options: WriteOptions = {}): PatternRunnerOutcome {
+    return this.support.gates.settle(nodeId, expectedRevisionNumber, this.gateSource(this.support.node(nodeId)), options);
   }
 
   private inspectWaiting(node: PatternPlanNode, state: RouteState): NodeAdvice {
@@ -222,7 +259,8 @@ export class RoutePatternRunner {
         if (result.status === "failed") return this.support.failNow(node, "result_failed", options);
         if (result.status === "blocked") return blockingDecisionOf(stores, branch) !== null ? this.support.wait(node, "decision", options) : this.support.failNow(node, "result_blocked", options);
         if (outstandingChangesetOf(stores, branch) !== null) return { kind: "no_change" };
-        if (node.gateAcceptanceCriterionIds.length > 0) return { kind: "awaiting_gate_phase" };
+        // With Gate criteria the integrated branch result is the Gate candidate; the Gate engine settles the node.
+        if (node.gateAcceptanceCriterionIds.length > 0) return { kind: "no_change" };
         return this.support.succeedNow(node, result.artifactIds, options, current);
       }
       default:
@@ -298,6 +336,8 @@ export class RoutePatternRunner {
       if (advice.kind !== "waiting" || !advice.cleared) return { kind: "no_change" };
       const running = stores.plans.transitionNode(node.id, { to: "running" }, options) as PatternPlanNode;
       if (reason !== "decision") return { kind: "resumed", reason };
+      const gated = this.support.resumeGateEvaluator(running, options);
+      if (gated !== null) return gated;
       const latest = state.branch ?? state.selection;
       if (latest === null || blockedOn(stores, latest) === null) return this.applyDecisionSelector(running, options);
       const extra = latest.patternPosition?.kind === "route_branch" && state.fact !== null ? [this.selectionInput(state.fact)] : [];
