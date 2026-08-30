@@ -166,6 +166,39 @@ describe("import boundaries", () => {
     }
   });
 
+  it("the scheduler and Pattern runners import nothing legacy, poll nothing, and implement only the Phase 2C Patterns", () => {
+    const files = [...listFiles("server/src/execution/patterns", isCode), path.join(repoRoot, "server/src/execution/scheduler.ts"), path.join(repoRoot, "server/src/execution/readiness.ts"), path.join(repoRoot, "server/src/execution/handoff-routing.ts"), path.join(repoRoot, "server/src/execution/integration-service.ts")];
+    expect(files.length).toBeGreaterThan(5);
+    for (const file of files) {
+      for (const specifier of importsOf(file)) {
+        if (file.endsWith(".test.ts") && (specifier === "vitest" || specifier.startsWith("node:"))) continue;
+        const allowed = specifier === "@agentique-console/core" || specifier === "zod" || resolvesInto(file, specifier, "server/src/execution") || resolvesInto(file, specifier, "server/src/persistence") || resolvesInto(file, specifier, "server/src/provider");
+        expect(allowed, `${rel(file)} imports ${specifier}`).toBe(true);
+      }
+      if (file.endsWith(".test.ts")) continue;
+      const text = fs.readFileSync(file, "utf8");
+      // Event-driven, never polling: no timer, interval, or sleep anywhere in the runtime.
+      expect(text, rel(file)).not.toMatch(/setTimeout|setInterval|setImmediate|sleep\(/);
+      // Nothing schedules from a transcript, an Event replay, or a rendered position string.
+      expect(text, rel(file)).not.toMatch(/journal\.read\(|renderPatternPosition|TRANSCRIPT_MEDIA_TYPE/);
+    }
+    // Only the Phase 2C runners exist; later Patterns have no runner file and no runner registration.
+    const runnerFiles = listFiles("server/src/execution/patterns", (f) => isCode(f) && !f.endsWith(".test.ts")).map((f) => path.basename(f)).sort();
+    expect(runnerFiles).toEqual(["chain.ts", "index.ts", "root.ts", "single.ts", "support.ts"]);
+    const registry = fs.readFileSync(path.join(repoRoot, "server/src/execution/patterns/index.ts"), "utf8");
+    for (const later of ["route", "parallel", "coordinator_worker", "evaluator_optimizer"]) expect(registry).not.toMatch(new RegExp(`case "${later}"`));
+    // The readiness evaluator is pure: no persistence, provider, Workspace, clock, or id minting.
+    const readiness = fs.readFileSync(path.join(repoRoot, "server/src/execution/readiness.ts"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    expect(importsOf(path.join(repoRoot, "server/src/execution/readiness.ts"))).toEqual(["@agentique-console/core"]);
+    expect(readiness).not.toMatch(/\bstores\b|\bctx\b|clock\(|newId\(|\.ids\(|Date\.|journal|\.execute\(|\.prepare\(|\.apply\(/);
+    // The provider boundary never imports the scheduler or the stores; the persistence boundary never imports execution (checked above too).
+    for (const file of listFiles("server/src/provider", isCode)) {
+      for (const specifier of importsOf(file)) {
+        expect(resolvesInto(file, specifier, "server/src/execution"), `${rel(file)} imports ${specifier}`).toBe(false);
+      }
+    }
+  });
+
   it("no execution code reads a transcript Artifact or blob to make a decision (invariant 6)", () => {
     for (const file of listFiles("server/src/execution", (f) => isCode(f) && !f.endsWith(".test.ts"))) {
       const text = fs.readFileSync(file, "utf8");

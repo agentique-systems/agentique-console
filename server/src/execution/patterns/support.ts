@@ -287,6 +287,59 @@ export class SequentialStepEngine {
     });
   }
 
+  /**
+   * Finishes the own work of a node that left the current membership
+   * (execution-model §4.5): its latest terminal Invocation's Changeset is
+   * integrated and the node reaches its own terminal state — succeeded with
+   * its outputs only when that Invocation was its final position, failed, or
+   * cancelled — but no next step is prepared and no Handoff to any successor
+   * is created: only the current revision's graph schedules future work. A
+   * removed node whose chain is unfinished stays as it is until cancelled.
+   */
+  async settleRemoved(nodeId: PlanNodeId, options: WriteOptions = {}): Promise<PatternRunnerOutcome> {
+    const { ctx, stores, integration } = this.deps;
+    if (ctx.tx.inTransaction) throw new Error("a Pattern runner settles outside any transaction; integration is external");
+    const node = this.node(nodeId);
+    if (PLAN_NODE_MACHINE.isTerminal(node.status)) return { kind: "no_change" };
+    if (stores.plans.listMembership(node.runId, stores.plans.latestRevisionNumber(node.runId)).some((m) => m.planNodeId === nodeId)) throw new ConflictError(`PlanNode ${nodeId} is a current member; settle it through the current revision`);
+    const latest = this.latestInvocation(node);
+    if (latest === null || !INVOCATION_MACHINE.isTerminal(latest.status)) return { kind: "no_change" };
+    if (latest.status === "succeeded" && latest.result?.status === "completed") {
+      const changeset = outstandingChangesetOf(stores, latest);
+      if (changeset !== null) {
+        const outcome = await integration.integrate(changeset.id, options);
+        if (outcome.kind !== "integrated" && outcome.kind !== "already_integrated") return { kind: "no_change" };
+      }
+    }
+    return ctx.tx.write((): PatternRunnerOutcome => {
+      const current = this.node(nodeId);
+      const invocation = stores.invocations.get(latest.id);
+      if (PLAN_NODE_MACHINE.isTerminal(current.status)) return { kind: "no_change" };
+      switch (invocation.status) {
+        case "blocked":
+          return current.status === "waiting" ? { kind: "no_change" } : this.wait(current, "decision", options);
+        case "cancelled":
+          if (current.status === "waiting") stores.plans.transitionNode(current.id, { to: "running" }, options);
+          stores.plans.transitionNode(current.id, { to: "cancelled", reason: "invocation_cancelled" }, options);
+          return { kind: "cancelled" };
+        case "failed":
+          return this.failNow(current, "invocation_failed", invocation, options);
+        case "succeeded": {
+          const result = invocation.result!;
+          if (result.status === "failed") return this.failNow(current, "result_failed", invocation, options);
+          if (result.status === "blocked") return current.status === "waiting" ? { kind: "no_change" } : this.wait(current, "decision", options);
+          if (this.nextPosition(current, invocation) !== null || current.gateAcceptanceCriterionIds.length > 0) return { kind: "no_change" };
+          if (current.status === "waiting") stores.plans.transitionNode(current.id, { to: "running" }, options);
+          const outputArtifactIds = [...result.artifactIds].sort();
+          stores.plans.transitionNode(current.id, { to: "succeeded", outputArtifactIds }, options);
+          return { kind: "succeeded", outputArtifactIds, handoffIds: [] };
+        }
+        default:
+          throw new Error(`unreachable: Invocation ${invocation.id} is ${invocation.status}`);
+      }
+    });
+  }
+
   /** Inside the settle transaction, for a completed final or intermediate step whose Changeset is integrated. */
   private complete(nodeId: PlanNodeId, expectedRevisionNumber: number, invocationId: InvocationId, options: WriteOptions): PatternRunnerOutcome {
     const { stores } = this.deps;

@@ -30,6 +30,7 @@ import { ChangesetIntegrationService } from "./integration-service.ts";
 import type { CollectedChangeset, ExecutionWorkspacePort, ExecutionWorkspaceRequest, PreparedExecutionWorkspace } from "./ports/execution-workspace.ts";
 import type { IntegrationApplyOutcome, IntegrationApplyRequest, IntegrationWorkspacePort } from "./ports/integration-workspace.ts";
 import { createPatternRunners, type PatternRunners } from "./patterns/index.ts";
+import { RunScheduler, type SchedulerConfig } from "./scheduler.ts";
 import type { PreparedRunWorkspace, RunWorkspacePreparationPort, RunWorkspacePreparationRequest } from "./ports/workspace-preparation.ts";
 import { RecoveryService } from "./recovery-service.ts";
 import { RunCreationService, type CreatedRun, type RunCreationPolicy, type RunCreationRequest } from "./run-creation-service.ts";
@@ -181,6 +182,7 @@ export interface RuntimeHarness extends Harness {
   integration: ChangesetIntegrationService;
   handoffs: HandoffRouter;
   runners: PatternRunners;
+  scheduler: RunScheduler;
   provider: ScriptedProvider;
   payloads: MemoryContinuationPayloadStore;
   continuations: ContinuationService;
@@ -203,6 +205,7 @@ export interface RuntimeHarnessOptions {
   governor?: GovernorConfig;
   executor?: AttemptExecutorConfig;
   supportsContinuation?: boolean;
+  scheduler?: SchedulerConfig;
   /** Reuse an already opened persistence harness (simulating a restarted process over the same database). */
   base?: Harness;
   payloads?: MemoryContinuationPayloadStore;
@@ -225,6 +228,7 @@ export function openRuntimeHarness(options: RuntimeHarnessOptions = {}): Runtime
   const cleanup = new WorkspaceCleanup(h.ctx, h.stores, executionWorkspace, diagnostics);
   const executor = new AttemptExecutor(h.ctx, h.stores, provider, continuations, governor, executionWorkspace, executorConfig, (chunk) => transient.push(chunk), diagnostics);
   const integration = new ChangesetIntegrationService(h.ctx, h.stores, integrationWorkspace);
+  const runners = createPatternRunners({ ctx: h.ctx, stores: h.stores, executor, preparation, integration, governor, provider });
   return {
     ...h,
     workspacePreparation,
@@ -232,7 +236,8 @@ export function openRuntimeHarness(options: RuntimeHarnessOptions = {}): Runtime
     integrationWorkspace,
     integration,
     handoffs: new HandoffRouter(h.stores),
-    runners: createPatternRunners({ ctx: h.ctx, stores: h.stores, executor, preparation, integration, governor, provider }),
+    runners,
+    scheduler: new RunScheduler(h.ctx, h.stores, executor, governor, runners, provider, options.scheduler),
     provider,
     payloads,
     continuations,

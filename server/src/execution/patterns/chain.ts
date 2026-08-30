@@ -52,6 +52,11 @@ export class ChainPatternRunner {
     return this.engine.resume(nodeId, expectedRevisionNumber, options);
   }
 
+  /** Finishes the own work of a node that left the current membership; never activates a successor. */
+  settleRemoved(nodeId: PlanNodeId, options?: WriteOptions): Promise<PatternRunnerOutcome> {
+    return this.engine.settleRemoved(nodeId, options);
+  }
+
   markWaiting(nodeId: PlanNodeId, expectedRevisionNumber: number, reason: "provider_capacity" | "budget", options?: WriteOptions): PatternRunnerOutcome {
     return this.engine.markWaiting(nodeId, expectedRevisionNumber, reason, options);
   }
