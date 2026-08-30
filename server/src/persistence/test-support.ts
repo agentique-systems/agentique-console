@@ -68,10 +68,11 @@ export interface Harness {
   close(): void;
 }
 
-export function openHarness(): Harness {
-  const database = openDatabase(":memory:");
-  const blobs = new MemoryBlobStore();
-  const clock = testClock();
+/** A harness over `file` (`:memory:` by default); a reopened file keeps its rows, and the clock and blobs may be carried over to simulate one restarted process. */
+export function openHarness(file = ":memory:", carried: { clock?: TestClock; blobs?: MemoryBlobStore } = {}): Harness {
+  const database = openDatabase(file);
+  const blobs = carried.blobs ?? new MemoryBlobStore();
+  const clock = carried.clock ?? testClock();
   const diagnostics: PersistenceDiagnostic[] = [];
   const ctx = createPersistenceContext(database, blobs, { clock: clock.now, diagnostics: (d) => diagnostics.push(d) });
   const stores = createStores(ctx);

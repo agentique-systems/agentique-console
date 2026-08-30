@@ -12,7 +12,7 @@ import { createStores } from "../persistence/stores/index.ts";
 import { seedRequirements, INVOCATION_ALLOCATION } from "../persistence/test-support.ts";
 import { PlanRevisionService } from "./plan-revision-service.ts";
 import { RunCreationService } from "./run-creation-service.ts";
-import { accepted, FakeWorkspacePreparation, openRuntimeHarness, propose, rejected, seedRuntime, TEST_NODE_ALLOCATION, TEST_POLICY, type RuntimeHarness, type RuntimeSeed } from "./test-support.ts";
+import { accepted, FakeWorkspacePreparation, openRuntimeHarness, propose, rejected, seedPlanningRuntime, TEST_NODE_ALLOCATION, TEST_POLICY, type RuntimeHarness, type RuntimeSeed } from "./test-support.ts";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -46,7 +46,7 @@ describe("accepted revisions", () => {
   it("compiles, materializes, and journals an accepted revision in one transaction with consecutive numbering", () => {
     const h = openRuntimeHarness();
     try {
-      const s = seedRuntime(h);
+      const s = seedPlanningRuntime(h);
       const runId = s.created.run.id;
       const seq = h.ctx.journal.lastSeq();
       const outcome = accepted(propose(h, s, [chain(leaf(s.worker.id, "a"), parallel(leaf(s.worker.id), chain(leaf(s.worker.id), leaf(s.worker.id))))], { correlationId: "turn-1", causationSeq: seq }));
@@ -89,7 +89,7 @@ describe("accepted revisions", () => {
   it("the root belongs to every accepted revision and revision numbers count accepted revisions only", () => {
     const h = openRuntimeHarness();
     try {
-      const s = seedRuntime(h);
+      const s = seedPlanningRuntime(h);
       const runId = s.created.run.id;
       accepted(propose(h, s, [leaf(s.worker.id)]));
       rejected(propose(h, s, [leaf("agdr_000000000000000000000000")]));
@@ -106,11 +106,11 @@ describe("accepted revisions", () => {
   it("only an Orchestrator Invocation of the Run may propose; an ended Run cannot be revised", () => {
     const h = openRuntimeHarness();
     try {
-      const s = seedRuntime(h);
+      const s = seedPlanningRuntime(h);
       const seq = h.ctx.journal.lastSeq();
       const worker = h.stores.invocations.create({ runId: s.created.run.id, planNodeId: s.created.root.id, role: "worker", purpose: "step", agentDefinitionRevisionId: s.worker.id, continuedFromInvocationId: null, taskIds: [], allocation: { costUsd: 0.1, tokens: 10, attempts: 1 } });
       expect(() => h.planRevisions.propose({ runId: s.created.run.id, proposedByInvocationId: worker.id, source: { version: 1, expressions: [] } })).toThrow(InvariantViolationError);
-      const other = seedRuntime(h);
+      const other = seedPlanningRuntime(h);
       expect(() => h.planRevisions.propose({ runId: s.created.run.id, proposedByInvocationId: other.invocation.id, source: { version: 1, expressions: [] } })).toThrow(InvariantViolationError);
       // Authorization failures are errors, not rejections: no rejected Event.
       expect(h.ctx.journal.read({ runId: s.created.run.id, afterSeq: seq }).filter((e) => e.type === "execution_plan.rejected")).toHaveLength(0);
@@ -126,7 +126,7 @@ describe("rejected proposals", () => {
   it("writes exactly one execution_plan.rejected Event with stable reasons and correlation, consuming no revision number", () => {
     const h = openRuntimeHarness();
     try {
-      const s = seedRuntime(h);
+      const s = seedPlanningRuntime(h);
       const runId = s.created.run.id;
       const before = rowCounts(h, runId);
       const seq = h.ctx.journal.lastSeq();
@@ -172,7 +172,7 @@ describe("rejected proposals", () => {
   it("an unexpected persistence failure throws and writes no false rejection", () => {
     const h = openRuntimeHarness();
     try {
-      const s = seedRuntime(h);
+      const s = seedPlanningRuntime(h);
       const runId = s.created.run.id;
       const seq = h.ctx.journal.lastSeq();
       const before = rowCounts(h, runId);
@@ -193,7 +193,7 @@ describe("rejected proposals", () => {
 });
 
 describe("reconciliation", () => {
-  function twoNodes(h: RuntimeHarness, s: RuntimeSeed) {
+  function twoNodes(h: RuntimeHarness, s: ReturnType<typeof seedPlanningRuntime>) {
     const outcome = accepted(propose(h, s, [leaf(s.worker.id, "A"), leaf(s.worker.id, "B")]));
     const [a, b] = outcome.graph.nodes.slice(1);
     return { outcome, a: a!, b: b! };
@@ -202,7 +202,7 @@ describe("reconciliation", () => {
   it("an identical revision reuses every node with no new reservation", () => {
     const h = openRuntimeHarness();
     try {
-      const s = seedRuntime(h);
+      const s = seedPlanningRuntime(h);
       const { a, b } = twoNodes(h, s);
       const again = accepted(propose(h, s, [leaf(s.worker.id, "A"), leaf(s.worker.id, "B")]));
       expect(again.revision.number).toBe(3);
@@ -220,7 +220,7 @@ describe("reconciliation", () => {
   it("appending a sibling keeps existing nodes, ids, status, timestamps, and reservations", () => {
     const h = openRuntimeHarness();
     try {
-      const s = seedRuntime(h);
+      const s = seedPlanningRuntime(h);
       const { a, b } = twoNodes(h, s);
       start(h, a.id);
       const started = h.stores.plans.getNode(a.id);
@@ -239,7 +239,7 @@ describe("reconciliation", () => {
   it("removing an unstarted node cancels it and releases its reservation; removing a running node leaves it untouched but out of membership", () => {
     const h = openRuntimeHarness();
     try {
-      const s = seedRuntime(h);
+      const s = seedPlanningRuntime(h);
       const runId = s.created.run.id;
       const { a, b } = twoNodes(h, s);
       start(h, a.id);
@@ -266,7 +266,7 @@ describe("reconciliation", () => {
   it("a changed definition replaces an unstarted node with a new id and rejects for a started or terminal node", () => {
     const h = openRuntimeHarness();
     try {
-      const s = seedRuntime(h);
+      const s = seedPlanningRuntime(h);
       const runId = s.created.run.id;
       const { a, b } = twoNodes(h, s);
       const changedB = accepted(propose(h, s, [leaf(s.worker.id, "A"), leaf(s.worker.id, "B changed")]));
@@ -308,7 +308,7 @@ describe("reconciliation", () => {
   it("an edge-only change reuses both nodes and writes revision-specific edges; historical edges never reach the current graph", () => {
     const h = openRuntimeHarness();
     try {
-      const s = seedRuntime(h);
+      const s = seedPlanningRuntime(h);
       const runId = s.created.run.id;
       // Two independent top-level leaves, then the same two leaves as a chain of composite steps: the nodes keep their
       // definitions only if their source paths match, so build them at chain-step paths from the start.
@@ -336,7 +336,7 @@ describe("reconciliation", () => {
   it("an allocation failure rolls back the entire candidate revision (invariant 22)", () => {
     const h = openRuntimeHarness();
     try {
-      const s = seedRuntime(h);
+      const s = seedPlanningRuntime(h);
       const runId = s.created.run.id;
       const { a } = twoNodes(h, s);
       const before = rowCounts(h, runId);

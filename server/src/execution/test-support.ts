@@ -1,12 +1,35 @@
 /**
  * Runtime test harness: the persistence harness plus the execution services
- * over a deterministic fake Workspace preparation port.
+ * over deterministic fakes — the Workspace preparation port, the
+ * execution-workspace port, the scripted provider, and an in-memory
+ * continuation payload store — with the harness clock driving every
+ * timestamp, backoff, and deadline. No timers, no network.
  */
-import { DEFAULT_PLAN_LIMITS, type AgentDefinitionRevision, type Invocation, type PlanExpression, type PlanLimits } from "@agentique-console/core";
+import {
+  DEFAULT_PLAN_LIMITS,
+  EMPTY_WORKSPACE_CAPABILITY_POLICY,
+  type AgentDefinitionRevision,
+  type ConversationMessage,
+  type Invocation,
+  type PlanExpression,
+  type PlanLimits,
+  type SnapshotIdentity,
+} from "@agentique-console/core";
+import { sha256Hex } from "../persistence/blob-store.ts";
 import { DEFAULT_BUDGET, INVOCATION_ALLOCATION, openHarness, seedAgentRevision, type Harness } from "../persistence/test-support.ts";
+import { MemoryContinuationPayloadStore } from "../provider/continuation-store.ts";
+import { ContinuationService } from "../provider/continuation.ts";
+import { ScriptedProvider } from "../provider/fake.ts";
+import type { TransientOutput } from "../provider/adapter.ts";
+import { AttemptExecutor, DEFAULT_EXECUTOR_CONFIG, type AttemptExecutorConfig } from "./attempt-executor.ts";
+import { ResourceGovernor, type GovernorConfig } from "./governor.ts";
+import { InvocationPreparationService } from "./invocation-preparation-service.ts";
 import { PlanRevisionService, type PlanRevisionOutcome } from "./plan-revision-service.ts";
+import type { CollectedChangeset, ExecutionWorkspacePort, ExecutionWorkspaceRequest, PreparedExecutionWorkspace } from "./ports/execution-workspace.ts";
 import type { PreparedRunWorkspace, RunWorkspacePreparationPort, RunWorkspacePreparationRequest } from "./ports/workspace-preparation.ts";
+import { RecoveryService } from "./recovery-service.ts";
 import { RunCreationService, type CreatedRun, type RunCreationPolicy, type RunCreationRequest } from "./run-creation-service.ts";
+import { RunStartService } from "./run-start-service.ts";
 
 /** A deterministic Workspace preparation port that records what it did and can be told to fail. */
 export class FakeWorkspacePreparation implements RunWorkspacePreparationPort {
@@ -34,6 +57,50 @@ export class FakeWorkspacePreparation implements RunWorkspacePreparationPort {
   }
 }
 
+/** A deterministic execution-workspace port: one worktree per writing Invocation, an explicit (empty by default) Changeset, recorded calls. */
+export class FakeExecutionWorkspace implements ExecutionWorkspacePort {
+  readonly prepared: { request: ExecutionWorkspaceRequest; result: PreparedExecutionWorkspace }[] = [];
+  readonly discarded: ExecutionWorkspaceRequest[] = [];
+  readonly collected: ExecutionWorkspaceRequest[] = [];
+  readonly released: ExecutionWorkspaceRequest[] = [];
+  failWith: Error | null = null;
+  /** The next collected Changeset; `null` makes the port report none (a validation violation for a writing Invocation). */
+  nextChangeset: CollectedChangeset | null | undefined = undefined;
+  #counter = 0;
+
+  prepare(request: ExecutionWorkspaceRequest): PreparedExecutionWorkspace {
+    if (this.failWith) {
+      const error = this.failWith;
+      this.failWith = null;
+      throw error;
+    }
+    this.#counter += 1;
+    const result: PreparedExecutionWorkspace = request.writes
+      ? { worktreePath: `${request.integrationWorkspacePath ?? "/tmp"}/worktrees/${request.invocationId}`, startingSnapshot: { kind: "git", commitId: this.#counter.toString(16).padStart(40, "0"), treeId: "b".repeat(40) } as SnapshotIdentity }
+      : { worktreePath: request.integrationWorkspacePath, startingSnapshot: null };
+    this.prepared.push({ request, result });
+    return result;
+  }
+
+  discard(request: ExecutionWorkspaceRequest): void {
+    this.discarded.push(request);
+  }
+
+  async collectChangeset(request: ExecutionWorkspaceRequest): Promise<CollectedChangeset | null> {
+    this.collected.push(request);
+    if (this.nextChangeset !== undefined) {
+      const next = this.nextChangeset;
+      this.nextChangeset = undefined;
+      return next;
+    }
+    return { afterSnapshot: { kind: "git", commitId: "e".repeat(40), treeId: "f".repeat(40) }, diff: new Uint8Array(), empty: true };
+  }
+
+  release(request: ExecutionWorkspaceRequest): void {
+    this.released.push(request);
+  }
+}
+
 export const TEST_POLICY: RunCreationPolicy = {
   initialOrchestratorAllocation: { costUsd: 10, tokens: 100_000, attempts: 5 },
   finalReserve: { code: { costUsd: 5, tokens: 50_000, attempts: 3 }, other: { costUsd: 0, tokens: 0, attempts: 0 } },
@@ -41,23 +108,66 @@ export const TEST_POLICY: RunCreationPolicy = {
 
 export const TEST_NODE_ALLOCATION = { costUsd: 4, tokens: 40_000, attempts: 2 };
 
+export const TEST_GOVERNOR: GovernorConfig = { providers: { fake: { maxConcurrency: 2 } }, maxProcessConcurrency: 3, maxWorktrees: null };
+
+export const TEST_EXECUTOR_CONFIG: AttemptExecutorConfig = { retry: { backoffBaseMs: 1_000, backoffMaxMs: 8_000 }, continuation: DEFAULT_EXECUTOR_CONFIG.continuation };
+
 export interface RuntimeHarness extends Harness {
   workspacePreparation: FakeWorkspacePreparation;
+  executionWorkspace: FakeExecutionWorkspace;
+  provider: ScriptedProvider;
+  payloads: MemoryContinuationPayloadStore;
+  continuations: ContinuationService;
+  governor: ResourceGovernor;
   runCreation: RunCreationService;
   planRevisions: PlanRevisionService;
+  preparation: InvocationPreparationService;
+  executor: AttemptExecutor;
+  recovery: RecoveryService;
+  runStart: RunStartService;
+  /** Every transient output chunk the executor forwarded. */
+  transient: TransientOutput[];
 }
 
-export function openRuntimeHarness(limits: PlanLimits = DEFAULT_PLAN_LIMITS): RuntimeHarness {
-  const h = openHarness();
+export interface RuntimeHarnessOptions {
+  limits?: PlanLimits;
+  governor?: GovernorConfig;
+  executor?: AttemptExecutorConfig;
+  supportsContinuation?: boolean;
+  /** Reuse an already opened persistence harness (simulating a restarted process over the same database). */
+  base?: Harness;
+  payloads?: MemoryContinuationPayloadStore;
+}
+
+export function openRuntimeHarness(options: RuntimeHarnessOptions = {}): RuntimeHarness {
+  const h = options.base ?? openHarness();
   const workspacePreparation = new FakeWorkspacePreparation();
+  const executionWorkspace = new FakeExecutionWorkspace();
+  const provider = new ScriptedProvider({ clock: h.ctx.clock, inTransaction: () => h.ctx.tx.inTransaction, supportsContinuation: options.supportsContinuation ?? true });
+  const payloads = options.payloads ?? new MemoryContinuationPayloadStore(sha256Hex);
+  const continuations = new ContinuationService(h.stores.continuations, payloads, { ttlMs: null, clock: h.ctx.clock });
+  const governor = new ResourceGovernor(h.stores.leases, options.governor ?? TEST_GOVERNOR, h.ctx.clock);
+  const executorConfig = options.executor ?? TEST_EXECUTOR_CONFIG;
+  const preparation = new InvocationPreparationService(h.ctx, h.stores, executionWorkspace, { workspacePolicy: EMPTY_WORKSPACE_CAPABILITY_POLICY });
+  const transient: TransientOutput[] = [];
   return {
     ...h,
     workspacePreparation,
+    executionWorkspace,
+    provider,
+    payloads,
+    continuations,
+    governor,
     runCreation: new RunCreationService(h.ctx, h.stores, workspacePreparation, TEST_POLICY),
     planRevisions: new PlanRevisionService(h.ctx, h.stores, {
       defaults: { nodeAllocation: TEST_NODE_ALLOCATION, coordinatorWorkerBounds: { maxTasks: 8, maxConcurrentWorkers: 2, maxCoordinatorInvocations: 4 } },
-      limits,
+      limits: options.limits ?? DEFAULT_PLAN_LIMITS,
     }),
+    preparation,
+    executor: new AttemptExecutor(h.ctx, h.stores, provider, continuations, governor, executionWorkspace, executorConfig, (chunk) => transient.push(chunk)),
+    recovery: new RecoveryService(h.ctx, h.stores, governor, continuations, provider, executorConfig),
+    runStart: new RunStartService(h.ctx, h.stores, preparation),
+    transient,
   };
 }
 
@@ -65,10 +175,10 @@ export interface RuntimeSeed {
   created: CreatedRun;
   orchestrator: AgentDefinitionRevision;
   worker: AgentDefinitionRevision;
-  invocation: Invocation;
+  message: ConversationMessage;
 }
 
-/** Workspace, Conversation, Orchestrator and worker definitions, a created Run, and an Orchestrator Invocation to propose with. */
+/** Workspace, Conversation, Orchestrator and worker definitions, a created Run, and the operator's opening message. */
 export function seedRuntime(h: RuntimeHarness, overrides: Partial<RunCreationRequest> = {}): RuntimeSeed {
   const workspace = h.stores.workspaces.create({ name: "demo", rootPath: `/tmp/demo-${h.ctx.ids("workspace")}`, kind: "git" });
   const conversation = h.stores.conversations.create({ workspaceId: workspace.id, title: "demo" });
@@ -82,20 +192,23 @@ export function seedRuntime(h: RuntimeHarness, overrides: Partial<RunCreationReq
     orchestratorAgentDefinitionRevisionId: orchestrator.id,
     ...overrides,
   });
-  const invocation = h.stores.invocations.create({
-    runId: created.run.id,
-    planNodeId: created.root.id,
-    role: "orchestrator",
-    purpose: "operator_input",
-    agentDefinitionRevisionId: orchestrator.id,
-    continuedFromInvocationId: null,
-    taskIds: [],
-    allocation: INVOCATION_ALLOCATION,
-  });
-  return { created, orchestrator, worker, invocation };
+  const message = h.stores.conversations.postMessage({ conversationId: conversation.id, author: "operator", content: "Add a --version flag to the CLI.", runId: created.run.id, invocationId: null });
+  return { created, orchestrator, worker, message };
 }
 
-export function propose(h: RuntimeHarness, seed: RuntimeSeed, expressions: PlanExpression[], options: { correlationId?: string; causationSeq?: number } = {}): PlanRevisionOutcome {
+/** Starts the seeded Run: root running, Run running, first Orchestrator Invocation prepared. */
+export function startRun(h: RuntimeHarness, seed: RuntimeSeed) {
+  return h.runStart.start({ runId: seed.created.run.id, conversationMessageId: seed.message.id });
+}
+
+/** A seeded Run whose first Orchestrator Invocation has completed, so a plan proposal has an authorizing Invocation. */
+export function seedPlanningRuntime(h: RuntimeHarness, overrides: Partial<RunCreationRequest> = {}): RuntimeSeed & { invocation: Invocation } {
+  const seed = seedRuntime(h, overrides);
+  const started = startRun(h, seed);
+  return { ...seed, invocation: started.prepared.invocation };
+}
+
+export function propose(h: RuntimeHarness, seed: RuntimeSeed & { invocation: Invocation }, expressions: PlanExpression[], options: { correlationId?: string; causationSeq?: number } = {}): PlanRevisionOutcome {
   return h.planRevisions.propose({
     runId: seed.created.run.id,
     proposedByInvocationId: seed.invocation.id,
@@ -114,3 +227,7 @@ export function rejected(outcome: PlanRevisionOutcome): Extract<PlanRevisionOutc
   if (outcome.accepted) throw new Error("expected a rejection");
   return outcome;
 }
+
+export const COMPLETED_RESULT = { status: "completed" as const, artifactIds: [] as string[], tasks: [] as never[], evidence: [] as never[], summary: "done", openItems: [] as string[], blocker: null, runOutcome: null };
+
+export { INVOCATION_ALLOCATION };

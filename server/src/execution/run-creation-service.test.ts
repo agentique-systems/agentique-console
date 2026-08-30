@@ -57,7 +57,7 @@ describe("RunCreationService", () => {
       const capacity = h.stores.reservations.runCapacity(run.id);
       expect(capacity.ordinary.available).toEqual({ costUsd: 85, tokens: 850_000, attempts: 42 });
       expect(capacity.final.available).toEqual(TEST_POLICY.finalReserve.code);
-      // Creation writes exactly these Events, all correlated; the Invocation afterwards is the test seed's, not creation's (Phase 2B starts the first one).
+      // Creation writes exactly these Events, all correlated; no Invocation exists until the Run starts.
       const events = h.ctx.journal.read({ runId: run.id });
       expect(events.map((e) => e.type)).toEqual([
         "run.created",
@@ -67,9 +67,9 @@ describe("RunCreationService", () => {
         "execution_plan.compiled",
         "plan_node.created",
         "budget_reservation.created",
-        "invocation.created",
-        "budget_reservation.created",
+        "conversation.message_posted",
       ]);
+      expect(h.stores.invocations.listByRun(run.id)).toEqual([]);
       expect(events.slice(0, 7).every((e) => e.correlationId === "req-1")).toBe(true);
       expect(events[0]!.payload).toEqual(h.stores.runs.get(run.id) && { ...run, baseSnapshotId: null, integrationWorkspacePath: null, updatedAt: (events[0]!.payload as { updatedAt: string }).updatedAt });
       expect(h.workspacePreparation.prepared).toHaveLength(1);

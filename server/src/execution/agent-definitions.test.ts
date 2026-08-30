@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import { approvalDecision } from "../persistence/stores/agents.test.ts";
 import { DEFAULT_BUDGET, INVOCATION_ALLOCATION, type Harness } from "../persistence/test-support.ts";
 import { resolveExecutableAgentDefinitionRevision } from "./agent-definitions.ts";
-import { accepted, openRuntimeHarness, propose, rejected, seedRuntime, type RuntimeSeed } from "./test-support.ts";
+import { accepted, openRuntimeHarness, propose, rejected, seedPlanningRuntime, type RuntimeSeed } from "./test-support.ts";
 
 const leaf = (agent: string): PlanExpression => ({ pattern: "single", operation: { agentDefinitionRevisionId: agent as never } });
 
@@ -31,8 +31,8 @@ describe("executable-revision resolver", () => {
   it("accepts builtin everywhere, Workspace-file revisions in their Workspace, and Conversation revisions in their Conversation", () => {
     const h = openRuntimeHarness();
     try {
-      const s = seedRuntime(h);
-      const other = seedRuntime(h);
+      const s = seedPlanningRuntime(h);
+      const other = seedPlanningRuntime(h);
       const builtin = reviewer(h, { kind: "builtin" });
       const file = reviewer(h, { kind: "workspace_file", path: ".claude/agents/reviewer.md", snapshotId: s.created.baseSnapshot.id });
       const conversation = reviewer(h, { kind: "conversation", conversationId: s.created.run.conversationId, approvedByDecisionId: approvalDecision(h, s.created.run.conversationId) });
@@ -59,8 +59,8 @@ describe("executable-revision resolver", () => {
   it("rejects a foreign-provenance Orchestrator before Workspace preparation or any canonical write", () => {
     const h = openRuntimeHarness();
     try {
-      const s = seedRuntime(h);
-      const other = seedRuntime(h);
+      const s = seedPlanningRuntime(h);
+      const other = seedPlanningRuntime(h);
       // Two candidate Orchestrator definitions of the other Run's origin: a Workspace file and a Conversation authoring.
       const foreignFile = reviewer(h, { kind: "workspace_file", path: ".claude/agents/orchestrator.md", snapshotId: other.created.baseSnapshot.id }, "orchestrator");
       const foreignConversation = reviewer(h, { kind: "conversation", conversationId: other.created.run.conversationId, approvedByDecisionId: approvalDecision(h, other.created.run.conversationId) }, "orchestrator");
@@ -84,8 +84,8 @@ describe("executable-revision resolver", () => {
   it("a foreign-provenance plan Worker produces exactly one rejected Event and consumes no revision number; own-provenance Workers compile", () => {
     const h = openRuntimeHarness();
     try {
-      const s = seedRuntime(h);
-      const other = seedRuntime(h);
+      const s = seedPlanningRuntime(h);
+      const other = seedPlanningRuntime(h);
       const runId = s.created.run.id;
       const foreignFile = reviewer(h, { kind: "workspace_file", path: ".claude/agents/reviewer.md", snapshotId: other.created.baseSnapshot.id });
       const foreignConversation = reviewer(h, { kind: "conversation", conversationId: other.created.run.conversationId, approvedByDecisionId: approvalDecision(h, other.created.run.conversationId) }, "author");
@@ -114,8 +114,8 @@ describe("executable-revision resolver", () => {
   it("the compiler receives only already-authorized revision facts", () => {
     const h = openRuntimeHarness();
     try {
-      const s = seedRuntime(h);
-      const other = seedRuntime(h);
+      const s = seedPlanningRuntime(h);
+      const other = seedPlanningRuntime(h);
       const foreign = reviewer(h, { kind: "workspace_file", path: ".claude/agents/reviewer.md", snapshotId: other.created.baseSnapshot.id });
       const lookups: string[] = [];
       const original = h.stores.agents.getRevision.bind(h.stores.agents);
