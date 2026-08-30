@@ -26,7 +26,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { AcceptanceCriterionId, PlanNodeId, RunId } from "@agentique-console/core";
+import { optimizerRoundOf, type AcceptanceCriterionId, type PlanNodeId, type RunId } from "@agentique-console/core";
 import { describe, expect, it } from "vitest";
 import { sha256Hex, type MemoryBlobStore } from "../persistence/blob-store.ts";
 import { openHarness, type TestClock } from "../persistence/test-support.ts";
@@ -245,7 +245,7 @@ describe("evaluator_optimizer restart", () => {
         expect(outcome).toMatchObject({ stop: "quiescent", failure: null });
         expect(h.provider.requests).toHaveLength(0);
         expect(statusOf(h, w.nodeId)).toBe("succeeded");
-        expect(verdictsOf(h, w.nodeId).map((v) => [v.context!.round, v.verdict])).toEqual([[1, "fail"], [2, "pass"]]);
+        expect(verdictsOf(h, w.nodeId).map((v) => [optimizerRoundOf(v), v.verdict])).toEqual([[1, "fail"], [2, "pass"]]);
         expect(criterionEvaluationsOf(h, w.nodeId, 2).map((e) => e.producedBy.kind).sort()).toEqual(["evaluator", "runtime", "runtime"]);
         expect(work(h, w)).toMatchObject({ ...before, verdicts: 2, criterionEvaluations: 5, events: work(h, w).events });
         expect(h.stores.plans.getNode(w.nodeId).outputArtifactIds).toEqual(producersOf(h, w.nodeId)[2]!.result!.artifactIds);

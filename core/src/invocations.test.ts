@@ -28,9 +28,9 @@ import {
 } from "./invocations.ts";
 
 describe("purposes", () => {
-  it("is the exact closed enum of fourteen purposes", () => {
+  it("is the exact closed enum of thirteen purposes", () => {
     expect([...INVOCATION_PURPOSES].sort()).toEqual(
-      ["operator_input", "plan_revision", "node_result", "decision_resolution", "gate_result", "publication_result", "final_synthesis", "step", "task", "select", "evaluate", "decompose", "replan", "synthesize"].sort(),
+      ["operator_input", "plan_revision", "node_result", "decision_resolution", "gate_result", "final_synthesis", "step", "task", "select", "evaluate", "decompose", "replan", "synthesize"].sort(),
     );
     expect(INVOCATION_ROLES).toEqual(["orchestrator", "worker", "coordinator", "evaluator"]);
   });

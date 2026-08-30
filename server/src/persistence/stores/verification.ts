@@ -8,6 +8,7 @@ import {
   gateInputSchema,
   gateSchema,
   InvariantViolationError,
+  optimizerRoundOf,
   parseOrThrow,
   type AcceptanceCriterionId,
   type ArtifactId,
@@ -21,15 +22,16 @@ import {
   type GateInput,
   type GateKind,
   type PlanNodeId,
+  type PublicationId,
   type RunId,
 } from "@agentique-console/core";
 import type { PersistenceContext } from "../context.ts";
-import { acceptanceCriteria, artifacts, completionRequests, evaluations, gates, invocations, planNodes, requirementRevisions, runs, snapshots } from "../schema.ts";
+import { acceptanceCriteria, artifacts, completionRequests, evaluations, gates, invocations, planNodes, publications, requirementRevisions, runs, snapshots } from "../schema.ts";
 import { assertSameRun, loadRunRef, requireRow, runScope, writeMeta, type WriteOptions } from "./support.ts";
 
 function evaluationToDomain(row: typeof evaluations.$inferSelect): Evaluation {
   // The generated index columns are projections of `context` and `subject`, never part of the domain object.
-  const { contextKind: _kind, contextRound: _round, subjectCriterionId: _criterion, ...evaluation } = row;
+  const { contextKind: _kind, contextRound: _round, contextPublicationId: _publication, subjectCriterionId: _criterion, ...evaluation } = row;
   return parseOrThrow(evaluationSchema, evaluation, "Evaluation row");
 }
 
@@ -67,6 +69,20 @@ export class EvaluationStore {
     const valid = parseOrThrow(evaluationInputSchema, input, "Evaluation input");
     return this.ctx.tx.write(() => {
       const run = loadRunRef(this.ctx, valid.runId);
+      if (valid.context?.kind === "publication") {
+        // Publication candidate verification (execution-model §9.4): one runtime-recorded deterministic check of one
+        // prepared Publication's candidate Snapshot, at most once per Publication and criterion.
+        const publicationId = valid.context.publicationId;
+        const publication = requireRow(this.ctx.db.select({ runId: publications.runId, status: publications.status, candidateSnapshotId: publications.candidateSnapshotId }).from(publications).where(eq(publications.id, publicationId)).get(), "Publication", publicationId);
+        assertSameRun("Publication", publicationId, publication.runId, run.id);
+        if (publication.status !== "prepared") throw new InvariantViolationError(`Publication ${publicationId} is ${publication.status}; candidate verification runs while it is prepared`, { publicationId, status: publication.status });
+        if (valid.snapshotId !== publication.candidateSnapshotId) throw new InvariantViolationError(`Publication ${publicationId} prepared candidate ${String(publication.candidateSnapshotId)}, not ${String(valid.snapshotId)}`, { publicationId, snapshotId: valid.snapshotId });
+        if (valid.subject.kind !== "acceptance_criterion") throw new InvariantViolationError("a publication Evaluation judges one Acceptance Criterion");
+        const criterionId = valid.subject.acceptanceCriterionId;
+        this.assertCriterionProducer(run.conversationId, criterionId, valid.producedBy.kind);
+        const existing = this.publicationCriterionEvaluationsOf(publicationId).find((e) => e.subject.kind === "acceptance_criterion" && e.subject.acceptanceCriterionId === criterionId);
+        if (existing !== undefined) throw new ConflictError(`Publication ${publicationId} already checked AcceptanceCriterion ${criterionId} (Evaluation ${existing.id})`, { publicationId, evaluationId: existing.id });
+      }
       if (valid.planNodeId !== null) {
         const node = requireRow(this.ctx.db.select({ runId: planNodes.runId, kind: planNodes.kind, shape: planNodes.shape, gateAcceptanceCriterionIds: planNodes.gateAcceptanceCriterionIds }).from(planNodes).where(eq(planNodes.id, valid.planNodeId)).get(), "PlanNode", valid.planNodeId);
         assertSameRun("PlanNode", valid.planNodeId, node.runId, run.id);
@@ -77,7 +93,7 @@ export class EvaluationStore {
           const existing = this.routeSelectionOf(valid.planNodeId);
           if (existing !== null) throw new ConflictError(`PlanNode ${valid.planNodeId} already selected ${existing.subject.kind === "route_selection" ? existing.subject.selectedLabel : ""} (Evaluation ${existing.id})`, { planNodeId: valid.planNodeId, evaluationId: existing.id });
         }
-        if (valid.context !== null) {
+        if (valid.context !== null && valid.context.kind !== "publication") {
           const context = valid.context;
           if (node.kind !== "pattern" || node.shape === null || node.shape.pattern !== "evaluator_optimizer") throw new InvariantViolationError(`PlanNode ${valid.planNodeId} is not an evaluator_optimizer node; it has no optimizer rounds`, { planNodeId: valid.planNodeId });
           if (context.maxRounds !== node.shape.maxRounds) throw new InvariantViolationError(`PlanNode ${valid.planNodeId} has ${node.shape.maxRounds} rounds, not ${context.maxRounds}`, { planNodeId: valid.planNodeId, maxRounds: context.maxRounds });
@@ -94,7 +110,7 @@ export class EvaluationStore {
             if (existing !== undefined) throw new ConflictError(`PlanNode ${valid.planNodeId} already evaluated AcceptanceCriterion ${criterionId} in round ${context.round} (Evaluation ${existing.id})`, { planNodeId: valid.planNodeId, round: context.round, evaluationId: existing.id });
           }
         }
-      } else if (valid.context !== null) {
+      } else if (valid.context !== null && valid.context.kind !== "publication") {
         throw new InvariantViolationError("an optimizer-round Evaluation belongs to its evaluator_optimizer Plan Node");
       }
       if (valid.snapshotId !== null) {
@@ -238,11 +254,22 @@ export class EvaluationStore {
       .map(evaluationToDomain);
     const seen = new Set<number>();
     for (const row of rows) {
-      const round = row.context!.round;
+      const round = optimizerRoundOf(row);
       if (seen.has(round)) throw new InvariantViolationError(`PlanNode ${planNodeId} has two verdicts for round ${round}`, { planNodeId, round });
       seen.add(round);
     }
     return rows;
+  }
+
+  /** The candidate-verification Evaluations of one Publication, by Acceptance Criterion id; one per criterion (a database unique index). */
+  publicationCriterionEvaluationsOf(publicationId: PublicationId): Evaluation[] {
+    return this.ctx.db
+      .select()
+      .from(evaluations)
+      .where(and(sql`json_extract(${evaluations.context}, '$.kind') = 'publication'`, sql`json_extract(${evaluations.context}, '$.publicationId') = ${publicationId}`))
+      .all()
+      .map(evaluationToDomain)
+      .sort((a, b) => (a.subject.kind === "acceptance_criterion" && b.subject.kind === "acceptance_criterion" && a.subject.acceptanceCriterionId < b.subject.acceptanceCriterionId ? -1 : 1));
   }
 
   /** The criterion Evaluations of one evaluator_optimizer round, by Acceptance Criterion id. */
@@ -271,7 +298,8 @@ export class EvaluationStore {
       .map(evaluationToDomain)) {
       const nodeId = evaluation.planNodeId!;
       const list = out.get(nodeId) ?? [];
-      if (list.some((e) => e.context!.round === evaluation.context!.round)) throw new InvariantViolationError(`PlanNode ${nodeId} has two verdicts for round ${evaluation.context!.round}`, { planNodeId: nodeId });
+      const round = optimizerRoundOf(evaluation);
+      if (list.some((e) => optimizerRoundOf(e) === round)) throw new InvariantViolationError(`PlanNode ${nodeId} has two verdicts for round ${round}`, { planNodeId: nodeId });
       list.push(evaluation);
       out.set(nodeId, list);
     }

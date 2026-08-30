@@ -63,6 +63,7 @@ import {
   type PlanNodeId,
   type SnapshotId,
   type Timestamp,
+  optimizerRoundOf,
 } from "@agentique-console/core";
 import type { WriteOptions } from "../../persistence/stores/support.ts";
 import { edgeActivation, predecessorEdges } from "../readiness.ts";
@@ -409,7 +410,7 @@ export class EvaluatorOptimizerPatternRunner {
         const feedback = this.support.router.optimizerFeedbackHandoff(node.runId, node.id, round.round - 1);
         if (previous === null || previous.verdict === "pass" || feedback === null) throw new InvariantViolationError(`round ${round.round} of PlanNode ${node.id} started without the previous round's feedback`, { planNodeId: node.id, round: round.round });
         handoffIds.push(feedback.id);
-        inputs.push({ kind: "optimizer_feedback", evaluationId: previous.id, round: previous.context!.round, verdict: previous.verdict as "fail" | "inconclusive", evidence: previous.evidence });
+        inputs.push({ kind: "optimizer_feedback", evaluationId: previous.id, round: optimizerRoundOf(previous), verdict: previous.verdict as "fail" | "inconclusive", evidence: previous.evidence });
       }
     } else {
       handoffIds = this.support.incomingHandoffIds(node);

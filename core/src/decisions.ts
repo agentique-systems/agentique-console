@@ -13,8 +13,12 @@ import type {
   RunId,
   SnapshotId,
   TaskId,
+  WorkspaceId,
 } from "./ids.ts";
+import type { ChangesetId } from "./ids.ts";
+import { runTargetSchema, type RunTarget } from "./runs.ts";
 import { SIDE_EFFECT_APPROVAL_OPTIONS } from "./tool-calls.ts";
+import { publicationStrategyRequestSchema, type PublicationStrategyRequest } from "./workspace-state.ts";
 import { idSchema, nonEmptyString, sha256Hex, timestampSchema, uniqueIds, type Timestamp } from "./validation.ts";
 
 export const DECISION_KINDS = [
@@ -90,8 +94,12 @@ export const activationConditionSchema: z.ZodType<ActivationCondition> = z.discr
 export const SIGNOFF_OPTIONS = ["accept", "request_changes"] as const;
 export type SignoffOption = (typeof SIGNOFF_OPTIONS)[number];
 
+/** The two stable options of a `publish` Decision (execution-model §9.4). */
+export const PUBLISH_OPTIONS = ["publish", "cancel"] as const;
+export type PublishOption = (typeof PUBLISH_OPTIONS)[number];
+
 /** Decision kinds whose canonical subject is a typed record (`subject.kind` equals the Decision kind). */
-export const SUBJECT_DECISION_KINDS = ["side_effect_approval", "signoff"] as const satisfies readonly DecisionKind[];
+export const SUBJECT_DECISION_KINDS = ["side_effect_approval", "signoff", "publish"] as const satisfies readonly DecisionKind[];
 
 /**
  * The canonical subject of a Decision that concerns one exact runtime fact.
@@ -101,8 +109,13 @@ export const SUBJECT_DECISION_KINDS = ["side_effect_approval", "signoff"] as con
  * only in the Artifact. A `signoff` names the Run, the open
  * `operator_signoff` Gate it resolves, the passed `run_completion` Gate and
  * Completion Request it presents, the verified integration Snapshot, and the
- * final-report Artifact; it carries no publish authority. Subjects carry ids
- * and digests only, so they may travel in Events and views.
+ * final-report Artifact; it carries no publish authority. A `publish` names
+ * exactly what an authorized Publication would apply where (execution-model
+ * §9.4): the completed Run, its Workspace, the exact Target, the accepted
+ * final Snapshot and final Changeset, and the requested strategy; resolving
+ * it with `publish` authorizes exactly one Publication of exactly those
+ * facts. Subjects carry ids, digests, and closed values only, so they may
+ * travel in Events and views.
  */
 export type DecisionSubject =
   | {
@@ -123,6 +136,15 @@ export type DecisionSubject =
       completionRequestId: CompletionRequestId;
       snapshotId: SnapshotId;
       reportArtifactId: ArtifactId;
+    }
+  | {
+      kind: "publish";
+      runId: RunId;
+      workspaceId: WorkspaceId;
+      target: RunTarget;
+      finalSnapshotId: SnapshotId;
+      finalChangesetId: ChangesetId;
+      requestedStrategy: PublicationStrategyRequest;
     };
 
 export const decisionSubjectSchema: z.ZodType<DecisionSubject> = z.discriminatedUnion("kind", [
@@ -147,20 +169,33 @@ export const decisionSubjectSchema: z.ZodType<DecisionSubject> = z.discriminated
       reportArtifactId: idSchema("artifact"),
     })
     .refine((s) => s.gateId !== s.completionGateId, { message: "the signoff Gate and the completion Gate are distinct", path: ["completionGateId"] }),
+  z.strictObject({
+    kind: z.literal("publish"),
+    runId: idSchema("run"),
+    workspaceId: idSchema("workspace"),
+    target: runTargetSchema,
+    finalSnapshotId: idSchema("snapshot"),
+    finalChangesetId: idSchema("changeset"),
+    requestedStrategy: publicationStrategyRequestSchema,
+  }),
 ]);
 
-/** A `side_effect_approval` or `signoff` Decision has exactly its typed subject, exactly its two stable options, and a Run; no other kind has a subject. */
-function sideEffectApprovalShape(decision: { kind: DecisionKind; subject: DecisionSubject | null; options: DecisionOption[]; runId: RunId | null; resolutionPolicy: ResolutionPolicy }, ctx: z.RefinementCtx): void {
-  if (decision.kind === "side_effect_approval" || decision.kind === "signoff") {
-    const expected: readonly string[] = decision.kind === "side_effect_approval" ? SIDE_EFFECT_APPROVAL_OPTIONS : SIGNOFF_OPTIONS;
+/** A `side_effect_approval`, `signoff`, or `publish` Decision has exactly its typed subject, exactly its two stable options, and a Run; no other kind has a subject. */
+function subjectShape(decision: { kind: DecisionKind; subject: DecisionSubject | null; options: DecisionOption[]; runId: RunId | null; resolutionPolicy: ResolutionPolicy }, ctx: z.RefinementCtx): void {
+  if ((SUBJECT_DECISION_KINDS as readonly DecisionKind[]).includes(decision.kind)) {
+    const expected: readonly string[] = decision.kind === "side_effect_approval" ? SIDE_EFFECT_APPROVAL_OPTIONS : decision.kind === "signoff" ? SIGNOFF_OPTIONS : PUBLISH_OPTIONS;
     if (decision.subject === null || decision.subject.kind !== decision.kind) ctx.addIssue({ code: "custom", path: ["subject"], message: `a ${decision.kind} names its ${decision.kind} subject` });
     const ids = decision.options.map((o) => o.id).sort();
     if (ids.join(",") !== [...expected].sort().join(",")) {
       ctx.addIssue({ code: "custom", path: ["options"], message: `a ${decision.kind} offers exactly ${expected.join(" and ")}` });
     }
     if (decision.runId === null) ctx.addIssue({ code: "custom", path: ["runId"], message: `a ${decision.kind} belongs to a Run` });
-    if (decision.kind === "signoff" && decision.resolutionPolicy !== "operator_required") ctx.addIssue({ code: "custom", path: ["resolutionPolicy"], message: "a signoff is always operator_required" });
-    if (decision.kind === "signoff" && decision.subject?.kind === "signoff" && decision.subject.runId !== decision.runId) ctx.addIssue({ code: "custom", path: ["subject"], message: "a signoff subject names the Decision's own Run" });
+    if ((decision.kind === "signoff" || decision.kind === "publish") && decision.resolutionPolicy !== "operator_required") {
+      ctx.addIssue({ code: "custom", path: ["resolutionPolicy"], message: `a ${decision.kind} is always operator_required` });
+    }
+    if (decision.subject !== null && decision.subject.kind !== "side_effect_approval" && decision.subject.kind === decision.kind && decision.subject.runId !== decision.runId) {
+      ctx.addIssue({ code: "custom", path: ["subject"], message: `a ${decision.kind} subject names the Decision's own Run` });
+    }
   } else if (decision.subject !== null) {
     ctx.addIssue({ code: "custom", path: ["subject"], message: `a ${decision.kind} Decision has no subject` });
   }
@@ -243,7 +278,7 @@ export const decisionRequestSchema: z.ZodType<DecisionRequest> = z
     supersedesDecisionId: idSchema("decision").nullable(),
   })
   .superRefine((request, ctx) => {
-    sideEffectApprovalShape(request, ctx);
+    subjectShape(request, ctx);
     if (request.recommendedOptionId !== null && !request.options.some((o) => o.id === request.recommendedOptionId)) {
       ctx.addIssue({ code: "custom", path: ["recommendedOptionId"], message: "recommended option must be one of the options" });
     }
@@ -299,7 +334,7 @@ export const decisionSchema: z.ZodType<Decision> = z
     supersededByDecisionId: idSchema("decision").nullable(),
     createdAt: timestampSchema,
   })
-  .superRefine(sideEffectApprovalShape)
+  .superRefine(subjectShape)
   .refine((d) => (d.status === "open") === (d.resolution === null), {
     message: "an open Decision has no resolution; a resolved or superseded one does",
     path: ["resolution"],
@@ -376,6 +411,14 @@ export function approvalSubjectOf(decision: Pick<Decision, "id" | "kind" | "subj
 export function signoffSubjectOf(decision: Pick<Decision, "id" | "kind" | "subject">): Extract<DecisionSubject, { kind: "signoff" }> {
   if (decision.kind !== "signoff" || decision.subject === null || decision.subject.kind !== "signoff") {
     throw new ValidationError(`Decision ${decision.id} is not a signoff with its subject`, { decisionId: decision.id, kind: decision.kind });
+  }
+  return decision.subject;
+}
+
+/** The typed subject of a `publish` Decision; a Decision of another kind (or without one) is an invariant violation. */
+export function publishSubjectOf(decision: Pick<Decision, "id" | "kind" | "subject">): Extract<DecisionSubject, { kind: "publish" }> {
+  if (decision.kind !== "publish" || decision.subject === null || decision.subject.kind !== "publish") {
+    throw new ValidationError(`Decision ${decision.id} is not a publish Decision with its subject`, { decisionId: decision.id, kind: decision.kind });
   }
   return decision.subject;
 }

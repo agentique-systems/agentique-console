@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "be2673a0-18e7-4eb8-a48e-9be68cd4290d",
+  "id": "e4e321a2-3d38-4eee-93e6-fef3be9f3dd2",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "acceptance_criteria": {
@@ -2288,6 +2288,14 @@
           ],
           "isUnique": true,
           "where": "kind = 'signoff'"
+        },
+        "decisions_open_publish_run": {
+          "name": "decisions_open_publish_run",
+          "columns": [
+            "run_id"
+          ],
+          "isUnique": true,
+          "where": "kind = 'publish' AND status = 'open'"
         }
       },
       "foreignKeys": {
@@ -2389,11 +2397,11 @@
         },
         "decisions_subject_shape": {
           "name": "decisions_subject_shape",
-          "value": "(\"decisions\".\"kind\" IN ('side_effect_approval', 'signoff')) = (\"decisions\".\"subject\" IS NOT NULL AND json_extract(\"decisions\".\"subject\", '$.kind') = \"decisions\".\"kind\" AND \"decisions\".\"run_id\" IS NOT NULL)"
+          "value": "(\"decisions\".\"kind\" IN ('side_effect_approval', 'signoff', 'publish')) = (\"decisions\".\"subject\" IS NOT NULL AND json_extract(\"decisions\".\"subject\", '$.kind') = \"decisions\".\"kind\" AND \"decisions\".\"run_id\" IS NOT NULL)"
         },
         "decisions_signoff_policy": {
           "name": "decisions_signoff_policy",
-          "value": "\"decisions\".\"kind\" <> 'signoff' OR (\"decisions\".\"resolution_policy\" = 'operator_required' AND json_extract(\"decisions\".\"subject\", '$.runId') = \"decisions\".\"run_id\")"
+          "value": "\"decisions\".\"kind\" NOT IN ('signoff', 'publish') OR (\"decisions\".\"resolution_policy\" = 'operator_required' AND json_extract(\"decisions\".\"subject\", '$.runId') = \"decisions\".\"run_id\")"
         },
         "decisions_no_self_supersede": {
           "name": "decisions_no_self_supersede",
@@ -2510,6 +2518,17 @@
             "type": "virtual"
           }
         },
+        "context_publication_id": {
+          "name": "context_publication_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false,
+          "generated": {
+            "as": "(json_extract(context, '$.publicationId'))",
+            "type": "virtual"
+          }
+        },
         "subject_criterion_id": {
           "name": "subject_criterion_id",
           "type": "text",
@@ -2571,6 +2590,15 @@
           ],
           "isUnique": true,
           "where": "context_kind = 'optimizer_criterion'"
+        },
+        "evaluations_publication_criterion": {
+          "name": "evaluations_publication_criterion",
+          "columns": [
+            "context_publication_id",
+            "subject_criterion_id"
+          ],
+          "isUnique": true,
+          "where": "context_kind = 'publication'"
         },
         "evaluations_gate_criterion": {
           "name": "evaluations_gate_criterion",
@@ -2649,7 +2677,11 @@
         },
         "evaluations_optimizer_shape": {
           "name": "evaluations_optimizer_shape",
-          "value": "\"evaluations\".\"context\" IS NULL OR (\"evaluations\".\"plan_node_id\" IS NOT NULL AND \"evaluations\".\"gate_id\" IS NULL AND \"evaluations\".\"snapshot_id\" IS NOT NULL AND json_extract(\"evaluations\".\"context\", '$.round') >= 1 AND json_extract(\"evaluations\".\"context\", '$.round') <= json_extract(\"evaluations\".\"context\", '$.maxRounds') AND ((json_extract(\"evaluations\".\"context\", '$.kind') = 'optimizer_verdict' AND json_extract(\"evaluations\".\"subject\", '$.kind') = 'optimizer_round') OR (json_extract(\"evaluations\".\"context\", '$.kind') = 'optimizer_criterion' AND json_extract(\"evaluations\".\"subject\", '$.kind') = 'acceptance_criterion')))"
+          "value": "\"evaluations\".\"context\" IS NULL OR json_extract(\"evaluations\".\"context\", '$.kind') = 'publication' OR (\"evaluations\".\"plan_node_id\" IS NOT NULL AND \"evaluations\".\"gate_id\" IS NULL AND \"evaluations\".\"snapshot_id\" IS NOT NULL AND json_extract(\"evaluations\".\"context\", '$.round') >= 1 AND json_extract(\"evaluations\".\"context\", '$.round') <= json_extract(\"evaluations\".\"context\", '$.maxRounds') AND ((json_extract(\"evaluations\".\"context\", '$.kind') = 'optimizer_verdict' AND json_extract(\"evaluations\".\"subject\", '$.kind') = 'optimizer_round') OR (json_extract(\"evaluations\".\"context\", '$.kind') = 'optimizer_criterion' AND json_extract(\"evaluations\".\"subject\", '$.kind') = 'acceptance_criterion')))"
+        },
+        "evaluations_publication_shape": {
+          "name": "evaluations_publication_shape",
+          "value": "\"evaluations\".\"context_kind\" IS NOT 'publication' OR (\"evaluations\".\"plan_node_id\" IS NULL AND \"evaluations\".\"gate_id\" IS NULL AND \"evaluations\".\"snapshot_id\" IS NOT NULL AND json_extract(\"evaluations\".\"subject\", '$.kind') = 'acceptance_criterion' AND json_extract(\"evaluations\".\"produced_by\", '$.kind') = 'runtime')"
         },
         "evaluations_optimizer_round_subject": {
           "name": "evaluations_optimizer_round_subject",
@@ -3792,11 +3824,11 @@
         },
         "invocations_purpose": {
           "name": "invocations_purpose",
-          "value": "\"invocations\".\"purpose\" IN ('operator_input', 'plan_revision', 'node_result', 'decision_resolution', 'gate_result', 'publication_result', 'final_synthesis', 'step', 'task', 'select', 'evaluate', 'decompose', 'replan', 'synthesize')"
+          "value": "\"invocations\".\"purpose\" IN ('operator_input', 'plan_revision', 'node_result', 'decision_resolution', 'gate_result', 'final_synthesis', 'step', 'task', 'select', 'evaluate', 'decompose', 'replan', 'synthesize')"
         },
         "invocations_role_purpose": {
           "name": "invocations_role_purpose",
-          "value": "(role = 'orchestrator' AND purpose IN ('operator_input', 'plan_revision', 'node_result', 'decision_resolution', 'gate_result', 'publication_result', 'final_synthesis')) OR (role = 'worker' AND purpose IN ('step', 'task')) OR (role = 'evaluator' AND purpose IN ('select', 'evaluate')) OR (role = 'coordinator' AND purpose IN ('decompose', 'replan', 'synthesize'))"
+          "value": "(role = 'orchestrator' AND purpose IN ('operator_input', 'plan_revision', 'node_result', 'decision_resolution', 'gate_result', 'final_synthesis')) OR (role = 'worker' AND purpose IN ('step', 'task')) OR (role = 'evaluator' AND purpose IN ('select', 'evaluate')) OR (role = 'coordinator' AND purpose IN ('decompose', 'replan', 'synthesize'))"
         },
         "invocations_status": {
           "name": "invocations_status",
@@ -4703,11 +4735,32 @@
           "notNull": true,
           "autoincrement": false
         },
+        "requested_strategy": {
+          "name": "requested_strategy",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "strategy": {
+          "name": "strategy",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "target_before_snapshot_id": {
           "name": "target_before_snapshot_id",
           "type": "text",
           "primaryKey": false,
-          "notNull": true,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "candidate_snapshot_id": {
+          "name": "candidate_snapshot_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
           "autoincrement": false
         },
         "target_after_snapshot_id": {
@@ -4717,32 +4770,32 @@
           "notNull": false,
           "autoincrement": false
         },
-        "strategy": {
-          "name": "strategy",
+        "status": {
+          "name": "status",
           "type": "text",
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
         },
-        "outcome": {
-          "name": "outcome",
+        "failure": {
+          "name": "failure",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "report_artifact_id": {
+          "name": "report_artifact_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "staging_cleanup": {
+          "name": "staging_cleanup",
           "type": "text",
           "primaryKey": false,
           "notNull": true,
-          "autoincrement": false
-        },
-        "failure_reason": {
-          "name": "failure_reason",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "artifact_id": {
-          "name": "artifact_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
           "autoincrement": false
         },
         "created_at": {
@@ -4750,6 +4803,41 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true,
+          "autoincrement": false
+        },
+        "prepared_at": {
+          "name": "prepared_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "verified_at": {
+          "name": "verified_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "applying_at": {
+          "name": "applying_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "ended_at": {
+          "name": "ended_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "staging_released_at": {
+          "name": "staging_released_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
           "autoincrement": false
         }
       },
@@ -4761,6 +4849,36 @@
             "created_at"
           ],
           "isUnique": false
+        },
+        "publications_status": {
+          "name": "publications_status",
+          "columns": [
+            "status"
+          ],
+          "isUnique": false
+        },
+        "publications_decision": {
+          "name": "publications_decision",
+          "columns": [
+            "decision_id"
+          ],
+          "isUnique": true
+        },
+        "publications_active_run": {
+          "name": "publications_active_run",
+          "columns": [
+            "run_id"
+          ],
+          "isUnique": true,
+          "where": "status NOT IN ('succeeded', 'failed')"
+        },
+        "publications_succeeded_run": {
+          "name": "publications_succeeded_run",
+          "columns": [
+            "run_id"
+          ],
+          "isUnique": true,
+          "where": "status = 'succeeded'"
         }
       },
       "foreignKeys": {
@@ -4816,6 +4934,19 @@
           "onDelete": "no action",
           "onUpdate": "no action"
         },
+        "publications_candidate_snapshot_id_snapshots_id_fk": {
+          "name": "publications_candidate_snapshot_id_snapshots_id_fk",
+          "tableFrom": "publications",
+          "tableTo": "snapshots",
+          "columnsFrom": [
+            "candidate_snapshot_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
         "publications_target_after_snapshot_id_snapshots_id_fk": {
           "name": "publications_target_after_snapshot_id_snapshots_id_fk",
           "tableFrom": "publications",
@@ -4829,12 +4960,12 @@
           "onDelete": "no action",
           "onUpdate": "no action"
         },
-        "publications_artifact_id_artifacts_id_fk": {
-          "name": "publications_artifact_id_artifacts_id_fk",
+        "publications_report_artifact_id_artifacts_id_fk": {
+          "name": "publications_report_artifact_id_artifacts_id_fk",
           "tableFrom": "publications",
           "tableTo": "artifacts",
           "columnsFrom": [
-            "artifact_id"
+            "report_artifact_id"
           ],
           "columnsTo": [
             "id"
@@ -4846,17 +4977,53 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {
-        "publications_outcome": {
-          "name": "publications_outcome",
-          "value": "\"publications\".\"outcome\" IN ('succeeded', 'failed')"
+        "publications_status": {
+          "name": "publications_status",
+          "value": "\"publications\".\"status\" IN ('requested', 'prepared', 'verified', 'applying', 'succeeded', 'failed')"
         },
-        "publications_failure_reason": {
-          "name": "publications_failure_reason",
-          "value": "(\"publications\".\"outcome\" = 'failed') = (\"publications\".\"failure_reason\" IS NOT NULL)"
+        "publications_staging_cleanup": {
+          "name": "publications_staging_cleanup",
+          "value": "\"publications\".\"staging_cleanup\" IN ('pending', 'released')"
+        },
+        "publications_prepared_shape": {
+          "name": "publications_prepared_shape",
+          "value": "(\"publications\".\"prepared_at\" IS NOT NULL) = (\"publications\".\"strategy\" IS NOT NULL) AND (\"publications\".\"prepared_at\" IS NOT NULL) = (\"publications\".\"target_before_snapshot_id\" IS NOT NULL) AND (\"publications\".\"prepared_at\" IS NOT NULL) = (\"publications\".\"candidate_snapshot_id\" IS NOT NULL)"
+        },
+        "publications_prepared_status": {
+          "name": "publications_prepared_status",
+          "value": "(\"publications\".\"status\" NOT IN ('prepared', 'verified', 'applying', 'succeeded') OR \"publications\".\"prepared_at\" IS NOT NULL) AND (\"publications\".\"status\" <> 'requested' OR \"publications\".\"prepared_at\" IS NULL)"
+        },
+        "publications_verified_status": {
+          "name": "publications_verified_status",
+          "value": "(\"publications\".\"status\" NOT IN ('verified', 'applying', 'succeeded') OR \"publications\".\"verified_at\" IS NOT NULL) AND (\"publications\".\"status\" NOT IN ('requested', 'prepared') OR \"publications\".\"verified_at\" IS NULL)"
+        },
+        "publications_applying_status": {
+          "name": "publications_applying_status",
+          "value": "(\"publications\".\"status\" NOT IN ('applying', 'succeeded') OR \"publications\".\"applying_at\" IS NOT NULL) AND (\"publications\".\"status\" NOT IN ('requested', 'prepared', 'verified') OR \"publications\".\"applying_at\" IS NULL)"
+        },
+        "publications_milestones_monotone": {
+          "name": "publications_milestones_monotone",
+          "value": "(\"publications\".\"verified_at\" IS NULL OR \"publications\".\"prepared_at\" IS NOT NULL) AND (\"publications\".\"applying_at\" IS NULL OR \"publications\".\"verified_at\" IS NOT NULL)"
+        },
+        "publications_failure_shape": {
+          "name": "publications_failure_shape",
+          "value": "(\"publications\".\"status\" = 'failed') = (\"publications\".\"failure\" IS NOT NULL)"
+        },
+        "publications_terminal_shape": {
+          "name": "publications_terminal_shape",
+          "value": "(\"publications\".\"status\" IN ('succeeded', 'failed')) = (\"publications\".\"ended_at\" IS NOT NULL) AND (\"publications\".\"status\" IN ('succeeded', 'failed')) = (\"publications\".\"report_artifact_id\" IS NOT NULL)"
         },
         "publications_after_snapshot": {
           "name": "publications_after_snapshot",
-          "value": "(\"publications\".\"outcome\" = 'succeeded') = (\"publications\".\"target_after_snapshot_id\" IS NOT NULL)"
+          "value": "(\"publications\".\"status\" = 'succeeded') = (\"publications\".\"target_after_snapshot_id\" IS NOT NULL) AND (\"publications\".\"status\" <> 'succeeded' OR \"publications\".\"target_after_snapshot_id\" = \"publications\".\"candidate_snapshot_id\")"
+        },
+        "publications_failure_stage": {
+          "name": "publications_failure_stage",
+          "value": "\"publications\".\"failure\" IS NULL OR ((json_extract(\"publications\".\"failure\", '$.kind') <> 'verification_failed' OR \"publications\".\"prepared_at\" IS NOT NULL) AND (json_extract(\"publications\".\"failure\", '$.kind') <> 'target_changed' OR \"publications\".\"applying_at\" IS NOT NULL) AND (json_extract(\"publications\".\"failure\", '$.kind') NOT IN ('strategy_unsupported', 'fast_forward_unavailable', 'candidate_conflict', 'candidate_invalid') OR \"publications\".\"verified_at\" IS NULL))"
+        },
+        "publications_cleanup_shape": {
+          "name": "publications_cleanup_shape",
+          "value": "((\"publications\".\"staging_cleanup\" = 'released') = (\"publications\".\"staging_released_at\" IS NOT NULL)) AND (\"publications\".\"staging_cleanup\" <> 'released' OR \"publications\".\"status\" IN ('succeeded', 'failed'))"
         }
       }
     },
@@ -6130,7 +6297,7 @@
         },
         "snapshots_reason": {
           "name": "snapshots_reason",
-          "value": "\"snapshots\".\"reason\" IN ('run_start', 'before_invocation', 'after_invocation', 'integration', 'run_completion', 'publish_before', 'publish_after', 'agent_definition_read')"
+          "value": "\"snapshots\".\"reason\" IN ('run_start', 'before_invocation', 'after_invocation', 'integration', 'run_completion', 'publish_before', 'publish_candidate', 'agent_definition_read')"
         },
         "snapshots_identity": {
           "name": "snapshots_identity",

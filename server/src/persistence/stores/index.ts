@@ -12,6 +12,7 @@ import { DecisionStore } from "./decisions.ts";
 import { HandoffStore } from "./handoffs.ts";
 import { InvocationStore } from "./invocations.ts";
 import { ExecutionPlanStore } from "./plans.ts";
+import { PublicationStore } from "./publications.ts";
 import { RequirementStore } from "./requirements.ts";
 import { RunStore } from "./runs.ts";
 import { RuntimeToolCallStore } from "./runtime-tool-calls.ts";
@@ -19,7 +20,7 @@ import { SignoffResolutionStore } from "./signoff-resolutions.ts";
 import { TaskStore } from "./tasks.ts";
 import { UsageStore } from "./usage.ts";
 import { EvaluationStore, GateStore } from "./verification.ts";
-import { ChangesetStore, PublicationStore, SnapshotStore } from "./workspace-state.ts";
+import { ChangesetStore, SnapshotStore } from "./workspace-state.ts";
 import { WorkspaceStore } from "./workspaces.ts";
 
 export interface Stores {

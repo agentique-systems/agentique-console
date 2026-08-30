@@ -333,14 +333,15 @@ CREATE TABLE `decisions` (
 	CONSTRAINT "decisions_policy_resolver" CHECK("decisions"."resolved_by" IS NULL OR "decisions"."resolved_by" <> 'policy:use_default_after_deadline' OR ("decisions"."resolution_policy" = 'use_default_after_deadline' AND "decisions"."chosen_option_id" = "decisions"."recommended_option_id")),
 	CONSTRAINT "decisions_resolution_shape" CHECK(("decisions"."status" = 'open' AND "decisions"."resolved_by" IS NULL AND "decisions"."chosen_option_id" IS NULL AND "decisions"."resolved_at" IS NULL) OR ("decisions"."status" = 'resolved' AND "decisions"."resolved_by" IS NOT NULL AND "decisions"."chosen_option_id" IS NOT NULL AND "decisions"."resolved_at" IS NOT NULL) OR "decisions"."status" = 'superseded'),
 	CONSTRAINT "decisions_superseded_by" CHECK(("decisions"."status" = 'superseded') = ("decisions"."superseded_by_decision_id" IS NOT NULL)),
-	CONSTRAINT "decisions_subject_shape" CHECK(("decisions"."kind" IN ('side_effect_approval', 'signoff')) = ("decisions"."subject" IS NOT NULL AND json_extract("decisions"."subject", '$.kind') = "decisions"."kind" AND "decisions"."run_id" IS NOT NULL)),
-	CONSTRAINT "decisions_signoff_policy" CHECK("decisions"."kind" <> 'signoff' OR ("decisions"."resolution_policy" = 'operator_required' AND json_extract("decisions"."subject", '$.runId') = "decisions"."run_id")),
+	CONSTRAINT "decisions_subject_shape" CHECK(("decisions"."kind" IN ('side_effect_approval', 'signoff', 'publish')) = ("decisions"."subject" IS NOT NULL AND json_extract("decisions"."subject", '$.kind') = "decisions"."kind" AND "decisions"."run_id" IS NOT NULL)),
+	CONSTRAINT "decisions_signoff_policy" CHECK("decisions"."kind" NOT IN ('signoff', 'publish') OR ("decisions"."resolution_policy" = 'operator_required' AND json_extract("decisions"."subject", '$.runId') = "decisions"."run_id")),
 	CONSTRAINT "decisions_no_self_supersede" CHECK("decisions"."supersedes_decision_id" IS NULL OR "decisions"."supersedes_decision_id" <> "decisions"."id")
 );
 --> statement-breakpoint
 CREATE INDEX `decisions_conversation_status` ON `decisions` (`conversation_id`,`status`);--> statement-breakpoint
 CREATE INDEX `decisions_run` ON `decisions` (`run_id`);--> statement-breakpoint
 CREATE UNIQUE INDEX `decisions_signoff_gate` ON `decisions` (`subject_gate_id`) WHERE kind = 'signoff';--> statement-breakpoint
+CREATE UNIQUE INDEX `decisions_open_publish_run` ON `decisions` (`run_id`) WHERE kind = 'publish' AND status = 'open';--> statement-breakpoint
 CREATE TABLE `evaluations` (
 	`id` text PRIMARY KEY NOT NULL,
 	`run_id` text NOT NULL,
@@ -356,6 +357,7 @@ CREATE TABLE `evaluations` (
 	`created_at` text NOT NULL,
 	`context_kind` text GENERATED ALWAYS AS (json_extract(context, '$.kind')) VIRTUAL,
 	`context_round` integer GENERATED ALWAYS AS (json_extract(context, '$.round')) VIRTUAL,
+	`context_publication_id` text GENERATED ALWAYS AS (json_extract(context, '$.publicationId')) VIRTUAL,
 	`subject_criterion_id` text GENERATED ALWAYS AS (json_extract(subject, '$.acceptanceCriterionId')) VIRTUAL,
 	FOREIGN KEY (`run_id`) REFERENCES `runs`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`plan_node_id`) REFERENCES `plan_nodes`(`id`) ON UPDATE no action ON DELETE no action,
@@ -363,7 +365,8 @@ CREATE TABLE `evaluations` (
 	FOREIGN KEY (`snapshot_id`) REFERENCES `snapshots`(`id`) ON UPDATE no action ON DELETE no action,
 	CONSTRAINT "evaluations_verdict" CHECK("evaluations"."verdict" IN ('pass', 'fail', 'inconclusive')),
 	CONSTRAINT "evaluations_route_selection_shape" CHECK(json_extract("evaluations"."subject", '$.kind') <> 'route_selection' OR ("evaluations"."plan_node_id" IS NOT NULL AND "evaluations"."gate_id" IS NULL AND "evaluations"."context" IS NULL AND "evaluations"."verdict" = 'pass' AND json_extract("evaluations"."subject", '$.selectedLabel') IS NOT NULL)),
-	CONSTRAINT "evaluations_optimizer_shape" CHECK("evaluations"."context" IS NULL OR ("evaluations"."plan_node_id" IS NOT NULL AND "evaluations"."gate_id" IS NULL AND "evaluations"."snapshot_id" IS NOT NULL AND json_extract("evaluations"."context", '$.round') >= 1 AND json_extract("evaluations"."context", '$.round') <= json_extract("evaluations"."context", '$.maxRounds') AND ((json_extract("evaluations"."context", '$.kind') = 'optimizer_verdict' AND json_extract("evaluations"."subject", '$.kind') = 'optimizer_round') OR (json_extract("evaluations"."context", '$.kind') = 'optimizer_criterion' AND json_extract("evaluations"."subject", '$.kind') = 'acceptance_criterion')))),
+	CONSTRAINT "evaluations_optimizer_shape" CHECK("evaluations"."context" IS NULL OR json_extract("evaluations"."context", '$.kind') = 'publication' OR ("evaluations"."plan_node_id" IS NOT NULL AND "evaluations"."gate_id" IS NULL AND "evaluations"."snapshot_id" IS NOT NULL AND json_extract("evaluations"."context", '$.round') >= 1 AND json_extract("evaluations"."context", '$.round') <= json_extract("evaluations"."context", '$.maxRounds') AND ((json_extract("evaluations"."context", '$.kind') = 'optimizer_verdict' AND json_extract("evaluations"."subject", '$.kind') = 'optimizer_round') OR (json_extract("evaluations"."context", '$.kind') = 'optimizer_criterion' AND json_extract("evaluations"."subject", '$.kind') = 'acceptance_criterion')))),
+	CONSTRAINT "evaluations_publication_shape" CHECK("evaluations"."context_kind" IS NOT 'publication' OR ("evaluations"."plan_node_id" IS NULL AND "evaluations"."gate_id" IS NULL AND "evaluations"."snapshot_id" IS NOT NULL AND json_extract("evaluations"."subject", '$.kind') = 'acceptance_criterion' AND json_extract("evaluations"."produced_by", '$.kind') = 'runtime')),
 	CONSTRAINT "evaluations_optimizer_round_subject" CHECK(json_extract("evaluations"."subject", '$.kind') <> 'optimizer_round' OR json_extract("evaluations"."context", '$.kind') = 'optimizer_verdict'),
 	CONSTRAINT "evaluations_gate_shape" CHECK("evaluations"."gate_id" IS NULL OR "evaluations"."context" IS NULL)
 );
@@ -374,6 +377,7 @@ CREATE INDEX `evaluations_plan_node` ON `evaluations` (`plan_node_id`);--> state
 CREATE UNIQUE INDEX `evaluations_route_selection_node` ON `evaluations` (`plan_node_id`) WHERE json_extract(subject, '$.kind') = 'route_selection';--> statement-breakpoint
 CREATE UNIQUE INDEX `evaluations_optimizer_verdict_round` ON `evaluations` (`plan_node_id`,`context_round`) WHERE context_kind = 'optimizer_verdict';--> statement-breakpoint
 CREATE UNIQUE INDEX `evaluations_optimizer_criterion_round` ON `evaluations` (`plan_node_id`,`context_round`,`subject_criterion_id`) WHERE context_kind = 'optimizer_criterion';--> statement-breakpoint
+CREATE UNIQUE INDEX `evaluations_publication_criterion` ON `evaluations` (`context_publication_id`,`subject_criterion_id`) WHERE context_kind = 'publication';--> statement-breakpoint
 CREATE UNIQUE INDEX `evaluations_gate_criterion` ON `evaluations` (`gate_id`,`subject_criterion_id`) WHERE gate_id IS NOT NULL AND subject_criterion_id IS NOT NULL;--> statement-breakpoint
 CREATE TABLE `events` (
 	`seq` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
@@ -522,8 +526,8 @@ CREATE TABLE `invocations` (
 	CONSTRAINT "invocations_final_reserve_shape" CHECK(("invocations"."allocation_source" = 'run_final_reserve') = ("invocations"."final_reserve_use" IS NOT NULL)),
 	CONSTRAINT "invocations_final_reserve_binding" CHECK("invocations"."final_reserve_use" IS NULL OR ("invocations"."final_reserve_use" = 'final_synthesis' AND "invocations"."role" = 'orchestrator' AND "invocations"."purpose" = 'final_synthesis') OR ("invocations"."final_reserve_use" = 'run_completion' AND "invocations"."role" = 'evaluator' AND "invocations"."purpose" = 'evaluate')),
 	CONSTRAINT "invocations_final_reserve_no_tasks" CHECK("invocations"."allocation_source" = 'plan_node' OR "invocations"."task_ids" = '[]'),
-	CONSTRAINT "invocations_purpose" CHECK("invocations"."purpose" IN ('operator_input', 'plan_revision', 'node_result', 'decision_resolution', 'gate_result', 'publication_result', 'final_synthesis', 'step', 'task', 'select', 'evaluate', 'decompose', 'replan', 'synthesize')),
-	CONSTRAINT "invocations_role_purpose" CHECK((role = 'orchestrator' AND purpose IN ('operator_input', 'plan_revision', 'node_result', 'decision_resolution', 'gate_result', 'publication_result', 'final_synthesis')) OR (role = 'worker' AND purpose IN ('step', 'task')) OR (role = 'evaluator' AND purpose IN ('select', 'evaluate')) OR (role = 'coordinator' AND purpose IN ('decompose', 'replan', 'synthesize'))),
+	CONSTRAINT "invocations_purpose" CHECK("invocations"."purpose" IN ('operator_input', 'plan_revision', 'node_result', 'decision_resolution', 'gate_result', 'final_synthesis', 'step', 'task', 'select', 'evaluate', 'decompose', 'replan', 'synthesize')),
+	CONSTRAINT "invocations_role_purpose" CHECK((role = 'orchestrator' AND purpose IN ('operator_input', 'plan_revision', 'node_result', 'decision_resolution', 'gate_result', 'final_synthesis')) OR (role = 'worker' AND purpose IN ('step', 'task')) OR (role = 'evaluator' AND purpose IN ('select', 'evaluate')) OR (role = 'coordinator' AND purpose IN ('decompose', 'replan', 'synthesize'))),
 	CONSTRAINT "invocations_status" CHECK("invocations"."status" IN ('pending', 'running', 'waiting', 'blocked', 'succeeded', 'failed', 'cancelled')),
 	CONSTRAINT "invocations_wait_reason" CHECK("invocations"."wait_reason" IS NULL OR "invocations"."wait_reason" IN ('decision', 'budget', 'provider_capacity', 'operator')),
 	CONSTRAINT "invocations_failure_reason" CHECK("invocations"."failure_reason" IS NULL OR "invocations"."failure_reason" IN ('attempts_exhausted', 'provider_permanent', 'allocation_exhausted', 'result_invalid', 'cancelled')),
@@ -673,25 +677,47 @@ CREATE TABLE `publications` (
 	`run_id` text NOT NULL,
 	`decision_id` text NOT NULL,
 	`changeset_id` text NOT NULL,
-	`target_before_snapshot_id` text NOT NULL,
+	`requested_strategy` text NOT NULL,
+	`strategy` text,
+	`target_before_snapshot_id` text,
+	`candidate_snapshot_id` text,
 	`target_after_snapshot_id` text,
-	`strategy` text NOT NULL,
-	`outcome` text NOT NULL,
-	`failure_reason` text,
-	`artifact_id` text,
+	`status` text NOT NULL,
+	`failure` text,
+	`report_artifact_id` text,
+	`staging_cleanup` text NOT NULL,
 	`created_at` text NOT NULL,
+	`prepared_at` text,
+	`verified_at` text,
+	`applying_at` text,
+	`ended_at` text,
+	`staging_released_at` text,
 	FOREIGN KEY (`run_id`) REFERENCES `runs`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`decision_id`) REFERENCES `decisions`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`changeset_id`) REFERENCES `changesets`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`target_before_snapshot_id`) REFERENCES `snapshots`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`candidate_snapshot_id`) REFERENCES `snapshots`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`target_after_snapshot_id`) REFERENCES `snapshots`(`id`) ON UPDATE no action ON DELETE no action,
-	FOREIGN KEY (`artifact_id`) REFERENCES `artifacts`(`id`) ON UPDATE no action ON DELETE no action,
-	CONSTRAINT "publications_outcome" CHECK("publications"."outcome" IN ('succeeded', 'failed')),
-	CONSTRAINT "publications_failure_reason" CHECK(("publications"."outcome" = 'failed') = ("publications"."failure_reason" IS NOT NULL)),
-	CONSTRAINT "publications_after_snapshot" CHECK(("publications"."outcome" = 'succeeded') = ("publications"."target_after_snapshot_id" IS NOT NULL))
+	FOREIGN KEY (`report_artifact_id`) REFERENCES `artifacts`(`id`) ON UPDATE no action ON DELETE no action,
+	CONSTRAINT "publications_status" CHECK("publications"."status" IN ('requested', 'prepared', 'verified', 'applying', 'succeeded', 'failed')),
+	CONSTRAINT "publications_staging_cleanup" CHECK("publications"."staging_cleanup" IN ('pending', 'released')),
+	CONSTRAINT "publications_prepared_shape" CHECK(("publications"."prepared_at" IS NOT NULL) = ("publications"."strategy" IS NOT NULL) AND ("publications"."prepared_at" IS NOT NULL) = ("publications"."target_before_snapshot_id" IS NOT NULL) AND ("publications"."prepared_at" IS NOT NULL) = ("publications"."candidate_snapshot_id" IS NOT NULL)),
+	CONSTRAINT "publications_prepared_status" CHECK(("publications"."status" NOT IN ('prepared', 'verified', 'applying', 'succeeded') OR "publications"."prepared_at" IS NOT NULL) AND ("publications"."status" <> 'requested' OR "publications"."prepared_at" IS NULL)),
+	CONSTRAINT "publications_verified_status" CHECK(("publications"."status" NOT IN ('verified', 'applying', 'succeeded') OR "publications"."verified_at" IS NOT NULL) AND ("publications"."status" NOT IN ('requested', 'prepared') OR "publications"."verified_at" IS NULL)),
+	CONSTRAINT "publications_applying_status" CHECK(("publications"."status" NOT IN ('applying', 'succeeded') OR "publications"."applying_at" IS NOT NULL) AND ("publications"."status" NOT IN ('requested', 'prepared', 'verified') OR "publications"."applying_at" IS NULL)),
+	CONSTRAINT "publications_milestones_monotone" CHECK(("publications"."verified_at" IS NULL OR "publications"."prepared_at" IS NOT NULL) AND ("publications"."applying_at" IS NULL OR "publications"."verified_at" IS NOT NULL)),
+	CONSTRAINT "publications_failure_shape" CHECK(("publications"."status" = 'failed') = ("publications"."failure" IS NOT NULL)),
+	CONSTRAINT "publications_terminal_shape" CHECK(("publications"."status" IN ('succeeded', 'failed')) = ("publications"."ended_at" IS NOT NULL) AND ("publications"."status" IN ('succeeded', 'failed')) = ("publications"."report_artifact_id" IS NOT NULL)),
+	CONSTRAINT "publications_after_snapshot" CHECK(("publications"."status" = 'succeeded') = ("publications"."target_after_snapshot_id" IS NOT NULL) AND ("publications"."status" <> 'succeeded' OR "publications"."target_after_snapshot_id" = "publications"."candidate_snapshot_id")),
+	CONSTRAINT "publications_failure_stage" CHECK("publications"."failure" IS NULL OR ((json_extract("publications"."failure", '$.kind') <> 'verification_failed' OR "publications"."prepared_at" IS NOT NULL) AND (json_extract("publications"."failure", '$.kind') <> 'target_changed' OR "publications"."applying_at" IS NOT NULL) AND (json_extract("publications"."failure", '$.kind') NOT IN ('strategy_unsupported', 'fast_forward_unavailable', 'candidate_conflict', 'candidate_invalid') OR "publications"."verified_at" IS NULL))),
+	CONSTRAINT "publications_cleanup_shape" CHECK((("publications"."staging_cleanup" = 'released') = ("publications"."staging_released_at" IS NOT NULL)) AND ("publications"."staging_cleanup" <> 'released' OR "publications"."status" IN ('succeeded', 'failed')))
 );
 --> statement-breakpoint
 CREATE INDEX `publications_run` ON `publications` (`run_id`,`created_at`);--> statement-breakpoint
+CREATE INDEX `publications_status` ON `publications` (`status`);--> statement-breakpoint
+CREATE UNIQUE INDEX `publications_decision` ON `publications` (`decision_id`);--> statement-breakpoint
+CREATE UNIQUE INDEX `publications_active_run` ON `publications` (`run_id`) WHERE status NOT IN ('succeeded', 'failed');--> statement-breakpoint
+CREATE UNIQUE INDEX `publications_succeeded_run` ON `publications` (`run_id`) WHERE status = 'succeeded';--> statement-breakpoint
 CREATE TABLE `requirement_revisions` (
 	`id` text PRIMARY KEY NOT NULL,
 	`conversation_id` text NOT NULL,
@@ -866,7 +892,7 @@ CREATE TABLE `snapshots` (
 	FOREIGN KEY (`workspace_id`) REFERENCES `workspaces`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`run_id`) REFERENCES `runs`(`id`) ON UPDATE no action ON DELETE no action,
 	CONSTRAINT "snapshots_kind" CHECK("snapshots"."kind" IN ('git', 'directory')),
-	CONSTRAINT "snapshots_reason" CHECK("snapshots"."reason" IN ('run_start', 'before_invocation', 'after_invocation', 'integration', 'run_completion', 'publish_before', 'publish_after', 'agent_definition_read')),
+	CONSTRAINT "snapshots_reason" CHECK("snapshots"."reason" IN ('run_start', 'before_invocation', 'after_invocation', 'integration', 'run_completion', 'publish_before', 'publish_candidate', 'agent_definition_read')),
 	CONSTRAINT "snapshots_identity" CHECK(("snapshots"."kind" = 'git' AND "snapshots"."commit_id" IS NOT NULL AND "snapshots"."tree_id" IS NOT NULL AND "snapshots"."content_digest" IS NULL) OR ("snapshots"."kind" = 'directory' AND "snapshots"."content_digest" IS NOT NULL AND "snapshots"."commit_id" IS NULL AND "snapshots"."tree_id" IS NULL))
 );
 --> statement-breakpoint
@@ -1038,8 +1064,12 @@ CREATE TRIGGER `signoff_resolutions_identity_immutable` BEFORE UPDATE OF `id`, `
 CREATE TRIGGER `signoff_resolutions_follow_up_once` BEFORE UPDATE OF `follow_up_invocation_id` ON `signoff_resolutions` WHEN OLD.`follow_up_invocation_id` IS NOT NULL BEGIN SELECT RAISE(ABORT, 'a signoff resolution links its follow-up invocation once'); END;--> statement-breakpoint
 CREATE TRIGGER `signoff_resolutions_follow_up_valid` BEFORE UPDATE OF `follow_up_invocation_id` ON `signoff_resolutions` WHEN NEW.`follow_up_invocation_id` IS NOT NULL BEGIN SELECT RAISE(ABORT, 'a request_changes signoff resolution links a root decision_resolution orchestrator invocation of its run') WHERE NEW.`outcome` <> 'request_changes' OR NOT EXISTS (SELECT 1 FROM `invocations` i JOIN `plan_nodes` n ON n.`id` = i.`plan_node_id` WHERE i.`id` = NEW.`follow_up_invocation_id` AND i.`run_id` = NEW.`run_id` AND i.`role` = 'orchestrator' AND i.`purpose` = 'decision_resolution' AND n.`source_path` = 'root'); END;--> statement-breakpoint
 CREATE TRIGGER `signoff_resolutions_no_delete` BEFORE DELETE ON `signoff_resolutions` BEGIN SELECT RAISE(ABORT, 'signoff resolutions are append-only history'); END;--> statement-breakpoint
-CREATE TRIGGER `publications_no_update` BEFORE UPDATE ON `publications` BEGIN SELECT RAISE(ABORT, 'publications are immutable'); END;--> statement-breakpoint
-CREATE TRIGGER `publications_no_delete` BEFORE DELETE ON `publications` BEGIN SELECT RAISE(ABORT, 'publications are immutable'); END;--> statement-breakpoint
+CREATE TRIGGER `publications_identity_immutable` BEFORE UPDATE OF `id`, `run_id`, `decision_id`, `changeset_id`, `requested_strategy`, `created_at` ON `publications` BEGIN SELECT RAISE(ABORT, 'publication identity columns are immutable'); END;--> statement-breakpoint
+CREATE TRIGGER `publications_prepared_immutable` BEFORE UPDATE OF `strategy`, `target_before_snapshot_id`, `candidate_snapshot_id`, `prepared_at` ON `publications` WHEN OLD.`prepared_at` IS NOT NULL BEGIN SELECT RAISE(ABORT, 'a publication records its prepared facts once'); END;--> statement-breakpoint
+CREATE TRIGGER `publications_terminal_immutable` BEFORE UPDATE OF `status`, `strategy`, `target_before_snapshot_id`, `candidate_snapshot_id`, `target_after_snapshot_id`, `failure`, `report_artifact_id`, `prepared_at`, `verified_at`, `applying_at`, `ended_at` ON `publications` WHEN OLD.`status` IN ('succeeded', 'failed') BEGIN SELECT RAISE(ABORT, 'a terminal publication never changes again'); END;--> statement-breakpoint
+CREATE TRIGGER `publications_cleanup_once` BEFORE UPDATE OF `staging_cleanup`, `staging_released_at` ON `publications` WHEN OLD.`staging_cleanup` = 'released' BEGIN SELECT RAISE(ABORT, 'publication staging resources are released once'); END;--> statement-breakpoint
+CREATE TRIGGER `publications_no_delete` BEFORE DELETE ON `publications` BEGIN SELECT RAISE(ABORT, 'publications are append-only history'); END;--> statement-breakpoint
+CREATE TRIGGER `publications_boundary_valid` BEFORE INSERT ON `publications` BEGIN SELECT RAISE(ABORT, 'a publication belongs to a completed run, is authorized by the run''s operator-resolved publish decision, applies the run''s final changeset, and a published run is never published again') WHERE NOT EXISTS (SELECT 1 FROM `runs` r JOIN `decisions` d ON d.`id` = NEW.`decision_id` WHERE r.`id` = NEW.`run_id` AND r.`status` = 'completed' AND r.`final_changeset_id` = NEW.`changeset_id` AND d.`run_id` = NEW.`run_id` AND d.`kind` = 'publish' AND d.`status` = 'resolved' AND d.`resolved_by` = 'operator' AND d.`chosen_option_id` = 'publish') OR EXISTS (SELECT 1 FROM `publications` p WHERE p.`run_id` = NEW.`run_id` AND p.`status` = 'succeeded'); END;--> statement-breakpoint
 CREATE TRIGGER `budget_reservations_definition_immutable` BEFORE UPDATE OF `run_id`, `parent_type`, `parent_id`, `child_type`, `child_id`, `reserved_cost_usd`, `reserved_tokens`, `reserved_attempts`, `capacity_source`, `final_reserve_use`, `transferred_from_reservation_id`, `created_at` ON `budget_reservations` BEGIN SELECT RAISE(ABORT, 'budget_reservation allocation columns are immutable'); END;--> statement-breakpoint
 CREATE TRIGGER `budget_reservations_released_once` BEFORE UPDATE ON `budget_reservations` WHEN OLD.`status` = 'released' BEGIN SELECT RAISE(ABORT, 'a released budget_reservation never changes again'); END;--> statement-breakpoint
 CREATE TRIGGER `budget_reservations_no_delete` BEFORE DELETE ON `budget_reservations` BEGIN SELECT RAISE(ABORT, 'budget_reservations are historical records'); END;--> statement-breakpoint

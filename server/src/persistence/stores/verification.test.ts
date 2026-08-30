@@ -1,6 +1,6 @@
-import { ConflictError, IllegalTransitionError, InvariantViolationError, ValidationError } from "@agentique-console/core";
+import { ConflictError, IllegalTransitionError, InvariantViolationError, optimizerRoundOf, ValidationError } from "@agentique-console/core";
 import { describe, expect, it } from "vitest";
-import { openHarness, operation, seedArtifact, seedFinalChangeset, seedInvocation, seedRun, seedSignoffBoundary, seedSnapshot, seedWorkerNode, seedRunCompletionGate, seedRequirements } from "../test-support.ts";
+import { openHarness, operation, seedArtifact, seedInvocation, seedRun, seedSnapshot, seedWorkerNode, seedRunCompletionGate, seedRequirements } from "../test-support.ts";
 
 describe("evaluations and gates", () => {
   it("opens node_exit Gates on pattern nodes only and closes them once", () => {
@@ -106,7 +106,7 @@ describe("optimizer round Evaluations", () => {
           .run("eval_" + "3".repeat(24), s.run.id, node.id, JSON.stringify({ kind: "optimizer_round" }), JSON.stringify({ kind: "optimizer_verdict", round: 2, maxRounds: 2 }), JSON.stringify({ kind: "runtime" }), "2026-01-01T00:00:00.000Z"),
       ).toThrow(/CHECK constraint failed: evaluations_optimizer_shape/);
       const second = h.stores.evaluations.record({ ...common, ...verdict(2), verdict: "pass", producedBy: { kind: "evaluator", invocationId: evaluator.id, agentDefinitionRevisionId: s.definition.id } });
-      expect(h.stores.evaluations.optimizerVerdictsOfNode(node.id).map((e) => [e.context!.round, e.verdict])).toEqual([[1, "fail"], [2, "pass"]]);
+      expect(h.stores.evaluations.optimizerVerdictsOfNode(node.id).map((e) => [optimizerRoundOf(e), e.verdict])).toEqual([[1, "fail"], [2, "pass"]]);
       expect([...h.stores.evaluations.optimizerVerdictsOf(s.run.id).entries()]).toEqual([[node.id, [first, second]]]);
       // Reads return exactly the domain object: the generated index columns never surface.
       expect(Object.keys(h.stores.evaluations.get(second.id)).sort()).toEqual(["artifactIds", "context", "createdAt", "evidence", "gateId", "id", "planNodeId", "producedBy", "runId", "snapshotId", "subject", "verdict"]);
@@ -142,7 +142,7 @@ describe("optimizer round Evaluations", () => {
   });
 });
 
-describe("snapshots, changesets, publications", () => {
+describe("snapshots, changesets", () => {
   it("records immutable Snapshots matching the Workspace kind", () => {
     const h = openHarness();
     try {
@@ -176,33 +176,6 @@ describe("snapshots, changesets, publications", () => {
       const other = seedRun(h);
       const foreignDiff = seedArtifact(h, other);
       expect(() => h.stores.changesets.record({ runId: s.run.id, invocationId: writer.id, beforeSnapshotId: before.id, afterSnapshotId: after.id, diffArtifactId: foreignDiff.id })).toThrow(InvariantViolationError);
-    } finally {
-      h.close();
-    }
-  });
-
-  it("publishes only a completed Run under an operator-resolved publish Decision", () => {
-    const h = openHarness();
-    try {
-      const s = seedRun(h);
-      const boundary = seedSignoffBoundary(h, s, { distinctIntegrationSnapshot: true });
-      const before = { id: boundary.baseSnapshotId };
-      const final = { id: boundary.verifiedSnapshotId };
-      const { changeset } = seedFinalChangeset(h, s, boundary, "final diff");
-      const decision = h.stores.decisions.request({ conversationId: s.conversation.id, runId: s.run.id, kind: "publish", resolutionPolicy: "operator_required", requestedBy: { kind: "operator" }, question: "Publish?", options: [{ id: "yes", label: "Yes", description: null }], recommendedOptionId: null, rationale: null, affects: { requirementIds: [], taskIds: [], planNodeIds: [] }, deadlineAt: null, activationCondition: null, subject: null, supersedesDecisionId: null });
-      const input = { runId: s.run.id, decisionId: decision.id, changesetId: changeset.id, targetBeforeSnapshotId: before.id, targetAfterSnapshotId: final.id, strategy: { kind: "fast_forward" as const }, outcome: "succeeded" as const, failureReason: null, artifactId: null };
-      expect(() => h.stores.publications.record(input)).toThrow(ConflictError);
-      h.stores.runs.transition(s.run.id, { to: "completed", finalSnapshotId: final.id, finalChangesetId: changeset.id });
-      expect(() => h.stores.publications.record(input)).toThrow(/not resolved by the operator/);
-      h.stores.decisions.resolve(decision.id, { resolvedBy: "operator", chosenOptionId: "yes", rationale: null, artifactIds: [] });
-      const publication = h.stores.publications.record(input);
-      expect(publication.outcome).toBe("succeeded");
-      expect(h.ctx.journal.read({ runId: s.run.id, type: "run.published" })).toHaveLength(1);
-      const failed = h.stores.publications.record({ ...input, outcome: "failed", failureReason: "target moved", targetAfterSnapshotId: null, strategy: { kind: "merge" } });
-      expect(failed.targetAfterSnapshotId).toBeNull();
-      expect(h.ctx.journal.read({ runId: s.run.id, type: "run.publish_failed" })).toHaveLength(1);
-      expect(() => h.stores.publications.record({ ...input, outcome: "failed", failureReason: null })).toThrow(ValidationError);
-      expect(h.stores.runs.get(s.run.id).status).toBe("completed");
     } finally {
       h.close();
     }

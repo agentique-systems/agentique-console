@@ -13,7 +13,9 @@ import {
   ROOT_NODE_TITLE,
   ROOT_SOURCE_PATH,
   runtimeToolsFor,
+  PUBLISH_OPTIONS,
   SIGNOFF_OPTIONS,
+  type PublicationStrategyRequest,
   type AgentDefinitionRevision,
   type AgentDefinitionRevisionId,
   type Allocation,
@@ -514,4 +516,55 @@ export function seedFinalChangeset(h: Harness, seeded: Seeded, boundary: Pick<Se
     const changeset = h.stores.changesets.recordFinal({ runId: seeded.run.id, beforeSnapshotId: boundary.baseSnapshotId, afterSnapshotId: boundary.verifiedSnapshotId, diffArtifactId: artifact.id });
     return { artifact, changeset };
   });
+}
+
+export interface SeededCompletedRun {
+  run: Run;
+  boundary: SeededSignoffBoundary;
+  finalChangeset: Changeset;
+}
+
+/** Completes the seeded Run the way signoff acceptance does: boundary, final Changeset, accepted Decision, closed Gate, completed Run. */
+export function seedCompletedRun(h: Harness, seeded: Seeded, content = "+final"): SeededCompletedRun {
+  const boundary = seedSignoffBoundary(h, seeded, { distinctIntegrationSnapshot: true });
+  const { changeset } = seedFinalChangeset(h, seeded, boundary, content);
+  return h.ctx.tx.write(() => {
+    h.stores.signoffResolutions.record({ runId: seeded.run.id, gateId: boundary.gate.id, decisionId: boundary.decision.id, outcome: "accept", finalChangesetId: changeset.id });
+    h.stores.decisions.resolve(boundary.decision.id, { resolvedBy: "operator", chosenOptionId: "accept", rationale: null, artifactIds: [] });
+    h.stores.gates.close(boundary.gate.id, "passed", null);
+    const run = h.stores.runs.transition(seeded.run.id, { to: "completed", finalSnapshotId: boundary.verifiedSnapshotId, finalChangesetId: changeset.id });
+    return { run, boundary, finalChangeset: changeset };
+  });
+}
+
+/** A resolved `publish` Decision of the completed Run: the operator's exact publication authorization. */
+export function seedPublishDecision(h: Harness, seeded: Seeded, completed: SeededCompletedRun, options: { requestedStrategy?: PublicationStrategyRequest; resolve?: "publish" | "cancel" | null } = {}): Decision {
+  const requestedStrategy = options.requestedStrategy ?? { kind: "automatic" as const };
+  const decision = h.stores.decisions.request({
+    conversationId: seeded.conversation.id,
+    runId: seeded.run.id,
+    kind: "publish",
+    resolutionPolicy: "operator_required",
+    requestedBy: { kind: "operator" },
+    question: `Publish the accepted result of Run ${seeded.run.id}?`,
+    options: [
+      { id: PUBLISH_OPTIONS[0], label: "Publish", description: null },
+      { id: PUBLISH_OPTIONS[1], label: "Cancel", description: null },
+    ],
+    recommendedOptionId: null,
+    rationale: null,
+    affects: { requirementIds: [], taskIds: [], planNodeIds: [] },
+    deadlineAt: null,
+    activationCondition: null,
+    subject: { kind: "publish", runId: seeded.run.id, workspaceId: seeded.workspace.id, target: completed.run.target, finalSnapshotId: completed.run.finalSnapshotId!, finalChangesetId: completed.run.finalChangesetId!, requestedStrategy },
+    supersedesDecisionId: null,
+  });
+  const resolve = options.resolve === undefined ? "publish" : options.resolve;
+  if (resolve === null) return decision;
+  return h.stores.decisions.resolve(decision.id, { resolvedBy: "operator", chosenOptionId: resolve, rationale: null, artifactIds: [] });
+}
+
+/** A Snapshot of the publication flow: the Target as found (`publish_before`) or the prepared candidate (`publish_candidate`). */
+export function seedPublicationSnapshot(h: Harness, seeded: Seeded, reason: "publish_before" | "publish_candidate", commit = "e".repeat(40)) {
+  return h.stores.snapshots.record({ workspaceId: seeded.workspace.id, runId: seeded.run.id, identity: { kind: "git", commitId: commit, treeId: commit.slice(0, 40) }, reason });
 }

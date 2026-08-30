@@ -10,7 +10,7 @@
  * across rounds, an approval continuation consuming no round, and one active
  * position at a time.
  */
-import type { PlanNode } from "@agentique-console/core";
+import { optimizerRoundOf, type PlanNode } from "@agentique-console/core";
 import { describe, expect, it } from "vitest";
 import { criterionEvaluationsOf, evaluatorsOf, evaluatorStep, finishRoot, optimizerNodes, producersOf, producerStep, seedCriteria, verdictsOf } from "../optimizer-test-support.ts";
 import { COMPLETED_RESULT, openRuntimeHarness, seedPlanningRuntime, type RuntimeHarness } from "../test-support.ts";
@@ -123,7 +123,7 @@ describe("EvaluatorOptimizerPatternRunner (inline)", () => {
       expect(round1.map((e) => e.verdict)).toEqual(["fail"]);
       expect(round1[0]!.evidence[0]).toMatchObject({ kind: "command", exitCode: 1, outputTruncated: false });
       const verdicts = verdictsOf(h, node);
-      expect(verdicts.map((v) => [v.context!.round, v.verdict, v.producedBy.kind])).toEqual([[1, "fail", "runtime"], [2, "pass", "evaluator"]]);
+      expect(verdicts.map((v) => [optimizerRoundOf(v), v.verdict, v.producedBy.kind])).toEqual([[1, "fail", "runtime"], [2, "pass", "evaluator"]]);
       expect(verdicts[0]!.evidence).toEqual([{ kind: "evaluation", evaluationId: round1[0]!.id }, ...round1[0]!.evidence]);
       // Raw output lives only in the Artifact; the Event carries ids and metadata.
       const output = h.stores.artifacts.get(round1[0]!.evidence[0]!.kind === "command" ? round1[0]!.evidence[0]!.outputArtifactId : ("" as never));
@@ -163,7 +163,7 @@ describe("EvaluatorOptimizerPatternRunner (inline)", () => {
       expect(h.stores.plans.getNode(node.id).status).toBe("failed");
       expect(h.ctx.journal.read({ runId: s.created.run.id, type: "plan_node.failed" }).map((e) => e.payload)).toEqual([expect.objectContaining({ reason: "optimizer_rounds_exhausted" })]);
       const verdicts = verdictsOf(h, node);
-      expect(verdicts.map((v) => [v.context!.round, v.verdict])).toEqual([[1, "fail"], [2, "inconclusive"], [3, "fail"]]);
+      expect(verdicts.map((v) => [optimizerRoundOf(v), v.verdict])).toEqual([[1, "fail"], [2, "inconclusive"], [3, "fail"]]);
       const byId = (round: number) => Object.fromEntries(criterionEvaluationsOf(h, node, round).map((e) => [e.subject.kind === "acceptance_criterion" ? e.subject.acceptanceCriterionId : "", e.verdict]));
       expect(byId(1)).toEqual({ [criteria.deterministic[0]!]: "pass", [c0]: "pass", [c1]: "fail" });
       expect(byId(2)).toEqual({ [criteria.deterministic[0]!]: "pass", [c0]: "inconclusive", [c1]: "pass" });
@@ -287,7 +287,7 @@ describe("EvaluatorOptimizerPatternRunner (inline)", () => {
       h.provider.script({ kind: "tool_calls", calls: [CALL], then: producerStep(h, "v2b") }, evaluatorStep(h, "pass"));
       expect((await h.scheduler.advanceRun(s.created.run.id)).stop).toBe("quiescent");
       expect(positions(h, node)).toEqual([["producer_round:1", "succeeded"], ["evaluator_round:1", "succeeded"], ["producer_round:2", "blocked"], ["producer_round:2", "succeeded"], ["evaluator_round:2", "succeeded"]]);
-      expect(verdictsOf(h, node).map((v) => [v.context!.round, v.verdict])).toEqual([[1, "fail"], [2, "pass"]]);
+      expect(verdictsOf(h, node).map((v) => [optimizerRoundOf(v), v.verdict])).toEqual([[1, "fail"], [2, "pass"]]);
       expect(h.stores.plans.getNode(node.id).status).toBe("succeeded");
     } finally {
       h.close();

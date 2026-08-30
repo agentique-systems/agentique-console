@@ -487,11 +487,6 @@ export class ContextManifestAssembler {
           if (!inputs.some((i) => i.kind === "operator_message" && i.conversationMessageId === input.operatorMessageId)) throw new InvariantViolationError(`the operator message ${input.operatorMessageId} of the change request is not delivered to Invocation ${invocation.id}`);
           break;
         }
-        case "publication_result": {
-          const publication = this.stores.publications.get(input.publicationId);
-          if (publication.runId !== run.id) throw new InvariantViolationError(`Publication ${input.publicationId} belongs to another Run`);
-          break;
-        }
         case "route_selection": {
           // The canonical selection fact of this node: it exists, belongs to this route node, and names exactly this label.
           const evaluation = this.stores.evaluations.get(input.evaluationId);

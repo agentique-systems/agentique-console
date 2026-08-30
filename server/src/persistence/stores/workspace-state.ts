@@ -8,8 +8,6 @@ import {
   finalChangesetInputSchema,
   InvariantViolationError,
   parseOrThrow,
-  publicationInputSchema,
-  publicationSchema,
   snapshotInputSchema,
   snapshotSchema,
   type Changeset,
@@ -17,16 +15,13 @@ import {
   type ChangesetInput,
   type ChangesetTransition,
   type FinalChangesetInput,
-  type Publication,
-  type PublicationId,
-  type PublicationInput,
   type RunId,
   type Snapshot,
   type SnapshotId,
   type SnapshotInput,
 } from "@agentique-console/core";
 import type { PersistenceContext } from "../context.ts";
-import { artifacts, changesets, decisions, gates, invocations, publications, runs, snapshots, tasks, workspaces } from "../schema.ts";
+import { artifacts, changesets, gates, invocations, runs, snapshots, tasks, workspaces } from "../schema.ts";
 import { assertSameRun, loadRunRef, requireRow, runScope, workspaceScope, writeMeta, type WriteOptions } from "./support.ts";
 
 function snapshotToDomain(row: typeof snapshots.$inferSelect): Snapshot {
@@ -41,10 +36,6 @@ function snapshotToDomain(row: typeof snapshots.$inferSelect): Snapshot {
 
 function changesetToDomain(row: typeof changesets.$inferSelect): Changeset {
   return parseOrThrow(changesetSchema, row, "Changeset row");
-}
-
-function publicationToDomain(row: typeof publications.$inferSelect): Publication {
-  return parseOrThrow(publicationSchema, row, "Publication row");
 }
 
 export class SnapshotStore {
@@ -245,57 +236,5 @@ export class ChangesetStore {
         .run();
       return next;
     });
-  }
-}
-
-export class PublicationStore {
-  constructor(private readonly ctx: PersistenceContext) {}
-
-  /** Records one publish action on a `completed` Run authorized by an operator-resolved Decision. */
-  record(input: PublicationInput, options?: WriteOptions): Publication {
-    const valid = parseOrThrow(publicationInputSchema, input, "Publication input");
-    return this.ctx.tx.write(() => {
-      const run = loadRunRef(this.ctx, valid.runId);
-      if (run.status !== "completed") throw new ConflictError(`Run ${run.id} is ${run.status}; only a completed Run is published`);
-      const decision = requireRow(
-        this.ctx.db.select({ conversationId: decisions.conversationId, kind: decisions.kind, status: decisions.status, resolvedBy: decisions.resolvedBy }).from(decisions).where(eq(decisions.id, valid.decisionId)).get(),
-        "Decision",
-        valid.decisionId,
-      );
-      if (decision.conversationId !== run.conversationId) throw new InvariantViolationError(`Decision ${valid.decisionId} belongs to another Conversation`);
-      if (decision.kind !== "publish" && decision.kind !== "operator_choice") throw new InvariantViolationError(`a ${decision.kind} Decision does not authorize publishing`);
-      if (decision.status !== "resolved" || decision.resolvedBy !== "operator") throw new InvariantViolationError(`Decision ${valid.decisionId} was not resolved by the operator`);
-      const changeset = requireRow(this.ctx.db.select({ runId: changesets.runId }).from(changesets).where(eq(changesets.id, valid.changesetId)).get(), "Changeset", valid.changesetId);
-      assertSameRun("Changeset", valid.changesetId, changeset.runId, run.id);
-      for (const snapshotId of [valid.targetBeforeSnapshotId, valid.targetAfterSnapshotId]) {
-        if (snapshotId === null) continue;
-        const snapshot = requireRow(this.ctx.db.select({ workspaceId: snapshots.workspaceId }).from(snapshots).where(eq(snapshots.id, snapshotId)).get(), "Snapshot", snapshotId);
-        if (snapshot.workspaceId !== run.workspaceId) throw new InvariantViolationError(`Snapshot ${snapshotId} belongs to another Workspace`);
-      }
-      if (valid.artifactId !== null) {
-        const artifact = requireRow(this.ctx.db.select({ runId: artifacts.runId }).from(artifacts).where(eq(artifacts.id, valid.artifactId)).get(), "Artifact", valid.artifactId);
-        assertSameRun("Artifact", valid.artifactId, artifact.runId, run.id);
-      }
-      const publication: Publication = { id: this.ctx.ids("publication"), ...valid, createdAt: this.ctx.clock() };
-      parseOrThrow(publicationSchema, publication, "Publication");
-      this.ctx.journal.append({
-        type: valid.outcome === "succeeded" ? "run.published" : "run.publish_failed",
-        scope: runScope(run),
-        subjectType: "publication",
-        subjectId: publication.id,
-        payload: publication,
-        ...writeMeta(options),
-      });
-      this.ctx.db.insert(publications).values(publication).run();
-      return publication;
-    });
-  }
-
-  get(id: PublicationId): Publication {
-    return publicationToDomain(requireRow(this.ctx.db.select().from(publications).where(eq(publications.id, id)).get(), "Publication", id));
-  }
-
-  listByRun(runId: RunId): Publication[] {
-    return this.ctx.db.select().from(publications).where(eq(publications.runId, runId)).orderBy(asc(publications.createdAt)).all().map(publicationToDomain);
   }
 }

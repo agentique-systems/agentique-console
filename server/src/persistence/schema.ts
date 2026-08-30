@@ -59,7 +59,8 @@ import {
   PLAN_NODE_KINDS,
   PLAN_NODE_STATUSES,
   PLAN_NODE_WAIT_REASONS,
-  PUBLICATION_OUTCOMES,
+  PUBLICATION_STAGING_CLEANUP_STATES,
+  PUBLICATION_STATUSES,
   REQUIREMENT_STATUSES,
   REQUIREMENT_STATUS_ACTORS,
   RESERVATION_CAPACITY_SOURCES,
@@ -110,7 +111,9 @@ import {
   type ModelPolicy,
   type PatternPosition,
   type PatternShape,
+  type PublicationFailure,
   type PublicationStrategy,
+  type PublicationStrategyRequest,
   type RequirementTreeEntry,
   type RetryDecision,
   type RunFailure,
@@ -587,6 +590,10 @@ export const decisions = sqliteTable(
     uniqueIndex("decisions_signoff_gate")
       .on(t.subjectGateId)
       .where(sql`kind = 'signoff'`),
+    // Only one open publish Decision may exist per Run (execution-model §9.4).
+    uniqueIndex("decisions_open_publish_run")
+      .on(t.runId)
+      .where(sql`kind = 'publish' AND status = 'open'`),
     check("decisions_kind", sql`${t.kind} IN (${inList(DECISION_KINDS)})`),
     check("decisions_policy", sql`${t.resolutionPolicy} IN (${inList(RESOLUTION_POLICIES)})`),
     check("decisions_status", sql`${t.status} IN (${inList(DECISION_STATUSES)})`),
@@ -609,9 +616,9 @@ export const decisions = sqliteTable(
       sql`(${t.status} = 'open' AND ${t.resolvedBy} IS NULL AND ${t.chosenOptionId} IS NULL AND ${t.resolvedAt} IS NULL) OR (${t.status} = 'resolved' AND ${t.resolvedBy} IS NOT NULL AND ${t.chosenOptionId} IS NOT NULL AND ${t.resolvedAt} IS NOT NULL) OR ${t.status} = 'superseded'`,
     ),
     check("decisions_superseded_by", sql`(${t.status} = 'superseded') = (${t.supersededByDecisionId} IS NOT NULL)`),
-    // A side_effect_approval and a signoff carry exactly their typed subject and belong to a Run; no other kind has a subject; a signoff is operator_required.
-    check("decisions_subject_shape", sql`(${t.kind} IN ('side_effect_approval', 'signoff')) = (${t.subject} IS NOT NULL AND json_extract(${t.subject}, '$.kind') = ${t.kind} AND ${t.runId} IS NOT NULL)`),
-    check("decisions_signoff_policy", sql`${t.kind} <> 'signoff' OR (${t.resolutionPolicy} = 'operator_required' AND json_extract(${t.subject}, '$.runId') = ${t.runId})`),
+    // A side_effect_approval, a signoff, and a publish carry exactly their typed subject and belong to a Run; no other kind has a subject; a signoff and a publish are operator_required.
+    check("decisions_subject_shape", sql`(${t.kind} IN ('side_effect_approval', 'signoff', 'publish')) = (${t.subject} IS NOT NULL AND json_extract(${t.subject}, '$.kind') = ${t.kind} AND ${t.runId} IS NOT NULL)`),
+    check("decisions_signoff_policy", sql`${t.kind} NOT IN ('signoff', 'publish') OR (${t.resolutionPolicy} = 'operator_required' AND json_extract(${t.subject}, '$.runId') = ${t.runId})`),
     check("decisions_no_self_supersede", sql`${t.supersedesDecisionId} IS NULL OR ${t.supersedesDecisionId} <> ${t.id}`),
   ],
 );
@@ -1124,6 +1131,7 @@ export const evaluations = sqliteTable(
     // Generated projections of the JSON columns, so the optimizer uniqueness rules are plain indexed columns.
     contextKind: text("context_kind").generatedAlwaysAs(sql`json_extract(context, '$.kind')`, { mode: "virtual" }),
     contextRound: integer("context_round").generatedAlwaysAs(sql`json_extract(context, '$.round')`, { mode: "virtual" }),
+    contextPublicationId: text("context_publication_id").generatedAlwaysAs(sql`json_extract(context, '$.publicationId')`, { mode: "virtual" }),
     subjectCriterionId: text("subject_criterion_id").generatedAlwaysAs(sql`json_extract(subject, '$.acceptanceCriterionId')`, { mode: "virtual" }),
   },
   (t) => [
@@ -1150,7 +1158,16 @@ export const evaluations = sqliteTable(
       .where(sql`context_kind = 'optimizer_criterion'`),
     check(
       "evaluations_optimizer_shape",
-      sql`${t.context} IS NULL OR (${t.planNodeId} IS NOT NULL AND ${t.gateId} IS NULL AND ${t.snapshotId} IS NOT NULL AND json_extract(${t.context}, '$.round') >= 1 AND json_extract(${t.context}, '$.round') <= json_extract(${t.context}, '$.maxRounds') AND ((json_extract(${t.context}, '$.kind') = 'optimizer_verdict' AND json_extract(${t.subject}, '$.kind') = 'optimizer_round') OR (json_extract(${t.context}, '$.kind') = 'optimizer_criterion' AND json_extract(${t.subject}, '$.kind') = 'acceptance_criterion')))`,
+      sql`${t.context} IS NULL OR json_extract(${t.context}, '$.kind') = 'publication' OR (${t.planNodeId} IS NOT NULL AND ${t.gateId} IS NULL AND ${t.snapshotId} IS NOT NULL AND json_extract(${t.context}, '$.round') >= 1 AND json_extract(${t.context}, '$.round') <= json_extract(${t.context}, '$.maxRounds') AND ((json_extract(${t.context}, '$.kind') = 'optimizer_verdict' AND json_extract(${t.subject}, '$.kind') = 'optimizer_round') OR (json_extract(${t.context}, '$.kind') = 'optimizer_criterion' AND json_extract(${t.subject}, '$.kind') = 'acceptance_criterion')))`,
+    ),
+    // Publication candidate verification (execution-model §9.4): runtime-recorded deterministic checks of one Publication's
+    // candidate Snapshot — no Plan Node, no Gate — one Evaluation per Publication and Acceptance Criterion.
+    uniqueIndex("evaluations_publication_criterion")
+      .on(t.contextPublicationId, t.subjectCriterionId)
+      .where(sql`context_kind = 'publication'`),
+    check(
+      "evaluations_publication_shape",
+      sql`${t.contextKind} IS NOT 'publication' OR (${t.planNodeId} IS NULL AND ${t.gateId} IS NULL AND ${t.snapshotId} IS NOT NULL AND json_extract(${t.subject}, '$.kind') = 'acceptance_criterion' AND json_extract(${t.producedBy}, '$.kind') = 'runtime')`,
     ),
     check("evaluations_optimizer_round_subject", sql`json_extract(${t.subject}, '$.kind') <> 'optimizer_round' OR json_extract(${t.context}, '$.kind') = 'optimizer_verdict'`),
     // One Evaluation per Gate and Acceptance Criterion (execution-model §10): repeated passes, restarts, and racing callers converge on one row.
@@ -1416,6 +1433,18 @@ export const signoffResolutions = sqliteTable(
   ],
 );
 
+/**
+ * Publications (execution-model §9.4): the recoverable lifecycle record of
+ * one authorized Target update. Identity (Run, publish Decision, final
+ * Changeset, requested strategy) is immutable from insertion; the prepared
+ * facts are recorded once; terminal rows never change again except their
+ * durable staging-cleanup obligation, and are never deleted. The unique
+ * indexes hold "one Publication per publish Decision", "at most one
+ * nonterminal Publication per Run", and "at most one succeeded Publication
+ * per Run"; the baseline migration's triggers re-check the boundary (a
+ * completed Run, its operator-resolved publish Decision, its final
+ * Changeset, no succeeded Publication) at insertion.
+ */
 export const publications = sqliteTable(
   "publications",
   {
@@ -1429,21 +1458,57 @@ export const publications = sqliteTable(
     changesetId: text("changeset_id")
       .notNull()
       .references(() => changesets.id),
-    targetBeforeSnapshotId: text("target_before_snapshot_id")
-      .notNull()
-      .references(() => snapshots.id),
+    requestedStrategy: text("requested_strategy", { mode: "json" }).$type<PublicationStrategyRequest>().notNull(),
+    /** The concrete strategy the provider selected or honored; recorded once, when prepared. */
+    strategy: text("strategy", { mode: "json" }).$type<PublicationStrategy>(),
+    targetBeforeSnapshotId: text("target_before_snapshot_id").references(() => snapshots.id),
+    candidateSnapshotId: text("candidate_snapshot_id").references(() => snapshots.id),
+    /** On success, exactly the candidate Snapshot: the state the Target was atomically updated to. */
     targetAfterSnapshotId: text("target_after_snapshot_id").references(() => snapshots.id),
-    strategy: text("strategy", { mode: "json" }).$type<PublicationStrategy>().notNull(),
-    outcome: text("outcome").notNull(),
-    failureReason: text("failure_reason"),
-    artifactId: text("artifact_id").references(() => artifacts.id),
+    status: text("status").notNull(),
+    failure: text("failure", { mode: "json" }).$type<PublicationFailure>(),
+    reportArtifactId: text("report_artifact_id").references(() => artifacts.id),
+    stagingCleanup: text("staging_cleanup").notNull(),
     createdAt: timestamp("created_at").notNull(),
+    preparedAt: timestamp("prepared_at"),
+    verifiedAt: timestamp("verified_at"),
+    applyingAt: timestamp("applying_at"),
+    endedAt: timestamp("ended_at"),
+    stagingReleasedAt: timestamp("staging_released_at"),
   },
   (t) => [
     index("publications_run").on(t.runId, t.createdAt),
-    check("publications_outcome", sql`${t.outcome} IN (${inList(PUBLICATION_OUTCOMES)})`),
-    check("publications_failure_reason", sql`(${t.outcome} = 'failed') = (${t.failureReason} IS NOT NULL)`),
-    check("publications_after_snapshot", sql`(${t.outcome} = 'succeeded') = (${t.targetAfterSnapshotId} IS NOT NULL)`),
+    index("publications_status").on(t.status),
+    // One Publication per publish Decision; a Decision never authorizes two.
+    uniqueIndex("publications_decision").on(t.decisionId),
+    // At most one nonterminal Publication per Run.
+    uniqueIndex("publications_active_run")
+      .on(t.runId)
+      .where(sql`status NOT IN ('succeeded', 'failed')`),
+    // At most one succeeded Publication per Run; a succeeded Run is never published again.
+    uniqueIndex("publications_succeeded_run")
+      .on(t.runId)
+      .where(sql`status = 'succeeded'`),
+    check("publications_status", sql`${t.status} IN (${inList(PUBLICATION_STATUSES)})`),
+    check("publications_staging_cleanup", sql`${t.stagingCleanup} IN (${inList(PUBLICATION_STAGING_CLEANUP_STATES)})`),
+    // The prepared facts are recorded together, exactly when preparation persisted.
+    check(
+      "publications_prepared_shape",
+      sql`(${t.preparedAt} IS NOT NULL) = (${t.strategy} IS NOT NULL) AND (${t.preparedAt} IS NOT NULL) = (${t.targetBeforeSnapshotId} IS NOT NULL) AND (${t.preparedAt} IS NOT NULL) = (${t.candidateSnapshotId} IS NOT NULL)`,
+    ),
+    check("publications_prepared_status", sql`(${t.status} NOT IN ('prepared', 'verified', 'applying', 'succeeded') OR ${t.preparedAt} IS NOT NULL) AND (${t.status} <> 'requested' OR ${t.preparedAt} IS NULL)`),
+    check("publications_verified_status", sql`(${t.status} NOT IN ('verified', 'applying', 'succeeded') OR ${t.verifiedAt} IS NOT NULL) AND (${t.status} NOT IN ('requested', 'prepared') OR ${t.verifiedAt} IS NULL)`),
+    check("publications_applying_status", sql`(${t.status} NOT IN ('applying', 'succeeded') OR ${t.applyingAt} IS NOT NULL) AND (${t.status} NOT IN ('requested', 'prepared', 'verified') OR ${t.applyingAt} IS NULL)`),
+    check("publications_milestones_monotone", sql`(${t.verifiedAt} IS NULL OR ${t.preparedAt} IS NOT NULL) AND (${t.applyingAt} IS NULL OR ${t.verifiedAt} IS NOT NULL)`),
+    check("publications_failure_shape", sql`(${t.status} = 'failed') = (${t.failure} IS NOT NULL)`),
+    check("publications_terminal_shape", sql`(${t.status} IN ('succeeded', 'failed')) = (${t.endedAt} IS NOT NULL) AND (${t.status} IN ('succeeded', 'failed')) = (${t.reportArtifactId} IS NOT NULL)`),
+    // succeeded means the Target now holds exactly the prepared candidate; anything else left the Target unmodified.
+    check("publications_after_snapshot", sql`(${t.status} = 'succeeded') = (${t.targetAfterSnapshotId} IS NOT NULL) AND (${t.status} <> 'succeeded' OR ${t.targetAfterSnapshotId} = ${t.candidateSnapshotId})`),
+    check(
+      "publications_failure_stage",
+      sql`${t.failure} IS NULL OR ((json_extract(${t.failure}, '$.kind') <> 'verification_failed' OR ${t.preparedAt} IS NOT NULL) AND (json_extract(${t.failure}, '$.kind') <> 'target_changed' OR ${t.applyingAt} IS NOT NULL) AND (json_extract(${t.failure}, '$.kind') NOT IN ('strategy_unsupported', 'fast_forward_unavailable', 'candidate_conflict', 'candidate_invalid') OR ${t.verifiedAt} IS NULL))`,
+    ),
+    check("publications_cleanup_shape", sql`((${t.stagingCleanup} = 'released') = (${t.stagingReleasedAt} IS NOT NULL)) AND (${t.stagingCleanup} <> 'released' OR ${t.status} IN ('succeeded', 'failed'))`),
   ],
 );
 

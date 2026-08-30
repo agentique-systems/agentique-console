@@ -104,8 +104,6 @@ function renderInput(input: ManifestInput): string[] {
         `- plan_revision ${input.accepted ? `accepted revision ${input.revisionNumber ?? NONE}` : "rejected"}`,
         ...input.reasons.map((r) => `  - ${r.code}${r.path === null ? "" : ` at ${r.path}`}: ${r.message}`),
       ];
-    case "publication_result":
-      return [`- publication_result ${input.publicationId} ${input.outcome}`];
     case "route_selection":
       return [`- route_selection ${input.evaluationId} selected ${input.selectedLabel}`];
     case "coordinator_turn":

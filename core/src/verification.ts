@@ -11,11 +11,13 @@ import type {
   GateId,
   InvocationId,
   PlanNodeId,
+  PublicationId,
   RequirementId,
   RequirementRevisionId,
   RunId,
   SnapshotId,
 } from "./ids.ts";
+import { ValidationError } from "./errors.ts";
 import { evidenceSchema, type Evidence } from "./requirements.ts";
 import { defineStateMachine } from "./transitions.ts";
 import { idSchema, nonEmptyString, positiveCount, timestampSchema, uniqueIds, type Timestamp } from "./validation.ts";
@@ -46,26 +48,46 @@ export const evaluationSubjectSchema: z.ZodType<EvaluationSubject> = z.discrimin
 ]);
 
 /**
- * The machine-readable context of an Evaluation recorded inside an
- * `evaluator_optimizer` round (execution-model §5.6): which round of how many
- * it belongs to, and whether it judges one Acceptance Criterion of the round
- * (`optimizer_criterion`, subject `acceptance_criterion`) or is the overall
- * round verdict (`optimizer_verdict`, subject `optimizer_round`). Round
- * identity lives here and nowhere else — never in a rubric string, a
- * summary, or a Handoff. `null` for every other Evaluation.
+ * The machine-readable context of an Evaluation recorded outside a Gate. An
+ * `evaluator_optimizer` round's Evaluation (execution-model §5.6) names which
+ * round of how many it belongs to, and whether it judges one Acceptance
+ * Criterion of the round (`optimizer_criterion`, subject
+ * `acceptance_criterion`) or is the overall round verdict
+ * (`optimizer_verdict`, subject `optimizer_round`). A `publication` context
+ * (execution-model §9.4) is the canonical ownership of one candidate
+ * verification check: it names the exact Publication whose prepared
+ * candidate Snapshot the deterministic criterion was checked against —
+ * runtime producer only, no Gate, no Plan Node, one Evaluation per
+ * Publication and criterion. Identity lives here and nowhere else — never in
+ * a rubric string, a summary, or a Handoff. `null` for every other
+ * Evaluation.
  */
 export type EvaluationContext =
   | { kind: "optimizer_criterion"; round: number; maxRounds: number }
-  | { kind: "optimizer_verdict"; round: number; maxRounds: number };
+  | { kind: "optimizer_verdict"; round: number; maxRounds: number }
+  | { kind: "publication"; publicationId: PublicationId };
 
 const roundContext = <K extends string>(kind: K) =>
   z
     .strictObject({ kind: z.literal(kind), round: positiveCount, maxRounds: positiveCount })
     .refine((c) => c.round <= c.maxRounds, { message: "round is within maxRounds", path: ["round"] });
 
-export const evaluationContextSchema: z.ZodType<EvaluationContext> = z.discriminatedUnion("kind", [roundContext("optimizer_criterion"), roundContext("optimizer_verdict")]);
+export const evaluationContextSchema: z.ZodType<EvaluationContext> = z.discriminatedUnion("kind", [
+  roundContext("optimizer_criterion"),
+  roundContext("optimizer_verdict"),
+  z.strictObject({ kind: z.literal("publication"), publicationId: idSchema("publication") }),
+]);
 
 export const OPTIMIZER_EVALUATION_CONTEXT_KINDS = ["optimizer_criterion", "optimizer_verdict"] as const;
+
+/** The round of an optimizer Evaluation's context; an Evaluation without an optimizer context is an invariant violation. */
+export function optimizerRoundOf(evaluation: { id: EvaluationId; context: EvaluationContext | null }): number {
+  const context = evaluation.context;
+  if (context === null || context.kind === "publication") {
+    throw new ValidationError(`Evaluation ${evaluation.id} carries no optimizer round context`, { evaluationId: evaluation.id });
+  }
+  return context.round;
+}
 
 /** `runtime` for a deterministic check; otherwise the Evaluator Invocation and its definition revision. */
 export type EvaluationProducer =
@@ -99,7 +121,7 @@ export interface Evaluation {
   createdAt: Timestamp;
 }
 
-type EvaluationShape = Pick<Evaluation, "subject" | "context" | "planNodeId" | "gateId" | "verdict" | "snapshotId">;
+type EvaluationShape = Pick<Evaluation, "subject" | "context" | "planNodeId" | "gateId" | "verdict" | "snapshotId" | "producedBy">;
 
 /** A route-selection Evaluation names its route node, no Gate, no context, and no judged Artifact: the selection is the whole fact. */
 function routeSelectionShape(evaluation: EvaluationShape, ctx: z.RefinementCtx): void {
@@ -123,11 +145,28 @@ function optimizerShape(evaluation: EvaluationShape, ctx: z.RefinementCtx): void
     if (subject.kind === "optimizer_round") ctx.addIssue({ code: "custom", path: ["context"], message: "an optimizer_round subject carries the optimizer_verdict context" });
     return;
   }
+  if (context.kind === "publication") return;
   if (evaluation.planNodeId === null) ctx.addIssue({ code: "custom", path: ["planNodeId"], message: "an optimizer-round Evaluation belongs to its evaluator_optimizer Plan Node" });
   if (evaluation.gateId !== null) ctx.addIssue({ code: "custom", path: ["gateId"], message: "an optimizer-round Evaluation belongs to no Gate" });
   if (evaluation.snapshotId === null) ctx.addIssue({ code: "custom", path: ["snapshotId"], message: "an optimizer-round Evaluation names the judged Snapshot" });
   if (context.kind === "optimizer_verdict" && subject.kind !== "optimizer_round") ctx.addIssue({ code: "custom", path: ["subject"], message: "the overall optimizer verdict judges the round (subject optimizer_round)" });
   if (context.kind === "optimizer_criterion" && subject.kind !== "acceptance_criterion") ctx.addIssue({ code: "custom", path: ["subject"], message: "an optimizer criterion Evaluation judges one Acceptance Criterion" });
+}
+
+/**
+ * A publication-verification Evaluation (context `publication`) is the
+ * runtime's deterministic check of one Acceptance Criterion against the
+ * exact prepared candidate Snapshot of one Publication: no Plan Node, no
+ * Gate, the candidate Snapshot named, subject `acceptance_criterion`,
+ * runtime producer only — no Evaluator Invocation and no model call.
+ */
+function publicationShape(evaluation: EvaluationShape, ctx: z.RefinementCtx): void {
+  if (evaluation.context?.kind !== "publication") return;
+  if (evaluation.planNodeId !== null) ctx.addIssue({ code: "custom", path: ["planNodeId"], message: "a publication Evaluation belongs to no Plan Node" });
+  if (evaluation.gateId !== null) ctx.addIssue({ code: "custom", path: ["gateId"], message: "a publication Evaluation belongs to no Gate" });
+  if (evaluation.snapshotId === null) ctx.addIssue({ code: "custom", path: ["snapshotId"], message: "a publication Evaluation names the judged candidate Snapshot" });
+  if (evaluation.subject.kind !== "acceptance_criterion") ctx.addIssue({ code: "custom", path: ["subject"], message: "a publication Evaluation judges one Acceptance Criterion" });
+  if (evaluation.producedBy.kind !== "runtime") ctx.addIssue({ code: "custom", path: ["producedBy"], message: "publication verification is deterministic; only the runtime records it" });
 }
 
 export const evaluationSchema: z.ZodType<Evaluation> = z
@@ -146,7 +185,8 @@ export const evaluationSchema: z.ZodType<Evaluation> = z
     createdAt: timestampSchema,
   })
   .superRefine(routeSelectionShape)
-  .superRefine(optimizerShape);
+  .superRefine(optimizerShape)
+  .superRefine(publicationShape);
 
 export interface EvaluationInput {
   runId: RunId;
@@ -175,7 +215,8 @@ export const evaluationInputSchema: z.ZodType<EvaluationInput> = z
     snapshotId: idSchema("snapshot").nullable(),
   })
   .superRefine(routeSelectionShape)
-  .superRefine(optimizerShape);
+  .superRefine(optimizerShape)
+  .superRefine(publicationShape);
 
 export const GATE_KINDS = ["node_exit", "run_completion", "operator_signoff"] as const;
 export type GateKind = (typeof GATE_KINDS)[number];

@@ -19,7 +19,6 @@ import type {
   HandoffId,
   InvocationId,
   PlanNodeId,
-  PublicationId,
   RequirementId,
   RequirementRevisionId,
   RunId,
@@ -45,7 +44,6 @@ import {
   type Timestamp,
 } from "./validation.ts";
 import { approvedToolCallSchema, SIDE_EFFECT_APPROVAL_OPTIONS, type ApprovedToolCall, type SideEffectApprovalOption } from "./tool-calls.ts";
-import { PUBLICATION_OUTCOMES, type PublicationOutcome } from "./workspace-state.ts";
 
 // ---------------------------------------------------------------------------
 // Roles and purposes (closed)
@@ -60,7 +58,6 @@ export const ORCHESTRATOR_PURPOSES = [
   "node_result",
   "decision_resolution",
   "gate_result",
-  "publication_result",
   "final_synthesis",
 ] as const;
 export const WORKER_PURPOSES = ["step", "task"] as const;
@@ -1073,7 +1070,6 @@ export type ManifestInput =
    */
   | { kind: "signoff_resolution"; signoffResolutionId: SignoffResolutionId; gateId: GateId; decisionId: DecisionId; completionGateId: GateId; outcome: "request_changes"; operatorMessageId: ConversationMessageId; verifiedSnapshotId: SnapshotId; reportArtifactId: ArtifactId }
   | { kind: "plan_revision"; accepted: boolean; revisionNumber: number | null; reasons: PlanRejectionReason[] }
-  | { kind: "publication_result"; publicationId: PublicationId; outcome: PublicationOutcome }
   /** The canonical route-selection Evaluation of the route node an inline branch Invocation executes for (execution-model §5.3). */
   | { kind: "route_selection"; evaluationId: EvaluationId; selectedLabel: string }
   /**
@@ -1171,7 +1167,6 @@ export const manifestInputSchema: z.ZodType<ManifestInput> = z.discriminatedUnio
     })
     .refine((i) => i.gateId !== i.completionGateId, { message: "the signoff Gate and the completion Gate are distinct", path: ["completionGateId"] }),
   z.strictObject({ kind: z.literal("plan_revision"), accepted: z.boolean(), revisionNumber: positiveCount.nullable(), reasons: z.array(planRejectionReasonSchema) }),
-  z.strictObject({ kind: z.literal("publication_result"), publicationId: idSchema("publication"), outcome: z.enum(PUBLICATION_OUTCOMES) }),
   z.strictObject({ kind: z.literal("route_selection"), evaluationId: idSchema("evaluation"), selectedLabel: nonEmptyString }),
   z.strictObject({
     kind: z.literal("coordinator_turn"),

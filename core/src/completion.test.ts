@@ -205,9 +205,9 @@ describe("signoff Decision", () => {
 
 describe("request_completion runtime tool", () => {
   it("is executable for the root Orchestrator's ordinary turns only, with an empty canonical input", () => {
-    expect(RUNTIME_TOOL_HANDLER_BINDINGS.request_completion).toEqual({ role: "orchestrator", purposes: ["operator_input", "plan_revision", "node_result", "decision_resolution", "gate_result", "publication_result"] });
+    expect(RUNTIME_TOOL_HANDLER_BINDINGS.request_completion).toEqual({ role: "orchestrator", purposes: ["operator_input", "plan_revision", "node_result", "decision_resolution", "gate_result"] });
     expect(runtimeToolsFor("orchestrator", "final_synthesis")).toEqual(["read_requirements", "read_decisions", "read_tasks", "read_artifact", "read_execution_plan", "read_agent_definitions", "write_artifact", "return_result"]);
-    for (const purpose of ["operator_input", "node_result", "decision_resolution", "gate_result", "plan_revision", "publication_result"] as const) {
+    for (const purpose of ["operator_input", "node_result", "decision_resolution", "gate_result", "plan_revision"] as const) {
       expect(effectiveRuntimeTools(runtimeToolsFor("orchestrator", purpose), "orchestrator", purpose)).toEqual(["request_completion"]);
     }
     expect(effectiveRuntimeTools(runtimeToolsFor("orchestrator", "final_synthesis"), "orchestrator", "final_synthesis")).toEqual([]);

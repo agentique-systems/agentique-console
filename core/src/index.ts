@@ -24,6 +24,7 @@ export * from "./verification.ts";
 export * from "./completion.ts";
 export * from "./signoff.ts";
 export * from "./workspace-state.ts";
+export * from "./publication.ts";
 export * from "./capacity.ts";
 export * from "./usage.ts";
 export * from "./events.ts";

@@ -41,7 +41,8 @@ import { taskBlockReasonSchema, taskDependencySchema, taskSchema, TASK_FAILURE_R
 import { runtimeToolCallSchema } from "./runtime-tools.ts";
 import { approvedToolCallUseSchema } from "./tool-calls.ts";
 import { usageSchema } from "./usage.ts";
-import { changesetSchema, publicationSchema, snapshotSchema } from "./workspace-state.ts";
+import { publicationSchema } from "./publication.ts";
+import { changesetSchema, snapshotSchema } from "./workspace-state.ts";
 import { workspaceSchema } from "./workspaces.ts";
 import { evaluationSchema, gateFailureSchema, gateSchema } from "./verification.ts";
 import { idSchema, nonEmptyString, parseOrThrow, timestampSchema, uniqueIds, type Timestamp } from "./validation.ts";
@@ -112,6 +113,7 @@ export const EVENT_CATALOGUE = {
   "run.cancelled": transition(RUN_STATUSES),
   /** A Changeset was integrated into the Run's Integration Workspace and the Run's integration Snapshot advanced. */
   "run.integrated": z.strictObject({ runId: idSchema("run"), changesetId: idSchema("changeset"), integrationSnapshotId: idSchema("snapshot") }),
+  /** The Run-scoped terminal Publication facts: the Publication row (ids, status, strategies, Snapshot references, closed failure), never diff bytes, receipts, paths, or output. */
   "run.published": publicationSchema,
   "run.publish_failed": publicationSchema,
   "execution_plan.revised": executionPlanRevisionSchema,
@@ -214,6 +216,15 @@ export const EVENT_CATALOGUE = {
   "signoff_resolution.recorded": signoffResolutionSchema,
   /** The `request_changes` resolution's one follow-up Orchestrator Invocation was prepared and linked. */
   "signoff_resolution.linked": z.strictObject({ signoffResolutionId: idSchema("signoffResolution"), followUpInvocationId: idSchema("invocation") }),
+  /** The closed Publication lifecycle (execution-model §9.4): one Event per durable boundary, each carrying the row's ids, status, strategies, Snapshot references, closed failure, Artifact ids, and timestamps — never diff bytes, command output, credentials, repository paths, provider receipts, or transcripts. */
+  "publication.requested": publicationSchema,
+  "publication.prepared": publicationSchema,
+  "publication.verified": publicationSchema,
+  "publication.applying": publicationSchema,
+  "publication.succeeded": publicationSchema,
+  "publication.failed": publicationSchema,
+  /** The Publication's staging resources were released; recorded only after the external release ran, so a crash in between leaves the obligation pending for recovery. */
+  "publication.workspace_released": z.strictObject({ publicationId: idSchema("publication") }),
   "snapshot.taken": snapshotSchema,
   "changeset.recorded": changesetSchema,
   "changeset.integrated": z.strictObject({ changesetId: idSchema("changeset"), integratedSnapshotId: idSchema("snapshot") }),

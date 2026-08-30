@@ -2,9 +2,7 @@ import { z } from "zod";
 import type {
   ArtifactId,
   ChangesetId,
-  DecisionId,
   InvocationId,
-  PublicationId,
   RunId,
   SnapshotId,
   TaskId,
@@ -13,7 +11,13 @@ import type {
 import { defineStateMachine } from "./transitions.ts";
 import { idSchema, nonEmptyString, sha256Hex, timestampSchema, type Timestamp } from "./validation.ts";
 
-/** Why a Snapshot was taken. */
+/**
+ * Why a Snapshot was taken. `publish_before` identifies the Target as a
+ * Publication found it; `publish_candidate` identifies the prospective
+ * post-publication state a Publication prepared without touching the Target
+ * — on success the Target-after reference points at the same candidate row,
+ * so no third Snapshot renames its purpose.
+ */
 export const SNAPSHOT_REASONS = [
   "run_start",
   "before_invocation",
@@ -21,7 +25,7 @@ export const SNAPSHOT_REASONS = [
   "integration",
   "run_completion",
   "publish_before",
-  "publish_after",
+  "publish_candidate",
   "agent_definition_read",
 ] as const;
 export type SnapshotReason = (typeof SNAPSHOT_REASONS)[number];
@@ -204,10 +208,7 @@ export type ChangesetTransition =
   | { to: "integrated"; integratedSnapshotId: SnapshotId }
   | { to: "conflict"; conflictTaskId: TaskId };
 
-export const PUBLICATION_OUTCOMES = ["succeeded", "failed"] as const;
-export type PublicationOutcome = (typeof PUBLICATION_OUTCOMES)[number];
-
-/** Strategies the Workspace provider may select at publish time; `other` carries the provider's name. */
+/** The concrete strategies a Workspace provider may apply at publication time; `other` carries the provider's name. */
 export type PublicationStrategy = { kind: "fast_forward" } | { kind: "merge" } | { kind: "other"; name: string };
 
 export const publicationStrategySchema: z.ZodType<PublicationStrategy> = z.discriminatedUnion("kind", [
@@ -216,68 +217,17 @@ export const publicationStrategySchema: z.ZodType<PublicationStrategy> = z.discr
   z.strictObject({ kind: z.literal("other"), name: nonEmptyString }),
 ]);
 
-/** One publish action on a `completed` Run. */
-export interface Publication {
-  id: PublicationId;
-  runId: RunId;
-  /** The `publish` Decision or the `operator_choice` publish authorization. */
-  decisionId: DecisionId;
-  changesetId: ChangesetId;
-  targetBeforeSnapshotId: SnapshotId;
-  targetAfterSnapshotId: SnapshotId | null;
-  strategy: PublicationStrategy;
-  outcome: PublicationOutcome;
-  failureReason: string | null;
-  artifactId: ArtifactId | null;
-  createdAt: Timestamp;
-}
+/**
+ * What a `publish` Decision asks for (execution-model §9.4): `automatic`
+ * lets the provider select `fast_forward` when the Target still equals the
+ * Run's base Snapshot and a clean `merge` otherwise; `exact` names one
+ * concrete strategy that is honored exactly or refused, never silently
+ * widened or replaced. The concrete strategy is selected at publication
+ * time, never at Run creation, and is invisible to every Invocation.
+ */
+export type PublicationStrategyRequest = { kind: "automatic" } | { kind: "exact"; strategy: PublicationStrategy };
 
-export const publicationSchema: z.ZodType<Publication> = z
-  .strictObject({
-    id: idSchema("publication"),
-    runId: idSchema("run"),
-    decisionId: idSchema("decision"),
-    changesetId: idSchema("changeset"),
-    targetBeforeSnapshotId: idSchema("snapshot"),
-    targetAfterSnapshotId: idSchema("snapshot").nullable(),
-    strategy: publicationStrategySchema,
-    outcome: z.enum(PUBLICATION_OUTCOMES),
-    failureReason: nonEmptyString.nullable(),
-    artifactId: idSchema("artifact").nullable(),
-    createdAt: timestampSchema,
-  })
-  .refine((p) => (p.outcome === "failed") === (p.failureReason !== null), {
-    message: "failureReason is set exactly when the Publication failed",
-    path: ["failureReason"],
-  })
-  .refine((p) => p.outcome !== "succeeded" || p.targetAfterSnapshotId !== null, {
-    message: "a succeeded Publication records the Target's after Snapshot",
-    path: ["targetAfterSnapshotId"],
-  })
-  .refine((p) => p.outcome !== "failed" || p.targetAfterSnapshotId === null, {
-    message: "a failed Publication wrote nothing to the Target",
-    path: ["targetAfterSnapshotId"],
-  });
-
-export type PublicationInput = Omit<Publication, "id" | "createdAt">;
-
-export const publicationInputSchema: z.ZodType<PublicationInput> = z
-  .strictObject({
-    runId: idSchema("run"),
-    decisionId: idSchema("decision"),
-    changesetId: idSchema("changeset"),
-    targetBeforeSnapshotId: idSchema("snapshot"),
-    targetAfterSnapshotId: idSchema("snapshot").nullable(),
-    strategy: publicationStrategySchema,
-    outcome: z.enum(PUBLICATION_OUTCOMES),
-    failureReason: nonEmptyString.nullable(),
-    artifactId: idSchema("artifact").nullable(),
-  })
-  .refine((p) => (p.outcome === "failed") === (p.failureReason !== null), {
-    message: "failureReason is set exactly when the Publication failed",
-    path: ["failureReason"],
-  })
-  .refine((p) => (p.outcome === "succeeded") === (p.targetAfterSnapshotId !== null), {
-    message: "a succeeded Publication records the Target after Snapshot; a failed one wrote nothing",
-    path: ["targetAfterSnapshotId"],
-  });
+export const publicationStrategyRequestSchema: z.ZodType<PublicationStrategyRequest> = z.discriminatedUnion("kind", [
+  z.strictObject({ kind: z.literal("automatic") }),
+  z.strictObject({ kind: z.literal("exact"), strategy: publicationStrategySchema }),
+]);

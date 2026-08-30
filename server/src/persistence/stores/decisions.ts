@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray, notInArray } from "drizzle-orm";
 import {
   assertDecisionResolutionRules,
   ConflictError,
@@ -17,7 +17,7 @@ import {
   type EventActor,
 } from "@agentique-console/core";
 import type { PersistenceContext } from "../context.ts";
-import { artifacts, attempts, completionRequests, decisions, gates, invocations, planNodes, requirements, runs, tasks } from "../schema.ts";
+import { artifacts, attempts, completionRequests, decisions, gates, invocations, planNodes, publications, requirements, runs, tasks } from "../schema.ts";
 import { assertSameConversation, conversationScope, loadConversationRef, OPERATOR_ACTOR, requireRow, writeMeta, type WriteOptions } from "./support.ts";
 
 type Row = typeof decisions.$inferSelect;
@@ -143,6 +143,18 @@ export class DecisionStore {
     return row ? toDomain(row) : null;
   }
 
+  /** Every `publish` Decision of a Run, in creation order. */
+  publishDecisionsOf(runId: string): Decision[] {
+    return this.ctx.db.select().from(decisions).where(and(eq(decisions.kind, "publish"), eq(decisions.runId, runId))).orderBy(asc(decisions.createdAt), asc(decisions.id)).all().map(toDomain);
+  }
+
+  /** The Run's one open `publish` Decision, or `null`; at most one exists (a database unique index). */
+  openPublishOf(runId: string): Decision | null {
+    const rows = this.publishDecisionsOf(runId).filter((d) => d.status === "open");
+    if (rows.length > 1) throw new InvariantViolationError(`Run ${runId} has ${rows.length} open publish Decisions`, { runId });
+    return rows[0] ?? null;
+  }
+
   /** Resolves an open Decision once; who may resolve what is enforced by the core rules. */
   resolve(id: DecisionId, input: DecisionResolutionInput, options?: WriteOptions): Decision {
     const resolution = parseOrThrow(decisionResolutionInputSchema, input, "Decision resolution");
@@ -187,10 +199,27 @@ export class DecisionStore {
    * Run's open `operator_signoff` Gate, the passed `run_completion` Gate and
    * `passed` Completion Request that Gate presents, and exactly the Gate's
    * verified Snapshot and final-report Artifact — and the Gate has no other
-   * signoff Decision.
+   * signoff Decision. A publish subject names exactly the completed Run's
+   * Workspace, Target, final Snapshot, and final Changeset, and the Run has
+   * no other open publish Decision, no nonterminal Publication, and no
+   * succeeded Publication.
    */
   private assertSubjectOwnership(subject: DecisionSubject, runId: string | null): void {
     if (subject.runId !== runId) throw new InvariantViolationError(`Decision subject names Run ${subject.runId}, not ${String(runId)}`);
+    if (subject.kind === "publish") {
+      const run = requireRow(this.ctx.db.select({ status: runs.status, workspaceId: runs.workspaceId, target: runs.target, finalSnapshotId: runs.finalSnapshotId, finalChangesetId: runs.finalChangesetId }).from(runs).where(eq(runs.id, subject.runId)).get(), "Run", subject.runId);
+      if (run.status !== "completed") throw new ConflictError(`Run ${subject.runId} is ${run.status}; a publish Decision is requested for a completed Run`, { runId: subject.runId, status: run.status });
+      if (run.workspaceId !== subject.workspaceId || JSON.stringify(run.target) !== JSON.stringify(subject.target) || run.finalSnapshotId !== subject.finalSnapshotId || run.finalChangesetId !== subject.finalChangesetId) {
+        throw new InvariantViolationError(`publish subject disagrees with the completed Run ${subject.runId}`, { runId: subject.runId });
+      }
+      const open = this.ctx.db.select({ id: decisions.id }).from(decisions).where(and(eq(decisions.kind, "publish"), eq(decisions.runId, subject.runId), eq(decisions.status, "open"))).get();
+      if (open) throw new ConflictError(`Run ${subject.runId} already has open publish Decision ${open.id}`, { runId: subject.runId, decisionId: open.id });
+      const active = this.ctx.db.select({ id: publications.id, status: publications.status }).from(publications).where(and(eq(publications.runId, subject.runId), notInArray(publications.status, ["succeeded", "failed"]))).get();
+      if (active) throw new ConflictError(`Run ${subject.runId} has nonterminal Publication ${active.id} (${active.status})`, { runId: subject.runId, publicationId: active.id });
+      const succeeded = this.ctx.db.select({ id: publications.id }).from(publications).where(and(eq(publications.runId, subject.runId), eq(publications.status, "succeeded"))).get();
+      if (succeeded) throw new ConflictError(`Run ${subject.runId} was published by Publication ${succeeded.id}; a succeeded Run is never published again`, { runId: subject.runId, publicationId: succeeded.id });
+      return;
+    }
     if (subject.kind === "signoff") {
       const gate = requireRow(this.ctx.db.select({ runId: gates.runId, kind: gates.kind, status: gates.status, completionRequestId: gates.completionRequestId, completionGateId: gates.completionGateId, snapshotId: gates.snapshotId, reportArtifactId: gates.reportArtifactId }).from(gates).where(eq(gates.id, subject.gateId)).get(), "Gate", subject.gateId);
       if (gate.runId !== subject.runId || gate.kind !== "operator_signoff") throw new InvariantViolationError(`Gate ${subject.gateId} is not an operator_signoff Gate of Run ${subject.runId}`, { gateId: subject.gateId });
