@@ -29,6 +29,7 @@ import { HandoffRouter } from "./handoff-routing.ts";
 import { ChangesetIntegrationService } from "./integration-service.ts";
 import type { CollectedChangeset, ExecutionWorkspacePort, ExecutionWorkspaceRequest, PreparedExecutionWorkspace } from "./ports/execution-workspace.ts";
 import type { IntegrationApplyOutcome, IntegrationApplyRequest, IntegrationWorkspacePort } from "./ports/integration-workspace.ts";
+import { createPatternRunners, type PatternRunners } from "./patterns/index.ts";
 import type { PreparedRunWorkspace, RunWorkspacePreparationPort, RunWorkspacePreparationRequest } from "./ports/workspace-preparation.ts";
 import { RecoveryService } from "./recovery-service.ts";
 import { RunCreationService, type CreatedRun, type RunCreationPolicy, type RunCreationRequest } from "./run-creation-service.ts";
@@ -179,6 +180,7 @@ export interface RuntimeHarness extends Harness {
   integrationWorkspace: FakeIntegrationWorkspace;
   integration: ChangesetIntegrationService;
   handoffs: HandoffRouter;
+  runners: PatternRunners;
   provider: ScriptedProvider;
   payloads: MemoryContinuationPayloadStore;
   continuations: ContinuationService;
@@ -221,13 +223,16 @@ export function openRuntimeHarness(options: RuntimeHarnessOptions = {}): Runtime
   const executionDiagnostics: ExecutionDiagnostic[] = [];
   const diagnostics = (d: ExecutionDiagnostic) => executionDiagnostics.push(d);
   const cleanup = new WorkspaceCleanup(h.ctx, h.stores, executionWorkspace, diagnostics);
+  const executor = new AttemptExecutor(h.ctx, h.stores, provider, continuations, governor, executionWorkspace, executorConfig, (chunk) => transient.push(chunk), diagnostics);
+  const integration = new ChangesetIntegrationService(h.ctx, h.stores, integrationWorkspace);
   return {
     ...h,
     workspacePreparation,
     executionWorkspace,
     integrationWorkspace,
-    integration: new ChangesetIntegrationService(h.ctx, h.stores, integrationWorkspace),
+    integration,
     handoffs: new HandoffRouter(h.stores),
+    runners: createPatternRunners({ ctx: h.ctx, stores: h.stores, executor, preparation, integration, governor, provider }),
     provider,
     payloads,
     continuations,
@@ -238,7 +243,7 @@ export function openRuntimeHarness(options: RuntimeHarnessOptions = {}): Runtime
       limits: options.limits ?? DEFAULT_PLAN_LIMITS,
     }),
     preparation,
-    executor: new AttemptExecutor(h.ctx, h.stores, provider, continuations, governor, executionWorkspace, executorConfig, (chunk) => transient.push(chunk), diagnostics),
+    executor,
     recovery: new RecoveryService(h.ctx, h.stores, governor, continuations, provider, cleanup, executorConfig),
     runStart: new RunStartService(h.ctx, h.stores, preparation),
     cleanup,
@@ -302,6 +307,25 @@ export function accepted(outcome: PlanRevisionOutcome): Extract<PlanRevisionOutc
 export function rejected(outcome: PlanRevisionOutcome): Extract<PlanRevisionOutcome, { accepted: false }> {
   if (outcome.accepted) throw new Error("expected a rejection");
   return outcome;
+}
+
+/** A worker revision that declares only the read tool: its Invocations are read-only and produce no Changeset. */
+export function seedReadOnlyWorker(h: RuntimeHarness, name = "reader"): AgentDefinitionRevision {
+  const definition = h.stores.agents.ensureDefinition(name);
+  return h.stores.agents.appendRevision(definition.id, {
+    provenance: { kind: "builtin" },
+    modelPolicy: { model: "claude-fable-5", effort: "medium", maxContextOccupancy: 0.8 },
+    instructions: `You are the ${name}.`,
+    capabilities: { tools: ["read"], mcpServers: [] },
+    toolPolicy: { read: "allowed" },
+    defaultLimits: { allocation: INVOCATION_ALLOCATION, maxWallClockMs: 600_000 },
+  });
+}
+
+/** Proposes a plan from the seeded Orchestrator Invocation and returns the accepted graph's non-root nodes in membership order. */
+export function planNodes(h: RuntimeHarness, seed: RuntimeSeed & { invocation: Invocation }, expressions: PlanExpression[]) {
+  const outcome = accepted(propose(h, seed, expressions));
+  return { outcome, nodes: outcome.graph.nodes.slice(1), revisionNumber: outcome.revision.number };
 }
 
 export const COMPLETED_RESULT = { status: "completed" as const, artifactIds: [] as string[], tasks: [] as never[], evidence: [] as never[], summary: "done", openItems: [] as string[], blocker: null, runOutcome: null };

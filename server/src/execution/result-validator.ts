@@ -88,9 +88,10 @@ export class InvocationResultValidator {
       }
       report.evidence.forEach((evidence, i) => this.evidence(evidence, context, `${path}.evidence.${i}`, add));
     });
-    if (invocation.purpose === "task" && result.status === "completed") {
+    // A completed Invocation reports every Task it owns, so ownership always ends in a canonical Task state.
+    if (invocation.taskIds.length > 0 && result.status === "completed") {
       for (const taskId of invocation.taskIds as TaskId[]) {
-        if (!result.tasks.some((t) => t.taskId === taskId)) add("status_incompatible", `a completed task Invocation reports its Task ${taskId}`, "tasks");
+        if (!result.tasks.some((t) => t.taskId === taskId)) add("status_incompatible", `a completed Invocation reports its owned Task ${taskId}`, "tasks");
       }
     }
 
