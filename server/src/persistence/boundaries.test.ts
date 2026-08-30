@@ -202,8 +202,49 @@ describe("import boundaries", () => {
   it("no execution code reads a transcript Artifact or blob to make a decision (invariant 6)", () => {
     for (const file of listFiles("server/src/execution", (f) => isCode(f) && !f.endsWith(".test.ts"))) {
       const text = fs.readFileSync(file, "utf8");
+      // The integration service is the one reader of Artifact content: it delivers a Changeset's verified diff to the
+      // Integration Workspace (§9.2) and decides nothing from the bytes; it never touches a transcript.
+      if (rel(file) === "server/src/execution/integration-service.ts") {
+        expect(text, rel(file)).not.toMatch(/blobs\.get\(|transcript|TRANSCRIPT_MEDIA_TYPE/i);
+        continue;
+      }
       expect(text, rel(file)).not.toMatch(/artifacts\.read\(|blobs\.get\(|\.transcriptArtifactId\b[^;\n]*\bread|TRANSCRIPT_MEDIA_TYPE[^;\n]*(read|get)\(/);
     }
+  });
+
+  it("the integration-workspace port carries verified content bound to one Artifact, and only the integration service binds it", () => {
+    const portFile = path.join(repoRoot, "server/src/execution/ports/integration-workspace.ts");
+    const port = fs.readFileSync(portFile, "utf8");
+    // The port depends on core alone and names no persistence, storage, database, or transaction concept an adapter could reach.
+    expect(importsOf(portFile)).toEqual(["@agentique-console/core"]);
+    expect(port).not.toMatch(/PersistenceContext|\bStores\b|ArtifactStore|BlobStore|Database|better-sqlite3|drizzle|storageKey|blobKey|\btx\b|transaction\(/);
+    // The content source is bound to exactly one Artifact: one parameterless read, no lookup by id, no enumeration.
+    const source = port.match(/export interface ArtifactContentSource \{([\s\S]*?)\n\}/)?.[1] ?? "";
+    expect(source).toMatch(/readonly artifactId: ArtifactId;/);
+    expect(source).toMatch(/readonly digest: string;/);
+    expect(source).toMatch(/readonly byteSize: number;/);
+    const methods = source.replace(/\/\*[\s\S]*?\*\//g, "").match(/^\s*\w+\(.*\).*;$/gm) ?? [];
+    expect(methods.map((m) => m.trim())).toEqual(["read(): Promise<Uint8Array>;"]);
+    // The request carries the content source and no path, key, bare digest, or metadata-only shortcut for the diff.
+    const request = port.match(/export interface IntegrationApplyRequest \{([\s\S]*?)\n\}/)?.[1] ?? "";
+    expect(request).toMatch(/diff: ArtifactContentSource;/);
+    expect(request).not.toMatch(/diffArtifactId|diffDigest|diffByteSize|diffPath|empty:|blob|key/i);
+    // The integration service alone resolves stored content and binds it; the port and every adapter location stay free of persistence.
+    const service = fs.readFileSync(path.join(repoRoot, "server/src/execution/integration-service.ts"), "utf8");
+    expect(service).toMatch(/implements ArtifactContentSource/);
+    expect(service).toMatch(/artifacts\.read\(/);
+    for (const file of [...listFiles("server/src/provider", (f) => isCode(f) && !f.endsWith(".test.ts")), ...listFiles("server/src/execution/ports", isCode)]) {
+      const text = fs.readFileSync(file, "utf8");
+      expect(text, rel(file)).not.toMatch(/artifacts\.read\(|blobs\.get\(|BlobStore|ArtifactStore|persistence\/(stores\/(?!continuations)|blob-store|database|client|schema)|better-sqlite3|drizzle-orm/);
+    }
+    // The fake Integration Workspace consumes the content source and touches no persistence.
+    const support = fs.readFileSync(path.join(repoRoot, "server/src/execution/test-support.ts"), "utf8");
+    const fake = support.slice(support.indexOf("export class FakeIntegrationWorkspace"), support.indexOf("export class FakeExecutionWorkspace"));
+    expect(fake.length).toBeGreaterThan(100);
+    expect(fake).toMatch(/await request\.changeset\.diff\.read\(\)/);
+    expect(fake).not.toMatch(/\bstores\b|\bctx\b|\bblobs\b|artifacts\.|sha256Hex|BlobStore|ArtifactStore/);
+    // No compatibility path: neither the port nor the service offers a second way to obtain the content.
+    expect(`${port}\n${service}`).not.toMatch(/\b(legacy|compat\w*|fallback|shim|deprecated)\b/i);
   });
 
   it("legacy code imports neither core nor the new persistence boundary", () => {

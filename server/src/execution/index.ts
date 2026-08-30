@@ -56,9 +56,9 @@ export { evaluateReadiness, decideReadiness, predecessorEdges, successorEdges, s
 export type { DeferralReason, ReadinessDecision, ReadinessEvaluation, SkipCause } from "./readiness.ts";
 export { HandoffRouter, boundedHandoffSummary } from "./handoff-routing.ts";
 export type { EnsuredHandoff } from "./handoff-routing.ts";
-export type { IntegrationApplyOutcome, IntegrationApplyRequest, IntegrationWorkspacePort } from "./ports/integration-workspace.ts";
-export { ChangesetIntegrationService, CONFLICT_REPORT_MAX_BYTES } from "./integration-service.ts";
-export type { IntegrationOutcome } from "./integration-service.ts";
+export type { ArtifactContentSource, IntegrationApplyOutcome, IntegrationApplyRequest, IntegrationWorkspacePort } from "./ports/integration-workspace.ts";
+export { ChangesetContentError, ChangesetIntegrationService, CONFLICT_REPORT_MAX_BYTES } from "./integration-service.ts";
+export type { ChangesetContentFailure, IntegrationOutcome } from "./integration-service.ts";
 export { ChainPatternRunner, RootNodeSupport, SinglePatternRunner, SequentialStepEngine, createPatternRunners, runnerFor } from "./patterns/index.ts";
 export type { NodeAdvice, PatternRunner, PatternRunnerDependencies, PatternRunnerOutcome, PatternRunners, RootAdvice, RootOutcome } from "./patterns/index.ts";
 export { RunScheduler, DEFAULT_SCHEDULER_CONFIG } from "./scheduler.ts";

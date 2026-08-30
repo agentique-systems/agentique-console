@@ -8,6 +8,7 @@
  */
 import { type Changeset, type Invocation } from "@agentique-console/core";
 import { describe, expect, it } from "vitest";
+import { sha256Hex } from "../persistence/blob-store.ts";
 import { COMPLETED_RESULT, accepted, fakeSnapshot, openRuntimeHarness, propose, seedPlanningRuntime, type RuntimeHarness } from "./test-support.ts";
 
 /** A running single worker node with one succeeded writing Invocation whose Changeset is pending. */
@@ -44,13 +45,15 @@ describe("ChangesetIntegrationService", () => {
       await Promise.resolve();
       expect(h.ctx.tx.inTransaction).toBe(false);
       expect(h.integrationWorkspace.requests).toHaveLength(1);
-      expect(h.integrationWorkspace.requests[0]).toEqual({
+      const diffArtifact = h.stores.artifacts.get(changeset.diffArtifactId);
+      expect(h.integrationWorkspace.requests[0]).toMatchObject({
         runId: run.id,
         changesetId: changeset.id,
         integrationWorkspacePath: run.integrationWorkspacePath,
         currentSnapshot: base.identity,
-        changeset: { beforeSnapshot: h.stores.snapshots.get(changeset.beforeSnapshotId).identity, afterSnapshot: h.stores.snapshots.get(changeset.afterSnapshotId).identity, diffArtifactId: changeset.diffArtifactId, diffDigest: h.stores.artifacts.get(changeset.diffArtifactId).digest, diffByteSize: h.stores.artifacts.get(changeset.diffArtifactId).byteSize, empty: false },
+        changeset: { beforeSnapshot: h.stores.snapshots.get(changeset.beforeSnapshotId).identity, afterSnapshot: h.stores.snapshots.get(changeset.afterSnapshotId).identity, diff: { artifactId: diffArtifact.id, mediaType: "text/x-diff", digest: diffArtifact.digest, byteSize: diffArtifact.byteSize } },
       });
+      expect(Object.keys(h.integrationWorkspace.requests[0]!.changeset).sort()).toEqual(["afterSnapshot", "beforeSnapshot", "diff"]);
       // Nothing about the Target reaches the port, and the Target is unchanged.
       expect(Object.keys(h.integrationWorkspace.requests[0]!)).not.toContain("target");
       const seq = h.ctx.journal.lastSeq();
@@ -90,7 +93,7 @@ describe("ChangesetIntegrationService", () => {
       expect(h.stores.artifacts.get(changeset.diffArtifactId).byteSize).toBe(0);
       const outcome = await h.integration.integrate(changeset.id);
       if (outcome.kind !== "integrated") throw new Error(outcome.kind);
-      expect(h.integrationWorkspace.requests[0]!.changeset.empty).toBe(true);
+      expect(h.integrationWorkspace.observed[0]).toMatchObject({ changesetId: changeset.id, artifactId: changeset.diffArtifactId, byteSize: 0, digest: sha256Hex(new Uint8Array()) });
       const base = h.stores.snapshots.get(s.created.run.baseSnapshotId!);
       expect(outcome.snapshot.identity).toEqual(base.identity);
       expect(outcome.snapshot.id).not.toBe(base.id);

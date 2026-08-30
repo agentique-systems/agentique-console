@@ -77,8 +77,27 @@ export function fakeSnapshot(...parts: string[]): SnapshotIdentity {
  * tests can assert serialization, idempotence, and that nothing named the
  * Target.
  */
+/** What the fake adapter observed about one apply: safe facts only, never the diff bytes. */
+export interface ObservedIntegration {
+  changesetId: string;
+  artifactId: string;
+  /** The digest the adapter computed over the bytes it read. */
+  digest: string;
+  byteSize: number;
+  /** Whether a database transaction was open while the adapter read the content and applied it (`null` when the harness gave no probe). */
+  inTransaction: boolean | null;
+}
+
+/**
+ * A deterministic Integration Workspace: applies exactly the bytes it reads
+ * from the request's content source, idempotent by Changeset id, with no
+ * access to persistence — it receives a digest function and, from the test
+ * harness, a transaction-state probe, nothing else.
+ */
 export class FakeIntegrationWorkspace implements IntegrationWorkspacePort {
   readonly requests: IntegrationApplyRequest[] = [];
+  /** One entry per completed content read, in apply order. */
+  readonly observed: ObservedIntegration[] = [];
   readonly applied = new Map<string, SnapshotIdentity>();
   /** Changeset ids whose next apply conflicts; consumed on use unless `conflictAlways` is set. */
   readonly conflictNext = new Set<string>();
@@ -91,6 +110,12 @@ export class FakeIntegrationWorkspace implements IntegrationWorkspacePort {
   /** When set, the next apply records success in the fake (as if the external application happened) and then throws (a crash before persistence). */
   crashAfterApply = false;
 
+  constructor(
+    private readonly digestOf: (bytes: Uint8Array) => string,
+    /** Reports whether a database transaction is open; set by the test harness, never by persistence. */
+    public transactionProbe: (() => boolean) | null = null,
+  ) {}
+
   async apply(request: IntegrationApplyRequest): Promise<IntegrationApplyOutcome> {
     this.requests.push(request);
     const inFlight = (this.#inFlightByRun.get(request.runId) ?? 0) + 1;
@@ -98,13 +123,22 @@ export class FakeIntegrationWorkspace implements IntegrationWorkspacePort {
     this.maxConcurrentByRun.set(request.runId, Math.max(this.maxConcurrentByRun.get(request.runId) ?? 0, inFlight));
     try {
       if (this.gate) await this.gate;
+      // The content is read on every apply — an already-applied Changeset included — and refused unless it verifies.
+      const openBeforeRead = this.transactionProbe?.() ?? null;
+      const bytes = await request.changeset.diff.read();
+      const inTransaction = openBeforeRead === null ? null : openBeforeRead || (this.transactionProbe?.() ?? false);
+      const digest = this.digestOf(bytes);
+      if (digest !== request.changeset.diff.digest || bytes.byteLength !== request.changeset.diff.byteSize) {
+        throw new Error(`the content source of ${request.changesetId} delivered bytes that do not match its declared digest and size`);
+      }
+      this.observed.push({ changesetId: request.changesetId, artifactId: request.changeset.diff.artifactId, digest, byteSize: bytes.byteLength, inTransaction });
       const existing = this.applied.get(request.changesetId);
       if (existing) return { kind: "integrated", snapshot: existing, alreadyApplied: true };
       if (this.conflictAlways.has(request.changesetId) || this.conflictNext.delete(request.changesetId)) {
         return { kind: "conflict", report: `CONFLICT (content): merge conflict applying ${request.changesetId} onto ${request.currentSnapshot.kind === "git" ? request.currentSnapshot.commitId : request.currentSnapshot.contentDigest}` };
       }
       const current = request.currentSnapshot.kind === "git" ? request.currentSnapshot.commitId : request.currentSnapshot.contentDigest;
-      const snapshot = request.changeset.empty ? request.currentSnapshot : fakeSnapshot(current, request.changesetId);
+      const snapshot = bytes.byteLength === 0 ? request.currentSnapshot : fakeSnapshot(current, request.changesetId);
       this.applied.set(request.changesetId, snapshot);
       if (this.crashAfterApply) {
         this.crashAfterApply = false;
@@ -209,13 +243,16 @@ export interface RuntimeHarnessOptions {
   /** Reuse an already opened persistence harness (simulating a restarted process over the same database). */
   base?: Harness;
   payloads?: MemoryContinuationPayloadStore;
+  /** Reuse the fake Integration Workspace of an earlier harness (the external Workspace survives a process). */
+  integrationWorkspace?: FakeIntegrationWorkspace;
 }
 
 export function openRuntimeHarness(options: RuntimeHarnessOptions = {}): RuntimeHarness {
   const h = options.base ?? openHarness();
   const workspacePreparation = new FakeWorkspacePreparation();
   const executionWorkspace = new FakeExecutionWorkspace();
-  const integrationWorkspace = new FakeIntegrationWorkspace();
+  const integrationWorkspace = options.integrationWorkspace ?? new FakeIntegrationWorkspace(sha256Hex);
+  integrationWorkspace.transactionProbe = () => h.ctx.tx.inTransaction;
   const provider = new ScriptedProvider({ clock: h.ctx.clock, inTransaction: () => h.ctx.tx.inTransaction, supportsContinuation: options.supportsContinuation ?? true });
   const payloads = options.payloads ?? new MemoryContinuationPayloadStore(sha256Hex);
   const continuations = new ContinuationService(h.stores.continuations, payloads, { ttlMs: null, clock: h.ctx.clock });

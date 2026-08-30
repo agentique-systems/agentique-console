@@ -29,6 +29,7 @@
  * reported rather than duplicated. Nothing here reads a transcript.
  */
 import {
+  CHANGESET_DIFF_MEDIA_TYPE,
   ATTEMPT_MACHINE,
   boundedFailureMessage,
   ConflictError,
@@ -486,7 +487,7 @@ export class AttemptExecutor {
     if (before === null) throw new Error(`writing Invocation ${invocation.id} has no starting Snapshot`);
     const after = this.stores.snapshots.record({ workspaceId: run.workspaceId as never, runId: run.id, identity: changeset.afterSnapshot, reason: "after_invocation" }, meta);
     const diff = this.stores.artifacts.create(
-      { runId: run.id, mediaType: "text/x-diff", producer: { kind: "runtime", component: "changeset" }, taskId: null, title: changeset.empty ? `empty changeset of ${invocation.id}` : `changeset of ${invocation.id}` },
+      { runId: run.id, mediaType: CHANGESET_DIFF_MEDIA_TYPE, producer: { kind: "runtime", component: "changeset" }, taskId: null, title: changeset.empty ? `empty changeset of ${invocation.id}` : `changeset of ${invocation.id}` },
       changeset.diff,
       meta,
     );

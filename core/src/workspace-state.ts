@@ -83,6 +83,9 @@ export const CHANGESET_MACHINE = defineStateMachine<ChangesetIntegrationStatus>(
   },
 );
 
+/** The media type of every Changeset diff Artifact (execution-model §9.2). */
+export const CHANGESET_DIFF_MEDIA_TYPE = "text/x-diff";
+
 /** The difference between two Snapshots, stored as a diff Artifact. */
 export interface Changeset {
   id: ChangesetId;

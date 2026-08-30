@@ -12,6 +12,7 @@ import os from "node:os";
 import path from "node:path";
 import type { InvocationId, PlanExpression, PlanNodeId, RunId } from "@agentique-console/core";
 import { describe, expect, it } from "vitest";
+import type { MemoryBlobStore } from "../persistence/blob-store.ts";
 import { openHarness, type TestClock } from "../persistence/test-support.ts";
 import { COMPLETED_RESULT, fakeSnapshot, openRuntimeHarness, planNodes, seedPlanningRuntime, type RuntimeHarness } from "./test-support.ts";
 
@@ -22,12 +23,14 @@ interface World {
   dir: string;
   file: string;
   clock: TestClock;
+  /** The Artifact content store survives a process, as the file-backed store does in production. */
+  blobs: MemoryBlobStore;
   runId: RunId;
 }
 
 /** Runs `body` in a fresh process over the same database: recovery runs first, exactly as at startup, and the file is always closed. */
 async function withProcess<T>(w: World, body: (h: RuntimeHarness) => Promise<T> | T, options: { recover?: boolean } = {}): Promise<T> {
-  const h = openRuntimeHarness({ base: openHarness(w.file, { clock: w.clock }) });
+  const h = openRuntimeHarness({ base: openHarness(w.file, { clock: w.clock, blobs: w.blobs }) });
   try {
     if (options.recover !== false) h.recovery.recover();
     return await body(h);
@@ -54,13 +57,14 @@ function work(h: RuntimeHarness, runId: RunId) {
 describe("scheduler restart", () => {
   it("converges from every durable boundary of a chain behind a single node, executing and integrating each step exactly once", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agentique-scheduler-"));
-    const w: World = { dir, file: path.join(dir, "console.db"), clock: undefined as never, runId: undefined as never };
+    const w: World = { dir, file: path.join(dir, "console.db"), clock: undefined as never, blobs: undefined as never, runId: undefined as never };
     try {
       let nodeIds: PlanNodeId[];
       let orchestrator: InvocationId;
       // Process 1: a plan with A → chain(B0, B1) is accepted; the root's first turn completes; the process dies before any pass.
       await withProcess(w, async (h) => {
         w.clock = h.clock;
+        w.blobs = h.blobs;
         const s = seedPlanningRuntime(h);
         w.runId = s.created.run.id;
         orchestrator = s.invocation.id;
@@ -172,10 +176,11 @@ describe("scheduler restart", () => {
 
   it("converges after a crash between an integration and its record, and after a restart with an integration conflict", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agentique-scheduler-"));
-    const w: World = { dir, file: path.join(dir, "console.db"), clock: undefined as never, runId: undefined as never };
+    const w: World = { dir, file: path.join(dir, "console.db"), clock: undefined as never, blobs: undefined as never, runId: undefined as never };
     try {
       const a = await withProcess(w, async (h) => {
         w.clock = h.clock;
+        w.blobs = h.blobs;
         const s = seedPlanningRuntime(h);
         w.runId = s.created.run.id;
         const { nodes } = planNodes(h, s, [single(s, "A")]);

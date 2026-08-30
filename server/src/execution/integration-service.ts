@@ -20,15 +20,123 @@
  * fail. Integration within one Run is serialized in this process, which is
  * the repository's single-runtime-process ownership assumption; the Target
  * is never touched.
+ *
+ * Content ownership: this service, not the Workspace provider, resolves the
+ * Changeset's diff Artifact through the canonical Artifact Store, checks
+ * that it belongs to the Run and has the Changeset diff media type, and
+ * verifies its digest and byte size — all outside any transaction — before
+ * the port is called. The port receives an `ArtifactContentSource` bound to
+ * that one Artifact; it never receives a store, a blob, a key, or a path to
+ * the content. Content that is missing, corrupted, or inconsistent is an
+ * infrastructure failure (`ChangesetContentError`): the port is not called,
+ * nothing is recorded, and no conflict is invented. Diff bytes never appear
+ * in an Event, an outcome, a diagnostic, or an error message.
  */
-import { TASK_MACHINE, type Artifact, type Changeset, type ChangesetId, type PlanNodeId, type RunId, type Snapshot, type Task } from "@agentique-console/core";
+import {
+  CHANGESET_DIFF_MEDIA_TYPE,
+  NotFoundError,
+  TASK_MACHINE,
+  type Artifact,
+  type ArtifactId,
+  type Changeset,
+  type ChangesetId,
+  type PlanNodeId,
+  type RunId,
+  type Snapshot,
+  type Task,
+} from "@agentique-console/core";
+import { BlobCorruptedError, BlobMissingError } from "../persistence/blob-store.ts";
 import type { PersistenceContext } from "../persistence/context.ts";
 import type { Stores } from "../persistence/stores/index.ts";
 import type { WriteOptions } from "../persistence/stores/support.ts";
-import type { IntegrationApplyRequest, IntegrationWorkspacePort } from "./ports/integration-workspace.ts";
+import type { ArtifactContentSource, IntegrationApplyRequest, IntegrationWorkspacePort } from "./ports/integration-workspace.ts";
 
 /** The bound on a conflict report stored as the conflict Artifact. */
 export const CONFLICT_REPORT_MAX_BYTES = 16_384;
+
+export type ChangesetContentFailure =
+  /** The Changeset names an Artifact that has no metadata row. */
+  | "artifact_missing"
+  /** The Artifact belongs to another Run. */
+  | "foreign_artifact"
+  /** The Artifact is not a Changeset diff. */
+  | "media_type"
+  /** The Artifact's metadata no longer agrees with the content the source was bound to. */
+  | "metadata_changed"
+  /** The blob store holds no content for the Artifact's digest. */
+  | "content_missing"
+  /** The stored content does not hash to the Artifact's digest or has another byte size. */
+  | "content_corrupted"
+  /** Reading the content failed for another reason. */
+  | "read_failed";
+
+/**
+ * A Changeset whose diff content cannot be delivered as verified bytes. An
+ * infrastructure failure, never an integration outcome: the message carries
+ * ids, the failure kind, and the digest — never content.
+ */
+export class ChangesetContentError extends Error {
+  constructor(
+    readonly changesetId: ChangesetId,
+    readonly artifactId: ArtifactId,
+    readonly failure: ChangesetContentFailure,
+    detail: string,
+  ) {
+    super(`Changeset ${changesetId} content is unavailable (${failure}): Artifact ${artifactId} ${detail}`);
+    this.name = "ChangesetContentError";
+  }
+}
+
+/**
+ * The content source handed to the port: bound to one Artifact's identity,
+ * digest, and size at construction; every read re-resolves the Artifact
+ * through the store outside any transaction, checks the metadata still
+ * agrees, and returns bytes the store verified against the digest and size.
+ */
+class VerifiedArtifactContent implements ArtifactContentSource {
+  readonly artifactId: ArtifactId;
+  readonly mediaType: string;
+  readonly digest: string;
+  readonly byteSize: number;
+  // Private fields: the holder sees the four metadata fields and `read` and nothing of persistence, not even by enumeration or serialization.
+  readonly #ctx: PersistenceContext;
+  readonly #stores: Stores;
+  readonly #changesetId: ChangesetId;
+  readonly #runId: RunId;
+
+  constructor(ctx: PersistenceContext, stores: Stores, changesetId: ChangesetId, runId: RunId, artifact: Artifact) {
+    this.#ctx = ctx;
+    this.#stores = stores;
+    this.#changesetId = changesetId;
+    this.#runId = runId;
+    this.artifactId = artifact.id;
+    this.mediaType = artifact.mediaType;
+    this.digest = artifact.digest;
+    this.byteSize = artifact.byteSize;
+  }
+
+  async read(): Promise<Uint8Array> {
+    if (this.#ctx.tx.inTransaction) throw new Error("Changeset content is read outside any transaction");
+    const { artifact, bytes } = readVerified(this.#stores, this.#changesetId, this.artifactId);
+    if (artifact.digest !== this.digest || artifact.byteSize !== this.byteSize || artifact.runId !== this.#runId || artifact.mediaType !== this.mediaType) {
+      throw new ChangesetContentError(this.#changesetId, this.artifactId, "metadata_changed", `no longer matches the bound digest ${this.digest} and size ${this.byteSize}`);
+    }
+    return bytes;
+  }
+}
+
+/** Metadata plus bytes verified by the Artifact Store; every failure becomes a `ChangesetContentError` without content. */
+function readVerified(stores: Stores, changesetId: ChangesetId, artifactId: ArtifactId): { artifact: Artifact; bytes: Uint8Array } {
+  try {
+    return stores.artifacts.read(artifactId);
+  } catch (error) {
+    if (error instanceof ChangesetContentError) throw error;
+    if (error instanceof NotFoundError) throw new ChangesetContentError(changesetId, artifactId, "artifact_missing", "has no metadata");
+    if (error instanceof BlobMissingError) throw new ChangesetContentError(changesetId, artifactId, "content_missing", `has no stored content for digest ${error.digest}`);
+    if (error instanceof BlobCorruptedError) throw new ChangesetContentError(changesetId, artifactId, "content_corrupted", `stored content does not verify against digest ${error.digest}`);
+    throw new ChangesetContentError(changesetId, artifactId, "read_failed", `could not be read: ${error instanceof Error ? error.name : "unknown error"}`);
+  }
+}
 
 export type IntegrationOutcome =
   /** Applied now and recorded: the Run's integration Snapshot advanced to `snapshot`. */
@@ -85,7 +193,8 @@ export class ChangesetIntegrationService {
       if (task.status !== "completed") return { kind: "conflict_unresolved", changeset, task, cause: task.status === "failed" ? "task_failed" : "task_cancelled" };
       resolvedTask = task;
     }
-    const outcome = await this.port.apply(this.request(changeset));
+    const diff = this.content(changeset);
+    const outcome = await this.port.apply(this.request(changeset, diff));
     if (outcome.kind === "integrated") {
       return this.ctx.tx.write((): IntegrationOutcome => {
         const current = this.stores.changesets.get(changesetId);
@@ -125,11 +234,35 @@ export class ChangesetIntegrationService {
     });
   }
 
-  private request(changeset: Changeset): IntegrationApplyRequest {
+  /**
+   * Resolves and verifies the Changeset's diff Artifact — metadata, Run
+   * ownership, media type, then the stored bytes against digest and size —
+   * outside any transaction, and binds a content source to it. Throws
+   * `ChangesetContentError` before the port is involved when any check
+   * fails; an empty diff is a valid zero-byte Artifact like any other.
+   */
+  private content(changeset: Changeset): ArtifactContentSource {
+    if (this.ctx.tx.inTransaction) throw new Error("Changeset content is resolved outside any transaction");
+    let artifact: Artifact;
+    try {
+      artifact = this.stores.artifacts.get(changeset.diffArtifactId);
+    } catch (error) {
+      if (error instanceof NotFoundError) throw new ChangesetContentError(changeset.id, changeset.diffArtifactId, "artifact_missing", "has no metadata");
+      throw error;
+    }
+    if (artifact.runId !== changeset.runId) throw new ChangesetContentError(changeset.id, artifact.id, "foreign_artifact", `belongs to Run ${artifact.runId}, not ${changeset.runId}`);
+    if (artifact.mediaType !== CHANGESET_DIFF_MEDIA_TYPE) throw new ChangesetContentError(changeset.id, artifact.id, "media_type", `is ${artifact.mediaType}, not ${CHANGESET_DIFF_MEDIA_TYPE}`);
+    const verified = readVerified(this.stores, changeset.id, artifact.id);
+    if (verified.artifact.digest !== artifact.digest || verified.artifact.byteSize !== artifact.byteSize) {
+      throw new ChangesetContentError(changeset.id, artifact.id, "metadata_changed", "metadata changed while it was being verified");
+    }
+    return new VerifiedArtifactContent(this.ctx, this.stores, changeset.id, changeset.runId, artifact);
+  }
+
+  private request(changeset: Changeset, diff: ArtifactContentSource): IntegrationApplyRequest {
     const run = this.stores.runs.get(changeset.runId);
     const currentId = run.integrationSnapshotId ?? run.baseSnapshotId;
     if (currentId === null) throw new Error(`Run ${run.id} has no base Snapshot to integrate onto`);
-    const diff = this.stores.artifacts.get(changeset.diffArtifactId);
     return {
       runId: run.id,
       changesetId: changeset.id,
@@ -138,10 +271,7 @@ export class ChangesetIntegrationService {
       changeset: {
         beforeSnapshot: this.stores.snapshots.get(changeset.beforeSnapshotId).identity,
         afterSnapshot: this.stores.snapshots.get(changeset.afterSnapshotId).identity,
-        diffArtifactId: diff.id,
-        diffDigest: diff.digest,
-        diffByteSize: diff.byteSize,
-        empty: diff.byteSize === 0,
+        diff,
       },
     };
   }

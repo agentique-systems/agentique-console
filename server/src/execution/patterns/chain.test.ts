@@ -13,6 +13,7 @@ import os from "node:os";
 import path from "node:path";
 import type { DecisionId, HandoffId, Invocation, InvocationId, PlanNode, PlanNodeId, RunId } from "@agentique-console/core";
 import { describe, expect, it } from "vitest";
+import type { MemoryBlobStore } from "../../persistence/blob-store.ts";
 import { openHarness, type TestClock } from "../../persistence/test-support.ts";
 import { COMPLETED_RESULT, fakeSnapshot, openRuntimeHarness, planNodes, seedPlanningRuntime, type RuntimeHarness } from "../test-support.ts";
 
@@ -214,6 +215,7 @@ describe("ChainPatternRunner", () => {
     try {
       const file = path.join(dir, "console.db");
       let clock: TestClock;
+      let blobs: MemoryBlobStore;
       let runId: RunId;
       let nodeId: PlanNodeId;
       let revisionNumber: number;
@@ -222,6 +224,7 @@ describe("ChainPatternRunner", () => {
       {
         const h = openRuntimeHarness({ base: openHarness(file) });
         clock = h.clock;
+        blobs = h.blobs;
         const s = seedPlanningRuntime(h);
         runId = s.created.run.id;
         const ready = readyChain(h, s, 3);
@@ -237,7 +240,7 @@ describe("ChainPatternRunner", () => {
       let step1: InvocationId;
       let handoff0: HandoffId;
       {
-        const h = openRuntimeHarness({ base: openHarness(file, { clock }) });
+        const h = openRuntimeHarness({ base: openHarness(file, { clock, blobs }) });
         expect(h.recovery.recover().interruptedAttemptIds).toEqual([]);
         expect(h.runners.chain.inspect(nodeId)).toEqual({ kind: "settle", invocationId: step0 });
         const prepare = h.preparation.prepare.bind(h.preparation);
@@ -254,7 +257,7 @@ describe("ChainPatternRunner", () => {
       }
       // Boundary 3: reopen with the Handoff created by a separate reconciliation but not yet delivered.
       {
-        const h = openRuntimeHarness({ base: openHarness(file, { clock }) });
+        const h = openRuntimeHarness({ base: openHarness(file, { clock, blobs }) });
         const node = h.stores.plans.getNode(nodeId);
         if (node.kind !== "pattern") throw new Error("pattern node expected");
         const ensured = h.handoffs.ensureChainStepHandoff(node, h.stores.invocations.get(step0));
@@ -264,7 +267,7 @@ describe("ChainPatternRunner", () => {
         h.close();
       }
       {
-        const h = openRuntimeHarness({ base: openHarness(file, { clock }) });
+        const h = openRuntimeHarness({ base: openHarness(file, { clock, blobs }) });
         const requests = h.integrationWorkspace.requests.length;
         const outcome = await h.runners.chain.settle(nodeId, revisionNumber);
         expect(outcome).toMatchObject({ kind: "step_prepared", position: { kind: "chain_step", index: 1, count: 3 }, handoffId: handoff0 });
@@ -284,7 +287,7 @@ describe("ChainPatternRunner", () => {
       let step2: InvocationId;
       let decisionId: DecisionId;
       {
-        const h = openRuntimeHarness({ base: openHarness(file, { clock }) });
+        const h = openRuntimeHarness({ base: openHarness(file, { clock, blobs }) });
         const report = h.recovery.recover();
         expect(report.retryEligible.map((r) => r.invocationId)).toEqual([step1]);
         expect(h.runners.chain.inspect(nodeId)).toEqual({ kind: "execute", invocationId: step1 });
@@ -300,7 +303,7 @@ describe("ChainPatternRunner", () => {
         h.close();
       }
       {
-        const h = openRuntimeHarness({ base: openHarness(file, { clock }) });
+        const h = openRuntimeHarness({ base: openHarness(file, { clock, blobs }) });
         expect(h.recovery.recover().interruptedAttemptIds).toEqual([]);
         expect(h.runners.chain.inspect(nodeId)).toEqual({ kind: "waiting", reason: "decision", cleared: false, wakeAt: null });
         expect(h.runners.chain.resume(nodeId, revisionNumber)).toEqual({ kind: "no_change" });
@@ -310,7 +313,7 @@ describe("ChainPatternRunner", () => {
       }
       // Boundary 5: the resolution is found from rows; the successor continues step 2; the final step completes; a crash before the node transition converges too.
       {
-        const h = openRuntimeHarness({ base: openHarness(file, { clock }) });
+        const h = openRuntimeHarness({ base: openHarness(file, { clock, blobs }) });
         expect(h.runners.chain.inspect(nodeId)).toEqual({ kind: "waiting", reason: "decision", cleared: true, wakeAt: null });
         const resumed = h.runners.chain.resume(nodeId, revisionNumber);
         expect(resumed).toMatchObject({ kind: "successor_prepared", position: { kind: "chain_step", index: 2, count: 3 }, decisionId });
@@ -327,7 +330,7 @@ describe("ChainPatternRunner", () => {
         expect(h.stores.changesets.listByRun(runId).map((c) => c.integrationStatus)).toEqual(["integrated", "integrated", "integrated"]);
         expect(h.stores.plans.getNode(nodeId).status).toBe("running");
         h.close();
-        const r = openRuntimeHarness({ base: openHarness(file, { clock }) });
+        const r = openRuntimeHarness({ base: openHarness(file, { clock, blobs }) });
         expect(r.runners.chain.inspect(nodeId)).toEqual({ kind: "settle", invocationId: resumed.invocationId });
         expect(await r.runners.chain.settle(nodeId, revisionNumber)).toEqual({ kind: "succeeded", outputArtifactIds: [last.artifact.id], handoffIds: [] });
         expect(r.integrationWorkspace.requests).toEqual([]);
