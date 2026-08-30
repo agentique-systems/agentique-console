@@ -1857,16 +1857,40 @@ the operator; the runtime records the superseding Decision and creates a
   (`server/src/execution/integration-service.ts`) and the
   integration-workspace port (`ports/integration-workspace.ts`:
   `apply` takes the Run, the Changeset identity, the Integration Workspace
-  path, the current integration Snapshot, and the diff, and returns
-  `integrated` with the new Snapshot or `conflict` with a bounded report).
+  path, the current integration Snapshot, and the Changeset's diff as an
+  `ArtifactContentSource`, and returns `integrated` with the new Snapshot
+  or `conflict` with a bounded report). **The execution runtime resolves
+  and verifies Changeset content. The Integration Workspace receives a
+  capability bound to that exact immutable content and has no persistence
+  access.** Before the port is called, and outside any transaction, the
+  service resolves the diff Artifact through the canonical Artifact Store,
+  checks that it belongs to the Run and has the Changeset diff media type
+  (`text/x-diff`), and verifies the stored bytes against the Artifact's
+  digest and byte size; the content source it then binds names exactly
+  that Artifact, its media type, digest, and size, and offers one
+  parameterless `read` that verifies again on every call — never a store,
+  a blob, a storage key, a path to the content, or a lookup by id. An
+  adapter applies exactly the bytes it reads; a zero-byte diff is a valid
+  empty Changeset, not a metadata-only shortcut. Content that is missing,
+  corrupted, or inconsistent with its metadata is an infrastructure
+  failure (`ChangesetContentError`, carrying ids, the failure kind, and
+  the digest, never bytes): the port is not called, nothing is recorded,
+  no conflict Task or report Artifact is invented, and the Changeset stays
+  `pending` for a later pass once the store is repaired. Diff bytes appear
+  in no Event, outcome, projection, diagnostic, manifest, Handoff, or
+  error message; they live in the Artifact Store alone.
   The service is idempotent by Changeset id: an already-`integrated`
   Changeset is never applied again, one integration runs at a time per
   Run, and the apply happens outside any transaction with the record
   written in one transaction afterwards — the Changeset `integrated`, the
   integration Snapshot, and `run.integrated` on the Run. A crash between
   the apply and its record leaves the Changeset `pending`; the next pass
-  applies it again, and the port reports an application that already
-  holds (`alreadyApplied`) so persistence catches up exactly once.
+  resolves and verifies the same content again, applies it again, and
+  the port reports an application that already holds (`alreadyApplied`:
+  the external Integration Workspace had already accepted that exact
+  Changeset) so persistence catches up exactly once. Adapters keep
+  whatever that idempotence needs in the Integration Workspace itself and
+  never persist integration state in Agentique's database.
 - A Changeset that does not apply cleanly is not applied. The runtime
   records, in one transaction, the Changeset `conflict`, a runtime-owned
   Task for the Plan Node's owner (a `replan` Coordinator Invocation for

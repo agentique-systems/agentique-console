@@ -584,6 +584,20 @@ Merge to `main` happens after step 7 as one merge commit. Rollback is
   re-applies once; a second conflict, a failed Task, and a cancelled Task
   fail the node with `integration_conflict`; one integration runs at a
   time per Run.
+- Integration content tests, over real persistence and the real Artifact
+  and blob stores: the adapter observes exactly the verified diff bytes,
+  digest, and size; a zero-byte diff is delivered and integrated; missing
+  content, a digest or size mismatch, and an Artifact that is not a diff
+  of the Run each stop integration before the port is called, change no
+  projection, and record nothing; content is read and applied outside
+  every transaction; after a crash between the external apply and its
+  record the next process reads the same content, receives
+  `alreadyApplied`, and records once; and diff bytes appear in no Event,
+  diagnostic, scheduler outcome or projection, manifest, Handoff, Task,
+  or error. The boundary test proves the port and every adapter location
+  import no store, blob store, or database module, that the content
+  source offers one parameterless read and no lookup, and that the
+  integration service alone binds stored content to the port request.
 - Scheduler tests: `reconcileRun` reads only canonical rows and returns
   the same projection before and after a reopen; `advanceRun` performs
   exactly `maxActions` actions in membership order, stops with each

@@ -638,7 +638,10 @@ writes to it.
 The Run-owned worktree and branch, created from the base Snapshot, into
 which the runtime integrates every Changeset and against which
 deterministic verification runs. It is isolated from the Target and from
-every Invocation's worktree.
+every Invocation's worktree. The execution runtime resolves and verifies
+Changeset content; the Integration Workspace receives a capability bound
+to that exact immutable content (execution-model §9.2) and has no
+persistence access.
 
 - Stored on the Run; no separate table.
 - Related: Run, Changeset, Snapshot, Target
