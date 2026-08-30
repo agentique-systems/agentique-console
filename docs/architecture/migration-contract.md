@@ -106,9 +106,9 @@ Phase 1 and remain after cutover:
   the provider-neutral adapter contract under `server/src/provider/`, and
   the narrow capability ports it declares under `ports/`
   (`RunWorkspacePreparationPort`, `ExecutionWorkspacePort`,
-  `IntegrationWorkspacePort`, `AcceptanceCriterionExecutionPort`, and
-  `RunFinalizationWorkspacePort`, implemented by the Workspace provider
-  in the Workspace phase). Nothing legacy
+  `IntegrationWorkspacePort`, `AcceptanceCriterionExecutionPort`,
+  `RunFinalizationWorkspacePort`, and `PublicationWorkspacePort`,
+  implemented by the Workspace provider in the Workspace phase). Nothing legacy
   imports it and it imports nothing legacy; the persistence boundary and
   the provider boundary never depend on it.
 
@@ -339,7 +339,7 @@ architecture corrects it before cutover, because nothing has shipped.
 | `snapshots` | runtime (Workspace provider) | immutable |
 | `changesets` | runtime (Workspace provider; the signoff service for the `final` kind) | immutable metadata + diff Artifact; kind `invocation` (integration lifecycle) or `final` (one per Run, `recorded`, only at signoff acceptance, never changed) |
 | `signoff_resolutions` | runtime (signoff service, from the operator) | append-only; exactly one per `operator_signoff` Gate and per `signoff` Decision; identity and outcome immutable; the follow-up Invocation linked once |
-| `publications` | runtime (publish action) | one per publish action on a `completed` Run |
+| `publications` | runtime (publication service) | recoverable lifecycle rows: one per resolved `publish` Decision, at most one nonterminal and one succeeded per Run, only for a `completed` Run applying its final Changeset; prepared facts recorded once; terminal rows immutable except the staging-cleanup obligation |
 | `capacity_leases` | resource governor | one per granted lease; grant and release times |
 | `budget_reservations` | runtime | one per allocation; capacity source and final-reserve use derive from the creating operation; `active` → `released` once |
 | `usage` | runtime | append-only per Attempt |
@@ -515,9 +515,31 @@ is one or more commits; each commit keeps `npm run typecheck` and
    preflight refusal (`ordinary_capacity_insufficient`); the
    Conversation's active-Run reference cleared only when it still names
    the terminal Run; and restart safety across every signoff window.
-   Remaining typed deferrals: publication (Target revalidation, publish
-   authorization, the `publish` Decision, strategy selection, the
-   Publication row), allocation extension
+   Phase 2E-D (done): safe, explicitly authorized, crash-recoverable
+   Publication — the recoverable Publication lifecycle (`requested →
+   prepared → verified → applying → succeeded | failed`) with its closed
+   structured failures, prepared facts, terminal publication-report
+   Artifact, and durable staging-cleanup obligation; the `publish`
+   Decision with its typed subject (completed Run, Workspace, exact
+   Target, final Snapshot, final Changeset, requested strategy), the
+   options `publish` and `cancel`, one open per Run, and the atomic
+   resolve-plus-create; the strategy request (`automatic` | `exact`)
+   beside the concrete strategy selected at publication time; the narrow
+   `PublicationWorkspacePort` (idempotent `prepare` over the
+   runtime-verified final-Changeset content constructing the candidate
+   without touching the Target, idempotent atomic
+   compare-and-swap-plus-durable-receipt `apply`, idempotent `release`);
+   candidate verification through the shared Acceptance Criterion check
+   boundary under the typed `publication` Evaluation context (the
+   accepted completion boundary's deterministic criteria, one Evaluation
+   per Publication and criterion, runtime producer only); the
+   publication service (`request`, `resolve`, `inspect`, `advance`,
+   `reconcileOutstanding`, `releaseOutstanding`) with one durable
+   boundary per advance and recovery from every nonterminal status; the
+   removal of the provisional `publication_result` Orchestrator purpose
+   and of Conversation-level automatic publish authorization; and
+   restart and concurrency safety across every publication window.
+   Remaining typed deferrals: allocation extension
    (`awaiting_allocation_extension_phase`, also for the root's unfunded
    `gate_result` turn and a change request's unfundable follow-up), and
    the executable `request_decision` runtime tool. Later
@@ -629,10 +651,25 @@ Merge to `main` happens after step 7 as one merge commit. Rollback is
   follow-up link; and twenty-one file-backed crash windows converge
   without a duplicate resolution, Decision resolution, Gate closure,
   Artifact, Changeset, transition, Invocation, preparation, or Event.
-- Publishing tests: a Run never writes to the Target; publish revalidates
-  the Target, selects the strategy at publish time, fails without writing
-  when the Target moved and the operation is not clean, and records a
-  Publication, Event, and Artifact.
+- Publication tests: a Run never writes to the Target and signoff
+  acceptance creates no publish authority; every Publication needs its own
+  operator-resolved `publish` Decision with the exact typed subject (one
+  open per Run, identical retries replayed, conflicts refused, one
+  Publication per Decision, none after a succeeded one); preparation
+  constructs and persists the candidate without modifying the Target and
+  honors an exact strategy or refuses it; verification runs the accepted
+  boundary's deterministic criteria on the candidate before any Target
+  call, one canonical Evaluation per Publication and criterion; `applying`
+  is durably persisted before the apply; the apply is one idempotent
+  atomic compare-and-swap-plus-receipt with no force update, a definite
+  not-applied failure when the Target moved, and success never inferred
+  from a Target that merely equals the candidate; terminal outcomes record
+  the closed failure and the versioned publication-report Artifact with
+  raw diagnostics in a separate Artifact; staging cleanup is a durable
+  retried obligation; and twenty file-backed crash and concurrency windows
+  converge with at most one Target mutation, one receipt, no duplicated
+  Evaluation, Snapshot, report, or terminal Event, no external call inside
+  a transaction, and identical projections after reopen.
 - Governor tests: leases are granted and refused deterministically with
   structured reasons; a refused Run is `waiting` with `provider_capacity`;
   the governor has no dependency on any model or prompt module.

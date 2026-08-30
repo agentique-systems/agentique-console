@@ -37,7 +37,8 @@ Related documents:
   `server/src/persistence/`, and the deterministic runtime (plan compiler,
   plan-revision service, Run creation, the scheduler, the six Pattern
   runners, join settlement, the deterministic Acceptance Criterion check
-  service, and the Gates) behind the permanent execution boundary
+  service, the Gates, and the publication service) behind the permanent
+  execution boundary
   `server/src/execution/`, which depends only on the core package, the
   persistence boundary, and narrow ports for capabilities implemented in
   later phases. None of them imports the legacy `shared/` package or the
@@ -374,7 +375,14 @@ subject naming the Run, the signoff Gate, the verified Snapshot, the
 completion Gate, the Completion Request, and the final-report Artifact —
 one per signoff Gate, carrying no publish authority; it is resolved only
 by the operator through the signoff service, and its resolution is
-recorded as one Signoff Resolution. A
+recorded as one Signoff Resolution. A `publish` Decision is the exact
+authorization of one Publication (execution-model §9.4) — always
+`operator_required`, exactly the options `publish` and `cancel`, an
+immutable typed subject naming the completed Run, its Workspace, the
+exact Target, the final Snapshot, the final Changeset, and the requested
+strategy; only one open publish Decision exists per Run, `cancel` creates
+nothing, and `publish` creates exactly one `requested` Publication in the
+resolving transaction. A
 `requirement_waiver` is proposed by the Orchestrator, always
 `operator_required`, resolved only by the operator, and never delegated or
 auto-resolved; its resolution records actor, rationale, Requirement id,
@@ -524,7 +532,7 @@ One logical execution of an Agent Definition revision inside a `pattern`
 Plan Node: one role (`orchestrator`, `worker`, `coordinator`,
 `evaluator`), one **purpose** (for example `operator_input`,
 `node_result`, `decision_resolution`, `gate_result`, `plan_revision`,
-`publication_result`, `final_synthesis` for the Orchestrator; `decompose`,
+`final_synthesis` for the Orchestrator; `decompose`,
 `replan`, `synthesize` for a Coordinator; `step`, `task` for a Worker;
 `select`, `evaluate` for an Evaluator), one immutable Context Manifest, one
 Budget allocation with its **allocation source** (`plan_node`: reserved
@@ -781,19 +789,36 @@ persistence access.
 
 ### Publication
 
-The record of one publish action: applying a `completed` Run's final
-Changeset to its Target. A Publication records the authorizing `publish`
-Decision (or the policy Decision that authorized automatic publishing),
-the Target's Snapshot before and after, the strategy the Workspace
-provider selected at publish time (`fast_forward`, `merge`, or another
-supported strategy), the outcome (`succeeded` or `failed` with reason),
-and the publish Artifact. A Publication never writes to the Target unless
-the Target was revalidated and the operation is clean.
+The recoverable record of one authorized application of a `completed`
+Run's final Changeset to its Target — the one runtime boundary that may
+modify the Target (execution-model §9.4). Every Publication is authorized
+by its own operator-resolved `publish` Decision (one Publication per
+Decision; signoff acceptance grants no publish authority and no standing
+or automatic authorization exists) and moves through the closed lifecycle
+`requested → prepared → verified → applying → succeeded | failed`: the
+candidate post-publication state is prepared in an isolated publication
+workspace and deterministically verified **before** the Target is touched,
+`applying` is durably persisted before the external call, and the one
+Target mutation is an idempotent atomic compare-and-swap against the
+recorded Target-before state with a durable provider receipt. A
+Publication records its Run, Decision, final Changeset, requested and
+selected strategy (`fast_forward`, `merge`, or a provider-named `other`,
+selected at publication time and invisible to every Invocation), the
+Target-before, candidate, and (on success, equal to the candidate)
+Target-after Snapshots, its closed structured failure when it failed
+(`strategy_unsupported`, `fast_forward_unavailable`, `candidate_conflict`,
+`verification_failed`, `target_changed`, `candidate_invalid`), its
+terminal publication-report Artifact, and the durable cleanup state of
+its staging resources. At most one nonterminal and one succeeded
+Publication exist per Run; terminal rows are immutable and undeletable; a
+failed attempt is retried only through a new exact `publish` Decision; a
+Publication outcome never changes the Run's status and never creates an
+Invocation.
 
 - Id prefix: `pub_`
-- Owned by: the runtime (Workspace provider)
+- Owned by: the runtime (publication service)
 - Store: `publications`
-- Related: Run, Target, Changeset, Snapshot, Decision, Event
+- Related: Run, Target, Changeset, Snapshot, Decision, Evaluation, Event
 
 ## Records
 

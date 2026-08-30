@@ -43,14 +43,15 @@ router, the Changeset integration service, the `single`, `chain`, `route`,
 runners, the deterministic join settler, the pure Task projection, the
 runtime-tool call boundary with its Task proposal handlers, the
 deterministic Acceptance Criterion check service, the scheduler, the
-Gates, the completion engine, and the signoff service — lives behind
-`server/src/execution/`, which
+Gates, the completion engine, the signoff service, and the publication
+service — lives behind `server/src/execution/`, which
 depends only on the core package, the persistence boundary, the
 provider-neutral adapter contract under `server/src/provider/` (§6.5),
 and narrow ports for capabilities implemented in later phases (the
 Workspace preparation port, §3, the execution-workspace port, §9.1, the
 integration-workspace port, §9.2, the Acceptance Criterion execution
-port, §10.1, and the Run finalization Workspace port, §9.3). The provider boundary
+port, §10.1, the Run finalization Workspace port, §9.3, and the
+publication Workspace port, §9.4). The provider boundary
 (`server/src/provider/`) holds the adapter contract, the scripted fake,
 the continuation payload stores, and, in a later subphase, the
 provider-specific adapters; it depends on the core package and on the
@@ -135,7 +136,7 @@ re-entrant over one SQLite connection:
 | Context Manifest | Runtime | `context_manifests` | Invocation inspector |
 | Evaluation, Gate | Runtime | `evaluations`, `gates` | Gate view |
 | Snapshot, Changeset | Runtime | `snapshots`, `changesets` | Run view |
-| Publication | Runtime (publish action) | `publications` | Run view |
+| Publication | Runtime (publication service) | `publications` | Run view |
 | Budget reservation | Runtime | `budget_reservations` | Run view, Plan view |
 | Capacity lease | Resource governor | `capacity_leases` | System view |
 | Usage | Runtime | `usage` | Every view's cost line |
@@ -249,9 +250,10 @@ created ──► running ──► verifying ──► awaiting_signoff ──�
   `finalSnapshotId` (the signoff Gate's verified Snapshot, by reference)
   and `finalChangesetId` (the Run's one `final` Changeset, §9.3), and no
   other Run carries either. Its Integration Workspace remains in place. A
-  completed Run may then be published (§9.4); publishing is a separate,
-  explicit operation that does not change the Run's state, and signoff
-  acceptance grants no publish authority.
+  completed Run may then be published (§9.4) through its own resolved
+  `publish` Decision; Publication is a separate, explicit operation that
+  never changes the Run's state, and signoff acceptance grants no publish
+  authority.
 - `failed`: reached only by a terminal failure transition: the root Plan
   Node failed (its current Orchestrator Invocation failed after its
   permitted Attempts with a permanent failure), or the Orchestrator
@@ -794,7 +796,6 @@ exists for the Orchestrator and no Orchestrator Invocation is active:
 | `decision_resolution` | A Decision the Orchestrator requested or that affects the Run was resolved or superseded; or the operator resolved the Run's `signoff` Decision with `request_changes` (§10): the signoff service prepares exactly one such turn in the resolving transaction — continued from the previous root turn, funded from the root's ordinary allocation, carrying the typed `signoff_resolution` input and the operator's message — and links it to the Signoff Resolution. |
 | `gate_result` | A `node_exit` Gate of a node without a Coordinator failed and its remediation Task awaits the Orchestrator (§10): every pending remediation Task of the Run is batched into one turn, created only when no other action, in-flight Attempt, or concurrency-limited node remains, funded from the root's ordinary allocation (when it does not fit, the root's `extend` policy applies and the turn is deferred as `awaiting_allocation_extension_phase`); or a `run_completion` Gate failed and its one remediation Task awaits the Orchestrator (§10) — coalesced into the same batched turn as any failed node Gates, with a typed `gate_result` input per Gate. |
 | `plan_revision` | The Orchestrator's previous Invocation ended by returning `blocked` on a rejected plan revision or by requesting continuation after a revision, and the compiled outcome is now available. |
-| `publication_result` | A Publication succeeded or failed. |
 | `final_synthesis` | The Run's `run_completion` Gate passed every criterion and every structural condition (§10): the completion engine prepares the one read-only final-synthesis turn of that Gate — positioned at the root's `orchestrator` position, owning the Gate through `gateId`, funded from the final reserve, with no Task, no Execution Workspace, and no Changeset — and its typed `FinalSynthesisResult` becomes the final-report Artifact. Never created by the input queue, never for a terminal Run. |
 
 There is never more than one active Orchestrator Invocation for a Run.
@@ -1406,7 +1407,7 @@ Purposes by role:
 
 | Role | Purposes |
 |---|---|
-| `orchestrator` | `operator_input`, `node_result`, `decision_resolution`, `gate_result`, `plan_revision`, `publication_result`, `final_synthesis` |
+| `orchestrator` | `operator_input`, `node_result`, `decision_resolution`, `gate_result`, `plan_revision`, `final_synthesis` |
 | `coordinator` | `decompose`, `replan`, `synthesize` |
 | `worker` | `step` (single, chain, parallel item, aggregation, producer), `task` (coordinator-worker Task) |
 | `evaluator` | `select` (route selector), `evaluate` (evaluator-optimizer round, Gate evaluated criterion) |
@@ -1420,7 +1421,7 @@ provider execution is over, the Invocation records the open
 and the logical continuation is a successor Invocation with
 `continuedFromInvocationId` set (§6.4). `blocked`, `succeeded`, `failed`,
 and `cancelled` are terminal.
-The `purpose` value set is closed: exactly the fourteen values in the table
+The `purpose` value set is closed: exactly the thirteen values in the table
 above, enforced by the `InvocationPurpose` union in `core/src/invocations.ts`
 and a database check constraint on `invocations.purpose`; each purpose is
 valid for exactly one role.
@@ -2545,10 +2546,9 @@ Only `operator_choice` Decisions may use `use_default_after_deadline`.
 `requirement_waiver`, `side_effect_approval`, `signoff`, and `publish`
 Decisions always use `operator_required` and are resolved only by the
 operator. No policy, delegation, or Conversation-level setting can resolve
-them or transfer that authority. The one automatic capability that exists
-is the separate publish authorization in §9.4, which authorizes the
-runtime to perform a publish after `completed`; it is not a Decision
-resolution mechanism and does not generalize to any other kind.
+them or transfer that authority, and no standing or automatic publication
+authorization exists: every Publication is authorized by its own resolved
+`publish` Decision (§9.4).
 
 Resolution, by whichever path, writes exactly one `decision.resolved`
 Event recording the answer, the resolver (`operator`, `orchestrator`, or
@@ -2716,40 +2716,161 @@ it and `Run.finalSnapshotId` equals its after Snapshot (database-enforced
 on the Run row). The diff bytes live only in the Artifact Store: no
 outcome, projection, Event, or manifest carries them.
 
-### 9.4 Publishing
+### 9.4 Publication
 
-Applying the final Changeset to the Target is a separate **publish**
-action on a completed Run. It is performed by the runtime's Workspace
-provider (the git implementation for git Workspaces) and never by an
-Invocation.
+Applying a completed Run's accepted final Changeset to its Target is a
+**Publication**: the one runtime boundary that may modify the Target,
+performed by the publication service
+(`server/src/execution/publication.ts`) through the publication Workspace
+port (`ports/publication-workspace.ts`) and never by an Invocation.
+Publication is separate from Run execution, signoff acceptance, Changeset
+integration, provider/model execution, and the Run scheduler: the service
+holds no timer, no polling, no action graph, and invokes no model, and a
+completed Run stays `completed` whatever the Publication's outcome. The
+design verifies the prospective post-publication state **before** the
+Target is mutated; nothing is checked "after publishing" on the theory
+that nothing was written.
 
-Publishing:
+**Authorization is explicit and exact.** Every Publication requires its
+own resolved `publish` Decision (§8.2): always `operator_required`, the
+two options `publish` and `cancel`, and a typed subject naming the
+completed Run, its Workspace, the exact Target, the accepted final
+Snapshot, the final Changeset, and the requested strategy — immutable
+once requested. Only one open publish Decision exists per Run (an
+identical retry replays it; a conflicting one is refused), the Run must
+already be `completed` when it is created, and signoff acceptance grants
+no publish authority. There is no Conversation-level standing or
+automatic publication authorization of any kind; a future
+standing-authorization product would be a separate design. `cancel`
+resolves the Decision and creates nothing; `publish` resolves it and
+creates exactly one `requested` Publication in the same transaction.
+Identical resolution replays return the canonical result; conflicting
+replays are refused; resolving one Run's Decision never acts on another
+Run, Target, Snapshot, or Changeset. A bounded read-only publication
+projection (facts and allowed actions; never Artifact content, command
+output, credentials, paths, transcripts, or Event history) serves the
+later operator-facing layer.
 
-- requires a `publish` Decision by the operator, unless a Conversation-level
-  publish authorization recorded by the operator (itself a Decision of kind
-  `operator_choice` naming the Target) authorizes automatic publishing for
-  that Target, in which case the runtime publishes immediately after
-  `completed` and records the authorizing Decision id on the Publication;
-  this authorization covers publishing only;
-- revalidates the Target: the Target's current Snapshot is taken and
-  compared with the Run's base Snapshot;
-- selects the strategy at publish time from what the Workspace provider
-  supports (`fast_forward` when the Target still equals the base Snapshot,
-  `merge` when it has moved and the merge is clean, or another provider
-  strategy the operator named in the `publish` Decision);
-- fails safely: if the Target changed and the chosen strategy is not clean,
-  or if any deterministic verification the Workspace policy requires on the
-  post-publish state fails, nothing is written to the Target, the
-  Publication is recorded `failed` with the reason, and a
-  `publication_result` Orchestrator Invocation is created so it can propose
-  a new Run to reconcile;
-- records the result as a Publication row, a `run.published` or
-  `run.publish_failed` Event, and a publish Artifact (strategy, before and
-  after Target Snapshots, command output).
+**The lifecycle is staged and recoverable.** A Publication moves
+`requested → prepared → verified → applying → succeeded | failed`
+(`requested → failed` for a deterministic preparation refusal,
+`prepared → failed` for a failed candidate verification,
+`applying → failed` for a definite compare-and-swap refusal; `verified →
+applying` is the durable commitment boundary and has no failure edge).
+Each row persists its identity (Run, publish Decision, final Changeset,
+requested strategy), its prepared facts once preparation persists (the
+selected concrete strategy, the Target-before Snapshot, the candidate
+Snapshot), the Target-after Snapshot on success (exactly the candidate),
+the closed structured failure on a deterministic terminal failure, the
+milestone times, the terminal publication-report Artifact, and the
+durable cleanup state of its staging resources. The database enforces one
+Publication per publish Decision, at most one nonterminal and one
+succeeded Publication per Run, only a completed Run, only the Run's
+`finalChangesetId`, immutable terminal rows, and that a succeeded Run is
+never published again; a failed attempt may be retried only through a
+new exact publish Decision.
 
-Git strategy is Workspace-provider behaviour selected at publish time. It is
-not a Run mode, is not chosen at Run creation, and is not visible to any
-Invocation.
+**Strategy.** The Decision carries a strategy **request** — `automatic`,
+or `exact` with one concrete strategy — and the concrete strategy
+(`fast_forward`, `merge`, or a provider-named `other`) is selected at
+publication time, never at Run creation, and is invisible to every
+Invocation, Context Manifest, and model call. `automatic` selects
+`fast_forward` when the Target still equals the Run's base Snapshot and
+otherwise a clean `merge` where the provider supports it; an `exact`
+request is honored exactly or refused, never silently widened or
+replaced; `fast_forward` requires the Target to equal the base Snapshot;
+a provider-named strategy must be named in the Decision and reported as
+supported. Terminal failures are closed structured facts —
+`strategy_unsupported`, `fast_forward_unavailable`, `candidate_conflict`,
+`verification_failed`, `target_changed`, `candidate_invalid` — never
+arbitrary strings; infrastructure failures are retryable nonterminal
+state, not one of them.
+
+**The flow.** SQLite and the Workspace provider never form one
+transaction; every port call runs outside every database transaction and
+every external-call/record crash window is bridged explicitly:
+
+1. *Prepare* (`requested`): the port's idempotent `prepare` inspects the
+   current Target, receives the runtime-verified final-Changeset content
+   through a narrow content source (the same content-ownership rule as
+   Changeset integration, §9.2 — the port can neither enumerate nor
+   retrieve arbitrary Artifacts and receives no store, database, or
+   credential), selects or validates the strategy, and constructs the
+   candidate state in an isolated publication workspace/ref **without
+   modifying the Target**, returning the Target-before and candidate
+   identities, the selected strategy, and the verification workspace
+   location; a replay returns the same prepared result. One transaction
+   then records the two Snapshots and the prepared facts. A deterministic
+   refusal is a terminal failure with its report; an unavailable provider
+   leaves the Publication `requested`.
+2. *Verify* (`prepared`): the exact deterministic Acceptance Criteria of
+   the passed `run_completion` Gate behind the accepted signoff boundary
+   run against a disposable view of the prepared candidate Snapshot,
+   through the shared Acceptance Criterion check service (§10.1) — the
+   criteria in canonical id order, outside every transaction, bounded
+   output stored only as Artifacts, one canonical Evaluation per
+   Publication and criterion (the typed `publication` Evaluation context:
+   runtime producer only, no Gate, no Plan Node, no new Evaluator
+   Invocation, no model call, no transcript, no Evaluation reused from a
+   different Snapshot, no mutable Workspace-policy lookup), idempotent
+   across restart. All passing — or structural candidate validation when
+   no deterministic criteria apply — persists `verified`; a failing
+   criterion is the terminal `verification_failed` and the Target is
+   unchanged. Evaluated (model-judged) criteria never run during
+   Publication.
+3. *Commit* (`verified`): one transaction persists `applying` before any
+   Target call, so a later unknown result is reconciled through the
+   idempotent apply, never guessed.
+4. *Apply* (`applying`): the port's idempotent `apply` compares the
+   Target against the persisted Target-before identity and, in **one
+   atomic provider operation**, updates the Target to the persisted
+   candidate and writes a durable provider-owned receipt keyed by the
+   Publication id — for git, an atomic reference transaction updating the
+   Target ref and a publication receipt ref together. A replay whose
+   receipt exists returns the applied result with the receipt's recorded
+   identity, even when the Target has since moved again; success is never
+   inferred from the Target merely equalling or containing the candidate,
+   and no force update exists. A failed compare-and-swap is the definite
+   `target_changed`: nothing was applied. One transaction then records
+   `succeeded` (Target-after = the candidate) or `failed`, the canonical
+   publication-report Artifact
+   (`application/vnd.agentique.publication-report.v1+json`; bounded
+   canonical facts, raw diagnostics in a separate referenced Artifact),
+   and the Events.
+5. *Release*: a terminal Publication's staging resources carry a durable
+   cleanup obligation, released through the idempotent port operation
+   outside every transaction, retried by recovery until `released`; a
+   cleanup failure is a bounded diagnostic that never alters the outcome.
+   Successful Publication releases only publication-specific staging; the
+   Run's Integration Workspace is retained until an explicit
+   retention/disposal policy exists.
+
+**Recovery** (`reconcileOutstanding`) scans every nonterminal Publication
+and every terminal row with pending cleanup and re-drives each through
+`advance`, which always re-reads canonical state before acting:
+`requested` idempotently prepares and persists; `prepared` finishes or
+resumes the deterministic checks; `verified` persists `applying` before
+any Target call; `applying` calls the idempotent apply and records the
+canonical result; terminal rows perform pending cleanup only. The Target
+mutation is never called from `requested` or `prepared`.
+
+**Events.** Each durable boundary journals its Event —
+`publication.requested`, `publication.prepared`, `publication.verified`,
+`publication.applying`, `publication.succeeded`, `publication.failed`,
+`publication.workspace_released` — and a terminal outcome also journals
+the Run-scoped `run.published` or `run.publish_failed`. Payloads carry
+ids, statuses, strategies, Snapshot references, structured failure codes,
+Artifact ids, and timestamps — never diff bytes, command output,
+credentials, repository paths, provider receipts, opaque Workspace keys,
+transcripts, or exception stacks. None of them changes the Run's status.
+
+**Failure is an operator-visible fact, not a model call.** No
+`publication_result` Invocation, Task, coordinator turn, or automatic
+model call follows a Publication outcome: a completed Run is terminal and
+never resumes agent execution. After a failure the operator may retry
+through a new exact `publish` Decision when retry is valid (the Target
+unchanged, the failure understood) or start a new Run to reconcile the
+Target.
 
 ## 10. Verification and Gates
 
@@ -3016,8 +3137,8 @@ Order is fixed: deterministic checks, then Evaluations, then the operator.
   merge, cherry-pick, rebase, push, create a Publication, choose a publish
   strategy, or create publish authorization; the Integration Workspace is
   retained (not deleted or released) because publication has not
-  occurred. Publishing (§9.4) remains a separate explicit operation of a
-  later phase.
+  occurred. Publication (§9.4) is a separate, explicitly authorized
+  operation.
 
 Evaluations produced by Evaluator Invocations carry the Evaluator's
 Invocation id and Agent Definition revision, so a reviewer of the Run can
@@ -3208,7 +3329,13 @@ mechanism, if ever added, is a new feature with its own design.
 | Changeset conflict | Changeset `conflict`; Task with a bounded report Artifact created for the node owner; node (and, when nothing else can proceed, the Run) `waiting` with `integration_conflict`; applied once more when the Task completes; a second conflict, or a failed or cancelled Task, fails the node with `integration_conflict` (§9.2). |
 | Crash between an external Changeset application and its record | The Changeset stays `pending`; the next pass applies it again and the port reports the application that already holds; the record is written exactly once (§9.2). |
 | Crash during a scheduler pass | Nothing is lost: every action is one transaction; the next pass re-projects from rows, retries interrupted Attempts through recovery, and repeats no Invocation, Handoff, integration, or provider call (§7.1). |
-| Publish fails | Target untouched; Publication `failed`; a `publication_result` Orchestrator Invocation is created. |
+| Publication preparation is refused (unsupported or unavailable strategy, candidate conflict, invalid candidate) | Target untouched; Publication `failed` with the closed structured fact and its report Artifact; the operator may retry through a new exact `publish` Decision or start a new Run (§9.4). No Invocation is created. |
+| Publication candidate verification fails | Target untouched; Publication `failed` with `verification_failed` naming the criteria; as above (§9.4). |
+| Target changed between preparation and apply | The compare-and-swap definitely did not apply; Publication `failed` with `target_changed`; Target untouched by this Publication (§9.4). |
+| Publication provider unavailable (prepare, verify, or apply result unknown) | Nonterminal state is kept — `requested`, `prepared`, or `applying` — and recovery retries or reconciles through the idempotent port operations; no terminal outcome is fabricated (§9.4). |
+| Crash after the atomic Target update and durable receipt, before SQLite records success | The Publication stays `applying`; the retried apply finds the durable receipt and reports the applied identity — even when the Target has since moved again — and success is recorded exactly once (§9.4). |
+| Crash during a Publication (between the Decision, the resolution-plus-creation transaction, external preparation, the prepared facts, the deterministic checks, `verified`, `applying`, the apply, the success or failure record, or the staging release) | Every step is one transaction or one idempotent external step recorded once; `reconcileOutstanding` re-drives the Publication from canonical rows and the provider's durable state, repeating nothing (§9.4). |
+| Publication staging release fails | The terminal outcome never changes; the obligation stays `pending` with a bounded diagnostic and recovery retries until `released` (§9.4). |
 | Provider continuation payload missing, expired, or corrupt | The Attempt starts `fresh`; no other effect. |
 | Approval claim transaction fails (callback or COMMIT) | No use row, no Event, no execution; the adapter learns `failed` and ends the Attempt as a tool failure with a bounded message; one `tool_call_authorization_failed` diagnostic; the retry may claim again. |
 | Provider fails after an approval claim | The use stays committed; the retry receives the same manifest but the grant is refused; repeating the call needs a new `side_effect_approval` Decision. |
@@ -3311,11 +3438,19 @@ by a test.
     and `plan_node_requirements`; Coordinator-proposed Tasks never change
     them; the current executable graph is read from the latest accepted
     revision and never inferred.
-16. **The Target is never modified by a Run.** Only a publish action on a
-    `completed` Run writes to the Target, after revalidating it, and it
-    fails without writing when the operation is not clean. Signoff
-    acceptance reads the Integration Workspace through a read-only port,
-    writes the Target nothing, and grants no publish authority.
+16. **The Target is never modified by a Run.** Only a Publication of a
+    `completed` Run, authorized by its own operator-resolved `publish`
+    Decision, writes to the Target (§9.4): the candidate is prepared and
+    deterministically verified without modifying the Target, `applying` is
+    durably persisted before the external call, and the one Target
+    mutation is an idempotent atomic compare-and-swap against the
+    persisted Target-before state with a durable provider receipt — no
+    force update, at most one Target mutation per Publication, at most one
+    succeeded Publication per Run, and a definite not-applied failure when
+    the Target changed. Signoff acceptance reads the Integration Workspace
+    through a read-only port, writes the Target nothing, and grants no
+    publish authority; no Invocation or provider adapter can reach the
+    Target, and no standing or automatic publish authorization exists.
 17. **Provider resumption is optional and non-canonical.** Every Attempt
     can start `fresh` from its Context Manifest; deleting every
     continuation payload and index row changes no outcome; no payload
