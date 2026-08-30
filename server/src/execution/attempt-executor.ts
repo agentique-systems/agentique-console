@@ -95,6 +95,15 @@ export interface InvocationInspection {
   previousFailure: { attemptId: AttemptId; failureClass: Attempt["failureClass"]; detail: Attempt["failureDetail"]; decision: RetryDecision | null } | null;
 }
 
+/** What the prepare transaction commits; a flight is built from these only after the commit. */
+interface PreparedFacts {
+  attempt: Attempt;
+  lease: CapacityLease;
+  invocation: Invocation;
+  deadlineAt: Timestamp | null;
+  continuation: Uint8Array | null;
+}
+
 interface InFlight {
   attemptId: AttemptId;
   invocationId: InvocationId;
@@ -194,7 +203,11 @@ export class AttemptExecutor {
     // The payload is resolved outside any transaction; a missing or corrupt payload yields a fresh start with no error.
     const candidate = inspection.resumeCandidateAttemptId;
     const continuation = candidate === null ? null : await this.continuations.resolve(candidate, this.provider.provider);
-    return this.ctx.tx.write((): PrepareOutcome => {
+    // The transaction returns the facts a flight is built from; the flight is published only once `write` has
+    // returned, i.e. after COMMIT succeeded. A callback failure, a rollback-only root, or a failed COMMIT throws
+    // out of `write` before any in-memory entry exists, so the provider can never be called for an Attempt that
+    // did not commit.
+    const committed = this.ctx.tx.write((): PrepareOutcome | { kind: "committed"; facts: PreparedFacts } => {
       const again = this.inspectInvocation(invocationId);
       if (!again.next.permitted) return this.refuse(again, options);
       const invocation = again.invocation;
@@ -211,20 +224,23 @@ export class AttemptExecutor {
       const running = invocation.status === "pending" ? this.stores.invocations.transition(invocation.id, { to: "running" }, caused) : invocation;
       // One Invocation-wide deadline from the persisted start and the immutable manifest limit; every Attempt shares it (execution-model §7.6).
       const deadlineAt = invocationDeadlineAt(running.startedAt, manifest.content.maxWallClockMs);
-      this.#inFlight.set(attempt.id, {
-        attemptId: attempt.id,
-        invocationId: invocation.id,
-        controller: new AbortController(),
-        deadlineAt,
-        runtimeInterruption: null,
-        continuation: resumedFrom ? continuation : null,
-        outcome: null,
-        changeset: null,
-        continuationStored: false,
-        executing: null,
-      });
-      return { kind: "prepared", attempt: started, lease: grant.lease, invocation: running };
+      return { kind: "committed", facts: { attempt: started, lease: grant.lease, invocation: running, deadlineAt, continuation: resumedFrom ? continuation : null } };
     });
+    if (committed.kind !== "committed") return committed;
+    const { facts } = committed;
+    this.#inFlight.set(facts.attempt.id, {
+      attemptId: facts.attempt.id,
+      invocationId: facts.invocation.id,
+      controller: new AbortController(),
+      deadlineAt: facts.deadlineAt,
+      runtimeInterruption: null,
+      continuation: facts.continuation,
+      outcome: null,
+      changeset: null,
+      continuationStored: false,
+      executing: null,
+    });
+    return { kind: "prepared", attempt: facts.attempt, lease: facts.lease, invocation: facts.invocation };
   }
 
   private refuse(inspection: InvocationInspection, options: WriteOptions): PrepareOutcome {

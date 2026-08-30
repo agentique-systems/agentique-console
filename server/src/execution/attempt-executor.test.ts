@@ -285,6 +285,53 @@ describe("AttemptExecutor", () => {
     }
   });
 
+  it("publishes an in-flight Attempt only after the prepare transaction commits: a failed COMMIT leaves no Attempt, lease, Event, or flight", async () => {
+    const h = openRuntimeHarness();
+    try {
+      const s = seedRuntime(h);
+      const invocation = startRun(h, s).prepared.invocation;
+      const seq = h.ctx.journal.lastSeq();
+      const before = h.stores.invocations.get(invocation.id);
+      // The next COMMIT fails after the whole prepare callback has run; SQLite rolls the transaction back.
+      const sqlite = h.database.sqlite as unknown as { exec: (sql: string) => unknown };
+      const exec = sqlite.exec.bind(h.database.sqlite);
+      let armed = true;
+      sqlite.exec = (sql: string) => {
+        if (sql === "COMMIT" && armed) {
+          armed = false;
+          throw new Error("disk I/O error at COMMIT");
+        }
+        return exec(sql);
+      };
+      await expect(h.executor.prepareNextAttempt(invocation.id)).rejects.toThrow("disk I/O error at COMMIT");
+      expect(h.stores.invocations.listAttempts(invocation.id)).toEqual([]);
+      expect(h.stores.leases.listByRun(s.created.run.id)).toEqual([]);
+      expect(h.stores.invocations.get(invocation.id)).toEqual(before);
+      expect(h.ctx.journal.lastSeq()).toBe(seq);
+      expect(h.executor.inFlight()).toEqual([]);
+      expect(h.provider.requests).toHaveLength(0);
+      expect(h.ctx.tx.inTransaction).toBe(false);
+      // A callback failure (the store refusing the lease) likewise publishes nothing.
+      const grant = h.stores.leases.grant.bind(h.stores.leases);
+      h.stores.leases.grant = () => {
+        throw new Error("lease insert failed");
+      };
+      await expect(h.executor.prepareNextAttempt(invocation.id)).rejects.toThrow("lease insert failed");
+      h.stores.leases.grant = grant;
+      expect(h.stores.invocations.listAttempts(invocation.id)).toEqual([]);
+      expect(h.ctx.journal.lastSeq()).toBe(seq);
+      expect(h.executor.inFlight()).toEqual([]);
+      // The executor is reusable: the same Invocation now prepares, runs, and finalizes normally.
+      h.provider.script({ kind: "succeed", result: COMPLETED_RESULT });
+      const outcome = await h.executor.advanceInvocation(invocation.id);
+      expect(outcome).toMatchObject({ kind: "finalized", attempt: { number: 1, status: "succeeded" } });
+      expect(h.provider.requests).toHaveLength(1);
+      expect(h.executor.inFlight()).toEqual([]);
+    } finally {
+      h.close();
+    }
+  });
+
   it("recovers a failed finalization on the next call without repeating the provider call, Usage, or Events", async () => {
     const h = openRuntimeHarness();
     try {
