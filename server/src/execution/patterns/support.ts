@@ -149,6 +149,8 @@ export type PatternRunnerOutcome =
   | { kind: "gate_passed"; gateId: GateId; outputArtifactIds: string[]; handoffIds: HandoffId[] }
   /** The Gate closed `failed`; its one remediation Task exists (or the node failed on an exhausted cycle bound, reported as `failed`). */
   | { kind: "gate_failed"; gateId: GateId; remediationTaskId: TaskId | null }
+  /** A Coordinator's replan turn made canonical progress on a failed Gate delivered to it: the remediation Task is addressed; the next synthesis is the next Gate's candidate. */
+  | { kind: "gate_remediation_addressed"; gateId: GateId; taskId: TaskId; invocationId: InvocationId }
   | { kind: "succeeded"; outputArtifactIds: string[]; handoffIds: HandoffId[] }
   | { kind: "failed"; reason: PlanNodeFailureReason }
   | { kind: "cancelled" }

@@ -86,6 +86,10 @@ export type SchedulerAction =
   | { kind: "resume_node"; nodeId: PlanNodeId; reason: PlanNodeWaitReason }
   | { kind: "wait_node"; nodeId: PlanNodeId; reason: "provider_capacity"; wakeAt: Timestamp | null }
   | { kind: "settle_root"; invocationId: InvocationId }
+  /** Nothing else can proceed: every pending root-owned remediation Task of a failed node_exit Gate goes to one batched `gate_result` Orchestrator turn (execution-model §10). */
+  | { kind: "prepare_gate_remediation"; taskIds: TaskId[] }
+  /** The latest `gate_result` turn ended: its Changeset is integrated and its remediation Tasks are addressed or ended. */
+  | { kind: "settle_gate_remediation"; invocationId: InvocationId }
   /** No current work can proceed and no Attempt is running: the Run records the reason. */
   | { kind: "wait_run"; reason: RunWaitReason };
 
@@ -103,7 +107,7 @@ export interface DeferredWork {
   pattern: Pattern | null;
 }
 
-/** A node whose failed `node_exit` Gate is being remediated by its owner (the root Orchestrator); no action of its own. */
+/** A node whose failed `node_exit` Gate is being remediated by the root Orchestrator; it has no action of its own until its remediation Task ends. */
 export interface RemediatingNode {
   nodeId: PlanNodeId;
   gateId: GateId;
@@ -216,6 +220,7 @@ export class RunScheduler {
     // Every Attempt of the Run executing in this process, from the executor's record, whatever its node advises.
     const inFlight = [...new Set(this.executor.inFlight().map((a) => this.stores.invocations.getAttempt(a)).filter((a) => a.runId === runId).map((a) => a.invocationId))].sort();
     let wakeAt: Timestamp | null = null;
+    let remediate: Extract<RootAdvice, { kind: "remediate" }> | null = null;
     let active = this.stores.invocations.listActive(runId).length;
     const max = run.budget.maxConcurrency;
     const withinNodeLimit = (node: PlanNode) => node.maxConcurrency === null || this.stores.invocations.listByPlanNode(node.id).filter((i) => !["blocked", "succeeded", "failed", "cancelled"].includes(i.status)).length < node.maxConcurrency;
@@ -243,8 +248,15 @@ export class RunScheduler {
       case "settle":
         actions.push({ kind: "settle_root", invocationId: rootAdvice.invocationId });
         break;
+      case "settle_remediation":
+        actions.push({ kind: "settle_gate_remediation", invocationId: rootAdvice.invocationId });
+        break;
       case "blocked":
         waiting.push({ nodeId: root.id, reason: "decision", wakeAt: null });
+        break;
+      case "remediate":
+        // Batched after every other node had its turn: a Gate failing later in this pass joins the same turn.
+        remediate = rootAdvice;
         break;
       case "idle":
       case "run_terminal":
@@ -356,6 +368,13 @@ export class RunScheduler {
       if (advice.kind === "not_current" && advice.settle) actions.push({ kind: "settle_removed_node", nodeId: node.id, invocationId: advice.invocationId });
     }
     for (const invocationId of inFlight) wakeAt = earliest(wakeAt, this.executor.inspectInvocation(invocationId, now).deadlineAt);
+
+    // Root-owned Gate remediation: one turn for every pending Task, only once no other action exists, no Attempt is executing, and no
+    // node is held back by a concurrency limit (a Gate failing later in this pass joins the same turn).
+    if (remediate !== null && actions.length === 0 && inFlight.length === 0 && limited.length === 0) {
+      if (remediate.funded) actions.push({ kind: "prepare_gate_remediation", taskIds: remediate.taskIds });
+      else deferred.push({ nodeId: root.id, reason: "awaiting_allocation_extension_phase", pattern: "single" });
+    }
 
     // Run-level: resume before any other action; wait only when nothing can proceed and nothing is running.
     if (run.status === "waiting" && actions.length > 0) actions.unshift({ kind: "resume_run", reason: run.waitReason! });
@@ -510,6 +529,10 @@ export class RunScheduler {
         return runnerFor(this.runners, this.patternOf(action.nodeId)).markWaiting(action.nodeId, revision, action.reason, meta);
       case "settle_root":
         return this.runners.root.settle(runId, meta);
+      case "prepare_gate_remediation":
+        return this.runners.root.prepareRemediation(runId, meta);
+      case "settle_gate_remediation":
+        return this.runners.root.settleRemediation(runId, meta);
       case "execute_invocation": {
         const prepared = await this.executor.prepareNextAttempt(action.invocationId, meta);
         if (prepared.kind === "prepared") {

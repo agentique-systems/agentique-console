@@ -17,16 +17,23 @@
  *   Worker is active or runnable and no Changeset can be integrated — and
  *   the unresolved blocker frontier (failed and unreplaced Tasks, Tasks
  *   blocked by a failed or cancelled dependency or by a Worker's report,
- *   unresolved integration conflicts) is non-empty. The whole frontier is
- *   coalesced into one turn; it receives the Worker-result Handoffs since
- *   the previous turn and only the blocker facts not delivered before. It
+ *   unresolved integration conflicts, the node's own failed `node_exit`
+ *   Gate) is non-empty. The whole frontier is coalesced into one turn; it
+ *   receives the Worker-result Handoffs since the previous turn and only
+ *   the blocker facts not delivered before (a failed Gate arrives as a
+ *   `gate_failed` blocker with the Gate's typed `gate_result` facts). It
  *   must make canonical progress (an accepted proposal, a cancellation, or
  *   a changed frontier); otherwise the node fails with
- *   `coordinator_no_progress`.
- * - `synthesize`: once, when every current Task is completed or cancelled,
+ *   `coordinator_no_progress`. Progress on a delivered failed Gate marks
+ *   its remediation Task addressed; the next synthesis is the next Gate's
+ *   candidate (execution-model §10).
+ * - `synthesize`: when every current Task is completed or cancelled,
  *   every completed Task's Changeset is integrated and its Worker-result
  *   Handoff exists, no conflict is open, and no Worker is active. Its result
- *   Artifacts (after its own Changeset is integrated) are the node's output.
+ *   Artifacts (after its own Changeset is integrated) are the node's output,
+ *   or — with Gate criteria — the candidate its `node_exit` Gate judges; a
+ *   failed Gate returns the node to its frontier, and a later synthesis
+ *   follows the remediation.
  * An approval successor at the same position continues the same logical
  * turn: it consumes no turn of `maxCoordinatorInvocations` and never
  * duplicates its predecessor's accepted proposal. Logical turns are
@@ -61,6 +68,7 @@ import {
   type CoordinatorPurpose,
   type CoordinatorWorkerBounds,
   type Decision,
+  type Gate,
   type Handoff,
   type Invocation,
   type ManifestInput,
@@ -149,6 +157,8 @@ export class CoordinatorWorkerPatternRunner {
       if (this.gateSource(state).candidate({}) !== null) return this.support.gates.advice(state.node, this.gateSource(state), now);
       return { kind: "settle", invocationId: turn.id };
     }
+    // A replan turn made progress on the failed Gate delivered to it: its remediation Task is marked addressed before anything else.
+    if (this.addressedRemediation(state) !== null) return { kind: "settle", invocationId: turn.id };
     // 2. The Task projection: readiness and dependency blocking, and Workers that ended without reporting their Task.
     if (state.projection.decisions.length > 0 || state.staleRunning.length > 0) return { kind: "settle", invocationId: null };
     // 3. A Worker blocked on a Decision that resolved continues at its position.
@@ -239,6 +249,7 @@ export class CoordinatorWorkerPatternRunner {
           if (decision === null || decision.status !== "resolved") return { kind: "no_change" };
           return this.prepareTurnSuccessor(node, turn, decision, options);
         }
+        if (this.addressedRemediation(state) !== null) return { kind: "no_change" };
         if (state.projection.decisions.length > 0 || state.staleRunning.length > 0 || state.activeWorkers.length > 0 || this.nextIntegrable(state) !== null || this.missingHandoff(state) !== null) return { kind: "no_change" };
         if (state.projection.order.some((id) => state.projection.states.get(id)!.kind === "runnable")) return { kind: "no_change" };
         if (state.frontier.length > 0) return this.prepareTurn(node, "replan", state, options);
@@ -370,6 +381,15 @@ export class CoordinatorWorkerPatternRunner {
           throw new Error(`unreachable: Invocation ${turn.id} is ${turn.status}`);
       }
     }
+    // Progress on a delivered failed Gate: the remediation Task is addressed by the replan turn (execution-model §10).
+    const addressed = this.addressedRemediation(state);
+    if (addressed !== null) {
+      const run = stores.runs.get(node.runId);
+      const snapshotId = run.integrationSnapshotId ?? run.baseSnapshotId;
+      if (snapshotId === null) throw new InvariantViolationError(`Run ${run.id} has no integration Snapshot; a remediated Gate reopens on one`, { runId: run.id });
+      const task = this.support.gates.completeRemediation(addressed.task, turn, [{ kind: "snapshot", snapshotId }], [], options);
+      return { kind: "gate_remediation_addressed", gateId: addressed.gate.id, taskId: task.id, invocationId: turn.id };
+    }
     // The Task projection and the normalization of Workers that ended without reporting their Task.
     const projected = this.applyProjection(state, options);
     if (projected !== null) return projected;
@@ -428,7 +448,12 @@ export class CoordinatorWorkerPatternRunner {
     const inputs: ManifestInput[] = [{ kind: "coordinator_turn", purpose, bounds: state.bounds, turnsUsed: state.turnsUsed + 1, tasks: this.ledger(node), blockerKeys }];
     if (purpose === "replan") {
       const delivered = this.deliveredBlockerKeys(state);
-      for (const blocker of state.frontier) if (!delivered.has(coordinatorBlockerKey(blocker))) inputs.push({ kind: "coordinator_blocker", blocker });
+      for (const blocker of state.frontier) {
+        if (delivered.has(coordinatorBlockerKey(blocker))) continue;
+        inputs.push({ kind: "coordinator_blocker", blocker });
+        // A failed Gate arrives with its canonical facts: the judged candidate, the failed criteria, every Evaluation, its Task.
+        if (blocker.kind === "gate_failed") inputs.push(this.support.gates.gateResultInput(this.deps.stores.gates.get(blocker.gateId)));
+      }
     }
     const handoffIds = purpose === "decompose" ? this.support.router.pendingHandoffsFor(node.runId, node.id).map((h) => h.id) : this.support.router.workerResultHandoffs(node.runId, node.id, "pending").map((h) => h.id);
     const prepared = this.support.prepareAs(node, TURN, purpose, { continuedFromInvocationId: state.latestTurn?.id ?? null, handoffIds, inputs }, options);
@@ -479,10 +504,27 @@ export class CoordinatorWorkerPatternRunner {
       case "replan":
         return !this.progressMade(turn, state);
       case "synthesize":
-        return true;
+        // A failed Gate under remediation returns the node to its frontier; the synthesis is settled again only once the remediation ended.
+        return this.support.gates.pendingRemediationOf(state.node) === null;
       default:
         return true;
     }
+  }
+
+  /**
+   * The pending remediation of the node's latest failed Gate once the replan
+   * turn it was delivered to completed with canonical progress: the Task is
+   * addressed by that turn. `null` when no remediation is pending, the Gate
+   * was not delivered to the latest turn, or the turn is not settled.
+   */
+  private addressedRemediation(state: CoordinatorState): { gate: Gate; task: Task } | null {
+    const turn = state.latestTurn;
+    if (turn === null || turn.purpose !== "replan" || turn.status !== "succeeded" || turn.result?.status !== "completed") return null;
+    if (outstandingChangesetOf(this.deps.stores, turn) !== null || !this.progressMade(turn, state)) return null;
+    const remediation = this.support.gates.pendingRemediationOf(state.node);
+    if (remediation === null) return null;
+    const delivered = logicalTurnInvocationIds(this.deps.stores, turn).some((id) => this.deps.stores.invocations.getManifest(id).content.inputs.some((i) => i.kind === "gate_result" && i.gateId === remediation.gate.id));
+    return delivered ? remediation : null;
   }
 
   /** Whether the logical turn accepted a Task proposal (a committed `propose_tasks` call of any of its Invocations). */
@@ -646,7 +688,10 @@ export class CoordinatorWorkerPatternRunner {
         }
       }
     }
-    return { node, bounds, turns, latestTurn: turns.at(-1) ?? null, turnsUsed, projection, workers, activeWorkers, staleRunning, frontier: [...projection.frontier, ...conflicts] };
+    // The node's own failed node_exit Gate under remediation is a blocker of its Coordinator (execution-model §10).
+    const remediation = this.support.gates.pendingRemediationOf(node);
+    const gateBlockers: CoordinatorBlocker[] = remediation === null ? [] : [{ kind: "gate_failed", taskId: remediation.task.id, gateId: remediation.gate.id }];
+    return { node, bounds, turns, latestTurn: turns.at(-1) ?? null, turnsUsed, projection, workers, activeWorkers, staleRunning, frontier: [...projection.frontier, ...conflicts, ...gateBlockers] };
   }
 
   /**
