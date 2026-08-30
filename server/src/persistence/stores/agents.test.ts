@@ -10,7 +10,7 @@ import { createPersistenceContext } from "../context.ts";
 import { MemoryBlobStore } from "../blob-store.ts";
 import { openDatabase } from "../database.ts";
 import { createStores } from "../stores/index.ts";
-import { INVOCATION_ALLOCATION, openHarness, seedRun, seedSnapshot, type Harness } from "../test-support.ts";
+import { INVOCATION_ALLOCATION, openHarness, seedRun, seedSnapshot, testClock, type Harness } from "../test-support.ts";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -104,7 +104,8 @@ describe("agent definition provenance", () => {
     let expected: unknown[];
     let definitionId!: string;
     try {
-      const ctx = createPersistenceContext(first, new MemoryBlobStore());
+      // A deterministic clock: revisions created within one real millisecond would otherwise order by random id.
+      const ctx = createPersistenceContext(first, new MemoryBlobStore(), { clock: testClock().now });
       const stores = createStores(ctx);
       const h = { ctx, stores, database: first } as unknown as Harness;
       const s = seedRun(h);

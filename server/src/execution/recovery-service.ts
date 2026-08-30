@@ -12,7 +12,7 @@
  * Recovery is idempotent: a second run finds no non-terminal Attempt and no
  * active lease, and writes nothing.
  */
-import { type AttemptId, type CapacityLeaseId, type InvocationId, type Timestamp } from "@agentique-console/core";
+import { invocationDeadlineAt, type AttemptId, type CapacityLeaseId, type InvocationId, type Timestamp } from "@agentique-console/core";
 import type { PersistenceContext } from "../persistence/context.ts";
 import type { Stores } from "../persistence/stores/index.ts";
 import type { WriteOptions } from "../persistence/stores/support.ts";
@@ -52,14 +52,17 @@ export class RecoveryService {
       const report: RecoveryReport = { interruptedAttemptIds: [], releasedLeaseIds: [], failedInvocationIds: [], retryEligible: [] };
       for (const attempt of this.stores.invocations.activeAttempts()) {
         const invocation = this.stores.invocations.get(attempt.invocationId);
+        const manifest = this.stores.invocations.getManifest(invocation.id);
         const previous = attempt.number > 1 ? this.stores.invocations.listAttempts(invocation.id)[attempt.number - 2] : undefined;
         const detail = { message: "interrupted by a runtime restart", violations: [], tool: null, cancelled: false };
+        // The same Invocation-wide deadline the previous process enforced, derived from persisted facts alone.
         const decision = decideRetry({
           classified: { status: "interrupted", failureClass: "interrupted", detail, result: null },
           attemptNumber: attempt.number,
           maxAttempts: invocation.allocation.attempts,
           previousFailureClass: previous?.failureClass ?? null,
           approvalRequired: false,
+          deadlineAt: invocationDeadlineAt(invocation.startedAt, manifest.content.maxWallClockMs),
           now,
           config: this.config.retry,
         });
@@ -74,7 +77,6 @@ export class RecoveryService {
           if (settlement.invocation.status === "failed") report.failedInvocationIds.push(settlement.invocation.id);
           continue;
         }
-        const manifest = this.stores.invocations.getManifest(invocation.id);
         const candidate = continuationCandidate(this.stores, this.continuations, this.provider, this.config.continuation, invocation, manifest, now);
         report.retryEligible.push({ invocationId: invocation.id, notBefore: settlement.decision.notBefore, resumeCandidateAttemptId: candidate?.attemptId ?? null });
       }

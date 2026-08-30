@@ -103,6 +103,8 @@ export interface RetryDecisionInput {
   previousFailureClass: AttemptFailureClass | null;
   /** True when the provider ended on an `approval_required` call, which no retry can resolve. */
   approvalRequired: boolean;
+  /** The Invocation-wide wall-clock deadline (`invocationDeadlineAt`), or `null` when unbounded. */
+  deadlineAt: Timestamp | null;
   now: Timestamp;
   config: RetryPolicyConfig;
 }
@@ -112,8 +114,12 @@ export interface RetryDecisionInput {
  * one): transient → retry after deterministic backoff; result invalid →
  * retry at once with the validation appendix; interruption → retry unless
  * cancelled; tool failure → retry once; permanent, allocation exhaustion,
- * cancellation, and approval-required → no retry; and never beyond the
- * Attempt allocation.
+ * cancellation, and approval-required → no retry; never beyond the Attempt
+ * allocation; and never beyond the one Invocation-wide deadline — a
+ * deadline interruption is final whatever Attempts remain, a retry is
+ * refused once the deadline has passed, and a backoff that would end at or
+ * after the deadline is refused rather than persisted as a retry that can
+ * never run.
  */
 export function decideRetry(input: RetryDecisionInput): RetryDecision | null {
   const { classified } = input;
@@ -121,6 +127,7 @@ export function decideRetry(input: RetryDecisionInput): RetryDecision | null {
   const refuse = (reason: RetryDecision["reason"]): RetryDecision => ({ permitted: false, reason, notBefore: null });
   if (classified.status === "cancelled" || classified.detail?.cancelled) return refuse("cancelled");
   if (input.approvalRequired) return refuse("approval_required");
+  if (classified.status === "timed_out") return refuse("wall_clock_exhausted");
   switch (classified.failureClass) {
     case "provider_permanent":
       return refuse("provider_permanent");
@@ -137,9 +144,11 @@ export function decideRetry(input: RetryDecisionInput): RetryDecision | null {
       return refuse("provider_permanent");
   }
   if (input.attemptNumber >= input.maxAttempts) return refuse("attempts_exhausted");
+  if (input.deadlineAt !== null && input.now >= input.deadlineAt) return refuse("wall_clock_exhausted");
   const reason = classified.failureClass;
   if (reason === "provider_transient") {
     const notBefore = new Date(Date.parse(input.now) + retryBackoffMs(input.attemptNumber, input.config.backoffBaseMs, input.config.backoffMaxMs)).toISOString();
+    if (input.deadlineAt !== null && notBefore >= input.deadlineAt) return refuse("wall_clock_exhausted");
     return { permitted: true, reason, notBefore };
   }
   return { permitted: true, reason, notBefore: null };

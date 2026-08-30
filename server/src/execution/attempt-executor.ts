@@ -4,11 +4,13 @@
  * call that never runs inside a transaction:
  *
  *   prepare   verify the Invocation and its immutable manifest, the
- *             remaining Attempt, cost, token, and wall-clock allocation, and
- *             the durable retry decision of the previous Attempt; select a
- *             fresh or resumed start; obtain a capacity lease; create the
- *             Attempt (`initial` or `retry`) and start it — or refuse
- *             without creating anything.
+ *             remaining Attempt, cost, and token allocation, the one
+ *             Invocation-wide wall-clock deadline (`startedAt +
+ *             maxWallClockMs`, shared by every Attempt), and the durable
+ *             retry decision of the previous Attempt; select a fresh or
+ *             resumed start; obtain a capacity lease; create the Attempt
+ *             (`initial` or `retry`) and start it — or refuse without
+ *             creating anything.
  *   execute   render the persisted manifest (plus the bounded retry
  *             appendix), call the provider with cancellation and deadline,
  *             stream transient output, collect the writing Invocation's
@@ -30,6 +32,7 @@ import {
   ConflictError,
   grantsWriteCapability,
   INVOCATION_MACHINE,
+  invocationDeadlineAt,
   TRANSCRIPT_MEDIA_TYPE,
   type Attempt,
   type AttemptId,
@@ -83,6 +86,8 @@ export interface InvocationInspection {
   attempts: Attempt[];
   latestAttempt: Attempt | null;
   attemptsRemaining: number;
+  /** The one Invocation-wide wall-clock deadline (`startedAt + maxWallClockMs`), `null` when unbounded or not yet started. */
+  deadlineAt: Timestamp | null;
   /** Whether another Attempt may be created now, or why not; `retry_not_yet` carries the earliest time. */
   next: { permitted: true } | { permitted: false; reason: NotPermittedReason; notBefore: Timestamp | null };
   /** The Attempt whose provider execution the next Attempt may continue from, when every canonical check passes. */
@@ -133,10 +138,11 @@ export class AttemptExecutor {
         ? { attemptId: latest.id, failureClass: latest.failureClass, detail: latest.failureDetail, decision: latest.retryDecision }
         : null;
     const manifest = this.manifestOf(invocation);
-    const next = this.nextPermission(invocation, manifest, attempts, now);
+    const deadlineAt = manifest === null ? null : invocationDeadlineAt(invocation.startedAt, manifest.content.maxWallClockMs);
+    const next = this.nextPermission(invocation, manifest, attempts, deadlineAt, now);
     const resumeCandidateAttemptId =
       next.permitted && manifest !== null ? (continuationCandidate(this.stores, this.continuations, this.provider, this.config.continuation, invocation, manifest, now)?.attemptId ?? null) : null;
-    return { invocation, attempts, latestAttempt: latest, attemptsRemaining: Math.max(0, invocation.allocation.attempts - attempts.length), next, resumeCandidateAttemptId, previousFailure };
+    return { invocation, attempts, latestAttempt: latest, attemptsRemaining: Math.max(0, invocation.allocation.attempts - attempts.length), deadlineAt, next, resumeCandidateAttemptId, previousFailure };
   }
 
   /** The Attempts this process is executing, in Attempt id order. */
@@ -152,11 +158,13 @@ export class AttemptExecutor {
     }
   }
 
-  private nextPermission(invocation: Invocation, manifest: ContextManifest | null, attempts: Attempt[], now: Timestamp): InvocationInspection["next"] {
+  private nextPermission(invocation: Invocation, manifest: ContextManifest | null, attempts: Attempt[], deadlineAt: Timestamp | null, now: Timestamp): InvocationInspection["next"] {
     if (INVOCATION_MACHINE.isTerminal(invocation.status)) return { permitted: false, reason: "invocation_terminal", notBefore: null };
     if (invocation.status === "waiting") return { permitted: false, reason: "invocation_waiting", notBefore: null };
     if (manifest === null) return { permitted: false, reason: "invocation_terminal", notBefore: null };
     if (attempts.some((a) => !ATTEMPT_MACHINE.isTerminal(a.status))) return { permitted: false, reason: "attempt_active", notBefore: null };
+    // No Attempt may be created once the Invocation-wide deadline has been reached.
+    if (deadlineAt !== null && now >= deadlineAt) return { permitted: false, reason: "allocation_exhausted", notBefore: null };
     const latest = attempts.at(-1);
     if (latest) {
       const decision = latest.retryDecision;
@@ -201,14 +209,13 @@ export class AttemptExecutor {
       if (!grant.granted) throw new ConflictError(`the governor refused a lease it had just offered (${grant.refusal.reason})`);
       const started = this.stores.invocations.transitionAttempt(attempt.id, { to: "running", capacityLeaseId: grant.lease.id }, caused);
       const running = invocation.status === "pending" ? this.stores.invocations.transition(invocation.id, { to: "running" }, caused) : invocation;
-      // The wall-clock limit bounds each Attempt from its start; reaching it interrupts the Attempt (execution-model §7.6).
-      const limit = manifest.content.maxWallClockMs;
-      const now = started.startedAt ?? this.ctx.clock();
+      // One Invocation-wide deadline from the persisted start and the immutable manifest limit; every Attempt shares it (execution-model §7.6).
+      const deadlineAt = invocationDeadlineAt(running.startedAt, manifest.content.maxWallClockMs);
       this.#inFlight.set(attempt.id, {
         attemptId: attempt.id,
         invocationId: invocation.id,
         controller: new AbortController(),
-        deadlineAt: limit === null ? null : new Date(Date.parse(now) + limit).toISOString(),
+        deadlineAt,
         runtimeInterruption: null,
         continuation: resumedFrom ? continuation : null,
         outcome: null,
@@ -371,6 +378,7 @@ export class AttemptExecutor {
         maxAttempts: invocation.allocation.attempts,
         previousFailureClass: previous?.failureClass ?? null,
         approvalRequired,
+        deadlineAt: invocationDeadlineAt(invocation.startedAt, manifest.content.maxWallClockMs),
         now: this.ctx.clock(),
         config: this.config.retry,
       });

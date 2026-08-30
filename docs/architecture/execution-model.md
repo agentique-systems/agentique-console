@@ -1112,8 +1112,8 @@ decision, selects a fresh or resumed start, checks the governor before
 creating anything, then creates the Attempt with its lease and starts it;
 a capacity refusal creates no Attempt and consumes nothing. *Execute*
 (no transaction) renders the manifest, calls the provider under
-cancellation and a per-Attempt wall-clock deadline that the caller's
-clock enforces, streams transient output, collects a writing
+cancellation and the Invocation-wide wall-clock deadline that the
+caller's clock enforces, streams transient output, collects a writing
 Invocation's Changeset through the execution-workspace port, and stores
 any continuation payload. *Finalize* (one transaction) stores the
 transcript Artifact, records every Usage row, records the Changeset,
@@ -1222,12 +1222,16 @@ and no agent can.
   `side_effect_approval` Decision — no approval is invented and no
   provider process waits. The decision is persisted on the Attempt with
   its exact `retryNotBefore`, and the Invocation's next Attempt is
-  permitted only when that time has passed. A refused retry ends the
-  Invocation: `provider_permanent`, `allocation_exhausted` (cost, tokens,
-  or Attempts exhausted, including after an interruption), `result_invalid`
-  when the last Attempt's result was invalid, `attempts_exhausted` after
-  a repeated tool failure, `cancelled` on cancellation; a `task`
-  Invocation's Task fails with the corresponding reason. The retry
+  permitted only when that time has passed and the Invocation-wide
+  deadline (§7.6) has not; a deadline timeout, a passed deadline, or a
+  backoff ending at or after the deadline refuses with
+  `wall_clock_exhausted`. A refused retry ends the Invocation:
+  `provider_permanent`, `allocation_exhausted` (cost, tokens, Attempts,
+  or wall clock exhausted, including after an interruption),
+  `result_invalid` when the last Attempt's result was invalid,
+  `attempts_exhausted` after a repeated tool failure, `cancelled` on
+  cancellation; a `task` Invocation's Task fails with the corresponding
+  reason. The retry
   Attempt is rendered from the unchanged manifest plus a bounded appendix
   carrying only the prior Attempt id, failure class, sanitized detail,
   exact violations, and the ordinal and remaining Attempts.
@@ -1402,10 +1406,18 @@ the node when the Invocation reaches a terminal state.
 
 - An Invocation that reaches its reserved cost, tokens, or Attempts is
   `failed` with reason `allocation_exhausted`; no retry. The wall-clock
-  limit (the Invocation's, bounded by its node's) applies to each Attempt
-  from its start; reaching it interrupts the Attempt and is classified
-  `interrupted`, and the retry that follows is bounded by the same limit
-  from its own start.
+  limit (the Invocation's, bounded by its node's) is Invocation-wide: one
+  absolute deadline, `Invocation.startedAt + maxWallClockMs`, begins when
+  the Invocation first becomes `running` and is shared by every Attempt
+  and every retry backoff. Reaching it interrupts the running Attempt
+  (`timed_out`, classified `interrupted`) and that interruption is final:
+  no further Attempt is created whatever Attempts remain, a backoff that
+  would end at or after the deadline is refused rather than persisted, and
+  an Invocation whose deadline has passed is settled `failed` with
+  `allocation_exhausted` exactly once. A non-deadline interruption before
+  the deadline may retry with only the remaining time. A restart derives
+  the same deadline from the persisted start and the immutable manifest
+  limit.
 - A Plan Node whose unconsumed, unreserved allocation cannot cover the next
   Invocation it must create acts on its `onAllocationExhausted` policy:
   `fail` (default) fails the node; `wait` puts the node in `waiting` with

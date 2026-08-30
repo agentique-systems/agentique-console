@@ -39,17 +39,16 @@ describe("classifyAttempt", () => {
 
 describe("decideRetry", () => {
   const failed = (failureClass: ClassifiedAttempt["failureClass"], extra: Partial<ClassifiedAttempt> = {}): ClassifiedAttempt => ({ status: "failed", failureClass, detail: { message: "m", violations: [], tool: null, cancelled: false }, result: null, ...extra });
-  const decide = (classified: ClassifiedAttempt, attemptNumber = 1, previousFailureClass: ClassifiedAttempt["failureClass"] = null, approvalRequired = false) =>
-    decideRetry({ classified, attemptNumber, maxAttempts: allocation.attempts, previousFailureClass, approvalRequired, now, config });
+  const decide = (classified: ClassifiedAttempt, attemptNumber = 1, previousFailureClass: ClassifiedAttempt["failureClass"] = null, approvalRequired = false, deadlineAt: string | null = null) =>
+    decideRetry({ classified, attemptNumber, maxAttempts: allocation.attempts, previousFailureClass, approvalRequired, deadlineAt, now, config });
 
   it("retries transient failures after deterministic backoff, invalid results at once, interruptions unless cancelled, tool failures once", () => {
     expect(decide({ status: "succeeded", failureClass: null, detail: null, result: valid.result })).toBeNull();
     expect(decide(failed("provider_transient"))).toEqual({ permitted: true, reason: "provider_transient", notBefore: "2026-01-01T00:00:01.000Z" });
     expect(decide(failed("provider_transient"), 2)).toEqual({ permitted: true, reason: "provider_transient", notBefore: "2026-01-01T00:00:02.000Z" });
-    expect(decideRetry({ classified: failed("provider_transient"), attemptNumber: 3, maxAttempts: 10, previousFailureClass: null, approvalRequired: false, now, config })).toEqual({ permitted: true, reason: "provider_transient", notBefore: "2026-01-01T00:00:03.000Z" });
+    expect(decideRetry({ classified: failed("provider_transient"), attemptNumber: 3, maxAttempts: 10, previousFailureClass: null, approvalRequired: false, deadlineAt: null, now, config })).toEqual({ permitted: true, reason: "provider_transient", notBefore: "2026-01-01T00:00:03.000Z" });
     expect(decide(failed("result_invalid"))).toEqual({ permitted: true, reason: "result_invalid", notBefore: null });
     expect(decide({ ...failed("interrupted"), status: "interrupted" })).toEqual({ permitted: true, reason: "interrupted", notBefore: null });
-    expect(decide({ ...failed("interrupted"), status: "timed_out" })).toEqual({ permitted: true, reason: "interrupted", notBefore: null });
     expect(decide(failed("tool_failure"))).toEqual({ permitted: true, reason: "tool_failure", notBefore: null });
     expect(decide(failed("tool_failure"), 2, "tool_failure")).toEqual({ permitted: false, reason: "tool_failure_retried", notBefore: null });
     expect(decide(failed("tool_failure"), 2, "provider_transient")).toEqual({ permitted: true, reason: "tool_failure", notBefore: null });
@@ -65,5 +64,22 @@ describe("decideRetry", () => {
     expect(decide(failed("provider_transient"), 3)).toEqual({ permitted: false, reason: "attempts_exhausted", notBefore: null });
     // Decisions are pure: the same input always yields the same decision.
     expect(decide(failed("provider_transient"))).toEqual(decide(failed("provider_transient")));
+  });
+
+  it("never retries past the one Invocation-wide deadline: a deadline timeout is final, a passed deadline refuses, and a backoff ending at or after it is refused", () => {
+    const deadline = "2026-01-01T00:00:00.500Z";
+    // A deadline interruption is final even with Attempts to spare.
+    expect(decide({ ...failed("interrupted"), status: "timed_out" }, 1, null, false, "2026-01-01T01:00:00.000Z")).toEqual({ permitted: false, reason: "wall_clock_exhausted", notBefore: null });
+    // A non-deadline interruption before the deadline may retry with the remaining time.
+    expect(decide({ ...failed("interrupted"), status: "interrupted" }, 1, null, false, "2026-01-01T01:00:00.000Z")).toEqual({ permitted: true, reason: "interrupted", notBefore: null });
+    // Once the deadline has passed nothing retries.
+    expect(decide({ ...failed("interrupted"), status: "interrupted" }, 1, null, false, now)).toEqual({ permitted: false, reason: "wall_clock_exhausted", notBefore: null });
+    expect(decide(failed("result_invalid"), 1, null, false, "2025-12-31T23:59:59.999Z")).toEqual({ permitted: false, reason: "wall_clock_exhausted", notBefore: null });
+    // A transient backoff of 1 s that would end at or after a deadline 500 ms away is refused rather than persisted.
+    expect(decide(failed("provider_transient"), 1, null, false, deadline)).toEqual({ permitted: false, reason: "wall_clock_exhausted", notBefore: null });
+    expect(decide(failed("provider_transient"), 1, null, false, "2026-01-01T00:00:01.000Z")).toEqual({ permitted: false, reason: "wall_clock_exhausted", notBefore: null });
+    expect(decide(failed("provider_transient"), 1, null, false, "2026-01-01T00:00:01.001Z")).toEqual({ permitted: true, reason: "provider_transient", notBefore: "2026-01-01T00:00:01.000Z" });
+    // An unbounded Invocation never refuses on wall clock.
+    expect(decide({ ...failed("interrupted"), status: "interrupted" }, 1, null, false, null)).toEqual({ permitted: true, reason: "interrupted", notBefore: null });
   });
 });

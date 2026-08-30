@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "a21ea6a2-34f9-4c98-993e-ac25b84b4098",
+  "id": "e3db9b1e-1fd9-46eb-adf4-4656945d9285",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "acceptance_criteria": {
@@ -785,7 +785,7 @@
         },
         "attempts_retry_decision_shape": {
           "name": "attempts_retry_decision_shape",
-          "value": "\"attempts\".\"retry_decision\" IS NULL OR (\"attempts\".\"status\" IN ('failed', 'timed_out', 'interrupted', 'cancelled') AND json_extract(\"attempts\".\"retry_decision\", '$.reason') IN ('provider_transient', 'result_invalid', 'interrupted', 'tool_failure', 'provider_permanent', 'allocation_exhausted', 'attempts_exhausted', 'cancelled', 'tool_failure_retried', 'approval_required') AND json_extract(\"attempts\".\"retry_decision\", '$.permitted') IN (0, 1) AND ((json_extract(\"attempts\".\"retry_decision\", '$.permitted') = 1 AND json_extract(\"attempts\".\"retry_decision\", '$.reason') IN ('provider_transient', 'result_invalid', 'interrupted', 'tool_failure')) OR (json_extract(\"attempts\".\"retry_decision\", '$.permitted') = 0 AND json_extract(\"attempts\".\"retry_decision\", '$.notBefore') IS NULL AND json_extract(\"attempts\".\"retry_decision\", '$.reason') IN ('provider_permanent', 'allocation_exhausted', 'attempts_exhausted', 'cancelled', 'tool_failure_retried', 'approval_required'))))"
+          "value": "\"attempts\".\"retry_decision\" IS NULL OR (\"attempts\".\"status\" IN ('failed', 'timed_out', 'interrupted', 'cancelled') AND json_extract(\"attempts\".\"retry_decision\", '$.reason') IN ('provider_transient', 'result_invalid', 'interrupted', 'tool_failure', 'provider_permanent', 'allocation_exhausted', 'attempts_exhausted', 'wall_clock_exhausted', 'cancelled', 'tool_failure_retried', 'approval_required') AND json_extract(\"attempts\".\"retry_decision\", '$.permitted') IN (0, 1) AND ((json_extract(\"attempts\".\"retry_decision\", '$.permitted') = 1 AND json_extract(\"attempts\".\"retry_decision\", '$.reason') IN ('provider_transient', 'result_invalid', 'interrupted', 'tool_failure')) OR (json_extract(\"attempts\".\"retry_decision\", '$.permitted') = 0 AND json_extract(\"attempts\".\"retry_decision\", '$.notBefore') IS NULL AND json_extract(\"attempts\".\"retry_decision\", '$.reason') IN ('provider_permanent', 'allocation_exhausted', 'attempts_exhausted', 'wall_clock_exhausted', 'cancelled', 'tool_failure_retried', 'approval_required'))))"
         },
         "attempts_retry_not_before_agrees": {
           "name": "attempts_retry_not_before_agrees",

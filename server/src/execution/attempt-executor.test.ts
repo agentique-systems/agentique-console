@@ -39,7 +39,7 @@ describe("AttemptExecutor", () => {
       expect(request.inTransaction).toBe(false);
       expect(request.continuation).toBeNull();
       expect(request.request).toMatchObject({ attemptId: attempt.id, invocationId: invocation.id, runId: s.created.run.id, model: "claude-fable-5", effort: "medium", workingDirectory: prepared.manifest.content.worktreePath, capabilities: prepared.manifest.content.capabilities, toolPolicy: prepared.manifest.content.toolPolicy });
-      expect(request.request.deadlineAt).toBe(new Date(Date.parse(attempt.startedAt!) + 600_000).toISOString());
+      expect(request.request.deadlineAt).toBe(new Date(Date.parse(h.stores.invocations.get(invocation.id).startedAt!) + 600_000).toISOString());
       expect(request.request.input.text).toContain(`manifest: ${prepared.manifest.id}`);
       expect(request.request.input.text).not.toContain("## Retry");
       expect(h.transient).toEqual([{ attemptId: attempt.id, kind: "text", text: "thinking…" }]);
@@ -189,28 +189,30 @@ describe("AttemptExecutor", () => {
     }
   });
 
-  it("interrupts at the wall-clock deadline and retries, and fails with allocation_exhausted when cost or tokens run out", async () => {
+  it("interrupts at the Invocation-wide deadline as a final timeout, and fails with allocation_exhausted when cost or tokens run out", async () => {
     const h = openRuntimeHarness();
     try {
       const s = seedRuntime(h);
       const invocation = startRun(h, s).prepared.invocation;
-      h.provider.script({ kind: "hang" }, { kind: "succeed", result: COMPLETED_RESULT });
+      h.provider.script({ kind: "hang" });
       const prepared = await h.executor.prepareNextAttempt(invocation.id);
       if (prepared.kind !== "prepared") throw new Error(prepared.kind);
       const executing = h.executor.executePreparedAttempt(prepared.attempt.id);
-      const deadline = new Date(Date.parse(prepared.attempt.startedAt!) + 600_000).toISOString();
+      // The deadline is the Invocation's start plus its limit, not the Attempt's start.
+      const deadline = new Date(Date.parse(prepared.invocation.startedAt!) + 600_000).toISOString();
       expect(h.provider.requests[0]!.request.deadlineAt).toBe(deadline);
+      expect(h.executor.inspectInvocation(invocation.id).deadlineAt).toBe(deadline);
       expect(h.executor.enforceDeadlines(new Date(Date.parse(deadline) - 1).toISOString())).toEqual([]);
       h.clock.set(deadline);
       expect(h.executor.enforceDeadlines()).toEqual([prepared.attempt.id]);
       const outcome = await executing;
-      expect(outcome.attempt).toMatchObject({ status: "timed_out", failureClass: "interrupted", retryDecision: { permitted: true, reason: "interrupted", notBefore: null } });
-      expect(outcome.settlement.kind).toBe("retry_pending");
+      expect(outcome.attempt).toMatchObject({ status: "timed_out", failureClass: "interrupted", retryDecision: { permitted: false, reason: "wall_clock_exhausted", notBefore: null } });
       expect(h.provider.requests[0]).toMatchObject({ aborted: true, abortCause: "deadline" });
-      // The timed-out Attempt consumed its Attempt; the retry is bounded by the same wall-clock limit from its own start.
-      const retry = await finalized(h, invocation);
-      expect(retry.attempt).toMatchObject({ number: 2, kind: "retry", status: "succeeded" });
-      expect(h.provider.requests[1]!.request.deadlineAt).toBe(new Date(Date.parse(retry.attempt.startedAt!) + 600_000).toISOString());
+      // A deadline timeout gets no fresh allowance whatever Attempts remain: the Invocation is settled once.
+      expect(outcome.settlement).toMatchObject({ kind: "settled", invocation: { status: "failed", failureReason: "allocation_exhausted" } });
+      expect(h.stores.invocations.listAttempts(invocation.id)).toHaveLength(1);
+      expect(h.stores.reservations.listByChild({ type: "invocation", id: invocation.id })[0]!.status).toBe("released");
+      expect(await h.executor.advanceInvocation(invocation.id)).toMatchObject({ kind: "not_permitted", reason: "invocation_terminal" });
     } finally {
       h.close();
     }

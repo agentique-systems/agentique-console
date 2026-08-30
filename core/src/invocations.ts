@@ -498,6 +498,7 @@ export const RETRY_REFUSED_REASONS = [
   "provider_permanent",
   "allocation_exhausted",
   "attempts_exhausted",
+  "wall_clock_exhausted",
   "cancelled",
   "tool_failure_retried",
   "approval_required",
@@ -540,6 +541,18 @@ export const retryDecisionSchema: z.ZodType<RetryDecision> = z
 export function retryBackoffMs(attemptNumber: number, baseMs: number, maxMs: number): number {
   const exponent = Math.max(0, attemptNumber - 1);
   return Math.min(maxMs, baseMs * 2 ** exponent);
+}
+
+/**
+ * The one Invocation-wide wall-clock deadline (execution-model §7.6):
+ * `Invocation.startedAt + Context Manifest.maxWallClockMs`, or `null` when
+ * the Invocation is unbounded or has not started. Every Attempt of the
+ * Invocation, every retry backoff, and every restart derives the same
+ * absolute instant from these two persisted facts; nothing resets it.
+ */
+export function invocationDeadlineAt(startedAt: Timestamp | null, maxWallClockMs: number | null): Timestamp | null {
+  if (startedAt === null || maxWallClockMs === null) return null;
+  return new Date(Date.parse(startedAt) + maxWallClockMs).toISOString();
 }
 
 export interface Attempt {

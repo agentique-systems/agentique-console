@@ -37,6 +37,7 @@ export function invocationFailureReasonFor(decision: RetryDecision, attempt: Pic
     case "provider_permanent":
       return "provider_permanent";
     case "allocation_exhausted":
+    case "wall_clock_exhausted":
       return "allocation_exhausted";
     case "cancelled":
       return "cancelled";
