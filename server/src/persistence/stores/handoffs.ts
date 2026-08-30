@@ -1,8 +1,11 @@
-import { asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray } from "drizzle-orm";
 import {
+  canonicalJson,
   HANDOFF_MACHINE,
   handoffInputSchema,
+  handoffKeyOf,
   handoffSchema,
+  InvariantViolationError,
   parseOrThrow,
   type Handoff,
   type HandoffEndpoint,
@@ -18,9 +21,36 @@ function toDomain(row: typeof handoffs.$inferSelect): Handoff {
   return parseOrThrow(handoffSchema, row, "Handoff row");
 }
 
-/** Immutable routing rows with a `pending → delivered | cancelled` lifecycle. */
+/**
+ * Immutable routing rows with a `pending → delivered | cancelled` lifecycle,
+ * identified by the stable key of the logical transfer they carry. One row
+ * exists per key per Run: `ensure` is the idempotent entry point every
+ * runtime path uses, and the unique index — not a check-then-insert — is
+ * what makes repeated reconciliation, transaction retry, restart, and
+ * racing callers converge on one Handoff.
+ */
 export class HandoffStore {
   constructor(private readonly ctx: PersistenceContext) {}
+
+  /**
+   * The Handoff for `input.route`, created now or found existing. An
+   * existing row must carry the same routing (source, target, Task and
+   * Artifact ids); a different transfer under the same key is an invariant
+   * violation, never a silent overwrite. Creation writes `handoff.created`;
+   * an existing row writes nothing.
+   */
+  ensure(input: HandoffInput, options?: WriteOptions): { handoff: Handoff; created: boolean } {
+    const valid = parseOrThrow(handoffInputSchema, input, "Handoff input");
+    return this.ctx.tx.write(() => {
+      const existing = this.getByKey(valid.runId, handoffKeyOf(valid.route));
+      if (existing !== null) {
+        const same = canonicalJson({ source: existing.source, target: existing.target, taskIds: [...existing.taskIds].sort(), artifactIds: [...existing.artifactIds].sort() }) === canonicalJson({ source: valid.source, target: valid.target, taskIds: [...valid.taskIds].sort(), artifactIds: [...valid.artifactIds].sort() });
+        if (!same) throw new InvariantViolationError(`Handoff ${existing.id} already carries key ${existing.handoffKey} with different routing`, { handoffId: existing.id, handoffKey: existing.handoffKey });
+        return { handoff: existing, created: false };
+      }
+      return { handoff: this.create(valid, options), created: true };
+    });
+  }
 
   create(input: HandoffInput, options?: WriteOptions): Handoff {
     const valid = parseOrThrow(handoffInputSchema, input, "Handoff input");
@@ -28,6 +58,7 @@ export class HandoffStore {
       const run = loadRunRef(this.ctx, valid.runId);
       this.assertEndpoint(valid.source, run.id);
       this.assertEndpoint(valid.target, run.id);
+      this.assertRoute(valid);
       if (valid.taskIds.length > 0) {
         const rows = this.ctx.db.select({ id: tasks.id, runId: tasks.runId }).from(tasks).where(inArray(tasks.id, valid.taskIds)).all();
         for (const id of valid.taskIds) assertSameRun("Task", id, requireRow(rows.find((r) => r.id === id), "Task", id).runId, run.id);
@@ -36,9 +67,11 @@ export class HandoffStore {
         const rows = this.ctx.db.select({ id: artifacts.id, runId: artifacts.runId }).from(artifacts).where(inArray(artifacts.id, valid.artifactIds)).all();
         for (const id of valid.artifactIds) assertSameRun("Artifact", id, requireRow(rows.find((r) => r.id === id), "Artifact", id).runId, run.id);
       }
+      const { route, ...routing } = valid;
       const handoff: Handoff = {
         id: this.ctx.ids("handoff"),
-        ...valid,
+        handoffKey: handoffKeyOf(route),
+        ...routing,
         status: "pending",
         createdAt: this.ctx.clock(),
         deliveredAt: null,
@@ -62,6 +95,12 @@ export class HandoffStore {
 
   get(id: HandoffId): Handoff {
     return toDomain(requireRow(this.ctx.db.select().from(handoffs).where(eq(handoffs.id, id)).get(), "Handoff", id));
+  }
+
+  /** The one Handoff of a Run with `handoffKey`, or `null`. */
+  getByKey(runId: RunId, handoffKey: string): Handoff | null {
+    const row = this.ctx.db.select().from(handoffs).where(and(eq(handoffs.runId, runId), eq(handoffs.handoffKey, handoffKey))).get();
+    return row ? toDomain(row) : null;
   }
 
   listByRun(runId: RunId): Handoff[] {
@@ -97,6 +136,23 @@ export class HandoffStore {
       this.ctx.db.update(handoffs).set({ status: next.status, deliveredAt: next.deliveredAt }).where(eq(handoffs.id, id)).run();
       return next;
     });
+  }
+
+  /** The endpoints agree with the route: a sequence transfer runs node to node; a chain-step transfer runs from a step Invocation to its own node. */
+  private assertRoute(input: HandoffInput): void {
+    const { route, source, target } = input;
+    if (route.kind === "sequence") {
+      if (source.kind !== "plan_node" || source.planNodeId !== route.sourceNodeId) throw new InvariantViolationError("a sequence Handoff's source is its source Plan Node", { route, source });
+      if (target.kind !== "plan_node" || target.planNodeId !== route.targetNodeId) throw new InvariantViolationError("a sequence Handoff's target is its target Plan Node", { route, target });
+      return;
+    }
+    if (target.kind !== "plan_node" || target.planNodeId !== route.planNodeId) throw new InvariantViolationError("a chain-step Handoff's target is its own Plan Node", { route, target });
+    if (source.kind !== "invocation") throw new InvariantViolationError("a chain-step Handoff's source is the completed step Invocation", { route, source });
+    const invocation = requireRow(this.ctx.db.select({ planNodeId: invocations.planNodeId, patternPosition: invocations.patternPosition }).from(invocations).where(eq(invocations.id, source.invocationId)).get(), "Invocation", source.invocationId);
+    const position = invocation.patternPosition;
+    if (invocation.planNodeId !== route.planNodeId || position === null || position.kind !== "chain_step" || position.index !== route.fromStep) {
+      throw new InvariantViolationError(`Invocation ${source.invocationId} is not chain step ${route.fromStep} of PlanNode ${route.planNodeId}`, { route, source });
+    }
   }
 
   private assertEndpoint(endpoint: HandoffEndpoint, runId: RunId): void {

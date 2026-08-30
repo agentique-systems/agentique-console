@@ -30,10 +30,9 @@ function successor(h: RuntimeHarness, s: ReturnType<typeof seedRuntime>, previou
     planNodeId: s.created.root.id,
     role: "orchestrator",
     purpose: "operator_input",
-    agentDefinitionRevisionId: overrides.agentDefinitionRevisionId ?? s.orchestrator.id,
+    ...(overrides.agentDefinitionRevisionId ? { agentDefinitionRevisionId: overrides.agentDefinitionRevisionId } : {}),
     continuedFromInvocationId: previous.id,
-    taskIds: [],
-    patternPosition: null,
+    patternPosition: { kind: "orchestrator" as const },
     inputs: [{ kind: "operator_message", conversationMessageId: message.id, content: message.content }],
   });
 }
@@ -148,9 +147,10 @@ describe("provider continuation", () => {
         defaultLimits: s.orchestrator.defaultLimits,
       });
       expect(revised.id).not.toBe(s.orchestrator.id);
-      const next = successor(d, s, first, { agentDefinitionRevisionId: revised.id });
-      expect(d.executor.inspectInvocation(next.invocation.id).resumeCandidateAttemptId).toBeNull();
-      expect((await run(d, next.invocation)).attempt).toMatchObject({ startMode: "fresh", resumedFromAttemptId: null, status: "succeeded" });
+      // A position runs exactly the revision its node shape pins: a successor cannot switch definitions, so a changed
+      // definition is refused at preparation rather than reaching the continuation policy at all.
+      expect(() => successor(d, s, first, { agentDefinitionRevisionId: revised.id })).toThrow(/runs Agent Definition revision/);
+      expect(d.stores.invocations.listByRun(s.created.run.id)).toHaveLength(1);
     } finally {
       d.close();
     }
@@ -163,7 +163,7 @@ describe("provider continuation", () => {
       await run(m, first);
       const narrowed = new InvocationPreparationService(m.ctx, m.stores, m.executionWorkspace, { workspacePolicy: { deniedTools: ["shell"], approvalRequiredTools: [], deniedMcpServers: [] } });
       const message = m.stores.conversations.postMessage({ conversationId: s.created.run.conversationId, author: "operator", content: "Continue.", runId: s.created.run.id, invocationId: null });
-      const next = narrowed.prepare({ runId: s.created.run.id, planNodeId: s.created.root.id, role: "orchestrator", purpose: "operator_input", agentDefinitionRevisionId: s.orchestrator.id, continuedFromInvocationId: first.id, taskIds: [], patternPosition: null, inputs: [{ kind: "operator_message", conversationMessageId: message.id, content: message.content }] });
+      const next = narrowed.prepare({ runId: s.created.run.id, planNodeId: s.created.root.id, role: "orchestrator", purpose: "operator_input", continuedFromInvocationId: first.id, patternPosition: { kind: "orchestrator" }, inputs: [{ kind: "operator_message", conversationMessageId: message.id, content: message.content }] });
       expect(next.manifest.content.toolPolicy.shell).toBe("denied");
       expect(manifestContinuationContext(next.manifest)).not.toBe(manifestContinuationContext(m.stores.invocations.getManifest(first.id)));
       expect(m.executor.inspectInvocation(next.invocation.id).resumeCandidateAttemptId).toBeNull();
@@ -175,7 +175,7 @@ describe("provider continuation", () => {
       const node = outcome.graph.nodes[1]!;
       m.stores.plans.transitionNode(node.id, { to: "ready" });
       m.stores.plans.transitionNode(node.id, { to: "running" });
-      const worker = m.preparation.prepare({ runId: s2.created.run.id, planNodeId: node.id, role: "worker", purpose: "step", agentDefinitionRevisionId: s2.worker.id, continuedFromInvocationId: null, taskIds: [], patternPosition: null });
+      const worker = m.preparation.prepare({ runId: s2.created.run.id, planNodeId: node.id, role: "worker", purpose: "step", continuedFromInvocationId: null, patternPosition: { kind: "single" } });
       expect(m.executor.inspectInvocation(worker.invocation.id).resumeCandidateAttemptId).toBeNull();
     } finally {
       m.close();

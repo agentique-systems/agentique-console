@@ -6,15 +6,21 @@
  * which fails Invocation preparation transactionally.
  *
  * Included: the Agent Definition revision (id, hash, instructions, model
- * policy); role, purpose, Pattern position, continued-from; Run and Plan
- * Node ids; the Invocation's Tasks; the exact pinned leaf Requirements of
- * a scoped node or the current Requirements for the root node, with their
- * Acceptance Criteria; Decisions that reference those Requirements, Tasks,
- * or this node, that the node's template names, or that were resolved since
- * the previous Invocation's manifest; the delivered Handoffs; the queued
- * logical inputs; readable Artifact metadata; the starting Snapshot and
- * worktree; allocation, funding, and limits; the effective capabilities,
- * Tool Policy, and runtime tools.
+ * policy); role, purpose, the typed Pattern position, continued-from; Run
+ * and Plan Node ids; the Invocation's owned Tasks; the exact pinned leaf
+ * Requirements of a scoped node or the current Requirements for the root
+ * node, with their Acceptance Criteria; Decisions that reference those
+ * Requirements, Tasks, or this node, that the Invocation's own operation
+ * input names, or that were resolved since the previous Invocation's
+ * manifest; the delivered Handoffs; the queued logical inputs; readable
+ * Artifact metadata; the starting Snapshot and worktree; allocation,
+ * funding, and limits; the effective capabilities, Tool Policy, and
+ * runtime tools.
+ *
+ * The template applied is exactly the one operation's input (`operationInput`),
+ * never the node's union of every operation: chain step `n` receives step
+ * `n`'s Task, Decision, and Artifact references and nothing another step
+ * named.
  *
  * Excluded by construction: any transcript, provider continuation state,
  * storage key, provider message, narrative status, routine Event, unrelated
@@ -40,6 +46,7 @@ import {
   type ManifestDecision,
   type ManifestInput,
   type ManifestRequirement,
+  type ManifestTemplate,
   type PatternPlanNode,
   type RequirementId,
   type RequirementRevisionId,
@@ -55,7 +62,8 @@ export interface ManifestAssemblyRequest {
   invocation: Invocation;
   revision: AgentDefinitionRevision;
   policy: EffectiveCapabilityPolicy;
-  patternPosition: string | null;
+  /** Exactly the input of the operation at the Invocation's position (empty for a Gate Evaluator). */
+  operationInput: ManifestTemplate;
   inputs: ManifestInput[];
   /** Handoffs the runtime delivers to this Invocation (already validated as addressed to it). */
   handoffIds: HandoffId[];
@@ -85,11 +93,14 @@ export class ContextManifestAssembler {
     const { requirementRevisionId, requirements } = this.requirements(run, node);
     const acceptanceCriteria = this.acceptanceCriteria(run, requirementRevisionId, requirements, tasks.map((t) => t.taskId));
     const previousManifestAt = this.previousManifestAt(invocation);
-    const decisions = this.decisions(run, node, invocation, requirements, tasks.map((t) => t.taskId), request.inputs, previousManifestAt);
+    const decisions = this.decisions(run, node, invocation, requirements, tasks.map((t) => t.taskId), request.operationInput, request.inputs, previousManifestAt);
     const inputs = this.inputs(run, invocation, request.inputs);
     const handoffs = this.handoffs(run, node, invocation, request.handoffIds);
     const approvalArtifactIds = inputs.flatMap((i) => (i.kind === "side_effect_approval_resolution" ? [i.callArtifactId] : []));
-    const artifacts = this.artifacts(run, unique([...node.input.artifactIds, ...handoffs.flatMap((h) => h.artifactIds), ...request.artifactIds, ...approvalArtifactIds, ...this.taskInputArtifacts(tasks.map((t) => t.taskId))]));
+    const artifacts = this.artifacts(run, unique([...request.operationInput.artifactIds, ...handoffs.flatMap((h) => h.artifactIds), ...request.artifactIds, ...approvalArtifactIds, ...this.taskInputArtifacts(tasks.map((t) => t.taskId))]));
+    for (const id of request.operationInput.taskIds) {
+      if (!invocation.taskIds.includes(id)) throw new InvariantViolationError(`operation input names Task ${id}, which Invocation ${invocation.id} does not own`);
+    }
     // Approved calls: exactly the approve_once resolutions among the inputs, by Decision, tool, and digest; they widen no policy.
     const approvedCalls = inputs
       .flatMap((i) => (i.kind === "side_effect_approval_resolution" && i.outcome === "approve_once" ? [{ decisionId: i.decisionId, tool: i.tool, callDigest: i.callDigest }] : []))
@@ -106,7 +117,7 @@ export class ContextManifestAssembler {
       modelPolicy: revision.modelPolicy,
       role: invocation.role,
       purpose: invocation.purpose,
-      patternPosition: request.patternPosition,
+      patternPosition: invocation.patternPosition,
       continuedFromInvocationId: invocation.continuedFromInvocationId,
       runId: run.id,
       planNodeId: node.id,
@@ -204,11 +215,11 @@ export class ContextManifestAssembler {
     }
   }
 
-  /** Relevant Decisions only: the template's, those affecting included Requirements, Tasks, or this node, those the inputs name, and those resolved since the previous manifest. */
-  private decisions(run: Run, node: PatternPlanNode, invocation: Invocation, requirements: ManifestRequirement[], taskIds: TaskId[], inputs: ManifestInput[], previousManifestAt: string | null): ManifestDecision[] {
+  /** Relevant Decisions only: the operation's, those affecting included Requirements, Tasks, or this node, those the inputs name, and those resolved since the previous manifest. */
+  private decisions(run: Run, node: PatternPlanNode, invocation: Invocation, requirements: ManifestRequirement[], taskIds: TaskId[], operationInput: ManifestTemplate, inputs: ManifestInput[], previousManifestAt: string | null): ManifestDecision[] {
     const requirementIds = new Set(requirements.map((r) => r.requirementId));
     const taskSet = new Set<string>(taskIds);
-    const named = new Set<DecisionId>([...node.input.decisionIds, ...inputs.flatMap((i) => (i.kind === "decision_resolution" ? [i.decisionId] : []))]);
+    const named = new Set<DecisionId>([...operationInput.decisionIds, ...inputs.flatMap((i) => (i.kind === "decision_resolution" ? [i.decisionId] : []))]);
     const all = this.stores.decisions.listByConversation(run.conversationId);
     const byIdMap = new Map(all.map((d) => [d.id, d] as const));
     for (const id of named) {

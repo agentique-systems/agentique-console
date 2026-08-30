@@ -21,6 +21,7 @@ import {
   type InvocationRole,
   type JoinPlanNodeDefinition,
   type PatternPlanNodeDefinition,
+  type PatternPosition,
   type PlanGraph,
   type PlanNode,
   type PlanNodeScope,
@@ -234,19 +235,51 @@ export function extendPlan(h: Harness, seeded: Seeded, nodes: RevisionNodeInput[
   });
 }
 
+/**
+ * Appends a running worker node to the seeded Run: a `single` worker node
+ * or a `coordinator_worker` node, at a fresh source path. Worker, Task, and
+ * Coordinator Invocations belong on such a node, never on the root.
+ */
+export function seedWorkerNode(h: Harness, seeded: Seeded, pattern: "single" | "coordinator_worker" = "single", overrides: Partial<Omit<PatternPlanNodeDefinition, "kind" | "shape">> = {}): PlanNode {
+  const sourcePath = overrides.sourcePath ?? `e${h.stores.plans.listNodes(seeded.run.id).length}`;
+  const definition = pattern === "single" ? patternDefinition(seeded.definition.id, { ...overrides, sourcePath }) : coordinatorWorkerDefinition(seeded.definition.id, { ...overrides, sourcePath });
+  const node = nodeInput(h, definition);
+  extendPlan(h, seeded, [node]);
+  h.stores.plans.transitionNode(node.id, { to: "ready" });
+  return h.stores.plans.transitionNode(node.id, { to: "running" });
+}
+
+/** The position a test Invocation occupies by default, from its role, purpose, and owned Task. */
+export function defaultPatternPosition(role: InvocationRole, purpose: InvocationPurpose, taskIds: readonly string[]): PatternPosition | null {
+  switch (role) {
+    case "orchestrator":
+      return { kind: "orchestrator" };
+    case "worker":
+      return purpose === "task" ? { kind: "worker_task", taskId: taskIds[0] as never } : { kind: "single" };
+    case "coordinator":
+      return { kind: "coordinator_turn" };
+    case "evaluator":
+      return purpose === "select" ? { kind: "route_selection" } : null;
+  }
+}
+
 export function seedInvocation(
   h: Harness,
   seeded: Seeded,
-  overrides: Partial<{ role: InvocationRole; purpose: InvocationPurpose; planNodeId: string; allocation: Allocation; continuedFromInvocationId: string | null }> = {},
+  overrides: Partial<{ role: InvocationRole; purpose: InvocationPurpose; planNodeId: string; allocation: Allocation; continuedFromInvocationId: string | null; patternPosition: PatternPosition | null; taskIds: string[] }> = {},
 ): Invocation {
+  const role = overrides.role ?? "orchestrator";
+  const purpose = overrides.purpose ?? "operator_input";
+  const taskIds = overrides.taskIds ?? [];
   return h.stores.invocations.create({
     runId: seeded.run.id,
     planNodeId: (overrides.planNodeId ?? seeded.root.id) as never,
-    role: overrides.role ?? "orchestrator",
-    purpose: overrides.purpose ?? "operator_input",
+    role,
+    purpose,
     agentDefinitionRevisionId: seeded.definition.id,
     continuedFromInvocationId: (overrides.continuedFromInvocationId ?? null) as never,
-    taskIds: [],
+    patternPosition: overrides.patternPosition === undefined ? defaultPatternPosition(role, purpose, taskIds) : overrides.patternPosition,
+    taskIds: taskIds as never,
     allocation: overrides.allocation ?? INVOCATION_ALLOCATION,
   });
 }
@@ -262,7 +295,7 @@ export function seedManifest(h: Harness, seeded: Seeded, invocation: Invocation,
     modelPolicy: definition.modelPolicy,
     role: invocation.role,
     purpose: invocation.purpose,
-    patternPosition: null,
+    patternPosition: invocation.patternPosition,
     continuedFromInvocationId: invocation.continuedFromInvocationId,
     runId: invocation.runId,
     planNodeId: invocation.planNodeId,

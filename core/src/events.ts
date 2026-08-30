@@ -23,6 +23,7 @@ import {
   planNodeSchema,
   planRejectionReasonSchema,
   planRevisionNodeSchema,
+  PLAN_NODE_FAILURE_REASONS,
   PLAN_NODE_STATUSES,
   PLAN_NODE_WAIT_REASONS,
 } from "./plans.ts";
@@ -105,6 +106,8 @@ export const EVENT_CATALOGUE = {
   "run.completed": z.strictObject({ from: z.enum(RUN_STATUSES), to: z.literal("completed"), finalSnapshotId: idSchema("snapshot") }),
   "run.failed": z.strictObject({ from: z.enum(RUN_STATUSES), to: z.literal("failed"), failure: runFailureSchema }),
   "run.cancelled": transition(RUN_STATUSES),
+  /** A Changeset was integrated into the Run's Integration Workspace and the Run's integration Snapshot advanced. */
+  "run.integrated": z.strictObject({ runId: idSchema("run"), changesetId: idSchema("changeset"), integrationSnapshotId: idSchema("snapshot") }),
   "run.published": publicationSchema,
   "run.publish_failed": publicationSchema,
   "execution_plan.revised": executionPlanRevisionSchema,
@@ -133,7 +136,7 @@ export const EVENT_CATALOGUE = {
   "plan_node.waiting": z.strictObject({ from: z.enum(PLAN_NODE_STATUSES), to: z.literal("waiting"), waitReason: z.enum(PLAN_NODE_WAIT_REASONS) }),
   "plan_node.wait_cleared": transition(PLAN_NODE_STATUSES),
   "plan_node.succeeded": z.strictObject({ from: z.enum(PLAN_NODE_STATUSES), to: z.literal("succeeded"), outputArtifactIds: z.array(idSchema("artifact")) }),
-  "plan_node.failed": transition(PLAN_NODE_STATUSES),
+  "plan_node.failed": z.strictObject({ from: z.enum(PLAN_NODE_STATUSES), to: z.literal("failed"), reason: z.enum(PLAN_NODE_FAILURE_REASONS) }),
   "plan_node.cancelled": transition(PLAN_NODE_STATUSES),
   "plan_node.skipped": transition(PLAN_NODE_STATUSES),
   "requirement_revision.created": requirementRevisionSchema,

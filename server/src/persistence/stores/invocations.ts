@@ -12,10 +12,12 @@ import {
   failureClassForTransition,
   INVOCATION_MACHINE,
   invocationInputSchema,
+  invocationPositionKey,
   invocationSchema,
   InvariantViolationError,
   MANIFEST_RENDERER_VERSION,
   parseOrThrow,
+  patternPositionDefects,
   PLAN_NODE_MACHINE,
   ValidationError,
   type Attempt,
@@ -55,6 +57,7 @@ function invocationToDomain(row: InvocationRow): Invocation {
       purpose: row.purpose,
       agentDefinitionRevisionId: row.agentDefinitionRevisionId,
       continuedFromInvocationId: row.continuedFromInvocationId,
+      patternPosition: row.patternPosition,
       taskIds: row.taskIds,
       allocation: { costUsd: row.allocCostUsd, tokens: row.allocTokens, attempts: row.allocAttempts },
       allocationSource: row.allocationSource,
@@ -108,13 +111,18 @@ export class InvocationStore {
     return this.ctx.tx.write(() => {
       const run = loadRunRef(this.ctx, valid.runId);
       const node = requireRow(
-        this.ctx.db.select({ runId: planNodes.runId, kind: planNodes.kind, status: planNodes.status, sourcePath: planNodes.sourcePath }).from(planNodes).where(eq(planNodes.id, valid.planNodeId)).get(),
+        this.ctx.db.select({ runId: planNodes.runId, kind: planNodes.kind, status: planNodes.status, sourcePath: planNodes.sourcePath, shape: planNodes.shape }).from(planNodes).where(eq(planNodes.id, valid.planNodeId)).get(),
         "PlanNode",
         valid.planNodeId,
       );
       assertSameRun("PlanNode", valid.planNodeId, node.runId, run.id);
-      if (node.kind !== "pattern") {
+      if (node.kind !== "pattern" || node.shape === null) {
         throw new InvariantViolationError(`join node ${valid.planNodeId} creates no Invocation`, { planNodeId: valid.planNodeId });
+      }
+      // The position belongs to the node's actual Pattern and agrees with the operation it names (core `patternPositionDefects`).
+      if (valid.patternPosition !== null) {
+        const defects = patternPositionDefects({ sourcePath: node.sourcePath, shape: node.shape }, valid.patternPosition, valid);
+        if (defects.length > 0) throw new InvariantViolationError(`Pattern position is invalid for PlanNode ${valid.planNodeId}: ${defects.join("; ")}`, { planNodeId: valid.planNodeId, patternPosition: valid.patternPosition, defects });
       }
       if (PLAN_NODE_MACHINE.isTerminal(node.status as never)) {
         throw new ConflictError(`PlanNode ${valid.planNodeId} is ${node.status}`);
@@ -131,12 +139,21 @@ export class InvocationStore {
       }
       requireRow(this.ctx.db.select({ id: agentDefinitionRevisions.id }).from(agentDefinitionRevisions).where(eq(agentDefinitionRevisions.id, valid.agentDefinitionRevisionId)).get(), "AgentDefinitionRevision", valid.agentDefinitionRevisionId);
       if (valid.continuedFromInvocationId !== null) {
-        const previous = requireRow(this.ctx.db.select({ runId: invocations.runId }).from(invocations).where(eq(invocations.id, valid.continuedFromInvocationId)).get(), "Invocation", valid.continuedFromInvocationId);
+        const previous = requireRow(this.ctx.db.select({ runId: invocations.runId, planNodeId: invocations.planNodeId, patternPosition: invocations.patternPosition, status: invocations.status }).from(invocations).where(eq(invocations.id, valid.continuedFromInvocationId)).get(), "Invocation", valid.continuedFromInvocationId);
         assertSameRun("Invocation", valid.continuedFromInvocationId, previous.runId, run.id);
+        // A successor at the same logical position continues from a terminal predecessor of that position.
+        if (valid.patternPosition !== null && previous.planNodeId === valid.planNodeId && canonicalJson(previous.patternPosition) === canonicalJson(valid.patternPosition) && !INVOCATION_MACHINE.isTerminal(previous.status as Invocation["status"])) {
+          throw new ConflictError(`Invocation ${valid.continuedFromInvocationId} at the same position is still ${previous.status}`, { invocationId: valid.continuedFromInvocationId });
+        }
       }
       if (valid.taskIds.length > 0) {
         const rows = this.ctx.db.select({ id: tasks.id, runId: tasks.runId }).from(tasks).where(inArray(tasks.id, valid.taskIds)).all();
         for (const id of valid.taskIds) assertSameRun("Task", id, requireRow(rows.find((r) => r.id === id), "Task", id).runId, run.id);
+      }
+      // At most one active Invocation per logical position of a node: a successor after a blocker shares the position, never concurrently.
+      if (valid.patternPosition !== null) {
+        const active = this.listAtPosition(valid.planNodeId, invocationPositionKey(valid.patternPosition)!).filter((i) => !INVOCATION_MACHINE.isTerminal(i.status));
+        if (active.length > 0) throw new ConflictError(`PlanNode ${valid.planNodeId} already has active Invocation ${active[0]!.id} at position ${invocationPositionKey(valid.patternPosition)}`, { planNodeId: valid.planNodeId, invocationId: active[0]!.id });
       }
       // Invariant 20: at most one active Orchestrator Invocation per Run and one active Coordinator Invocation per node (the schema enforces it too).
       if (valid.role === "orchestrator") {
@@ -372,6 +389,9 @@ export class InvocationStore {
       }
       if (valid.continuedFromInvocationId !== invocation.continuedFromInvocationId) {
         throw new InvariantViolationError("the manifest disagrees with its Invocation's continuedFromInvocationId");
+      }
+      if (canonicalJson(valid.patternPosition) !== canonicalJson(invocation.patternPosition)) {
+        throw new InvariantViolationError("the manifest disagrees with its Invocation's Pattern position");
       }
       if (
         valid.allocationSource !== invocation.allocationSource ||
@@ -616,6 +636,22 @@ export class InvocationStore {
     return this.ctx.db.select().from(invocations).where(and(...conditions)).orderBy(asc(invocations.createdAt), asc(invocations.id)).all().map(invocationToDomain);
   }
 
+  /** Every Invocation of a node at one logical position (by `patternPositionKey`), in creation order: the position's history, of which at most one is active. */
+  listAtPosition(planNodeId: PlanNodeId, positionKey: string): Invocation[] {
+    return this.ctx.db
+      .select()
+      .from(invocations)
+      .where(and(eq(invocations.planNodeId, planNodeId), eq(invocations.patternPositionKey, positionKey)))
+      .orderBy(asc(invocations.createdAt), asc(invocations.id))
+      .all()
+      .map(invocationToDomain);
+  }
+
+  /** The most recently created Invocation at a position, or `null` before the first: the predecessor a successor at that position continues from. */
+  latestAtPosition(planNodeId: PlanNodeId, positionKey: string): Invocation | null {
+    return this.listAtPosition(planNodeId, positionKey).at(-1) ?? null;
+  }
+
   /** The most recently created Invocation of a role on a Plan Node (its logical predecessor for `continuedFromInvocationId`). */
   latestByRole(planNodeId: PlanNodeId, role: InvocationRole): Invocation | null {
     const row = this.ctx.db
@@ -637,6 +673,8 @@ export class InvocationStore {
       purpose: invocation.purpose,
       agentDefinitionRevisionId: invocation.agentDefinitionRevisionId,
       continuedFromInvocationId: invocation.continuedFromInvocationId,
+      patternPosition: invocation.patternPosition,
+      patternPositionKey: invocationPositionKey(invocation.patternPosition),
       taskIds: invocation.taskIds,
       allocCostUsd: invocation.allocation.costUsd,
       allocTokens: invocation.allocation.tokens,

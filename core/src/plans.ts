@@ -66,8 +66,27 @@ export const PLAN_NODE_STATUSES = [
 ] as const;
 export type PlanNodeStatus = (typeof PLAN_NODE_STATUSES)[number];
 
-export const PLAN_NODE_WAIT_REASONS = ["decision", "budget", "provider_capacity", "operator"] as const;
+export const PLAN_NODE_WAIT_REASONS = ["decision", "budget", "provider_capacity", "integration_conflict", "operator"] as const;
 export type PlanNodeWaitReason = (typeof PLAN_NODE_WAIT_REASONS)[number];
+
+/** Why a pattern node ended `failed` (execution-model §5, §7.6, §9.2); recorded on the `plan_node.failed` Event. */
+export const PLAN_NODE_FAILURE_REASONS = [
+  /** The node's Invocation ended `failed` after its permitted Attempts. */
+  "invocation_failed",
+  /** The Invocation returned a valid result declaring the work `failed`. */
+  "result_failed",
+  /** The Invocation returned `blocked` without naming an open Decision of the Run. */
+  "result_blocked",
+  /** An operation names a Task the node cannot own: missing, assigned elsewhere, blocked, or already terminal. */
+  "task_unavailable",
+  /** The node's allocation cannot cover its next Invocation under policy `fail`. */
+  "allocation_exhausted",
+  /** The conflict Task of the node's Changeset ended without resolving the conflict. */
+  "integration_conflict",
+  /** A join node's fan-in policy was not met. */
+  "join_fan_in_failed",
+] as const;
+export type PlanNodeFailureReason = (typeof PLAN_NODE_FAILURE_REASONS)[number];
 
 export const PLAN_EDGE_TYPES = ["sequence", "branch", "fan_in", "retry"] as const;
 export type PlanEdgeType = (typeof PLAN_EDGE_TYPES)[number];
@@ -444,6 +463,7 @@ export const PLAN_REJECTION_CODES = [
   "invalid_agent_definition_revision",
   "invalid_role_binding",
   "invalid_task_reference",
+  "duplicate_task_assignment",
   "invalid_artifact_reference",
   "invalid_decision_reference",
   "invalid_acceptance_criterion_reference",

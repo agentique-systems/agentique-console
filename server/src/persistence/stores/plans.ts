@@ -27,6 +27,7 @@ import {
   type PlanLimits,
   type PlanNode,
   type PlanNodeDefinition,
+  type PlanNodeFailureReason,
   type PlanNodeId,
   type PlanNodeRequirement,
   type PlanNodeScope,
@@ -181,14 +182,15 @@ export interface RevisionMaterialization {
   cancelledNodeIds: PlanNodeId[];
 }
 
-export type PlanNodeCancellationReason = "plan_revision" | "orchestrator" | "operator" | "run_cancelled";
+/** Who or what cancelled a node; `invocation_cancelled` is the runtime ending a node whose Invocation was cancelled. */
+export type PlanNodeCancellationReason = "plan_revision" | "orchestrator" | "operator" | "run_cancelled" | "invocation_cancelled";
 
 export type PlanNodeTransition =
   | { to: "ready" }
   | { to: "running" }
   | { to: "waiting"; waitReason: PlanNodeWaitReason }
   | { to: "succeeded"; outputArtifactIds: ArtifactId[] }
-  | { to: "failed" }
+  | { to: "failed"; reason: PlanNodeFailureReason }
   | { to: "cancelled"; reason: PlanNodeCancellationReason }
   | { to: "skipped" };
 
@@ -200,6 +202,7 @@ function releaseReasonOf(reason: PlanNodeCancellationReason): ReservationRelease
       return "run_cancelled";
     case "orchestrator":
     case "operator":
+    case "invocation_cancelled":
       return "child_terminal";
   }
 }
@@ -641,6 +644,9 @@ export class ExecutionPlanStore {
         }
         case "cancelled":
           payload = { from: current.status, to: "cancelled", reason: transition.reason };
+          break;
+        case "failed":
+          payload = { from: current.status, to: "failed", reason: transition.reason };
           break;
         default:
           break;

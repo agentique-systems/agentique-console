@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { sha256Hex } from "../blob-store.ts";
 import { MemoryContinuationPayloadStore } from "../../provider/continuation-store.ts";
 import { ContinuationService } from "../../provider/continuation.ts";
-import { INVOCATION_ALLOCATION, extendPlan, joinDefinition, nodeInput, openHarness, seedArtifact, seedInvocation, seedManifest, seedRun } from "../test-support.ts";
+import { INVOCATION_ALLOCATION, extendPlan, joinDefinition, nodeInput, openHarness, seedArtifact, seedInvocation, seedManifest, seedRun, seedWorkerNode } from "../test-support.ts";
 
 const result: InvocationResult = { status: "completed", artifactIds: [], tasks: [], evidence: [], summary: "done", openItems: [], blocker: null, runOutcome: null };
 
@@ -173,7 +173,7 @@ describe("attempts", () => {
       seedManifest(h, s, second);
       const resumed = h.stores.invocations.createAttempt({ invocationId: second.id, startMode: "resumed", resumedFromAttemptId: a1.id });
       expect(resumed.resumedFromAttemptId).toBe(a1.id);
-      const unrelated = seedInvocation(h, s, { role: "worker", purpose: "step" });
+      const unrelated = seedInvocation(h, s, { role: "worker", purpose: "step", planNodeId: seedWorkerNode(h, s).id });
       seedManifest(h, s, unrelated);
       expect(() => h.stores.invocations.createAttempt({ invocationId: unrelated.id, startMode: "resumed", resumedFromAttemptId: a1.id })).toThrow(InvariantViolationError);
       expect(() => h.stores.invocations.createAttempt({ invocationId: unrelated.id, startMode: "resumed", resumedFromAttemptId: null })).toThrow(ValidationError);

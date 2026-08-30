@@ -1,6 +1,6 @@
 import { ConflictError, InsufficientCapacityError, InvariantViolationError, ValidationError } from "@agentique-console/core";
 import { describe, expect, it } from "vitest";
-import { coordinatorWorkerDefinition, extendPlan, nodeInput, openHarness, patternDefinition, seedInvocation, seedManifest, seedRequirements, seedRun, SMALL_ALLOCATION } from "../test-support.ts";
+import { coordinatorWorkerDefinition, extendPlan, nodeInput, openHarness, patternDefinition, seedInvocation, seedManifest, seedRequirements, seedRun, seedWorkerNode, SMALL_ALLOCATION } from "../test-support.ts";
 
 describe("budget reservations", () => {
   it("reserves atomically from the parent's unreserved capacity and rejects over-reservation", () => {
@@ -104,7 +104,7 @@ describe("budget reservations", () => {
       expect(before.reserved).toEqual(amount);
 
       const invocation = h.stores.invocations.create(
-        { runId: s.run.id, planNodeId: node.id, role: "worker", purpose: "task", agentDefinitionRevisionId: s.definition.id, continuedFromInvocationId: null, taskIds: [task.id], allocation: amount },
+        { runId: s.run.id, planNodeId: node.id, role: "worker", purpose: "task", agentDefinitionRevisionId: s.definition.id, continuedFromInvocationId: null, patternPosition: { kind: "worker_task", taskId: task.id }, taskIds: [task.id], allocation: amount },
         { fromTaskReservationId: taskReservation.id },
       );
       const rows = h.stores.reservations.listByParent({ type: "plan_node", id: node.id });
@@ -133,22 +133,23 @@ describe("budget reservations", () => {
     const h = openHarness();
     try {
       const s = seedRun(h);
-      const task = h.stores.tasks.create({ runId: s.run.id, planNodeId: s.root.id, origin: "orchestrator", subject: "t", requirementIds: [], requirementRevisionId: null, inputArtifactIds: [], requiredOutputs: [], replacesTaskId: null });
-      const taskReservation = h.stores.reservations.reserveOrdinary({ runId: s.run.id, parent: { type: "plan_node", id: s.root.id }, child: { type: "task", id: task.id }, amount: { costUsd: 1, tokens: 1000, attempts: 1 } });
+      const node = seedWorkerNode(h, s, "coordinator_worker");
+      const task = h.stores.tasks.create({ runId: s.run.id, planNodeId: node.id, origin: "orchestrator", subject: "t", requirementIds: [], requirementRevisionId: null, inputArtifactIds: [], requiredOutputs: [], replacesTaskId: null });
+      const taskReservation = h.stores.reservations.reserveOrdinary({ runId: s.run.id, parent: { type: "plan_node", id: node.id }, child: { type: "task", id: task.id }, amount: { costUsd: 1, tokens: 1000, attempts: 1 } });
       const before = h.ctx.journal.lastSeq();
       // The Invocation names a different allocation than the Task reservation carries.
       expect(() =>
         h.stores.invocations.create(
-          { runId: s.run.id, planNodeId: s.root.id, role: "worker", purpose: "task", agentDefinitionRevisionId: s.definition.id, continuedFromInvocationId: null, taskIds: [task.id], allocation: { costUsd: 2, tokens: 1000, attempts: 1 } },
+          { runId: s.run.id, planNodeId: node.id, role: "worker", purpose: "task", agentDefinitionRevisionId: s.definition.id, continuedFromInvocationId: null, patternPosition: { kind: "worker_task", taskId: task.id }, taskIds: [task.id], allocation: { costUsd: 2, tokens: 1000, attempts: 1 } },
           { fromTaskReservationId: taskReservation.id },
         ),
       ).toThrow(InvariantViolationError);
       expect(h.ctx.journal.lastSeq()).toBe(before);
       expect(h.stores.reservations.get(taskReservation.id).status).toBe("active");
-      expect(h.stores.invocations.listByPlanNode(s.root.id)).toEqual([]);
+      expect(h.stores.invocations.listByPlanNode(node.id)).toEqual([]);
       // Cancelling the Task releases the reservation without an Invocation reservation.
       h.stores.reservations.release(taskReservation.id, "task_cancelled", { costUsd: 0, tokens: 0, attempts: 0 });
-      expect(h.stores.reservations.listByParent({ type: "plan_node", id: s.root.id }).map((r) => r.status)).toEqual(["released"]);
+      expect(h.stores.reservations.listByParent({ type: "plan_node", id: node.id }).map((r) => r.status)).toEqual(["released"]);
     } finally {
       h.close();
     }

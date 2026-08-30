@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "63db78a5-03c3-4442-bd26-1671e16f34dc",
+  "id": "5b70532b-9de5-4a9f-aa31-a0c1338f924e",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "acceptance_criteria": {
@@ -2696,6 +2696,13 @@
           "notNull": true,
           "autoincrement": false
         },
+        "handoff_key": {
+          "name": "handoff_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
         "source": {
           "name": "source",
           "type": "text",
@@ -2761,6 +2768,14 @@
             "created_at"
           ],
           "isUnique": false
+        },
+        "handoffs_run_key": {
+          "name": "handoffs_run_key",
+          "columns": [
+            "run_id",
+            "handoff_key"
+          ],
+          "isUnique": true
         }
       },
       "foreignKeys": {
@@ -2781,6 +2796,10 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {
+        "handoffs_key_shape": {
+          "name": "handoffs_key_shape",
+          "value": "\"handoffs\".\"handoff_key\" GLOB 'sequence:pn_*:pn_*' OR \"handoffs\".\"handoff_key\" GLOB 'chain_step:pn_*:[0-9]*'"
+        },
         "handoffs_status": {
           "name": "handoffs_status",
           "value": "\"handoffs\".\"status\" IN ('pending', 'delivered', 'cancelled')"
@@ -2842,6 +2861,20 @@
         },
         "continued_from_invocation_id": {
           "name": "continued_from_invocation_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "pattern_position": {
+          "name": "pattern_position",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "pattern_position_key": {
+          "name": "pattern_position_key",
           "type": "text",
           "primaryKey": false,
           "notNull": false,
@@ -2994,6 +3027,24 @@
             "allocation_source"
           ],
           "isUnique": false
+        },
+        "invocations_plan_node_position": {
+          "name": "invocations_plan_node_position",
+          "columns": [
+            "plan_node_id",
+            "pattern_position_key",
+            "created_at"
+          ],
+          "isUnique": false
+        },
+        "invocations_active_position": {
+          "name": "invocations_active_position",
+          "columns": [
+            "plan_node_id",
+            "pattern_position_key"
+          ],
+          "isUnique": true,
+          "where": "pattern_position_key IS NOT NULL AND status IN ('pending', 'running', 'waiting')"
         },
         "invocations_active_orchestrator": {
           "name": "invocations_active_orchestrator",
@@ -3157,6 +3208,22 @@
         "invocations_no_self_continue": {
           "name": "invocations_no_self_continue",
           "value": "\"invocations\".\"continued_from_invocation_id\" IS NULL OR \"invocations\".\"continued_from_invocation_id\" <> \"invocations\".\"id\""
+        },
+        "invocations_pattern_position_kind": {
+          "name": "invocations_pattern_position_kind",
+          "value": "\"invocations\".\"pattern_position\" IS NULL OR json_extract(\"invocations\".\"pattern_position\", '$.kind') IN ('orchestrator', 'single', 'chain_step', 'route_selection', 'route_branch', 'parallel_item', 'parallel_aggregation', 'coordinator_turn', 'worker_task', 'producer_round', 'evaluator_round')"
+        },
+        "invocations_pattern_position_present": {
+          "name": "invocations_pattern_position_present",
+          "value": "\"invocations\".\"pattern_position\" IS NOT NULL OR (\"invocations\".\"role\" = 'evaluator' AND \"invocations\".\"purpose\" = 'evaluate')"
+        },
+        "invocations_pattern_position_key_agrees": {
+          "name": "invocations_pattern_position_key_agrees",
+          "value": "(\"invocations\".\"pattern_position\" IS NULL AND \"invocations\".\"pattern_position_key\" IS NULL) OR \"invocations\".\"pattern_position_key\" = (json_extract(\"invocations\".\"pattern_position\", '$.kind') || CASE WHEN json_extract(\"invocations\".\"pattern_position\", '$.index') IS NOT NULL THEN ':' || json_extract(\"invocations\".\"pattern_position\", '$.index') WHEN json_extract(\"invocations\".\"pattern_position\", '$.round') IS NOT NULL THEN ':' || json_extract(\"invocations\".\"pattern_position\", '$.round') WHEN json_extract(\"invocations\".\"pattern_position\", '$.label') IS NOT NULL THEN ':' || json_extract(\"invocations\".\"pattern_position\", '$.label') WHEN json_extract(\"invocations\".\"pattern_position\", '$.taskId') IS NOT NULL THEN ':' || json_extract(\"invocations\".\"pattern_position\", '$.taskId') ELSE '' END)"
+        },
+        "invocations_pattern_position_role": {
+          "name": "invocations_pattern_position_role",
+          "value": "\"invocations\".\"pattern_position\" IS NULL OR (json_extract(\"invocations\".\"pattern_position\", '$.kind') = 'orchestrator' AND \"invocations\".\"role\" = 'orchestrator') OR (json_extract(\"invocations\".\"pattern_position\", '$.kind') IN ('single', 'chain_step', 'route_branch', 'parallel_item', 'parallel_aggregation', 'producer_round') AND \"invocations\".\"role\" = 'worker' AND \"invocations\".\"purpose\" = 'step') OR (json_extract(\"invocations\".\"pattern_position\", '$.kind') = 'worker_task' AND \"invocations\".\"role\" = 'worker' AND \"invocations\".\"purpose\" = 'task') OR (json_extract(\"invocations\".\"pattern_position\", '$.kind') = 'route_selection' AND \"invocations\".\"role\" = 'evaluator' AND \"invocations\".\"purpose\" = 'select') OR (json_extract(\"invocations\".\"pattern_position\", '$.kind') = 'evaluator_round' AND \"invocations\".\"role\" = 'evaluator' AND \"invocations\".\"purpose\" = 'evaluate') OR (json_extract(\"invocations\".\"pattern_position\", '$.kind') = 'coordinator_turn' AND \"invocations\".\"role\" = 'coordinator')"
         }
       }
     },
@@ -3742,7 +3809,7 @@
         },
         "plan_nodes_wait_reason": {
           "name": "plan_nodes_wait_reason",
-          "value": "\"plan_nodes\".\"wait_reason\" IS NULL OR \"plan_nodes\".\"wait_reason\" IN ('decision', 'budget', 'provider_capacity', 'operator')"
+          "value": "\"plan_nodes\".\"wait_reason\" IS NULL OR \"plan_nodes\".\"wait_reason\" IN ('decision', 'budget', 'provider_capacity', 'integration_conflict', 'operator')"
         },
         "plan_nodes_waiting_has_reason": {
           "name": "plan_nodes_waiting_has_reason",
@@ -4818,7 +4885,7 @@
         },
         "runs_wait_reason": {
           "name": "runs_wait_reason",
-          "value": "\"runs\".\"wait_reason\" IS NULL OR \"runs\".\"wait_reason\" IN ('decision', 'budget', 'provider_capacity', 'operator')"
+          "value": "\"runs\".\"wait_reason\" IS NULL OR \"runs\".\"wait_reason\" IN ('decision', 'budget', 'provider_capacity', 'integration_conflict', 'operator')"
         },
         "runs_waiting_has_reason": {
           "name": "runs_waiting_has_reason",

@@ -27,7 +27,7 @@ export const RUN_STATUSES = [
 export type RunStatus = (typeof RUN_STATUSES)[number];
 
 /** Why a Run is `waiting`; recorded exactly when the status is `waiting`. */
-export const RUN_WAIT_REASONS = ["decision", "budget", "provider_capacity", "operator"] as const;
+export const RUN_WAIT_REASONS = ["decision", "budget", "provider_capacity", "integration_conflict", "operator"] as const;
 export type RunWaitReason = (typeof RUN_WAIT_REASONS)[number];
 
 /**

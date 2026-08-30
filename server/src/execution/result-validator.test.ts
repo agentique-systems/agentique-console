@@ -4,7 +4,7 @@
  */
 import type { InvocationResult } from "@agentique-console/core";
 import { describe, expect, it } from "vitest";
-import { openHarness, seedArtifact, seedInvocation, seedManifest, seedRun, seedSnapshot, type Harness, type Seeded } from "../persistence/test-support.ts";
+import { openHarness, seedArtifact, seedInvocation, seedManifest, seedRun, seedSnapshot, seedWorkerNode, type Harness, type Seeded } from "../persistence/test-support.ts";
 import { InvocationResultValidator, type ResultValidationContext } from "./result-validator.ts";
 
 const base: InvocationResult = { status: "completed", artifactIds: [], tasks: [], evidence: [], summary: "done", openItems: [], blocker: null, runOutcome: null };
@@ -12,7 +12,11 @@ const base: InvocationResult = { status: "completed", artifactIds: [], tasks: []
 function context(h: Harness, s: Seeded, overrides: Partial<{ role: "orchestrator" | "worker" | "evaluator" | "coordinator"; purpose: "operator_input" | "step" | "task" | "evaluate" | "decompose"; taskIds: string[]; writes: boolean; changeset: ResultValidationContext["changeset"] }> = {}): ResultValidationContext {
   const role = overrides.role ?? "worker";
   const purpose = overrides.purpose ?? (role === "worker" ? "step" : role === "orchestrator" ? "operator_input" : role === "evaluator" ? "evaluate" : "decompose");
-  const invocation = h.stores.invocations.create({ runId: s.run.id, planNodeId: s.root.id, role, purpose, agentDefinitionRevisionId: s.definition.id, continuedFromInvocationId: null, taskIds: (overrides.taskIds ?? []) as never, allocation: { costUsd: 0.1, tokens: 100, attempts: 1 } });
+  const taskIds = (overrides.taskIds ?? []) as never[];
+  // Each role sits at a position its node's shape defines: the Orchestrator and a Gate Evaluator on the root, a step on a single node, a Task or Coordinator turn on a coordinator_worker node.
+  const node = role === "orchestrator" || role === "evaluator" ? s.root : role === "coordinator" || purpose === "task" ? seedWorkerNode(h, s, "coordinator_worker") : seedWorkerNode(h, s);
+  const patternPosition = role === "orchestrator" ? { kind: "orchestrator" as const } : role === "evaluator" ? null : role === "coordinator" ? { kind: "coordinator_turn" as const } : purpose === "task" ? { kind: "worker_task" as const, taskId: taskIds[0]! } : { kind: "single" as const };
+  const invocation = h.stores.invocations.create({ runId: s.run.id, planNodeId: node.id, role, purpose, agentDefinitionRevisionId: s.definition.id, continuedFromInvocationId: null, patternPosition, taskIds, allocation: { costUsd: 0.1, tokens: 100, attempts: 1 } });
   const manifest = seedManifest(h, s, invocation);
   return { run: h.stores.runs.get(s.run.id), invocation, manifest, writes: overrides.writes ?? false, changeset: overrides.changeset ?? null };
 }

@@ -1,6 +1,6 @@
 import { ConflictError, IllegalTransitionError, InvariantViolationError, ValidationError } from "@agentique-console/core";
 import { describe, expect, it } from "vitest";
-import { openHarness, seedArtifact, seedInvocation, seedRun, seedSnapshot } from "../test-support.ts";
+import { openHarness, seedArtifact, seedInvocation, seedRun, seedSnapshot, seedWorkerNode } from "../test-support.ts";
 
 describe("evaluations and gates", () => {
   it("opens node_exit Gates on pattern nodes only and closes them once", () => {
@@ -25,7 +25,7 @@ describe("evaluations and gates", () => {
     try {
       const s = seedRun(h);
       const gate = h.stores.gates.open({ runId: s.run.id, planNodeId: null, kind: "run_completion", acceptanceCriterionIds: [], snapshotId: null });
-      const worker = seedInvocation(h, s, { role: "worker", purpose: "step" });
+      const worker = seedInvocation(h, s, { role: "worker", purpose: "step", planNodeId: seedWorkerNode(h, s).id });
       const evaluator = seedInvocation(h, s, { role: "evaluator", purpose: "evaluate" });
       const produced = seedArtifact(h, s, "judge me", { invocationId: worker.id });
       const selfProduced = seedArtifact(h, s, "mine", { invocationId: evaluator.id });

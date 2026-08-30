@@ -32,7 +32,7 @@ const resolution = (blocked: Invocation, decision: Decision, outcome: "approve_o
 };
 
 function successor(h: RuntimeHarness, s: RuntimeSeed, blocked: Invocation, inputs: ReturnType<typeof resolution>[]) {
-  return h.preparation.prepare({ runId: s.created.run.id, planNodeId: s.created.root.id, role: "orchestrator", purpose: "decision_resolution", agentDefinitionRevisionId: s.orchestrator.id, continuedFromInvocationId: blocked.id, taskIds: [], patternPosition: null, inputs });
+  return h.preparation.prepare({ runId: s.created.run.id, planNodeId: s.created.root.id, role: "orchestrator", purpose: "decision_resolution", continuedFromInvocationId: blocked.id, patternPosition: { kind: "orchestrator" }, inputs });
 }
 
 /** A blocked Invocation, its `approve_once` Decision, and the pending successor whose manifest carries the grant. */

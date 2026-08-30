@@ -10,11 +10,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { openHarness, seedInvocation, seedManifest, seedRun, type Harness, type Seeded } from "../persistence/test-support.ts";
+import { openHarness, seedInvocation, seedManifest, seedRun, seedWorkerNode, type Harness, type Seeded } from "../persistence/test-support.ts";
 import { ResourceGovernor, type LeaseOutcome } from "./governor.ts";
 
 function attempt(h: Harness, s: Seeded, role: "worker" | "evaluator" = "worker") {
-  const invocation = seedInvocation(h, s, { role, purpose: role === "worker" ? "step" : "evaluate" });
+  const invocation = role === "worker" ? seedInvocation(h, s, { role, purpose: "step", planNodeId: seedWorkerNode(h, s).id }) : seedInvocation(h, s, { role, purpose: "evaluate" });
   seedManifest(h, s, invocation);
   return h.stores.invocations.createAttempt({ invocationId: invocation.id, startMode: "fresh", resumedFromAttemptId: null });
 }

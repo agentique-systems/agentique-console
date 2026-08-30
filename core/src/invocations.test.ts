@@ -57,10 +57,16 @@ describe("purposes", () => {
       purpose: "step",
       agentDefinitionRevisionId: newId("agentDefinitionRevision"),
       continuedFromInvocationId: null,
+      patternPosition: { kind: "single" },
       taskIds: [],
       allocation: { costUsd: 1, tokens: 100, attempts: 2 },
     };
     expect(invocationInputSchema.safeParse(input).success).toBe(true);
+    // The position agrees with the role and purpose; only a Gate Evaluator has none.
+    expect(invocationInputSchema.safeParse({ ...input, patternPosition: { kind: "orchestrator" } }).success).toBe(false);
+    expect(invocationInputSchema.safeParse({ ...input, patternPosition: { kind: "chain_step", index: 2, count: 2 } }).success).toBe(false);
+    expect(invocationInputSchema.safeParse({ ...input, patternPosition: null }).success).toBe(false);
+    expect(invocationInputSchema.safeParse({ ...input, role: "evaluator", purpose: "evaluate", patternPosition: null }).success).toBe(true);
     expect(invocationInputSchema.safeParse({ ...input, purpose: "turn" }).success).toBe(false);
     expect(invocationInputSchema.safeParse({ ...input, purpose: "chat" }).success).toBe(false);
     expect(invocationInputSchema.safeParse({ ...input, purpose: "evaluate" }).success).toBe(false);
@@ -77,8 +83,8 @@ describe("purposes", () => {
       taskIds: [],
       allocation: { costUsd: 1, tokens: 100, attempts: 2 },
     };
-    const synthesis = { ...base, role: "orchestrator", purpose: "final_synthesis", allocationSource: "run_final_reserve", finalReserveUse: "final_synthesis" };
-    const completion = { ...base, role: "evaluator", purpose: "evaluate", allocationSource: "run_final_reserve", finalReserveUse: "run_completion" };
+    const synthesis = { ...base, role: "orchestrator", purpose: "final_synthesis", patternPosition: { kind: "orchestrator" }, allocationSource: "run_final_reserve", finalReserveUse: "final_synthesis" };
+    const completion = { ...base, role: "evaluator", purpose: "evaluate", patternPosition: null, allocationSource: "run_final_reserve", finalReserveUse: "run_completion" };
     expect(invocationInputSchema.safeParse(synthesis).success).toBe(true);
     expect(invocationInputSchema.safeParse(completion).success).toBe(true);
     // Source and use go together.
@@ -94,7 +100,7 @@ describe("purposes", () => {
     expect(invocationInputSchema.safeParse({ ...base, role: "coordinator", purpose: "decompose", allocationSource: "run_final_reserve", finalReserveUse: "final_synthesis" }).success).toBe(false);
     // A final-reserve Invocation executes no Task; an ordinary evaluate Invocation is plan_node by default.
     expect(invocationInputSchema.safeParse({ ...completion, taskIds: [newId("task")] }).success).toBe(false);
-    expect(invocationInputSchema.safeParse({ ...base, role: "evaluator", purpose: "evaluate" }).success).toBe(true);
+    expect(invocationInputSchema.safeParse({ ...base, role: "evaluator", purpose: "evaluate", patternPosition: null }).success).toBe(true);
     expect(invocationFundingDefects({ role: "evaluator", purpose: "select", allocationSource: "run_final_reserve", finalReserveUse: "run_completion" })).toHaveLength(1);
     expect(invocationFundingDefects({ role: "worker", purpose: "step", allocationSource: "plan_node", finalReserveUse: null })).toEqual([]);
   });
@@ -110,6 +116,7 @@ describe("invocation record", () => {
       purpose: "node_result",
       agentDefinitionRevisionId: newId("agentDefinitionRevision"),
       continuedFromInvocationId: newId("invocation"),
+      patternPosition: { kind: "orchestrator" },
       taskIds: [],
       allocation: { costUsd: 1, tokens: 100, attempts: 2 },
       allocationSource: "plan_node",
@@ -259,7 +266,7 @@ describe("context manifest", () => {
     modelPolicy: { model: "claude-fable-5", effort: "medium", maxContextOccupancy: 0.8 },
     role: "worker",
     purpose: "step",
-    patternPosition: "chain step 1 of 2",
+    patternPosition: { kind: "chain_step", index: 0, count: 2 },
     continuedFromInvocationId: null,
     runId: newId("run"),
     planNodeId: newId("planNode"),
@@ -296,7 +303,9 @@ describe("context manifest", () => {
     expect(contextManifestContentSchema.safeParse({ ...content, capabilities: { tools: ["write"], mcpServers: [] } }).success).toBe(false);
     // Runtime tools are restricted by role.
     expect(contextManifestContentSchema.safeParse({ ...content, runtimeTools: ["revise_execution_plan"] }).success).toBe(false);
-    expect(contextManifestContentSchema.safeParse({ ...content, role: "orchestrator", purpose: "operator_input", runtimeTools: ["revise_execution_plan", "return_result"] }).success).toBe(true);
+    expect(contextManifestContentSchema.safeParse({ ...content, role: "orchestrator", purpose: "operator_input", patternPosition: { kind: "orchestrator" }, runtimeTools: ["revise_execution_plan", "return_result"] }).success).toBe(true);
+    // The typed position must agree with the role and purpose.
+    expect(contextManifestContentSchema.safeParse({ ...content, role: "orchestrator", purpose: "operator_input", runtimeTools: ["return_result"] }).success).toBe(false);
     expect(contextManifestContentSchema.safeParse({ ...content, role: "evaluator", purpose: "evaluate", runtimeTools: ["update_task"] }).success).toBe(false);
     expect(contextManifestContentSchema.safeParse({ ...content, runtimeTools: ["peer_message"] }).success).toBe(false);
     // Funding agrees.

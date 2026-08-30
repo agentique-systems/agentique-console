@@ -319,6 +319,18 @@ class Compilation {
     options: NodeOptions,
     scope: PlanNodeScope | null,
   ): void {
+    // An executable Task is owned by exactly one operation of a node: two chain steps or two parallel items naming the
+    // same Task would each own and transition it, which no result application can reconcile.
+    if (shape.pattern === "chain" || shape.pattern === "parallel") {
+      const owners = new Map<string, number>();
+      operations.forEach((operation, index) => {
+        for (const taskId of operation.input.taskIds) {
+          const first = owners.get(taskId);
+          if (first !== undefined) reject("duplicate_task_assignment", `Task ${taskId} is assigned to operations ${first} and ${index} of the ${shape.pattern}; an executable Task belongs to exactly one`, key);
+          owners.set(taskId, index);
+        }
+      });
+    }
     const definition: PatternPlanNodeDefinition = {
       kind: "pattern",
       pattern: shape.pattern,

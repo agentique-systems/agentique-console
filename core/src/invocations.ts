@@ -24,6 +24,7 @@ import type {
   TaskId,
 } from "./ids.ts";
 import { PLAN_NODE_STATUSES, planRejectionReasonSchema, type PlanNodeStatus, type PlanRejectionReason } from "./plans.ts";
+import { PATTERN_POSITION_BINDINGS, patternPositionKey, patternPositionSchema, type PatternPosition } from "./pattern-positions.ts";
 import { acceptanceCheckSchema, evidenceSchema, REQUIREMENT_STATUSES, type AcceptanceCheck, type Evidence, type RequirementStatus } from "./requirements.ts";
 import { agentCapabilitiesSchema, modelPolicySchema, toolPolicySchema, type AgentCapabilities, type ModelPolicy, type ToolPolicy } from "./agents.ts";
 import { defineStateMachine } from "./transitions.ts";
@@ -305,6 +306,12 @@ export interface Invocation {
   purpose: InvocationPurpose;
   agentDefinitionRevisionId: AgentDefinitionRevisionId;
   continuedFromInvocationId: InvocationId | null;
+  /**
+   * The canonical position inside the node's Pattern, owned by the Pattern
+   * runtime; `null` only for a Gate Evaluator Invocation (purpose
+   * `evaluate` outside a Pattern position).
+   */
+  patternPosition: PatternPosition | null;
   taskIds: TaskId[];
   /** The explicit allocation reserved before the Invocation starts, from the source named by `allocationSource`. */
   allocation: Allocation;
@@ -342,6 +349,7 @@ export const invocationSchema: z.ZodType<Invocation> = z
     purpose: z.enum(INVOCATION_PURPOSES),
     agentDefinitionRevisionId: idSchema("agentDefinitionRevision"),
     continuedFromInvocationId: idSchema("invocation").nullable(),
+    patternPosition: patternPositionSchema.nullable(),
     taskIds: uniqueIds(idSchema("task")),
     allocation: allocationSchema,
     allocationSource: z.enum(INVOCATION_ALLOCATION_SOURCES),
@@ -396,7 +404,34 @@ export const invocationSchema: z.ZodType<Invocation> = z
   .refine((i) => i.allocationSource === "plan_node" || i.taskIds.length === 0, {
     message: "a final-reserve Invocation executes no Task",
     path: ["taskIds"],
+  })
+  .refine((i) => patternPositionDefectsForInvocation(i).length === 0, {
+    message: "the Pattern position agrees with the Invocation's role and purpose",
+    path: ["patternPosition"],
   });
+
+/**
+ * Why a position disagrees with an Invocation's own role and purpose, from
+ * the Invocation alone (the node shape is checked by the store): a
+ * positioned Invocation holds the position's role and fixed purpose; a
+ * position is absent only for a Gate Evaluator (`evaluate` outside a
+ * Pattern position).
+ */
+export function patternPositionDefectsForInvocation(invocation: { role: InvocationRole; purpose: InvocationPurpose; patternPosition: PatternPosition | null }): string[] {
+  if (invocation.patternPosition === null) {
+    return invocation.role === "evaluator" && invocation.purpose === "evaluate" ? [] : ["every Invocation but a Gate Evaluator holds a Pattern position"];
+  }
+  const binding = PATTERN_POSITION_BINDINGS[invocation.patternPosition.kind];
+  const defects: string[] = [];
+  if (invocation.role !== binding.role) defects.push(`the ${invocation.patternPosition.kind} position holds the ${binding.role} role, not ${invocation.role}`);
+  if (binding.purpose !== null && invocation.purpose !== binding.purpose) defects.push(`the ${invocation.patternPosition.kind} position has purpose ${binding.purpose}, not ${invocation.purpose}`);
+  return defects;
+}
+
+/** The position key persisted beside the typed position, or `null` for a position-less Invocation. */
+export function invocationPositionKey(position: PatternPosition | null): string | null {
+  return position === null ? null : patternPositionKey(position);
+}
 
 export interface InvocationInput {
   runId: RunId;
@@ -405,6 +440,7 @@ export interface InvocationInput {
   purpose: InvocationPurpose;
   agentDefinitionRevisionId: AgentDefinitionRevisionId;
   continuedFromInvocationId: InvocationId | null;
+  patternPosition: PatternPosition | null;
   taskIds: TaskId[];
   allocation: Allocation;
   /** Defaults to `plan_node`; `run_final_reserve` requires a `finalReserveUse`. */
@@ -420,6 +456,7 @@ export const invocationInputSchema: z.ZodType<InvocationInput> = z
     purpose: z.enum(INVOCATION_PURPOSES),
     agentDefinitionRevisionId: idSchema("agentDefinitionRevision"),
     continuedFromInvocationId: idSchema("invocation").nullable(),
+    patternPosition: patternPositionSchema.nullable(),
     taskIds: uniqueIds(idSchema("task")),
     allocation: allocationSchema,
     allocationSource: z.enum(INVOCATION_ALLOCATION_SOURCES).optional(),
@@ -440,6 +477,10 @@ export const invocationInputSchema: z.ZodType<InvocationInput> = z
   .refine((i) => (i.allocationSource ?? "plan_node") === "plan_node" || i.taskIds.length === 0, {
     message: "a final-reserve Invocation executes no Task",
     path: ["taskIds"],
+  })
+  .refine((i) => patternPositionDefectsForInvocation(i).length === 0, {
+    message: "the Pattern position agrees with the Invocation's role and purpose",
+    path: ["patternPosition"],
   });
 
 export type InvocationTransition =
@@ -872,7 +913,8 @@ export interface ContextManifestContent {
   modelPolicy: ModelPolicy;
   role: InvocationRole;
   purpose: InvocationPurpose;
-  patternPosition: string | null;
+  /** The typed Pattern position the Invocation occupies; the renderer projects it to one line. */
+  patternPosition: PatternPosition | null;
   continuedFromInvocationId: InvocationId | null;
   runId: RunId;
   planNodeId: PlanNodeId;
@@ -917,7 +959,7 @@ export const contextManifestContentSchema: z.ZodType<ContextManifestContent> = z
     modelPolicy: modelPolicySchema,
     role: z.enum(INVOCATION_ROLES),
     purpose: z.enum(INVOCATION_PURPOSES),
-    patternPosition: nonEmptyString.nullable(),
+    patternPosition: patternPositionSchema.nullable(),
     continuedFromInvocationId: idSchema("invocation").nullable(),
     runId: idSchema("run"),
     planNodeId: idSchema("planNode"),
@@ -971,6 +1013,7 @@ export const contextManifestContentSchema: z.ZodType<ContextManifestContent> = z
     approvedCalls: z.array(approvedToolCallSchema).refine(sortedIds("callDigest"), { message: "approved calls are ordered by digest" }),
   })
   .refine((m) => PURPOSES_BY_ROLE[m.role].includes(m.purpose), { message: "purpose must belong to the role", path: ["purpose"] })
+  .refine((m) => patternPositionDefectsForInvocation(m).length === 0, { message: "the Pattern position agrees with the role and purpose", path: ["patternPosition"] })
   .refine(
     (m) =>
       m.approvedCalls.every((call) =>

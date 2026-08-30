@@ -12,10 +12,11 @@ import {
   type RunId,
   type RunInput,
   type RunTransition,
+  type ChangesetId,
   type SnapshotId,
 } from "@agentique-console/core";
 import type { PersistenceContext } from "../context.ts";
-import { runs, snapshots } from "../schema.ts";
+import { changesets, runs, snapshots } from "../schema.ts";
 import type { ConversationStore } from "./conversations.ts";
 import { assertSameRun, loadConversationRef, requireRow, runScope, writeMeta, type WriteOptions } from "./support.ts";
 
@@ -249,6 +250,35 @@ export class RunStore {
         })
         .where(eq(runs.id, id))
         .run();
+      return next;
+    });
+  }
+
+  /**
+   * Advances the Run's integration Snapshot after one Changeset was
+   * integrated, journaling `run.integrated`. The Snapshot belongs to the
+   * Run's Workspace and the Changeset to the Run; the Changeset's own
+   * transition is recorded by its store in the same transaction.
+   */
+  recordIntegration(id: RunId, state: { changesetId: ChangesetId; integrationSnapshotId: SnapshotId }, options?: WriteOptions): Run {
+    return this.ctx.tx.write(() => {
+      const current = this.get(id);
+      if (RUN_MACHINE.isTerminal(current.status)) throw new ConflictError(`Run ${id} has ended`);
+      const snapshot = requireRow(this.ctx.db.select({ workspaceId: snapshots.workspaceId }).from(snapshots).where(eq(snapshots.id, state.integrationSnapshotId)).get(), "Snapshot", state.integrationSnapshotId);
+      if (snapshot.workspaceId !== current.workspaceId) throw new ConflictError(`Snapshot ${state.integrationSnapshotId} belongs to another Workspace`);
+      const changeset = requireRow(this.ctx.db.select({ runId: changesets.runId }).from(changesets).where(eq(changesets.id, state.changesetId)).get(), "Changeset", state.changesetId);
+      assertSameRun("Changeset", state.changesetId, changeset.runId, id);
+      const next: Run = { ...current, integrationSnapshotId: state.integrationSnapshotId, updatedAt: this.ctx.clock() };
+      parseOrThrow(runSchema, next, "Run");
+      this.ctx.journal.append({
+        type: "run.integrated",
+        scope: runScope(current),
+        subjectType: "run",
+        subjectId: id,
+        payload: { runId: id, changesetId: state.changesetId, integrationSnapshotId: state.integrationSnapshotId },
+        ...writeMeta(options),
+      });
+      this.ctx.db.update(runs).set({ integrationSnapshotId: next.integrationSnapshotId, updatedAt: next.updatedAt }).where(eq(runs.id, id)).run();
       return next;
     });
   }

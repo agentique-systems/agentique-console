@@ -1,6 +1,6 @@
 import { ConflictError, InsufficientCapacityError, InvariantViolationError, ValidationError, type PlanNodeId } from "@agentique-console/core";
 import { describe, expect, it } from "vitest";
-import { extendPlan, joinDefinition, nodeInput, openHarness, patternDefinition, seedRequirements, seedRun } from "../test-support.ts";
+import { extendPlan, joinDefinition, nodeInput, openHarness, patternDefinition, seedRequirements, seedRun, seedWorkerNode } from "../test-support.ts";
 
 describe("execution plan revisions", () => {
   it("appends numbered, immutable source revisions and rejects unknown Patterns", () => {
@@ -24,10 +24,11 @@ describe("execution plan revisions", () => {
     const h = openHarness();
     try {
       const s = seedRun(h);
-      const worker = h.stores.invocations.create({ runId: s.run.id, planNodeId: s.root.id, role: "worker", purpose: "step", agentDefinitionRevisionId: s.definition.id, continuedFromInvocationId: null, taskIds: [], allocation: { costUsd: 1, tokens: 10, attempts: 1 } });
+      const workerNode = seedWorkerNode(h, s);
+      const worker = h.stores.invocations.create({ runId: s.run.id, planNodeId: workerNode.id, role: "worker", purpose: "step", agentDefinitionRevisionId: s.definition.id, continuedFromInvocationId: null, patternPosition: { kind: "single" }, taskIds: [], allocation: { costUsd: 1, tokens: 10, attempts: 1 } });
       expect(() => h.stores.plans.appendRevision(s.run.id, { version: 1, expressions: [] }, worker.id)).toThrow(/only the Orchestrator/);
       const other = seedRun(h);
-      const foreign = h.stores.invocations.create({ runId: other.run.id, planNodeId: other.root.id, role: "orchestrator", purpose: "operator_input", agentDefinitionRevisionId: other.definition.id, continuedFromInvocationId: null, taskIds: [], allocation: { costUsd: 1, tokens: 10, attempts: 1 } });
+      const foreign = h.stores.invocations.create({ runId: other.run.id, planNodeId: other.root.id, role: "orchestrator", purpose: "operator_input", agentDefinitionRevisionId: other.definition.id, continuedFromInvocationId: null, patternPosition: { kind: "orchestrator" }, taskIds: [], allocation: { costUsd: 1, tokens: 10, attempts: 1 } });
       expect(() => h.stores.plans.appendRevision(s.run.id, { version: 1, expressions: [] }, foreign.id)).toThrow(InvariantViolationError);
     } finally {
       h.close();
@@ -199,7 +200,7 @@ describe("revision membership and edges", () => {
       extendPlan(h, s, [p, j], [{ type: "fan_in", sourceNodeId: p.id, targetNodeId: j.id, position: 0 }]);
       h.stores.plans.transitionNode(j.id, { to: "ready" });
       expect(() => h.stores.plans.transitionNode(j.id, { to: "running" })).toThrow(ValidationError);
-      expect(h.stores.plans.transitionNode(j.id, { to: "failed" }).status).toBe("failed");
+      expect(h.stores.plans.transitionNode(j.id, { to: "failed", reason: "join_fan_in_failed" }).status).toBe("failed");
       h.stores.plans.transitionNode(p.id, { to: "ready" });
       expect(() => h.stores.plans.transitionNode(p.id, { to: "succeeded", outputArtifactIds: [] })).toThrow(ValidationError);
       h.stores.plans.transitionNode(p.id, { to: "running" });

@@ -1,14 +1,17 @@
 /**
  * Atomic Invocation preparation (execution-model §6.1, §6.2). One root
- * transaction validates the requested logical Invocation, resolves the
- * executable Agent Definition revision, computes the effective capability
- * and Tool Policy, obtains the starting Snapshot and worktree through the
- * execution-workspace port, creates the Invocation with its Budget
- * reservation (Plan Node allocation, Task reservation transfer, or the Run
- * final reserve), marks the delivered Handoffs, starts its Tasks, assembles
- * and persists exactly one Context Manifest, and writes every Event. No
- * caller sequences these by hand; a failure anywhere rolls everything back
- * and runs the port's compensation; no provider call happens here.
+ * transaction validates the requested logical Invocation, resolves its
+ * operation from the node's immutable shape and the typed Pattern position
+ * (never from a caller-supplied template), resolves the executable Agent
+ * Definition revision, computes the effective capability and Tool Policy,
+ * obtains the starting Snapshot and worktree through the execution-workspace
+ * port, creates the Invocation with its Budget reservation (Plan Node
+ * allocation, Task reservation transfer, or the Run final reserve), marks
+ * the delivered Handoffs, starts its owned Tasks, assembles and persists
+ * exactly one Context Manifest carrying exactly that operation's input, and
+ * writes every Event. No caller sequences these by hand; a failure anywhere
+ * rolls everything back and runs the port's compensation; no provider call
+ * happens here.
  */
 import {
   addAllocation,
@@ -16,6 +19,7 @@ import {
   ATTEMPT_MACHINE,
   ConflictError,
   effectiveCapabilityPolicy,
+  EMPTY_MANIFEST_TEMPLATE,
   FINAL_RESERVE_USES,
   grantsWriteCapability,
   idSchema,
@@ -25,8 +29,12 @@ import {
   manifestInputSchema,
   MANIFEST_RENDERER_VERSION,
   nonEmptyString,
+  operationAt,
   orchestratorDefinitionDefects,
   parseOrThrow,
+  patternPositionDefects,
+  patternPositionKey,
+  patternPositionSchema,
   positiveCount,
   ROOT_SOURCE_PATH,
   RUN_MACHINE,
@@ -36,6 +44,7 @@ import {
   type Allocation,
   type ArtifactId,
   type BudgetReservationId,
+  type CompiledOperation,
   type ContextManifest,
   type EffectiveCapabilityPolicy,
   type FinalReserveUse,
@@ -45,7 +54,9 @@ import {
   type InvocationPurpose,
   type InvocationRole,
   type ManifestInput,
+  type ManifestTemplate,
   type PatternPlanNode,
+  type PatternPosition,
   type PlanNodeId,
   type Run,
   type RunId,
@@ -78,10 +89,21 @@ export interface InvocationPreparationRequest {
   planNodeId: PlanNodeId;
   role: InvocationRole;
   purpose: InvocationPurpose;
-  agentDefinitionRevisionId: string;
+  /**
+   * The typed Pattern position the Invocation occupies; the operation
+   * (Agent Definition revision, exact input, role) is resolved from the
+   * node shape at this position. `null` only for a Gate Evaluator.
+   */
+  patternPosition: PatternPosition | null;
+  /** Required for a position-less Invocation; for a positioned one it is derived from the operation and, when given, must agree with it. */
+  agentDefinitionRevisionId?: string;
   continuedFromInvocationId: InvocationId | null;
-  taskIds: TaskId[];
-  patternPosition: string | null;
+  /**
+   * The Tasks the Invocation owns and executes: exactly the operation's
+   * `input.taskIds` (the default) or, for a `worker_task` position, the one
+   * Task the position names. Never a wider set.
+   */
+  taskIds?: TaskId[];
   /** Defaults to the Agent Definition revision's default allocation. */
   allocation?: Allocation;
   /** Defaults to the revision's default wall-clock limit, bounded by the node's. */
@@ -99,10 +121,10 @@ const requestSchema: z.ZodType<InvocationPreparationRequest> = z.strictObject({
   planNodeId: idSchema("planNode"),
   role: z.enum(INVOCATION_ROLES),
   purpose: z.enum(INVOCATION_PURPOSES),
-  agentDefinitionRevisionId: nonEmptyString,
+  patternPosition: patternPositionSchema.nullable(),
+  agentDefinitionRevisionId: nonEmptyString.optional(),
   continuedFromInvocationId: idSchema("invocation").nullable(),
-  taskIds: uniqueIds(idSchema("task")),
-  patternPosition: nonEmptyString.nullable(),
+  taskIds: uniqueIds(idSchema("task")).optional(),
   allocation: allocationSchema.optional(),
   maxWallClockMs: positiveCount.nullable().optional(),
   funding: fundingSchema.optional(),
@@ -129,6 +151,15 @@ export interface InvocationPreparationConfig {
   workspacePolicy: WorkspaceCapabilityPolicy;
 }
 
+/** The operation an Invocation executes, resolved from the persisted node shape and the typed position. */
+interface ResolvedOperation {
+  operation: CompiledOperation | null;
+  agentDefinitionRevisionId: string;
+  /** Exactly this operation's input: the only template the manifest receives. */
+  input: ManifestTemplate;
+  taskIds: TaskId[];
+}
+
 export class InvocationPreparationService {
   private readonly assembler: ContextManifestAssembler;
 
@@ -148,12 +179,13 @@ export class InvocationPreparationService {
       const run = this.stores.runs.get(valid.runId);
       if (RUN_MACHINE.isTerminal(run.status)) throw new ConflictError(`Run ${run.id} is ${run.status}; no Invocation can be prepared`);
       const node = this.node(run, valid);
-      const revision = this.revision(run, valid);
+      const resolved = this.operation(node, valid);
+      const revision = this.revision(run, valid, resolved.agentDefinitionRevisionId);
       const policy = effectiveCapabilityPolicy(revision, valid.role, this.config.workspacePolicy);
+      const tasks = this.tasks(run, node, valid, resolved.taskIds);
       this.assertContinuation(run, node, valid);
-      const tasks = this.tasks(run, node, valid);
       const funding = valid.funding ?? { source: "plan_node" };
-      this.assertFunding(node, valid, funding);
+      this.assertFunding(node, valid, resolved.taskIds, funding);
       const allocation = valid.allocation ?? revision.defaultLimits.allocation;
       const maxWallClockMs = this.wallClock(node, revision, valid.maxWallClockMs);
 
@@ -165,7 +197,8 @@ export class InvocationPreparationService {
           purpose: valid.purpose,
           agentDefinitionRevisionId: revision.id,
           continuedFromInvocationId: valid.continuedFromInvocationId,
-          taskIds: valid.taskIds,
+          patternPosition: valid.patternPosition,
+          taskIds: resolved.taskIds,
           allocation,
           allocationSource: funding.source === "run_final_reserve" ? "run_final_reserve" : "plan_node",
           finalReserveUse: funding.source === "run_final_reserve" ? funding.use : null,
@@ -193,7 +226,7 @@ export class InvocationPreparationService {
         invocation,
         revision,
         policy,
-        patternPosition: valid.patternPosition,
+        operationInput: resolved.input,
         inputs: valid.inputs ?? [],
         handoffIds: valid.handoffIds ?? [],
         artifactIds: valid.artifactIds ?? [],
@@ -223,8 +256,37 @@ export class InvocationPreparationService {
     return node;
   }
 
-  private revision(run: Run, request: InvocationPreparationRequest): AgentDefinitionRevision {
-    const resolved = resolveExecutableAgentDefinitionRevision(this.stores, { workspaceId: run.workspaceId, conversationId: run.conversationId }, request.agentDefinitionRevisionId);
+  /**
+   * The operation at the typed position of the node's immutable shape. A
+   * positioned Invocation runs exactly that operation's Agent Definition
+   * revision with exactly its input and owns exactly its Tasks; a
+   * position-less Gate Evaluator names its revision explicitly, receives no
+   * operation input, and owns no Task.
+   */
+  private operation(node: PatternPlanNode, request: InvocationPreparationRequest): ResolvedOperation {
+    if (request.patternPosition === null) {
+      if (!(request.role === "evaluator" && request.purpose === "evaluate")) throw new ValidationError("every Invocation but a Gate Evaluator names its Pattern position", { role: request.role, purpose: request.purpose });
+      if (request.agentDefinitionRevisionId === undefined) throw new ValidationError("a position-less Evaluator Invocation names its Agent Definition revision");
+      if ((request.taskIds ?? []).length > 0) throw new ValidationError("an Evaluator Invocation holds no Task");
+      return { operation: null, agentDefinitionRevisionId: request.agentDefinitionRevisionId, input: { ...EMPTY_MANIFEST_TEMPLATE }, taskIds: [] };
+    }
+    const operation = operationAt(node.shape, request.patternPosition);
+    const defects = patternPositionDefects(node, request.patternPosition, { role: request.role, purpose: request.purpose, agentDefinitionRevisionId: (request.agentDefinitionRevisionId ?? operation?.agentDefinitionRevisionId ?? "agdr_none") as never });
+    if (operation === null || defects.length > 0) {
+      throw new ValidationError(`Pattern position is invalid for PlanNode ${node.id}: ${defects.join("; ")}`, { planNodeId: node.id, patternPosition: request.patternPosition, defects });
+    }
+    const owned = request.patternPosition.kind === "worker_task" ? [request.patternPosition.taskId] : [...operation.input.taskIds].sort();
+    if (request.taskIds !== undefined) {
+      const requested = [...request.taskIds].sort();
+      if (requested.length !== owned.length || requested.some((id, i) => id !== owned[i])) {
+        throw new ValidationError(`an Invocation at ${patternPositionKey(request.patternPosition)} owns exactly the operation's Tasks`, { requested, owned });
+      }
+    }
+    return { operation, agentDefinitionRevisionId: operation.agentDefinitionRevisionId, input: operation.input, taskIds: owned };
+  }
+
+  private revision(run: Run, request: InvocationPreparationRequest, agentDefinitionRevisionId: string): AgentDefinitionRevision {
+    const resolved = resolveExecutableAgentDefinitionRevision(this.stores, { workspaceId: run.workspaceId, conversationId: run.conversationId }, agentDefinitionRevisionId);
     if (!resolved.ok) throw new ValidationError(`the Agent Definition revision is not executable by this Run: ${resolved.message}`, { revisionId: resolved.revisionId });
     const revision = this.stores.agents.getRevision(resolved.revision.id);
     if (request.role === "orchestrator") {
@@ -236,16 +298,17 @@ export class InvocationPreparationService {
 
   /**
    * `continuedFromInvocationId` must belong to the same Run and be the
-   * correct logical predecessor: the latest Invocation of the same role on
-   * the same node (the previous Orchestrator turn, Coordinator turn, or
-   * producer round), and no longer active. A first Orchestrator or
-   * Coordinator Invocation continues from nothing.
+   * correct logical predecessor: for a positioned Invocation, the latest
+   * Invocation at the same position of the same node (the previous
+   * Orchestrator turn, Coordinator turn, or the blocked predecessor of the
+   * same step), and no longer active. The first Invocation at a position
+   * continues from nothing; a later one always names its predecessor.
    */
   private assertContinuation(run: Run, node: PatternPlanNode, request: InvocationPreparationRequest): void {
-    const latest = this.stores.invocations.latestByRole(node.id, request.role);
+    const latest = request.patternPosition === null ? null : this.stores.invocations.latestAtPosition(node.id, patternPositionKey(request.patternPosition));
     if (request.continuedFromInvocationId === null) {
-      if ((request.role === "orchestrator" || request.role === "coordinator") && latest !== null) {
-        throw new ValidationError(`a later ${request.role} Invocation records continuedFromInvocationId ${latest.id}`, { latestInvocationId: latest.id });
+      if (latest !== null) {
+        throw new ValidationError(`a later Invocation at ${patternPositionKey(request.patternPosition!)} records continuedFromInvocationId ${latest.id}`, { latestInvocationId: latest.id });
       }
       return;
     }
@@ -254,17 +317,17 @@ export class InvocationPreparationService {
     if (previous.planNodeId !== node.id) throw new ValidationError(`Invocation ${previous.id} belongs to PlanNode ${previous.planNodeId}, not ${node.id}`);
     if (previous.role !== request.role) throw new ValidationError(`Invocation ${previous.id} holds the ${previous.role} role, not ${request.role}`);
     if (!INVOCATION_MACHINE.isTerminal(previous.status)) throw new ConflictError(`Invocation ${previous.id} is still ${previous.status}`);
-    if ((request.role === "orchestrator" || request.role === "coordinator") && latest !== null && latest.id !== previous.id) {
-      throw new ValidationError(`Invocation ${previous.id} is not the latest ${request.role} Invocation (${latest.id})`, { latestInvocationId: latest.id });
+    if (latest !== null && latest.id !== previous.id) {
+      throw new ValidationError(`Invocation ${previous.id} is not the latest ${request.role} Invocation at ${patternPositionKey(request.patternPosition!)} (${latest.id})`, { latestInvocationId: latest.id });
     }
     const active = this.stores.invocations.activeAttempt(previous.id);
     if (active && !ATTEMPT_MACHINE.isTerminal(active.status)) throw new ConflictError(`Invocation ${previous.id} still has an active Attempt`);
   }
 
-  private tasks(run: Run, node: PatternPlanNode, request: InvocationPreparationRequest) {
-    if (request.purpose === "task" && request.taskIds.length !== 1) throw new ValidationError("a task Invocation executes exactly one Task", { taskIds: request.taskIds });
-    if (request.role === "evaluator" && request.taskIds.length > 0) throw new ValidationError("an Evaluator Invocation holds no Task");
-    return request.taskIds.map((id) => {
+  private tasks(run: Run, node: PatternPlanNode, request: InvocationPreparationRequest, taskIds: TaskId[]) {
+    if (request.purpose === "task" && taskIds.length !== 1) throw new ValidationError("a task Invocation executes exactly one Task", { taskIds });
+    if (request.role === "evaluator" && taskIds.length > 0) throw new ValidationError("an Evaluator Invocation holds no Task");
+    return taskIds.map((id) => {
       const task = this.stores.tasks.get(id);
       if (task.runId !== run.id) throw new ValidationError(`Task ${id} belongs to Run ${task.runId}, not ${run.id}`);
       if (task.planNodeId !== null && task.planNodeId !== node.id) throw new ValidationError(`Task ${id} belongs to PlanNode ${task.planNodeId}, not ${node.id}`);
@@ -273,17 +336,18 @@ export class InvocationPreparationService {
     });
   }
 
-  private assertFunding(node: PatternPlanNode, request: InvocationPreparationRequest, funding: InvocationFunding): void {
+  private assertFunding(node: PatternPlanNode, request: InvocationPreparationRequest, taskIds: TaskId[], funding: InvocationFunding): void {
     if (funding.source === "run_final_reserve") {
       if (node.sourcePath !== ROOT_SOURCE_PATH) throw new ValidationError("a final-reserve Invocation belongs to the root Plan Node");
-      if (request.taskIds.length > 0) throw new ValidationError("a final-reserve Invocation executes no Task");
+      if (taskIds.length > 0) throw new ValidationError("a final-reserve Invocation executes no Task");
     }
     if (funding.source === "task_transfer") {
       const reservation = this.stores.reservations.get(funding.taskReservationId);
-      if (reservation.child.type !== "task" || !request.taskIds.includes(reservation.child.id)) {
+      if (reservation.child.type !== "task" || !taskIds.includes(reservation.child.id)) {
         throw new ValidationError(`reservation ${funding.taskReservationId} is not a reservation of the Invocation's Task`);
       }
     }
+    if (request.role === "orchestrator" && request.patternPosition?.kind !== "orchestrator") throw new ValidationError("an Orchestrator Invocation occupies the orchestrator position");
   }
 
   private wallClock(node: PatternPlanNode, revision: AgentDefinitionRevision, requested: number | null | undefined): number | null {

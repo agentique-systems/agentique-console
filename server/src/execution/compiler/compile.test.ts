@@ -461,8 +461,14 @@ describe("allocation and references (rule 8, invariant 22)", () => {
   });
 
   it("unions operation inputs into the node input and rejects unknown references", () => {
-    const draft = compile([chain({ pattern: "single", operation: { agentDefinitionRevisionId: agentA, input: { taskIds: [taskId], decisionIds: [], artifactIds: [artifactId] } } }, { pattern: "single", operation: { agentDefinitionRevisionId: agentB, input: { taskIds: [taskId], decisionIds: [decisionId], artifactIds: [] } } })]);
+    const draft = compile([chain({ pattern: "single", operation: { agentDefinitionRevisionId: agentA, input: { taskIds: [taskId], decisionIds: [], artifactIds: [artifactId] } } }, { pattern: "single", operation: { agentDefinitionRevisionId: agentB, input: { taskIds: [], decisionIds: [decisionId], artifactIds: [] } } })]);
     expect(node(draft, "e0")).toMatchObject({ input: { taskIds: [taskId], decisionIds: [decisionId], artifactIds: [artifactId] } });
+    // The union is for validation and authorization only; each step's own input stays exact on its operation, and one executable Task cannot be owned by two steps.
+    const definition = node(draft, "e0");
+    expect(definition.kind === "pattern" && definition.shape.pattern === "chain" ? definition.shape.steps.map((step) => step.input) : null).toEqual([{ taskIds: [taskId], decisionIds: [], artifactIds: [artifactId] }, { taskIds: [], decisionIds: [decisionId], artifactIds: [] }]);
+    const duplicated = rejection([chain({ pattern: "single", operation: { agentDefinitionRevisionId: agentA, input: { taskIds: [taskId], decisionIds: [], artifactIds: [] } } }, { pattern: "single", operation: { agentDefinitionRevisionId: agentB, input: { taskIds: [taskId], decisionIds: [], artifactIds: [] } } })]);
+    expect(duplicated[0]).toMatchObject({ code: "duplicate_task_assignment", path: "e0" });
+    expect(rejection([parallel([{ pattern: "single", operation: { agentDefinitionRevisionId: agentA, input: { taskIds: [taskId], decisionIds: [], artifactIds: [] } } }, { pattern: "single", operation: { agentDefinitionRevisionId: agentB, input: { taskIds: [taskId], decisionIds: [], artifactIds: [] } } }])])[0]!.code).toBe("duplicate_task_assignment");
     const withInput = (input: Record<string, string[]>): PlanExpression => ({ pattern: "single", operation: { agentDefinitionRevisionId: agentA, input: { taskIds: [], decisionIds: [], artifactIds: [], ...input } as never } });
     expect(rejection([withInput({ taskIds: [newId("task")] })])[0]!.code).toBe("invalid_task_reference");
     expect(rejection([withInput({ decisionIds: [newId("decision")] })])[0]!.code).toBe("invalid_decision_reference");

@@ -48,6 +48,7 @@ import {
   MODEL_EFFORTS,
   ON_ALLOCATION_EXHAUSTED_POLICIES,
   ORCHESTRATOR_PURPOSES,
+  PATTERN_POSITION_KINDS,
   PATTERNS,
   PLAN_EDGE_TYPES,
   PLAN_NODE_KINDS,
@@ -97,6 +98,7 @@ import {
   type LeasedResources,
   type ManifestTemplate,
   type ModelPolicy,
+  type PatternPosition,
   type PatternShape,
   type PublicationStrategy,
   type RequirementTreeEntry,
@@ -684,6 +686,8 @@ export const handoffs = sqliteTable(
     runId: text("run_id")
       .notNull()
       .references(() => runs.id),
+    /** The stable logical key of the transfer (`handoffKeyOf`); the unique index below is the idempotency rule. */
+    handoffKey: text("handoff_key").notNull(),
     source: text("source", { mode: "json" }).$type<HandoffEndpoint>().notNull(),
     target: text("target", { mode: "json" }).$type<HandoffEndpoint>().notNull(),
     taskIds: text("task_ids", { mode: "json" }).$type<string[]>().notNull(),
@@ -695,6 +699,9 @@ export const handoffs = sqliteTable(
   },
   (t) => [
     index("handoffs_run").on(t.runId, t.createdAt),
+    // One Handoff per logical transfer per Run: repeated reconciliation, transaction retry, restart, and racing callers all land here.
+    uniqueIndex("handoffs_run_key").on(t.runId, t.handoffKey),
+    check("handoffs_key_shape", sql`${t.handoffKey} GLOB 'sequence:pn_*:pn_*' OR ${t.handoffKey} GLOB 'chain_step:pn_*:[0-9]*'`),
     check("handoffs_status", sql`${t.status} IN (${inList(HANDOFF_STATUSES)})`),
     check("handoffs_summary_length", sql`length(${t.summary}) <= ${sql.raw(String(HANDOFF_MAX_SUMMARY_LENGTH))}`),
     check("handoffs_delivered_at", sql`(${t.status} = 'delivered') = (${t.deliveredAt} IS NOT NULL)`),
@@ -755,6 +762,10 @@ export const invocations = sqliteTable(
       .notNull()
       .references(() => agentDefinitionRevisions.id),
     continuedFromInvocationId: text("continued_from_invocation_id").references((): AnySQLiteColumn => invocations.id),
+    /** The typed Pattern position (core `PatternPosition`); `null` only for a Gate Evaluator. */
+    patternPosition: text("pattern_position", { mode: "json" }).$type<PatternPosition>(),
+    /** The position's stable key (`patternPositionKey`), denormalized for the one-active-per-position rule; agrees with the JSON by CHECK. */
+    patternPositionKey: text("pattern_position_key"),
     taskIds: text("task_ids", { mode: "json" }).$type<string[]>().notNull(),
     allocCostUsd: real("alloc_cost_usd").notNull(),
     allocTokens: integer("alloc_tokens").notNull(),
@@ -804,6 +815,24 @@ export const invocations = sqliteTable(
     check("invocations_terminal_has_ended_at", sql`(${t.status} IN ('blocked', 'succeeded', 'failed', 'cancelled')) = (${t.endedAt} IS NOT NULL)`),
     check("invocations_alloc_attempts", sql`${t.allocAttempts} >= 1 AND ${t.allocCostUsd} >= 0 AND ${t.allocTokens} >= 0`),
     check("invocations_no_self_continue", sql`${t.continuedFromInvocationId} IS NULL OR ${t.continuedFromInvocationId} <> ${t.id}`),
+    index("invocations_plan_node_position").on(t.planNodeId, t.patternPositionKey, t.createdAt),
+    check("invocations_pattern_position_kind", sql`${t.patternPosition} IS NULL OR json_extract(${t.patternPosition}, '$.kind') IN (${inList(PATTERN_POSITION_KINDS)})`),
+    // A position is absent only for a Gate Evaluator; every other Invocation names one.
+    check("invocations_pattern_position_present", sql`${t.patternPosition} IS NOT NULL OR (${t.role} = 'evaluator' AND ${t.purpose} = 'evaluate')`),
+    // The denormalized key is exactly the kind plus its one discriminating field.
+    check(
+      "invocations_pattern_position_key_agrees",
+      sql`(${t.patternPosition} IS NULL AND ${t.patternPositionKey} IS NULL) OR ${t.patternPositionKey} = (json_extract(${t.patternPosition}, '$.kind') || CASE WHEN json_extract(${t.patternPosition}, '$.index') IS NOT NULL THEN ':' || json_extract(${t.patternPosition}, '$.index') WHEN json_extract(${t.patternPosition}, '$.round') IS NOT NULL THEN ':' || json_extract(${t.patternPosition}, '$.round') WHEN json_extract(${t.patternPosition}, '$.label') IS NOT NULL THEN ':' || json_extract(${t.patternPosition}, '$.label') WHEN json_extract(${t.patternPosition}, '$.taskId') IS NOT NULL THEN ':' || json_extract(${t.patternPosition}, '$.taskId') ELSE '' END)`,
+    ),
+    // The position's role and fixed purpose (core `PATTERN_POSITION_BINDINGS`); the store additionally checks the node shape.
+    check(
+      "invocations_pattern_position_role",
+      sql`${t.patternPosition} IS NULL OR (json_extract(${t.patternPosition}, '$.kind') = 'orchestrator' AND ${t.role} = 'orchestrator') OR (json_extract(${t.patternPosition}, '$.kind') IN ('single', 'chain_step', 'route_branch', 'parallel_item', 'parallel_aggregation', 'producer_round') AND ${t.role} = 'worker' AND ${t.purpose} = 'step') OR (json_extract(${t.patternPosition}, '$.kind') = 'worker_task' AND ${t.role} = 'worker' AND ${t.purpose} = 'task') OR (json_extract(${t.patternPosition}, '$.kind') = 'route_selection' AND ${t.role} = 'evaluator' AND ${t.purpose} = 'select') OR (json_extract(${t.patternPosition}, '$.kind') = 'evaluator_round' AND ${t.role} = 'evaluator' AND ${t.purpose} = 'evaluate') OR (json_extract(${t.patternPosition}, '$.kind') = 'coordinator_turn' AND ${t.role} = 'coordinator')`,
+    ),
+    // At most one active Invocation per logical Pattern position of a node: successors after a blocker share the position, never concurrently.
+    uniqueIndex("invocations_active_position")
+      .on(t.planNodeId, t.patternPositionKey)
+      .where(sql`pattern_position_key IS NOT NULL AND status IN ('pending', 'running', 'waiting')`),
     // At most one active (non-terminal) Orchestrator Invocation per Run and one active Coordinator Invocation per node (execution-model §4.6, §5.5).
     uniqueIndex("invocations_active_orchestrator")
       .on(t.runId)

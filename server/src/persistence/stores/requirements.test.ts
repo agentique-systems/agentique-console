@@ -1,6 +1,6 @@
 import { ConflictError, IllegalTransitionError, InvariantViolationError, ValidationError, type DecisionRequest } from "@agentique-console/core";
 import { describe, expect, it } from "vitest";
-import { openHarness, seedRequirements, seedRun, seedSnapshot, type Harness, type Seeded } from "../test-support.ts";
+import { openHarness, seedRequirements, seedRun, seedSnapshot, seedWorkerNode, type Harness, type Seeded } from "../test-support.ts";
 
 function waiverRequest(s: Seeded, requirementId: string, overrides: Partial<DecisionRequest> = {}): DecisionRequest {
   return {
@@ -71,7 +71,8 @@ describe("requirement status", () => {
       const { leafIds } = seedRequirements(h, s);
       const task = h.stores.tasks.create({ runId: s.run.id, planNodeId: null, origin: "orchestrator", subject: "do", requirementIds: [leafIds[0]!], requirementRevisionId: null, inputArtifactIds: [], requiredOutputs: [], replacesTaskId: null });
       h.stores.tasks.transition(task.id, { to: "ready" });
-      const invocation = h.stores.invocations.create({ runId: s.run.id, planNodeId: s.root.id, role: "worker", purpose: "task", agentDefinitionRevisionId: s.definition.id, continuedFromInvocationId: null, taskIds: [task.id], allocation: { costUsd: 1, tokens: 10, attempts: 1 } });
+      const workers = seedWorkerNode(h, s, "coordinator_worker");
+      const invocation = h.stores.invocations.create({ runId: s.run.id, planNodeId: workers.id, role: "worker", purpose: "task", agentDefinitionRevisionId: s.definition.id, continuedFromInvocationId: null, patternPosition: { kind: "worker_task", taskId: task.id }, taskIds: [task.id], allocation: { costUsd: 1, tokens: 10, attempts: 1 } });
       h.stores.tasks.transition(task.id, { to: "running", invocationId: invocation.id });
       h.stores.tasks.transition(task.id, { to: "completed", evidence: [{ kind: "url", url: "https://example.test" }], outputArtifactIds: [] });
       expect(h.stores.requirements.get(leafIds[0]!).status).toBe("open");

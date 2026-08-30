@@ -1,6 +1,12 @@
 import { ConflictError, IllegalTransitionError, InvariantViolationError, ValidationError, type TaskInput } from "@agentique-console/core";
 import { describe, expect, it } from "vitest";
-import { openHarness, coordinatorWorkerDefinition, extendPlan, nodeInput, seedArtifact, seedRequirements, seedRun, type Harness, type Seeded } from "../test-support.ts";
+import { openHarness, coordinatorWorkerDefinition, extendPlan, nodeInput, seedArtifact, seedRequirements, seedRun, seedWorkerNode, type Harness, type Seeded } from "../test-support.ts";
+
+/** A Worker Invocation owning `taskId` at its `worker_task` position on a fresh coordinator_worker node. */
+function workerFor(h: Harness, s: Seeded, taskId: string) {
+  const node = seedWorkerNode(h, s, "coordinator_worker");
+  return h.stores.invocations.create({ runId: s.run.id, planNodeId: node.id, role: "worker", purpose: "task", agentDefinitionRevisionId: s.definition.id, continuedFromInvocationId: null, patternPosition: { kind: "worker_task", taskId: taskId as never }, taskIds: [taskId as never], allocation: { costUsd: 1, tokens: 10, attempts: 1 } });
+}
 
 function taskInput(s: Seeded, overrides: Partial<TaskInput> = {}): TaskInput {
   return { runId: s.run.id, planNodeId: null, origin: "orchestrator", subject: "work", requirementIds: [], requirementRevisionId: null, inputArtifactIds: [], requiredOutputs: [], replacesTaskId: null, ...overrides };
@@ -9,7 +15,7 @@ function taskInput(s: Seeded, overrides: Partial<TaskInput> = {}): TaskInput {
 function runningTask(h: Harness, s: Seeded) {
   const task = h.stores.tasks.create(taskInput(s));
   h.stores.tasks.transition(task.id, { to: "ready" });
-  const invocation = h.stores.invocations.create({ runId: s.run.id, planNodeId: s.root.id, role: "worker", purpose: "task", agentDefinitionRevisionId: s.definition.id, continuedFromInvocationId: null, taskIds: [task.id], allocation: { costUsd: 1, tokens: 10, attempts: 1 } });
+  const invocation = workerFor(h, s, task.id);
   return { task: h.stores.tasks.transition(task.id, { to: "running", invocationId: invocation.id }), invocation };
 }
 
@@ -46,7 +52,7 @@ describe("tasks", () => {
       h.stores.tasks.addDependency(b.id, a.id);
       expect(() => h.stores.tasks.transition(b.id, { to: "ready" })).toThrow(/not completed/);
       h.stores.tasks.transition(a.id, { to: "ready" });
-      const invocation = h.stores.invocations.create({ runId: s.run.id, planNodeId: s.root.id, role: "worker", purpose: "task", agentDefinitionRevisionId: s.definition.id, continuedFromInvocationId: null, taskIds: [a.id], allocation: { costUsd: 1, tokens: 10, attempts: 1 } });
+      const invocation = workerFor(h, s, a.id);
       h.stores.tasks.transition(a.id, { to: "running", invocationId: invocation.id });
       expect(() => h.stores.tasks.transition(a.id, { to: "completed", evidence: [], outputArtifactIds: [] })).toThrow(ValidationError);
       h.stores.tasks.transition(a.id, { to: "completed", evidence: [{ kind: "url", url: "https://example.test/log" }], outputArtifactIds: [] });
@@ -93,7 +99,7 @@ describe("tasks", () => {
       expect(ready.invocationId).toBeNull();
       const other = seedRun(h);
       const foreignArtifact = seedArtifact(h, other);
-      const invocation = h.stores.invocations.create({ runId: s.run.id, planNodeId: s.root.id, role: "worker", purpose: "task", agentDefinitionRevisionId: s.definition.id, continuedFromInvocationId: null, taskIds: [task.id], allocation: { costUsd: 1, tokens: 10, attempts: 1 } });
+      const invocation = workerFor(h, s, task.id);
       h.stores.tasks.transition(task.id, { to: "running", invocationId: invocation.id });
       expect(() => h.stores.tasks.transition(task.id, { to: "completed", evidence: [{ kind: "artifact", artifactId: foreignArtifact.id }], outputArtifactIds: [foreignArtifact.id] })).toThrow(InvariantViolationError);
       const artifact = seedArtifact(h, s);

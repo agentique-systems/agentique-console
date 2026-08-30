@@ -34,10 +34,8 @@ function successor(h: RuntimeHarness, s: RuntimeSeed, blocked: Invocation, decis
     planNodeId: s.created.root.id,
     role: "orchestrator",
     purpose: "decision_resolution",
-    agentDefinitionRevisionId: s.orchestrator.id,
     continuedFromInvocationId: blocked.id,
-    taskIds: [],
-    patternPosition: null,
+    patternPosition: { kind: "orchestrator" },
     inputs: decision && subject ? [{ kind: "side_effect_approval_resolution", decisionId: decision.id, blockedInvocationId: blocked.id, attemptId: subject.attemptId, tool: subject.tool, callDigest: subject.callDigest, callArtifactId: subject.callArtifactId, outcome }] : [],
   });
 }
@@ -182,10 +180,10 @@ describe("approval use store", () => {
       expect(await h.executor.advanceInvocation(planning.invocation.id)).toMatchObject({ kind: "finalized", attempt: { status: "succeeded" } });
       h.stores.plans.transitionNode(node.id, { to: "ready" });
       h.stores.plans.transitionNode(node.id, { to: "running" });
-      const openWorker = await blockOnApproval(h, h.preparation.prepare({ runId: planning.created.run.id, planNodeId: node.id, role: "worker", purpose: "step", agentDefinitionRevisionId: planning.worker.id, continuedFromInvocationId: null, taskIds: [], patternPosition: null }).invocation);
+      const openWorker = await blockOnApproval(h, h.preparation.prepare({ runId: planning.created.run.id, planNodeId: node.id, role: "worker", purpose: "step", continuedFromInvocationId: null, patternPosition: { kind: "single" } }).invocation);
       h.stores.decisions.resolve(openWorker.id, { resolvedBy: "operator", chosenOptionId: "approve_once", rationale: null, artifactIds: [] });
       // An Orchestrator successor on the root, continuing from the Orchestrator's own terminal Invocation, is on another Plan Node than the Worker's Decision.
-      const rootBlocked = await blockOnApproval(h, h.preparation.prepare({ runId: planning.created.run.id, planNodeId: planning.created.root.id, role: "orchestrator", purpose: "node_result", agentDefinitionRevisionId: planning.orchestrator.id, continuedFromInvocationId: planning.invocation.id, taskIds: [], patternPosition: null }).invocation);
+      const rootBlocked = await blockOnApproval(h, h.preparation.prepare({ runId: planning.created.run.id, planNodeId: planning.created.root.id, role: "orchestrator", purpose: "node_result", continuedFromInvocationId: planning.invocation.id, patternPosition: { kind: "orchestrator" } }).invocation);
       h.stores.decisions.resolve(rootBlocked.id, { resolvedBy: "operator", chosenOptionId: "approve_once", rationale: null, artifactIds: [] });
       const rootSuccessor = successor(h, planning, h.stores.invocations.get(rootBlocked.subject!.invocationId), h.stores.decisions.get(rootBlocked.id));
       const rootPrepared = await h.executor.prepareNextAttempt(rootSuccessor.invocation.id);
@@ -198,7 +196,7 @@ describe("approval use store", () => {
       // Finish the successor and start a third Orchestrator Invocation continuing from it: the grant names the first blocked Invocation, not this predecessor.
       h.provider.script({ kind: "succeed", result: COMPLETED_RESULT });
       expect(await h.executor.executePreparedAttempt(rootPrepared.attempt.id)).toMatchObject({ kind: "finalized", attempt: { status: "succeeded" } });
-      const third = h.preparation.prepare({ runId: planning.created.run.id, planNodeId: planning.created.root.id, role: "orchestrator", purpose: "node_result", agentDefinitionRevisionId: planning.orchestrator.id, continuedFromInvocationId: firstSuccessor.id, taskIds: [], patternPosition: null });
+      const third = h.preparation.prepare({ runId: planning.created.run.id, planNodeId: planning.created.root.id, role: "orchestrator", purpose: "node_result", continuedFromInvocationId: firstSuccessor.id, patternPosition: { kind: "orchestrator" } });
       const thirdPrepared = await h.executor.prepareNextAttempt(third.invocation.id);
       if (thirdPrepared.kind !== "prepared") throw new Error(thirdPrepared.kind);
       expect(uses.claim({ decisionId: first.id, invocationId: third.invocation.id, attemptId: thirdPrepared.attempt.id, tool: "shell", callDigest: DIGEST })).toEqual({ kind: "refused", reason: "predecessor_mismatch" });

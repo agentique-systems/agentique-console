@@ -3,7 +3,7 @@
  * §6.2, §6.4; invariants 6 transcripts are never canonical, 9 canonical
  * objects by id, 20 one immutable manifest per Invocation).
  */
-import { canonicalJson, InvariantViolationError, MANIFEST_RENDERER_VERSION, ValidationError, type ContextManifest, type Invocation } from "@agentique-console/core";
+import { canonicalJson, EMPTY_MANIFEST_TEMPLATE, InvariantViolationError, MANIFEST_RENDERER_VERSION, ValidationError, type ContextManifest, type Invocation } from "@agentique-console/core";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -58,7 +58,7 @@ describe("context manifest assembly", () => {
         modelPolicy: s.orchestrator.modelPolicy,
         role: "orchestrator",
         purpose: "operator_input",
-        patternPosition: null,
+        patternPosition: { kind: "orchestrator" },
         continuedFromInvocationId: null,
         runId: s.created.run.id,
         planNodeId: s.created.root.id,
@@ -92,7 +92,7 @@ describe("context manifest assembly", () => {
         invocation,
         revision: s.orchestrator,
         policy: started.prepared.policy,
-        patternPosition: null,
+        operationInput: EMPTY_MANIFEST_TEMPLATE,
         inputs: c.inputs,
         handoffIds: [],
         artifactIds: [],
@@ -112,7 +112,7 @@ describe("context manifest assembly", () => {
     try {
       const s = seedPlanningRuntime(h);
       const { node, revision, rootId, leafIds, criterion } = scopedWorkerNode(h, s);
-      const worker = h.preparation.prepare({ runId: s.created.run.id, planNodeId: node.id, role: "worker", purpose: "step", agentDefinitionRevisionId: s.worker.id, continuedFromInvocationId: null, taskIds: [], patternPosition: "single" });
+      const worker = h.preparation.prepare({ runId: s.created.run.id, planNodeId: node.id, role: "worker", purpose: "step", continuedFromInvocationId: null, patternPosition: { kind: "single" } });
       const c = worker.manifest.content;
       expect(c.requirementRevisionId).toBe(revision.id);
       expect(c.requirements.map((r) => r.requirementId)).toEqual(leafIds);
@@ -120,7 +120,9 @@ describe("context manifest assembly", () => {
       expect(c.acceptanceCriteria).toEqual([{ acceptanceCriterionId: criterion.id, requirementId: leafIds[0], taskId: null, check: { kind: "deterministic", command: "npm test", expectedExitCode: 0 } }]);
       expect(c.runtimeTools).not.toContain("revise_execution_plan");
       expect(c.runtimeTools).toContain("return_result");
-      expect(c.patternPosition).toBe("single");
+      expect(c.patternPosition).toEqual({ kind: "single" });
+      expect(worker.invocation.patternPosition).toEqual({ kind: "single" });
+      expect(worker.invocation.agentDefinitionRevisionId).toBe(s.worker.id);
       // An Evaluator on the node is read-only whatever its definition declares, and runs against the Integration Workspace.
       const evaluator = h.preparation.prepare({ runId: s.created.run.id, planNodeId: node.id, role: "evaluator", purpose: "evaluate", agentDefinitionRevisionId: s.worker.id, continuedFromInvocationId: null, taskIds: [], patternPosition: null });
       expect(evaluator.manifest.content.capabilities).toEqual({ tools: ["read"], mcpServers: [] });
@@ -138,12 +140,14 @@ describe("context manifest assembly", () => {
       });
       expect(h.stores.invocations.getManifest(worker.invocation.id)).toEqual(worker.manifest);
       await completeOrchestratorTurn(h, s.invocation);
-      const orchestrator = h.preparation.prepare({ runId: s.created.run.id, planNodeId: s.created.root.id, role: "orchestrator", purpose: "node_result", agentDefinitionRevisionId: s.orchestrator.id, continuedFromInvocationId: s.invocation.id, taskIds: [], patternPosition: null, inputs: [{ kind: "node_result", planNodeId: node.id, status: "running", outputArtifactIds: [] }] });
+      const orchestrator = h.preparation.prepare({ runId: s.created.run.id, planNodeId: s.created.root.id, role: "orchestrator", purpose: "node_result", continuedFromInvocationId: s.invocation.id, patternPosition: { kind: "orchestrator" }, inputs: [{ kind: "node_result", planNodeId: node.id, status: "running", outputArtifactIds: [] }] });
       expect(orchestrator.manifest.content.requirementRevisionId).toBe(later.id);
       expect(orchestrator.manifest.content.requirements.map((r) => r.requirementId)).toEqual([rootId, leafIds[0]]);
       expect(orchestrator.manifest.content.requirements.map((r) => r.status)).toEqual(["open", "open"]);
       expect(h.stores.requirements.get(leafIds[1]!).status).toBe("retired");
-      expect(() => h.preparation.prepare({ runId: s.created.run.id, planNodeId: node.id, role: "worker", purpose: "step", agentDefinitionRevisionId: s.worker.id, continuedFromInvocationId: null, taskIds: [], patternPosition: null })).toThrow(/retired/);
+      expect(() => h.preparation.prepare({ runId: s.created.run.id, planNodeId: node.id, role: "worker", purpose: "step", continuedFromInvocationId: worker.invocation.id, patternPosition: { kind: "single" } })).toThrow(/still pending/);
+      h.stores.invocations.transition(worker.invocation.id, { to: "cancelled" });
+      expect(() => h.preparation.prepare({ runId: s.created.run.id, planNodeId: node.id, role: "worker", purpose: "step", continuedFromInvocationId: worker.invocation.id, patternPosition: { kind: "single" } })).toThrow(/retired/);
     } finally {
       h.close();
     }
@@ -177,11 +181,11 @@ describe("context manifest assembly", () => {
       const unrelated = request({});
       h.stores.decisions.resolve(relevant.id, { resolvedBy: "operator", chosenOptionId: "a", rationale: null, artifactIds: [] });
       const artifact = h.stores.artifacts.create({ runId: s.created.run.id, mediaType: "text/plain", producer: { kind: "runtime", component: "command" }, taskId: null, title: "notes" }, new TextEncoder().encode("hello"));
-      const handoff = h.stores.handoffs.create({ runId: s.created.run.id, source: { kind: "plan_node", planNodeId: s.created.root.id }, target: { kind: "plan_node", planNodeId: node.id }, taskIds: [], artifactIds: [artifact.id], summary: "read the notes" });
-      const elsewhere = h.stores.handoffs.create({ runId: s.created.run.id, source: { kind: "plan_node", planNodeId: s.created.root.id }, target: { kind: "plan_node", planNodeId: s.created.root.id }, taskIds: [], artifactIds: [], summary: "not for the worker" });
+      const handoff = h.stores.handoffs.create({ runId: s.created.run.id, route: { kind: "sequence", sourceNodeId: s.created.root.id, targetNodeId: node.id }, source: { kind: "plan_node", planNodeId: s.created.root.id }, target: { kind: "plan_node", planNodeId: node.id }, taskIds: [], artifactIds: [artifact.id], summary: "read the notes" });
+      const elsewhere = h.stores.handoffs.create({ runId: s.created.run.id, route: { kind: "sequence", sourceNodeId: node.id, targetNodeId: s.created.root.id }, source: { kind: "plan_node", planNodeId: node.id }, target: { kind: "plan_node", planNodeId: s.created.root.id }, taskIds: [], artifactIds: [], summary: "not for the worker" });
       const other = seedRuntime(h);
       const foreignArtifact = h.stores.artifacts.create({ runId: other.created.run.id, mediaType: "text/plain", producer: { kind: "runtime", component: "command" }, taskId: null, title: null }, new TextEncoder().encode("foreign"));
-      const base = { runId: s.created.run.id, planNodeId: node.id, role: "worker" as const, purpose: "step" as const, agentDefinitionRevisionId: s.worker.id, continuedFromInvocationId: null, taskIds: [], patternPosition: null };
+      const base = { runId: s.created.run.id, planNodeId: node.id, role: "worker" as const, purpose: "step" as const, continuedFromInvocationId: null, patternPosition: { kind: "single" as const } };
       const before = h.stores.invocations.listByRun(s.created.run.id).length;
       // Every foreign or unauthorized reference fails preparation transactionally: nothing is created.
       expect(() => h.preparation.prepare({ ...base, handoffIds: [elsewhere.id] })).toThrow(ValidationError);
@@ -189,7 +193,8 @@ describe("context manifest assembly", () => {
       expect(() => h.preparation.prepare({ ...base, artifactIds: ["art_000000000000000000000000"] })).toThrow(/not found/);
       expect(() => h.preparation.prepare({ ...base, inputs: [{ kind: "operator_message", conversationMessageId: other.message.id, content: other.message.content }] })).toThrow(InvariantViolationError);
       expect(() => h.preparation.prepare({ ...base, inputs: [{ kind: "decision_resolution", decisionId: "dec_000000000000000000000000" }] })).toThrow(/not found/);
-      expect(() => h.preparation.prepare({ ...base, taskIds: ["task_000000000000000000000000"] })).toThrow(/not found/);
+      // A caller cannot widen the owned Tasks beyond the operation's; the operation resolved from the shape decides.
+      expect(() => h.preparation.prepare({ ...base, taskIds: ["task_000000000000000000000000"] })).toThrow(/owns exactly the operation's Tasks/);
       h.stores.handoffs.transition(elsewhere.id, "cancelled");
       expect(h.stores.invocations.listByRun(s.created.run.id)).toHaveLength(before);
       expect(h.stores.handoffs.get(handoff.id).status).toBe("pending");
@@ -208,7 +213,7 @@ describe("context manifest assembly", () => {
       await completeOrchestratorTurn(h, s.invocation);
       const resolvedLater = request({}, "later");
       h.stores.decisions.resolve(resolvedLater.id, { resolvedBy: "operator", chosenOptionId: "a", rationale: null, artifactIds: [] });
-      const successor = h.preparation.prepare({ runId: s.created.run.id, planNodeId: s.created.root.id, role: "orchestrator", purpose: "decision_resolution", agentDefinitionRevisionId: s.orchestrator.id, continuedFromInvocationId: s.invocation.id, taskIds: [], patternPosition: null, inputs: [{ kind: "decision_resolution", decisionId: resolvedLater.id }] });
+      const successor = h.preparation.prepare({ runId: s.created.run.id, planNodeId: s.created.root.id, role: "orchestrator", purpose: "decision_resolution", continuedFromInvocationId: s.invocation.id, patternPosition: { kind: "orchestrator" }, inputs: [{ kind: "decision_resolution", decisionId: resolvedLater.id }] });
       expect(successor.manifest.content.decisions.find((d) => d.decisionId === resolvedLater.id)).toEqual({ decisionId: resolvedLater.id, kind: "operator_choice", chosenOptionId: "a", resolvedSincePrevious: true });
       expect(successor.manifest.content.decisions.some((d) => d.decisionId === nodeDecision.id)).toBe(false);
     } finally {

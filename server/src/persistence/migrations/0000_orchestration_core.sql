@@ -383,6 +383,7 @@ CREATE INDEX `gates_run` ON `gates` (`run_id`,`kind`,`status`);--> statement-bre
 CREATE TABLE `handoffs` (
 	`id` text PRIMARY KEY NOT NULL,
 	`run_id` text NOT NULL,
+	`handoff_key` text NOT NULL,
 	`source` text NOT NULL,
 	`target` text NOT NULL,
 	`task_ids` text NOT NULL,
@@ -392,12 +393,14 @@ CREATE TABLE `handoffs` (
 	`created_at` text NOT NULL,
 	`delivered_at` text,
 	FOREIGN KEY (`run_id`) REFERENCES `runs`(`id`) ON UPDATE no action ON DELETE no action,
+	CONSTRAINT "handoffs_key_shape" CHECK("handoffs"."handoff_key" GLOB 'sequence:pn_*:pn_*' OR "handoffs"."handoff_key" GLOB 'chain_step:pn_*:[0-9]*'),
 	CONSTRAINT "handoffs_status" CHECK("handoffs"."status" IN ('pending', 'delivered', 'cancelled')),
 	CONSTRAINT "handoffs_summary_length" CHECK(length("handoffs"."summary") <= 500),
 	CONSTRAINT "handoffs_delivered_at" CHECK(("handoffs"."status" = 'delivered') = ("handoffs"."delivered_at" IS NOT NULL))
 );
 --> statement-breakpoint
 CREATE INDEX `handoffs_run` ON `handoffs` (`run_id`,`created_at`);--> statement-breakpoint
+CREATE UNIQUE INDEX `handoffs_run_key` ON `handoffs` (`run_id`,`handoff_key`);--> statement-breakpoint
 CREATE TABLE `invocations` (
 	`id` text PRIMARY KEY NOT NULL,
 	`run_id` text NOT NULL,
@@ -406,6 +409,8 @@ CREATE TABLE `invocations` (
 	`purpose` text NOT NULL,
 	`agent_definition_revision_id` text NOT NULL,
 	`continued_from_invocation_id` text,
+	`pattern_position` text,
+	`pattern_position_key` text,
 	`task_ids` text NOT NULL,
 	`alloc_cost_usd` real NOT NULL,
 	`alloc_tokens` integer NOT NULL,
@@ -445,13 +450,19 @@ CREATE TABLE `invocations` (
 	CONSTRAINT "invocations_blocked_has_decision" CHECK(("invocations"."status" = 'blocked') = ("invocations"."blocked_by_decision_id" IS NOT NULL)),
 	CONSTRAINT "invocations_terminal_has_ended_at" CHECK(("invocations"."status" IN ('blocked', 'succeeded', 'failed', 'cancelled')) = ("invocations"."ended_at" IS NOT NULL)),
 	CONSTRAINT "invocations_alloc_attempts" CHECK("invocations"."alloc_attempts" >= 1 AND "invocations"."alloc_cost_usd" >= 0 AND "invocations"."alloc_tokens" >= 0),
-	CONSTRAINT "invocations_no_self_continue" CHECK("invocations"."continued_from_invocation_id" IS NULL OR "invocations"."continued_from_invocation_id" <> "invocations"."id")
+	CONSTRAINT "invocations_no_self_continue" CHECK("invocations"."continued_from_invocation_id" IS NULL OR "invocations"."continued_from_invocation_id" <> "invocations"."id"),
+	CONSTRAINT "invocations_pattern_position_kind" CHECK("invocations"."pattern_position" IS NULL OR json_extract("invocations"."pattern_position", '$.kind') IN ('orchestrator', 'single', 'chain_step', 'route_selection', 'route_branch', 'parallel_item', 'parallel_aggregation', 'coordinator_turn', 'worker_task', 'producer_round', 'evaluator_round')),
+	CONSTRAINT "invocations_pattern_position_present" CHECK("invocations"."pattern_position" IS NOT NULL OR ("invocations"."role" = 'evaluator' AND "invocations"."purpose" = 'evaluate')),
+	CONSTRAINT "invocations_pattern_position_key_agrees" CHECK(("invocations"."pattern_position" IS NULL AND "invocations"."pattern_position_key" IS NULL) OR "invocations"."pattern_position_key" = (json_extract("invocations"."pattern_position", '$.kind') || CASE WHEN json_extract("invocations"."pattern_position", '$.index') IS NOT NULL THEN ':' || json_extract("invocations"."pattern_position", '$.index') WHEN json_extract("invocations"."pattern_position", '$.round') IS NOT NULL THEN ':' || json_extract("invocations"."pattern_position", '$.round') WHEN json_extract("invocations"."pattern_position", '$.label') IS NOT NULL THEN ':' || json_extract("invocations"."pattern_position", '$.label') WHEN json_extract("invocations"."pattern_position", '$.taskId') IS NOT NULL THEN ':' || json_extract("invocations"."pattern_position", '$.taskId') ELSE '' END)),
+	CONSTRAINT "invocations_pattern_position_role" CHECK("invocations"."pattern_position" IS NULL OR (json_extract("invocations"."pattern_position", '$.kind') = 'orchestrator' AND "invocations"."role" = 'orchestrator') OR (json_extract("invocations"."pattern_position", '$.kind') IN ('single', 'chain_step', 'route_branch', 'parallel_item', 'parallel_aggregation', 'producer_round') AND "invocations"."role" = 'worker' AND "invocations"."purpose" = 'step') OR (json_extract("invocations"."pattern_position", '$.kind') = 'worker_task' AND "invocations"."role" = 'worker' AND "invocations"."purpose" = 'task') OR (json_extract("invocations"."pattern_position", '$.kind') = 'route_selection' AND "invocations"."role" = 'evaluator' AND "invocations"."purpose" = 'select') OR (json_extract("invocations"."pattern_position", '$.kind') = 'evaluator_round' AND "invocations"."role" = 'evaluator' AND "invocations"."purpose" = 'evaluate') OR (json_extract("invocations"."pattern_position", '$.kind') = 'coordinator_turn' AND "invocations"."role" = 'coordinator'))
 );
 --> statement-breakpoint
 CREATE INDEX `invocations_plan_node_status` ON `invocations` (`plan_node_id`,`status`);--> statement-breakpoint
 CREATE INDEX `invocations_workspace_cleanup_pending` ON `invocations` (`run_id`,`status`) WHERE workspace_cleanup = 'pending';--> statement-breakpoint
 CREATE INDEX `invocations_run_status` ON `invocations` (`run_id`,`status`);--> statement-breakpoint
 CREATE INDEX `invocations_plan_node_source` ON `invocations` (`plan_node_id`,`allocation_source`);--> statement-breakpoint
+CREATE INDEX `invocations_plan_node_position` ON `invocations` (`plan_node_id`,`pattern_position_key`,`created_at`);--> statement-breakpoint
+CREATE UNIQUE INDEX `invocations_active_position` ON `invocations` (`plan_node_id`,`pattern_position_key`) WHERE pattern_position_key IS NOT NULL AND status IN ('pending', 'running', 'waiting');--> statement-breakpoint
 CREATE UNIQUE INDEX `invocations_active_orchestrator` ON `invocations` (`run_id`) WHERE role = 'orchestrator' AND status IN ('pending', 'running', 'waiting');--> statement-breakpoint
 CREATE UNIQUE INDEX `invocations_active_coordinator` ON `invocations` (`plan_node_id`) WHERE role = 'coordinator' AND status IN ('pending', 'running', 'waiting');--> statement-breakpoint
 CREATE TABLE `plan_edges` (
@@ -530,7 +541,7 @@ CREATE TABLE `plan_nodes` (
 	CONSTRAINT "plan_nodes_pattern" CHECK("plan_nodes"."pattern" IS NULL OR "plan_nodes"."pattern" IN ('single', 'chain', 'route', 'parallel', 'coordinator_worker', 'evaluator_optimizer')),
 	CONSTRAINT "plan_nodes_fan_in_policy" CHECK("plan_nodes"."fan_in_policy" IS NULL OR "plan_nodes"."fan_in_policy" IN ('require_all', 'require_any')),
 	CONSTRAINT "plan_nodes_on_allocation_exhausted" CHECK("plan_nodes"."on_allocation_exhausted" IS NULL OR "plan_nodes"."on_allocation_exhausted" IN ('fail', 'wait', 'extend')),
-	CONSTRAINT "plan_nodes_wait_reason" CHECK("plan_nodes"."wait_reason" IS NULL OR "plan_nodes"."wait_reason" IN ('decision', 'budget', 'provider_capacity', 'operator')),
+	CONSTRAINT "plan_nodes_wait_reason" CHECK("plan_nodes"."wait_reason" IS NULL OR "plan_nodes"."wait_reason" IN ('decision', 'budget', 'provider_capacity', 'integration_conflict', 'operator')),
 	CONSTRAINT "plan_nodes_waiting_has_reason" CHECK(("plan_nodes"."status" = 'waiting') = ("plan_nodes"."wait_reason" IS NOT NULL)),
 	CONSTRAINT "plan_nodes_pattern_shape" CHECK("plan_nodes"."kind" <> 'pattern' OR ("plan_nodes"."pattern" IS NOT NULL AND "plan_nodes"."fan_in_policy" IS NULL AND "plan_nodes"."shape" IS NOT NULL AND json_extract("plan_nodes"."shape", '$.pattern') = "plan_nodes"."pattern" AND "plan_nodes"."input" IS NOT NULL AND "plan_nodes"."on_allocation_exhausted" IS NOT NULL AND "plan_nodes"."gate_acceptance_criterion_ids" IS NOT NULL)),
 	CONSTRAINT "plan_nodes_join_shape" CHECK("plan_nodes"."kind" <> 'join' OR ("plan_nodes"."pattern" IS NULL AND "plan_nodes"."fan_in_policy" IS NOT NULL AND "plan_nodes"."shape" IS NULL AND "plan_nodes"."input" IS NULL AND "plan_nodes"."on_allocation_exhausted" IS NULL AND "plan_nodes"."gate_acceptance_criterion_ids" IS NULL AND "plan_nodes"."alloc_cost_usd" = 0 AND "plan_nodes"."alloc_tokens" = 0 AND "plan_nodes"."alloc_attempts" = 0)),
@@ -679,7 +690,7 @@ CREATE TABLE `runs` (
 	FOREIGN KEY (`final_snapshot_id`) REFERENCES `snapshots`(`id`) ON UPDATE no action ON DELETE no action,
 	CONSTRAINT "runs_kind" CHECK("runs"."kind" IN ('code', 'other')),
 	CONSTRAINT "runs_status" CHECK("runs"."status" IN ('created', 'running', 'waiting', 'verifying', 'awaiting_signoff', 'completed', 'failed', 'cancelled')),
-	CONSTRAINT "runs_wait_reason" CHECK("runs"."wait_reason" IS NULL OR "runs"."wait_reason" IN ('decision', 'budget', 'provider_capacity', 'operator')),
+	CONSTRAINT "runs_wait_reason" CHECK("runs"."wait_reason" IS NULL OR "runs"."wait_reason" IN ('decision', 'budget', 'provider_capacity', 'integration_conflict', 'operator')),
 	CONSTRAINT "runs_waiting_has_reason" CHECK(("runs"."status" = 'waiting') = ("runs"."wait_reason" IS NOT NULL)),
 	CONSTRAINT "runs_failed_has_failure" CHECK(("runs"."status" = 'failed') = ("runs"."failure" IS NOT NULL)),
 	CONSTRAINT "runs_terminal_has_ended_at" CHECK(("runs"."status" IN ('completed', 'failed', 'cancelled')) = ("runs"."ended_at" IS NOT NULL)),
@@ -838,7 +849,7 @@ CREATE TRIGGER `handoffs_routing_immutable` BEFORE UPDATE OF `run_id`, `source`,
 CREATE TRIGGER `handoffs_no_delete` BEFORE DELETE ON `handoffs` BEGIN SELECT RAISE(ABORT, 'handoffs are never deleted'); END;--> statement-breakpoint
 CREATE TRIGGER `agent_definition_revisions_no_update` BEFORE UPDATE ON `agent_definition_revisions` BEGIN SELECT RAISE(ABORT, 'agent_definition_revisions are immutable'); END;--> statement-breakpoint
 CREATE TRIGGER `agent_definition_revisions_no_delete` BEFORE DELETE ON `agent_definition_revisions` BEGIN SELECT RAISE(ABORT, 'agent_definition_revisions are immutable'); END;--> statement-breakpoint
-CREATE TRIGGER `invocations_definition_immutable` BEFORE UPDATE OF `run_id`, `plan_node_id`, `role`, `purpose`, `agent_definition_revision_id`, `continued_from_invocation_id`, `task_ids`, `alloc_cost_usd`, `alloc_tokens`, `alloc_attempts`, `allocation_source`, `final_reserve_use`, `created_at` ON `invocations` BEGIN SELECT RAISE(ABORT, 'invocation definition columns are immutable'); END;--> statement-breakpoint
+CREATE TRIGGER `invocations_definition_immutable` BEFORE UPDATE OF `run_id`, `plan_node_id`, `role`, `purpose`, `agent_definition_revision_id`, `continued_from_invocation_id`, `pattern_position`, `pattern_position_key`, `task_ids`, `alloc_cost_usd`, `alloc_tokens`, `alloc_attempts`, `allocation_source`, `final_reserve_use`, `created_at` ON `invocations` BEGIN SELECT RAISE(ABORT, 'invocation definition columns are immutable'); END;--> statement-breakpoint
 CREATE TRIGGER `invocations_no_delete` BEFORE DELETE ON `invocations` BEGIN SELECT RAISE(ABORT, 'invocations are never deleted'); END;--> statement-breakpoint
 CREATE TRIGGER `attempts_definition_immutable` BEFORE UPDATE OF `invocation_id`, `run_id`, `plan_node_id`, `number`, `kind`, `start_mode`, `resumed_from_attempt_id`, `created_at` ON `attempts` BEGIN SELECT RAISE(ABORT, 'attempt definition columns are immutable'); END;--> statement-breakpoint
 CREATE TRIGGER `attempts_no_delete` BEFORE DELETE ON `attempts` BEGIN SELECT RAISE(ABORT, 'attempts are never deleted'); END;--> statement-breakpoint

@@ -108,7 +108,8 @@ describe("accepted revisions", () => {
     try {
       const s = seedPlanningRuntime(h);
       const seq = h.ctx.journal.lastSeq();
-      const worker = h.stores.invocations.create({ runId: s.created.run.id, planNodeId: s.created.root.id, role: "worker", purpose: "step", agentDefinitionRevisionId: s.worker.id, continuedFromInvocationId: null, taskIds: [], allocation: { costUsd: 0.1, tokens: 10, attempts: 1 } });
+      const workerNode = accepted(propose(h, s, [leaf(s.worker.id)])).graph.nodes[1]!;
+      const worker = h.stores.invocations.create({ runId: s.created.run.id, planNodeId: workerNode.id, role: "worker", purpose: "step", agentDefinitionRevisionId: s.worker.id, continuedFromInvocationId: null, patternPosition: { kind: "single" }, taskIds: [], allocation: { costUsd: 0.1, tokens: 10, attempts: 1 } });
       expect(() => h.planRevisions.propose({ runId: s.created.run.id, proposedByInvocationId: worker.id, source: { version: 1, expressions: [] } })).toThrow(InvariantViolationError);
       const other = seedPlanningRuntime(h);
       expect(() => h.planRevisions.propose({ runId: s.created.run.id, proposedByInvocationId: other.invocation.id, source: { version: 1, expressions: [] } })).toThrow(InvariantViolationError);
@@ -391,7 +392,7 @@ describe("reconciliation", () => {
       const runCreation = new RunCreationService(ctx, stores, new FakeWorkspacePreparation(), TEST_POLICY);
       const created = runCreation.create({ conversationId: conversation.id, kind: "code", target: { kind: "branch", branch: "main" }, budget: { maxCostUsd: 100, maxTokens: 1_000_000, maxAttempts: 50, maxWallClockMs: null, maxConcurrency: null }, orchestratorAgentDefinitionRevisionId: orchestrator.id });
       runId = created.run.id;
-      const invocation = stores.invocations.create({ runId: created.run.id, planNodeId: created.root.id, role: "orchestrator", purpose: "operator_input", agentDefinitionRevisionId: orchestrator.id, continuedFromInvocationId: null, taskIds: [], allocation: INVOCATION_ALLOCATION });
+      const invocation = stores.invocations.create({ runId: created.run.id, planNodeId: created.root.id, role: "orchestrator", purpose: "operator_input", agentDefinitionRevisionId: orchestrator.id, continuedFromInvocationId: null, patternPosition: { kind: "orchestrator" }, taskIds: [], allocation: INVOCATION_ALLOCATION });
       const service = new PlanRevisionService(ctx, stores, { defaults: { nodeAllocation: TEST_NODE_ALLOCATION, coordinatorWorkerBounds: { maxTasks: 8, maxConcurrentWorkers: 2, maxCoordinatorInvocations: 4 } }, limits: { maxPlanDepth: 4, maxUnrolledRounds: 6, maxPlanNodes: 200 } });
       const outcome = service.propose({ runId, proposedByInvocationId: invocation.id, source: { version: 1, expressions: [chain(leaf(worker.id, "a"), parallel(leaf(worker.id), chain(leaf(worker.id), leaf(worker.id))))] } });
       if (!outcome.accepted) throw new Error("expected acceptance");

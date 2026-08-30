@@ -146,7 +146,7 @@ describe("Execution Workspace cleanup", () => {
       const node = plan.graph.nodes[1]!;
       h.stores.plans.transitionNode(node.id, { to: "ready" });
       h.stores.plans.transitionNode(node.id, { to: "running" });
-      const evaluator = h.preparation.prepare({ runId: s.created.run.id, planNodeId: node.id, role: "evaluator", purpose: "evaluate", agentDefinitionRevisionId: s.worker.id, continuedFromInvocationId: null, taskIds: [], patternPosition: null });
+      const evaluator = h.preparation.prepare({ runId: s.created.run.id, planNodeId: node.id, role: "evaluator", purpose: "evaluate", agentDefinitionRevisionId: s.worker.id, continuedFromInvocationId: null, patternPosition: null });
       expect(evaluator.invocation.workspaceCleanup).toBe("none");
       expect(h.ctx.journal.read({ runId: s.created.run.id, type: "invocation.workspace_prepared" }).map((e) => (e.payload as { invocationId: string }).invocationId)).toEqual([s.invocation.id]);
       h.provider.script({ kind: "succeed", result: COMPLETED_RESULT });
@@ -154,7 +154,7 @@ describe("Execution Workspace cleanup", () => {
       expect(h.executor.releaseWorkspace(evaluator.invocation.id)).toBe("not_due");
       expect(h.executionWorkspace.released).toHaveLength(1);
       // Cancelled: released.
-      const worker = h.preparation.prepare({ runId: s.created.run.id, planNodeId: node.id, role: "worker", purpose: "step", agentDefinitionRevisionId: s.worker.id, continuedFromInvocationId: null, taskIds: [], patternPosition: null });
+      const worker = h.preparation.prepare({ runId: s.created.run.id, planNodeId: node.id, role: "worker", purpose: "step", continuedFromInvocationId: null, patternPosition: { kind: "single" } });
       expect(worker.invocation.workspaceCleanup).toBe("pending");
       h.provider.script({ kind: "hang" });
       const prepared = await h.executor.prepareNextAttempt(worker.invocation.id);
@@ -165,7 +165,7 @@ describe("Execution Workspace cleanup", () => {
       expect(h.stores.invocations.get(worker.invocation.id).workspaceCleanup).toBe("released");
       expect(h.executionWorkspace.released.map((r) => r.invocationId)).toEqual([s.invocation.id, worker.invocation.id]);
       // A non-terminal Invocation is never released, however it is asked.
-      const pending = h.preparation.prepare({ runId: s.created.run.id, planNodeId: node.id, role: "worker", purpose: "step", agentDefinitionRevisionId: s.worker.id, continuedFromInvocationId: null, taskIds: [], patternPosition: null });
+      const pending = h.preparation.prepare({ runId: s.created.run.id, planNodeId: node.id, role: "worker", purpose: "step", continuedFromInvocationId: worker.invocation.id, patternPosition: { kind: "single" } });
       expect(h.executor.releaseWorkspace(pending.invocation.id)).toBe("not_due");
       expect(h.recovery.recover().workspaceReleasedInvocationIds).toEqual([]);
       expect(() => h.stores.invocations.recordWorkspaceReleased(pending.invocation.id)).toThrow(/released only once it is terminal/);
@@ -185,7 +185,7 @@ describe("Execution Workspace cleanup", () => {
       h.stores.plans.transitionNode(node.id, { to: "ready" });
       h.stores.plans.transitionNode(node.id, { to: "running" });
       const seq = h.ctx.journal.lastSeq();
-      expect(() => h.preparation.prepare({ runId: s.created.run.id, planNodeId: node.id, role: "worker", purpose: "step", agentDefinitionRevisionId: s.worker.id, continuedFromInvocationId: null, taskIds: [], patternPosition: null, artifactIds: [foreign.id] })).toThrow(/belongs to Run/);
+      expect(() => h.preparation.prepare({ runId: s.created.run.id, planNodeId: node.id, role: "worker", purpose: "step", continuedFromInvocationId: null, patternPosition: { kind: "single" }, artifactIds: [foreign.id] })).toThrow(/belongs to Run/);
       expect(h.executionWorkspace.discarded).toHaveLength(1);
       expect(h.ctx.journal.lastSeq()).toBe(seq);
       expect(h.stores.invocations.listPendingWorkspaceCleanup()).toEqual([]);

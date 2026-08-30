@@ -31,6 +31,7 @@
  */
 import {
   MANIFEST_RENDERER_VERSION,
+  renderPatternPosition,
   type AttemptFailureClass,
   type AttemptFailureDetail,
   type AttemptId,
@@ -100,7 +101,7 @@ export function renderManifest(manifest: ContextManifest, appendix: RetryAppendi
     line("invocation", `${manifest.invocationId} role ${c.role} purpose ${c.purpose}`),
     line("run", c.runId),
     line("plan_node", c.planNodeId),
-    line("pattern_position", c.patternPosition),
+    line("pattern_position", c.patternPosition === null ? null : renderPatternPosition(c.patternPosition)),
     line("predecessor_invocation", c.continuedFromInvocationId),
     line("agent_definition", `${c.agentDefinitionRevisionId} hash ${c.agentDefinitionContentHash}`),
     line("model", `${c.modelPolicy.model} effort ${c.modelPolicy.effort} max_context_occupancy ${c.modelPolicy.maxContextOccupancy}`),

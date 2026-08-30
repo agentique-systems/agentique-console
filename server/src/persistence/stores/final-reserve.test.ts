@@ -8,7 +8,7 @@ import { createPersistenceContext } from "../context.ts";
 import { MemoryBlobStore } from "../blob-store.ts";
 import { openDatabase } from "../database.ts";
 import { createStores } from "../stores/index.ts";
-import { extendPlan, nodeInput, openHarness, patternDefinition, seedAgentRevision, seedInvocation, seedManifest, seedRun, type Harness, type Seeded } from "../test-support.ts";
+import { extendPlan, nodeInput, openHarness, patternDefinition, seedAgentRevision, seedInvocation, seedManifest, seedRun, seedWorkerNode, type Harness, type Seeded } from "../test-support.ts";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -26,6 +26,7 @@ function finalInvocation(h: Harness, s: Seeded, use: "final_synthesis" | "run_co
     purpose: overrides.purpose ?? binding.purpose,
     agentDefinitionRevisionId: s.definition.id,
     continuedFromInvocationId: null,
+    patternPosition: (overrides.role ?? binding.role) === "orchestrator" ? { kind: "orchestrator" } : (overrides.purpose ?? binding.purpose) === "select" ? { kind: "route_selection" } : null,
     taskIds: (overrides.taskIds ?? []) as never,
     allocation: overrides.allocation ?? { costUsd: 3, tokens: 30_000, attempts: 2 },
     allocationSource: "run_final_reserve",
@@ -50,7 +51,7 @@ describe("final-reserve Invocations", () => {
     const h = openHarness();
     try {
       const s = seedRun(h, { budget: BUDGET, finalReserve: RESERVE });
-      const ordinary = seedInvocation(h, s, { role: "worker", purpose: "step" });
+      const ordinary = seedInvocation(h, s, { role: "evaluator", purpose: "evaluate" });
       expect(ordinary).toMatchObject({ allocationSource: "plan_node", finalReserveUse: null });
       expect(h.stores.reservations.listByChild({ type: "invocation", id: ordinary.id })[0]).toMatchObject({ parent: { type: "plan_node", id: s.root.id }, capacitySource: "ordinary", finalReserveUse: null });
 
@@ -84,7 +85,7 @@ describe("final-reserve Invocations", () => {
       expect(() => finalInvocation(h, s, "final_synthesis", { purpose: "operator_input" })).toThrow(ValidationError);
       expect(() => finalInvocation(h, s, "final_synthesis", { role: "evaluator", purpose: "evaluate" })).toThrow(ValidationError);
       expect(() => finalInvocation(h, s, "run_completion", { role: "orchestrator", purpose: "final_synthesis" })).toThrow(ValidationError);
-      expect(() => h.stores.invocations.create({ runId: s.run.id, planNodeId: s.root.id, role: "orchestrator", purpose: "final_synthesis", agentDefinitionRevisionId: s.definition.id, continuedFromInvocationId: null, taskIds: [], allocation: { costUsd: 1, tokens: 1, attempts: 1 }, allocationSource: "run_final_reserve" })).toThrow(ValidationError);
+      expect(() => h.stores.invocations.create({ runId: s.run.id, planNodeId: s.root.id, role: "orchestrator", purpose: "final_synthesis", agentDefinitionRevisionId: s.definition.id, continuedFromInvocationId: null, patternPosition: { kind: "orchestrator" }, taskIds: [], allocation: { costUsd: 1, tokens: 1, attempts: 1 }, allocationSource: "run_final_reserve" })).toThrow(ValidationError);
       // A route selector or evaluator-optimizer Evaluator cannot use the reserve: only `evaluate` classified `run_completion` may, and a plain evaluate is plan_node.
       expect(() => finalInvocation(h, s, "run_completion", { purpose: "select" })).toThrow(ValidationError);
       const worker = nodeInput(h, patternDefinition(s.definition.id, { sourcePath: "e1" }));
@@ -96,7 +97,7 @@ describe("final-reserve Invocations", () => {
       const task = h.stores.tasks.create({ runId: s.run.id, planNodeId: s.root.id, origin: "orchestrator", subject: "t", requirementIds: [], requirementRevisionId: null, inputArtifactIds: [], requiredOutputs: [], replacesTaskId: null });
       expect(() => finalInvocation(h, s, "final_synthesis", { taskIds: [task.id] })).toThrow(ValidationError);
       const taskReservation = h.stores.reservations.reserveOrdinary({ runId: s.run.id, parent: { type: "plan_node", id: s.root.id }, child: { type: "task", id: task.id }, amount: { costUsd: 1, tokens: 1, attempts: 1 } });
-      expect(() => h.stores.invocations.create({ runId: s.run.id, planNodeId: s.root.id, role: "orchestrator", purpose: "final_synthesis", agentDefinitionRevisionId: s.definition.id, continuedFromInvocationId: null, taskIds: [], allocation: { costUsd: 1, tokens: 1, attempts: 1 }, allocationSource: "run_final_reserve", finalReserveUse: "final_synthesis" }, { fromTaskReservationId: taskReservation.id })).toThrow(/cannot transfer a Task reservation/);
+      expect(() => h.stores.invocations.create({ runId: s.run.id, planNodeId: s.root.id, role: "orchestrator", purpose: "final_synthesis", agentDefinitionRevisionId: s.definition.id, continuedFromInvocationId: null, patternPosition: { kind: "orchestrator" }, taskIds: [], allocation: { costUsd: 1, tokens: 1, attempts: 1 }, allocationSource: "run_final_reserve", finalReserveUse: "final_synthesis" }, { fromTaskReservationId: taskReservation.id })).toThrow(/cannot transfer a Task reservation/);
       expect(() => finalInvocation(h, s, "final_synthesis", { allocation: { costUsd: 1, tokens: 1, attempts: 0 } })).toThrow(ValidationError);
       // Nothing was written: no Invocation, no reservation, no Event beyond the Task and its reservation.
       expect(h.stores.invocations.listByPlanNode(s.root.id)).toEqual([]);
@@ -143,7 +144,7 @@ describe("final-reserve Invocations", () => {
     const h = openHarness();
     try {
       const s = seedRun(h, { budget: BUDGET, finalReserve: RESERVE });
-      const ordinary = seedInvocation(h, s, { role: "worker", purpose: "step", allocation: { costUsd: 2, tokens: 20_000, attempts: 2 } });
+      const ordinary = seedInvocation(h, s, { role: "evaluator", purpose: "evaluate", allocation: { costUsd: 2, tokens: 20_000, attempts: 2 } });
       const synthesis = finalInvocation(h, s, "final_synthesis", { allocation: { costUsd: 4, tokens: 40_000, attempts: 2 } });
       spend(h, s, ordinary, { costUsd: 1, tokens: 1000 });
       spend(h, s, synthesis, { costUsd: 3, tokens: 3000 });
@@ -185,7 +186,7 @@ describe("global Run Budget across partitions", () => {
       expect(capacity.ordinary.effectiveAvailable).toEqual({ costUsd: 30, tokens: 400, attempts: 3 });
       expect(capacity.final.effectiveAvailable).toEqual({ costUsd: 10, tokens: 100, attempts: 2 });
       // The root's Invocation overruns the root's reservation on cost only, while still active.
-      const invocation = seedInvocation(h, s, { role: "worker", purpose: "step", allocation: { costUsd: 60, tokens: 500, attempts: 5 } });
+      const invocation = seedInvocation(h, s, { role: "evaluator", purpose: "evaluate", allocation: { costUsd: 60, tokens: 500, attempts: 5 } });
       spend(h, s, invocation, { costUsd: 95, tokens: 400 });
       capacity = h.stores.reservations.runCapacity(s.run.id);
       // Visible before release: the root is charged max(60, 95) = 95 on cost, max(500, 400) = 500 on tokens.
@@ -253,11 +254,12 @@ describe("global Run Budget across partitions", () => {
       expect(node.committed).toEqual({ costUsd: 4, tokens: 1000, attempts: 1 });
       expect(node.available).toEqual({ costUsd: 6, tokens: 99_000, attempts: 4 });
       // A Task reservation is charged at its reserved amount and transfer leaves every account unchanged.
-      const task = h.stores.tasks.create({ runId: s.run.id, planNodeId: s.root.id, origin: "orchestrator", subject: "t", requirementIds: [], requirementRevisionId: null, inputArtifactIds: [], requiredOutputs: [], replacesTaskId: null });
-      const taskReservation = h.stores.reservations.reserveOrdinary({ runId: s.run.id, parent: { type: "plan_node", id: s.root.id }, child: { type: "task", id: task.id }, amount: { costUsd: 2, tokens: 2000, attempts: 1 } });
-      const beforeTransfer = { node: h.stores.reservations.capacity({ type: "plan_node", id: s.root.id }), run: h.stores.reservations.runCapacity(s.run.id) };
-      h.stores.invocations.create({ runId: s.run.id, planNodeId: s.root.id, role: "worker", purpose: "task", agentDefinitionRevisionId: s.definition.id, continuedFromInvocationId: null, taskIds: [task.id], allocation: { costUsd: 2, tokens: 2000, attempts: 1 } }, { fromTaskReservationId: taskReservation.id });
-      expect(h.stores.reservations.capacity({ type: "plan_node", id: s.root.id })).toEqual(beforeTransfer.node);
+      const workers = seedWorkerNode(h, s, "coordinator_worker");
+      const task = h.stores.tasks.create({ runId: s.run.id, planNodeId: workers.id, origin: "orchestrator", subject: "t", requirementIds: [], requirementRevisionId: null, inputArtifactIds: [], requiredOutputs: [], replacesTaskId: null });
+      const taskReservation = h.stores.reservations.reserveOrdinary({ runId: s.run.id, parent: { type: "plan_node", id: workers.id }, child: { type: "task", id: task.id }, amount: { costUsd: 2, tokens: 2000, attempts: 1 } });
+      const beforeTransfer = { node: h.stores.reservations.capacity({ type: "plan_node", id: workers.id }), run: h.stores.reservations.runCapacity(s.run.id) };
+      h.stores.invocations.create({ runId: s.run.id, planNodeId: workers.id, role: "worker", purpose: "task", agentDefinitionRevisionId: s.definition.id, continuedFromInvocationId: null, patternPosition: { kind: "worker_task", taskId: task.id }, taskIds: [task.id], allocation: { costUsd: 2, tokens: 2000, attempts: 1 } }, { fromTaskReservationId: taskReservation.id });
+      expect(h.stores.reservations.capacity({ type: "plan_node", id: workers.id })).toEqual(beforeTransfer.node);
       expect(h.stores.reservations.runCapacity(s.run.id)).toEqual(beforeTransfer.run);
     } finally {
       h.close();

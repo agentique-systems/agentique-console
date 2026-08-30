@@ -30,10 +30,8 @@ function successorAfter(h: RuntimeHarness, s: ReturnType<typeof seedRuntime>, bl
     planNodeId: s.created.root.id,
     role: "orchestrator",
     purpose: "decision_resolution",
-    agentDefinitionRevisionId: s.orchestrator.id,
     continuedFromInvocationId: blocked.id,
-    taskIds: [],
-    patternPosition: null,
+    patternPosition: { kind: "orchestrator" },
     inputs: [{ kind: "side_effect_approval_resolution", decisionId: decision.id, blockedInvocationId: blocked.id, attemptId: subject.attemptId, tool: subject.tool, callDigest: subject.callDigest, callArtifactId: subject.callArtifactId, outcome }],
   });
 }
@@ -42,15 +40,15 @@ describe("side-effect approval", () => {
   it("atomically records the failed Attempt, the call Artifact, the open Decision, the blocked Invocation, blocked Tasks, and the released reservation", async () => {
     const h = openRuntimeHarness();
     try {
-      // A Worker executing one Task on a running single node, so Task blocking is exercised too.
+      // A Worker executing one Task on a running coordinator_worker node, so Task blocking is exercised too.
       const s = seedPlanningRuntime(h);
-      const plan = accepted(propose(h, s, [{ pattern: "single", operation: { agentDefinitionRevisionId: s.worker.id, title: "build" }, allocation: { costUsd: 6, tokens: 60_000, attempts: 4 } }]));
+      const plan = accepted(propose(h, s, [{ pattern: "coordinator_worker", coordinator: { agentDefinitionRevisionId: s.worker.id, title: "coordinator" }, worker: { agentDefinitionRevisionId: s.worker.id, title: "build" }, allocation: { costUsd: 6, tokens: 60_000, attempts: 4 } }]));
       const node = plan.graph.nodes[1]!;
       h.stores.plans.transitionNode(node.id, { to: "ready" });
       h.stores.plans.transitionNode(node.id, { to: "running" });
       const task = h.stores.tasks.create({ runId: s.created.run.id, planNodeId: node.id, origin: "orchestrator", subject: "build", requirementIds: [], requirementRevisionId: null, inputArtifactIds: [], requiredOutputs: [], replacesTaskId: null });
       h.stores.tasks.transition(task.id, { to: "ready" });
-      const { invocation } = h.preparation.prepare({ runId: s.created.run.id, planNodeId: node.id, role: "worker", purpose: "task", agentDefinitionRevisionId: s.worker.id, continuedFromInvocationId: null, taskIds: [task.id], patternPosition: null });
+      const { invocation } = h.preparation.prepare({ runId: s.created.run.id, planNodeId: node.id, role: "worker", purpose: "task", continuedFromInvocationId: null, patternPosition: { kind: "worker_task", taskId: task.id } });
       expect(h.stores.tasks.get(task.id)).toMatchObject({ status: "running", invocationId: invocation.id });
       const seq = h.ctx.journal.lastSeq();
       const outcome = await blockOnApproval(h, invocation);
@@ -239,7 +237,7 @@ describe("side-effect approval", () => {
       expect(successor.manifest.content.inputs[0]).toMatchObject({ kind: "side_effect_approval_resolution", outcome: "deny" });
       expect(successor.manifest.content.toolPolicy.shell).toBe("approval_required");
       // The blocked predecessor is the latest Orchestrator Invocation; a successor that skips it is refused.
-      expect(() => h.preparation.prepare({ runId: s.created.run.id, planNodeId: s.created.root.id, role: "orchestrator", purpose: "node_result", agentDefinitionRevisionId: s.orchestrator.id, continuedFromInvocationId: null, taskIds: [], patternPosition: null })).toThrow(/records continuedFromInvocationId/);
+      expect(() => h.preparation.prepare({ runId: s.created.run.id, planNodeId: s.created.root.id, role: "orchestrator", purpose: "node_result", continuedFromInvocationId: null, patternPosition: { kind: "orchestrator" } })).toThrow(/records continuedFromInvocationId/);
     } finally {
       h.close();
     }

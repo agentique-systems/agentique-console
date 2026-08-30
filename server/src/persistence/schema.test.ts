@@ -68,14 +68,19 @@ describe("database constraints", () => {
     try {
       const s = seedRun(h);
       const now = "2026-01-01T00:00:00.000Z";
-      const insertInvocation = (purpose: string, role = "orchestrator") =>
+      const insertInvocation = (purpose: string, role = "orchestrator", position: string | null = '{"kind":"orchestrator"}', positionKey: string | null = "orchestrator") =>
         h.database.sqlite
           .prepare(
-            "INSERT INTO invocations (id, run_id, plan_node_id, role, purpose, agent_definition_revision_id, continued_from_invocation_id, task_ids, alloc_cost_usd, alloc_tokens, alloc_attempts, allocation_source, final_reserve_use, status, wait_reason, failure_reason, result, created_at, started_at, ended_at) VALUES (?, ?, ?, ?, ?, ?, NULL, '[]', 1, 1, 1, 'plan_node', NULL, 'pending', NULL, NULL, NULL, ?, NULL, NULL)",
+            "INSERT INTO invocations (id, run_id, plan_node_id, role, purpose, agent_definition_revision_id, continued_from_invocation_id, pattern_position, pattern_position_key, task_ids, alloc_cost_usd, alloc_tokens, alloc_attempts, allocation_source, final_reserve_use, status, wait_reason, failure_reason, result, created_at, started_at, ended_at) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, '[]', 1, 1, 1, 'plan_node', NULL, 'pending', NULL, NULL, NULL, ?, NULL, NULL)",
           )
-          .run(`inv_${"0".repeat(24)}`, s.run.id, s.root.id, role, purpose, s.definition.id, now);
+          .run(`inv_${"0".repeat(24)}`, s.run.id, s.root.id, role, purpose, s.definition.id, position, positionKey, now);
       expect(() => insertInvocation("turn")).toThrow(/CHECK constraint failed: invocations_purpose/);
       expect(() => insertInvocation("step")).toThrow(/CHECK constraint failed: invocations_role_purpose/);
+      // The Pattern position: closed kinds, present unless a Gate Evaluator, the key agreeing with the JSON, the role agreeing with the kind.
+      expect(() => insertInvocation("operator_input", "orchestrator", '{"kind":"turn"}', "turn")).toThrow(/CHECK constraint failed: invocations_pattern_position_kind/);
+      expect(() => insertInvocation("operator_input", "orchestrator", null, null)).toThrow(/CHECK constraint failed: invocations_pattern_position_present/);
+      expect(() => insertInvocation("operator_input", "orchestrator", '{"kind":"orchestrator"}', "single")).toThrow(/CHECK constraint failed: invocations_pattern_position_key_agrees/);
+      expect(() => insertInvocation("operator_input", "orchestrator", '{"kind":"chain_step","index":1,"count":2}', "chain_step:1")).toThrow(/CHECK constraint failed: invocations_pattern_position_role/);
       expect(() => insertInvocation("operator_input")).not.toThrow();
       expect(() =>
         h.database.sqlite

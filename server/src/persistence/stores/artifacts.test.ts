@@ -1,7 +1,7 @@
 import { InvariantViolationError, NotFoundError, ValidationError, type ArtifactInput } from "@agentique-console/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BlobCorruptedError, BlobMissingError, sha256Hex } from "../blob-store.ts";
-import { openHarness, seedArtifact, seedInvocation, seedManifest, seedRun, type Harness, type Seeded } from "../test-support.ts";
+import { openHarness, seedArtifact, seedInvocation, seedManifest, seedRun, seedWorkerNode, type Harness, type Seeded } from "../test-support.ts";
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -241,13 +241,15 @@ describe("handoffs", () => {
     try {
       const s = seedRun(h);
       const artifact = seedArtifact(h, s);
-      const invocation = seedInvocation(h, s);
-      const handoff = h.stores.handoffs.create({ runId: s.run.id, source: { kind: "invocation", invocationId: invocation.id }, target: { kind: "plan_node", planNodeId: s.root.id }, taskIds: [], artifactIds: [artifact.id], summary: "results ready" });
+      const node = seedWorkerNode(h, s);
+      const input = { runId: s.run.id, route: { kind: "sequence" as const, sourceNodeId: node.id, targetNodeId: s.root.id }, source: { kind: "plan_node" as const, planNodeId: node.id }, target: { kind: "plan_node" as const, planNodeId: s.root.id }, taskIds: [], artifactIds: [artifact.id], summary: "results ready" };
+      const handoff = h.stores.handoffs.create(input);
       expect(handoff.status).toBe("pending");
-      expect(Object.keys(handoff).sort()).toEqual(["artifactIds", "createdAt", "deliveredAt", "id", "runId", "source", "status", "summary", "target", "taskIds"]);
-      expect(() => h.stores.handoffs.create({ ...handoff, summary: "x".repeat(501) })).toThrow(ValidationError);
+      expect(handoff.handoffKey).toBe(`sequence:${node.id}:${s.root.id}`);
+      expect(Object.keys(handoff).sort()).toEqual(["artifactIds", "createdAt", "deliveredAt", "handoffKey", "id", "runId", "source", "status", "summary", "target", "taskIds"]);
+      expect(() => h.stores.handoffs.create({ ...input, summary: "x".repeat(501) })).toThrow(ValidationError);
       const other = seedRun(h);
-      expect(() => h.stores.handoffs.create({ runId: s.run.id, source: { kind: "plan_node", planNodeId: other.root.id }, target: { kind: "plan_node", planNodeId: s.root.id }, taskIds: [], artifactIds: [], summary: "" })).toThrow(InvariantViolationError);
+      expect(() => h.stores.handoffs.create({ runId: s.run.id, route: { kind: "sequence", sourceNodeId: other.root.id, targetNodeId: s.root.id }, source: { kind: "plan_node", planNodeId: other.root.id }, target: { kind: "plan_node", planNodeId: s.root.id }, taskIds: [], artifactIds: [], summary: "" })).toThrow(InvariantViolationError);
       const delivered = h.stores.handoffs.transition(handoff.id, "delivered");
       expect(delivered.deliveredAt).not.toBeNull();
       expect(() => h.stores.handoffs.transition(handoff.id, "cancelled")).toThrow(/cannot transition/);
@@ -285,11 +287,12 @@ describe("artifact composition inside an outer transaction", () => {
     const h = openHarness();
     try {
       const s = seedRun(h);
+      const nested = seedWorkerNode(h, s);
       const bytes = encode("deeply nested");
       const composedService = () =>
         h.ctx.tx.write(() => {
           const artifact = h.stores.artifacts.create(runtimeInput(s), bytes);
-          return h.stores.handoffs.create({ runId: s.run.id, source: { kind: "plan_node", planNodeId: s.root.id }, target: { kind: "plan_node", planNodeId: s.root.id }, taskIds: [], artifactIds: [artifact.id], summary: "nested" });
+          return h.stores.handoffs.create({ runId: s.run.id, route: { kind: "sequence", sourceNodeId: nested.id, targetNodeId: s.root.id }, source: { kind: "plan_node", planNodeId: nested.id }, target: { kind: "plan_node", planNodeId: s.root.id }, taskIds: [], artifactIds: [artifact.id], summary: "nested" });
         });
       expect(() =>
         h.ctx.tx.write(() => {
