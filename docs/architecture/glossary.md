@@ -35,8 +35,9 @@ Related documents:
   which the final server and the final web application both import. The
   canonical stores live behind the permanent server persistence boundary
   `server/src/persistence/`, and the deterministic runtime (plan compiler,
-  plan-revision service, Run creation, and in later phases the scheduler,
-  Pattern executors, and Gates) behind the permanent execution boundary
+  plan-revision service, Run creation, the scheduler, the `single`,
+  `chain`, `route`, and `parallel` Pattern runners, join settlement, and
+  in later phases the remaining Pattern runners and Gates) behind the permanent execution boundary
   `server/src/execution/`, which depends only on the core package, the
   persistence boundary, and narrow ports for capabilities implemented in
   later phases. None of them imports the legacy `shared/` package or the
@@ -155,16 +156,20 @@ coordinator and worker operands and bounds, inline or unrolled
 evaluator-optimizer round), a Context Manifest template (the union of its
 operations' inputs), an exact Requirement scope, and creates Invocations.
 A `join` node has no Pattern value, no shape, no scope, zero allocation,
-and creates no Invocation: it executes deterministically when its
-`fan_in` predecessors are terminal, produces an index Artifact of the
-ordered predecessor references, outcomes, and output Artifact ids, and
-succeeds or fails by its fan-in policy. `join` is a deterministic node
-kind, not a seventh Pattern. A node that waits records one of the wait
+and creates no Invocation, Attempt, lease, or Usage: it executes
+deterministically from `ready` when its `fan_in` predecessors are
+terminal, produces an index Artifact (`application/vnd.agentique.join-index.v1+json`)
+of the ordered predecessor references, outcomes, and output Artifact ids,
+and succeeds or fails by its fan-in policy over the non-skipped
+predecessors (skipped when all were skipped). `join` is a deterministic
+node kind, not a seventh Pattern. A node that waits records one of the wait
 reasons `decision`, `budget`, `provider_capacity`, `integration_conflict`,
 `operator`; a node that fails records one of the failure reasons
 `invocation_failed`, `result_failed`, `result_blocked`, `task_unavailable`,
-`allocation_exhausted`, `integration_conflict`, `join_fan_in_failed` on
-its `plan_node.failed` Event. A persisted Plan Node does not contain other
+`allocation_exhausted`, `integration_conflict`, `join_fan_in_failed`,
+`route_selection_failed`, `parallel_items_failed` on its
+`plan_node.failed` Event, which also lists the runtime index Artifacts
+recorded with a fan-in failure. A persisted Plan Node does not contain other
 Plan Nodes; composition between nodes is expressed only by Plan Edges. A
 node's **definition** (everything but its id, revision, status,
 timestamps, and output) is immutable; reconciliation reuses a node across
@@ -190,8 +195,12 @@ round of an `evaluator_optimizer` expression, active only when the
 source's Evaluation failed). Every Plan Edge belongs to exactly one
 accepted Execution Plan revision and is append-only; reusing a node in a
 later revision never reuses an earlier revision's edge row. Node readiness
-is computed from the current accepted revision's edges and allocation
-alone; an edge of a historical revision never affects readiness. Only the
+is a pure function of the current accepted revision's graph plus the
+explicit canonical condition facts a conditional edge needs (a `route`
+node's recorded `route_selection` Evaluation for its `branch(label)` and
+`sequence` edges), together with allocation; an edge of a historical
+revision never affects readiness, and a fact is keyed by node id so a
+historical selection never activates a current edge. Only the
 plan-revision service, through the compiler, writes Plan Edges.
 
 - Id prefix: `pe_`
@@ -393,7 +402,12 @@ derived from its route — `sequence:<source node>:<target node>` for the
 delivery along a `sequence` Plan Edge, `chain_step:<node>:<step>` for the
 delivery from one `chain` step to the next — unique per Run and enforced
 by the database, so a Handoff exists at most once for a route however
-many times the runtime reaches it (a pass, a retry, a restart).
+many times the runtime reaches it (a pass, a retry, a restart). The closed
+route set is `sequence:<source node>:<target node>` (a delivering
+`sequence` edge), `branch:<source node>:<target node>` (the one active
+`branch(label)` edge of a route that selected a composite branch, carrying
+no Artifacts), `chain_step:<node>:<step>`, and `parallel_index:<node>`
+(a parallel node's index Artifact to its own aggregation).
 
 - Id prefix: `ho_`
 - Owned by: the runtime
@@ -554,7 +568,11 @@ read-only tools and never modifies the Workspace.
 The recorded outcome of a check: which Acceptance Criterion or rubric was
 checked, the verdict (`pass`, `fail`, `inconclusive`), the Evidence, and
 who produced it (`runtime` for a deterministic check, an Evaluator
-Invocation id otherwise). Evaluations are append-only.
+Invocation id otherwise). A `route_selection` Evaluation is the one
+canonical fact that a `route` Plan Node selected a branch label: exactly
+one exists per route node (a database unique index), it names a label the
+node's shape binds, and readiness reads it as an explicit condition fact.
+Evaluations are append-only.
 
 - Id prefix: `eval_`
 - Owned by: the runtime or the Evaluator

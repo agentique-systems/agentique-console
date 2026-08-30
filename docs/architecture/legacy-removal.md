@@ -45,11 +45,11 @@ server/src/
                  invocation-preparation-service.ts  invocation-lifecycle.ts  attempt-executor.ts
                  result-validator.ts  retry-policy.ts  continuation-policy.ts  governor.ts
                  recovery-service.ts  workspace-cleanup.ts  tool-call-authorization.ts  agent-definitions.ts
-                 readiness.ts  handoff-routing.ts  integration-service.ts  scheduler.ts  test-support.ts
+                 readiness.ts  readiness-facts.ts  handoff-routing.ts  integration-service.ts  join.ts  scheduler.ts  test-support.ts
                  compiler/{compile,input,source-path}.ts  manifest/{assembler,renderer}.ts
                  ports/{workspace-preparation,execution-workspace,integration-workspace}.ts
-                 patterns/{index,support,root,single,chain}.ts
-                 (later subphases) join.ts  patterns/{route,parallel,coordinator-worker,evaluator-optimizer}.ts  tools.ts  gates.ts
+                 patterns/{index,support,root,single,chain,route,parallel}.ts
+                 (later subphases) patterns/{coordinator-worker,evaluator-optimizer}.ts  tools.ts  gates.ts
   agents/        definitions.ts  revisions.ts  native-agent-file.ts  builtins.ts  policy.ts
   provider/      adapter.ts  continuations.ts  continuation-store.ts  fake.ts  mapping.ts  env.ts  usage-normalization.ts  failure-classifier.ts
   capacity/      governor.ts  leases.ts

@@ -94,10 +94,12 @@ Phase 1 and remain after cutover:
   renderer (`manifest/`), the Invocation preparation service, the result
   validator, the retry and continuation policies, the resource governor,
   the Attempt executor, restart recovery, the Run start service, the pure
-  readiness evaluator, the Handoff router, the Changeset integration
-  service, the `single` and `chain` Pattern runners with the root-node
-  support, the bounded scheduler, and, in later phases, the remaining
-  Pattern runners, joins, and Gates. It imports
+  readiness evaluator with its condition-fact projection, the Handoff
+  router, the Changeset integration service, the `single`, `chain`,
+  `route`, and `parallel` Pattern runners with the root-node support, the
+  deterministic join settler, the bounded scheduler, and, in later
+  phases, the `coordinator_worker` and `evaluator_optimizer` runners and
+  Gates. It imports
   only `@agentique-console/core`, the persistence boundary, `zod`, the
   provider-neutral adapter contract under `server/src/provider/`, and the
   narrow capability ports it declares under `ports/`
@@ -412,8 +414,23 @@ is one or more commits; each commit keeps `npm run typecheck` and
    `single` and `chain` Pattern runners over a shared sequential step
    engine, root-node settlement, and the event-driven bounded scheduler
    (`reconcileRun` projection, `advanceRun` pass) with restart and
-   concurrency guarantees; later-phase Patterns, edges, joins, Gates, and
-   allocation extension are returned as typed deferrals. Later
+   concurrency guarantees. Phase 2D-A (done): readiness as a pure
+   function over the current graph plus explicit canonical condition
+   facts (`ReadinessInput`, projected from `route_selection`
+   Evaluations), the `route` Pattern runner (Decision and Evaluator
+   selectors, one canonical selection Evaluation per node enforced by a
+   unique index, inline and composite branches, `branch(label)` edge
+   activation), the `parallel` Pattern runner (concurrent items under
+   Run, node, and governor limits, index-ordered integration, the
+   versioned parallel index Artifact, `requireAll`, aggregation over one
+   `parallel_index` Handoff), deterministic `join` settlement (`fan_in`
+   readiness, `require_all` / `require_any` over non-skipped sources, the
+   versioned join index Artifact), `sequence` edges out of a route, the
+   `branch` and `parallel_index` Handoff routes, and the typed
+   `routeSelection` result member. Remaining typed deferrals: the
+   `coordinator_worker` and `evaluator_optimizer` Patterns, `retry(round)`
+   edges, `node_exit` and `run_completion` Gates, and allocation
+   extension. Later
    subphases: Runs, Execution
    Plan source validation and compiler,
    Plan Nodes of both kinds (`pattern`, `join`), Plan Edges, Plan Node
@@ -567,16 +584,35 @@ Merge to `main` happens after step 7 as one merge commit. Rollback is
   per node and position; the manifest carries the position and exactly
   the operation's inputs; the same Task in two chain steps or parallel
   items is rejected at compilation.
-- Readiness tests: the evaluator is pure (no store, clock, or Invocation
-  read), decides ready, pending, and skipped with causes for every
-  predecessor combination in §4.3, honours `runOnDependencyFailure`,
-  ignores historical revisions' edges, and defers joins, non-`sequence`
-  edges, `route` successors, and later-phase Patterns without marking
-  anything successful.
+- Readiness tests: the evaluator is pure over the current graph plus the
+  explicit condition facts (no store, clock, or Invocation read; the facts
+  projection reads only `route_selection` Evaluations), decides ready,
+  pending, and skipped with causes for every predecessor combination in
+  §4.3, honours `runOnDependencyFailure`, activates exactly the selected
+  `branch(label)` edge and a route's `sequence` edges only for an inline
+  selection, makes a join ready when every `fan_in` source is terminal
+  and skipped when all were skipped, fails explicitly on a missing or
+  contradictory fact, ignores historical revisions' edges and historical
+  facts, and defers `retry` edges and the `coordinator_worker` and
+  `evaluator_optimizer` Patterns without marking anything successful.
 - Handoff tests: a Handoff is created at most once per key across
   repeated passes, retries, and restarts; a second Handoff with the same
-  key and a different route is refused; chain steps and `sequence` edges
-  produce exactly the keys of §5.
+  key and a different route is refused; `sequence` edges, `branch(label)`
+  activations, chain steps, and parallel index deliveries produce exactly
+  the keys of §7.7, validated at the store and bounded at the database.
+- Route, parallel, and join tests: a Decision selector selects without an
+  Attempt and waits canonically while open; an Evaluator selector runs
+  exactly one read-only Invocation and records exactly one Evaluation; an
+  invalid label fails deterministically; a composite selection activates
+  only its edge, skips every other branch, and holds successors until the
+  selected exit; parallel items start concurrently within every limit,
+  integrate in item order whatever the completion order, never see each
+  other's outputs, honour `requireAll`, write one canonical index, and
+  deliver it once to the aggregation; joins apply both policies over
+  non-skipped sources, order the index by edge position, and create no
+  Invocation, Attempt, lease, or Usage; every one converges across a
+  restart and repeated settlement without a duplicate Evaluation,
+  Invocation, index, integration, or Handoff.
 - Integration tests: an integrated Changeset is never applied twice; a
   crash between the apply and its record is reconciled exactly once; a
   conflict records the Changeset, the Task, the report Artifact, and the

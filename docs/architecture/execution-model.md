@@ -37,9 +37,11 @@ stores into canonical operations — the plan compiler, the plan-revision
 service, Run creation, the Context Manifest assembler and renderer,
 Invocation preparation, the Attempt executor with its retry policy and
 result validator, the resource governor, restart recovery, Run start, the
-readiness evaluator, the Handoff router, the Changeset integration
-service, the `single` and `chain` Pattern runners, the scheduler, and in
-later phases the remaining Pattern runners, joins, and Gates — lives behind
+readiness evaluator with its condition-fact projection, the Handoff
+router, the Changeset integration service, the `single`, `chain`, `route`,
+and `parallel` Pattern runners, the deterministic join settler, the
+scheduler, and in later phases the `coordinator_worker` and
+`evaluator_optimizer` runners and Gates — lives behind
 `server/src/execution/`, which depends only on the core package, the
 persistence boundary, the provider-neutral adapter contract under
 `server/src/provider/` (§6.5), and narrow ports for capabilities
@@ -307,6 +309,25 @@ the ordered predecessor references, their outcomes, and their output
 Artifact ids, and succeeds or fails according to its `fanInPolicy`. `join`
 is a deterministic node kind, not a seventh orchestration Pattern.
 
+**Join settlement** (`server/src/execution/join.ts`). A join requests no
+capacity lease, consumes no provider tokens, creates no Invocation and no
+Attempt, holds zero allocation, and never enters `running` or `waiting`.
+Once the readiness evaluator has made it `ready` (§4.3), one transaction
+settles it: over its non-skipped `fan_in` predecessors, `require_all`
+succeeds only when every one succeeded and `require_any` when at least
+one did; a skipped predecessor counts as neither success nor failure. The
+transaction writes the **join index Artifact** (media type
+`application/vnd.agentique.join-index.v1+json`, schema `joinIndexSchema`
+in `core/src/index-artifacts.ts`: `{ version: 1, planNodeId, sources:
+[{ position, edgeId, sourceNodeId, status, outputArtifactIds }] }`,
+ordered by `fan_in` edge position, then edge id, as canonical JSON; never
+Artifact bytes or narrative) and moves the node to `succeeded` with that
+Artifact as its output, creating the current-revision edge Handoffs from
+it, or to `failed` with `join_fan_in_failed`, the index recorded in the
+`plan_node.failed` Event's `artifactIds` for diagnosis. Because the index
+and the terminal transition share one transaction, a repeated pass or a
+restart creates neither a second index nor a second Handoff.
+
 A persisted Plan Node does not contain other Plan Nodes. Everything inside
 a `pattern` node is an Invocation (§5). Composition between nodes is
 expressed only by Plan Edges.
@@ -344,16 +365,61 @@ edge of a historical revision never makes a node ready:
   never holds a capacity lease or a Budget allocation beyond zero.
 
 Readiness is computed by a pure evaluator
-(`server/src/execution/readiness.ts`) over the current graph alone: given
-the nodes and edges of the latest accepted revision it returns, per node,
+(`server/src/execution/readiness.ts`) over one **readiness input**: the
+current graph plus the explicit canonical condition facts that decide
+conditional edges.
+
+```ts
+interface ReadinessInput {
+  graph: PlanGraph;
+  routeSelections: ReadonlyMap<PlanNodeId, RouteSelectionFact>;
+}
+interface RouteSelectionFact { planNodeId; selectedLabel; evaluationId }
+```
+
+Readiness cannot be a function of `PlanGraph` alone: a `branch(label)`
+edge (and, in a later phase, a `retry(round)` edge) is activated by a
+canonical Evaluation fact the graph does not contain. The evaluator
+therefore receives those facts as input and stays pure: it queries no
+store, writes nothing, mints nothing, and reads no clock, transcript,
+Artifact content, Handoff summary, Invocation creation order, source-path
+text, or Event replay. The caller projects the facts from canonical rows
+(`server/src/execution/readiness-facts.ts`: `projectReadinessInput` reads
+exactly the `route_selection` Evaluations of the Run, keyed by route node
+id) and hands them in. A fact that is missing where an edge needs it (a
+succeeded route node without a selection) or that contradicts the graph (a
+label the node's shape does not bind, a fact on a member that is not a
+route node, a fact keyed by another node) is a typed `ReadinessFactError`
+— an invariant failure, never guessed readiness. Facts are per node id, so
+a node a later revision replaced (a new id) carries no historical
+selection, and a fact of a node outside the current membership is inert:
+historical Evaluation facts cannot activate current-revision edges. Later
+phases add the facts their conditional edges need (a `retry(round)` edge
+reads the round's Evaluation verdict) as further members of this input.
+
+Given the input, the evaluator returns, per member in membership order,
 `remain_pending`, `become_ready`, `become_skipped` (with the cause and the
 failed predecessors), or the observation that the node is already ready,
-active, or terminal. It reads no clock, no store, and no Invocation. Work
-the runtime does not yet support — `join` nodes, `branch`, `fan_in`, and
-`retry` edges, `sequence` edges out of a `route` node, and the `route`,
-`parallel`, `coordinator_worker`, and `evaluator_optimizer` Patterns — is
-returned as a typed deferral, never as readiness and never as success.
-Nodes are considered in membership order.
+active, or terminal. Each current-revision edge into a pending node has an
+**activation**: `pending` while its source has not ended; `inactive` when
+the source was skipped, when it is a `branch(label)` edge whose route
+selected another label, or when it is a `sequence` edge out of a route
+that selected a composite branch (that selection delivers through the
+branch's exits, never through the route's own edges); `failed` when the
+source failed or was cancelled; `delivers` when the source succeeded and
+the edge is active. A pending pattern node with no edges becomes ready;
+with every edge inactive it is skipped; with a failed edge it is skipped
+unless compiled with `runOnDependencyFailure`; otherwise it becomes ready
+once every edge has settled and at least one delivers — so an inline
+selection lets successors proceed once every composite alternative has
+been skipped, and a composite selection makes successors wait until the
+selected branch's exits are terminal. A `join` becomes ready when every
+`fan_in` predecessor is terminal and is skipped when every one was
+skipped; its policy is applied at settlement (§4.2), never here. The same
+activation decides which edges the Handoff router delivers along (§7.7).
+Work the runtime does not yet support — `retry` edges and the
+`coordinator_worker` and `evaluator_optimizer` Patterns — is returned as a
+typed deferral, never as readiness and never as success.
 
 ### 4.4 Composition and compilation
 
@@ -775,11 +841,54 @@ selection is recorded as an Evaluation on the node. A leaf branch runs as
 one Invocation inside the node; a composite branch is a subgraph reached by
 a `branch(label)` edge.
 
-- Invocations: 0 or 1 selector (`evaluator`, `select`), then 1 inline branch (`worker`, `step`) when the selected branch is a leaf
-- Input: the node manifest; the branch additionally receives the selection Evaluation reference
-- Output: the inline branch's result Artifacts, or nothing when the selected branch is composite (its subgraph's exits deliver)
+- Invocations: 0 or 1 selector (`evaluator`, `select`, position `route_selection`), then 1 inline branch (`worker`, `step`, position `route_branch { label }`) when the selected branch is a leaf
+- Input: the node manifest with the node's incoming edge Handoffs; the branch additionally receives the selection Evaluation as its typed `route_selection` manifest input (`evaluationId`, `selectedLabel`)
+- Output: the inline branch's result Artifacts, or nothing (`[]`) when the selected branch is composite (its subgraph's exits deliver)
 - Fan-in: none
-- Failure: a selector that returns no valid label fails the node
+- Failure: a selector that yields no valid label fails the node with `route_selection_failed`; a failed inline branch fails the node like a `single`
+
+**Selection ownership.** The selection is one canonical `route_selection`
+Evaluation on the node (`subject: { kind: "route_selection",
+selectedLabel }`, verdict `pass`, `planNodeId` the route node, no Gate, no
+judged Artifact) — exactly one per route node, enforced by the Evaluation
+store (a second selection is a conflict) and by a database unique index
+over `evaluations(plan_node_id)` for `route_selection` subjects, so
+repeated or concurrent settlement never records two. The Evaluation is
+recorded in the same transaction that acts on it, and every later pass or
+restart reads it back from rows: it is never inferred from a transcript,
+Artifact, Handoff summary, Invocation order, or Event.
+
+- `decision_answer` selector: the runner reads the exact referenced
+  Decision (its Conversation and Run ownership checked). While it is open
+  the node waits with reason `decision` and the Run waits when nothing else
+  can proceed; no model is invoked and no Attempt is consumed. Once
+  resolved, the chosen option is mapped through `labelsByOptionId` and the
+  label validated against the shape's branch bindings; an unmapped option
+  or a superseded Decision fails the node with `route_selection_failed`.
+  The Evaluation's producer is `runtime`.
+- `evaluator` selector: one read-only Evaluator Invocation (role
+  `evaluator`, purpose `select`) whose Context Manifest carries the node's
+  incoming Handoffs and the empty selector input the compiled shape
+  authorizes. It returns the typed `routeSelection.selectedLabel` of the
+  result contract (§6.3); the result validator admits a selection only
+  from a `select` Invocation, only with a label the shape binds, and from
+  no other Invocation, so an invalid label is an invalid result — retried
+  within the Invocation's Attempts with the violation in the retry
+  appendix — and no valid label after the permitted Attempts fails the
+  node with `route_selection_failed`. The Evaluation's producer names the
+  Evaluator Invocation and its Agent Definition revision. Evaluators are
+  read-only by role policy and record no Changeset.
+- Inline branch: the Worker Invocation is prepared with the Evaluation
+  (its `route_selection` input), the node's incoming Handoffs, and only its
+  own operation input; an approval successor continues at the same
+  position with the selection re-delivered; its Changeset is integrated
+  before the node settles; its result Artifacts are the node's output.
+- Composite branch: the node succeeds with no fabricated output, the
+  `branch(label)` Handoff to the selected branch's entry is created, and
+  the readiness evaluator activates exactly that edge from the recorded
+  fact (§4.3), skipping every inactive branch's subgraph. No inline
+  Invocation is created, and no child is ever inferred to have been
+  selected from having started.
 
 ### 5.4 `parallel`
 
@@ -791,14 +900,52 @@ aggregation Invocation over that index inside the node. Composite items
 never live in a `parallel` node; the compiler lifts them into subgraphs
 that fan into a `join` node (§4.4).
 
-- Invocations: one `worker` (`step`) per item, then 0 or 1 aggregation `worker` (`step`)
-- Input: each item receives the node manifest plus its item payload; the aggregation receives the manifest plus a Handoff to the index Artifact
+- Invocations: one `worker` (`step`) per item at position `parallel_item { index, count }`, then 0 or 1 aggregation `worker` (`step`) at position `parallel_aggregation`
+- Input: each item receives only its own operation input (`operationAt(shape, position)`) plus the node's incoming edge Handoffs; the aggregation receives the manifest plus the one `parallel_index` Handoff to the index Artifact
 - Output: the aggregation's result Artifacts, or the index Artifact when there is no aggregation
-- Fan-in: the runtime waits for every item to reach a terminal state, then writes the index
-- Failure: an item that fails after its Attempts is recorded as failed in the index; whether that fails the node is a node option (`requireAll`, default true)
+- Fan-in: the runtime waits for every item to reach its required terminal state and for every successful writing Changeset to be integrated, then writes the index
+- Failure: an item that fails after its Attempts (or returns a `failed` or `blocked` result) is recorded as failed in the index; `requireAll: true` (default) needs every item to succeed, `requireAll: false` at least one; otherwise the node fails with `parallel_items_failed`, the index recorded on the failure Event; a failed aggregation fails the node like a `single`
 
 Items never see each other's results. A `parallel` node whose items are
 not independent is a plan error; the Orchestrator should use `chain`.
+
+**Scheduling.** Items may run concurrently subject to the Run's
+`maxConcurrency`, the node's `maxConcurrency`, the governor's leases, and
+the node's remaining allocation (an item that cannot be funded follows
+`onAllocationExhausted`). The scheduler starts one further position per
+iteration (`start_position`), so no single transaction creates every item
+and the database's one-active-Invocation-per-position rule bounds
+duplicates. An approval-blocked item continues through a successor
+Invocation at the same position once its Decision resolves; the node
+waits with reason `decision` only while a blocked item's Decision is open
+and nothing else can proceed.
+
+**Deterministic integration order.** Attempts finish in any order, but
+writing Changesets are integrated in item-index order, never completion
+order: an item's Changeset is integrated only once every lower-index item
+is determined (terminal and integrated, or terminal without a Changeset),
+so a later item whose Attempt finished first stays pending. A conflict
+follows the ordinary lifecycle (§9.2) — the node waits with
+`integration_conflict`; a second conflict or a failed or cancelled conflict
+Task fails the node — and never lets another item's Changeset pass it.
+
+**Index Artifact.** After every item is terminal and every successful
+Changeset is integrated, exactly one **parallel index Artifact** is
+created (media type `application/vnd.agentique.parallel-index.v1+json`,
+schema `parallelIndexSchema` in `core/src/index-artifacts.ts`:
+`{ version: 1, planNodeId, items: [{ index, invocationId, outcome,
+outputArtifactIds, failure }] }` in item-index order, `outcome` one of
+`succeeded | failed | cancelled`, `failure` the bounded classification
+`{ kind: invocation_failed | result_failed | result_blocked,
+invocationFailureReason }` for a failed item; canonical JSON; never a
+transcript, provider message, prompt, worktree path, continuation, copied
+Artifact content, or summary). The index is created in the same
+transaction that consumes it — the node's success, the `parallel_index`
+Handoff plus the aggregation Invocation, or the node's failure — so a
+repeated pass or a restart never creates a second one. With an
+aggregation, the Handoff carries the index by reference (never inlined
+into narrative), the aggregation's Changeset is integrated before the node
+settles, and its result Artifacts are the node's output.
 
 ### 5.5 `coordinator_worker`
 
@@ -983,7 +1130,8 @@ allocation source and final-reserve use, the effective capability set and
 Tool Policy (§6.4), the role's runtime tools, the queued logical inputs
 as typed entries (an operator message with its content; a Plan Node
 outcome; a Decision resolution; a Gate result; a plan-revision outcome; a
-Publication result), each delivered Handoff's routing metadata, and
+Publication result; a route selection, validated against the node's
+canonical `route_selection` Evaluation), each delivered Handoff's routing metadata, and
 bounded metadata (media type, size, title) of every readable Artifact;
 Artifact content is never embedded and is read through `read_artifact`.
 Every collection is in canonical order — Requirements in scope order,
@@ -1023,12 +1171,17 @@ Every Attempt must end by returning a typed result through the runtime's
   statement of what must change
 - `runOutcome`: Orchestrator only, optional — `infeasible` with Evidence,
   which is the Orchestrator's only path to a terminal Run failure (§3)
+- `routeSelection`: route selector only (`select`) — the typed
+  `{ selectedLabel }` of exactly one branch the node's shape binds; the
+  only channel for a selection (never the summary, blocker, an open item,
+  an Artifact, or transcript text), `null` for every other Invocation
 
 The runtime validates the result: every referenced id must exist and belong
 to this Run; every `completed` Task must carry Evidence and its required
 output Artifacts; a writing Invocation must have produced a Changeset
-(possibly empty, stated as such). An Attempt that ends without a valid
-result is a failed Attempt.
+(possibly empty, stated as such); a completed `select` result names a
+bound branch label and no other result names one. An Attempt that ends
+without a valid result is a failed Attempt.
 
 A Task reported `completed` in a valid result is transitioned to
 `completed` by the runtime (§7.9). It does not change any Requirement's
@@ -1336,14 +1489,20 @@ runtime component with two entry points and no timer, loop, or interval:
   decisions, Handoffs, Changesets and their integration status, Decisions,
   reservations, and leases — it returns the ordered list of typed
   **actions** that are canonical next (`resume_run`, `ready_node`,
-  `skip_node`, `start_node`, `execute_invocation`, `settle_node`,
-  `settle_removed_node`, `resume_node`, `wait_node`, `settle_root`,
-  `wait_run`), the nodes that are waiting and why, the work deferred to a
-  later phase, the ready nodes held back by the Run's `maxConcurrency`,
-  the Invocations executing in this process, and the earliest resumption
-  time (retry `notBefore`, provider `retryAfter`, or an Invocation
-  deadline). One action is projected per node per iteration, in
-  membership order; the root node is settled first.
+  `skip_node`, `start_node`, `start_position`, `execute_invocation`,
+  `settle_node`, `settle_join`, `settle_removed_node`, `resume_node`,
+  `wait_node`, `settle_root`, `wait_run`), the nodes that are waiting and
+  why, the work deferred to a later phase, the ready nodes held back by
+  the Run's `maxConcurrency`, the Invocations executing in this process,
+  and the earliest resumption time (retry `notBefore`, provider
+  `retryAfter`, or an Invocation deadline). Readiness is evaluated over
+  the current graph plus the condition facts projected from rows (§4.3).
+  One action is projected per node per iteration, in membership order; the
+  root node is settled first. `start_position` is the one further
+  position a running `parallel` node may prepare now (a further item, or
+  the successor of a blocked position whose Decision resolved), subject to
+  the same Run and node concurrency limits as `start_node`; `settle_join`
+  is the deterministic settlement of a `ready` join (§4.2).
 - `advanceRun(runId, { maxActions })` is a bounded pass. It performs the
   projected actions one at a time, re-projecting the current graph before
   every state-changing action; every mutation runs inside a Pattern
@@ -1352,8 +1511,9 @@ runtime component with two entry points and no timer, loop, or interval:
   (`stale`, `no_change`). Provider executions run outside every
   transaction; independent Attempts execute concurrently within one pass
   up to the Run's `maxConcurrency` and the governor's leases (§7.8), and
-  the pass awaits the batch only when no other action can proceed — an
-  Attempt's completion is what re-triggers projection. The pass stops with
+  the pass waits only when no other action can proceed, until the first
+  executing Attempt ends — that completion is what re-triggers projection
+  while the others keep running. The pass stops with
   a closed reason: `quiescent` (nothing to do), `waiting` (the Run
   waits, an Attempt is still in flight, or a resumption time is pending),
   `action_limit`, `run_terminal`, `unsupported` (only later-phase work
@@ -1363,8 +1523,9 @@ runtime component with two entry points and no timer, loop, or interval:
   database constraints (one active Invocation per position, one Handoff
   per key, one active Attempt per Invocation) remain the source of
   correctness across processes.
-- Node readiness is computed from Plan Edges and allocation as defined in
-  §4.3. Within a node, the Pattern runner (`patterns/`) decides Invocation
+- Node readiness is computed from Plan Edges, the explicit condition
+  facts, and allocation as defined in §4.3. Within a node, the Pattern
+  runner (`patterns/`) decides Invocation
   order (§5); an Invocation starts only after its allocation is reserved
   (§7.6) and executes only under a lease. A node whose allocation cannot
   be reserved follows its `onAllocationExhausted` policy: `fail` fails it
@@ -1624,12 +1785,29 @@ the node when the Invocation reaches a terminal state.
 
 ### 7.7 Fan-in
 
-Fan-in is performed by the runtime: by `join` nodes for `fan_in` edges, by
-the `parallel` Pattern for its inline items, and by the
+Fan-in is performed by the runtime: by `join` nodes for `fan_in` edges
+(§4.2), by the `parallel` Pattern for its inline items (§5.4), and by the
 `coordinator_worker` Pattern for Worker results. It waits for the required
 results, writes the index Artifact or records the Handoffs, and creates the
 next Invocation or marks the node terminal. No agent waits for another
 agent.
+
+**Handoff routes.** The Handoff router (`server/src/execution/handoff-routing.ts`)
+carries every transfer under a stable canonical key of the closed core
+`HandoffRoute` union: `sequence:<source>:<target>` for a delivering
+`sequence` edge (a join's output is its index Artifact; a route's own
+sequence edges deliver only for an inline selection), `branch:<source>:<target>`
+for the one active `branch(label)` edge of a route that selected a
+composite branch (no Artifacts; the label is validated routing metadata
+against the node's shape and the revision's edge), `chain_step:<node>:<step>`
+for a chain's internal transfer, and `parallel_index:<node>` for a parallel
+node's delivery of its index to its own aggregation. Which edges deliver is
+decided by the readiness evaluator's activation over the graph and the
+facts (§4.3); a Handoff still holds only source, target, Task ids,
+Artifact ids, a bounded summary, and a status — never a message, an
+Evaluation payload, or copied Artifact content — and the database's unique
+key per Run makes every transfer exist at most once across passes,
+retries, and restarts.
 
 ### 7.8 Resource governor
 
@@ -2077,7 +2255,9 @@ mechanism, if ever added, is a new feature with its own design.
 | Plan Node exhausts its allocation | Per `onAllocationExhausted`: `fail`, `wait` (Run may enter `waiting`/`budget`), or `extend`. |
 | Run Budget has no unreserved capacity for work that must proceed | Run `waiting` (`budget`); operator raises the Budget or cancels. Never `failed` on this alone. |
 | Plan Node fails | Successors `skipped` (or `ready` with the failure if opted in); a `node_result` Orchestrator Invocation is created. |
-| `join` fan-in policy not met | Join `failed`; handled as a Plan Node failure. |
+| `join` fan-in policy not met | Join `failed` with `join_fan_in_failed`, its index Artifact recorded on the failure Event; handled as a Plan Node failure. |
+| `parallel` items do not satisfy `requireAll` | Node `failed` with `parallel_items_failed` after every item ended and every successful Changeset was integrated; the index Artifact (failed items included) is recorded on the failure Event. |
+| `route` selector yields no valid label | Node `failed` with `route_selection_failed`: an unmapped or superseded selector Decision, or an Evaluator selection Invocation that failed after its permitted Attempts (an unbound label is an invalid result, retried within them). |
 | Task fails or is blocked inside `coordinator_worker` | Task `failed`/`blocked`; a `replan` Coordinator Invocation is created unless one is active (then queued). |
 | Changeset conflict | Changeset `conflict`; Task with a bounded report Artifact created for the node owner; node (and, when nothing else can proceed, the Run) `waiting` with `integration_conflict`; applied once more when the Task completes; a second conflict, or a failed or cancelled Task, fails the node with `integration_conflict` (§9.2). |
 | Crash between an external Changeset application and its record | The Changeset stays `pending`; the next pass applies it again and the port reports the application that already holds; the record is written exactly once (§9.2). |
