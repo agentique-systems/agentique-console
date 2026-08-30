@@ -42,13 +42,15 @@ router, the Changeset integration service, the `single`, `chain`, `route`,
 `parallel`, `coordinator_worker`, and `evaluator_optimizer` Pattern
 runners, the deterministic join settler, the pure Task projection, the
 runtime-tool call boundary with its Task proposal handlers, the
-deterministic Acceptance Criterion check service, the scheduler, and the Gates — lives behind `server/src/execution/`, which
+deterministic Acceptance Criterion check service, the scheduler, the
+Gates, the completion engine, and the signoff service — lives behind
+`server/src/execution/`, which
 depends only on the core package, the persistence boundary, the
 provider-neutral adapter contract under `server/src/provider/` (§6.5),
 and narrow ports for capabilities implemented in later phases (the
 Workspace preparation port, §3, the execution-workspace port, §9.1, the
-integration-workspace port, §9.2, and the Acceptance Criterion execution
-port, §10.1). The provider boundary
+integration-workspace port, §9.2, the Acceptance Criterion execution
+port, §10.1, and the Run finalization Workspace port, §9.3). The provider boundary
 (`server/src/provider/`) holds the adapter contract, the scripted fake,
 the continuation payload stores, and, in a later subphase, the
 provider-specific adapters; it depends on the core package and on the
@@ -128,6 +130,7 @@ re-entrant over one SQLite connection:
 | Approval use | Runtime (tool-call authorization) | `approved_tool_call_uses` | Decision cards, Plan view |
 | Runtime-tool call | Runtime (runtime-tool executor) | `runtime_tool_calls` | Invocation inspector |
 | Completion Request | Runtime (`request_completion` handler, completion engine) | `completion_requests` | Run view |
+| Signoff Resolution | Runtime (signoff service, from the operator's `accept` or `request_changes`) | `signoff_resolutions` | Run view, Decision cards |
 | Provider continuation index | Provider adapter | `provider_continuations` (index) + adapter-owned payload store | Attempt inspector (existence only) |
 | Context Manifest | Runtime | `context_manifests` | Invocation inspector |
 | Evaluation, Gate | Runtime | `evaluations`, `gates` | Gate view |
@@ -232,11 +235,23 @@ created ──► running ──► verifying ──► awaiting_signoff ──�
   Artifact exists, and the `operator_signoff` Gate is open with its one
   `operator_required` `signoff` Decision. The runtime performs nothing:
   no action is projected, no Invocation can be prepared, no Completion
-  Request can be created, and nothing resolves the Decision. Resolving
-  it (`completed`, or `running` on a change request) is a later phase.
+  Request can be created, and nothing resolves the Decision by itself.
+  Only the operator resolves it, through the signoff service
+  (`server/src/execution/signoff.ts`, §10 `operator_signoff`), by exactly
+  one of two closed operations: `accept` moves the Run to `completed`
+  with its final Snapshot and final Changeset (§9.3); `request_changes`
+  returns it to `running` with one follow-up root Orchestrator turn.
+  Each is recorded as one canonical Signoff Resolution; neither is
+  inferred from Conversation text, an Orchestrator result, a model
+  summary, or an unresolved Decision.
 - `completed`: the operator accepted the verified final Snapshot. Terminal.
-  A completed Run may then be published (§9.4); publishing does not change
-  the Run's state.
+  A completed Run carries exactly its two final references,
+  `finalSnapshotId` (the signoff Gate's verified Snapshot, by reference)
+  and `finalChangesetId` (the Run's one `final` Changeset, §9.3), and no
+  other Run carries either. Its Integration Workspace remains in place. A
+  completed Run may then be published (§9.4); publishing is a separate,
+  explicit operation that does not change the Run's state, and signoff
+  acceptance grants no publish authority.
 - `failed`: reached only by a terminal failure transition: the root Plan
   Node failed (its current Orchestrator Invocation failed after its
   permitted Attempts with a permanent failure), or the Orchestrator
@@ -776,7 +791,7 @@ exists for the Orchestrator and no Orchestrator Invocation is active:
 |---|---|
 | `operator_input` | The operator posted a message (the Run's first Invocation always has this purpose). |
 | `node_result` | A Plan Node reached a terminal state. |
-| `decision_resolution` | A Decision the Orchestrator requested or that affects the Run was resolved or superseded. |
+| `decision_resolution` | A Decision the Orchestrator requested or that affects the Run was resolved or superseded; or the operator resolved the Run's `signoff` Decision with `request_changes` (§10): the signoff service prepares exactly one such turn in the resolving transaction — continued from the previous root turn, funded from the root's ordinary allocation, carrying the typed `signoff_resolution` input and the operator's message — and links it to the Signoff Resolution. |
 | `gate_result` | A `node_exit` Gate of a node without a Coordinator failed and its remediation Task awaits the Orchestrator (§10): every pending remediation Task of the Run is batched into one turn, created only when no other action, in-flight Attempt, or concurrency-limited node remains, funded from the root's ordinary allocation (when it does not fit, the root's `extend` policy applies and the turn is deferred as `awaiting_allocation_extension_phase`); or a `run_completion` Gate failed and its one remediation Task awaits the Orchestrator (§10) — coalesced into the same batched turn as any failed node Gates, with a typed `gate_result` input per Gate. |
 | `plan_revision` | The Orchestrator's previous Invocation ended by returning `blocked` on a rejected plan revision or by requesting continuation after a revision, and the compiled outcome is now available. |
 | `publication_result` | A Publication succeeded or failed. |
@@ -1472,7 +1487,14 @@ outcome; a Decision resolution; a `gate_result`, validated against the
 closed Gate's canonical facts (kind, node, cycle ordinal, verdict, pinned
 Snapshot and candidate, failed criteria, Evaluations, remediation Task)
 and delivered only to the root Orchestrator or to the gated node's
-Coordinator; a `gate_candidate`, validated to name the Invocation's own
+Coordinator; a `signoff_resolution`, validated against the canonical
+Signoff Resolution of this Run (outcome `request_changes`, its closed
+`operator_signoff` Gate failed `changes_requested` on the named
+Decision, the operator-resolved Decision, the passed completion Gate,
+the verified Snapshot, the final report, and the operator's message,
+which must also be delivered as the ordinary `operator_message` input)
+and delivered only to the root Orchestrator's `decision_resolution`
+turn; a `gate_candidate`, validated to name the Invocation's own
 open Gate, the Gate's pinned Snapshot and candidate, and exactly the
 Gate's evaluated criteria; a plan-revision outcome; a
 Publication result; a route selection, validated against the node's
@@ -2003,7 +2025,12 @@ runtime component with two entry points and no timer, loop, or interval:
   `awaiting_signoff` Run nothing at all. Every one of them revalidates the
   request, Gate, Invocation, and Run rows inside its transaction, so a
   repeated or stale projection changes nothing. The projection reports
-  the engine's advice under `completion`.
+  the engine's advice under `completion`. Operator signoff (§10
+  `operator_signoff`) is externally triggered, never a scheduler
+  decision: after `accept` the projection reports `run_terminal` and
+  performs nothing; after `request_changes` the Run is `running` again
+  and the prepared follow-up turn executes and settles through the
+  ordinary root path. No polling, timer, or second scheduler exists.
   For an `evaluator_optimizer` node the projection distinguishes, from rows
   alone: producer position ready (`start_node` / `settle_node` preparing
   the next round), producer Attempt active (`execute_invocation` or an
@@ -2571,10 +2598,14 @@ the operator; the runtime records the superseding Decision and creates a
 ### 9.2 Integration
 
 - When a writing Invocation returns, the runtime commits its worktree,
-  records the Changeset (before Snapshot, after Snapshot, diff Artifact,
-  integration status `pending`), and integrates the Changeset into the
-  Integration Workspace in Plan Edge order — before the node is settled,
-  the next `chain` step is prepared, or a successor is readied.
+  records the Changeset (kind `invocation`, its writing Invocation, before
+  Snapshot, after Snapshot, diff Artifact, integration status `pending`),
+  and integrates the Changeset into the Integration Workspace in Plan Edge
+  order — before the node is settled, the next `chain` step is prepared,
+  or a successor is readied. Changesets have a closed **kind**:
+  `invocation` Changesets live in the integration lifecycle above; the
+  Run's one `final` Changeset (§9.3) is a descriptive record that is never
+  applied, retried, or resolved.
 - Integration goes through the Changeset integration service
   (`server/src/execution/integration-service.ts`) and the
   integration-workspace port (`ports/integration-workspace.ts`:
@@ -2641,8 +2672,49 @@ verified, unchanged since (§10). When the operator accepts at
 `operator_signoff`, the runtime records the accepted integration Snapshot as
 the Run's **final Snapshot** and the diff from the base Snapshot as the
 Run's **final Changeset**. The Run is `completed`. The Target is still
-untouched. Accepting, requesting changes, the final Snapshot, and the
-final Changeset are a later phase; this one ends at `awaiting_signoff`.
+untouched.
+
+**Final Snapshot.** The final Snapshot is the signoff Gate's verified
+Snapshot itself, referenced through `Run.finalSnapshotId`; no second
+Snapshot row is taken to rename its purpose. Acceptance validates that it
+is exactly the Snapshot the signoff Gate pinned, exactly the Snapshot the
+passed completion Gate verified, that it belongs to the Run's Workspace,
+that the Run's integration Snapshot has not moved since, and — through the
+**Run finalization Workspace port** (`ports/run-finalization-workspace.ts`,
+`RunFinalizationWorkspacePort`) — that the external Integration Workspace
+still holds exactly that Snapshot with a clean working state. The port is
+read-only and provider-neutral: it receives the Run and Workspace
+identity, the Integration Workspace path, the base Snapshot identity, and
+the verified Snapshot identity — never a store, a database handle, the
+Blob Store, an Artifact lookup, a transcript, or any authority over the
+Target — and returns the Snapshot the Workspace holds now, the exact,
+untruncated base-to-verified diff (a zero-byte diff is valid), and whether
+the working state is clean. It never modifies the Integration Workspace or
+the Target, never commits, combines, rebases, or switches anything, never
+publishes, and creates no provider-side marker correctness would depend
+on; the signoff service calls it outside every transaction and refuses to
+call it from inside one. Any other observation is **drift**, refused with
+`workspace_drifted`, never reinterpreted as acceptance; an unobservable
+Workspace is `finalization_failed`; both leave the boundary open and
+acceptance retryable (or the operator may request changes). The "final"
+status of the Snapshot is the completed Run's canonical reference, not a
+Snapshot property.
+
+**Final Changeset.** The complete base-to-final difference is one canonical
+Changeset of kind `final`: the Run, no Invocation, before Snapshot = the
+Run's base Snapshot, after Snapshot = the final Snapshot, a content-addressed
+`text/x-diff` Artifact holding the exact bytes the port computed (digest
+and byte size verified on every read), and the one terminal state
+`recorded` — it has no integration retry lifecycle, no conflict state, and
+no external apply action, because the Integration Workspace already holds
+that state. At most one exists per Run and none before signoff acceptance
+(the store and a database trigger admit it only for a Run
+`awaiting_signoff`, from its base Snapshot to the open signoff Gate's
+Snapshot, with a diff Artifact of the Run; a unique index holds one per
+Run); it is immutable and never deleted; `Run.finalChangesetId` references
+it and `Run.finalSnapshotId` equals its after Snapshot (database-enforced
+on the Run row). The diff bytes live only in the Artifact Store: no
+outcome, projection, Event, or manifest carries them.
 
 ### 9.4 Publishing
 
@@ -2822,8 +2894,130 @@ Order is fixed: deterministic checks, then Evaluations, then the operator.
   per signoff Gate) carries no publish authority. The operator sees the
   Requirement statuses (waivers shown with their Decisions), the
   Evaluations, the report, and the Usage, and accepts or requests
-  changes; accepting completes the Run, requesting changes returns it to
-  `running` — both a later phase. Until then the Run performs nothing.
+  changes. Until the operator does, the Run performs nothing.
+
+  **Resolution.** The signoff service (`server/src/execution/signoff.ts`,
+  `RunSignoffService`) is the one boundary through which the
+  operator-facing layer resolves the Decision, and it never accepts a
+  caller-supplied Snapshot id, Changeset id, report Artifact id,
+  Completion Request id, Run status, diff, or any Decision outcome other
+  than the closed operation invoked: a caller names the Run, the Gate, the
+  Decision, and (for a change request) the operator's message; everything
+  else is resolved from rows. Its three operations are separated:
+
+  - `inspect` is read-only. It returns a bounded **signoff projection**
+    for an operator-facing API: the Run id and status; the signoff Gate
+    and Decision ids and statuses; the verified Snapshot id; the
+    Completion Request and passed completion Gate ids; the final-report
+    Artifact's metadata; the pinned leaves' statuses with their waiver
+    Decision ids; the completion Evaluation ids; the Run's Usage totals;
+    the candidate Artifacts' metadata; the resolution, if any; the final
+    references; the current blockers; and the allowed actions. It carries
+    no Artifact bytes, verification output, transcript, provider message,
+    continuation, worktree path, or Event history, writes nothing, and
+    derives no status. A missing or inconsistent boundary is a typed
+    refusal, never a guess.
+  - Both `accept` and `request_changes` require, before writing anything:
+    the Run `awaiting_signoff`; the named Gate the Run's open
+    `operator_signoff` Gate; the named Decision that Gate's open,
+    `operator_required` `signoff` Decision; the Decision subject naming
+    this Run, this Gate, the passed `run_completion` Gate, the Completion
+    Request, the verified Snapshot, and the final-report Artifact, all in
+    agreement with the Gate row; the completion Gate `passed` and the
+    request `passed` on it; the report an Artifact of the Run; the
+    verified Snapshot of the Run and its Workspace; and **quiescence** —
+    no active Invocation, Attempt, or capacity lease; no pending worktree
+    cleanup obligation; no active reservation below the root node's own
+    (ordinary or final-reserve); no `invocation` Changeset pending or in
+    conflict; no open `node_exit` Gate or unresolved remediation Task; no
+    other `operator_required` Decision open; no active Completion Request;
+    every current Task completed or cancelled and every current non-root
+    node ended; the pinned leaves `satisfied`, `waived`, or `retired` on
+    the still-current Requirement revision; the integration Snapshot
+    unchanged. Unexpected active state is an invariant violation
+    (`active_state`): nothing is released, repaired, or written. Every
+    refusal is a closed code (`SIGNOFF_REFUSAL_CODES`).
+  - `accept` is one external read followed by one root transaction. The
+    external read (§9.3) inspects the Integration Workspace through the
+    finalization port outside every transaction. The transaction
+    revalidates every row (the boundary, quiescence, and that the Run did
+    not change during the inspection) and then, in order: stores the
+    exact diff as a content-addressed `text/x-diff` Artifact; records the
+    `final` Changeset; records the Signoff Resolution with outcome
+    `accept` naming it; resolves the Decision (resolver `operator`,
+    option `accept`); closes the Gate `passed`; sets `Run.finalSnapshotId`
+    and `Run.finalChangesetId` and moves the Run
+    `awaiting_signoff → completed`; clears the Conversation's active-Run
+    reference when it still names this Run; every Event under one
+    correlation chain. A database failure anywhere rolls every relational
+    change back, compensates a newly written diff blob through the
+    Artifact rollback mechanism, and leaves the boundary open. A repeated
+    `accept` returns the canonical existing outcome from rows without
+    inspecting the Workspace again and creates no second Artifact,
+    Changeset, resolution, Decision resolution, Gate transition, or Run
+    transition; a `request_changes` after acceptance is refused
+    (`conflicting_resolution`).
+  - `request_changes` requires a valid operator message — of the Run's
+    Conversation, authored by the operator, non-empty, not consumed by
+    another resolution — and, as a preflight, that the root node's
+    ordinary allocation admits the follow-up turn: when it cannot, the
+    request is refused typed (`ordinary_capacity_insufficient`) before
+    any write and the Run stays `awaiting_signoff`; the final reserve is
+    never a fallback. (Preflight refusal is chosen over a pending
+    follow-up because no canonical pending-allocation state exists yet;
+    allocation extension is a later phase.) In one root transaction it
+    then: records the Signoff Resolution with outcome `request_changes`
+    naming the message (by id; the prose is never copied into the row or
+    an Event); resolves the Decision (resolver `operator`, option
+    `request_changes`); closes the Gate `failed` with the precise reason
+    `changes_requested` naming the Decision; moves the Run
+    `awaiting_signoff → running`; prepares exactly one root Orchestrator
+    Invocation — role `orchestrator`, purpose `decision_resolution`,
+    the root position, continued from the previous root turn, ordinary
+    root funding, no Task, no Gate — whose manifest carries the typed
+    `signoff_resolution` input (the resolution, Gate, Decision,
+    completion Gate, outcome, message id, verified Snapshot, and report,
+    each verified against rows by the assembler) and the operator's
+    message as the ordinary `operator_message` input, with the final
+    report readable by id; and links that Invocation to the resolution.
+    Workspace preparation inside the transaction uses the existing
+    rollback-compensation contract. A repeated identical request replays
+    the same outcome from rows and prepares nothing twice; a request for
+    another message, or an `accept` after it, is refused
+    (`conflicting_resolution`).
+
+  **After a change request.** The follow-up turn may inspect the operator's
+  request, work directly, revise the Execution Plan through later
+  executable tools, and produce ordinary Changesets; a later ordinary
+  turn calls `request_completion` explicitly, which is a new request and a
+  new cycle on the then-current Snapshot with a new signoff boundary. The
+  runtime never reopens the old completion Gate, mutates the old signoff
+  Gate, reuses the old Completion Request, requests completion by itself,
+  preserves `awaiting_signoff`, or spends the final reserve as ordinary
+  work; the previous completion Gate, report, signoff Gate, Decision, and
+  Signoff Resolution remain immutable history.
+
+  **Signoff Resolution.** Each outcome is one append-only
+  `signoff_resolutions` row (`sres_`): the Run, the signoff Gate, the
+  Decision, the outcome, the operator message id (`request_changes`) or the
+  final Changeset id (`accept`), the follow-up Invocation id
+  (`request_changes`, linked once in the resolving transaction), and the
+  resolution time. Exactly one exists per signoff Gate and per signoff
+  Decision, a message answers at most one, identity and outcome are
+  immutable, rows are never deleted, and the database (unique indexes and
+  triggers) re-checks every relationship at insertion. The Decision and
+  Gate rows alone could not carry the operator message or the follow-up
+  link without reading manifest JSON or inferring the follow-up from the
+  latest Orchestrator Invocation, which is why the explicit row exists.
+
+  **Separation from publication.** Signoff accepts the verified Run result.
+  The signoff service, the finalization port, and the completed Run never
+  read the Target's current Snapshot, write the Target, fast-forward,
+  merge, cherry-pick, rebase, push, create a Publication, choose a publish
+  strategy, or create publish authorization; the Integration Workspace is
+  retained (not deleted or released) because publication has not
+  occurred. Publishing (§9.4) remains a separate explicit operation of a
+  later phase.
 
 Evaluations produced by Evaluator Invocations carry the Evaluator's
 Invocation id and Agent Definition revision, so a reviewer of the Run can
@@ -2841,8 +3035,8 @@ the exact judged Snapshot and Artifact set; no criterion of such a node
 is ever judged twice and the Gate engine never touches it. `single`,
 `chain`, `route`, `parallel`, and `coordinator_worker` execute the
 general `node_exit` Gate above; `run_completion` is executed by the
-completion engine and opens `operator_signoff`, whose resolution is a
-later phase.
+completion engine and opens `operator_signoff`, which the signoff service
+resolves.
 
 ### 10.1 Deterministic Acceptance Criterion execution
 
@@ -3001,6 +3195,11 @@ mechanism, if ever added, is a new feature with its own design.
 | Final synthesis fails permanently or returns a Changeset | The Gate closes `failed` with `final_synthesis_failed`; no report Artifact exists; as above. A Changeset from a synthesis is an invalid result. |
 | Final reserve cannot fund the completion Evaluator or the synthesis | The Gate closes `failed` with `final_reserve_exhausted` naming the use; nothing is fabricated and no ordinary capacity is used; as above. |
 | `run_completion` cycles exhausted | The next `request_completion` call is refused (`run_completion_cycles_exhausted`); the Run stays `running`. |
+| Integration Workspace drifted or unobservable at signoff acceptance | Refused typed (`workspace_drifted`, `finalization_failed`) before any write: no Decision resolution, Gate closure, Artifact, Changeset, or Run transition; acceptance stays retryable and the operator may request changes (§9.3, §10). |
+| Unexpected active state at signoff (an Invocation, Attempt, lease, reservation, cleanup obligation, Changeset, node Gate, remediation, Decision, request, Task, Requirement, or moved Snapshot) | Refused typed (`active_state`); nothing is released, repaired, or written (§10). |
+| Root allocation cannot fund the follow-up turn of a change request | Refused typed (`ordinary_capacity_insufficient`) before any write; the Run stays `awaiting_signoff`; the final reserve is never used (§10). |
+| Database failure inside the signoff transaction (Artifact, Changeset, resolution, Decision, Gate, Run, active-Run clearing, or COMMIT) | Everything rolls back, a newly written diff blob is compensated, the boundary stays open, and the canonical failure is rethrown; the next call starts over from rows (§10). |
+| Crash after a signoff resolution committed (response lost, follow-up not executed, follow-up result not integrated, restart before settlement) | The resolution, Decision, Gate, Run, and follow-up rows are the record: a repeated call replays the canonical outcome, and the scheduler executes and settles the follow-up through the ordinary root path; nothing is repeated (§10, §14 "Server restart"). |
 | Crash during a completion cycle (between the request, the turn's settlement, the Gate opening, a check, the Evaluator, the derivation, the synthesis, the passing or failing transaction, or the remediation turn) | Every step is one transaction or one external step recorded once; the next pass finds the request, the open or closed Gate, the recorded checks, the existing Evaluator, statuses, synthesis, report, Task, or signoff boundary, and repeats nothing (§10). |
 | Crash during a Gate cycle (between opening, a check, the Evaluator, settlement, the remediation turn, or a reopened cycle) | Every step is one transaction or one external step recorded once; the next pass finds the open Gate, the recorded checks, the existing Evaluator or Task, or the closed Gate, and repeats nothing (§10). |
 | Deterministic check cannot run (timeout, abort, lost view, lost output, failed start) | Infrastructure failure: nothing recorded, no Evaluation fabricated, the pass stops typed (`verification_failed`); the next pass reruns exactly the unrecorded checks (§10.1). |
@@ -3114,7 +3313,9 @@ by a test.
     revision and never inferred.
 16. **The Target is never modified by a Run.** Only a publish action on a
     `completed` Run writes to the Target, after revalidating it, and it
-    fails without writing when the operation is not clean.
+    fails without writing when the operation is not clean. Signoff
+    acceptance reads the Integration Workspace through a read-only port,
+    writes the Target nothing, and grants no publish authority.
 17. **Provider resumption is optional and non-canonical.** Every Attempt
     can start `fresh` from its Context Manifest; deleting every
     continuation payload and index row changes no outcome; no payload
@@ -3190,6 +3391,24 @@ by a test.
     model-authored completion output — no model sets a Requirement
     status, closes a Gate, ends a request, resolves signoff, or changes
     the Run's state.
+27. **Signoff is resolved once, by the operator, from rows.** The
+    `operator_signoff` Gate ends only through the signoff service's
+    `accept` or `request_changes`, each recorded as exactly one
+    append-only Signoff Resolution per Gate and per Decision
+    (database-enforced), never inferred from prose, a result, a manifest,
+    or an unresolved Decision. Acceptance requires quiescence and an
+    Integration Workspace that still holds exactly the verified Snapshot,
+    records the final Snapshot by reference and one `final` Changeset
+    (kind `final`, `recorded`, base to final, exact `text/x-diff` bytes,
+    one per Run, none before acceptance) in one transaction with the
+    Decision resolution, Gate closure, and Run completion, and completes
+    a Run only with both final references (database-enforced). A change
+    request records the operator's message by id, fails the Gate
+    `changes_requested`, reopens the Run, and prepares exactly one
+    ordinary-funded root `decision_resolution` turn linked once; it never
+    requests completion or spends the final reserve. Identical replays
+    return the canonical outcome; conflicting replays are refused; a
+    drifted or unobservable Workspace is refused before any write.
 
 ## 16. Non-goals
 

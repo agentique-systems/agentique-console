@@ -97,7 +97,12 @@ criteria (of its Conversation, deduplicated and in id order; a coding Run
 declares at least one deterministic one). Creating a Run establishes its
 complete initial state atomically (execution-model §3, §4.6). A Run
 reaches `awaiting_signoff` only through a passed `run_completion` Gate
-(execution-model §10).
+(execution-model §10) and `completed` only through the operator's
+`accept` at the `operator_signoff` Gate, recorded as a Signoff Resolution;
+a completed Run carries exactly its **final Snapshot** (`finalSnapshotId`,
+the signoff Gate's verified Snapshot by reference) and its **final
+Changeset** (`finalChangesetId`, its one `final` Changeset), and no other
+Run carries either (execution-model §9.3).
 
 - Id prefix: `run_`
 - Owned by: the runtime
@@ -367,7 +372,9 @@ A `signoff` Decision is requested by the runtime when the
 options `accept` and `request_changes`, no default policy, a typed
 subject naming the Run, the signoff Gate, the verified Snapshot, the
 completion Gate, the Completion Request, and the final-report Artifact —
-one per signoff Gate, carrying no publish authority. A
+one per signoff Gate, carrying no publish authority; it is resolved only
+by the operator through the signoff service, and its resolution is
+recorded as one Signoff Resolution. A
 `requirement_waiver` is proposed by the Orchestrator, always
 `operator_required`, resolved only by the operator, and never delegated or
 auto-resolved; its resolution records actor, rationale, Requirement id,
@@ -657,7 +664,8 @@ Run completes, or before a Run is accepted by the operator. A Gate lists
 the Acceptance Criteria it requires and the order they are checked:
 deterministic criteria first, then evaluated criteria, then, for the
 `operator_signoff` Gate, the operator's explicit acceptance. A Gate that
-fails does not end the Run; it produces a Task. A `node_exit` Gate is one
+fails does not end the Run; it produces a Task (a failed
+`operator_signoff` Gate produces the follow-up Orchestrator turn instead). A `node_exit` Gate is one
 **cycle** of a Plan Node's verification with a canonical identity — the
 Run, the Plan Node, the cycle ordinal, the integration Snapshot pinned
 when it opened, the exact candidate Artifact ids, the exact criterion ids
@@ -680,7 +688,10 @@ Artifact — at most one open per Run, one per request, bounded by
 the root and the Run returns to `running`. An `operator_signoff` Gate is
 opened by a passed `run_completion` Gate on the same Snapshot,
 referencing that Gate, the request, and the report, with no criteria of
-its own and one `signoff` Decision; one open per Run. An
+its own and one `signoff` Decision; one open per Run. It closes only
+through a Signoff Resolution: `passed` on `accept`, `failed` with the one
+failure it may record, `changes_requested` (naming the Decision), on
+`request_changes`. An
 `evaluator_optimizer` node never has a Gate: its rounds consume its
 criteria (execution-model §5.6, §10).
 
@@ -721,18 +732,23 @@ Invocation, and at Run completion.
 
 ### Changeset
 
-The difference between two Snapshots, produced by one writing Invocation in
-its isolated worktree and stored as an Artifact. The runtime integrates
-Changesets into the Run's Integration Workspace in Plan Edge order and
-records the resulting Snapshot. A Changeset has an **integration status**:
-`pending` until the runtime applies it, then `integrated` (with the
-integration Snapshot) or `conflict`. A Changeset that cannot be integrated
-cleanly is never applied partially: the runtime records the conflict as a
-Task for the node's owner with a bounded conflict-report Artifact, the
-node and the Run wait with reason `integration_conflict`, and the
-Changeset is applied again exactly once when that Task completes. The
-Run's **final Changeset** is the diff from its base Snapshot to its
-accepted final Snapshot.
+The difference between two Snapshots, stored as a diff Artifact. A
+Changeset has a closed **kind**. An `invocation` Changeset is produced by
+one writing Invocation in its isolated worktree and names it; the runtime
+integrates such Changesets into the Run's Integration Workspace in Plan
+Edge order and records the resulting Snapshot, through the **integration
+status** `pending` until the runtime applies it, then `integrated` (with
+the integration Snapshot) or `conflict`. A Changeset that cannot be
+integrated cleanly is never applied partially: the runtime records the
+conflict as a Task for the node's owner with a bounded conflict-report
+Artifact, the node and the Run wait with reason `integration_conflict`,
+and the Changeset is applied again exactly once when that Task completes.
+The Run's one **final Changeset** (kind `final`) is the descriptive record
+of the diff from its base Snapshot to its accepted final Snapshot,
+recorded at signoff acceptance in the one terminal state `recorded`: it
+names no Invocation, is never applied, retried, or resolved, holds the
+exact `text/x-diff` bytes, exists at most once per Run and never before
+acceptance, and never changes (execution-model §9.3).
 
 - Id prefix: `cs_`
 - Owned by: the runtime
@@ -890,6 +906,28 @@ is a new request. Nothing infers a request from Events or a transcript.
 - Store: `completion_requests`
 - Related: Run, Invocation, Runtime Tool Call, Gate, Artifact, Decision
 
+### Signoff Resolution
+
+The canonical, append-only record of the operator's one resolution of an
+`operator_signoff` Gate (execution-model §10): the Run, the signoff Gate,
+its `signoff` Decision, the closed outcome (`accept` or
+`request_changes`), the operator's Conversation message for
+`request_changes` (by id — the prose is never copied), the Run's final
+Changeset for `accept`, the one follow-up root `decision_resolution`
+Orchestrator Invocation a `request_changes` resolution prepared (linked
+once, in the resolving transaction), and the resolution time. Exactly one
+exists per signoff Gate and per signoff Decision; a message answers at
+most one; identity and outcome are immutable; rows are never deleted; the
+database re-checks every relationship at insertion. It is written only by
+the signoff service, from the operator's explicit operation, never
+inferred from prose, a result, a manifest, or an unresolved Decision. An
+identical repeated operation returns it; a conflicting one is refused.
+
+- Id prefix: `sres_`
+- Owned by: the runtime (signoff service), from the operator's resolution
+- Store: `signoff_resolutions`
+- Related: Run, Gate, Decision, Changeset, Snapshot, Conversation, Invocation
+
 ### Budget
 
 A set of limits: maximum cost, maximum tokens, maximum wall-clock time,
@@ -1031,11 +1069,12 @@ logical turn is a new Invocation), `in_progress` (as a Task state; use
   `plan_edges`, `plan_revision_nodes`, `plan_node_requirements`, `acceptance_criteria`,
   `context_manifests`, `agent_definition_revisions`, `publications`,
   `capacity_leases`, `budget_reservations`, `provider_continuations`,
-  `approved_tool_call_uses`, `runtime_tool_calls`, `completion_requests`.
+  `approved_tool_call_uses`, `runtime_tool_calls`, `completion_requests`,
+  `signoff_resolutions`.
 - Id prefixes: `ws_`, `cv_`, `cvm_`, `run_`, `pn_`, `pe_`, `req_`,
   `reqr_`, `ac_`, `dec_`, `task_`, `art_`, `ho_`, `agd_`, `agdr_`, `inv_`,
   `att_`, `eval_`, `gate_`, `snap_`, `cs_`, `pub_`, `lease_`, `bres_`,
-  `cm_`, `use_`, `acu_`, `rtc_`, `crq_`. A prefix is never reused for a second kind.
+  `cm_`, `use_`, `acu_`, `rtc_`, `crq_`, `sres_`. A prefix is never reused for a second kind.
   `plan_node_requirements`, `plan_revision_nodes`, and
   `provider_continuations` are keyed by the objects they index and carry
   no own prefix; `events`,

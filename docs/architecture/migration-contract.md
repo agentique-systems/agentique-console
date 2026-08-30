@@ -100,13 +100,15 @@ Phase 1 and remain after cutover:
   Pattern runners with the root-node support, the deterministic join
   settler, the pure Task projection, the runtime-tool call executor with
   the Task proposal service, the deterministic Acceptance Criterion check
-  service, the bounded scheduler, and, in a later phase, the Gates. It
+  service, the bounded scheduler, the Gates, the completion engine, and
+  the signoff service. It
   imports only `@agentique-console/core`, the persistence boundary, `zod`,
   the provider-neutral adapter contract under `server/src/provider/`, and
   the narrow capability ports it declares under `ports/`
   (`RunWorkspacePreparationPort`, `ExecutionWorkspacePort`,
-  `IntegrationWorkspacePort`, and `AcceptanceCriterionExecutionPort`,
-  implemented by the Workspace provider in the Workspace phase). Nothing legacy
+  `IntegrationWorkspacePort`, `AcceptanceCriterionExecutionPort`, and
+  `RunFinalizationWorkspacePort`, implemented by the Workspace provider
+  in the Workspace phase). Nothing legacy
   imports it and it imports nothing legacy; the persistence boundary and
   the provider boundary never depend on it.
 
@@ -297,7 +299,7 @@ code; each is the final production location of what it contains.
 
 ### Phase 1 schema expectations
 
-The baseline creates exactly these 35 tables, with the ownership and
+The baseline creates exactly these 36 tables, with the ownership and
 cardinality stated here and in [glossary.md](glossary.md). Column design
 beyond identifiers, keys, and the fields the architecture names is
 implementation work; the baseline is regenerated in place whenever the
@@ -309,7 +311,7 @@ architecture corrects it before cutover, because nothing has shipped.
 | `workspaces` | operator via API | mutable |
 | `conversations` | runtime | one per operator thread; mutable title/policy |
 | `conversation_messages` | runtime | append-only per Conversation |
-| `runs` | runtime (Run creation service) | one per Run; state, Target, base/integration/final Snapshot ids, Run Budget limits, persisted final reserve (immutable) |
+| `runs` | runtime (Run creation service) | one per Run; state, Target, base/integration/final Snapshot ids, final Changeset id (both final references exactly when `completed`, immutable afterwards), Run Budget limits, persisted final reserve (immutable) |
 | `execution_plan_revisions` | runtime (plan-revision service; revision 1 by Run creation) | append-only per Run; accepted revisions only, numbered consecutively |
 | `plan_nodes` | plan-revision service (compiler); root by Run creation | one per compiled node; `kind`, `pattern`, immutable `shape`, creating revision, status, allocation; definition immutable from insertion |
 | `plan_revision_nodes` | plan-revision service; revision 1 by Run creation | immutable ordered membership, one row per (Run, revision, Plan Node); root first in every revision |
@@ -335,7 +337,8 @@ architecture corrects it before cutover, because nothing has shipped.
 | `evaluations` | runtime / Evaluator via runtime | append-only |
 | `gates` | runtime | one per Gate instance with outcome |
 | `snapshots` | runtime (Workspace provider) | immutable |
-| `changesets` | runtime (Workspace provider) | immutable metadata + diff Artifact |
+| `changesets` | runtime (Workspace provider; the signoff service for the `final` kind) | immutable metadata + diff Artifact; kind `invocation` (integration lifecycle) or `final` (one per Run, `recorded`, only at signoff acceptance, never changed) |
+| `signoff_resolutions` | runtime (signoff service, from the operator) | append-only; exactly one per `operator_signoff` Gate and per `signoff` Decision; identity and outcome immutable; the follow-up Invocation linked once |
 | `publications` | runtime (publish action) | one per publish action on a `completed` Run |
 | `capacity_leases` | resource governor | one per granted lease; grant and release times |
 | `budget_reservations` | runtime | one per allocation; capacity source and final-reserve use derive from the creating operation; `active` → `released` once |
@@ -494,12 +497,30 @@ is one or more commits; each commit keeps `npm run typecheck` and
    `prepare_run_completion_evaluator`, `settle_run_completion_evaluator`,
    `derive_requirement_statuses`, `prepare_final_synthesis`,
    `settle_final_synthesis`, and `complete_run_verification` scheduler
-   actions; and restart safety across every completion window. Remaining
-   typed deferrals: resolving signoff (`awaiting_signoff → completed |
-   running`, the final Snapshot and final Changeset, publication),
-   allocation extension (`awaiting_allocation_extension_phase`, also for
-   the root's unfunded `gate_result` turn), and the executable
-   `request_decision` runtime tool. Later
+   actions; and restart safety across every completion window. Phase
+   2E-C (done): operator signoff resolution through the signoff service
+   (`RunSignoffService`: read-only bounded inspection, `accept`,
+   `request_changes`; caller-supplied ids limited to the Run, Gate,
+   Decision, and message); the canonical Signoff Resolution
+   (`signoff_resolutions`, `sres_`, one per Gate and per Decision,
+   append-only); the closed Changeset kind with the Run's one `final`
+   Changeset (`recorded`, base to final, exact `text/x-diff` bytes, one
+   per Run, none before acceptance) and `Run.finalChangesetId` beside
+   `Run.finalSnapshotId` (both exactly when `completed`); the read-only
+   `RunFinalizationWorkspacePort` (Integration Workspace observation and
+   the exact base-to-verified diff, outside every transaction, drift
+   refused); the `changes_requested` Gate failure; the one follow-up
+   root `decision_resolution` turn over the typed `signoff_resolution`
+   input, funded from the root's ordinary allocation with a typed
+   preflight refusal (`ordinary_capacity_insufficient`); the
+   Conversation's active-Run reference cleared only when it still names
+   the terminal Run; and restart safety across every signoff window.
+   Remaining typed deferrals: publication (Target revalidation, publish
+   authorization, the `publish` Decision, strategy selection, the
+   Publication row), allocation extension
+   (`awaiting_allocation_extension_phase`, also for the root's unfunded
+   `gate_result` turn and a change request's unfundable follow-up), and
+   the executable `request_decision` runtime tool. Later
    subphases: Runs, Execution
    Plan source validation and compiler,
    Plan Nodes of both kinds (`pattern`, `join`), Plan Edges, Plan Node
@@ -588,6 +609,26 @@ Merge to `main` happens after step 7 as one merge commit. Rollback is
   `operator_choice` only and resolves only with a recorded recommendation,
   deadline or condition, rationale, and affected ids, always writing
   `decision.resolved`.
+- Signoff tests: the bounded inspection carries no content, transcript,
+  worktree path, or Event history and writes nothing; acceptance
+  completes the Run on exactly the signoff Gate's Snapshot with one exact
+  base-to-final `final` Changeset (a zero-byte diff included), clears the
+  active Run, retains the Integration Workspace, touches no Target and
+  creates no Publication, refuses drift, an unobservable Workspace,
+  foreign ids, and every kind of unexpected active state without
+  resolving anything, replays identically, and refuses a conflicting
+  change request; a change request reopens the Run with exactly one
+  ordinary-funded root `decision_resolution` turn over the typed
+  `signoff_resolution` input (forged inputs refused at assembly), leaves
+  the completion history immutable, requests no completion by itself,
+  leaves the final reserve untouched, refuses an unfundable follow-up
+  typed before any write, replays identically, and refuses a conflicting
+  accept; the store and the database enforce the final Changeset's kind,
+  state, uniqueness, and boundary, the completed Run's final references,
+  and the Signoff Resolution's uniqueness, agreement, immutability, and
+  follow-up link; and twenty-one file-backed crash windows converge
+  without a duplicate resolution, Decision resolution, Gate closure,
+  Artifact, Changeset, transition, Invocation, preparation, or Event.
 - Publishing tests: a Run never writes to the Target; publish revalidates
   the Target, selects the strategy at publish time, fails without writing
   when the Target moved and the operation is not clean, and records a
