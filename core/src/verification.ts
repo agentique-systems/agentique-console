@@ -17,16 +17,23 @@ import { idSchema, nonEmptyString, timestampSchema, uniqueIds, type Timestamp } 
 export const VERDICTS = ["pass", "fail", "inconclusive"] as const;
 export type Verdict = (typeof VERDICTS)[number];
 
-/** What an Evaluation judged: an Acceptance Criterion, a rubric, or a route selection. */
+/**
+ * What an Evaluation judged: an Acceptance Criterion, a rubric, or a route
+ * selection. A `route_selection` Evaluation is the one canonical fact that a
+ * `route` Plan Node selected `selectedLabel` (execution-model §5.3): exactly
+ * one exists per route node, it always names a label of the node's branch
+ * bindings, and readiness reads it as an explicit condition fact — never a
+ * transcript, Handoff summary, or Invocation order.
+ */
 export type EvaluationSubject =
   | { kind: "acceptance_criterion"; acceptanceCriterionId: AcceptanceCriterionId }
   | { kind: "rubric"; rubric: string }
-  | { kind: "route_selection"; selectedLabel: string | null };
+  | { kind: "route_selection"; selectedLabel: string };
 
 export const evaluationSubjectSchema: z.ZodType<EvaluationSubject> = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("acceptance_criterion"), acceptanceCriterionId: idSchema("acceptanceCriterion") }),
   z.strictObject({ kind: z.literal("rubric"), rubric: nonEmptyString }),
-  z.strictObject({ kind: z.literal("route_selection"), selectedLabel: nonEmptyString.nullable() }),
+  z.strictObject({ kind: z.literal("route_selection"), selectedLabel: nonEmptyString }),
 ]);
 
 /** `runtime` for a deterministic check; otherwise the Evaluator Invocation and its definition revision. */
@@ -57,18 +64,28 @@ export interface Evaluation {
   createdAt: Timestamp;
 }
 
-export const evaluationSchema: z.ZodType<Evaluation> = z.strictObject({
-  id: idSchema("evaluation"),
-  runId: idSchema("run"),
-  planNodeId: idSchema("planNode").nullable(),
-  gateId: idSchema("gate").nullable(),
-  subject: evaluationSubjectSchema,
-  verdict: z.enum(VERDICTS),
-  evidence: z.array(evidenceSchema),
-  producedBy: evaluationProducerSchema,
-  artifactIds: uniqueIds(idSchema("artifact")),
-  createdAt: timestampSchema,
-});
+/** A route-selection Evaluation names its route node, no Gate, and no judged Artifact: the selection is the whole fact. */
+function routeSelectionShape(evaluation: Pick<Evaluation, "subject" | "planNodeId" | "gateId" | "verdict">, ctx: z.RefinementCtx): void {
+  if (evaluation.subject.kind !== "route_selection") return;
+  if (evaluation.planNodeId === null) ctx.addIssue({ code: "custom", path: ["planNodeId"], message: "a route_selection Evaluation belongs to its route Plan Node" });
+  if (evaluation.gateId !== null) ctx.addIssue({ code: "custom", path: ["gateId"], message: "a route_selection Evaluation belongs to no Gate" });
+  if (evaluation.verdict !== "pass") ctx.addIssue({ code: "custom", path: ["verdict"], message: "a route_selection Evaluation records a selection that was made; an unmade selection is never recorded" });
+}
+
+export const evaluationSchema: z.ZodType<Evaluation> = z
+  .strictObject({
+    id: idSchema("evaluation"),
+    runId: idSchema("run"),
+    planNodeId: idSchema("planNode").nullable(),
+    gateId: idSchema("gate").nullable(),
+    subject: evaluationSubjectSchema,
+    verdict: z.enum(VERDICTS),
+    evidence: z.array(evidenceSchema),
+    producedBy: evaluationProducerSchema,
+    artifactIds: uniqueIds(idSchema("artifact")),
+    createdAt: timestampSchema,
+  })
+  .superRefine(routeSelectionShape);
 
 export interface EvaluationInput {
   runId: RunId;
@@ -81,16 +98,18 @@ export interface EvaluationInput {
   artifactIds: ArtifactId[];
 }
 
-export const evaluationInputSchema: z.ZodType<EvaluationInput> = z.strictObject({
-  runId: idSchema("run"),
-  planNodeId: idSchema("planNode").nullable(),
-  gateId: idSchema("gate").nullable(),
-  subject: evaluationSubjectSchema,
-  verdict: z.enum(VERDICTS),
-  evidence: z.array(evidenceSchema),
-  producedBy: evaluationProducerSchema,
-  artifactIds: uniqueIds(idSchema("artifact")),
-});
+export const evaluationInputSchema: z.ZodType<EvaluationInput> = z
+  .strictObject({
+    runId: idSchema("run"),
+    planNodeId: idSchema("planNode").nullable(),
+    gateId: idSchema("gate").nullable(),
+    subject: evaluationSubjectSchema,
+    verdict: z.enum(VERDICTS),
+    evidence: z.array(evidenceSchema),
+    producedBy: evaluationProducerSchema,
+    artifactIds: uniqueIds(idSchema("artifact")),
+  })
+  .superRefine(routeSelectionShape);
 
 export const GATE_KINDS = ["node_exit", "run_completion", "operator_signoff"] as const;
 export type GateKind = (typeof GATE_KINDS)[number];

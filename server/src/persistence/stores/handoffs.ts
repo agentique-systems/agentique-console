@@ -14,7 +14,7 @@ import {
   type RunId,
 } from "@agentique-console/core";
 import type { PersistenceContext } from "../context.ts";
-import { artifacts, handoffs, invocations, planNodes, tasks } from "../schema.ts";
+import { artifacts, handoffs, invocations, planEdges, planNodes, tasks } from "../schema.ts";
 import { assertSameRun, loadRunRef, requireRow, runScope, writeMeta, type WriteOptions } from "./support.ts";
 
 function toDomain(row: typeof handoffs.$inferSelect): Handoff {
@@ -138,12 +138,43 @@ export class HandoffStore {
     });
   }
 
-  /** The endpoints agree with the route: a sequence transfer runs node to node; a chain-step transfer runs from a step Invocation to its own node. */
+  /**
+   * The endpoints agree with the route: a sequence transfer runs node to
+   * node; a branch transfer runs from a route node to the target of one of
+   * its `branch(label)` edges with exactly that label and no Artifacts; a
+   * parallel-index transfer runs from a parallel node with an aggregation
+   * to itself; a chain-step transfer runs from a step Invocation to its own
+   * node.
+   */
   private assertRoute(input: HandoffInput): void {
     const { route, source, target } = input;
     if (route.kind === "sequence") {
       if (source.kind !== "plan_node" || source.planNodeId !== route.sourceNodeId) throw new InvariantViolationError("a sequence Handoff's source is its source Plan Node", { route, source });
       if (target.kind !== "plan_node" || target.planNodeId !== route.targetNodeId) throw new InvariantViolationError("a sequence Handoff's target is its target Plan Node", { route, target });
+      return;
+    }
+    if (route.kind === "branch") {
+      if (source.kind !== "plan_node" || source.planNodeId !== route.sourceNodeId) throw new InvariantViolationError("a branch Handoff's source is its route Plan Node", { route, source });
+      if (target.kind !== "plan_node" || target.planNodeId !== route.targetNodeId) throw new InvariantViolationError("a branch Handoff's target is the branch's entry Plan Node", { route, target });
+      if (input.artifactIds.length > 0) throw new InvariantViolationError("a branch Handoff carries no Artifacts; a composite selection fabricates no output", { route });
+      const node = requireRow(this.ctx.db.select({ kind: planNodes.kind, shape: planNodes.shape }).from(planNodes).where(eq(planNodes.id, route.sourceNodeId)).get(), "PlanNode", route.sourceNodeId);
+      if (node.kind !== "pattern" || node.shape === null || node.shape.pattern !== "route") throw new InvariantViolationError(`PlanNode ${route.sourceNodeId} is not a route node`, { route });
+      if (!node.shape.branches.some((b) => b.label === route.label && b.inline === null)) throw new InvariantViolationError(`PlanNode ${route.sourceNodeId} binds no composite branch ${route.label}`, { route });
+      const edge = this.ctx.db
+        .select({ id: planEdges.id })
+        .from(planEdges)
+        .where(and(eq(planEdges.runId, input.runId), eq(planEdges.sourceNodeId, route.sourceNodeId), eq(planEdges.targetNodeId, route.targetNodeId), eq(planEdges.type, "branch"), eq(planEdges.label, route.label)))
+        .get();
+      if (!edge) throw new InvariantViolationError(`no branch(${route.label}) edge runs from ${route.sourceNodeId} to ${route.targetNodeId}`, { route });
+      return;
+    }
+    if (route.kind === "parallel_index") {
+      if (source.kind !== "plan_node" || source.planNodeId !== route.planNodeId || target.kind !== "plan_node" || target.planNodeId !== route.planNodeId) {
+        throw new InvariantViolationError("a parallel-index Handoff runs from a parallel Plan Node to itself", { route, source, target });
+      }
+      const node = requireRow(this.ctx.db.select({ kind: planNodes.kind, shape: planNodes.shape }).from(planNodes).where(eq(planNodes.id, route.planNodeId)).get(), "PlanNode", route.planNodeId);
+      if (node.kind !== "pattern" || node.shape === null || node.shape.pattern !== "parallel" || node.shape.aggregate === null) throw new InvariantViolationError(`PlanNode ${route.planNodeId} is not a parallel node with an aggregation`, { route });
+      if (input.artifactIds.length !== 1) throw new InvariantViolationError("a parallel-index Handoff carries exactly the index Artifact", { route, artifactIds: input.artifactIds });
       return;
     }
     if (target.kind !== "plan_node" || target.planNodeId !== route.planNodeId) throw new InvariantViolationError("a chain-step Handoff's target is its own Plan Node", { route, target });

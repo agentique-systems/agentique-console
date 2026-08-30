@@ -13,6 +13,7 @@ export * from "./decisions.ts";
 export * from "./tool-calls.ts";
 export * from "./tasks.ts";
 export * from "./artifacts.ts";
+export * from "./index-artifacts.ts";
 export * from "./handoffs.ts";
 export * from "./agents.ts";
 export * from "./invocations.ts";

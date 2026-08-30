@@ -701,7 +701,7 @@ export const handoffs = sqliteTable(
     index("handoffs_run").on(t.runId, t.createdAt),
     // One Handoff per logical transfer per Run: repeated reconciliation, transaction retry, restart, and racing callers all land here.
     uniqueIndex("handoffs_run_key").on(t.runId, t.handoffKey),
-    check("handoffs_key_shape", sql`${t.handoffKey} GLOB 'sequence:pn_*:pn_*' OR ${t.handoffKey} GLOB 'chain_step:pn_*:[0-9]*'`),
+    check("handoffs_key_shape", sql`${t.handoffKey} GLOB 'sequence:pn_*:pn_*' OR ${t.handoffKey} GLOB 'chain_step:pn_*:[0-9]*' OR ${t.handoffKey} GLOB 'branch:pn_*:pn_*' OR ${t.handoffKey} GLOB 'parallel_index:pn_*'`),
     check("handoffs_status", sql`${t.status} IN (${inList(HANDOFF_STATUSES)})`),
     check("handoffs_summary_length", sql`length(${t.summary}) <= ${sql.raw(String(HANDOFF_MAX_SUMMARY_LENGTH))}`),
     check("handoffs_delivered_at", sql`(${t.status} = 'delivered') = (${t.deliveredAt} IS NOT NULL)`),
@@ -1019,7 +1019,17 @@ export const evaluations = sqliteTable(
   (t) => [
     index("evaluations_run").on(t.runId, t.createdAt),
     index("evaluations_gate").on(t.gateId),
+    index("evaluations_plan_node").on(t.planNodeId),
     check("evaluations_verdict", sql`${t.verdict} IN (${inList(VERDICTS)})`),
+    // A route node selects exactly once (execution-model §5.3): the database, not a check-then-insert, holds the rule
+    // across repeated settlement, restart, and racing callers.
+    uniqueIndex("evaluations_route_selection_node")
+      .on(t.planNodeId)
+      .where(sql`json_extract(subject, '$.kind') = 'route_selection'`),
+    check(
+      "evaluations_route_selection_shape",
+      sql`json_extract(${t.subject}, '$.kind') <> 'route_selection' OR (${t.planNodeId} IS NOT NULL AND ${t.gateId} IS NULL AND ${t.verdict} = 'pass' AND json_extract(${t.subject}, '$.selectedLabel') IS NOT NULL)`,
+    ),
   ],
 );
 

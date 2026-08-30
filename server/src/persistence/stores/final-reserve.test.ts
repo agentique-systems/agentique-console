@@ -44,7 +44,7 @@ function spend(h: Harness, s: Seeded, invocation: Invocation, usage: { costUsd: 
   h.stores.invocations.transitionAttempt(attempt.id, { to: "failed", failureClass: "provider_transient", transcriptArtifactId: null });
 }
 
-const RESULT = { status: "completed" as const, artifactIds: [], tasks: [], evidence: [], summary: "done", openItems: [], blocker: null, runOutcome: null };
+const RESULT = { status: "completed" as const, artifactIds: [], tasks: [], evidence: [], summary: "done", openItems: [], blocker: null, runOutcome: null, routeSelection: null };
 
 describe("final-reserve Invocations", () => {
   it("an ordinary Invocation reserves from its Plan Node; final-synthesis and run-completion Invocations reserve directly from the Run final reserve", () => {

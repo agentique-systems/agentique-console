@@ -1,26 +1,36 @@
 /**
- * Canonical Handoff routing (execution-model §4.3, §5.2, §7.7; invariant 8).
- * The runtime carries work between Plan Nodes and between chain steps as
- * Handoffs: routing metadata only — source, target, Task ids, output
- * Artifact ids, a bounded summary — identified by the stable key of the
- * logical transfer, never by the pass that created them. Every operation
- * here is idempotent through `HandoffStore.ensure` and the per-Run unique
- * index: repeated reconciliation, transaction retry, a restart, or racing
- * callers converge on one row per transfer.
+ * Canonical Handoff routing (execution-model §4.3, §5.2, §5.3, §5.4, §7.7;
+ * invariant 8). The runtime carries work between Plan Nodes and inside a
+ * node as Handoffs: routing metadata only — source, target, Task ids,
+ * output Artifact ids, a bounded summary — identified by the stable key of
+ * the logical transfer, never by the pass that created them. Every
+ * operation here is idempotent through `HandoffStore.ensure` and the
+ * per-Run unique index: repeated reconciliation, transaction retry, a
+ * restart, or racing callers converge on one row per transfer.
  *
- * Transfers in Phase 2C:
- * - `sequence`: a terminal source node → a current-revision target node,
- *   carrying the source's output Artifacts when it succeeded, or its
- *   failure (no Artifacts) when the target runs on dependency failure;
+ * Transfers:
+ * - `sequence`: a terminal source node → a current-revision target node
+ *   along a delivering `sequence` edge, carrying the source's output
+ *   Artifacts when it succeeded, or its failure (no Artifacts) when the
+ *   target runs on dependency failure. A `sequence` edge out of a `route`
+ *   node delivers only for an inline selection; a join's output is its
+ *   index Artifact;
+ * - `branch`: a succeeded `route` node → the entry node of the composite
+ *   branch it selected, along the one active `branch(label)` edge, carrying
+ *   no Artifacts;
  * - `chain_step`: a completed step Invocation → its own chain node, for the
- *   next step.
+ *   next step;
+ * - `parallel_index`: a parallel node → itself, delivering its canonical
+ *   index Artifact to its aggregation Invocation.
+ * Which edges deliver is decided by the pure readiness evaluator over the
+ * graph and its explicit condition facts; nothing here infers a selection.
  * Decision and approval continuations use the typed manifest inputs
  * instead; nothing here invents a narrative Handoff.
  */
-import { HANDOFF_MAX_SUMMARY_LENGTH, INVOCATION_MACHINE, PLAN_NODE_MACHINE, type Handoff, type Invocation, type PatternPlanNode, type PlanGraph, type PlanNode, type PlanNodeId, type RunId } from "@agentique-console/core";
+import { HANDOFF_MAX_SUMMARY_LENGTH, INVOCATION_MACHINE, isIncomingHandoffKey, PLAN_NODE_MACHINE, type ArtifactId, type Handoff, type Invocation, type PatternPlanNode, type PlanEdge, type PlanGraph, type PlanNode, type PlanNodeId, type RunId } from "@agentique-console/core";
 import type { Stores } from "../persistence/stores/index.ts";
 import type { WriteOptions } from "../persistence/stores/support.ts";
-import { predecessorEdges, successorEdges } from "./readiness.ts";
+import { edgeActivation, predecessorEdges, successorEdges, type ReadinessInput } from "./readiness.ts";
 
 export interface EnsuredHandoff {
   handoff: Handoff;
@@ -37,33 +47,29 @@ export class HandoffRouter {
   constructor(private readonly stores: Stores) {}
 
   /**
-   * The sequence Handoffs of every current-revision edge leaving a terminal
-   * source node: outputs when it succeeded, a failure notice when it failed
-   * or was cancelled and the target opted in, nothing when it was skipped
-   * (the target skips or hears from its other predecessors). Idempotent.
+   * The Handoffs of every current-revision `sequence` and `branch` edge
+   * leaving a terminal source node that is active for its target: outputs
+   * when the source succeeded and the edge delivers, a failure notice when
+   * it failed or was cancelled and the target opted in, nothing when the
+   * edge is inactive (a skipped source, an unselected branch, a composite
+   * selection's own sequence edges). Idempotent.
    */
-  ensureSequenceHandoffsFrom(graph: PlanGraph, sourceNodeId: PlanNodeId, options?: WriteOptions): EnsuredHandoff[] {
-    const source = member(graph, sourceNodeId);
-    if (!PLAN_NODE_MACHINE.isTerminal(source.status)) throw new Error(`PlanNode ${sourceNodeId} is ${source.status}; a sequence Handoff carries a terminal source`);
-    return successorEdges(graph, sourceNodeId)
-      .filter((edge) => edge.type === "sequence")
-      .flatMap((edge) => this.ensureSequence(graph.runId, source, member(graph, edge.targetNodeId), options) ?? []);
+  ensureEdgeHandoffsFrom(input: ReadinessInput, sourceNodeId: PlanNodeId, options?: WriteOptions): EnsuredHandoff[] {
+    const source = member(input.graph, sourceNodeId);
+    if (!PLAN_NODE_MACHINE.isTerminal(source.status)) throw new Error(`PlanNode ${sourceNodeId} is ${source.status}; an edge Handoff carries a terminal source`);
+    return successorEdges(input.graph, sourceNodeId).flatMap((edge) => this.ensureEdge(input, edge, options) ?? []);
   }
 
   /**
-   * The sequence Handoffs of every current-revision edge entering a target
-   * node whose source is already terminal — what the target's first
-   * Invocation is delivered when it starts, including edges added by a
-   * later revision after the source ended. Idempotent.
+   * The Handoffs of every current-revision `sequence` and `branch` edge
+   * entering a target node whose source is already terminal and active —
+   * what the target's first Invocation is delivered when it starts,
+   * including edges added by a later revision after the source ended.
+   * Idempotent.
    */
-  ensureSequenceHandoffsInto(graph: PlanGraph, targetNodeId: PlanNodeId, options?: WriteOptions): EnsuredHandoff[] {
-    const target = member(graph, targetNodeId);
-    return predecessorEdges(graph, targetNodeId)
-      .filter((edge) => edge.type === "sequence")
-      .flatMap((edge) => {
-        const source = member(graph, edge.sourceNodeId);
-        return PLAN_NODE_MACHINE.isTerminal(source.status) ? (this.ensureSequence(graph.runId, source, target, options) ?? []) : [];
-      });
+  ensureEdgeHandoffsInto(input: ReadinessInput, targetNodeId: PlanNodeId, options?: WriteOptions): EnsuredHandoff[] {
+    member(input.graph, targetNodeId);
+    return predecessorEdges(input.graph, targetNodeId).flatMap((edge) => (PLAN_NODE_MACHINE.isTerminal(member(input.graph, edge.sourceNodeId).status) ? (this.ensureEdge(input, edge, options) ?? []) : []));
   }
 
   /** The internal chain transfer from a completed step to the next step of the same node. Idempotent by the step. */
@@ -87,9 +93,31 @@ export class HandoffRouter {
     );
   }
 
-  /** The pending Handoffs addressed to a node, in creation order: what its next Invocation delivers. */
+  /** The internal parallel transfer of the node's index Artifact to its aggregation. Idempotent by the node. */
+  ensureParallelIndexHandoff(node: PatternPlanNode, indexArtifactId: ArtifactId, options?: WriteOptions): EnsuredHandoff {
+    if (node.shape.pattern !== "parallel" || node.shape.aggregate === null) throw new Error(`PlanNode ${node.id} is not a parallel node with an aggregation`);
+    return this.stores.handoffs.ensure(
+      {
+        runId: node.runId,
+        route: { kind: "parallel_index", planNodeId: node.id },
+        source: { kind: "plan_node", planNodeId: node.id },
+        target: { kind: "plan_node", planNodeId: node.id },
+        taskIds: [],
+        artifactIds: [indexArtifactId],
+        summary: boundedHandoffSummary(`${node.title} index`),
+      },
+      options,
+    );
+  }
+
+  /** The pending edge Handoffs addressed to a node, in creation order: what its next Invocation delivers. */
   pendingHandoffsFor(runId: RunId, planNodeId: PlanNodeId): Handoff[] {
-    return this.stores.handoffs.listByTarget(runId, { kind: "plan_node", planNodeId }, "pending");
+    return this.incomingHandoffsFor(runId, planNodeId).filter((h) => h.status === "pending");
+  }
+
+  /** Every non-cancelled edge Handoff (`sequence`, `branch`) addressed to a node, in creation order, whether or not an earlier Invocation already received it. */
+  incomingHandoffsFor(runId: RunId, planNodeId: PlanNodeId): Handoff[] {
+    return this.stores.handoffs.listByTarget(runId, { kind: "plan_node", planNodeId }).filter((h) => h.status !== "cancelled" && isIncomingHandoffKey(h.handoffKey));
   }
 
   /** The Handoff of a chain node's transfer from step `fromStep`, if it exists. */
@@ -97,16 +125,40 @@ export class HandoffRouter {
     return this.stores.handoffs.getByKey(runId, `chain_step:${planNodeId}:${fromStep}`);
   }
 
-  private ensureSequence(runId: RunId, source: PlanNode, target: PlanNode, options?: WriteOptions): EnsuredHandoff | null {
-    if (source.status === "skipped") return null;
-    const succeeded = source.status === "succeeded";
+  /** The Handoff of a parallel node's index to its aggregation, if it exists. */
+  parallelIndexHandoff(runId: RunId, planNodeId: PlanNodeId): Handoff | null {
+    return this.stores.handoffs.getByKey(runId, `parallel_index:${planNodeId}`);
+  }
+
+  private ensureEdge(input: ReadinessInput, edge: PlanEdge, options?: WriteOptions): EnsuredHandoff | null {
+    if (edge.type !== "sequence" && edge.type !== "branch") return null;
+    const source = member(input.graph, edge.sourceNodeId);
+    const target = member(input.graph, edge.targetNodeId);
+    const activation = edgeActivation(input, edge);
+    if (activation.kind === "pending" || activation.kind === "inactive") return null;
+    if (edge.type === "branch") {
+      if (activation.kind !== "delivers") return null;
+      return this.stores.handoffs.ensure(
+        {
+          runId: input.graph.runId,
+          route: { kind: "branch", sourceNodeId: source.id, targetNodeId: target.id, label: edge.label },
+          source: { kind: "plan_node", planNodeId: source.id },
+          target: { kind: "plan_node", planNodeId: target.id },
+          taskIds: [],
+          artifactIds: [],
+          summary: boundedHandoffSummary(`${source.title} selected ${edge.label}`),
+        },
+        options,
+      );
+    }
+    const succeeded = activation.kind === "delivers";
     if (!succeeded && !target.runOnDependencyFailure) return null;
-    const invocations = this.stores.invocations.listByPlanNode(source.id);
+    const invocations = source.kind === "pattern" ? this.stores.invocations.listByPlanNode(source.id) : [];
     const taskIds = succeeded ? [...new Set(invocations.filter((i) => INVOCATION_MACHINE.isTerminal(i.status)).flatMap((i) => i.taskIds))].sort() : [];
     const last = invocations.filter((i) => i.status === "succeeded" && i.result !== null).at(-1) ?? null;
     return this.stores.handoffs.ensure(
       {
-        runId,
+        runId: input.graph.runId,
         route: { kind: "sequence", sourceNodeId: source.id, targetNodeId: target.id },
         source: { kind: "plan_node", planNodeId: source.id },
         target: { kind: "plan_node", planNodeId: target.id },

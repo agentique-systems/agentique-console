@@ -218,7 +218,7 @@ describe("attempts", () => {
     expect(attemptSchema.safeParse(terminal).success).toBe(true);
     // A running Attempt carries neither; a succeeded Attempt carries neither.
     expect(attemptSchema.safeParse({ ...terminal, status: "running", failureClass: null, endedAt: null }).success).toBe(false);
-    const result = { status: "completed", artifactIds: [], tasks: [], evidence: [], summary: "ok", openItems: [], blocker: null, runOutcome: null };
+    const result = { status: "completed", artifactIds: [], tasks: [], evidence: [], summary: "ok", openItems: [], blocker: null, runOutcome: null, routeSelection: null };
     expect(attemptSchema.safeParse({ ...terminal, status: "succeeded", failureClass: null, failureDetail: null, retryDecision: null, result }).success).toBe(true);
     expect(attemptSchema.safeParse({ ...terminal, status: "succeeded", failureClass: null, failureDetail: null, result }).success).toBe(false);
     // The decision's reason agrees with its permission and a refusal carries no notBefore.

@@ -136,7 +136,8 @@ export const EVENT_CATALOGUE = {
   "plan_node.waiting": z.strictObject({ from: z.enum(PLAN_NODE_STATUSES), to: z.literal("waiting"), waitReason: z.enum(PLAN_NODE_WAIT_REASONS) }),
   "plan_node.wait_cleared": transition(PLAN_NODE_STATUSES),
   "plan_node.succeeded": z.strictObject({ from: z.enum(PLAN_NODE_STATUSES), to: z.literal("succeeded"), outputArtifactIds: z.array(idSchema("artifact")) }),
-  "plan_node.failed": z.strictObject({ from: z.enum(PLAN_NODE_STATUSES), to: z.literal("failed"), reason: z.enum(PLAN_NODE_FAILURE_REASONS) }),
+  /** `artifactIds`: the runtime index Artifacts recorded with a fan-in failure (a join or parallel index), for diagnosis; empty otherwise. */
+  "plan_node.failed": z.strictObject({ from: z.enum(PLAN_NODE_STATUSES), to: z.literal("failed"), reason: z.enum(PLAN_NODE_FAILURE_REASONS), artifactIds: uniqueIds(idSchema("artifact")) }),
   "plan_node.cancelled": transition(PLAN_NODE_STATUSES),
   "plan_node.skipped": transition(PLAN_NODE_STATUSES),
   "requirement_revision.created": requirementRevisionSchema,

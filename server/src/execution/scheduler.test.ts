@@ -271,16 +271,16 @@ describe("RunScheduler", () => {
     const h = openRuntimeHarness();
     try {
       const s = seedPlanningRuntime(h);
-      const { nodes } = planNodes(h, s, [{ pattern: "parallel", items: [{ pattern: "single", operation: { agentDefinitionRevisionId: s.worker.id } }], allocation: { costUsd: 6, tokens: 60_000, attempts: 6 } }, single(s, "A")]);
-      const [parallel, a] = nodes as [PlanNode, PlanNode];
+      const { nodes } = planNodes(h, s, [{ pattern: "coordinator_worker", coordinator: { agentDefinitionRevisionId: s.worker.id }, worker: { agentDefinitionRevisionId: s.worker.id }, allocation: { costUsd: 6, tokens: 60_000, attempts: 6 } }, single(s, "A")]);
+      const [coordinator, a] = nodes as [PlanNode, PlanNode];
       h.executionWorkspace.nextChangeset = { afterSnapshot: fakeSnapshot("root"), diff: new TextEncoder().encode("+root"), empty: false };
       const outcome = await h.scheduler.advanceRun(s.created.run.id);
-      // A completes; the parallel node is deferred, never marked ready, running, or succeeded; the pass reports later-phase work.
+      // A completes; the coordinator_worker node is deferred, never marked ready, running, or succeeded; the pass reports later-phase work.
       expect(outcome.stop).toBe("unsupported");
-      expect(outcome.deferred).toEqual([{ nodeId: parallel.id, reason: "later_phase_pattern", pattern: "parallel" }]);
-      expect(h.stores.plans.getNode(parallel.id).status).toBe("pending");
+      expect(outcome.deferred).toEqual([{ nodeId: coordinator.id, reason: "later_phase_pattern", pattern: "coordinator_worker" }]);
+      expect(h.stores.plans.getNode(coordinator.id).status).toBe("pending");
       expect(h.stores.plans.getNode(a.id).status).toBe("succeeded");
-      expect(h.stores.invocations.listByPlanNode(parallel.id)).toEqual([]);
+      expect(h.stores.invocations.listByPlanNode(coordinator.id)).toEqual([]);
       // The root Orchestrator's own Changeset was integrated and the root stays running.
       expect(h.stores.changesets.listByRun(s.created.run.id).find((c) => c.invocationId === s.invocation.id)!.integrationStatus).toBe("integrated");
       expect(h.stores.plans.getNode(s.created.root.id).status).toBe("running");

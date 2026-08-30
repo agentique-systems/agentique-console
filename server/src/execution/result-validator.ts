@@ -107,6 +107,19 @@ export class InvocationResultValidator {
 
     if (invocation.role === "evaluator" && result.status === "blocked") add("status_incompatible", "an Evaluator cannot return blocked; it has no Decision channel", "status");
 
+    // A route selector's selection is typed and closed: a completed `select` result names exactly one label the node's
+    // immutable shape binds; no other Invocation returns a selection (execution-model §5.3).
+    if (invocation.purpose === "select") {
+      if (result.status === "completed") {
+        if (result.routeSelection === null) add("selection_missing", "a completed route selection names the selected branch label", "routeSelection");
+        else {
+          const node = this.stores.plans.getNode(invocation.planNodeId);
+          const labels = node.kind === "pattern" && node.shape.pattern === "route" ? node.shape.branches.map((b) => b.label) : [];
+          if (!labels.includes(result.routeSelection.selectedLabel)) add("selection_invalid", `label ${result.routeSelection.selectedLabel} is not a branch of the route node (${labels.join(", ")})`, "routeSelection.selectedLabel");
+        }
+      }
+    } else if (result.routeSelection !== null) add("selection_not_permitted", "only a route selector returns a routeSelection", "routeSelection");
+
     if (context.writes && context.changeset === null) add("changeset_missing", "a writing Invocation records a Changeset, an explicitly empty one when nothing changed", null);
 
     return violations.length === 0 ? { ok: true, result } : { ok: false, violations: boundResultViolations(violations) };

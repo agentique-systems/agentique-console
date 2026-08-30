@@ -190,7 +190,8 @@ export type PlanNodeTransition =
   | { to: "running" }
   | { to: "waiting"; waitReason: PlanNodeWaitReason }
   | { to: "succeeded"; outputArtifactIds: ArtifactId[] }
-  | { to: "failed"; reason: PlanNodeFailureReason }
+  /** `artifactIds`: runtime index Artifacts recorded with a fan-in failure (a join or parallel index), for diagnosis. */
+  | { to: "failed"; reason: PlanNodeFailureReason; artifactIds?: ArtifactId[] }
   | { to: "cancelled"; reason: PlanNodeCancellationReason }
   | { to: "skipped" };
 
@@ -645,9 +646,19 @@ export class ExecutionPlanStore {
         case "cancelled":
           payload = { from: current.status, to: "cancelled", reason: transition.reason };
           break;
-        case "failed":
-          payload = { from: current.status, to: "failed", reason: transition.reason };
+        case "failed": {
+          const artifactIds = [...(transition.artifactIds ?? [])].sort();
+          if (artifactIds.length > 0) {
+            const rows = this.ctx.db.select({ id: artifacts.id, runId: artifacts.runId }).from(artifacts).where(inArray(artifacts.id, artifactIds)).all();
+            for (const artifactId of artifactIds) {
+              const row = rows.find((r) => r.id === artifactId);
+              if (!row) throw new ValidationError(`failure Artifact ${artifactId} does not exist`);
+              assertSameRun("Artifact", artifactId, row.runId, current.runId);
+            }
+          }
+          payload = { from: current.status, to: "failed", reason: transition.reason, artifactIds };
           break;
+        }
         default:
           break;
       }

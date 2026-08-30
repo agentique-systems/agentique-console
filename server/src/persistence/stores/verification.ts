@@ -1,5 +1,6 @@
-import { asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import {
+  ConflictError,
   evaluationInputSchema,
   evaluationSchema,
   GATE_MACHINE,
@@ -13,6 +14,7 @@ import {
   type Gate,
   type GateId,
   type GateInput,
+  type PlanNodeId,
   type RunId,
 } from "@agentique-console/core";
 import type { PersistenceContext } from "../context.ts";
@@ -30,14 +32,27 @@ function gateToDomain(row: typeof gates.$inferSelect): Gate {
 export class EvaluationStore {
   constructor(private readonly ctx: PersistenceContext) {}
 
-  /** Appends an Evaluation; an Evaluator never evaluates an Artifact it produced. */
+  /**
+   * Appends an Evaluation; an Evaluator never evaluates an Artifact it
+   * produced. A `route_selection` Evaluation is admitted only for a `route`
+   * node whose shape binds the selected label, and only once per node: a
+   * second selection is a conflict here and a unique-index violation at the
+   * database, so concurrent or repeated settlement never records two.
+   */
   record(input: EvaluationInput, options?: WriteOptions): Evaluation {
     const valid = parseOrThrow(evaluationInputSchema, input, "Evaluation input");
     return this.ctx.tx.write(() => {
       const run = loadRunRef(this.ctx, valid.runId);
       if (valid.planNodeId !== null) {
-        const node = requireRow(this.ctx.db.select({ runId: planNodes.runId }).from(planNodes).where(eq(planNodes.id, valid.planNodeId)).get(), "PlanNode", valid.planNodeId);
+        const node = requireRow(this.ctx.db.select({ runId: planNodes.runId, kind: planNodes.kind, shape: planNodes.shape }).from(planNodes).where(eq(planNodes.id, valid.planNodeId)).get(), "PlanNode", valid.planNodeId);
         assertSameRun("PlanNode", valid.planNodeId, node.runId, run.id);
+        if (valid.subject.kind === "route_selection") {
+          if (node.kind !== "pattern" || node.shape === null || node.shape.pattern !== "route") throw new InvariantViolationError(`PlanNode ${valid.planNodeId} is not a route node; it selects no branch`, { planNodeId: valid.planNodeId });
+          const label = valid.subject.selectedLabel;
+          if (!node.shape.branches.some((b) => b.label === label)) throw new InvariantViolationError(`PlanNode ${valid.planNodeId} binds no branch ${label}`, { planNodeId: valid.planNodeId, selectedLabel: label });
+          const existing = this.routeSelectionOf(valid.planNodeId);
+          if (existing !== null) throw new ConflictError(`PlanNode ${valid.planNodeId} already selected ${existing.subject.kind === "route_selection" ? existing.subject.selectedLabel : ""} (Evaluation ${existing.id})`, { planNodeId: valid.planNodeId, evaluationId: existing.id });
+        }
       }
       if (valid.gateId !== null) {
         const gate = requireRow(this.ctx.db.select({ runId: gates.runId, status: gates.status }).from(gates).where(eq(gates.id, valid.gateId)).get(), "Gate", valid.gateId);
@@ -86,6 +101,39 @@ export class EvaluationStore {
 
   listByRun(runId: RunId): Evaluation[] {
     return this.ctx.db.select().from(evaluations).where(eq(evaluations.runId, runId)).orderBy(asc(evaluations.createdAt)).all().map(evaluationToDomain);
+  }
+
+  listByPlanNode(planNodeId: PlanNodeId): Evaluation[] {
+    return this.ctx.db.select().from(evaluations).where(eq(evaluations.planNodeId, planNodeId)).orderBy(asc(evaluations.createdAt), asc(evaluations.id)).all().map(evaluationToDomain);
+  }
+
+  /** The one canonical route-selection Evaluation of a route node, or `null` before it selected. */
+  routeSelectionOf(planNodeId: PlanNodeId): Evaluation | null {
+    const rows = this.ctx.db
+      .select()
+      .from(evaluations)
+      .where(and(eq(evaluations.planNodeId, planNodeId), sql`json_extract(${evaluations.subject}, '$.kind') = 'route_selection'`))
+      .all()
+      .map(evaluationToDomain);
+    if (rows.length > 1) throw new InvariantViolationError(`PlanNode ${planNodeId} has ${rows.length} route-selection Evaluations`, { planNodeId });
+    return rows[0] ?? null;
+  }
+
+  /** The route-selection Evaluations of every route node of a Run, keyed by node: the condition facts readiness receives. */
+  routeSelectionsOf(runId: RunId): Map<PlanNodeId, Evaluation> {
+    const out = new Map<PlanNodeId, Evaluation>();
+    for (const evaluation of this.ctx.db
+      .select()
+      .from(evaluations)
+      .where(and(eq(evaluations.runId, runId), sql`json_extract(${evaluations.subject}, '$.kind') = 'route_selection'`))
+      .orderBy(asc(evaluations.createdAt), asc(evaluations.id))
+      .all()
+      .map(evaluationToDomain)) {
+      const nodeId = evaluation.planNodeId!;
+      if (out.has(nodeId)) throw new InvariantViolationError(`PlanNode ${nodeId} has two route-selection Evaluations`, { planNodeId: nodeId });
+      out.set(nodeId, evaluation);
+    }
+    return out;
   }
 }
 

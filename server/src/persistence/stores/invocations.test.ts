@@ -5,7 +5,7 @@ import { MemoryContinuationPayloadStore } from "../../provider/continuation-stor
 import { ContinuationService } from "../../provider/continuation.ts";
 import { INVOCATION_ALLOCATION, extendPlan, joinDefinition, nodeInput, openHarness, seedArtifact, seedInvocation, seedManifest, seedRun, seedWorkerNode } from "../test-support.ts";
 
-const result: InvocationResult = { status: "completed", artifactIds: [], tasks: [], evidence: [], summary: "done", openItems: [], blocker: null, runOutcome: null };
+const result: InvocationResult = { status: "completed", artifactIds: [], tasks: [], evidence: [], summary: "done", openItems: [], blocker: null, runOutcome: null, routeSelection: null };
 
 describe("invocations", () => {
   it("creates an Invocation with a closed purpose, reserving its allocation from the node", () => {

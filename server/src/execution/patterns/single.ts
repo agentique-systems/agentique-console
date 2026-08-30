@@ -24,7 +24,7 @@
  * The root Orchestrator node is a `single` node too, but it is never
  * completed by this runner (see `root.ts`).
  */
-import type { PlanNodeId, Timestamp } from "@agentique-console/core";
+import type { PatternPosition, PlanNodeId, Timestamp } from "@agentique-console/core";
 import type { WriteOptions } from "../../persistence/stores/support.ts";
 import { SequentialStepEngine, type NodeAdvice, type PatternRunnerDependencies, type PatternRunnerOutcome } from "./support.ts";
 
@@ -42,6 +42,11 @@ export class SinglePatternRunner {
 
   start(nodeId: PlanNodeId, expectedRevisionNumber: number, options?: WriteOptions): PatternRunnerOutcome {
     return this.engine.start(nodeId, expectedRevisionNumber, options);
+  }
+
+  /** Never advised for this Pattern; a no-op after revalidation. */
+  startPosition(nodeId: PlanNodeId, expectedRevisionNumber: number, position: PatternPosition, options?: WriteOptions): PatternRunnerOutcome {
+    return this.engine.startPosition(nodeId, expectedRevisionNumber, position, options);
   }
 
   settle(nodeId: PlanNodeId, expectedRevisionNumber: number, options?: WriteOptions): Promise<PatternRunnerOutcome> {

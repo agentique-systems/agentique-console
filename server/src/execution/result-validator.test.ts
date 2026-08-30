@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import { openHarness, seedArtifact, seedInvocation, seedManifest, seedRun, seedSnapshot, seedWorkerNode, type Harness, type Seeded } from "../persistence/test-support.ts";
 import { InvocationResultValidator, type ResultValidationContext } from "./result-validator.ts";
 
-const base: InvocationResult = { status: "completed", artifactIds: [], tasks: [], evidence: [], summary: "done", openItems: [], blocker: null, runOutcome: null };
+const base: InvocationResult = { status: "completed", artifactIds: [], tasks: [], evidence: [], summary: "done", openItems: [], blocker: null, runOutcome: null, routeSelection: null };
 
 function context(h: Harness, s: Seeded, overrides: Partial<{ role: "orchestrator" | "worker" | "evaluator" | "coordinator"; purpose: "operator_input" | "step" | "task" | "evaluate" | "decompose"; taskIds: string[]; writes: boolean; changeset: ResultValidationContext["changeset"] }> = {}): ResultValidationContext {
   const role = overrides.role ?? "worker";

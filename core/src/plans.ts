@@ -85,6 +85,10 @@ export const PLAN_NODE_FAILURE_REASONS = [
   "integration_conflict",
   /** A join node's fan-in policy was not met. */
   "join_fan_in_failed",
+  /** A route node's selector produced no valid branch label: the selection Invocation failed, or a Decision answer maps to no branch. */
+  "route_selection_failed",
+  /** A parallel node's items ended without satisfying `requireAll` (or with no item succeeding). */
+  "parallel_items_failed",
 ] as const;
 export type PlanNodeFailureReason = (typeof PLAN_NODE_FAILURE_REASONS)[number];
 

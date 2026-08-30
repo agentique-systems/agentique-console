@@ -370,6 +370,6 @@ export function planNodes(h: RuntimeHarness, seed: RuntimeSeed & { invocation: I
   return { outcome, nodes: outcome.graph.nodes.slice(1), revisionNumber: outcome.revision.number };
 }
 
-export const COMPLETED_RESULT = { status: "completed" as const, artifactIds: [] as string[], tasks: [] as never[], evidence: [] as never[], summary: "done", openItems: [] as string[], blocker: null, runOutcome: null };
+export const COMPLETED_RESULT = { status: "completed" as const, artifactIds: [] as string[], tasks: [] as never[], evidence: [] as never[], summary: "done", openItems: [] as string[], blocker: null, runOutcome: null, routeSelection: null };
 
 export { INVOCATION_ALLOCATION };

@@ -8,15 +8,19 @@
  *   on what, which work belongs to a later phase, and when to look again.
  * - `advanceRun(runId, { maxActions })`: an asynchronous, bounded pass that
  *   performs those actions one at a time, re-projecting the current
- *   accepted graph before every state-changing action and revalidating the
- *   revision, membership, node state, and active Invocation inside each
- *   mutation transaction (the Pattern runners do that), until the Run is
- *   quiescent, waiting, terminal, at the action limit, left with only
- *   later-phase work, or an infrastructure failure stops it.
+ *   accepted graph and its condition facts before every state-changing
+ *   action and revalidating the revision, membership, node state, and
+ *   active Invocations inside each mutation transaction (the Pattern
+ *   runners and the join settler do that), until the Run is quiescent,
+ *   waiting, terminal, at the action limit, left with only later-phase
+ *   work, or an infrastructure failure stops it.
  *
+ * Readiness is the pure evaluator over the current graph plus the explicit
+ * canonical condition facts projected from rows (`readiness-facts.ts`).
  * Provider executions run outside every transaction; several independent
- * Attempts may execute concurrently within one pass and their completion
- * is what re-triggers projection — nothing polls and no interval exists.
+ * Attempts may execute concurrently within one pass, and the first of them
+ * to end is what re-triggers projection while the others keep running —
+ * nothing polls and no interval exists.
  * Retry `notBefore`, provider `retryAfter`, and Invocation deadlines are
  * returned as typed resumption times; deadlines are enforced from the caller's
  * clock at the start of each iteration. Routine progress creates no
@@ -34,7 +38,7 @@ import {
   type AttemptId,
   type InvocationId,
   type Pattern,
-  type PlanGraph,
+  type PatternPosition,
   type PlanNode,
   type PlanNodeId,
   type PlanNodeWaitReason,
@@ -48,7 +52,9 @@ import type { Stores } from "../persistence/stores/index.ts";
 import type { WriteOptions } from "../persistence/stores/support.ts";
 import type { AttemptExecutor, ExecutionOutcome } from "./attempt-executor.ts";
 import type { ResourceGovernor } from "./governor.ts";
+import { JoinNodeSettler, type JoinOutcome } from "./join.ts";
 import { runnerFor, type NodeAdvice, type PatternRunnerOutcome, type PatternRunners, type RootAdvice, type RootOutcome } from "./patterns/index.ts";
+import { projectReadinessInput } from "./readiness-facts.ts";
 import { decideReadiness, evaluateReadiness, type DeferralReason, type ReadinessDecision, type SkipCause } from "./readiness.ts";
 
 export type SchedulerAction =
@@ -56,10 +62,14 @@ export type SchedulerAction =
   | { kind: "resume_run"; reason: RunWaitReason }
   | { kind: "ready_node"; nodeId: PlanNodeId }
   | { kind: "skip_node"; nodeId: PlanNodeId; cause: SkipCause; failed: PlanNodeId[] }
-  | { kind: "start_node"; nodeId: PlanNodeId; pattern: "single" | "chain" }
+  | { kind: "start_node"; nodeId: PlanNodeId; pattern: Pattern }
+  /** A running node prepares one more position (a parallel item, or a blocked position's successor). */
+  | { kind: "start_position"; nodeId: PlanNodeId; position: PatternPosition }
   | { kind: "execute_invocation"; nodeId: PlanNodeId; invocationId: InvocationId; worktrees: number }
-  | { kind: "settle_node"; nodeId: PlanNodeId; invocationId: InvocationId }
-  | { kind: "settle_removed_node"; nodeId: PlanNodeId; invocationId: InvocationId }
+  | { kind: "settle_node"; nodeId: PlanNodeId; invocationId: InvocationId | null }
+  /** A `ready` join executes deterministically: policy, index Artifact, terminal transition, edge Handoffs — in one transaction. */
+  | { kind: "settle_join"; nodeId: PlanNodeId }
+  | { kind: "settle_removed_node"; nodeId: PlanNodeId; invocationId: InvocationId | null }
   | { kind: "resume_node"; nodeId: PlanNodeId; reason: PlanNodeWaitReason }
   | { kind: "wait_node"; nodeId: PlanNodeId; reason: "provider_capacity"; wakeAt: Timestamp | null }
   | { kind: "settle_root"; invocationId: InvocationId }
@@ -98,7 +108,7 @@ export interface SchedulerProjection {
   actions: SchedulerAction[];
   waiting: WaitingCondition[];
   deferred: DeferredWork[];
-  /** Ready nodes not started this pass because the Run's `maxConcurrency` is reached; they start as active Invocations end. */
+  /** Ready nodes (or further positions) not started this pass because the Run's `maxConcurrency` is reached; they start as active Invocations end. */
   limited: PlanNodeId[];
   /** Invocations whose Attempt is executing in this process. */
   inFlight: InvocationId[];
@@ -111,7 +121,7 @@ export interface SchedulerProjection {
 
 export interface PerformedAction {
   action: SchedulerAction;
-  outcome: PatternRunnerOutcome | RootOutcome | { kind: "prepared"; attemptId: AttemptId } | { kind: "capacity_refused" } | { kind: "not_permitted"; reason: string } | { kind: "transitioned" } | { kind: "stale" } | { kind: "no_change" };
+  outcome: PatternRunnerOutcome | RootOutcome | JoinOutcome | { kind: "prepared"; attemptId: AttemptId } | { kind: "capacity_refused" } | { kind: "not_permitted"; reason: string } | { kind: "transitioned" } | { kind: "stale" } | { kind: "no_change" };
 }
 
 export interface SchedulerOutcome {
@@ -149,6 +159,7 @@ function earliest(a: Timestamp | null, b: Timestamp | null): Timestamp | null {
 
 export class RunScheduler {
   readonly #passes = new Map<RunId, Promise<SchedulerOutcome>>();
+  private readonly joins: JoinNodeSettler;
 
   constructor(
     private readonly ctx: PersistenceContext,
@@ -158,7 +169,9 @@ export class RunScheduler {
     private readonly runners: PatternRunners,
     private readonly provider: { readonly provider: string },
     private readonly config: SchedulerConfig = DEFAULT_SCHEDULER_CONFIG,
-  ) {}
+  ) {
+    this.joins = new JoinNodeSettler(ctx, stores);
+  }
 
   // ---------------------------------------------------------------------------
   // Projection
@@ -170,16 +183,18 @@ export class RunScheduler {
     const graph = this.stores.plans.currentGraph(runId);
     const base = { runId, revisionNumber: graph.revisionNumber, run: { status: run.status, waitReason: run.waitReason } };
     if (RUN_MACHINE.isTerminal(run.status)) return { ...base, nodes: [], actions: [], waiting: [], deferred: [], limited: [], inFlight: [], wakeAt: null, concurrency: { active: 0, max: run.budget.maxConcurrency }, stop: "run_terminal" };
-    const readiness = new Map(evaluateReadiness(graph).decisions.map((d) => [d.nodeId, d] as const));
+    const readiness = new Map(evaluateReadiness(projectReadinessInput(this.stores, graph)).decisions.map((d) => [d.nodeId, d] as const));
     const nodes: NodeProjection[] = [];
     const actions: SchedulerAction[] = [];
     const waiting: WaitingCondition[] = [];
     const deferred: DeferredWork[] = [];
     const limited: PlanNodeId[] = [];
-    const inFlight: InvocationId[] = [];
+    // Every Attempt of the Run executing in this process, from the executor's record, whatever its node advises.
+    const inFlight = [...new Set(this.executor.inFlight().map((a) => this.stores.invocations.getAttempt(a)).filter((a) => a.runId === runId).map((a) => a.invocationId))].sort();
     let wakeAt: Timestamp | null = null;
     let active = this.stores.invocations.listActive(runId).length;
     const max = run.budget.maxConcurrency;
+    const withinNodeLimit = (node: PlanNode) => node.maxConcurrency === null || this.stores.invocations.listByPlanNode(node.id).filter((i) => !["blocked", "succeeded", "failed", "cancelled"].includes(i.status)).length < node.maxConcurrency;
 
     // The root Orchestrator node: its existing turns execute and settle; it is never started or completed here.
     const root = graph.nodes.find((n) => n.sourcePath === ROOT_SOURCE_PATH)!;
@@ -196,7 +211,6 @@ export class RunScheduler {
         break;
       }
       case "attempt_in_flight":
-        inFlight.push(rootAdvice.invocationId);
         wakeAt = earliest(wakeAt, this.executor.inspectInvocation(rootAdvice.invocationId, now).deadlineAt);
         break;
       case "retry_not_before":
@@ -236,7 +250,11 @@ export class RunScheduler {
         case "active":
           break;
       }
-      if (node.kind !== "pattern") continue;
+      if (node.kind === "join") {
+        // A ready join executes deterministically now; it never runs, waits, or holds an Invocation.
+        if (decision.kind === "ready") actions.push({ kind: "settle_join", nodeId: node.id });
+        continue;
+      }
       const runner = runnerFor(this.runners, node.pattern);
       if (runner === null) {
         deferred.push({ nodeId: node.id, reason: "later_phase_pattern", pattern: node.pattern });
@@ -246,13 +264,14 @@ export class RunScheduler {
       projection.advice = advice;
       switch (advice.kind) {
         case "start":
+        case "start_position":
           if (max !== null && active >= max) {
             limited.push(node.id);
             break;
           }
-          if (node.maxConcurrency !== null && this.stores.invocations.listByPlanNode(node.id).filter((i) => !["blocked", "succeeded", "failed", "cancelled"].includes(i.status)).length >= node.maxConcurrency) break;
+          if (!withinNodeLimit(node)) break;
           active += 1;
-          actions.push({ kind: "start_node", nodeId: node.id, pattern: node.pattern as "single" | "chain" });
+          actions.push(advice.kind === "start" ? { kind: "start_node", nodeId: node.id, pattern: node.pattern } : { kind: "start_position", nodeId: node.id, position: advice.position });
           break;
         case "execute": {
           const refusal = this.capacityRefusal(runId, advice.invocationId);
@@ -264,7 +283,6 @@ export class RunScheduler {
           break;
         }
         case "attempt_in_flight":
-          inFlight.push(advice.invocationId);
           wakeAt = earliest(wakeAt, this.executor.inspectInvocation(advice.invocationId, now).deadlineAt);
           break;
         case "retry_not_before":
@@ -298,12 +316,9 @@ export class RunScheduler {
       if (runner === null) continue;
       const advice = runner.inspect(node.id, now);
       nodes.push({ nodeId: node.id, pattern: node.pattern, status: node.status, readiness: null, advice, current: false });
-      if (advice.kind !== "not_current" || advice.invocationId === null) continue;
-      const invocation = this.stores.invocations.get(advice.invocationId);
-      if (["blocked", "succeeded", "failed", "cancelled"].includes(invocation.status)) {
-        if (!(node.status === "waiting" && invocation.status === "blocked")) actions.push({ kind: "settle_removed_node", nodeId: node.id, invocationId: invocation.id });
-      } else if (this.executor.inFlight().some((a) => this.stores.invocations.getAttempt(a).invocationId === invocation.id)) inFlight.push(invocation.id);
+      if (advice.kind === "not_current" && advice.settle) actions.push({ kind: "settle_removed_node", nodeId: node.id, invocationId: advice.invocationId });
     }
+    for (const invocationId of inFlight) wakeAt = earliest(wakeAt, this.executor.inspectInvocation(invocationId, now).deadlineAt);
 
     // Run-level: resume before any other action; wait only when nothing can proceed and nothing is running.
     if (run.status === "waiting" && actions.length > 0) actions.unshift({ kind: "resume_run", reason: run.waitReason! });
@@ -351,26 +366,51 @@ export class RunScheduler {
     const actions: PerformedAction[] = [];
     const executed: AttemptId[] = [];
     const batch = new Map<AttemptId, Promise<ExecutionOutcome>>();
+    const failureOf = (reason: unknown) => ({ message: boundedFailureMessage(reason instanceof Error ? reason.message : String(reason)) });
+    /** Awaits every executing Attempt (when the pass ends). */
     const settle = async (): Promise<{ message: string } | null> => {
       const results = await Promise.allSettled(batch.values());
       batch.clear();
       const rejected = results.find((r): r is PromiseRejectedResult => r.status === "rejected");
-      return rejected ? { message: boundedFailureMessage(rejected.reason instanceof Error ? rejected.reason.message : String(rejected.reason)) } : null;
+      return rejected ? failureOf(rejected.reason) : null;
+    };
+    /** Awaits the first executing Attempt to end: its completion is what re-triggers projection while the others keep running. */
+    const settleFirst = async (): Promise<{ message: string } | null> => {
+      const ended = await Promise.race([...batch.entries()].map(([attemptId, promise]) => promise.then(() => attemptId, () => attemptId)));
+      const promise = batch.get(ended)!;
+      batch.delete(ended);
+      try {
+        await promise;
+        return null;
+      } catch (error) {
+        return failureOf(error);
+      }
     };
     const finish = async (stop: SchedulerStopReason, failure: { message: string } | null = null): Promise<SchedulerOutcome> => {
       const batchFailure = await settle();
-      const projection = this.reconcileRun(runId);
-      const finalFailure = failure ?? batchFailure;
-      return { runId, stop: finalFailure !== null ? "infrastructure_failure" : stop, actions, executed, waiting: projection.waiting, deferred: projection.deferred, wakeAt: projection.wakeAt, failure: finalFailure };
+      let finalFailure = failure ?? batchFailure;
+      let projection: SchedulerProjection | null = null;
+      try {
+        projection = this.reconcileRun(runId);
+      } catch (error) {
+        // A projection that cannot be computed (a missing or contradictory condition fact) is an infrastructure failure, never a guess.
+        finalFailure = finalFailure ?? failureOf(error);
+      }
+      return { runId, stop: finalFailure !== null ? "infrastructure_failure" : stop, actions, executed, waiting: projection?.waiting ?? [], deferred: projection?.deferred ?? [], wakeAt: projection?.wakeAt ?? null, failure: finalFailure };
     };
     for (;;) {
       this.executor.enforceDeadlines(this.ctx.clock());
-      const projection = this.reconcileRun(runId);
+      let projection: SchedulerProjection;
+      try {
+        projection = this.reconcileRun(runId);
+      } catch (error) {
+        return finish("infrastructure_failure", failureOf(error));
+      }
       if (projection.stop === "run_terminal") return finish("run_terminal");
       const action = projection.actions[0];
       if (action === undefined) {
         if (batch.size > 0) {
-          const failure = await settle();
+          const failure = await settleFirst();
           if (failure !== null) return finish("infrastructure_failure", failure);
           continue;
         }
@@ -407,8 +447,12 @@ export class RunScheduler {
         return this.ctx.tx.write(() => this.#applyReadiness(runId, revision, action, meta));
       case "start_node":
         return runnerFor(this.runners, action.pattern)!.start(action.nodeId, revision, meta);
+      case "start_position":
+        return runnerFor(this.runners, this.patternOf(action.nodeId))!.startPosition(action.nodeId, revision, action.position, meta);
       case "settle_node":
         return runnerFor(this.runners, this.patternOf(action.nodeId))!.settle(action.nodeId, revision, meta);
+      case "settle_join":
+        return this.joins.settle(action.nodeId, revision, meta);
       case "settle_removed_node":
         return runnerFor(this.runners, this.patternOf(action.nodeId))!.settleRemoved(action.nodeId, meta);
       case "resume_node":
@@ -433,11 +477,11 @@ export class RunScheduler {
     }
   }
 
-  /** Applies one readiness decision after re-deciding it inside the transaction against the current graph. */
+  /** Applies one readiness decision after re-deciding it inside the transaction against the current graph and facts. */
   #applyReadiness(runId: RunId, revision: number, action: Extract<SchedulerAction, { kind: "ready_node" | "skip_node" }>, meta: WriteOptions): PerformedAction["outcome"] {
-    const graph: PlanGraph = this.stores.plans.currentGraph(runId);
+    const graph = this.stores.plans.currentGraph(runId);
     if (graph.revisionNumber !== revision || !graph.nodes.some((n) => n.id === action.nodeId)) return { kind: "stale" };
-    const decision = decideReadiness(graph, action.nodeId);
+    const decision = decideReadiness(projectReadinessInput(this.stores, graph), action.nodeId);
     if (action.kind === "ready_node" && decision.kind === "become_ready") {
       this.stores.plans.transitionNode(action.nodeId, { to: "ready" }, meta);
       return { kind: "transitioned" };

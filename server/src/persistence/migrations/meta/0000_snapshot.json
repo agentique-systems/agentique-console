@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "5b70532b-9de5-4a9f-aa31-a0c1338f924e",
+  "id": "98930566-922d-42d9-a00a-9a35e3576146",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "acceptance_criteria": {
@@ -2235,6 +2235,21 @@
             "gate_id"
           ],
           "isUnique": false
+        },
+        "evaluations_plan_node": {
+          "name": "evaluations_plan_node",
+          "columns": [
+            "plan_node_id"
+          ],
+          "isUnique": false
+        },
+        "evaluations_route_selection_node": {
+          "name": "evaluations_route_selection_node",
+          "columns": [
+            "plan_node_id"
+          ],
+          "isUnique": true,
+          "where": "json_extract(subject, '$.kind') = 'route_selection'"
         }
       },
       "foreignKeys": {
@@ -2284,6 +2299,10 @@
         "evaluations_verdict": {
           "name": "evaluations_verdict",
           "value": "\"evaluations\".\"verdict\" IN ('pass', 'fail', 'inconclusive')"
+        },
+        "evaluations_route_selection_shape": {
+          "name": "evaluations_route_selection_shape",
+          "value": "json_extract(\"evaluations\".\"subject\", '$.kind') <> 'route_selection' OR (\"evaluations\".\"plan_node_id\" IS NOT NULL AND \"evaluations\".\"gate_id\" IS NULL AND \"evaluations\".\"verdict\" = 'pass' AND json_extract(\"evaluations\".\"subject\", '$.selectedLabel') IS NOT NULL)"
         }
       }
     },
@@ -2798,7 +2817,7 @@
       "checkConstraints": {
         "handoffs_key_shape": {
           "name": "handoffs_key_shape",
-          "value": "\"handoffs\".\"handoff_key\" GLOB 'sequence:pn_*:pn_*' OR \"handoffs\".\"handoff_key\" GLOB 'chain_step:pn_*:[0-9]*'"
+          "value": "\"handoffs\".\"handoff_key\" GLOB 'sequence:pn_*:pn_*' OR \"handoffs\".\"handoff_key\" GLOB 'chain_step:pn_*:[0-9]*' OR \"handoffs\".\"handoff_key\" GLOB 'branch:pn_*:pn_*' OR \"handoffs\".\"handoff_key\" GLOB 'parallel_index:pn_*'"
         },
         "handoffs_status": {
           "name": "handoffs_status",

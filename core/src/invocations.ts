@@ -12,6 +12,7 @@ import type {
   ContextManifestId,
   ConversationMessageId,
   DecisionId,
+  EvaluationId,
   GateId,
   HandoffId,
   InvocationId,
@@ -189,7 +190,25 @@ export interface TaskResult {
   blocker: string | null;
 }
 
-/** The typed result every Attempt returns through `return_result`. */
+/**
+ * The typed selection a route selector returns (execution-model §5.3): the
+ * label of exactly one branch binding of its route node. It is the only
+ * channel for a selection — never the summary, the blocker, an open item,
+ * an Artifact, or transcript text — and the validator admits it only from
+ * an Evaluator Invocation of purpose `select` with a label the node's
+ * immutable shape binds.
+ */
+export interface RouteSelectionResult {
+  selectedLabel: string;
+}
+
+export const routeSelectionResultSchema: z.ZodType<RouteSelectionResult> = z.strictObject({ selectedLabel: nonEmptyString });
+
+/**
+ * The typed result every Attempt returns through `return_result`. The
+ * purpose-specific members are typed and closed: `runOutcome` exists only
+ * for the Orchestrator, `routeSelection` only for a route selector.
+ */
 export interface InvocationResult {
   status: ResultStatus;
   artifactIds: ArtifactId[];
@@ -199,6 +218,7 @@ export interface InvocationResult {
   openItems: string[];
   blocker: string | null;
   runOutcome: { kind: "infeasible"; evidence: Evidence[] } | null;
+  routeSelection: RouteSelectionResult | null;
 }
 
 export const RESULT_MAX_SUMMARY_LENGTH = 500;
@@ -230,6 +250,9 @@ export const RESULT_VIOLATION_CODES = [
   "foreign_evidence_reference",
   "run_outcome_not_permitted",
   "run_outcome_without_evidence",
+  "selection_missing",
+  "selection_invalid",
+  "selection_not_permitted",
   "changeset_missing",
   "status_incompatible",
 ] as const;
@@ -292,10 +315,15 @@ export const invocationResultSchema: z.ZodType<InvocationResult> = z
     runOutcome: z
       .strictObject({ kind: z.literal("infeasible"), evidence: z.array(evidenceSchema).min(1) })
       .nullable(),
+    routeSelection: routeSelectionResultSchema.nullable(),
   })
   .refine((r) => (r.status === "blocked") === (r.blocker !== null), {
     message: "blocker is set exactly for a blocked result",
     path: ["blocker"],
+  })
+  .refine((r) => r.routeSelection === null || r.status === "completed", {
+    message: "a route selection is returned only by a completed result",
+    path: ["routeSelection"],
   });
 
 export interface Invocation {
@@ -875,7 +903,9 @@ export type ManifestInput =
     }
   | { kind: "gate_result"; gateId: GateId; passed: boolean }
   | { kind: "plan_revision"; accepted: boolean; revisionNumber: number | null; reasons: PlanRejectionReason[] }
-  | { kind: "publication_result"; publicationId: PublicationId; outcome: PublicationOutcome };
+  | { kind: "publication_result"; publicationId: PublicationId; outcome: PublicationOutcome }
+  /** The canonical route-selection Evaluation of the route node an inline branch Invocation executes for (execution-model §5.3). */
+  | { kind: "route_selection"; evaluationId: EvaluationId; selectedLabel: string };
 
 export const manifestInputSchema: z.ZodType<ManifestInput> = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("operator_message"), conversationMessageId: idSchema("conversationMessage"), content: z.string().min(1) }),
@@ -894,6 +924,7 @@ export const manifestInputSchema: z.ZodType<ManifestInput> = z.discriminatedUnio
   z.strictObject({ kind: z.literal("gate_result"), gateId: idSchema("gate"), passed: z.boolean() }),
   z.strictObject({ kind: z.literal("plan_revision"), accepted: z.boolean(), revisionNumber: positiveCount.nullable(), reasons: z.array(planRejectionReasonSchema) }),
   z.strictObject({ kind: z.literal("publication_result"), publicationId: idSchema("publication"), outcome: z.enum(PUBLICATION_OUTCOMES) }),
+  z.strictObject({ kind: z.literal("route_selection"), evaluationId: idSchema("evaluation"), selectedLabel: nonEmptyString }),
 ]);
 
 /**

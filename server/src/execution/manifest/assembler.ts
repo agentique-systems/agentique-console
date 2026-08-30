@@ -295,6 +295,16 @@ export class ContextManifestAssembler {
           if (publication.runId !== run.id) throw new InvariantViolationError(`Publication ${input.publicationId} belongs to another Run`);
           break;
         }
+        case "route_selection": {
+          // The canonical selection fact of this node: it exists, belongs to this route node, and names exactly this label.
+          const evaluation = this.stores.evaluations.get(input.evaluationId);
+          if (evaluation.runId !== run.id) throw new InvariantViolationError(`Evaluation ${input.evaluationId} belongs to another Run`);
+          if (evaluation.planNodeId !== invocation.planNodeId) throw new InvariantViolationError(`Evaluation ${input.evaluationId} belongs to PlanNode ${String(evaluation.planNodeId)}, not ${invocation.planNodeId}`);
+          if (evaluation.subject.kind !== "route_selection") throw new ValidationError(`Evaluation ${input.evaluationId} is not a route selection`);
+          if (evaluation.subject.selectedLabel !== input.selectedLabel) throw new InvariantViolationError(`Evaluation ${input.evaluationId} selected ${evaluation.subject.selectedLabel}, not ${input.selectedLabel}`);
+          if (invocation.patternPosition?.kind !== "route_branch" || invocation.patternPosition.label !== input.selectedLabel) throw new InvariantViolationError(`Invocation ${invocation.id} does not execute route branch ${input.selectedLabel}`);
+          break;
+        }
         case "plan_revision":
           break;
       }

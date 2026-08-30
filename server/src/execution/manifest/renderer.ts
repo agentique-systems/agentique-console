@@ -86,6 +86,8 @@ function renderInput(input: ManifestInput): string[] {
       ];
     case "publication_result":
       return [`- publication_result ${input.publicationId} ${input.outcome}`];
+    case "route_selection":
+      return [`- route_selection ${input.evaluationId} selected ${input.selectedLabel}`];
   }
 }
 
