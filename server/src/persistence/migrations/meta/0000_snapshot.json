@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "be3ccdbe-6ca6-4f16-8eab-5416ad37e357",
+  "id": "be2673a0-18e7-4eb8-a48e-9be68cd4290d",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "acceptance_criteria": {
@@ -1366,6 +1366,13 @@
           "notNull": true,
           "autoincrement": false
         },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
         "invocation_id": {
           "name": "invocation_id",
           "type": "text",
@@ -1438,6 +1445,14 @@
             "created_at"
           ],
           "isUnique": false
+        },
+        "changesets_final_run": {
+          "name": "changesets_final_run",
+          "columns": [
+            "run_id"
+          ],
+          "isUnique": true,
+          "where": "kind = 'final'"
         }
       },
       "foreignKeys": {
@@ -1538,7 +1553,7 @@
       "checkConstraints": {
         "changesets_status": {
           "name": "changesets_status",
-          "value": "\"changesets\".\"integration_status\" IN ('pending', 'integrated', 'conflict')"
+          "value": "\"changesets\".\"integration_status\" IN ('pending', 'integrated', 'conflict', 'recorded')"
         },
         "changesets_integrated_shape": {
           "name": "changesets_integrated_shape",
@@ -1547,6 +1562,14 @@
         "changesets_conflict_shape": {
           "name": "changesets_conflict_shape",
           "value": "(\"changesets\".\"integration_status\" = 'conflict') = (\"changesets\".\"conflict_task_id\" IS NOT NULL)"
+        },
+        "changesets_kind": {
+          "name": "changesets_kind",
+          "value": "\"changesets\".\"kind\" IN ('invocation', 'final')"
+        },
+        "changesets_kind_shape": {
+          "name": "changesets_kind_shape",
+          "value": "(\"changesets\".\"kind\" = 'invocation' AND \"changesets\".\"invocation_id\" IS NOT NULL AND \"changesets\".\"integration_status\" IN ('pending', 'integrated', 'conflict')) OR (\"changesets\".\"kind\" = 'final' AND \"changesets\".\"invocation_id\" IS NULL AND \"changesets\".\"integration_status\" = 'recorded')"
         }
       }
     },
@@ -3206,11 +3229,11 @@
         },
         "gates_failure_kind": {
           "name": "gates_failure_kind",
-          "value": "\"gates\".\"failure\" IS NULL OR json_extract(\"gates\".\"failure\", '$.kind') IN ('criteria_failed', 'evaluator_failed', 'conditions_unmet', 'final_synthesis_failed', 'final_reserve_exhausted')"
+          "value": "\"gates\".\"failure\" IS NULL OR json_extract(\"gates\".\"failure\", '$.kind') IN ('criteria_failed', 'evaluator_failed', 'conditions_unmet', 'final_synthesis_failed', 'final_reserve_exhausted', 'changes_requested')"
         },
-        "gates_run_completion_failure": {
-          "name": "gates_run_completion_failure",
-          "value": "\"gates\".\"failure\" IS NULL OR \"gates\".\"kind\" = 'run_completion' OR json_extract(\"gates\".\"failure\", '$.kind') IN ('criteria_failed', 'evaluator_failed')"
+        "gates_failure_by_kind": {
+          "name": "gates_failure_by_kind",
+          "value": "\"gates\".\"failure\" IS NULL OR (\"gates\".\"kind\" = 'node_exit' AND json_extract(\"gates\".\"failure\", '$.kind') IN ('criteria_failed', 'evaluator_failed')) OR (\"gates\".\"kind\" = 'run_completion' AND json_extract(\"gates\".\"failure\", '$.kind') IN ('criteria_failed', 'evaluator_failed', 'conditions_unmet', 'final_synthesis_failed', 'final_reserve_exhausted')) OR (\"gates\".\"kind\" = 'operator_signoff' AND json_extract(\"gates\".\"failure\", '$.kind') = 'changes_requested')"
         },
         "gates_run_gate_identity": {
           "name": "gates_run_gate_identity",
@@ -5373,6 +5396,13 @@
           "notNull": false,
           "autoincrement": false
         },
+        "final_changeset_id": {
+          "name": "final_changeset_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "integration_workspace_path": {
           "name": "integration_workspace_path",
           "type": "text",
@@ -5491,6 +5521,19 @@
           ],
           "onDelete": "no action",
           "onUpdate": "no action"
+        },
+        "runs_final_changeset_id_changesets_id_fk": {
+          "name": "runs_final_changeset_id_changesets_id_fk",
+          "tableFrom": "runs",
+          "tableTo": "changesets",
+          "columnsFrom": [
+            "final_changeset_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -5519,6 +5562,10 @@
         "runs_terminal_has_ended_at": {
           "name": "runs_terminal_has_ended_at",
           "value": "(\"runs\".\"status\" IN ('completed', 'failed', 'cancelled')) = (\"runs\".\"ended_at\" IS NOT NULL)"
+        },
+        "runs_completed_has_final": {
+          "name": "runs_completed_has_final",
+          "value": "(\"runs\".\"status\" = 'completed' AND \"runs\".\"final_snapshot_id\" IS NOT NULL AND \"runs\".\"final_changeset_id\" IS NOT NULL) OR (\"runs\".\"status\" <> 'completed' AND \"runs\".\"final_snapshot_id\" IS NULL AND \"runs\".\"final_changeset_id\" IS NULL)"
         },
         "runs_budget_non_negative": {
           "name": "runs_budget_non_negative",
@@ -5750,6 +5797,222 @@
         "schema_info_single_row": {
           "name": "schema_info_single_row",
           "value": "\"schema_info\".\"id\" = 1"
+        }
+      }
+    },
+    "signoff_resolutions": {
+      "name": "signoff_resolutions",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "run_id": {
+          "name": "run_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "gate_id": {
+          "name": "gate_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "decision_id": {
+          "name": "decision_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "outcome": {
+          "name": "outcome",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "operator_message_id": {
+          "name": "operator_message_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "final_changeset_id": {
+          "name": "final_changeset_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "follow_up_invocation_id": {
+          "name": "follow_up_invocation_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "resolved_at": {
+          "name": "resolved_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "signoff_resolutions_run": {
+          "name": "signoff_resolutions_run",
+          "columns": [
+            "run_id",
+            "resolved_at"
+          ],
+          "isUnique": false
+        },
+        "signoff_resolutions_gate": {
+          "name": "signoff_resolutions_gate",
+          "columns": [
+            "gate_id"
+          ],
+          "isUnique": true
+        },
+        "signoff_resolutions_decision": {
+          "name": "signoff_resolutions_decision",
+          "columns": [
+            "decision_id"
+          ],
+          "isUnique": true
+        },
+        "signoff_resolutions_operator_message": {
+          "name": "signoff_resolutions_operator_message",
+          "columns": [
+            "operator_message_id"
+          ],
+          "isUnique": true,
+          "where": "operator_message_id IS NOT NULL"
+        },
+        "signoff_resolutions_final_changeset": {
+          "name": "signoff_resolutions_final_changeset",
+          "columns": [
+            "final_changeset_id"
+          ],
+          "isUnique": true,
+          "where": "final_changeset_id IS NOT NULL"
+        },
+        "signoff_resolutions_follow_up": {
+          "name": "signoff_resolutions_follow_up",
+          "columns": [
+            "follow_up_invocation_id"
+          ],
+          "isUnique": true,
+          "where": "follow_up_invocation_id IS NOT NULL"
+        }
+      },
+      "foreignKeys": {
+        "signoff_resolutions_run_id_runs_id_fk": {
+          "name": "signoff_resolutions_run_id_runs_id_fk",
+          "tableFrom": "signoff_resolutions",
+          "tableTo": "runs",
+          "columnsFrom": [
+            "run_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "signoff_resolutions_gate_id_gates_id_fk": {
+          "name": "signoff_resolutions_gate_id_gates_id_fk",
+          "tableFrom": "signoff_resolutions",
+          "tableTo": "gates",
+          "columnsFrom": [
+            "gate_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "signoff_resolutions_decision_id_decisions_id_fk": {
+          "name": "signoff_resolutions_decision_id_decisions_id_fk",
+          "tableFrom": "signoff_resolutions",
+          "tableTo": "decisions",
+          "columnsFrom": [
+            "decision_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "signoff_resolutions_operator_message_id_conversation_messages_id_fk": {
+          "name": "signoff_resolutions_operator_message_id_conversation_messages_id_fk",
+          "tableFrom": "signoff_resolutions",
+          "tableTo": "conversation_messages",
+          "columnsFrom": [
+            "operator_message_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "signoff_resolutions_final_changeset_id_changesets_id_fk": {
+          "name": "signoff_resolutions_final_changeset_id_changesets_id_fk",
+          "tableFrom": "signoff_resolutions",
+          "tableTo": "changesets",
+          "columnsFrom": [
+            "final_changeset_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "signoff_resolutions_follow_up_invocation_id_invocations_id_fk": {
+          "name": "signoff_resolutions_follow_up_invocation_id_invocations_id_fk",
+          "tableFrom": "signoff_resolutions",
+          "tableTo": "invocations",
+          "columnsFrom": [
+            "follow_up_invocation_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "signoff_resolutions_outcome": {
+          "name": "signoff_resolutions_outcome",
+          "value": "\"signoff_resolutions\".\"outcome\" IN ('accept', 'request_changes')"
+        },
+        "signoff_resolutions_accept_shape": {
+          "name": "signoff_resolutions_accept_shape",
+          "value": "(\"signoff_resolutions\".\"outcome\" = 'accept') = (\"signoff_resolutions\".\"final_changeset_id\" IS NOT NULL)"
+        },
+        "signoff_resolutions_request_changes_shape": {
+          "name": "signoff_resolutions_request_changes_shape",
+          "value": "(\"signoff_resolutions\".\"outcome\" = 'request_changes') = (\"signoff_resolutions\".\"operator_message_id\" IS NOT NULL)"
+        },
+        "signoff_resolutions_follow_up_shape": {
+          "name": "signoff_resolutions_follow_up_shape",
+          "value": "\"signoff_resolutions\".\"outcome\" = 'request_changes' OR \"signoff_resolutions\".\"follow_up_invocation_id\" IS NULL"
         }
       }
     },

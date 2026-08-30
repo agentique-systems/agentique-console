@@ -15,6 +15,7 @@ import { ExecutionPlanStore } from "./plans.ts";
 import { RequirementStore } from "./requirements.ts";
 import { RunStore } from "./runs.ts";
 import { RuntimeToolCallStore } from "./runtime-tool-calls.ts";
+import { SignoffResolutionStore } from "./signoff-resolutions.ts";
 import { TaskStore } from "./tasks.ts";
 import { UsageStore } from "./usage.ts";
 import { EvaluationStore, GateStore } from "./verification.ts";
@@ -39,6 +40,7 @@ export interface Stores {
   evaluations: EvaluationStore;
   gates: GateStore;
   completionRequests: CompletionRequestStore;
+  signoffResolutions: SignoffResolutionStore;
   snapshots: SnapshotStore;
   changesets: ChangesetStore;
   publications: PublicationStore;
@@ -71,6 +73,7 @@ export function createStores(ctx: PersistenceContext, options: { planLimits?: Pl
     evaluations: new EvaluationStore(ctx),
     gates: new GateStore(ctx),
     completionRequests: new CompletionRequestStore(ctx),
+    signoffResolutions: new SignoffResolutionStore(ctx),
     snapshots: new SnapshotStore(ctx),
     changesets: new ChangesetStore(ctx),
     publications: new PublicationStore(ctx),
@@ -100,6 +103,7 @@ export {
   RequirementStore,
   RunStore,
   RuntimeToolCallStore,
+  SignoffResolutionStore,
   SnapshotStore,
   TaskStore,
   UsageStore,

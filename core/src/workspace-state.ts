@@ -70,8 +70,28 @@ export const snapshotInputSchema: z.ZodType<SnapshotInput> = z.strictObject({
   reason: z.enum(SNAPSHOT_REASONS),
 });
 
-export const CHANGESET_INTEGRATION_STATUSES = ["pending", "integrated", "conflict"] as const;
+/**
+ * Which Changeset a row is (execution-model §9.2, §9.3). An `invocation`
+ * Changeset is what one writing Invocation produced in its isolated worktree
+ * and is applied into the Run's Integration Workspace through the
+ * integration lifecycle; the Run's one `final` Changeset is the descriptive
+ * record of the complete base-to-final difference the operator accepted at
+ * the `operator_signoff` Gate — it is never applied, retried, or resolved,
+ * because the Integration Workspace already holds that state.
+ */
+export const CHANGESET_KINDS = ["invocation", "final"] as const;
+export type ChangesetKind = (typeof CHANGESET_KINDS)[number];
+
+/**
+ * `pending`, `integrated`, and `conflict` are the integration lifecycle of
+ * an `invocation` Changeset; `recorded` is the one terminal state of a
+ * `final` Changeset, which exists in it from creation and never leaves it.
+ */
+export const CHANGESET_INTEGRATION_STATUSES = ["pending", "integrated", "conflict", "recorded"] as const;
 export type ChangesetIntegrationStatus = (typeof CHANGESET_INTEGRATION_STATUSES)[number];
+
+/** The statuses an `invocation` Changeset may hold. */
+export const INVOCATION_CHANGESET_STATUSES = ["pending", "integrated", "conflict"] as const satisfies readonly ChangesetIntegrationStatus[];
 
 export const CHANGESET_MACHINE = defineStateMachine<ChangesetIntegrationStatus>(
   "Changeset",
@@ -80,6 +100,7 @@ export const CHANGESET_MACHINE = defineStateMachine<ChangesetIntegrationStatus>(
     pending: ["integrated", "conflict"],
     integrated: [],
     conflict: ["integrated"],
+    recorded: [],
   },
 );
 
@@ -90,7 +111,8 @@ export const CHANGESET_DIFF_MEDIA_TYPE = "text/x-diff";
 export interface Changeset {
   id: ChangesetId;
   runId: RunId;
-  /** The writing Invocation; `null` for the Run's final Changeset. */
+  kind: ChangesetKind;
+  /** The writing Invocation of an `invocation` Changeset; `null` for the Run's `final` Changeset. */
   invocationId: InvocationId | null;
   beforeSnapshotId: SnapshotId;
   afterSnapshotId: SnapshotId;
@@ -102,10 +124,34 @@ export interface Changeset {
   integratedAt: Timestamp | null;
 }
 
+type ChangesetShape = Pick<Changeset, "kind" | "invocationId" | "integrationStatus" | "integratedSnapshotId" | "conflictTaskId" | "integratedAt">;
+
+/**
+ * An `invocation` Changeset names its writing Invocation and lives in the
+ * integration lifecycle; a `final` Changeset names no Invocation, is
+ * `recorded` from creation, and carries no integration or conflict fact.
+ */
+function changesetShape(changeset: ChangesetShape, ctx: z.RefinementCtx): void {
+  if (changeset.kind === "invocation") {
+    if (changeset.invocationId === null) ctx.addIssue({ code: "custom", path: ["invocationId"], message: "an invocation Changeset names the writing Invocation that produced it" });
+    if (changeset.integrationStatus === "recorded") ctx.addIssue({ code: "custom", path: ["integrationStatus"], message: "an invocation Changeset is pending, integrated, or in conflict; recorded is the final Changeset's state" });
+  } else {
+    if (changeset.invocationId !== null) ctx.addIssue({ code: "custom", path: ["invocationId"], message: "the final Changeset is produced by no Invocation" });
+    if (changeset.integrationStatus !== "recorded") ctx.addIssue({ code: "custom", path: ["integrationStatus"], message: "the final Changeset is recorded, never pending, integrated, or in conflict" });
+  }
+  if ((changeset.integrationStatus === "integrated") !== (changeset.integratedSnapshotId !== null && changeset.integratedAt !== null)) {
+    ctx.addIssue({ code: "custom", path: ["integratedSnapshotId"], message: "integration fields are set exactly when the Changeset is integrated" });
+  }
+  if ((changeset.integrationStatus === "conflict") !== (changeset.conflictTaskId !== null)) {
+    ctx.addIssue({ code: "custom", path: ["conflictTaskId"], message: "conflictTaskId is set exactly when the Changeset conflicts" });
+  }
+}
+
 export const changesetSchema: z.ZodType<Changeset> = z
   .strictObject({
     id: idSchema("changeset"),
     runId: idSchema("run"),
+    kind: z.enum(CHANGESET_KINDS),
     invocationId: idSchema("invocation").nullable(),
     beforeSnapshotId: idSchema("snapshot"),
     afterSnapshotId: idSchema("snapshot"),
@@ -116,18 +162,12 @@ export const changesetSchema: z.ZodType<Changeset> = z
     createdAt: timestampSchema,
     integratedAt: timestampSchema.nullable(),
   })
-  .refine((c) => (c.integrationStatus === "integrated") === (c.integratedSnapshotId !== null && c.integratedAt !== null), {
-    message: "integration fields are set exactly when the Changeset is integrated",
-    path: ["integratedSnapshotId"],
-  })
-  .refine((c) => (c.integrationStatus === "conflict") === (c.conflictTaskId !== null), {
-    message: "conflictTaskId is set exactly when the Changeset conflicts",
-    path: ["conflictTaskId"],
-  });
+  .superRefine(changesetShape);
 
+/** What records an `invocation` Changeset: the writing Invocation's before and after Snapshots and its diff Artifact. */
 export interface ChangesetInput {
   runId: RunId;
-  invocationId: InvocationId | null;
+  invocationId: InvocationId;
   beforeSnapshotId: SnapshotId;
   afterSnapshotId: SnapshotId;
   diffArtifactId: ArtifactId;
@@ -135,7 +175,26 @@ export interface ChangesetInput {
 
 export const changesetInputSchema: z.ZodType<ChangesetInput> = z.strictObject({
   runId: idSchema("run"),
-  invocationId: idSchema("invocation").nullable(),
+  invocationId: idSchema("invocation"),
+  beforeSnapshotId: idSchema("snapshot"),
+  afterSnapshotId: idSchema("snapshot"),
+  diffArtifactId: idSchema("artifact"),
+});
+
+/**
+ * What records the Run's `final` Changeset at signoff acceptance
+ * (execution-model §9.3): the Run's base Snapshot, the accepted final
+ * Snapshot, and the exact base-to-final diff Artifact.
+ */
+export interface FinalChangesetInput {
+  runId: RunId;
+  beforeSnapshotId: SnapshotId;
+  afterSnapshotId: SnapshotId;
+  diffArtifactId: ArtifactId;
+}
+
+export const finalChangesetInputSchema: z.ZodType<FinalChangesetInput> = z.strictObject({
+  runId: idSchema("run"),
   beforeSnapshotId: idSchema("snapshot"),
   afterSnapshotId: idSchema("snapshot"),
   diffArtifactId: idSchema("artifact"),

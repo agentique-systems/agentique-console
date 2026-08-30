@@ -26,6 +26,7 @@ import {
   ATTEMPT_START_MODES,
   ATTEMPT_STATUSES,
   CHANGESET_INTEGRATION_STATUSES,
+  CHANGESET_KINDS,
   COMPLETION_REQUEST_STATUSES,
   CONVERSATION_MESSAGE_AUTHORS,
   COORDINATOR_PURPOSES,
@@ -74,6 +75,7 @@ import {
   RUN_KINDS,
   RUN_STATUSES,
   RUN_WAIT_REASONS,
+  SIGNOFF_RESOLUTION_OUTCOMES,
   SNAPSHOT_REASONS,
   TASK_FAILURE_REASONS,
   TASK_ORIGINS,
@@ -220,6 +222,8 @@ export const runs = sqliteTable(
     baseSnapshotId: text("base_snapshot_id").references((): AnySQLiteColumn => snapshots.id),
     integrationSnapshotId: text("integration_snapshot_id").references((): AnySQLiteColumn => snapshots.id),
     finalSnapshotId: text("final_snapshot_id").references((): AnySQLiteColumn => snapshots.id),
+    /** The Run's one `final` Changeset, recorded at signoff acceptance; set exactly when the Run is `completed` (execution-model §9.3). */
+    finalChangesetId: text("final_changeset_id").references((): AnySQLiteColumn => changesets.id),
     integrationWorkspacePath: text("integration_workspace_path"),
     failure: text("failure", { mode: "json" }).$type<RunFailure>(),
     createdAt: timestamp("created_at").notNull(),
@@ -238,6 +242,8 @@ export const runs = sqliteTable(
       "runs_terminal_has_ended_at",
       sql`(${t.status} IN ('completed', 'failed', 'cancelled')) = (${t.endedAt} IS NOT NULL)`,
     ),
+    // A completed Run records its final Snapshot and its final Changeset; no other Run carries either (execution-model §9.3).
+    check("runs_completed_has_final", sql`(${t.status} = 'completed' AND ${t.finalSnapshotId} IS NOT NULL AND ${t.finalChangesetId} IS NOT NULL) OR (${t.status} <> 'completed' AND ${t.finalSnapshotId} IS NULL AND ${t.finalChangesetId} IS NULL)`),
     check("runs_budget_non_negative", sql`${t.maxCostUsd} >= 0 AND ${t.maxTokens} >= 0 AND ${t.maxAttempts} >= 0`),
     check(
       "runs_final_reserve_non_negative",
@@ -1199,7 +1205,12 @@ export const gates = sqliteTable(
     check("gates_closed_at", sql`(${t.status} = 'open') = (${t.closedAt} IS NULL)`),
     check("gates_failed_has_failure", sql`(${t.status} = 'failed') = (${t.failure} IS NOT NULL)`),
     check("gates_failure_kind", sql`${t.failure} IS NULL OR json_extract(${t.failure}, '$.kind') IN (${inList(GATE_FAILURE_KINDS)})`),
-    check("gates_run_completion_failure", sql`${t.failure} IS NULL OR ${t.kind} = 'run_completion' OR json_extract(${t.failure}, '$.kind') IN ('criteria_failed', 'evaluator_failed')`),
+    // The failure kinds a Gate may record follow its kind: a node_exit Gate fails on its criteria or its Evaluator; a run_completion Gate also on
+    // conditions, the synthesis, or the final reserve; an operator_signoff Gate only on the operator's request for changes (execution-model §10).
+    check(
+      "gates_failure_by_kind",
+      sql`${t.failure} IS NULL OR (${t.kind} = 'node_exit' AND json_extract(${t.failure}, '$.kind') IN ('criteria_failed', 'evaluator_failed')) OR (${t.kind} = 'run_completion' AND json_extract(${t.failure}, '$.kind') IN ('criteria_failed', 'evaluator_failed', 'conditions_unmet', 'final_synthesis_failed', 'final_reserve_exhausted')) OR (${t.kind} = 'operator_signoff' AND json_extract(${t.failure}, '$.kind') = 'changes_requested')`,
+    ),
     // A Run Gate names its Completion Request and pinned Requirement revision; a node_exit Gate names neither and no Requirement.
     check("gates_run_gate_identity", sql`(${t.kind} <> 'node_exit') = (${t.completionRequestId} IS NOT NULL AND ${t.requirementRevisionId} IS NOT NULL)`),
     check("gates_node_exit_no_requirements", sql`${t.kind} <> 'node_exit' OR ${t.requirementIds} = '[]'`),
@@ -1312,6 +1323,8 @@ export const changesets = sqliteTable(
     runId: text("run_id")
       .notNull()
       .references(() => runs.id),
+    /** `invocation`: a writing Invocation's Changeset in the integration lifecycle; `final`: the Run's one recorded base-to-final Changeset (execution-model §9.3). */
+    kind: text("kind").notNull(),
     invocationId: text("invocation_id").references(() => invocations.id),
     beforeSnapshotId: text("before_snapshot_id")
       .notNull()
@@ -1336,6 +1349,70 @@ export const changesets = sqliteTable(
       sql`(${t.integrationStatus} = 'integrated') = (${t.integratedSnapshotId} IS NOT NULL AND ${t.integratedAt} IS NOT NULL)`,
     ),
     check("changesets_conflict_shape", sql`(${t.integrationStatus} = 'conflict') = (${t.conflictTaskId} IS NOT NULL)`),
+    check("changesets_kind", sql`${t.kind} IN (${inList(CHANGESET_KINDS)})`),
+    // An invocation Changeset names its writing Invocation and lives in the integration lifecycle; the final Changeset names no
+    // Invocation and is recorded, never pending, integrated, or in conflict.
+    check(
+      "changesets_kind_shape",
+      sql`(${t.kind} = 'invocation' AND ${t.invocationId} IS NOT NULL AND ${t.integrationStatus} IN ('pending', 'integrated', 'conflict')) OR (${t.kind} = 'final' AND ${t.invocationId} IS NULL AND ${t.integrationStatus} = 'recorded')`,
+    ),
+    // At most one final Changeset per Run (execution-model §9.3).
+    uniqueIndex("changesets_final_run")
+      .on(t.runId)
+      .where(sql`kind = 'final'`),
+  ],
+);
+
+/**
+ * Signoff Resolutions (execution-model §10 `operator_signoff`): one
+ * append-only row per resolved `operator_signoff` Gate — the canonical
+ * record of the operator's `accept` or `request_changes`. The unique indexes
+ * hold "exactly one per Gate", "exactly one per Decision", "an operator
+ * message answers one resolution", "a final Changeset belongs to one
+ * resolution", and "a follow-up Invocation continues one resolution"; the
+ * baseline migration's triggers re-check every relationship at insertion
+ * and keep identity and outcome immutable. Rows carry ids and the closed
+ * outcome only: never the operator's prose, a diff, or a transcript.
+ */
+export const signoffResolutions = sqliteTable(
+  "signoff_resolutions",
+  {
+    id: text("id").primaryKey(),
+    runId: text("run_id")
+      .notNull()
+      .references(() => runs.id),
+    gateId: text("gate_id")
+      .notNull()
+      .references(() => gates.id),
+    decisionId: text("decision_id")
+      .notNull()
+      .references(() => decisions.id),
+    outcome: text("outcome").notNull(),
+    /** The operator's Conversation message a request_changes resolution answers, by id. */
+    operatorMessageId: text("operator_message_id").references(() => conversationMessages.id),
+    /** The Run's final Changeset an accept resolution recorded. */
+    finalChangesetId: text("final_changeset_id").references(() => changesets.id),
+    /** The follow-up root decision_resolution Orchestrator Invocation of a request_changes resolution; recorded once, in the resolving transaction. */
+    followUpInvocationId: text("follow_up_invocation_id").references(() => invocations.id),
+    resolvedAt: timestamp("resolved_at").notNull(),
+  },
+  (t) => [
+    index("signoff_resolutions_run").on(t.runId, t.resolvedAt),
+    uniqueIndex("signoff_resolutions_gate").on(t.gateId),
+    uniqueIndex("signoff_resolutions_decision").on(t.decisionId),
+    uniqueIndex("signoff_resolutions_operator_message")
+      .on(t.operatorMessageId)
+      .where(sql`operator_message_id IS NOT NULL`),
+    uniqueIndex("signoff_resolutions_final_changeset")
+      .on(t.finalChangesetId)
+      .where(sql`final_changeset_id IS NOT NULL`),
+    uniqueIndex("signoff_resolutions_follow_up")
+      .on(t.followUpInvocationId)
+      .where(sql`follow_up_invocation_id IS NOT NULL`),
+    check("signoff_resolutions_outcome", sql`${t.outcome} IN (${inList(SIGNOFF_RESOLUTION_OUTCOMES)})`),
+    check("signoff_resolutions_accept_shape", sql`(${t.outcome} = 'accept') = (${t.finalChangesetId} IS NOT NULL)`),
+    check("signoff_resolutions_request_changes_shape", sql`(${t.outcome} = 'request_changes') = (${t.operatorMessageId} IS NOT NULL)`),
+    check("signoff_resolutions_follow_up_shape", sql`${t.outcome} = 'request_changes' OR ${t.followUpInvocationId} IS NULL`),
   ],
 );
 
@@ -1578,6 +1655,7 @@ export const TABLE_NAMES = [
   "completion_requests",
   "snapshots",
   "changesets",
+  "signoff_resolutions",
   "publications",
   "capacity_leases",
   "budget_reservations",

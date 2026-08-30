@@ -97,6 +97,8 @@ function renderInput(input: ManifestInput): string[] {
         ...(input.tasks.length === 0 ? ["  tasks: none"] : input.tasks.map((t) => `  - task ${t.taskId} [${t.status}]${t.replacesTaskId === null ? "" : ` replaces ${t.replacesTaskId}`}${t.supersededByTaskId === null ? "" : ` superseded_by ${t.supersededByTaskId}`} outputs ${list(t.outputArtifactIds)}: ${t.subject}`)),
         ...(input.unresolved.length === 0 ? ["  unresolved: none"] : input.unresolved.map((c) => `  - unresolved ${renderCondition(c)}`)),
       ];
+    case "signoff_resolution":
+      return [`- signoff_resolution ${input.signoffResolutionId} ${input.outcome} gate ${input.gateId} decision ${input.decisionId} completion_gate ${input.completionGateId} verified_snapshot ${input.verifiedSnapshotId} report ${input.reportArtifactId} operator_message ${input.operatorMessageId}`];
     case "plan_revision":
       return [
         `- plan_revision ${input.accepted ? `accepted revision ${input.revisionNumber ?? NONE}` : "rejected"}`,

@@ -120,6 +120,9 @@ export type CompletionAdvice =
   | { kind: "prepare_synthesis"; gateId: Gate["id"] }
   | { kind: "settle_synthesis"; gateId: Gate["id"]; invocationId: Invocation["id"] };
 
+/** The failures a `run_completion` Gate records; `changes_requested` belongs to the `operator_signoff` Gate alone. */
+type CompletionGateFailure = Exclude<GateFailure, { kind: "changes_requested" }>;
+
 export type CompletionOutcome =
   | { kind: "completion_begun"; completionRequestId: CompletionRequest["id"]; gateId: Gate["id"]; ordinal: number; snapshotId: string }
   | { kind: "completion_cancelled"; completionRequestId: CompletionRequest["id"]; outcome: CompletionRequestOutcome }
@@ -311,7 +314,7 @@ export class RunCompletionEngine {
     }
     for (const decision of this.facts.openOperatorDecisions(run)) conditions.push({ kind: "decision_unresolved", decisionId: decision.id });
     for (const changeset of this.stores.changesets.listByRun(run.id)) {
-      if (changeset.integrationStatus !== "integrated") conditions.push({ kind: "changeset_unintegrated", changesetId: changeset.id, status: changeset.integrationStatus });
+      if (changeset.kind === "invocation" && changeset.integrationStatus !== "integrated") conditions.push({ kind: "changeset_unintegrated", changesetId: changeset.id, status: changeset.integrationStatus });
     }
     for (const node of this.stores.gates.listByKind(run.id, "node_exit")) {
       if (node.status === "open") conditions.push({ kind: "node_gate_open", gateId: node.id, planNodeId: node.planNodeId! });
@@ -479,7 +482,7 @@ export class RunCompletionEngine {
   /** The successor of a completion Invocation blocked on a now-resolved Decision: the same Gate and typed inputs, continuing from the blocked one. */
   private successor(run: Run, request: CompletionRequest, gate: Gate, predecessor: Invocation, decision: Decision, options: WriteOptions): CompletionOutcome {
     if (decision.status !== "resolved" || decision.resolution === null) {
-      const failure: GateFailure = predecessor.purpose === "final_synthesis" ? { kind: "final_synthesis_failed", invocationId: predecessor.id } : { kind: "evaluator_failed", invocationId: predecessor.id };
+      const failure: CompletionGateFailure = predecessor.purpose === "final_synthesis" ? { kind: "final_synthesis_failed", invocationId: predecessor.id } : { kind: "evaluator_failed", invocationId: predecessor.id };
       return this.fail(run, request, gate, failure, options);
     }
     const resolution: ManifestInput =
@@ -676,7 +679,7 @@ export class RunCompletionEngine {
    * The root Orchestrator's batched `gate_result` turn takes it from there;
    * completion is never retried automatically.
    */
-  private fail(run: Run, request: CompletionRequest, gate: Gate, failure: GateFailure, options: WriteOptions): CompletionOutcome {
+  private fail(run: Run, request: CompletionRequest, gate: Gate, failure: CompletionGateFailure, options: WriteOptions): CompletionOutcome {
     const closed = this.stores.gates.close(gate.id, "failed", failure, options);
     this.stores.completionRequests.transition(request.id, { to: "failed", outcome: failure }, options);
     const evaluations = this.stores.evaluations.gateCriterionEvaluationsOf(gate.id);

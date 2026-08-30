@@ -178,13 +178,14 @@ export class ChangesetIntegrationService {
     return next;
   }
 
-  /** The Changesets of a Run still to integrate, in creation order: pending ones and conflicts whose Task completed. */
+  /** The invocation Changesets of a Run still to integrate, in creation order: pending ones and conflicts whose Task completed. The final Changeset is never integrated. */
   outstanding(runId: RunId): Changeset[] {
-    return this.stores.changesets.listByRun(runId).filter((c) => c.integrationStatus === "pending" || (c.integrationStatus === "conflict" && c.conflictTaskId !== null && this.stores.tasks.get(c.conflictTaskId).status === "completed"));
+    return this.stores.changesets.listByRun(runId).filter((c) => c.kind === "invocation" && (c.integrationStatus === "pending" || (c.integrationStatus === "conflict" && c.conflictTaskId !== null && this.stores.tasks.get(c.conflictTaskId).status === "completed")));
   }
 
   async #integrate(changesetId: ChangesetId, options: WriteOptions): Promise<IntegrationOutcome> {
     const changeset = this.stores.changesets.get(changesetId);
+    if (changeset.kind === "final") throw new Error(`Changeset ${changesetId} is the Run's final Changeset; it records the accepted result and is never applied`);
     if (changeset.integrationStatus === "integrated") return { kind: "already_integrated", changeset };
     let resolvedTask: Task | null = null;
     if (changeset.integrationStatus === "conflict") {

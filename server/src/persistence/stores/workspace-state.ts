@@ -1,9 +1,11 @@
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 import {
+  CHANGESET_DIFF_MEDIA_TYPE,
   CHANGESET_MACHINE,
   changesetInputSchema,
   changesetSchema,
   ConflictError,
+  finalChangesetInputSchema,
   InvariantViolationError,
   parseOrThrow,
   publicationInputSchema,
@@ -14,6 +16,7 @@ import {
   type ChangesetId,
   type ChangesetInput,
   type ChangesetTransition,
+  type FinalChangesetInput,
   type Publication,
   type PublicationId,
   type PublicationInput,
@@ -23,7 +26,7 @@ import {
   type SnapshotInput,
 } from "@agentique-console/core";
 import type { PersistenceContext } from "../context.ts";
-import { artifacts, changesets, decisions, invocations, publications, snapshots, tasks, workspaces } from "../schema.ts";
+import { artifacts, changesets, decisions, gates, invocations, publications, runs, snapshots, tasks, workspaces } from "../schema.ts";
 import { assertSameRun, loadRunRef, requireRow, runScope, workspaceScope, writeMeta, type WriteOptions } from "./support.ts";
 
 function snapshotToDomain(row: typeof snapshots.$inferSelect): Snapshot {
@@ -93,6 +96,16 @@ export class SnapshotStore {
   }
 }
 
+/**
+ * Changesets (execution-model §9.2, §9.3). `record` appends a writing
+ * Invocation's `invocation` Changeset in `pending`, for the integration
+ * lifecycle; `recordFinal` appends the Run's one `final` Changeset in
+ * `recorded` — only while the Run is `awaiting_signoff`, from exactly the
+ * Run's base Snapshot to exactly the open `operator_signoff` Gate's
+ * verified Snapshot, with a `text/x-diff` Artifact of the Run — and the
+ * database (unique index and trigger) holds the same rules. A final
+ * Changeset never transitions; no Changeset is ever deleted.
+ */
 export class ChangesetStore {
   constructor(private readonly ctx: PersistenceContext) {}
 
@@ -100,18 +113,14 @@ export class ChangesetStore {
     const valid = parseOrThrow(changesetInputSchema, input, "Changeset input");
     return this.ctx.tx.write(() => {
       const run = loadRunRef(this.ctx, valid.runId);
-      for (const snapshotId of [valid.beforeSnapshotId, valid.afterSnapshotId]) {
-        const snapshot = requireRow(this.ctx.db.select({ workspaceId: snapshots.workspaceId }).from(snapshots).where(eq(snapshots.id, snapshotId)).get(), "Snapshot", snapshotId);
-        if (snapshot.workspaceId !== run.workspaceId) throw new InvariantViolationError(`Snapshot ${snapshotId} belongs to another Workspace`);
-      }
+      this.assertSnapshots(run, valid.beforeSnapshotId, valid.afterSnapshotId);
       const diff = requireRow(this.ctx.db.select({ runId: artifacts.runId }).from(artifacts).where(eq(artifacts.id, valid.diffArtifactId)).get(), "Artifact", valid.diffArtifactId);
       assertSameRun("Artifact", valid.diffArtifactId, diff.runId, run.id);
-      if (valid.invocationId !== null) {
-        const invocation = requireRow(this.ctx.db.select({ runId: invocations.runId }).from(invocations).where(eq(invocations.id, valid.invocationId)).get(), "Invocation", valid.invocationId);
-        assertSameRun("Invocation", valid.invocationId, invocation.runId, run.id);
-      }
+      const invocation = requireRow(this.ctx.db.select({ runId: invocations.runId }).from(invocations).where(eq(invocations.id, valid.invocationId)).get(), "Invocation", valid.invocationId);
+      assertSameRun("Invocation", valid.invocationId, invocation.runId, run.id);
       const changeset: Changeset = {
         id: this.ctx.ids("changeset"),
+        kind: "invocation",
         ...valid,
         integrationStatus: "pending",
         integratedSnapshotId: null,
@@ -119,18 +128,78 @@ export class ChangesetStore {
         createdAt: this.ctx.clock(),
         integratedAt: null,
       };
-      parseOrThrow(changesetSchema, changeset, "Changeset");
-      this.ctx.journal.append({
-        type: "changeset.recorded",
-        scope: runScope(run, { invocationId: valid.invocationId }),
-        subjectType: "changeset",
-        subjectId: changeset.id,
-        payload: changeset,
-        ...writeMeta(options),
-      });
-      this.ctx.db.insert(changesets).values(changeset).run();
-      return changeset;
+      return this.insert(run, changeset, options);
     });
+  }
+
+  /**
+   * The Run's one `final` Changeset, recorded at signoff acceptance: the Run
+   * is `awaiting_signoff`, `beforeSnapshotId` is its base Snapshot,
+   * `afterSnapshotId` is the open `operator_signoff` Gate's verified
+   * Snapshot, and the diff Artifact is a `text/x-diff` of the Run. A second
+   * final Changeset is a conflict here and a unique-index violation at the
+   * database.
+   */
+  recordFinal(input: FinalChangesetInput, options?: WriteOptions): Changeset {
+    const valid = parseOrThrow(finalChangesetInputSchema, input, "final Changeset input");
+    return this.ctx.tx.write(() => {
+      const run = loadRunRef(this.ctx, valid.runId);
+      if (run.status !== "awaiting_signoff") throw new ConflictError(`Run ${run.id} is ${run.status}; the final Changeset is recorded at signoff acceptance of a Run awaiting signoff`, { runId: run.id, status: run.status });
+      this.assertSnapshots(run, valid.beforeSnapshotId, valid.afterSnapshotId);
+      const base = requireRow(this.ctx.db.select({ baseSnapshotId: runs.baseSnapshotId }).from(runs).where(eq(runs.id, run.id)).get(), "Run", run.id).baseSnapshotId;
+      if (base !== valid.beforeSnapshotId) throw new InvariantViolationError(`the final Changeset starts at the Run's base Snapshot ${String(base)}, not ${valid.beforeSnapshotId}`, { runId: run.id, beforeSnapshotId: valid.beforeSnapshotId });
+      const signoff = this.ctx.db.select({ id: gates.id, snapshotId: gates.snapshotId }).from(gates).where(and(eq(gates.runId, run.id), eq(gates.kind, "operator_signoff"), eq(gates.status, "open"))).get();
+      if (signoff === undefined) throw new ConflictError(`Run ${run.id} has no open operator_signoff Gate; the final Changeset is recorded at its acceptance`, { runId: run.id });
+      if (signoff.snapshotId !== valid.afterSnapshotId) throw new InvariantViolationError(`the final Changeset ends at the verified Snapshot ${signoff.snapshotId} of Gate ${signoff.id}, not ${valid.afterSnapshotId}`, { gateId: signoff.id, afterSnapshotId: valid.afterSnapshotId });
+      const diff = requireRow(this.ctx.db.select({ runId: artifacts.runId, mediaType: artifacts.mediaType }).from(artifacts).where(eq(artifacts.id, valid.diffArtifactId)).get(), "Artifact", valid.diffArtifactId);
+      assertSameRun("Artifact", valid.diffArtifactId, diff.runId, run.id);
+      if (diff.mediaType !== CHANGESET_DIFF_MEDIA_TYPE) throw new InvariantViolationError(`Artifact ${valid.diffArtifactId} is ${diff.mediaType}, not a ${CHANGESET_DIFF_MEDIA_TYPE} Changeset diff`, { artifactId: valid.diffArtifactId });
+      const existing = this.finalOf(run.id);
+      if (existing !== null) throw new ConflictError(`Run ${run.id} already has final Changeset ${existing.id}`, { runId: run.id, changesetId: existing.id });
+      const changeset: Changeset = {
+        id: this.ctx.ids("changeset"),
+        runId: run.id,
+        kind: "final",
+        invocationId: null,
+        beforeSnapshotId: valid.beforeSnapshotId,
+        afterSnapshotId: valid.afterSnapshotId,
+        diffArtifactId: valid.diffArtifactId,
+        integrationStatus: "recorded",
+        integratedSnapshotId: null,
+        conflictTaskId: null,
+        createdAt: this.ctx.clock(),
+        integratedAt: null,
+      };
+      return this.insert(run, changeset, options);
+    });
+  }
+
+  private assertSnapshots(run: { workspaceId: string }, ...snapshotIds: string[]): void {
+    for (const snapshotId of snapshotIds) {
+      const snapshot = requireRow(this.ctx.db.select({ workspaceId: snapshots.workspaceId }).from(snapshots).where(eq(snapshots.id, snapshotId)).get(), "Snapshot", snapshotId);
+      if (snapshot.workspaceId !== run.workspaceId) throw new InvariantViolationError(`Snapshot ${snapshotId} belongs to another Workspace`);
+    }
+  }
+
+  private insert(run: { id: RunId; conversationId: string; workspaceId: string; status: string }, changeset: Changeset, options?: WriteOptions): Changeset {
+    parseOrThrow(changesetSchema, changeset, "Changeset");
+    this.ctx.journal.append({
+      type: "changeset.recorded",
+      scope: runScope(run as never, { invocationId: changeset.invocationId }),
+      subjectType: "changeset",
+      subjectId: changeset.id,
+      payload: changeset,
+      ...writeMeta(options),
+    });
+    this.ctx.db.insert(changesets).values(changeset).run();
+    return changeset;
+  }
+
+  /** The Run's one `final` Changeset, or `null` before signoff acceptance; at most one exists (a database unique index). */
+  finalOf(runId: RunId): Changeset | null {
+    const rows = this.ctx.db.select().from(changesets).where(and(eq(changesets.runId, runId), eq(changesets.kind, "final"))).all().map(changesetToDomain);
+    if (rows.length > 1) throw new InvariantViolationError(`Run ${runId} has ${rows.length} final Changesets`, { runId });
+    return rows[0] ?? null;
   }
 
   get(id: ChangesetId): Changeset {
@@ -144,6 +213,7 @@ export class ChangesetStore {
   transition(id: ChangesetId, transition: ChangesetTransition, options?: WriteOptions): Changeset {
     return this.ctx.tx.write(() => {
       const current = this.get(id);
+      if (current.kind === "final") throw new ConflictError(`Changeset ${id} is the Run's final Changeset; it is recorded once and never integrated, retried, or resolved`, { changesetId: id });
       CHANGESET_MACHINE.assertTransition(current.integrationStatus, transition.to, { changesetId: id });
       const run = loadRunRef(this.ctx, current.runId);
       const next: Changeset = { ...current, integrationStatus: transition.to, conflictTaskId: null };

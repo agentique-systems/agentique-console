@@ -23,6 +23,7 @@ import type {
   RequirementId,
   RequirementRevisionId,
   RunId,
+  SignoffResolutionId,
   SnapshotId,
   TaskId,
 } from "./ids.ts";
@@ -1063,6 +1064,14 @@ export type ManifestInput =
       finalReserve: { limit: Allocation; consumed: Allocation };
       unresolved: CompletionCondition[];
     }
+  /**
+   * The operator's `request_changes` resolution of the `operator_signoff` Gate (execution-model §10), delivered to the root
+   * Orchestrator's follow-up `decision_resolution` turn: the canonical Signoff Resolution, the closed signoff Gate and
+   * resolved Decision, the passed `run_completion` Gate, the verified Snapshot and final-report Artifact the operator
+   * reviewed, and the operator's message by id — ids and the closed outcome only; the message travels as the ordinary
+   * `operator_message` input, never copied here.
+   */
+  | { kind: "signoff_resolution"; signoffResolutionId: SignoffResolutionId; gateId: GateId; decisionId: DecisionId; completionGateId: GateId; outcome: "request_changes"; operatorMessageId: ConversationMessageId; verifiedSnapshotId: SnapshotId; reportArtifactId: ArtifactId }
   | { kind: "plan_revision"; accepted: boolean; revisionNumber: number | null; reasons: PlanRejectionReason[] }
   | { kind: "publication_result"; publicationId: PublicationId; outcome: PublicationOutcome }
   /** The canonical route-selection Evaluation of the route node an inline branch Invocation executes for (execution-model §5.3). */
@@ -1148,6 +1157,19 @@ export const manifestInputSchema: z.ZodType<ManifestInput> = z.discriminatedUnio
     finalReserve: z.strictObject({ limit: allocationSchema, consumed: allocationSchema }),
     unresolved: z.array(completionConditionSchema),
   }),
+  z
+    .strictObject({
+      kind: z.literal("signoff_resolution"),
+      signoffResolutionId: idSchema("signoffResolution"),
+      gateId: idSchema("gate"),
+      decisionId: idSchema("decision"),
+      completionGateId: idSchema("gate"),
+      outcome: z.literal("request_changes"),
+      operatorMessageId: idSchema("conversationMessage"),
+      verifiedSnapshotId: idSchema("snapshot"),
+      reportArtifactId: idSchema("artifact"),
+    })
+    .refine((i) => i.gateId !== i.completionGateId, { message: "the signoff Gate and the completion Gate are distinct", path: ["completionGateId"] }),
   z.strictObject({ kind: z.literal("plan_revision"), accepted: z.boolean(), revisionNumber: positiveCount.nullable(), reasons: z.array(planRejectionReasonSchema) }),
   z.strictObject({ kind: z.literal("publication_result"), publicationId: idSchema("publication"), outcome: z.enum(PUBLICATION_OUTCOMES) }),
   z.strictObject({ kind: z.literal("route_selection"), evaluationId: idSchema("evaluation"), selectedLabel: nonEmptyString }),

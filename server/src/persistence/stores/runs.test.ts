@@ -1,6 +1,6 @@
 import { ConflictError, IllegalTransitionError, NotFoundError, RUN_STATUSES, ValidationError } from "@agentique-console/core";
 import { describe, expect, it } from "vitest";
-import { DEFAULT_BUDGET, DEFAULT_FINAL_RESERVE, openHarness, seedRun, seedSnapshot } from "../test-support.ts";
+import { DEFAULT_BUDGET, DEFAULT_FINAL_RESERVE, openHarness, seedFinalChangeset, seedRun, seedSignoffBoundary, seedSnapshot } from "../test-support.ts";
 
 const NO_EVALUATOR = { evaluatorAgentDefinitionRevisionId: null, maxNodeGateCycles: 3, maxRunCompletionCycles: 3, runCompletionAcceptanceCriterionIds: [] };
 
@@ -78,17 +78,22 @@ describe("runs", () => {
     }
   });
 
-  it("walks the happy path and records final Snapshot and ended time", () => {
+  it("walks the happy path and records the final Snapshot, the final Changeset, and the ended time", () => {
     const h = openHarness();
     try {
       const s = seedRun(h);
-      const snapshot = seedSnapshot(h, s, "run_completion");
-      h.stores.runs.transition(s.run.id, { to: "verifying" });
-      h.stores.runs.transition(s.run.id, { to: "awaiting_signoff" });
-      const completed = h.stores.runs.transition(s.run.id, { to: "completed", finalSnapshotId: snapshot.id });
+      const boundary = seedSignoffBoundary(h, s, { distinctIntegrationSnapshot: true });
+      const { changeset } = seedFinalChangeset(h, s, boundary, "+final");
+      // Both final references are required, must agree with the final Changeset, and exist only on a completed Run.
+      expect(() => h.stores.runs.transition(s.run.id, { to: "completed", finalSnapshotId: boundary.baseSnapshotId, finalChangesetId: changeset.id })).toThrow(/ends at Snapshot/);
+      expect(h.stores.runs.get(s.run.id)).toMatchObject({ status: "awaiting_signoff", finalSnapshotId: null, finalChangesetId: null });
+      const completed = h.stores.runs.transition(s.run.id, { to: "completed", finalSnapshotId: boundary.verifiedSnapshotId, finalChangesetId: changeset.id });
       expect(completed.status).toBe("completed");
-      expect(completed.finalSnapshotId).toBe(snapshot.id);
+      expect(completed.finalSnapshotId).toBe(boundary.verifiedSnapshotId);
+      expect(completed.finalChangesetId).toBe(changeset.id);
       expect(completed.endedAt).not.toBeNull();
+      expect(h.stores.conversations.get(s.conversation.id).activeRunId).toBeNull();
+      expect(() => h.database.sqlite.prepare("UPDATE runs SET final_changeset_id = NULL, final_snapshot_id = NULL WHERE id = ?").run(s.run.id)).toThrow(/final references never change/);
       expect(h.ctx.journal.read({ runId: s.run.id }).map((e) => e.type)).toEqual(
         expect.arrayContaining(["run.started", "run.verifying", "run.awaiting_signoff", "run.completed"]),
       );

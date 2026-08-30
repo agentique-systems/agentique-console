@@ -1,6 +1,7 @@
 import { asc, eq } from "drizzle-orm";
 import {
   ConflictError,
+  InvariantViolationError,
   ORCHESTRATOR_DEFINITION_NAME,
   parseOrThrow,
   RUN_MACHINE,
@@ -46,6 +47,7 @@ function toDomain(row: Row): Run {
       baseSnapshotId: row.baseSnapshotId,
       integrationSnapshotId: row.integrationSnapshotId,
       finalSnapshotId: row.finalSnapshotId,
+      finalChangesetId: row.finalChangesetId,
       integrationWorkspacePath: row.integrationWorkspacePath,
       failure: row.failure,
       createdAt: row.createdAt,
@@ -110,6 +112,7 @@ export class RunStore {
         baseSnapshotId: null,
         integrationSnapshotId: null,
         finalSnapshotId: null,
+        finalChangesetId: null,
         integrationWorkspacePath: null,
         failure: null,
         createdAt: now,
@@ -143,7 +146,11 @@ export class RunStore {
 
   /**
    * Applies one legal transition. Terminal states are final; `waiting` needs
-   * a reason; leaving `waiting` for `running` states which reason cleared.
+   * a reason; leaving `waiting` for `running` states which reason cleared;
+   * `completed` records the final Snapshot and the Run's one `final`
+   * Changeset, which must agree (the Changeset ends at that Snapshot and
+   * starts at the Run's base Snapshot; execution-model §9.3), and clears the
+   * Conversation's active-Run reference when it still names this Run.
    */
   transition(id: RunId, transition: RunTransition, options?: WriteOptions): Run {
     return this.ctx.tx.write(() => {
@@ -182,8 +189,18 @@ export class RunStore {
             transition.finalSnapshotId,
           );
           assertSameRun("Snapshot", transition.finalSnapshotId, snapshot.runId ?? "", id);
+          const changeset = requireRow(
+            this.ctx.db.select({ runId: changesets.runId, kind: changesets.kind, beforeSnapshotId: changesets.beforeSnapshotId, afterSnapshotId: changesets.afterSnapshotId }).from(changesets).where(eq(changesets.id, transition.finalChangesetId)).get(),
+            "Changeset",
+            transition.finalChangesetId,
+          );
+          assertSameRun("Changeset", transition.finalChangesetId, changeset.runId, id);
+          if (changeset.kind !== "final") throw new InvariantViolationError(`Changeset ${transition.finalChangesetId} is an ${changeset.kind} Changeset, not the Run's final Changeset`, { changesetId: transition.finalChangesetId });
+          if (changeset.afterSnapshotId !== transition.finalSnapshotId) throw new InvariantViolationError(`final Changeset ${transition.finalChangesetId} ends at Snapshot ${changeset.afterSnapshotId}, not the final Snapshot ${transition.finalSnapshotId}`, { changesetId: transition.finalChangesetId });
+          if (changeset.beforeSnapshotId !== current.baseSnapshotId) throw new InvariantViolationError(`final Changeset ${transition.finalChangesetId} starts at Snapshot ${changeset.beforeSnapshotId}, not the Run's base Snapshot ${String(current.baseSnapshotId)}`, { changesetId: transition.finalChangesetId });
           next.finalSnapshotId = transition.finalSnapshotId;
-          payload = { from: current.status, to: "completed", finalSnapshotId: transition.finalSnapshotId };
+          next.finalChangesetId = transition.finalChangesetId;
+          payload = { from: current.status, to: "completed", finalSnapshotId: transition.finalSnapshotId, finalChangesetId: transition.finalChangesetId };
           break;
         }
         case "failed":
@@ -207,13 +224,15 @@ export class RunStore {
           status: next.status,
           waitReason: next.waitReason,
           finalSnapshotId: next.finalSnapshotId,
+          finalChangesetId: next.finalChangesetId,
           failure: next.failure,
           updatedAt: next.updatedAt,
           endedAt: next.endedAt,
         })
         .where(eq(runs.id, id))
         .run();
-      if (RUN_MACHINE.isTerminal(next.status)) {
+      // A terminal Run releases the Conversation's active-Run slot, but only when the slot still names this Run.
+      if (RUN_MACHINE.isTerminal(next.status) && this.conversations.get(current.conversationId).activeRunId === id) {
         this.conversations.setActiveRun(current.conversationId, null, options);
       }
       return next;
@@ -318,6 +337,7 @@ export class RunStore {
       baseSnapshotId: run.baseSnapshotId,
       integrationSnapshotId: run.integrationSnapshotId,
       finalSnapshotId: run.finalSnapshotId,
+      finalChangesetId: run.finalChangesetId,
       integrationWorkspacePath: run.integrationWorkspacePath,
       failure: run.failure,
       createdAt: run.createdAt,

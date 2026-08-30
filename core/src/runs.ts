@@ -7,7 +7,7 @@ import {
   type Allocation,
   type BudgetLimits,
 } from "./budgets.ts";
-import type { AcceptanceCriterionId, AgentDefinitionRevisionId, ConversationId, RunId, SnapshotId, WorkspaceId } from "./ids.ts";
+import type { AcceptanceCriterionId, AgentDefinitionRevisionId, ChangesetId, ConversationId, RunId, SnapshotId, WorkspaceId } from "./ids.ts";
 import { defineStateMachine } from "./transitions.ts";
 import { idSchema, nonEmptyString, timestampSchema, uniqueIds, type Timestamp } from "./validation.ts";
 
@@ -122,7 +122,10 @@ export interface Run {
   verificationPolicy: VerificationPolicy;
   baseSnapshotId: SnapshotId | null;
   integrationSnapshotId: SnapshotId | null;
+  /** The accepted integration Snapshot of a `completed` Run (execution-model §9.3): the signoff Gate's verified Snapshot; `null` otherwise. */
   finalSnapshotId: SnapshotId | null;
+  /** The Run's one `final` Changeset (base Snapshot to final Snapshot), recorded at signoff acceptance; set exactly when the Run is `completed`. */
+  finalChangesetId: ChangesetId | null;
   integrationWorkspacePath: string | null;
   failure: RunFailure | null;
   createdAt: Timestamp;
@@ -156,11 +159,16 @@ export const runSchema: z.ZodType<Run> = z
     baseSnapshotId: idSchema("snapshot").nullable(),
     integrationSnapshotId: idSchema("snapshot").nullable(),
     finalSnapshotId: idSchema("snapshot").nullable(),
+    finalChangesetId: idSchema("changeset").nullable(),
     integrationWorkspacePath: nonEmptyString.nullable(),
     failure: runFailureSchema.nullable(),
     createdAt: timestampSchema,
     updatedAt: timestampSchema,
     endedAt: timestampSchema.nullable(),
+  })
+  .refine((run) => (run.status === "completed" ? run.finalSnapshotId !== null && run.finalChangesetId !== null : run.finalSnapshotId === null && run.finalChangesetId === null), {
+    message: "a completed Run records its final Snapshot and final Changeset; no other Run carries either",
+    path: ["finalChangesetId"],
   })
   .refine((run) => (run.status === "waiting") === (run.waitReason !== null), {
     message: "waitReason is set exactly when the Run is waiting",
@@ -215,6 +223,7 @@ export type RunTransition =
   | { to: "waiting"; waitReason: RunWaitReason }
   | { to: "verifying" }
   | { to: "awaiting_signoff" }
-  | { to: "completed"; finalSnapshotId: SnapshotId }
+  /** Acceptance at the `operator_signoff` Gate (execution-model §9.3): the verified Snapshot becomes the final Snapshot and the Run's `final` Changeset is named. */
+  | { to: "completed"; finalSnapshotId: SnapshotId; finalChangesetId: ChangesetId }
   | { to: "failed"; failure: RunFailure }
   | { to: "cancelled" };

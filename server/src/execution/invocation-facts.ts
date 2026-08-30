@@ -23,7 +23,7 @@ export function blockingDecisionOf(stores: Stores, invocation: Invocation): Deci
 
 /** The Changeset of an Invocation that is not yet integrated, if any. */
 export function outstandingChangesetOf(stores: Stores, invocation: Invocation): Changeset | null {
-  return stores.changesets.listByRun(invocation.runId).find((c) => c.invocationId === invocation.id && c.integrationStatus !== "integrated") ?? null;
+  return stores.changesets.listByRun(invocation.runId).find((c) => c.kind === "invocation" && c.invocationId === invocation.id && c.integrationStatus !== "integrated") ?? null;
 }
 
 /** Whether a terminal Invocation is blocked (by status or by a `blocked` result) on a Decision, and that Decision. */

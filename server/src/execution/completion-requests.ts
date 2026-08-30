@@ -213,7 +213,7 @@ export class CompletionFacts {
     }
     if (nodeActive) codes.push("node_active");
     if (nodeFailed) codes.push("node_failed");
-    if (this.stores.changesets.listByRun(run.id).some((c) => c.integrationStatus !== "integrated")) codes.push("changeset_unintegrated");
+    if (this.stores.changesets.listByRun(run.id).some((c) => c.kind === "invocation" && c.integrationStatus !== "integrated")) codes.push("changeset_unintegrated");
     if (this.stores.gates.listByKind(run.id, "node_exit").some((g) => g.status === "open")) codes.push("gate_open");
     if (this.stores.tasks.listRemediationTasks(run.id).some((t) => !TASK_MACHINE.isTerminal(t.status) && this.stores.gates.get(t.gateId!).kind === "node_exit")) codes.push("gate_remediation_unresolved");
     if (this.stores.invocations.listActive(run.id).some((i) => i.id !== requestingInvocationId)) codes.push("invocation_active");

@@ -4,19 +4,28 @@
  * domain objects through the stores themselves.
  */
 import {
+  canonicalFinalReport,
+  CHANGESET_DIFF_MEDIA_TYPE,
   effectiveCapabilityPolicy,
   EMPTY_MANIFEST_TEMPLATE,
   EMPTY_WORKSPACE_CAPABILITY_POLICY,
+  FINAL_REPORT_MEDIA_TYPE,
   ROOT_NODE_TITLE,
   ROOT_SOURCE_PATH,
   runtimeToolsFor,
+  SIGNOFF_OPTIONS,
   type AgentDefinitionRevision,
   type AgentDefinitionRevisionId,
   type Allocation,
+  type Artifact,
   type BudgetLimits,
+  type Changeset,
   type CompiledOperation,
   type CompletionRequest,
   type Conversation,
+  type Decision,
+  type FinalReport,
+  type Gate,
   type Invocation,
   type InvocationPurpose,
   type InvocationRole,
@@ -30,6 +39,7 @@ import {
   type RequirementRevision,
   type Run,
   type RuntimeToolCall,
+  type SnapshotId,
   type VerificationPolicy,
   type Workspace,
 } from "@agentique-console/core";
@@ -433,5 +443,75 @@ export function seedSnapshot(h: Harness, seeded: Seeded, reason: "run_start" | "
     runId: seeded.run.id,
     identity: { kind: "git", commitId: "a".repeat(40), treeId: "b".repeat(40) },
     reason,
+  });
+}
+
+/** The open signoff boundary of a Run built through the stores: what the completion engine leaves behind when its Gate passed. */
+export interface SeededSignoffBoundary {
+  run: Run;
+  completionGate: Gate;
+  request: CompletionRequest;
+  report: Artifact;
+  /** The open `operator_signoff` Gate. */
+  gate: Gate;
+  /** Its open `signoff` Decision. */
+  decision: Decision;
+  baseSnapshotId: SnapshotId;
+  /** The verified Snapshot the operator is asked to accept (the completion Gate's pinned Snapshot). */
+  verifiedSnapshotId: SnapshotId;
+}
+
+/**
+ * Moves the seeded Run to `awaiting_signoff` the way the completion engine does: a base Snapshot recorded when none
+ * exists (and, with `distinctIntegrationSnapshot`, a separate integration Snapshot), a passed `run_completion` Gate with
+ * its final-report Artifact, the passed Completion Request, the open `operator_signoff` Gate, and its one `signoff`
+ * Decision, all in one transaction.
+ */
+export function seedSignoffBoundary(h: Harness, seeded: Seeded, options: { distinctIntegrationSnapshot?: boolean } = {}): SeededSignoffBoundary {
+  const runId = seeded.run.id;
+  let run = h.stores.runs.get(runId);
+  if (run.baseSnapshotId === null) run = h.stores.runs.recordWorkspaceState(runId, { baseSnapshotId: seedSnapshot(h, seeded, "run_start").id });
+  if (options.distinctIntegrationSnapshot && run.integrationSnapshotId === null) {
+    const integration = h.stores.snapshots.record({ workspaceId: seeded.workspace.id, runId, identity: { kind: "git", commitId: "c".repeat(40), treeId: "d".repeat(40) }, reason: "integration" });
+    run = h.stores.runs.recordWorkspaceState(runId, { integrationSnapshotId: integration.id });
+  }
+  const { gate, request, revision } = seedRunCompletionGate(h, seeded);
+  if (h.stores.runs.get(runId).status === "running") h.stores.runs.transition(runId, { to: "verifying" });
+  return h.ctx.tx.write(() => {
+    const report: FinalReport = { version: 1, runId, completionRequestId: request.id, gateId: gate.id, snapshotId: gate.snapshotId!, requirementRevisionId: revision.id, report: { summary: "done", completed: [], verification: [], risks: [], followUps: [] } };
+    const artifact = h.stores.artifacts.create({ runId, mediaType: FINAL_REPORT_MEDIA_TYPE, producer: { kind: "runtime", component: "final_report" }, taskId: null, title: `final report of ${request.id}` }, new TextEncoder().encode(canonicalFinalReport(report)));
+    const passed = h.stores.gates.close(gate.id, "passed", null, { reportArtifactId: artifact.id });
+    const passedRequest = h.stores.completionRequests.transition(request.id, { to: "passed", reportArtifactId: artifact.id });
+    const signoff = h.stores.gates.open({ runId, planNodeId: null, kind: "operator_signoff", acceptanceCriterionIds: [], snapshotId: gate.snapshotId, candidateArtifactIds: gate.candidateArtifactIds, completionRequestId: request.id, requirementRevisionId: gate.requirementRevisionId, requirementIds: gate.requirementIds, completionGateId: gate.id, reportArtifactId: artifact.id });
+    const decision = h.stores.decisions.request({
+      conversationId: seeded.conversation.id,
+      runId,
+      kind: "signoff",
+      resolutionPolicy: "operator_required",
+      requestedBy: { kind: "runtime" },
+      question: `Accept the verified result of Run ${runId}?`,
+      options: [
+        { id: SIGNOFF_OPTIONS[0], label: "Accept", description: null },
+        { id: SIGNOFF_OPTIONS[1], label: "Request changes", description: null },
+      ],
+      recommendedOptionId: null,
+      rationale: null,
+      affects: { requirementIds: gate.requirementIds, taskIds: [], planNodeIds: [seeded.root.id] },
+      deadlineAt: null,
+      activationCondition: null,
+      subject: { kind: "signoff", runId, gateId: signoff.id, completionGateId: gate.id, completionRequestId: request.id, snapshotId: gate.snapshotId!, reportArtifactId: artifact.id },
+      supersedesDecisionId: null,
+    });
+    const awaiting = h.stores.runs.transition(runId, { to: "awaiting_signoff" });
+    return { run: awaiting, completionGate: passed, request: passedRequest, report: artifact, gate: signoff, decision, baseSnapshotId: run.baseSnapshotId!, verifiedSnapshotId: gate.snapshotId! };
+  });
+}
+
+/** The Run's `final` Changeset over the open signoff boundary: a `text/x-diff` Artifact of `content` (empty by default) from the base to the verified Snapshot. */
+export function seedFinalChangeset(h: Harness, seeded: Seeded, boundary: Pick<SeededSignoffBoundary, "baseSnapshotId" | "verifiedSnapshotId">, content = ""): { artifact: Artifact; changeset: Changeset } {
+  return h.ctx.tx.write(() => {
+    const artifact = h.stores.artifacts.create({ runId: seeded.run.id, mediaType: CHANGESET_DIFF_MEDIA_TYPE, producer: { kind: "runtime", component: "changeset" }, taskId: null, title: `final changeset of ${seeded.run.id}` }, new TextEncoder().encode(content));
+    const changeset = h.stores.changesets.recordFinal({ runId: seeded.run.id, beforeSnapshotId: boundary.baseSnapshotId, afterSnapshotId: boundary.verifiedSnapshotId, diffArtifactId: artifact.id });
+    return { artifact, changeset };
   });
 }

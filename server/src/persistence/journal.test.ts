@@ -58,7 +58,7 @@ describe("event journal", () => {
       const s = seedRun(h);
       const before = h.ctx.journal.lastSeq();
       // Illegal transition: validated before any write, nothing appended.
-      expect(() => h.stores.runs.transition(s.run.id, { to: "completed", finalSnapshotId: "snap_000000000000000000000000" })).toThrow(IllegalTransitionError);
+      expect(() => h.stores.runs.transition(s.run.id, { to: "completed", finalSnapshotId: "snap_000000000000000000000000", finalChangesetId: "cs_000000000000000000000000" })).toThrow(IllegalTransitionError);
       expect(h.ctx.journal.lastSeq()).toBe(before);
       expect(h.stores.runs.get(s.run.id).status).toBe("running");
       // A failure after the Event is appended rolls the Event back too: a
@@ -66,7 +66,7 @@ describe("event journal", () => {
       h.stores.runs.transition(s.run.id, { to: "verifying" });
       h.stores.runs.transition(s.run.id, { to: "awaiting_signoff" });
       const mid = h.ctx.journal.lastSeq();
-      expect(() => h.stores.runs.transition(s.run.id, { to: "completed", finalSnapshotId: "snap_000000000000000000000000" })).toThrow(/Snapshot .* not found/);
+      expect(() => h.stores.runs.transition(s.run.id, { to: "completed", finalSnapshotId: "snap_000000000000000000000000", finalChangesetId: "cs_000000000000000000000000" })).toThrow(/Snapshot .* not found/);
       expect(h.ctx.journal.lastSeq()).toBe(mid);
       expect(h.stores.runs.get(s.run.id).status).toBe("awaiting_signoff");
     } finally {

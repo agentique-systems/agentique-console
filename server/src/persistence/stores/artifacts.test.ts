@@ -297,7 +297,7 @@ describe("artifact composition inside an outer transaction", () => {
       expect(() =>
         h.ctx.tx.write(() => {
           composedService();
-          h.stores.runs.transition(s.run.id, { to: "completed", finalSnapshotId: "snap_000000000000000000000000" });
+          h.stores.runs.transition(s.run.id, { to: "completed", finalSnapshotId: "snap_000000000000000000000000", finalChangesetId: "cs_000000000000000000000000" });
         }),
       ).toThrow(/cannot transition/);
       expect(h.stores.artifacts.listByRun(s.run.id)).toEqual([]);

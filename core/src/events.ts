@@ -36,6 +36,7 @@ import {
   REQUIREMENT_STATUS_ACTORS,
 } from "./requirements.ts";
 import { runFailureSchema, runSchema, RUN_STATUSES, RUN_WAIT_REASONS } from "./runs.ts";
+import { signoffResolutionSchema } from "./signoff.ts";
 import { taskBlockReasonSchema, taskDependencySchema, taskSchema, TASK_FAILURE_REASONS, TASK_STATUSES } from "./tasks.ts";
 import { runtimeToolCallSchema } from "./runtime-tools.ts";
 import { approvedToolCallUseSchema } from "./tool-calls.ts";
@@ -105,7 +106,8 @@ export const EVENT_CATALOGUE = {
   "run.verification_failed": transition(RUN_STATUSES),
   "run.awaiting_signoff": transition(RUN_STATUSES),
   "run.changes_requested": transition(RUN_STATUSES),
-  "run.completed": z.strictObject({ from: z.enum(RUN_STATUSES), to: z.literal("completed"), finalSnapshotId: idSchema("snapshot") }),
+  /** Signoff acceptance (execution-model §9.3): the final Snapshot and the Run's `final` Changeset, by id. */
+  "run.completed": z.strictObject({ from: z.enum(RUN_STATUSES), to: z.literal("completed"), finalSnapshotId: idSchema("snapshot"), finalChangesetId: idSchema("changeset") }),
   "run.failed": z.strictObject({ from: z.enum(RUN_STATUSES), to: z.literal("failed"), failure: runFailureSchema }),
   "run.cancelled": transition(RUN_STATUSES),
   /** A Changeset was integrated into the Run's Integration Workspace and the Run's integration Snapshot advanced. */
@@ -208,6 +210,10 @@ export const EVENT_CATALOGUE = {
   "completion_request.cancelled": completionRequestSchema,
   /** Ids and the closed failure fact only: never command output, a rubric, or a prompt. */
   "gate.failed": z.strictObject({ gateId: idSchema("gate"), failure: gateFailureSchema }),
+  /** One canonical Signoff Resolution (execution-model §10 `operator_signoff`): ids and the closed outcome only, never the operator's prose or a diff. */
+  "signoff_resolution.recorded": signoffResolutionSchema,
+  /** The `request_changes` resolution's one follow-up Orchestrator Invocation was prepared and linked. */
+  "signoff_resolution.linked": z.strictObject({ signoffResolutionId: idSchema("signoffResolution"), followUpInvocationId: idSchema("invocation") }),
   "snapshot.taken": snapshotSchema,
   "changeset.recorded": changesetSchema,
   "changeset.integrated": z.strictObject({ changesetId: idSchema("changeset"), integratedSnapshotId: idSchema("snapshot") }),

@@ -187,10 +187,10 @@ describe("Changeset content delivery", () => {
       // A Changeset naming an Artifact of another Run is refused by the store itself.
       const other = seedPlanningRuntime(h);
       const foreign = h.stores.artifacts.create({ runId: other.created.run.id, mediaType: "text/x-diff", producer: { kind: "runtime", component: "changeset" }, taskId: null, title: "foreign diff" }, DIFF);
-      expect(() => h.stores.changesets.record({ runId: run.id, invocationId: null, beforeSnapshotId: changeset.beforeSnapshotId, afterSnapshotId: changeset.afterSnapshotId, diffArtifactId: foreign.id })).toThrow(/Artifact .* belongs to Run/);
+      expect(() => h.stores.changesets.record({ runId: run.id, invocationId: invocation.id, beforeSnapshotId: changeset.beforeSnapshotId, afterSnapshotId: changeset.afterSnapshotId, diffArtifactId: foreign.id })).toThrow(/Artifact .* belongs to Run/);
       // An Artifact of the Run that is not a Changeset diff is refused by the service before the port is involved.
       const text = h.stores.artifacts.create({ runId: run.id, mediaType: "text/plain", producer: { kind: "runtime", component: "changeset" }, taskId: null, title: "not a diff" }, DIFF);
-      const wrong = h.stores.changesets.record({ runId: run.id, invocationId: null, beforeSnapshotId: changeset.beforeSnapshotId, afterSnapshotId: changeset.afterSnapshotId, diffArtifactId: text.id });
+      const wrong = h.stores.changesets.record({ runId: run.id, invocationId: invocation.id, beforeSnapshotId: changeset.beforeSnapshotId, afterSnapshotId: changeset.afterSnapshotId, diffArtifactId: text.id });
       const error = await contentFailure(h, wrong.id);
       expect(error).toMatchObject({ failure: "media_type", changesetId: wrong.id, artifactId: text.id });
       expect(error.message).toContain("text/plain");

@@ -6,6 +6,7 @@ import type {
   AgentDefinitionRevisionId,
   ArtifactId,
   CompletionRequestId,
+  DecisionId,
   EvaluationId,
   GateId,
   InvocationId,
@@ -195,17 +196,23 @@ export const GATE_MACHINE = defineStateMachine<GateStatus>("Gate", GATE_STATUSES
  * an execution failure that fabricates no criterion verdict; or, for a
  * `run_completion` Gate, the Run's structural completion conditions did not
  * hold, its final synthesis ended without a valid report, or the Run's final
- * reserve could not fund the next completion Invocation. The failure is a
- * closed fact of the Gate row, never inferred from Events.
+ * reserve could not fund the next completion Invocation; or, for an
+ * `operator_signoff` Gate, the operator resolved its `signoff` Decision with
+ * `request_changes` (`changes_requested`, naming that Decision). The failure
+ * is a closed fact of the Gate row, never inferred from Events.
  */
 export type GateFailure =
   | { kind: "criteria_failed"; acceptanceCriterionIds: AcceptanceCriterionId[] }
   | { kind: "evaluator_failed"; invocationId: InvocationId }
   | { kind: "conditions_unmet"; conditions: CompletionCondition[] }
   | { kind: "final_synthesis_failed"; invocationId: InvocationId }
-  | { kind: "final_reserve_exhausted"; use: FinalReserveUse };
+  | { kind: "final_reserve_exhausted"; use: FinalReserveUse }
+  | { kind: "changes_requested"; decisionId: DecisionId };
 
-export const GATE_FAILURE_KINDS = ["criteria_failed", "evaluator_failed", "conditions_unmet", "final_synthesis_failed", "final_reserve_exhausted"] as const;
+export const GATE_FAILURE_KINDS = ["criteria_failed", "evaluator_failed", "conditions_unmet", "final_synthesis_failed", "final_reserve_exhausted", "changes_requested"] as const;
+
+/** The one failure kind an `operator_signoff` Gate may record, and the only Gate kind that may record it. */
+export const OPERATOR_SIGNOFF_GATE_FAILURE_KINDS = ["changes_requested"] as const satisfies readonly GateFailure["kind"][];
 
 /** The failure kinds only a `run_completion` Gate may record. */
 export const RUN_COMPLETION_GATE_FAILURE_KINDS = ["conditions_unmet", "final_synthesis_failed", "final_reserve_exhausted"] as const satisfies readonly GateFailure["kind"][];
@@ -216,6 +223,7 @@ export const gateFailureSchema: z.ZodType<GateFailure> = z.discriminatedUnion("k
   z.strictObject({ kind: z.literal("conditions_unmet"), conditions: z.array(completionConditionSchema).min(1) }),
   z.strictObject({ kind: z.literal("final_synthesis_failed"), invocationId: idSchema("invocation") }),
   z.strictObject({ kind: z.literal("final_reserve_exhausted"), use: z.enum(FINAL_RESERVE_USES) }),
+  z.strictObject({ kind: z.literal("changes_requested"), decisionId: idSchema("decision") }),
 ]);
 
 const sortedIds = (ids: readonly string[]): boolean => ids.every((id, i) => i === 0 || ids[i - 1]! < id);
@@ -316,6 +324,10 @@ export const gateSchema: z.ZodType<Gate> = z
   })
   .refine((g) => g.failure === null || g.kind === "run_completion" || !(RUN_COMPLETION_GATE_FAILURE_KINDS as readonly string[]).includes(g.failure.kind), {
     message: "only a run_completion Gate fails on completion conditions, final synthesis, or the final reserve",
+    path: ["failure"],
+  })
+  .refine((g) => g.failure === null || (g.kind === "operator_signoff") === (OPERATOR_SIGNOFF_GATE_FAILURE_KINDS as readonly string[]).includes(g.failure.kind), {
+    message: "an operator_signoff Gate fails only on changes_requested, and no other Gate does",
     path: ["failure"],
   })
   .refine((g) => sortedIds(g.candidateArtifactIds), {

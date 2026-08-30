@@ -33,6 +33,7 @@ export const ID_PREFIXES = {
   approvedToolCallUse: "acu",
   runtimeToolCall: "rtc",
   completionRequest: "crq",
+  signoffResolution: "sres",
 } as const;
 
 export type IdKind = keyof typeof ID_PREFIXES;
@@ -69,6 +70,7 @@ export type UsageId = Id<"use">;
 export type ApprovedToolCallUseId = Id<"acu">;
 export type RuntimeToolCallId = Id<"rtc">;
 export type CompletionRequestId = Id<"crq">;
+export type SignoffResolutionId = Id<"sres">;
 
 const ID_BODY_LENGTH = 24;
 const ID_BODY = /^[0-9a-f]{24}$/;

@@ -196,6 +196,7 @@ CREATE UNIQUE INDEX `capacity_leases_active_attempt` ON `capacity_leases` (`atte
 CREATE TABLE `changesets` (
 	`id` text PRIMARY KEY NOT NULL,
 	`run_id` text NOT NULL,
+	`kind` text NOT NULL,
 	`invocation_id` text,
 	`before_snapshot_id` text NOT NULL,
 	`after_snapshot_id` text NOT NULL,
@@ -212,12 +213,15 @@ CREATE TABLE `changesets` (
 	FOREIGN KEY (`diff_artifact_id`) REFERENCES `artifacts`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`integrated_snapshot_id`) REFERENCES `snapshots`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`conflict_task_id`) REFERENCES `tasks`(`id`) ON UPDATE no action ON DELETE no action,
-	CONSTRAINT "changesets_status" CHECK("changesets"."integration_status" IN ('pending', 'integrated', 'conflict')),
+	CONSTRAINT "changesets_status" CHECK("changesets"."integration_status" IN ('pending', 'integrated', 'conflict', 'recorded')),
 	CONSTRAINT "changesets_integrated_shape" CHECK(("changesets"."integration_status" = 'integrated') = ("changesets"."integrated_snapshot_id" IS NOT NULL AND "changesets"."integrated_at" IS NOT NULL)),
-	CONSTRAINT "changesets_conflict_shape" CHECK(("changesets"."integration_status" = 'conflict') = ("changesets"."conflict_task_id" IS NOT NULL))
+	CONSTRAINT "changesets_conflict_shape" CHECK(("changesets"."integration_status" = 'conflict') = ("changesets"."conflict_task_id" IS NOT NULL)),
+	CONSTRAINT "changesets_kind" CHECK("changesets"."kind" IN ('invocation', 'final')),
+	CONSTRAINT "changesets_kind_shape" CHECK(("changesets"."kind" = 'invocation' AND "changesets"."invocation_id" IS NOT NULL AND "changesets"."integration_status" IN ('pending', 'integrated', 'conflict')) OR ("changesets"."kind" = 'final' AND "changesets"."invocation_id" IS NULL AND "changesets"."integration_status" = 'recorded'))
 );
 --> statement-breakpoint
 CREATE INDEX `changesets_run` ON `changesets` (`run_id`,`created_at`);--> statement-breakpoint
+CREATE UNIQUE INDEX `changesets_final_run` ON `changesets` (`run_id`) WHERE kind = 'final';--> statement-breakpoint
 CREATE TABLE `completion_requests` (
 	`id` text PRIMARY KEY NOT NULL,
 	`run_id` text NOT NULL,
@@ -438,8 +442,8 @@ CREATE TABLE `gates` (
 	CONSTRAINT "gates_ordinal" CHECK("gates"."ordinal" >= 1),
 	CONSTRAINT "gates_closed_at" CHECK(("gates"."status" = 'open') = ("gates"."closed_at" IS NULL)),
 	CONSTRAINT "gates_failed_has_failure" CHECK(("gates"."status" = 'failed') = ("gates"."failure" IS NOT NULL)),
-	CONSTRAINT "gates_failure_kind" CHECK("gates"."failure" IS NULL OR json_extract("gates"."failure", '$.kind') IN ('criteria_failed', 'evaluator_failed', 'conditions_unmet', 'final_synthesis_failed', 'final_reserve_exhausted')),
-	CONSTRAINT "gates_run_completion_failure" CHECK("gates"."failure" IS NULL OR "gates"."kind" = 'run_completion' OR json_extract("gates"."failure", '$.kind') IN ('criteria_failed', 'evaluator_failed')),
+	CONSTRAINT "gates_failure_kind" CHECK("gates"."failure" IS NULL OR json_extract("gates"."failure", '$.kind') IN ('criteria_failed', 'evaluator_failed', 'conditions_unmet', 'final_synthesis_failed', 'final_reserve_exhausted', 'changes_requested')),
+	CONSTRAINT "gates_failure_by_kind" CHECK("gates"."failure" IS NULL OR ("gates"."kind" = 'node_exit' AND json_extract("gates"."failure", '$.kind') IN ('criteria_failed', 'evaluator_failed')) OR ("gates"."kind" = 'run_completion' AND json_extract("gates"."failure", '$.kind') IN ('criteria_failed', 'evaluator_failed', 'conditions_unmet', 'final_synthesis_failed', 'final_reserve_exhausted')) OR ("gates"."kind" = 'operator_signoff' AND json_extract("gates"."failure", '$.kind') = 'changes_requested')),
 	CONSTRAINT "gates_run_gate_identity" CHECK(("gates"."kind" <> 'node_exit') = ("gates"."completion_request_id" IS NOT NULL AND "gates"."requirement_revision_id" IS NOT NULL)),
 	CONSTRAINT "gates_node_exit_no_requirements" CHECK("gates"."kind" <> 'node_exit' OR "gates"."requirement_ids" = '[]'),
 	CONSTRAINT "gates_signoff_shape" CHECK(("gates"."kind" = 'operator_signoff') = ("gates"."completion_gate_id" IS NOT NULL)),
@@ -763,6 +767,7 @@ CREATE TABLE `runs` (
 	`base_snapshot_id` text,
 	`integration_snapshot_id` text,
 	`final_snapshot_id` text,
+	`final_changeset_id` text,
 	`integration_workspace_path` text,
 	`failure` text,
 	`created_at` text NOT NULL,
@@ -773,12 +778,14 @@ CREATE TABLE `runs` (
 	FOREIGN KEY (`base_snapshot_id`) REFERENCES `snapshots`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`integration_snapshot_id`) REFERENCES `snapshots`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`final_snapshot_id`) REFERENCES `snapshots`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`final_changeset_id`) REFERENCES `changesets`(`id`) ON UPDATE no action ON DELETE no action,
 	CONSTRAINT "runs_kind" CHECK("runs"."kind" IN ('code', 'other')),
 	CONSTRAINT "runs_status" CHECK("runs"."status" IN ('created', 'running', 'waiting', 'verifying', 'awaiting_signoff', 'completed', 'failed', 'cancelled')),
 	CONSTRAINT "runs_wait_reason" CHECK("runs"."wait_reason" IS NULL OR "runs"."wait_reason" IN ('decision', 'budget', 'provider_capacity', 'integration_conflict', 'operator')),
 	CONSTRAINT "runs_waiting_has_reason" CHECK(("runs"."status" = 'waiting') = ("runs"."wait_reason" IS NOT NULL)),
 	CONSTRAINT "runs_failed_has_failure" CHECK(("runs"."status" = 'failed') = ("runs"."failure" IS NOT NULL)),
 	CONSTRAINT "runs_terminal_has_ended_at" CHECK(("runs"."status" IN ('completed', 'failed', 'cancelled')) = ("runs"."ended_at" IS NOT NULL)),
+	CONSTRAINT "runs_completed_has_final" CHECK(("runs"."status" = 'completed' AND "runs"."final_snapshot_id" IS NOT NULL AND "runs"."final_changeset_id" IS NOT NULL) OR ("runs"."status" <> 'completed' AND "runs"."final_snapshot_id" IS NULL AND "runs"."final_changeset_id" IS NULL)),
 	CONSTRAINT "runs_budget_non_negative" CHECK("runs"."max_cost_usd" >= 0 AND "runs"."max_tokens" >= 0 AND "runs"."max_attempts" >= 0),
 	CONSTRAINT "runs_final_reserve_non_negative" CHECK("runs"."final_reserve_cost_usd" >= 0 AND "runs"."final_reserve_tokens" >= 0 AND "runs"."final_reserve_attempts" >= 0),
 	CONSTRAINT "runs_final_reserve_within_budget" CHECK("runs"."final_reserve_cost_usd" <= "runs"."max_cost_usd" AND "runs"."final_reserve_tokens" <= "runs"."max_tokens" AND "runs"."final_reserve_attempts" <= "runs"."max_attempts"),
@@ -818,6 +825,34 @@ CREATE TABLE `schema_info` (
 	CONSTRAINT "schema_info_single_row" CHECK("schema_info"."id" = 1)
 );
 --> statement-breakpoint
+CREATE TABLE `signoff_resolutions` (
+	`id` text PRIMARY KEY NOT NULL,
+	`run_id` text NOT NULL,
+	`gate_id` text NOT NULL,
+	`decision_id` text NOT NULL,
+	`outcome` text NOT NULL,
+	`operator_message_id` text,
+	`final_changeset_id` text,
+	`follow_up_invocation_id` text,
+	`resolved_at` text NOT NULL,
+	FOREIGN KEY (`run_id`) REFERENCES `runs`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`gate_id`) REFERENCES `gates`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`decision_id`) REFERENCES `decisions`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`operator_message_id`) REFERENCES `conversation_messages`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`final_changeset_id`) REFERENCES `changesets`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`follow_up_invocation_id`) REFERENCES `invocations`(`id`) ON UPDATE no action ON DELETE no action,
+	CONSTRAINT "signoff_resolutions_outcome" CHECK("signoff_resolutions"."outcome" IN ('accept', 'request_changes')),
+	CONSTRAINT "signoff_resolutions_accept_shape" CHECK(("signoff_resolutions"."outcome" = 'accept') = ("signoff_resolutions"."final_changeset_id" IS NOT NULL)),
+	CONSTRAINT "signoff_resolutions_request_changes_shape" CHECK(("signoff_resolutions"."outcome" = 'request_changes') = ("signoff_resolutions"."operator_message_id" IS NOT NULL)),
+	CONSTRAINT "signoff_resolutions_follow_up_shape" CHECK("signoff_resolutions"."outcome" = 'request_changes' OR "signoff_resolutions"."follow_up_invocation_id" IS NULL)
+);
+--> statement-breakpoint
+CREATE INDEX `signoff_resolutions_run` ON `signoff_resolutions` (`run_id`,`resolved_at`);--> statement-breakpoint
+CREATE UNIQUE INDEX `signoff_resolutions_gate` ON `signoff_resolutions` (`gate_id`);--> statement-breakpoint
+CREATE UNIQUE INDEX `signoff_resolutions_decision` ON `signoff_resolutions` (`decision_id`);--> statement-breakpoint
+CREATE UNIQUE INDEX `signoff_resolutions_operator_message` ON `signoff_resolutions` (`operator_message_id`) WHERE operator_message_id IS NOT NULL;--> statement-breakpoint
+CREATE UNIQUE INDEX `signoff_resolutions_final_changeset` ON `signoff_resolutions` (`final_changeset_id`) WHERE final_changeset_id IS NOT NULL;--> statement-breakpoint
+CREATE UNIQUE INDEX `signoff_resolutions_follow_up` ON `signoff_resolutions` (`follow_up_invocation_id`) WHERE follow_up_invocation_id IS NOT NULL;--> statement-breakpoint
 CREATE TABLE `snapshots` (
 	`id` text PRIMARY KEY NOT NULL,
 	`workspace_id` text NOT NULL,
@@ -928,13 +963,16 @@ CREATE TABLE `workspaces` (
 	CONSTRAINT "workspaces_kind" CHECK("workspaces"."kind" IN ('git', 'directory'))
 );
 --> statement-breakpoint
-CREATE UNIQUE INDEX `workspaces_root_path_unique` ON `workspaces` (`root_path`);--> statement-breakpoint
+CREATE UNIQUE INDEX `workspaces_root_path_unique` ON `workspaces` (`root_path`);
+--> statement-breakpoint
 INSERT INTO `schema_info` (`id`, `application`, `schema`, `version`) VALUES (1, 'agentique-console', 'orchestration-core', 1);--> statement-breakpoint
 CREATE TRIGGER `schema_info_no_delete` BEFORE DELETE ON `schema_info` BEGIN SELECT RAISE(ABORT, 'schema_info is never deleted'); END;--> statement-breakpoint
 CREATE TRIGGER `events_no_update` BEFORE UPDATE ON `events` BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;--> statement-breakpoint
 CREATE TRIGGER `events_no_delete` BEFORE DELETE ON `events` BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;--> statement-breakpoint
 CREATE TRIGGER `runs_definition_immutable` BEFORE UPDATE OF `conversation_id`, `workspace_id`, `kind`, `target`, `final_reserve_cost_usd`, `final_reserve_tokens`, `final_reserve_attempts`, `verification_policy`, `created_at` ON `runs` BEGIN SELECT RAISE(ABORT, 'run definition columns are immutable'); END;--> statement-breakpoint
 CREATE TRIGGER `runs_no_delete` BEFORE DELETE ON `runs` BEGIN SELECT RAISE(ABORT, 'runs are never deleted'); END;--> statement-breakpoint
+CREATE TRIGGER `runs_final_references_valid` BEFORE UPDATE OF `final_changeset_id` ON `runs` WHEN NEW.`final_changeset_id` IS NOT NULL BEGIN SELECT RAISE(ABORT, 'a completed run names its own final changeset, which runs from its base snapshot to its final snapshot') WHERE NOT EXISTS (SELECT 1 FROM `changesets` c WHERE c.`id` = NEW.`final_changeset_id` AND c.`run_id` = NEW.`id` AND c.`kind` = 'final' AND c.`after_snapshot_id` = NEW.`final_snapshot_id` AND c.`before_snapshot_id` = NEW.`base_snapshot_id`); END;--> statement-breakpoint
+CREATE TRIGGER `runs_final_references_immutable` BEFORE UPDATE OF `final_snapshot_id`, `final_changeset_id` ON `runs` WHEN OLD.`final_changeset_id` IS NOT NULL BEGIN SELECT RAISE(ABORT, 'a completed run''s final references never change'); END;--> statement-breakpoint
 CREATE TRIGGER `execution_plan_revisions_no_update` BEFORE UPDATE ON `execution_plan_revisions` BEGIN SELECT RAISE(ABORT, 'execution_plan_revisions are immutable'); END;--> statement-breakpoint
 CREATE TRIGGER `execution_plan_revisions_no_delete` BEFORE DELETE ON `execution_plan_revisions` BEGIN SELECT RAISE(ABORT, 'execution_plan_revisions are immutable'); END;--> statement-breakpoint
 CREATE TRIGGER `plan_edges_no_update` BEFORE UPDATE ON `plan_edges` BEGIN SELECT RAISE(ABORT, 'plan_edges are append-only'); END;--> statement-breakpoint
@@ -991,7 +1029,15 @@ CREATE TRIGGER `completion_requests_terminal_immutable` BEFORE UPDATE ON `comple
 CREATE TRIGGER `completion_requests_no_delete` BEFORE DELETE ON `completion_requests` BEGIN SELECT RAISE(ABORT, 'completion requests are append-only history'); END;--> statement-breakpoint
 CREATE TRIGGER `snapshots_no_update` BEFORE UPDATE ON `snapshots` BEGIN SELECT RAISE(ABORT, 'snapshots are immutable'); END;--> statement-breakpoint
 CREATE TRIGGER `snapshots_no_delete` BEFORE DELETE ON `snapshots` BEGIN SELECT RAISE(ABORT, 'snapshots are immutable'); END;--> statement-breakpoint
-CREATE TRIGGER `changesets_definition_immutable` BEFORE UPDATE OF `run_id`, `invocation_id`, `before_snapshot_id`, `after_snapshot_id`, `diff_artifact_id`, `created_at` ON `changesets` BEGIN SELECT RAISE(ABORT, 'changeset definition columns are immutable'); END;--> statement-breakpoint
+CREATE TRIGGER `changesets_definition_immutable` BEFORE UPDATE OF `run_id`, `kind`, `invocation_id`, `before_snapshot_id`, `after_snapshot_id`, `diff_artifact_id`, `created_at` ON `changesets` BEGIN SELECT RAISE(ABORT, 'changeset definition columns are immutable'); END;--> statement-breakpoint
+CREATE TRIGGER `changesets_final_immutable` BEFORE UPDATE ON `changesets` WHEN OLD.`kind` = 'final' BEGIN SELECT RAISE(ABORT, 'the final changeset is recorded once and never changes'); END;--> statement-breakpoint
+CREATE TRIGGER `changesets_no_delete` BEFORE DELETE ON `changesets` BEGIN SELECT RAISE(ABORT, 'changesets are never deleted'); END;--> statement-breakpoint
+CREATE TRIGGER `changesets_final_valid` BEFORE INSERT ON `changesets` WHEN NEW.`kind` = 'final' BEGIN SELECT RAISE(ABORT, 'the final changeset is recorded for a run awaiting signoff, from its base snapshot to the open operator_signoff gate''s verified snapshot, with a text/x-diff artifact of the run') WHERE NOT EXISTS (SELECT 1 FROM `runs` r JOIN `gates` g ON g.`run_id` = r.`id` JOIN `artifacts` a ON a.`id` = NEW.`diff_artifact_id` WHERE r.`id` = NEW.`run_id` AND r.`status` = 'awaiting_signoff' AND r.`base_snapshot_id` = NEW.`before_snapshot_id` AND g.`kind` = 'operator_signoff' AND g.`status` = 'open' AND g.`snapshot_id` = NEW.`after_snapshot_id` AND a.`run_id` = NEW.`run_id` AND a.`media_type` = 'text/x-diff'); END;--> statement-breakpoint
+CREATE TRIGGER `signoff_resolutions_valid` BEFORE INSERT ON `signoff_resolutions` BEGIN SELECT RAISE(ABORT, 'a signoff resolution resolves an open operator_signoff gate of its run through the gate''s open signoff decision; an accept names the run''s final changeset ending at the gate''s verified snapshot, a request_changes names an operator message of the run''s conversation') WHERE NOT EXISTS (SELECT 1 FROM `gates` g JOIN `decisions` d ON d.`id` = NEW.`decision_id` WHERE g.`id` = NEW.`gate_id` AND g.`run_id` = NEW.`run_id` AND g.`kind` = 'operator_signoff' AND g.`status` = 'open' AND d.`run_id` = NEW.`run_id` AND d.`kind` = 'signoff' AND d.`status` = 'open' AND json_extract(d.`subject`, '$.gateId') = NEW.`gate_id` AND ((NEW.`outcome` = 'accept' AND EXISTS (SELECT 1 FROM `changesets` c WHERE c.`id` = NEW.`final_changeset_id` AND c.`run_id` = NEW.`run_id` AND c.`kind` = 'final' AND c.`after_snapshot_id` = g.`snapshot_id`)) OR (NEW.`outcome` = 'request_changes' AND EXISTS (SELECT 1 FROM `conversation_messages` m WHERE m.`id` = NEW.`operator_message_id` AND m.`conversation_id` = d.`conversation_id` AND m.`author` = 'operator')))); END;--> statement-breakpoint
+CREATE TRIGGER `signoff_resolutions_identity_immutable` BEFORE UPDATE OF `id`, `run_id`, `gate_id`, `decision_id`, `outcome`, `operator_message_id`, `final_changeset_id`, `resolved_at` ON `signoff_resolutions` BEGIN SELECT RAISE(ABORT, 'signoff resolution identity and outcome are immutable'); END;--> statement-breakpoint
+CREATE TRIGGER `signoff_resolutions_follow_up_once` BEFORE UPDATE OF `follow_up_invocation_id` ON `signoff_resolutions` WHEN OLD.`follow_up_invocation_id` IS NOT NULL BEGIN SELECT RAISE(ABORT, 'a signoff resolution links its follow-up invocation once'); END;--> statement-breakpoint
+CREATE TRIGGER `signoff_resolutions_follow_up_valid` BEFORE UPDATE OF `follow_up_invocation_id` ON `signoff_resolutions` WHEN NEW.`follow_up_invocation_id` IS NOT NULL BEGIN SELECT RAISE(ABORT, 'a request_changes signoff resolution links a root decision_resolution orchestrator invocation of its run') WHERE NEW.`outcome` <> 'request_changes' OR NOT EXISTS (SELECT 1 FROM `invocations` i JOIN `plan_nodes` n ON n.`id` = i.`plan_node_id` WHERE i.`id` = NEW.`follow_up_invocation_id` AND i.`run_id` = NEW.`run_id` AND i.`role` = 'orchestrator' AND i.`purpose` = 'decision_resolution' AND n.`source_path` = 'root'); END;--> statement-breakpoint
+CREATE TRIGGER `signoff_resolutions_no_delete` BEFORE DELETE ON `signoff_resolutions` BEGIN SELECT RAISE(ABORT, 'signoff resolutions are append-only history'); END;--> statement-breakpoint
 CREATE TRIGGER `publications_no_update` BEFORE UPDATE ON `publications` BEGIN SELECT RAISE(ABORT, 'publications are immutable'); END;--> statement-breakpoint
 CREATE TRIGGER `publications_no_delete` BEFORE DELETE ON `publications` BEGIN SELECT RAISE(ABORT, 'publications are immutable'); END;--> statement-breakpoint
 CREATE TRIGGER `budget_reservations_definition_immutable` BEFORE UPDATE OF `run_id`, `parent_type`, `parent_id`, `child_type`, `child_id`, `reserved_cost_usd`, `reserved_tokens`, `reserved_attempts`, `capacity_source`, `final_reserve_use`, `transferred_from_reservation_id`, `created_at` ON `budget_reservations` BEGIN SELECT RAISE(ABORT, 'budget_reservation allocation columns are immutable'); END;--> statement-breakpoint

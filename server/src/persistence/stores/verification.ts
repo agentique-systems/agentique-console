@@ -485,7 +485,8 @@ export class GateStore {
       } else {
         this.ctx.journal.append({ type: "gate.failed", scope: runScope(run, { planNodeId: current.planNodeId }), subjectType: "gate", subjectId: id, payload: { gateId: id, failure: valid! }, ...writeMeta(options) });
       }
-      this.ctx.db.update(gates).set({ status: next.status, failure: next.failure, reportArtifactId: next.reportArtifactId, closedAt: next.closedAt }).where(eq(gates.id, id)).run();
+      // The report column is written only when this closure records it; an operator_signoff Gate's report (set at opening) is never rewritten.
+      this.ctx.db.update(gates).set({ status: next.status, failure: next.failure, closedAt: next.closedAt, ...(reportArtifactId === null ? {} : { reportArtifactId }) }).where(eq(gates.id, id)).run();
       return next;
     });
   }

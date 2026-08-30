@@ -22,6 +22,7 @@ export * from "./pattern-positions.ts";
 export * from "./capability-policy.ts";
 export * from "./verification.ts";
 export * from "./completion.ts";
+export * from "./signoff.ts";
 export * from "./workspace-state.ts";
 export * from "./capacity.ts";
 export * from "./usage.ts";

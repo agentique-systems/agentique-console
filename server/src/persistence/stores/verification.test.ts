@@ -1,6 +1,6 @@
 import { ConflictError, IllegalTransitionError, InvariantViolationError, ValidationError } from "@agentique-console/core";
 import { describe, expect, it } from "vitest";
-import { openHarness, operation, seedArtifact, seedInvocation, seedRun, seedSnapshot, seedWorkerNode, seedRunCompletionGate, seedRequirements } from "../test-support.ts";
+import { openHarness, operation, seedArtifact, seedFinalChangeset, seedInvocation, seedRun, seedSignoffBoundary, seedSnapshot, seedWorkerNode, seedRunCompletionGate, seedRequirements } from "../test-support.ts";
 
 describe("evaluations and gates", () => {
   it("opens node_exit Gates on pattern nodes only and closes them once", () => {
@@ -163,8 +163,9 @@ describe("snapshots, changesets, publications", () => {
       const before = seedSnapshot(h, s);
       const after = seedSnapshot(h, s, "integration");
       const diff = seedArtifact(h, s, "diff --git");
-      const changeset = h.stores.changesets.record({ runId: s.run.id, invocationId: null, beforeSnapshotId: before.id, afterSnapshotId: after.id, diffArtifactId: diff.id });
-      expect(changeset.integrationStatus).toBe("pending");
+      const writer = seedInvocation(h, s);
+      const changeset = h.stores.changesets.record({ runId: s.run.id, invocationId: writer.id, beforeSnapshotId: before.id, afterSnapshotId: after.id, diffArtifactId: diff.id });
+      expect(changeset).toMatchObject({ kind: "invocation", invocationId: writer.id, integrationStatus: "pending" });
       const task = h.stores.tasks.create({ runId: s.run.id, planNodeId: null, origin: "runtime", subject: "resolve conflict", requirementIds: [], requirementRevisionId: null, inputArtifactIds: [], requiredOutputs: [], replacesTaskId: null });
       const conflicted = h.stores.changesets.transition(changeset.id, { to: "conflict", conflictTaskId: task.id });
       expect(conflicted.conflictTaskId).toBe(task.id);
@@ -174,7 +175,7 @@ describe("snapshots, changesets, publications", () => {
       expect(() => h.stores.changesets.transition(changeset.id, { to: "conflict", conflictTaskId: task.id })).toThrow(IllegalTransitionError);
       const other = seedRun(h);
       const foreignDiff = seedArtifact(h, other);
-      expect(() => h.stores.changesets.record({ runId: s.run.id, invocationId: null, beforeSnapshotId: before.id, afterSnapshotId: after.id, diffArtifactId: foreignDiff.id })).toThrow(InvariantViolationError);
+      expect(() => h.stores.changesets.record({ runId: s.run.id, invocationId: writer.id, beforeSnapshotId: before.id, afterSnapshotId: after.id, diffArtifactId: foreignDiff.id })).toThrow(InvariantViolationError);
     } finally {
       h.close();
     }
@@ -184,16 +185,14 @@ describe("snapshots, changesets, publications", () => {
     const h = openHarness();
     try {
       const s = seedRun(h);
-      const before = seedSnapshot(h, s);
-      const final = seedSnapshot(h, s, "run_completion");
-      const diff = seedArtifact(h, s, "final diff");
-      const changeset = h.stores.changesets.record({ runId: s.run.id, invocationId: null, beforeSnapshotId: before.id, afterSnapshotId: final.id, diffArtifactId: diff.id });
+      const boundary = seedSignoffBoundary(h, s, { distinctIntegrationSnapshot: true });
+      const before = { id: boundary.baseSnapshotId };
+      const final = { id: boundary.verifiedSnapshotId };
+      const { changeset } = seedFinalChangeset(h, s, boundary, "final diff");
       const decision = h.stores.decisions.request({ conversationId: s.conversation.id, runId: s.run.id, kind: "publish", resolutionPolicy: "operator_required", requestedBy: { kind: "operator" }, question: "Publish?", options: [{ id: "yes", label: "Yes", description: null }], recommendedOptionId: null, rationale: null, affects: { requirementIds: [], taskIds: [], planNodeIds: [] }, deadlineAt: null, activationCondition: null, subject: null, supersedesDecisionId: null });
       const input = { runId: s.run.id, decisionId: decision.id, changesetId: changeset.id, targetBeforeSnapshotId: before.id, targetAfterSnapshotId: final.id, strategy: { kind: "fast_forward" as const }, outcome: "succeeded" as const, failureReason: null, artifactId: null };
       expect(() => h.stores.publications.record(input)).toThrow(ConflictError);
-      h.stores.runs.transition(s.run.id, { to: "verifying" });
-      h.stores.runs.transition(s.run.id, { to: "awaiting_signoff" });
-      h.stores.runs.transition(s.run.id, { to: "completed", finalSnapshotId: final.id });
+      h.stores.runs.transition(s.run.id, { to: "completed", finalSnapshotId: final.id, finalChangesetId: changeset.id });
       expect(() => h.stores.publications.record(input)).toThrow(/not resolved by the operator/);
       h.stores.decisions.resolve(decision.id, { resolvedBy: "operator", chosenOptionId: "yes", rationale: null, artifactIds: [] });
       const publication = h.stores.publications.record(input);
