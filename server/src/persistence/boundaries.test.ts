@@ -288,6 +288,38 @@ describe("import boundaries", () => {
     expect(`${service}\n${port}\n${coreSignoff}`).not.toMatch(/\b(legacy|compat\w*|fallback|shim|deprecated|feature.?flag)\b/i);
   });
 
+  it("publication is the one Target boundary: a narrow three-operation port with no persistence, no force update, no model call, and no scheduler (invariant 16)", () => {
+    const strip = (text: string) => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    // The port depends on core and the shared content-source type alone, and names no persistence, storage, credential, or transcript concept.
+    const portFile = path.join(repoRoot, "server/src/execution/ports/publication-workspace.ts");
+    expect(importsOf(portFile).sort()).toEqual(["./integration-workspace.ts", "@agentique-console/core"]);
+    const port = strip(fs.readFileSync(portFile, "utf8"));
+    expect(port).not.toMatch(/PersistenceContext|\bStores\b|ArtifactStore|BlobStore|Database|better-sqlite3|drizzle|storageKey|\btx\b|transcript|continuation|credential|token|password/i);
+    // Three separate operations, never an opaque publish-everything call, and no force update anywhere near the Target.
+    const portMethods = (port.match(/export interface PublicationWorkspacePort \{([\s\S]*?)\n\}/)?.[1] ?? "").match(/^\s*\w+\(.*\).*;$/gm) ?? [];
+    expect(portMethods.map((m) => m.trim())).toEqual([
+      "prepare(request: PublicationPrepareRequest): Promise<PublicationPrepareOutcome>;",
+      "apply(request: PublicationApplyRequest): Promise<PublicationApplyOutcome>;",
+      "release(request: PublicationReleaseRequest): Promise<PublicationReleaseOutcome>;",
+    ]);
+    expect(port).not.toMatch(/force/i);
+    // The service is deterministic runtime code: no Invocation, Attempt, lease, Task, manifest, provider, scheduler, timer, or transcript —
+    // and no second scheduler; it advances only through the port and the shared check service.
+    const service = strip(fs.readFileSync(path.join(repoRoot, "server/src/execution/publication.ts"), "utf8"));
+    expect(service).not.toMatch(/invocations\.(create|prepare)|createAttempt|preparation\.|executor|governor|\blease\b|usage\.record|\bmanifest\b|\bscheduler\b|setTimeout|setInterval|journal\.read\(|TRANSCRIPT_MEDIA_TYPE|\bforce\b/i);
+    expect(service).toMatch(/never run inside a transaction/);
+    // Only the publication service drives the port and the Publication lifecycle (outside stores, tests, and test support).
+    const drivers = listFiles("server/src", (f) => isCode(f) && !f.endsWith(".test.ts") && !f.endsWith("test-support.ts") && !f.endsWith("stores/publications.ts")).filter((f) => /publications\.(create|transition|recordStagingReleased)\(|PublicationWorkspacePort/.test(strip(fs.readFileSync(f, "utf8")))).map(rel).sort();
+    expect(drivers).toEqual(["server/src/execution/index.ts", "server/src/execution/ports/publication-workspace.ts", "server/src/execution/publication.ts"]);
+    // No provider code names a Target, a Publication, or a publish strategy: no Invocation or provider-model adapter can modify the Target.
+    for (const file of listFiles("server/src/provider", isCode)) {
+      expect(strip(fs.readFileSync(file, "utf8")), rel(file)).not.toMatch(/\bpublication\b|\bpublish\b|fast_forward|targetBefore|PublicationWorkspace/i);
+    }
+    // No compatibility mechanism anywhere in the publication path.
+    const corePublication = strip(fs.readFileSync(path.join(repoRoot, "core/src/publication.ts"), "utf8"));
+    expect(`${service}\n${port}\n${corePublication}`).not.toMatch(/\b(legacy|compat\w*|fallback\b|shim|deprecated|feature.?flag|v2|standing)\b/i);
+  });
+
   it("no execution code reads a transcript Artifact or blob to make a decision (invariant 6)", () => {
     for (const file of listFiles("server/src/execution", (f) => isCode(f) && !f.endsWith(".test.ts"))) {
       const text = fs.readFileSync(file, "utf8");
