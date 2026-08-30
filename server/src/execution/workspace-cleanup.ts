@@ -11,14 +11,17 @@
  * Invocation outcome: it is reported through a bounded diagnostic and left
  * for the next reconciliation.
  */
-import { boundedFailureMessage, INVOCATION_MACHINE, grantsWriteCapability, type Invocation, type InvocationId } from "@agentique-console/core";
+import { boundedFailureMessage, INVOCATION_MACHINE, grantsWriteCapability, type AttemptId, type Invocation, type InvocationId } from "@agentique-console/core";
 import type { PersistenceContext } from "../persistence/context.ts";
 import type { Stores } from "../persistence/stores/index.ts";
 import type { WriteOptions } from "../persistence/stores/support.ts";
 import type { ExecutionWorkspacePort, ExecutionWorkspaceRequest, PreparedExecutionWorkspace } from "./ports/execution-workspace.ts";
 
 /** A bounded, non-sensitive operational report from the execution boundary; never a prompt, payload, path secret, or stack trace. */
-export type ExecutionDiagnostic = { kind: "workspace_release_failed"; invocationId: InvocationId; message: string };
+export type ExecutionDiagnostic =
+  | { kind: "workspace_release_failed"; invocationId: InvocationId; message: string }
+  /** An approval claim transaction failed: nothing persisted, nothing authorized; ids, tool, and digest only. */
+  | { kind: "tool_call_authorization_failed"; invocationId: InvocationId; attemptId: AttemptId; tool: string; callDigest: string; message: string };
 
 export type ExecutionDiagnosticSink = (diagnostic: ExecutionDiagnostic) => void;
 

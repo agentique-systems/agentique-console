@@ -6,10 +6,14 @@
  * model and effort, working directory, capability and Tool Policy,
  * continuation handling, and cancellation. No network, no credentials, no
  * timers: a `hang` step resolves only when the runtime aborts the request,
- * and a `delay` step resolves only when the test releases it.
+ * and a `delay` step resolves only when the test releases it. A
+ * `tool_calls` step submits each proposed call to the request's
+ * authorization port exactly as a real adapter must, "executes" it (into
+ * the `executed` ledger) only on `allowed` or `approved_once`, and ends on
+ * the first refusal; the fake keeps no approval state of its own.
  */
-import type { AttemptId, JsonValue, Timestamp } from "@agentique-console/core";
-import type { AttemptExecutionOutcome, AttemptExecutionRequest, InterruptionCause, ProviderAdapter, ProviderCompletion, UsageChunk } from "./adapter.ts";
+import type { AttemptId, ProposedToolCall, Timestamp } from "@agentique-console/core";
+import type { AttemptExecutionOutcome, AttemptExecutionRequest, InterruptionCause, ProviderAdapter, ProviderCompletion, ToolCallAuthorization, UsageChunk } from "./adapter.ts";
 
 export interface FakeStepCommon {
   /** Usage chunks to report; defaults to one chunk of `DEFAULT_USAGE`. */
@@ -30,16 +34,26 @@ export type FakeStep = FakeStepCommon &
     | { kind: "transient_error"; message?: string }
     | { kind: "permanent_error"; message?: string }
     | { kind: "tool_failure"; tool: string; message?: string }
-    | { kind: "approval_required"; tool: string; input: JsonValue }
+    /** Proposes each call to the authorization port in order; on the first non-executable outcome the step ends, otherwise `then` follows. */
+    | { kind: "tool_calls"; calls: ProposedToolCall[]; then: FakeStep }
     | { kind: "interrupted"; message?: string }
     | { kind: "hang" }
     | { kind: "throw"; error: Error }
     | { kind: "delay"; key: string; then: FakeStep }
   );
 
+/** One authorization the fake requested and the outcome it received. */
+export interface RecordedAuthorization {
+  attemptId: AttemptId;
+  call: ProposedToolCall;
+  authorization: ToolCallAuthorization;
+}
+
 export interface RecordedRequest {
   attemptId: AttemptId;
-  request: Omit<AttemptExecutionRequest, "signal" | "output" | "continuation">;
+  request: Omit<AttemptExecutionRequest, "signal" | "output" | "continuation" | "authorization">;
+  /** Every call submitted to the authorization port during this execution, in order, with its outcome. */
+  authorizations: RecordedAuthorization[];
   /** A copy of the continuation bytes the runtime supplied, or `null` for a fresh start. */
   continuation: Uint8Array | null;
   /** Whether the request was aborted before the step completed, and why. */
@@ -82,6 +96,10 @@ export class ScriptedProvider implements ProviderAdapter {
   readonly supportsContinuation: boolean;
   readonly requests: RecordedRequest[] = [];
   readonly outputs: { attemptId: AttemptId; text: string }[] = [];
+  /** Every authorization requested, across executions. */
+  readonly authorizations: RecordedAuthorization[] = [];
+  /** The external side effects the fake performed: exactly the calls the port answered `allowed` or `approved_once`. */
+  readonly executed: RecordedAuthorization[] = [];
   readonly #script: FakeStep[] = [];
   readonly #released = new Map<string, () => void>();
   readonly #clock: () => Timestamp;
@@ -120,10 +138,11 @@ export class ScriptedProvider implements ProviderAdapter {
 
   async execute(request: AttemptExecutionRequest): Promise<AttemptExecutionOutcome> {
     const step = this.#script.shift() ?? this.#defaultStep;
-    const { signal, output, continuation, ...rest } = request;
+    const { signal, output, continuation, authorization: _port, ...rest } = request;
     const recorded: RecordedRequest = {
       attemptId: request.attemptId,
       request: rest,
+      authorizations: [],
       continuation: continuation ? Uint8Array.from(continuation) : null,
       aborted: false,
       abortCause: null,
@@ -156,6 +175,30 @@ export class ScriptedProvider implements ProviderAdapter {
       if (!request.signal.aborted) await new Promise<void>((resolve) => request.signal.addEventListener("abort", () => resolve(), { once: true }));
       return this.#interrupted(step, request, recorded);
     }
+    if (step.kind === "tool_calls") {
+      for (const call of step.calls) {
+        const authorization = request.authorization.authorize(call);
+        const record: RecordedAuthorization = { attemptId: request.attemptId, call, authorization };
+        this.authorizations.push(record);
+        recorded.authorizations.push(record);
+        switch (authorization.kind) {
+          case "allowed":
+          case "approved_once":
+            this.executed.push(record);
+            request.output({ attemptId: request.attemptId, kind: "tool_call", text: `${authorization.tool} executed` });
+            continue;
+          case "approval_required":
+            return { ...this.#base(step, request), completion: { kind: "approval_required", call }, result: null };
+          case "denied":
+            return { ...this.#base(step, request), completion: { kind: "tool_failure", tool: authorization.tool, message: `tool ${authorization.tool} is denied by the Tool Policy` }, result: null };
+          case "invalid":
+            return { ...this.#base(step, request), completion: { kind: "tool_failure", tool: authorization.tool ?? "unknown", message: authorization.message }, result: null };
+          case "failed":
+            return { ...this.#base(step, request), completion: { kind: "tool_failure", tool: authorization.tool, message: `authorization failed: ${authorization.message}` }, result: null };
+        }
+      }
+      return this.#run({ ...step.then, usage: step.then.usage ?? step.usage, transcript: step.then.transcript ?? step.transcript, continuation: step.then.continuation ?? step.continuation }, request, recorded);
+    }
     const base = this.#base(step, request);
     switch (step.kind) {
       case "succeed":
@@ -166,8 +209,6 @@ export class ScriptedProvider implements ProviderAdapter {
         return { ...base, completion: { kind: "provider_error", transient: false, message: step.message ?? "model not available" }, result: null };
       case "tool_failure":
         return { ...base, completion: { kind: "tool_failure", tool: step.tool, message: step.message ?? `${step.tool} failed` }, result: null };
-      case "approval_required":
-        return { ...base, completion: { kind: "approval_required", call: { tool: step.tool, input: step.input } }, result: null };
       case "interrupted":
         return { ...base, completion: { kind: "interrupted", cause: "provider", message: step.message ?? "provider stream ended" }, result: null };
     }

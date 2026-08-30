@@ -17,7 +17,7 @@ const CANONICAL = canonicalToolCall(CALL);
 const DIGEST = sha256Hex(CANONICAL);
 
 async function blockOnApproval(h: RuntimeHarness, invocation: Invocation) {
-  h.provider.script({ kind: "approval_required", tool: CALL.tool, input: CALL.input });
+  h.provider.script({ kind: "tool_calls", calls: [CALL], then: { kind: "succeed", result: COMPLETED_RESULT } });
   const outcome = await h.executor.advanceInvocation(invocation.id);
   if (outcome.kind !== "approval_required") throw new Error(`expected approval_required, got ${outcome.kind}`);
   return outcome;
@@ -139,7 +139,7 @@ describe("side-effect approval", () => {
     try {
       const s = seedRuntime(h);
       const { invocation } = startRun(h, s).prepared;
-      h.provider.script({ kind: "approval_required", tool: CALL.tool, input: CALL.input });
+      h.provider.script({ kind: "tool_calls", calls: [CALL], then: { kind: "succeed", result: COMPLETED_RESULT } });
       const prepared = await h.executor.prepareNextAttempt(invocation.id);
       if (prepared.kind !== "prepared") throw new Error(prepared.kind);
       const seq = h.ctx.journal.lastSeq();
@@ -201,12 +201,16 @@ describe("side-effect approval", () => {
       // Approval widens nothing: the Tool Policy still requires approval for shell; only the exact digest is permitted once.
       expect(content.toolPolicy.shell).toBe("approval_required");
       expect(content.capabilities.tools).toEqual(["read", "shell", "write"]);
-      // The provider receives the approved call list and a manifest that renders it; the raw call is still absent.
-      reopened.provider.script({ kind: "succeed", result: COMPLETED_RESULT });
+      // The provider receives a manifest that renders the grant and an authorization port; the raw call is still absent, and the
+      // exact approved call executes once through the port.
+      reopened.provider.script({ kind: "tool_calls", calls: [CALL], then: { kind: "succeed", result: COMPLETED_RESULT } });
       const run = await reopened.executor.advanceInvocation(successor.invocation.id);
       expect(run).toMatchObject({ kind: "finalized", attempt: { status: "succeeded" } });
-      const request = reopened.provider.requests[0]!.request;
-      expect(request.approvedCalls).toEqual([{ decisionId: decision.id, tool: "shell", callDigest: DIGEST }]);
+      if (run.kind !== "finalized") throw new Error(run.kind);
+      const recorded = reopened.provider.requests[0]!;
+      const request = recorded.request;
+      expect(recorded.authorizations.map((a) => a.authorization)).toEqual([{ kind: "approved_once", tool: "shell", callDigest: DIGEST, decisionId: decision.id, useId: expect.stringMatching(/^acu_/) }]);
+      expect(reopened.stores.approvedToolCallUses.getByDecision(decision.id)).toMatchObject({ invocationId: successor.invocation.id, attemptId: run.attempt.id });
       expect(request.toolPolicy.shell).toBe("approval_required");
       expect(request.input.text).toContain(`- shell ${DIGEST} once, by decision ${decision.id}`);
       expect(request.input.text).not.toContain("rm -rf");
@@ -246,7 +250,7 @@ describe("side-effect approval", () => {
     try {
       const s = seedRuntime(h);
       const { invocation } = startRun(h, s).prepared;
-      h.provider.script({ kind: "tool_failure", tool: "shell", message: "exit 1" }, { kind: "approval_required", tool: "shell", input: { command: "x".repeat(70_000) } });
+      h.provider.script({ kind: "tool_failure", tool: "shell", message: "exit 1" }, { kind: "tool_calls", calls: [{ tool: "shell", input: { command: "x".repeat(70_000) } }], then: { kind: "succeed", result: COMPLETED_RESULT } });
       const first = await h.executor.advanceInvocation(invocation.id);
       expect(first).toMatchObject({ kind: "finalized", attempt: { failureClass: "tool_failure", retryDecision: { permitted: true, reason: "tool_failure" } }, settlement: { kind: "retry_pending" } });
       expect(h.stores.decisions.listByConversation(s.created.run.conversationId)).toEqual([]);

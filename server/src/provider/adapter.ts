@@ -10,10 +10,16 @@
  * Requirement, or Decision; assembles a Context Manifest; decides a
  * Pattern; performs fan-in; interprets Budget policy; or exposes a
  * continuation payload or storage key in a log, Event, or diagnostic. It
- * never treats an `approval_required` disposition as `allowed`: such a call
- * ends the execution with the typed `approval_required` completion.
+ * never treats an `approval_required` disposition as `allowed`, and it
+ * never decides for itself whether a call may run: before executing any
+ * provider-native capability call it submits the exact proposed call to
+ * the request's `authorization` port and executes only on `allowed` or
+ * `approved_once`; on `approval_required` it ends the execution with the
+ * typed `approval_required` completion. The adapter keeps no
+ * approval-consumption state — the runtime's canonical approval use
+ * decides, so a fresh or restarted adapter cannot repeat a consumed call.
  */
-import type { AgentCapabilities, ApprovedToolCall, AttemptId, InvocationId, ModelEffort, ProposedToolCall, RunId, Timestamp, ToolPolicy, UsageInput } from "@agentique-console/core";
+import type { AgentCapabilities, ApprovedToolCallUseId, AttemptId, DecisionId, InvocationId, ModelEffort, ProposedToolCall, RunId, Timestamp, ToolPolicy, UsageInput } from "@agentique-console/core";
 
 /** The deterministic bytes rendered from the persisted Context Manifest (plus a bounded retry appendix). */
 export interface RenderedInput {
@@ -32,6 +38,33 @@ export interface TransientOutput {
 
 export type TransientOutputSink = (output: TransientOutput) => void;
 
+/**
+ * The closed outcome of authorizing one proposed call (execution-model
+ * §6.4). Execution is permitted on exactly `allowed` and `approved_once`.
+ */
+export type ToolCallAuthorization =
+  /** The tool's effective disposition is `allowed`; no approval is involved. */
+  | { kind: "allowed"; tool: string }
+  /** The tool's effective disposition is `denied` (or the tool is not declared); the call never executes. */
+  | { kind: "denied"; tool: string }
+  /** An exact matching `approve_once` grant was claimed and committed: this call, this once. */
+  | { kind: "approved_once"; tool: string; callDigest: string; decisionId: DecisionId; useId: ApprovedToolCallUseId }
+  /** The tool requires approval and no matching unconsumed grant exists; the execution ends with the `approval_required` completion carrying the call. */
+  | { kind: "approval_required"; tool: string; callDigest: string }
+  /** The call is malformed or exceeds the canonical bound; nothing is recorded and the call never executes. */
+  | { kind: "invalid"; tool: string | null; message: string }
+  /** The claim could not be recorded (a persistence failure); nothing persisted, nothing authorized; a retry may claim again. */
+  | { kind: "failed"; tool: string; message: string };
+
+/**
+ * The runtime-owned authorization boundary the adapter consults before
+ * every provider-native capability call. It is bound by the runtime to the
+ * Attempt being executed; the adapter submits only the proposed call.
+ */
+export interface ToolCallAuthorizationPort {
+  authorize(call: ProposedToolCall): ToolCallAuthorization;
+}
+
 export interface AttemptExecutionRequest {
   attemptId: AttemptId;
   invocationId: InvocationId;
@@ -41,18 +74,16 @@ export interface AttemptExecutionRequest {
   input: RenderedInput;
   /** The effective capability set: which provider-native tools and MCP servers may be exposed. */
   capabilities: AgentCapabilities;
-  /** The effective Tool Policy over every declared tool; `approval_required` calls end the execution. */
+  /** The effective Tool Policy over every declared tool, for exposing tools; the `authorization` port is the authority for every call. */
   toolPolicy: ToolPolicy;
   /**
-   * Calls the operator approved once for this Invocation. Enforcement is
-   * the adapter's, at the provider boundary, never the model's: a call
-   * whose tool's disposition is `approval_required` proceeds only when the
-   * canonical digest of the exact proposed call (`canonicalToolCall`)
-   * matches an entry here and that entry has not been used; any other
-   * `approval_required` call still ends the execution with the typed
-   * `approval_required` completion. An approval widens no Tool Policy.
+   * The runtime's authorization boundary for this Attempt. Every
+   * provider-native capability call is submitted here first and executes
+   * only on `allowed` or `approved_once`; an `approval_required` outcome
+   * ends the execution with the typed completion carrying the same call.
+   * An approval widens no Tool Policy: it is one exact digest, once.
    */
-  approvedCalls: ApprovedToolCall[];
+  authorization: ToolCallAuthorizationPort;
   /** The worktree (or Integration Workspace for a read-only Invocation) the Attempt runs in; `null` for a Run without one. */
   workingDirectory: string | null;
   /** The wall-clock deadline the runtime enforces; the adapter may also stop itself at it. */
@@ -72,7 +103,7 @@ export type ProviderCompletion =
   | { kind: "completed" }
   | { kind: "provider_error"; transient: boolean; message: string }
   | { kind: "tool_failure"; tool: string; message: string }
-  /** An `approval_required` tool was called: the exact proposed call in the provider-neutral form the runtime canonicalizes and records. */
+  /** The authorization port answered `approval_required`: the exact proposed call in the provider-neutral form the runtime canonicalizes and records. */
   | { kind: "approval_required"; call: ProposedToolCall }
   | { kind: "interrupted"; cause: InterruptionCause; message: string };
 

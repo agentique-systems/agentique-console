@@ -248,6 +248,9 @@ export class ContextManifestAssembler {
             throw new InvariantViolationError(`input disagrees with the subject of Decision ${input.decisionId}`);
           }
           if (invocation.continuedFromInvocationId !== input.blockedInvocationId) throw new InvariantViolationError(`Invocation ${invocation.id} does not continue from blocked Invocation ${input.blockedInvocationId}`);
+          // A consumed grant is never delivered again: the canonical use, not the manifest, says whether the approval remains claimable.
+          const use = input.outcome === "approve_once" ? this.stores.approvedToolCallUses.getByDecision(decision.id) : null;
+          if (use !== null) throw new ValidationError(`Decision ${input.decisionId} was already used by Attempt ${use.attemptId}; executing the call again needs a new approval`, { useId: use.id });
           if (digests.has(input.callDigest)) throw new ValidationError(`approval resolution for call ${input.callDigest} appears twice`);
           digests.add(input.callDigest);
           break;

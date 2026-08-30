@@ -12,10 +12,12 @@
  *             (`initial` or `retry`) and start it — or refuse without
  *             creating anything.
  *   execute   render the persisted manifest (plus the bounded retry
- *             appendix), call the provider with cancellation and deadline,
- *             stream transient output, collect the writing Invocation's
- *             Changeset through the execution-workspace port, store the
- *             continuation payload.
+ *             appendix), call the provider with cancellation, deadline, and
+ *             the runtime-owned tool-call authorization port bound to this
+ *             Attempt (each approval claim commits in its own short
+ *             transaction before the call may run), stream transient
+ *             output, collect the writing Invocation's Changeset through
+ *             the execution-workspace port, store the continuation payload.
  *   finalize  transcript Artifact; every Usage row; Changeset; result
  *             validation; the Attempt's terminal transition with its bounded
  *             failure detail and durable retry decision; lease release;
@@ -29,12 +31,10 @@
 import {
   ATTEMPT_MACHINE,
   boundedFailureMessage,
-  canonicalToolCall,
   ConflictError,
   grantsWriteCapability,
   INVOCATION_MACHINE,
   invocationDeadlineAt,
-  TOOL_CALL_MAX_BYTES,
   TOOL_CALL_MEDIA_TYPE,
   TRANSCRIPT_MEDIA_TYPE,
   type Attempt,
@@ -45,7 +45,6 @@ import {
   type Decision,
   type Invocation,
   type InvocationId,
-  type ProposedToolCall,
   type RetryDecision,
   type Run,
   type Timestamp,
@@ -62,6 +61,7 @@ import { renderManifest, type RetryAppendix } from "./manifest/renderer.ts";
 import type { CollectedChangeset, ExecutionWorkspacePort } from "./ports/execution-workspace.ts";
 import { InvocationResultValidator, type ResultValidation } from "./result-validator.ts";
 import { classifyAttempt, decideRetry, DEFAULT_RETRY_POLICY, type RetryPolicyConfig, type RuntimeInterruption } from "./retry-policy.ts";
+import { canonicalizeToolCall, ToolCallAuthorizer } from "./tool-call-authorization.ts";
 import { WorkspaceCleanup, type ExecutionDiagnosticSink, type WorkspaceReleaseOutcome } from "./workspace-cleanup.ts";
 
 export interface AttemptExecutorConfig {
@@ -129,6 +129,7 @@ export class AttemptExecutor {
   readonly #inFlight = new Map<AttemptId, InFlight>();
   private readonly validator: InvocationResultValidator;
   private readonly cleanup: WorkspaceCleanup;
+  private readonly diagnostics: ExecutionDiagnosticSink;
 
   constructor(
     private readonly ctx: PersistenceContext,
@@ -143,6 +144,7 @@ export class AttemptExecutor {
   ) {
     this.validator = new InvocationResultValidator(stores);
     this.cleanup = new WorkspaceCleanup(ctx, stores, workspace, diagnostics);
+    this.diagnostics = diagnostics;
   }
 
   // ---------------------------------------------------------------------------
@@ -305,7 +307,7 @@ export class AttemptExecutor {
   }
 
   private async run(flight: InFlight, options: WriteOptions): Promise<ExecutionOutcome> {
-    if (flight.outcome === null) flight.outcome = await this.callProvider(flight);
+    if (flight.outcome === null) flight.outcome = await this.callProvider(flight, options);
     const invocation = this.stores.invocations.get(flight.invocationId);
     const workspace = this.cleanup.workspaceOf(invocation);
     if (workspace.request.writes && flight.outcome.completion.kind === "completed" && flight.changeset === null) {
@@ -318,7 +320,7 @@ export class AttemptExecutor {
     return this.finalize(flight, options);
   }
 
-  private async callProvider(flight: InFlight): Promise<AttemptExecutionOutcome> {
+  private async callProvider(flight: InFlight, options: WriteOptions): Promise<AttemptExecutionOutcome> {
     const invocation = this.stores.invocations.get(flight.invocationId);
     const manifest = this.stores.invocations.getManifest(invocation.id);
     const attempt = this.stores.invocations.getAttempt(flight.attemptId);
@@ -337,7 +339,14 @@ export class AttemptExecutor {
       input: renderManifest(manifest, appendix),
       capabilities: manifest.content.capabilities,
       toolPolicy: manifest.content.toolPolicy,
-      approvedCalls: manifest.content.approvedCalls,
+      // The authorization port is bound here, from canonical rows, to exactly this Attempt; the adapter chooses no id.
+      authorization: new ToolCallAuthorizer(
+        this.ctx,
+        this.stores,
+        { runId: invocation.runId, planNodeId: invocation.planNodeId, invocationId: invocation.id, attemptId: attempt.id, toolPolicy: manifest.content.toolPolicy, approvedCalls: manifest.content.approvedCalls },
+        options,
+        this.diagnostics,
+      ),
       workingDirectory: manifest.content.worktreePath,
       deadlineAt: flight.deadlineAt,
       signal: flight.controller.signal,
@@ -385,11 +394,12 @@ export class AttemptExecutor {
       // 4. Result validation (only a completed provider execution has a candidate).
       const validation: ResultValidation =
         outcome.completion.kind === "completed" ? this.validator.validate(outcome.result, { run, invocation, manifest, writes, changeset: flight.changeset }) : { ok: false, violations: [] };
-      // An intercepted call is canonicalized once; a call beyond the bound is a tool failure, never a truncated approval subject.
-      const proposed = outcome.completion.kind === "approval_required" ? this.canonicalize(outcome.completion.call) : null;
+      // An intercepted call is canonicalized once, by the same contract the authorization port applied; a malformed or
+      // over-bound call is a tool failure, never a truncated approval subject.
+      const proposed = outcome.completion.kind === "approval_required" ? canonicalizeToolCall(outcome.completion.call) : null;
       const completion: ProviderCompletion =
-        outcome.completion.kind === "approval_required" && proposed !== null && proposed.bytes.byteLength > TOOL_CALL_MAX_BYTES
-          ? { kind: "tool_failure", tool: outcome.completion.call.tool, message: `proposed ${outcome.completion.call.tool} call exceeds the ${TOOL_CALL_MAX_BYTES}-byte canonical bound` }
+        outcome.completion.kind === "approval_required" && proposed !== null && proposed.kind === "invalid"
+          ? { kind: "tool_failure", tool: proposed.tool ?? outcome.completion.call.tool, message: proposed.message }
           : outcome.completion;
       const consumed = this.stores.usage.consumedByInvocation(invocation.id);
       const classified = classifyAttempt({ completion, validation, runtimeInterruption: flight.runtimeInterruption, consumed, allocation: invocation.allocation });
@@ -422,7 +432,7 @@ export class AttemptExecutor {
       // 7. An intercepted call becomes canonical in the same transaction: the call Artifact (its bytes live only there,
       //    compensated on rollback like every blob) and the open side_effect_approval Decision whose subject names the
       //    tool, the canonical digest, the Artifact, and the originating Run, Plan Node, Invocation, and Attempt.
-      const approvalDecision = approvalRequired && proposed !== null && completion.kind === "approval_required" ? this.recordApproval(run, invocation, terminal, completion.call.tool, proposed.bytes, meta) : null;
+      const approvalDecision = approvalRequired && proposed !== null && proposed.kind === "ok" && completion.kind === "approval_required" ? this.recordApproval(run, invocation, terminal, proposed.call.tool, proposed.bytes, meta) : null;
       // 8–10. Retry eligibility is the decision above; the Invocation ends only when no retry remains (releasing its reservation), and its Tasks follow.
       const settlement = settleInvocation(this.stores, { invocation, attempt: terminal, decision, result: classified.result, approval: approvalDecision ? { decisionId: approvalDecision.id } : null, meta });
       if (approvalDecision) return { kind: "approval_required", attempt: terminal, settlement, decision: approvalDecision };
@@ -438,10 +448,6 @@ export class AttemptExecutor {
   /** Retries the Invocation's outstanding worktree release (external, idempotent); `not_due` for a non-terminal or read-only Invocation. */
   releaseWorkspace(invocationId: InvocationId, options: WriteOptions = {}): WorkspaceReleaseOutcome {
     return this.cleanup.release(invocationId, options);
-  }
-
-  private canonicalize(call: ProposedToolCall): { bytes: Uint8Array } {
-    return { bytes: new TextEncoder().encode(canonicalToolCall(call)) };
   }
 
   /** The call Artifact and the open `side_effect_approval` Decision, both in the finalization transaction. */

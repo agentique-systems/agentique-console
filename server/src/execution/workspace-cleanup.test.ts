@@ -136,7 +136,7 @@ describe("Execution Workspace cleanup", () => {
     try {
       const s = seedPlanningRuntime(h);
       // Approval-blocked: terminal, released.
-      h.provider.script({ kind: "approval_required", tool: "shell", input: { command: "rm -rf build" } });
+      h.provider.script({ kind: "tool_calls", calls: [{ tool: "shell", input: { command: "rm -rf build" } }], then: { kind: "succeed", result: COMPLETED_RESULT } });
       const blocked = await advance(h, s.invocation);
       expect(blocked).toMatchObject({ kind: "approval_required", settlement: { invocation: { status: "blocked" } } });
       expect(h.stores.invocations.get(s.invocation.id)).toMatchObject({ status: "blocked", workspaceCleanup: "released" });
