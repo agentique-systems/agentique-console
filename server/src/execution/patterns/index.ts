@@ -1,18 +1,21 @@
 /**
  * The Pattern runners: `single` and `chain` over the shared sequential step
- * engine, `route` over the shared node support, plus the root
- * Orchestrator node's support. Every other Pattern has no runner yet and
- * `runnerFor` returns `null` for it, so it is never falsely scheduled.
+ * engine, `route` and `parallel` over the shared node support, plus the root
+ * Orchestrator node's support. `coordinator_worker` and
+ * `evaluator_optimizer` belong to a later phase and are never falsely
+ * scheduled: they have no runner and `runnerFor` returns `null` for them.
  */
 import type { Pattern, PatternPosition, PlanNodeId, Timestamp } from "@agentique-console/core";
 import type { WriteOptions } from "../../persistence/stores/support.ts";
 import { ChainPatternRunner } from "./chain.ts";
+import { ParallelPatternRunner } from "./parallel.ts";
 import { RootNodeSupport } from "./root.ts";
 import { RoutePatternRunner } from "./route.ts";
 import { SinglePatternRunner } from "./single.ts";
 import type { NodeAdvice, PatternRunnerDependencies, PatternRunnerOutcome } from "./support.ts";
 
 export { ChainPatternRunner } from "./chain.ts";
+export { ParallelPatternRunner } from "./parallel.ts";
 export { RootNodeSupport } from "./root.ts";
 export type { RootAdvice, RootOutcome } from "./root.ts";
 export { RoutePatternRunner } from "./route.ts";
@@ -36,11 +39,12 @@ export interface PatternRunners {
   single: SinglePatternRunner;
   chain: ChainPatternRunner;
   route: RoutePatternRunner;
+  parallel: ParallelPatternRunner;
   root: RootNodeSupport;
 }
 
 export function createPatternRunners(deps: PatternRunnerDependencies): PatternRunners {
-  return { single: new SinglePatternRunner(deps), chain: new ChainPatternRunner(deps), route: new RoutePatternRunner(deps), root: new RootNodeSupport(deps) };
+  return { single: new SinglePatternRunner(deps), chain: new ChainPatternRunner(deps), route: new RoutePatternRunner(deps), parallel: new ParallelPatternRunner(deps), root: new RootNodeSupport(deps) };
 }
 
 /** The runner for a Pattern, or `null` when the Pattern belongs to a later phase. */
@@ -52,6 +56,8 @@ export function runnerFor(runners: PatternRunners, pattern: Pattern): PatternRun
       return runners.chain;
     case "route":
       return runners.route;
+    case "parallel":
+      return runners.parallel;
     default:
       return null;
   }

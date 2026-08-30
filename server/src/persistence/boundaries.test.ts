@@ -166,8 +166,8 @@ describe("import boundaries", () => {
     }
   });
 
-  it("the scheduler and Pattern runners import nothing legacy, poll nothing, and implement only the Phase 2C Patterns", () => {
-    const files = [...listFiles("server/src/execution/patterns", isCode), path.join(repoRoot, "server/src/execution/scheduler.ts"), path.join(repoRoot, "server/src/execution/readiness.ts"), path.join(repoRoot, "server/src/execution/handoff-routing.ts"), path.join(repoRoot, "server/src/execution/integration-service.ts")];
+  it("the scheduler, join settler, and Pattern runners import nothing legacy, poll nothing, and implement only the supported Patterns", () => {
+    const files = [...listFiles("server/src/execution/patterns", isCode), path.join(repoRoot, "server/src/execution/scheduler.ts"), path.join(repoRoot, "server/src/execution/join.ts"), path.join(repoRoot, "server/src/execution/readiness.ts"), path.join(repoRoot, "server/src/execution/readiness-facts.ts"), path.join(repoRoot, "server/src/execution/handoff-routing.ts"), path.join(repoRoot, "server/src/execution/integration-service.ts")];
     expect(files.length).toBeGreaterThan(5);
     for (const file of files) {
       for (const specifier of importsOf(file)) {
@@ -182,15 +182,23 @@ describe("import boundaries", () => {
       // Nothing schedules from a transcript, an Event replay, or a rendered position string.
       expect(text, rel(file)).not.toMatch(/journal\.read\(|renderPatternPosition|TRANSCRIPT_MEDIA_TYPE/);
     }
-    // Only the Phase 2C runners exist; later Patterns have no runner file and no runner registration.
+    // Only the supported runners exist; coordinator_worker and evaluator_optimizer have no runner file and no runner registration.
     const runnerFiles = listFiles("server/src/execution/patterns", (f) => isCode(f) && !f.endsWith(".test.ts")).map((f) => path.basename(f)).sort();
-    expect(runnerFiles).toEqual(["chain.ts", "index.ts", "root.ts", "single.ts", "support.ts"]);
+    expect(runnerFiles).toEqual(["chain.ts", "index.ts", "parallel.ts", "root.ts", "route.ts", "single.ts", "support.ts"]);
     const registry = fs.readFileSync(path.join(repoRoot, "server/src/execution/patterns/index.ts"), "utf8");
-    for (const later of ["route", "parallel", "coordinator_worker", "evaluator_optimizer"]) expect(registry).not.toMatch(new RegExp(`case "${later}"`));
-    // The readiness evaluator is pure: no persistence, provider, Workspace, clock, or id minting.
+    for (const later of ["coordinator_worker", "evaluator_optimizer"]) expect(registry).not.toMatch(new RegExp(`case "${later}"`));
+    for (const supported of ["single", "chain", "route", "parallel"]) expect(registry).toMatch(new RegExp(`case "${supported}"`));
+    // The readiness evaluator is pure over the graph plus explicit facts: no persistence, provider, Workspace, clock, or id minting; the
+    // facts projection is the one reader of rows and reads only route-selection Evaluations (never a transcript, Handoff summary, or Event).
     const readiness = fs.readFileSync(path.join(repoRoot, "server/src/execution/readiness.ts"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
     expect(importsOf(path.join(repoRoot, "server/src/execution/readiness.ts"))).toEqual(["@agentique-console/core"]);
     expect(readiness).not.toMatch(/\bstores\b|\bctx\b|clock\(|newId\(|\.ids\(|Date\.|journal|\.execute\(|\.prepare\(|\.apply\(/);
+    const facts = fs.readFileSync(path.join(repoRoot, "server/src/execution/readiness-facts.ts"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    expect(facts).toMatch(/stores\.evaluations\.routeSelectionsOf\(/);
+    expect(facts).not.toMatch(/stores\.(invocations|handoffs|artifacts|tasks|decisions|runs)\b|journal|transcript|summary|artifacts\.read\(/);
+    // A join never touches the executor, the governor, or a provider: no Invocation, Attempt, lease, or Usage.
+    const join = fs.readFileSync(path.join(repoRoot, "server/src/execution/join.ts"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    expect(join).not.toMatch(/executor|governor|provider|invocations\.create|createAttempt|tryAcquire|usage\.record|preparation/);
     // The provider boundary never imports the scheduler or the stores; the persistence boundary never imports execution (checked above too).
     for (const file of listFiles("server/src/provider", isCode)) {
       for (const specifier of importsOf(file)) {

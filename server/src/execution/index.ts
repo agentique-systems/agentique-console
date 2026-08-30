@@ -62,7 +62,7 @@ export type { EnsuredHandoff } from "./handoff-routing.ts";
 export type { ArtifactContentSource, IntegrationApplyOutcome, IntegrationApplyRequest, IntegrationWorkspacePort } from "./ports/integration-workspace.ts";
 export { ChangesetContentError, ChangesetIntegrationService, CONFLICT_REPORT_MAX_BYTES } from "./integration-service.ts";
 export type { ChangesetContentFailure, IntegrationOutcome } from "./integration-service.ts";
-export { ChainPatternRunner, PatternNodeSupport, RootNodeSupport, RoutePatternRunner, SinglePatternRunner, SequentialStepEngine, createPatternRunners, runnerFor } from "./patterns/index.ts";
+export { ChainPatternRunner, ParallelPatternRunner, PatternNodeSupport, RootNodeSupport, RoutePatternRunner, SinglePatternRunner, SequentialStepEngine, createPatternRunners, runnerFor } from "./patterns/index.ts";
 export type { NodeAdvice, PatternRunner, PatternRunnerDependencies, PatternRunnerOutcome, PatternRunners, RootAdvice, RootOutcome } from "./patterns/index.ts";
 export { RunScheduler, DEFAULT_SCHEDULER_CONFIG } from "./scheduler.ts";
 export type { DeferredWork, NodeProjection, PerformedAction, SchedulerAction, SchedulerConfig, SchedulerOutcome, SchedulerProjection, SchedulerStopReason, WaitingCondition } from "./scheduler.ts";
