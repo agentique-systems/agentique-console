@@ -18,6 +18,8 @@ export interface ExecutionWorkspaceRequest {
   /** True when the effective capability policy grants a write-capable tool: the Invocation needs an isolated worktree and produces a Changeset. */
   writes: boolean;
   integrationWorkspacePath: string | null;
+  /** The Run's current integration Snapshot (its base Snapshot before any integration): the state a worktree is created from. */
+  integrationSnapshot: SnapshotIdentity | null;
 }
 
 export interface PreparedExecutionWorkspace {

@@ -25,7 +25,10 @@ import { AttemptExecutor, DEFAULT_EXECUTOR_CONFIG, type AttemptExecutorConfig } 
 import { ResourceGovernor, type GovernorConfig } from "./governor.ts";
 import { InvocationPreparationService } from "./invocation-preparation-service.ts";
 import { PlanRevisionService, type PlanRevisionOutcome } from "./plan-revision-service.ts";
+import { HandoffRouter } from "./handoff-routing.ts";
+import { ChangesetIntegrationService } from "./integration-service.ts";
 import type { CollectedChangeset, ExecutionWorkspacePort, ExecutionWorkspaceRequest, PreparedExecutionWorkspace } from "./ports/execution-workspace.ts";
+import type { IntegrationApplyOutcome, IntegrationApplyRequest, IntegrationWorkspacePort } from "./ports/integration-workspace.ts";
 import type { PreparedRunWorkspace, RunWorkspacePreparationPort, RunWorkspacePreparationRequest } from "./ports/workspace-preparation.ts";
 import { RecoveryService } from "./recovery-service.ts";
 import { RunCreationService, type CreatedRun, type RunCreationPolicy, type RunCreationRequest } from "./run-creation-service.ts";
@@ -58,7 +61,61 @@ export class FakeWorkspacePreparation implements RunWorkspacePreparationPort {
   }
 }
 
-/** A deterministic execution-workspace port: one worktree per writing Invocation, an explicit (empty by default) Changeset, recorded calls. */
+/** A deterministic git Snapshot identity derived from its inputs, so integrated states are reproducible across processes. */
+export function fakeSnapshot(...parts: string[]): SnapshotIdentity {
+  const digest = sha256Hex(parts.join("|"));
+  return { kind: "git", commitId: digest.slice(0, 40), treeId: digest.slice(24, 64) };
+}
+
+/**
+ * A deterministic integration-workspace port: applies a Changeset onto the
+ * current integration Snapshot by deriving the next Snapshot from both,
+ * idempotently by Changeset id (a repeated apply returns the same Snapshot
+ * and reports it), conflicting when told to, and recording every call so
+ * tests can assert serialization, idempotence, and that nothing named the
+ * Target.
+ */
+export class FakeIntegrationWorkspace implements IntegrationWorkspacePort {
+  readonly requests: IntegrationApplyRequest[] = [];
+  readonly applied = new Map<string, SnapshotIdentity>();
+  /** Changeset ids whose next apply conflicts; consumed on use unless `conflictAlways` is set. */
+  readonly conflictNext = new Set<string>();
+  conflictAlways = new Set<string>();
+  /** When set, `apply` waits for this promise before returning (to exercise "no transaction while awaiting"). */
+  gate: Promise<void> | null = null;
+  readonly #inFlightByRun = new Map<string, number>();
+  /** The most applies ever in flight at once per Run: 1 proves serialization. */
+  readonly maxConcurrentByRun = new Map<string, number>();
+  /** When set, the next apply records success in the fake (as if the external application happened) and then throws (a crash before persistence). */
+  crashAfterApply = false;
+
+  async apply(request: IntegrationApplyRequest): Promise<IntegrationApplyOutcome> {
+    this.requests.push(request);
+    const inFlight = (this.#inFlightByRun.get(request.runId) ?? 0) + 1;
+    this.#inFlightByRun.set(request.runId, inFlight);
+    this.maxConcurrentByRun.set(request.runId, Math.max(this.maxConcurrentByRun.get(request.runId) ?? 0, inFlight));
+    try {
+      if (this.gate) await this.gate;
+      const existing = this.applied.get(request.changesetId);
+      if (existing) return { kind: "integrated", snapshot: existing, alreadyApplied: true };
+      if (this.conflictAlways.has(request.changesetId) || this.conflictNext.delete(request.changesetId)) {
+        return { kind: "conflict", report: `CONFLICT (content): merge conflict applying ${request.changesetId} onto ${request.currentSnapshot.kind === "git" ? request.currentSnapshot.commitId : request.currentSnapshot.contentDigest}` };
+      }
+      const current = request.currentSnapshot.kind === "git" ? request.currentSnapshot.commitId : request.currentSnapshot.contentDigest;
+      const snapshot = request.changeset.empty ? request.currentSnapshot : fakeSnapshot(current, request.changesetId);
+      this.applied.set(request.changesetId, snapshot);
+      if (this.crashAfterApply) {
+        this.crashAfterApply = false;
+        throw new Error("process died after applying the Changeset");
+      }
+      return { kind: "integrated", snapshot, alreadyApplied: false };
+    } finally {
+      this.#inFlightByRun.set(request.runId, (this.#inFlightByRun.get(request.runId) ?? 1) - 1);
+    }
+  }
+}
+
+/** A deterministic execution-workspace port: one worktree per writing Invocation created from the Run's current integration Snapshot, an explicit (empty by default) Changeset, recorded calls. */
 export class FakeExecutionWorkspace implements ExecutionWorkspacePort {
   readonly prepared: { request: ExecutionWorkspaceRequest; result: PreparedExecutionWorkspace }[] = [];
   readonly discarded: ExecutionWorkspaceRequest[] = [];
@@ -79,7 +136,7 @@ export class FakeExecutionWorkspace implements ExecutionWorkspacePort {
     }
     this.#counter += 1;
     const result: PreparedExecutionWorkspace = request.writes
-      ? { worktreePath: `${request.integrationWorkspacePath ?? "/tmp"}/worktrees/${request.invocationId}`, startingSnapshot: { kind: "git", commitId: this.#counter.toString(16).padStart(40, "0"), treeId: "b".repeat(40) } as SnapshotIdentity }
+      ? { worktreePath: `${request.integrationWorkspacePath ?? "/tmp"}/worktrees/${request.invocationId}`, startingSnapshot: request.integrationSnapshot ?? ({ kind: "git", commitId: this.#counter.toString(16).padStart(40, "0"), treeId: "b".repeat(40) } as SnapshotIdentity) }
       : { worktreePath: request.integrationWorkspacePath, startingSnapshot: null };
     this.prepared.push({ request, result });
     return result;
@@ -119,6 +176,9 @@ export const TEST_EXECUTOR_CONFIG: AttemptExecutorConfig = { retry: { backoffBas
 export interface RuntimeHarness extends Harness {
   workspacePreparation: FakeWorkspacePreparation;
   executionWorkspace: FakeExecutionWorkspace;
+  integrationWorkspace: FakeIntegrationWorkspace;
+  integration: ChangesetIntegrationService;
+  handoffs: HandoffRouter;
   provider: ScriptedProvider;
   payloads: MemoryContinuationPayloadStore;
   continuations: ContinuationService;
@@ -150,6 +210,7 @@ export function openRuntimeHarness(options: RuntimeHarnessOptions = {}): Runtime
   const h = options.base ?? openHarness();
   const workspacePreparation = new FakeWorkspacePreparation();
   const executionWorkspace = new FakeExecutionWorkspace();
+  const integrationWorkspace = new FakeIntegrationWorkspace();
   const provider = new ScriptedProvider({ clock: h.ctx.clock, inTransaction: () => h.ctx.tx.inTransaction, supportsContinuation: options.supportsContinuation ?? true });
   const payloads = options.payloads ?? new MemoryContinuationPayloadStore(sha256Hex);
   const continuations = new ContinuationService(h.stores.continuations, payloads, { ttlMs: null, clock: h.ctx.clock });
@@ -164,6 +225,9 @@ export function openRuntimeHarness(options: RuntimeHarnessOptions = {}): Runtime
     ...h,
     workspacePreparation,
     executionWorkspace,
+    integrationWorkspace,
+    integration: new ChangesetIntegrationService(h.ctx, h.stores, integrationWorkspace),
+    handoffs: new HandoffRouter(h.stores),
     provider,
     payloads,
     continuations,

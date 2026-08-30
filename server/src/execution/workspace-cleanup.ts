@@ -41,8 +41,9 @@ export class WorkspaceCleanup {
     const run = this.stores.runs.get(invocation.runId);
     const writes = grantsWriteCapability(manifest.content);
     const startingSnapshot = writes && manifest.content.startingSnapshotId !== null ? this.stores.snapshots.get(manifest.content.startingSnapshotId).identity : null;
+    const integrationId = run.integrationSnapshotId ?? run.baseSnapshotId;
     return {
-      request: { runId: run.id, invocationId: invocation.id, role: invocation.role, writes, integrationWorkspacePath: run.integrationWorkspacePath },
+      request: { runId: run.id, invocationId: invocation.id, role: invocation.role, writes, integrationWorkspacePath: run.integrationWorkspacePath, integrationSnapshot: integrationId === null ? null : this.stores.snapshots.get(integrationId).identity },
       prepared: { worktreePath: manifest.content.worktreePath, startingSnapshot },
     };
   }

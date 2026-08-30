@@ -40,7 +40,7 @@ describe("InvocationPreparationService", () => {
       expect(prepared.invocation.workspaceCleanup).toBe("pending");
       expect(h.stores.reservations.activeForChild({ type: "invocation", id: prepared.invocation.id })).toMatchObject({ parent: { type: "plan_node", id: s.created.root.id }, reserved: prepared.invocation.allocation });
       expect(h.executionWorkspace.prepared).toHaveLength(1);
-      expect(h.executionWorkspace.prepared[0]!.request).toEqual({ runId: s.created.run.id, invocationId: prepared.invocation.id, role: "orchestrator", writes: true, integrationWorkspacePath: s.created.run.integrationWorkspacePath });
+      expect(h.executionWorkspace.prepared[0]!.request).toEqual({ runId: s.created.run.id, invocationId: prepared.invocation.id, role: "orchestrator", writes: true, integrationWorkspacePath: s.created.run.integrationWorkspacePath, integrationSnapshot: h.stores.snapshots.get(s.created.run.baseSnapshotId!).identity });
       expect(h.stores.invocations.createAttempt({ invocationId: prepared.invocation.id, startMode: "fresh", resumedFromAttemptId: null }).kind).toBe("initial");
     } finally {
       h.close();

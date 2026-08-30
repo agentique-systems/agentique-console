@@ -208,7 +208,7 @@ export class InvocationPreparationService {
       const caused: WriteOptions = { ...meta, causationSeq: this.ctx.journal.lastSeq() };
       // Workspace preparation is an external side effect inside the transaction; its compensation runs only on rollback.
       const writes = grantsWriteCapability(policy);
-      const workspaceRequest: ExecutionWorkspaceRequest = { runId: run.id, invocationId: invocation.id, role: valid.role, writes, integrationWorkspacePath: run.integrationWorkspacePath };
+      const workspaceRequest: ExecutionWorkspaceRequest = { runId: run.id, invocationId: invocation.id, role: valid.role, writes, integrationWorkspacePath: run.integrationWorkspacePath, integrationSnapshot: this.integrationSnapshot(run) };
       const prepared = this.workspace.prepare(workspaceRequest);
       this.ctx.tx.afterRollback(() => this.workspace.discard(workspaceRequest, prepared));
       if (writes && prepared.startingSnapshot === null) throw new ValidationError("a writing Invocation needs a starting Snapshot from the execution-workspace port");
@@ -354,6 +354,12 @@ export class InvocationPreparationService {
     const own = requested === undefined ? revision.defaultLimits.maxWallClockMs : requested;
     if (own === null) return node.maxWallClockMs;
     return node.maxWallClockMs === null ? own : Math.min(own, node.maxWallClockMs);
+  }
+
+  /** The identity of the Run's current integration Snapshot (or base Snapshot), which every worktree is created from. */
+  private integrationSnapshot(run: Run) {
+    const id = run.integrationSnapshotId ?? run.baseSnapshotId;
+    return id === null ? null : this.stores.snapshots.get(id).identity;
   }
 
   /** A writing Invocation starts from the Snapshot the port took; a read-only one from the Run's current integration (or base) Snapshot. */
