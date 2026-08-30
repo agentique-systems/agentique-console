@@ -89,9 +89,15 @@ persisted on the Run, that ordinary Plan Node allocations never consume
 (see Budget), and its immutable **verification policy**: the Gate
 Evaluator Agent Definition revision every `node_exit` Gate's evaluated
 criteria are judged by (`null` for a Run whose Gates are deterministic
-only; never the `orchestrator` definition) and `maxNodeGateCycles`, the
-bound on Gate cycles per Plan Node. Creating a Run establishes its
-complete initial state atomically (execution-model §3, §4.6).
+only; never the `orchestrator` definition), `maxNodeGateCycles`, the
+bound on Gate cycles per Plan Node, `maxRunCompletionCycles`, the bound
+on `run_completion` Gate cycles per Run, and
+`runCompletionAcceptanceCriterionIds`, the Run's declared completion
+criteria (of its Conversation, deduplicated and in id order; a coding Run
+declares at least one deterministic one). Creating a Run establishes its
+complete initial state atomically (execution-model §3, §4.6). A Run
+reaches `awaiting_signoff` only through a passed `run_completion` Gate
+(execution-model §10).
 
 - Id prefix: `run_`
 - Owned by: the runtime
@@ -356,7 +362,13 @@ Run, Plan Node, Invocation, and Attempt — with exactly the options
 an `approve_once` resolution is an **approval grant** that authorizes
 exactly that digest at most once across the Run without widening any Tool
 Policy — consumed by one canonical Approval Use, never by adapter memory.
-A `requirement_waiver` is proposed by the Orchestrator, always
+A `signoff` Decision is requested by the runtime when the
+`operator_signoff` Gate opens — always `operator_required`, exactly the
+options `accept` and `request_changes`, no default policy, a typed
+subject naming the Run, the signoff Gate, the verified Snapshot, the
+completion Gate, the Completion Request, and the final-report Artifact —
+one per signoff Gate, carrying no publish authority. A
+`requirement_waiver` is proposed by the Orchestrator, always
 `operator_required`, resolved only by the operator, and never delegated or
 auto-resolved; its resolution records actor, rationale, Requirement id,
 timestamp, and optional Artifact ids, after which the runtime sets the
@@ -515,7 +527,10 @@ directly from the Run's final reserve, permitted only for the
 Evaluator Invocation, each recorded as the Invocation's `finalReserveUse`
 and always attached to the root Plan Node), one Pattern Position (the
 operation of its node's shape it executes, which fixes its definition,
-role, purpose, and inputs), one or more Attempts, a
+role, purpose, and inputs; a Gate Evaluator has none and names its Gate
+instead, and the `final_synthesis` turn is positioned at the root and
+also names the `run_completion` Gate it reports on), one or more
+Attempts, a
 status (`pending`, `running`, `waiting`, and the terminal `blocked`,
 `succeeded`, `failed`, `cancelled` — `blocked` names the open
 `side_effect_approval` Decision that ended it), one Invocation-wide
@@ -654,8 +669,20 @@ Gate. A failed `node_exit` Gate has exactly one runtime-owned remediation
 Task (the Task's `gateId`), addressed by the node's Coordinator or by the
 root Orchestrator's batched `gate_result` turn; cycles are bounded by the
 Run's verification policy (`maxNodeGateCycles`), beyond which the node
-fails with `gate_cycles_exhausted`. An `evaluator_optimizer` node never
-has a Gate: its rounds consume its criteria (execution-model §5.6, §10).
+fails with `gate_cycles_exhausted`. A `run_completion` Gate is one
+cycle of the Run's own verification for one Completion Request — no
+Plan Node; the Run, the ordinal (unique per Run and kind), the request,
+the pinned integration Snapshot, the pinned Requirement revision and its
+current leaf ids, the canonical criterion set, the candidate Artifact
+ids, its status and failure, and, once passed, the final-report
+Artifact — at most one open per Run, one per request, bounded by
+`maxRunCompletionCycles`; failed, it has exactly one remediation Task on
+the root and the Run returns to `running`. An `operator_signoff` Gate is
+opened by a passed `run_completion` Gate on the same Snapshot,
+referencing that Gate, the request, and the report, with no criteria of
+its own and one `signoff` Decision; one open per Run. An
+`evaluator_optimizer` node never has a Gate: its rounds consume its
+criteria (execution-model §5.6, §10).
 
 - Id prefix: `gate_`
 - Kinds: `node_exit`, `run_completion`, `operator_signoff`
@@ -827,8 +854,8 @@ approval, and executing the call again needs a new Decision.
 ### Runtime Tool Call
 
 The canonical, append-only record that the runtime executed one mutating
-runtime-tool call (`propose_tasks` or `update_task`) on behalf of a
-running Invocation: the Run, Plan Node, Invocation, the first Attempt
+runtime-tool call (`propose_tasks`, `update_task`, or
+`request_completion`) on behalf of a running Invocation: the Run, Plan Node, Invocation, the first Attempt
 that committed it, the tool, the digest of the canonicalized call, the
 safe result, and the commit time. It is written by the runtime-tool
 executor in its own short transaction outside provider execution, after
@@ -841,7 +868,27 @@ instead of repeating its effect. It never holds the call's raw input.
 - Id prefix: `rtc_`
 - Owned by: the runtime
 - Store: `runtime_tool_calls`
-- Related: Invocation, Attempt, Task, Context Manifest, Coordinator
+- Related: Invocation, Attempt, Task, Context Manifest, Coordinator, Completion Request
+
+### Completion Request
+
+The canonical record that the root Orchestrator's ordinary turn asked the
+runtime, through an accepted `request_completion` call, to verify the Run
+for completion: the Run, the requesting Invocation, the accepted Runtime
+Tool Call, a closed status (`requested`, `verifying`, `passed`, `failed`,
+`cancelled`), the `run_completion` Gate it became once it began, the
+final-report Artifact once it passed, its closed outcome once it failed or
+was cancelled, and its timestamps. It is created only after the
+transactional completion preflight admitted the call; at most one
+non-terminal request exists per Run; a replayed call of the same logical
+turn names the same request; rows are never deleted, their identity never
+changes, and every transition is one Event; a later attempt at completion
+is a new request. Nothing infers a request from Events or a transcript.
+
+- Id prefix: `crq_`
+- Owned by: the runtime
+- Store: `completion_requests`
+- Related: Run, Invocation, Runtime Tool Call, Gate, Artifact, Decision
 
 ### Budget
 
@@ -984,11 +1031,11 @@ logical turn is a new Invocation), `in_progress` (as a Task state; use
   `plan_edges`, `plan_revision_nodes`, `plan_node_requirements`, `acceptance_criteria`,
   `context_manifests`, `agent_definition_revisions`, `publications`,
   `capacity_leases`, `budget_reservations`, `provider_continuations`,
-  `approved_tool_call_uses`, `runtime_tool_calls`.
+  `approved_tool_call_uses`, `runtime_tool_calls`, `completion_requests`.
 - Id prefixes: `ws_`, `cv_`, `cvm_`, `run_`, `pn_`, `pe_`, `req_`,
   `reqr_`, `ac_`, `dec_`, `task_`, `art_`, `ho_`, `agd_`, `agdr_`, `inv_`,
   `att_`, `eval_`, `gate_`, `snap_`, `cs_`, `pub_`, `lease_`, `bres_`,
-  `cm_`, `use_`, `acu_`, `rtc_`. A prefix is never reused for a second kind.
+  `cm_`, `use_`, `acu_`, `rtc_`, `crq_`. A prefix is never reused for a second kind.
   `plan_node_requirements`, `plan_revision_nodes`, and
   `provider_continuations` are keyed by the objects they index and carry
   no own prefix; `events`,

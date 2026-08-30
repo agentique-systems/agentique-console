@@ -127,6 +127,7 @@ re-entrant over one SQLite connection:
 | Attempt | Runtime | `attempts` | Plan view, transcript viewer |
 | Approval use | Runtime (tool-call authorization) | `approved_tool_call_uses` | Decision cards, Plan view |
 | Runtime-tool call | Runtime (runtime-tool executor) | `runtime_tool_calls` | Invocation inspector |
+| Completion Request | Runtime (`request_completion` handler, completion engine) | `completion_requests` | Run view |
 | Provider continuation index | Provider adapter | `provider_continuations` (index) + adapter-owned payload store | Attempt inspector (existence only) |
 | Context Manifest | Runtime | `context_manifests` | Invocation inspector |
 | Evaluation, Gate | Runtime | `evaluations`, `gates` | Gate view |
@@ -181,8 +182,16 @@ created ──► running ──► verifying ──► awaiting_signoff ──�
   Evaluator Agent Definition revision — resolved through the same
   executable-revision resolver as the Orchestrator's, never the
   `orchestrator` definition, `null` for a Run whose Gates are
-  deterministic only — and `maxNodeGateCycles`, the bound on `node_exit`
-  Gate cycles per Plan Node. A preparation
+  deterministic only — `maxNodeGateCycles`, the bound on `node_exit`
+  Gate cycles per Plan Node, `maxRunCompletionCycles`, the bound on
+  `run_completion` Gate cycles per Run, and
+  `runCompletionAcceptanceCriterionIds`, the Run's declared completion
+  criteria: each must exist in the Run's Conversation on a Requirement of
+  the current revision or on a Task; the list is deduplicated and kept in
+  id order; a `kind: code` Run declares at least one deterministic one, an
+  `other` Run may declare none, and an evaluated one requires the Gate
+  Evaluator. The policy is never read from mutable configuration after
+  creation. A preparation
   failure creates nothing; a database failure after preparation rolls back
   and runs the port's compensation. No Invocation exists yet: the initial
   Orchestrator Invocation is created when the Run starts.
@@ -208,10 +217,23 @@ created ──► running ──► verifying ──► awaiting_signoff ──�
   no ready node is merely held back by the concurrency limit; the reason
   is the earliest waiting node's reason, and the Run resumes through an
   explicit `resume_run` action when that exact reason has cleared.
-- `verifying`: the Orchestrator has requested completion; the runtime is
-  executing the `run_completion` Gate.
-- `awaiting_signoff`: the `run_completion` Gate passed; the
-  `operator_signoff` Gate is open.
+- `verifying`: the root Orchestrator's accepted Completion Request (§6.4)
+  has begun: its requesting turn settled and integrated, and one
+  transaction pinned the integration Snapshot, the current Requirement
+  revision, and the criterion set, opened the `run_completion` Gate
+  (§10), and moved the Run here. Only the completion engine's actions
+  execute (§7.1): the deterministic checks, the one Gate Evaluator, the
+  Requirement-status derivation, and the one read-only final synthesis,
+  the last two funded from the final reserve. A failed Gate returns the
+  Run to `running` with exactly one remediation Task for the root's
+  batched `gate_result` turn; no ordinary work starts meanwhile and no
+  ordinary Invocation can be prepared.
+- `awaiting_signoff`: the `run_completion` Gate passed, the final-report
+  Artifact exists, and the `operator_signoff` Gate is open with its one
+  `operator_required` `signoff` Decision. The runtime performs nothing:
+  no action is projected, no Invocation can be prepared, no Completion
+  Request can be created, and nothing resolves the Decision. Resolving
+  it (`completed`, or `running` on a change request) is a later phase.
 - `completed`: the operator accepted the verified final Snapshot. Terminal.
   A completed Run may then be published (§9.4); publishing does not change
   the Run's state.
@@ -755,10 +777,10 @@ exists for the Orchestrator and no Orchestrator Invocation is active:
 | `operator_input` | The operator posted a message (the Run's first Invocation always has this purpose). |
 | `node_result` | A Plan Node reached a terminal state. |
 | `decision_resolution` | A Decision the Orchestrator requested or that affects the Run was resolved or superseded. |
-| `gate_result` | A `node_exit` Gate of a node without a Coordinator failed and its remediation Task awaits the Orchestrator (§10): every pending remediation Task of the Run is batched into one turn, created only when no other action, in-flight Attempt, or concurrency-limited node remains, funded from the root's ordinary allocation (when it does not fit, the root's `extend` policy applies and the turn is deferred as `awaiting_allocation_extension_phase`); or a `run_completion` Gate produced a result (later phase). |
+| `gate_result` | A `node_exit` Gate of a node without a Coordinator failed and its remediation Task awaits the Orchestrator (§10): every pending remediation Task of the Run is batched into one turn, created only when no other action, in-flight Attempt, or concurrency-limited node remains, funded from the root's ordinary allocation (when it does not fit, the root's `extend` policy applies and the turn is deferred as `awaiting_allocation_extension_phase`); or a `run_completion` Gate failed and its one remediation Task awaits the Orchestrator (§10) — coalesced into the same batched turn as any failed node Gates, with a typed `gate_result` input per Gate. |
 | `plan_revision` | The Orchestrator's previous Invocation ended by returning `blocked` on a rejected plan revision or by requesting continuation after a revision, and the compiled outcome is now available. |
 | `publication_result` | A Publication succeeded or failed. |
-| `final_synthesis` | The `operator_signoff` Gate opened, or the Run reached a terminal state, and the Orchestrator produces the final report. |
+| `final_synthesis` | The Run's `run_completion` Gate passed every criterion and every structural condition (§10): the completion engine prepares the one read-only final-synthesis turn of that Gate — positioned at the root's `orchestrator` position, owning the Gate through `gateId`, funded from the final reserve, with no Task, no Execution Workspace, and no Changeset — and its typed `FinalSynthesisResult` becomes the final-report Artifact. Never created by the input queue, never for a terminal Run. |
 
 There is never more than one active Orchestrator Invocation for a Run.
 Inputs that arrive while one is active are queued; when it ends, the
@@ -1393,10 +1415,18 @@ has no Pattern position and names its Gate in the immutable `gateId`; a
 positioned Invocation names no Gate (database-enforced, as is the role).
 It belongs to the Gate's Plan Node, executes exactly the Run's
 verification-policy Evaluator revision, holds no Task, is read-only, is
-funded from the node's allocation under the node's allocation policy, and
-is the one active Evaluator of its Gate; it can be created only while the
-Gate is open. An `evaluator_optimizer` round's Evaluator is positioned
-(`evaluator_round`) and names no Gate.
+funded from the node's allocation under the node's allocation policy —
+or, for the `run_completion` Gate, from the Run's final reserve
+(`finalReserveUse: run_completion`) on the root node — and is the one
+active Evaluator of its Gate; it can be created only while the Gate is
+open. An `evaluator_optimizer` round's Evaluator is positioned
+(`evaluator_round`) and names no Gate. The one other Invocation that
+names a Gate is the **final-synthesis Invocation** (role `orchestrator`,
+purpose `final_synthesis`, §10): positioned at the root's `orchestrator`
+position, it names the passed-in-verification `run_completion` Gate it
+reports on in `gateId`, is funded from the final reserve
+(`finalReserveUse: final_synthesis`), holds no Task, and is the one
+active synthesis of its Gate (database-enforced).
 
 ### 6.2 Context Manifest
 
@@ -1692,11 +1722,14 @@ particular `record_decision` cannot create or resolve a
    manifest);
 2. the tools the **manifest** permits (the role's set, restricted by
    purpose — a `synthesize` turn has neither `propose_tasks` nor
-   `update_task`);
+   `update_task`; a `final_synthesis` turn has no mutating runtime tool
+   at all);
 3. the tools the runtime **can execute** in this phase — the handler
    bindings in `core/src/runtime-tools.ts`: `propose_tasks` and the
    cancelling `update_task`, for a Coordinator with purpose `decompose`
-   or `replan` and for no other role; and
+   or `replan`; and `request_completion`, for the root Orchestrator's
+   ordinary turns (every Orchestrator purpose but `final_synthesis`) and
+   for no other role, node, or purpose; and
 4. the **effective callable set** exposed to a provider execution: the
    intersection of the manifest's tools, the runtime handlers, and the
    validity of the caller's role and purpose. A tool that is permitted
@@ -1706,7 +1739,8 @@ particular `record_decision` cannot create or resolve a
 The Attempt executor binds one `RuntimeToolCallPort` (`tools`, `call`)
 per Attempt, fixed to that Attempt, Invocation, manifest, role, purpose,
 Run, and Plan Node; the adapter receives the port and nothing else. A
-call is a closed discriminated request (`propose_tasks`, `update_task`),
+call is a closed discriminated request (`propose_tasks`, `update_task`,
+`request_completion`),
 parsed strictly, canonicalized (sorted-key JSON of `{ tool, input }`),
 bounded at 65,536 bytes, and digested; its outcome is a closed union —
 `accepted` (call id, digest, `replayed`, the tool's typed result),
@@ -1727,6 +1761,47 @@ therefore never duplicate an accepted proposal, and the raw call input
 never appears in an Event, diagnostic, or manifest. Decisions are not
 touched by the runtime-tool executor: `request_decision` remains
 permitted by role and not executable in this phase.
+
+**`request_completion`.** The root Orchestrator's running ordinary turn
+(the root Plan Node, a running Invocation of any Orchestrator purpose but
+`final_synthesis`, on a `running` Run) calls it with an empty input to
+ask the runtime to verify the Run; no Worker, Coordinator, Evaluator,
+final-synthesis turn, or non-root caller can (`caller_not_permitted`,
+nothing written). The handler runs the **completion preflight** inside
+the call's transaction and rejects with the closed codes, creating
+nothing, when: another Completion Request is active
+(`completion_request_active`); the Run is not running
+(`run_not_running`); a current non-root node is pending, ready, running,
+or waiting (`node_active`) or failed without a canonical resolution
+(`node_failed`); a Changeset is pending or in conflict
+(`changeset_unintegrated`); a `node_exit` Gate is open (`gate_open`) or
+its remediation unresolved (`gate_remediation_unresolved`); another
+Invocation is active (`invocation_active`); a current Task is not
+completed or cancelled and has no valid replacement (`task_unfinished`);
+an `operator_required` Decision is unresolved (`decision_unresolved`);
+the Run has no integration Snapshot (`no_integration_snapshot`); a
+coding Run's criterion set holds no deterministic criterion
+(`no_deterministic_completion_criterion`); an evaluated criterion exists
+without a Gate Evaluator (`evaluator_unavailable`); the final reserve
+cannot fund the Evaluator (when needed) and the synthesis
+(`final_reserve_insufficient`); or the Run's `run_completion` cycles are
+exhausted (`run_completion_cycles_exhausted`). An accepted call records
+the one `runtime_tool_calls` row and creates exactly one **Completion
+Request** (`completion_requests`, id `crq_`) in status `requested`,
+naming the Run, the requesting Invocation, and the accepted call; the
+call's typed result is the request id, so a retry or approval successor
+of the same logical turn replays the same request and a concurrent
+duplicate commits one row. The request's lifecycle is closed —
+`requested → verifying → passed | failed`, `requested → cancelled` —
+with one Event per transition; at most one non-terminal request exists
+per Run (database-enforced); rows are never deleted and their identity
+never changes; a later attempt at completion is a new request; nothing
+infers a request from Events. The Run stays `running` while the
+requesting turn is active; the scheduler begins the request only after
+the turn completed and its Changeset integrated (§7.1, §10), and a
+requesting turn that failed, was cancelled, or ended without completing
+cancels the request (`requesting_turn_failed`) before anything else
+happens to the Run.
 
 ### 6.5 Attempts
 
@@ -1910,6 +1985,25 @@ runtime component with two entry points and no timer, loop, or interval:
   remains, so every Gate that fails in a pass joins the same turn. The
   projection lists nodes whose failed Gate awaits the root under
   `remediating`; no Gate work is ever deferred to a later phase.
+  Run completion (§10) is the same scheduler's work, under the same
+  bound, with typed actions the completion engine
+  (`server/src/execution/completion.ts`) performs: on a `running` Run,
+  `begin_run_completion` (the accepted request's turn has settled and
+  integrated; projected only when the root is idle and nothing is in
+  flight) and `complete_run_verification` (a failed cycle's or a
+  cancelled request's consequence); on a `verifying` Run — where no
+  ordinary Pattern work, settlement, or `wait_run` is projected — exactly
+  one of `run_completion_checks` (external, outside every transaction),
+  `prepare_run_completion_evaluator`, `execute_invocation` of the
+  Evaluator or synthesis (subject to the Run's concurrency limit and the
+  governor), `settle_run_completion_evaluator`,
+  `derive_requirement_statuses`, `prepare_final_synthesis`,
+  `settle_final_synthesis`, or `complete_run_verification`, plus the
+  waits of a blocked or retrying completion Invocation; on an
+  `awaiting_signoff` Run nothing at all. Every one of them revalidates the
+  request, Gate, Invocation, and Run rows inside its transaction, so a
+  repeated or stale projection changes nothing. The projection reports
+  the engine's advice under `completion`.
   For an `evaluator_optimizer` node the projection distinguishes, from rows
   alone: producer position ready (`start_node` / `settle_node` preparing
   the next round), producer Attempt active (`execute_invocation` or an
@@ -2104,8 +2198,14 @@ existing Run. The Run Budget is thereby partitioned: the **ordinary pool**
 and root-node extensions can reserve; the final reserve is spent only on
 `final_synthesis` Orchestrator Invocations and `run_completion` Gate
 Evaluator Invocations, each reserved with the explicit capacity source
-`final_reserve`. Unused node allocation is released when the node reaches
-a terminal state. A `join` node's allocation is zero.
+`final_reserve`. The completion preflight admits a request only when the
+reserve can fund the remaining completion work (the Evaluator when an
+evaluated criterion exists, and the synthesis); a reserve that can no
+longer fund an Invocation when it is prepared fails the cycle with
+`final_reserve_exhausted` — no verdict or report is fabricated and no
+ordinary capacity is used instead (§10). Unused node allocation is
+released when the node reaches a terminal state. A `join` node's
+allocation is zero.
 
 **Global and partition availability.** The ordinary pool and the final
 reserve are partitions of one Run Budget, not independent Budgets.
@@ -2352,7 +2452,18 @@ or `failed` Task is never described as in progress; only `running` is.
   evaluated criterion has a passing Evaluation. The runtime records the
   status change with the Evaluations as Evidence. A Task completing, a
   Worker's claim, or an Orchestrator's statement never satisfies a
-  Requirement.
+  Requirement. The derivation runs at the `run_completion` Gate
+  (`server/src/execution/requirement-derivation.ts`, §10) over the pinned
+  revision: for each current leaf, `waived` and `retired` are retained
+  (`waived` only with its operator waiver Decision), `infeasible` is
+  retained and never derived from a failed check, every criterion `pass`
+  → `satisfied`, any `fail` or `inconclusive` → `violated`, no criterion
+  or an incomplete set → `open`; each internal Requirement follows its
+  `all`/`any` composition bottom-up over the derived children; every
+  change is one `requirement_status_changes` row by the runtime
+  referencing the Gate and the Evaluation Evidence that established it,
+  and a status that already holds produces no row, so repeating the
+  derivation writes nothing.
 - `violated` and `infeasible` are recorded by the runtime from a failing
   Evaluation or by the Orchestrator or operator with Evidence.
 - `waived` is reached only when the operator resolves a Decision of kind
@@ -2524,11 +2635,14 @@ integration Snapshot, with the command outputs stored as Artifacts and
 referenced as Evidence. Whether a Run is a coding Run is a property of the
 Run declared at creation (`kind: code | other`); a coding Run must declare at
 least one deterministic Acceptance Criterion on its `run_completion` Gate
-(typically build, typecheck, test). When the operator accepts at
+(typically build, typecheck, test). The Snapshot the operator is asked
+to accept is exactly the one the `run_completion` Gate pinned and
+verified, unchanged since (§10). When the operator accepts at
 `operator_signoff`, the runtime records the accepted integration Snapshot as
 the Run's **final Snapshot** and the diff from the base Snapshot as the
 Run's **final Changeset**. The Run is `completed`. The Target is still
-untouched.
+untouched. Accepting, requesting changes, the final Snapshot, and the
+final Changeset are a later phase; this one ends at `awaiting_signoff`.
 
 ### 9.4 Publishing
 
@@ -2614,20 +2728,102 @@ Order is fixed: deterministic checks, then Evaluations, then the operator.
   cancelled fails the node with `gate_remediation_failed`. There are no
   waivers and no implicit passes: a node with Gate criteria reaches
   `succeeded` only through a `passed` Gate.
-- `run_completion`: runs when the Orchestrator calls `request_completion`.
-  Checks every `open` Requirement's Acceptance Criteria on the integration
-  Snapshot and records the resulting statuses; requires every leaf
-  Requirement to be `satisfied`, `waived`, or `retired`; checks that every
-  Task is `completed` or `cancelled` (a `failed` Task blocks completion
-  until replaced or cancelled by a recorded action); checks that no
-  `operator_required` Decision is unanswered; then runs the Run's evaluated
-  criteria from the final reserve. A failure returns the Run to `running`
-  with Tasks created and a `gate_result` Orchestrator Invocation.
-- `operator_signoff`: opens when `run_completion` passes. The operator sees
-  the Requirement statuses (waivers shown with their Decisions), the
-  Evaluations, the final Changeset, and the Usage, and accepts or requests
-  changes through a `signoff` Decision. Requesting changes returns the Run
-  to `running`.
+- `run_completion`: executed by the completion engine
+  (`server/src/execution/completion.ts`) for one accepted Completion
+  Request (§6.4) once its requesting turn completed and integrated. One
+  cycle is one `gates` row with `planNodeId` null and a canonical
+  identity: the Run, the kind, the cycle **ordinal** (unique per Run and
+  kind; at most one open Run Gate per Run and one Gate per request,
+  database-enforced), the Completion Request, the integration Snapshot
+  pinned at opening, the pinned Requirement revision (the Conversation's
+  current one), the exact current leaf Requirement ids of that revision,
+  the exact criterion ids in canonical order, the candidate Artifact ids,
+  its status and failure, its timestamps, and — once passed — the
+  final-report Artifact. Cycles are bounded by the Run's
+  `maxRunCompletionCycles`: a request beyond the bound is refused at the
+  call (`run_completion_cycles_exhausted`) and the Run stays `running`.
+  The **criterion set** is the canonical union of the Run's declared
+  `runCompletionAcceptanceCriterionIds` and the Acceptance Criteria of
+  every current leaf of the pinned revision that is neither `waived` nor
+  `retired`, deduplicated and in id order — never a historical revision's,
+  a retired Requirement's, a superseded Task's, another Conversation's or
+  Run's, a historical node's, or anything read from a transcript; a leaf
+  without criteria stays `open` and fails the cycle. The **candidate** is
+  the deterministic, bounded, id-ordered union of the outputs of every
+  succeeded current non-root node, the outputs of every completed current
+  Task, and the Evidence Artifacts of the Run's `node_exit` Gate
+  Evaluations; never a transcript. Beginning is one transaction: the
+  preflight is revalidated (drift cancels the request with its exact
+  codes, `preconditions_changed`), the Run moves `running → verifying`,
+  the Gate opens, the request moves `requested → verifying`. Then, in
+  order: deterministic criteria run in id order through the shared check
+  service (§10.1) in a disposable view of the pinned Snapshot, each
+  recorded once as a `runtime` Evaluation of the Gate (no Plan Node, no
+  optimizer context), the first failure ending the checks (an
+  infrastructure failure records nothing and the next pass reruns exactly
+  the unrecorded checks); evaluated criteria are judged by exactly one
+  read-only Gate Evaluator Invocation funded from the final reserve
+  (§6.1), whose manifest carries one typed `gate_candidate` input (the
+  Gate and request, the Snapshot, the revision, the candidate, exactly
+  the evaluated criteria, the current Requirement and Task facts; no
+  transcript, history, or continuation) and whose validated result — one
+  verdict per evaluated criterion, no more and no fewer — becomes one
+  Evaluation per criterion (an invalid result is an ordinary retry; a
+  permanently failed Evaluator fails the cycle `evaluator_failed` with no
+  verdict invented); the Requirement statuses are derived and recorded
+  (§8.1); the **structural conditions** are evaluated — every leaf of the
+  pinned revision `satisfied`, `waived`, or `retired`; every current Task
+  `completed` or `cancelled` (a `failed` Task blocks until replaced or
+  cancelled); no `operator_required` Decision open; no Changeset pending
+  or in conflict; no `node_exit` Gate open and no node remediation
+  unresolved; every current non-root node terminal without unresolved
+  failure; every criterion of the Gate judged `pass`; the integration
+  Snapshot unchanged since opening — and any unmet one fails the cycle
+  `conditions_unmet` with the exact typed conditions; then the one
+  read-only `final_synthesis` turn (§4.6, §6.1) is prepared from the
+  final reserve, its manifest carrying one typed `final_synthesis` input
+  of canonical facts only (request, Gate, Snapshot, revision, the leaf
+  statuses with waiver Decisions, the Gate's Evaluations with their
+  Evidence, the current Task ledger, the candidate, Usage, the final
+  reserve's limit and consumption) and no transcript, message, history,
+  or raw output; its result is the closed typed `FinalSynthesisResult`
+  (`summary`, `completed`, `verification`, `risks`, `followUps`, bounded)
+  and nothing else — an invalid one retries, a permanently failed one
+  fails the cycle `final_synthesis_failed`. **Passing** is one
+  transaction: the report is serialized as canonical JSON
+  (`FinalReport`, version 1, naming the Run, request, Gate, Snapshot,
+  and revision) into one content-addressed Artifact of media type
+  `application/vnd.agentique.final-report.v1+json` (the bytes live only
+  in the Artifact Store; Events carry the id), the Gate closes `passed`
+  with the report, the request passes with the report, the
+  `operator_signoff` Gate opens, the `signoff` Decision is requested, and
+  the Run moves `verifying → awaiting_signoff`. **Failing** — a failed
+  check, a failing or inconclusive verdict (`criteria_failed`), a
+  permanently failed Evaluator, unmet conditions, a failed synthesis, or
+  a final reserve that can no longer fund the Evaluator or the synthesis
+  (`final_reserve_exhausted`; no fallback to ordinary capacity) — is one
+  transaction: the Gate closes `failed` with the closed fact, the request
+  ends `failed` with the same outcome, exactly one runtime-owned
+  remediation Task is created on the root (`gateId` on the Task; linked
+  to the failed criteria's and the open or violated Requirements, the
+  pinned revision, the candidate and Evidence Artifacts), and the Run
+  moves `verifying → running`; the root's batched `gate_result` turn
+  remediates it together with any node-Gate Tasks (§4.6). Completion is
+  never retried automatically: a later ordinary turn calls
+  `request_completion` again, which is a new request and a new cycle on
+  the then-current Snapshot. A closed Gate never changes.
+- `operator_signoff`: opened by the passing transaction above on the same
+  Snapshot, referencing the completion Gate, the request, the report
+  Artifact, and the Evaluations, with no criteria of its own; one open
+  per Run, one per successful request. Its one `signoff` Decision (kind
+  `signoff`, `operator_required`, options `accept` and `request_changes`,
+  no default policy, a typed subject naming the Run, the signoff Gate,
+  the Snapshot, the completion Gate, the request, and the report; one
+  per signoff Gate) carries no publish authority. The operator sees the
+  Requirement statuses (waivers shown with their Decisions), the
+  Evaluations, the report, and the Usage, and accepts or requests
+  changes; accepting completes the Run, requesting changes returns it to
+  `running` — both a later phase. Until then the Run performs nothing.
 
 Evaluations produced by Evaluator Invocations carry the Evaluator's
 Invocation id and Agent Definition revision, so a reviewer of the Run can
@@ -2644,8 +2840,9 @@ because the optimizer contract has consumed every one of its criteria on
 the exact judged Snapshot and Artifact set; no criterion of such a node
 is ever judged twice and the Gate engine never touches it. `single`,
 `chain`, `route`, `parallel`, and `coordinator_worker` execute the
-general `node_exit` Gate above; `run_completion` and `operator_signoff`
-are later phases.
+general `node_exit` Gate above; `run_completion` is executed by the
+completion engine and opens `operator_signoff`, whose resolution is a
+later phase.
 
 ### 10.1 Deterministic Acceptance Criterion execution
 
@@ -2682,9 +2879,10 @@ Artifact (bounded at `maxOutputBytes`; a stored prefix is recorded as
 outcomes, projections, diagnostics, and errors carry ids, exit status,
 digest, byte size, and the truncation flag. The service is driven under
 two typed scopes, an `evaluator_optimizer` round (`optimizer_round`) and a
-`node_exit` Gate (`gate`); the scope fixes the Evaluation's context or
-Gate, the isolation key, and the output Artifact's title, and nothing else
-differs.
+Gate (`gate`, for a `node_exit` Gate of a node or the `run_completion`
+Gate of the Run, which has no Plan Node); the scope fixes the
+Evaluation's context or Gate, the isolation key, and the output
+Artifact's title, and nothing else differs.
 
 ## 11. Agent Definitions
 
@@ -2792,6 +2990,18 @@ mechanism, if ever added, is a new feature with its own design.
 | `node_exit` Gate Evaluator fails permanently | The Gate closes `failed` with the `evaluator_failed` fact (no verdict invented, no Task) and the node fails with `gate_evaluator_failed`. |
 | Root `gate_result` turn fails, ends without completing, or reports a remediation Task blocked | The affected Tasks end (`failed` under the turn, `cancelled` otherwise) and each affected node fails with `gate_remediation_failed`; the root and the Run stay `running` (§4.6). |
 | Coordinator `replan` makes no progress on its node's failed Gate | Node `failed` with `coordinator_no_progress`; the remediation Task stays unaddressed and no further Gate opens (§5.5). |
+| `request_completion` preflight fails | The call is rejected with the closed codes inside its transaction; no Completion Request, Gate, or Event is written; the turn continues (§6.4). |
+| Requesting turn fails, is cancelled, or ends without completing | The Completion Request is cancelled (`requesting_turn_failed`) — before the Run fails when the Invocation failed — and no Gate opens (§6.4). |
+| Preconditions drift between the accepted request and its beginning | The request is cancelled with the exact preflight codes (`preconditions_changed`); the Run stays `running`. |
+| `run_completion` deterministic criterion fails | The checks stop at that criterion, no Evaluator is invoked, the Gate closes `failed` on it, the request fails, one remediation Task is created on the root, and the Run returns to `running` (§10). |
+| `run_completion` Evaluator returns `fail` or `inconclusive` | Every verdict is recorded; the Gate closes `failed` on exactly those criteria, as above; the affected leaves are `violated`. |
+| `run_completion` Evaluator fails permanently | The Gate closes `failed` with `evaluator_failed` (no verdict invented), as above. |
+| A pinned leaf has no criteria, a Task is unfinished, a Decision is open, a Changeset or node Gate is unsettled, a node is unfinished, or the Snapshot moved | The Gate closes `failed` with `conditions_unmet` naming the exact typed conditions, as above. |
+| Final synthesis returns an invalid result | Ordinary Attempt retry within the synthesis Invocation's final-reserve allocation. |
+| Final synthesis fails permanently or returns a Changeset | The Gate closes `failed` with `final_synthesis_failed`; no report Artifact exists; as above. A Changeset from a synthesis is an invalid result. |
+| Final reserve cannot fund the completion Evaluator or the synthesis | The Gate closes `failed` with `final_reserve_exhausted` naming the use; nothing is fabricated and no ordinary capacity is used; as above. |
+| `run_completion` cycles exhausted | The next `request_completion` call is refused (`run_completion_cycles_exhausted`); the Run stays `running`. |
+| Crash during a completion cycle (between the request, the turn's settlement, the Gate opening, a check, the Evaluator, the derivation, the synthesis, the passing or failing transaction, or the remediation turn) | Every step is one transaction or one external step recorded once; the next pass finds the request, the open or closed Gate, the recorded checks, the existing Evaluator, statuses, synthesis, report, Task, or signoff boundary, and repeats nothing (§10). |
 | Crash during a Gate cycle (between opening, a check, the Evaluator, settlement, the remediation turn, or a reopened cycle) | Every step is one transaction or one external step recorded once; the next pass finds the open Gate, the recorded checks, the existing Evaluator or Task, or the closed Gate, and repeats nothing (§10). |
 | Deterministic check cannot run (timeout, abort, lost view, lost output, failed start) | Infrastructure failure: nothing recorded, no Evaluation fabricated, the pass stops typed (`verification_failed`); the next pass reruns exactly the unrecorded checks (§10.1). |
 | Crash between a check's command and its record | The command reruns in a fresh view (the stale one is discarded); the output Artifact and its Evaluation are recorded once, in one transaction. |
@@ -2867,13 +3077,26 @@ by a test.
     remediation Task; closed Gates never change; and a node with Gate
     criteria succeeds only through a `passed` Gate (all database-enforced).
 12. **Completed coding Runs must finish on a verified integration state.** A
-    Run with `kind: code` cannot leave `verifying` unless its deterministic
-    `run_completion` criteria passed on the integration Snapshot that the
-    operator is then asked to accept, and the Evidence for that pass is
-    stored as Artifacts.
+    Run with `kind: code` cannot leave `verifying` for `awaiting_signoff`
+    unless its `run_completion` Gate — one `gates` row per cycle with its
+    ordinal, pinned Snapshot, pinned Requirement revision and leaves,
+    criterion set, and candidate — closed `passed`: every deterministic
+    criterion passed through the check service and every evaluated
+    criterion passed by exactly one final-reserve Evaluator on the
+    integration Snapshot that the operator is then asked to accept, with
+    the Evidence stored as Artifacts, every structural condition met, and
+    one typed final report serialized to one canonical Artifact; the
+    `operator_signoff` Gate and its one `signoff` Decision open in that
+    same transaction, one per Run and per successful request. Any other
+    ending of `verifying` is `running` with exactly one remediation Task,
+    and completion is never retried without a new `request_completion`
+    call (all database-enforced where a row expresses it).
 13. **Requirement satisfaction derives from Acceptance Criteria and
     Evidence.** No tool, result, or Task transition sets a Requirement to
-    `satisfied`; only a Gate's recorded Evaluations do. `waived` is set
+    `satisfied`; only a Gate's recorded Evaluations do, through the
+    runtime's derivation at the `run_completion` Gate, each change
+    referencing the Gate and its Evaluation Evidence and no change written
+    for a status that already holds. `waived` is set
     only after the operator resolves a `requirement_waiver` Decision; no
     policy, tool, or setting can resolve one.
 14. **Coordination depth is one.** A Coordinator cannot revise the plan,
@@ -2954,6 +3177,19 @@ by a test.
     proposal is validated as one atomic batch against the node's exact
     scope, bounds, and allocation; the Coordinator proposes and the
     runtime alone creates, orders, funds, integrates, and fans in.
+26. **Run completion is requested once, verified by the runtime, and
+    never inferred.** `request_completion` is callable only by the root
+    Orchestrator's ordinary turn, refuses transactionally with closed
+    codes, and an accepted call is exactly one `completion_requests` row
+    with a closed lifecycle (at most one non-terminal per Run, never
+    deleted, one Event per transition, replayed by the same turn, never
+    reconstructed from Events); one request has at most one
+    `run_completion` Gate; the criterion set, candidate, Snapshot, and
+    revision are pinned on the Gate; the final synthesis is read-only,
+    funded from the final reserve, and its report is the only
+    model-authored completion output — no model sets a Requirement
+    status, closes a Gate, ends a request, resolves signoff, or changes
+    the Run's state.
 
 ## 16. Non-goals
 

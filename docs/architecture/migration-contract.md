@@ -477,11 +477,29 @@ is one or more commits; each commit keeps `npm run typecheck` and
    `open_node_gate`, `run_gate_checks`, `prepare_gate_evaluator`,
    `settle_node_gate`, `prepare_gate_remediation`, and
    `settle_gate_remediation` scheduler actions, and restart safety across
-   every Gate window; `awaiting_gate_phase` no longer exists. Remaining
-   typed deferrals: the `run_completion` and `operator_signoff` Gates,
+   every Gate window; `awaiting_gate_phase` no longer exists. Phase 2E-B
+   (done): the executable `request_completion` runtime tool with its
+   transactional preflight; canonical Completion Requests
+   (`completion_requests`, `crq_`, closed lifecycle, one non-terminal per
+   Run); the immutable completion policy (`maxRunCompletionCycles`,
+   `runCompletionAcceptanceCriterionIds`); the `run_completion` Gate
+   executed by the completion engine (pinned Snapshot, revision, leaves,
+   criterion set, and candidate; deterministic checks through the shared
+   check service; one final-reserve Gate Evaluator; Requirement-status
+   derivation from the Gate's Evaluations; structural conditions; the
+   read-only `final_synthesis` turn and its canonical final-report
+   Artifact; one remediation Task on failure); the `operator_signoff`
+   Gate and its `signoff` Decision opened on passing; the
+   `begin_run_completion`, `run_completion_checks`,
+   `prepare_run_completion_evaluator`, `settle_run_completion_evaluator`,
+   `derive_requirement_statuses`, `prepare_final_synthesis`,
+   `settle_final_synthesis`, and `complete_run_verification` scheduler
+   actions; and restart safety across every completion window. Remaining
+   typed deferrals: resolving signoff (`awaiting_signoff → completed |
+   running`, the final Snapshot and final Changeset, publication),
    allocation extension (`awaiting_allocation_extension_phase`, also for
-   the root's unfunded `gate_result` turn), and executable
-   `request_decision` and `request_completion` runtime tools. Later
+   the root's unfunded `gate_result` turn), and the executable
+   `request_decision` runtime tool. Later
    subphases: Runs, Execution
    Plan source validation and compiler,
    Plan Nodes of both kinds (`pattern`, `join`), Plan Edges, Plan Node
