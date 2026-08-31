@@ -15,14 +15,20 @@
  * Every mutating call runs in its own short root transaction while the
  * provider executes outside every transaction: the validated call is
  * canonicalized and hashed; an existing `runtime_tool_calls` row for the
- * same logical Coordinator turn, tool, and digest replays its committed
- * result without repeating effects; otherwise the caller is verified to be
- * the running Attempt of a running Invocation, the handler validates
- * (read-only) and applies, and the row and its Event commit with the
- * mutation. A rejected call writes no row, no domain mutation, and no
- * Event. A commit failure reports `failed` with a bounded message and one
- * diagnostic; the adapter may call again. Neither the raw input nor any
- * transcript reaches an Event, a diagnostic, or the record.
+ * same logical turn, tool, and digest replays its committed result without
+ * repeating effects; otherwise the caller is verified to be the running
+ * Attempt of a running Invocation whose logical turn has not ended, the
+ * handler validates (read-only) and applies, and the row and its Event
+ * commit with the mutation. A rejected call writes no row, no domain
+ * mutation, and no Event. A commit failure reports `failed` with a bounded
+ * message and one diagnostic; the adapter may call again. Neither the raw
+ * input nor any transcript reaches an Event, a diagnostic, or the record.
+ *
+ * An accepted `request_decision` ends the logical turn (execution-model
+ * §8.2): after it commits, an identical call still replays, but every other
+ * call of the turn is refused (`turn_ended`, or `decision_already_requested`
+ * for a different request), and the Attempt executor ends the Invocation
+ * `blocked` whatever the provider does next.
  */
 import {
   boundedFailureMessage,
@@ -36,7 +42,6 @@ import {
   type InvocationId,
   type InvocationPurpose,
   type InvocationRole,
-  type PatternPlanNode,
   type PlanNodeId,
   type RunId,
   type RuntimeTool,
@@ -50,6 +55,7 @@ import type { Stores } from "../persistence/stores/index.ts";
 import type { WriteOptions } from "../persistence/stores/support.ts";
 import type { RuntimeToolCallPort } from "../provider/adapter.ts";
 import { CompletionRequestService } from "./completion-requests.ts";
+import { DecisionRequestService, forbiddenDecisionKindOf } from "./decision-requests.ts";
 import { TaskProposalService, type HandlerOutcome, type RuntimeToolCaller } from "./task-proposals.ts";
 import type { ExecutionDiagnosticSink } from "./workspace-cleanup.ts";
 
@@ -66,11 +72,14 @@ export interface RuntimeToolBinding {
 }
 
 /**
- * The Invocations of one logical Coordinator turn: the Invocation and every
- * approval predecessor it continues from (a `blocked` predecessor at the
- * same position). An accepted call of any of them belongs to the turn, so a
- * successor never duplicates its predecessor's accepted proposal and a
- * repeated call replays across the boundary.
+ * The Invocations of one logical turn: the Invocation and every approval
+ * predecessor it continues from (a predecessor at the same position that
+ * ended `blocked` on a `side_effect_approval`). An accepted call of any of
+ * them belongs to the turn, so an approval successor never duplicates its
+ * predecessor's accepted proposal and a repeated call replays across the
+ * boundary. A predecessor blocked on a Decision it requested itself ended
+ * its own logical turn (execution-model §8.2): the successor is a new turn
+ * and replays nothing of it.
  */
 export function logicalTurnInvocationIds(stores: Stores, invocation: Invocation): InvocationId[] {
   const ids: InvocationId[] = [invocation.id];
@@ -78,6 +87,7 @@ export function logicalTurnInvocationIds(stores: Stores, invocation: Invocation)
   while (current.continuedFromInvocationId !== null) {
     const previous = stores.invocations.get(current.continuedFromInvocationId);
     if (previous.status !== "blocked" || previous.planNodeId !== current.planNodeId || previous.purpose !== current.purpose) break;
+    if (previous.blockedByDecisionId === null || stores.decisions.get(previous.blockedByDecisionId).kind !== "side_effect_approval") break;
     ids.push(previous.id);
     current = previous;
   }
@@ -93,6 +103,7 @@ export class RuntimeToolExecutor implements RuntimeToolCallPort {
   readonly #diagnostics: ExecutionDiagnosticSink;
   readonly #proposals: TaskProposalService;
   readonly #completion: CompletionRequestService;
+  readonly #decisions: DecisionRequestService;
 
   constructor(ctx: PersistenceContext, stores: Stores, binding: RuntimeToolBinding, options: WriteOptions = {}, diagnostics: ExecutionDiagnosticSink = () => {}) {
     this.#ctx = ctx;
@@ -102,6 +113,7 @@ export class RuntimeToolExecutor implements RuntimeToolCallPort {
     this.#diagnostics = diagnostics;
     this.#proposals = new TaskProposalService(ctx, stores);
     this.#completion = new CompletionRequestService(ctx, stores);
+    this.#decisions = new DecisionRequestService(ctx, stores);
     this.tools = effectiveRuntimeTools(binding.manifestTools, binding.role, binding.purpose);
   }
 
@@ -111,6 +123,11 @@ export class RuntimeToolExecutor implements RuntimeToolCallPort {
     const named = typeof request === "object" && request !== null && typeof (request as { tool?: unknown }).tool === "string" ? (request as { tool: string }).tool : "unknown";
     if (!(this.tools as readonly string[]).includes(named)) return { kind: "not_callable", tool: named };
     const tool = named as RuntimeToolCallTool;
+    // A closed Decision kind with another owner is refused by name before schema validation (execution-model §8.2).
+    if (tool === "request_decision") {
+      const forbidden = forbiddenDecisionKindOf((request as { input?: unknown }).input);
+      if (forbidden !== null) return { kind: "rejected", tool, reasons: [{ code: "decision_kind_not_permitted", message: `a ${forbidden} Decision is never requested by an agent`, path: "kind" }] };
+    }
     const parsed = runtimeToolCallRequestSchema.safeParse(request);
     if (!parsed.success) {
       const issue = parsed.error.issues[0];
@@ -126,13 +143,21 @@ export class RuntimeToolExecutor implements RuntimeToolCallPort {
       return this.#ctx.tx.write((): RuntimeToolCallOutcome => {
         const invocation = this.#stores.invocations.get(this.#binding.invocationId);
         // A call the logical turn already committed replays its result; the predecessor's row serves the successor.
-        for (const invocationId of logicalTurnInvocationIds(this.#stores, invocation)) {
+        const turn = logicalTurnInvocationIds(this.#stores, invocation);
+        for (const invocationId of turn) {
           const existing = this.#stores.runtimeToolCalls.find(invocationId, tool, callDigest);
           if (existing !== null) return { kind: "accepted", tool, callId: existing.id, callDigest, replayed: true, result: existing.result };
         }
         const attempt = this.#stores.invocations.getAttempt(this.#binding.attemptId);
         if (invocation.status !== "running" || INVOCATION_MACHINE.isTerminal(invocation.status) || attempt.invocationId !== invocation.id || attempt.status !== "running") {
           return { kind: "rejected", tool, reasons: [{ code: "caller_not_running", message: `Invocation ${invocation.id} is ${invocation.status} and Attempt ${attempt.id} is ${attempt.status}`, path: null }] };
+        }
+        // An accepted blocking request ended the logical turn: nothing else of the turn is executed, and a different request is refused.
+        const blocking = turn.flatMap((id) => this.#stores.runtimeToolCalls.listByInvocation(id)).find((c) => c.tool === "request_decision");
+        if (blocking !== undefined) {
+          return tool === "request_decision"
+            ? { kind: "rejected", tool, reasons: [{ code: "decision_already_requested", message: `this logical turn already requested Decision ${blocking.result.tool === "request_decision" ? blocking.result.decisionId : ""}`, path: null }] }
+            : { kind: "rejected", tool, reasons: [{ code: "turn_ended", message: `the logical turn ended on an accepted request_decision (${blocking.id}); no further call is executed`, path: null }] };
         }
         const node = this.#stores.plans.getNode(invocation.planNodeId);
         if (node.kind !== "pattern") throw new Error(`PlanNode ${node.id} is a join node`);
@@ -165,6 +190,8 @@ export class RuntimeToolExecutor implements RuntimeToolCallPort {
         return this.#proposals.cancel(caller, request.input, this.#options);
       case "request_completion":
         return this.#completion.request(caller, this.#options);
+      case "request_decision":
+        return this.#decisions.request(caller, request.input, this.#options);
     }
   }
 }

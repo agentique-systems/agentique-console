@@ -5,7 +5,7 @@
  * id, 20 one Invocation per logical turn, 22 atomic allocation, 23
  * runtime-owned Task states, 24 at-most-once approval).
  */
-import { ConflictError, type Invocation, type PlanNode, approvalSubjectOf } from "@agentique-console/core";
+import { ConflictError, type Invocation, type PlanNode, approvalSubjectOf, decisionResolutionInputOf } from "@agentique-console/core";
 import { describe, expect, it } from "vitest";
 import { COMPLETED_RESULT, fakeSnapshot, openRuntimeHarness, planNodes, seedPlanningRuntime, seedReadOnlyWorker, TEST_GOVERNOR, type RuntimeHarness } from "../test-support.ts";
 
@@ -333,7 +333,7 @@ describe("SinglePatternRunner", () => {
       const runner = h.runners.single;
       const started = runner.start(node.id, revisionNumber);
       if (started.kind !== "started") throw new Error(started.kind);
-      const decision = h.stores.decisions.request({ conversationId: s.created.run.conversationId, runId: s.created.run.id, kind: "operator_choice", resolutionPolicy: "operator_required", requestedBy: { kind: "invocation", invocationId: started.invocationId }, question: "Which library?", options: [{ id: "a", label: "A", description: null }, { id: "b", label: "B", description: null }], recommendedOptionId: "a", rationale: null, affects: { requirementIds: [], taskIds: [], planNodeIds: [node.id] }, deadlineAt: null, activationCondition: null, subject: null, supersedesDecisionId: null });
+      const decision = h.stores.decisions.request({ conversationId: s.created.run.conversationId, runId: s.created.run.id, kind: "operator_choice", resolutionPolicy: "operator_required", requestedBy: { kind: "runtime" }, question: "Which library?", options: [{ id: "a", label: "A", description: null }, { id: "b", label: "B", description: null }], recommendedOptionId: "a", rationale: null, affects: { requirementIds: [], taskIds: [], planNodeIds: [node.id] }, deadlineAt: null, activationCondition: null, subject: null, supersedesDecisionId: null });
       h.provider.script({ kind: "succeed", result: { ...COMPLETED_RESULT, status: "blocked", blocker: decision.id } });
       expect(await execute(h, started.invocationId)).toMatchObject({ kind: "finalized", settlement: { invocation: { status: "succeeded", result: { status: "blocked" } } } });
       expect(await runner.settle(node.id, revisionNumber)).toEqual({ kind: "waiting", reason: "decision", wakeAt: null });
@@ -343,7 +343,7 @@ describe("SinglePatternRunner", () => {
       expect(resumed).toMatchObject({ kind: "successor_prepared", decisionId: decision.id });
       if (resumed.kind !== "successor_prepared") throw new Error(resumed.kind);
       const manifest = h.stores.invocations.getManifest(resumed.invocationId).content;
-      expect(manifest.inputs).toEqual([{ kind: "decision_resolution", decisionId: decision.id }]);
+      expect(manifest.inputs).toEqual([decisionResolutionInputOf(h.stores.decisions.get(decision.id))]);
       expect(manifest.decisions.find((d) => d.decisionId === decision.id)).toMatchObject({ chosenOptionId: "b", resolvedSincePrevious: true });
       expect(h.stores.invocations.get(resumed.invocationId).continuedFromInvocationId).toBe(started.invocationId);
       h.provider.script({ kind: "succeed", result: COMPLETED_RESULT });

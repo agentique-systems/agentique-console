@@ -396,11 +396,12 @@ describe("import boundaries", () => {
     const binders = listFiles("server/src", (f) => isCode(f) && !f.endsWith(".test.ts") && !f.endsWith("test-support.ts")).filter((f) => /new RuntimeToolExecutor\(/.test(fs.readFileSync(f, "utf8"))).map(rel);
     expect(binders).toEqual(["server/src/execution/attempt-executor.ts"]);
     const executor = fs.readFileSync(path.join(repoRoot, "server/src/execution/runtime-tools.ts"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
-    // The port's runtime does not authorize provider-native calls and never touches approvals, Decisions, transcripts, or side-effect approval state.
-    expect(executor).not.toMatch(/approvedToolCallUses|ToolCallAuthorizer|side_effect_approval|TRANSCRIPT_MEDIA_TYPE|artifacts\.read\(|decisions\.(request|resolve)/);
+    // The port's runtime does not authorize provider-native calls and never touches approval uses, transcripts, or a Decision's resolution;
+    // it reads a blocking Decision's kind only to bound a logical turn, and creates a Decision only through the request service.
+    expect(executor).not.toMatch(/approvedToolCallUses|ToolCallAuthorizer|authorize\(|TRANSCRIPT_MEDIA_TYPE|artifacts\.read\(|stores\.decisions\.(request|resolve|supersede)\(/);
     // Runtime tools are closed unions in core: no free tool name, no `unknown` input at the boundary.
     const core = fs.readFileSync(path.join(repoRoot, "core/src/runtime-tools.ts"), "utf8");
-    expect(core).toMatch(/export type RuntimeToolCallRequest = \{ tool: "propose_tasks"; input: TaskProposalBatch \} \| \{ tool: "update_task"; input: TaskUpdateRequest \} \| \{ tool: "request_completion"; input: CompletionCallInput \};/);
+    expect(core).toMatch(/export type RuntimeToolCallRequest = \{ tool: "propose_tasks"; input: TaskProposalBatch \} \| \{ tool: "update_task"; input: TaskUpdateRequest \} \| \{ tool: "request_completion"; input: CompletionCallInput \} \| \{ tool: "request_decision"; input: RequestDecisionInput \};/);
     expect(core).not.toMatch(/input: unknown|tool: string;/);
   });
 

@@ -28,6 +28,21 @@ export function idSchema<K extends IdKind>(kind: K): z.ZodType<Id<(typeof ID_PRE
 
 export const nonEmptyString = z.string().trim().min(1);
 
+/** The UTF-8 byte length of a string, without a platform encoder: what every byte bound on operator-facing text is measured in. */
+export function utf8ByteLength(text: string): number {
+  let bytes = 0;
+  for (const character of text) {
+    const point = character.codePointAt(0)!;
+    bytes += point < 0x80 ? 1 : point < 0x800 ? 2 : point < 0x10000 ? 3 : 4;
+  }
+  return bytes;
+}
+
+/** A non-empty string of at most `maxBytes` UTF-8 bytes; a longer one is rejected, never truncated. */
+export function boundedString(maxBytes: number) {
+  return nonEmptyString.refine((text) => utf8ByteLength(text) <= maxBytes, { message: `at most ${maxBytes} UTF-8 bytes` });
+}
+
 /** A non-negative finite quantity (tokens, cost, counts). */
 export const quantity = z.number().min(0);
 

@@ -205,14 +205,14 @@ describe("signoff Decision", () => {
 
 describe("request_completion runtime tool", () => {
   it("is executable for the root Orchestrator's ordinary turns only, with an empty canonical input", () => {
-    expect(RUNTIME_TOOL_HANDLER_BINDINGS.request_completion).toEqual({ role: "orchestrator", purposes: ["operator_input", "plan_revision", "node_result", "decision_resolution", "gate_result"] });
+    expect(RUNTIME_TOOL_HANDLER_BINDINGS.request_completion).toEqual([{ role: "orchestrator", purposes: ["operator_input", "plan_revision", "node_result", "decision_resolution", "gate_result"] }]);
     expect(runtimeToolsFor("orchestrator", "final_synthesis")).toEqual(["read_requirements", "read_decisions", "read_tasks", "read_artifact", "read_execution_plan", "read_agent_definitions", "write_artifact", "return_result"]);
     for (const purpose of ["operator_input", "node_result", "decision_resolution", "gate_result", "plan_revision"] as const) {
-      expect(effectiveRuntimeTools(runtimeToolsFor("orchestrator", purpose), "orchestrator", purpose)).toEqual(["request_completion"]);
+      expect(effectiveRuntimeTools(runtimeToolsFor("orchestrator", purpose), "orchestrator", purpose)).toEqual(["request_completion", "request_decision"]);
     }
     expect(effectiveRuntimeTools(runtimeToolsFor("orchestrator", "final_synthesis"), "orchestrator", "final_synthesis")).toEqual([]);
-    expect(effectiveRuntimeTools(runtimeToolsFor("coordinator", "decompose"), "coordinator", "decompose")).toEqual(["propose_tasks", "update_task"]);
-    expect(effectiveRuntimeTools(runtimeToolsFor("worker", "step"), "worker", "step")).toEqual([]);
+    expect(effectiveRuntimeTools(runtimeToolsFor("coordinator", "decompose"), "coordinator", "decompose")).toEqual(["propose_tasks", "update_task", "request_decision"]);
+    expect(effectiveRuntimeTools(runtimeToolsFor("worker", "step"), "worker", "step")).toEqual(["request_decision"]);
     expect(effectiveRuntimeTools(runtimeToolsFor("evaluator", "evaluate"), "evaluator", "evaluate")).toEqual([]);
     expect(runtimeToolCallRequestSchema.safeParse({ tool: "request_completion", input: {} }).success).toBe(true);
     expect(runtimeToolCallRequestSchema.safeParse({ tool: "request_completion", input: { summary: "done" } }).success).toBe(false);

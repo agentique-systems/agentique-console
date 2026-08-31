@@ -341,7 +341,7 @@ export class RequirementStore {
   private assertOperatorWaiver(decisionId: DecisionId, requirement: Requirement): void {
     const decision = requireRow(
       this.ctx.db
-        .select({ conversationId: decisions.conversationId, kind: decisions.kind, status: decisions.status, resolvedBy: decisions.resolvedBy, affects: decisions.affects })
+        .select({ conversationId: decisions.conversationId, kind: decisions.kind, status: decisions.status, resolvedBy: decisions.resolvedBy, chosenOptionId: decisions.chosenOptionId, affects: decisions.affects, subject: decisions.subject })
         .from(decisions)
         .where(eq(decisions.id, decisionId))
         .get(),
@@ -358,8 +358,11 @@ export class RequirementStore {
         resolvedBy: decision.resolvedBy,
       });
     }
-    if (!decision.affects.requirementIds.includes(requirement.id)) {
+    if (!decision.affects.requirementIds.includes(requirement.id) || decision.subject?.kind !== "requirement_waiver" || decision.subject.requirementId !== requirement.id) {
       throw new InvariantViolationError(`requirement_waiver ${decisionId} does not name Requirement ${requirement.id}`);
+    }
+    if (decision.chosenOptionId !== "waive") {
+      throw new InvariantViolationError(`requirement_waiver ${decisionId} chose ${String(decision.chosenOptionId)}, not waive; a denied waiver waives nothing`, { chosenOptionId: decision.chosenOptionId });
     }
   }
 }

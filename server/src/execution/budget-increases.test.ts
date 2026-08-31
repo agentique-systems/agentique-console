@@ -185,7 +185,7 @@ describe("budget increase resolution", () => {
       expect(() => h.database.sqlite.prepare("INSERT INTO budget_increases (id, run_id, decision_id, partition, added_cost_usd, added_tokens, added_attempts, created_at) VALUES (?, ?, ?, 'final_reserve', 1, 0, 0, ?)").run(`binc_${"7".repeat(24)}`, runId, decision.id, "2026-01-01T00:00:00.000Z")).toThrow(/operator-approved budget_increase decision/);
       expect(h.stores.budgetIncreases.listByRun(runId)).toHaveLength(1);
       // No runtime tool exposes a Budget Increase to any role or purpose, and no Orchestrator turn was created by the resolution.
-      expect(RUNTIME_TOOL_CALL_TOOLS).toEqual(["propose_tasks", "update_task", "request_completion"]);
+      expect(RUNTIME_TOOL_CALL_TOOLS).toEqual(["propose_tasks", "update_task", "request_completion", "request_decision"]);
       for (const role of ["orchestrator", "coordinator", "worker", "evaluator"] as const) {
         expect(RUNTIME_TOOLS_BY_ROLE[role].some((tool) => /budget|increase|allocation|extend/i.test(tool))).toBe(false);
         expect(effectiveRuntimeTools(RUNTIME_TOOLS_BY_ROLE[role], role, role === "orchestrator" ? "operator_input" : role === "coordinator" ? "decompose" : role === "worker" ? "step" : "evaluate").some((tool) => /budget|increase|allocation|extend/i.test(tool))).toBe(false);

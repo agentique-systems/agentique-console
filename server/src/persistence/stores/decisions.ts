@@ -7,6 +7,7 @@ import {
   decisionResolutionInputSchema,
   decisionSchema,
   InvariantViolationError,
+  isRequestableDecisionKind,
   parseOrThrow,
   RUN_MACHINE,
   TOOL_CALL_MEDIA_TYPE,
@@ -16,12 +17,15 @@ import {
   type DecisionRequest,
   type DecisionResolutionInput,
   type DecisionSubject,
+  type DecisionSupersessionReason,
   type EventActor,
+  type InvocationId,
+  type RunId,
   type RunStatus,
 } from "@agentique-console/core";
 import type { PersistenceContext } from "../context.ts";
-import { artifacts, attempts, completionRequests, decisions, gates, invocations, planNodes, publications, requirements, runs, tasks } from "../schema.ts";
-import { assertSameConversation, conversationScope, loadConversationRef, OPERATOR_ACTOR, requireRow, writeMeta, type WriteOptions } from "./support.ts";
+import { artifacts, attempts, completionRequests, decisions, gates, invocations, planNodes, publications, requirementRevisions, requirements, runs, tasks } from "../schema.ts";
+import { assertSameConversation, conversationScope, loadConversationRef, OPERATOR_ACTOR, requireRow, RUNTIME_ACTOR, writeMeta, type WriteOptions } from "./support.ts";
 
 type Row = typeof decisions.$inferSelect;
 
@@ -56,6 +60,7 @@ function toDomain(row: Row): Decision {
             },
       supersedesDecisionId: row.supersedesDecisionId,
       supersededByDecisionId: row.supersededByDecisionId,
+      supersessionReason: row.supersessionReason,
       createdAt: row.createdAt,
     },
     "Decision row",
@@ -71,7 +76,8 @@ function actorFor(resolvedBy: DecisionResolutionInput["resolvedBy"], decision: D
 /**
  * Decisions are append-only: a request creates one; a resolution is recorded
  * once and always writes `decision.resolved`; a later Decision may supersede
- * an earlier one by id, which is recorded on both rows.
+ * an earlier one by id, which is recorded on both rows; the runtime may
+ * supersede an open `requirement_waiver` whose pinned Requirement went stale.
  */
 export class DecisionStore {
   constructor(private readonly ctx: PersistenceContext) {}
@@ -85,13 +91,15 @@ export class DecisionStore {
         assertSameConversation("Run", valid.runId, run.conversationId, conversation.id);
       }
       this.assertAffectsOwnership(valid, conversation.id);
-      if (valid.subject !== null) this.assertSubjectOwnership(valid.subject, valid.runId);
+      if (valid.requestedBy.kind === "invocation" && isRequestableDecisionKind(valid.kind)) this.assertRequester(valid.requestedBy.invocationId, valid.runId);
+      if (valid.subject !== null) this.assertSubjectOwnership(valid.subject, valid.runId, conversation.id);
       const decision: Decision = {
         id: this.ctx.ids("decision"),
         ...valid,
         status: "open",
         resolution: null,
         supersededByDecisionId: null,
+        supersessionReason: null,
         createdAt: this.ctx.clock(),
       };
       parseOrThrow(decisionSchema, decision, "Decision");
@@ -113,10 +121,10 @@ export class DecisionStore {
           scope: conversationScope(conversation, { runId: superseded.runId }),
           subjectType: "decision",
           subjectId: superseded.id,
-          payload: { decisionId: superseded.id, supersededByDecisionId: decision.id },
+          payload: { decisionId: superseded.id, supersededByDecisionId: decision.id, reason: "superseding_decision" },
           ...writeMeta(options),
         });
-        this.ctx.db.update(decisions).set({ status: "superseded", supersededByDecisionId: decision.id }).where(eq(decisions.id, superseded.id)).run();
+        this.ctx.db.update(decisions).set({ status: "superseded", supersededByDecisionId: decision.id, supersessionReason: "superseding_decision" }).where(eq(decisions.id, superseded.id)).run();
       }
       return decision;
     });
@@ -138,6 +146,38 @@ export class DecisionStore {
       .orderBy(asc(decisions.createdAt))
       .all()
       .map(toDomain);
+  }
+
+  /** Every Decision of a Run, in creation order (then id order). */
+  listByRun(runId: RunId): Decision[] {
+    return this.ctx.db.select().from(decisions).where(eq(decisions.runId, runId)).orderBy(asc(decisions.createdAt), asc(decisions.id)).all().map(toDomain);
+  }
+
+  /** The Decisions an Invocation requested through `request_decision` (the requestable kinds it is the requester of), in creation order. */
+  requestedByInvocation(invocationId: InvocationId): Decision[] {
+    return this.ctx.db
+      .select()
+      .from(decisions)
+      .where(and(eq(decisions.requesterInvocationId, invocationId), inArray(decisions.kind, ["operator_choice", "requirement_waiver"])))
+      .orderBy(asc(decisions.createdAt), asc(decisions.id))
+      .all()
+      .map(toDomain);
+  }
+
+  /** The Run's open `use_default_after_deadline` Decisions, in creation order: what the scheduler resolves by policy once due. */
+  openDefaultPolicyOf(runId: RunId): Decision[] {
+    return this.ctx.db
+      .select()
+      .from(decisions)
+      .where(and(eq(decisions.runId, runId), eq(decisions.status, "open"), eq(decisions.resolutionPolicy, "use_default_after_deadline")))
+      .orderBy(asc(decisions.createdAt), asc(decisions.id))
+      .all()
+      .map(toDomain);
+  }
+
+  /** The Conversation's open `requirement_waiver` Decisions naming a Requirement, in creation order. */
+  openWaiversOf(conversationId: ConversationId, requirementId: string): Decision[] {
+    return this.listOpen(conversationId).filter((d) => d.kind === "requirement_waiver" && d.affects.requirementIds.includes(requirementId as never));
   }
 
   /** The one `signoff` Decision of an `operator_signoff` Gate, or `null` before it was requested; at most one exists (a database unique index). */
@@ -209,6 +249,41 @@ export class DecisionStore {
   }
 
   /**
+   * Supersedes an open `requirement_waiver` Decision whose pinned Requirement
+   * went stale (execution-model §8.2), with no superseding Decision: the
+   * runtime's one path to retire a waiver request the operator can no longer
+   * meaningfully answer. Never resolves anything; writes one
+   * `decision.superseded` Event.
+   */
+  supersede(id: DecisionId, reason: Exclude<DecisionSupersessionReason, "superseding_decision">, options?: WriteOptions): Decision {
+    return this.ctx.tx.write(() => {
+      const current = this.get(id);
+      if (current.kind !== "requirement_waiver") throw new ConflictError(`Decision ${id} is a ${current.kind}; only a requirement_waiver is superseded as stale`, { decisionId: id, kind: current.kind });
+      if (current.status !== "open") throw new ConflictError(`Decision ${id} is ${current.status}; only an open Decision is superseded`, { decisionId: id, status: current.status });
+      const conversation = loadConversationRef(this.ctx, current.conversationId);
+      const superseded: Decision = { ...current, status: "superseded", supersessionReason: reason };
+      parseOrThrow(decisionSchema, superseded, "Decision");
+      this.ctx.journal.append({
+        type: "decision.superseded",
+        scope: conversationScope(conversation, { runId: current.runId }),
+        subjectType: "decision",
+        subjectId: id,
+        payload: { decisionId: id, supersededByDecisionId: null, reason },
+        ...writeMeta(options, RUNTIME_ACTOR),
+      });
+      this.ctx.db.update(decisions).set({ status: "superseded", supersessionReason: reason }).where(eq(decisions.id, id)).run();
+      return superseded;
+    });
+  }
+
+  /** An Invocation requesting a Decision belongs to the Decision's Run and is running (execution-model §8.2). */
+  private assertRequester(invocationId: InvocationId, runId: string | null): void {
+    const invocation = requireRow(this.ctx.db.select({ runId: invocations.runId, status: invocations.status }).from(invocations).where(eq(invocations.id, invocationId)).get(), "Invocation", invocationId);
+    if (runId === null || invocation.runId !== runId) throw new InvariantViolationError(`Invocation ${invocationId} belongs to Run ${invocation.runId}, not ${String(runId)}`, { invocationId, runId });
+    if (invocation.status !== "running") throw new ConflictError(`Invocation ${invocationId} is ${invocation.status}; a Decision is requested by a running Invocation`, { invocationId, status: invocation.status });
+  }
+
+  /**
    * A side-effect approval subject names the Run's own Plan Node, Invocation,
    * Attempt, and call Artifact, consistently; a signoff subject names the
    * Run's open `operator_signoff` Gate, the passed `run_completion` Gate and
@@ -217,10 +292,26 @@ export class DecisionStore {
    * signoff Decision. A publish subject names exactly the completed Run's
    * Workspace, Target, final Snapshot, and final Changeset, and the Run has
    * no other open publish Decision, no nonterminal Publication, and no
-   * succeeded Publication.
+   * succeeded Publication. A requirement_waiver subject names a Requirement
+   * and a Requirement revision of the Decision's Conversation and Evidence
+   * Artifacts of the Run.
    */
-  private assertSubjectOwnership(subject: DecisionSubject, runId: string | null): void {
+  private assertSubjectOwnership(subject: DecisionSubject, runId: string | null, conversationId: string): void {
     if (subject.runId !== runId) throw new InvariantViolationError(`Decision subject names Run ${subject.runId}, not ${String(runId)}`);
+    if (subject.kind === "requirement_waiver") {
+      const requirement = requireRow(this.ctx.db.select({ conversationId: requirements.conversationId }).from(requirements).where(eq(requirements.id, subject.requirementId)).get(), "Requirement", subject.requirementId);
+      assertSameConversation("Requirement", subject.requirementId, requirement.conversationId, conversationId);
+      const revision = requireRow(this.ctx.db.select({ conversationId: requirementRevisions.conversationId }).from(requirementRevisions).where(eq(requirementRevisions.id, subject.requirementRevisionId)).get(), "RequirementRevision", subject.requirementRevisionId);
+      assertSameConversation("RequirementRevision", subject.requirementRevisionId, revision.conversationId, conversationId);
+      if (subject.evidenceArtifactIds.length > 0) {
+        const rows = this.ctx.db.select({ id: artifacts.id, runId: artifacts.runId }).from(artifacts).where(inArray(artifacts.id, subject.evidenceArtifactIds)).all();
+        for (const id of subject.evidenceArtifactIds) {
+          const row = requireRow(rows.find((r) => r.id === id), "Artifact", id);
+          if (row.runId !== subject.runId) throw new InvariantViolationError(`Artifact ${id} belongs to Run ${row.runId}, not ${subject.runId}`, { artifactId: id });
+        }
+      }
+      return;
+    }
     if (subject.kind === "budget_increase") {
       // A budget_increase is requested for a nonterminal Run whose status admits the partition, and only one is open per Run.
       const run = requireRow(this.ctx.db.select({ status: runs.status }).from(runs).where(eq(runs.id, subject.runId)).get(), "Run", subject.runId);
@@ -320,6 +411,7 @@ export class DecisionStore {
       resolvedAt: decision.resolution?.resolvedAt ?? null,
       supersedesDecisionId: decision.supersedesDecisionId,
       supersededByDecisionId: decision.supersededByDecisionId,
+      supersessionReason: decision.supersessionReason,
       createdAt: decision.createdAt,
     };
   }

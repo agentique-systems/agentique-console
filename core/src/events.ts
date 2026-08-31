@@ -5,7 +5,7 @@ import { allocationExtensionSchema, budgetIncreaseSchema, budgetReservationSchem
 import { capacityLeaseSchema } from "./capacity.ts";
 import { completionRequestSchema } from "./completion.ts";
 import { conversationMessageSchema, conversationSchema } from "./conversations.ts";
-import { decisionResolutionSchema, decisionSchema } from "./decisions.ts";
+import { DECISION_SUPERSESSION_REASONS, decisionResolutionSchema, decisionSchema } from "./decisions.ts";
 import { handoffSchema } from "./handoffs.ts";
 import type { AttemptId, ConversationId, InvocationId, PlanNodeId, RunId, WorkspaceId } from "./ids.ts";
 import {
@@ -160,7 +160,10 @@ export const EVENT_CATALOGUE = {
   "acceptance_criterion.created": acceptanceCriterionSchema,
   "decision.requested": decisionSchema,
   "decision.resolved": z.strictObject({ decisionId: idSchema("decision"), kind: nonEmptyString, resolution: decisionResolutionSchema }),
-  "decision.superseded": z.strictObject({ decisionId: idSchema("decision"), supersededByDecisionId: idSchema("decision") }),
+  /** A Decision was superseded: by a later Decision (`superseding_decision`, named), or by the runtime because its waiver subject went stale (`requirement_waiver_stale`, no superseding Decision). */
+  "decision.superseded": z
+    .strictObject({ decisionId: idSchema("decision"), supersededByDecisionId: idSchema("decision").nullable(), reason: z.enum(DECISION_SUPERSESSION_REASONS) })
+    .refine((p) => (p.reason === "superseding_decision") === (p.supersededByDecisionId !== null), { message: "a superseding Decision is named exactly for the superseding_decision reason", path: ["supersededByDecisionId"] }),
   "task.created": taskSchema,
   "task.dependency_added": taskDependencySchema,
   "task.ready": transition(TASK_STATUSES),

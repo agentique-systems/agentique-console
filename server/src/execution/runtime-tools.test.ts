@@ -20,24 +20,25 @@ describe("runtime-tool call boundary", () => {
     try {
       const s = seedPlanningRuntime(h);
       const d = await decomposePort(h, s);
-      // Role permission is wider than the effective set: the Coordinator may hold request_decision by role, but no handler exists for it yet.
+      // Role permission is wider than the effective set: an Evaluator never reaches a handler, and a synthesize turn holds no Task handler.
       expect(runtimeToolsFor("coordinator", "decompose")).toContain("request_decision");
-      expect(d.port.tools).toEqual(["propose_tasks", "update_task"]);
-      expect(effectiveRuntimeTools(runtimeToolsFor("coordinator", "synthesize"), "coordinator", "synthesize")).toEqual([]);
-      expect(effectiveRuntimeTools(runtimeToolsFor("worker", "task"), "worker", "task")).toEqual([]);
-      expect(effectiveRuntimeTools(runtimeToolsFor("orchestrator", "operator_input"), "orchestrator", "operator_input")).toEqual(["request_completion"]);
+      expect(d.port.tools).toEqual(["propose_tasks", "update_task", "request_decision"]);
+      expect(effectiveRuntimeTools(runtimeToolsFor("coordinator", "synthesize"), "coordinator", "synthesize")).toEqual(["request_decision"]);
+      expect(effectiveRuntimeTools(runtimeToolsFor("worker", "task"), "worker", "task")).toEqual(["request_decision"]);
+      expect(effectiveRuntimeTools(runtimeToolsFor("evaluator", "evaluate"), "evaluator", "evaluate")).toEqual([]);
+      expect(effectiveRuntimeTools(runtimeToolsFor("orchestrator", "operator_input"), "orchestrator", "operator_input")).toEqual(["request_completion", "request_decision"]);
       // A manifest that withholds a tool withholds it from the port even for the right role and purpose.
       const narrowed = new RuntimeToolExecutor(h.ctx, h.stores, { runId: s.created.run.id, planNodeId: d.node.id, invocationId: d.invocation.id, attemptId: d.attempt.id, role: "coordinator", purpose: "decompose", manifestTools: ["update_task", "return_result"] });
       expect(narrowed.tools).toEqual(["update_task"]);
       expect(await narrowed.call(propose([proposal({ key: "a", requirementIds: [d.leafIds[0]!] })]))).toEqual({ kind: "not_callable", tool: "propose_tasks" });
       const seq = h.ctx.journal.lastSeq();
-      expect(await d.port.call({ tool: "request_decision", input: {} } as never)).toEqual({ kind: "not_callable", tool: "request_decision" });
+      expect(await d.port.call({ tool: "request_decision", input: {} } as never)).toMatchObject({ kind: "rejected", tool: "request_decision", reasons: [{ code: "invalid_input" }] });
       expect(await d.port.call({ tool: "return_result", input: {} } as never)).toEqual({ kind: "not_callable", tool: "return_result" });
       expect(await d.port.call({ input: {} } as never)).toEqual({ kind: "not_callable", tool: "unknown" });
       expect(h.ctx.journal.lastSeq()).toBe(seq);
       expect(h.stores.tasks.listByRun(s.created.run.id)).toEqual([]);
-      // The port bound to the root Orchestrator's Attempt exposed nothing in this phase, whatever its role permits.
-      expect(h.provider.requests[0]!.runtimeTools).toEqual(["request_completion"]);
+      // The port bound to the root Orchestrator's Attempt exposes exactly its handlers, whatever its role permits.
+      expect(h.provider.requests[0]!.runtimeTools).toEqual(["request_completion", "request_decision"]);
     } finally {
       h.close();
     }

@@ -73,6 +73,7 @@ import {
   type Task,
   type Timestamp,
   approvalSubjectOf,
+  decisionResolutionInputOf,
 } from "@agentique-console/core";
 import type { WriteOptions } from "../persistence/stores/support.ts";
 import { activeInvocationAdvice, blockedOn, blockingDecisionOf } from "./invocation-facts.ts";
@@ -365,7 +366,7 @@ export class NodeExitGates {
     const resolution: ManifestInput =
       predecessor.status === "blocked" && decision.kind === "side_effect_approval" && decision.subject !== null
         ? { kind: "side_effect_approval_resolution", decisionId: decision.id, blockedInvocationId: predecessor.id, attemptId: approvalSubjectOf(decision).attemptId, tool: approvalSubjectOf(decision).tool, callDigest: approvalSubjectOf(decision).callDigest, callArtifactId: approvalSubjectOf(decision).callArtifactId, outcome: decision.resolution.chosenOptionId as "approve_once" | "deny" }
-        : { kind: "decision_resolution", decisionId: decision.id };
+        : decisionResolutionInputOf(decision);
     const prepared = this.prepareEvaluatorFor(node, gate, predecessor, [resolution], options);
     if (prepared.kind !== "gate_evaluator_prepared") return prepared;
     return { kind: "successor_prepared", invocationId: prepared.invocationId, position: null, decisionId: decision.id };

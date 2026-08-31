@@ -15,6 +15,7 @@ import {
   invocationPositionKey,
   invocationSchema,
   InvariantViolationError,
+  isRequestableDecisionKind,
   MANIFEST_RENDERER_VERSION,
   parseOrThrow,
   patternPositionDefects,
@@ -306,14 +307,17 @@ export class InvocationStore {
           payload = { invocationId: id, waitReason: transition.waitReason };
           break;
         case "blocked": {
-          // The blocking Decision is an open side_effect_approval of this Run whose subject names this Invocation.
+          // The blocking Decision is an open Decision of this Run that this Invocation ended on: the side_effect_approval whose subject
+          // names it, or the operator_choice / requirement_waiver it requested itself through request_decision (execution-model §8.2).
           const decision = requireRow(
-            this.ctx.db.select({ runId: decisions.runId, kind: decisions.kind, status: decisions.status, subject: decisions.subject }).from(decisions).where(eq(decisions.id, transition.decisionId)).get(),
+            this.ctx.db.select({ runId: decisions.runId, kind: decisions.kind, status: decisions.status, subject: decisions.subject, requestedBy: decisions.requestedBy }).from(decisions).where(eq(decisions.id, transition.decisionId)).get(),
             "Decision",
             transition.decisionId,
           );
-          if (decision.runId !== current.runId || decision.kind !== "side_effect_approval" || decision.status !== "open" || (decision.subject?.kind === "side_effect_approval" ? decision.subject.invocationId : null) !== id) {
-            throw new InvariantViolationError(`Decision ${transition.decisionId} is not an open side_effect_approval of Invocation ${id}`, { decisionId: transition.decisionId });
+          const approvalOfThis = decision.kind === "side_effect_approval" && decision.subject?.kind === "side_effect_approval" && decision.subject.invocationId === id;
+          const requestedByThis = isRequestableDecisionKind(decision.kind) && decision.requestedBy.kind === "invocation" && decision.requestedBy.invocationId === id;
+          if (decision.runId !== current.runId || decision.status !== "open" || !(approvalOfThis || requestedByThis)) {
+            throw new InvariantViolationError(`Decision ${transition.decisionId} is not an open Decision that Invocation ${id} ended on (its intercepted call's approval, or its own request)`, { decisionId: transition.decisionId, kind: decision.kind });
           }
           next.blockedByDecisionId = transition.decisionId;
           type = "invocation.blocked";

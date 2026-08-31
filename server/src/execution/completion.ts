@@ -41,6 +41,7 @@
  */
 import {
   approvalSubjectOf,
+  decisionResolutionInputOf,
   canonicalFinalReport,
   FINAL_REPORT_MEDIA_TYPE,
   INVOCATION_MACHINE,
@@ -488,7 +489,7 @@ export class RunCompletionEngine {
     const resolution: ManifestInput =
       predecessor.status === "blocked" && decision.kind === "side_effect_approval"
         ? { kind: "side_effect_approval_resolution", decisionId: decision.id, blockedInvocationId: predecessor.id, attemptId: approvalSubjectOf(decision).attemptId, tool: approvalSubjectOf(decision).tool, callDigest: approvalSubjectOf(decision).callDigest, callArtifactId: approvalSubjectOf(decision).callArtifactId, outcome: decision.resolution.chosenOptionId as "approve_once" | "deny" }
-        : { kind: "decision_resolution", decisionId: decision.id };
+        : decisionResolutionInputOf(decision);
     const prepared = predecessor.purpose === "final_synthesis" ? this.prepareSynthesisFor(run, request, gate, predecessor, [resolution], options) : this.prepareEvaluatorFor(run, request, gate, predecessor, [resolution], options);
     if (prepared.kind !== "completion_evaluator_prepared" && prepared.kind !== "final_synthesis_prepared") return prepared;
     return { kind: "successor_prepared", invocationId: prepared.invocationId, decisionId: decision.id };

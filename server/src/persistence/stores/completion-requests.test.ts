@@ -250,7 +250,7 @@ describe("Run Gates", () => {
       expect(decision.options.map((o) => o.id).sort()).toEqual(["accept", "request_changes"]);
       expect(h.stores.decisions.signoffOf(signoff.id)?.id).toBe(decision.id);
       expect(() => signoffRequest(h, s, signoff)).toThrow(ConflictError);
-      expect(() => h.database.sqlite.prepare("INSERT INTO decisions SELECT 'dec_000000000000000000000000', conversation_id, run_id, kind, resolution_policy, status, requested_by, question, options, recommended_option_id, rationale, affects, deadline_at, activation_condition, subject, resolved_by, chosen_option_id, resolution_rationale, resolution_artifact_ids, resolved_at, supersedes_decision_id, superseded_by_decision_id, created_at FROM decisions WHERE id = ?").run(decision.id)).toThrow(/UNIQUE constraint failed: decisions\.subject_gate_id/);
+      expect(() => h.database.sqlite.prepare("INSERT INTO decisions SELECT 'dec_000000000000000000000000', conversation_id, run_id, kind, resolution_policy, status, requested_by, question, options, recommended_option_id, rationale, affects, deadline_at, activation_condition, subject, resolved_by, chosen_option_id, resolution_rationale, resolution_artifact_ids, resolved_at, supersedes_decision_id, superseded_by_decision_id, supersession_reason, created_at FROM decisions WHERE id = ?").run(decision.id)).toThrow(/UNIQUE constraint failed: decisions\.subject_gate_id/);
       // Only the operator resolves it; nothing here resolves anything.
       expect(() => h.stores.decisions.resolve(decision.id, { resolvedBy: "orchestrator", chosenOptionId: "accept", rationale: null, artifactIds: [] })).toThrow(ValidationError);
       expect(h.stores.decisions.get(decision.id).status).toBe("open");

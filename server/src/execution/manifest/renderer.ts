@@ -76,7 +76,11 @@ function renderInput(input: ManifestInput): string[] {
     case "node_result":
       return [`- node_result ${input.planNodeId} status ${input.status} output_artifacts ${list(input.outputArtifactIds)}`];
     case "decision_resolution":
-      return [`- decision_resolution ${input.decisionId}`];
+      return [
+        `- decision_resolution ${input.decisionId} ${input.decisionKind} ${input.status}${input.resolvedBy === null ? "" : ` by ${input.resolvedBy}`}${input.selected === null ? "" : ` selected ${input.selected.optionId}`}${input.waiver === null ? "" : ` requirement ${input.waiver.requirementId} revision ${input.waiver.requirementRevisionId} ${input.waiver.outcome}`}`,
+        `  question: ${input.question}`,
+        ...(input.selected === null ? [] : [`  selected: ${input.selected.label}${input.selected.description === null ? "" : ` — ${input.selected.description}`}`]),
+      ];
     case "side_effect_approval_resolution":
       return [`- side_effect_approval_resolution ${input.decisionId} ${input.outcome}: ${input.tool} call ${input.callDigest} (artifact ${input.callArtifactId}) from invocation ${input.blockedInvocationId} attempt ${input.attemptId}`];
     case "gate_result":

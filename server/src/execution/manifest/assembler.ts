@@ -56,6 +56,7 @@ import {
   type SnapshotId,
   type TaskId,
   approvalSubjectOf,
+  decisionResolutionInputOf,
 } from "@agentique-console/core";
 import type { Stores } from "../../persistence/stores/index.ts";
 
@@ -378,8 +379,13 @@ export class ContextManifestAssembler {
           break;
         }
         case "decision_resolution": {
+          // The bounded resolution semantics restate the canonical Decision exactly (execution-model §8.2): kind, status, question, resolver,
+          // selected option, and waiver facts all come from rows; an open, foreign, or misquoted Decision is refused.
           const decision = this.stores.decisions.get(input.decisionId);
           if (decision.conversationId !== run.conversationId) throw new InvariantViolationError(`Decision ${input.decisionId} belongs to another Conversation`);
+          if (decision.runId !== null && decision.runId !== run.id) throw new InvariantViolationError(`Decision ${input.decisionId} belongs to another Run`);
+          if (decision.status === "open") throw new ValidationError(`Decision ${input.decisionId} is open; a successor continues on a resolved or superseded Decision`, { decisionId: decision.id });
+          if (canonicalJson(decisionResolutionInputOf(decision)) !== canonicalJson(input)) throw new InvariantViolationError(`decision_resolution input disagrees with the canonical facts of Decision ${decision.id}`, { decisionId: decision.id });
           break;
         }
         case "gate_result": {

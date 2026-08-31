@@ -35,6 +35,9 @@ import {
   DECISION_KINDS,
   DECISION_RESOLVERS,
   DECISION_STATUSES,
+  DECISION_SUPERSESSION_REASONS,
+  REQUESTABLE_DECISION_KINDS,
+  REQUIREMENT_WAIVER_MAX_EVIDENCE,
   EVALUATOR_PURPOSES,
   FAN_IN_POLICIES,
   FINAL_RESERVE_USES,
@@ -582,13 +585,18 @@ export const decisions = sqliteTable(
     resolvedAt: timestamp("resolved_at"),
     supersedesDecisionId: text("supersedes_decision_id").references((): AnySQLiteColumn => decisions.id),
     supersededByDecisionId: text("superseded_by_decision_id").references((): AnySQLiteColumn => decisions.id),
+    /** Why the Decision is superseded (core `DECISION_SUPERSESSION_REASONS`); set exactly when it is. */
+    supersessionReason: text("supersession_reason"),
     createdAt: timestamp("created_at").notNull(),
     // A generated projection of the subject, so "one signoff Decision per operator_signoff Gate" is a plain unique index.
     subjectGateId: text("subject_gate_id").generatedAlwaysAs(sql`json_extract(subject, '$.gateId')`, { mode: "virtual" }),
+    // A generated projection of the requester, so the Decisions an Invocation requested through `request_decision` are indexed rows.
+    requesterInvocationId: text("requester_invocation_id").generatedAlwaysAs(sql`json_extract(requested_by, '$.invocationId')`, { mode: "virtual" }),
   },
   (t) => [
     index("decisions_conversation_status").on(t.conversationId, t.status),
     index("decisions_run").on(t.runId),
+    index("decisions_requester_invocation").on(t.requesterInvocationId),
     uniqueIndex("decisions_signoff_gate")
       .on(t.subjectGateId)
       .where(sql`kind = 'signoff'`),
@@ -626,11 +634,23 @@ export const decisions = sqliteTable(
       "decisions_resolution_shape",
       sql`(${t.status} = 'open' AND ${t.resolvedBy} IS NULL AND ${t.chosenOptionId} IS NULL AND ${t.resolvedAt} IS NULL) OR (${t.status} = 'resolved' AND ${t.resolvedBy} IS NOT NULL AND ${t.chosenOptionId} IS NOT NULL AND ${t.resolvedAt} IS NOT NULL) OR ${t.status} = 'superseded'`,
     ),
-    check("decisions_superseded_by", sql`(${t.status} = 'superseded') = (${t.supersededByDecisionId} IS NOT NULL)`),
-    // A side_effect_approval, a signoff, a publish, and a budget_increase carry exactly their typed subject and belong to a Run; no other kind has a
-    // subject; a signoff, a publish, and a budget_increase are operator_required and name their own Run.
-    check("decisions_subject_shape", sql`(${t.kind} IN ('side_effect_approval', 'signoff', 'publish', 'budget_increase')) = (${t.subject} IS NOT NULL AND json_extract(${t.subject}, '$.kind') = ${t.kind} AND ${t.runId} IS NOT NULL)`),
-    check("decisions_signoff_policy", sql`${t.kind} NOT IN ('signoff', 'publish', 'budget_increase') OR (${t.resolutionPolicy} = 'operator_required' AND json_extract(${t.subject}, '$.runId') = ${t.runId})`),
+    // Supersession is closed: superseded exactly when a reason is recorded; a superseding Decision exactly for the superseding_decision reason;
+    // only a requirement_waiver is superseded as stale (its pinned Requirement changed before the operator answered).
+    check("decisions_superseded_reason", sql`(${t.status} = 'superseded') = (${t.supersessionReason} IS NOT NULL)`),
+    check("decisions_supersession_reason", sql`${t.supersessionReason} IS NULL OR ${t.supersessionReason} IN (${inList(DECISION_SUPERSESSION_REASONS)})`),
+    check("decisions_superseded_by", sql`(${t.supersessionReason} IS 'superseding_decision') = (${t.supersededByDecisionId} IS NOT NULL)`),
+    check("decisions_stale_waiver_only", sql`${t.supersessionReason} IS NOT 'requirement_waiver_stale' OR ${t.kind} = 'requirement_waiver'`),
+    // A side_effect_approval, a signoff, a publish, a budget_increase, and a requirement_waiver carry exactly their typed subject and belong to a
+    // Run; no other kind has a subject; a signoff, a publish, a budget_increase, and a requirement_waiver are operator_required and name their own Run.
+    check("decisions_subject_shape", sql`(${t.kind} IN ('side_effect_approval', 'signoff', 'publish', 'budget_increase', 'requirement_waiver')) = (${t.subject} IS NOT NULL AND json_extract(${t.subject}, '$.kind') = ${t.kind} AND ${t.runId} IS NOT NULL)`),
+    check("decisions_signoff_policy", sql`${t.kind} NOT IN ('signoff', 'publish', 'budget_increase', 'requirement_waiver') OR (${t.resolutionPolicy} = 'operator_required' AND json_extract(${t.subject}, '$.runId') = ${t.runId})`),
+    // A requirement_waiver pins exactly the one Requirement it affects, at a Requirement revision, with a bounded sorted Evidence list.
+    check(
+      "decisions_waiver_subject_shape",
+      sql`${t.kind} <> 'requirement_waiver' OR (json_extract(${t.subject}, '$.requirementId') GLOB 'req_*' AND json_extract(${t.subject}, '$.requirementRevisionId') GLOB 'reqr_*' AND json_type(${t.subject}, '$.evidenceArtifactIds') = 'array' AND json_array_length(${t.subject}, '$.evidenceArtifactIds') <= ${sql.raw(String(REQUIREMENT_WAIVER_MAX_EVIDENCE))} AND json_array_length(${t.affects}, '$.requirementIds') = 1 AND json_extract(${t.affects}, '$.requirementIds[0]') = json_extract(${t.subject}, '$.requirementId'))`,
+    ),
+    // An Invocation requests only the requestable kinds (execution-model §8.2); the runtime records a side_effect_approval on its behalf.
+    check("decisions_requestable_by_invocation", sql`json_extract(${t.requestedBy}, '$.kind') <> 'invocation' OR ${t.kind} IN (${inList(REQUESTABLE_DECISION_KINDS)}, 'side_effect_approval')`),
     check("decisions_no_self_supersede", sql`${t.supersedesDecisionId} IS NULL OR ${t.supersedesDecisionId} <> ${t.id}`),
   ],
 );
@@ -839,7 +859,7 @@ export const invocations = sqliteTable(
     status: text("status").notNull(),
     waitReason: text("wait_reason"),
     failureReason: text("failure_reason"),
-    /** The open `side_effect_approval` Decision that ended the Invocation `blocked`; set exactly then. */
+    /** The open Decision that ended the Invocation `blocked` (an intercepted call's side_effect_approval, or the Decision the Invocation requested); set exactly then; agreement re-checked by trigger. */
     blockedByDecisionId: text("blocked_by_decision_id").references((): AnySQLiteColumn => decisions.id),
     result: text("result", { mode: "json" }).$type<InvocationResult>(),
     /** The Execution Workspace cleanup obligation: `none` (read-only), `pending` (worktree prepared, not yet released), `released`. */
@@ -1067,6 +1087,10 @@ export const runtimeToolCalls = sqliteTable(
     uniqueIndex("runtime_tool_calls_one_proposal")
       .on(t.invocationId)
       .where(sql`tool = 'propose_tasks'`),
+    // At most one accepted blocking request_decision per Invocation (execution-model §8.2): the accepted request ends the logical turn.
+    uniqueIndex("runtime_tool_calls_one_decision_request")
+      .on(t.invocationId)
+      .where(sql`tool = 'request_decision'`),
     index("runtime_tool_calls_plan_node").on(t.planNodeId, t.committedAt),
     index("runtime_tool_calls_attempt").on(t.attemptId),
     check("runtime_tool_calls_tool", sql`${t.tool} IN (${inList(RUNTIME_TOOL_CALL_TOOLS)})`),

@@ -3,7 +3,7 @@
  * §6.2, §6.4; invariants 6 transcripts are never canonical, 9 canonical
  * objects by id, 20 one immutable manifest per Invocation).
  */
-import { canonicalJson, EMPTY_MANIFEST_TEMPLATE, InvariantViolationError, MANIFEST_RENDERER_VERSION, ValidationError, type ContextManifest, type Invocation } from "@agentique-console/core";
+import { canonicalJson, decisionResolutionInputOf, EMPTY_MANIFEST_TEMPLATE, InvariantViolationError, MANIFEST_RENDERER_VERSION, ValidationError, type ContextManifest, type Invocation } from "@agentique-console/core";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -195,7 +195,7 @@ describe("context manifest assembly", () => {
       expect(() => h.preparation.prepare({ ...base, artifactIds: [foreignArtifact.id] })).toThrow(InvariantViolationError);
       expect(() => h.preparation.prepare({ ...base, artifactIds: ["art_000000000000000000000000"] })).toThrow(/not found/);
       expect(() => h.preparation.prepare({ ...base, inputs: [{ kind: "operator_message", conversationMessageId: other.message.id, content: other.message.content }] })).toThrow(InvariantViolationError);
-      expect(() => h.preparation.prepare({ ...base, inputs: [{ kind: "decision_resolution", decisionId: "dec_000000000000000000000000" }] })).toThrow(/not found/);
+      expect(() => h.preparation.prepare({ ...base, inputs: [{ kind: "decision_resolution", decisionId: "dec_000000000000000000000000", decisionKind: "operator_choice", status: "resolved", question: "q", resolvedBy: "operator", selected: { optionId: "a", label: "A", description: null }, waiver: null }] })).toThrow(/not found/);
       // A caller cannot widen the owned Tasks beyond the operation's; the operation resolved from the shape decides.
       expect(() => h.preparation.prepare({ ...base, taskIds: ["task_000000000000000000000000"] })).toThrow(/owns exactly the operation's Tasks/);
       h.stores.handoffs.transition(elsewhere.id, "cancelled");
@@ -216,7 +216,7 @@ describe("context manifest assembly", () => {
       await completeOrchestratorTurn(h, s.invocation);
       const resolvedLater = request({}, "later");
       h.stores.decisions.resolve(resolvedLater.id, { resolvedBy: "operator", chosenOptionId: "a", rationale: null, artifactIds: [] });
-      const successor = h.preparation.prepare({ runId: s.created.run.id, planNodeId: s.created.root.id, role: "orchestrator", purpose: "decision_resolution", continuedFromInvocationId: s.invocation.id, patternPosition: { kind: "orchestrator" }, inputs: [{ kind: "decision_resolution", decisionId: resolvedLater.id }] });
+      const successor = h.preparation.prepare({ runId: s.created.run.id, planNodeId: s.created.root.id, role: "orchestrator", purpose: "decision_resolution", continuedFromInvocationId: s.invocation.id, patternPosition: { kind: "orchestrator" }, inputs: [decisionResolutionInputOf(h.stores.decisions.get(resolvedLater.id))] });
       expect(successor.manifest.content.decisions.find((d) => d.decisionId === resolvedLater.id)).toEqual({ decisionId: resolvedLater.id, kind: "operator_choice", chosenOptionId: "a", resolvedSincePrevious: true });
       expect(successor.manifest.content.decisions.some((d) => d.decisionId === nodeDecision.id)).toBe(false);
     } finally {

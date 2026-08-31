@@ -3,9 +3,14 @@ import {
   assertDecisionResolutionRules,
   budgetIncreaseSubjectOf,
   DECISION_KINDS,
+  DECISION_SUPERSESSION_REASONS,
   decisionRequestSchema,
+  isAgentRequestedDecision,
   isOperatorOnlyDecisionKind,
+  isRequestableDecisionKind,
+  REQUESTABLE_DECISION_KINDS,
   RESOLUTION_POLICIES,
+  waiverSubjectOf,
   type DecisionRequest,
 } from "./decisions.ts";
 import { ValidationError } from "./errors.ts";
@@ -39,13 +44,34 @@ describe("decision kinds and policies", () => {
     expect(decisionRequestSchema.safeParse(request({ kind: "auto_approve" as never })).success).toBe(false);
   });
 
-  it("a requirement_waiver is always operator_required and names one Requirement", () => {
-    const waiver = request({ kind: "requirement_waiver", affects: { requirementIds: [newId("requirement")], taskIds: [], planNodeIds: [] } });
+  it("a requirement_waiver is always operator_required, offers exactly waive and deny, and names the one Requirement its typed subject pins at a revision", () => {
+    const requirementId = newId("requirement");
+    const runId = newId("run");
+    const subject = { kind: "requirement_waiver" as const, runId, requirementId, requirementRevisionId: newId("requirementRevision"), evidenceArtifactIds: [] };
+    const waiver = request({ kind: "requirement_waiver", runId, subject, options: [{ id: "waive", label: "Waive", description: null }, { id: "deny", label: "Deny", description: null }], recommendedOptionId: null, affects: { requirementIds: [requirementId], taskIds: [], planNodeIds: [] } });
     expect(decisionRequestSchema.safeParse(waiver).success).toBe(true);
     expect(decisionRequestSchema.safeParse({ ...waiver, resolutionPolicy: "use_default_after_deadline", deadlineAt: "2026-01-02T00:00:00.000Z" }).success).toBe(false);
     expect(decisionRequestSchema.safeParse({ ...waiver, affects: { requirementIds: [], taskIds: [], planNodeIds: [] } }).success).toBe(false);
+    expect(decisionRequestSchema.safeParse({ ...waiver, affects: { requirementIds: [newId("requirement")], taskIds: [], planNodeIds: [] } }).success).toBe(false);
+    expect(decisionRequestSchema.safeParse({ ...waiver, subject: null }).success).toBe(false);
+    expect(decisionRequestSchema.safeParse({ ...waiver, runId: null }).success).toBe(false);
+    expect(decisionRequestSchema.safeParse({ ...waiver, options: [{ id: "waive", label: "Waive", description: null }, { id: "keep", label: "Keep", description: null }] }).success).toBe(false);
+    expect(decisionRequestSchema.safeParse({ ...waiver, subject: { ...subject, evidenceArtifactIds: [newId("artifact"), newId("artifact")].sort().reverse() } }).success).toBe(false);
+    expect(waiverSubjectOf({ id: newId("decision"), kind: "requirement_waiver", subject })).toEqual(subject);
+    expect(() => waiverSubjectOf({ id: newId("decision"), kind: "operator_choice", subject: null })).toThrow(ValidationError);
     expect(isOperatorOnlyDecisionKind("requirement_waiver")).toBe(true);
     expect(isOperatorOnlyDecisionKind("operator_choice")).toBe(false);
+    // Exactly two kinds are requestable by an agent; every other kind has its own owner and an Invocation never requests it.
+    expect(REQUESTABLE_DECISION_KINDS).toEqual(["operator_choice", "requirement_waiver"]);
+    for (const kind of ["orchestrator_choice", "signoff", "publish", "budget_increase"] as const) {
+      expect(isRequestableDecisionKind(kind)).toBe(false);
+      expect(decisionRequestSchema.safeParse(request({ kind, requestedBy: { kind: "invocation", invocationId: newId("invocation") }, subject: null })).success).toBe(false);
+    }
+    expect(isAgentRequestedDecision({ kind: "operator_choice", requestedBy: { kind: "invocation", invocationId: newId("invocation") } })).toBe(true);
+    expect(isAgentRequestedDecision({ kind: "operator_choice", requestedBy: { kind: "operator" } })).toBe(false);
+    expect(isAgentRequestedDecision({ kind: "side_effect_approval", requestedBy: { kind: "invocation", invocationId: newId("invocation") } })).toBe(false);
+    // Supersession is closed: a later Decision by id, or a stale waiver retired by the runtime with no superseding Decision.
+    expect(DECISION_SUPERSESSION_REASONS).toEqual(["superseding_decision", "requirement_waiver_stale"]);
   });
 
   it("a budget_increase is operator_required, carries exactly its typed subject and the approve/deny options, belongs to its subject's Run, and never a default deadline", () => {

@@ -99,7 +99,7 @@ describe("runtime-tool calls", () => {
       expect(() => insert(`rtc_${"1".repeat(24)}`, "update_task", "short")).toThrow(/CHECK constraint failed: runtime_tool_calls_digest_shape/);
       expect(() => sqlite.prepare("UPDATE runtime_tool_calls SET call_digest = ? WHERE id = ?").run("e".repeat(64), recorded.id)).toThrow(/append-only/);
       expect(() => sqlite.prepare("DELETE FROM runtime_tool_calls").run()).toThrow(/append-only/);
-      expect(sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'runtime_tool_calls' ORDER BY name").all()).toEqual([{ name: "runtime_tool_calls_no_delete" }, { name: "runtime_tool_calls_no_update" }]);
+      expect(sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'runtime_tool_calls' ORDER BY name").all()).toEqual([{ name: "runtime_tool_calls_decision_request_valid" }, { name: "runtime_tool_calls_no_delete" }, { name: "runtime_tool_calls_no_update" }]);
     } finally {
       h.close();
     }

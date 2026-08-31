@@ -2,7 +2,9 @@ import { ConflictError, IllegalTransitionError, InvariantViolationError, Validat
 import { describe, expect, it } from "vitest";
 import { openHarness, seedRequirements, seedRun, seedSnapshot, seedWorkerNode, type Harness, type Seeded, seedRunCompletionGate } from "../test-support.ts";
 
-function waiverRequest(s: Seeded, requirementId: string, overrides: Partial<DecisionRequest> = {}): DecisionRequest {
+/** A waiver request pinned to `revisionId`; with a `kind` override other than `requirement_waiver` it becomes a plain Decision of that kind (`subject: null`, the same two options). */
+function waiverRequest(s: Seeded, requirementId: string, revisionId: string, overrides: Partial<DecisionRequest> = {}): DecisionRequest {
+  const plain = overrides.kind !== undefined && overrides.kind !== "requirement_waiver";
   return {
     conversationId: s.conversation.id,
     runId: s.run.id,
@@ -12,14 +14,14 @@ function waiverRequest(s: Seeded, requirementId: string, overrides: Partial<Deci
     question: "Waive?",
     options: [
       { id: "waive", label: "Waive", description: null },
-      { id: "keep", label: "Keep", description: null },
+      { id: "deny", label: "Deny", description: null },
     ],
-    recommendedOptionId: "waive",
+    recommendedOptionId: null,
     rationale: "cannot be met",
     affects: { requirementIds: [requirementId as never], taskIds: [], planNodeIds: [] },
     deadlineAt: null,
     activationCondition: null,
-    subject: null,
+    subject: plain ? null : { kind: "requirement_waiver", runId: s.run.id, requirementId: requirementId as never, requirementRevisionId: revisionId as never, evidenceArtifactIds: [] },
     supersedesDecisionId: null,
     ...overrides,
   };
@@ -111,26 +113,32 @@ describe("requirement waivers", () => {
     const h = openHarness();
     try {
       const s = seedRun(h);
-      const { leafIds } = seedRequirements(h, s);
+      const { leafIds, revision } = seedRequirements(h, s);
       const target = leafIds[0]!;
       const attempt = (decisionId: string | null, actor: "operator" | "runtime" | "orchestrator" = "operator") =>
         h.stores.requirements.recordStatusChange({ requirementId: target, runId: s.run.id, to: "waived", actor, evidence: [], gateId: null, decisionId: decisionId as never, rationale: "accepted" });
 
       expect(() => attempt(null)).toThrow(ValidationError);
-      const openWaiver = h.stores.decisions.request(waiverRequest(s, target));
+      const openWaiver = h.stores.decisions.request(waiverRequest(s, target, revision.id));
       expect(() => attempt(openWaiver.id)).toThrow(/not been resolved by the operator/);
       // A non-waiver Decision, even resolved by the operator, does not waive.
-      const choice = h.stores.decisions.request(waiverRequest(s, target, { kind: "operator_choice", affects: { requirementIds: [], taskIds: [], planNodeIds: [] } }));
+      const choice = h.stores.decisions.request(waiverRequest(s, target, revision.id, { kind: "operator_choice", affects: { requirementIds: [], taskIds: [], planNodeIds: [] } }));
       h.stores.decisions.resolve(choice.id, { resolvedBy: "operator", chosenOptionId: "waive", rationale: "x", artifactIds: [] });
       expect(() => attempt(choice.id)).toThrow(/not a requirement_waiver/);
       // A waiver for another Requirement does not waive this one.
-      const otherWaiver = h.stores.decisions.request(waiverRequest(s, leafIds[1]!));
+      const otherWaiver = h.stores.decisions.request(waiverRequest(s, leafIds[1]!, revision.id));
       h.stores.decisions.resolve(otherWaiver.id, { resolvedBy: "operator", chosenOptionId: "waive", rationale: "x", artifactIds: [] });
       expect(() => attempt(otherWaiver.id)).toThrow(/does not name Requirement/);
-      // No automatic or Orchestrator resolution of a waiver is possible.
+      // A waiver the operator denied waives nothing either.
+      const denied = h.stores.decisions.request(waiverRequest(s, target, revision.id));
+      h.stores.decisions.resolve(denied.id, { resolvedBy: "operator", chosenOptionId: "deny", rationale: "keep it", artifactIds: [] });
+      expect(() => attempt(denied.id)).toThrow(/waive/);
+      // No automatic or Orchestrator resolution of a waiver is possible; a waiver subject names an existing Requirement and revision of the Conversation.
       expect(() => h.stores.decisions.resolve(openWaiver.id, { resolvedBy: "orchestrator", chosenOptionId: "waive", rationale: "x", artifactIds: [] })).toThrow(ValidationError);
       expect(() => h.stores.decisions.resolve(openWaiver.id, { resolvedBy: "policy:use_default_after_deadline", chosenOptionId: "waive", rationale: "x", artifactIds: [] })).toThrow(ValidationError);
-      expect(() => h.stores.decisions.request(waiverRequest(s, target, { resolutionPolicy: "use_default_after_deadline", deadlineAt: "2026-02-01T00:00:00.000Z" }))).toThrow(ValidationError);
+      expect(() => h.stores.decisions.request(waiverRequest(s, target, revision.id, { resolutionPolicy: "use_default_after_deadline", deadlineAt: "2026-02-01T00:00:00.000Z" }))).toThrow(ValidationError);
+      expect(() => h.stores.decisions.request(waiverRequest(s, target, "reqr_000000000000000000000000"))).toThrow(/RequirementRevision/);
+      expect(() => h.stores.decisions.request(waiverRequest(s, "req_000000000000000000000000", revision.id))).toThrow(/Requirement/);
       expect(h.stores.requirements.get(target).status).toBe("open");
       // The operator resolves it; only then does the status change apply and link the Decision.
       h.stores.decisions.resolve(openWaiver.id, { resolvedBy: "operator", chosenOptionId: "waive", rationale: "acceptable risk", artifactIds: [] });
@@ -150,18 +158,23 @@ describe("decisions", () => {
     const h = openHarness();
     try {
       const s = seedRun(h);
-      const first = h.stores.decisions.request(waiverRequest(s, "req_000000000000000000000000" as never, { kind: "operator_choice", affects: { requirementIds: [], taskIds: [], planNodeIds: [s.root.id] }, resolutionPolicy: "use_default_after_deadline", deadlineAt: "2026-01-02T00:00:00.000Z" }));
+      const first = h.stores.decisions.request(waiverRequest(s, "req_000000000000000000000000" as never, "reqr_000000000000000000000000", { kind: "operator_choice", affects: { requirementIds: [], taskIds: [], planNodeIds: [s.root.id] }, resolutionPolicy: "use_default_after_deadline", recommendedOptionId: "waive", deadlineAt: "2026-01-02T00:00:00.000Z" }));
       const resolved = h.stores.decisions.resolve(first.id, { resolvedBy: "policy:use_default_after_deadline", chosenOptionId: "waive", rationale: null, artifactIds: [] });
       expect(resolved.status).toBe("resolved");
       expect(h.ctx.journal.read({ conversationId: s.conversation.id, type: "decision.resolved" })).toHaveLength(1);
-      expect(() => h.stores.decisions.resolve(first.id, { resolvedBy: "operator", chosenOptionId: "keep", rationale: null, artifactIds: [] })).toThrow(ValidationError);
-      const second = h.stores.decisions.request(waiverRequest(s, "req_000000000000000000000000" as never, { kind: "operator_choice", affects: { requirementIds: [], taskIds: [], planNodeIds: [] }, supersedesDecisionId: first.id }));
-      expect(h.stores.decisions.get(first.id).status).toBe("superseded");
-      expect(h.stores.decisions.get(first.id).supersededByDecisionId).toBe(second.id);
+      expect(() => h.stores.decisions.resolve(first.id, { resolvedBy: "operator", chosenOptionId: "deny", rationale: null, artifactIds: [] })).toThrow(ValidationError);
+      const second = h.stores.decisions.request(waiverRequest(s, "req_000000000000000000000000" as never, "reqr_000000000000000000000000", { kind: "operator_choice", affects: { requirementIds: [], taskIds: [], planNodeIds: [] }, supersedesDecisionId: first.id }));
+      // The superseded Decision keeps the resolution it had (the policy's), and is never resolved again.
+      expect(h.stores.decisions.get(first.id)).toMatchObject({ status: "superseded", supersededByDecisionId: second.id, supersessionReason: "superseding_decision", resolution: { resolvedBy: "policy:use_default_after_deadline", chosenOptionId: "waive" } });
       expect(h.stores.decisions.get(second.id).supersedesDecisionId).toBe(first.id);
-      expect(() => h.stores.decisions.request(waiverRequest(s, "req_000000000000000000000000" as never, { kind: "operator_choice", affects: { requirementIds: [], taskIds: [], planNodeIds: [] }, supersedesDecisionId: first.id }))).toThrow(ConflictError);
+      expect(h.ctx.journal.read({ conversationId: s.conversation.id, type: "decision.superseded" }).map((e) => e.payload)).toEqual([{ decisionId: first.id, supersededByDecisionId: second.id, reason: "superseding_decision" }]);
+      expect(() => h.stores.decisions.request(waiverRequest(s, "req_000000000000000000000000" as never, "reqr_000000000000000000000000", { kind: "operator_choice", affects: { requirementIds: [], taskIds: [], planNodeIds: [] }, supersedesDecisionId: first.id }))).toThrow(ConflictError);
+      // A superseded Decision never changes again, and only an open requirement_waiver is superseded by the runtime without a superseding Decision.
+      expect(() => h.database.sqlite.prepare("UPDATE decisions SET status = 'open', supersession_reason = NULL, superseded_by_decision_id = NULL WHERE id = ?").run(first.id)).toThrow(/superseded/);
+      expect(() => h.stores.decisions.supersede(second.id, "requirement_waiver_stale")).toThrow(/requirement_waiver/);
       expect(h.stores.decisions.listOpen(s.conversation.id).map((d) => d.id)).toEqual([second.id]);
-      expect(() => h.database.sqlite.prepare("UPDATE decisions SET question = 'edited' WHERE id = ?").run(first.id)).toThrow(/immutable/);
+      expect(() => h.database.sqlite.prepare("UPDATE decisions SET question = 'edited' WHERE id = ?").run(first.id)).toThrow(/immutable|never changes/);
+      expect(() => h.database.sqlite.prepare("UPDATE decisions SET question = 'edited' WHERE id = ?").run(second.id)).toThrow(/immutable/);
     } finally {
       h.close();
     }
@@ -173,8 +186,8 @@ describe("decisions", () => {
       const s = seedRun(h);
       const other = seedRun(h);
       const foreign = seedRequirements(h, other);
-      expect(() => h.stores.decisions.request(waiverRequest(s, foreign.leafIds[0]!))).toThrow(InvariantViolationError);
-      expect(() => h.stores.decisions.request(waiverRequest(s, "req_000000000000000000000000" as never, { kind: "operator_choice", affects: { requirementIds: [], taskIds: [], planNodeIds: [other.root.id] } }))).toThrow(InvariantViolationError);
+      expect(() => h.stores.decisions.request(waiverRequest(s, foreign.leafIds[0]!, foreign.revision.id))).toThrow(InvariantViolationError);
+      expect(() => h.stores.decisions.request(waiverRequest(s, "req_000000000000000000000000" as never, "reqr_000000000000000000000000", { kind: "operator_choice", affects: { requirementIds: [], taskIds: [], planNodeIds: [other.root.id] } }))).toThrow(InvariantViolationError);
     } finally {
       h.close();
     }

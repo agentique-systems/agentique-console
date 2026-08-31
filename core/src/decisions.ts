@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { addedAllocationSchema, BUDGET_INCREASE_PARTITIONS, type Allocation, type BudgetIncreasePartition } from "./budgets.ts";
-import { ValidationError } from "./errors.ts";
+import { DomainError, ValidationError } from "./errors.ts";
 import type {
   ArtifactId,
   AttemptId,
@@ -11,6 +11,7 @@ import type {
   InvocationId,
   PlanNodeId,
   RequirementId,
+  RequirementRevisionId,
   RunId,
   SnapshotId,
   TaskId,
@@ -42,6 +43,21 @@ export const OPERATOR_ONLY_DECISION_KINDS = [
   "budget_increase",
 ] as const satisfies readonly DecisionKind[];
 
+/**
+ * The only Decision kinds an agent may request through the `request_decision`
+ * runtime tool (execution-model §8.2). Every other kind has one owner and one
+ * path: `orchestrator_choice` its dedicated recording path,
+ * `side_effect_approval` tool-call authorization, `signoff` Run completion,
+ * `publish` the publication service, `budget_increase` the Budget Increase
+ * service. None of them is ever requested by a model.
+ */
+export const REQUESTABLE_DECISION_KINDS = ["operator_choice", "requirement_waiver"] as const satisfies readonly DecisionKind[];
+export type RequestableDecisionKind = (typeof REQUESTABLE_DECISION_KINDS)[number];
+
+export function isRequestableDecisionKind(kind: string): kind is RequestableDecisionKind {
+  return (REQUESTABLE_DECISION_KINDS as readonly string[]).includes(kind);
+}
+
 export const RESOLUTION_POLICIES = ["operator_required", "use_default_after_deadline"] as const;
 export type ResolutionPolicy = (typeof RESOLUTION_POLICIES)[number];
 
@@ -50,6 +66,19 @@ export type DecisionStatus = (typeof DECISION_STATUSES)[number];
 
 export const DECISION_RESOLVERS = ["operator", "orchestrator", "policy:use_default_after_deadline"] as const;
 export type DecisionResolver = (typeof DECISION_RESOLVERS)[number];
+
+/**
+ * Why a Decision is `superseded` (execution-model §8.2): a later Decision
+ * superseded it by id (`superseding_decision`, that Decision recorded in
+ * `supersededByDecisionId`), or the runtime retired an open
+ * `requirement_waiver` whose pinned Requirement became stale — retired,
+ * satisfied, no longer a current leaf, or pinned to a revision that is no
+ * longer current — before the operator resolved it
+ * (`requirement_waiver_stale`; no superseding Decision exists). A superseded
+ * Decision is never resolved.
+ */
+export const DECISION_SUPERSESSION_REASONS = ["superseding_decision", "requirement_waiver_stale"] as const;
+export type DecisionSupersessionReason = (typeof DECISION_SUPERSESSION_REASONS)[number];
 
 export type DecisionRequester =
   | { kind: "operator" }
@@ -105,8 +134,15 @@ export type PublishOption = (typeof PUBLISH_OPTIONS)[number];
 export const BUDGET_INCREASE_OPTIONS = ["approve", "deny"] as const;
 export type BudgetIncreaseOption = (typeof BUDGET_INCREASE_OPTIONS)[number];
 
+/** The two fixed options of a `requirement_waiver` Decision (execution-model §8.1, §8.2); a requester never defines waiver options. */
+export const REQUIREMENT_WAIVER_OPTIONS = ["waive", "deny"] as const;
+export type RequirementWaiverOption = (typeof REQUIREMENT_WAIVER_OPTIONS)[number];
+
+/** The bound on the Evidence Artifacts a waiver request may name. */
+export const REQUIREMENT_WAIVER_MAX_EVIDENCE = 20;
+
 /** Decision kinds whose canonical subject is a typed record (`subject.kind` equals the Decision kind). */
-export const SUBJECT_DECISION_KINDS = ["side_effect_approval", "signoff", "publish", "budget_increase"] as const satisfies readonly DecisionKind[];
+export const SUBJECT_DECISION_KINDS = ["side_effect_approval", "signoff", "publish", "budget_increase", "requirement_waiver"] as const satisfies readonly DecisionKind[];
 
 /**
  * The canonical subject of a Decision that concerns one exact runtime fact.
@@ -124,9 +160,14 @@ export const SUBJECT_DECISION_KINDS = ["side_effect_approval", "signoff", "publi
  * facts. A `budget_increase` names the exact operator-authorized growth of
  * one Run's Budget (execution-model §7.6): the Run, the partition, and the
  * exact added cost, tokens, and Attempts; resolving it with `approve`
- * records exactly one Budget Increase of exactly those quantities. Subjects
- * carry ids, digests, and closed values only, so they may travel in Events
- * and views.
+ * records exactly one Budget Increase of exactly those quantities. A
+ * `requirement_waiver` pins the one leaf Requirement it asks the operator
+ * to waive at the Requirement revision that was current when the root
+ * Orchestrator requested it (execution-model §8.1, §8.2), with the Evidence
+ * Artifacts the requester offered; resolving it with `waive` sets exactly
+ * that Requirement `waived`, and a Requirement that became stale before the
+ * operator answered supersedes the Decision instead. Subjects carry ids,
+ * digests, and closed values only, so they may travel in Events and views.
  */
 export type DecisionSubject =
   | {
@@ -163,6 +204,15 @@ export type DecisionSubject =
       partition: BudgetIncreasePartition;
       /** The exact quantities the increase adds; non-negative, at least one positive. */
       added: Allocation;
+    }
+  | {
+      kind: "requirement_waiver";
+      runId: RunId;
+      requirementId: RequirementId;
+      /** The Requirement revision current when the waiver was requested; a waiver is never applied to a newer one. */
+      requirementRevisionId: RequirementRevisionId;
+      /** Evidence Artifacts of the Run the requester offered, by id, sorted; bounded. */
+      evidenceArtifactIds: ArtifactId[];
     };
 
 export const decisionSubjectSchema: z.ZodType<DecisionSubject> = z.discriminatedUnion("kind", [
@@ -202,6 +252,15 @@ export const decisionSubjectSchema: z.ZodType<DecisionSubject> = z.discriminated
     partition: z.enum(BUDGET_INCREASE_PARTITIONS),
     added: addedAllocationSchema,
   }),
+  z.strictObject({
+    kind: z.literal("requirement_waiver"),
+    runId: idSchema("run"),
+    requirementId: idSchema("requirement"),
+    requirementRevisionId: idSchema("requirementRevision"),
+    evidenceArtifactIds: uniqueIds(idSchema("artifact"))
+      .max(REQUIREMENT_WAIVER_MAX_EVIDENCE)
+      .refine((ids) => ids.every((id, i) => i === 0 || ids[i - 1]! < id), { message: "evidence Artifact ids are sorted" }),
+  }),
 ]);
 
 const OPTIONS_BY_SUBJECT_KIND: Readonly<Record<(typeof SUBJECT_DECISION_KINDS)[number], readonly string[]>> = {
@@ -209,10 +268,17 @@ const OPTIONS_BY_SUBJECT_KIND: Readonly<Record<(typeof SUBJECT_DECISION_KINDS)[n
   signoff: SIGNOFF_OPTIONS,
   publish: PUBLISH_OPTIONS,
   budget_increase: BUDGET_INCREASE_OPTIONS,
+  requirement_waiver: REQUIREMENT_WAIVER_OPTIONS,
 };
 
-/** A `side_effect_approval`, `signoff`, `publish`, or `budget_increase` Decision has exactly its typed subject, exactly its two stable options, and a Run; no other kind has a subject. */
-function subjectShape(decision: { kind: DecisionKind; subject: DecisionSubject | null; options: DecisionOption[]; runId: RunId | null; resolutionPolicy: ResolutionPolicy }, ctx: z.RefinementCtx): void {
+/**
+ * A `side_effect_approval`, `signoff`, `publish`, `budget_increase`, or
+ * `requirement_waiver` Decision has exactly its typed subject, exactly its
+ * two stable options, and a Run; no other kind has a subject. An Invocation
+ * requests only the requestable kinds (the runtime records a
+ * `side_effect_approval` on an Invocation's behalf).
+ */
+function subjectShape(decision: { kind: DecisionKind; subject: DecisionSubject | null; options: DecisionOption[]; runId: RunId | null; resolutionPolicy: ResolutionPolicy; affects: DecisionAffects; requestedBy: DecisionRequester }, ctx: z.RefinementCtx): void {
   if ((SUBJECT_DECISION_KINDS as readonly DecisionKind[]).includes(decision.kind)) {
     const expected = OPTIONS_BY_SUBJECT_KIND[decision.kind as (typeof SUBJECT_DECISION_KINDS)[number]];
     if (decision.subject === null || decision.subject.kind !== decision.kind) ctx.addIssue({ code: "custom", path: ["subject"], message: `a ${decision.kind} names its ${decision.kind} subject` });
@@ -221,14 +287,20 @@ function subjectShape(decision: { kind: DecisionKind; subject: DecisionSubject |
       ctx.addIssue({ code: "custom", path: ["options"], message: `a ${decision.kind} offers exactly ${expected.join(" and ")}` });
     }
     if (decision.runId === null) ctx.addIssue({ code: "custom", path: ["runId"], message: `a ${decision.kind} belongs to a Run` });
-    if ((decision.kind === "signoff" || decision.kind === "publish" || decision.kind === "budget_increase") && decision.resolutionPolicy !== "operator_required") {
+    if (decision.kind !== "side_effect_approval" && decision.resolutionPolicy !== "operator_required") {
       ctx.addIssue({ code: "custom", path: ["resolutionPolicy"], message: `a ${decision.kind} is always operator_required` });
     }
     if (decision.subject !== null && decision.subject.kind !== "side_effect_approval" && decision.subject.kind === decision.kind && decision.subject.runId !== decision.runId) {
       ctx.addIssue({ code: "custom", path: ["subject"], message: `a ${decision.kind} subject names the Decision's own Run` });
     }
+    if (decision.subject !== null && decision.subject.kind === "requirement_waiver" && (decision.affects.requirementIds.length !== 1 || decision.affects.requirementIds[0] !== decision.subject.requirementId)) {
+      ctx.addIssue({ code: "custom", path: ["affects", "requirementIds"], message: "a requirement_waiver affects exactly the Requirement its subject pins" });
+    }
   } else if (decision.subject !== null) {
     ctx.addIssue({ code: "custom", path: ["subject"], message: `a ${decision.kind} Decision has no subject` });
+  }
+  if (decision.requestedBy.kind === "invocation" && !isRequestableDecisionKind(decision.kind) && decision.kind !== "side_effect_approval") {
+    ctx.addIssue({ code: "custom", path: ["requestedBy"], message: `an Invocation never requests a ${decision.kind} Decision` });
   }
 }
 
@@ -263,12 +335,15 @@ export interface Decision {
   affects: DecisionAffects;
   deadlineAt: Timestamp | null;
   activationCondition: ActivationCondition | null;
-  /** The canonical subject; present exactly for `side_effect_approval`. */
+  /** The canonical subject; present exactly for the subject kinds. */
   subject: DecisionSubject | null;
   resolution: DecisionResolution | null;
   /** The earlier Decision this one supersedes, when it was recorded as a supersession. */
   supersedesDecisionId: DecisionId | null;
+  /** The later Decision that superseded this one; set exactly for the `superseding_decision` reason. */
   supersededByDecisionId: DecisionId | null;
+  /** Why the Decision is superseded; set exactly when it is. */
+  supersessionReason: DecisionSupersessionReason | null;
   createdAt: Timestamp;
 }
 
@@ -363,16 +438,25 @@ export const decisionSchema: z.ZodType<Decision> = z
     resolution: decisionResolutionSchema.nullable(),
     supersedesDecisionId: idSchema("decision").nullable(),
     supersededByDecisionId: idSchema("decision").nullable(),
+    supersessionReason: z.enum(DECISION_SUPERSESSION_REASONS).nullable(),
     createdAt: timestampSchema,
   })
   .superRefine(subjectShape)
-  .refine((d) => (d.status === "open") === (d.resolution === null), {
-    message: "an open Decision has no resolution; a resolved or superseded one does",
+  .refine((d) => (d.status === "open" ? d.resolution === null : d.status === "resolved" ? d.resolution !== null : true), {
+    message: "an open Decision has no resolution; a resolved one has; a superseded one keeps the resolution it had, if any",
     path: ["resolution"],
   })
-  .refine((d) => (d.status === "superseded") === (d.supersededByDecisionId !== null), {
-    message: "supersededByDecisionId is set exactly when the Decision is superseded",
+  .refine((d) => (d.status === "superseded") === (d.supersessionReason !== null), {
+    message: "supersessionReason is set exactly when the Decision is superseded",
+    path: ["supersessionReason"],
+  })
+  .refine((d) => (d.supersessionReason === "superseding_decision") === (d.supersededByDecisionId !== null), {
+    message: "supersededByDecisionId is set exactly when a later Decision superseded this one",
     path: ["supersededByDecisionId"],
+  })
+  .refine((d) => d.supersessionReason !== "requirement_waiver_stale" || d.kind === "requirement_waiver", {
+    message: "only a requirement_waiver is superseded as stale",
+    path: ["supersessionReason"],
   });
 
 export type DecisionResolutionInput = Omit<DecisionResolution, "resolvedAt">;
@@ -462,6 +546,54 @@ export function budgetIncreaseSubjectOf(decision: Pick<Decision, "id" | "kind" |
   return decision.subject;
 }
 
+/** The typed subject of a `requirement_waiver` Decision; a Decision of another kind (or without one) is an invariant violation. */
+export function waiverSubjectOf(decision: Pick<Decision, "id" | "kind" | "subject">): Extract<DecisionSubject, { kind: "requirement_waiver" }> {
+  if (decision.kind !== "requirement_waiver" || decision.subject === null || decision.subject.kind !== "requirement_waiver") {
+    throw new ValidationError(`Decision ${decision.id} is not a requirement_waiver Decision with its subject`, { decisionId: decision.id, kind: decision.kind });
+  }
+  return decision.subject;
+}
+
 export function isOperatorOnlyDecisionKind(kind: DecisionKind): boolean {
   return (OPERATOR_ONLY_DECISION_KINDS as readonly DecisionKind[]).includes(kind);
+}
+
+/** Whether a Decision was requested by an Invocation through `request_decision`: a requestable kind whose requester is an Invocation. */
+export function isAgentRequestedDecision(decision: Pick<Decision, "kind" | "requestedBy">): boolean {
+  return decision.requestedBy.kind === "invocation" && isRequestableDecisionKind(decision.kind);
+}
+
+/**
+ * The closed reasons the Decision request service refuses to resolve an
+ * agent-requested Decision (execution-model §8.2); a refusal writes nothing.
+ */
+export const DECISION_REQUEST_REFUSAL_CODES = [
+  /** The Decision does not exist, was not requested by an Invocation, or is not one of the requestable kinds. */
+  "decision_not_requested",
+  /** The chosen option is not one of the Decision's options. */
+  "option_invalid",
+  /** The Decision is already resolved with another option, or superseded. */
+  "conflicting_resolution",
+  /** A `requirement_waiver` resolution records the operator's rationale. */
+  "rationale_required",
+  /** An operator resolution needs an operator actor. */
+  "operator_required",
+  /** The Decision's Run ended; nothing is resolved for a terminal Run. */
+  "run_terminal",
+  /** A resolution names an Artifact that does not belong to the Decision's Run. */
+  "evidence_invalid",
+  /** A `use_default_after_deadline` Decision is not yet due: its deadline has not passed and its activation condition is not true. */
+  "not_due",
+  /** The Decision's rows disagree with what a resolution needs (a missing subject, a requester that is not blocked on it). */
+  "boundary_inconsistent",
+] as const;
+export type DecisionRequestRefusalCode = (typeof DECISION_REQUEST_REFUSAL_CODES)[number];
+
+export class DecisionRequestRefusedError extends DomainError {
+  readonly refusal: DecisionRequestRefusalCode;
+
+  constructor(refusal: DecisionRequestRefusalCode, message: string, details: Record<string, unknown> = {}) {
+    super("conflict", message, { refusal, ...details });
+    this.refusal = refusal;
+  }
 }

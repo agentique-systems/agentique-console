@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { allocationSchema, FINAL_RESERVE_USES, type Allocation, type FinalReserveUse } from "./budgets.ts";
 import { completionConditionSchema, finalSynthesisResultSchema, type CompletionCondition, type FinalSynthesisResult } from "./completion.ts";
-import { DECISION_KINDS, type DecisionKind } from "./decisions.ts";
+import { DECISION_KINDS, DECISION_RESOLVERS, type Decision, type DecisionKind, type DecisionResolver } from "./decisions.ts";
 import { ValidationError } from "./errors.ts";
 import { handoffEndpointSchema, HANDOFF_MAX_SUMMARY_LENGTH, type HandoffEndpoint } from "./handoffs.ts";
 import type {
@@ -421,7 +421,10 @@ export interface Invocation {
   status: InvocationStatus;
   waitReason: InvocationWaitReason | null;
   failureReason: InvocationFailureReason | null;
-  /** The open `side_effect_approval` Decision that ended the Invocation `blocked`; set exactly then. */
+  /**
+   * The open Decision that ended the Invocation `blocked`; set exactly then: the `side_effect_approval` of an intercepted
+   * call, or the `operator_choice` / `requirement_waiver` the Invocation itself requested through `request_decision`.
+   */
   blockedByDecisionId: DecisionId | null;
   result: InvocationResult | null;
   workspaceCleanup: WorkspaceCleanupState;
@@ -657,6 +660,8 @@ export const ATTEMPT_FAILURE_CLASSES = [
   "allocation_exhausted",
   "interrupted",
   "tool_failure",
+  /** The Attempt committed an accepted `request_decision`: the logical turn ended there whatever the provider did afterwards (execution-model §8.2). */
+  "decision_requested",
 ] as const;
 export type AttemptFailureClass = (typeof ATTEMPT_FAILURE_CLASSES)[number];
 
@@ -718,6 +723,8 @@ export const RETRY_REFUSED_REASONS = [
   "cancelled",
   "tool_failure_retried",
   "approval_required",
+  /** A blocking Decision was durably requested by this Invocation; the continuation is a successor Invocation, never another Attempt. */
+  "decision_requested",
 ] as const;
 export const RETRY_DECISION_REASONS = [...RETRY_PERMITTED_REASONS, ...RETRY_REFUSED_REASONS] as const;
 export type RetryPermittedReason = (typeof RETRY_PERMITTED_REASONS)[number];
@@ -1013,7 +1020,23 @@ export interface FinalEvaluationFact {
 export type ManifestInput =
   | { kind: "operator_message"; conversationMessageId: ConversationMessageId; content: string }
   | { kind: "node_result"; planNodeId: PlanNodeId; status: PlanNodeStatus; outputArtifactIds: ArtifactId[] }
-  | { kind: "decision_resolution"; decisionId: DecisionId }
+  /**
+   * The resolved (or superseded) Decision a successor continues on (execution-model §8.2): only the bounded canonical
+   * semantics needed to continue — the Decision's identity and kind, its status, the original bounded question, the
+   * selected option with its label and bounded description when resolved, who resolved it, and, for a waiver, the pinned
+   * Requirement and revision with the waiver outcome. Never the predecessor's transcript, provider messages, manifest,
+   * unselected option narratives, Event history, raw call input, or any unrelated Decision.
+   */
+  | {
+      kind: "decision_resolution";
+      decisionId: DecisionId;
+      decisionKind: DecisionKind;
+      status: "resolved" | "superseded";
+      question: string;
+      resolvedBy: DecisionResolver | null;
+      selected: { optionId: string; label: string; description: string | null } | null;
+      waiver: { requirementId: RequirementId; requirementRevisionId: RequirementRevisionId; outcome: "waived" | "denied" | "superseded" } | null;
+    }
   | {
       /** The resolved `side_effect_approval` Decision that ended the predecessor `blocked`: the successor's typed logical input. */
       kind: "side_effect_approval_resolution";
@@ -1096,7 +1119,20 @@ export type ManifestInput =
 export const manifestInputSchema: z.ZodType<ManifestInput> = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("operator_message"), conversationMessageId: idSchema("conversationMessage"), content: z.string().min(1) }),
   z.strictObject({ kind: z.literal("node_result"), planNodeId: idSchema("planNode"), status: z.enum(PLAN_NODE_STATUSES), outputArtifactIds: uniqueIds(idSchema("artifact")) }),
-  z.strictObject({ kind: z.literal("decision_resolution"), decisionId: idSchema("decision") }),
+  z
+    .strictObject({
+      kind: z.literal("decision_resolution"),
+      decisionId: idSchema("decision"),
+      decisionKind: z.enum(DECISION_KINDS),
+      status: z.enum(["resolved", "superseded"]),
+      question: nonEmptyString,
+      resolvedBy: z.enum(DECISION_RESOLVERS).nullable(),
+      selected: z.strictObject({ optionId: nonEmptyString, label: nonEmptyString, description: nonEmptyString.nullable() }).nullable(),
+      waiver: z.strictObject({ requirementId: idSchema("requirement"), requirementRevisionId: idSchema("requirementRevision"), outcome: z.enum(["waived", "denied", "superseded"]) }).nullable(),
+    })
+    .refine((i) => (i.status === "resolved") === (i.resolvedBy !== null && i.selected !== null), { message: "a resolved Decision names its resolver and selected option; a superseded one names neither", path: ["selected"] })
+    .refine((i) => (i.decisionKind === "requirement_waiver") === (i.waiver !== null), { message: "a requirement_waiver carries its waiver facts; no other kind does", path: ["waiver"] })
+    .refine((i) => i.waiver === null || (i.status === "superseded" ? i.waiver.outcome === "superseded" : i.waiver.outcome !== "superseded"), { message: "the waiver outcome agrees with the Decision's status", path: ["waiver"] }),
   z.strictObject({
     kind: z.literal("side_effect_approval_resolution"),
     decisionId: idSchema("decision"),
@@ -1190,6 +1226,33 @@ export const manifestInputSchema: z.ZodType<ManifestInput> = z.discriminatedUnio
     .refine((i) => i.round <= i.maxRounds, { message: "round is within maxRounds", path: ["round"] }),
   z.strictObject({ kind: z.literal("optimizer_feedback"), evaluationId: idSchema("evaluation"), round: positiveCount, verdict: z.enum(["fail", "inconclusive"]), evidence: z.array(evidenceSchema) }),
 ]);
+
+/**
+ * The typed `decision_resolution` input a successor receives for a resolved
+ * or superseded Decision, built from the canonical Decision alone
+ * (execution-model §8.2): bounded semantics, never the predecessor's
+ * manifest or transcript. An open Decision is an invariant violation.
+ */
+export function decisionResolutionInputOf(decision: Decision): Extract<ManifestInput, { kind: "decision_resolution" }> {
+  if (decision.status === "open") throw new ValidationError(`Decision ${decision.id} is open; a successor continues on a resolved or superseded Decision`, { decisionId: decision.id });
+  const resolution = decision.status === "resolved" ? decision.resolution : null;
+  const option = resolution === null ? null : (decision.options.find((o) => o.id === resolution.chosenOptionId) ?? null);
+  if (resolution !== null && option === null) throw new ValidationError(`Decision ${decision.id} resolved to ${resolution.chosenOptionId}, which is not one of its options`, { decisionId: decision.id });
+  const waiver =
+    decision.kind === "requirement_waiver" && decision.subject !== null && decision.subject.kind === "requirement_waiver"
+      ? { requirementId: decision.subject.requirementId, requirementRevisionId: decision.subject.requirementRevisionId, outcome: (resolution === null ? "superseded" : resolution.chosenOptionId === "waive" ? "waived" : "denied") as "waived" | "denied" | "superseded" }
+      : null;
+  return {
+    kind: "decision_resolution",
+    decisionId: decision.id,
+    decisionKind: decision.kind,
+    status: decision.status === "resolved" ? "resolved" : "superseded",
+    question: decision.question,
+    resolvedBy: resolution?.resolvedBy ?? null,
+    selected: option === null ? null : { optionId: option.id, label: option.label, description: option.description },
+    waiver,
+  };
+}
 
 /**
  * The explicit, complete list of inputs an Invocation receives
