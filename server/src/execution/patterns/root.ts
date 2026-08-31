@@ -38,11 +38,13 @@ import {
   ROOT_SOURCE_PATH,
   RUN_MACHINE,
   type Allocation,
+  type Decision,
   type DecisionId,
   type Evidence,
   type Gate,
   type Invocation,
   type InvocationId,
+  type InvocationPurpose,
   type ManifestInput,
   type PatternPlanNode,
   type RunId,
@@ -50,6 +52,8 @@ import {
   type TaskId,
   type Timestamp,
   approvalSubjectOf,
+  decisionResolutionInputOf,
+  isAgentRequestedDecision,
 } from "@agentique-console/core";
 import type { WriteOptions } from "../../persistence/stores/support.ts";
 import type { RunCompletionEngine } from "../completion.ts";
@@ -66,7 +70,7 @@ export type RootAdvice =
   | { kind: "settle"; invocationId: InvocationId; funded: boolean }
   /** The latest turn is a `gate_result` turn whose consequences (its Changeset, its remediation Tasks) are not yet applied; `funded` as for `settle`. */
   | { kind: "settle_remediation"; invocationId: InvocationId; funded: boolean }
-  /** The latest turn is blocked on an open `side_effect_approval` Decision. */
+  /** The latest turn is blocked on an open Decision: the `side_effect_approval` of its intercepted call, or the Decision it requested. */
   | { kind: "blocked"; invocationId: InvocationId; decisionId: DecisionId }
   /** The root is idle and these remediation Tasks of failed node_exit Gates await one batched `gate_result` turn; `funded` says the root can fund it now — directly or through the Allocation Extension its `extend` policy admits. */
   | { kind: "remediate"; taskIds: TaskId[]; funded: boolean }
@@ -133,7 +137,7 @@ export class RootNodeSupport {
     if (latest.status === "blocked") {
       const decision = blockingDecisionOf(stores, latest)!;
       // A resolved blocker implies a successor turn, which the root must be able to fund (directly or through an Allocation Extension).
-      return decision.status === "open" ? { kind: "blocked", invocationId: latest.id, decisionId: decision.id } : this.settleAdvice(latest, decision.status === "resolved" ? this.funded(runId) : true);
+      return decision.status === "open" ? { kind: "blocked", invocationId: latest.id, decisionId: decision.id } : this.settleAdvice(latest, decision.status === "resolved" || isAgentRequestedDecision(decision) ? this.funded(runId) : true);
     }
     if (latest.purpose === "gate_result") {
       // A gate_result turn ends its Tasks, never the Run: unsettled Tasks or an outstanding Changeset are its settlement.
@@ -258,7 +262,8 @@ export class RootNodeSupport {
       }
       if (turn.status === "blocked") {
         const decision = blockingDecisionOf(stores, turn)!;
-        if (decision.status !== "resolved" || decision.resolution === null || decision.subject === null) return { kind: "no_change" };
+        const successor = this.successorInputs(turn, decision);
+        if (successor === null) return { kind: "no_change" };
         if (stores.invocations.latestAtPosition(root.id, "orchestrator")?.id !== turn.id) return { kind: "no_change" };
         const unfunded = this.fund(root, "root_turn", options);
         if (unfunded !== null) return unfunded;
@@ -266,11 +271,11 @@ export class RootNodeSupport {
           runId,
           planNodeId: root.id,
           role: "orchestrator",
-          purpose: "decision_resolution",
+          purpose: successor.purpose,
           patternPosition: { kind: "orchestrator" },
           continuedFromInvocationId: turn.id,
           handoffIds: stores.invocations.getManifest(turn.id).content.handoffs.map((h) => h.handoffId),
-          inputs: [{ kind: "side_effect_approval_resolution", decisionId: decision.id, blockedInvocationId: turn.id, attemptId: approvalSubjectOf(decision).attemptId, tool: approvalSubjectOf(decision).tool, callDigest: approvalSubjectOf(decision).callDigest, callArtifactId: approvalSubjectOf(decision).callArtifactId, outcome: decision.resolution.chosenOptionId as "approve_once" | "deny" }],
+          inputs: successor.inputs,
           correlationId: options.correlationId ?? null,
           causationSeq: options.causationSeq ?? null,
         });
@@ -278,6 +283,29 @@ export class RootNodeSupport {
       }
       return { kind: "no_change" };
     });
+  }
+
+  /**
+   * The purpose and typed inputs of the successor a blocked turn's ended
+   * Decision implies, or `null` while nothing continues: an approval of the
+   * turn's intercepted call continues a plain turn as the `decision_resolution`
+   * turn (a `gate_result` turn as itself) with the approval resolution; a
+   * Decision the turn requested continues the same logical turn — the same
+   * purpose, its turn-defining inputs — with exactly one typed
+   * `decision_resolution` input, whether the Decision was resolved or
+   * superseded (a stale waiver). No relay turn is ever inserted.
+   */
+  private successorInputs(turn: Invocation, decision: Decision): { purpose: InvocationPurpose; inputs: ManifestInput[] } | null {
+    const previous = this.deps.stores.invocations.getManifest(turn.id).content.inputs;
+    if (isAgentRequestedDecision(decision)) {
+      if (decision.status === "open") return null;
+      const carried = previous.filter((i) => i.kind !== "decision_resolution" && i.kind !== "side_effect_approval_resolution");
+      return { purpose: turn.purpose, inputs: [...carried, decisionResolutionInputOf(decision)] };
+    }
+    if (decision.status !== "resolved" || decision.resolution === null || decision.subject === null) return null;
+    const approval: ManifestInput = { kind: "side_effect_approval_resolution", decisionId: decision.id, blockedInvocationId: turn.id, attemptId: approvalSubjectOf(decision).attemptId, tool: approvalSubjectOf(decision).tool, callDigest: approvalSubjectOf(decision).callDigest, callArtifactId: approvalSubjectOf(decision).callArtifactId, outcome: decision.resolution.chosenOptionId as "approve_once" | "deny" };
+    if (turn.purpose === "gate_result") return { purpose: "gate_result", inputs: [...previous.filter((i) => i.kind === "gate_result"), approval] };
+    return { purpose: "decision_resolution", inputs: [approval] };
   }
 
   /** The settlement of a `gate_result` turn: its Changeset first (external, through `settle`), then its Tasks in one transaction. */
@@ -301,20 +329,20 @@ export class RootNodeSupport {
     if (turn.status === "blocked") {
       const decision = blockingDecisionOf(stores, turn)!;
       if (decision.status === "open") return { kind: "no_change" };
-      if (decision.status !== "resolved" || decision.resolution === null || decision.subject === null) return this.endTasks(turn, tasks, options);
+      const successor = this.successorInputs(turn, decision);
+      if (successor === null) return this.endTasks(turn, tasks, options);
       if (this.latestTurn(runId)?.id !== turn.id) return { kind: "no_change" };
       const unfunded = this.fund(this.rootOf(runId), "gate_remediation", options);
       if (unfunded !== null) return unfunded;
-      const previous = stores.invocations.getManifest(turn.id).content.inputs.filter((i) => i.kind === "gate_result");
       const prepared = preparation.prepare({
         runId,
         planNodeId: this.rootOf(runId).id,
         role: "orchestrator",
-        purpose: "gate_result",
+        purpose: successor.purpose,
         patternPosition: { kind: "orchestrator" },
         continuedFromInvocationId: turn.id,
         handoffIds: stores.invocations.getManifest(turn.id).content.handoffs.map((h) => h.handoffId),
-        inputs: [...previous, { kind: "side_effect_approval_resolution", decisionId: decision.id, blockedInvocationId: turn.id, attemptId: approvalSubjectOf(decision).attemptId, tool: approvalSubjectOf(decision).tool, callDigest: approvalSubjectOf(decision).callDigest, callArtifactId: approvalSubjectOf(decision).callArtifactId, outcome: decision.resolution.chosenOptionId as "approve_once" | "deny" }],
+        inputs: successor.inputs,
         correlationId: options.correlationId ?? null,
         causationSeq: options.causationSeq ?? null,
       });

@@ -61,6 +61,7 @@ import {
   type Timestamp,
   approvalSubjectOf,
   decisionResolutionInputOf,
+  isAgentRequestedDecision,
 } from "@agentique-console/core";
 import type { PersistenceContext } from "../../persistence/context.ts";
 import type { Stores } from "../../persistence/stores/index.ts";
@@ -334,18 +335,23 @@ export class PatternNodeSupport {
   }
 
   /**
-   * The successor of a terminal Invocation blocked on a now-resolved
-   * Decision, at the same position, continuing from it with the typed
-   * resolution input (plus `extraInputs`, e.g. a route selection) and its
-   * predecessor's Handoffs, on a fresh reservation and worktree. A
-   * superseded Decision without a resolution fails the node as blocked.
+   * The successor of a terminal Invocation blocked on a now-ended Decision,
+   * at the same position, with the same role, purpose, and Task ownership,
+   * continuing from it with exactly one typed resolution input (plus
+   * `extraInputs`, e.g. a route selection or the turn-defining inputs of a
+   * logical turn) and its predecessor's Handoffs, on a fresh reservation and
+   * worktree. A Decision the predecessor requested continues whether it was
+   * resolved or superseded (a stale waiver); an open one prepares nothing;
+   * any other superseded Decision without a resolution fails the node as
+   * blocked.
    */
   prepareSuccessor(node: PatternPlanNode, predecessor: Invocation, decision: Decision, extraInputs: ManifestInput[], options: WriteOptions): PatternRunnerOutcome {
     const { stores } = this.deps;
     const position = predecessor.patternPosition!;
-    if (decision.status !== "resolved" || decision.resolution === null) return this.failNow(node, "result_blocked", options);
+    if (decision.status === "open") return { kind: "no_change" };
+    if (!isAgentRequestedDecision(decision) && (decision.status !== "resolved" || decision.resolution === null)) return this.failNow(node, "result_blocked", options);
     const resolution: ManifestInput =
-      predecessor.status === "blocked" && decision.kind === "side_effect_approval" && decision.subject !== null
+      predecessor.status === "blocked" && decision.kind === "side_effect_approval" && decision.subject !== null && decision.resolution !== null
         ? { kind: "side_effect_approval_resolution", decisionId: decision.id, blockedInvocationId: predecessor.id, attemptId: approvalSubjectOf(decision).attemptId, tool: approvalSubjectOf(decision).tool, callDigest: approvalSubjectOf(decision).callDigest, callArtifactId: approvalSubjectOf(decision).callArtifactId, outcome: decision.resolution.chosenOptionId as "approve_once" | "deny" }
         : decisionResolutionInputOf(decision);
     const handoffIds = stores.invocations.getManifest(predecessor.id).content.handoffs.map((h) => h.handoffId);
@@ -615,7 +621,8 @@ export class SequentialStepEngine {
     return this.support.inspectWaiting(node, {
       blocked: latest !== null && blockedOn(this.deps.stores, latest) !== null ? [latest] : [],
       selectorDecision: null,
-      nextPosition: latest === null ? this.positions(node)[0]! : this.nextPosition(node, latest),
+      // A blocked position continues at itself: its successor is what a `budget` wait must fund, never the position after it.
+      nextPosition: latest === null ? this.positions(node)[0]! : blockedOn(this.deps.stores, latest) !== null ? latest.patternPosition! : this.nextPosition(node, latest),
       capacity: latest,
       conflicted: latest === null ? [] : [latest],
     });

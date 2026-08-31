@@ -412,10 +412,13 @@ export class RunScheduler {
       actions.push(completion.kind === "begin" ? { kind: "begin_run_completion", completionRequestId: completion.completionRequestId } : { kind: "complete_run_verification", completionRequestId: completion.completionRequestId });
     }
 
-    // Run-level: resume before any other action; wait only when nothing can proceed and nothing is running.
+    // Run-level: resume before any other action; wait only when nothing can proceed and nothing is running. A waiting Run whose
+    // wait changed nature — a resolved Decision whose successor the root cannot fund now waits on budget — records the exact reason.
     if (run.status === "waiting" && actions.length > 0) actions.unshift({ kind: "resume_run", reason: run.waitReason! });
-    if (actions.length === 0 && run.status === "running" && waiting.length > 0 && inFlight.length === 0 && limited.length === 0) {
-      actions.push({ kind: "wait_run", reason: RUN_WAIT_REASONS_BY_NODE[waiting[0]!.reason] });
+    if (actions.length === 0 && waiting.length > 0 && inFlight.length === 0 && limited.length === 0) {
+      const reason = RUN_WAIT_REASONS_BY_NODE[waiting[0]!.reason];
+      if (run.status === "running") actions.push({ kind: "wait_run", reason });
+      else if (run.status === "waiting" && run.waitReason !== reason) actions.push({ kind: "resume_run", reason: run.waitReason! }, { kind: "wait_run", reason });
     }
     const stop: SchedulerProjection["stop"] = waiting.length > 0 || inFlight.length > 0 || limited.length > 0 || wakeAt !== null ? "waiting" : "quiescent";
     return { ...base, nodes, actions, waiting, remediating, limited, inFlight, wakeAt, concurrency: { active, max }, completion, stop };
