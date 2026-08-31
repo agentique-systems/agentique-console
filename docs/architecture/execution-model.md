@@ -1728,7 +1728,7 @@ mechanisms; there is no trust flag.
 | `update_task` (Evidence, output Artifacts on own Tasks) | yes | own node | own Task | no |
 | `create_tasks` | yes | no | no | no |
 | `propose_tasks` | no | own node | no | no |
-| `request_decision` (any kind except `orchestrator_choice` and `budget_increase`; `requirement_waiver` is always `operator_required`) | yes | yes | yes | no |
+| `request_decision` (`operator_choice`; `requirement_waiver` from the root Orchestrator only, always `operator_required`; every other kind has its own owner, §8.2) | yes | yes | yes | no |
 | `record_decision` (kind `orchestrator_choice` only; cannot resolve any other kind) | yes | no | no | no |
 | `propose_requirements` | yes | no | no | no |
 | `revise_execution_plan` (source form only; validated and compiled by the runtime) | yes | no | no | no |
@@ -1754,20 +1754,24 @@ particular `record_decision` cannot create or resolve a
 3. the tools the runtime **can execute** in this phase — the handler
    bindings in `core/src/runtime-tools.ts`: `propose_tasks` and the
    cancelling `update_task`, for a Coordinator with purpose `decompose`
-   or `replan`; and `request_completion`, for the root Orchestrator's
+   or `replan`; `request_completion`, for the root Orchestrator's
    ordinary turns (every Orchestrator purpose but `final_synthesis`) and
-   for no other role, node, or purpose; and
+   for no other role, node, or purpose; and `request_decision`, for an
+   Orchestrator turn of any purpose but `final_synthesis`, a Coordinator's
+   `decompose`, `replan`, and `synthesize` turns, and a Worker's `step` or
+   `task` — never an Evaluator, a Gate evaluation, a Run completion
+   evaluation, or a final-synthesis turn; and
 4. the **effective callable set** exposed to a provider execution: the
    intersection of the manifest's tools, the runtime handlers, and the
    validity of the caller's role and purpose. A tool that is permitted
-   but not executable (`request_decision`, every read tool, a Worker's
-   `update_task`) is not exposed as callable.
+   but not executable (every read tool, a Worker's `update_task`) is not
+   exposed as callable.
 
 The Attempt executor binds one `RuntimeToolCallPort` (`tools`, `call`)
 per Attempt, fixed to that Attempt, Invocation, manifest, role, purpose,
 Run, and Plan Node; the adapter receives the port and nothing else. A
 call is a closed discriminated request (`propose_tasks`, `update_task`,
-`request_completion`),
+`request_completion`, `request_decision`),
 parsed strictly, canonicalized (sorted-key JSON of `{ tool, input }`),
 bounded at 65,536 bytes, and digested; its outcome is a closed union —
 `accepted` (call id, digest, `replayed`, the tool's typed result),
@@ -1782,12 +1786,72 @@ predecessors) by digest, otherwise runs the handler and appends one
 first committing Attempt, tool, digest, the safe result, and the commit
 time — with one `runtime_tool_call.committed` Event. The row set is
 unique per Invocation, tool, and digest, and holds at most one accepted
-`propose_tasks` per Invocation; rejected calls write nothing; rows are
-append-only (database triggers). Retries and approval successors
-therefore never duplicate an accepted proposal, and the raw call input
-never appears in an Event, diagnostic, or manifest. Decisions are not
-touched by the runtime-tool executor: `request_decision` remains
-permitted by role and not executable in this phase.
+`propose_tasks` and at most one accepted `request_decision` per
+Invocation; rejected calls write nothing; rows are append-only (database
+triggers). Retries and approval successors therefore never duplicate an
+accepted proposal or request, and the raw call input never appears in an
+Event, diagnostic, or manifest. The executor creates a Decision only
+through the decision-request service (`request_decision`, below) and never
+resolves one.
+
+**`request_decision`.** A running Invocation asks the operator for one
+Decision. Exactly two kinds are requestable: an `operator_choice` (a bounded
+question, two to sixteen ordered options with unique keys, an optional
+recommended option and rationale, a resolution policy, and the affected
+Requirement, Task, and Plan Node ids), and — from the root Orchestrator
+only — a `requirement_waiver` (the Requirement id, the rationale, optional
+Evidence Artifact ids). Every other Decision kind has its own owner and is
+refused typed before validation (`decision_kind_not_permitted`): a
+`side_effect_approval` is created by the Attempt executor when it
+intercepts a call, a `signoff` by the completion engine, a `publish` by the
+publication service, a `budget_increase` by the Budget Increase service,
+and an `orchestrator_choice` is the Orchestrator's own record, never a
+request. The handler is bound for an Orchestrator turn of any purpose but
+`final_synthesis`, a Coordinator's `decompose`, `replan`, and `synthesize`
+turns, and a Worker's `step` or `task`; an Evaluator, a Gate evaluation, a
+Run completion evaluation, and a final-synthesis turn can never call it,
+and the handler re-checks the caller (a running Invocation of a running
+node of a running Run, never Gate-owned) inside the call's transaction.
+
+The runtime owns authorization, validation, scope, idempotency, and the
+Decision itself; the model supplies only the bounded request. The ids the
+request affects are validated against the caller's scope, and naming an id
+authorizes nothing: a Worker may name its own Tasks, its own node, and the
+Requirements of its manifest; a Coordinator its node, the node's Tasks, and
+the node's pinned Requirement scope; the Orchestrator the current graph's
+nodes, the Run's current Tasks, and the current revision's unretired
+Requirements — historical, superseded, foreign, or inaccessible ids are
+refused (`decision_scope_invalid`). A `use_default_after_deadline` request
+must carry the recommended option, the rationale, at least one affected
+id, and a deadline or a deterministic activation condition naming a Plan
+Node in scope. A waiver names a leaf of the Conversation's current
+Requirement revision in a state the transition table lets become `waived`,
+with no other waiver open for it, and Evidence Artifacts of the Run the
+caller can read; the runtime fixes its options (`waive`, `deny`), its
+policy (`operator_required`), and its typed subject — the Run, the
+Requirement, the Requirement revision current at the request, and the
+Evidence ids — so the waiver is pinned to that revision. Input is bounded
+(`REQUEST_DECISION_BOUNDS`) and malformed input is rejected typed.
+
+An accepted call creates exactly one open Decision — its `requestedBy`
+names the Invocation — in the same transaction as its
+`runtime_tool_calls` row; a refusal writes nothing; an identical call of
+the same logical turn replays by digest, and a second, different request
+of the turn is refused (`decision_already_requested`). At most one accepted
+`request_decision` exists per Invocation. **An accepted request is a hard
+logical-turn boundary under both resolution policies**: the executor
+refuses every later call of the turn (`turn_ended`), no provider process
+is held open for the operator, and once the provider returns — whatever it
+returned afterwards: a completed result, a further tool call, a thrown
+adapter, a transient failure, an approval-required call — the Attempt ends
+`failed` with the closed class `decision_requested` and a refused retry,
+the Invocation ends `blocked` on the requested Decision with its running
+Tasks blocked on it, Usage is recorded once for the response the provider
+reported, and its reservation, lease, and worktree are released exactly
+once. Nothing the provider does after the accepted request overrides the
+boundary; a result it returned is never recorded. Recovery converges an
+interrupted requesting Attempt to the same blocked boundary without a
+provider call (§8.2, §14).
 
 **`request_completion`.** The root Orchestrator's running ordinary turn
 (the root Plan Node, a running Invocation of any Orchestrator purpose but
@@ -1985,8 +2049,9 @@ runtime component with two entry points and no timer, loop, or interval:
   **actions** that are canonical next (`resume_run`, `ready_node`,
   `skip_node`, `start_node`, `start_position`, `execute_invocation`,
   `verify_node`, `settle_node`, `settle_join`, `settle_removed_node`,
-  `resume_node`, `wait_node`, `settle_root`, `wait_run`), the nodes that
-  are waiting and why, the work deferred to a later phase, the ready nodes held back by
+  `resume_node`, `wait_node`, `settle_root`, `resolve_decision_default`,
+  `continue_decision_request`, `wait_run`), the nodes that
+  are waiting and why, the ready nodes held back by
   the Run's `maxConcurrency`, the Invocations executing in this process,
   and the earliest resumption time (retry `notBefore`, provider
   `retryAfter`, or an Invocation deadline). Readiness is evaluated over
@@ -2139,8 +2204,10 @@ runtime component with two entry points and no timer, loop, or interval:
 
 ### 7.4 Waiting
 
-A node or Invocation waits when it has requested an `operator_required`
-Decision that is unanswered, when its allocation is exhausted under policy
+A node waits when an Invocation it owns is blocked on an unanswered
+Decision — the `side_effect_approval` of an intercepted call, or a Decision
+the Invocation requested under either resolution policy (§8.2) — when its
+allocation is exhausted under policy
 `wait` or `extend` with no capacity available, when the resource governor
 has no lease to grant, when its Changeset conflicted on integration and
 the conflict Task is open (`integration_conflict`, §9.2), or when the
@@ -2152,8 +2219,14 @@ ended on an intercepted `approval_required` call is not waiting: it is
 terminal, `blocked` on its `side_effect_approval` Decision (§6.1, §6.4),
 and when the Decision is resolved the runtime creates a new Invocation
 with `continuedFromInvocationId` set and the resolution in its manifest
-(its initial Attempt `resumed` if §6.6 allows, otherwise `fresh`).
-Nothing waits by polling, and nothing waits inside a provider process.
+(its initial Attempt `resumed` if §6.6 allows, otherwise `fresh`). The
+same holds for an Invocation whose logical turn ended on an accepted
+`request_decision`: it is terminal, `blocked` on the Decision it requested,
+and continues in one successor at its own position once the Decision is
+resolved or superseded (§8.2). A waiting Run whose wait changes nature —
+a resolved Decision whose successor the root cannot fund now waits on
+budget — re-records the exact reason. Nothing waits by polling, and
+nothing waits inside a provider process.
 
 ### 7.5 Progress
 
@@ -2630,17 +2703,26 @@ recommended option, the rationale, the affected Run, Requirement, Task,
 and Plan Node ids, and a **resolution policy**:
 
 - `operator_required` — the Decision resolves only when the operator
-  answers. The requesting Invocation ends `blocked` and waits (§7.4); other
-  nodes continue.
+  answers. The requesting Invocation ends `blocked` and its node waits
+  (§7.4); other nodes continue.
 - `use_default_after_deadline` — the Decision resolves with the recorded
   recommended option when the operator has not answered by a recorded
-  deadline or when a recorded deterministic activation condition becomes
-  true (for example "the Plan Node this Decision affects becomes ready").
-  A request with this policy must carry the recommended option, the
-  deadline or condition, the rationale, and the affected ids; a request
-  missing any of them is rejected. The requesting Invocation continues on
-  the recommendation; the Decision stays open for the operator until it
-  resolves.
+  deadline or when a recorded deterministic activation condition holds
+  (`plan_node_ready`: the named Plan Node has left `pending`). A request
+  with this policy must carry the recommended option, the deadline or
+  condition, the rationale, and at least one affected id; a request
+  missing any of them is rejected. The requesting Invocation does not
+  continue on the recommendation: under both policies an accepted request
+  ends its logical turn (§6.4), and the successor carries the resolution
+  once the runtime resolved the Decision by policy or the operator
+  answered first. The default resolution is the scheduler's: a pass
+  projects one `resolve_decision_default` action per due open Decision of
+  the Run from the persisted deadline, condition, and the caller's clock,
+  and projects a future deadline as the Run's next resumption time; no
+  timer, interval, or polling exists, and the action revalidates the
+  Decision inside its transaction, so an operator answer that landed first
+  leaves it a no-op and the reverse order leaves the operator's later
+  different answer a typed conflict.
 
 Only `operator_choice` Decisions may use `use_default_after_deadline`.
 `requirement_waiver`, `side_effect_approval`, `signoff`, `publish`, and
@@ -2659,9 +2741,74 @@ Resolution, by whichever path, writes exactly one `decision.resolved`
 Event recording the answer, the resolver (`operator`, `orchestrator`, or
 `policy:use_default_after_deadline`), and the time. No Decision resolves
 without that Event, and a policy resolution is shown in the Conversation
-like any other. A Decision resolved by policy may later be superseded by
-the operator; the runtime records the superseding Decision and creates a
-`decision_resolution` Orchestrator Invocation.
+like any other. A Decision that ends without a resolution is
+`superseded` with a closed **supersession reason**: `superseding_decision`
+(a later Decision, named by id) or `requirement_waiver_stale` (the runtime,
+below); an operator path that supersedes a policy resolution with a later
+Decision is not built in this phase.
+
+**Agent-requested Decisions.** `operator_choice` and `requirement_waiver`
+are the only kinds an agent may request, through `request_decision`
+(§6.4), which owns authorization, scope, bounds, idempotency, and the
+Decision's creation; the request's `requestedBy` names the Invocation.
+The operator resolves such a Decision through the decision-request
+service boundary (`resolve`), never through a tool: the option must be one
+of the Decision's, an identical resolution replays without a write, a
+conflicting one is refused typed (`conflicting_resolution`), a Decision
+of a terminal Run is refused (`run_terminal`), Evidence Artifacts must
+belong to the Run, and a `requirement_waiver` requires the operator's
+rationale. Resolution never invokes a provider and never prepares the
+continuation inside its transaction; it commits even when the continuation
+cannot be funded now.
+
+A `requirement_waiver` is requested by the root Orchestrator only, pinned
+by its typed subject to the Requirement revision current at the request.
+`waive` sets the pinned Requirement `waived` in the resolving transaction
+(actor `operator`, the rationale, the Evidence, the Decision id); `deny`
+touches nothing. When the operator answers after the pinned Requirement
+went stale — the Conversation's current revision is no longer the pinned
+one, the Requirement is retired, no longer a current leaf, or no longer in
+a waivable state — the runtime supersedes the Decision with
+`requirement_waiver_stale` and applies no waiver to the newer state,
+whatever the option; the requester continues with the superseded outcome.
+A waiver is never applied to a revision other than the one it pinned.
+
+**Continuation.** Once a requested Decision is resolved or superseded, the
+scheduler projects one `continue_decision_request` action for the blocked
+requester (from rows: a blocked Invocation whose requested Decision ended
+and that no successor continues yet) and prepares exactly one successor
+of the requester — the same Run, Plan Node, role, purpose, Pattern
+position, and Task ownership, `continuedFromInvocationId` naming the
+blocked Invocation, a fresh Context Manifest that carries the logical
+turn's defining inputs plus exactly one typed `decision_resolution` input
+(the Decision, its kind, its status, the selected option, the resolver,
+and for a waiver the Requirement, the pinned revision, and the outcome
+`waived`, `denied`, or `superseded`). The resolution returns directly to
+the requesting role and position: a Coordinator turn continues at its own
+logical turn without consuming another, a Worker re-owns its Task, a
+chain step or parallel item continues at its own position, and the root
+Orchestrator continues at its own purpose (a `gate_result` turn keeps its
+remediation Tasks). No generic Orchestrator relay turn is inserted for a
+Coordinator's or Worker's Decision. The successor is funded through the
+node's one capacity operation (§7.6): under `fail` the node ends with
+`allocation_exhausted`, under `wait` it waits on budget for its own fixed
+allocation — a Run Budget Increase alone does not enlarge a `wait` node —
+and under `extend` exactly the shortfall is written with the successor;
+the root's successor waits the Run on `budget` until an ordinary increase
+lets its extension fit. A terminal Plan Node is capacity-ineligible
+regardless of arithmetic. A capacity-blocked continuation is retried from
+rows on later passes and is never duplicated across passes or processes.
+
+**Recovery.** Every step is one transaction: the Decision with its call;
+the Attempt's failure with the Invocation's blocking and its Tasks; the
+resolution with the waiver's status change; the successor with its
+manifest and reservation. A crash before a commit leaves nothing and the
+retried Attempt requests again; a crash after the request commit leaves
+the Attempt `interrupted` with a refused retry and the Invocation
+`blocked` without another provider call; a crash after a resolution or
+during a continuation is completed by the next pass from rows; the
+default resolution racing the operator yields exactly one resolution
+(§14).
 
 ## 9. Workspace, Snapshots, Changesets, integration, publishing
 
@@ -3441,6 +3588,14 @@ mechanism, if ever added, is a new feature with its own design.
 | Deterministic check cannot run (timeout, abort, lost view, lost output, failed start) | Infrastructure failure: nothing recorded, no Evaluation fabricated, the pass stops typed (`verification_failed`); the next pass reruns exactly the unrecorded checks (§10.1). |
 | Crash between a check's command and its record | The command reruns in a fresh view (the stale one is discarded); the output Artifact and its Evaluation are recorded once, in one transaction. |
 | Runtime-tool call fails or crashes | A failure inside the call's transaction commits nothing and returns `failed` with a bounded message and one `runtime_tool_call_failed` diagnostic; a crash after the commit leaves the row, and the retry or approval successor replays it by digest instead of repeating the effect (§6.4). |
+| `request_decision` refused (a kind with another owner, an out-of-scope or inaccessible id, invalid or over-bound input, an unbound role or purpose, a non-running or Gate-owned caller, a second request of the turn) | Rejected typed inside the call's transaction; nothing is written; the turn continues (§6.4). |
+| Provider misbehaves after an accepted `request_decision` (returns a result, attempts a further call, throws, fails transiently, ends on an approval-required call) | Ignored: the Attempt ends `failed` with class `decision_requested` and a refused retry, the Invocation `blocked` on the Decision, Usage recorded once for whatever the provider reported; no result, Changeset, approval, or second Decision is recorded (§8.2). |
+| Crash between an accepted `request_decision` and the Attempt's settlement | The Decision and its call row are the record; recovery marks the Attempt `interrupted` with the refused `decision_requested` retry and settles the Invocation `blocked` on the Decision, without a provider call; the Attempt's and the Invocation's settlement are one transaction, so neither exists without the other. |
+| Crash after the Invocation blocked, before its worktree release | The obligation stays `pending`; recovery releases it exactly once (§9.1). |
+| Crash between a Decision resolution and its continuation | The resolution is one transaction (a `waive` with its Requirement status change); the next pass projects `continue_decision_request` from rows and prepares exactly one successor; a failed preparation (Event, insert, COMMIT) writes nothing and is retried from rows. |
+| A `requirement_waiver` resolved after its pinned Requirement went stale | Superseded with reason `requirement_waiver_stale`, no waiver applied to the newer state; the requester continues with the superseded outcome (§8.2). |
+| Continuation cannot be funded | By the node's policy: `fail` ends the node (`allocation_exhausted`), `wait` waits on budget for the node's own allocation (a Run Budget Increase alone changes nothing), `extend` writes exactly the shortfall with the successor; the root's successor waits the Run on `budget` until an ordinary increase fits (§7.6, §8.2). |
+| Runtime default resolution races the operator | Both revalidate the Decision inside their transaction: the first commit resolves it, a later identical answer replays, a later different answer is refused (`conflicting_resolution`), and exactly one `decision.resolved` Event exists (§8.2). |
 | Changeset conflict | Changeset `conflict`; Task with a bounded report Artifact created for the node owner; node (and, when nothing else can proceed, the Run) `waiting` with `integration_conflict`; applied once more when the Task completes; a second conflict, or a failed or cancelled Task, fails the node with `integration_conflict` (§9.2). |
 | Crash between an external Changeset application and its record | The Changeset stays `pending`; the next pass applies it again and the port reports the application that already holds; the record is written exactly once (§9.2). |
 | Crash during a scheduler pass | Nothing is lost: every action is one transaction; the next pass re-projects from rows, retries interrupted Attempts through recovery, and repeats no Invocation, Handoff, integration, or provider call (§7.1). |
@@ -3538,8 +3693,12 @@ by a test.
     runtime's derivation at the `run_completion` Gate, each change
     referencing the Gate and its Evaluation Evidence and no change written
     for a status that already holds. `waived` is set
-    only after the operator resolves a `requirement_waiver` Decision; no
-    policy, tool, or setting can resolve one.
+    only after the operator resolves a `requirement_waiver` Decision that
+    the root Orchestrator requested through `request_decision`, pinned to
+    the Requirement revision current at the request, and applied in the
+    resolving transaction; a resolution after the pinned Requirement went
+    stale supersedes the Decision (`requirement_waiver_stale`) and waives
+    nothing; no policy, tool, or setting can resolve one.
 14. **Coordination depth is one.** A Coordinator cannot revise the plan,
     create Invocations, or address Workers; a Worker cannot propose or
     create anything; a `coordinator_worker` expression cannot contain a
@@ -3668,6 +3827,24 @@ by a test.
     requests completion or spends the final reserve. Identical replays
     return the canonical outcome; conflicting replays are refused; a
     drifted or unobservable Workspace is refused before any write.
+
+28. **An accepted `request_decision` is a hard logical-turn boundary.**
+    An agent requests only an `operator_choice` or (the root Orchestrator)
+    a `requirement_waiver`, within its own scope, at most once per
+    Invocation; every other Decision kind is created by its owning
+    service. The accepted request and its Decision commit together, the
+    requesting Attempt then ends `failed` (`decision_requested`) with a
+    refused retry and the Invocation `blocked` under either resolution
+    policy, no provider process waits for the operator, and nothing the
+    provider returns afterwards is recorded. Resolution — by the operator
+    through the service boundary or by the scheduler's
+    `resolve_decision_default` from rows and the clock — writes exactly
+    one Event, and the scheduler's `continue_decision_request` prepares
+    exactly one successor of the requester at its own role, purpose, and
+    position with one typed `decision_resolution` input; no relay turn,
+    timer, poll, transcript read, or agent message is involved, and every
+    crash window converges from rows (database-enforced where a row
+    expresses it).
 
 ## 16. Non-goals
 

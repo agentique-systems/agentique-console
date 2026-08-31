@@ -392,15 +392,32 @@ Attempts; requested and resolved only through the Budget Increase service
 tool), one open per Run, `deny` creates nothing, and `approve` records
 exactly one Budget Increase in the resolving transaction without creating
 an Invocation or a Context Manifest input. A
-`requirement_waiver` is proposed by the Orchestrator, always
+`requirement_waiver` is requested by the root Orchestrator only, always
 `operator_required`, resolved only by the operator, and never delegated or
-auto-resolved; its resolution records actor, rationale, Requirement id,
-timestamp, and optional Artifact ids, after which the runtime sets the
-Requirement `waived`. Every resolution writes one `decision.resolved`
-Event; no Decision resolves silently. Decisions are append-only; a later
-Decision may supersede an earlier one by id. An unanswered
-`operator_required` Decision is the only thing that makes a Plan Node wait
-on a human.
+auto-resolved; its typed subject pins the Run, the Requirement, the
+Requirement revision current at the request, and the Evidence Artifact
+ids, with exactly the options `waive` and `deny`; its resolution records
+actor, rationale, timestamp, and optional Artifact ids, and `waive` sets
+the pinned Requirement `waived` in the same transaction, while a
+resolution after the pinned Requirement went stale supersedes the Decision
+instead. `operator_choice` and `requirement_waiver` are the only kinds an
+agent may request, through the `request_decision` runtime tool
+(execution-model §6.4, §8.2): an Orchestrator turn (never the final
+synthesis), a Coordinator turn, or a Worker for an `operator_choice`
+within its own scope, the root Orchestrator alone for a waiver; the
+Decision's `requestedBy` names the requesting Invocation, and an accepted
+request ends that logical turn under either resolution policy. Every
+other kind is owned by a runtime service — `side_effect_approval` by the
+Attempt executor, `signoff` by the completion engine, `publish` by the
+publication service, `budget_increase` by the Budget Increase service —
+or, for `orchestrator_choice`, is the Orchestrator's own record. Every
+resolution writes one `decision.resolved` Event; no Decision resolves
+silently. Decisions are append-only; a Decision that ends unresolved is
+`superseded` with a closed **supersession reason** — `superseding_decision`
+(a later Decision, named by id) or `requirement_waiver_stale` (the
+runtime, no superseding Decision). An unanswered Decision that an
+Invocation is blocked on is the only thing that makes a Plan Node wait on
+a human.
 
 - Id prefix: `dec_`
 - Owned by: whoever resolved it
@@ -904,16 +921,18 @@ approval, and executing the call again needs a new Decision.
 ### Runtime Tool Call
 
 The canonical, append-only record that the runtime executed one mutating
-runtime-tool call (`propose_tasks`, `update_task`, or
-`request_completion`) on behalf of a running Invocation: the Run, Plan Node, Invocation, the first Attempt
+runtime-tool call (`propose_tasks`, `update_task`, `request_completion`,
+or `request_decision`) on behalf of a running Invocation: the Run, Plan Node, Invocation, the first Attempt
 that committed it, the tool, the digest of the canonicalized call, the
 safe result, and the commit time. It is written by the runtime-tool
 executor in its own short transaction outside provider execution, after
 the handler validated and applied the call; a rejected call writes
 nothing. It is unique per Invocation, tool, and digest, and at most one
-accepted `propose_tasks` exists per Invocation; a retry or approval
-successor of the same logical turn replays a recorded call by digest
-instead of repeating its effect. It never holds the call's raw input.
+accepted `propose_tasks` and at most one accepted `request_decision`
+exist per Invocation; a retry or approval successor of the same logical
+turn replays a recorded call by digest instead of repeating its effect,
+and an accepted `request_decision` ends the logical turn. It never holds
+the call's raw input.
 
 - Id prefix: `rtc_`
 - Owned by: the runtime

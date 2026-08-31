@@ -570,8 +570,39 @@ is one or more commits; each commit keeps `npm run typecheck` and
    fundable; the removal of the typed allocation-extension deferral from the
    scheduler, the runners, the Gate engine, the root support, the tests,
    and these documents; and restart and concurrency safety across every
-   extension and increase window. Remaining typed deferral: the executable
-   `request_decision` runtime tool. Later
+   extension and increase window.
+   Phase 2F-B (done): the executable `request_decision` runtime tool —
+   the closed requestable kinds (`operator_choice`; `requirement_waiver`
+   from the root Orchestrator only) with every other kind left to its
+   owning service; the bounded request contract, the role and purpose
+   bindings (an Orchestrator turn but the final synthesis, a Coordinator
+   turn, a Worker), and scope validation against the caller's own Tasks,
+   node, and Requirements; the decision-request service that creates the
+   one Decision in the call's transaction, refuses typed, replays by
+   digest, and refuses a second request of the turn; the hard logical-turn
+   boundary under both resolution policies (the typed `decision_requested`
+   adapter completion, the closed Attempt failure class and refused retry,
+   the blocked Invocation with its Tasks, one Usage record, no provider
+   process held open, nothing the provider returns afterwards recorded);
+   the operator's resolution through the service boundary (replay,
+   conflict, Evidence, waiver rationale) and the scheduler's
+   `resolve_decision_default` action from rows and the clock with the
+   deadline as the Run's resumption time; the waiver's revision pinning,
+   its `waived` status change in the resolving transaction, and its
+   `requirement_waiver_stale` supersession; the scheduler's
+   `continue_decision_request` action preparing exactly one successor at
+   the requesting role, purpose, and position with one typed
+   `decision_resolution` input and no relay turn, funded through the one
+   capacity operation (`fail`, `wait`, `extend`; a Budget Increase alone
+   never enlarges a `wait` node); capacity ineligibility of terminal Plan
+   Nodes before any arithmetic; and restart and concurrency safety across
+   every request, blocking, resolution, and continuation window. No typed
+   deferral remains in the runtime-tool bindings; the remaining
+   permitted-but-not-executable tools of execution-model §6.4
+   (`create_tasks`, `record_decision`, `propose_requirements`,
+   `revise_execution_plan`, `write_artifact`, the read tools, a Worker's
+   `update_task`) and operator supersession of a policy-resolved Decision
+   are later subphases. Later
    subphases: Runs, Execution
    Plan source validation and compiler,
    Plan Nodes of both kinds (`pattern`, `join`), Plan Edges, Plan Node

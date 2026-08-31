@@ -405,6 +405,79 @@ describe("import boundaries", () => {
     expect(core).not.toMatch(/input: unknown|tool: string;/);
   });
 
+  it("agent-requested Decisions come only from request_decision through the canonical services, from rows, without timers, transcripts, messaging, a second scheduler, or duplicate capacity arithmetic (invariants 5, 6, 20, 28)", () => {
+    const strip = (text: string) => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    const read = (f: string) => strip(fs.readFileSync(path.join(repoRoot, f), "utf8"));
+    const executionFiles = listFiles("server/src/execution", (f) => isCode(f) && !f.endsWith(".test.ts") && !f.endsWith("test-support.ts"));
+    // 1. The requestable kinds are a closed pair; every kind with another owner is excluded from the tool contract and its handler.
+    expect(read("core/src/decisions.ts")).toMatch(/export const REQUESTABLE_DECISION_KINDS = \["operator_choice", "requirement_waiver"\] as const/);
+    for (const f of ["core/src/runtime-tools.ts", "server/src/execution/decision-requests.ts"]) {
+      expect(read(f), f).not.toMatch(/kind: "(budget_increase|side_effect_approval|signoff|publish|orchestrator_choice)"/);
+      expect(read(f), f).not.toMatch(/z\.literal\("(budget_increase|side_effect_approval|signoff|publish|orchestrator_choice)"\)/);
+    }
+    // 2. The handler and the resolution service import nothing legacy: core, the persistence boundary, and the execution boundary only.
+    const service = path.join(repoRoot, "server/src/execution/decision-requests.ts");
+    for (const specifier of importsOf(service)) {
+      expect(specifier === "@agentique-console/core" || resolvesInto(service, specifier, "server/src/execution") || resolvesInto(service, specifier, "server/src/persistence"), specifier).toBe(true);
+    }
+    // 3. Provider adapters reach no store and no Decision: they see the runtime-tool port and the typed completion only.
+    for (const file of listFiles("server/src/provider", (f) => isCode(f) && !f.endsWith(".test.ts"))) {
+      const text = read(rel(file));
+      expect(text, rel(file)).not.toMatch(/DecisionRequestService|decisions\.(request|resolve|supersede|get)\(|stores\.|resolveDefault|blockedByDecisionId/);
+    }
+    // 4. Deadline and default resolution, the blocking boundary, and the continuation are decided from rows and the caller's clock:
+    //    no timer, interval, polling, wall clock, transcript, or agent messaging anywhere on those paths.
+    for (const f of ["server/src/execution/decision-requests.ts", "server/src/execution/scheduler.ts", "server/src/execution/attempt-executor.ts", "server/src/execution/runtime-tools.ts", "server/src/execution/invocation-lifecycle.ts", "server/src/execution/recovery-service.ts"]) {
+      const text = read(f);
+      expect(text, f).not.toMatch(/setTimeout|setInterval|setImmediate|process\.nextTick|Date\.now|new Date\(\)|\bpoll\w*\(/);
+      expect(text, f).not.toMatch(/sendMessage|mailbox|inbox|agent_message|messageTo|\bnotify\w*Agent/i);
+    }
+    for (const f of ["server/src/execution/decision-requests.ts", "server/src/execution/scheduler.ts", "server/src/execution/invocation-lifecycle.ts"]) {
+      expect(read(f), f).not.toMatch(/transcript|TRANSCRIPT_MEDIA_TYPE|artifacts\.read\(|blobs\.|journal\.read\(/i);
+    }
+    // 5. One scheduler: nothing else in the execution boundary declares a scheduler or a loop that waits on time.
+    const schedulers = executionFiles.filter((f) => /class \w*Scheduler\b|setInterval\(/.test(read(rel(f)))).map(rel);
+    expect(schedulers).toEqual(["server/src/execution/scheduler.ts"]);
+    expect(read("server/src/execution/decision-requests.ts")).not.toMatch(/class \w*(Scheduler|Loop|Poller|Timer)\b|advanceRun|reconcileRun/);
+    // 6. No duplicate capacity arithmetic: the request service and the scheduler fund nothing and compute no shortfall; `wait` never extends.
+    for (const f of ["server/src/execution/decision-requests.ts", "server/src/execution/scheduler.ts"]) {
+      expect(read(f), f).not.toMatch(/allocationFits\(|allocationShortfall\(|capacity\.ensure\(|allocationExtensions\.record\(|subtractAllocation\(|addAllocation\(/);
+    }
+    const capacity = read("server/src/execution/plan-node-capacity.ts");
+    expect(capacity).toMatch(/case "wait":[\s\S]*?return \{ kind: "refused", policy: "wait" \};/);
+    expect(capacity.slice(capacity.indexOf('case "wait":'), capacity.indexOf('case "extend":'))).not.toMatch(/allocationExtensions\.record\(/);
+    // 7. Only the canonical services create or end an agent-requested Decision: the requestable kind literals, the request service's
+    //    handler, and every `supersede` live in decision-requests.ts; every other Decision writer names its own owned kind.
+    const requestableWriters = executionFiles.filter((f) => /kind: "(operator_choice|requirement_waiver)"/.test(read(rel(f)))).map(rel).sort();
+    expect(requestableWriters).toEqual(["server/src/execution/decision-requests.ts"]);
+    const superseders = listFiles("server/src", (f) => isCode(f) && !f.endsWith(".test.ts") && !f.endsWith("test-support.ts") && !f.endsWith("stores/decisions.ts")).filter((f) => /stores\.decisions\.supersede\(/.test(read(rel(f)))).map(rel).sort();
+    expect(superseders).toEqual(["server/src/execution/decision-requests.ts"]);
+    const requesters = executionFiles.filter((f) => /stores\.decisions\.request\(/.test(read(rel(f)))).map(rel).sort();
+    expect(requesters).toEqual(["server/src/execution/attempt-executor.ts", "server/src/execution/budget-increases.ts", "server/src/execution/completion.ts", "server/src/execution/decision-requests.ts", "server/src/execution/publication.ts"]);
+    for (const [file, kind] of [["server/src/execution/attempt-executor.ts", "side_effect_approval"], ["server/src/execution/budget-increases.ts", "budget_increase"], ["server/src/execution/completion.ts", "signoff"], ["server/src/execution/publication.ts", "publish"]] as const) {
+      expect(read(file), file).toMatch(new RegExp(`kind: "${kind}"`));
+    }
+    const resolvers = executionFiles.filter((f) => /stores\.decisions\.resolve\(/.test(read(rel(f)))).map(rel).sort();
+    expect(resolvers).toEqual(["server/src/execution/budget-increases.ts", "server/src/execution/decision-requests.ts", "server/src/execution/publication.ts", "server/src/execution/signoff.ts"]);
+    expect(read("server/src/execution/runtime-tools.ts")).toMatch(/this\.#decisions\.request\(/);
+    // 8. The requester is refused typed before validation for every kind with another owner, and the store enforces the same closed set.
+    expect(read("server/src/execution/runtime-tools.ts")).toMatch(/forbiddenDecisionKindOf\(/);
+    expect(read("server/src/persistence/stores/decisions.ts")).toMatch(/isRequestableDecisionKind\(/);
+    const sql = fs.readFileSync(path.join(repoRoot, "server/src/persistence/migrations/0000_orchestration_core.sql"), "utf8");
+    for (const trigger of ["runtime_tool_calls_no_update", "runtime_tool_calls_no_delete"]) {
+      expect(sql, trigger).toMatch(new RegExp(`CREATE TRIGGER \`${trigger}\``));
+    }
+    expect(sql).toMatch(/CONSTRAINT "decisions_requestable_by_invocation" CHECK/);
+    expect(sql).toMatch(/CREATE TRIGGER `decisions_[a-z_]+` BEFORE UPDATE ON `decisions`/);
+    expect(sql).toMatch(/CREATE UNIQUE INDEX `runtime_tool_calls_one_decision_request` ON `runtime_tool_calls` \(`invocation_id`\) WHERE tool = 'request_decision';/);
+    // 9. The canonical runtime-tool-call record and its Event carry the safe result and the digest, never the raw call input.
+    const core = read("core/src/runtime-tools.ts");
+    const record = core.match(/export interface RuntimeToolCall \{([\s\S]*?)\n\}/)?.[1] ?? "";
+    expect(record.length).toBeGreaterThan(0);
+    expect(record).not.toMatch(/\binput\b|\bargs\b|\bpayload\b/);
+    expect(read("server/src/execution/runtime-tools.ts")).not.toMatch(/journal\.append\([^)]*\binput\b/);
+  });
+
   it("the integration-workspace port carries verified content bound to one Artifact, and only the integration service binds it", () => {
     const portFile = path.join(repoRoot, "server/src/execution/ports/integration-workspace.ts");
     const port = fs.readFileSync(portFile, "utf8");
