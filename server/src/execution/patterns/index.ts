@@ -5,7 +5,7 @@
  * service) over the shared node support, plus the root Orchestrator node's
  * support. Every one of the six Patterns has a runner.
  */
-import type { Pattern, PatternPosition, PlanNodeId, Timestamp } from "@agentique-console/core";
+import type { InvocationId, Pattern, PatternPosition, PlanNodeId, Timestamp } from "@agentique-console/core";
 import type { WriteOptions } from "../../persistence/stores/support.ts";
 import { RunCompletionEngine } from "../completion.ts";
 import { DecisionRequestService } from "../decision-requests.ts";
@@ -37,7 +37,11 @@ export interface PatternRunner {
   startPosition(nodeId: PlanNodeId, expectedRevisionNumber: number, position: PatternPosition, options?: WriteOptions): PatternRunnerOutcome;
   settle(nodeId: PlanNodeId, expectedRevisionNumber: number, options?: WriteOptions): Promise<PatternRunnerOutcome>;
   settleRemoved(nodeId: PlanNodeId, options?: WriteOptions): Promise<PatternRunnerOutcome>;
-  resume(nodeId: PlanNodeId, expectedRevisionNumber: number, options?: WriteOptions): PatternRunnerOutcome;
+  /**
+   * Clears a cleared wait. With `continueInvocationId` (the scheduler's `continue_decision_request`) the runner continues exactly that
+   * blocked Invocation of the node — its position reconstructed by the runner — and writes nothing when it is not the one to continue.
+   */
+  resume(nodeId: PlanNodeId, expectedRevisionNumber: number, options?: WriteOptions, continueInvocationId?: InvocationId | null): PatternRunnerOutcome;
   markWaiting(nodeId: PlanNodeId, expectedRevisionNumber: number, reason: "provider_capacity" | "budget", options?: WriteOptions): PatternRunnerOutcome;
   /** The `node_exit` Gate phase (execution-model §10), delegated to the shared Gate engine; never advised by `evaluator_optimizer`. */
   openGate(nodeId: PlanNodeId, expectedRevisionNumber: number, options?: WriteOptions): PatternRunnerOutcome;

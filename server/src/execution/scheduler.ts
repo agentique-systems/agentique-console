@@ -686,14 +686,24 @@ export class RunScheduler {
    * one successor, or waiting on budget when the node cannot fund it now.
    */
   async #continueRequester(runId: RunId, revision: number, action: Extract<SchedulerAction, { kind: "continue_decision_request" }>, meta: WriteOptions): Promise<PerformedAction["outcome"]> {
+    // Revalidated from rows before the runner's own transaction re-reads them: the Run, the plan revision, the node's membership, the
+    // requester's state and node, the Decision's end, the absence of a successor, and the exact position the runner is told to continue.
     const invocation = this.stores.invocations.get(action.invocationId);
     if (!this.runners.decisionRequests.awaitsContinuation(invocation, action.decisionId)) return { kind: "no_change" };
+    if (RUN_MACHINE.isTerminal(this.stores.runs.get(runId).status)) return { kind: "stale" };
+    const graph = this.stores.plans.currentGraph(runId);
+    if (graph.revisionNumber !== revision) return { kind: "stale" };
     const node = this.stores.plans.getNode(action.nodeId);
-    if (node.kind !== "pattern" || invocation.planNodeId !== node.id) return { kind: "stale" };
-    if (node.sourcePath === ROOT_SOURCE_PATH) return this.runners.root.settle(runId, meta);
+    if (node.kind !== "pattern" || invocation.runId !== runId || invocation.planNodeId !== node.id || invocation.patternPosition === null) return { kind: "stale" };
+    if (node.sourcePath === ROOT_SOURCE_PATH) {
+      // The root support continues its latest turn only: an older blocked turn is history, never continued.
+      if (this.runners.root.latestTurn(runId)?.id !== invocation.id) return { kind: "stale" };
+      return this.runners.root.settle(runId, meta);
+    }
+    if (!graph.nodes.some((n) => n.id === node.id)) return { kind: "stale" };
     const runner = runnerFor(this.runners, node.pattern);
-    if (node.status === "waiting") return runner.resume(node.id, revision, meta);
-    if (node.status === "running") return runner.startPosition(node.id, revision, invocation.patternPosition!, meta);
+    if (node.status === "waiting") return runner.resume(node.id, revision, meta, invocation.id);
+    if (node.status === "running") return runner.startPosition(node.id, revision, invocation.patternPosition, meta);
     return { kind: "stale" };
   }
 

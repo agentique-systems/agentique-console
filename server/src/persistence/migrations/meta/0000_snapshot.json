@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "eeb6c63c-9fe8-4ce4-b273-3c678fb0da63",
+  "id": "c9c0a293-288d-4226-9b4b-75350d855dad",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "acceptance_criteria": {
@@ -3977,6 +3977,14 @@
             "allocation_source"
           ],
           "isUnique": false
+        },
+        "invocations_one_successor": {
+          "name": "invocations_one_successor",
+          "columns": [
+            "continued_from_invocation_id"
+          ],
+          "isUnique": true,
+          "where": "continued_from_invocation_id IS NOT NULL"
         },
         "invocations_plan_node_position": {
           "name": "invocations_plan_node_position",

@@ -25,7 +25,7 @@
  * Every action is idempotent: repeated reconciliation creates no duplicate
  * Invocation, Handoff, integration, or transition.
  */
-import type { Invocation, PatternPlanNode, PatternPosition, PlanNodeId, Timestamp } from "@agentique-console/core";
+import type { Invocation, InvocationId, PatternPlanNode, PatternPosition, PlanNodeId, Timestamp } from "@agentique-console/core";
 import type { WriteOptions } from "../../persistence/stores/support.ts";
 import { SequentialStepEngine, type NodeAdvice, type PatternRunnerDependencies, type PatternRunnerOutcome } from "./support.ts";
 
@@ -54,8 +54,8 @@ export class ChainPatternRunner {
     return this.engine.settle(nodeId, expectedRevisionNumber, options);
   }
 
-  resume(nodeId: PlanNodeId, expectedRevisionNumber: number, options?: WriteOptions): PatternRunnerOutcome {
-    return this.engine.resume(nodeId, expectedRevisionNumber, options);
+  resume(nodeId: PlanNodeId, expectedRevisionNumber: number, options?: WriteOptions, continueInvocationId: InvocationId | null = null): PatternRunnerOutcome {
+    return this.engine.resume(nodeId, expectedRevisionNumber, options, continueInvocationId);
   }
 
   /** Finishes the own work of a node that left the current membership; never activates a successor. */

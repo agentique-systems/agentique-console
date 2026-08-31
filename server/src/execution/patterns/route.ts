@@ -42,7 +42,7 @@
  * along the route's `sequence` edges and skips every composite branch; a
  * composite selection delivers through the selected branch's exits only.
  */
-import { INVOCATION_MACHINE, InvariantViolationError, PLAN_NODE_MACHINE, type Decision, type Evaluation, type Invocation, type ManifestInput, type PatternPlanNode, type PatternPosition, type PlanNodeId, type Timestamp } from "@agentique-console/core";
+import { INVOCATION_MACHINE, InvariantViolationError, PLAN_NODE_MACHINE, type Decision, type Evaluation, type Invocation, type ManifestInput, type PatternPlanNode, type PatternPosition, type PlanNodeId, type Timestamp, type InvocationId } from "@agentique-console/core";
 import type { WriteOptions } from "../../persistence/stores/support.ts";
 import type { GateCandidateSource } from "../gates.ts";
 import { activeInvocationAdvice, blockedOn, blockingDecisionOf, outstandingChangesetOf, PatternNodeSupport, type NodeAdvice, type PatternRunnerDependencies, type PatternRunnerOutcome } from "./support.ts";
@@ -323,7 +323,7 @@ export class RoutePatternRunner {
    * successor keeps the selection as its typed input); other waits return
    * the node to `running`.
    */
-  resume(nodeId: PlanNodeId, expectedRevisionNumber: number, options: WriteOptions = {}): PatternRunnerOutcome {
+  resume(nodeId: PlanNodeId, expectedRevisionNumber: number, options: WriteOptions = {}, continueInvocationId: InvocationId | null = null): PatternRunnerOutcome {
     const { ctx, stores } = this.deps;
     return ctx.tx.write((): PatternRunnerOutcome => {
       const stale = this.support.staleness(nodeId, expectedRevisionNumber);
@@ -334,6 +334,9 @@ export class RoutePatternRunner {
       const state = this.state(node);
       const advice = this.inspectWaiting(node, state);
       if (advice.kind !== "waiting" || !advice.cleared) return { kind: "no_change" };
+      // A targeted continuation names the blocked selection or branch Invocation; a selector Decision is never one.
+      const target = state.branch ?? state.selection;
+      if (continueInvocationId !== null && (reason !== "decision" || target === null || target.id !== continueInvocationId || blockedOn(stores, target) === null)) return { kind: "no_change" };
       const running = stores.plans.transitionNode(node.id, { to: "running" }, options) as PatternPlanNode;
       if (reason !== "decision") return { kind: "resumed", reason };
       const gated = this.support.resumeGateEvaluator(running, options);

@@ -50,6 +50,7 @@ import {
   TASK_MACHINE,
   type Artifact,
   type Invocation,
+  type InvocationId,
   type ParallelIndex,
   type ParallelIndexEntry,
   type PatternPlanNode,
@@ -404,7 +405,7 @@ export class ParallelPatternRunner {
    * Decision resolved gets its successor now, and any further one on the
    * following iterations through `start_position`.
    */
-  resume(nodeId: PlanNodeId, expectedRevisionNumber: number, options: WriteOptions = {}): PatternRunnerOutcome {
+  resume(nodeId: PlanNodeId, expectedRevisionNumber: number, options: WriteOptions = {}, continueInvocationId: InvocationId | null = null): PatternRunnerOutcome {
     const { ctx, stores } = this.deps;
     return ctx.tx.write((): PatternRunnerOutcome => {
       const stale = this.support.staleness(nodeId, expectedRevisionNumber);
@@ -415,12 +416,14 @@ export class ParallelPatternRunner {
       const state = this.state(node);
       const advice = this.inspectWaiting(node, state);
       if (advice.kind !== "waiting" || !advice.cleared) return { kind: "no_change" };
+      const candidates = [...state.items.flatMap((s) => ("invocation" in s ? [s.invocation] : [])), ...(state.aggregation === null ? [] : [state.aggregation])];
+      // A targeted continuation names exactly one blocked item or the aggregation; otherwise the first ended blocker continues.
+      const blocked = candidates.find((i) => INVOCATION_MACHINE.isTerminal(i.status) && (blockedOn(stores, i)?.status ?? "open") !== "open" && (continueInvocationId === null || i.id === continueInvocationId));
+      if (continueInvocationId !== null && (reason !== "decision" || blocked === undefined)) return { kind: "no_change" };
       const running = stores.plans.transitionNode(node.id, { to: "running" }, options) as PatternPlanNode;
       if (reason !== "decision") return { kind: "resumed", reason };
       const gated = this.support.resumeGateEvaluator(running, options);
       if (gated !== null) return gated;
-      const candidates = [...state.items.flatMap((s) => ("invocation" in s ? [s.invocation] : [])), ...(state.aggregation === null ? [] : [state.aggregation])];
-      const blocked = candidates.find((i) => INVOCATION_MACHINE.isTerminal(i.status) && (blockedOn(stores, i)?.status ?? "open") !== "open");
       if (!blocked) return { kind: "resumed", reason };
       return this.support.prepareSuccessor(running, blocked, blockedOn(stores, blocked)!, [], options);
     });

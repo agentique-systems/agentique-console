@@ -57,6 +57,7 @@ import {
   type Evaluation,
   type EvaluatorResult,
   type Invocation,
+  type InvocationId,
   type ManifestInput,
   type PatternPlanNode,
   type PatternPosition,
@@ -505,7 +506,7 @@ export class EvaluatorOptimizerPatternRunner {
    * or Evaluator gets its approval successor at the same round position, with the same typed optimizer inputs, so a
    * continuation never consumes another round.
    */
-  resume(nodeId: PlanNodeId, expectedRevisionNumber: number, options: WriteOptions = {}): PatternRunnerOutcome {
+  resume(nodeId: PlanNodeId, expectedRevisionNumber: number, options: WriteOptions = {}, continueInvocationId: InvocationId | null = null): PatternRunnerOutcome {
     const { ctx, stores } = this.deps;
     return ctx.tx.write((): PatternRunnerOutcome => {
       const stale = this.support.staleness(nodeId, expectedRevisionNumber);
@@ -516,9 +517,11 @@ export class EvaluatorOptimizerPatternRunner {
       const state = this.state(node);
       const advice = this.inspectWaiting(node, state);
       if (advice.kind !== "waiting" || !advice.cleared) return { kind: "no_change" };
+      // A targeted continuation names the current round's blocked producer or Evaluator; nothing else is this node's to continue.
+      const blocked = [state.current.evaluator, state.current.producer].find((i): i is Invocation => i !== null && INVOCATION_MACHINE.isTerminal(i.status) && (blockedOn(stores, i)?.status ?? "open") !== "open" && (continueInvocationId === null || i.id === continueInvocationId));
+      if (continueInvocationId !== null && (reason !== "decision" || blocked === undefined)) return { kind: "no_change" };
       const running = stores.plans.transitionNode(node.id, { to: "running" }, options) as PatternPlanNode;
       if (reason !== "decision") return { kind: "resumed", reason };
-      const blocked = [state.current.evaluator, state.current.producer].find((i): i is Invocation => i !== null && INVOCATION_MACHINE.isTerminal(i.status) && (blockedOn(stores, i)?.status ?? "open") !== "open");
       if (blocked === undefined) return { kind: "resumed", reason };
       const extra = stores.invocations.getManifest(blocked.id).content.inputs.filter((i) => i.kind === "optimizer_candidate" || i.kind === "optimizer_feedback");
       return this.support.prepareSuccessor(running, blocked, blockedOn(stores, blocked)!, extra, options);

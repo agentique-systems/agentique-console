@@ -801,7 +801,7 @@ export class SequentialStepEngine {
    * from the blocked one with the typed resolution input, re-owning its
    * Tasks, on a fresh reservation and worktree, never widening Tool Policy.
    */
-  resume(nodeId: PlanNodeId, expectedRevisionNumber: number, options: WriteOptions = {}): PatternRunnerOutcome {
+  resume(nodeId: PlanNodeId, expectedRevisionNumber: number, options: WriteOptions = {}, continueInvocationId: InvocationId | null = null): PatternRunnerOutcome {
     const { ctx, stores } = this.deps;
     return ctx.tx.write((): PatternRunnerOutcome => {
       const stale = this.support.staleness(nodeId, expectedRevisionNumber);
@@ -809,8 +809,11 @@ export class SequentialStepEngine {
       const node = this.node(nodeId);
       if (node.status !== "waiting") return { kind: "no_change" };
       const reason = node.waitReason!;
-      const advice = this.inspectWaiting(node, this.latestInvocation(node));
+      const latest = this.latestInvocation(node);
+      const advice = this.inspectWaiting(node, latest);
       if (advice.kind !== "waiting" || !advice.cleared) return { kind: "no_change" };
+      // A targeted continuation names the node's one blocked position; anything else is not this node's to continue.
+      if (continueInvocationId !== null && (reason !== "decision" || latest === null || latest.id !== continueInvocationId || blockingDecisionOf(stores, latest) === null)) return { kind: "no_change" };
       const running = stores.plans.transitionNode(node.id, { to: "running" }, options) as PatternPlanNode;
       if (reason !== "decision") return { kind: "resumed", reason };
       const gated = this.support.resumeGateEvaluator(running, options);

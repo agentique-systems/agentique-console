@@ -27,7 +27,7 @@
  * The root Orchestrator node is a `single` node too, but it is never
  * completed by this runner (see `root.ts`).
  */
-import type { PatternPosition, PlanNodeId, Timestamp } from "@agentique-console/core";
+import type { InvocationId, PatternPosition, PlanNodeId, Timestamp } from "@agentique-console/core";
 import type { WriteOptions } from "../../persistence/stores/support.ts";
 import { SequentialStepEngine, type NodeAdvice, type PatternRunnerDependencies, type PatternRunnerOutcome } from "./support.ts";
 
@@ -56,8 +56,8 @@ export class SinglePatternRunner {
     return this.engine.settle(nodeId, expectedRevisionNumber, options);
   }
 
-  resume(nodeId: PlanNodeId, expectedRevisionNumber: number, options?: WriteOptions): PatternRunnerOutcome {
-    return this.engine.resume(nodeId, expectedRevisionNumber, options);
+  resume(nodeId: PlanNodeId, expectedRevisionNumber: number, options?: WriteOptions, continueInvocationId: InvocationId | null = null): PatternRunnerOutcome {
+    return this.engine.resume(nodeId, expectedRevisionNumber, options, continueInvocationId);
   }
 
   /** Finishes the own work of a node that left the current membership; never activates a successor. */

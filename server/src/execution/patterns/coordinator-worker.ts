@@ -71,6 +71,7 @@ import {
   type Gate,
   type Handoff,
   type Invocation,
+  type InvocationId,
   type ManifestInput,
   type PatternPlanNode,
   type PatternPosition,
@@ -623,7 +624,7 @@ export class CoordinatorWorkerPatternRunner {
    * `running`; for a `decision` wait the blocked turn or the first blocked
    * Worker whose Decision resolved gets its successor now.
    */
-  resume(nodeId: PlanNodeId, expectedRevisionNumber: number, options: WriteOptions = {}): PatternRunnerOutcome {
+  resume(nodeId: PlanNodeId, expectedRevisionNumber: number, options: WriteOptions = {}, continueInvocationId: InvocationId | null = null): PatternRunnerOutcome {
     const { ctx, stores } = this.deps;
     return ctx.tx.write((): PatternRunnerOutcome => {
       const stale = this.support.staleness(nodeId, expectedRevisionNumber);
@@ -634,23 +635,23 @@ export class CoordinatorWorkerPatternRunner {
       const state = this.state(node);
       const advice = this.inspectWaiting(node, state);
       if (advice.kind !== "waiting" || !advice.cleared) return { kind: "no_change" };
+      const turn = state.latestTurn;
+      const turnContinues = turn !== null && INVOCATION_MACHINE.isTerminal(turn.status) && blockedOn(stores, turn)?.status === "resolved" && this.turnNeedsSettlement(state);
+      const workerContinues = (w: WorkerFacts) => w.invocation !== null && INVOCATION_MACHINE.isTerminal(w.invocation.status) && blockedOn(stores, w.invocation)?.status === "resolved" && w.task.status === "blocked" && w.task.blockReason?.kind === "decision";
+      // A targeted continuation names the blocked turn or exactly one blocked Worker; otherwise the turn continues first, then the first Worker in canonical order.
+      const targetWorker = continueInvocationId === null ? null : ([...state.workers.values()].find((w) => w.invocation?.id === continueInvocationId && workerContinues(w)) ?? null);
+      if (continueInvocationId !== null && (reason !== "decision" || !((turnContinues && turn.id === continueInvocationId) || targetWorker !== null))) return { kind: "no_change" };
       const running = stores.plans.transitionNode(node.id, { to: "running" }, options) as PatternPlanNode;
       if (reason !== "decision") return { kind: "resumed", reason };
       const gated = this.support.resumeGateEvaluator(running, options);
       if (gated !== null) return gated;
-      const turn = state.latestTurn;
-      if (turn !== null && INVOCATION_MACHINE.isTerminal(turn.status)) {
-        const decision = blockedOn(stores, turn);
-        if (decision !== null && decision.status === "resolved" && this.turnNeedsSettlement(state)) return this.prepareTurnSuccessor(running, turn, decision, options);
-      }
+      if (turnContinues && (continueInvocationId === null || turn.id === continueInvocationId)) return this.prepareTurnSuccessor(running, turn, blockedOn(stores, turn)!, options);
       for (const taskId of state.projection.order) {
         const w = state.workers.get(taskId)!;
-        if (w.invocation === null || !INVOCATION_MACHINE.isTerminal(w.invocation.status)) continue;
-        const decision = blockedOn(stores, w.invocation);
-        if (decision === null || decision.status !== "resolved" || w.task.status !== "blocked" || w.task.blockReason?.kind !== "decision") continue;
+        if (!workerContinues(w) || (targetWorker !== null && w.task.id !== targetWorker.task.id)) continue;
         if (state.activeWorkers.length >= state.bounds.maxConcurrentWorkers) break;
         stores.tasks.transition(w.task.id, { to: "ready" }, options);
-        return this.support.prepareSuccessor(running, w.invocation, decision, [], options);
+        return this.support.prepareSuccessor(running, w.invocation!, blockedOn(stores, w.invocation!)!, [], options);
       }
       return { kind: "resumed", reason };
     });

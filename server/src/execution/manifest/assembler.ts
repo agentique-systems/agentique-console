@@ -44,6 +44,7 @@ import {
   type EffectiveCapabilityPolicy,
   type HandoffId,
   type Invocation,
+  type InvocationId,
   type ManifestAcceptanceCriterion,
   type ManifestDecision,
   type ManifestInput,
@@ -251,6 +252,21 @@ export class ContextManifestAssembler {
       if (error instanceof NotFoundError) return null;
       throw error;
     }
+  }
+
+  /**
+   * Whether `invocation` continues `ancestorId` as the same logical turn: every Invocation on the chain back to it, the ancestor
+   * included, ended `blocked` (on a Decision whose resolution the successor carries). A chain through any other ending is a new turn.
+   */
+  private continuesFrom(invocation: Pick<Invocation, "continuedFromInvocationId">, ancestorId: InvocationId): boolean {
+    let cursor = invocation.continuedFromInvocationId;
+    for (let hops = 0; cursor !== null && hops < 1_000; hops += 1) {
+      const predecessor = this.stores.invocations.get(cursor);
+      if (predecessor.status !== "blocked") return false;
+      if (cursor === ancestorId) return true;
+      cursor = predecessor.continuedFromInvocationId;
+    }
+    return false;
   }
 
   /** Relevant Decisions only: the operation's, those affecting included Requirements, Tasks, or this node, those the inputs name, and those resolved since the previous manifest. */
@@ -474,7 +490,11 @@ export class ContextManifestAssembler {
           if (resolution.outcome !== "request_changes" || resolution.gateId !== input.gateId || resolution.decisionId !== input.decisionId || resolution.operatorMessageId !== input.operatorMessageId) {
             throw new InvariantViolationError(`signoff_resolution input disagrees with Signoff Resolution ${resolution.id}`, { signoffResolutionId: resolution.id });
           }
-          if (resolution.followUpInvocationId !== null && resolution.followUpInvocationId !== invocation.id) throw new InvariantViolationError(`Signoff Resolution ${resolution.id} already continues in Invocation ${resolution.followUpInvocationId}`);
+          // The one follow-up is a logical turn: the linked Invocation, or a successor continuing from it (a resolved Decision it requested,
+          // §8.2) — never a second, unrelated turn.
+          if (resolution.followUpInvocationId !== null && resolution.followUpInvocationId !== invocation.id && !this.continuesFrom(invocation, resolution.followUpInvocationId)) {
+            throw new InvariantViolationError(`Signoff Resolution ${resolution.id} already continues in Invocation ${resolution.followUpInvocationId}`);
+          }
           const gate = this.stores.gates.get(input.gateId);
           if (gate.runId !== run.id || gate.kind !== "operator_signoff" || gate.status !== "failed" || gate.failure?.kind !== "changes_requested" || gate.failure.decisionId !== input.decisionId) {
             throw new InvariantViolationError(`Gate ${input.gateId} is not the operator_signoff Gate closed on Decision ${input.decisionId}`, { gateId: input.gateId });

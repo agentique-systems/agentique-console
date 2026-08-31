@@ -899,6 +899,11 @@ export const invocations = sqliteTable(
     check("invocations_terminal_has_ended_at", sql`(${t.status} IN ('blocked', 'succeeded', 'failed', 'cancelled')) = (${t.endedAt} IS NOT NULL)`),
     check("invocations_alloc_attempts", sql`${t.allocAttempts} >= 1 AND ${t.allocCostUsd} >= 0 AND ${t.allocTokens} >= 0`),
     check("invocations_no_self_continue", sql`${t.continuedFromInvocationId} IS NULL OR ${t.continuedFromInvocationId} <> ${t.id}`),
+    // At most one Invocation continues from another: a blocked requester, an approval-blocked Invocation, or a logical turn has exactly
+    // one successor, so two passes or processes can never both prepare one (execution-model §8.2).
+    uniqueIndex("invocations_one_successor")
+      .on(t.continuedFromInvocationId)
+      .where(sql`continued_from_invocation_id IS NOT NULL`),
     index("invocations_plan_node_position").on(t.planNodeId, t.patternPositionKey, t.createdAt),
     check("invocations_pattern_position_kind", sql`${t.patternPosition} IS NULL OR json_extract(${t.patternPosition}, '$.kind') IN (${inList(PATTERN_POSITION_KINDS)})`),
     // A position is absent only for a Gate Evaluator; every other Invocation names one.

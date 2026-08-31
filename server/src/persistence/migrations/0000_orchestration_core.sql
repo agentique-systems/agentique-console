@@ -599,6 +599,7 @@ CREATE INDEX `invocations_plan_node_status` ON `invocations` (`plan_node_id`,`st
 CREATE INDEX `invocations_workspace_cleanup_pending` ON `invocations` (`run_id`,`status`) WHERE workspace_cleanup = 'pending';--> statement-breakpoint
 CREATE INDEX `invocations_run_status` ON `invocations` (`run_id`,`status`);--> statement-breakpoint
 CREATE INDEX `invocations_plan_node_source` ON `invocations` (`plan_node_id`,`allocation_source`);--> statement-breakpoint
+CREATE UNIQUE INDEX `invocations_one_successor` ON `invocations` (`continued_from_invocation_id`) WHERE continued_from_invocation_id IS NOT NULL;--> statement-breakpoint
 CREATE INDEX `invocations_plan_node_position` ON `invocations` (`plan_node_id`,`pattern_position_key`,`created_at`);--> statement-breakpoint
 CREATE UNIQUE INDEX `invocations_active_gate` ON `invocations` (`gate_id`) WHERE gate_id IS NOT NULL AND role = 'evaluator' AND status IN ('pending', 'running', 'waiting');--> statement-breakpoint
 CREATE UNIQUE INDEX `invocations_active_synthesis` ON `invocations` (`gate_id`) WHERE gate_id IS NOT NULL AND purpose = 'final_synthesis' AND status IN ('pending', 'running', 'waiting');--> statement-breakpoint
