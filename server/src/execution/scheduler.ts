@@ -5,15 +5,19 @@
  *
  * - `reconcileRun(runId)`: a read-only projection that explains, from
  *   canonical rows alone, what the next canonical actions are, what waits
- *   on what, which work belongs to a later phase, and when to look again.
+ *   on what, and when to look again.
  * - `advanceRun(runId, { maxActions })`: an asynchronous, bounded pass that
  *   performs those actions one at a time, re-projecting the current
  *   accepted graph and its condition facts before every state-changing
  *   action and revalidating the revision, membership, node state, and
  *   active Invocations inside each mutation transaction (the Pattern
  *   runners and the join settler do that), until the Run is quiescent,
- *   waiting, terminal, at the action limit, left with only later-phase
- *   work, or an infrastructure failure stops it.
+ *   waiting, terminal, at the action limit, or an infrastructure failure
+ *   stops it. Nothing is deferred to a later phase: every node whose next
+ *   work does not fit follows its allocation policy (execution-model §7.6),
+ *   and the Run waits with reason `budget` only when required work cannot
+ *   proceed, no other action can, nothing is in flight, and the needed
+ *   Allocation Extension does not fit the Run's effective ordinary capacity.
  *
  * Readiness is the pure evaluator over the current graph plus the explicit
  * canonical condition facts projected from rows (`readiness-facts.ts`).
@@ -111,18 +115,12 @@ export type SchedulerAction =
   /** No current work can proceed and no Attempt is running: the Run records the reason. */
   | { kind: "wait_run"; reason: RunWaitReason };
 
-export type SchedulerStopReason = "quiescent" | "waiting" | "action_limit" | "run_terminal" | "unsupported" | "infrastructure_failure";
+export type SchedulerStopReason = "quiescent" | "waiting" | "action_limit" | "run_terminal" | "infrastructure_failure";
 
 export interface WaitingCondition {
   nodeId: PlanNodeId;
   reason: PlanNodeWaitReason;
   wakeAt: Timestamp | null;
-}
-
-export interface DeferredWork {
-  nodeId: PlanNodeId;
-  reason: "awaiting_allocation_extension_phase";
-  pattern: Pattern | null;
 }
 
 /** A node whose failed `node_exit` Gate is being remediated by the root Orchestrator; it has no action of its own until its remediation Task ends. */
@@ -149,7 +147,6 @@ export interface SchedulerProjection {
   /** The canonical actions, in scheduling order; the first is what a pass performs next. */
   actions: SchedulerAction[];
   waiting: WaitingCondition[];
-  deferred: DeferredWork[];
   /** Nodes whose failed Gate awaits its owner's remediation. */
   remediating: RemediatingNode[];
   /** Ready nodes (or further positions) not started this pass because the Run's `maxConcurrency` is reached; they start as active Invocations end. */
@@ -177,7 +174,6 @@ export interface SchedulerOutcome {
   /** Attempts executed to completion during the pass, in completion order. */
   executed: AttemptId[];
   waiting: WaitingCondition[];
-  deferred: DeferredWork[];
   remediating: RemediatingNode[];
   wakeAt: Timestamp | null;
   failure: { message: string } | null;
@@ -230,17 +226,16 @@ export class RunScheduler {
     const graph = this.stores.plans.currentGraph(runId);
     const base = { runId, revisionNumber: graph.revisionNumber, run: { status: run.status, waitReason: run.waitReason } };
     const none: CompletionAdvice = { kind: "none" };
-    if (RUN_MACHINE.isTerminal(run.status)) return { ...base, nodes: [], actions: [], waiting: [], deferred: [], remediating: [], limited: [], inFlight: [], wakeAt: null, concurrency: { active: 0, max: run.budget.maxConcurrency }, completion: none, stop: "run_terminal" };
+    if (RUN_MACHINE.isTerminal(run.status)) return { ...base, nodes: [], actions: [], waiting: [], remediating: [], limited: [], inFlight: [], wakeAt: null, concurrency: { active: 0, max: run.budget.maxConcurrency }, completion: none, stop: "run_terminal" };
     const root = graph.nodes.find((n) => n.sourcePath === ROOT_SOURCE_PATH)!;
     // Awaiting the operator's signoff: no model or Pattern work is scheduled (execution-model §3).
-    if (run.status === "awaiting_signoff") return { ...base, nodes: [{ nodeId: root.id, pattern: "single", status: root.status, readiness: null, advice: null, current: true }], actions: [], waiting: [], deferred: [], remediating: [], limited: [], inFlight: [], wakeAt: null, concurrency: { active: 0, max: run.budget.maxConcurrency }, completion: none, stop: "quiescent" };
+    if (run.status === "awaiting_signoff") return { ...base, nodes: [{ nodeId: root.id, pattern: "single", status: root.status, readiness: null, advice: null, current: true }], actions: [], waiting: [], remediating: [], limited: [], inFlight: [], wakeAt: null, concurrency: { active: 0, max: run.budget.maxConcurrency }, completion: none, stop: "quiescent" };
     // Verifying: only the completion engine's actions execute; no ordinary Pattern work starts (execution-model §10).
     if (run.status === "verifying") return this.reconcileVerifying(runId, run, root, base, now);
     const readiness = new Map(evaluateReadiness(projectReadinessInput(this.stores, graph)).decisions.map((d) => [d.nodeId, d] as const));
     const nodes: NodeProjection[] = [];
     const actions: SchedulerAction[] = [];
     const waiting: WaitingCondition[] = [];
-    const deferred: DeferredWork[] = [];
     const remediating: RemediatingNode[] = [];
     const limited: PlanNodeId[] = [];
     // Every Attempt of the Run executing in this process, from the executor's record, whatever its node advises.
@@ -272,10 +267,14 @@ export class RunScheduler {
         wakeAt = earliest(wakeAt, rootAdvice.notBefore);
         break;
       case "settle":
-        actions.push({ kind: "settle_root", invocationId: rootAdvice.invocationId });
+        // A settlement that implies a successor turn the root cannot fund now waits on budget (execution-model §7.6); the Run resumes through
+        // the ordinary resume_run once an approved Budget Increase makes the turn fundable.
+        if (rootAdvice.funded) actions.push({ kind: "settle_root", invocationId: rootAdvice.invocationId });
+        else waiting.push({ nodeId: root.id, reason: "budget", wakeAt: null });
         break;
       case "settle_remediation":
-        actions.push({ kind: "settle_gate_remediation", invocationId: rootAdvice.invocationId });
+        if (rootAdvice.funded) actions.push({ kind: "settle_gate_remediation", invocationId: rootAdvice.invocationId });
+        else waiting.push({ nodeId: root.id, reason: "budget", wakeAt: null });
         break;
       case "blocked":
         waiting.push({ nodeId: root.id, reason: "decision", wakeAt: null });
@@ -376,9 +375,6 @@ export class RunScheduler {
             wakeAt = earliest(wakeAt, advice.wakeAt);
           }
           break;
-        case "awaiting_allocation_extension_phase":
-          deferred.push({ nodeId: node.id, reason: advice.kind, pattern: node.pattern });
-          break;
         case "terminal":
         case "not_current":
           break;
@@ -396,10 +392,11 @@ export class RunScheduler {
     for (const invocationId of inFlight) wakeAt = earliest(wakeAt, this.executor.inspectInvocation(invocationId, now).deadlineAt);
 
     // Root-owned Gate remediation: one turn for every pending Task, only once no other action exists, no Attempt is executing, and no
-    // node is held back by a concurrency limit (a Gate failing later in this pass joins the same turn).
+    // node is held back by a concurrency limit (a Gate failing later in this pass joins the same turn). A turn the root cannot fund —
+    // not even through the Allocation Extension its `extend` policy admits — waits on budget until a Budget Increase is approved.
     if (remediate !== null && actions.length === 0 && inFlight.length === 0 && limited.length === 0) {
       if (remediate.funded) actions.push({ kind: "prepare_gate_remediation", taskIds: remediate.taskIds });
-      else deferred.push({ nodeId: root.id, reason: "awaiting_allocation_extension_phase", pattern: "single" });
+      else waiting.push({ nodeId: root.id, reason: "budget", wakeAt: null });
     }
 
     // An accepted Completion Request whose requesting turn settled begins (or, when that turn did not complete, ends) once the root is idle
@@ -413,8 +410,8 @@ export class RunScheduler {
     if (actions.length === 0 && run.status === "running" && waiting.length > 0 && inFlight.length === 0 && limited.length === 0) {
       actions.push({ kind: "wait_run", reason: RUN_WAIT_REASONS_BY_NODE[waiting[0]!.reason] });
     }
-    const stop: SchedulerProjection["stop"] = waiting.length > 0 || inFlight.length > 0 || limited.length > 0 || wakeAt !== null ? "waiting" : deferred.length > 0 ? "unsupported" : "quiescent";
-    return { ...base, nodes, actions, waiting, deferred, remediating, limited, inFlight, wakeAt, concurrency: { active, max }, completion, stop };
+    const stop: SchedulerProjection["stop"] = waiting.length > 0 || inFlight.length > 0 || limited.length > 0 || wakeAt !== null ? "waiting" : "quiescent";
+    return { ...base, nodes, actions, waiting, remediating, limited, inFlight, wakeAt, concurrency: { active, max }, completion, stop };
   }
 
   /** The projection of a `verifying` Run: the completion engine's one next action, its waits, and its in-flight Attempt. */
@@ -470,7 +467,7 @@ export class RunScheduler {
     }
     for (const invocationId of inFlight) wakeAt = earliest(wakeAt, this.executor.inspectInvocation(invocationId, now).deadlineAt);
     const stop: SchedulerProjection["stop"] = waiting.length > 0 || inFlight.length > 0 || wakeAt !== null ? "waiting" : "quiescent";
-    return { ...base, nodes: [{ nodeId: root.id, pattern: "single", status: root.status, readiness: null, advice: null, current: true }], actions, waiting, deferred: [], remediating: [], limited: [], inFlight, wakeAt, concurrency: { active: this.stores.invocations.listActive(runId).length, max: run.budget.maxConcurrency }, completion, stop };
+    return { ...base, nodes: [{ nodeId: root.id, pattern: "single", status: root.status, readiness: null, advice: null, current: true }], actions, waiting, remediating: [], limited: [], inFlight, wakeAt, concurrency: { active: this.stores.invocations.listActive(runId).length, max: run.budget.maxConcurrency }, completion, stop };
   }
 
   private capacityRefusal(runId: RunId, invocationId: InvocationId) {
@@ -492,7 +489,7 @@ export class RunScheduler {
 
   /**
    * Performs the Run's canonical actions until it is quiescent, waiting,
-   * terminal, at `maxActions`, left with only later-phase work, or stopped
+   * terminal, at `maxActions`, or stopped
    * by an infrastructure failure. A concurrent call for the same Run joins
    * the pass in progress and receives its outcome.
    */
@@ -540,7 +537,7 @@ export class RunScheduler {
         // A projection that cannot be computed (a missing or contradictory condition fact) is an infrastructure failure, never a guess.
         finalFailure = finalFailure ?? failureOf(error);
       }
-      return { runId, stop: finalFailure !== null ? "infrastructure_failure" : stop, actions, executed, waiting: projection?.waiting ?? [], deferred: projection?.deferred ?? [], remediating: projection?.remediating ?? [], wakeAt: projection?.wakeAt ?? null, failure: finalFailure };
+      return { runId, stop: finalFailure !== null ? "infrastructure_failure" : stop, actions, executed, waiting: projection?.waiting ?? [], remediating: projection?.remediating ?? [], wakeAt: projection?.wakeAt ?? null, failure: finalFailure };
     };
     for (;;) {
       this.executor.enforceDeadlines(this.ctx.clock());

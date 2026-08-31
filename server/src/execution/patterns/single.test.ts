@@ -172,8 +172,8 @@ describe("SinglePatternRunner", () => {
     } finally {
       h.close();
     }
-    // Allocation policy: a node whose allocation cannot fund its Invocation fails under `fail`, waits on budget under `wait`,
-    // and reports the later-phase extension under `extend` without corrupting anything.
+    // Allocation policy: a node whose allocation cannot fund its Invocation fails under `fail`, waits on budget under `wait`, and under
+    // `extend` receives exactly its shortfall from the Run's ordinary capacity in the transaction that creates the Invocation.
     for (const policy of ["fail", "wait", "extend"] as const) {
       const b = openRuntimeHarness();
       try {
@@ -182,21 +182,34 @@ describe("SinglePatternRunner", () => {
         const runner = b.runners.single;
         const seq = b.ctx.journal.lastSeq();
         const outcome = runner.start(node.id, revisionNumber);
-        expect(b.stores.invocations.listByPlanNode(node.id)).toEqual([]);
         if (policy === "fail") {
+          expect(b.stores.invocations.listByPlanNode(node.id)).toEqual([]);
           expect(outcome).toEqual({ kind: "failed", reason: "allocation_exhausted" });
           expect(nodeState(b, node).status).toBe("failed");
           expect(b.ctx.journal.read({ runId: s.created.run.id, afterSeq: seq }).map((e) => e.type)).toEqual(["plan_node.started", "plan_node.failed", "budget_reservation.released"]);
           expect(b.ctx.journal.read({ runId: s.created.run.id, type: "plan_node.failed" })[0]!.payload).toMatchObject({ reason: "allocation_exhausted" });
+          expect(b.stores.allocationExtensions.listByRun(s.created.run.id)).toEqual([]);
         } else if (policy === "wait") {
+          expect(b.stores.invocations.listByPlanNode(node.id)).toEqual([]);
           expect(outcome).toEqual({ kind: "waiting", reason: "budget", wakeAt: null });
           expect(nodeState(b, node)).toMatchObject({ status: "waiting", waitReason: "budget" });
           expect(runner.inspect(node.id)).toEqual({ kind: "waiting", reason: "budget", cleared: false, wakeAt: null });
+          expect(b.stores.allocationExtensions.listByRun(s.created.run.id)).toEqual([]);
         } else {
-          expect(outcome).toEqual({ kind: "awaiting_allocation_extension_phase" });
+          expect(outcome).toMatchObject({ kind: "started", position: { kind: "single" } });
           expect(nodeState(b, node).status).toBe("running");
-          expect(runner.inspect(node.id)).toEqual({ kind: "start" });
-          expect(runner.start(node.id, revisionNumber)).toEqual({ kind: "awaiting_allocation_extension_phase" });
+          expect(b.stores.invocations.listByPlanNode(node.id)).toHaveLength(1);
+          // Exactly the component-wise shortfall (2 − 1 USD, 20 000 − 1 000 tokens, 2 − 1 Attempts): no spare remainder, no rounding.
+          const extensions = b.stores.allocationExtensions.listByPlanNode(node.id);
+          expect(extensions).toHaveLength(1);
+          expect(extensions[0]).toMatchObject({ trigger: "invocation", added: { costUsd: 1, tokens: 19_000, attempts: 1 } });
+          expect(b.stores.reservations.planNodeAllocation(node.id)).toMatchObject({ original: { costUsd: 1, tokens: 1_000, attempts: 1 }, effective: { costUsd: 2, tokens: 20_000, attempts: 2 } });
+          expect(b.stores.reservations.capacity({ type: "plan_node", id: node.id }).available).toEqual({ costUsd: 0, tokens: 0, attempts: 0 });
+          const types = b.ctx.journal.read({ runId: s.created.run.id, afterSeq: seq }).map((e) => e.type);
+          expect(types.indexOf("allocation_extension.created")).toBeGreaterThan(types.indexOf("plan_node.started"));
+          expect(types.indexOf("allocation_extension.created")).toBeLessThan(types.indexOf("invocation.created"));
+          expect(runner.start(node.id, revisionNumber)).toEqual({ kind: "no_change" });
+          expect(b.stores.allocationExtensions.listByPlanNode(node.id)).toHaveLength(1);
         }
       } finally {
         b.close();

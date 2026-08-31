@@ -14,7 +14,8 @@ import type { ArtifactId, PlanNode, PlanNodeId, Task } from "@agentique-console/
 import { describe, expect, it } from "vitest";
 import { coordinatorNode, proposal, propose, synthesisStep, turn, turnsOf, WIDE_GOVERNOR, workerStep as coordinatorWorkerStep } from "./coordinator-test-support.ts";
 import { criterionVerdictsOf, finishRoot, gateEvaluatorStep, gatesOf, orchestratorStep, remediationOf, rootTurnsOf, scriptByRole, seedCriteria, singleExpression, workerStep } from "./gate-test-support.ts";
-import { openRuntimeHarness, planNodes, seedPlanningRuntime, type RuntimeHarness } from "./test-support.ts";
+import { DEFAULT_BUDGET, seedBudgetIncrease } from "../persistence/test-support.ts";
+import { asSeeded, openRuntimeHarness, planNodes, seedPlanningRuntime, type RuntimeHarness } from "./test-support.ts";
 
 const failingGate = (h: RuntimeHarness, evaluated: string[]) => gateEvaluatorStep(h, "fail", { criteria: Object.fromEntries(evaluated.map((id) => [id, "fail" as const])) });
 
@@ -80,7 +81,6 @@ describe("node_exit Gate remediation", () => {
       expect(manifest.inputs.map((i) => i.kind).every((k) => k === "gate_result")).toBe(true);
       // Nothing is deferred and the gated nodes stay running while remediation is pending; the projection names them and executes the turn next.
       const projection = h.scheduler.reconcileRun(runId);
-      expect(projection.deferred).toEqual([]);
       expect(projection.remediating.map((r) => r.nodeId).sort()).toEqual([a.id, b.id].sort());
       expect(projection.actions.map((x) => x.kind)).toEqual(["execute_invocation"]);
       expect([a, b].map((n) => h.stores.plans.getNode(n.id).status)).toEqual(["running", "running"]);
@@ -227,22 +227,76 @@ describe("node_exit Gate remediation", () => {
     }
   });
 
-  it("defers root remediation as awaiting_allocation_extension_phase when the root's allocation cannot fund the turn, creating nothing", async () => {
+  it("extends the root's allocation by exactly the remediation turn's shortfall from the Run's ordinary capacity, atomically with the turn", async () => {
     const h = openRuntimeHarness({ governor: WIDE_GOVERNOR });
     try {
-      // The root can fund exactly one Orchestrator turn: the operator_input turn consumed an Attempt of the two.
+      // The root can fund exactly one Orchestrator turn: the operator_input turn consumed an Attempt of the two; the Run has ordinary capacity to spare.
       const s = seedPlanningRuntime(h, { orchestratorAllocation: { costUsd: 4, tokens: 40_000, attempts: 2 } });
+      const runId = s.created.run.id;
+      const rootId = h.stores.plans.rootNode(runId).id;
       const criteria = seedCriteria(h, s, { deterministic: 1 });
       const { nodes } = planNodes(h, s, [singleExpression(s, "A", { gate: criteria.all })]);
       await finishRoot(h, s);
       h.criterionExecution.script(criteria.deterministic[0]!, { kind: "exit", exitCode: 1 });
       scriptByRole(h, { worker: [workerStep(h, "a")] });
-      const outcome = await h.scheduler.advanceRun(s.created.run.id);
-      expect(outcome.stop).toBe("unsupported");
-      expect(outcome.deferred).toEqual([{ nodeId: h.stores.plans.rootNode(s.created.run.id).id, reason: "awaiting_allocation_extension_phase", pattern: "single" }]);
-      expect(rootTurnsOf(h, s.created.run.id)).toHaveLength(1);
+      const shortfall = h.capacity.admits(h.stores.plans.rootNode(runId) as never, s.orchestrator.defaultLimits.allocation);
+      const kinds = await stepUntil(h, runId, () => rootTurnsOf(h, runId).length === 2);
+      expect(kinds.at(-1)).toBe("prepare_gate_remediation");
+      expect(remediationOf(h, gatesOf(h, nodes[0]!.id)[0]!.id)!.status).toBe("running");
+      // One extension, exactly the component-wise shortfall, in the transaction that prepared the turn; nothing rounded up.
+      const extensions = h.stores.allocationExtensions.listByRun(runId);
+      expect(extensions).toHaveLength(1);
+      expect(extensions[0]).toMatchObject({ planNodeId: rootId, trigger: "gate_remediation", added: shortfall.shortfall });
+      expect(shortfall.shortfall.attempts).toBe(1);
+      expect(h.stores.reservations.planNodeAllocation(rootId).extended).toEqual(shortfall.shortfall);
+      const events = h.ctx.journal.read({ runId, type: "allocation_extension.created" });
+      expect(events).toHaveLength(1);
+      const created = h.ctx.journal.read({ runId, type: "invocation.created" }).find((e) => e.subjectId === rootTurnsOf(h, runId)[1]!.id)!;
+      expect(events[0]!.seq).toBeLessThan(created.seq);
+      expect(events[0]!.correlationId).toBe(created.correlationId);
+      expect(h.stores.usage.totalsForRun(runId).rows).toBe(h.stores.usage.totalsForRun(runId).rows);
+    } finally {
+      h.close();
+    }
+  });
+
+  it("waits the Run on budget when the root cannot fund the remediation turn and no extension fits, then resumes it after an approved ordinary Budget Increase with exactly one extension and one turn", async () => {
+    const h = openRuntimeHarness({ governor: WIDE_GOVERNOR });
+    try {
+      // Ordinary capacity is exactly reserved (root 2 + gated node 12 + reserve 3 = 17 Attempts): the root's extend policy finds nothing to draw from.
+      const s = seedPlanningRuntime(h, { orchestratorAllocation: { costUsd: 4, tokens: 40_000, attempts: 2 }, budget: { ...DEFAULT_BUDGET, maxAttempts: 17 } });
+      const runId = s.created.run.id;
+      const rootId = h.stores.plans.rootNode(runId).id;
+      const criteria = seedCriteria(h, s, { deterministic: 1 });
+      const { nodes } = planNodes(h, s, [singleExpression(s, "A", { gate: criteria.all })]);
+      await finishRoot(h, s);
+      h.criterionExecution.script(criteria.deterministic[0]!, { kind: "exit", exitCode: 1 });
+      scriptByRole(h, { worker: [workerStep(h, "a")] });
+      const outcome = await h.scheduler.advanceRun(runId);
+      expect(outcome.stop).toBe("waiting");
+      expect(outcome.waiting).toEqual([{ nodeId: rootId, reason: "budget", wakeAt: null }]);
+      expect(h.stores.runs.get(runId)).toMatchObject({ status: "waiting", waitReason: "budget" });
+      expect(rootTurnsOf(h, runId)).toHaveLength(1);
       expect(remediationOf(h, gatesOf(h, nodes[0]!.id)[0]!.id)!.status).toBe("pending");
-      expect(h.scheduler.reconcileRun(s.created.run.id).nodes[0]!.advice).toMatchObject({ kind: "remediate", funded: false });
+      expect(h.stores.allocationExtensions.listByRun(runId)).toEqual([]);
+      expect(h.scheduler.reconcileRun(runId).nodes[0]!.advice).toMatchObject({ kind: "remediate", funded: false });
+      // Nothing changes on a repeated pass, and no agent turn exists merely to report the shortfall.
+      const again = await h.scheduler.advanceRun(runId);
+      expect(again.actions).toEqual([]);
+      expect(rootTurnsOf(h, runId)).toHaveLength(1);
+      // An approved ordinary increase of exactly one Attempt: the next pass resumes the Run through the ordinary transition, extends the root by exactly its
+      // shortfall, and prepares the one turn — and nothing but the scheduler pass acted on the increase.
+      seedBudgetIncrease(h, asSeeded(s), "ordinary", { costUsd: 0, tokens: 0, attempts: 1 });
+      expect(h.stores.runs.get(runId).status).toBe("waiting");
+      expect(h.scheduler.reconcileRun(runId).actions.map((a) => a.kind)).toEqual(["resume_run", "prepare_gate_remediation"]);
+      scriptByRole(h, { orchestrator: [orchestratorStep(h)] });
+      const resumed = await h.scheduler.advanceRun(runId);
+      expect(resumed.actions.map((a) => a.action.kind).slice(0, 2)).toEqual(["resume_run", "prepare_gate_remediation"]);
+      expect(h.ctx.journal.read({ runId, type: "run.wait_cleared" }).map((e) => e.payload)).toEqual([{ from: "waiting", to: "running", clearedWaitReason: "budget" }]);
+      expect(h.stores.allocationExtensions.listByRun(runId)).toMatchObject([{ planNodeId: rootId, trigger: "gate_remediation", added: { costUsd: 0, tokens: 0, attempts: 1 } }]);
+      expect(rootTurnsOf(h, runId).map((t) => t.purpose)).toEqual(["operator_input", "gate_result"]);
+      expect(h.stores.reservations.runCapacity(runId).increases.ordinary).toEqual({ costUsd: 0, tokens: 0, attempts: 1 });
+      expect(h.stores.runs.get(runId).budget.maxAttempts).toBe(17);
     } finally {
       h.close();
     }

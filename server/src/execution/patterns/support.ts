@@ -22,7 +22,6 @@
  * node already transitioned is found, never duplicated.
  */
 import {
-  allocationFits,
   ConflictError,
   InvariantViolationError,
   INVOCATION_MACHINE,
@@ -33,6 +32,7 @@ import {
   ROOT_SOURCE_PATH,
   TASK_MACHINE,
   type AcceptanceCriterionId,
+  type Allocation,
   type ArtifactId,
   type BudgetReservationId,
   type CompiledOperation,
@@ -73,6 +73,7 @@ import { activeInvocationAdvice, blockedOn, blockingDecisionOf, outstandingChang
 import type { AcceptanceCriterionExecutionFailure } from "../ports/acceptance-criterion-execution.ts";
 import type { ChangesetIntegrationService } from "../integration-service.ts";
 import type { InvocationPreparationService } from "../invocation-preparation-service.ts";
+import type { CapacityAdmission, PlanNodeCapacity } from "../plan-node-capacity.ts";
 import { currentReadinessInput } from "../readiness-facts.ts";
 import type { ReadinessInput } from "../readiness.ts";
 
@@ -108,8 +109,6 @@ export type NodeAdvice =
   /** The node waits; `cleared` says whether the condition has cleared and `resume` applies; `wakeAt` when a time is known. */
   | { kind: "waiting"; reason: PlanNodeWaitReason; cleared: boolean; wakeAt: Timestamp | null }
   | { kind: "terminal"; status: "succeeded" | "failed" | "cancelled" | "skipped" }
-  /** The node's `extend` allocation policy would apply and extension arrives in a later phase. */
-  | { kind: "awaiting_allocation_extension_phase" }
   /** The node is not a member of the current revision: its own started work may finish (`settle` says a settlement is due), nothing new starts. */
   | { kind: "not_current"; invocationId: InvocationId | null; settle: boolean };
 
@@ -157,7 +156,6 @@ export type PatternRunnerOutcome =
   | { kind: "cancelled" }
   | { kind: "waiting"; reason: PlanNodeWaitReason; wakeAt: Timestamp | null }
   | { kind: "resumed"; reason: PlanNodeWaitReason }
-  | { kind: "awaiting_allocation_extension_phase" }
   /** The revision, membership, or node state changed since projection; nothing was written. */
   | { kind: "stale"; expectedRevisionNumber: number; currentRevisionNumber: number }
   /** Already applied by an earlier pass; nothing was written. */
@@ -171,6 +169,8 @@ export interface PatternRunnerDependencies {
   integration: ChangesetIntegrationService;
   /** Deterministic Acceptance Criterion execution, used by the evaluator_optimizer runner for its rounds. */
   checks: AcceptanceCheckService;
+  /** Reservable Plan Node capacity (execution-model §7.6): the one operation that funds a node's next child under its allocation policy. */
+  capacity: PlanNodeCapacity;
   governor: ResourceGovernor;
   provider: { readonly provider: string };
 }
@@ -307,16 +307,11 @@ export class PatternNodeSupport {
     if (operation === null) throw new Error(`PlanNode ${node.id} has no ${patternPositionKey(position)} position`);
     const binding = PATTERN_POSITION_BINDINGS[position.kind];
     if (binding.purpose !== null && binding.purpose !== purpose) throw new Error(`position ${position.kind} fixes purpose ${binding.purpose}, not ${purpose}`);
-    // A transferred Task reservation was checked against the node when the Task was accepted; only fresh funding is checked now.
-    if (request.taskReservationId === undefined && !this.allocationFor(node, position).fits) {
-      switch (node.onAllocationExhausted) {
-        case "fail":
-          return { kind: "refused", outcome: this.failNow(node, "allocation_exhausted", options) };
-        case "wait":
-          return { kind: "refused", outcome: this.wait(node, "budget", options) };
-        case "extend":
-          return { kind: "refused", outcome: { kind: "awaiting_allocation_extension_phase" } };
-      }
+    // A transferred Task reservation was checked against the node when the Task was accepted; fresh funding goes through the one
+    // capacity operation, which extends the node's allocation under `extend` in this same transaction or refuses by policy.
+    if (request.taskReservationId === undefined) {
+      const funded = this.deps.capacity.ensure(node, this.requiredFor(node, position), "invocation", options);
+      if (funded.kind === "refused") return { kind: "refused", outcome: funded.policy === "fail" ? this.failNow(node, "allocation_exhausted", options) : this.wait(node, "budget", options) };
     }
     const tasks = this.readyOwnedTasks(node, operation, options);
     if (tasks.kind === "unavailable") return { kind: "refused", outcome: this.failNow(node, "task_unavailable", options) };
@@ -357,12 +352,16 @@ export class PatternNodeSupport {
     return { kind: "successor_prepared", invocationId: prepared.invocationId, position, decisionId: decision.id };
   }
 
-  /** Whether the node's unconsumed, unreserved allocation covers the operation's default Invocation allocation. */
-  allocationFor(node: PatternPlanNode, position: PatternPosition): { fits: boolean } {
+  /** The allocation the Invocation at `position` needs: its operation's Agent Definition default. */
+  requiredFor(node: PatternPlanNode, position: PatternPosition): Allocation {
     const operation = operationAt(node.shape, position);
-    if (operation === null) return { fits: false };
-    const allocation = this.deps.stores.agents.getRevision(operation.agentDefinitionRevisionId).defaultLimits.allocation;
-    return { fits: allocationFits(allocation, this.deps.stores.reservations.capacity({ type: "plan_node", id: node.id }).available) };
+    if (operation === null) throw new Error(`PlanNode ${node.id} has no ${patternPositionKey(position)} position`);
+    return this.deps.stores.agents.getRevision(operation.agentDefinitionRevisionId).defaultLimits.allocation;
+  }
+
+  /** Whether the node can fund the Invocation at `position` now — from its effective allocation, or through the extension its `extend` policy admits (read-only). */
+  admits(node: PatternPlanNode, position: PatternPosition): CapacityAdmission {
+    return this.deps.capacity.admits(node, this.requiredFor(node, position));
   }
 
   /**
@@ -436,7 +435,7 @@ export class PatternNodeSupport {
       case "budget": {
         // A node whose open Gate awaits its Evaluator waits for the Evaluator's funding, not for a further position's.
         if (this.gates.awaitingEvaluator(node)) return { kind: "waiting", reason, cleared: this.gates.evaluatorFits(node), wakeAt: null };
-        const fits = context.nextPosition === null || this.allocationFor(node, context.nextPosition).fits;
+        const fits = context.nextPosition === null || this.admits(node, context.nextPosition).fits;
         return { kind: "waiting", reason, cleared: fits, wakeAt: null };
       }
       case "integration_conflict": {

@@ -71,7 +71,6 @@ describe("node_exit Gate lifecycle", () => {
       expect(runner.inspect(node.id)).toEqual({ kind: "verify_gate", gateId: gate.id });
       // Nothing about the Gate is deferred to a later phase.
       const projection = h.scheduler.reconcileRun(runId);
-      expect(projection.deferred).toEqual([]);
       expect(projection.actions).toEqual([{ kind: "run_gate_checks", nodeId: node.id, gateId: gate.id }]);
     } finally {
       h.close();
@@ -250,7 +249,7 @@ describe("node_exit Gate lifecycle", () => {
       expect(h.stores.plans.getNode(node.id).status).toBe("failed");
       expect(failureReasonOf(h, runId, node.id)).toMatchObject({ reason: "gate_evaluator_failed" });
       expect(rootTurnsOf(h, runId)).toHaveLength(1);
-      expect(h.scheduler.reconcileRun(runId)).toMatchObject({ actions: [], remediating: [], deferred: [] });
+      expect(h.scheduler.reconcileRun(runId)).toMatchObject({ actions: [], remediating: [] });
     } finally {
       h.close();
     }
@@ -338,14 +337,11 @@ describe("node_exit Gate lifecycle", () => {
       const { node, runId } = await integratedSingle(h, { deterministic: 1, evaluated: 1 });
       scriptByRole(h, { evaluator: [gateEvaluatorStep(h, "pass")] });
       const kinds: string[] = [];
-      const deferred: unknown[] = [];
       for (let i = 0; i < 20 && h.stores.plans.getNode(node.id).status !== "succeeded"; i += 1) {
         const pass = await h.scheduler.advanceRun(runId, { maxActions: 1 });
         kinds.push(...pass.actions.map((p) => p.action.kind));
-        deferred.push(...pass.deferred);
       }
       expect(kinds).toEqual(["open_node_gate", "run_gate_checks", "prepare_gate_evaluator", "execute_invocation", "settle_node_gate"]);
-      expect(deferred).toEqual([]);
       expect(h.stores.plans.getNode(node.id).status).toBe("succeeded");
     } finally {
       h.close();
@@ -411,7 +407,6 @@ describe("node_exit Gates across Patterns", () => {
       scriptByRole(h, { worker: [workerStep(h, "first"), workerStep(h, "second")], evaluator: [gateEvaluatorStep(h, "pass")] });
       const outcome = await h.scheduler.advanceRun(runId);
       expect(outcome.stop).toBe("quiescent");
-      expect(outcome.deferred).toEqual([]);
       const steps = h.stores.invocations.listByPlanNode(node.id).filter((i) => i.role === "worker");
       expect(steps.map((i) => i.patternPosition?.kind)).toEqual(["chain_step", "chain_step"]);
       const [gate] = gatesOf(h, node.id);
@@ -439,7 +434,6 @@ describe("node_exit Gates across Patterns", () => {
       scriptByRole(h, { worker: [workerStep(h, "quick")], evaluator: [gateEvaluatorStep(h, "pass")] });
       const outcome = await h.scheduler.advanceRun(runId);
       expect(outcome.stop).toBe("quiescent");
-      expect(outcome.deferred).toEqual([]);
       const branch = h.stores.invocations.listByPlanNode(node.id).find((i) => i.role === "worker")!;
       expect(branch.patternPosition).toEqual({ kind: "route_branch", label: "quick" });
       const [gate] = gatesOf(h, node.id);
@@ -464,7 +458,6 @@ describe("node_exit Gates across Patterns", () => {
         scriptByRole(h, { worker: [workerStep(h, "item0"), workerStep(h, "item1"), ...(aggregate ? [workerStep(h, "aggregate")] : [])], evaluator: [gateEvaluatorStep(h, "pass")] });
         const outcome = await h.scheduler.advanceRun(runId);
         expect(outcome.stop).toBe("quiescent");
-        expect(outcome.deferred).toEqual([]);
         const workers = h.stores.invocations.listByPlanNode(node.id).filter((i) => i.role === "worker");
         expect(workers.map((i) => i.patternPosition?.kind).sort()).toEqual(aggregate ? ["parallel_aggregation", "parallel_item", "parallel_item"] : ["parallel_item", "parallel_item"]);
         const [gate] = gatesOf(h, node.id);
@@ -594,7 +587,6 @@ describe("node_exit Gates across Patterns", () => {
       });
       const outcome = await h.scheduler.advanceRun(runId);
       expect(outcome.stop).toBe("quiescent");
-      expect(outcome.deferred).toEqual([]);
       const [gate] = gatesOf(h, node.id);
       expect(gatesOf(h, node.id)).toHaveLength(1);
       expect(gate).toMatchObject({ status: "passed", candidateArtifactIds: [final.artifactId] });

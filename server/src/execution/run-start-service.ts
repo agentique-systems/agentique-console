@@ -8,11 +8,12 @@
  * Attempt executor runs the prepared Invocation when explicitly asked.
  * Starting a Run twice is a conflict and creates no second Invocation.
  */
-import { ConflictError, idSchema, nonEmptyString, parseOrThrow, ValidationError, type ConversationMessageId, type PlanNode, type Run, type RunId } from "@agentique-console/core";
+import { ConflictError, idSchema, InsufficientCapacityError, nonEmptyString, parseOrThrow, ValidationError, type ConversationMessageId, type PlanNode, type Run, type RunId } from "@agentique-console/core";
 import { z } from "zod";
 import type { PersistenceContext } from "../persistence/context.ts";
 import type { Stores } from "../persistence/stores/index.ts";
 import type { InvocationPreparationService, PreparedInvocation } from "./invocation-preparation-service.ts";
+import { PlanNodeCapacity } from "./plan-node-capacity.ts";
 
 export interface RunStartRequest {
   runId: RunId;
@@ -34,11 +35,15 @@ export interface StartedRun {
 }
 
 export class RunStartService {
+  private readonly capacity: PlanNodeCapacity;
+
   constructor(
     private readonly ctx: PersistenceContext,
     private readonly stores: Stores,
     private readonly preparation: InvocationPreparationService,
-  ) {}
+  ) {
+    this.capacity = new PlanNodeCapacity(ctx, stores);
+  }
 
   start(request: RunStartRequest): StartedRun {
     const valid = parseOrThrow(requestSchema, request, "Run start request");
@@ -56,6 +61,9 @@ export class RunStartService {
       this.stores.plans.transitionNode(root.id, { to: "ready" }, meta);
       const running = this.stores.plans.transitionNode(root.id, { to: "running" }, meta);
       const started = this.stores.runs.transition(run.id, { to: "running" }, meta);
+      // The first operator turn is ordinary root work: funded through the one capacity operation (the root's `extend` policy applies).
+      const funded = this.capacity.ensure(running as never, this.stores.agents.getRevision(root.shape.operation.agentDefinitionRevisionId).defaultLimits.allocation, "root_turn", meta);
+      if (funded.kind === "refused") throw new InsufficientCapacityError(`the root node of Run ${run.id} cannot fund its first Orchestrator turn`, { runId: run.id, planNodeId: root.id });
       const prepared = this.preparation.prepare({
         runId: run.id,
         planNodeId: root.id,

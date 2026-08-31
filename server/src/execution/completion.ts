@@ -548,7 +548,8 @@ export class RunCompletionEngine {
       tasks: this.facts.taskLedger(run),
       artifactIds: gate.candidateArtifactIds,
       usage: { costUsd: usage.costUsd, tokens: usage.inputTokensUncached + usage.cacheCreationTokens + usage.cacheReadTokens + usage.outputTokens, attempts },
-      finalReserve: { limit: run.finalReserve, consumed: capacity.final.committed },
+      // The effective final-reserve limit: the immutable base reserve plus approved final-reserve Budget Increases.
+      finalReserve: { limit: capacity.finalReserve, consumed: capacity.final.committed },
       unresolved: [],
     };
   }

@@ -31,6 +31,7 @@ import { AttemptExecutor, DEFAULT_EXECUTOR_CONFIG, type AttemptExecutorConfig } 
 import type { AcceptanceCriterionExecutionFailure, AcceptanceCriterionExecutionOutcome, AcceptanceCriterionExecutionPort, AcceptanceCriterionExecutionRequest } from "./ports/acceptance-criterion-execution.ts";
 import { ResourceGovernor, type GovernorConfig } from "./governor.ts";
 import { InvocationPreparationService } from "./invocation-preparation-service.ts";
+import { PlanNodeCapacity } from "./plan-node-capacity.ts";
 import { PlanRevisionService, type PlanRevisionOutcome } from "./plan-revision-service.ts";
 import { HandoffRouter } from "./handoff-routing.ts";
 import { ChangesetIntegrationService } from "./integration-service.ts";
@@ -556,6 +557,9 @@ export interface RuntimeHarness extends Harness {
   integrationWorkspace: FakeIntegrationWorkspace;
   integration: ChangesetIntegrationService;
   finalizationWorkspace: FakeRunFinalizationWorkspace;
+  /** Reservable Plan Node capacity (execution-model §7.6): the one operation every node-funded path funds its next child through. */
+  capacity: PlanNodeCapacity;
+  /** The operator-only Budget Increase boundary (execution-model §7.6): `request`, `resolve`, `inspect`. */
   /** The operator signoff boundary (execution-model §10 `operator_signoff`). */
   signoff: RunSignoffService;
   publicationWorkspace: FakePublicationWorkspace;
@@ -624,7 +628,8 @@ export function openRuntimeHarness(options: RuntimeHarnessOptions = {}): Runtime
   const criterionExecution = options.criterionExecution ?? new FakeAcceptanceCriterionExecution();
   criterionExecution.transactionProbe = () => h.ctx.tx.inTransaction;
   const checks = new AcceptanceCheckService(h.ctx, h.stores, criterionExecution, options.checks ?? TEST_ACCEPTANCE_CHECKS);
-  const runners = createPatternRunners({ ctx: h.ctx, stores: h.stores, executor, preparation, integration, checks, governor, provider });
+  const capacity = new PlanNodeCapacity(h.ctx, h.stores);
+  const runners = createPatternRunners({ ctx: h.ctx, stores: h.stores, executor, preparation, integration, checks, capacity, governor, provider });
   const finalizationWorkspace = options.finalizationWorkspace ?? new FakeRunFinalizationWorkspace(integrationWorkspace);
   finalizationWorkspace.transactionProbe = () => h.ctx.tx.inTransaction;
   const publicationWorkspace = options.publicationWorkspace ?? new FakePublicationWorkspace(sha256Hex);
@@ -636,7 +641,8 @@ export function openRuntimeHarness(options: RuntimeHarnessOptions = {}): Runtime
     integrationWorkspace,
     integration,
     finalizationWorkspace,
-    signoff: new RunSignoffService({ ctx: h.ctx, stores: h.stores, preparation, finalization: finalizationWorkspace }),
+    capacity,
+    signoff: new RunSignoffService({ ctx: h.ctx, stores: h.stores, preparation, capacity, finalization: finalizationWorkspace }),
     publicationWorkspace,
     publication: new RunPublicationService({ ctx: h.ctx, stores: h.stores, port: publicationWorkspace, checks, diagnostics }),
     criterionExecution,

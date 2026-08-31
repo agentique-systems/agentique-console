@@ -44,7 +44,7 @@ describe("RunScheduler", () => {
         { kind: "ready_node", nodeId: b.id },
         { kind: "ready_node", nodeId: c.id },
       ]);
-      expect(projection).toMatchObject({ stop: "quiescent", waiting: [], deferred: [], inFlight: [], wakeAt: null, concurrency: { active: 1, max: 4 } });
+      expect(projection).toMatchObject({ stop: "quiescent", waiting: [], inFlight: [], wakeAt: null, concurrency: { active: 1, max: 4 } });
       expect(h.ctx.journal.lastSeq()).toBe(seq);
       // The root turn and A execute concurrently (provider concurrency 2); B's execution waits on capacity; C starts (Run concurrency 4) and waits too.
       h.provider.script({ kind: "delay", key: "root", then: { kind: "succeed", result: COMPLETED_RESULT } }, { kind: "delay", key: "a", then: { kind: "succeed", result: COMPLETED_RESULT } });
@@ -276,7 +276,6 @@ describe("RunScheduler", () => {
       h.executionWorkspace.nextChangeset = { afterSnapshot: fakeSnapshot("root"), diff: new TextEncoder().encode("+root"), empty: false };
       const outcome = await h.scheduler.advanceRun(s.created.run.id);
       expect(outcome.stop).toBe("quiescent");
-      expect(outcome.deferred).toEqual([]);
       expect(h.stores.plans.getNode(a.id).status).toBe("succeeded");
       // The root Orchestrator's own Changeset was integrated and the root stays running.
       expect(h.stores.changesets.listByRun(s.created.run.id).find((c) => c.invocationId === s.invocation.id)!.integrationStatus).toBe("integrated");
@@ -293,7 +292,6 @@ describe("RunScheduler", () => {
       const outcome = await g.scheduler.advanceRun(s.created.run.id);
       // The Gate is opened, checked (external), and settled by typed actions; nothing is deferred and the node succeeds.
       expect(outcome.stop).toBe("quiescent");
-      expect(outcome.deferred).toEqual([]);
       const kinds = outcome.actions.map((p) => p.action.kind);
       expect(kinds.slice(kinds.indexOf("open_node_gate"))).toEqual(["open_node_gate", "run_gate_checks", "settle_node_gate"]);
       expect(outcome.actions.map((p) => p.outcome.kind)).toEqual(expect.arrayContaining(["gate_opened", "gate_verified", "gate_passed"]));

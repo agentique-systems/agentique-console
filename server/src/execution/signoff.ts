@@ -41,7 +41,6 @@
  * later operation.
  */
 import {
-  allocationFits,
   canonicalJson,
   CHANGESET_DIFF_MEDIA_TYPE,
   FINAL_REPORT_MEDIA_TYPE,
@@ -86,6 +85,7 @@ import type { Stores } from "../persistence/stores/index.ts";
 import { OPERATOR_ACTOR, type WriteOptions } from "../persistence/stores/support.ts";
 import { CompletionFacts } from "./completion-requests.ts";
 import type { InvocationPreparationService } from "./invocation-preparation-service.ts";
+import type { PlanNodeCapacity } from "./plan-node-capacity.ts";
 import type { RunFinalizationWorkspacePort } from "./ports/run-finalization-workspace.ts";
 
 /** Bounded Artifact facts: never content. */
@@ -157,6 +157,8 @@ export interface SignoffServiceDependencies {
   ctx: PersistenceContext;
   stores: Stores;
   preparation: InvocationPreparationService;
+  /** Reservable root capacity for the follow-up turn (execution-model §7.6). */
+  capacity: PlanNodeCapacity;
   finalization: RunFinalizationWorkspacePort;
 }
 
@@ -427,14 +429,15 @@ export class RunSignoffService {
       const { run, gate, decision } = boundary;
       // The operator's message: of the Run's Conversation, the operator's own, not consumed by another resolution.
       const message = this.messageOf(run, input.operatorMessageId);
-      // Funding preflight: the follow-up turn is an ordinary root turn; when the root's allocation cannot admit it, nothing is written (the final reserve is never a fallback).
+      // Funding preflight: the follow-up turn is an ordinary root turn; when the root's effective allocation cannot admit it — directly or
+      // through the exact Allocation Extension the root's `extend` policy draws from the Run's effective ordinary capacity — nothing is
+      // written (the final reserve is never a fallback).
       const root = this.completion.root(run);
       const operation = operationAt(root.shape, { kind: "orchestrator" });
       if (operation === null) throw new SignoffRefusedError("boundary_inconsistent", `root PlanNode ${root.id} has no orchestrator position`, { planNodeId: root.id });
       const allocation = this.stores.agents.getRevision(operation.agentDefinitionRevisionId).defaultLimits.allocation;
-      if (!allocationFits(allocation, this.stores.reservations.capacity({ type: "plan_node", id: root.id }).available)) {
-        throw new SignoffRefusedError("ordinary_capacity_insufficient", `the root node's ordinary allocation cannot fund the follow-up Orchestrator turn of Run ${run.id}`, { runId: run.id, planNodeId: root.id });
-      }
+      const unfundable = () => new SignoffRefusedError("ordinary_capacity_insufficient", `the root node's ordinary allocation cannot fund the follow-up Orchestrator turn of Run ${run.id}`, { runId: run.id, planNodeId: root.id });
+      if (!this.deps.capacity.admits(root, allocation).fits) throw unfundable();
       const latest = this.stores.invocations.latestAtPosition(root.id, "orchestrator");
       if (latest !== null && !INVOCATION_MACHINE.isTerminal(latest.status)) throw new SignoffRefusedError("active_state", `Orchestrator Invocation ${latest.id} is still ${latest.status}`, { invocationId: latest.id });
       const id = ctx.ids("signoffResolution");
@@ -443,6 +446,9 @@ export class RunSignoffService {
       this.stores.decisions.resolve(decision.id, { resolvedBy: "operator", chosenOptionId: "request_changes", rationale: null, artifactIds: [] }, this.chain(meta));
       this.stores.gates.close(gate.id, "failed", { kind: "changes_requested", decisionId: decision.id }, this.chain(meta));
       this.stores.runs.transition(run.id, { to: "running" }, this.chain(meta));
+      // The follow-up's funding and the follow-up itself commit with the resolution or not at all: a refusal here (a race) rolls everything back.
+      const funded = this.deps.capacity.ensure(root, allocation, "signoff_follow_up", this.chain(meta));
+      if (funded.kind === "refused") throw unfundable();
       const prepared = preparation.prepare({
         runId: run.id,
         planNodeId: root.id,

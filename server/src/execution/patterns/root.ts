@@ -22,15 +22,22 @@
  * nodes fail with `gate_remediation_failed` and the Run stays alive. No
  * turn is created from routine progress; the Orchestrator input queue is a
  * later phase.
+ *
+ * Every root turn is funded through the one Plan Node capacity operation
+ * (execution-model §7.6): the root's `extend` policy creates exactly the
+ * Allocation Extension the Run's effective ordinary capacity admits, in the
+ * transaction that prepares the turn; when none fits, nothing is written and
+ * the Run waits with reason `budget` until an ordinary Budget Increase is
+ * approved and the next scheduler pass resumes it.
  */
 import {
-  allocationFits,
   InvariantViolationError,
   INVOCATION_MACHINE,
   operationAt,
   PLAN_NODE_MACHINE,
   ROOT_SOURCE_PATH,
   RUN_MACHINE,
+  type Allocation,
   type DecisionId,
   type Evidence,
   type Gate,
@@ -55,13 +62,13 @@ export type RootAdvice =
   | { kind: "execute"; invocationId: InvocationId }
   | { kind: "attempt_in_flight"; invocationId: InvocationId }
   | { kind: "retry_not_before"; invocationId: InvocationId; notBefore: Timestamp }
-  /** The latest turn is terminal and its consequences are not yet applied. */
-  | { kind: "settle"; invocationId: InvocationId }
-  /** The latest turn is a `gate_result` turn whose consequences (its Changeset, its remediation Tasks) are not yet applied. */
-  | { kind: "settle_remediation"; invocationId: InvocationId }
+  /** The latest turn is terminal and its consequences are not yet applied; `funded` says the root can fund the successor turn a resolved blocker implies (always true when none is implied). */
+  | { kind: "settle"; invocationId: InvocationId; funded: boolean }
+  /** The latest turn is a `gate_result` turn whose consequences (its Changeset, its remediation Tasks) are not yet applied; `funded` as for `settle`. */
+  | { kind: "settle_remediation"; invocationId: InvocationId; funded: boolean }
   /** The latest turn is blocked on an open `side_effect_approval` Decision. */
   | { kind: "blocked"; invocationId: InvocationId; decisionId: DecisionId }
-  /** The root is idle and these remediation Tasks of failed node_exit Gates await one batched `gate_result` turn; `funded` says the root's allocation admits it now. */
+  /** The root is idle and these remediation Tasks of failed node_exit Gates await one batched `gate_result` turn; `funded` says the root can fund it now — directly or through the Allocation Extension its `extend` policy admits. */
   | { kind: "remediate"; taskIds: TaskId[]; funded: boolean }
   | { kind: "run_terminal" };
 
@@ -73,8 +80,8 @@ export type RootOutcome =
   | { kind: "remediation_prepared"; invocationId: InvocationId; taskIds: TaskId[] }
   /** The `gate_result` turn's Tasks ended: addressed (`completed`) after a completed turn, or ended (`failed`/`cancelled`) after a turn that did not complete. */
   | { kind: "remediation_settled"; invocationId: InvocationId; completed: TaskId[]; ended: TaskId[] }
-  /** The root's allocation does not admit the Evaluator-sized turn and its `extend` policy arrives in a later phase. */
-  | { kind: "awaiting_allocation_extension_phase" }
+  /** The root's effective allocation cannot fund the turn and no Allocation Extension fits the Run's effective ordinary capacity: nothing was written; the Run waits with reason `budget` until a Budget Increase is approved. */
+  | { kind: "unfunded" }
   | { kind: "no_change" };
 
 /** A pending remediation the root owns: the failed Gate, its Task, and the gated node. */
@@ -125,20 +132,21 @@ export class RootNodeSupport {
     if (latest.purpose === "final_synthesis") return this.idle(runId, latest.id);
     if (latest.status === "blocked") {
       const decision = blockingDecisionOf(stores, latest)!;
-      return decision.status === "open" ? { kind: "blocked", invocationId: latest.id, decisionId: decision.id } : this.settleAdvice(latest);
+      // A resolved blocker implies a successor turn, which the root must be able to fund (directly or through an Allocation Extension).
+      return decision.status === "open" ? { kind: "blocked", invocationId: latest.id, decisionId: decision.id } : this.settleAdvice(latest, decision.status === "resolved" ? this.funded(runId) : true);
     }
     if (latest.purpose === "gate_result") {
       // A gate_result turn ends its Tasks, never the Run: unsettled Tasks or an outstanding Changeset are its settlement.
-      if (this.unsettledTasksOf(latest).length > 0 || (latest.status === "succeeded" && outstandingChangesetOf(stores, latest) !== null)) return { kind: "settle_remediation", invocationId: latest.id };
+      if (this.unsettledTasksOf(latest).length > 0 || (latest.status === "succeeded" && outstandingChangesetOf(stores, latest) !== null)) return { kind: "settle_remediation", invocationId: latest.id, funded: true };
       return this.idle(runId, latest.id);
     }
-    if (latest.status === "failed") return this.rootOf(runId).status === "failed" ? { kind: "idle", invocationId: latest.id } : { kind: "settle", invocationId: latest.id };
-    if (latest.status === "succeeded" && outstandingChangesetOf(stores, latest) !== null) return { kind: "settle", invocationId: latest.id };
+    if (latest.status === "failed") return this.rootOf(runId).status === "failed" ? { kind: "idle", invocationId: latest.id } : { kind: "settle", invocationId: latest.id, funded: true };
+    if (latest.status === "succeeded" && outstandingChangesetOf(stores, latest) !== null) return { kind: "settle", invocationId: latest.id, funded: true };
     return this.idle(runId, latest.id);
   }
 
-  private settleAdvice(turn: Invocation): RootAdvice {
-    return turn.purpose === "gate_result" ? { kind: "settle_remediation", invocationId: turn.id } : { kind: "settle", invocationId: turn.id };
+  private settleAdvice(turn: Invocation, funded: boolean): RootAdvice {
+    return turn.purpose === "gate_result" ? { kind: "settle_remediation", invocationId: turn.id, funded } : { kind: "settle", invocationId: turn.id, funded };
   }
 
   /** An idle root with pending root-owned remediations advises one batched `gate_result` turn. */
@@ -193,14 +201,23 @@ export class RootNodeSupport {
     return this.tasksOfTurn(turn).filter((t) => t.status !== "completed" && t.status !== "failed" && t.status !== "cancelled");
   }
 
-  /** Whether the root node's ordinary allocation admits one more Orchestrator turn now. */
-  private funded(runId: RunId): boolean {
-    const { stores } = this.deps;
-    const root = this.rootOf(runId);
+  /** The allocation one Orchestrator turn needs: the root operation's Agent Definition default. */
+  private turnAllocation(root: PatternPlanNode): Allocation {
     const operation = operationAt(root.shape, { kind: "orchestrator" });
     if (operation === null) throw new InvariantViolationError(`root PlanNode ${root.id} has no orchestrator position`, { planNodeId: root.id });
-    const allocation = stores.agents.getRevision(operation.agentDefinitionRevisionId).defaultLimits.allocation;
-    return allocationFits(allocation, stores.reservations.capacity({ type: "plan_node", id: root.id }).available);
+    return this.deps.stores.agents.getRevision(operation.agentDefinitionRevisionId).defaultLimits.allocation;
+  }
+
+  /** Whether the root can fund one more Orchestrator turn now: from its effective allocation, or through the Allocation Extension its `extend` policy admits (read-only). */
+  private funded(runId: RunId): boolean {
+    const root = this.rootOf(runId);
+    return this.deps.capacity.admits(root, this.turnAllocation(root)).fits;
+  }
+
+  /** Inside the transaction: funds one root turn through the one capacity operation; `null` when the root cannot fund it now. */
+  private fund(root: PatternPlanNode, trigger: "root_turn" | "gate_remediation", options: WriteOptions): RootOutcome | null {
+    const funded = this.deps.capacity.ensure(root, this.turnAllocation(root), trigger, options);
+    return funded.kind === "funded" ? null : { kind: "unfunded" };
   }
 
   // ---------------------------------------------------------------------------
@@ -242,6 +259,8 @@ export class RootNodeSupport {
         const decision = blockingDecisionOf(stores, turn)!;
         if (decision.status !== "resolved" || decision.resolution === null || decision.subject === null) return { kind: "no_change" };
         if (stores.invocations.latestAtPosition(root.id, "orchestrator")?.id !== turn.id) return { kind: "no_change" };
+        const unfunded = this.fund(root, "root_turn", options);
+        if (unfunded !== null) return unfunded;
         const prepared = preparation.prepare({
           runId,
           planNodeId: root.id,
@@ -283,6 +302,8 @@ export class RootNodeSupport {
       if (decision.status === "open") return { kind: "no_change" };
       if (decision.status !== "resolved" || decision.resolution === null || decision.subject === null) return this.endTasks(turn, tasks, options);
       if (this.latestTurn(runId)?.id !== turn.id) return { kind: "no_change" };
+      const unfunded = this.fund(this.rootOf(runId), "gate_remediation", options);
+      if (unfunded !== null) return unfunded;
       const previous = stores.invocations.getManifest(turn.id).content.inputs.filter((i) => i.kind === "gate_result");
       const prepared = preparation.prepare({
         runId,
@@ -346,7 +367,10 @@ export class RootNodeSupport {
       if (root.status !== "running" || PLAN_NODE_MACHINE.isTerminal(root.status)) return { kind: "no_change" };
       const advice = this.inspect(runId);
       if (advice.kind !== "remediate") return { kind: "no_change" };
-      if (!advice.funded) return { kind: "awaiting_allocation_extension_phase" };
+      // The turn is funded through the one capacity operation in this transaction: the root's `extend` policy creates the exact Allocation
+      // Extension the Run's ordinary capacity admits, or nothing is written and the Run waits on budget.
+      const unfunded = this.fund(root, "gate_remediation", options);
+      if (unfunded !== null) return unfunded;
       const pending = this.pendingRemediations(runId);
       const inputs: ManifestInput[] = pending.map((r) => this.gates.gateResultInput(r.gate));
       const latest = this.latestTurn(runId);

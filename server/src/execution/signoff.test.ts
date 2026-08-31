@@ -14,6 +14,7 @@
 import { FINAL_REPORT_MEDIA_TYPE, SignoffRefusedError, type ManifestInput } from "@agentique-console/core";
 import { describe, expect, it } from "vitest";
 import { sha256Hex } from "../persistence/blob-store.ts";
+import { DEFAULT_BUDGET, seedBudgetIncrease } from "../persistence/test-support.ts";
 import { completionGatesOf, prepareOperatorTurn, requestingStep, requestsOf, signoffGatesOf, synthesisStep } from "./completion-test-support.ts";
 import { orchestratorStep, scriptByRole } from "./gate-test-support.ts";
 import { awaitSignoff, finalChangesetOf, followUpsOf, operatorMessage, resolutionsOf, rootTurnsOf, signoffWork } from "./signoff-test-support.ts";
@@ -348,17 +349,33 @@ describe("signoff change request", () => {
       expect(h.finalizationWorkspace.requests).toEqual([]);
       // The consumed message cannot answer another Run's boundary.
       expect((await refusal(() => h.signoff.requestChanges({ runId: other.runId, gateId: other.gate.id, decisionId: other.decisionId, operatorMessageId: message.id }))).refusal).toBe("operator_message_invalid");
-      // An unfundable follow-up: a root allocation the requesting turn already consumed leaves one Attempt, the turn needs two — one typed refusal, no half-state.
-      const starved = await awaitSignoff(h, { seed: { orchestratorAllocation: { costUsd: 10, tokens: 100_000, attempts: 2 } } });
+      // An unfundable follow-up: a root allocation the requesting turn already consumed leaves one Attempt, the turn needs two, and the Run's
+      // ordinary capacity (root 2 + reserve 3 = 5 Attempts) leaves the root's extend policy nothing to draw from — one typed refusal, no half-state.
+      const starved = await awaitSignoff(h, { seed: { orchestratorAllocation: { costUsd: 10, tokens: 100_000, attempts: 2 }, budget: { ...DEFAULT_BUDGET, maxAttempts: 5 } } });
       const starvedBefore = signoffWork(h, starved.runId);
-      const refused = await refusal(() => h.signoff.requestChanges({ runId: starved.runId, gateId: starved.gate.id, decisionId: starved.decisionId, operatorMessageId: operatorMessage(h, starved.runId).id }));
+      const starvedMessage = operatorMessage(h, starved.runId);
+      const refused = await refusal(() => h.signoff.requestChanges({ runId: starved.runId, gateId: starved.gate.id, decisionId: starved.decisionId, operatorMessageId: starvedMessage.id }));
       expect(refused.refusal).toBe("ordinary_capacity_insufficient");
       expect(signoffWork(h, starved.runId)).toEqual(starvedBefore);
       expect(h.stores.runs.get(starved.runId).status).toBe("awaiting_signoff");
       expect(h.stores.decisions.get(starved.decisionId).status).toBe("open");
-      expect(h.stores.reservations.runCapacity(starved.runId).final).toEqual(h.stores.reservations.runCapacity(starved.runId).final);
-      // The final reserve is never the fallback: acceptance still works on that Run.
-      expect(await h.signoff.accept({ runId: starved.runId, gateId: starved.gate.id, decisionId: starved.decisionId })).toMatchObject({ kind: "accepted" });
+      expect(h.stores.allocationExtensions.listByRun(starved.runId)).toEqual([]);
+      const finalBefore = h.stores.reservations.runCapacity(starved.runId).final;
+      // A final-reserve increase is refused while the Run awaits signoff and is never a fallback for ordinary work; an ordinary increase of exactly
+      // the one missing Attempt makes the identical retry fundable: the root's extend policy creates the exact extension atomically with the follow-up.
+      const starvedRun = h.stores.runs.get(starved.runId);
+      expect(() => seedBudgetIncrease(h, { conversation: { id: starvedRun.conversationId } as never, run: starvedRun }, "final_reserve", { costUsd: 0, tokens: 0, attempts: 1 })).toThrow(/cannot be increased now/);
+      seedBudgetIncrease(h, { conversation: { id: starvedRun.conversationId } as never, run: starvedRun }, "ordinary", { costUsd: 0, tokens: 0, attempts: 1 });
+      expect(h.stores.runs.get(starved.runId).status).toBe("awaiting_signoff");
+      expect(followUpsOf(h, starved.runId)).toEqual([]);
+      const retried = h.signoff.requestChanges({ runId: starved.runId, gateId: starved.gate.id, decisionId: starved.decisionId, operatorMessageId: starvedMessage.id });
+      expect(retried).toMatchObject({ kind: "changes_requested", replayed: false });
+      expect(h.stores.allocationExtensions.listByRun(starved.runId)).toMatchObject([{ planNodeId: h.stores.plans.rootNode(starved.runId).id, trigger: "signoff_follow_up", added: { costUsd: 0, tokens: 0, attempts: 1 } }]);
+      expect(h.stores.reservations.runCapacity(starved.runId).final).toEqual(finalBefore);
+      expect(followUpsOf(h, starved.runId)).toHaveLength(1);
+      expect(h.stores.runs.get(starved.runId).status).toBe("running");
+      expect(h.signoff.requestChanges({ runId: starved.runId, gateId: starved.gate.id, decisionId: starved.decisionId, operatorMessageId: starvedMessage.id })).toEqual({ ...retried, replayed: true });
+      expect(h.stores.allocationExtensions.listByRun(starved.runId)).toHaveLength(1);
     } finally {
       h.close();
     }

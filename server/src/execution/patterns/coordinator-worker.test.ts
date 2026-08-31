@@ -358,7 +358,6 @@ describe("CoordinatorWorkerPatternRunner", () => {
       h.provider.script(turn([propose([proposal({ key: "a", requirementIds: [leafIds[0]!] })])]), workerStep(h, { summary: "a", diff: "+a" }), synthesisStep(h, runId, final));
       const outcome = await h.scheduler.advanceRun(runId);
       expect(outcome.stop).toBe("quiescent");
-      expect(outcome.deferred).toEqual([]);
       expect(outcome.actions.map((p) => p.action.kind).filter((k) => k.includes("gate"))).toEqual(["open_node_gate", "run_gate_checks", "settle_node_gate"]);
       expect(h.stores.plans.getNode(node.id)).toMatchObject({ status: "succeeded", outputArtifactIds: [final.artifactId] });
       expect(h.stores.changesets.listByRun(runId).every((c) => c.integrationStatus === "integrated")).toBe(true);

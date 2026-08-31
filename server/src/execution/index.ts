@@ -75,6 +75,8 @@ export type { ChangesetContentFailure, IntegrationOutcome } from "./integration-
 export { ChainPatternRunner, CoordinatorWorkerPatternRunner, EvaluatorOptimizerPatternRunner, ParallelPatternRunner, PatternNodeSupport, RootNodeSupport, RoutePatternRunner, SinglePatternRunner, SequentialStepEngine, createPatternRunners, runnerFor } from "./patterns/index.ts";
 export type { NodeAdvice, PatternRunner, PatternRunnerDependencies, PatternRunnerOutcome, PatternRunners, RootAdvice, RootOutcome } from "./patterns/index.ts";
 export { RunScheduler, DEFAULT_SCHEDULER_CONFIG } from "./scheduler.ts";
+export { PlanNodeCapacity } from "./plan-node-capacity.ts";
+export type { CapacityAdmission, CapacityOutcome } from "./plan-node-capacity.ts";
 export type { RunFinalizationFailure, RunFinalizationOutcome, RunFinalizationRequest, RunFinalizationWorkspacePort } from "./ports/run-finalization-workspace.ts";
 export { RUN_FINALIZATION_FAILURES } from "./ports/run-finalization-workspace.ts";
 export { RunSignoffService } from "./signoff.ts";
@@ -93,4 +95,4 @@ export type {
 export { PUBLICATION_PREPARE_REFUSALS } from "./ports/publication-workspace.ts";
 export { RunPublicationService, PUBLICATION_DIAGNOSTIC_MEDIA_TYPE, PUBLICATION_DIAGNOSTIC_MAX_BYTES } from "./publication.ts";
 export type { PublicationAdvanceOutcome, PublicationArtifactFacts, PublicationProjection, PublicationRequestInput, PublicationResolutionOutcome, PublicationResolveInput, PublicationServiceDependencies } from "./publication.ts";
-export type { DeferredWork, NodeProjection, PerformedAction, SchedulerAction, SchedulerConfig, SchedulerOutcome, SchedulerProjection, SchedulerStopReason, WaitingCondition } from "./scheduler.ts";
+export type { NodeProjection, PerformedAction, SchedulerAction, SchedulerConfig, SchedulerOutcome, SchedulerProjection, SchedulerStopReason, WaitingCondition } from "./scheduler.ts";

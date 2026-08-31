@@ -53,7 +53,6 @@
  * never mutated; a later cycle is a new Gate.
  */
 import {
-  allocationFits,
   INVOCATION_MACHINE,
   InvariantViolationError,
   PLAN_NODE_MACHINE,
@@ -311,10 +310,14 @@ export class NodeExitGates {
     return revisionId;
   }
 
-  /** Whether the node's allocation admits one Gate Evaluator Invocation now (what a `budget` wait of the Gate phase is cleared by). */
+  /** The allocation one Gate Evaluator Invocation of the node needs: the Run's Evaluator revision's default. */
+  private evaluatorAllocation(node: PatternPlanNode) {
+    return this.stores.agents.getRevision(this.evaluatorRevisionOf(node)).defaultLimits.allocation;
+  }
+
+  /** Whether the node can fund one Gate Evaluator Invocation now — directly or through the extension its `extend` policy admits (what a `budget` wait of the Gate phase is cleared by). */
   evaluatorFits(node: PatternPlanNode): boolean {
-    const allocation = this.stores.agents.getRevision(this.evaluatorRevisionOf(node)).defaultLimits.allocation;
-    return allocationFits(allocation, this.stores.reservations.capacity({ type: "plan_node", id: node.id }).available);
+    return this.support.deps.capacity.admits(node, this.evaluatorAllocation(node)).fits;
   }
 
   /** Whether the node's open Gate awaits its Evaluator (none exists yet): the phase whose funding a `budget` wait concerns. */
@@ -327,16 +330,9 @@ export class NodeExitGates {
   private prepareEvaluatorFor(node: PatternPlanNode, gate: Gate, predecessor: Invocation | null, extraInputs: ManifestInput[], options: WriteOptions): PatternRunnerOutcome {
     const { preparation } = this.support.deps;
     const revisionId = this.evaluatorRevisionOf(node);
-    if (!this.evaluatorFits(node)) {
-      switch (node.onAllocationExhausted) {
-        case "fail":
-          return this.support.failNow(node, "allocation_exhausted", options);
-        case "wait":
-          return this.support.wait(node, "budget", options);
-        case "extend":
-          return { kind: "awaiting_allocation_extension_phase" };
-      }
-    }
+    // The Evaluator is funded from the node under its allocation policy through the one capacity operation, in this transaction.
+    const funded = this.support.deps.capacity.ensure(node, this.evaluatorAllocation(node), "gate_evaluator", options);
+    if (funded.kind === "refused") return funded.policy === "fail" ? this.support.failNow(node, "allocation_exhausted", options) : this.support.wait(node, "budget", options);
     const input: ManifestInput = { kind: "gate_candidate", gateId: gate.id, gateKind: gate.kind, snapshotId: gate.snapshotId!, artifactIds: gate.candidateArtifactIds, acceptanceCriterionIds: this.criteriaOf(node).evaluated, completionRequestId: null, requirementRevisionId: null, tasks: [] };
     const prepared = preparation.prepare({
       runId: node.runId,

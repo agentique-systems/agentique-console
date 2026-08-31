@@ -18,7 +18,6 @@
  * never reserved lazily later.
  */
 import {
-  allocationFits,
   NotFoundError,
   TASK_MACHINE,
   ValidationError,
@@ -37,6 +36,7 @@ import {
 import type { PersistenceContext } from "../persistence/context.ts";
 import type { Stores } from "../persistence/stores/index.ts";
 import type { WriteOptions } from "../persistence/stores/support.ts";
+import { PlanNodeCapacity } from "./plan-node-capacity.ts";
 
 /** The Invocation a handler executes for; every fact comes from the Attempt being executed, never from the adapter. */
 export interface RuntimeToolCaller {
@@ -74,10 +74,14 @@ function replaceable(task: Task): boolean {
 }
 
 export class TaskProposalService {
+  private readonly capacity: PlanNodeCapacity;
+
   constructor(
     private readonly ctx: PersistenceContext,
     private readonly stores: Stores,
-  ) {}
+  ) {
+    this.capacity = new PlanNodeCapacity(ctx, stores);
+  }
 
   /**
    * Validates the whole batch, then applies it inside the caller's
@@ -211,14 +215,14 @@ export class TaskProposalService {
     if (existing.length + batch.tasks.length > bounds.maxTasks) {
       reject("max_tasks_exceeded", `the node has accepted ${existing.length} Task(s); ${batch.tasks.length} more would exceed maxTasks ${bounds.maxTasks}`, "tasks");
     }
-    // Rules 12–13: every Worker allocation fits, and the whole batch fits atomically, the node's remaining allocation.
+    // Rules 12–13: every Worker allocation fits, and the whole batch fits atomically, the node's effective remaining allocation —
+    // or, under the node's `extend` policy, the one exact aggregate Allocation Extension the Run's ordinary capacity admits.
     const allocation = this.stores.agents.getRevision(shape.worker.agentDefinitionRevisionId).defaultLimits.allocation;
     const total: Allocation = { costUsd: allocation.costUsd * batch.tasks.length, tokens: allocation.tokens * batch.tasks.length, attempts: allocation.attempts * batch.tasks.length };
-    const available = this.stores.reservations.capacity({ type: "plan_node", id: node.id }).available;
-    if (!allocationFits(total, available)) {
+    if (!this.capacity.admits(node, total).fits) {
       reject("allocation_insufficient", `${batch.tasks.length} Worker allocation(s) of ${allocation.costUsd} USD / ${allocation.tokens} tokens / ${allocation.attempts} attempts do not fit the node's remaining allocation`, "tasks");
     }
-    return { allocation, existingById, dependents, superseded };
+    return { allocation, total, existingById, dependents, superseded };
   }
 
   // ---------------------------------------------------------------------------
@@ -228,6 +232,10 @@ export class TaskProposalService {
   private applyProposal(caller: RuntimeToolCaller, batch: TaskProposalBatch, plan: ProposalPlan, options: WriteOptions): RuntimeToolResult {
     const { node } = caller;
     const scope = node.scope!;
+    // The whole batch's capacity first: one exact aggregate Allocation Extension under `extend`, in this transaction, before any Task exists;
+    // a refusal rejects the batch and leaves no Task, reservation, extension, or Event.
+    const funded = this.capacity.ensure(node, plan.total, "task_batch", options);
+    if (funded.kind === "refused") reject("allocation_insufficient", `${batch.tasks.length} Worker allocation(s) do not fit the node's remaining allocation`, "tasks");
     // A replaced blocked Task is cancelled (its Task reservation released); a replaced failed Task stays failed in history.
     for (const proposal of batch.tasks) {
       if (proposal.replacesTaskId === null) continue;
@@ -282,7 +290,10 @@ export class TaskProposalService {
 }
 
 interface ProposalPlan {
+  /** One Worker Invocation allocation. */
   allocation: Allocation;
+  /** The whole batch's node-capacity requirement: one Worker allocation per proposal. */
+  total: Allocation;
   existingById: ReadonlyMap<TaskId, Task>;
   /** Existing Task id → the current Tasks that depend on it. */
   dependents: ReadonlyMap<TaskId, TaskId[]>;
