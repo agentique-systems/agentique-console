@@ -36,6 +36,7 @@
 import {
   boundedFailureMessage,
   grantsWriteCapability,
+  patternPositionKey,
   PLAN_NODE_MACHINE,
   ROOT_SOURCE_PATH,
   RUN_MACHINE,
@@ -115,6 +116,8 @@ export type SchedulerAction =
   | { kind: "complete_run_verification"; completionRequestId: CompletionRequestId }
   /** An open `use_default_after_deadline` Decision of the Run is due (its deadline passed or its activation condition holds): the runtime resolves it to the persisted recommendation (execution-model §8.2). */
   | { kind: "resolve_decision_default"; decisionId: DecisionId }
+  /** A requester blocked on a Decision that ended continues in its one successor at the same position, prepared from rows by its node's runner (the root support for the Orchestrator); the position's operation is reconstructed by the runner, ownership and idempotency are this action's (execution-model §8.2). */
+  | { kind: "continue_decision_request"; nodeId: PlanNodeId; invocationId: InvocationId; decisionId: DecisionId }
   /** No current work can proceed and no Attempt is running: the Run records the reason. */
   | { kind: "wait_run"; reason: RunWaitReason };
 
@@ -236,6 +239,11 @@ export class RunScheduler {
     // Verifying: only the completion engine's actions execute; no ordinary Pattern work starts (execution-model §10).
     if (run.status === "verifying") return this.reconcileVerifying(runId, run, root, base, now);
     const readiness = new Map(evaluateReadiness(projectReadinessInput(this.stores, graph)).decisions.map((d) => [d.nodeId, d] as const));
+    // Requesters whose Decision ended continue through the one canonical action, by node and position; the runner's own advice
+    // (a cleared `decision` wait, a blocked position to start, a blocked root turn to settle) is what tells the pass it can happen now.
+    const continuations = this.runners.decisionRequests.pendingContinuations(runId);
+    const continuationOf = (nodeId: PlanNodeId, position: PatternPosition | null) => continuations.find((c) => c.invocation.planNodeId === nodeId && (position === null || patternPositionKey(c.invocation.patternPosition!) === patternPositionKey(position)));
+    const continueAction = (c: { invocation: { planNodeId: PlanNodeId; id: InvocationId }; decision: { id: DecisionId } }): SchedulerAction => ({ kind: "continue_decision_request", nodeId: c.invocation.planNodeId, invocationId: c.invocation.id, decisionId: c.decision.id });
     const nodes: NodeProjection[] = [];
     const actions: SchedulerAction[] = [];
     const waiting: WaitingCondition[] = [];
@@ -270,15 +278,16 @@ export class RunScheduler {
         wakeAt = earliest(wakeAt, rootAdvice.notBefore);
         break;
       case "settle":
+      case "settle_remediation": {
         // A settlement that implies a successor turn the root cannot fund now waits on budget (execution-model §7.6); the Run resumes through
-        // the ordinary resume_run once an approved Budget Increase makes the turn fundable.
-        if (rootAdvice.funded) actions.push({ kind: "settle_root", invocationId: rootAdvice.invocationId });
-        else waiting.push({ nodeId: root.id, reason: "budget", wakeAt: null });
+        // the ordinary resume_run once an approved Budget Increase makes the turn fundable. A blocked turn whose requested Decision ended
+        // continues through the canonical continuation action.
+        const continuation = continuations.find((c) => c.invocation.id === rootAdvice.invocationId);
+        if (!rootAdvice.funded) waiting.push({ nodeId: root.id, reason: "budget", wakeAt: null });
+        else if (continuation !== undefined) actions.push(continueAction(continuation));
+        else actions.push(rootAdvice.kind === "settle" ? { kind: "settle_root", invocationId: rootAdvice.invocationId } : { kind: "settle_gate_remediation", invocationId: rootAdvice.invocationId });
         break;
-      case "settle_remediation":
-        if (rootAdvice.funded) actions.push({ kind: "settle_gate_remediation", invocationId: rootAdvice.invocationId });
-        else waiting.push({ nodeId: root.id, reason: "budget", wakeAt: null });
-        break;
+      }
       case "blocked":
         waiting.push({ nodeId: root.id, reason: "decision", wakeAt: null });
         break;
@@ -324,15 +333,18 @@ export class RunScheduler {
       projection.advice = advice;
       switch (advice.kind) {
         case "start":
-        case "start_position":
+        case "start_position": {
           if (max !== null && active >= max) {
             limited.push(node.id);
             break;
           }
           if (!withinNodeLimit(node)) break;
           active += 1;
-          actions.push(advice.kind === "start" ? { kind: "start_node", nodeId: node.id, pattern: node.pattern } : { kind: "start_position", nodeId: node.id, position: advice.position, ...(advice.turn === undefined ? {} : { turn: advice.turn }) });
+          const continuation = advice.kind === "start_position" && advice.turn === undefined ? continuationOf(node.id, advice.position) : undefined;
+          if (continuation !== undefined) actions.push(continueAction(continuation));
+          else actions.push(advice.kind === "start" ? { kind: "start_node", nodeId: node.id, pattern: node.pattern } : { kind: "start_position", nodeId: node.id, position: advice.position, ...(advice.turn === undefined ? {} : { turn: advice.turn }) });
           break;
+        }
         case "execute": {
           const refusal = this.capacityRefusal(runId, advice.invocationId);
           if (refusal === null) actions.push({ kind: "execute_invocation", nodeId: node.id, invocationId: advice.invocationId, worktrees: this.worktreesOf(advice.invocationId) });
@@ -376,8 +388,10 @@ export class RunScheduler {
           remediating.push({ nodeId: node.id, gateId: advice.gateId, taskId: advice.taskId });
           break;
         case "waiting":
-          if (advice.cleared) actions.push({ kind: "resume_node", nodeId: node.id, reason: advice.reason });
-          else {
+          if (advice.cleared) {
+            const continuation = advice.reason === "decision" ? continuationOf(node.id, null) : undefined;
+            actions.push(continuation !== undefined ? continueAction(continuation) : { kind: "resume_node", nodeId: node.id, reason: advice.reason });
+          } else {
             waiting.push({ nodeId: node.id, reason: advice.reason, wakeAt: advice.wakeAt });
             wakeAt = earliest(wakeAt, advice.wakeAt);
           }
@@ -647,6 +661,8 @@ export class RunScheduler {
         return this.runners.completion.complete(runId, meta);
       case "resolve_decision_default":
         return this.runners.decisionRequests.resolveDefault(action.decisionId, this.ctx.clock(), meta).kind === "resolved" ? { kind: "transitioned" } : { kind: "no_change" };
+      case "continue_decision_request":
+        return this.#continueRequester(runId, revision, action, meta);
       case "execute_invocation": {
         const prepared = await this.executor.prepareNextAttempt(action.invocationId, meta);
         if (prepared.kind === "prepared") {
@@ -661,6 +677,24 @@ export class RunScheduler {
         return { kind: "not_permitted", reason: prepared.reason };
       }
     }
+  }
+
+  /**
+   * Continues one blocked requester in its one successor: the requester must still be blocked on the named, ended Decision with no
+   * successor (rows re-read now, and again inside the runner's transaction); the root support settles the blocked turn, a waiting node
+   * resumes, a running node starts the blocked position — each reconstructing the position's operation from rows and preparing exactly
+   * one successor, or waiting on budget when the node cannot fund it now.
+   */
+  async #continueRequester(runId: RunId, revision: number, action: Extract<SchedulerAction, { kind: "continue_decision_request" }>, meta: WriteOptions): Promise<PerformedAction["outcome"]> {
+    const invocation = this.stores.invocations.get(action.invocationId);
+    if (!this.runners.decisionRequests.awaitsContinuation(invocation, action.decisionId)) return { kind: "no_change" };
+    const node = this.stores.plans.getNode(action.nodeId);
+    if (node.kind !== "pattern" || invocation.planNodeId !== node.id) return { kind: "stale" };
+    if (node.sourcePath === ROOT_SOURCE_PATH) return this.runners.root.settle(runId, meta);
+    const runner = runnerFor(this.runners, node.pattern);
+    if (node.status === "waiting") return runner.resume(node.id, revision, meta);
+    if (node.status === "running") return runner.startPosition(node.id, revision, invocation.patternPosition!, meta);
+    return { kind: "stale" };
   }
 
   /** Applies one readiness decision after re-deciding it inside the transaction against the current graph and facts. */

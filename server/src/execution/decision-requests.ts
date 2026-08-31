@@ -103,6 +103,12 @@ export type DecisionResolutionOutcome =
   /** A `requirement_waiver` whose pinned Requirement went stale was superseded (now, or already: `replayed`); no waiver was applied. */
   | { kind: "superseded"; decisionId: DecisionId; reason: "requirement_waiver_stale"; replayed: boolean };
 
+/** A requester whose Decision ended and whose one successor does not exist yet: what the scheduler's `continue_decision_request` names. */
+export interface PendingContinuation {
+  invocation: Invocation;
+  decision: Decision;
+}
+
 /** Why a waiver Decision's pinned Requirement can no longer be waived as requested. */
 export type WaiverStaleness = "requirement_retired" | "requirement_not_waivable" | "requirement_not_current_leaf" | "revision_superseded";
 
@@ -356,6 +362,39 @@ export class DecisionRequestService {
       this.stores.decisions.resolve(decision.id, { resolvedBy: "policy:use_default_after_deadline", chosenOptionId: decision.recommendedOptionId, rationale: null, artifactIds: [] }, meta);
       return { kind: "resolved", decisionId: decision.id, chosenOptionId: decision.recommendedOptionId };
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Continuation (rows only)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * The Run's blocked requesters whose requested Decision has ended
+   * (resolved or superseded) and that no successor continues yet, in
+   * Invocation creation order. The scheduler projects one
+   * `continue_decision_request` per entry; the node's runner (or the root
+   * support) prepares the successor from rows inside one transaction, so a
+   * pass that dies or repeats prepares nothing twice.
+   */
+  pendingContinuations(runId: RunId): PendingContinuation[] {
+    const invocations = this.stores.invocations.listByRun(runId);
+    const continued = new Set(invocations.flatMap((i) => (i.continuedFromInvocationId === null ? [] : [i.continuedFromInvocationId])));
+    const pending: PendingContinuation[] = [];
+    for (const invocation of invocations) {
+      if (invocation.status !== "blocked" || invocation.blockedByDecisionId === null || continued.has(invocation.id)) continue;
+      const decision = this.stores.decisions.get(invocation.blockedByDecisionId);
+      if (!isAgentRequestedDecision(decision) || decision.status === "open") continue;
+      pending.push({ invocation, decision });
+    }
+    return pending;
+  }
+
+  /** Whether `invocation` still awaits its continuation: blocked on `decisionId`, the Decision ended, and no successor exists (re-read inside a transaction by the scheduler). */
+  awaitsContinuation(invocation: Invocation, decisionId: DecisionId): boolean {
+    if (invocation.status !== "blocked" || invocation.blockedByDecisionId !== decisionId) return false;
+    const decision = this.stores.decisions.get(decisionId);
+    if (!isAgentRequestedDecision(decision) || decision.status === "open") return false;
+    return !this.stores.invocations.listByRun(invocation.runId).some((i) => i.continuedFromInvocationId === invocation.id);
   }
 
   // ---------------------------------------------------------------------------

@@ -59,7 +59,9 @@ describe("continuation after a requested Decision", () => {
       h.decisionRequests.resolve({ decisionId: firstDecision.id, optionId: "express" });
       expect(h.stores.invocations.listByRun(runId)).toHaveLength(1);
       const pass = await h.scheduler.advanceRun(runId, { maxActions: 2 });
-      expect(pass.actions.map((a) => a.action.kind)).toEqual(["resume_run", "settle_root"]);
+      expect(pass.actions.map((a) => a.action.kind)).toEqual(["resume_run", "continue_decision_request"]);
+      expect(pass.actions[1]!.action).toEqual({ kind: "continue_decision_request", nodeId: first.planNodeId, invocationId: first.id, decisionId: firstDecision.id });
+      expect(pass.actions[1]!.outcome).toMatchObject({ kind: "successor_prepared", decisionId: firstDecision.id });
       const second = expectSuccessor(h, h.stores.invocations.get(first.id), firstDecision.id);
       expect(second.purpose).toBe(first.purpose);
       expect(inputKinds(h, second)).toEqual([...before, "decision_resolution"]);
