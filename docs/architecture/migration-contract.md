@@ -337,7 +337,7 @@ architecture corrects it before cutover, because nothing has shipped.
 | `invocations` | runtime | one per logical execution; role, purpose, `continuedFromInvocationId`, allocation source and final-reserve use (immutable), status with `blockedByDecisionId`, the Workspace cleanup obligation; manifest immutable |
 | `attempts` | runtime | one per provider execution; `kind`, `startMode`, `resumedFromAttemptId` |
 | `approved_tool_call_uses` | runtime (tool-call authorization) | append-only; one per claimed `approve_once` Decision (unique), naming tool, digest, Run, Plan Node, successor Invocation, claiming Attempt; every ownership fact re-checked at insertion |
-| `runtime_tool_calls` | runtime (runtime-tool executor) | append-only (triggers refuse update and delete); one per accepted mutating runtime-tool call, unique per (Invocation, tool, digest) and at most one `propose_tasks` per Invocation; safe result only, never the raw input |
+| `runtime_tool_calls` | runtime (runtime-tool executor) | append-only (triggers refuse update and delete); one per accepted mutating runtime-tool call, unique per (Invocation, tool, digest), at most one accepted `propose_tasks` per Invocation, and at most one accepted blocking `request_decision` per Invocation (the logical turn it ends); safe result only, never the raw input |
 | `provider_continuations` | provider adapter | index keyed by Attempt; truncatable |
 | `context_manifests` | runtime | exactly one per Invocation; immutable |
 | `evaluations` | runtime / Evaluator via runtime | append-only |
@@ -885,16 +885,39 @@ Merge to `main` happens after step 7 as one merge commit. Rollback is
 - Runtime-tool call tests: the effective callable set is the
   intersection of manifest permission, runtime handlers, and role and
   purpose validity (a Worker and a `synthesize` turn never see
-  `propose_tasks`; `request_decision` is never exposed as callable); an
-  unlisted tool is `not_callable`; a malformed or oversized call is
+  `propose_tasks`; `request_decision` is callable only when all three
+  layers admit it — the immutable manifest Tool Policy, a registered
+  runtime handler, and the exact role/purpose binding — so it is
+  executable only for Orchestrator purposes other than `final_synthesis`,
+  Coordinator `decompose`, `replan`, and `synthesize`, and eligible Worker
+  `step` and `task` positions, never for an Evaluator or a Gate-owned
+  Invocation, and it can request only an `operator_choice` or the root
+  Orchestrator's `requirement_waiver` while every other Decision kind
+  stays with its dedicated service); an unlisted tool is `not_callable`; a malformed or oversized call is
   `rejected` with nothing written; every mutating call runs in its own
   root transaction outside provider execution and refuses to nest; an
   identical call is replayed by digest within the logical turn (retry
   and approval successor) and never repeats its effect; a second
-  proposal in one turn is `proposal_already_accepted`; a call from an
-  Attempt that is no longer running is `caller_not_running`; a handler
-  failure commits nothing and yields one diagnostic; no Event carries
-  the raw input.
+  proposal in one turn is `proposal_already_accepted` and a second
+  Decision request in one turn is `decision_already_requested`, an
+  accepted request ending the turn (`turn_ended` for every later call); a
+  call from an Attempt that is no longer running is `caller_not_running`;
+  a handler failure commits nothing and yields one diagnostic; no Event
+  carries the raw input.
+- Decision continuation tests: every position at which the canonical
+  role/purpose bindings expose `request_decision` — the root Orchestrator
+  at each executable purpose, `single`, every `chain_step` (first, a
+  nonzero middle, last), the inline `route_branch`, a nonzero
+  `parallel_item` and the `parallel_aggregation`, Coordinator `decompose`,
+  `replan`, and `synthesize`, `worker_task`, and a first and a later
+  `producer_round` — continues in one successor at the exact blocked
+  position with the position's operation inputs and Handoffs delivered
+  once and exactly one `decision_resolution` input, through the one
+  `continue_decision_request` action; the Evaluator positions
+  (`route_selection`, `evaluator_round`, node-exit and run-completion
+  Gates) and the final synthesis are never callable; file-backed restarts
+  at each Pattern-specific position, a fixed-`wait` continuation, and two
+  scheduler processes racing prepare at most one successor.
 - Task proposal tests: every rule of execution-model §5.5.1 rejects the
   whole batch with its closed code and persists nothing; an accepted
   batch creates every Task, dependency, and reservation atomically;

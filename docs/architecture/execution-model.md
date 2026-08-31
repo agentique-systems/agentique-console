@@ -1765,7 +1765,11 @@ particular `record_decision` cannot create or resolve a
    intersection of the manifest's tools, the runtime handlers, and the
    validity of the caller's role and purpose. A tool that is permitted
    but not executable (every read tool, a Worker's `update_task`) is not
-   exposed as callable.
+   exposed as callable; `request_decision` is exposed exactly when all
+   three layers admit it, at every Pattern position bound to a Worker or
+   Coordinator role and at every Orchestrator purpose but
+   `final_synthesis`, and never at an Evaluator position
+   (`route_selection`, `evaluator_round`) or in a Gate-owned Invocation.
 
 The Attempt executor binds one `RuntimeToolCallPort` (`tools`, `call`)
 per Attempt, fixed to that Attempt, Invocation, manifest, role, purpose,
@@ -2788,8 +2792,21 @@ the requesting role and position: a Coordinator turn continues at its own
 logical turn without consuming another, a Worker re-owns its Task, a
 chain step or parallel item continues at its own position, and the root
 Orchestrator continues at its own purpose (a `gate_result` turn keeps its
-remediation Tasks). No generic Orchestrator relay turn is inserted for a
-Coordinator's or Worker's Decision. The successor is funded through the
+remediation Tasks, the `decision_resolution` follow-up of a change request
+keeps its `signoff_resolution` input — the one follow-up is a logical
+turn). No generic Orchestrator relay turn is inserted for a Coordinator's
+or Worker's Decision. `continue_decision_request` names the blocked
+Invocation and its Decision, is projected only for a Decision an agent
+requested (an approval, a selector, a signoff, a publish, or a
+budget-increase Decision never enters it; a stale-waiver supersession
+does), revalidates the Run, the plan revision, the node's membership, the
+requester's state, the Decision's end, the absence of a successor, and the
+exact position before the runner's own transaction re-reads them, and
+tells the runner exactly which blocked Invocation to continue; the runner
+reconstructs the position's operation inputs and never decides on its own
+that an agent-requested continuation exists. At most one Invocation
+continues from another (database-enforced by a unique index), so repeated
+or concurrent passes prepare at most one successor. The successor is funded through the
 node's one capacity operation (§7.6): under `fail` the node ends with
 `allocation_exhausted`, under `wait` it waits on budget for its own fixed
 allocation — a Run Budget Increase alone does not enlarge a `wait` node —

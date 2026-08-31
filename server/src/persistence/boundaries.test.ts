@@ -470,7 +470,14 @@ describe("import boundaries", () => {
     expect(sql).toMatch(/CONSTRAINT "decisions_requestable_by_invocation" CHECK/);
     expect(sql).toMatch(/CREATE TRIGGER `decisions_[a-z_]+` BEFORE UPDATE ON `decisions`/);
     expect(sql).toMatch(/CREATE UNIQUE INDEX `runtime_tool_calls_one_decision_request` ON `runtime_tool_calls` \(`invocation_id`\) WHERE tool = 'request_decision';/);
-    // 9. The canonical runtime-tool-call record and its Event carry the safe result and the digest, never the raw call input.
+    // 9. The normative documents describe request_decision as it is: callable when the manifest, a handler, and the exact role/purpose
+    //    binding admit it; never as permitted-but-not-executable, handler-less, deferred, or absent from callable tools.
+    for (const file of listFiles("docs/architecture", (f) => f.endsWith(".md"))) {
+      const doc = fs.readFileSync(file, "utf8");
+      expect(doc, rel(file)).not.toMatch(/`request_decision` is never exposed as callable|`request_decision` remains\s+permitted by role and not executable|not executable \(`request_decision`|`request_decision`[^.\n]{0,80}(typed deferral|has no handler|no handler)|deferral[^.\n]{0,40}`request_decision`/);
+    }
+    expect(fs.readFileSync(path.join(repoRoot, "docs/architecture/migration-contract.md"), "utf8")).toMatch(/at most one accepted `propose_tasks` per Invocation, and at most one accepted blocking `request_decision` per Invocation/);
+    // 10. The canonical runtime-tool-call record and its Event carry the safe result and the digest, never the raw call input.
     const core = read("core/src/runtime-tools.ts");
     const record = core.match(/export interface RuntimeToolCall \{([\s\S]*?)\n\}/)?.[1] ?? "";
     expect(record.length).toBeGreaterThan(0);
