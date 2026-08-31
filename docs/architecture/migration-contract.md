@@ -597,11 +597,40 @@ is one or more commits; each commit keeps `npm run typecheck` and
    never enlarges a `wait` node); capacity ineligibility of terminal Plan
    Nodes before any arithmetic; and restart and concurrency safety across
    every request, blocking, resolution, and continuation window. No typed
-   deferral remains in the runtime-tool bindings; the remaining
+   deferral remains in the runtime-tool bindings.
+   Phase 2G-A (done): bounded canonical read tools and runtime-owned
+   Artifact creation — the closed runtime-tool outcome model separating a
+   successful read (a typed bounded projection; no `runtime_tool_calls`
+   row, no Event, no Usage row, no invented digest or call id) from an
+   accepted recorded mutation; the six executable read tools
+   (`read_requirements`, `read_decisions`, `read_tasks`, `read_artifact`,
+   `read_execution_plan`, `read_agent_definitions`) under one common
+   contract (strict closed schemas, per-role canonical scopes over the
+   caller's immutable manifest and rows, execution outside every
+   transaction, deterministic canonical order, the stateless keyset
+   cursor with default 25 and maximum 100, the 64 KiB response bound
+   with the typed oversized-record reference, refusal of malformed and
+   foreign cursors, no stored cursor or read receipt); `read_artifact`
+   as the one content-returning tool (manifest or own-logical-turn
+   producer authorization, Artifact-Store-verified bytes, 16 KiB default
+   and 64 KiB maximum pages, UTF-8-boundary-safe `utf8` and
+   decoded-byte-paged `base64`, closed missing/corrupt failures); the
+   executable `write_artifact` mutation (runtime-derived id, digest,
+   size, and producer ownership; 200-byte title and media type, 48 KiB
+   decoded per call, 32 calls and 1 MiB per logical turn from accepted
+   rows; blob-compensated one-transaction commit; digest replay of the
+   same Artifact id; its own 96 KiB canonical call bound) with Evaluator
+   Artifact creation for bounded Evidence reports and immediate
+   same-turn visibility; the post-phase executable handler set
+   (the read tools and `write_artifact` beside `propose_tasks`, the
+   Coordinator cancellation `update_task`, `request_completion`, and
+   `request_decision`; the `final_synthesis` turn reads only); and
+   restart safety across every write-replay, rollback, routing,
+   corruption, and Evaluator-Evidence window. The remaining
    permitted-but-not-executable tools of execution-model §6.4
    (`create_tasks`, `record_decision`, `propose_requirements`,
-   `revise_execution_plan`, `write_artifact`, the read tools, a Worker's
-   `update_task`) and operator supersession of a policy-resolved Decision
+   `revise_execution_plan`, `update_task` beyond the Coordinator's
+   cancel) and operator supersession of a policy-resolved Decision
    are later subphases. Later
    subphases: Runs, Execution
    Plan source validation and compiler,
@@ -927,6 +956,35 @@ the passing total alone.
   Gates) and the final synthesis are never callable; file-backed restarts
   at each Pattern-specific position, a fixed-`wait` continuation, and two
   scheduler processes racing prepare at most one successor.
+- Runtime data-access tests: every read tool returns a typed projection
+  with no Event, `runtime_tool_calls` row, Usage row, or stored cursor;
+  paging is deterministic with default and maximum limits, stateless
+  keyset continuation, refused malformed and foreign cursors, the 64 KiB
+  response bound, and the typed oversized-record reference; reads are
+  refused inside a transaction, after the caller stopped running, and
+  after the logical turn ended; results repeat identically across a
+  file-backed reopen; the scope matrix covers every read tool for the
+  root Orchestrator, a Coordinator, a Worker, and an Evaluator — exact
+  in-scope records, foreign Run, Workspace, and Conversation records,
+  same-Run-but-out-of-scope records, pinned versus current Requirement
+  revisions, replacement history, and pagination that cannot enumerate
+  beyond scope. `read_artifact` covers complete and multi-page
+  boundary-safe UTF-8 reads, invalid-UTF-8 refusal, base64 paging over
+  decoded bytes, zero-byte Artifacts, maximum pages, offsets at and
+  beyond the end, missing and corrupt blobs as closed typed failures,
+  and the absence of content bytes in Events, diagnostics, manifests,
+  rows, and errors. `write_artifact` covers every permitted role,
+  Evaluator Evidence Artifacts admitted by result validation, malformed
+  and non-canonical content, invalid media types, the per-call,
+  per-turn-count, and cumulative-byte bounds, exact and concurrent
+  replay, distinct calls over deduplicated blobs, Event, insert, and
+  COMMIT failures leaving no row, Event, or unreferenced blob, the
+  cleanup-failure diagnostic that never replaces the canonical error,
+  immediate same-turn visibility, successors unreadable without
+  canonical routing, and file-backed restart windows (lost-response
+  replay of the same Artifact id, rollback after the blob write, routed
+  and unrouted visibility after reopen, corruption staying typed, an
+  Evaluator's Evidence settling once).
 - Task proposal tests: every rule of execution-model §5.5.1 rejects the
   whole batch with its closed code and persists nothing; an accepted
   batch creates every Task, dependency, and reservation atomically;

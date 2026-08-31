@@ -922,17 +922,24 @@ approval, and executing the call again needs a new Decision.
 
 The canonical, append-only record that the runtime executed one mutating
 runtime-tool call (`propose_tasks`, `update_task`, `request_completion`,
-or `request_decision`) on behalf of a running Invocation: the Run, Plan Node, Invocation, the first Attempt
+`request_decision`, or `write_artifact`) on behalf of a running
+Invocation: the Run, Plan Node, Invocation, the first Attempt
 that committed it, the tool, the digest of the canonicalized call, the
 safe result, and the commit time. It is written by the runtime-tool
 executor in its own short transaction outside provider execution, after
 the handler validated and applied the call; a rejected call writes
-nothing. It is unique per Invocation, tool, and digest, and at most one
+nothing, and a runtime read tool (`read_requirements`, `read_decisions`,
+`read_tasks`, `read_artifact`, `read_execution_plan`,
+`read_agent_definitions`) is never recorded here: a successful read is an
+ephemeral typed projection, not a durable mutation. It is unique per
+Invocation, tool, and digest, and at most one
 accepted `propose_tasks` and at most one accepted `request_decision`
 exist per Invocation; a retry or approval successor of the same logical
 turn replays a recorded call by digest instead of repeating its effect,
-and an accepted `request_decision` ends the logical turn. It never holds
-the call's raw input.
+and an accepted `request_decision` ends the logical turn. A
+`write_artifact` row's safe result names the created Artifact's id,
+media type, digest, byte size, and title; the content lives only in the
+Artifact Store. It never holds the call's raw input.
 
 - Id prefix: `rtc_`
 - Owned by: the runtime

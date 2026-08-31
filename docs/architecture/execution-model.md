@@ -1752,7 +1752,11 @@ particular `record_decision` cannot create or resolve a
    `update_task`; a `final_synthesis` turn has no mutating runtime tool
    at all);
 3. the tools the runtime **can execute** in this phase — the handler
-   bindings in `core/src/runtime-tools.ts`: `propose_tasks` and the
+   bindings in `core/src/runtime-tools.ts`: the six read tools
+   (`read_requirements`, `read_decisions`, `read_tasks`, `read_artifact`,
+   `read_execution_plan`, `read_agent_definitions`), for every role at
+   every purpose of that role; `write_artifact`, for every role except
+   the read-only `final_synthesis` turn; `propose_tasks` and the
    cancelling `update_task`, for a Coordinator with purpose `decompose`
    or `replan`; `request_completion`, for the root Orchestrator's
    ordinary turns (every Orchestrator purpose but `final_synthesis`) and
@@ -1764,12 +1768,20 @@ particular `record_decision` cannot create or resolve a
 4. the **effective callable set** exposed to a provider execution: the
    intersection of the manifest's tools, the runtime handlers, and the
    validity of the caller's role and purpose. A tool that is permitted
-   but not executable (every read tool, a Worker's `update_task`) is not
+   but not executable (`create_tasks`, `record_decision`,
+   `propose_requirements`, `revise_execution_plan`, and every
+   `update_task` operation beyond the Coordinator's cancel) is not
    exposed as callable; `request_decision` is exposed exactly when all
    three layers admit it, at every Pattern position bound to a Worker or
    Coordinator role and at every Orchestrator purpose but
    `final_synthesis`, and never at an Evaluator position
    (`route_selection`, `evaluator_round`) or in a Gate-owned Invocation.
+   A `final_synthesis` turn holds the read tools and no mutating runtime
+   tool; an Evaluator additionally holds `write_artifact` while remaining
+   read-only with respect to the Workspace. A role cannot call a tool its
+   persisted manifest omits even though a handler exists, an unknown tool
+   is `not_callable`, the provider adapter can add no handler, and every
+   retry executes under the immutable manifest's same callable set.
 
 The Attempt executor binds one `RuntimeToolCallPort` (`tools`, `call`)
 per Attempt, fixed to that Attempt, Invocation, manifest, role, purpose,
@@ -1796,7 +1808,156 @@ triggers). Retries and approval successors therefore never duplicate an
 accepted proposal or request, and the raw call input never appears in an
 Event, diagnostic, or manifest. The executor creates a Decision only
 through the decision-request service (`request_decision`, below) and never
-resolves one.
+resolves one. The outcome of one call is a closed union with five kinds:
+a successful **read** (a typed bounded projection; no `runtime_tool_calls`
+row, no Event, no Usage row, and no digest or call id presented as a
+durable record), an **accepted** mutation (the canonical digest, the
+append-only row, the safe typed result, replay semantics), a typed
+**rejection** (closed codes; nothing written), **not_callable** (the tool
+is outside the effective set), and an infrastructure **failure** (nothing
+persisted; one bounded diagnostic; the call may be retried). The
+`write_artifact` call alone carries a larger canonical-byte bound
+(`WRITE_ARTIFACT_CALL_MAX_BYTES`, 96 KiB), sized so a maximal 48 KiB
+base64 payload always fits; every other call keeps the 64 KiB bound.
+
+**Runtime read tools.** `read_requirements`, `read_decisions`,
+`read_tasks`, `read_artifact`, `read_execution_plan`, and
+`read_agent_definitions` are executable for every role. They exist for
+useful information per token: Context Manifests stay compact — carrying
+identifiers and bounded metadata — and an agent fetches exactly the
+records or Artifact bytes it needs, on demand. A read is not a durable
+runtime-tool mutation. Every read obeys one common contract
+(`RuntimeReadService`, `server/src/execution/runtime-reads.ts`; contracts
+in `core/src/runtime-reads.ts`):
+
+- it is parsed through a strict closed schema and bounded before
+  execution; it is authorized against the caller's immutable manifest,
+  role, purpose, Run, Plan Node, Invocation, and Attempt; it executes
+  only while the Attempt and Invocation are running and never after the
+  logical turn ended on an accepted `request_decision`; it is refused
+  when invoked inside a persistence transaction and opens none itself;
+- it uses the canonical projection and store APIs only, writes no Event,
+  no `runtime_tool_calls` row, no Usage row, and no receipt, access log,
+  or stored cursor of any kind; repeated reads are harmless and return
+  the same canonical result for the same database state;
+- every list is in a deterministic canonical order (Requirement tree
+  order, ledger id order, plan membership order, edge id order) and is
+  paged by a stateless keyset cursor `{ after?, limit? }` (default 25,
+  maximum 100) reconstructible from persisted rows; a malformed,
+  foreign, or invalid cursor is rejected (`cursor_invalid`);
+- the total serialized result is bounded at 64 KiB: a page returns the
+  largest complete prefix that fits with the next cursor, and a single
+  record that alone exceeds the bound is returned as a typed
+  `record_too_large` reference (id and serialized size) that the next
+  cursor skips — never a truncated JSON object or a silently dropped
+  record;
+- no result embeds a transcript, Event history, provider message,
+  continuation payload, storage key, worktree path, credential, raw
+  tool-call input, or unrelated Artifact content; errors and diagnostics
+  carry bounded identifiers and closed failure kinds only;
+- authorization is canonical ownership plus the caller's manifest scope;
+  a supplied id authorizes nothing, and an exactly named record outside
+  the caller's scope is refused (`record_out_of_scope`) without
+  confirming whether it exists.
+
+The per-role scopes are: **`read_requirements`** — the root
+Orchestrator's ordinary turns read the Conversation's current Requirement
+revision (whole tree, internal nodes included, with current semantic
+statuses and, where waived, the waiver Decision id); every scoped caller —
+Coordinator, Worker, Evaluator, and a Gate-owned Orchestrator turn — reads
+exactly the pinned revision and Requirement set its immutable manifest
+carries, and a newer revision is never silently substituted; optional
+bounded Acceptance Criterion metadata (id and kind) is included on
+request. **`read_decisions`** — the Orchestrator sees the Decisions of
+the Run and the Conversation-level ones; a Coordinator those affecting
+its node, the node's Tasks, or its pinned scope, and those requested from
+its node; a Worker those affecting its own Tasks, node, or manifest
+Requirements, and its own turn's requests; an Evaluator only the
+Decisions its manifest names. A record carries the bounded question,
+ordered options, recommendation, resolution policy and facts, affected
+ids, supersession references, and the typed subject — which for a
+`side_effect_approval` names the tool, digest, and call Artifact id and
+never the proposed call's bytes. **`read_tasks`** — the root Orchestrator
+sees the Run's current (non-superseded) Tasks; a Coordinator its node's
+complete ledger, superseded rows included; a Worker exactly its assigned
+Tasks and their direct dependencies; an Evaluator exactly the Tasks its
+Gate candidate represents; a record carries identity, state, ownership,
+dependency and replacement references, the typed block reason, and
+Artifact and Evidence references. **`read_execution_plan`** — every role
+inspects the current accepted graph of its own Run, as separately paged
+node membership and edges: the revision number, node identity, kind,
+Pattern, status, source path, title, a bounded shape summary, the
+Requirement scope ids, allocation policy and bounded allocation metadata,
+and typed edge records — never a historical revision, a source proposal,
+compiler intermediate state, a rejected proposal, or full nested plan
+JSON. **`read_agent_definitions`** — bounded metadata of the executable
+revisions relevant to the Run's Workspace and Conversation (the latest
+executable revision per definition plus any older revision the current
+graph, the verification policy, or the caller still references): identity,
+hash, safe provenance references, derived role compatibility,
+capabilities, Tool Policy, model policy, and default limits — never
+instruction text, credentials, file contents, or a foreign Workspace's or
+Conversation's definition.
+
+**`read_artifact`** is the only runtime tool that returns Artifact
+content. An Artifact is readable exactly when the caller's immutable
+manifest lists it (a Handoff, Task input, Gate candidate, Decision
+resolution, optimizer, completion, or explicitly listed Artifact), or
+when the caller's own logical turn produced it through `write_artifact`
+(the Invocation or its approval predecessors, by canonical producer
+ownership — never by mutating the manifest or process memory). A later
+Invocation gains visibility only through normal canonical routing (Task
+output, Handoff, typed manifest input, Gate candidate, explicit
+reference); a predecessor's production is never automatically visible,
+and no role can read every Artifact of the Run. The runtime loads the
+metadata, validates authorization and Run ownership, verifies blob
+existence, byte size, and digest through the canonical Artifact Store,
+slices the verified bytes, and binds the bounded content into the tool
+response — the provider boundary never imports the store. Paging is over
+the Artifact's bytes: `offset` (default 0) and `maxBytes` (default
+16 KiB, maximum 64 KiB) select a range; `utf8` never splits a UTF-8
+sequence (the page end is pulled back to a boundary, an offset inside a
+sequence is refused, and invalid UTF-8 is a typed refusal recommending
+`base64`, never a silent replacement); `base64` pages over decoded bytes
+with the returned text representing exactly the selected range. The
+result names the Artifact, media type, digest and total byte size (always
+of the complete Artifact), offset, returned byte count, encoding,
+content, `nextOffset`, and `eof`. Missing or corrupt content is a closed
+typed failure (`artifact_content_missing`, `artifact_content_corrupt`) —
+never "not found", never a filesystem path, and never bytes in an Event
+or diagnostic.
+
+**`write_artifact`.** A running Invocation of any role but the
+`final_synthesis` turn creates one canonical Artifact through the
+mutating runtime-tool path: the model supplies a bounded title (at most
+200 UTF-8 bytes), a normalized media type (at most 200 bytes), an
+encoding (`utf8` or `base64`), and the content (at most 48 KiB decoded
+per call); the runtime derives everything else — the Artifact id, digest,
+byte size, producer (`invocation`, naming the caller and the committing
+Attempt), Run, and storage — and the model can supply none of them. One
+logical turn accepts at most 32 `write_artifact` calls and at most 1 MiB
+of cumulative decoded content, enforced from the accepted
+`runtime_tool_calls` rows so a replay consumes nothing. Malformed or
+non-canonical base64, ill-formed text, an invalid or non-normalized media
+type, a bound overflow, a caller that is no longer running, and a caller
+whose manifest omits the tool are rejected typed. The accepted call runs
+in the one root transaction: content is decoded and bounded, the Artifact
+and blob are created through the canonical `ArtifactStore.create` (with
+its rollback compensation), the Artifact Event and the safe
+`runtime_tool_calls` row commit together, and a callback, Event, insert,
+or COMMIT failure leaves no Artifact row, Event, call row, or
+unreferenced blob. Raw content never enters the row, an Event, or a
+diagnostic; the safe result carries `artifactId`, `mediaType`, `digest`,
+`byteSize`, and `title` only. An identical call of the same logical turn
+replays the same Artifact id; distinct requests create distinct Artifact
+metadata over safely deduplicated content-addressed blobs; concurrent
+identical calls converge; a provider retry duplicates nothing. The
+created Artifact is immediately readable by the same logical turn through
+`read_artifact` (producer ownership); Evaluators may call
+`write_artifact` for a bounded Evidence report — result validation admits
+a same-Invocation Artifact as Evidence under the existing Evidence
+rules — while creating no Changeset, mutating no Task, and holding no
+write-capable provider capability.
 
 **`request_decision`.** A running Invocation asks the operator for one
 Decision. Exactly two kinds are requestable: an `operator_choice` (a bounded
