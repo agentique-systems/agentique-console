@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { addedAllocationSchema, BUDGET_INCREASE_PARTITIONS, type Allocation, type BudgetIncreasePartition } from "./budgets.ts";
 import { ValidationError } from "./errors.ts";
 import type {
   ArtifactId,
@@ -28,6 +29,7 @@ export const DECISION_KINDS = [
   "side_effect_approval",
   "signoff",
   "publish",
+  "budget_increase",
 ] as const;
 export type DecisionKind = (typeof DECISION_KINDS)[number];
 
@@ -37,6 +39,7 @@ export const OPERATOR_ONLY_DECISION_KINDS = [
   "side_effect_approval",
   "signoff",
   "publish",
+  "budget_increase",
 ] as const satisfies readonly DecisionKind[];
 
 export const RESOLUTION_POLICIES = ["operator_required", "use_default_after_deadline"] as const;
@@ -98,8 +101,12 @@ export type SignoffOption = (typeof SIGNOFF_OPTIONS)[number];
 export const PUBLISH_OPTIONS = ["publish", "cancel"] as const;
 export type PublishOption = (typeof PUBLISH_OPTIONS)[number];
 
+/** The two stable options of a `budget_increase` Decision (execution-model §7.6). */
+export const BUDGET_INCREASE_OPTIONS = ["approve", "deny"] as const;
+export type BudgetIncreaseOption = (typeof BUDGET_INCREASE_OPTIONS)[number];
+
 /** Decision kinds whose canonical subject is a typed record (`subject.kind` equals the Decision kind). */
-export const SUBJECT_DECISION_KINDS = ["side_effect_approval", "signoff", "publish"] as const satisfies readonly DecisionKind[];
+export const SUBJECT_DECISION_KINDS = ["side_effect_approval", "signoff", "publish", "budget_increase"] as const satisfies readonly DecisionKind[];
 
 /**
  * The canonical subject of a Decision that concerns one exact runtime fact.
@@ -114,8 +121,12 @@ export const SUBJECT_DECISION_KINDS = ["side_effect_approval", "signoff", "publi
  * §9.4): the completed Run, its Workspace, the exact Target, the accepted
  * final Snapshot and final Changeset, and the requested strategy; resolving
  * it with `publish` authorizes exactly one Publication of exactly those
- * facts. Subjects carry ids, digests, and closed values only, so they may
- * travel in Events and views.
+ * facts. A `budget_increase` names the exact operator-authorized growth of
+ * one Run's Budget (execution-model §7.6): the Run, the partition, and the
+ * exact added cost, tokens, and Attempts; resolving it with `approve`
+ * records exactly one Budget Increase of exactly those quantities. Subjects
+ * carry ids, digests, and closed values only, so they may travel in Events
+ * and views.
  */
 export type DecisionSubject =
   | {
@@ -145,6 +156,13 @@ export type DecisionSubject =
       finalSnapshotId: SnapshotId;
       finalChangesetId: ChangesetId;
       requestedStrategy: PublicationStrategyRequest;
+    }
+  | {
+      kind: "budget_increase";
+      runId: RunId;
+      partition: BudgetIncreasePartition;
+      /** The exact quantities the increase adds; non-negative, at least one positive. */
+      added: Allocation;
     };
 
 export const decisionSubjectSchema: z.ZodType<DecisionSubject> = z.discriminatedUnion("kind", [
@@ -178,19 +196,32 @@ export const decisionSubjectSchema: z.ZodType<DecisionSubject> = z.discriminated
     finalChangesetId: idSchema("changeset"),
     requestedStrategy: publicationStrategyRequestSchema,
   }),
+  z.strictObject({
+    kind: z.literal("budget_increase"),
+    runId: idSchema("run"),
+    partition: z.enum(BUDGET_INCREASE_PARTITIONS),
+    added: addedAllocationSchema,
+  }),
 ]);
 
-/** A `side_effect_approval`, `signoff`, or `publish` Decision has exactly its typed subject, exactly its two stable options, and a Run; no other kind has a subject. */
+const OPTIONS_BY_SUBJECT_KIND: Readonly<Record<(typeof SUBJECT_DECISION_KINDS)[number], readonly string[]>> = {
+  side_effect_approval: SIDE_EFFECT_APPROVAL_OPTIONS,
+  signoff: SIGNOFF_OPTIONS,
+  publish: PUBLISH_OPTIONS,
+  budget_increase: BUDGET_INCREASE_OPTIONS,
+};
+
+/** A `side_effect_approval`, `signoff`, `publish`, or `budget_increase` Decision has exactly its typed subject, exactly its two stable options, and a Run; no other kind has a subject. */
 function subjectShape(decision: { kind: DecisionKind; subject: DecisionSubject | null; options: DecisionOption[]; runId: RunId | null; resolutionPolicy: ResolutionPolicy }, ctx: z.RefinementCtx): void {
   if ((SUBJECT_DECISION_KINDS as readonly DecisionKind[]).includes(decision.kind)) {
-    const expected: readonly string[] = decision.kind === "side_effect_approval" ? SIDE_EFFECT_APPROVAL_OPTIONS : decision.kind === "signoff" ? SIGNOFF_OPTIONS : PUBLISH_OPTIONS;
+    const expected = OPTIONS_BY_SUBJECT_KIND[decision.kind as (typeof SUBJECT_DECISION_KINDS)[number]];
     if (decision.subject === null || decision.subject.kind !== decision.kind) ctx.addIssue({ code: "custom", path: ["subject"], message: `a ${decision.kind} names its ${decision.kind} subject` });
     const ids = decision.options.map((o) => o.id).sort();
     if (ids.join(",") !== [...expected].sort().join(",")) {
       ctx.addIssue({ code: "custom", path: ["options"], message: `a ${decision.kind} offers exactly ${expected.join(" and ")}` });
     }
     if (decision.runId === null) ctx.addIssue({ code: "custom", path: ["runId"], message: `a ${decision.kind} belongs to a Run` });
-    if ((decision.kind === "signoff" || decision.kind === "publish") && decision.resolutionPolicy !== "operator_required") {
+    if ((decision.kind === "signoff" || decision.kind === "publish" || decision.kind === "budget_increase") && decision.resolutionPolicy !== "operator_required") {
       ctx.addIssue({ code: "custom", path: ["resolutionPolicy"], message: `a ${decision.kind} is always operator_required` });
     }
     if (decision.subject !== null && decision.subject.kind !== "side_effect_approval" && decision.subject.kind === decision.kind && decision.subject.runId !== decision.runId) {
@@ -419,6 +450,14 @@ export function signoffSubjectOf(decision: Pick<Decision, "id" | "kind" | "subje
 export function publishSubjectOf(decision: Pick<Decision, "id" | "kind" | "subject">): Extract<DecisionSubject, { kind: "publish" }> {
   if (decision.kind !== "publish" || decision.subject === null || decision.subject.kind !== "publish") {
     throw new ValidationError(`Decision ${decision.id} is not a publish Decision with its subject`, { decisionId: decision.id, kind: decision.kind });
+  }
+  return decision.subject;
+}
+
+/** The typed subject of a `budget_increase` Decision; a Decision of another kind (or without one) is an invariant violation. */
+export function budgetIncreaseSubjectOf(decision: Pick<Decision, "id" | "kind" | "subject">): Extract<DecisionSubject, { kind: "budget_increase" }> {
+  if (decision.kind !== "budget_increase" || decision.subject === null || decision.subject.kind !== "budget_increase") {
+    throw new ValidationError(`Decision ${decision.id} is not a budget_increase Decision with its subject`, { decisionId: decision.id, kind: decision.kind });
   }
   return decision.subject;
 }

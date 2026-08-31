@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "e4e321a2-3d38-4eee-93e6-fef3be9f3dd2",
+  "id": "30cfc565-3137-4198-9aa3-6380e3f9dc27",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "acceptance_criteria": {
@@ -297,6 +297,156 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {}
+    },
+    "allocation_extensions": {
+      "name": "allocation_extensions",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "run_id": {
+          "name": "run_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "plan_node_id": {
+          "name": "plan_node_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "reservation_id": {
+          "name": "reservation_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "added_cost_usd": {
+          "name": "added_cost_usd",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "added_tokens": {
+          "name": "added_tokens",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "added_attempts": {
+          "name": "added_attempts",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "trigger": {
+          "name": "trigger",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "allocation_extensions_run": {
+          "name": "allocation_extensions_run",
+          "columns": [
+            "run_id",
+            "created_at"
+          ],
+          "isUnique": false
+        },
+        "allocation_extensions_plan_node": {
+          "name": "allocation_extensions_plan_node",
+          "columns": [
+            "plan_node_id",
+            "created_at"
+          ],
+          "isUnique": false
+        },
+        "allocation_extensions_reservation": {
+          "name": "allocation_extensions_reservation",
+          "columns": [
+            "reservation_id"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "allocation_extensions_run_id_runs_id_fk": {
+          "name": "allocation_extensions_run_id_runs_id_fk",
+          "tableFrom": "allocation_extensions",
+          "tableTo": "runs",
+          "columnsFrom": [
+            "run_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "allocation_extensions_plan_node_id_plan_nodes_id_fk": {
+          "name": "allocation_extensions_plan_node_id_plan_nodes_id_fk",
+          "tableFrom": "allocation_extensions",
+          "tableTo": "plan_nodes",
+          "columnsFrom": [
+            "plan_node_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "allocation_extensions_reservation_id_budget_reservations_id_fk": {
+          "name": "allocation_extensions_reservation_id_budget_reservations_id_fk",
+          "tableFrom": "allocation_extensions",
+          "tableTo": "budget_reservations",
+          "columnsFrom": [
+            "reservation_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "allocation_extensions_trigger": {
+          "name": "allocation_extensions_trigger",
+          "value": "\"allocation_extensions\".\"trigger\" IN ('invocation', 'task_batch', 'gate_evaluator', 'gate_remediation', 'root_turn', 'signoff_follow_up')"
+        },
+        "allocation_extensions_non_negative": {
+          "name": "allocation_extensions_non_negative",
+          "value": "\"allocation_extensions\".\"added_cost_usd\" >= 0 AND \"allocation_extensions\".\"added_tokens\" >= 0 AND \"allocation_extensions\".\"added_attempts\" >= 0"
+        },
+        "allocation_extensions_not_all_zero": {
+          "name": "allocation_extensions_not_all_zero",
+          "value": "\"allocation_extensions\".\"added_cost_usd\" > 0 OR \"allocation_extensions\".\"added_tokens\" > 0 OR \"allocation_extensions\".\"added_attempts\" > 0"
+        }
+      }
     },
     "approved_tool_call_uses": {
       "name": "approved_tool_call_uses",
@@ -975,6 +1125,128 @@
         "attempts_cancelled_never_retries": {
           "name": "attempts_cancelled_never_retries",
           "value": "\"attempts\".\"status\" <> 'cancelled' OR \"attempts\".\"retry_decision\" IS NULL OR json_extract(\"attempts\".\"retry_decision\", '$.permitted') = 0"
+        }
+      }
+    },
+    "budget_increases": {
+      "name": "budget_increases",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "run_id": {
+          "name": "run_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "decision_id": {
+          "name": "decision_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "partition": {
+          "name": "partition",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "added_cost_usd": {
+          "name": "added_cost_usd",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "added_tokens": {
+          "name": "added_tokens",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "added_attempts": {
+          "name": "added_attempts",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "budget_increases_run": {
+          "name": "budget_increases_run",
+          "columns": [
+            "run_id",
+            "created_at"
+          ],
+          "isUnique": false
+        },
+        "budget_increases_decision": {
+          "name": "budget_increases_decision",
+          "columns": [
+            "decision_id"
+          ],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {
+        "budget_increases_run_id_runs_id_fk": {
+          "name": "budget_increases_run_id_runs_id_fk",
+          "tableFrom": "budget_increases",
+          "tableTo": "runs",
+          "columnsFrom": [
+            "run_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "budget_increases_decision_id_decisions_id_fk": {
+          "name": "budget_increases_decision_id_decisions_id_fk",
+          "tableFrom": "budget_increases",
+          "tableTo": "decisions",
+          "columnsFrom": [
+            "decision_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "budget_increases_partition": {
+          "name": "budget_increases_partition",
+          "value": "\"budget_increases\".\"partition\" IN ('ordinary', 'final_reserve')"
+        },
+        "budget_increases_non_negative": {
+          "name": "budget_increases_non_negative",
+          "value": "\"budget_increases\".\"added_cost_usd\" >= 0 AND \"budget_increases\".\"added_tokens\" >= 0 AND \"budget_increases\".\"added_attempts\" >= 0"
+        },
+        "budget_increases_not_all_zero": {
+          "name": "budget_increases_not_all_zero",
+          "value": "\"budget_increases\".\"added_cost_usd\" > 0 OR \"budget_increases\".\"added_tokens\" > 0 OR \"budget_increases\".\"added_attempts\" > 0"
         }
       }
     },
@@ -2296,6 +2568,14 @@
           ],
           "isUnique": true,
           "where": "kind = 'publish' AND status = 'open'"
+        },
+        "decisions_open_budget_increase_run": {
+          "name": "decisions_open_budget_increase_run",
+          "columns": [
+            "run_id"
+          ],
+          "isUnique": true,
+          "where": "kind = 'budget_increase' AND status = 'open'"
         }
       },
       "foreignKeys": {
@@ -2357,7 +2637,7 @@
       "checkConstraints": {
         "decisions_kind": {
           "name": "decisions_kind",
-          "value": "\"decisions\".\"kind\" IN ('operator_choice', 'orchestrator_choice', 'requirement_waiver', 'side_effect_approval', 'signoff', 'publish')"
+          "value": "\"decisions\".\"kind\" IN ('operator_choice', 'orchestrator_choice', 'requirement_waiver', 'side_effect_approval', 'signoff', 'publish', 'budget_increase')"
         },
         "decisions_policy": {
           "name": "decisions_policy",
@@ -2377,7 +2657,11 @@
         },
         "decisions_operator_only_kinds": {
           "name": "decisions_operator_only_kinds",
-          "value": "\"decisions\".\"kind\" NOT IN ('requirement_waiver', 'side_effect_approval', 'signoff', 'publish') OR \"decisions\".\"resolved_by\" IS NULL OR \"decisions\".\"resolved_by\" = 'operator'"
+          "value": "\"decisions\".\"kind\" NOT IN ('requirement_waiver', 'side_effect_approval', 'signoff', 'publish', 'budget_increase') OR \"decisions\".\"resolved_by\" IS NULL OR \"decisions\".\"resolved_by\" = 'operator'"
+        },
+        "decisions_budget_increase_shape": {
+          "name": "decisions_budget_increase_shape",
+          "value": "\"decisions\".\"kind\" <> 'budget_increase' OR (json_extract(\"decisions\".\"subject\", '$.partition') IN ('ordinary', 'final_reserve') AND json_extract(\"decisions\".\"subject\", '$.added.costUsd') >= 0 AND json_extract(\"decisions\".\"subject\", '$.added.tokens') >= 0 AND json_extract(\"decisions\".\"subject\", '$.added.attempts') >= 0 AND (json_extract(\"decisions\".\"subject\", '$.added.costUsd') > 0 OR json_extract(\"decisions\".\"subject\", '$.added.tokens') > 0 OR json_extract(\"decisions\".\"subject\", '$.added.attempts') > 0) AND \"decisions\".\"deadline_at\" IS NULL AND \"decisions\".\"activation_condition\" IS NULL)"
         },
         "decisions_default_policy_shape": {
           "name": "decisions_default_policy_shape",
@@ -2397,11 +2681,11 @@
         },
         "decisions_subject_shape": {
           "name": "decisions_subject_shape",
-          "value": "(\"decisions\".\"kind\" IN ('side_effect_approval', 'signoff', 'publish')) = (\"decisions\".\"subject\" IS NOT NULL AND json_extract(\"decisions\".\"subject\", '$.kind') = \"decisions\".\"kind\" AND \"decisions\".\"run_id\" IS NOT NULL)"
+          "value": "(\"decisions\".\"kind\" IN ('side_effect_approval', 'signoff', 'publish', 'budget_increase')) = (\"decisions\".\"subject\" IS NOT NULL AND json_extract(\"decisions\".\"subject\", '$.kind') = \"decisions\".\"kind\" AND \"decisions\".\"run_id\" IS NOT NULL)"
         },
         "decisions_signoff_policy": {
           "name": "decisions_signoff_policy",
-          "value": "\"decisions\".\"kind\" NOT IN ('signoff', 'publish') OR (\"decisions\".\"resolution_policy\" = 'operator_required' AND json_extract(\"decisions\".\"subject\", '$.runId') = \"decisions\".\"run_id\")"
+          "value": "\"decisions\".\"kind\" NOT IN ('signoff', 'publish', 'budget_increase') OR (\"decisions\".\"resolution_policy\" = 'operator_required' AND json_extract(\"decisions\".\"subject\", '$.runId') = \"decisions\".\"run_id\")"
         },
         "decisions_no_self_supersede": {
           "name": "decisions_no_self_supersede",

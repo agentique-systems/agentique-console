@@ -1,12 +1,14 @@
 import { and, asc, eq, inArray, notInArray } from "drizzle-orm";
 import {
   assertDecisionResolutionRules,
+  budgetIncreasePermitted,
   ConflictError,
   decisionRequestSchema,
   decisionResolutionInputSchema,
   decisionSchema,
   InvariantViolationError,
   parseOrThrow,
+  RUN_MACHINE,
   TOOL_CALL_MEDIA_TYPE,
   type ConversationId,
   type Decision,
@@ -15,6 +17,7 @@ import {
   type DecisionResolutionInput,
   type DecisionSubject,
   type EventActor,
+  type RunStatus,
 } from "@agentique-console/core";
 import type { PersistenceContext } from "../context.ts";
 import { artifacts, attempts, completionRequests, decisions, gates, invocations, planNodes, publications, requirements, runs, tasks } from "../schema.ts";
@@ -155,6 +158,18 @@ export class DecisionStore {
     return rows[0] ?? null;
   }
 
+  /** Every `budget_increase` Decision of a Run, in creation order. */
+  budgetIncreaseDecisionsOf(runId: string): Decision[] {
+    return this.ctx.db.select().from(decisions).where(and(eq(decisions.kind, "budget_increase"), eq(decisions.runId, runId))).orderBy(asc(decisions.createdAt), asc(decisions.id)).all().map(toDomain);
+  }
+
+  /** The Run's one open `budget_increase` Decision, or `null`; at most one exists (a database unique index). */
+  openBudgetIncreaseOf(runId: string): Decision | null {
+    const rows = this.budgetIncreaseDecisionsOf(runId).filter((d) => d.status === "open");
+    if (rows.length > 1) throw new InvariantViolationError(`Run ${runId} has ${rows.length} open budget_increase Decisions`, { runId });
+    return rows[0] ?? null;
+  }
+
   /** Resolves an open Decision once; who may resolve what is enforced by the core rules. */
   resolve(id: DecisionId, input: DecisionResolutionInput, options?: WriteOptions): Decision {
     const resolution = parseOrThrow(decisionResolutionInputSchema, input, "Decision resolution");
@@ -206,6 +221,17 @@ export class DecisionStore {
    */
   private assertSubjectOwnership(subject: DecisionSubject, runId: string | null): void {
     if (subject.runId !== runId) throw new InvariantViolationError(`Decision subject names Run ${subject.runId}, not ${String(runId)}`);
+    if (subject.kind === "budget_increase") {
+      // A budget_increase is requested for a nonterminal Run whose status admits the partition, and only one is open per Run.
+      const run = requireRow(this.ctx.db.select({ status: runs.status }).from(runs).where(eq(runs.id, subject.runId)).get(), "Run", subject.runId);
+      if (RUN_MACHINE.isTerminal(run.status as RunStatus)) throw new ConflictError(`Run ${subject.runId} is ${run.status}; no Budget Increase is requested for a terminal Run`, { runId: subject.runId, status: run.status });
+      if (!budgetIncreasePermitted(run.status as RunStatus, subject.partition)) {
+        throw new ConflictError(`Run ${subject.runId} is ${run.status}; its ${subject.partition} partition cannot be increased now`, { runId: subject.runId, status: run.status, partition: subject.partition });
+      }
+      const open = this.ctx.db.select({ id: decisions.id }).from(decisions).where(and(eq(decisions.kind, "budget_increase"), eq(decisions.runId, subject.runId), eq(decisions.status, "open"))).get();
+      if (open) throw new ConflictError(`Run ${subject.runId} already has open budget_increase Decision ${open.id}`, { runId: subject.runId, decisionId: open.id });
+      return;
+    }
     if (subject.kind === "publish") {
       const run = requireRow(this.ctx.db.select({ status: runs.status, workspaceId: runs.workspaceId, target: runs.target, finalSnapshotId: runs.finalSnapshotId, finalChangesetId: runs.finalChangesetId }).from(runs).where(eq(runs.id, subject.runId)).get(), "Run", subject.runId);
       if (run.status !== "completed") throw new ConflictError(`Run ${subject.runId} is ${run.status}; a publish Decision is requested for a completed Run`, { runId: subject.runId, status: run.status });

@@ -1,5 +1,6 @@
 import { and, eq } from "drizzle-orm";
 import {
+  addAllocation,
   allocationFits,
   allocationSchema,
   budgetReservationSchema,
@@ -13,6 +14,8 @@ import {
   parseOrThrow,
   ROOT_SOURCE_PATH,
   runCapacityAccount,
+  subtractAllocation,
+  sumAllocations,
   ValidationError,
   ZERO_ALLOCATION,
   type Allocation,
@@ -21,16 +24,21 @@ import {
   type CapacityAccount,
   type FinalReserveUse,
   type InvocationId,
+  type PlanNodeAllocationProjection,
+  type PlanNodeId,
   type ReservationCapacitySource,
   type ReservationCharge,
   type ReservationChildRef,
   type ReservationParentRef,
   type ReservationReleaseReason,
+  type RunBudgetLimits,
   type RunCapacity,
   type RunId,
 } from "@agentique-console/core";
 import type { PersistenceContext } from "../context.ts";
 import { budgetReservations, invocations, planNodes, runs, tasks } from "../schema.ts";
+import type { AllocationExtensionStore } from "./allocation-extensions.ts";
+import type { BudgetIncreaseStore } from "./budget-increases.ts";
 import { assertSameRun, loadRunRef, requireRow, runScope, writeMeta, type WriteOptions } from "./support.ts";
 import type { UsageStore } from "./usage.ts";
 
@@ -83,15 +91,21 @@ export interface ReserveFinalInvocationInput {
 /**
  * Atomic allocation accounting over `budget_reservations`. Reservations are
  * the only record of allocation; limits live on the bounded objects and are
- * read here to compute capacity. Two entry points exist and neither takes a
- * capacity source from its caller: `reserveOrdinary` never touches the final
- * reserve, and `reserveFinalInvocation` funds only an Invocation whose
- * persisted row names a permitted final-reserve use.
+ * read here to compute capacity — a Run's effective limits derive from its
+ * immutable base Budget plus its approved Budget Increases, and a Plan
+ * Node's effective allocation from its immutable reservation plus its
+ * Allocation Extensions; no aggregate is stored. Two reservation entry
+ * points exist and neither takes a capacity source from its caller:
+ * `reserveOrdinary` never touches the final reserve, and
+ * `reserveFinalInvocation` funds only an Invocation whose persisted row
+ * names a permitted final-reserve use.
  */
 export class BudgetReservationStore {
   constructor(
     private readonly ctx: PersistenceContext,
     private readonly usage: UsageStore,
+    private readonly increases: BudgetIncreaseStore,
+    private readonly extensions: AllocationExtensionStore,
   ) {}
 
   get(id: BudgetReservationId): BudgetReservation {
@@ -130,24 +144,21 @@ export class BudgetReservationStore {
   // -------------------------------------------------------------------------
 
   /**
-   * The limit of a parent as an Allocation, read from the bounded object.
-   * For a Run this is the ordinary pool: the Run Budget less the persisted
-   * final reserve. `runCapacity` exposes every partition.
+   * The effective limit of a parent as an Allocation. For a Run this is the
+   * effective ordinary pool: the effective Run Budget less the effective
+   * final reserve (`runCapacity` exposes every partition). For a Plan Node
+   * it is the node's immutable compiled allocation plus every Allocation
+   * Extension of its Run-level reservation. For an Invocation it is its
+   * immutable allocation.
    */
   limitOf(parent: ReservationParentRef): Allocation {
     switch (parent.type) {
       case "run": {
-        const { budget, finalReserve } = this.runLimits(parent.id);
-        return { costUsd: budget.costUsd - finalReserve.costUsd, tokens: budget.tokens - finalReserve.tokens, attempts: budget.attempts - finalReserve.attempts };
+        const capacity = this.runCapacity(parent.id);
+        return subtractAllocation(capacity.limit, capacity.finalReserve);
       }
-      case "plan_node": {
-        const node = requireRow(
-          this.ctx.db.select({ costUsd: planNodes.allocCostUsd, tokens: planNodes.allocTokens, attempts: planNodes.allocAttempts }).from(planNodes).where(eq(planNodes.id, parent.id)).get(),
-          "PlanNode",
-          parent.id,
-        );
-        return node;
-      }
+      case "plan_node":
+        return this.planNodeAllocation(parent.id).effective;
       case "invocation": {
         const invocation = requireRow(
           this.ctx.db.select({ costUsd: invocations.allocCostUsd, tokens: invocations.allocTokens, attempts: invocations.allocAttempts }).from(invocations).where(eq(invocations.id, parent.id)).get(),
@@ -185,25 +196,55 @@ export class BudgetReservationStore {
    * capacity, and the final reserve is never double-counted.
    */
   runCapacity(runId: RunId): RunCapacity {
-    const { budget, finalReserve } = this.runLimits(runId);
     const charges = this.listByParent({ type: "run", id: runId }).map((r) => [r.capacitySource, this.charge(r)] as const);
     return runCapacityAccount(
-      budget,
-      finalReserve,
+      this.runLimits(runId),
       charges.filter(([source]) => source === "ordinary").map(([, c]) => c),
       charges.filter(([source]) => source === "final_reserve").map(([, c]) => c),
     );
   }
 
-  /** The current charge of one reservation: actual attributable consumption while active, recorded consumption once released. */
+  /**
+   * One Plan Node's effective allocation from rows: its Run-level
+   * reservation's immutable original amounts, its Allocation Extensions,
+   * their sum, the effective reserved allocation, and the node's account
+   * over that effective limit. A node without a reservation (a join, or a
+   * node whose revision was never applied) has a zero limit.
+   */
+  planNodeAllocation(planNodeId: PlanNodeId): PlanNodeAllocationProjection {
+    const node = requireRow(
+      this.ctx.db.select({ costUsd: planNodes.allocCostUsd, tokens: planNodes.allocTokens, attempts: planNodes.allocAttempts }).from(planNodes).where(eq(planNodes.id, planNodeId)).get(),
+      "PlanNode",
+      planNodeId,
+    );
+    const reservations = this.listByChild({ type: "plan_node", id: planNodeId }).filter((r) => r.parent.type === "run");
+    const reservation = reservations.find((r) => r.status === "active") ?? reservations.at(-1) ?? null;
+    const extensions = reservation === null ? [] : this.extensions.listByReservation(reservation.id);
+    const extended = sumAllocations(extensions.map((e) => e.added));
+    const original: Allocation = { costUsd: node.costUsd, tokens: node.tokens, attempts: node.attempts };
+    const effective = addAllocation(original, extended);
+    const account = capacityAccount(effective, this.listByParent({ type: "plan_node", id: planNodeId }).map((r) => this.charge(r)));
+    return { planNodeId, reservationId: reservation?.id ?? null, reservationStatus: reservation?.status ?? null, original, extensions, extended, effective, account };
+  }
+
+  /**
+   * The current charge of one reservation: while active, its effective
+   * reserved allocation (the immutable original amounts plus, for a Plan
+   * Node's Run-level reservation, its Allocation Extensions) against the
+   * child's actual attributable consumption so far; once released, its
+   * recorded complete consumption alone — extensions are provenance, never
+   * a second charge.
+   */
   private charge(reservation: BudgetReservation): ReservationCharge {
     if (reservation.status === "released") {
       return { status: "released", reserved: reservation.reserved, actual: reservation.consumed ?? ZERO_ALLOCATION };
     }
     let actual: Allocation;
+    let reserved = reservation.reserved;
     switch (reservation.child.type) {
       case "plan_node":
         actual = this.usage.consumedFromPlanNodeAllocation(reservation.child.id);
+        if (reservation.parent.type === "run") reserved = addAllocation(reserved, this.extensions.totalByReservation(reservation.id));
         break;
       case "invocation":
         actual = this.usage.consumedByInvocation(reservation.child.id);
@@ -212,10 +253,11 @@ export class BudgetReservationStore {
         actual = ZERO_ALLOCATION;
         break;
     }
-    return { status: "active", reserved: reservation.reserved, actual };
+    return { status: "active", reserved, actual };
   }
 
-  private runLimits(runId: string): { budget: Allocation; finalReserve: Allocation } {
+  /** The Run's immutable base limits plus its approved Budget Increases: what every effective limit derives from. */
+  private runLimits(runId: string): RunBudgetLimits {
     const run = requireRow(
       this.ctx.db
         .select({
@@ -233,8 +275,9 @@ export class BudgetReservationStore {
       runId,
     );
     return {
-      budget: { costUsd: run.maxCostUsd, tokens: run.maxTokens, attempts: run.maxAttempts },
-      finalReserve: { costUsd: run.finalReserveCostUsd, tokens: run.finalReserveTokens, attempts: run.finalReserveAttempts },
+      baseLimit: { costUsd: run.maxCostUsd, tokens: run.maxTokens, attempts: run.maxAttempts },
+      baseFinalReserve: { costUsd: run.finalReserveCostUsd, tokens: run.finalReserveTokens, attempts: run.finalReserveAttempts },
+      increases: this.increases.totalsByRun(runId as RunId),
     };
   }
 

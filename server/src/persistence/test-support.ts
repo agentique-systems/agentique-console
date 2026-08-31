@@ -13,6 +13,7 @@ import {
   ROOT_NODE_TITLE,
   ROOT_SOURCE_PATH,
   runtimeToolsFor,
+  BUDGET_INCREASE_OPTIONS,
   PUBLISH_OPTIONS,
   SIGNOFF_OPTIONS,
   type PublicationStrategyRequest,
@@ -20,6 +21,9 @@ import {
   type AgentDefinitionRevisionId,
   type Allocation,
   type Artifact,
+  type BudgetIncrease,
+  type BudgetIncreaseOption,
+  type BudgetIncreasePartition,
   type BudgetLimits,
   type Changeset,
   type CompiledOperation,
@@ -562,6 +566,41 @@ export function seedPublishDecision(h: Harness, seeded: Seeded, completed: Seede
   const resolve = options.resolve === undefined ? "publish" : options.resolve;
   if (resolve === null) return decision;
   return h.stores.decisions.resolve(decision.id, { resolvedBy: "operator", chosenOptionId: resolve, rationale: null, artifactIds: [] });
+}
+
+/** A `budget_increase` Decision of the seeded Run, requested the way the Budget Increase service requests it; resolved by the operator when `resolve` names an option. */
+export function seedBudgetIncreaseDecision(h: Harness, seeded: Pick<Seeded, "conversation" | "run">, partition: BudgetIncreasePartition, added: Allocation, options: { resolve?: BudgetIncreaseOption | null } = {}): Decision {
+  const decision = h.stores.decisions.request({
+    conversationId: seeded.conversation.id,
+    runId: seeded.run.id,
+    kind: "budget_increase",
+    resolutionPolicy: "operator_required",
+    requestedBy: { kind: "operator" },
+    question: `Increase the ${partition} Budget of Run ${seeded.run.id}?`,
+    options: [
+      { id: BUDGET_INCREASE_OPTIONS[0], label: "Approve", description: null },
+      { id: BUDGET_INCREASE_OPTIONS[1], label: "Deny", description: null },
+    ],
+    recommendedOptionId: null,
+    rationale: null,
+    affects: { requirementIds: [], taskIds: [], planNodeIds: [] },
+    deadlineAt: null,
+    activationCondition: null,
+    subject: { kind: "budget_increase", runId: seeded.run.id, partition, added },
+    supersedesDecisionId: null,
+  });
+  const resolve = options.resolve === undefined ? "approve" : options.resolve;
+  if (resolve === null) return decision;
+  return h.stores.decisions.resolve(decision.id, { resolvedBy: "operator", chosenOptionId: resolve, rationale: null, artifactIds: [] });
+}
+
+/** An approved Budget Increase of the seeded Run: its Decision resolved `approve` by the operator and the one increase it authorizes, in one transaction. */
+export function seedBudgetIncrease(h: Harness, seeded: Pick<Seeded, "conversation" | "run">, partition: BudgetIncreasePartition, added: Allocation): { decision: Decision; increase: BudgetIncrease } {
+  return h.ctx.tx.write(() => {
+    const decision = seedBudgetIncreaseDecision(h, seeded, partition, added);
+    const increase = h.stores.budgetIncreases.record({ runId: seeded.run.id, decisionId: decision.id, partition, added });
+    return { decision, increase };
+  });
 }
 
 /** A Snapshot of the publication flow: the Target as found (`publish_before`) or the prepared candidate (`publish_candidate`). */

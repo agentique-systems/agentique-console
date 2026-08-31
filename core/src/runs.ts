@@ -5,6 +5,7 @@ import {
   allocationSchema,
   budgetLimitsSchema,
   type Allocation,
+  type BudgetIncreasePartition,
   type BudgetLimits,
 } from "./budgets.ts";
 import type { AcceptanceCriterionId, AgentDefinitionRevisionId, ChangesetId, ConversationId, RunId, SnapshotId, WorkspaceId } from "./ids.ts";
@@ -109,13 +110,18 @@ export interface Run {
   status: RunStatus;
   waitReason: RunWaitReason | null;
   target: RunTarget;
-  /** The Run Budget: the global cap and allocation pool. */
+  /**
+   * The immutable base Run Budget: the global cap and allocation pool as
+   * supplied at creation. The effective limits derive from it plus the Run's
+   * approved Budget Increases (`RunCapacity`); no effective aggregate is stored.
+   */
   budget: BudgetLimits;
   /**
-   * The effective final reserve, chosen at Run creation and immutable: Run
-   * capacity that ordinary Plan Node allocations never consume, spent only on
+   * The immutable base final reserve, chosen at Run creation: Run capacity
+   * that ordinary Plan Node allocations never consume, spent only on
    * `final_synthesis` Orchestrator Invocations and `run_completion` Gate
-   * Evaluator Invocations.
+   * Evaluator Invocations. The effective final reserve adds the approved
+   * `final_reserve` Budget Increases.
    */
   finalReserve: Allocation;
   /** The immutable verification policy: the Gate Evaluator revision and the `node_exit` Gate cycle bound. */
@@ -131,6 +137,23 @@ export interface Run {
   createdAt: Timestamp;
   updatedAt: Timestamp;
   endedAt: Timestamp | null;
+}
+
+/**
+ * The Run statuses in which a Budget Increase of each partition may be
+ * requested and approved (execution-model §7.6): the ordinary pool may grow
+ * until the Run ends, including while it awaits signoff (the follow-up turn
+ * of a change request is ordinary work); the final reserve may grow only
+ * before completion verification has begun — never while the Run is
+ * `verifying` or `awaiting_signoff`, and never on a terminal Run.
+ */
+export const BUDGET_INCREASE_PERMITTED_STATUSES: Readonly<Record<BudgetIncreasePartition, readonly RunStatus[]>> = Object.freeze({
+  ordinary: ["created", "running", "waiting", "awaiting_signoff"],
+  final_reserve: ["created", "running", "waiting"],
+});
+
+export function budgetIncreasePermitted(status: RunStatus, partition: BudgetIncreasePartition): boolean {
+  return BUDGET_INCREASE_PERMITTED_STATUSES[partition].includes(status);
 }
 
 export const RUN_MACHINE = defineStateMachine<RunStatus>("Run", RUN_STATUSES, {

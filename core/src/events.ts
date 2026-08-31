@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { agentDefinitionRevisionSchema, agentDefinitionSchema } from "./agents.ts";
 import { artifactSchema } from "./artifacts.ts";
-import { budgetReservationSchema, RESERVATION_RELEASE_REASONS } from "./budgets.ts";
+import { allocationExtensionSchema, budgetIncreaseSchema, budgetReservationSchema, RESERVATION_RELEASE_REASONS } from "./budgets.ts";
 import { capacityLeaseSchema } from "./capacity.ts";
 import { completionRequestSchema } from "./completion.ts";
 import { conversationMessageSchema, conversationSchema } from "./conversations.ts";
@@ -231,6 +231,10 @@ export const EVENT_CATALOGUE = {
   "changeset.conflicted": z.strictObject({ changesetId: idSchema("changeset"), conflictTaskId: idSchema("task") }),
   "capacity_lease.granted": capacityLeaseSchema,
   "capacity_lease.released": z.strictObject({ leaseId: idSchema("capacityLease") }),
+  /** One operator-approved Budget Increase was recorded (execution-model §7.6): ids, partition, added quantities, and time; never a capacity snapshot or rationale. */
+  "budget_increase.recorded": budgetIncreaseSchema,
+  /** One deterministic Allocation Extension was created atomically with the work it funds: ids, the reservation, the closed trigger, added quantities, and time. */
+  "allocation_extension.created": allocationExtensionSchema,
   "budget_reservation.created": budgetReservationSchema,
   "budget_reservation.released": z.strictObject({
     reservationId: idSchema("budgetReservation"),

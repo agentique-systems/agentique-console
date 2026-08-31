@@ -41,6 +41,27 @@ CREATE TABLE `agent_definitions` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `agent_definitions_name_unique` ON `agent_definitions` (`name`);--> statement-breakpoint
+CREATE TABLE `allocation_extensions` (
+	`id` text PRIMARY KEY NOT NULL,
+	`run_id` text NOT NULL,
+	`plan_node_id` text NOT NULL,
+	`reservation_id` text NOT NULL,
+	`added_cost_usd` real NOT NULL,
+	`added_tokens` integer NOT NULL,
+	`added_attempts` integer NOT NULL,
+	`trigger` text NOT NULL,
+	`created_at` text NOT NULL,
+	FOREIGN KEY (`run_id`) REFERENCES `runs`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`plan_node_id`) REFERENCES `plan_nodes`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`reservation_id`) REFERENCES `budget_reservations`(`id`) ON UPDATE no action ON DELETE no action,
+	CONSTRAINT "allocation_extensions_trigger" CHECK("allocation_extensions"."trigger" IN ('invocation', 'task_batch', 'gate_evaluator', 'gate_remediation', 'root_turn', 'signoff_follow_up')),
+	CONSTRAINT "allocation_extensions_non_negative" CHECK("allocation_extensions"."added_cost_usd" >= 0 AND "allocation_extensions"."added_tokens" >= 0 AND "allocation_extensions"."added_attempts" >= 0),
+	CONSTRAINT "allocation_extensions_not_all_zero" CHECK("allocation_extensions"."added_cost_usd" > 0 OR "allocation_extensions"."added_tokens" > 0 OR "allocation_extensions"."added_attempts" > 0)
+);
+--> statement-breakpoint
+CREATE INDEX `allocation_extensions_run` ON `allocation_extensions` (`run_id`,`created_at`);--> statement-breakpoint
+CREATE INDEX `allocation_extensions_plan_node` ON `allocation_extensions` (`plan_node_id`,`created_at`);--> statement-breakpoint
+CREATE INDEX `allocation_extensions_reservation` ON `allocation_extensions` (`reservation_id`);--> statement-breakpoint
 CREATE TABLE `approved_tool_call_uses` (
 	`id` text PRIMARY KEY NOT NULL,
 	`decision_id` text NOT NULL,
@@ -136,6 +157,24 @@ CREATE INDEX `attempts_status` ON `attempts` (`status`);--> statement-breakpoint
 CREATE INDEX `attempts_invocation_status` ON `attempts` (`invocation_id`,`status`,`number`);--> statement-breakpoint
 CREATE INDEX `attempts_retry_not_before` ON `attempts` (`retry_not_before`);--> statement-breakpoint
 CREATE UNIQUE INDEX `attempts_active_invocation` ON `attempts` (`invocation_id`) WHERE status IN ('pending', 'running');--> statement-breakpoint
+CREATE TABLE `budget_increases` (
+	`id` text PRIMARY KEY NOT NULL,
+	`run_id` text NOT NULL,
+	`decision_id` text NOT NULL,
+	`partition` text NOT NULL,
+	`added_cost_usd` real NOT NULL,
+	`added_tokens` integer NOT NULL,
+	`added_attempts` integer NOT NULL,
+	`created_at` text NOT NULL,
+	FOREIGN KEY (`run_id`) REFERENCES `runs`(`id`) ON UPDATE no action ON DELETE no action,
+	FOREIGN KEY (`decision_id`) REFERENCES `decisions`(`id`) ON UPDATE no action ON DELETE no action,
+	CONSTRAINT "budget_increases_partition" CHECK("budget_increases"."partition" IN ('ordinary', 'final_reserve')),
+	CONSTRAINT "budget_increases_non_negative" CHECK("budget_increases"."added_cost_usd" >= 0 AND "budget_increases"."added_tokens" >= 0 AND "budget_increases"."added_attempts" >= 0),
+	CONSTRAINT "budget_increases_not_all_zero" CHECK("budget_increases"."added_cost_usd" > 0 OR "budget_increases"."added_tokens" > 0 OR "budget_increases"."added_attempts" > 0)
+);
+--> statement-breakpoint
+CREATE INDEX `budget_increases_run` ON `budget_increases` (`run_id`,`created_at`);--> statement-breakpoint
+CREATE UNIQUE INDEX `budget_increases_decision` ON `budget_increases` (`decision_id`);--> statement-breakpoint
 CREATE TABLE `budget_reservations` (
 	`id` text PRIMARY KEY NOT NULL,
 	`run_id` text NOT NULL,
@@ -323,18 +362,19 @@ CREATE TABLE `decisions` (
 	FOREIGN KEY (`run_id`) REFERENCES `runs`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`supersedes_decision_id`) REFERENCES `decisions`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`superseded_by_decision_id`) REFERENCES `decisions`(`id`) ON UPDATE no action ON DELETE no action,
-	CONSTRAINT "decisions_kind" CHECK("decisions"."kind" IN ('operator_choice', 'orchestrator_choice', 'requirement_waiver', 'side_effect_approval', 'signoff', 'publish')),
+	CONSTRAINT "decisions_kind" CHECK("decisions"."kind" IN ('operator_choice', 'orchestrator_choice', 'requirement_waiver', 'side_effect_approval', 'signoff', 'publish', 'budget_increase')),
 	CONSTRAINT "decisions_policy" CHECK("decisions"."resolution_policy" IN ('operator_required', 'use_default_after_deadline')),
 	CONSTRAINT "decisions_status" CHECK("decisions"."status" IN ('open', 'resolved', 'superseded')),
 	CONSTRAINT "decisions_resolver" CHECK("decisions"."resolved_by" IS NULL OR "decisions"."resolved_by" IN ('operator', 'orchestrator', 'policy:use_default_after_deadline')),
 	CONSTRAINT "decisions_waiver_operator_required" CHECK("decisions"."kind" <> 'requirement_waiver' OR "decisions"."resolution_policy" = 'operator_required'),
-	CONSTRAINT "decisions_operator_only_kinds" CHECK("decisions"."kind" NOT IN ('requirement_waiver', 'side_effect_approval', 'signoff', 'publish') OR "decisions"."resolved_by" IS NULL OR "decisions"."resolved_by" = 'operator'),
+	CONSTRAINT "decisions_operator_only_kinds" CHECK("decisions"."kind" NOT IN ('requirement_waiver', 'side_effect_approval', 'signoff', 'publish', 'budget_increase') OR "decisions"."resolved_by" IS NULL OR "decisions"."resolved_by" = 'operator'),
+	CONSTRAINT "decisions_budget_increase_shape" CHECK("decisions"."kind" <> 'budget_increase' OR (json_extract("decisions"."subject", '$.partition') IN ('ordinary', 'final_reserve') AND json_extract("decisions"."subject", '$.added.costUsd') >= 0 AND json_extract("decisions"."subject", '$.added.tokens') >= 0 AND json_extract("decisions"."subject", '$.added.attempts') >= 0 AND (json_extract("decisions"."subject", '$.added.costUsd') > 0 OR json_extract("decisions"."subject", '$.added.tokens') > 0 OR json_extract("decisions"."subject", '$.added.attempts') > 0) AND "decisions"."deadline_at" IS NULL AND "decisions"."activation_condition" IS NULL)),
 	CONSTRAINT "decisions_default_policy_shape" CHECK("decisions"."resolution_policy" <> 'use_default_after_deadline' OR ("decisions"."kind" = 'operator_choice' AND "decisions"."recommended_option_id" IS NOT NULL AND "decisions"."rationale" IS NOT NULL AND ("decisions"."deadline_at" IS NOT NULL OR "decisions"."activation_condition" IS NOT NULL))),
 	CONSTRAINT "decisions_policy_resolver" CHECK("decisions"."resolved_by" IS NULL OR "decisions"."resolved_by" <> 'policy:use_default_after_deadline' OR ("decisions"."resolution_policy" = 'use_default_after_deadline' AND "decisions"."chosen_option_id" = "decisions"."recommended_option_id")),
 	CONSTRAINT "decisions_resolution_shape" CHECK(("decisions"."status" = 'open' AND "decisions"."resolved_by" IS NULL AND "decisions"."chosen_option_id" IS NULL AND "decisions"."resolved_at" IS NULL) OR ("decisions"."status" = 'resolved' AND "decisions"."resolved_by" IS NOT NULL AND "decisions"."chosen_option_id" IS NOT NULL AND "decisions"."resolved_at" IS NOT NULL) OR "decisions"."status" = 'superseded'),
 	CONSTRAINT "decisions_superseded_by" CHECK(("decisions"."status" = 'superseded') = ("decisions"."superseded_by_decision_id" IS NOT NULL)),
-	CONSTRAINT "decisions_subject_shape" CHECK(("decisions"."kind" IN ('side_effect_approval', 'signoff', 'publish')) = ("decisions"."subject" IS NOT NULL AND json_extract("decisions"."subject", '$.kind') = "decisions"."kind" AND "decisions"."run_id" IS NOT NULL)),
-	CONSTRAINT "decisions_signoff_policy" CHECK("decisions"."kind" NOT IN ('signoff', 'publish') OR ("decisions"."resolution_policy" = 'operator_required' AND json_extract("decisions"."subject", '$.runId') = "decisions"."run_id")),
+	CONSTRAINT "decisions_subject_shape" CHECK(("decisions"."kind" IN ('side_effect_approval', 'signoff', 'publish', 'budget_increase')) = ("decisions"."subject" IS NOT NULL AND json_extract("decisions"."subject", '$.kind') = "decisions"."kind" AND "decisions"."run_id" IS NOT NULL)),
+	CONSTRAINT "decisions_signoff_policy" CHECK("decisions"."kind" NOT IN ('signoff', 'publish', 'budget_increase') OR ("decisions"."resolution_policy" = 'operator_required' AND json_extract("decisions"."subject", '$.runId') = "decisions"."run_id")),
 	CONSTRAINT "decisions_no_self_supersede" CHECK("decisions"."supersedes_decision_id" IS NULL OR "decisions"."supersedes_decision_id" <> "decisions"."id")
 );
 --> statement-breakpoint
@@ -342,6 +382,7 @@ CREATE INDEX `decisions_conversation_status` ON `decisions` (`conversation_id`,`
 CREATE INDEX `decisions_run` ON `decisions` (`run_id`);--> statement-breakpoint
 CREATE UNIQUE INDEX `decisions_signoff_gate` ON `decisions` (`subject_gate_id`) WHERE kind = 'signoff';--> statement-breakpoint
 CREATE UNIQUE INDEX `decisions_open_publish_run` ON `decisions` (`run_id`) WHERE kind = 'publish' AND status = 'open';--> statement-breakpoint
+CREATE UNIQUE INDEX `decisions_open_budget_increase_run` ON `decisions` (`run_id`) WHERE kind = 'budget_increase' AND status = 'open';--> statement-breakpoint
 CREATE TABLE `evaluations` (
 	`id` text PRIMARY KEY NOT NULL,
 	`run_id` text NOT NULL,
@@ -1077,4 +1118,10 @@ CREATE TRIGGER `capacity_leases_released_once` BEFORE UPDATE ON `capacity_leases
 CREATE TRIGGER `usage_no_update` BEFORE UPDATE ON `usage` BEGIN SELECT RAISE(ABORT, 'usage is append-only'); END;--> statement-breakpoint
 CREATE TRIGGER `usage_no_delete` BEFORE DELETE ON `usage` BEGIN SELECT RAISE(ABORT, 'usage is append-only'); END;--> statement-breakpoint
 CREATE TRIGGER `conversation_messages_no_update` BEFORE UPDATE ON `conversation_messages` BEGIN SELECT RAISE(ABORT, 'conversation_messages are append-only'); END;--> statement-breakpoint
-CREATE TRIGGER `conversation_messages_no_delete` BEFORE DELETE ON `conversation_messages` BEGIN SELECT RAISE(ABORT, 'conversation_messages are append-only'); END;
+CREATE TRIGGER `conversation_messages_no_delete` BEFORE DELETE ON `conversation_messages` BEGIN SELECT RAISE(ABORT, 'conversation_messages are append-only'); END;--> statement-breakpoint
+CREATE TRIGGER `budget_increases_no_update` BEFORE UPDATE ON `budget_increases` BEGIN SELECT RAISE(ABORT, 'budget_increases are append-only'); END;--> statement-breakpoint
+CREATE TRIGGER `budget_increases_no_delete` BEFORE DELETE ON `budget_increases` BEGIN SELECT RAISE(ABORT, 'budget_increases are append-only'); END;--> statement-breakpoint
+CREATE TRIGGER `budget_increases_valid` BEFORE INSERT ON `budget_increases` BEGIN SELECT RAISE(ABORT, 'a budget increase is authorized by the run''s operator-approved budget_increase decision whose subject names exactly this partition and these quantities, for a nonterminal run whose status admits the partition') WHERE NOT EXISTS (SELECT 1 FROM `decisions` d JOIN `runs` r ON r.`id` = NEW.`run_id` WHERE d.`id` = NEW.`decision_id` AND d.`run_id` = NEW.`run_id` AND d.`kind` = 'budget_increase' AND d.`status` = 'resolved' AND d.`resolved_by` = 'operator' AND d.`chosen_option_id` = 'approve' AND json_extract(d.`subject`, '$.runId') = NEW.`run_id` AND json_extract(d.`subject`, '$.partition') = NEW.`partition` AND json_extract(d.`subject`, '$.added.costUsd') = NEW.`added_cost_usd` AND json_extract(d.`subject`, '$.added.tokens') = NEW.`added_tokens` AND json_extract(d.`subject`, '$.added.attempts') = NEW.`added_attempts` AND r.`status` NOT IN ('completed', 'failed', 'cancelled') AND (NEW.`partition` = 'ordinary' OR r.`status` IN ('created', 'running', 'waiting'))); END;--> statement-breakpoint
+CREATE TRIGGER `allocation_extensions_no_update` BEFORE UPDATE ON `allocation_extensions` BEGIN SELECT RAISE(ABORT, 'allocation_extensions are append-only'); END;--> statement-breakpoint
+CREATE TRIGGER `allocation_extensions_no_delete` BEFORE DELETE ON `allocation_extensions` BEGIN SELECT RAISE(ABORT, 'allocation_extensions are append-only'); END;--> statement-breakpoint
+CREATE TRIGGER `allocation_extensions_valid` BEFORE INSERT ON `allocation_extensions` BEGIN SELECT RAISE(ABORT, 'an allocation extension raises the active ordinary run-to-plan-node reservation of a nonterminal pattern plan node of its own run') WHERE NOT EXISTS (SELECT 1 FROM `budget_reservations` b JOIN `plan_nodes` n ON n.`id` = NEW.`plan_node_id` WHERE b.`id` = NEW.`reservation_id` AND b.`run_id` = NEW.`run_id` AND b.`parent_type` = 'run' AND b.`parent_id` = NEW.`run_id` AND b.`child_type` = 'plan_node' AND b.`child_id` = NEW.`plan_node_id` AND b.`capacity_source` = 'ordinary' AND b.`status` = 'active' AND n.`run_id` = NEW.`run_id` AND n.`kind` = 'pattern' AND n.`status` NOT IN ('succeeded', 'failed', 'cancelled', 'skipped')); END;

@@ -21,7 +21,9 @@ import {
 } from "drizzle-orm/sqlite-core";
 import {
   ACCEPTANCE_CRITERION_KINDS,
+  ALLOCATION_EXTENSION_TRIGGERS,
   ATTEMPT_FAILURE_CLASSES,
+  BUDGET_INCREASE_PARTITIONS,
   ATTEMPT_KINDS,
   ATTEMPT_START_MODES,
   ATTEMPT_STATUSES,
@@ -594,6 +596,10 @@ export const decisions = sqliteTable(
     uniqueIndex("decisions_open_publish_run")
       .on(t.runId)
       .where(sql`kind = 'publish' AND status = 'open'`),
+    // Only one open budget_increase Decision may exist per Run (execution-model §7.6).
+    uniqueIndex("decisions_open_budget_increase_run")
+      .on(t.runId)
+      .where(sql`kind = 'budget_increase' AND status = 'open'`),
     check("decisions_kind", sql`${t.kind} IN (${inList(DECISION_KINDS)})`),
     check("decisions_policy", sql`${t.resolutionPolicy} IN (${inList(RESOLUTION_POLICIES)})`),
     check("decisions_status", sql`${t.status} IN (${inList(DECISION_STATUSES)})`),
@@ -601,7 +607,12 @@ export const decisions = sqliteTable(
     check("decisions_waiver_operator_required", sql`${t.kind} <> 'requirement_waiver' OR ${t.resolutionPolicy} = 'operator_required'`),
     check(
       "decisions_operator_only_kinds",
-      sql`${t.kind} NOT IN ('requirement_waiver', 'side_effect_approval', 'signoff', 'publish') OR ${t.resolvedBy} IS NULL OR ${t.resolvedBy} = 'operator'`,
+      sql`${t.kind} NOT IN ('requirement_waiver', 'side_effect_approval', 'signoff', 'publish', 'budget_increase') OR ${t.resolvedBy} IS NULL OR ${t.resolvedBy} = 'operator'`,
+    ),
+    // A budget_increase names a partition and exact non-negative added quantities of which at least one is positive, and never a default deadline.
+    check(
+      "decisions_budget_increase_shape",
+      sql`${t.kind} <> 'budget_increase' OR (json_extract(${t.subject}, '$.partition') IN (${inList(BUDGET_INCREASE_PARTITIONS)}) AND json_extract(${t.subject}, '$.added.costUsd') >= 0 AND json_extract(${t.subject}, '$.added.tokens') >= 0 AND json_extract(${t.subject}, '$.added.attempts') >= 0 AND (json_extract(${t.subject}, '$.added.costUsd') > 0 OR json_extract(${t.subject}, '$.added.tokens') > 0 OR json_extract(${t.subject}, '$.added.attempts') > 0) AND ${t.deadlineAt} IS NULL AND ${t.activationCondition} IS NULL)`,
     ),
     check(
       "decisions_default_policy_shape",
@@ -616,9 +627,10 @@ export const decisions = sqliteTable(
       sql`(${t.status} = 'open' AND ${t.resolvedBy} IS NULL AND ${t.chosenOptionId} IS NULL AND ${t.resolvedAt} IS NULL) OR (${t.status} = 'resolved' AND ${t.resolvedBy} IS NOT NULL AND ${t.chosenOptionId} IS NOT NULL AND ${t.resolvedAt} IS NOT NULL) OR ${t.status} = 'superseded'`,
     ),
     check("decisions_superseded_by", sql`(${t.status} = 'superseded') = (${t.supersededByDecisionId} IS NOT NULL)`),
-    // A side_effect_approval, a signoff, and a publish carry exactly their typed subject and belong to a Run; no other kind has a subject; a signoff and a publish are operator_required.
-    check("decisions_subject_shape", sql`(${t.kind} IN ('side_effect_approval', 'signoff', 'publish')) = (${t.subject} IS NOT NULL AND json_extract(${t.subject}, '$.kind') = ${t.kind} AND ${t.runId} IS NOT NULL)`),
-    check("decisions_signoff_policy", sql`${t.kind} NOT IN ('signoff', 'publish') OR (${t.resolutionPolicy} = 'operator_required' AND json_extract(${t.subject}, '$.runId') = ${t.runId})`),
+    // A side_effect_approval, a signoff, a publish, and a budget_increase carry exactly their typed subject and belong to a Run; no other kind has a
+    // subject; a signoff, a publish, and a budget_increase are operator_required and name their own Run.
+    check("decisions_subject_shape", sql`(${t.kind} IN ('side_effect_approval', 'signoff', 'publish', 'budget_increase')) = (${t.subject} IS NOT NULL AND json_extract(${t.subject}, '$.kind') = ${t.kind} AND ${t.runId} IS NOT NULL)`),
+    check("decisions_signoff_policy", sql`${t.kind} NOT IN ('signoff', 'publish', 'budget_increase') OR (${t.resolutionPolicy} = 'operator_required' AND json_extract(${t.subject}, '$.runId') = ${t.runId})`),
     check("decisions_no_self_supersede", sql`${t.supersedesDecisionId} IS NULL OR ${t.supersedesDecisionId} <> ${t.id}`),
   ],
 );
@@ -1607,6 +1619,82 @@ export const budgetReservations = sqliteTable(
   ],
 );
 
+/**
+ * Budget Increases (execution-model §7.6): one append-only row per approved
+ * `budget_increase` Decision — the operator-authorized growth of a Run's
+ * effective Budget in one partition. The Run's base Budget and base final
+ * reserve on `runs` never change; every effective limit is derived from
+ * them plus these rows. The unique index over `decision_id` holds "one
+ * increase per approved Decision"; the baseline migration's triggers
+ * re-check at insertion that the Decision is the Run's operator-approved
+ * `budget_increase` Decision whose subject names exactly this partition and
+ * these quantities, and that the Run's status still admits the partition.
+ */
+export const budgetIncreases = sqliteTable(
+  "budget_increases",
+  {
+    id: text("id").primaryKey(),
+    runId: text("run_id")
+      .notNull()
+      .references(() => runs.id),
+    decisionId: text("decision_id")
+      .notNull()
+      .references(() => decisions.id),
+    partition: text("partition").notNull(),
+    addedCostUsd: real("added_cost_usd").notNull(),
+    addedTokens: integer("added_tokens").notNull(),
+    addedAttempts: integer("added_attempts").notNull(),
+    createdAt: timestamp("created_at").notNull(),
+  },
+  (t) => [
+    index("budget_increases_run").on(t.runId, t.createdAt),
+    uniqueIndex("budget_increases_decision").on(t.decisionId),
+    check("budget_increases_partition", sql`${t.partition} IN (${inList(BUDGET_INCREASE_PARTITIONS)})`),
+    check("budget_increases_non_negative", sql`${t.addedCostUsd} >= 0 AND ${t.addedTokens} >= 0 AND ${t.addedAttempts} >= 0`),
+    check("budget_increases_not_all_zero", sql`${t.addedCostUsd} > 0 OR ${t.addedTokens} > 0 OR ${t.addedAttempts} > 0`),
+  ],
+);
+
+/**
+ * Allocation Extensions (execution-model §7.6): one append-only row per
+ * deterministic transfer of existing ordinary Run capacity to one Plan
+ * Node's active `Run → Plan Node` reservation, created in the same
+ * transaction as the work it funds. The reservation's own amounts never
+ * change; its effective reserved allocation is its original amounts plus
+ * these rows while it is active. The baseline migration's trigger re-checks
+ * at insertion that the reservation is the named Plan Node's active
+ * ordinary Run-level reservation and that the node is a nonterminal
+ * `pattern` node of the same Run (a join holds no reservation).
+ */
+export const allocationExtensions = sqliteTable(
+  "allocation_extensions",
+  {
+    id: text("id").primaryKey(),
+    runId: text("run_id")
+      .notNull()
+      .references(() => runs.id),
+    planNodeId: text("plan_node_id")
+      .notNull()
+      .references(() => planNodes.id),
+    reservationId: text("reservation_id")
+      .notNull()
+      .references(() => budgetReservations.id),
+    addedCostUsd: real("added_cost_usd").notNull(),
+    addedTokens: integer("added_tokens").notNull(),
+    addedAttempts: integer("added_attempts").notNull(),
+    trigger: text("trigger").notNull(),
+    createdAt: timestamp("created_at").notNull(),
+  },
+  (t) => [
+    index("allocation_extensions_run").on(t.runId, t.createdAt),
+    index("allocation_extensions_plan_node").on(t.planNodeId, t.createdAt),
+    index("allocation_extensions_reservation").on(t.reservationId),
+    check("allocation_extensions_trigger", sql`${t.trigger} IN (${inList(ALLOCATION_EXTENSION_TRIGGERS)})`),
+    check("allocation_extensions_non_negative", sql`${t.addedCostUsd} >= 0 AND ${t.addedTokens} >= 0 AND ${t.addedAttempts} >= 0`),
+    check("allocation_extensions_not_all_zero", sql`${t.addedCostUsd} > 0 OR ${t.addedTokens} > 0 OR ${t.addedAttempts} > 0`),
+  ],
+);
+
 export const usage = sqliteTable(
   "usage",
   {
@@ -1724,6 +1812,8 @@ export const TABLE_NAMES = [
   "publications",
   "capacity_leases",
   "budget_reservations",
+  "budget_increases",
+  "allocation_extensions",
   "usage",
   "events",
 ] as const;

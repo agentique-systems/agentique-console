@@ -1,8 +1,10 @@
 import type { PlanLimits } from "@agentique-console/core";
 import type { PersistenceContext } from "../context.ts";
 import { AgentDefinitionStore } from "./agents.ts";
+import { AllocationExtensionStore } from "./allocation-extensions.ts";
 import { ApprovedToolCallUseStore } from "./approved-tool-call-uses.ts";
 import { ArtifactStore } from "./artifacts.ts";
+import { BudgetIncreaseStore } from "./budget-increases.ts";
 import { BudgetReservationStore } from "./budgets.ts";
 import { CapacityLeaseStore } from "./capacity.ts";
 import { CompletionRequestStore } from "./completion-requests.ts";
@@ -47,13 +49,22 @@ export interface Stores {
   publications: PublicationStore;
   leases: CapacityLeaseStore;
   reservations: BudgetReservationStore;
+  /** The append-only operator-approved Budget Increases (execution-model §7.6). */
+  budgetIncreases: BudgetIncreaseStore;
+  /** The append-only deterministic Allocation Extensions (execution-model §7.6). */
+  allocationExtensions: AllocationExtensionStore;
   usage: UsageStore;
 }
 
 /** Wires every store over one context; stores that compose others receive them here. */
 export function createStores(ctx: PersistenceContext, options: { planLimits?: PlanLimits } = {}): Stores {
   const usage = new UsageStore(ctx);
-  const reservations = new BudgetReservationStore(ctx, usage);
+  const budgetIncreases = new BudgetIncreaseStore(ctx);
+  // An extension is checked against the Run's effective ordinary availability, which the reservation store derives; the
+  // reservation store in turn reads the extensions to charge effective reserved allocations. The closure resolves the cycle.
+  let reservations!: BudgetReservationStore;
+  const allocationExtensions = new AllocationExtensionStore(ctx, { ordinaryAvailable: (runId) => reservations.runCapacity(runId).ordinary.effectiveAvailable });
+  reservations = new BudgetReservationStore(ctx, usage, budgetIncreases, allocationExtensions);
   const conversations = new ConversationStore(ctx);
   const plans = new ExecutionPlanStore(ctx, reservations, usage, options.planLimits);
   return {
@@ -80,14 +91,18 @@ export function createStores(ctx: PersistenceContext, options: { planLimits?: Pl
     publications: new PublicationStore(ctx),
     leases: new CapacityLeaseStore(ctx),
     reservations,
+    budgetIncreases,
+    allocationExtensions,
     usage,
   };
 }
 
 export {
   AgentDefinitionStore,
+  AllocationExtensionStore,
   ApprovedToolCallUseStore,
   ArtifactStore,
+  BudgetIncreaseStore,
   BudgetReservationStore,
   CapacityLeaseStore,
   ChangesetStore,

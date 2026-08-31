@@ -34,7 +34,10 @@ describe("budget reservations", () => {
       expect(capacity.finalReserve).toEqual(finalReserve);
       expect(capacity.global).toMatchObject({ limit: capacity.limit, reserved: SMALL_ALLOCATION, committed: SMALL_ALLOCATION, available: { costUsd: 20, tokens: 900_000, attempts: 45 } });
       expect(capacity.ordinary).toMatchObject({ limit: { costUsd: 25, tokens: 950_000, attempts: 47 }, reserved: SMALL_ALLOCATION, available: { costUsd: 15, tokens: 850_000, attempts: 42 }, effectiveAvailable: { costUsd: 15, tokens: 850_000, attempts: 42 } });
-      expect(capacity.final).toEqual({ limit: finalReserve, reserved: { costUsd: 0, tokens: 0, attempts: 0 }, consumed: { costUsd: 0, tokens: 0, attempts: 0 }, committed: { costUsd: 0, tokens: 0, attempts: 0 }, available: finalReserve, effectiveAvailable: finalReserve });
+      expect(capacity.final).toEqual({ limit: finalReserve, reserved: { costUsd: 0, tokens: 0, attempts: 0 }, consumed: { costUsd: 0, tokens: 0, attempts: 0 }, active: { costUsd: 0, tokens: 0, attempts: 0 }, committed: { costUsd: 0, tokens: 0, attempts: 0 }, available: finalReserve, effectiveAvailable: finalReserve });
+      // The effective limits equal the immutable base ones while no Budget Increase exists.
+      expect(capacity.baseLimit).toEqual(capacity.limit);
+      expect(capacity.baseFinalReserve).toEqual(capacity.finalReserve);
       // `capacity` of the Run is the ordinary partition: the reserve is never available to compiled nodes.
       expect(h.stores.reservations.capacity({ type: "run", id: s.run.id })).toEqual(capacity.ordinary);
       // The ordinary entry point cannot name final capacity: there is no such parameter, and run → invocation is not an ordinary pair.
