@@ -24,55 +24,22 @@ import os from "node:os";
 import path from "node:path";
 import type { DecisionId, PlanExpression, PlanNodeId, RunId } from "@agentique-console/core";
 import { describe, expect, it, vi } from "vitest";
-import { sha256Hex, type MemoryBlobStore } from "../persistence/blob-store.ts";
-import { DEFAULT_BUDGET, openHarness, type TestClock } from "../persistence/test-support.ts";
+import { DEFAULT_BUDGET, openHarness } from "../persistence/test-support.ts";
 import { DEFAULT_USAGE } from "../provider/fake.ts";
 import { CompletionFacts } from "./completion-requests.ts";
 import { finishRoot, portFor, proposal, propose, tasksOf, WIDE_GOVERNOR } from "./coordinator-test-support.ts";
 import { awaitSignoff, followUpsOf, operatorMessage } from "./signoff-test-support.ts";
-import { COMPLETED_RESULT, FakeAcceptanceCriterionExecution, FakeIntegrationWorkspace, FakeRunFinalizationWorkspace, INVOCATION_ALLOCATION, openRuntimeHarness, planNodes, seedPlanningRuntime, seedRuntime, startRun, type RuntimeHarness } from "./test-support.ts";
+import { competitor, newWorld as worldAt, withProcess as withProcessOver, type World } from "./recovery-test-support.ts";
+import { COMPLETED_RESULT, INVOCATION_ALLOCATION, openRuntimeHarness, planNodes, seedPlanningRuntime, seedRuntime, startRun, type RuntimeHarness } from "./test-support.ts";
 
-interface World {
-  dir: string;
-  file: string;
-  clock: TestClock;
-  blobs: MemoryBlobStore;
-  integration: FakeIntegrationWorkspace;
-  checks: FakeAcceptanceCriterionExecution;
-  finalization: FakeRunFinalizationWorkspace;
-  runId: RunId;
-  nodeId: PlanNodeId;
-  revisionNumber: number;
-}
-
-/** Runs `body` in a fresh process over the same database: recovery runs first, exactly as at startup, and the file is always closed. */
-async function withProcess<T>(w: World, body: (h: RuntimeHarness) => Promise<T> | T, options: { recover?: boolean } = {}): Promise<T> {
-  const h = openRuntimeHarness({ base: openHarness(w.file, { clock: w.clock, blobs: w.blobs }), governor: WIDE_GOVERNOR, integrationWorkspace: w.integration, criterionExecution: w.checks, finalizationWorkspace: w.finalization });
-  try {
-    if (options.recover !== false) h.recovery.recover();
-    return await body(h);
-  } finally {
-    vi.restoreAllMocks();
-    try {
-      h.close();
-    } catch {
-      // A process that "died" closed its own handle already.
-    }
-  }
-}
-
-/** A second connection to the same database, as another process would hold; it never waits for the write lock. */
-function competitor(w: World): RuntimeHarness {
-  const b = openRuntimeHarness({ base: openHarness(w.file, { clock: w.clock, blobs: w.blobs }), governor: WIDE_GOVERNOR, integrationWorkspace: w.integration, criterionExecution: w.checks, finalizationWorkspace: w.finalization });
-  b.database.sqlite.pragma("busy_timeout = 0");
-  return b;
-}
-
+/** A World in a fresh temporary directory. */
 function newWorld(prefix: string): World {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-  const integration = new FakeIntegrationWorkspace(sha256Hex);
-  return { dir, file: path.join(dir, "console.db"), clock: undefined as never, blobs: undefined as never, integration, checks: new FakeAcceptanceCriterionExecution(), finalization: new FakeRunFinalizationWorkspace(integration), runId: undefined as never, nodeId: undefined as never, revisionNumber: 0 };
+  return worldAt(dir, path.join(dir, "console.db"));
 }
+
+/** A process over the World whose injected failures (vitest spies) are restored when it ends. */
+const withProcess = <T>(w: World, body: (h: RuntimeHarness) => Promise<T> | T, options: { recover?: boolean } = {}) => withProcessOver(w, body, { ...options, after: () => vi.restoreAllMocks() });
 
 /** Everything a repeated capacity operation could duplicate, from rows alone. */
 function work(h: RuntimeHarness, runId: RunId) {
