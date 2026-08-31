@@ -279,7 +279,13 @@ code; each is the final production location of what it contains.
   a `resumed` Attempt is possible, and both index and payloads may be
   truncated at any time.
 - `budget_reservations` is the only allocation record. Reservations are
-  never inferred from limits and Usage.
+  never inferred from limits and Usage. `budget_increases` is the only
+  record of growth of a Run's effective Budget and `allocation_extensions`
+  the only record of growth of a Plan Node's effective allocation; both are
+  append-only, both are re-checked by triggers at insertion, and the Run's
+  base Budget, base final reserve, and every reservation's own amounts are
+  never rewritten — effective limits are derived on read from these rows
+  and no aggregate limit is stored.
 - `plan_node_requirements` is the only record of a Plan Node's Requirement
   scope; it is written by the compiler and never updated.
 - `plan_revision_nodes` is the only record of which Plan Nodes belong to an
@@ -299,7 +305,7 @@ code; each is the final production location of what it contains.
 
 ### Phase 1 schema expectations
 
-The baseline creates exactly these 36 tables, with the ownership and
+The baseline creates exactly these 40 tables, with the ownership and
 cardinality stated here and in [glossary.md](glossary.md). Column design
 beyond identifiers, keys, and the fields the architecture names is
 implementation work; the baseline is regenerated in place whenever the
@@ -341,7 +347,9 @@ architecture corrects it before cutover, because nothing has shipped.
 | `signoff_resolutions` | runtime (signoff service, from the operator) | append-only; exactly one per `operator_signoff` Gate and per `signoff` Decision; identity and outcome immutable; the follow-up Invocation linked once |
 | `publications` | runtime (publication service) | recoverable lifecycle rows: one per resolved `publish` Decision, at most one nonterminal and one succeeded per Run, only for a `completed` Run applying its final Changeset; prepared facts recorded once; terminal rows immutable except the staging-cleanup obligation |
 | `capacity_leases` | resource governor | one per granted lease; grant and release times |
-| `budget_reservations` | runtime | one per allocation; capacity source and final-reserve use derive from the creating operation; `active` → `released` once |
+| `budget_reservations` | runtime | one per allocation; capacity source and final-reserve use derive from the creating operation; `active` → `released` once; reserved amounts immutable |
+| `budget_increases` | runtime (Budget Increase service, from the operator's `approve`) | append-only; exactly one per approved `budget_increase` Decision (unique), agreeing with the Decision's Run, partition, and quantities; non-negative, not all zero; never updated or deleted |
+| `allocation_extensions` | runtime (Plan Node capacity operation) | append-only; one per deterministic extension of a nonterminal `pattern` node's active ordinary `Run → Plan Node` reservation, created with the work it funds; non-negative, not all zero; never updated or deleted |
 | `usage` | runtime | append-only per Attempt |
 | `events` | runtime | append-only, global sequence |
 
@@ -539,10 +547,31 @@ is one or more commits; each commit keeps `npm run typecheck` and
    removal of the provisional `publication_result` Orchestrator purpose
    and of Conversation-level automatic publish authorization; and
    restart and concurrency safety across every publication window.
-   Remaining typed deferrals: allocation extension
-   (`awaiting_allocation_extension_phase`, also for the root's unfunded
-   `gate_result` turn and a change request's unfundable follow-up), and
-   the executable `request_decision` runtime tool. Later
+   Phase 2F-A (done): deterministic Allocation Extensions and
+   operator-approved Run Budget Increases — the append-only
+   `budget_increases` and `allocation_extensions` records with their
+   closed partition and trigger vocabularies; effective Run capacity
+   derived from the immutable base Budget plus approved increases (base,
+   increases, effective global, final-reserve, and ordinary limits; active,
+   released, and available per account) and effective Plan Node
+   allocations derived from the immutable reservation plus its extensions;
+   the one Plan Node capacity operation (`ensure`, with the read-only
+   `admits`) that funds every node-funded child — Pattern Invocations,
+   root turns, `gate_result` remediation turns, Coordinator Task batches,
+   `node_exit` Gate Evaluators, approval successors, the signoff change
+   request's follow-up — by creating exactly the component-wise shortfall
+   under the node's `extend` policy in the transaction that creates the
+   child, or refusing by policy; the operator-only `budget_increase`
+   Decision with its typed subject and the Budget Increase service
+   (`request`, `resolve`, `inspect`) whose approval records exactly one
+   increase without creating an Invocation, Usage, or Run transition; the
+   scheduler's `budget` wait for a root or node whose required work no
+   extension can fund and the ordinary resume once an increase makes it
+   fundable; the removal of the typed allocation-extension deferral from the
+   scheduler, the runners, the Gate engine, the root support, the tests,
+   and these documents; and restart and concurrency safety across every
+   extension and increase window. Remaining typed deferral: the executable
+   `request_decision` runtime tool. Later
    subphases: Runs, Execution
    Plan source validation and compiler,
    Plan Nodes of both kinds (`pattern`, `join`), Plan Edges, Plan Node
@@ -622,6 +651,43 @@ Merge to `main` happens after step 7 as one merge commit. Rollback is
   capacity (after the final reserve) is rejected; release returns the
   unused remainder; Run Budget exhaustion yields `waiting`/`budget`, never
   `failed`; `fail`, `wait`, and `extend` node policies behave as specified.
+- Budget Increase and Allocation Extension tests: the base Budget is never
+  rewritten and every effective limit derives from it plus approved
+  increases; the ordinary and final partitions stay disjoint (an ordinary
+  increase never enlarges the final reserve; a final-reserve increase
+  enlarges the global and final limits together); an Allocation Extension
+  raises only the selected node's effective allocation, an active charge
+  is `max(original + extensions, actual)`, a released charge is complete
+  actual consumption once, Usage totals are unchanged by both records,
+  overruns are never clamped and negative availability stays visible;
+  `fail` and `wait` never extend, `extend` creates exactly the minimum with
+  no speculative remainder and waits without partial state when the Run's
+  effective ordinary capacity cannot cover it, an approved increase makes
+  the same work fundable, the final reserve is never an extension's
+  source, and an existing Invocation is never enlarged; extension is
+  exercised through an ordinary Pattern Invocation, a root turn, a
+  Coordinator Task batch, a Worker transfer or successor, a Gate Evaluator
+  and remediation turn, and a signoff change request; a non-operator or
+  policy resolution, a foreign Run, a mismatched subject, a terminal Run,
+  and a final-reserve increase during verification or signoff are refused,
+  `deny` creates nothing, `approve` creates exactly one increase, identical
+  retries replay, conflicting retries write nothing, and no Orchestrator
+  Invocation results; the boundary test proves no legacy import, no
+  compatibility mechanism, no model or provider dependency, no transcript
+  read, no timer, no second scheduler, no mutable historical amounts, and
+  that the retired allocation-extension deferral is absent from the new
+  source, its tests, and these documents; and eighteen file-backed and
+  multi-connection windows (crash before an extension; after an extension
+  and before its child; child, Event, and COMMIT failures; two processes
+  funding one position; two Task batches racing; two increase requests
+  racing; duplicate and conflicting approval replays; an approved increase
+  after reopen; a waiting Run resuming after reopen; a change request
+  retried after reopen; a final-reserve increase followed by the
+  completion preflight; a released reservation and a terminal node refusing
+  a late extension; overrun plus extension accounting; negative
+  availability followed by a sufficient increase) converge without a
+  duplicate increase, extension, Task, Invocation, reservation, Event,
+  scheduler action, or Usage row.
 - Requirement tests: `satisfied` follows only from Gate Evaluations;
   `waived` follows only from a `requirement_waiver` Decision resolved by
   the operator with actor, rationale, Requirement id, timestamp;

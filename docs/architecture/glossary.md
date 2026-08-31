@@ -357,7 +357,7 @@ recommended option, the chosen answer, who resolved it (`operator`,
 timestamp, and the ids of the Run, Requirements, Tasks, and Plan Nodes it
 affects. A Decision has a **kind** — `operator_choice`,
 `orchestrator_choice`, `requirement_waiver`, `side_effect_approval`,
-`signoff`, `publish` — and a **resolution policy** — `operator_required`
+`signoff`, `publish`, `budget_increase` — and a **resolution policy** — `operator_required`
 (resolves only when the operator answers) or `use_default_after_deadline`
 (resolves to the recorded recommended option at a recorded deadline or
 deterministic activation condition; permitted for `operator_choice` only).
@@ -382,7 +382,16 @@ immutable typed subject naming the completed Run, its Workspace, the
 exact Target, the final Snapshot, the final Changeset, and the requested
 strategy; only one open publish Decision exists per Run, `cancel` creates
 nothing, and `publish` creates exactly one `requested` Publication in the
-resolving transaction. A
+resolving transaction. A `budget_increase` Decision is the operator's
+exact authorization of one Budget Increase (execution-model §7.6) — always
+`operator_required`, exactly the options `approve` and `deny`, never a
+default deadline, an immutable typed subject naming the Run, the partition
+(`ordinary` or `final_reserve`), and the exact added cost, tokens, and
+Attempts; requested and resolved only through the Budget Increase service
+(never by a model, a policy, a Coordinator, the Orchestrator, or a runtime
+tool), one open per Run, `deny` creates nothing, and `approve` records
+exactly one Budget Increase in the resolving transaction without creating
+an Invocation or a Context Manifest input. A
 `requirement_waiver` is proposed by the Orchestrator, always
 `operator_required`, resolved only by the operator, and never delegated or
 auto-resolved; its resolution records actor, rationale, Requirement id,
@@ -957,33 +966,57 @@ identical repeated operation returns it; a conflicting one is refused.
 
 A set of limits: maximum cost, maximum tokens, maximum wall-clock time,
 maximum Attempts, and maximum concurrent Invocations. The **Run Budget** is
-the global cap and allocation pool for the whole Run. A **Plan Node
-allocation** is an explicit amount reserved from the Run Budget before the
-node becomes runnable — the root Orchestrator node receives an explicit
-initial allocation, never the entire Run Budget. An **Invocation
-allocation** is an explicit amount reserved from its Plan Node before the
-Invocation starts. Limits are stored on the object they bound; allocation
-accounting is done with Budget Reservations. Cost, tokens, and Attempts are
-reserved quantities; wall-clock deadlines and concurrency ceilings are
-limits enforced by the runtime and the Resource Governor. Exhausting a
-Run Budget places the Run in `waiting` with reason `budget`, never
-`failed`; a node or Invocation that exhausts its allocation fails or waits
-by its declared policy. The Run Budget is partitioned into the **ordinary
-pool** that compiled Plan Node allocations draw from and the **final
-reserve** — cost, tokens, and Attempts chosen at Run creation (from a
-configurable default per Run kind), validated to fit within the Run
-Budget together with the root node's initial allocation, and persisted on
-the Run, immutable for its life. The final reserve is spent only on
-`final_synthesis` Orchestrator Invocations and `run_completion` Gate
-Evaluator Invocations, which reserve directly from the Run
-(`Run → Invocation`) while remaining attached to the root Plan Node; it is
-accounted as its own capacity partition, never as fabricated Usage and
-never as an ordinary child reservation. The two partitions are partitions
-of one Budget: each may reserve only what both its own and the global
-availability permit, and neither may claim the other's unused capacity.
+the global cap and allocation pool for the whole Run: the immutable **base
+Budget** supplied at Run creation plus the Run's append-only Budget
+Increases. The base Budget (maximum cost, tokens, Attempts, and the base
+final reserve) is never rewritten; every **effective** limit is derived on
+read and no aggregate limit is stored:
 
-- Limits stored on the object they bound; the final reserve on the Run; reservations in `budget_reservations`.
-- Related: Run, Plan Node, Invocation, Budget Reservation, Usage
+```
+effective global limit        = base Budget + all approved Budget Increases
+effective final-reserve limit = base final reserve + all approved final-reserve Budget Increases
+effective ordinary limit      = effective global limit − effective final-reserve limit
+```
+
+An **allocation** is a child's reserved share of its parent's capacity. A
+**Plan Node allocation** is an explicit amount reserved from the ordinary
+pool before the node becomes runnable — the root Orchestrator node receives
+an explicit initial allocation, never the entire Run Budget. An
+**Invocation allocation** is an explicit amount reserved from its Plan Node
+before the Invocation starts, immutable for the Invocation's life. Limits
+are stored on the object they bound; allocation accounting is done with
+Budget Reservations. Cost, tokens, and Attempts are reserved quantities;
+wall-clock deadlines and concurrency ceilings are limits enforced by the
+runtime and the Resource Governor and are never increased by a Budget
+Increase or an Allocation Extension. A node or Invocation that exhausts its
+allocation fails or waits by its declared `onAllocationExhausted` policy:
+`fail` fails the node with `allocation_exhausted`, `wait` waits it with
+reason `budget`, and `extend` has the runtime create the automatic minimal
+Allocation Extension from existing effective ordinary capacity — exactly
+the component-wise shortfall, atomically with the work it funds — or waits
+it with reason `budget` when no such extension fits. Exhausting the
+effective ordinary Run capacity places the Run in `waiting` with reason
+`budget`, never `failed`, until an ordinary Budget Increase is approved. The
+Run Budget is partitioned into the **ordinary pool** that compiled Plan Node
+allocations and Allocation Extensions draw from and the **final reserve** —
+cost, tokens, and Attempts chosen at Run creation (from a configurable
+default per Run kind), validated to fit within the base Budget together
+with the root node's initial allocation, persisted on the Run, immutable as
+a base value, and enlarged only by an explicit `final_reserve` Budget
+Increase. The final reserve is spent only on `final_synthesis`
+Orchestrator Invocations and `run_completion` Gate Evaluator Invocations,
+which reserve directly from the Run (`Run → Invocation`) while remaining
+attached to the root Plan Node; it is accounted as its own capacity
+partition, never as fabricated Usage, never as an ordinary child
+reservation, and never as the source of an Allocation Extension. The two
+partitions are partitions of one Budget: each may reserve only what both
+its own and the global availability permit, and neither may claim the
+other's unused capacity. No agent decides accounting: a Budget Increase is
+the operator's, an Allocation Extension is the runtime's, and neither
+creates an agent turn to announce itself.
+
+- Limits stored on the object they bound; the base final reserve on the Run; reservations in `budget_reservations`; increases in `budget_increases`; extensions in `allocation_extensions`.
+- Related: Run, Plan Node, Invocation, Budget Reservation, Budget Increase, Allocation Extension, Usage
 
 ### Budget Reservation
 
@@ -1002,16 +1035,75 @@ alongside them. A Run-level reservation records its **capacity source**
 (`ordinary` or `final_reserve`) and, for the latter, the final-reserve
 use that authorized it; the source derives from the operation that created
 the reservation (`reserveOrdinary` or `reserveFinalInvocation`), never
-from a caller's parameter. While a reservation is active its parent
-charges it component-wise `max(reserved, actual attributable
-consumption)`, so an overrun is visible at once; once released, its
-recorded consumption. A plan revision whose allocations cannot all be
-reserved from the ordinary pool is rejected.
+from a caller's parameter. A reservation's own amounts never change; an
+active `Run → Plan Node` reservation's **effective reserved allocation** is
+its immutable original amounts plus the sum of its Allocation Extensions.
+While a reservation is active its parent charges it component-wise
+`max(effective reserved allocation, actual attributable consumption)`, so
+an overrun is visible at once; once released, its recorded complete
+consumption alone — an Allocation Extension is never charged as a second
+child and remains as provenance after release. A plan revision whose
+allocations cannot all be reserved from the effective ordinary pool is
+rejected.
 
 - Id prefix: `bres_`
 - Owned by: the runtime
 - Store: `budget_reservations`
-- Related: Budget, Run, Plan Node, Invocation, Task, Usage
+- Related: Budget, Run, Plan Node, Invocation, Task, Allocation Extension, Usage
+
+### Budget Increase
+
+The append-only canonical record of one operator-approved enlargement of a
+Run's effective Budget (execution-model §7.6): the Run, the authorizing
+`budget_increase` Decision, the partition (`ordinary` or `final_reserve`),
+the exact added cost, tokens, and Attempts (non-negative, at least one
+positive), and the creation time. Exactly one exists per approved Decision;
+it is immutable and never deleted; it changes no Run row, no Usage row, no
+reservation, no Invocation, no wall-clock deadline, and no concurrency
+limit; it never reduces, revokes, replaces, or expires earlier capacity.
+An `ordinary` increase enlarges the effective global limit and therefore
+the effective ordinary limit; a `final_reserve` increase enlarges the
+effective global limit and the effective final-reserve limit together.
+Only the Budget Increase service records one, from the operator's
+resolution; no model, Invocation, Coordinator, Orchestrator, policy, or
+runtime tool can. The scheduler's next explicit pass derives the new
+capacity from rows and resumes a Run waiting on `budget` through the
+ordinary resume transition; no agent turn is created to report the
+increase. A Budget Increase and an Allocation Extension are different
+facts: the former enlarges the Run Budget, the latter reallocates capacity
+already inside it.
+
+- Id prefix: `binc_`
+- Owned by: the runtime (Budget Increase service), from the operator's `approve`
+- Store: `budget_increases`
+- Related: Budget, Decision, Run, Allocation Extension
+
+### Allocation Extension
+
+The append-only canonical record of one deterministic transfer of existing
+effective ordinary Run capacity to one active Plan Node (execution-model
+§7.6): the Run, the Plan Node, the node's existing active ordinary
+`Run → Plan Node` reservation, the exact added cost, tokens, and Attempts
+(non-negative, at least one positive), the closed trigger — `invocation`,
+`task_batch`, `gate_evaluator`, `gate_remediation`, `root_turn`,
+`signoff_follow_up` — and the creation time. It is created by the runtime's
+one Plan Node capacity operation under the node's `extend` policy, for
+exactly the component-wise shortfall of the child the node must fund next,
+in the same root transaction that creates that child (an Invocation, a Task
+batch, a Gate Evaluator, a root turn), so both commit or neither does; it is
+never speculative, rounded up, or a configured increment. It raises the
+reservation's effective reserved allocation without creating a second
+reservation, changing the reservation's original amounts, creating Usage,
+enlarging an existing Invocation, or drawing from the final reserve. Only
+a nonterminal `pattern` node's active ordinary reservation may be
+extended; a released reservation, a terminal node, a join node, and a
+final-reserve reservation never are. After the reservation is released the
+extension is provenance only.
+
+- Id prefix: `aext_`
+- Owned by: the runtime (Plan Node capacity operation)
+- Store: `allocation_extensions`
+- Related: Budget, Budget Reservation, Plan Node, Budget Increase
 
 ### Usage
 
@@ -1093,13 +1185,14 @@ logical turn is a new Invocation), `in_progress` (as a Task state; use
 - Table names are the plural snake_case of the term: `runs`, `plan_nodes`,
   `plan_edges`, `plan_revision_nodes`, `plan_node_requirements`, `acceptance_criteria`,
   `context_manifests`, `agent_definition_revisions`, `publications`,
-  `capacity_leases`, `budget_reservations`, `provider_continuations`,
+  `capacity_leases`, `budget_reservations`, `budget_increases`,
+  `allocation_extensions`, `provider_continuations`,
   `approved_tool_call_uses`, `runtime_tool_calls`, `completion_requests`,
   `signoff_resolutions`.
 - Id prefixes: `ws_`, `cv_`, `cvm_`, `run_`, `pn_`, `pe_`, `req_`,
   `reqr_`, `ac_`, `dec_`, `task_`, `art_`, `ho_`, `agd_`, `agdr_`, `inv_`,
   `att_`, `eval_`, `gate_`, `snap_`, `cs_`, `pub_`, `lease_`, `bres_`,
-  `cm_`, `use_`, `acu_`, `rtc_`, `crq_`, `sres_`. A prefix is never reused for a second kind.
+  `binc_`, `aext_`, `cm_`, `use_`, `acu_`, `rtc_`, `crq_`, `sres_`. A prefix is never reused for a second kind.
   `plan_node_requirements`, `plan_revision_nodes`, and
   `provider_continuations` are keyed by the objects they index and carry
   no own prefix; `events`,

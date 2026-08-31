@@ -37,7 +37,7 @@ server/src/
                  stores/{index,support,workspaces,conversations,runs,plans,requirements,
                          decisions,tasks,artifacts,handoffs,agents,invocations,
                          continuations,verification,workspace-state,capacity,budgets,usage,
-                         runtime-tool-calls}.ts
+                         runtime-tool-calls,budget-increases,allocation-extensions}.ts
                  migrations/0000_orchestration_core.sql  migrations/meta/*
   events/        stream.ts
   workspaces/    service.ts  fs-browse.ts
@@ -48,6 +48,7 @@ server/src/
                  recovery-service.ts  workspace-cleanup.ts  tool-call-authorization.ts  agent-definitions.ts
                  readiness.ts  readiness-facts.ts  handoff-routing.ts  integration-service.ts  join.ts  scheduler.ts  test-support.ts
                  runtime-tools.ts  task-proposals.ts  task-projection.ts  coordinator-test-support.ts
+                 plan-node-capacity.ts  budget-increases.ts
                  compiler/{compile,input,source-path}.ts  manifest/{assembler,renderer}.ts
                  ports/{workspace-preparation,execution-workspace,integration-workspace}.ts
                  patterns/{index,support,root,single,chain,route,parallel,coordinator-worker}.ts
@@ -312,7 +313,8 @@ New tables not derived from any legacy table: `schema_info`,
 `agent_definition_revisions`, `invocations`, `attempts`,
 `provider_continuations` (index only; payloads in the adapter store),
 `context_manifests`, `evaluations`, `gates`, `snapshots`, `changesets`,
-`publications`, `capacity_leases`, `budget_reservations`. The complete
+`publications`, `capacity_leases`, `budget_reservations`,
+`budget_increases`, `allocation_extensions`. The complete
 Phase 1 table list with ownership and cardinality is in
 [migration-contract.md](migration-contract.md) §4.
 

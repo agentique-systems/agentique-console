@@ -115,6 +115,8 @@ re-entrant over one SQLite connection:
 | Workspace | Operator via API | `workspaces` | — |
 | Conversation, messages | Operator, Orchestrator via runtime | `conversations`, `conversation_messages` | Conversation view |
 | Run (with its persisted final reserve) | Runtime (Run creation service) | `runs` | Run view, Run list |
+| Budget Increase | Runtime (Budget Increase service, from the operator's `approve`) | `budget_increases` | Run view |
+| Allocation Extension | Runtime (Plan Node capacity operation) | `allocation_extensions` | Run view, Plan view |
 | Execution Plan (source; accepted revisions only) | Runtime (plan-revision service; revision 1 by Run creation) | `execution_plan_revisions` | Plan view |
 | Plan Node, Plan Edge (compiled) | Plan-revision service through the compiler; the root node by Run creation | `plan_nodes`, `plan_edges` | Plan view |
 | Plan Revision Membership | Plan-revision service; revision 1 by Run creation | `plan_revision_nodes` | Plan view |
@@ -213,8 +215,10 @@ created ──► running ──► verifying ──► awaiting_signoff ──�
   and the Run `running`.
 - `waiting`: no Plan Node can make progress. The Run records a structured
   reason: `decision` (an `operator_required` Decision is unanswered),
-  `budget` (the Run Budget has no unreserved capacity for work that must
-  proceed), `provider_capacity` (the resource governor has no lease to
+  `budget` (work that must proceed cannot be funded from the Run's
+  effective ordinary capacity, even through an Allocation Extension, and
+  only an approved ordinary Budget Increase can make it fundable, §7.6),
+  `provider_capacity` (the resource governor has no lease to
   grant), `integration_conflict` (a Changeset conflict Task is open, §9.2),
   `operator` (the operator paused the Run). The scheduler records the
   Run `waiting` only when no action remains, no Attempt is executing, and
@@ -794,7 +798,7 @@ exists for the Orchestrator and no Orchestrator Invocation is active:
 | `operator_input` | The operator posted a message (the Run's first Invocation always has this purpose). |
 | `node_result` | A Plan Node reached a terminal state. |
 | `decision_resolution` | A Decision the Orchestrator requested or that affects the Run was resolved or superseded; or the operator resolved the Run's `signoff` Decision with `request_changes` (§10): the signoff service prepares exactly one such turn in the resolving transaction — continued from the previous root turn, funded from the root's ordinary allocation, carrying the typed `signoff_resolution` input and the operator's message — and links it to the Signoff Resolution. |
-| `gate_result` | A `node_exit` Gate of a node without a Coordinator failed and its remediation Task awaits the Orchestrator (§10): every pending remediation Task of the Run is batched into one turn, created only when no other action, in-flight Attempt, or concurrency-limited node remains, funded from the root's ordinary allocation (when it does not fit, the root's `extend` policy applies and the turn is deferred as `awaiting_allocation_extension_phase`); or a `run_completion` Gate failed and its one remediation Task awaits the Orchestrator (§10) — coalesced into the same batched turn as any failed node Gates, with a typed `gate_result` input per Gate. |
+| `gate_result` | A `node_exit` Gate of a node without a Coordinator failed and its remediation Task awaits the Orchestrator (§10): every pending remediation Task of the Run is batched into one turn, created only when no other action, in-flight Attempt, or concurrency-limited node remains, funded from the root's ordinary allocation (when it does not fit, the root's `extend` policy creates the exact Allocation Extension the Run's effective ordinary capacity admits, in the transaction that creates the turn, and when no such extension fits the Run waits with reason `budget` until an ordinary Budget Increase is approved, §7.6); or a `run_completion` Gate failed and its one remediation Task awaits the Orchestrator (§10) — coalesced into the same batched turn as any failed node Gates, with a typed `gate_result` input per Gate. |
 | `plan_revision` | The Orchestrator's previous Invocation ended by returning `blocked` on a rejected plan revision or by requesting continuation after a revision, and the compiled outcome is now available. |
 | `final_synthesis` | The Run's `run_completion` Gate passed every criterion and every structural condition (§10): the completion engine prepares the one read-only final-synthesis turn of that Gate — positioned at the root's `orchestrator` position, owning the Gate through `gateId`, funded from the final reserve, with no Task, no Execution Workspace, and no Changeset — and its typed `FinalSynthesisResult` becomes the final-report Artifact. Never created by the input queue, never for a terminal Run. |
 
@@ -1724,7 +1728,7 @@ mechanisms; there is no trust flag.
 | `update_task` (Evidence, output Artifacts on own Tasks) | yes | own node | own Task | no |
 | `create_tasks` | yes | no | no | no |
 | `propose_tasks` | no | own node | no | no |
-| `request_decision` (any kind except `orchestrator_choice`; `requirement_waiver` is always `operator_required`) | yes | yes | yes | no |
+| `request_decision` (any kind except `orchestrator_choice` and `budget_increase`; `requirement_waiver` is always `operator_required`) | yes | yes | yes | no |
 | `record_decision` (kind `orchestrator_choice` only; cannot resolve any other kind) | yes | no | no | no |
 | `propose_requirements` | yes | no | no | no |
 | `revise_execution_plan` (source form only; validated and compiled by the runtime) | yes | no | no | no |
@@ -2068,8 +2072,13 @@ runtime component with two entry points and no timer, loop, or interval:
   (§7.6) and executes only under a lease. A node whose allocation cannot
   be reserved follows its `onAllocationExhausted` policy: `fail` fails it
   with `allocation_exhausted`, `wait` waits it with `budget`, and
-  `extend` is deferred (`awaiting_allocation_extension_phase`) until
-  extension exists.
+  `extend` has the runtime create exactly the minimal Allocation Extension
+  from the Run's effective ordinary capacity in the transaction that
+  creates the work — or, when no such extension fits, waits it with
+  `budget` (§7.6). The root node never transitions: an unfunded root turn
+  or remediation turn is what makes the Run `waiting`/`budget`, and the
+  next pass after an approved Budget Increase funds and creates it through
+  the ordinary transitions; no timer, poll, or second scheduler exists.
 - A node removed from the membership while running settles its own work
   (`settle_removed_node`) but hands off to nobody and readies nothing.
 - Deadlines are enforced from the caller's clock at the start of each
@@ -2166,7 +2175,20 @@ message type.
 **Run Budget.** The Run Budget is the global cap and allocation pool for
 the entire Run: limits for cost, tokens, wall-clock duration, Attempts, and
 concurrent Invocations, stored on the Run. All Usage from every Plan Node,
-Invocation, and Attempt counts against it.
+Invocation, and Attempt counts against it. The stored limits are the
+**base Budget**, immutable for the Run's life; the Run's **effective**
+limits are derived on every read from the base Budget plus the Run's
+approved Budget Increases (below), never stored as an aggregate and never
+written back to the Run row:
+
+```
+effective global limit        = base limit + Σ added of all Budget Increases
+effective final-reserve limit = base final reserve + Σ added of `final_reserve` Budget Increases
+effective ordinary limit      = effective global limit − effective final-reserve limit
+```
+
+Wall-clock duration and concurrency are limits, not reserved quantities,
+and no Budget Increase or Allocation Extension changes them.
 
 **Reservations.** Allocation is accounted with canonical
 `budget_reservations` rows, never inferred from limits and Usage. A
@@ -2177,9 +2199,14 @@ time, the release time, and the status (`active`, `released`). Wall-clock
 deadlines and concurrency ceilings are limits enforced by the runtime and
 the resource governor; they are not reserved quantities.
 
-- Unreserved capacity of a parent = its limit − Σ(reserved amounts of its
-  `active` reservations) − Σ(final consumed amounts of its `released`
+- Unreserved capacity of a parent = its effective limit − Σ(charges of
+  its `active` reservations) − Σ(final consumed amounts of its `released`
   reservations) − its own direct consumption (an Invocation's Attempts).
+  A reservation's own reserved amounts are immutable; an active
+  `Run → Plan Node` reservation's **effective reserved allocation** is
+  those amounts plus the sum of its Allocation Extensions (below), and a
+  Plan Node's effective limit for its own children is that effective
+  reserved allocation.
 - A reservation is created atomically with the object it allocates and
   before that object becomes runnable. Creation fails, and the requesting
   operation is rejected, when the parent's unreserved capacity is
@@ -2197,7 +2224,7 @@ the resource governor; they are not reserved quantities.
   `reserved`. The parent's unreserved capacity then goes negative: the
   overrun is visible, Run Usage totals and reservation accounting agree,
   and every further reservation request is rejected until the operator
-  raises the limit.
+  approves a Budget Increase that covers it.
 - Usage is attributed while the owning Invocation is non-terminal, which
   includes the interval after its Attempt has ended; once the Invocation
   is terminal its reservation has been released and further Usage for it
@@ -2219,16 +2246,22 @@ Attempts): chosen at Run creation from a configurable default per Run kind
 (enabled by default for `kind: code` Runs, zero for `other`) or an explicit
 value, validated to be non-negative and to fit within the Run Budget
 together with the root node's initial allocation, and persisted on the Run,
-immutable for its life. "Configured final reserve" always means this
-persisted value; a runtime configuration value is never read back into an
-existing Run. The Run Budget is thereby partitioned: the **ordinary pool**
-(the Budget less the final reserve) is the only capacity plan revisions
-and root-node extensions can reserve; the final reserve is spent only on
+immutable for its life as the **base final reserve**; the effective
+final-reserve limit is the base plus the Run's `final_reserve` Budget
+Increases. "Configured final reserve" always means the persisted base
+value; a runtime configuration value is never read back into an existing
+Run. The Run Budget is thereby partitioned: the **ordinary pool** (the
+effective global limit less the effective final reserve) is the only
+capacity plan revisions and Allocation Extensions can reserve; the final
+reserve is spent only on
 `final_synthesis` Orchestrator Invocations and `run_completion` Gate
 Evaluator Invocations, each reserved with the explicit capacity source
 `final_reserve`. The completion preflight admits a request only when the
-reserve can fund the remaining completion work (the Evaluator when an
-evaluated criterion exists, and the synthesis); a reserve that can no
+effective reserve can fund the remaining completion work (the Evaluator
+when an evaluated criterion exists, and the synthesis) — a refused
+request may be retried after a `final_reserve` Budget Increase, and no
+Completion Request is ever created automatically by an increase; a
+reserve that can no
 longer fund an Invocation when it is prepared fails the cycle with
 `final_reserve_exhausted` — no verdict or report is fabricated and no
 ordinary capacity is used instead (§10). Unused node allocation is
@@ -2237,9 +2270,12 @@ allocation is zero.
 
 **Global and partition availability.** The ordinary pool and the final
 reserve are partitions of one Run Budget, not independent Budgets.
-`runCapacity` reports three accounts, each with `limit`, `reserved` (Σ
-active reserved amounts), `consumed` (Σ released consumption), `committed`
-(Σ active charges + consumed), and signed `available = limit − committed`:
+`runCapacity` reports the base limit, the base final reserve, the Run's
+increases by partition, the effective global, final-reserve, and ordinary
+limits, and three accounts, each with `limit` (effective), `reserved` (Σ
+active effective reserved amounts), `active` (Σ active charges),
+`consumed` (Σ released consumption), `committed` (active + consumed), and
+signed `available = limit − committed`:
 
 - the **global** account charges every Run-level child of either partition
   against the whole Budget;
@@ -2250,8 +2286,8 @@ active reserved amounts), `consumed` (Σ released consumption), `committed`
 
 and each partition reports `effectiveAvailable = min(available, global
 available)` component-wise, which is what a reservation is checked
-against. An **active** child is charged component-wise `max(reserved,
-actual attributable consumption so far)` — a Plan Node's consumption from
+against. An **active** child is charged component-wise `max(effective
+reserved allocation, actual attributable consumption so far)` — a Plan Node's consumption from
 its own allocation at Run level, an Invocation's own Usage and Attempts at
 Plan Node level and for final-reserve Invocations at Run level; a Task
 reservation has no Usage and is charged its reserved amount — so an
@@ -2314,20 +2350,84 @@ the node when the Invocation reaches a terminal state.
   the deadline may retry with only the remaining time. A restart derives
   the same deadline from the persisted start and the immutable manifest
   limit.
-- A Plan Node whose unconsumed, unreserved allocation cannot cover the next
-  Invocation it must create acts on its `onAllocationExhausted` policy:
-  `fail` (default) fails the node; `wait` puts the node in `waiting` with
-  reason `budget` until the operator raises the Run Budget or the
+- A Plan Node whose effective allocation cannot cover the next child it
+  must fund acts on its `onAllocationExhausted` policy through the one
+  Plan Node capacity operation (below): `fail` (default) fails the node
+  with `allocation_exhausted`; `wait` puts the node in `waiting` with
+  reason `budget` until an ordinary Budget Increase is approved or the
   Orchestrator revises the node's expression; `extend` (the root node's
-  policy) has the runtime reserve a further increment from unreserved Run
-  capacity outside the final reserve and, when none is available, behaves
-  as `wait`.
-- The Run enters `waiting` with reason `budget` when a node that must
-  proceed is waiting on allocation and no unreserved Run capacity exists.
-  The operator may raise the Run Budget (which makes the waiting node's
-  extension or the Orchestrator's next revision possible) or cancel the
-  Run. Budget exhaustion never transitions the Run to `failed`; `failed` is
-  reached only through the terminal failure transitions in §3.
+  policy) has the runtime create an Allocation Extension for exactly the
+  shortfall from the Run's effective ordinary capacity and, when that
+  capacity cannot cover the shortfall, behaves as `wait`. Neither `fail`
+  nor `wait` ever extends.
+- The Run enters `waiting` with reason `budget` when the work that must
+  proceed cannot be funded — its node is waiting on allocation or the
+  root's own turn is unfunded — no other node can act, nothing is in
+  flight, and no Allocation Extension fits the Run's effective ordinary
+  capacity. The operator may approve an ordinary Budget Increase (after
+  which the next scheduler pass funds the same work through the ordinary
+  resume and readiness transitions) or cancel the Run. Budget exhaustion
+  never transitions the Run to `failed`; `failed` is reached only through
+  the terminal failure transitions in §3.
+
+**Plan Node capacity operation.** Every child funded from a Plan Node's
+allocation — a Pattern Invocation (single, chain, route, parallel,
+Coordinator, evaluator/optimizer), a root Orchestrator turn of any purpose,
+a `gate_result` remediation turn and its successor, a Coordinator Task
+batch, a Worker Invocation created from a Task, a `node_exit` Gate
+Evaluator, and the follow-up turn of a signoff change request — is admitted
+by the one canonical operation `ensurePlanNodeCapacity(planNodeId,
+required, trigger)` inside the root transaction that creates the child. It
+computes the component-wise shortfall `max(0, required − available)` of
+the node's effective allocation; with no shortfall it funds the child;
+otherwise it applies the node's policy: `fail` refuses with
+`allocation_exhausted`, `wait` refuses into a `budget` wait, and `extend`
+records exactly one Allocation Extension of exactly the shortfall when the
+Run's effective ordinary capacity covers it and otherwise refuses into a
+`budget` wait, writing nothing. A Coordinator Task batch is validated as a
+whole and funded by one aggregate extension for the batch's total, so
+either the whole batch and its extension commit or neither does. There is
+no speculative, rounded, or configured increment, no partial extension,
+and no extension created ahead of the work that needs it.
+
+**Allocation Extension.** The append-only `allocation_extensions` record
+of one such transfer: the Run, the Plan Node, the node's existing active
+ordinary `Run → Plan Node` reservation, the exact added cost, tokens, and
+Attempts (non-negative, at least one positive), the closed trigger
+(`invocation`, `task_batch`, `gate_evaluator`, `gate_remediation`,
+`root_turn`, `signoff_follow_up`), and the creation time. It raises the
+reservation's effective reserved allocation without creating a second
+reservation and without rewriting the reservation's own amounts; it
+creates no Usage, enlarges no existing Invocation's allocation, and never
+draws on the final reserve. Only a nonterminal `pattern` node's active
+ordinary reservation of the same Run may be extended; a released
+reservation, a terminal node, a join node, and a final-reserve reservation
+never are. While the reservation is active the Run charges
+`max(original + Σ extensions, actual)`; once released it charges the
+recorded actual consumption alone and the extension remains as provenance.
+The event is `allocation_extension.created`.
+
+**Budget Increase.** The append-only `budget_increases` record of one
+operator-approved enlargement of the Run's effective Budget: the Run, the
+authorizing `budget_increase` Decision (exactly one increase per approved
+Decision), the partition (`ordinary` or `final_reserve`), the exact added
+cost, tokens, and Attempts (non-negative, at least one positive), and the
+creation time. It is requested and resolved only through the Budget
+Increase service — never by a model, a policy, a runtime tool, a
+Coordinator, or the Orchestrator — and recorded in the Decision's
+resolving transaction with one correlation chain, creating no Invocation,
+no Usage, no Run transition, no reservation, and no `decision_resolution`
+turn: the scheduler's next explicit pass derives the new effective
+capacity from rows and resumes a Run waiting on `budget` through the
+existing transitions. An `ordinary` increase is permitted while the Run is
+`created`, `running`, `waiting`, or `awaiting_signoff`; a `final_reserve`
+increase while `created`, `running`, or `waiting`; neither on a
+`verifying` or terminal Run, and one `budget_increase` Decision is open per
+Run at a time. `deny` creates nothing; an identical retry replays the
+recorded resolution; a conflicting retry is refused typed and writes
+nothing. Increases never reduce, revoke, replace, or expire capacity, and
+never change wall-clock deadlines or concurrency. The event is
+`budget_increase.recorded`.
 
 ### 7.7 Fan-in
 
@@ -2543,9 +2643,14 @@ and Plan Node ids, and a **resolution policy**:
   resolves.
 
 Only `operator_choice` Decisions may use `use_default_after_deadline`.
-`requirement_waiver`, `side_effect_approval`, `signoff`, and `publish`
-Decisions always use `operator_required` and are resolved only by the
-operator. No policy, delegation, or Conversation-level setting can resolve
+`requirement_waiver`, `side_effect_approval`, `signoff`, `publish`, and
+`budget_increase` Decisions always use `operator_required` and are
+resolved only by the operator. A `budget_increase` Decision (§7.6) has
+exactly the options `approve` and `deny`, no default deadline, and an
+immutable typed subject naming the Run, the partition, and the exact added
+cost, tokens, and Attempts; it is requested and resolved only through the
+Budget Increase service — no runtime tool requests it — and its approval
+records exactly one Budget Increase in the resolving transaction. No policy, delegation, or Conversation-level setting can resolve
 them or transfer that authority, and no standing or automatic publication
 authorization exists: every Publication is authorized by its own resolved
 `publish` Decision (§9.4).
@@ -3081,13 +3186,14 @@ Order is fixed: deterministic checks, then Evaluations, then the operator.
   - `request_changes` requires a valid operator message — of the Run's
     Conversation, authored by the operator, non-empty, not consumed by
     another resolution — and, as a preflight, that the root node's
-    ordinary allocation admits the follow-up turn: when it cannot, the
-    request is refused typed (`ordinary_capacity_insufficient`) before
-    any write and the Run stays `awaiting_signoff`; the final reserve is
-    never a fallback. (Preflight refusal is chosen over a pending
-    follow-up because no canonical pending-allocation state exists yet;
-    allocation extension is a later phase.) In one root transaction it
-    then: records the Signoff Resolution with outcome `request_changes`
+    effective ordinary allocation admits the follow-up turn or an
+    Allocation Extension of exactly the shortfall fits the Run's effective
+    ordinary capacity: when neither holds, the request is refused typed
+    (`ordinary_capacity_insufficient`) before any write and the Run stays
+    `awaiting_signoff`; the final reserve is never a fallback; after an
+    ordinary Budget Increase the same request succeeds. In one root
+    transaction it then: creates the `signoff_follow_up` Allocation
+    Extension when one is needed; records the Signoff Resolution with outcome `request_changes`
     naming the message (by id; the prose is never copied into the row or
     an Event); resolves the Decision (resolver `operator`, option
     `request_changes`); closes the Gate `failed` with the precise reason
@@ -3260,7 +3366,14 @@ mechanism, if ever added, is a new feature with its own design.
 - Reservation accounting (§7.6) uses the same sums for consumed amounts;
   reserved amounts come from `budget_reservations`.
 - The operator-facing cost line always shows the Run total, and a per-node
-  breakdown with reserved and unreserved capacity is available.
+  breakdown with reserved and unreserved capacity is available; the Run
+  capacity projection exposes the base limits, the increases by partition,
+  the effective limits, and each account's active committed, released
+  consumed, and available amounts, and a Plan Node allocation projection
+  exposes its original allocation, its extensions, its effective
+  allocation, and its available capacity. `budget_increase.recorded` and
+  `allocation_extension.created` carry ids, partition or trigger,
+  quantities, Plan Node and reservation ids, and timestamps only.
 
 ## 13. Events and projections
 
@@ -3289,8 +3402,10 @@ mechanism, if ever added, is a new feature with its own design.
 | Provider capacity refused by the governor | Attempt not started; Run `waiting` (`provider_capacity`); the scheduler retries when the governor signals capacity or the retry-after time passes. |
 | Invocation returns an invalid result | New Attempt (`retry`) with the validation error in the rendering. |
 | Invocation exhausts its allocation | Invocation `failed` with reason `allocation_exhausted`; no retry; its Task, if any, `failed`. |
-| Plan Node exhausts its allocation | Per `onAllocationExhausted`: `fail`, `wait` (Run may enter `waiting`/`budget`), or `extend`. |
-| Run Budget has no unreserved capacity for work that must proceed | Run `waiting` (`budget`); operator raises the Budget or cancels. Never `failed` on this alone. |
+| Plan Node exhausts its allocation | Per `onAllocationExhausted`: `fail` (`allocation_exhausted`), `wait` (Run may enter `waiting`/`budget`), or `extend` (exactly the shortfall as an Allocation Extension from effective ordinary Run capacity, atomically with the child; otherwise as `wait`). |
+| Run Budget has no unreserved capacity for work that must proceed | Run `waiting` (`budget`); the operator approves an ordinary Budget Increase (the next pass resumes the Run and funds the same work) or cancels. Never `failed` on this alone. |
+| Crash between an Allocation Extension and the child it funds | Impossible to observe: both are written in one root transaction; after restart either both exist or neither, and the next pass re-derives the shortfall from rows. |
+| Crash during a `budget_increase` resolution | The Decision resolution and the increase commit together or not at all; a retried `approve` replays the recorded resolution, a conflicting retry is refused, and no Run row, Usage, or Invocation changes. |
 | Plan Node fails | Successors `skipped` (or `ready` with the failure if opted in); a `node_result` Orchestrator Invocation is created. |
 | `join` fan-in policy not met | Join `failed` with `join_fan_in_failed`, its index Artifact recorded on the failure Event; handled as a Plan Node failure. |
 | `parallel` items do not satisfy `requireAll` | Node `failed` with `parallel_items_failed` after every item ended and every successful Changeset was integrated; the index Artifact (failed items included) is recorded on the failure Event. |
@@ -3318,7 +3433,7 @@ mechanism, if ever added, is a new feature with its own design.
 | `run_completion` cycles exhausted | The next `request_completion` call is refused (`run_completion_cycles_exhausted`); the Run stays `running`. |
 | Integration Workspace drifted or unobservable at signoff acceptance | Refused typed (`workspace_drifted`, `finalization_failed`) before any write: no Decision resolution, Gate closure, Artifact, Changeset, or Run transition; acceptance stays retryable and the operator may request changes (§9.3, §10). |
 | Unexpected active state at signoff (an Invocation, Attempt, lease, reservation, cleanup obligation, Changeset, node Gate, remediation, Decision, request, Task, Requirement, or moved Snapshot) | Refused typed (`active_state`); nothing is released, repaired, or written (§10). |
-| Root allocation cannot fund the follow-up turn of a change request | Refused typed (`ordinary_capacity_insufficient`) before any write; the Run stays `awaiting_signoff`; the final reserve is never used (§10). |
+| Root allocation cannot fund the follow-up turn of a change request | The root's `extend` policy funds it from effective ordinary Run capacity in the resolving transaction; when no extension fits, refused typed (`ordinary_capacity_insufficient`) before any write, the Run stays `awaiting_signoff`, and the request may be retried after an ordinary Budget Increase; the final reserve is never used (§10). |
 | Database failure inside the signoff transaction (Artifact, Changeset, resolution, Decision, Gate, Run, active-Run clearing, or COMMIT) | Everything rolls back, a newly written diff blob is compensated, the boundary stays open, and the canonical failure is rethrown; the next call starts over from rows (§10). |
 | Crash after a signoff resolution committed (response lost, follow-up not executed, follow-up result not integrated, restart before settlement) | The resolution, Decision, Gate, Run, and follow-up rows are the record: a repeated call replays the canonical outcome, and the scheduler executes and settles the follow-up through the ordinary root path; nothing is repeated (§10, §14 "Server restart"). |
 | Crash during a completion cycle (between the request, the turn's settlement, the Gate opening, a check, the Evaluator, the derivation, the synthesis, the passing or failing transaction, or the remediation turn) | Every step is one transaction or one external step recorded once; the next pass finds the request, the open or closed Gate, the recorded checks, the existing Evaluator, statuses, synthesis, report, Task, or signoff boundary, and repeats nothing (§10). |
@@ -3487,7 +3602,16 @@ by a test.
     reservations never consume, reachable only by a `final_synthesis` or
     `run_completion` Invocation's own `Run → Invocation` reservation, and
     both partitions are bounded by the global Run Budget; Budget exhaustion
-    places a Run in `waiting`, never `failed`.
+    places a Run in `waiting`, never `failed`. The base Budget, the base
+    final reserve, and every reservation's own amounts are immutable;
+    growth exists only as append-only `budget_increases` (one per approved
+    operator `budget_increase` Decision) and `allocation_extensions`
+    (exactly the shortfall of the child created in the same transaction,
+    from effective ordinary capacity, never from the final reserve);
+    effective limits are derived from those rows on read and never
+    stored; neither record creates Usage, mutates a Run, Invocation,
+    Usage, or reservation row, or changes a deadline or concurrency limit;
+    and no model, policy, or runtime tool can create either.
 23. **Task states are complete and runtime-owned.** A Task is always in
     exactly one of `pending`, `ready`, `running`, `blocked`, `completed`,
     `failed`, `cancelled`; only the runtime transitions it; a `failed` Task

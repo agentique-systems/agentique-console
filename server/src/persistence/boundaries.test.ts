@@ -320,6 +320,54 @@ describe("import boundaries", () => {
     expect(`${service}\n${port}\n${corePublication}`).not.toMatch(/\b(legacy|compat\w*|fallback\b|shim|deprecated|feature.?flag|v2|standing)\b/i);
   });
 
+  it("budget accounting is deterministic runtime: no model or provider dependency, no transcript, no timer, no second scheduler, no mutable history, no compatibility mechanism, and no deferred extension phase (invariant 22)", () => {
+    const strip = (text: string) => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    const files = ["server/src/execution/plan-node-capacity.ts", "server/src/execution/budget-increases.ts", "server/src/persistence/stores/budget-increases.ts", "server/src/persistence/stores/allocation-extensions.ts", "server/src/persistence/stores/budgets.ts"].map((f) => path.join(repoRoot, f));
+    for (const file of files) {
+      const text = strip(fs.readFileSync(file, "utf8"));
+      // Rows only: no provider, adapter, model, prompt, transcript, Artifact content, Event replay, timer, or polling decides capacity.
+      expect(importsOf(file).some((s) => resolvesInto(file, s, "server/src/provider") || /provider|adapter|sdk/i.test(s)), rel(file)).toBe(false);
+      expect(text, rel(file)).not.toMatch(/\bprovider\b|\badapter\b|\bmodel\b|\bprompt\b|transcript|TRANSCRIPT_MEDIA_TYPE|artifacts\.read\(|blobs\.|journal\.read\(|setTimeout|setInterval|setImmediate|Date\.now|\bscheduler\b/i);
+      // No compatibility mechanism, no configured increment, no rounding, no retired vocabulary for the new facts.
+      expect(text, rel(file)).not.toMatch(/\b(legacy|compat\w*|fallback\b|shim|deprecated|feature.?flag|v2)\b/i);
+      expect(text, rel(file)).not.toMatch(/\b(credit|refill|boost|quota reset|top.?up|rollover|increment)\b/i);
+      expect(text, rel(file)).not.toMatch(/Math\.(ceil|round)\(/);
+    }
+    // The base Budget, the final reserve, and every reservation amount stay immutable: no store rewrites them, and no store updates or deletes an increase or an extension.
+    for (const file of listFiles("server/src/persistence/stores", (f) => isCode(f) && !f.endsWith(".test.ts"))) {
+      const text = strip(fs.readFileSync(file, "utf8"));
+      expect(text, rel(file)).not.toMatch(/update\((budgetIncreases|allocationExtensions)\)|delete\((budgetIncreases|allocationExtensions|budgetReservations)\)/);
+      expect(text, rel(file)).not.toMatch(/set\(\{[^}]*(maxCostUsd|maxTokens|maxAttempts|finalReserveCostUsd|finalReserveTokens|finalReserveAttempts|reservedCostUsd|reservedTokens|reservedAttempts)/);
+    }
+    // The migration guards both records append-only and re-checks them at insertion.
+    const sql = fs.readFileSync(path.join(repoRoot, "server/src/persistence/migrations/0000_orchestration_core.sql"), "utf8");
+    for (const trigger of ["budget_increases_no_update", "budget_increases_no_delete", "budget_increases_valid", "allocation_extensions_no_update", "allocation_extensions_no_delete", "allocation_extensions_valid", "budget_reservations_definition_immutable", "runs_definition_immutable"]) {
+      expect(sql, trigger).toMatch(new RegExp(`CREATE TRIGGER \`${trigger}\``));
+    }
+    // No runtime tool creates a Budget Increase or an Allocation Extension: the closed tool set and handler bindings name neither.
+    const tools = fs.readFileSync(path.join(repoRoot, "core/src/runtime-tools.ts"), "utf8");
+    expect(tools).not.toMatch(/budget_increase|allocation_extension|increase_budget|extend_allocation/);
+    // The only writer of an Allocation Extension outside stores and tests is the one capacity operation; the only writer of a Budget Increase is the increase service.
+    const extensionWriters = listFiles("server/src", (f) => isCode(f) && !f.endsWith(".test.ts") && !f.endsWith("test-support.ts") && !f.endsWith("stores/allocation-extensions.ts")).filter((f) => /allocationExtensions\.record\(/.test(strip(fs.readFileSync(f, "utf8")))).map(rel).sort();
+    expect(extensionWriters).toEqual(["server/src/execution/plan-node-capacity.ts"]);
+    const increaseWriters = listFiles("server/src", (f) => isCode(f) && !f.endsWith(".test.ts") && !f.endsWith("test-support.ts") && !f.endsWith("stores/budget-increases.ts")).filter((f) => /budgetIncreases\.record\(/.test(strip(fs.readFileSync(f, "utf8")))).map(rel).sort();
+    expect(increaseWriters).toEqual(["server/src/execution/budget-increases.ts"]);
+    // Every node-funded call site funds through the one capacity operation and none re-implements the arithmetic.
+    for (const file of ["server/src/execution/patterns/support.ts", "server/src/execution/gates.ts", "server/src/execution/patterns/root.ts", "server/src/execution/signoff.ts", "server/src/execution/task-proposals.ts", "server/src/execution/run-start-service.ts"].map((f) => path.join(repoRoot, f))) {
+      const text = strip(fs.readFileSync(file, "utf8"));
+      expect(text, rel(file)).toMatch(/capacity\.(ensure|admits)\(/);
+      expect(text, rel(file)).not.toMatch(/allocationFits\(|allocationShortfall\(/);
+    }
+    // The deferral no longer exists anywhere in the new source, its tests, or the normative documents.
+    const scanned = [...NEW_SOURCE_DIRS.flatMap((dir) => listFiles(dir, isSource)), ...listFiles("docs/architecture", (f) => f.endsWith(".md"))];
+    for (const file of scanned) {
+      if (rel(file) === "server/src/persistence/boundaries.test.ts") continue;
+      expect(fs.readFileSync(file, "utf8"), rel(file)).not.toMatch(/awaiting_allocation_extension_phase/);
+    }
+    const scheduler = strip(fs.readFileSync(path.join(repoRoot, "server/src/execution/scheduler.ts"), "utf8"));
+    expect(scheduler).not.toMatch(/deferred|unsupported|later.phase/);
+  });
+
   it("no execution code reads a transcript Artifact or blob to make a decision (invariant 6)", () => {
     for (const file of listFiles("server/src/execution", (f) => isCode(f) && !f.endsWith(".test.ts"))) {
       const text = fs.readFileSync(file, "utf8");
