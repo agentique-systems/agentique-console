@@ -638,6 +638,15 @@ Merge to `main` happens after step 7 as one merge commit. Rollback is
 
 ## 8. Testing requirements
 
+The full suite is `npm test` at the repository root (`npm run test
+--workspaces --if-present`: each workspace's own `vitest run` under its own
+configuration), and every reported count names its workspace. Running
+`npx vitest run` at the repository root is not a result: it collects the
+`web/` and `server/evals` fixture files outside their configurations and
+reports their collection failures beside the suites. Per-phase counts are
+compared per workspace and by collected file and case identity, not by
+the passing total alone.
+
 - Unit tests for every store, the scheduler, Budget arithmetic, result
   validation, manifest assembly, Changeset integration, and Gate ordering.
 - Integration tests, using a scripted fake provider, that run a complete
