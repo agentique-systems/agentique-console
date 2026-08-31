@@ -36,7 +36,7 @@ import {
   effectiveRuntimeTools,
   INVOCATION_MACHINE,
   isRuntimeToolReadTool,
-  RUNTIME_TOOL_CALL_MAX_BYTES,
+  runtimeToolCallMaxBytes,
   runtimeToolCallRequestSchema,
   type AttemptId,
   type ExecutableRuntimeTool,
@@ -145,8 +145,9 @@ export class RuntimeToolExecutor implements RuntimeToolCallPort {
     }
     const valid = parsed.data;
     const canonical = canonicalRuntimeToolCall(valid);
-    if (new TextEncoder().encode(canonical).byteLength > RUNTIME_TOOL_CALL_MAX_BYTES) {
-      return { kind: "rejected", tool, reasons: [{ code: "invalid_input", message: `the ${tool} call exceeds the ${RUNTIME_TOOL_CALL_MAX_BYTES}-byte canonical bound`, path: null }] };
+    const maxBytes = runtimeToolCallMaxBytes(tool);
+    if (new TextEncoder().encode(canonical).byteLength > maxBytes) {
+      return { kind: "rejected", tool, reasons: [{ code: "invalid_input", message: `the ${tool} call exceeds the ${maxBytes}-byte canonical bound`, path: null }] };
     }
     const callDigest = sha256Hex(canonical);
     if (isRuntimeToolReadTool(tool)) return this.#read(tool, valid as RuntimeToolReadRequest, callDigest);

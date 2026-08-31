@@ -541,6 +541,55 @@ describe("import boundaries", () => {
     expect(`${port}\n${service}`).not.toMatch(/\b(legacy|compat\w*|fallback|shim|deprecated)\b/i);
   });
 
+  it("runtime reads are ephemeral projections and write_artifact is store-owned: no transaction, row, Event, cursor state, timer, transcript, messaging, or compatibility mechanism, and future tools stay unbound (execution-model §6.4)", () => {
+    const strip = (text: string) => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    // 1. The read service reads canonical stores only: it opens no transaction, appends no Event, and performs no store write.
+    const reads = strip(fs.readFileSync(path.join(repoRoot, "server/src/execution/runtime-reads.ts"), "utf8"));
+    expect(reads).not.toMatch(/tx\.write\(|inTransaction|journal\b|\.append\(|\.record\(|\.create\(|\.transition\(|afterRollback|usage\.record|WriteOptions/);
+    // 2. Stateless cursors: the service holds no field but its stores — no process-memory cursor, cache, or receipt survives a call.
+    expect(reads).toMatch(/export class RuntimeReadService \{\r?\n  constructor\(private readonly stores: Stores\) \{\}/);
+    // 3. No timer, polling, transcript, agent messaging, clock, or id minting on the read or write path.
+    const writes = strip(fs.readFileSync(path.join(repoRoot, "server/src/execution/artifact-writes.ts"), "utf8"));
+    for (const [name, text] of [["runtime-reads.ts", reads], ["artifact-writes.ts", writes]] as const) {
+      expect(text, name).not.toMatch(/setTimeout|setInterval|setImmediate|Date\.now|new Date\(|clock\(|\.ids\(|newId\(/);
+      expect(text, name).not.toMatch(/transcript|TRANSCRIPT_MEDIA_TYPE|continuation|sendMessage|mailbox|inbox|agent_message/i);
+      expect(text, name).not.toMatch(/\b(legacy|compat\w*|fallback\b|shim|deprecated|feature.?flag|v2)\b/i);
+      expect(text, name).not.toMatch(/query.?session|read.?receipt|access.?log/i);
+    }
+    // 4. write_artifact mutates through the canonical Artifact Store alone: no blob access, no direct insert, no journal append.
+    expect(writes).toMatch(/artifacts\.create\(/);
+    expect(writes).not.toMatch(/blobs\.|journal|\.insert\(|tx\.write\(/);
+    // 5. Only the execution runtime reads Artifact content: the read service for `read_artifact`, plus the two existing narrow
+    //    content readers (Changeset integration, publication preparation). Nothing else — and no provider — touches `artifacts.read(`.
+    const contentReaders = listFiles("server/src", (f) => isCode(f) && !f.endsWith(".test.ts") && !f.endsWith("test-support.ts") && !rel(f).startsWith("server/src/persistence/"))
+      .filter((f) => /artifacts\.read\(/.test(strip(fs.readFileSync(f, "utf8"))))
+      .map(rel)
+      .sort();
+    expect(contentReaders).toEqual(["server/src/execution/integration-service.ts", "server/src/execution/publication.ts", "server/src/execution/runtime-reads.ts"]);
+    // 6. The provider boundary knows neither the read service nor the write service and holds no read result of its own.
+    for (const file of listFiles("server/src/provider", (f) => isCode(f) && !f.endsWith(".test.ts"))) {
+      expect(fs.readFileSync(file, "utf8"), rel(file)).not.toMatch(/RuntimeReadService|ArtifactWriteService|runtime-reads|artifact-writes/);
+    }
+    // 7. The executor separates the outcomes: a read is dispatched before any transaction opens and is never recorded.
+    const executor = strip(fs.readFileSync(path.join(repoRoot, "server/src/execution/runtime-tools.ts"), "utf8"));
+    expect(executor).toMatch(/if \(isRuntimeToolReadTool\(tool\)\) return this\.#read\(/);
+    expect(executor.slice(executor.indexOf("#read(tool:"), executor.indexOf("#handle("))).not.toMatch(/tx\.write\(|runtimeToolCalls\.record\(|journal\.append/);
+    // 8. Future tools remain permitted-but-not-executable, and no full update_task semantics exist: the closed executable
+    //    tuples name exactly the executable tools, and the one update_task operation is the Coordinator's cancel.
+    const core = fs.readFileSync(path.join(repoRoot, "core/src/runtime-tools.ts"), "utf8");
+    expect(core).toMatch(/export const RUNTIME_TOOL_CALL_TOOLS = \["propose_tasks", "update_task", "request_completion", "request_decision", "write_artifact"\] as const;/);
+    expect(core).toMatch(/export const RUNTIME_TOOL_READ_TOOLS = \["read_requirements", "read_decisions", "read_tasks", "read_artifact", "read_execution_plan", "read_agent_definitions"\] as const;/);
+    for (const future of ["create_tasks", "record_decision", "propose_requirements", "revise_execution_plan"]) {
+      expect(core, future).not.toMatch(new RegExp(`${future}: \\[\\{ role`));
+      expect(core, future).not.toMatch(new RegExp(`tool: "${future}"`));
+    }
+    expect(core).toMatch(/update_task: \[\{ role: "coordinator", purposes: \["decompose", "replan"\] \}\]/);
+    expect(core).toMatch(/z\.discriminatedUnion\("kind", \[z\.strictObject\(\{ kind: z\.literal\("cancel"\), reason: nonEmptyString\.max\(TASK_UPDATE_MAX_REASON_LENGTH\) \}\)\]\)/);
+    // 9. Raw Artifact content stays out of the safe result, the record, and the read rejections by shape: the result union's
+    //    write_artifact member carries metadata fields only.
+    expect(core).toMatch(/\{ tool: "write_artifact"; artifactId: ArtifactId; mediaType: string; digest: string; byteSize: number; title: string \}/);
+  });
+
   it("legacy code imports neither core nor the new persistence boundary", () => {
     for (const file of legacyFiles) {
       for (const specifier of importsOf(file)) {

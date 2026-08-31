@@ -470,6 +470,20 @@ export type RuntimeToolReadRequest = Extract<RuntimeToolCallRequest, { tool: Run
 /** The bound on a call's canonical bytes; a larger call is rejected, never truncated. */
 export const RUNTIME_TOOL_CALL_MAX_BYTES = 65_536;
 
+/**
+ * The canonical-byte bound of a `write_artifact` call: sized so that a
+ * maximal valid payload — 48 KiB of decoded content as base64 (65,536
+ * characters) plus the bounded title, media type, and envelope — always
+ * fits. Text whose JSON escaping inflates beyond this bound is submitted
+ * as base64 instead; nothing is ever truncated.
+ */
+export const WRITE_ARTIFACT_CALL_MAX_BYTES = 98_304;
+
+/** The canonical-byte bound of one call of `tool`. */
+export function runtimeToolCallMaxBytes(tool: ExecutableRuntimeTool): number {
+  return tool === "write_artifact" ? WRITE_ARTIFACT_CALL_MAX_BYTES : RUNTIME_TOOL_CALL_MAX_BYTES;
+}
+
 /** The canonical bytes of a validated call: canonical JSON of exactly `{ input, tool }`; two calls are the same call iff these are equal. */
 export function canonicalRuntimeToolCall(request: RuntimeToolCallRequest): string {
   return canonicalJson({ tool: request.tool, input: request.input });

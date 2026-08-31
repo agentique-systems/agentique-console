@@ -409,7 +409,10 @@ export const planNodeRecordSchema: z.ZodType<PlanNodeRecord> = z
     maxConcurrency: z.number().int().min(1).nullable(),
     maxWallClockMs: z.number().int().min(1).nullable(),
   })
-  .refine((n) => (n.kind === "pattern") === (n.pattern !== null && n.shape !== null && n.onAllocationExhausted !== null), { message: "a pattern node carries its Pattern, shape summary, and allocation policy", path: ["pattern"] })
+  .refine((n) => (n.kind === "pattern") === (n.pattern !== null) && (n.kind === "pattern") === (n.shape !== null) && (n.kind === "pattern") === (n.onAllocationExhausted !== null), {
+    message: "exactly a pattern node carries its Pattern, shape summary, and allocation policy",
+    path: ["pattern"],
+  })
   .refine((n) => (n.kind === "join") === (n.fanInPolicy !== null), { message: "a join node carries its fan-in policy", path: ["fanInPolicy"] });
 
 export type PlanEdgeRecord = { planEdgeId: PlanEdgeId; sourceNodeId: PlanNodeId; targetNodeId: PlanNodeId; position: number } & ({ type: "sequence" } | { type: "branch"; label: string } | { type: "fan_in" } | { type: "retry"; round: number });
