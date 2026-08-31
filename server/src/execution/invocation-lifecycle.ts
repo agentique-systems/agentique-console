@@ -26,8 +26,8 @@ export interface SettleInvocationInput {
   decision: RetryDecision | null;
   /** The validated result of a succeeded Attempt. */
   result: InvocationResult | null;
-  /** The open `side_effect_approval` Decision recorded for an intercepted call; the Invocation ends `blocked` on it. */
-  approval: { decisionId: DecisionId } | null;
+  /** The open Decision the Invocation ends `blocked` on: the `side_effect_approval` of its intercepted call, or the Decision it requested. */
+  blocked: { decisionId: DecisionId } | null;
   meta: WriteOptions;
 }
 
@@ -50,7 +50,8 @@ export function invocationFailureReasonFor(decision: RetryDecision, attempt: Pic
     case "tool_failure_retried":
       return "attempts_exhausted";
     case "approval_required":
-      throw new Error("an approval-required refusal ends the Invocation blocked, never failed");
+    case "decision_requested":
+      throw new Error(`a ${decision.reason} refusal ends the Invocation blocked, never failed`);
     default:
       throw new Error(`retry decision ${decision.reason} permits a retry; the Invocation does not fail`);
   }
@@ -76,18 +77,18 @@ export function settleInvocation(stores: Stores, input: SettleInvocationInput): 
     applyTaskReports(stores, invocation, result, meta);
     return { kind: "settled", invocation: settled };
   }
-  if (attempt.status === "cancelled" || decision?.reason === "cancelled") {
+  if (input.blocked === null && (attempt.status === "cancelled" || decision?.reason === "cancelled")) {
     const settled = stores.invocations.transition(invocation.id, { to: "cancelled" }, meta);
     blockRunningTasks(stores, invocation, { kind: "replan", description: `Invocation ${invocation.id} was cancelled` }, meta);
     return { kind: "settled", invocation: settled };
   }
-  if (!decision) throw new Error(`terminal Attempt ${attempt.id} carries no retry decision`);
-  if (input.approval !== null) {
-    // Terminal: the provider execution is over; the successor Invocation continues from here once the Decision is resolved.
-    const blocked = stores.invocations.transition(invocation.id, { to: "blocked", decisionId: input.approval.decisionId }, meta);
-    blockRunningTasks(stores, invocation, { kind: "decision", decisionId: input.approval.decisionId }, meta);
+  if (input.blocked !== null) {
+    // Terminal: the provider execution is over; the successor Invocation continues from here once the Decision is resolved or superseded.
+    const blocked = stores.invocations.transition(invocation.id, { to: "blocked", decisionId: input.blocked.decisionId }, meta);
+    blockRunningTasks(stores, invocation, { kind: "decision", decisionId: input.blocked.decisionId }, meta);
     return { kind: "settled", invocation: blocked };
   }
+  if (!decision) throw new Error(`terminal Attempt ${attempt.id} carries no retry decision`);
   if (decision.permitted) return { kind: "retry_pending", invocation, decision };
   const failureReason = invocationFailureReasonFor(decision, attempt);
   const failed = stores.invocations.transition(invocation.id, { to: "failed", failureReason, result: null }, meta);

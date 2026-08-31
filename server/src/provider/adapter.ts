@@ -18,6 +18,14 @@
  * typed `approval_required` completion. The adapter keeps no
  * approval-consumption state — the runtime's canonical approval use
  * decides, so a fresh or restarted adapter cannot repeat a consumed call.
+ *
+ * A runtime-tool call whose accepted result `blocksInvocation`
+ * (`request_decision`, execution-model §8.2) ends the logical turn: the
+ * adapter stops driving the model at once and returns the typed
+ * `decision_requested` completion. The runtime does not rely on it — the
+ * committed call row is the boundary, and whatever the adapter reports
+ * afterwards (a result, a failure, a throw, further calls) cannot override
+ * it — but a conforming adapter never spends provider work past it.
  */
 import type { AgentCapabilities, ApprovedToolCallUseId, AttemptId, DecisionId, InvocationId, ModelEffort, ProposedToolCall, RunId, RuntimeToolCallOutcome, RuntimeToolCallRequest, RuntimeToolCallTool, Timestamp, ToolPolicy, UsageInput } from "@agentique-console/core";
 
@@ -127,6 +135,8 @@ export type ProviderCompletion =
   | { kind: "tool_failure"; tool: string; message: string }
   /** The authorization port answered `approval_required`: the exact proposed call in the provider-neutral form the runtime canonicalizes and records. */
   | { kind: "approval_required"; call: ProposedToolCall }
+  /** The runtime-tool port accepted a blocking `request_decision`: the adapter stopped at that boundary; the runtime settles it from the committed row. */
+  | { kind: "decision_requested"; decisionId: DecisionId }
   | { kind: "interrupted"; cause: InterruptionCause; message: string };
 
 /** One provider result's measured consumption; the runtime records one Usage row per chunk. */

@@ -1,7 +1,9 @@
 /**
  * Agent-requested Decisions (execution-model §8.2): the `request_decision`
- * runtime-tool handler, the canonical facts it validates against, and the
- * one place a requested Decision is created.
+ * runtime-tool handler, the canonical facts it validates against, the one
+ * place a requested Decision is created, and the two paths that end one —
+ * the operator's resolution and the runtime's deterministic default
+ * resolution once a `use_default_after_deadline` Decision is due.
  *
  * An Orchestrator turn (never the read-only `final_synthesis`), a
  * Coordinator's executable turns, and a Worker's current work may request
@@ -17,22 +19,39 @@
  * refusal writes nothing, and an accepted call creates exactly one open
  * Decision in the same transaction that records the accepted
  * `runtime_tool_calls` row. An accepted request is a hard logical-turn
- * boundary: the Attempt executor ends the Attempt and the Invocation
- * `blocked` on the Decision once the provider returns, whatever the provider
- * did afterwards (`attempt-executor.ts`).
+ * boundary under both resolution policies: the Attempt executor ends the
+ * Attempt and the Invocation `blocked` on the Decision once the provider
+ * returns, whatever the provider did afterwards (`attempt-executor.ts`), and
+ * no provider process ever waits for the operator.
+ *
+ * Resolution never invokes a provider and never prepares the continuation:
+ * `resolve` (the operator) and `resolveDefault` (the scheduler's
+ * `resolve_decision_default` action, projected from persisted rows and the
+ * caller's clock — no timer, interval, or second scheduler) write the
+ * Decision resolution and its Event in one transaction; a `waive` also
+ * applies the Requirement's `waived` status change there; a waiver whose
+ * pinned Requirement went stale is superseded instead, never applied to a
+ * newer revision. The scheduler continues the blocked requester afterwards.
  */
 import {
   DECISION_KINDS,
+  DecisionRequestRefusedError,
+  isAgentRequestedDecision,
   isRequestableDecisionKind,
+  NotFoundError,
   REQUIREMENT_MACHINE,
   REQUIREMENT_WAIVER_OPTIONS,
   ROOT_SOURCE_PATH,
+  RUN_MACHINE,
   runtimeToolHandlerBound,
+  waiverSubjectOf,
   type ActivationCondition,
   type ArtifactId,
   type ContextManifest,
   type Decision,
+  type DecisionId,
   type DecisionOption,
+  type Evidence,
   type Invocation,
   type PatternPlanNode,
   type PlanNodeId,
@@ -40,13 +59,15 @@ import {
   type RequestedDecisionAffects,
   type RequirementId,
   type Run,
+  type RunId,
   type RuntimeToolCall,
   type RuntimeToolRejection,
   type TaskId,
+  type Timestamp,
 } from "@agentique-console/core";
 import type { PersistenceContext } from "../persistence/context.ts";
 import type { Stores } from "../persistence/stores/index.ts";
-import type { WriteOptions } from "../persistence/stores/support.ts";
+import { OPERATOR_ACTOR, type WriteOptions } from "../persistence/stores/support.ts";
 import type { HandlerOutcome, RuntimeToolCaller } from "./task-proposals.ts";
 
 /** The accepted `request_decision` call of an Invocation (the row that ended its logical turn), or `null`. */
@@ -67,6 +88,23 @@ interface RequestScope {
   taskIds: Set<TaskId>;
   planNodeIds: Set<PlanNodeId>;
 }
+
+/** The operator's resolution of an agent-requested Decision: the exact Decision and option, an optional rationale (required for a waiver), optional Evidence Artifacts of the Run. */
+export interface DecisionResolveInput {
+  decisionId: DecisionId;
+  optionId: string;
+  rationale?: string | null;
+  artifactIds?: ArtifactId[];
+}
+
+export type DecisionResolutionOutcome =
+  /** The Decision is resolved to `chosenOptionId` (now, or already identically: `replayed`). */
+  | { kind: "resolved"; decisionId: DecisionId; chosenOptionId: string; resolvedBy: Decision["resolution"] extends infer R ? (R extends { resolvedBy: infer B } ? B : never) : never; replayed: boolean }
+  /** A `requirement_waiver` whose pinned Requirement went stale was superseded (now, or already: `replayed`); no waiver was applied. */
+  | { kind: "superseded"; decisionId: DecisionId; reason: "requirement_waiver_stale"; replayed: boolean };
+
+/** Why a waiver Decision's pinned Requirement can no longer be waived as requested. */
+export type WaiverStaleness = "requirement_retired" | "requirement_not_waivable" | "requirement_not_current_leaf" | "revision_superseded";
 
 const reject = (code: RuntimeToolRejection["code"], message: string, path: string | null = null): HandlerOutcome => ({ kind: "rejected", reasons: [{ code, message, path }] });
 
@@ -200,6 +238,170 @@ export class DecisionRequestService {
 
   private accepted(decision: Decision): HandlerOutcome {
     return { kind: "applied", result: { tool: "request_decision", decisionId: decision.id, status: "open", blocksInvocation: true } };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Operator resolution
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Resolves an agent-requested Decision as the operator: the option must be
+   * one of the Decision's; an identical completed resolution replays without
+   * a write; a conflicting one is refused; a `requirement_waiver` needs the
+   * operator's rationale, and `waive` sets the pinned Requirement `waived`
+   * in the same transaction — unless the Requirement went stale, in which
+   * case the Decision is superseded and no waiver is applied. Nothing here
+   * invokes a provider or prepares the continuation; the scheduler continues
+   * the blocked requester from rows, whether or not it can be funded now.
+   */
+  resolve(input: DecisionResolveInput, options: WriteOptions = {}): DecisionResolutionOutcome {
+    if (options.actor !== undefined && options.actor.kind !== "operator") throw new DecisionRequestRefusedError("operator_required", `a requested Decision is resolved by the operator, not ${options.actor.kind}`, { decisionId: input.decisionId });
+    return this.ctx.tx.write(() => {
+      const decision = this.requested(input.decisionId);
+      const run = this.stores.runs.get(decision.runId!);
+      if (RUN_MACHINE.isTerminal(run.status)) throw new DecisionRequestRefusedError("run_terminal", `Run ${run.id} is ${run.status}; nothing is resolved for a terminal Run`, { decisionId: decision.id, runId: run.id });
+      if (!decision.options.some((o) => o.id === input.optionId)) throw new DecisionRequestRefusedError("option_invalid", `${input.optionId} is not an option of Decision ${decision.id}`, { decisionId: decision.id, optionId: input.optionId });
+      const replayed = this.replay(decision, input.optionId);
+      if (replayed !== null) return replayed;
+      const rationale = input.rationale ?? null;
+      const artifactIds = [...new Set(input.artifactIds ?? [])].sort();
+      for (const id of artifactIds) {
+        let artifact;
+        try {
+          artifact = this.stores.artifacts.get(id);
+        } catch {
+          throw new DecisionRequestRefusedError("evidence_invalid", `Artifact ${id} does not exist`, { decisionId: decision.id, artifactId: id });
+        }
+        if (artifact.runId !== run.id) throw new DecisionRequestRefusedError("evidence_invalid", `Artifact ${id} belongs to another Run`, { decisionId: decision.id, artifactId: id });
+      }
+      const meta: WriteOptions = { actor: OPERATOR_ACTOR, correlationId: options.correlationId ?? decision.id, causationSeq: options.causationSeq ?? null };
+      if (decision.kind !== "requirement_waiver") {
+        this.stores.decisions.resolve(decision.id, { resolvedBy: "operator", chosenOptionId: input.optionId, rationale, artifactIds }, meta);
+        return { kind: "resolved", decisionId: decision.id, chosenOptionId: input.optionId, resolvedBy: "operator", replayed: false };
+      }
+      if (rationale === null) throw new DecisionRequestRefusedError("rationale_required", `a requirement_waiver resolution records the operator's rationale`, { decisionId: decision.id });
+      // A stale pinned Requirement supersedes the waiver whatever the option: a waiver is never applied to a newer revision or a changed Requirement.
+      if (this.waiverStaleness(decision) !== null) {
+        this.stores.decisions.supersede(decision.id, "requirement_waiver_stale", meta);
+        return { kind: "superseded", decisionId: decision.id, reason: "requirement_waiver_stale", replayed: false };
+      }
+      const subject = waiverSubjectOf(decision);
+      this.stores.decisions.resolve(decision.id, { resolvedBy: "operator", chosenOptionId: input.optionId, rationale, artifactIds }, meta);
+      if (input.optionId === "waive") {
+        const evidence: Evidence[] = artifactIds.map((artifactId) => ({ kind: "artifact", artifactId }));
+        this.stores.requirements.recordStatusChange({ requirementId: subject.requirementId, runId: run.id, to: "waived", actor: "operator", evidence, gateId: null, decisionId: decision.id, rationale }, { ...meta, causationSeq: this.ctx.journal.lastSeq() });
+      }
+      return { kind: "resolved", decisionId: decision.id, chosenOptionId: input.optionId, resolvedBy: "operator", replayed: false };
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Deterministic default resolution (the scheduler's action)
+  // ---------------------------------------------------------------------------
+
+  /** The Run's open `use_default_after_deadline` Decisions that are due at `now`, in canonical order: deadline, then creation, then id. */
+  due(runId: RunId, now: Timestamp): Decision[] {
+    return this.stores.decisions
+      .openDefaultPolicyOf(runId)
+      .filter((d) => this.isDue(d, now))
+      .sort((a, b) => (a.deadlineAt ?? "~").localeCompare(b.deadlineAt ?? "~") || a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+  }
+
+  /** The earliest future deadline among the Run's open default-policy Decisions, or `null`: what the scheduler projects as a resumption time. */
+  nextDeadline(runId: RunId, now: Timestamp): Timestamp | null {
+    let earliest: Timestamp | null = null;
+    for (const decision of this.stores.decisions.openDefaultPolicyOf(runId)) {
+      if (decision.deadlineAt === null || decision.deadlineAt <= now) continue;
+      if (earliest === null || decision.deadlineAt < earliest) earliest = decision.deadlineAt;
+    }
+    return earliest;
+  }
+
+  /** Whether a default-policy Decision is due: its deadline has passed at `now`, or its activation condition holds. */
+  isDue(decision: Decision, now: Timestamp): boolean {
+    if (decision.status !== "open" || decision.resolutionPolicy !== "use_default_after_deadline") return false;
+    if (decision.deadlineAt !== null && decision.deadlineAt <= now) return true;
+    return decision.activationCondition !== null && this.activationConditionHolds(decision.activationCondition);
+  }
+
+  /** Whether a deterministic activation condition holds now, from rows: `plan_node_ready` once the node has left `pending` for `ready`. */
+  activationConditionHolds(condition: ActivationCondition): boolean {
+    switch (condition.kind) {
+      case "plan_node_ready": {
+        let node;
+        try {
+          node = this.stores.plans.getNode(condition.planNodeId);
+        } catch (error) {
+          if (error instanceof NotFoundError) return false;
+          throw error;
+        }
+        return node.status === "ready" || node.status === "running" || node.status === "waiting" || node.status === "succeeded" || node.status === "failed";
+      }
+    }
+  }
+
+  /**
+   * Resolves a due `use_default_after_deadline` Decision to its persisted
+   * recommendation, by policy, once: the Decision, its policy, and its
+   * dueness are revalidated inside the transaction, so a Decision the
+   * operator resolved meanwhile (or one not yet due) changes nothing.
+   */
+  resolveDefault(decisionId: DecisionId, now: Timestamp, options: WriteOptions = {}): { kind: "resolved"; decisionId: DecisionId; chosenOptionId: string } | { kind: "no_change"; reason: "not_open" | "not_default_policy" | "not_due" } {
+    return this.ctx.tx.write(() => {
+      const decision = this.stores.decisions.get(decisionId);
+      if (decision.status !== "open") return { kind: "no_change", reason: "not_open" };
+      if (decision.resolutionPolicy !== "use_default_after_deadline" || decision.recommendedOptionId === null) return { kind: "no_change", reason: "not_default_policy" };
+      if (!this.isDue(decision, now)) return { kind: "no_change", reason: "not_due" };
+      const meta: WriteOptions = { actor: { kind: "policy", policy: "use_default_after_deadline" }, correlationId: options.correlationId ?? decision.id, causationSeq: options.causationSeq ?? null };
+      this.stores.decisions.resolve(decision.id, { resolvedBy: "policy:use_default_after_deadline", chosenOptionId: decision.recommendedOptionId, rationale: null, artifactIds: [] }, meta);
+      return { kind: "resolved", decisionId: decision.id, chosenOptionId: decision.recommendedOptionId };
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Canonical facts
+  // ---------------------------------------------------------------------------
+
+  /** The agent-requested Decision, refused typed when it does not exist or was not requested through `request_decision`. */
+  requested(decisionId: DecisionId): Decision {
+    let decision: Decision;
+    try {
+      decision = this.stores.decisions.get(decisionId);
+    } catch (error) {
+      if (error instanceof NotFoundError) throw new DecisionRequestRefusedError("decision_not_requested", `Decision ${decisionId} does not exist`, { decisionId });
+      throw error;
+    }
+    if (!isAgentRequestedDecision(decision) || decision.runId === null) throw new DecisionRequestRefusedError("decision_not_requested", `Decision ${decisionId} is not a Decision an Invocation requested through request_decision`, { decisionId, kind: decision.kind });
+    return decision;
+  }
+
+  /**
+   * Why an open waiver can no longer be applied as requested, or `null`
+   * while it can: the Requirement was retired, satisfied, or otherwise left
+   * a waivable state; it is no longer a current leaf; or the Conversation's
+   * current revision is no longer the pinned one.
+   */
+  waiverStaleness(decision: Decision): WaiverStaleness | null {
+    const subject = waiverSubjectOf(decision);
+    const requirement = this.stores.requirements.get(subject.requirementId);
+    if (requirement.status === "retired") return "requirement_retired";
+    if (!REQUIREMENT_MACHINE.canTransition(requirement.status, "waived")) return "requirement_not_waivable";
+    const current = this.stores.requirements.currentRevision(decision.conversationId);
+    if (current === null || current.id !== subject.requirementRevisionId) return "revision_superseded";
+    if (!current.tree.some((e) => e.id === requirement.id) || current.tree.some((e) => e.parentId === requirement.id)) return "requirement_not_current_leaf";
+    return null;
+  }
+
+  /** An identical completed resolution replays; a conflicting one is refused; a superseded Decision reports its supersession. */
+  private replay(decision: Decision, optionId: string): DecisionResolutionOutcome | null {
+    if (decision.status === "open") return null;
+    if (decision.status === "superseded") {
+      if (decision.supersessionReason === "requirement_waiver_stale") return { kind: "superseded", decisionId: decision.id, reason: "requirement_waiver_stale", replayed: true };
+      throw new DecisionRequestRefusedError("conflicting_resolution", `Decision ${decision.id} was superseded by Decision ${String(decision.supersededByDecisionId)}`, { decisionId: decision.id });
+    }
+    const resolution = decision.resolution!;
+    if (resolution.chosenOptionId === optionId) return { kind: "resolved", decisionId: decision.id, chosenOptionId: optionId, resolvedBy: resolution.resolvedBy, replayed: true };
+    throw new DecisionRequestRefusedError("conflicting_resolution", `Decision ${decision.id} is resolved to ${resolution.chosenOptionId}; ${optionId} conflicts with it`, { decisionId: decision.id, chosen: resolution.chosenOptionId, requested: optionId });
   }
 
   // ---------------------------------------------------------------------------

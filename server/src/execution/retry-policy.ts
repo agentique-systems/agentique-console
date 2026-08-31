@@ -87,6 +87,9 @@ export function classifyAttempt(input: ClassificationInput): ClassifiedAttempt {
     case "approval_required":
       // The call itself is recorded only as the Decision's call Artifact; the bounded detail names the tool alone.
       return { status: "failed", failureClass: "tool_failure", detail: detail(`tool ${completion.call.tool} requires operator approval`, { tool: completion.call.tool }), result: null };
+    case "decision_requested":
+      // Reached only when no committed request backs the adapter's claim (the executor classifies a committed request itself): an adapter fault.
+      return { status: "failed", failureClass: "tool_failure", detail: detail("the adapter reported a Decision request that was not committed", { tool: "request_decision" }), result: null };
     case "interrupted":
       if (completion.cause === "cancelled") return { status: "cancelled", failureClass: null, detail: detail(completion.message, { cancelled: true }), result: null };
       if (completion.cause === "deadline") return { status: "timed_out", failureClass: "interrupted", detail: detail(completion.message), result: null };
@@ -104,6 +107,8 @@ export interface RetryDecisionInput {
   previousFailureClass: AttemptFailureClass | null;
   /** True when the provider ended on an `approval_required` call, which no retry can resolve. */
   approvalRequired: boolean;
+  /** True when the Invocation durably requested a blocking Decision (execution-model §8.2): the logical turn ended; no retry, whatever else happened. */
+  decisionRequested?: boolean;
   /** The Invocation-wide wall-clock deadline (`invocationDeadlineAt`), or `null` when unbounded. */
   deadlineAt: Timestamp | null;
   now: Timestamp;
@@ -126,6 +131,7 @@ export function decideRetry(input: RetryDecisionInput): RetryDecision | null {
   const { classified } = input;
   if (classified.status === "succeeded") return null;
   const refuse = (reason: RetryDecision["reason"]): RetryDecision => ({ permitted: false, reason, notBefore: null });
+  if (input.decisionRequested === true) return refuse("decision_requested");
   if (classified.status === "cancelled" || classified.detail?.cancelled) return refuse("cancelled");
   if (input.approvalRequired) return refuse("approval_required");
   if (classified.status === "timed_out") return refuse("wall_clock_exhausted");

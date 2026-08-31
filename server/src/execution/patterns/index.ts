@@ -8,6 +8,7 @@
 import type { Pattern, PatternPosition, PlanNodeId, Timestamp } from "@agentique-console/core";
 import type { WriteOptions } from "../../persistence/stores/support.ts";
 import { RunCompletionEngine } from "../completion.ts";
+import { DecisionRequestService } from "../decision-requests.ts";
 import { ChainPatternRunner } from "./chain.ts";
 import { CoordinatorWorkerPatternRunner } from "./coordinator-worker.ts";
 import { EvaluatorOptimizerPatternRunner } from "./evaluator-optimizer.ts";
@@ -55,6 +56,8 @@ export interface PatternRunners {
   root: RootNodeSupport;
   /** The Run completion engine (execution-model §10 `run_completion`), driven by the same scheduler. */
   completion: RunCompletionEngine;
+  /** Agent-requested Decisions (execution-model §8.2): resolution by the operator or by policy, driven by the same scheduler. */
+  decisionRequests: DecisionRequestService;
 }
 
 export function createPatternRunners(deps: PatternRunnerDependencies): PatternRunners {
@@ -68,6 +71,7 @@ export function createPatternRunners(deps: PatternRunnerDependencies): PatternRu
     evaluatorOptimizer: new EvaluatorOptimizerPatternRunner(deps),
     root: new RootNodeSupport(deps, completion),
     completion,
+    decisionRequests: new DecisionRequestService(deps.ctx, deps.stores),
   };
 }
 

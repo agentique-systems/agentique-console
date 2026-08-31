@@ -14,10 +14,14 @@
  * `runtime_tool_calls` step submits each runtime-tool call to the request's
  * runtime-tool port in order, records every outcome, and continues with
  * `then` whatever the outcomes were (a scripted agent that corrects itself
- * scripts the corrected call as the next entry); the fake holds no
- * canonical state and never inspects an outcome beyond recording it.
+ * scripts the corrected call as the next entry) — except that, like every
+ * conforming adapter, it stops at an accepted result that blocks the
+ * Invocation and reports the `decision_requested` completion; a step with
+ * `ignoreStop` models a misbehaving adapter that keeps going. The fake
+ * holds no canonical state and never inspects an outcome beyond recording it
+ * and the typed stop flag.
  */
-import type { AttemptId, ProposedToolCall, RuntimeToolCallOutcome, RuntimeToolCallRequest, RuntimeToolCallTool, Timestamp } from "@agentique-console/core";
+import { runtimeToolResultBlocksInvocation, type AttemptId, type ProposedToolCall, type RuntimeToolCallOutcome, type RuntimeToolCallRequest, type RuntimeToolCallTool, type Timestamp } from "@agentique-console/core";
 import type { AttemptExecutionOutcome, AttemptExecutionRequest, InterruptionCause, ProviderAdapter, ProviderCompletion, ToolCallAuthorization, UsageChunk } from "./adapter.ts";
 
 export interface FakeStepCommon {
@@ -41,8 +45,8 @@ export type FakeStep = FakeStepCommon &
     | { kind: "tool_failure"; tool: string; message?: string }
     /** Proposes each call to the authorization port in order; on the first non-executable outcome the step ends, otherwise `then` follows. */
     | { kind: "tool_calls"; calls: ProposedToolCall[]; then: FakeStep }
-    /** Submits each runtime-tool call to the runtime-tool port in order, recording every outcome, then `then` follows. */
-    | { kind: "runtime_tool_calls"; calls: RuntimeToolCallRequest[]; then: FakeStep }
+    /** Submits each runtime-tool call to the runtime-tool port in order, recording every outcome, then `then` follows; stops at a blocking result unless `ignoreStop`. */
+    | { kind: "runtime_tool_calls"; calls: RuntimeToolCallRequest[]; then: FakeStep; ignoreStop?: boolean }
     | { kind: "interrupted"; message?: string }
     /** A step computed when it executes, from the request alone (a test may derive it from ids minted earlier in the same pass); the fake reads nothing. */
     | { kind: "derived"; step: (request: AttemptExecutionRequest) => FakeStep }
@@ -207,6 +211,10 @@ export class ScriptedProvider implements ProviderAdapter {
         this.runtimeToolCalls.push(record);
         recorded.runtimeToolCalls.push(record);
         request.output({ attemptId: request.attemptId, kind: "tool_call", text: `${call.tool} ${outcome.kind}` });
+        // The stop boundary of the adapter contract: an accepted blocking result ends the execution here.
+        if (outcome.kind === "accepted" && runtimeToolResultBlocksInvocation(outcome.result) && outcome.result.tool === "request_decision" && step.ignoreStop !== true) {
+          return { ...this.#base(step, request), completion: { kind: "decision_requested", decisionId: outcome.result.decisionId }, result: null };
+        }
       }
       return this.#run({ ...step.then, usage: step.then.usage ?? step.usage, transcript: step.then.transcript ?? step.transcript, continuation: step.then.continuation ?? step.continuation }, request, recorded);
     }

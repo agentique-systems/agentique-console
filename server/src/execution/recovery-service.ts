@@ -5,7 +5,10 @@
  * Invocation is failed with `allocation_exhausted` when no Attempt remains
  * or left with durable retry eligibility otherwise (resumed only if the
  * continuation checks pass, fresh when the payload is absent or invalid),
- * and the governor is rebuilt from canonical lease state. Nothing here reads
+ * and the governor is rebuilt from canonical lease state. An Invocation
+ * whose Attempt had durably requested a blocking Decision (execution-model
+ * §8.2) converges to `blocked` on that Decision — no retry, no further
+ * provider call — from the accepted request row alone. Nothing here reads
  * a transcript or a provider message, and nothing executes: recoverable
  * work is returned for an explicit execution call.
  *
@@ -19,6 +22,7 @@ import type { WriteOptions } from "../persistence/stores/support.ts";
 import type { ProviderAdapter } from "../provider/adapter.ts";
 import type { ContinuationService } from "../provider/continuation.ts";
 import { continuationCandidate, type ContinuationPolicyConfig } from "./continuation-policy.ts";
+import { blockingRequestOf } from "./decision-requests.ts";
 import type { ResourceGovernor } from "./governor.ts";
 import { settleInvocation } from "./invocation-lifecycle.ts";
 import { decideRetry, type RetryPolicyConfig } from "./retry-policy.ts";
@@ -70,7 +74,10 @@ export class RecoveryService {
         const invocation = this.stores.invocations.get(attempt.invocationId);
         const manifest = this.stores.invocations.getManifest(invocation.id);
         const previous = attempt.number > 1 ? this.stores.invocations.listAttempts(invocation.id)[attempt.number - 2] : undefined;
-        const detail = { message: "interrupted by a runtime restart", violations: [], tool: null, cancelled: false };
+        // A blocking Decision the Attempt durably requested ends the logical turn: the Invocation converges to `blocked`, never retried.
+        const blocking = blockingRequestOf(this.stores, invocation);
+        const blocked = blocking !== null && blocking.result.tool === "request_decision" ? { decisionId: blocking.result.decisionId } : null;
+        const detail = { message: blocked === null ? "interrupted by a runtime restart" : `interrupted by a runtime restart after requesting Decision ${blocked.decisionId}`, violations: [], tool: null, cancelled: false };
         // The same Invocation-wide deadline the previous process enforced, derived from persisted facts alone.
         const decision = decideRetry({
           classified: { status: "interrupted", failureClass: "interrupted", detail, result: null },
@@ -78,6 +85,7 @@ export class RecoveryService {
           maxAttempts: invocation.allocation.attempts,
           previousFailureClass: previous?.failureClass ?? null,
           approvalRequired: false,
+          decisionRequested: blocked !== null,
           deadlineAt: invocationDeadlineAt(invocation.startedAt, manifest.content.maxWallClockMs),
           now,
           config: this.config.retry,
@@ -88,7 +96,7 @@ export class RecoveryService {
           const lease = this.stores.leases.get(interrupted.capacityLeaseId);
           if (lease.status === "active") report.releasedLeaseIds.push(this.governor.release(lease.id, options).id);
         }
-        const settlement = settleInvocation(this.stores, { invocation, attempt: interrupted, decision, result: null, approval: null, meta: options });
+        const settlement = settleInvocation(this.stores, { invocation, attempt: interrupted, decision, result: null, blocked, meta: options });
         if (settlement.kind === "settled") {
           if (settlement.invocation.status === "failed") report.failedInvocationIds.push(settlement.invocation.id);
           continue;

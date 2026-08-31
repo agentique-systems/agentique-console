@@ -42,6 +42,7 @@ import {
   type AttemptId,
   type CompletionRequestId,
   type CoordinatorPurpose,
+  type DecisionId,
   type GateId,
   type InvocationId,
   type Pattern,
@@ -112,6 +113,8 @@ export type SchedulerAction =
   | { kind: "settle_final_synthesis"; gateId: GateId; invocationId: InvocationId }
   /** The rows imply the request's end: cancelled before verification, or the Gate closed failed with its remediation Task. */
   | { kind: "complete_run_verification"; completionRequestId: CompletionRequestId }
+  /** An open `use_default_after_deadline` Decision of the Run is due (its deadline passed or its activation condition holds): the runtime resolves it to the persisted recommendation (execution-model §8.2). */
+  | { kind: "resolve_decision_default"; decisionId: DecisionId }
   /** No current work can proceed and no Attempt is running: the Run records the reason. */
   | { kind: "wait_run"; reason: RunWaitReason };
 
@@ -287,6 +290,10 @@ export class RunScheduler {
       case "run_terminal":
         break;
     }
+
+    // Due default-policy Decisions resolve by the runtime, in canonical order, before any node acts on them; a future deadline is a resumption time.
+    for (const decision of this.runners.decisionRequests.due(runId, now)) actions.push({ kind: "resolve_decision_default", decisionId: decision.id });
+    wakeAt = earliest(wakeAt, this.runners.decisionRequests.nextDeadline(runId, now));
 
     // Every other current member, in scheduling order.
     for (const node of graph.nodes) {
@@ -635,6 +642,8 @@ export class RunScheduler {
         return this.runners.completion.settleSynthesis(runId, meta);
       case "complete_run_verification":
         return this.runners.completion.complete(runId, meta);
+      case "resolve_decision_default":
+        return this.runners.decisionRequests.resolveDefault(action.decisionId, this.ctx.clock(), meta).kind === "resolved" ? { kind: "transitioned" } : { kind: "no_change" };
       case "execute_invocation": {
         const prepared = await this.executor.prepareNextAttempt(action.invocationId, meta);
         if (prepared.kind === "prepared") {

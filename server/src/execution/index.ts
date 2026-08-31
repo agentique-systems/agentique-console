@@ -78,6 +78,8 @@ export { RunScheduler, DEFAULT_SCHEDULER_CONFIG } from "./scheduler.ts";
 export { CAPACITY_ADMISSIBLE_STATUSES, PlanNodeCapacity } from "./plan-node-capacity.ts";
 export type { CapacityAdmission, CapacityIneligibility, CapacityOutcome } from "./plan-node-capacity.ts";
 export { BudgetIncreaseService } from "./budget-increases.ts";
+export { DecisionRequestService, blockingRequestOf } from "./decision-requests.ts";
+export type { DecisionResolutionOutcome, DecisionResolveInput } from "./decision-requests.ts";
 export type { BudgetIncreaseProjection, BudgetIncreaseRequestInput, BudgetIncreaseResolutionOutcome, BudgetIncreaseResolveInput, BudgetIncreaseServiceDependencies } from "./budget-increases.ts";
 export type { RunFinalizationFailure, RunFinalizationOutcome, RunFinalizationRequest, RunFinalizationWorkspacePort } from "./ports/run-finalization-workspace.ts";
 export { RUN_FINALIZATION_FAILURES } from "./ports/run-finalization-workspace.ts";

@@ -26,6 +26,17 @@
  *             Invocation settlement (terminal only when no retry remains,
  *             which releases its reservation) and Task transitions.
  *
+ * An accepted `request_decision` committed during execution is a hard
+ * logical-turn boundary (execution-model §8.2): whatever the provider then
+ * reports — a result, a failure, a throw, an interruption, further calls —
+ * finalization records the Usage once, ends the Attempt `failed` with the
+ * closed `decision_requested` class and a refused retry, ends the
+ * Invocation `blocked` on the requested Decision with its Tasks blocked on
+ * it, and releases its reservation and worktree. A running Invocation found
+ * with a committed request and no active Attempt (a process that died
+ * between the commit and finalization) converges to the same state on its
+ * next preparation without another provider call.
+ *
  * Every operation is safe to call repeatedly: a finalized Attempt is never
  * finalized twice, a refusal creates nothing, and an in-flight Attempt is
  * reported rather than duplicated. Nothing here reads a transcript.
@@ -58,6 +69,7 @@ import type { WriteOptions } from "../persistence/stores/support.ts";
 import type { AttemptExecutionOutcome, AttemptExecutionRequest, ProviderAdapter, ProviderCompletion, TransientOutputSink } from "../provider/adapter.ts";
 import type { ContinuationService } from "../provider/continuation.ts";
 import { continuationCandidate, type ContinuationPolicyConfig } from "./continuation-policy.ts";
+import { blockingRequestOf } from "./decision-requests.ts";
 import type { ResourceGovernor } from "./governor.ts";
 import { settleInvocation, type Settlement } from "./invocation-lifecycle.ts";
 import { renderManifest, type RetryAppendix } from "./manifest/renderer.ts";
@@ -78,7 +90,7 @@ export const DEFAULT_EXECUTOR_CONFIG: Readonly<AttemptExecutorConfig> = Object.f
   continuation: { contextWindowTokens: 200_000 },
 });
 
-export type NotPermittedReason = "invocation_terminal" | "invocation_waiting" | "attempt_active" | "retry_refused" | "retry_not_yet" | "allocation_exhausted";
+export type NotPermittedReason = "invocation_terminal" | "invocation_waiting" | "attempt_active" | "retry_refused" | "retry_not_yet" | "allocation_exhausted" | "decision_requested";
 
 export type PrepareOutcome =
   | { kind: "prepared"; attempt: Attempt; lease: CapacityLease; invocation: Invocation }
@@ -88,7 +100,9 @@ export type PrepareOutcome =
 export type ExecutionOutcome =
   | { kind: "finalized"; attempt: Attempt; settlement: Settlement }
   /** The Invocation ended `blocked` on the open `side_effect_approval` Decision; the call itself is only in the Decision's call Artifact. */
-  | { kind: "approval_required"; attempt: Attempt; settlement: Settlement; decision: Decision };
+  | { kind: "approval_required"; attempt: Attempt; settlement: Settlement; decision: Decision }
+  /** The Invocation ended `blocked` on the Decision it requested through `request_decision`; the provider's later output changed nothing. */
+  | { kind: "decision_requested"; attempt: Attempt; settlement: Settlement; decision: Decision };
 
 export type AdvanceOutcome = PrepareOutcome | ExecutionOutcome | { kind: "in_flight"; attemptId: AttemptId; invocation: Invocation };
 
@@ -189,6 +203,8 @@ export class AttemptExecutor {
     if (invocation.status === "waiting") return { permitted: false, reason: "invocation_waiting", notBefore: null };
     if (manifest === null) return { permitted: false, reason: "invocation_terminal", notBefore: null };
     if (attempts.some((a) => !ATTEMPT_MACHINE.isTerminal(a.status))) return { permitted: false, reason: "attempt_active", notBefore: null };
+    // A durably requested blocking Decision ended the logical turn: the Invocation settles blocked, never re-executes (execution-model §8.2).
+    if (blockingRequestOf(this.stores, invocation) !== null) return { permitted: false, reason: "decision_requested", notBefore: null };
     // No Attempt may be created once the Invocation-wide deadline has been reached.
     if (deadlineAt !== null && now >= deadlineAt) return { permitted: false, reason: "allocation_exhausted", notBefore: null };
     const latest = attempts.at(-1);
@@ -261,6 +277,22 @@ export class AttemptExecutor {
   }
 
   private refuse(inspection: InvocationInspection, options: WriteOptions): PrepareOutcome {
+    if (!inspection.next.permitted && inspection.next.reason === "decision_requested") {
+      // The committed request is canonical: the Invocation converges to `blocked` on its Decision, its Tasks with it, without a provider call.
+      const blocked = this.ctx.tx.write(() => {
+        const current = this.stores.invocations.get(inspection.invocation.id);
+        if (INVOCATION_MACHINE.isTerminal(current.status)) return current;
+        const request = blockingRequestOf(this.stores, current);
+        if (request === null || request.result.tool !== "request_decision") throw new ConflictError(`Invocation ${current.id} holds no accepted request_decision`);
+        const invocation = this.stores.invocations.transition(current.id, { to: "blocked", decisionId: request.result.decisionId }, options);
+        for (const taskId of invocation.taskIds) {
+          if (this.stores.tasks.get(taskId).status === "running") this.stores.tasks.transition(taskId, { to: "blocked", blockReason: { kind: "decision", decisionId: request.result.decisionId } }, options);
+        }
+        return invocation;
+      });
+      this.cleanup.release(blocked.id, options);
+      return { kind: "not_permitted", reason: "decision_requested", invocation: blocked, notBefore: null };
+    }
     if (!inspection.next.permitted && inspection.next.reason === "allocation_exhausted") {
       const failed = this.ctx.tx.write(() => {
         const current = this.stores.invocations.get(inspection.invocation.id);
@@ -414,15 +446,22 @@ export class AttemptExecutor {
           ? { kind: "tool_failure", tool: proposed.tool ?? outcome.completion.call.tool, message: proposed.message }
           : outcome.completion;
       const consumed = this.stores.usage.consumedByInvocation(invocation.id);
-      const classified = classifyAttempt({ completion, validation, runtimeInterruption: flight.runtimeInterruption, consumed, allocation: invocation.allocation });
+      // A blocking request the Invocation durably committed decides the Attempt's end, whatever the provider reported afterwards.
+      const blocking = blockingRequestOf(this.stores, invocation);
+      const requestedDecisionId = blocking !== null && blocking.result.tool === "request_decision" ? blocking.result.decisionId : null;
+      const classified =
+        requestedDecisionId !== null
+          ? { status: "failed" as const, failureClass: "decision_requested" as const, detail: { message: boundedFailureMessage(`Decision ${requestedDecisionId} requested; the logical turn ended`), violations: [], tool: null, cancelled: false }, result: null }
+          : classifyAttempt({ completion, validation, runtimeInterruption: flight.runtimeInterruption, consumed, allocation: invocation.allocation });
       const previous = attempt.number > 1 ? this.stores.invocations.listAttempts(invocation.id)[attempt.number - 2] : undefined;
-      const approvalRequired = completion.kind === "approval_required" && flight.runtimeInterruption === null;
+      const approvalRequired = requestedDecisionId === null && completion.kind === "approval_required" && flight.runtimeInterruption === null;
       const decision = decideRetry({
         classified,
         attemptNumber: attempt.number,
         maxAttempts: invocation.allocation.attempts,
         previousFailureClass: previous?.failureClass ?? null,
         approvalRequired,
+        decisionRequested: requestedDecisionId !== null,
         deadlineAt: invocationDeadlineAt(invocation.startedAt, manifest.content.maxWallClockMs),
         now: this.ctx.clock(),
         config: this.config.retry,
@@ -446,7 +485,9 @@ export class AttemptExecutor {
       //    tool, the canonical digest, the Artifact, and the originating Run, Plan Node, Invocation, and Attempt.
       const approvalDecision = approvalRequired && proposed !== null && proposed.kind === "ok" && completion.kind === "approval_required" ? this.recordApproval(run, invocation, terminal, proposed.call.tool, proposed.bytes, meta) : null;
       // 8–10. Retry eligibility is the decision above; the Invocation ends only when no retry remains (releasing its reservation), and its Tasks follow.
-      const settlement = settleInvocation(this.stores, { invocation, attempt: terminal, decision, result: classified.result, approval: approvalDecision ? { decisionId: approvalDecision.id } : null, meta });
+      const blockedOn = requestedDecisionId !== null ? { decisionId: requestedDecisionId } : approvalDecision ? { decisionId: approvalDecision.id } : null;
+      const settlement = settleInvocation(this.stores, { invocation, attempt: terminal, decision, result: classified.result, blocked: blockedOn, meta });
+      if (requestedDecisionId !== null) return { kind: "decision_requested", attempt: terminal, settlement, decision: this.stores.decisions.get(requestedDecisionId) };
       if (approvalDecision) return { kind: "approval_required", attempt: terminal, settlement, decision: approvalDecision };
       return { kind: "finalized", attempt: terminal, settlement };
     });
