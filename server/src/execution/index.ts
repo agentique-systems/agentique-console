@@ -75,8 +75,8 @@ export type { ChangesetContentFailure, IntegrationOutcome } from "./integration-
 export { ChainPatternRunner, CoordinatorWorkerPatternRunner, EvaluatorOptimizerPatternRunner, ParallelPatternRunner, PatternNodeSupport, RootNodeSupport, RoutePatternRunner, SinglePatternRunner, SequentialStepEngine, createPatternRunners, runnerFor } from "./patterns/index.ts";
 export type { NodeAdvice, PatternRunner, PatternRunnerDependencies, PatternRunnerOutcome, PatternRunners, RootAdvice, RootOutcome } from "./patterns/index.ts";
 export { RunScheduler, DEFAULT_SCHEDULER_CONFIG } from "./scheduler.ts";
-export { PlanNodeCapacity } from "./plan-node-capacity.ts";
-export type { CapacityAdmission, CapacityOutcome } from "./plan-node-capacity.ts";
+export { CAPACITY_ADMISSIBLE_STATUSES, PlanNodeCapacity } from "./plan-node-capacity.ts";
+export type { CapacityAdmission, CapacityIneligibility, CapacityOutcome } from "./plan-node-capacity.ts";
 export { BudgetIncreaseService } from "./budget-increases.ts";
 export type { BudgetIncreaseProjection, BudgetIncreaseRequestInput, BudgetIncreaseResolutionOutcome, BudgetIncreaseResolveInput, BudgetIncreaseServiceDependencies } from "./budget-increases.ts";
 export type { RunFinalizationFailure, RunFinalizationOutcome, RunFinalizationRequest, RunFinalizationWorkspacePort } from "./ports/run-finalization-workspace.ts";

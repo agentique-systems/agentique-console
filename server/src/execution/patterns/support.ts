@@ -311,6 +311,7 @@ export class PatternNodeSupport {
     // capacity operation, which extends the node's allocation under `extend` in this same transaction or refuses by policy.
     if (request.taskReservationId === undefined) {
       const funded = this.deps.capacity.ensure(node, this.requiredFor(node, position), "invocation", options);
+      if (funded.kind === "ineligible") throw new InvariantViolationError(`PlanNode ${node.id} cannot fund ${patternPositionKey(position)}: ${funded.reason.kind}`, { planNodeId: node.id, reason: funded.reason });
       if (funded.kind === "refused") return { kind: "refused", outcome: funded.policy === "fail" ? this.failNow(node, "allocation_exhausted", options) : this.wait(node, "budget", options) };
     }
     const tasks = this.readyOwnedTasks(node, operation, options);

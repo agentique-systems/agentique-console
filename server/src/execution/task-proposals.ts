@@ -235,7 +235,7 @@ export class TaskProposalService {
     // The whole batch's capacity first: one exact aggregate Allocation Extension under `extend`, in this transaction, before any Task exists;
     // a refusal rejects the batch and leaves no Task, reservation, extension, or Event.
     const funded = this.capacity.ensure(node, plan.total, "task_batch", options);
-    if (funded.kind === "refused") reject("allocation_insufficient", `${batch.tasks.length} Worker allocation(s) do not fit the node's remaining allocation`, "tasks");
+    if (funded.kind !== "funded") reject("allocation_insufficient", `${batch.tasks.length} Worker allocation(s) do not fit the node's remaining allocation`, "tasks");
     // A replaced blocked Task is cancelled (its Task reservation released); a replaced failed Task stays failed in history.
     for (const proposal of batch.tasks) {
       if (proposal.replacesTaskId === null) continue;

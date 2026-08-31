@@ -63,7 +63,7 @@ export class RunStartService {
       const started = this.stores.runs.transition(run.id, { to: "running" }, meta);
       // The first operator turn is ordinary root work: funded through the one capacity operation (the root's `extend` policy applies).
       const funded = this.capacity.ensure(running as never, this.stores.agents.getRevision(root.shape.operation.agentDefinitionRevisionId).defaultLimits.allocation, "root_turn", meta);
-      if (funded.kind === "refused") throw new InsufficientCapacityError(`the root node of Run ${run.id} cannot fund its first Orchestrator turn`, { runId: run.id, planNodeId: root.id });
+      if (funded.kind !== "funded") throw new InsufficientCapacityError(`the root node of Run ${run.id} cannot fund its first Orchestrator turn`, { runId: run.id, planNodeId: root.id, outcome: funded.kind });
       const prepared = this.preparation.prepare({
         runId: run.id,
         planNodeId: root.id,

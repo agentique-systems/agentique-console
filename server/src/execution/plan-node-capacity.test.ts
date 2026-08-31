@@ -49,7 +49,7 @@ describe("plan node capacity", () => {
       for (const policy of ["fail", "wait"] as const) {
         const { node } = readySingle(h, s, small, policy);
         const admission = h.capacity.admits(node, required);
-        expect(admission).toEqual({ required, available: small, shortfall: { costUsd: 1, tokens: 19_000, attempts: 1 }, fits: false, extension: null });
+        expect(admission).toEqual({ required, available: small, shortfall: { costUsd: 1, tokens: 19_000, attempts: 1 }, fits: false, extension: null, ineligible: null });
         const before = capacityWork(h, runId);
         expect(() => h.capacity.ensure(node, required, "invocation", {})).toThrow(/inside the root transaction/);
         expect(h.ctx.tx.write(() => h.capacity.ensure(node, required, "invocation", {}))).toEqual({ kind: "refused", policy });
@@ -58,6 +58,7 @@ describe("plan node capacity", () => {
       const { node } = readySingle(h, s, small, "extend");
       // Zero shortfall: funded, no extension.
       expect(h.ctx.tx.write(() => h.capacity.ensure(node, small, "invocation", {}))).toEqual({ kind: "funded", extension: null });
+      expect(h.capacity.admits(node, small)).toMatchObject({ fits: true, ineligible: null });
       expect(h.stores.allocationExtensions.listByRun(runId)).toEqual([]);
       // A positive shortfall the Run covers: exactly that extension, no remainder, and the node's effective allocation grew by it alone.
       const admission = h.capacity.admits(node, required);
@@ -73,6 +74,81 @@ describe("plan node capacity", () => {
       expect(runAfter.increases).toEqual(runBefore.increases);
       // Every runtime call site is a closed trigger; an open-ended one is refused at the store.
       expect(() => h.ctx.tx.write(() => h.stores.allocationExtensions.record({ runId, planNodeId: node.id, added: { costUsd: 1, tokens: 0, attempts: 0 }, trigger: "because" as never }))).toThrow();
+    } finally {
+      h.close();
+    }
+  });
+
+  it("refuses a node that may not fund a child — pending, terminal, cancelled, skipped, a join, or foreign — with a typed ineligibility before any arithmetic, under every policy, whatever capacity it holds", () => {
+    const h = openRuntimeHarness();
+    try {
+      const s = seedPlanningRuntime(h, { budget: { ...DEFAULT_BUDGET, maxAttempts: 200, maxCostUsd: 500, maxTokens: 5_000_000 } });
+      const runId = s.created.run.id;
+      // Every node holds exactly the child's allocation: its arithmetic admits the child in every state below; only its lifecycle refuses.
+      const required = INVOCATION_ALLOCATION;
+      const single = (title: string, policy?: "fail" | "wait" | "extend"): PlanExpression => ({ pattern: "single", operation: { agentDefinitionRevisionId: s.worker.id, title }, allocation: required, ...(policy ? { onAllocationExhausted: policy } : {}) }) as PlanExpression;
+      const policies = ["fail", "wait", "extend"] as const;
+      const states = ["pending", "skipped", "cancelled", "succeeded", "failed"] as const;
+      const expressions: PlanExpression[] = [
+        ...policies.flatMap((policy) => states.map((state) => single(`${policy} ${state}`, policy))),
+        single("ready"),
+        single("running"),
+        single("waiting"),
+        single("own"),
+        { pattern: "parallel", items: [{ pattern: "chain", steps: [single("a"), single("b")], allocation: required }], allocation: required } as PlanExpression,
+      ];
+      const { nodes } = planNodes(h, s, expressions);
+      const byTitle = new Map(nodes.map((n) => [n.title, n] as const));
+      const ready = (id: string) => h.stores.plans.transitionNode(id as never, { to: "ready" });
+      const running = (id: string) => {
+        ready(id);
+        h.stores.plans.transitionNode(id as never, { to: "running" });
+      };
+      const drive: Record<(typeof states)[number], (id: string) => void> = {
+        pending: () => {},
+        skipped: (id) => h.stores.plans.transitionNode(id as never, { to: "skipped" }),
+        cancelled: (id) => h.stores.plans.transitionNode(id as never, { to: "cancelled", reason: "operator" }),
+        succeeded: (id) => {
+          running(id);
+          h.stores.plans.transitionNode(id as never, { to: "succeeded", outputArtifactIds: [] });
+        },
+        failed: (id) => {
+          running(id);
+          h.stores.plans.transitionNode(id as never, { to: "failed", reason: "invocation_failed", artifactIds: [] });
+        },
+      };
+      for (const policy of policies) {
+        for (const state of states) {
+          const id = byTitle.get(`${policy} ${state}`)!.id;
+          drive[state](id);
+          const node = h.stores.plans.getNode(id) as PlanNode & { kind: "pattern" };
+          const expected = { kind: "node_not_active", status: state };
+          const before = capacityWork(h, runId);
+          expect(h.capacity.admits(node, required), `${policy} ${state}`).toEqual({ required, available: ZERO, shortfall: required, fits: false, extension: null, ineligible: expected });
+          expect(h.ctx.tx.write(() => h.capacity.ensure(node, required, "invocation", {})), `${policy} ${state}`).toEqual({ kind: "ineligible", reason: expected });
+          expect(h.capacity.eligibility(node)).toEqual(expected);
+          expect(capacityWork(h, runId)).toEqual(before);
+        }
+      }
+      // The admissible states: ready, running, and waiting all consult the arithmetic and fit.
+      ready(byTitle.get("ready")!.id);
+      running(byTitle.get("running")!.id);
+      running(byTitle.get("waiting")!.id);
+      h.stores.plans.transitionNode(byTitle.get("waiting")!.id, { to: "waiting", waitReason: "budget" });
+      for (const title of ["ready", "running", "waiting"]) {
+        const node = h.stores.plans.getNode(byTitle.get(title)!.id) as PlanNode & { kind: "pattern" };
+        expect(h.capacity.admits(node, required), title).toMatchObject({ fits: true, ineligible: null, available: required, shortfall: ZERO });
+        expect(h.capacity.eligibility(node)).toBeNull();
+      }
+      // A foreign node object (another Run's id) and a join node are refused by identity, never funded.
+      running(byTitle.get("own")!.id);
+      const own = h.stores.plans.getNode(byTitle.get("own")!.id) as PlanNode & { kind: "pattern" };
+      const foreign = { ...own, runId: "run_000000000000000000000000" as never };
+      expect(h.capacity.admits(foreign, required)).toMatchObject({ fits: false, ineligible: { kind: "foreign_run", runId } });
+      expect(h.ctx.tx.write(() => h.capacity.ensure(foreign, required, "invocation", {}))).toEqual({ kind: "ineligible", reason: { kind: "foreign_run", runId } });
+      const join = nodes.find((n) => n.kind === "join")!;
+      expect(h.capacity.admits({ ...own, id: join.id }, required)).toMatchObject({ fits: false, ineligible: { kind: "join_node" } });
+      expect(h.ctx.tx.write(() => h.capacity.ensure({ ...own, id: join.id }, required, "invocation", {}))).toEqual({ kind: "ineligible", reason: { kind: "join_node" } });
     } finally {
       h.close();
     }

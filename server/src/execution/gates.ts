@@ -332,6 +332,7 @@ export class NodeExitGates {
     const revisionId = this.evaluatorRevisionOf(node);
     // The Evaluator is funded from the node under its allocation policy through the one capacity operation, in this transaction.
     const funded = this.support.deps.capacity.ensure(node, this.evaluatorAllocation(node), "gate_evaluator", options);
+    if (funded.kind === "ineligible") throw new InvariantViolationError(`PlanNode ${node.id} cannot fund a Gate Evaluator: ${funded.reason.kind}`, { planNodeId: node.id, reason: funded.reason });
     if (funded.kind === "refused") return funded.policy === "fail" ? this.support.failNow(node, "allocation_exhausted", options) : this.support.wait(node, "budget", options);
     const input: ManifestInput = { kind: "gate_candidate", gateId: gate.id, gateKind: gate.kind, snapshotId: gate.snapshotId!, artifactIds: gate.candidateArtifactIds, acceptanceCriterionIds: this.criteriaOf(node).evaluated, completionRequestId: null, requirementRevisionId: null, tasks: [] };
     const prepared = preparation.prepare({

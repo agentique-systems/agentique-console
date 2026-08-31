@@ -217,6 +217,7 @@ export class RootNodeSupport {
   /** Inside the transaction: funds one root turn through the one capacity operation; `null` when the root cannot fund it now. */
   private fund(root: PatternPlanNode, trigger: "root_turn" | "gate_remediation", options: WriteOptions): RootOutcome | null {
     const funded = this.deps.capacity.ensure(root, this.turnAllocation(root), trigger, options);
+    if (funded.kind === "ineligible") throw new InvariantViolationError(`root PlanNode ${root.id} cannot fund a turn: ${funded.reason.kind}`, { planNodeId: root.id, reason: funded.reason });
     return funded.kind === "funded" ? null : { kind: "unfunded" };
   }
 

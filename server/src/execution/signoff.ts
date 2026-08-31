@@ -448,7 +448,7 @@ export class RunSignoffService {
       this.stores.runs.transition(run.id, { to: "running" }, this.chain(meta));
       // The follow-up's funding and the follow-up itself commit with the resolution or not at all: a refusal here (a race) rolls everything back.
       const funded = this.deps.capacity.ensure(root, allocation, "signoff_follow_up", this.chain(meta));
-      if (funded.kind === "refused") throw unfundable();
+      if (funded.kind !== "funded") throw unfundable();
       const prepared = preparation.prepare({
         runId: run.id,
         planNodeId: root.id,
