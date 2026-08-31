@@ -77,6 +77,8 @@ export type { NodeAdvice, PatternRunner, PatternRunnerDependencies, PatternRunne
 export { RunScheduler, DEFAULT_SCHEDULER_CONFIG } from "./scheduler.ts";
 export { PlanNodeCapacity } from "./plan-node-capacity.ts";
 export type { CapacityAdmission, CapacityOutcome } from "./plan-node-capacity.ts";
+export { BudgetIncreaseService } from "./budget-increases.ts";
+export type { BudgetIncreaseProjection, BudgetIncreaseRequestInput, BudgetIncreaseResolutionOutcome, BudgetIncreaseResolveInput, BudgetIncreaseServiceDependencies } from "./budget-increases.ts";
 export type { RunFinalizationFailure, RunFinalizationOutcome, RunFinalizationRequest, RunFinalizationWorkspacePort } from "./ports/run-finalization-workspace.ts";
 export { RUN_FINALIZATION_FAILURES } from "./ports/run-finalization-workspace.ts";
 export { RunSignoffService } from "./signoff.ts";

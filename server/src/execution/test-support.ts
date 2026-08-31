@@ -28,6 +28,7 @@ import { ScriptedProvider } from "../provider/fake.ts";
 import type { TransientOutput } from "../provider/adapter.ts";
 import { AcceptanceCheckService, type AcceptanceCheckConfig } from "./acceptance-checks.ts";
 import { AttemptExecutor, DEFAULT_EXECUTOR_CONFIG, type AttemptExecutorConfig } from "./attempt-executor.ts";
+import { BudgetIncreaseService } from "./budget-increases.ts";
 import type { AcceptanceCriterionExecutionFailure, AcceptanceCriterionExecutionOutcome, AcceptanceCriterionExecutionPort, AcceptanceCriterionExecutionRequest } from "./ports/acceptance-criterion-execution.ts";
 import { ResourceGovernor, type GovernorConfig } from "./governor.ts";
 import { InvocationPreparationService } from "./invocation-preparation-service.ts";
@@ -560,6 +561,7 @@ export interface RuntimeHarness extends Harness {
   /** Reservable Plan Node capacity (execution-model §7.6): the one operation every node-funded path funds its next child through. */
   capacity: PlanNodeCapacity;
   /** The operator-only Budget Increase boundary (execution-model §7.6): `request`, `resolve`, `inspect`. */
+  budgetIncreases: BudgetIncreaseService;
   /** The operator signoff boundary (execution-model §10 `operator_signoff`). */
   signoff: RunSignoffService;
   publicationWorkspace: FakePublicationWorkspace;
@@ -642,6 +644,7 @@ export function openRuntimeHarness(options: RuntimeHarnessOptions = {}): Runtime
     integration,
     finalizationWorkspace,
     capacity,
+    budgetIncreases: new BudgetIncreaseService({ ctx: h.ctx, stores: h.stores }),
     signoff: new RunSignoffService({ ctx: h.ctx, stores: h.stores, preparation, capacity, finalization: finalizationWorkspace }),
     publicationWorkspace,
     publication: new RunPublicationService({ ctx: h.ctx, stores: h.stores, port: publicationWorkspace, checks, diagnostics }),
