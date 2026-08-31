@@ -21,7 +21,7 @@
  * holds no canonical state and never inspects an outcome beyond recording it
  * and the typed stop flag.
  */
-import { runtimeToolResultBlocksInvocation, type AttemptId, type ProposedToolCall, type RuntimeToolCallOutcome, type RuntimeToolCallRequest, type RuntimeToolCallTool, type Timestamp } from "@agentique-console/core";
+import { runtimeToolResultBlocksInvocation, type AttemptId, type ExecutableRuntimeTool, type ProposedToolCall, type RuntimeToolCallOutcome, type RuntimeToolCallRequest, type Timestamp } from "@agentique-console/core";
 import type { AttemptExecutionOutcome, AttemptExecutionRequest, InterruptionCause, ProviderAdapter, ProviderCompletion, ToolCallAuthorization, UsageChunk } from "./adapter.ts";
 
 export interface FakeStepCommon {
@@ -73,7 +73,7 @@ export interface RecordedRequest {
   attemptId: AttemptId;
   request: Omit<AttemptExecutionRequest, "signal" | "output" | "continuation" | "authorization" | "runtimeTools">;
   /** The effective callable runtime tools the request exposed. */
-  runtimeTools: RuntimeToolCallTool[];
+  runtimeTools: ExecutableRuntimeTool[];
   /** Every call submitted to the authorization port during this execution, in order, with its outcome. */
   authorizations: RecordedAuthorization[];
   /** Every runtime-tool call submitted during this execution, in order, with its outcome. */

@@ -34,9 +34,11 @@ export const artifactProducerSchema: z.ZodType<ArtifactProducer> = z.discriminat
   z.strictObject({ kind: z.literal("runtime"), component: z.enum(RUNTIME_ARTIFACT_PRODUCERS) }),
 ]);
 
-const mediaType = z
+/** A media type such as `text/plain`; the normalized (lower-case) form is canonical. */
+export const mediaTypeSchema = z
   .string()
   .regex(/^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/i, "expected a media type such as text/plain");
+const mediaType = mediaTypeSchema;
 
 /**
  * Immutable, content-addressed metadata. The bytes live in the blob store

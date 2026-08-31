@@ -377,6 +377,12 @@ describe("import boundaries", () => {
         expect(text, rel(file)).not.toMatch(/blobs\.get\(|transcript|TRANSCRIPT_MEDIA_TYPE/i);
         continue;
       }
+      // The read service is the one other reader: it binds verified bytes only into the `read_artifact` response for an
+      // authorized caller (§6.4) and decides nothing from them; it never touches a transcript either.
+      if (rel(file) === "server/src/execution/runtime-reads.ts") {
+        expect(text, rel(file)).not.toMatch(/blobs\.get\(|transcript|TRANSCRIPT_MEDIA_TYPE/i);
+        continue;
+      }
       expect(text, rel(file)).not.toMatch(/artifacts\.read\(|blobs\.get\(|\.transcriptArtifactId\b[^;\n]*\bread|TRANSCRIPT_MEDIA_TYPE[^;\n]*(read|get)\(/);
     }
   });
@@ -384,9 +390,9 @@ describe("import boundaries", () => {
   it("the runtime-tool port exposes only the effective callable set and one call, and only the execution boundary binds it", () => {
     const adapter = fs.readFileSync(path.join(repoRoot, "server/src/provider/adapter.ts"), "utf8");
     const port = adapter.match(/export interface RuntimeToolCallPort \{([\s\S]*?)\n\}/)?.[1] ?? "";
-    expect(port).toMatch(/readonly tools: readonly RuntimeToolCallTool\[\];/);
+    expect(port).toMatch(/readonly tools: readonly ExecutableRuntimeTool\[\];/);
     const members = port.replace(/\/\*[\s\S]*?\*\//g, "").match(/^\s*(readonly\s+)?\w+(\(.*\))?:.*;$/gm) ?? [];
-    expect(members.map((m) => m.trim())).toEqual(["readonly tools: readonly RuntimeToolCallTool[];", "call(request: RuntimeToolCallRequest): Promise<RuntimeToolCallOutcome>;"]);
+    expect(members.map((m) => m.trim())).toEqual(["readonly tools: readonly ExecutableRuntimeTool[];", "call(request: RuntimeToolCallRequest): Promise<RuntimeToolCallOutcome>;"]);
     // Provider code never constructs, imports, or reaches the executor, a store, a proposal service, or a transaction; it calls the port only.
     for (const file of listFiles("server/src/provider", (f) => isCode(f) && !f.endsWith(".test.ts"))) {
       const text = fs.readFileSync(file, "utf8");
@@ -399,9 +405,24 @@ describe("import boundaries", () => {
     // The port's runtime does not authorize provider-native calls and never touches approval uses, transcripts, or a Decision's resolution;
     // it reads a blocking Decision's kind only to bound a logical turn, and creates a Decision only through the request service.
     expect(executor).not.toMatch(/approvedToolCallUses|ToolCallAuthorizer|authorize\(|TRANSCRIPT_MEDIA_TYPE|artifacts\.read\(|stores\.decisions\.(request|resolve|supersede)\(/);
-    // Runtime tools are closed unions in core: no free tool name, no `unknown` input at the boundary.
+    // Runtime tools are closed unions in core: every executable tool appears as a typed member, no free tool name, no
+    // `unknown` input at the boundary.
     const core = fs.readFileSync(path.join(repoRoot, "core/src/runtime-tools.ts"), "utf8");
-    expect(core).toMatch(/export type RuntimeToolCallRequest = \{ tool: "propose_tasks"; input: TaskProposalBatch \} \| \{ tool: "update_task"; input: TaskUpdateRequest \} \| \{ tool: "request_completion"; input: CompletionCallInput \} \| \{ tool: "request_decision"; input: RequestDecisionInput \};/);
+    for (const [tool, input] of [
+      ["propose_tasks", "TaskProposalBatch"],
+      ["update_task", "TaskUpdateRequest"],
+      ["request_completion", "CompletionCallInput"],
+      ["request_decision", "RequestDecisionInput"],
+      ["write_artifact", "WriteArtifactInput"],
+      ["read_requirements", "ReadRequirementsInput"],
+      ["read_decisions", "ReadDecisionsInput"],
+      ["read_tasks", "ReadTasksInput"],
+      ["read_artifact", "ReadArtifactInput"],
+      ["read_execution_plan", "ReadExecutionPlanInput"],
+      ["read_agent_definitions", "ReadAgentDefinitionsInput"],
+    ] as const) {
+      expect(core, tool).toMatch(new RegExp(`\\{ tool: "${tool}"; input: ${input} \\}`));
+    }
     expect(core).not.toMatch(/input: unknown|tool: string;/);
   });
 

@@ -12,7 +12,7 @@ import { decisionRequestSchema, SIGNOFF_OPTIONS, signoffSubjectOf } from "./deci
 import { newId } from "./ids.ts";
 import { gateOwnershipDefects, invocationResultSchema, manifestInputSchema } from "./invocations.ts";
 import { verificationPolicySchema, MAX_RUN_COMPLETION_CYCLES } from "./runs.ts";
-import { canonicalRuntimeToolCall, effectiveRuntimeTools, RUNTIME_TOOL_HANDLER_BINDINGS, runtimeToolCallRequestSchema, runtimeToolsFor } from "./runtime-tools.ts";
+import { canonicalRuntimeToolCall, effectiveRuntimeTools, RUNTIME_TOOL_HANDLER_BINDINGS, RUNTIME_TOOL_READ_TOOLS, runtimeToolCallRequestSchema, runtimeToolsFor } from "./runtime-tools.ts";
 import { gateInputSchema, gateSchema } from "./verification.ts";
 
 const runId = newId("run");
@@ -206,14 +206,16 @@ describe("signoff Decision", () => {
 describe("request_completion runtime tool", () => {
   it("is executable for the root Orchestrator's ordinary turns only, with an empty canonical input", () => {
     expect(RUNTIME_TOOL_HANDLER_BINDINGS.request_completion).toEqual([{ role: "orchestrator", purposes: ["operator_input", "plan_revision", "node_result", "decision_resolution", "gate_result"] }]);
-    expect(runtimeToolsFor("orchestrator", "final_synthesis")).toEqual(["read_requirements", "read_decisions", "read_tasks", "read_artifact", "read_execution_plan", "read_agent_definitions", "write_artifact", "return_result"]);
+    // The read-only final synthesis reads but never mutates: no write_artifact and no other mutating runtime tool.
+    expect(runtimeToolsFor("orchestrator", "final_synthesis")).toEqual([...RUNTIME_TOOL_READ_TOOLS, "return_result"]);
+    const READS = [...RUNTIME_TOOL_READ_TOOLS];
     for (const purpose of ["operator_input", "node_result", "decision_resolution", "gate_result", "plan_revision"] as const) {
-      expect(effectiveRuntimeTools(runtimeToolsFor("orchestrator", purpose), "orchestrator", purpose)).toEqual(["request_completion", "request_decision"]);
+      expect(effectiveRuntimeTools(runtimeToolsFor("orchestrator", purpose), "orchestrator", purpose)).toEqual([...READS, "request_completion", "request_decision", "write_artifact"]);
     }
-    expect(effectiveRuntimeTools(runtimeToolsFor("orchestrator", "final_synthesis"), "orchestrator", "final_synthesis")).toEqual([]);
-    expect(effectiveRuntimeTools(runtimeToolsFor("coordinator", "decompose"), "coordinator", "decompose")).toEqual(["propose_tasks", "update_task", "request_decision"]);
-    expect(effectiveRuntimeTools(runtimeToolsFor("worker", "step"), "worker", "step")).toEqual(["request_decision"]);
-    expect(effectiveRuntimeTools(runtimeToolsFor("evaluator", "evaluate"), "evaluator", "evaluate")).toEqual([]);
+    expect(effectiveRuntimeTools(runtimeToolsFor("orchestrator", "final_synthesis"), "orchestrator", "final_synthesis")).toEqual(READS);
+    expect(effectiveRuntimeTools(runtimeToolsFor("coordinator", "decompose"), "coordinator", "decompose")).toEqual([...READS, "propose_tasks", "update_task", "request_decision", "write_artifact"]);
+    expect(effectiveRuntimeTools(runtimeToolsFor("worker", "step"), "worker", "step")).toEqual([...READS, "request_decision", "write_artifact"]);
+    expect(effectiveRuntimeTools(runtimeToolsFor("evaluator", "evaluate"), "evaluator", "evaluate")).toEqual([...READS, "write_artifact"]);
     expect(runtimeToolCallRequestSchema.safeParse({ tool: "request_completion", input: {} }).success).toBe(true);
     expect(runtimeToolCallRequestSchema.safeParse({ tool: "request_completion", input: { summary: "done" } }).success).toBe(false);
     expect(canonicalRuntimeToolCall({ tool: "request_completion", input: {} })).toBe('{"input":{},"tool":"request_completion"}');

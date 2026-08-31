@@ -27,7 +27,7 @@
  * afterwards (a result, a failure, a throw, further calls) cannot override
  * it — but a conforming adapter never spends provider work past it.
  */
-import type { AgentCapabilities, ApprovedToolCallUseId, AttemptId, DecisionId, InvocationId, ModelEffort, ProposedToolCall, RunId, RuntimeToolCallOutcome, RuntimeToolCallRequest, RuntimeToolCallTool, Timestamp, ToolPolicy, UsageInput } from "@agentique-console/core";
+import type { AgentCapabilities, ApprovedToolCallUseId, AttemptId, DecisionId, ExecutableRuntimeTool, InvocationId, ModelEffort, ProposedToolCall, RunId, RuntimeToolCallOutcome, RuntimeToolCallRequest, Timestamp, ToolPolicy, UsageInput } from "@agentique-console/core";
 
 /** The deterministic bytes rendered from the persisted Context Manifest (plus a bounded retry appendix). */
 export interface RenderedInput {
@@ -85,11 +85,13 @@ export interface ToolCallAuthorizationPort {
  * commits in its own short root transaction while the provider runs outside
  * every transaction; an accepted call is replayable by canonical digest, a
  * rejected call writes nothing, and results carry ids and stable refusal
- * codes rather than domain history. Runtime tools never go through
- * side-effect approval and expose no transcript or continuation state.
+ * codes rather than domain history. A read tool returns a typed bounded
+ * projection (`kind: "read"`) with no durable record of any kind. Runtime
+ * tools never go through side-effect approval and expose no transcript or
+ * continuation state.
  */
 export interface RuntimeToolCallPort {
-  readonly tools: readonly RuntimeToolCallTool[];
+  readonly tools: readonly ExecutableRuntimeTool[];
   call(request: RuntimeToolCallRequest): Promise<RuntimeToolCallOutcome>;
 }
 

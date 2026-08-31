@@ -884,7 +884,7 @@ CREATE TABLE `runtime_tool_calls` (
 	FOREIGN KEY (`plan_node_id`) REFERENCES `plan_nodes`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`invocation_id`) REFERENCES `invocations`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`attempt_id`) REFERENCES `attempts`(`id`) ON UPDATE no action ON DELETE no action,
-	CONSTRAINT "runtime_tool_calls_tool" CHECK("runtime_tool_calls"."tool" IN ('propose_tasks', 'update_task', 'request_completion', 'request_decision')),
+	CONSTRAINT "runtime_tool_calls_tool" CHECK("runtime_tool_calls"."tool" IN ('propose_tasks', 'update_task', 'request_completion', 'request_decision', 'write_artifact')),
 	CONSTRAINT "runtime_tool_calls_digest_shape" CHECK(length("runtime_tool_calls"."call_digest") = 64),
 	CONSTRAINT "runtime_tool_calls_result_tool" CHECK(json_extract("runtime_tool_calls"."result", '$.tool') = "runtime_tool_calls"."tool")
 );

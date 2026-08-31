@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "c9c0a293-288d-4226-9b4b-75350d855dad",
+  "id": "04756fac-21a3-414b-ad7c-c1661ca53da5",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "acceptance_criteria": {
@@ -6257,7 +6257,7 @@
       "checkConstraints": {
         "runtime_tool_calls_tool": {
           "name": "runtime_tool_calls_tool",
-          "value": "\"runtime_tool_calls\".\"tool\" IN ('propose_tasks', 'update_task', 'request_completion', 'request_decision')"
+          "value": "\"runtime_tool_calls\".\"tool\" IN ('propose_tasks', 'update_task', 'request_completion', 'request_decision', 'write_artifact')"
         },
         "runtime_tool_calls_digest_shape": {
           "name": "runtime_tool_calls_digest_shape",

@@ -1,10 +1,28 @@
 import { z } from "zod";
+import { mediaTypeSchema } from "./artifacts.ts";
 import { COMPLETION_PREFLIGHT_CODES, COMPLETION_REQUEST_STATUSES, type CompletionRequestStatus } from "./completion.ts";
 import { activationConditionSchema, type ActivationCondition } from "./decisions.ts";
 import type { ArtifactId, AttemptId, CompletionRequestId, DecisionId, InvocationId, PlanNodeId, RequirementId, RunId, RuntimeToolCallId, TaskId } from "./ids.ts";
-import { COORDINATOR_PURPOSES, ORCHESTRATOR_PURPOSES, RUNTIME_TOOLS_BY_ROLE, WORKER_PURPOSES, type InvocationPurpose, type InvocationRole, type RuntimeTool } from "./invocations.ts";
+import { COORDINATOR_PURPOSES, EVALUATOR_PURPOSES, ORCHESTRATOR_PURPOSES, RUNTIME_TOOLS_BY_ROLE, WORKER_PURPOSES, type InvocationPurpose, type InvocationRole, type RuntimeTool } from "./invocations.ts";
+import {
+  ARTIFACT_CONTENT_ENCODINGS,
+  readAgentDefinitionsInputSchema,
+  readArtifactInputSchema,
+  readDecisionsInputSchema,
+  readExecutionPlanInputSchema,
+  readRequirementsInputSchema,
+  readTasksInputSchema,
+  type ArtifactContentEncoding,
+  type ReadAgentDefinitionsInput,
+  type ReadArtifactInput,
+  type ReadDecisionsInput,
+  type ReadExecutionPlanInput,
+  type ReadRequirementsInput,
+  type ReadTasksInput,
+  type RuntimeToolReadResult,
+} from "./runtime-reads.ts";
 import { TASK_STATUSES, type TaskStatus } from "./tasks.ts";
-import { boundedString, canonicalJson, idSchema, nonEmptyString, sha256Hex, timestampSchema, uniqueIds, utf8ByteLength, type Timestamp } from "./validation.ts";
+import { boundedString, canonicalJson, count, idSchema, nonEmptyString, sha256Hex, timestampSchema, uniqueIds, utf8ByteLength, type Timestamp } from "./validation.ts";
 
 /**
  * The runtime-tool call boundary (execution-model §6.4 "Runtime tools").
@@ -28,9 +46,31 @@ import { boundedString, canonicalJson, idSchema, nonEmptyString, sha256Hex, time
  * without repeating its effects.
  */
 
-/** The runtime tools the execution runtime implements as executable handlers. */
-export const RUNTIME_TOOL_CALL_TOOLS = ["propose_tasks", "update_task", "request_completion", "request_decision"] as const;
+/**
+ * The mutating runtime tools the execution runtime implements as executable
+ * handlers: exactly the tools an accepted call of which is recorded as one
+ * append-only `runtime_tool_calls` row with a canonical digest and replay
+ * semantics.
+ */
+export const RUNTIME_TOOL_CALL_TOOLS = ["propose_tasks", "update_task", "request_completion", "request_decision", "write_artifact"] as const;
 export type RuntimeToolCallTool = (typeof RUNTIME_TOOL_CALL_TOOLS)[number];
+
+/**
+ * The read runtime tools the execution runtime implements as executable
+ * handlers. A successful read returns a typed, bounded projection and is
+ * not a durable mutation: no `runtime_tool_calls` row, no Event, no Usage
+ * row, no digest or call id presented as a durable record.
+ */
+export const RUNTIME_TOOL_READ_TOOLS = ["read_requirements", "read_decisions", "read_tasks", "read_artifact", "read_execution_plan", "read_agent_definitions"] as const;
+export type RuntimeToolReadTool = (typeof RUNTIME_TOOL_READ_TOOLS)[number];
+
+/** Every runtime tool the execution runtime can execute: the read tools plus the recorded mutating tools. */
+export const EXECUTABLE_RUNTIME_TOOLS = [...RUNTIME_TOOL_READ_TOOLS, ...RUNTIME_TOOL_CALL_TOOLS] as const;
+export type ExecutableRuntimeTool = (typeof EXECUTABLE_RUNTIME_TOOLS)[number];
+
+export function isRuntimeToolReadTool(tool: ExecutableRuntimeTool): tool is RuntimeToolReadTool {
+  return (RUNTIME_TOOL_READ_TOOLS as readonly string[]).includes(tool);
+}
 
 /** The Orchestrator purposes from which completion may be requested: every turn but the read-only `final_synthesis` report. */
 export const COMPLETION_REQUESTING_PURPOSES = ORCHESTRATOR_PURPOSES.filter((purpose) => purpose !== "final_synthesis");
@@ -50,6 +90,8 @@ const PURPOSE_EXCLUSIONS: Readonly<Partial<Record<RuntimeTool, readonly Invocati
   propose_requirements: ["final_synthesis"],
   revise_execution_plan: ["final_synthesis"],
   request_completion: ["final_synthesis"],
+  // The read-only final synthesis may read but holds no mutating runtime tool at all (execution-model §10).
+  write_artifact: ["final_synthesis"],
 };
 
 /** Manifest permission: the role's runtime tools narrowed by the Invocation's purpose. */
@@ -63,8 +105,23 @@ export interface RuntimeToolHandlerBinding {
   purposes: readonly InvocationPurpose[];
 }
 
+/** Every role with every purpose of that role: the binding of a tool every running Invocation may hold. */
+const EVERY_ROLE_AND_PURPOSE: readonly RuntimeToolHandlerBinding[] = [
+  { role: "orchestrator", purposes: ORCHESTRATOR_PURPOSES },
+  { role: "coordinator", purposes: COORDINATOR_PURPOSES },
+  { role: "worker", purposes: WORKER_PURPOSES },
+  { role: "evaluator", purposes: EVALUATOR_PURPOSES },
+];
+
 /** The roles and purposes each executable handler is valid for; a call outside this table is never callable. */
-export const RUNTIME_TOOL_HANDLER_BINDINGS: Readonly<Record<RuntimeToolCallTool, readonly RuntimeToolHandlerBinding[]>> = {
+export const RUNTIME_TOOL_HANDLER_BINDINGS: Readonly<Record<ExecutableRuntimeTool, readonly RuntimeToolHandlerBinding[]>> = {
+  // Every role reads within its own scope (execution-model §6.4): the handler authorizes each record, never the binding alone.
+  read_requirements: EVERY_ROLE_AND_PURPOSE,
+  read_decisions: EVERY_ROLE_AND_PURPOSE,
+  read_tasks: EVERY_ROLE_AND_PURPOSE,
+  read_artifact: EVERY_ROLE_AND_PURPOSE,
+  read_execution_plan: EVERY_ROLE_AND_PURPOSE,
+  read_agent_definitions: EVERY_ROLE_AND_PURPOSE,
   propose_tasks: [{ role: "coordinator", purposes: ["decompose", "replan"] }],
   // The Coordinator-permitted subset of `update_task`: cancelling the node's own unstarted or blocked current Tasks.
   update_task: [{ role: "coordinator", purposes: ["decompose", "replan"] }],
@@ -77,16 +134,25 @@ export const RUNTIME_TOOL_HANDLER_BINDINGS: Readonly<Record<RuntimeToolCallTool,
     { role: "coordinator", purposes: COORDINATOR_PURPOSES },
     { role: "worker", purposes: WORKER_PURPOSES },
   ],
+  // Every role may create a bounded Artifact — an Evaluator's Evidence sometimes requires a report — except the read-only
+  // final synthesis, which holds no mutating runtime tool (execution-model §10). Artifact creation mutates no Task, no
+  // orchestration state, and no Workspace.
+  write_artifact: [
+    { role: "orchestrator", purposes: COMPLETION_REQUESTING_PURPOSES },
+    { role: "coordinator", purposes: COORDINATOR_PURPOSES },
+    { role: "worker", purposes: WORKER_PURPOSES },
+    { role: "evaluator", purposes: EVALUATOR_PURPOSES },
+  ],
 };
 
 /** Whether a handler is valid for one role and purpose. */
-export function runtimeToolHandlerBound(tool: RuntimeToolCallTool, role: InvocationRole, purpose: InvocationPurpose): boolean {
+export function runtimeToolHandlerBound(tool: ExecutableRuntimeTool, role: InvocationRole, purpose: InvocationPurpose): boolean {
   return RUNTIME_TOOL_HANDLER_BINDINGS[tool].some((binding) => binding.role === role && binding.purposes.includes(purpose));
 }
 
 /** The effective callable set of one Invocation: manifest permission ∩ runtime handlers ∩ role/purpose validity. */
-export function effectiveRuntimeTools(manifestTools: readonly RuntimeTool[], role: InvocationRole, purpose: InvocationPurpose): RuntimeToolCallTool[] {
-  return RUNTIME_TOOL_CALL_TOOLS.filter((tool) => manifestTools.includes(tool) && runtimeToolHandlerBound(tool, role, purpose));
+export function effectiveRuntimeTools(manifestTools: readonly RuntimeTool[], role: InvocationRole, purpose: InvocationPurpose): ExecutableRuntimeTool[] {
+  return EXECUTABLE_RUNTIME_TOOLS.filter((tool) => manifestTools.includes(tool) && runtimeToolHandlerBound(tool, role, purpose));
 }
 
 // ---------------------------------------------------------------------------
@@ -317,18 +383,89 @@ export const requestDecisionInputSchema: z.ZodType<RequestDecisionInput> = z.dis
 ]) as unknown as z.ZodType<RequestDecisionInput>;
 
 // ---------------------------------------------------------------------------
+// write_artifact
+// ---------------------------------------------------------------------------
+
+/**
+ * The bounds of a `write_artifact` call. Content is measured in decoded
+ * bytes; a call beyond a bound is rejected, never truncated. The per-turn
+ * bounds are enforced over the caller's logical turn (the Invocation plus
+ * its approval predecessors) from the accepted `runtime_tool_calls` rows,
+ * so a replayed identical call consumes nothing twice.
+ */
+export const WRITE_ARTIFACT_BOUNDS = Object.freeze({
+  /** UTF-8 bytes of the title. */
+  titleMaxBytes: 200,
+  /** UTF-8 bytes of the media type. */
+  mediaTypeMaxBytes: 200,
+  /** Decoded content bytes per call (48 KiB). */
+  maxContentBytes: 49_152,
+  /** Accepted `write_artifact` calls per logical turn. */
+  maxCallsPerTurn: 32,
+  /** Cumulative decoded bytes created by one logical turn (1 MiB). */
+  maxTotalContentBytes: 1_048_576,
+});
+
+/** The encoded-content bound a schema can check before decoding: base64 of `maxContentBytes` bytes. */
+export const WRITE_ARTIFACT_MAX_ENCODED_LENGTH = Math.ceil(WRITE_ARTIFACT_BOUNDS.maxContentBytes / 3) * 4;
+
+/**
+ * What the model supplies for one created Artifact — and nothing else: the
+ * runtime derives the Artifact id, digest, byte size, producer, Run, Plan
+ * Node, Invocation, and Attempt, and owns the storage key. The media type
+ * is the normalized lower-case form.
+ */
+export interface WriteArtifactInput {
+  title: string;
+  mediaType: string;
+  encoding: ArtifactContentEncoding;
+  content: string;
+}
+
+export const writeArtifactInputSchema: z.ZodType<WriteArtifactInput> = z.strictObject({
+  title: boundedString(WRITE_ARTIFACT_BOUNDS.titleMaxBytes),
+  mediaType: mediaTypeSchema
+    .refine((type) => type === type.toLowerCase(), { message: "the media type is the normalized lower-case form" })
+    .refine((type) => utf8ByteLength(type) <= WRITE_ARTIFACT_BOUNDS.mediaTypeMaxBytes, { message: `at most ${WRITE_ARTIFACT_BOUNDS.mediaTypeMaxBytes} UTF-8 bytes` }),
+  encoding: z.enum(ARTIFACT_CONTENT_ENCODINGS),
+  // The exact decoded-byte bound is enforced by the handler after decoding; this refuses grossly oversized text early.
+  content: z.string().max(WRITE_ARTIFACT_MAX_ENCODED_LENGTH),
+});
+
+// ---------------------------------------------------------------------------
 // Calls, results, outcomes
 // ---------------------------------------------------------------------------
 
 /** A runtime-tool call as the adapter submits it: a closed union, never a free tool name with unvalidated input. */
-export type RuntimeToolCallRequest = { tool: "propose_tasks"; input: TaskProposalBatch } | { tool: "update_task"; input: TaskUpdateRequest } | { tool: "request_completion"; input: CompletionCallInput } | { tool: "request_decision"; input: RequestDecisionInput };
+export type RuntimeToolCallRequest =
+  | { tool: "propose_tasks"; input: TaskProposalBatch }
+  | { tool: "update_task"; input: TaskUpdateRequest }
+  | { tool: "request_completion"; input: CompletionCallInput }
+  | { tool: "request_decision"; input: RequestDecisionInput }
+  | { tool: "write_artifact"; input: WriteArtifactInput }
+  | { tool: "read_requirements"; input: ReadRequirementsInput }
+  | { tool: "read_decisions"; input: ReadDecisionsInput }
+  | { tool: "read_tasks"; input: ReadTasksInput }
+  | { tool: "read_artifact"; input: ReadArtifactInput }
+  | { tool: "read_execution_plan"; input: ReadExecutionPlanInput }
+  | { tool: "read_agent_definitions"; input: ReadAgentDefinitionsInput };
 
 export const runtimeToolCallRequestSchema: z.ZodType<RuntimeToolCallRequest> = z.discriminatedUnion("tool", [
   z.strictObject({ tool: z.literal("propose_tasks"), input: taskProposalBatchSchema }),
   z.strictObject({ tool: z.literal("update_task"), input: taskUpdateRequestSchema }),
   z.strictObject({ tool: z.literal("request_completion"), input: completionCallInputSchema }),
   z.strictObject({ tool: z.literal("request_decision"), input: requestDecisionInputSchema }),
+  z.strictObject({ tool: z.literal("write_artifact"), input: writeArtifactInputSchema }),
+  z.strictObject({ tool: z.literal("read_requirements"), input: readRequirementsInputSchema }),
+  z.strictObject({ tool: z.literal("read_decisions"), input: readDecisionsInputSchema }),
+  z.strictObject({ tool: z.literal("read_tasks"), input: readTasksInputSchema }),
+  z.strictObject({ tool: z.literal("read_artifact"), input: readArtifactInputSchema }),
+  z.strictObject({ tool: z.literal("read_execution_plan"), input: readExecutionPlanInputSchema }),
+  z.strictObject({ tool: z.literal("read_agent_definitions"), input: readAgentDefinitionsInputSchema }),
 ]);
+
+/** The read requests of the closed union. */
+export type RuntimeToolReadRequest = Extract<RuntimeToolCallRequest, { tool: RuntimeToolReadTool }>;
 
 /** The bound on a call's canonical bytes; a larger call is rejected, never truncated. */
 export const RUNTIME_TOOL_CALL_MAX_BYTES = 65_536;
@@ -345,7 +482,9 @@ export type RuntimeToolResult =
   /** The Completion Request the call created (or, on replay, found); its status at commit time. */
   | { tool: "request_completion"; completionRequestId: CompletionRequestId; status: CompletionRequestStatus }
   /** The open Decision the call created (or, on replay, found); an accepted request ends the logical turn, so the provider must stop. */
-  | { tool: "request_decision"; decisionId: DecisionId; status: "open"; blocksInvocation: true };
+  | { tool: "request_decision"; decisionId: DecisionId; status: "open"; blocksInvocation: true }
+  /** The Artifact the call created (or, on replay, found): bounded metadata only, never the content, a storage key, or a path. */
+  | { tool: "write_artifact"; artifactId: ArtifactId; mediaType: string; digest: string; byteSize: number; title: string };
 
 export const runtimeToolResultSchema: z.ZodType<RuntimeToolResult> = z.discriminatedUnion("tool", [
   z
@@ -354,6 +493,7 @@ export const runtimeToolResultSchema: z.ZodType<RuntimeToolResult> = z.discrimin
   z.strictObject({ tool: z.literal("update_task"), taskId: idSchema("task"), status: z.enum(TASK_STATUSES) }),
   z.strictObject({ tool: z.literal("request_completion"), completionRequestId: idSchema("completionRequest"), status: z.enum(COMPLETION_REQUEST_STATUSES) }),
   z.strictObject({ tool: z.literal("request_decision"), decisionId: idSchema("decision"), status: z.literal("open"), blocksInvocation: z.literal(true) }),
+  z.strictObject({ tool: z.literal("write_artifact"), artifactId: idSchema("artifact"), mediaType: mediaTypeSchema, digest: sha256Hex, byteSize: count.max(WRITE_ARTIFACT_BOUNDS.maxContentBytes), title: boundedString(WRITE_ARTIFACT_BOUNDS.titleMaxBytes) }),
 ]);
 
 /** Whether an accepted result ends the caller's logical turn: the adapter must stop after it, and the runtime enforces the boundary anyway. */
@@ -398,6 +538,24 @@ export const RUNTIME_TOOL_REJECTION_CODES = [
   "evidence_invalid",
   /** The logical turn ended on an accepted `request_decision`; no further call of this turn is executed. */
   "turn_ended",
+  // The read refusals (execution-model §6.4 "Runtime read tools").
+  /** The `after` cursor is malformed for the caller's order, or names a record outside the caller's visible set. */
+  "cursor_invalid",
+  /** The exactly named record does not exist or is not readable in the caller's scope; naming an id authorizes nothing. */
+  "record_out_of_scope",
+  /** The Artifact is not readable by this caller: not in its manifest, not produced by its own logical turn, and not routed to it. */
+  "artifact_not_readable",
+  /** The Artifact's content is missing from the Artifact Store; the metadata exists and the failure is not "not found". */
+  "artifact_content_missing",
+  /** The Artifact's stored content does not verify against its digest or byte size; never reinterpreted as "not found". */
+  "artifact_content_corrupt",
+  /** The requested `utf8` page is not valid UTF-8 (or the offset splits a sequence); request the range as `base64` instead. */
+  "artifact_content_not_utf8",
+  // The `write_artifact` refusals.
+  /** The logical turn has reached its accepted `write_artifact` call bound. */
+  "artifact_count_exceeded",
+  /** The logical turn has reached its cumulative decoded Artifact byte bound. */
+  "artifact_bytes_exceeded",
 ] as const;
 export type RuntimeToolRejectionCode = (typeof RUNTIME_TOOL_REJECTION_CODES)[number];
 
@@ -418,14 +576,16 @@ export const runtimeToolRejectionSchema: z.ZodType<RuntimeToolRejection> = z.str
 
 /** The closed outcome of one runtime-tool call. */
 export type RuntimeToolCallOutcome =
-  /** Committed now (`replayed: false`) or found committed under the same Invocation, tool, and digest (`replayed: true`). */
+  /** A successful read: a typed bounded projection, no `runtime_tool_calls` row, no Event, no digest or call id presented as durable. */
+  | { kind: "read"; tool: RuntimeToolReadTool; result: RuntimeToolReadResult }
+  /** An accepted mutation: committed now (`replayed: false`) or found committed under the same Invocation, tool, and digest (`replayed: true`). */
   | { kind: "accepted"; tool: RuntimeToolCallTool; callId: RuntimeToolCallId; callDigest: string; replayed: boolean; result: RuntimeToolResult }
   /** Validation refused the call; nothing was written; the adapter may correct and call again. */
-  | { kind: "rejected"; tool: RuntimeToolCallTool; reasons: RuntimeToolRejection[] }
+  | { kind: "rejected"; tool: ExecutableRuntimeTool; reasons: RuntimeToolRejection[] }
   /** The tool is not in the port's effective callable set; nothing was written. */
   | { kind: "not_callable"; tool: string }
-  /** The commit failed (a persistence failure); nothing persisted; the adapter may call again. */
-  | { kind: "failed"; tool: RuntimeToolCallTool; message: string };
+  /** The execution failed (a persistence or store failure); nothing persisted; the adapter may call again. */
+  | { kind: "failed"; tool: ExecutableRuntimeTool; message: string };
 
 // ---------------------------------------------------------------------------
 // The canonical execution record

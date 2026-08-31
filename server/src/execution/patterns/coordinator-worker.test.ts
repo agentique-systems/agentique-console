@@ -68,7 +68,7 @@ describe("CoordinatorWorkerPatternRunner", () => {
       expect(manifestA.handoffs).toEqual([]);
       expect(manifestA.inputs).toEqual([]);
       expect(manifestA.runtimeTools).not.toContain("propose_tasks");
-      expect(h.provider.requests.find((r) => r.attemptId === h.stores.invocations.listAttempts(workers[0]!.id)[0]!.id)!.runtimeTools).toEqual(["request_decision"]);
+      expect(h.provider.requests.find((r) => r.attemptId === h.stores.invocations.listAttempts(workers[0]!.id)[0]!.id)!.runtimeTools).toEqual(["read_requirements", "read_decisions", "read_tasks", "read_artifact", "read_execution_plan", "read_agent_definitions", "request_decision", "write_artifact"]);
       // Integration in canonical Task order; each integrated result handed off exactly once to the node under its stable key.
       const byChangeset = new Map(h.stores.changesets.listByRun(runId).map((c) => [c.id, c.invocationId] as const));
       expect(h.integrationWorkspace.requests.map((r) => byChangeset.get(r.changesetId))).toEqual([s.invocation.id, turns[0]!.id, workers[0]!.id, workers[1]!.id, turns[1]!.id]);
@@ -83,8 +83,8 @@ describe("CoordinatorWorkerPatternRunner", () => {
       expect(synthesis.inputs).toMatchObject([{ kind: "coordinator_turn", purpose: "synthesize", turnsUsed: 2, blockerKeys: [], tasks: [{ taskId: a.id, status: "completed" }, { taskId: b.id, status: "completed" }].sort((x, y) => (x.taskId < y.taskId ? -1 : 1)) }]);
       expect(synthesis.runtimeTools).not.toContain("propose_tasks");
       expect(synthesis.runtimeTools).not.toContain("update_task");
-      expect(h.provider.requests.find((r) => r.attemptId === h.stores.invocations.listAttempts(turns[1]!.id)[0]!.id)!.runtimeTools).toEqual(["request_decision"]);
-      expect(h.provider.requests.find((r) => r.attemptId === h.stores.invocations.listAttempts(turns[0]!.id)[0]!.id)!.runtimeTools).toEqual(["propose_tasks", "update_task", "request_decision"]);
+      expect(h.provider.requests.find((r) => r.attemptId === h.stores.invocations.listAttempts(turns[1]!.id)[0]!.id)!.runtimeTools).toEqual(["read_requirements", "read_decisions", "read_tasks", "read_artifact", "read_execution_plan", "read_agent_definitions", "request_decision", "write_artifact"]);
+      expect(h.provider.requests.find((r) => r.attemptId === h.stores.invocations.listAttempts(turns[0]!.id)[0]!.id)!.runtimeTools).toEqual(["read_requirements", "read_decisions", "read_tasks", "read_artifact", "read_execution_plan", "read_agent_definitions", "propose_tasks", "update_task", "request_decision", "write_artifact"]);
       expect(h.stores.plans.getNode(node.id)).toMatchObject({ status: "succeeded", outputArtifactIds: [final.artifactId] });
       expect(h.stores.changesets.listByRun(runId).every((c) => c.integrationStatus === "integrated")).toBe(true);
       // No narrative anywhere, and routine Task progress created no Coordinator turn.
@@ -184,7 +184,7 @@ describe("CoordinatorWorkerPatternRunner", () => {
       expect(outcome.stop).toBe("quiescent");
       const worker = workersOf(h, node)[0]!;
       const recorded = h.provider.requests.find((r) => r.attemptId === h.stores.invocations.listAttempts(worker.id)[0]!.id)!;
-      expect(recorded.runtimeTools).toEqual(["request_decision"]);
+      expect(recorded.runtimeTools).toEqual(["read_requirements", "read_decisions", "read_tasks", "read_artifact", "read_execution_plan", "read_agent_definitions", "request_decision", "write_artifact"]);
       expect(recorded.runtimeToolCalls.map((c) => c.outcome)).toEqual([{ kind: "not_callable", tool: "propose_tasks" }]);
       // The capability port answered by Tool Policy alone (an undeclared tool is denied) and recorded no approval or use.
       expect(recorded.authorizations.map((a) => a.authorization.kind)).toEqual(["denied"]);
