@@ -648,7 +648,9 @@ export class RuntimeReadService {
       }
       let decoded: string;
       try {
-        decoded = new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(offset, end));
+        // Byte-range retrieval, never text normalization: a leading U+FEFF (a BOM at the Artifact's start or at a page boundary) is
+        // content and stays in the page, so the returned text re-encodes to exactly the selected bytes and every page advances.
+        decoded = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes.subarray(offset, end));
       } catch {
         refuse("artifact_content_not_utf8", `Artifact ${input.artifactId} is not valid UTF-8 in the requested range; request the content as base64`, "encoding");
       }

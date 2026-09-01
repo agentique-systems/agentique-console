@@ -70,7 +70,7 @@ function extendedBy(page: ReadArtifactResult, bytes: Uint8Array): ReadArtifactRe
   const lead = bytes[end]!;
   const length = lead < 0x80 ? 1 : lead < 0xe0 ? 2 : lead < 0xf0 ? 3 : 4;
   const next = end + length;
-  return { ...page, byteCount: next - page.offset, content: new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(page.offset, next)), nextOffset: next };
+  return { ...page, byteCount: next - page.offset, content: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes.subarray(page.offset, next)), nextOffset: next };
 }
 
 async function listed(h: RuntimeHarness, bytes: Uint8Array, mediaType = "application/octet-stream") {
