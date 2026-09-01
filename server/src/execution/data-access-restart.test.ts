@@ -18,7 +18,7 @@ import { canonicalJson, type ArtifactId, type InvocationId, type RunId } from "@
 import { describe, expect, it, vi } from "vitest";
 import { sha256Hex } from "../persistence/blob-store.ts";
 import { portFor } from "./coordinator-test-support.ts";
-import { evaluatorPort, readArtifact, readRequirements, readResult, rejectionCodes, stepUntil, writeArtifact, writtenArtifact } from "./data-access-test-support.ts";
+import { evaluatorPort, passRetryBackoff, readArtifact, readRequirements, readResult, rejectionCodes, stepUntil, writeArtifact, writtenArtifact } from "./data-access-test-support.ts";
 import { newWorld as worldAt, withProcess as withProcessOver, type World } from "./recovery-test-support.ts";
 import { COMPLETED_RESULT, seedReadOnlyWorker, seedRuntime, startRun, type RuntimeHarness } from "./test-support.ts";
 
@@ -55,12 +55,6 @@ function facts(h: RuntimeHarness, runId: RunId) {
     usage: h.stores.usage.totalsForRun(runId).rows,
     events: h.ctx.journal.read({ runId }).map((e) => e.type),
   };
-}
-
-/** Moves the shared clock past the last Attempt's durable retry backoff, as a later scheduler pass would wait it out. */
-function passRetryBackoff(h: RuntimeHarness, invocationId: InvocationId): void {
-  const notBefore = h.stores.invocations.listAttempts(invocationId).at(-1)?.retryDecision?.notBefore;
-  if (notBefore) h.clock.set(notBefore);
 }
 
 async function until(ready: () => boolean): Promise<void> {

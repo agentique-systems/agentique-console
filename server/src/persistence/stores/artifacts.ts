@@ -176,10 +176,21 @@ export class ArtifactStore {
   /** Metadata plus verified bytes; throws when the blob is missing or corrupted. */
   read(id: ArtifactId): { artifact: Artifact; bytes: Uint8Array } {
     const artifact = this.get(id);
+    return { artifact, bytes: this.content(artifact) };
+  }
+
+  /**
+   * The verified bytes of already-loaded metadata: the blob under the
+   * Artifact's digest, verified against its digest by the blob store and
+   * against its byte size here. A caller that must authorize before any
+   * byte is loaded loads the metadata with `get`, decides, and only then
+   * calls this. Throws `BlobMissingError` or `BlobCorruptedError`.
+   */
+  content(artifact: Artifact): Uint8Array {
     const bytes = this.ctx.blobs.get(artifact.digest);
     if (bytes.byteLength !== artifact.byteSize) {
       throw new BlobCorruptedError(artifact.digest, `${bytes.byteLength} bytes`);
     }
-    return { artifact, bytes };
+    return bytes;
   }
 }

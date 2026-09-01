@@ -369,21 +369,23 @@ describe("import boundaries", () => {
   });
 
   it("no execution code reads a transcript Artifact or blob to make a decision (invariant 6)", () => {
+    // Code only: a comment may name a transcript to say it is never read.
+    const strip = (text: string) => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
     for (const file of listFiles("server/src/execution", (f) => isCode(f) && !f.endsWith(".test.ts"))) {
-      const text = fs.readFileSync(file, "utf8");
+      const text = strip(fs.readFileSync(file, "utf8"));
       // The integration and publication services are the readers of Artifact content: each delivers one verified
       // Changeset diff to its Workspace port (§9.2, §9.4) and decides nothing from the bytes; neither touches a transcript.
       if (rel(file) === "server/src/execution/integration-service.ts" || rel(file) === "server/src/execution/publication.ts") {
         expect(text, rel(file)).not.toMatch(/blobs\.get\(|transcript|TRANSCRIPT_MEDIA_TYPE/i);
         continue;
       }
-      // The read service is the one other reader: it binds verified bytes only into the `read_artifact` response for an
-      // authorized caller (§6.4) and decides nothing from them; it never touches a transcript either.
+      // The read service is the one other reader: it authorizes from metadata and rows first, then binds verified bytes only
+      // into the `read_artifact` response (§6.4) and decides nothing from them; it never touches a transcript either.
       if (rel(file) === "server/src/execution/runtime-reads.ts") {
         expect(text, rel(file)).not.toMatch(/blobs\.get\(|transcript|TRANSCRIPT_MEDIA_TYPE/i);
         continue;
       }
-      expect(text, rel(file)).not.toMatch(/artifacts\.read\(|blobs\.get\(|\.transcriptArtifactId\b[^;\n]*\bread|TRANSCRIPT_MEDIA_TYPE[^;\n]*(read|get)\(/);
+      expect(text, rel(file)).not.toMatch(/artifacts\.(read|content)\(|blobs\.get\(|\.transcriptArtifactId\b[^;\n]*\bread|TRANSCRIPT_MEDIA_TYPE[^;\n]*(read|get)\(/);
     }
   });
 
@@ -559,13 +561,23 @@ describe("import boundaries", () => {
     // 4. write_artifact mutates through the canonical Artifact Store alone: no blob access, no direct insert, no journal append.
     expect(writes).toMatch(/artifacts\.create\(/);
     expect(writes).not.toMatch(/blobs\.|journal|\.insert\(|tx\.write\(/);
-    // 5. Only the execution runtime reads Artifact content: the read service for `read_artifact`, plus the two existing narrow
-    //    content readers (Changeset integration, publication preparation). Nothing else — and no provider — touches `artifacts.read(`.
+    // 5. Only the execution runtime reads Artifact content: the read service for `read_artifact` (metadata first, then
+    //    `artifacts.content(` only after authorization), plus the two existing narrow content readers (Changeset integration,
+    //    publication preparation). Nothing else — and no provider — touches `artifacts.read(` or `artifacts.content(`.
     const contentReaders = listFiles("server/src", (f) => isCode(f) && !f.endsWith(".test.ts") && !f.endsWith("test-support.ts") && !rel(f).startsWith("server/src/persistence/"))
-      .filter((f) => /artifacts\.read\(/.test(strip(fs.readFileSync(f, "utf8"))))
+      .filter((f) => /artifacts\.(read|content)\(/.test(strip(fs.readFileSync(f, "utf8"))))
       .map(rel)
       .sort();
     expect(contentReaders).toEqual(["server/src/execution/integration-service.ts", "server/src/execution/publication.ts", "server/src/execution/runtime-reads.ts"]);
+    // The read service authorizes before it loads: the one content load sits in `readArtifact` after `authorizeArtifact` returned
+    // the metadata, and Artifact authorization never consults the logical turn's replay scope.
+    expect(reads.match(/artifacts\.content\(/g)).toHaveLength(1);
+    expect(reads.indexOf("this.authorizeArtifact(")).toBeGreaterThan(-1);
+    expect(reads.indexOf("this.authorizeArtifact(")).toBeLessThan(reads.indexOf("artifacts.content("));
+    const authorize = reads.slice(reads.indexOf("private authorizeArtifact("), reads.indexOf("private artifactOrNull("));
+    expect(authorize).toMatch(/runtimeToolCalls\.writtenArtifactCall\(/);
+    expect(authorize).toMatch(/producer\.invocationId === caller\.invocation\.id/);
+    expect(authorize).not.toMatch(/turnInvocationIds|logicalTurn/);
     // 6. The provider boundary knows neither the read service nor the write service and holds no read result of its own.
     for (const file of listFiles("server/src/provider", (f) => isCode(f) && !f.endsWith(".test.ts"))) {
       expect(fs.readFileSync(file, "utf8"), rel(file)).not.toMatch(/RuntimeReadService|ArtifactWriteService|runtime-reads|artifact-writes/);

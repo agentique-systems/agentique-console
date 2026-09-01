@@ -1,10 +1,11 @@
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import {
   ConflictError,
   InvariantViolationError,
   parseOrThrow,
   runtimeToolCallInputSchema,
   runtimeToolCallSchema,
+  type ArtifactId,
   type AttemptId,
   type InvocationId,
   type PlanNodeId,
@@ -95,6 +96,22 @@ export class RuntimeToolCallStore {
       .select()
       .from(runtimeToolCalls)
       .where(and(eq(runtimeToolCalls.invocationId, invocationId), eq(runtimeToolCalls.tool, tool), eq(runtimeToolCalls.callDigest, callDigest)))
+      .get();
+    return row ? toDomain(row) : null;
+  }
+
+  /**
+   * The accepted `write_artifact` call of `invocationId` whose safe result
+   * names `artifactId`, or `null`: the one canonical fact that this exact
+   * Invocation created the Artifact through the write tool. A replayed
+   * call of an approval predecessor is recorded under the predecessor, so
+   * a successor holding the same Artifact id finds nothing here.
+   */
+  writtenArtifactCall(invocationId: InvocationId, artifactId: ArtifactId): RuntimeToolCall | null {
+    const row = this.ctx.db
+      .select()
+      .from(runtimeToolCalls)
+      .where(and(eq(runtimeToolCalls.invocationId, invocationId), eq(runtimeToolCalls.tool, "write_artifact"), eq(sql`json_extract(${runtimeToolCalls.result}, '$.artifactId')`, artifactId)))
       .get();
     return row ? toDomain(row) : null;
   }

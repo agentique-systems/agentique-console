@@ -6,21 +6,31 @@
  * a large current Requirement revision for paging. Nothing here reads a
  * transcript or process memory of the runtime.
  */
-import type {
-  Artifact,
-  ArtifactId,
-  ReadArtifactInput,
-  ReadRequirementsInput,
-  RequirementId,
-  RuntimeToolCallOutcome,
-  RuntimeToolCallRequest,
-  RuntimeToolReadResult,
-  RuntimeToolRejection,
-  WriteArtifactInput,
+import {
+  approvalSubjectOf,
+  EMPTY_MANIFEST_TEMPLATE,
+  type Artifact,
+  type ArtifactId,
+  type Decision,
+  type DecisionRequest,
+  type Invocation,
+  type InvocationId,
+  type PlanExpression,
+  type PlanNode,
+  type ProposedToolCall,
+  type ReadArtifactInput,
+  type ReadRequirementsInput,
+  type RequirementId,
+  type RuntimeToolCallOutcome,
+  type RuntimeToolCallRequest,
+  type RuntimeToolReadResult,
+  type RuntimeToolRejection,
+  type WriteArtifactInput,
 } from "@agentique-console/core";
 import { portFor, type PlanningSeed } from "./coordinator-test-support.ts";
 import { finishRoot, scriptByRole, seedCriteria, singleExpression, workerStep } from "./gate-test-support.ts";
-import { planNodes, seedPlanningRuntime, seedRuntime, startRun, type RuntimeHarness, type RuntimeSeed } from "./test-support.ts";
+import { DEFAULT_BUDGET } from "../persistence/test-support.ts";
+import { COMPLETED_RESULT, INVOCATION_ALLOCATION, planNodes, seedPlanningRuntime, seedRuntime, startRun, type RuntimeHarness, type RuntimeSeed } from "./test-support.ts";
 
 // ---------------------------------------------------------------------------
 // Call builders
@@ -150,4 +160,164 @@ export function approveRevision(h: RuntimeHarness, s: PlanningSeed | RuntimeSeed
 /** One Artifact of the seed's Run with the given bytes, produced by the runtime (readable only where canonically routed). */
 export function runArtifact(h: RuntimeHarness, s: PlanningSeed | RuntimeSeed, bytes: Uint8Array, title = "content", mediaType = "application/octet-stream"): Artifact {
   return h.stores.artifacts.create({ runId: s.created.run.id, mediaType, producer: { kind: "runtime", component: "command" }, taskId: null, title }, bytes);
+}
+
+/** An open `operator_choice` Decision recorded by the operator, of the Conversation (and, when given, the Run), affecting the given ids. */
+export function operatorDecision(h: RuntimeHarness, conversationId: string, runId: string | null, affects: Partial<DecisionRequest["affects"]> = {}, question = "Which way?"): Decision {
+  return h.stores.decisions.request({
+    conversationId: conversationId as never,
+    runId: runId as never,
+    kind: "operator_choice",
+    resolutionPolicy: "operator_required",
+    requestedBy: { kind: "operator" },
+    question,
+    options: [
+      { id: "a", label: "A", description: null },
+      { id: "b", label: "B", description: null },
+    ],
+    recommendedOptionId: null,
+    rationale: null,
+    affects: { requirementIds: [], taskIds: [], planNodeIds: [], ...affects },
+    deadlineAt: null,
+    activationCondition: null,
+    subject: null,
+    supersedesDecisionId: null,
+  });
+}
+
+/** A Run-scoped Task recorded by the runtime for the Orchestrator's ledger (no Plan Node). */
+export function orchestratorTask(h: RuntimeHarness, runId: string, subject: string, requirementIds: string[] = []) {
+  return h.stores.tasks.create({ runId: runId as never, planNodeId: null, origin: "orchestrator", subject, requirementIds: requirementIds as never, requirementRevisionId: null, inputArtifactIds: [], requiredOutputs: [], replacesTaskId: null });
+}
+
+/** Moves the shared clock past an Invocation's latest durable retry backoff, as a later scheduler pass would wait it out. */
+export function passRetryBackoff(h: RuntimeHarness, invocationId: InvocationId): void {
+  const notBefore = h.stores.invocations.listAttempts(invocationId).at(-1)?.retryDecision?.notBefore;
+  if (notBefore) h.clock.set(notBefore);
+}
+
+/**
+ * A second Run in the seed's Conversation. The seed's Run must be terminal
+ * first (a Conversation has at most one active Run); this one shares every
+ * Requirement identity of the Conversation with it. Returns a planning seed
+ * over the new Run whose first Orchestrator turn is prepared.
+ */
+export function laterRunInConversation(h: RuntimeHarness, s: PlanningSeed): PlanningSeed {
+  const conversationId = s.created.run.conversationId;
+  const created = h.runCreation.create({
+    conversationId,
+    kind: "code",
+    target: { kind: "branch", branch: "main" },
+    budget: DEFAULT_BUDGET,
+    orchestratorAgentDefinitionRevisionId: s.orchestrator.id,
+    verificationPolicy: { evaluatorAgentDefinitionRevisionId: s.evaluator.id, runCompletionAcceptanceCriterionIds: [s.completion.criterionId] },
+  });
+  const message = h.stores.conversations.postMessage({ conversationId, author: "operator", content: "Continue the work.", runId: created.run.id, invocationId: null });
+  const started = h.runStart.start({ runId: created.run.id, conversationMessageId: message.id });
+  return { ...s, created, message, invocation: started.prepared.invocation };
+}
+
+/** The seed's Run cancelled through the store, so another Run of the Conversation may be created. */
+export function cancelRun(h: RuntimeHarness, s: PlanningSeed): void {
+  for (const invocation of h.stores.invocations.listByRun(s.created.run.id)) {
+    if (invocation.status === "pending" || invocation.status === "running") h.stores.invocations.transition(invocation.id, { to: "cancelled" });
+  }
+  h.stores.runs.transition(s.created.run.id, { to: "cancelled" });
+}
+
+/**
+ * A running Worker `step` on a fresh single node of the seed's plan whose
+ * operation input lists `artifactIds` explicitly (the Orchestrator listing
+ * Artifacts on a node: one of the canonical manifest routes), with the port
+ * bound to its running Attempt.
+ */
+export async function listedArtifactWorker(h: RuntimeHarness, s: PlanningSeed, artifactIds: ArtifactId[], options: { title?: string; allocation?: { costUsd: number; tokens: number; attempts: number }; agent?: string } = {}) {
+  const title = options.title ?? "reader";
+  const expression: PlanExpression = {
+    pattern: "single",
+    operation: { agentDefinitionRevisionId: (options.agent ?? s.worker.id) as never, title, input: { ...EMPTY_MANIFEST_TEMPLATE, artifactIds } },
+    allocation: options.allocation ?? INVOCATION_ALLOCATION,
+  };
+  const runId = s.created.run.id;
+  const existing = h.stores.plans.getRevision(runId, h.stores.plans.latestRevisionNumber(runId)).source.expressions;
+  const { nodes, revisionNumber } = planNodes(h, s, [...existing, expression]);
+  const node = nodes.find((n) => n.kind === "pattern" && n.title === title && n.status === "pending") as (PlanNode & { kind: "pattern" }) | undefined;
+  if (node === undefined) throw new Error(`no fresh single node titled ${title}`);
+  h.stores.plans.transitionNode(node.id, { to: "ready" });
+  const started = h.runners.single.start(node.id, revisionNumber);
+  if (started.kind !== "started") throw new Error(`worker did not start: ${started.kind}`);
+  const prepared = await h.executor.prepareNextAttempt(started.invocationId);
+  if (prepared.kind !== "prepared") throw new Error(`worker Attempt not prepared: ${prepared.kind}`);
+  return { node, revisionNumber, invocation: prepared.invocation, attempt: prepared.attempt, port: portFor(h, prepared.invocation, prepared.attempt) };
+}
+
+/** The provider-native call every approval fixture intercepts (the seeded definitions require approval for `shell`). */
+export const APPROVAL_CALL: ProposedToolCall = { tool: "shell", input: { command: "rm -rf build", cwd: "/w" } };
+
+/**
+ * Ends a prepared Attempt on an intercepted `approval_required` call after
+ * the given runtime-tool calls: the Invocation ends `blocked` on the open
+ * `side_effect_approval` Decision. Returns the outcome and every recorded
+ * runtime-tool call of the execution.
+ */
+export async function blockOnApproval(h: RuntimeHarness, attemptId: string, calls: RuntimeToolCallRequest[] = [], call: ProposedToolCall = APPROVAL_CALL) {
+  const before = h.provider.runtimeToolCalls.length;
+  h.provider.script(calls.length === 0 ? { kind: "tool_calls", calls: [call], then: { kind: "succeed", result: COMPLETED_RESULT } } : { kind: "runtime_tool_calls", calls, then: { kind: "tool_calls", calls: [call], then: { kind: "succeed", result: COMPLETED_RESULT } } });
+  const outcome = await h.executor.executePreparedAttempt(attemptId as never);
+  if (outcome.kind !== "approval_required") throw new Error(`expected approval_required, got ${outcome.kind}`);
+  return { outcome, decision: outcome.decision, recorded: h.provider.runtimeToolCalls.slice(before) };
+}
+
+/**
+ * The one successor of an Invocation blocked on a `side_effect_approval`
+ * Decision the operator resolved, prepared exactly as the Pattern runner's
+ * `prepareSuccessor` prepares it: the same node, role, purpose, position,
+ * and Task ownership, `continuedFromInvocationId` naming the blocked
+ * Invocation, its predecessor's Handoffs, and one typed
+ * `side_effect_approval_resolution` input. Its first Attempt is prepared and
+ * a port bound to it.
+ */
+export async function approvalSuccessor(h: RuntimeHarness, blocked: Invocation, decisionId: string, outcome: "approve_once" | "deny") {
+  const current = h.stores.decisions.get(decisionId as never);
+  if (current.status === "open") h.stores.decisions.resolve(current.id, { resolvedBy: "operator", chosenOptionId: outcome, rationale: null, artifactIds: [] });
+  const decision = h.stores.decisions.get(current.id);
+  const subject = approvalSubjectOf(decision);
+  const handoffIds = h.stores.invocations.getManifest(blocked.id).content.handoffs.map((x) => x.handoffId);
+  const prepared = h.preparation.prepare({
+    runId: blocked.runId,
+    planNodeId: blocked.planNodeId,
+    role: blocked.role,
+    purpose: blocked.role === "orchestrator" ? "decision_resolution" : blocked.purpose,
+    continuedFromInvocationId: blocked.id,
+    patternPosition: blocked.patternPosition,
+    taskIds: [...blocked.taskIds],
+    handoffIds,
+    inputs: [{ kind: "side_effect_approval_resolution", decisionId: decision.id, blockedInvocationId: blocked.id, attemptId: subject.attemptId, tool: subject.tool, callDigest: subject.callDigest, callArtifactId: subject.callArtifactId, outcome }],
+  });
+  const attempt = await h.executor.prepareNextAttempt(prepared.invocation.id);
+  if (attempt.kind !== "prepared") throw new Error(`successor Attempt not prepared: ${attempt.kind}`);
+  return { invocation: attempt.invocation, attempt: attempt.attempt, decision, subject, port: portFor(h, attempt.invocation, attempt.attempt) };
+}
+
+/**
+ * A running root Orchestrator turn with its port: the seed's first turn when
+ * it has not executed yet, otherwise a fresh ordinary turn continuing the
+ * latest root turn (prepared through the preparation service, as the root
+ * support prepares one), with a fresh manifest assembled now.
+ */
+export async function rootTurn(h: RuntimeHarness, s: PlanningSeed) {
+  const rootId = s.created.root.id;
+  const latest = h.stores.invocations.latestAtPosition(rootId, "orchestrator");
+  const invocation = latest !== null && (latest.status === "pending" || latest.status === "running") ? latest : h.preparation.prepare({ runId: s.created.run.id, planNodeId: rootId, role: "orchestrator", purpose: "operator_input", continuedFromInvocationId: latest?.id ?? null, patternPosition: { kind: "orchestrator" } }).invocation;
+  const prepared = await h.executor.prepareNextAttempt(invocation.id);
+  if (prepared.kind !== "prepared") throw new Error(`root Attempt not prepared: ${prepared.kind}`);
+  return { invocation: prepared.invocation, attempt: prepared.attempt, port: portFor(h, prepared.invocation, prepared.attempt) };
+}
+
+/** The next Attempt of a running Invocation whose previous Attempt failed transiently: the same Invocation, a retried Attempt, a fresh port. */
+export async function retriedAttempt(h: RuntimeHarness, invocation: Invocation) {
+  passRetryBackoff(h, invocation.id);
+  const prepared = await h.executor.prepareNextAttempt(invocation.id);
+  if (prepared.kind !== "prepared") throw new Error(`retry not prepared: ${prepared.kind}`);
+  return { invocation: prepared.invocation, attempt: prepared.attempt, port: portFor(h, prepared.invocation, prepared.attempt) };
 }

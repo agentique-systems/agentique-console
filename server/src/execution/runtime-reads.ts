@@ -30,6 +30,7 @@ import {
   utf8ByteLength,
   type AgentDefinitionRecord,
   type AgentDefinitionRevisionId,
+  type Artifact,
   type ArtifactId,
   type ContextManifest,
   type Decision,
@@ -42,6 +43,7 @@ import {
   type PatternShape,
   type PlanEdgeRecord,
   type PlanNode,
+  type PlanNodeId,
   type PlanNodeRecord,
   type PlanNodeShapeSummary,
   type ReadAgentDefinitionsInput,
@@ -89,8 +91,26 @@ export interface ReadCaller {
   node: PatternPlanNode;
   invocation: Invocation;
   manifest: ContextManifest;
-  /** The caller's logical turn: the Invocation plus its approval predecessors, newest first. */
+  /**
+   * The caller's logical turn (the Invocation plus its approval predecessors,
+   * newest first): the replay scope of mutating calls and the scope of "its
+   * own turn's requests" for Decisions. It is never Artifact-content
+   * authorization — that requires the exact current Invocation.
+   */
   turnInvocationIds: readonly InvocationId[];
+}
+
+/**
+ * The caller's canonical scope over the three kinds of reference a Decision
+ * carries: exactly the Requirement, Task, and Plan Node ids the caller's
+ * `read_requirements`, `read_tasks`, and `read_execution_plan` would expose.
+ * A visible Decision is projected through it, so its `affects` never names
+ * an entity the caller could not read by id.
+ */
+interface CanonicalScope {
+  requirementIds: ReadonlySet<RequirementId>;
+  taskIds: ReadonlySet<TaskId>;
+  planNodeIds: ReadonlySet<PlanNodeId>;
 }
 
 interface Keyed<T, Id extends string> {
@@ -251,19 +271,30 @@ export class RuntimeReadService {
    */
   readDecisions(caller: ReadCaller, input: ReadDecisionsInput): ReadDecisionsResult {
     const manifestIds = new Set(caller.manifest.content.decisions.map((d) => d.decisionId));
-    const visible = this.decisionVisibility(caller, manifestIds);
+    const scope = this.canonicalScope(caller);
+    const visible = this.decisionVisibility(caller, manifestIds, scope);
     const ordered: Keyed<DecisionRecord, Decision["id"]>[] = this.stores.decisions
       .listByConversation(caller.run.conversationId)
       .filter(visible)
       .filter((d) => input.status === undefined || d.status === input.status)
       .sort(byId)
-      .map((d) => ({ id: d.id, record: decisionRecordOf(d) }));
+      .map((d) => ({ id: d.id, record: decisionRecordOf(d, scope) }));
     const paged = input.decisionId !== undefined ? exactly(ordered, input.decisionId, "Decision") : page(ordered, input.after, input.limit);
     return { tool: "read_decisions", ...paged };
   }
 
-  private decisionVisibility(caller: ReadCaller, manifestIds: ReadonlySet<string>): (d: Decision) => boolean {
-    const { run, node, invocation, manifest } = caller;
+  /**
+   * Which Decisions a caller sees. A Decision of another Run is visible only
+   * when the caller's immutable manifest names it (the assembler delivers
+   * the earlier Runs' Decisions that reference the caller's Requirements,
+   * validated to the same Conversation); every other route — the affected
+   * ids, the requester — admits only the caller's own Run and the
+   * Conversation-level Decisions (`runId` null). A Requirement id shared by
+   * two Runs never makes the other Run's Decision visible by itself.
+   */
+  private decisionVisibility(caller: ReadCaller, manifestIds: ReadonlySet<string>, scope: CanonicalScope): (d: Decision) => boolean {
+    const { run, node, invocation } = caller;
+    const ownRun = (d: Decision): boolean => d.runId === run.id || d.runId === null;
     const requestedByNode = (d: Decision): boolean => {
       if (d.requestedBy.kind !== "invocation") return false;
       try {
@@ -273,23 +304,39 @@ export class RuntimeReadService {
         throw error;
       }
     };
+    const affectsScope = (d: Decision): boolean => d.affects.planNodeIds.some((id) => scope.planNodeIds.has(id)) || d.affects.taskIds.some((id) => scope.taskIds.has(id)) || d.affects.requirementIds.some((id) => scope.requirementIds.has(id));
     switch (invocation.role) {
       case "orchestrator":
-        return (d) => d.runId === run.id || d.runId === null;
-      case "coordinator": {
-        const nodeTasks = new Set(this.stores.tasks.listByPlanNode(node.id).map((t) => t.id));
-        const scope = new Set(manifest.content.requirements.map((r) => r.requirementId));
-        return (d) => manifestIds.has(d.id) || d.affects.planNodeIds.includes(node.id) || d.affects.taskIds.some((id) => nodeTasks.has(id)) || d.affects.requirementIds.some((id) => scope.has(id)) || requestedByNode(d);
-      }
+        return (d) => manifestIds.has(d.id) || ownRun(d);
+      case "coordinator":
+        return (d) => manifestIds.has(d.id) || (ownRun(d) && (affectsScope(d) || requestedByNode(d)));
       case "worker": {
-        const own = new Set(invocation.taskIds);
-        const scope = new Set(manifest.content.requirements.map((r) => r.requirementId));
         const turn = new Set(caller.turnInvocationIds);
-        return (d) => manifestIds.has(d.id) || d.affects.taskIds.some((id) => own.has(id)) || d.affects.planNodeIds.includes(node.id) || d.affects.requirementIds.some((id) => scope.has(id)) || (d.requestedBy.kind === "invocation" && turn.has(d.requestedBy.invocationId));
+        return (d) => manifestIds.has(d.id) || (ownRun(d) && (affectsScope(d) || (d.requestedBy.kind === "invocation" && turn.has(d.requestedBy.invocationId))));
       }
       case "evaluator":
         return (d) => manifestIds.has(d.id);
     }
+  }
+
+  /**
+   * The caller's canonical scope, derived from the same rules the other read
+   * tools apply — never a separately maintained map: Requirements as
+   * `read_requirements` exposes them, Tasks as `read_tasks` exposes them,
+   * Plan Nodes as the current graph (the Orchestrator) or the caller's own
+   * node (everyone else).
+   */
+  private canonicalScope(caller: ReadCaller): CanonicalScope {
+    const { run, node, invocation } = caller;
+    const requirementIds = new Set(this.requirementScope(caller).visibleIds);
+    const all = this.stores.tasks.listByRun(run.id);
+    const supersededBy = new Map<TaskId, TaskId>();
+    for (const task of all) {
+      if (task.replacesTaskId !== null) supersededBy.set(task.replacesTaskId, task.id);
+    }
+    const taskIds = new Set(this.visibleTasks(caller, all, supersededBy).map((t) => t.id));
+    const planNodeIds = invocation.role === "orchestrator" ? new Set(this.stores.plans.currentGraph(run.id).nodes.map((n) => n.id)) : new Set([node.id]);
+    return { requirementIds, taskIds, planNodeIds };
   }
 
   // -------------------------------------------------------------------------
@@ -452,30 +499,25 @@ export class RuntimeReadService {
    * An Artifact is readable exactly when its id is in the caller's
    * immutable manifest (a Handoff, Task input, Gate candidate, Decision
    * resolution, optimizer, completion, or explicitly listed Artifact), or
-   * when the caller's own logical turn produced it (a `write_artifact` of
-   * this Invocation or its approval predecessors). Supplying an id is not
+   * when the exact current Invocation created it through an accepted
+   * `write_artifact` call (`authorizeArtifact`). Supplying an id is not
    * authorization, and a refusal never confirms a foreign Artifact's
-   * existence. The bytes are loaded and verified through the canonical
-   * Artifact Store; a missing or corrupt blob is a closed typed failure
-   * that is never "not found" and never carries bytes or paths.
+   * existence. Authorization completes before any byte is loaded; the bytes
+   * are then loaded and verified through the canonical Artifact Store, and
+   * a missing or corrupt blob is a closed typed failure that is never "not
+   * found" and never carries bytes or paths.
    */
   readArtifact(caller: ReadCaller, input: ReadArtifactInput): ReadArtifactResult {
-    const readable = new Set(caller.manifest.content.artifacts.map((a) => a.artifactId));
-    if (!readable.has(input.artifactId)) {
-      const metadata = this.artifactOrNull(input.artifactId);
-      const turn = new Set(caller.turnInvocationIds);
-      const produced = metadata !== null && metadata.runId === caller.run.id && metadata.producer.kind === "invocation" && turn.has(metadata.producer.invocationId);
-      if (!produced) refuse("artifact_not_readable", `Artifact ${input.artifactId} does not exist or is not readable by this Invocation`, "artifactId");
-    }
-    let loaded;
+    // Metadata and Run ownership are validated before any byte is loaded, on every path; a refusal confirms nothing.
+    const artifact = this.authorizeArtifact(caller, input.artifactId);
+    let bytes: Uint8Array;
     try {
-      loaded = this.stores.artifacts.read(input.artifactId);
+      bytes = this.stores.artifacts.content(artifact);
     } catch (error) {
       if (error instanceof BlobMissingError) refuse("artifact_content_missing", `the content of Artifact ${input.artifactId} (${error.digest}) is missing from the Artifact Store`);
       if (error instanceof BlobCorruptedError) refuse("artifact_content_corrupt", `the content of Artifact ${input.artifactId} (${error.digest}) does not verify against its digest and size`);
       throw error;
     }
-    const { artifact, bytes } = loaded;
     const offset = input.offset ?? 0;
     const maxBytes = input.maxBytes ?? READ_ARTIFACT_BOUNDS.defaultMaxBytes;
     const encoding = input.encoding ?? "utf8";
@@ -515,6 +557,34 @@ export class RuntimeReadService {
     };
   }
 
+  /**
+   * Exactly two routes make an Artifact readable, both over canonical rows
+   * and the immutable manifest, never over process memory or the logical
+   * turn's replay scope:
+   *
+   * 1. the caller's manifest lists it (a Handoff, Task input, Gate
+   *    candidate, Decision resolution, optimizer, completion, or explicitly
+   *    listed Artifact), and its metadata names the caller's Run;
+   * 2. the exact current Invocation created it through `write_artifact`:
+   *    the metadata names this Run and this Invocation as producer, and an
+   *    accepted `runtime_tool_calls` row of this Invocation names the
+   *    Artifact. Any Attempt of the Invocation qualifies. An approval
+   *    predecessor's or successor's production, a runtime-created Artifact
+   *    (a transcript, a captured call, a Changeset diff, an index) that
+   *    merely names an Invocation, and an id learned from a replayed result
+   *    or a Decision subject qualify through nothing but route 1.
+   */
+  private authorizeArtifact(caller: ReadCaller, artifactId: ArtifactId): Artifact {
+    const notReadable = () => refuse("artifact_not_readable", `Artifact ${artifactId} does not exist or is not readable by this Invocation`, "artifactId");
+    const artifact = this.artifactOrNull(artifactId);
+    if (artifact === null || artifact.runId !== caller.run.id) return notReadable();
+    if (caller.manifest.content.artifacts.some((a) => a.artifactId === artifactId)) return artifact;
+    const producedHere = artifact.producer.kind === "invocation" && artifact.producer.invocationId === caller.invocation.id;
+    if (!producedHere) return notReadable();
+    if (this.stores.runtimeToolCalls.writtenArtifactCall(caller.invocation.id, artifactId) === null) return notReadable();
+    return artifact;
+  }
+
   private artifactOrNull(id: ArtifactId) {
     try {
       return this.stores.artifacts.get(id);
@@ -525,8 +595,16 @@ export class RuntimeReadService {
   }
 }
 
-/** The bounded canonical projection of one Decision; the subject is safe by construction (ids, digests, closed values). */
-function decisionRecordOf(d: Decision): DecisionRecord {
+/**
+ * The bounded canonical projection of one Decision for one caller. The
+ * canonical row is untouched; the projected `affects` keeps exactly the
+ * references inside the caller's canonical scope, so a visible Decision
+ * never names a Task, Requirement, or Plan Node the caller could not read.
+ * The typed subject is safe by construction — ids, digests, closed values,
+ * never the proposed call's bytes — and a reference in it authorizes no
+ * read: `read_artifact` decides from the manifest and producer rows alone.
+ */
+function decisionRecordOf(d: Decision, scope: CanonicalScope): DecisionRecord {
   return {
     decisionId: d.id,
     kind: d.kind,
@@ -541,7 +619,11 @@ function decisionRecordOf(d: Decision): DecisionRecord {
     chosenOptionId: d.resolution?.chosenOptionId ?? null,
     resolvedBy: d.resolution?.resolvedBy ?? null,
     resolvedAt: d.resolution?.resolvedAt ?? null,
-    affects: d.affects,
+    affects: {
+      requirementIds: d.affects.requirementIds.filter((id) => scope.requirementIds.has(id)),
+      taskIds: d.affects.taskIds.filter((id) => scope.taskIds.has(id)),
+      planNodeIds: d.affects.planNodeIds.filter((id) => scope.planNodeIds.has(id)),
+    },
     subject: d.subject,
     supersessionReason: d.supersessionReason,
     supersededByDecisionId: d.supersededByDecisionId,

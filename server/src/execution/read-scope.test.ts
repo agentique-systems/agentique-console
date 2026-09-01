@@ -8,13 +8,17 @@
  * caller's scope, and anything reachable only by manipulating pagination.
  * Authorization is canonical ownership; a supplied id proves nothing.
  */
-import type { DecisionRequest, Invocation, TaskId } from "@agentique-console/core";
+import type { Invocation, TaskId } from "@agentique-console/core";
 import type { FakeStep } from "../provider/fake.ts";
 import { describe, expect, it } from "vitest";
 import { cancel, decomposePort, portFor, proposal, propose, WIDE_GOVERNOR, workerStep as coordinatorWorkerStep } from "./coordinator-test-support.ts";
 import {
   approveRevision,
+  cancelRun,
   evaluatorPort,
+  laterRunInConversation,
+  operatorDecision,
+  orchestratorTask,
   readAgents,
   readArtifact,
   readDecisions,
@@ -23,42 +27,15 @@ import {
   readResult,
   readTasks,
   rejectionCodes,
+  rootTurn,
   runArtifact,
   seedForeignRun,
   writeArtifact,
   writtenArtifact,
 } from "./data-access-test-support.ts";
-import { drain, rootPort, waiver } from "./decision-test-support.ts";
+import { drain, rootPort, waiver, workerPort } from "./decision-test-support.ts";
 import { scriptByRole } from "./gate-test-support.ts";
-import { COMPLETED_RESULT, openRuntimeHarness, seedPlanningRuntime, type RuntimeHarness } from "./test-support.ts";
-
-/** An open `operator_choice` Decision recorded by the operator, affecting the given ids. */
-function operatorDecision(h: RuntimeHarness, conversationId: string, runId: string | null, affects: Partial<DecisionRequest["affects"]> = {}, question = "Which way?") {
-  return h.stores.decisions.request({
-    conversationId: conversationId as never,
-    runId: runId as never,
-    kind: "operator_choice",
-    resolutionPolicy: "operator_required",
-    requestedBy: { kind: "operator" },
-    question,
-    options: [
-      { id: "a", label: "A", description: null },
-      { id: "b", label: "B", description: null },
-    ],
-    recommendedOptionId: null,
-    rationale: null,
-    affects: { requirementIds: [], taskIds: [], planNodeIds: [], ...affects },
-    deadlineAt: null,
-    activationCondition: null,
-    subject: null,
-    supersedesDecisionId: null,
-  });
-}
-
-/** A Run-scoped Task recorded by the runtime for the Orchestrator's ledger. */
-function orchestratorTask(h: RuntimeHarness, runId: string, subject: string, requirementIds: string[] = []) {
-  return h.stores.tasks.create({ runId: runId as never, planNodeId: null, origin: "orchestrator", subject, requirementIds: requirementIds as never, requirementRevisionId: null, inputArtifactIds: [], requiredOutputs: [], replacesTaskId: null });
-}
+import { COMPLETED_RESULT, openRuntimeHarness, planNodes, seedPlanningRuntime } from "./test-support.ts";
 
 describe("read scope by role", () => {
   it("root Orchestrator: the current Requirement revision (never a stale manifest's), every current Task, the Run's Decisions — and nothing of a foreign Run, Workspace, or Conversation", async () => {
@@ -296,6 +273,139 @@ describe("read scope by role", () => {
       const evaluations = h.stores.evaluations.listByGate(e.gateId).filter((x) => x.producedBy.kind === "evaluator");
       expect(evaluations.some((x) => x.evidence.some((v) => v.kind === "artifact" && v.artifactId === written.artifactId))).toBe(true);
       expect(h.stores.changesets.listByRun(runId).filter((c) => c.invocationId === e.invocation.id)).toEqual([]);
+    } finally {
+      h.close();
+    }
+  });
+
+  it("projects a Decision's affected ids through the caller's canonical scope: one mixed-scope Decision shows each role exactly its own references, while the canonical row keeps them all", async () => {
+    const h = openRuntimeHarness({ governor: WIDE_GOVERNOR });
+    try {
+      const s = seedPlanningRuntime(h);
+      const runId = s.created.run.id;
+      const conversationId = s.created.run.conversationId;
+      const d = await decomposePort(h, s, { leaves: 3 });
+      // The node's Tasks (a, b: b depends on a) and a root-side Task; the pinned scope's leaves and a newer revision's leaf.
+      const accepted = await d.port.call(propose([proposal({ key: "a", requirementIds: [d.leafIds[0]!] }), proposal({ key: "b", requirementIds: [d.leafIds[1]!], dependsOnKeys: ["a"] }), proposal({ key: "c", requirementIds: [d.leafIds[2]!] })]));
+      if (accepted.kind !== "accepted" || accepted.result.tool !== "propose_tasks") throw new Error("proposal not accepted");
+      const ids = accepted.result.taskIdsByKey as Record<string, TaskId>;
+      const rootTask = orchestratorTask(h, runId, "root side work");
+      // A newer current revision keeps every pinned Requirement (nothing retires) and adds one leaf the pinned scope cannot see.
+      const newLeafId = h.ctx.ids("requirement");
+      const newer = h.stores.requirements.createRevision({ conversationId, approvedByDecisionId: null, tree: [...d.revision.tree, { id: newLeafId, parentId: d.rootId, composition: null, statement: "Added later", position: d.revision.tree.length, acceptanceCriterionIds: [] }] });
+      const mixed = operatorDecision(h, conversationId, runId, {
+        requirementIds: [d.leafIds[0]!, d.leafIds[2]!, newLeafId, d.rootId],
+        taskIds: [ids.a!, ids.b!, ids.c!, rootTask.id],
+        planNodeIds: [d.node.id, s.created.root.id],
+      });
+      // The canonical row is untouched.
+      expect(h.stores.decisions.get(mixed.id).affects).toEqual(mixed.affects);
+      // The Coordinator: its pinned leaves (the scope root is not a scope row), its node's ledger, its own node.
+      const coordinator = readResult(await d.port.call(readDecisions({ decisionId: mixed.id })), "read_decisions").items[0]!;
+      expect(coordinator.affects).toEqual({ requirementIds: [d.leafIds[0]!, d.leafIds[2]!], taskIds: [ids.a!, ids.b!, ids.c!], planNodeIds: [d.node.id] });
+      // The paginated read projects identically to the exact-id read.
+      expect(readResult(await d.port.call(readDecisions()), "read_decisions").items.find((x) => x.decisionId === mixed.id)!.affects).toEqual(coordinator.affects);
+      // The Orchestrator: the whole current revision (the internal root and the new leaf included), the Run's current Tasks, the current graph.
+      const root = await rootTurn(h, s);
+      expect(readResult(await root.port.call(readRequirements()), "read_requirements").requirementRevisionId).toBe(newer.id);
+      const orchestrator = readResult(await root.port.call(readDecisions({ decisionId: mixed.id })), "read_decisions").items[0]!;
+      expect(orchestrator.affects).toEqual({ requirementIds: [d.leafIds[0]!, d.leafIds[2]!, newLeafId, d.rootId], taskIds: [ids.a!, ids.b!, ids.c!, rootTask.id], planNodeIds: [d.node.id, s.created.root.id] });
+      h.provider.script({ kind: "succeed", result: COMPLETED_RESULT });
+      await h.executor.executePreparedAttempt(root.attempt.id);
+      // A Worker on Task b: its own Task and its direct dependency, its manifest Requirement, its node — and nothing of Task c or the root.
+      h.provider.script({ kind: "succeed", result: COMPLETED_RESULT });
+      await h.executor.executePreparedAttempt(d.attempt.id);
+      const seen: Record<string, unknown> = {};
+      const readingWorker = (): FakeStep => ({
+        kind: "derived",
+        step: (request) => {
+          const invocation = h.stores.invocations.get(request.invocationId);
+          return { kind: "runtime_tool_calls", calls: [readDecisions({ decisionId: mixed.id })], then: { kind: "derived", step: () => { seen[invocation.taskIds[0]!] = h.provider.runtimeToolCalls.at(-1)!.outcome; return coordinatorWorkerStep(h); } } };
+        },
+      });
+      scriptByRole(h, { worker: [readingWorker(), readingWorker(), readingWorker()], coordinator: [{ kind: "succeed", result: COMPLETED_RESULT }] });
+      await drain(h, runId, 64);
+      expect(readResult(seen[ids.a!] as never, "read_decisions").items[0]!.affects).toEqual({ requirementIds: [d.leafIds[0]!], taskIds: [ids.a!], planNodeIds: [d.node.id] });
+      expect(readResult(seen[ids.b!] as never, "read_decisions").items[0]!.affects).toEqual({ requirementIds: [], taskIds: [ids.a!, ids.b!], planNodeIds: [d.node.id] });
+      expect(readResult(seen[ids.c!] as never, "read_decisions").items[0]!.affects).toEqual({ requirementIds: [d.leafIds[2]!], taskIds: [ids.c!], planNodeIds: [d.node.id] });
+    } finally {
+      h.close();
+    }
+  });
+
+  it("keeps another Run's Decisions invisible to a scoped caller even when a Requirement id is shared; an Evaluator sees exactly its manifest's Decisions, projected to its scope", async () => {
+    const h = openRuntimeHarness({ governor: WIDE_GOVERNOR });
+    try {
+      const earlier = seedPlanningRuntime(h);
+      const conversationId = earlier.created.run.conversationId;
+      // An earlier Run of the Conversation records a Decision about the Conversation's Requirement, then ends.
+      const earlierDecision = operatorDecision(h, conversationId, earlier.created.run.id, { requirementIds: [earlier.completion.requirementId] }, "Earlier Run's question");
+      cancelRun(h, earlier);
+      const s = laterRunInConversation(h, earlier);
+      const runId = s.created.run.id;
+      expect(runId).not.toBe(earlier.created.run.id);
+      // The later Run's Coordinator pins a scope containing that same Requirement id (a new revision keeps the id).
+      const revision = h.stores.requirements.createRevision({ conversationId, approvedByDecisionId: null, tree: [{ id: earlier.completion.requirementId, parentId: null, composition: null, statement: "The change builds and its tests pass", position: 0, acceptanceCriterionIds: [] }] });
+      const { nodes, revisionNumber } = planNodes(h, s, [{ pattern: "coordinator_worker", coordinator: { agentDefinitionRevisionId: s.worker.id, title: "coordinator" }, worker: { agentDefinitionRevisionId: s.worker.id, title: "worker" }, scope: { requirementRootIds: [earlier.completion.requirementId], requirementRevisionId: revision.id }, allocation: { costUsd: 40, tokens: 400_000, attempts: 40 } }]);
+      const node = nodes[0]!;
+      // Decisions recorded after the manifest would be assembled: one of the earlier Run, one Conversation-level, one of this Run.
+      h.provider.script({ kind: "succeed", result: COMPLETED_RESULT });
+      await h.executor.advanceInvocation(s.invocation.id);
+      h.stores.plans.transitionNode(node.id, { to: "ready" });
+      const started = h.runners.coordinatorWorker.start(node.id, revisionNumber);
+      if (started.kind !== "started") throw new Error(started.kind);
+      const lateForeign = operatorDecision(h, conversationId, earlier.created.run.id, { requirementIds: [earlier.completion.requirementId] }, "Recorded late for the earlier Run");
+      const conversationLevel = operatorDecision(h, conversationId, null, { requirementIds: [earlier.completion.requirementId] }, "Conversation-wide");
+      const own = operatorDecision(h, conversationId, runId, { requirementIds: [earlier.completion.requirementId], planNodeIds: [node.id] }, "This Run's");
+      const prepared = await h.executor.prepareNextAttempt(started.invocationId);
+      if (prepared.kind !== "prepared") throw new Error(prepared.kind);
+      const port = portFor(h, prepared.invocation, prepared.attempt);
+      const manifest = h.stores.invocations.getManifest(prepared.invocation.id).content;
+      // The manifest (assembled before the late Decisions) names the earlier Run's Decision that references the pinned Requirement: the one canonical
+      // Conversation-level exception (execution-model §6.2). The late foreign Decision is visible through nothing.
+      expect(manifest.decisions.map((x) => x.decisionId)).toContain(earlierDecision.id);
+      expect(manifest.decisions.map((x) => x.decisionId)).not.toContain(lateForeign.id);
+      const visible = readResult(await port.call(readDecisions()), "read_decisions").items.map((x) => x.decisionId);
+      expect(visible).toEqual([earlierDecision.id, conversationLevel.id, own.id].sort());
+      expect(visible).not.toContain(lateForeign.id);
+      expect(rejectionCodes(await port.call(readDecisions({ decisionId: lateForeign.id })))).toEqual(["record_out_of_scope"]);
+      expect(rejectionCodes(await port.call(readDecisions({ after: lateForeign.id })))).toEqual(["cursor_invalid"]);
+      // A root turn assembled now names the late foreign Decision in its manifest (it references a current Requirement): visible through
+      // that canonical route alone, and projected to the root's scope — the Requirement it shares, no Plan Node of the earlier Run.
+      h.provider.script({ kind: "succeed", result: COMPLETED_RESULT });
+      await h.executor.executePreparedAttempt(prepared.attempt.id);
+      const root = await rootTurn(h, s);
+      expect(h.stores.invocations.getManifest(root.invocation.id).content.decisions.map((x) => x.decisionId)).toContain(lateForeign.id);
+      expect(readResult(await root.port.call(readDecisions({ decisionId: lateForeign.id })), "read_decisions").items[0]!.affects).toEqual({ requirementIds: [earlier.completion.requirementId], taskIds: [], planNodeIds: [] });
+    } finally {
+      h.close();
+    }
+  });
+
+  it("a Worker's Decision projection and the Orchestrator's cover superseded Tasks and removed Plan Nodes exactly as read_tasks and read_execution_plan do", async () => {
+    const h = openRuntimeHarness({ governor: WIDE_GOVERNOR });
+    try {
+      const s = seedPlanningRuntime(h);
+      const runId = s.created.run.id;
+      const conversationId = s.created.run.conversationId;
+      const w = await workerPort(h, s, { allocation: { costUsd: 12, tokens: 120_000, attempts: 12 } });
+      const other = await workerPort(h, s, { allocation: { costUsd: 12, tokens: 120_000, attempts: 12 }, title: "other" });
+      const decision = operatorDecision(h, conversationId, runId, { planNodeIds: [w.node.id, other.node.id, s.created.root.id] });
+      // A Worker sees a Decision about its node, projected to its node alone; the other Worker likewise.
+      expect(readResult(await w.port.call(readDecisions({ decisionId: decision.id })), "read_decisions").items[0]!.affects.planNodeIds).toEqual([w.node.id]);
+      expect(readResult(await other.port.call(readDecisions({ decisionId: decision.id })), "read_decisions").items[0]!.affects.planNodeIds).toEqual([other.node.id]);
+      // The Orchestrator sees every current node; a Decision naming only a removed node keeps that reference out of the projection.
+      const root = await rootPort(h, s);
+      expect(readResult(await root.port.call(readDecisions({ decisionId: decision.id })), "read_decisions").items[0]!.affects.planNodeIds).toEqual([w.node.id, other.node.id, s.created.root.id]);
+      const stale = operatorDecision(h, conversationId, runId, { planNodeIds: [other.node.id] });
+      // The Orchestrator revises the plan to drop the other node (still pending): its reference leaves the current graph.
+      h.provider.script({ kind: "succeed", result: COMPLETED_RESULT });
+      await h.executor.executePreparedAttempt(other.attempt.id);
+      h.stores.plans.transitionNode(other.node.id, { to: "cancelled", reason: "orchestrator" });
+      const remaining = h.stores.plans.getRevision(runId, h.stores.plans.latestRevisionNumber(runId)).source.expressions.filter((e) => !("operation" in e && e.operation.title === "other"));
+      planNodes(h, s, remaining);
+      expect(h.stores.plans.currentGraph(runId).nodes.map((n) => n.id)).not.toContain(other.node.id);
+      expect(readResult(await root.port.call(readDecisions({ decisionId: stale.id })), "read_decisions").items[0]!.affects.planNodeIds).toEqual([]);
     } finally {
       h.close();
     }
