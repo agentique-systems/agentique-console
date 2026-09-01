@@ -20,7 +20,7 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import path from "node:path";
 import type { AcceptanceCriterionExecutionOutcome, AcceptanceCriterionExecutionPort, AcceptanceCriterionExecutionRequest } from "../execution/ports/acceptance-criterion-execution.ts";
 import { boundedStderr, gitEnvironment } from "./git.ts";
-import { assertOwned, checkViewDir, exists, type WorkspaceStateLayout } from "./paths.ts";
+import { checkViewDir, exists, runDirectoryOf, type WorkspaceStateLayout } from "./paths.ts";
 import { commitOfIdentity } from "./snapshots.ts";
 import { addWorktree, removeWorktree } from "./worktrees.ts";
 
@@ -88,7 +88,7 @@ export class WorkspaceChecks implements AcceptanceCriterionExecutionPort {
     if (base === null || !exists(base)) return { kind: "failed", failure: "workspace_unavailable", message: "the check has no workspace to derive its view of the Snapshot" };
     let view: string;
     try {
-      view = checkViewDir(path.dirname(assertOwned(this.layout, base)), request.workspace.isolationKey);
+      view = checkViewDir(runDirectoryOf(this.layout, base), request.workspace.isolationKey);
       const commit = await commitOfIdentity(base, request.workspace.snapshot);
       await addWorktree(this.layout, { fromCwd: base, worktreePath: view, commit });
     } catch (error) {

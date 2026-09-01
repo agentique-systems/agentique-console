@@ -89,7 +89,7 @@ export interface FakeSdkCapture {
   /** Native tools that actually executed. */
   executed: { tool: string; input: unknown }[];
   /** In-process MCP tool handler calls. */
-  mcpCalls: { tool: string; input: unknown; isError: boolean }[];
+  mcpCalls: { tool: string; input: unknown; isError: boolean; text: string }[];
   /** MCP calls the server's schema validation refused before the handler. */
   mcpRejected: { tool: string; input: unknown }[];
   denied: string[];
@@ -375,8 +375,9 @@ export class FakeClaudeSdk implements ClaudeSdk {
         return { messages: [toolResult(`MCP error -32602: Invalid arguments for tool ${binding.tool.name}: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`, true)], denial: null, stop };
       }
       const result = (await binding.tool.handler(parsed.data as never, {})) as { content: { type: string; text?: string }[]; isError?: boolean };
-      this.captured.mcpCalls.push({ tool: name, input: step.input, isError: result.isError === true });
-      return { messages: [toolResult(result.content.map((c) => c.text ?? "").join(""), result.isError === true)], denial: null, stop };
+      const text = result.content.map((c) => c.text ?? "").join("");
+      this.captured.mcpCalls.push({ tool: name, input: step.input, isError: result.isError === true, text });
+      return { messages: [toolResult(text, result.isError === true)], denial: null, stop };
     }
     if (step.effect !== undefined) await step.effect({ cwd: options.cwd ?? "" });
     this.captured.executed.push({ tool: name, input: step.input });

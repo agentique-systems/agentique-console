@@ -85,6 +85,22 @@ export function checkViewDir(runDirectory: string, isolationKey: string): string
   return path.join(runDirectory, "checks", createHash("sha256").update(isolationKey).digest("hex").slice(0, 32));
 }
 
+/**
+ * The Run directory an owned Run-scoped path lies under (`<stateRoot>/workspaces/<ws>/runs/<run>`): the integration
+ * checkout, a worktree, or a publication's staging all derive their check views there, so a view's path stays as short
+ * as the integration checkout's whatever the base — Windows bounds a repository path at 260 characters.
+ */
+export function runDirectoryOf(layout: WorkspaceStateLayout, ownedPath: string): string {
+  let cursor = assertOwned(layout, ownedPath);
+  const root = workspacesRoot(layout);
+  while (cursor !== root && cursor !== path.dirname(cursor)) {
+    const parent = path.dirname(cursor);
+    if (path.basename(parent) === "runs" && path.basename(path.dirname(parent)).startsWith("ws_")) return cursor;
+    cursor = parent;
+  }
+  throw new WorkspaceStateError("invalid_layout", `${JSON.stringify(ownedPath)} lies under no Run directory of the state root`);
+}
+
 export function publicationDir(layout: WorkspaceStateLayout, workspaceId: string, runId: string, publicationId: string): string {
   return path.join(runDir(layout, workspaceId, runId), "publications", id(publicationId, "Publication id"));
 }

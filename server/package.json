@@ -13,7 +13,8 @@
     "eval:orchestration:live": "tsx evals/orchestration/live/run-live.ts",
     "eval:orchestration:judge": "tsx evals/orchestration/live/judge.ts",
     "eval:orchestration:compare": "tsx evals/orchestration/live/compare.ts",
-    "import-legacy": "tsx scripts/import-legacy.ts"
+    "import-legacy": "tsx scripts/import-legacy.ts",
+    "verify:coding-run": "tsx src/composition/verify-coding-run.ts"
   },
   "dependencies": {
     "@agentique-console/core": "*",

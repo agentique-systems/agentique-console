@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-const NEW_SOURCE_DIRS = ["core/src", "server/src/persistence", "server/src/execution", "server/src/provider", "server/src/workspace-state", "server/src/agents"];
+const NEW_SOURCE_DIRS = ["core/src", "server/src/persistence", "server/src/execution", "server/src/provider", "server/src/workspace-state", "server/src/agents", "server/src/composition"];
 const LEGACY_SOURCE_DIRS = ["shared/src", "server/src", "web/src", "server/scripts", "server/evals"];
 
 function listFiles(dir: string, filter: (file: string) => boolean): string[] {
@@ -214,6 +214,30 @@ describe("import boundaries", () => {
       const source = fs.readFileSync(file, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
       // No overlay, sidecar, bundle, minted variant, or trust mechanism; no live-directory read of a definition file.
       expect(source, rel(file)).not.toMatch(/overlay|sidecar|bundle|mint|readFileSync\(.*agents|readdirSync/i);
+    }
+  });
+
+  it("the composition layer wires the new boundaries and nothing legacy: it imports core, Node built-ins, and the new server directories only, and no other new directory imports it", () => {
+    const files = listFiles("server/src/composition", isCode);
+    expect(files.length).toBeGreaterThan(0);
+    for (const file of files) {
+      const isTest = file.endsWith(".test.ts") || file.endsWith("test-support.ts");
+      for (const specifier of importsOf(file)) {
+        if (isTest && specifier === "vitest") continue;
+        const allowed =
+          specifier === "@agentique-console/core" ||
+          specifier.startsWith("node:") ||
+          resolvesInto(file, specifier, "server/src/composition") ||
+          resolvesInto(file, specifier, "server/src/persistence") ||
+          resolvesInto(file, specifier, "server/src/execution") ||
+          resolvesInto(file, specifier, "server/src/provider") ||
+          resolvesInto(file, specifier, "server/src/workspace-state") ||
+          resolvesInto(file, specifier, "server/src/agents");
+        expect(allowed, `${rel(file)} imports ${specifier}`).toBe(true);
+      }
+    }
+    for (const dir of ["server/src/persistence", "server/src/execution", "server/src/provider", "server/src/workspace-state", "server/src/agents"]) {
+      for (const file of listFiles(dir, isCode)) for (const specifier of importsOf(file)) expect(resolvesInto(file, specifier, "server/src/composition"), `${rel(file)} imports ${specifier}`).toBe(false);
     }
   });
 
@@ -818,7 +842,8 @@ describe("import boundaries", () => {
     // 6. Not an agent tool and not wired to any route yet: the closed runtime-tool set names no control tool, and no legacy module reaches the service.
     expect(fs.readFileSync(path.join(repoRoot, "core/src/runtime-tools.ts"), "utf8")).not.toMatch(/cancel_run|pause_run|resume_run|run_control/);
     const callers = listFiles("server/src", (f) => isCode(f) && !f.endsWith(".test.ts") && !f.endsWith("test-support.ts") && !f.startsWith(path.join(repoRoot, "server", "src", "execution"))).filter((f) => /RunControlService|run-control\.ts/.test(fs.readFileSync(f, "utf8"))).map(rel);
-    expect(callers).toEqual([]);
+    // The production composition wires the service for its callers; no route or legacy module does.
+    expect(callers).toEqual(["server/src/composition/console-runtime.ts"]);
   });
 
   it("legacy code imports neither core nor the new persistence boundary", () => {

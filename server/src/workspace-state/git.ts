@@ -31,6 +31,12 @@ export function gitEnvironment(extra: Record<string, string> = {}, source: NodeJ
   return { ...env, ...extra };
 }
 
+/** The line of a git stderr that names the failure: the first `fatal:`/`error:` line, else the first line (git prints progress before the failure). */
+function summaryLineOf(stderr: string): string {
+  const lines = stderr.trim().split(/\r?\n/);
+  return lines.find((line) => /^(fatal|error):/.test(line)) ?? lines[0] ?? "";
+}
+
 export class GitError extends Error {
   constructor(
     readonly args: readonly string[],
@@ -38,7 +44,7 @@ export class GitError extends Error {
     readonly stderr: string,
     readonly cwd: string,
   ) {
-    super(`git ${args[0] ?? ""} failed${exitCode === null ? "" : ` (exit ${exitCode})`}: ${stderr.trim().split(/\r?\n/)[0] ?? ""}`);
+    super(`git ${args[0] ?? ""} failed${exitCode === null ? "" : ` (exit ${exitCode})`}: ${summaryLineOf(stderr)}`);
     this.name = "GitError";
   }
 }

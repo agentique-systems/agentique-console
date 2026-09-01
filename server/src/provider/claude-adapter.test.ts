@@ -332,9 +332,9 @@ describe("ClaudeAgentSdkAdapter: runtime tools", () => {
     ]);
     expect(authorizations).toEqual([]);
     expect(sdk.captured.mcpCalls).toEqual([
-      { tool: runtimeToolNativeName("read_tasks"), input: { limit: 5 }, isError: false },
-      { tool: runtimeToolNativeName("write_artifact"), input: { title: "note", mediaType: "text/plain", encoding: "utf8", content: "hello" }, isError: true },
-      { tool: runtimeToolNativeName(RETURN_RESULT_TOOL), input: RESULT, isError: false },
+      { tool: runtimeToolNativeName("read_tasks"), input: { limit: 5 }, isError: false, text: expect.any(String) },
+      { tool: runtimeToolNativeName("write_artifact"), input: { title: "note", mediaType: "text/plain", encoding: "utf8", content: "hello" }, isError: true, text: expect.any(String) },
+      { tool: runtimeToolNativeName(RETURN_RESULT_TOOL), input: RESULT, isError: false, text: expect.any(String) },
     ]);
     expect(outcome.completion).toEqual({ kind: "completed" });
   });
