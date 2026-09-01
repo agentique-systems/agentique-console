@@ -117,8 +117,16 @@ export function validateRequirementTree(entries: RequirementTreeEntry[]): Requir
   return entries;
 }
 
+/**
+ * The most entries one Requirement revision's tree may hold. The tree is one
+ * immutable JSON value read whole; this bound is what makes a whole-tree
+ * read a bounded read (execution-model §6.4 `read_requirements`).
+ */
+export const REQUIREMENT_TREE_MAX_ENTRIES = 1_000;
+
 export const requirementTreeSchema = z
   .array(requirementTreeEntrySchema)
+  .max(REQUIREMENT_TREE_MAX_ENTRIES, { message: `a Requirement revision holds at most ${REQUIREMENT_TREE_MAX_ENTRIES} entries` })
   .transform((entries) => validateRequirementTree(entries));
 
 /** The leaf Requirement ids under `rootIds` (inclusive when a root is a leaf). */

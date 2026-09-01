@@ -7,6 +7,8 @@ import {
   deriveComposedStatus,
   expandRequirementRoots,
   REQUIREMENT_STATUSES,
+  REQUIREMENT_TREE_MAX_ENTRIES,
+  requirementTreeSchema,
   validateRequirementTree,
   type RequirementStatusChangeInput,
   type RequirementTreeEntry,
@@ -28,6 +30,14 @@ describe("requirement tree", () => {
     expect(expandRequirementRoots(tree, [root])).toEqual([a, b]);
     expect(expandRequirementRoots(tree, [a])).toEqual([a]);
     expect(() => expandRequirementRoots(tree, [r()])).toThrow(ValidationError);
+  });
+
+  it("bounds a revision's tree at REQUIREMENT_TREE_MAX_ENTRIES entries, so a whole-tree read is a bounded read", () => {
+    const rootId = newId("requirement");
+    const leaves = (count: number) => Array.from({ length: count }, (_, i) => ({ id: newId("requirement"), parentId: rootId, composition: null, statement: `Leaf ${i}`, position: i + 1, acceptanceCriterionIds: [] }));
+    const root = { id: rootId, parentId: null, composition: "all" as const, statement: "Everything", position: 0, acceptanceCriterionIds: [] };
+    expect(requirementTreeSchema.safeParse([root, ...leaves(REQUIREMENT_TREE_MAX_ENTRIES - 1)]).success).toBe(true);
+    expect(requirementTreeSchema.safeParse([root, ...leaves(REQUIREMENT_TREE_MAX_ENTRIES)]).success).toBe(false);
   });
 
   it("rejects duplicates, dangling parents, cycles, and mis-declared composition", () => {

@@ -1,4 +1,4 @@
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, inArray } from "drizzle-orm";
 import {
   acceptanceCriterionSchema,
   assertRequirementStatusChangeRules,
@@ -181,19 +181,38 @@ export class RequirementStore {
     return revisionToDomain(requireRow(this.ctx.db.select().from(requirementRevisions).where(eq(requirementRevisions.id, id)).get(), "RequirementRevision", id));
   }
 
+  /** The Conversation's latest revision — one bounded query, never the whole revision history (every row carries a tree). */
   currentRevision(conversationId: ConversationId): RequirementRevision | null {
     const row = this.ctx.db
       .select()
       .from(requirementRevisions)
       .where(eq(requirementRevisions.conversationId, conversationId))
-      .orderBy(asc(requirementRevisions.number))
-      .all()
-      .at(-1);
+      .orderBy(desc(requirementRevisions.number))
+      .limit(1)
+      .get();
     return row ? revisionToDomain(row) : null;
   }
 
   get(id: RequirementId): Requirement {
     return toDomain(requireRow(this.ctx.db.select().from(requirements).where(eq(requirements.id, id)).get(), "Requirement", id));
+  }
+
+  /** The Requirements with the given ids, in one bounded query. */
+  getMany(ids: readonly RequirementId[]): Requirement[] {
+    if (ids.length === 0) return [];
+    return this.ctx.db.select().from(requirements).where(inArray(requirements.id, [...ids])).all().map(toDomain);
+  }
+
+  /** The operator-resolved waiver Decision that last set the Requirement `waived` (from its status journal), or `null`. */
+  latestWaiverDecisionOf(requirementId: RequirementId): DecisionId | null {
+    const row = this.ctx.db
+      .select({ decisionId: requirementStatusChanges.decisionId })
+      .from(requirementStatusChanges)
+      .where(and(eq(requirementStatusChanges.requirementId, requirementId), eq(requirementStatusChanges.toStatus, "waived")))
+      .orderBy(desc(requirementStatusChanges.seq))
+      .limit(1)
+      .get();
+    return (row?.decisionId as DecisionId | null | undefined) ?? null;
   }
 
   listByConversation(conversationId: ConversationId): Requirement[] {
@@ -331,6 +350,12 @@ export class RequirementStore {
 
   getAcceptanceCriterion(id: AcceptanceCriterionId): AcceptanceCriterion {
     return criterionToDomain(requireRow(this.ctx.db.select().from(acceptanceCriteria).where(eq(acceptanceCriteria.id, id)).get(), "AcceptanceCriterion", id));
+  }
+
+  /** The Acceptance Criteria with the given ids, in one bounded query. */
+  getAcceptanceCriteria(ids: readonly AcceptanceCriterionId[]): AcceptanceCriterion[] {
+    if (ids.length === 0) return [];
+    return this.ctx.db.select().from(acceptanceCriteria).where(inArray(acceptanceCriteria.id, [...ids])).all().map(criterionToDomain);
   }
 
   listAcceptanceCriteria(owner: { requirementId: RequirementId } | { taskId: TaskId }): AcceptanceCriterion[] {

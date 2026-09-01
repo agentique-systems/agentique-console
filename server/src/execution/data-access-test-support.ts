@@ -314,6 +314,51 @@ export async function rootTurn(h: RuntimeHarness, s: PlanningSeed) {
   return { invocation: prepared.invocation, attempt: prepared.attempt, port: portFor(h, prepared.invocation, prepared.attempt) };
 }
 
+/**
+ * Observes every statement the harness database executes from now on:
+ * the SQL texts and the rows each returned. A bounded read is proven by
+ * what the store actually retrieved, never inferred from a small response.
+ */
+export function observeQueries(h: RuntimeHarness) {
+  const sqlite = h.ctx.sqlite;
+  const original = sqlite.prepare.bind(sqlite);
+  const statements: { sql: string; rows: number }[] = [];
+  const prepare = (source: string) => {
+    const statement = original(source);
+    const count = (rows: number) => statements.push({ sql: source, rows });
+    const all = statement.all.bind(statement);
+    const get = statement.get.bind(statement);
+    const raw = statement.raw.bind(statement);
+    statement.all = ((...params: unknown[]) => {
+      const rows = all(...params);
+      count(rows.length);
+      return rows;
+    }) as typeof statement.all;
+    statement.get = ((...params: unknown[]) => {
+      const row = get(...params);
+      count(row === undefined ? 0 : 1);
+      return row;
+    }) as typeof statement.get;
+    statement.raw = ((...args: unknown[]) => {
+      raw(...(args as []));
+      return statement;
+    }) as typeof statement.raw;
+    return statement;
+  };
+  (sqlite as { prepare: unknown }).prepare = prepare;
+  return {
+    statements,
+    reset: () => statements.splice(0),
+    /** Rows retrieved from `table` by every statement selecting from it. */
+    rowsFrom: (table: string) => statements.filter((s) => new RegExp(`\\bfrom\\s+"?${table}"?`, "i").test(s.sql)).reduce((sum, s) => sum + s.rows, 0),
+    /** The statements selecting from `table`. */
+    selectsFrom: (table: string) => statements.filter((s) => new RegExp(`\\bfrom\\s+"?${table}"?`, "i").test(s.sql)),
+    restore: () => {
+      (sqlite as { prepare: unknown }).prepare = original;
+    },
+  };
+}
+
 /** The next Attempt of a running Invocation whose previous Attempt failed transiently: the same Invocation, a retried Attempt, a fresh port. */
 export async function retriedAttempt(h: RuntimeHarness, invocation: Invocation) {
   passRetryBackoff(h, invocation.id);

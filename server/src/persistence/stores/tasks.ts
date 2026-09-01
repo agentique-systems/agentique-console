@@ -1,4 +1,5 @@
-import { and, asc, eq, inArray, isNotNull, or } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, isNotNull, notExists, or } from "drizzle-orm";
+import { alias } from "drizzle-orm/sqlite-core";
 import {
   assertTaskCompletion,
   ConflictError,
@@ -28,6 +29,17 @@ import { assertSameRun, loadRunRef, requireRow, runScope, writeMeta, type WriteO
 function toDomain(row: typeof tasks.$inferSelect): Task {
   return parseOrThrow(taskSchema, row, "Task row");
 }
+
+/**
+ * Which Tasks of a Run one reader sees (execution-model §6.4 `read_tasks`):
+ * `current` — every Task not superseded by a replacement (the root
+ * Orchestrator); `node` — a Plan Node's complete ledger, superseded rows
+ * included (its Coordinator); `ids` — an explicit bounded set (a Worker's
+ * own Tasks and their direct dependencies; an Evaluator's Gate candidate).
+ */
+export type TaskVisibility = { runId: RunId } & ({ kind: "current" } | { kind: "node"; planNodeId: PlanNodeId } | { kind: "ids"; taskIds: readonly TaskId[] });
+
+const replacement = alias(tasks, "replacement");
 
 /**
  * Run-scoped Tasks with the seven runtime-owned states, dependencies that
@@ -130,6 +142,72 @@ export class TaskStore {
   /** Every Task tagged with a Plan Node, historical ones included, in creation order (then id): the node's canonical Task order. */
   listByPlanNode(planNodeId: PlanNodeId): Task[] {
     return this.ctx.db.select().from(tasks).where(eq(tasks.planNodeId, planNodeId)).orderBy(asc(tasks.createdAt), asc(tasks.id)).all().map(toDomain);
+  }
+
+  /** One keyset page of the Tasks visible under `visibility`, in id order after `after` (exclusive), at most `limit` rows: one bounded query. */
+  page(visibility: TaskVisibility, after: TaskId | undefined, limit: number): Task[] {
+    const where = this.visibleWhere(visibility);
+    if (where === null) return [];
+    return this.ctx.db
+      .select()
+      .from(tasks)
+      .where(and(where, after === undefined ? undefined : gt(tasks.id, after)))
+      .orderBy(asc(tasks.id))
+      .limit(limit)
+      .all()
+      .map(toDomain);
+  }
+
+  /** Whether Task `id` is visible under `visibility` (one indexed lookup): the cursor and exact-id check. */
+  contains(visibility: TaskVisibility, id: TaskId): boolean {
+    return this.visibleAmong(visibility, [id]).length === 1;
+  }
+
+  /** The subset of `ids` visible under `visibility`, in one bounded query: how a page projects Task references it did not load. */
+  visibleAmong(visibility: TaskVisibility, ids: readonly TaskId[]): TaskId[] {
+    const where = this.visibleWhere(visibility);
+    if (where === null || ids.length === 0) return [];
+    return this.ctx.db
+      .select({ id: tasks.id })
+      .from(tasks)
+      .where(and(where, inArray(tasks.id, [...ids])))
+      .all()
+      .map((row) => row.id as TaskId);
+  }
+
+  private visibleWhere(visibility: TaskVisibility) {
+    const own = eq(tasks.runId, visibility.runId);
+    switch (visibility.kind) {
+      case "current":
+        return and(own, notExists(this.ctx.db.select({ id: replacement.id }).from(replacement).where(eq(replacement.replacesTaskId, tasks.id))));
+      case "node":
+        return and(own, eq(tasks.planNodeId, visibility.planNodeId));
+      case "ids":
+        return visibility.taskIds.length === 0 ? null : and(own, inArray(tasks.id, [...visibility.taskIds]));
+    }
+  }
+
+  /** The direct dependency ids of each of `taskIds` (edges whose dependent is the Task), in one bounded query; absent Tasks map to nothing. */
+  dependencyIdsOf(taskIds: readonly TaskId[]): Map<TaskId, TaskId[]> {
+    const out = new Map<TaskId, TaskId[]>();
+    if (taskIds.length === 0) return out;
+    const rows = this.ctx.db.select({ taskId: taskDependencies.taskId, dependsOnTaskId: taskDependencies.dependsOnTaskId }).from(taskDependencies).where(inArray(taskDependencies.taskId, [...taskIds])).all();
+    for (const row of rows) {
+      const list = out.get(row.taskId as TaskId) ?? [];
+      list.push(row.dependsOnTaskId as TaskId);
+      out.set(row.taskId as TaskId, list);
+    }
+    for (const list of out.values()) list.sort();
+    return out;
+  }
+
+  /** The replacement Task id of each superseded Task among `taskIds`, in one bounded query. */
+  replacementsOf(taskIds: readonly TaskId[]): Map<TaskId, TaskId> {
+    const out = new Map<TaskId, TaskId>();
+    if (taskIds.length === 0) return out;
+    const rows = this.ctx.db.select({ id: tasks.id, replacesTaskId: tasks.replacesTaskId }).from(tasks).where(inArray(tasks.replacesTaskId, [...taskIds])).all();
+    for (const row of rows) out.set(row.replacesTaskId as TaskId, row.id as TaskId);
+    return out;
   }
 
   /** The Task that replaced `taskId`, or `null` while it is not superseded; at most one exists (a database unique index). */

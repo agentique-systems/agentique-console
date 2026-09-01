@@ -1,4 +1,5 @@
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, or } from "drizzle-orm";
+import { alias } from "drizzle-orm/sqlite-core";
 import {
   assertPlanNodeTransition,
   ConflictError,
@@ -22,6 +23,7 @@ import {
   type ExecutionPlanSource,
   type InvocationId,
   type PlanEdge,
+  type PlanEdgeId,
   type PlanEdgeType,
   type PlanGraph,
   type PlanLimits,
@@ -543,6 +545,87 @@ export class ExecutionPlanStore {
     const rows = this.ctx.db.select().from(planNodes).where(inArray(planNodes.id, membership.map((m) => m.planNodeId))).all();
     const byId = new Map(this.attachScope(rows).map((n) => [n.id, n] as const));
     return membership.map((m) => byId.get(m.planNodeId)!);
+  }
+
+  /** The membership position of `planNodeId` in one accepted revision, or `null` when it is not a member: the node cursor check. */
+  memberPosition(runId: RunId, revisionNumber: number, planNodeId: PlanNodeId): number | null {
+    const row = this.ctx.db
+      .select({ position: planRevisionNodes.position })
+      .from(planRevisionNodes)
+      .where(and(eq(planRevisionNodes.runId, runId), eq(planRevisionNodes.revisionNumber, revisionNumber), eq(planRevisionNodes.planNodeId, planNodeId)))
+      .get();
+    return row?.position ?? null;
+  }
+
+  /** The subset of `ids` that are members of one accepted revision, in one bounded query. */
+  membersAmong(runId: RunId, revisionNumber: number, ids: readonly PlanNodeId[]): PlanNodeId[] {
+    if (ids.length === 0) return [];
+    return this.ctx.db
+      .select({ planNodeId: planRevisionNodes.planNodeId })
+      .from(planRevisionNodes)
+      .where(and(eq(planRevisionNodes.runId, runId), eq(planRevisionNodes.revisionNumber, revisionNumber), inArray(planRevisionNodes.planNodeId, [...ids])))
+      .all()
+      .map((row) => row.planNodeId as PlanNodeId);
+  }
+
+  /**
+   * One keyset page of a revision's members in membership order, after the
+   * member at position `afterPosition` (exclusive; -1 from the start), at
+   * most `limit` nodes, with their scope: two bounded queries.
+   */
+  pageMembers(runId: RunId, revisionNumber: number, afterPosition: number, limit: number): PlanNode[] {
+    const membership = this.ctx.db
+      .select({ planNodeId: planRevisionNodes.planNodeId })
+      .from(planRevisionNodes)
+      .where(and(eq(planRevisionNodes.runId, runId), eq(planRevisionNodes.revisionNumber, revisionNumber), gt(planRevisionNodes.position, afterPosition)))
+      .orderBy(asc(planRevisionNodes.position))
+      .limit(limit)
+      .all();
+    if (membership.length === 0) return [];
+    const rows = this.ctx.db.select().from(planNodes).where(inArray(planNodes.id, membership.map((m) => m.planNodeId))).all();
+    const byId = new Map(this.attachScope(rows).map((n) => [n.id, n] as const));
+    return membership.map((m) => byId.get(m.planNodeId as PlanNodeId)!);
+  }
+
+  /**
+   * The canonical key of an edge of one accepted revision — its target's
+   * membership position and its fan-in position, unique per revision — or
+   * `null` when the edge is not the revision's: the edge cursor check.
+   */
+  edgeKey(runId: RunId, revisionNumber: number, edgeId: PlanEdgeId): { targetPosition: number; position: number } | null {
+    const target = alias(planRevisionNodes, "target_member");
+    const row = this.ctx.db
+      .select({ targetPosition: target.position, position: planEdges.position })
+      .from(planEdges)
+      .innerJoin(target, and(eq(target.runId, planEdges.runId), eq(target.revisionNumber, planEdges.revisionNumber), eq(target.planNodeId, planEdges.targetNodeId)))
+      .where(and(eq(planEdges.id, edgeId), eq(planEdges.runId, runId), eq(planEdges.revisionNumber, revisionNumber)))
+      .get();
+    return row ?? null;
+  }
+
+  /**
+   * One keyset page of a revision's edges in the canonical order — target
+   * membership position, then fan-in position (unique per revision) — after
+   * the given key (exclusive; `null` from the start), at most `limit` edges:
+   * one bounded query. The same order `listEdges` returns whole.
+   */
+  pageEdges(runId: RunId, revisionNumber: number, after: { targetPosition: number; position: number } | null, limit: number): PlanEdge[] {
+    const target = alias(planRevisionNodes, "target_member");
+    return this.ctx.db
+      .select({ edge: planEdges })
+      .from(planEdges)
+      .innerJoin(target, and(eq(target.runId, planEdges.runId), eq(target.revisionNumber, planEdges.revisionNumber), eq(target.planNodeId, planEdges.targetNodeId)))
+      .where(
+        and(
+          eq(planEdges.runId, runId),
+          eq(planEdges.revisionNumber, revisionNumber),
+          after === null ? undefined : or(gt(target.position, after.targetPosition), and(eq(target.position, after.targetPosition), gt(planEdges.position, after.position))),
+        ),
+      )
+      .orderBy(asc(target.position), asc(planEdges.position))
+      .limit(limit)
+      .all()
+      .map((row) => edgeToDomain(row.edge));
   }
 
   /** The edges owned by one accepted revision, in fan-in order per target, targets in membership order. */

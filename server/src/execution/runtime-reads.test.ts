@@ -27,6 +27,7 @@ import {
   writtenArtifact,
 } from "./data-access-test-support.ts";
 import { choice, rootPort, workerPort } from "./decision-test-support.ts";
+import { readOutcomeBytes } from "./runtime-reads.ts";
 import { COMPLETED_RESULT, openRuntimeHarness, planNodes, seedPlanningRuntime } from "./test-support.ts";
 
 describe("runtime read tools", () => {
@@ -102,7 +103,7 @@ describe("runtime read tools", () => {
       const third = readResult(await port.call(readRequirements({ after: second.next! })), "read_requirements");
       expect(third.items.map((r) => r.requirementId)).toEqual([wide.leafIds[2]]);
       expect(third.next).toBeNull();
-      for (const page of [first, second, third]) expect(JSON.stringify(page).length).toBeLessThanOrEqual(RUNTIME_READ_BOUNDS.maxResponseBytes);
+      for (const page of [first, second, third]) expect(readOutcomeBytes(page)).toBeLessThanOrEqual(RUNTIME_READ_BOUNDS.maxResponseBytes);
       // One record beyond the bound: a typed reference with its id and size, and a cursor that skips exactly it.
       const huge = approveRevision(h, s, 2, 80_000);
       const oversized = readResult(await port.call(readRequirements({ after: huge.rootId })), "read_requirements");
@@ -185,11 +186,11 @@ describe("runtime read tools", () => {
       expect(parallel.shape).toEqual({ pattern: "parallel", itemCount: 2, hasAggregation: false, requireAll: false });
       // No full nested plan JSON: a node record never embeds operations, inputs, or instructions.
       expect(JSON.stringify(all)).not.toMatch(/agentDefinitionRevisionId|instructions|"input"/);
-      // Edges: typed records in edge-id order, separately paged.
+      // Edges: typed records in the plan's canonical order (target membership position, then fan-in position), separately paged.
       const edges = readResult(await port.call(readPlan({ view: "edges" })), "read_execution_plan");
       if (edges.view !== "edges") throw new Error("edges view expected");
       expect(edges.revisionNumber).toBe(revisionNumber);
-      expect(edges.items.map((e) => e.planEdgeId)).toEqual([...graph.edges.map((e) => e.id)].sort());
+      expect(edges.items.map((e) => e.planEdgeId)).toEqual(graph.edges.map((e) => e.id));
       for (const edge of edges.items) {
         const canonical = graph.edges.find((e) => e.id === edge.planEdgeId)!;
         expect(edge).toMatchObject({ type: canonical.type, sourceNodeId: canonical.sourceNodeId, targetNodeId: canonical.targetNodeId, position: canonical.position });

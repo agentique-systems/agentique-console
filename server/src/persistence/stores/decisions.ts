@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, notInArray } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, notInArray, sql, type SQL } from "drizzle-orm";
 import {
   assertDecisionResolutionRules,
   budgetIncreasePermitted,
@@ -16,12 +16,16 @@ import {
   type DecisionId,
   type DecisionRequest,
   type DecisionResolutionInput,
+  type DecisionStatus,
   type DecisionSubject,
   type DecisionSupersessionReason,
   type EventActor,
   type InvocationId,
+  type PlanNodeId,
+  type RequirementId,
   type RunId,
   type RunStatus,
+  type TaskId,
 } from "@agentique-console/core";
 import type { PersistenceContext } from "../context.ts";
 import { artifacts, attempts, completionRequests, decisions, gates, invocations, planNodes, publications, requirementRevisions, requirements, runs, tasks } from "../schema.ts";
@@ -66,6 +70,40 @@ function toDomain(row: Row): Decision {
     "Decision row",
   );
 }
+
+/**
+ * The routes through which a Decision reaches one reader (execution-model
+ * §6.4 `read_decisions`), evaluated by the database before any row is
+ * materialized. `run`: every Decision of the Run (the root Orchestrator).
+ * `scoped`: a Decision that affects the node, one of the admitted Tasks (the
+ * node's whole ledger, or an explicit bounded list), or one of the admitted
+ * Requirement ids, or that one of the admitted requesters requested (every
+ * Invocation of the node, or an explicit list). `named`: no route at all.
+ * Either way only the Run's own and the Conversation-level (`runId` null)
+ * Decisions travel these routes; `namedDecisionIds` (the caller's manifest)
+ * are visible regardless.
+ */
+export type DecisionRouteScope =
+  | { kind: "run" }
+  /** No route beyond the named ids (an Evaluator: exactly its manifest's Decisions). */
+  | { kind: "named" }
+  | {
+      kind: "scoped";
+      planNodeId: PlanNodeId;
+      tasks: { kind: "node"; planNodeId: PlanNodeId } | { kind: "ids"; taskIds: readonly TaskId[] };
+      requirementIds: readonly RequirementId[];
+      requesters: { kind: "node"; planNodeId: PlanNodeId } | { kind: "ids"; invocationIds: readonly InvocationId[] };
+    };
+
+export interface DecisionVisibility {
+  conversationId: ConversationId;
+  runId: RunId;
+  namedDecisionIds: readonly DecisionId[];
+  routes: DecisionRouteScope;
+  status?: DecisionStatus;
+}
+
+const idList = (ids: readonly string[]): SQL => sql.join(ids.map((id) => sql`${id}`), sql`, `);
 
 function actorFor(resolvedBy: DecisionResolutionInput["resolvedBy"], decision: Decision): EventActor {
   if (resolvedBy === "operator") return OPERATOR_ACTOR;
@@ -151,6 +189,59 @@ export class DecisionStore {
   /** Every Decision of a Run, in creation order (then id order). */
   listByRun(runId: RunId): Decision[] {
     return this.ctx.db.select().from(decisions).where(eq(decisions.runId, runId)).orderBy(asc(decisions.createdAt), asc(decisions.id)).all().map(toDomain);
+  }
+
+  /**
+   * One keyset page of the Decisions visible under `visibility`, in id
+   * order, starting after `after` (exclusive) and holding at most `limit`
+   * rows. Ownership and every route are SQL predicates over the row and the
+   * Conversation's index, so a page costs one bounded query however long the
+   * Conversation's Decision history is.
+   */
+  page(visibility: DecisionVisibility, after: DecisionId | undefined, limit: number): Decision[] {
+    return this.ctx.db
+      .select()
+      .from(decisions)
+      .where(and(this.visibleWhere(visibility), after === undefined ? undefined : gt(decisions.id, after)))
+      .orderBy(asc(decisions.id))
+      .limit(limit)
+      .all()
+      .map(toDomain);
+  }
+
+  /** Whether the Decision `id` is visible under `visibility` (one indexed lookup): the cursor and exact-id check. */
+  contains(visibility: DecisionVisibility, id: DecisionId): boolean {
+    return this.ctx.db.select({ id: decisions.id }).from(decisions).where(and(this.visibleWhere(visibility), eq(decisions.id, id))).get() !== undefined;
+  }
+
+  private visibleWhere(v: DecisionVisibility): SQL {
+    const named = v.namedDecisionIds.length === 0 ? sql`0` : sql`${decisions.id} IN (${idList(v.namedDecisionIds)})`;
+    const ownRun = sql`(${decisions.runId} = ${v.runId} OR ${decisions.runId} IS NULL)`;
+    let routes: SQL;
+    if (v.routes.kind === "run") {
+      routes = ownRun;
+    } else if (v.routes.kind === "named") {
+      routes = sql`0`;
+    } else {
+      const r = v.routes;
+      const byNode = sql`EXISTS (SELECT 1 FROM json_each(${decisions.affects}, '$.planNodeIds') WHERE json_each.value = ${r.planNodeId})`;
+      const byTask =
+        r.tasks.kind === "node"
+          ? sql`EXISTS (SELECT 1 FROM json_each(${decisions.affects}, '$.taskIds') JOIN ${tasks} ON ${tasks.id} = json_each.value WHERE ${tasks.planNodeId} = ${r.tasks.planNodeId})`
+          : r.tasks.taskIds.length === 0
+            ? sql`0`
+            : sql`EXISTS (SELECT 1 FROM json_each(${decisions.affects}, '$.taskIds') WHERE json_each.value IN (${idList(r.tasks.taskIds)}))`;
+      const byRequirement = r.requirementIds.length === 0 ? sql`0` : sql`EXISTS (SELECT 1 FROM json_each(${decisions.affects}, '$.requirementIds') WHERE json_each.value IN (${idList(r.requirementIds)}))`;
+      const byRequester =
+        r.requesters.kind === "node"
+          ? sql`${decisions.requesterInvocationId} IN (SELECT ${invocations.id} FROM ${invocations} WHERE ${invocations.planNodeId} = ${r.requesters.planNodeId})`
+          : r.requesters.invocationIds.length === 0
+            ? sql`0`
+            : sql`${decisions.requesterInvocationId} IN (${idList(r.requesters.invocationIds)})`;
+      routes = sql`(${ownRun} AND (${byNode} OR ${byTask} OR ${byRequirement} OR ${byRequester}))`;
+    }
+    const status = v.status === undefined ? sql`1` : sql`${decisions.status} = ${v.status}`;
+    return sql`(${decisions.conversationId} = ${v.conversationId} AND (${named} OR ${routes}) AND ${status})`;
   }
 
   /** The Decisions an Invocation requested through `request_decision` (the requestable kinds it is the requester of), in creation order. */

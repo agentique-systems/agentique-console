@@ -9,7 +9,7 @@
  * Event, no `runtime_tool_calls` row, and no unreferenced blob; and raw
  * content never reaches an Event, a diagnostic, or the call record.
  */
-import { canonicalJson, WRITE_ARTIFACT_BOUNDS, type RunId } from "@agentique-console/core";
+import { canonicalJson, canonicalRuntimeToolCall, RUNTIME_TOOL_CALL_MAX_BYTES, utf8ByteLength, WRITE_ARTIFACT_BOUNDS, WRITE_ARTIFACT_CALL_MAX_BYTES, type RunId } from "@agentique-console/core";
 import { describe, expect, it, vi } from "vitest";
 import { sha256Hex } from "../persistence/blob-store.ts";
 import { decomposePort, portFor, WIDE_GOVERNOR } from "./coordinator-test-support.ts";
@@ -230,6 +230,49 @@ describe("write_artifact", () => {
       expect(h.diagnostics.map((d) => d.kind)).toContain("blob_cleanup_failed");
     } finally {
       vi.restoreAllMocks();
+      h.close();
+    }
+  });
+
+  it("keeps the 96 KiB request ceiling distinct from the 48 KiB decoded ceiling: maximal base64 with maximal metadata fits, heavily escaped text beyond the request ceiling is refused without a write, the same bytes as base64 succeed, and a refusal consumes no allowance", async () => {
+    const h = openRuntimeHarness({ governor: WIDE_GOVERNOR });
+    try {
+      const s = seedPlanningRuntime(h);
+      const runId = s.created.run.id;
+      const { invocation, port } = await rootPort(h, s);
+      const title = "t".repeat(WRITE_ARTIFACT_BOUNDS.titleMaxBytes);
+      const mediaType = `application/${"m".repeat(WRITE_ARTIFACT_BOUNDS.mediaTypeMaxBytes - "application/".length)}`;
+      // 48 KiB decoded as base64 (65,536 characters) with a 200-byte title and a 200-byte media type: within the 96 KiB request ceiling.
+      const maximal = writeArtifact({ title, mediaType, encoding: "base64", content: Buffer.alloc(WRITE_ARTIFACT_BOUNDS.maxContentBytes, 0xff).toString("base64") });
+      const canonical = utf8ByteLength(canonicalRuntimeToolCall(maximal));
+      expect(canonical).toBeGreaterThan(RUNTIME_TOOL_CALL_MAX_BYTES);
+      expect(canonical).toBeLessThanOrEqual(WRITE_ARTIFACT_CALL_MAX_BYTES);
+      expect(writtenArtifact(await port.call(maximal))).toMatchObject({ byteSize: WRITE_ARTIFACT_BOUNDS.maxContentBytes, mediaType, title });
+      // Heavily escaped text: 49,152 quotes decode to exactly 48 KiB (within the decoded ceiling) but serialize to 98,304 bytes of
+      // escaped content — beyond the request ceiling. Refused typed before any transaction; nothing written, no allowance consumed.
+      const quotes = '"'.repeat(WRITE_ARTIFACT_BOUNDS.maxContentBytes);
+      const escaped = writeArtifact({ title: "escaped", content: quotes });
+      expect(utf8ByteLength(canonicalRuntimeToolCall(escaped))).toBeGreaterThan(WRITE_ARTIFACT_CALL_MAX_BYTES);
+      const before = { artifacts: artifactsOf(h, runId).length, calls: h.stores.runtimeToolCalls.listByInvocation(invocation.id).length, seq: h.ctx.journal.lastSeq(), blobs: h.blobs.size };
+      const refused = await port.call(escaped);
+      expect(refused).toMatchObject({ kind: "rejected", tool: "write_artifact", reasons: [{ code: "invalid_input", path: null }] });
+      expect((refused as { reasons: { message: string }[] }).reasons[0]!.message).toMatch(/canonical bound/);
+      // 16 KiB of NUL characters escape to six bytes each: refused likewise.
+      const controls = writeArtifact({ title: "controls", content: "\u0000".repeat(16_384) });
+      expect(utf8ByteLength(canonicalRuntimeToolCall(controls))).toBeGreaterThan(WRITE_ARTIFACT_CALL_MAX_BYTES);
+      expect(rejectionCodes(await port.call(controls))).toEqual(["invalid_input"]);
+      expect({ artifacts: artifactsOf(h, runId).length, calls: h.stores.runtimeToolCalls.listByInvocation(invocation.id).length, seq: h.ctx.journal.lastSeq(), blobs: h.blobs.size }).toEqual(before);
+      // The same permitted bytes submitted as base64 succeed: the decoded ceiling, not the escaping, is what bounds content.
+      const asBase64 = writtenArtifact(await port.call(writeArtifact({ title: "escaped", encoding: "base64", content: Buffer.from(quotes, "utf8").toString("base64") })));
+      expect(asBase64.byteSize).toBe(WRITE_ARTIFACT_BOUNDS.maxContentBytes);
+      expect(readResult(await port.call(readArtifact({ artifactId: asBase64.artifactId, maxBytes: 16 })), "read_artifact").content).toBe('"'.repeat(16));
+      const nulls = writtenArtifact(await port.call(writeArtifact({ title: "controls", encoding: "base64", content: Buffer.alloc(16_384, 0).toString("base64") })));
+      expect(nulls.byteSize).toBe(16_384);
+      // Decoded size, accepted-call count, and cumulative bytes stay independent: the two refusals counted toward none of them.
+      const accepted = h.stores.runtimeToolCalls.listByInvocation(invocation.id).filter((c) => c.tool === "write_artifact");
+      expect(accepted).toHaveLength(3);
+      expect(accepted.reduce((sum, c) => sum + (c.result.tool === "write_artifact" ? c.result.byteSize : 0), 0)).toBe(2 * WRITE_ARTIFACT_BOUNDS.maxContentBytes + 16_384);
+    } finally {
       h.close();
     }
   });

@@ -1,4 +1,4 @@
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, sql, type SQL } from "drizzle-orm";
 import {
   agentDefinitionContentBytes,
   agentDefinitionContentSchema,
@@ -13,6 +13,8 @@ import {
   type AgentDefinitionId,
   type AgentDefinitionRevision,
   type AgentDefinitionRevisionId,
+  type ConversationId,
+  type WorkspaceId,
 } from "@agentique-console/core";
 import { sha256Hex } from "../blob-store.ts";
 import type { PersistenceContext } from "../context.ts";
@@ -24,6 +26,26 @@ function revisionToDomain(row: typeof agentDefinitionRevisions.$inferSelect): Ag
 }
 
 const SYSTEM_SCOPE = { workspaceId: null, conversationId: null, runId: null, planNodeId: null, invocationId: null, attemptId: null } as const;
+
+/**
+ * The revisions one Run may read about (execution-model §6.4
+ * `read_agent_definitions`): the latest executable revision of every
+ * definition for the Run's Workspace and Conversation, plus any executable
+ * revision the Run still references (its graph, its verification policy,
+ * the caller). Executability is the provenance-ownership rule of the
+ * execution boundary's resolver (§11), stated once more here as a database
+ * predicate so the page is bounded before any row is materialized; the
+ * execution boundary re-resolves every returned row and treats a
+ * disagreement as an invariant violation.
+ */
+export interface ExecutableRevisionQuery {
+  workspaceId: WorkspaceId;
+  conversationId: ConversationId;
+  referencedRevisionIds: readonly AgentDefinitionRevisionId[];
+  definitionId?: AgentDefinitionId;
+}
+
+const revisionColumns = (t: string) => ({ provenance: sql.raw(`${t}.provenance`), definitionId: sql.raw(`${t}.definition_id`), createdAt: sql.raw(`${t}.created_at`), id: sql.raw(`${t}.id`) });
 
 /**
  * Agent Definitions (stable logical identity by name) and their immutable
@@ -136,6 +158,42 @@ export class AgentDefinitionStore {
         return;
       }
     }
+  }
+
+  /** The definitions with the given ids, in one bounded query. */
+  getDefinitions(ids: readonly AgentDefinitionId[]): AgentDefinition[] {
+    if (ids.length === 0) return [];
+    return this.ctx.db.select().from(agentDefinitions).where(inArray(agentDefinitions.id, [...ids])).all().map((row) => parseOrThrow(agentDefinitionSchema, row, "AgentDefinition row"));
+  }
+
+  /** One keyset page of the revisions `query` admits, in revision id order after `after` (exclusive), at most `limit` rows: one bounded query. */
+  pageExecutable(query: ExecutableRevisionQuery, after: AgentDefinitionRevisionId | undefined, limit: number): AgentDefinitionRevision[] {
+    return this.ctx.db
+      .select()
+      .from(agentDefinitionRevisions)
+      .where(and(this.executableWhere(query), after === undefined ? undefined : gt(agentDefinitionRevisions.id, after)))
+      .orderBy(asc(agentDefinitionRevisions.id))
+      .limit(limit)
+      .all()
+      .map(revisionToDomain);
+  }
+
+  /** Whether revision `id` is one `query` admits (one indexed lookup): the cursor check. */
+  containsExecutable(query: ExecutableRevisionQuery, id: AgentDefinitionRevisionId): boolean {
+    return this.ctx.db.select({ id: agentDefinitionRevisions.id }).from(agentDefinitionRevisions).where(and(this.executableWhere(query), eq(agentDefinitionRevisions.id, id))).get() !== undefined;
+  }
+
+  private executableWhere(query: ExecutableRevisionQuery): SQL {
+    // The provenance-ownership rule (§11): builtin anywhere; a Workspace file only where its Snapshot's Workspace is the Run's; a
+    // Conversation-authored revision only in that Conversation.
+    const executable = (t: ReturnType<typeof revisionColumns>): SQL =>
+      sql`(json_extract(${t.provenance}, '$.kind') = 'builtin' OR (json_extract(${t.provenance}, '$.kind') = 'workspace_file' AND EXISTS (SELECT 1 FROM ${snapshots} WHERE ${snapshots.id} = json_extract(${t.provenance}, '$.snapshotId') AND ${snapshots.workspaceId} = ${query.workspaceId})) OR (json_extract(${t.provenance}, '$.kind') = 'conversation' AND json_extract(${t.provenance}, '$.conversationId') = ${query.conversationId}))`;
+    const self = revisionColumns("agent_definition_revisions");
+    const newer = revisionColumns("newer");
+    const latest = sql`NOT EXISTS (SELECT 1 FROM agent_definition_revisions AS newer WHERE ${newer.definitionId} = ${self.definitionId} AND ${executable(newer)} AND (${newer.createdAt} > ${self.createdAt} OR (${newer.createdAt} = ${self.createdAt} AND ${newer.id} > ${self.id})))`;
+    const referenced = query.referencedRevisionIds.length === 0 ? sql`0` : sql`${agentDefinitionRevisions.id} IN (${sql.join(query.referencedRevisionIds.map((id) => sql`${id}`), sql`, `)})`;
+    const definition = query.definitionId === undefined ? sql`1` : sql`${agentDefinitionRevisions.definitionId} = ${query.definitionId}`;
+    return sql`(${executable(self)} AND (${latest} OR ${referenced}) AND ${definition})`;
   }
 
   getRevision(id: AgentDefinitionRevisionId): AgentDefinitionRevision {
