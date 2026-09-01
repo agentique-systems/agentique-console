@@ -143,11 +143,14 @@ describe("import boundaries", () => {
     for (const file of files) {
       const isTest = file.endsWith(".test.ts");
       for (const specifier of importsOf(file)) {
-        if (isTest && (specifier === "vitest" || resolvesInto(file, specifier, "server/src/persistence") || resolvesInto(file, specifier, "server/src/execution"))) continue;
+        // Tests may drive the persistence and execution fixtures, and the shape regression lists tools through the MCP client the SDK itself depends on.
+        if (isTest && (specifier === "vitest" || specifier.startsWith("@modelcontextprotocol/sdk/") || resolvesInto(file, specifier, "server/src/persistence") || resolvesInto(file, specifier, "server/src/execution"))) continue;
         const allowed =
           specifier === "@agentique-console/core" ||
           specifier === "zod" ||
           specifier.startsWith("node:") ||
+          // The pinned production SDK: types everywhere, the module itself only in the binding.
+          (specifier === "@anthropic-ai/claude-agent-sdk" && (isTest || rel(file) === "server/src/provider/claude-sdk-binding.ts" || fs.readFileSync(file, "utf8").split(/\r?\n/).filter((line) => /^\s*(import|export)\b/.test(line) && line.includes(specifier)).every((line) => /^(export type|import type) /.test(line)))) ||
           resolvesInto(file, specifier, "server/src/provider") ||
           // The continuation index is the one canonical row the adapter owns (execution-model §6.6).
           rel(path.resolve(path.dirname(file), specifier)) === "server/src/persistence/stores/continuations.ts";
